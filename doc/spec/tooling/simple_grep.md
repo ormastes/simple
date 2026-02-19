@@ -41,13 +41,13 @@ simple_grep --ref "x" .                    # Find references to "x"
 ```
 src/parser/lexer.spl:42: fn parse_token(input: String) -> Token:
 src/parser/parser.spl:156: fn parse_expression(tokens: List[Token]) -> Expr:
-src/core/json.spl:23: fn parse(text: String) -> Result[Value, Error]:
+src/compiler_core/json.spl:23: fn parse(text: String) -> Result[Value, Error]:
 ```
 
 ### With Context (-A, -B, -C)
 
 ```
-src/core/json.spl:
+src/compiler_core/json.spl:
   21│ """Parse JSON text into a Value."""
   22│
   23│ fn parse(text: String) -> Result[Value, Error]:
@@ -61,7 +61,7 @@ src/core/json.spl:
 {
   "matches": [
     {
-      "file": "src/core/json.spl",
+      "file": "src/compiler_core/json.spl",
       "line": 23,
       "column": 4,
       "kind": "function",

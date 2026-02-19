@@ -163,7 +163,7 @@ val result = wrapper(1, 2, 3)
 
 ### Test Case 2: Decorators Module
 
-**File:** simple/std_lib/src/core/decorators.spl
+**File:** simple/std_lib/src/compiler_core/decorators.spl
 
 **Before:** `error: expected identifier, found Star` (on `*args`)
 **After:** `Compiled successfully` ✅
@@ -362,7 +362,7 @@ class CachedFunction:
 - `src/parser/src/expressions/helpers.rs` (+10 lines)
 
 ### Stdlib Changes (1 file)
-- `simple/std_lib/src/core/decorators.spl` (8 changes)
+- `simple/std_lib/src/compiler_core/decorators.spl` (8 changes)
 
 ### Documentation (1 file)
 - `doc/report/SPREAD_OPERATOR_FIX_2026-01-13.md` (this file)

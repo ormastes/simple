@@ -7,7 +7,7 @@ ROOT CAUSE: Not registered in function table
 FIX: Add func_table_register() call (ONE line per location)
 
 ================================================================================
-LOCATION 1: src/core/interpreter/eval.spl
+LOCATION 1: src/compiler_core/interpreter/eval.spl
 LINE: 1769 (inside eval_module function)
 ================================================================================
 
@@ -23,7 +23,7 @@ AFTER:
             func_register_return_type(d_node.name, d_node.ret_type)
 
 ================================================================================
-LOCATION 2: src/core/interpreter/module_loader.spl
+LOCATION 2: src/compiler_core/interpreter/module_loader.spl
 LINE: 215 (inside register_module_functions function)
 ================================================================================
 

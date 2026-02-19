@@ -116,7 +116,7 @@ while i < len:
 
 **Files**:
 - `compiler/*_phase*.spl` (27 files)
-- `compiler_core/*_phase*.spl` (25 files)
+- `compiler_core_legacy/*_phase*.spl` (25 files)
 
 **Categories**:
 - Bidirectional type checking (8 files)

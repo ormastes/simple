@@ -191,7 +191,7 @@ PHASE 0 COMPLETE
    ```
 
 3. **Backend Infrastructure**:
-   - CUDA backend: `src/compiler_core/backend/cuda_backend.spl`
+   - CUDA backend: `src/compiler_core_legacy/backend/cuda_backend.spl`
    - CUDA FFI: `src/lib/cuda/` (10+ functions)
    - Device management: `src/std/gpu/` (context, memory, streams)
 

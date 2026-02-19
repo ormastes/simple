@@ -21,7 +21,7 @@ Deployed 5 specialized analysis agents across codebase areas:
 
 | Agent | Area | Files Scanned | Issues Found |
 |-------|------|---------------|--------------|
-| A1 | `src/core/` | 40 files | 12 issues |
+| A1 | `src/compiler_core/` | 40 files | 12 issues |
 | A2 | `src/std/` | 100+ files | 13 issues |
 | A3 | `src/lib/` | 30+ files | 10 issues |
 | A4 | `src/compiler/` | 400+ files | 12 issues |
@@ -153,7 +153,7 @@ fn merge_intervals_sorted(left, right) -> [LiveInterval]:
 
 ### 4. Generic Specialization Cache: O(n·m) → O(1)
 
-**File:** `src/core/generic_runtime.spl`
+**File:** `src/compiler_core/generic_runtime.spl`
 **Problem:** Parallel arrays with nested loop lookup for cached generic specializations.
 
 **Before:**
@@ -406,10 +406,10 @@ fn translate_method_expr(expr: text) -> text:
 4. `std/combinatorics_utils.spl` - pascal_triangle recurrence
 
 ### Core Interpreter (4 files)
-5. `core/generic_runtime.spl` - Dict cache
-6. `core/call_graph.spl` - fn_index_of Dict
-7. `core/closure_analysis.spl` - scope_find_var_depth Dict
-8. `core/interpreter/module_loader.spl` - module_is_loaded Dict
+5. `compiler_core/generic_runtime.spl` - Dict cache
+6. `compiler_core/call_graph.spl` - fn_index_of Dict
+7. `compiler_core/closure_analysis.spl` - scope_find_var_depth Dict
+8. `compiler_core/interpreter/module_loader.spl` - module_is_loaded Dict
 
 ### Compiler Backend (4 files)
 9. `compiler/backend/native/regalloc.spl` - merge sort + 30 .push() fixes
@@ -439,7 +439,7 @@ All optimizations tested against existing test suite:
 
 | Test | Before | After | Status |
 |------|--------|-------|--------|
-| `core/tokens_spec.spl` | 9 passed, 2 failed | 9 passed, 2 failed | ✅ Unchanged (pre-existing failures) |
+| `compiler_core/tokens_spec.spl` | 9 passed, 2 failed | 9 passed, 2 failed | ✅ Unchanged (pre-existing failures) |
 | `std/algorithm_utils_ext_spec.spl` | 39 passed | 39 passed | ✅ All pass |
 | `runtime/generic_runtime_spec.spl` | 0 passed, 1 failed | 0 passed, 1 failed | ✅ Unchanged (pre-existing) |
 | `compiler/closure_capture_warning_spec.spl` | 0 passed, 22 failed | 0 passed, 22 failed | ✅ Unchanged (pre-existing) |

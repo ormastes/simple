@@ -30,7 +30,7 @@ All testing framework features listed in the feature database are **complete and
 ### Timer Implementation Added
 
 **Fixed in this session:**
-- Added `Timer` class to `src/lib/std/src/core/time.spl`
+- Added `Timer` class to `src/lib/std/src/compiler_core/time.spl`
 - Implemented `_current_time_unix()` FFI function
 - Fixed import path in `src/lib/std/src/spec/runner/executor.spl`
 
@@ -223,7 +223,7 @@ test/lib/std/unit/core/dsl_spec.spl
 
 ## Files Modified Today
 
-1. `src/lib/std/src/core/time.spl`
+1. `src/lib/std/src/compiler_core/time.spl`
    - Added `Timer` class with `start()`, `now()`, `elapsed_ms()`, `elapsed_seconds()`
 
 2. `src/lib/std/src/spec/runner/executor.spl`

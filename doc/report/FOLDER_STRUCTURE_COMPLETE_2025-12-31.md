@@ -201,7 +201,7 @@ simple/
 - `core/`: 21 focused files (not one monolith)
 
 **✅ Test Mirroring:**
-- `test/unit/core/` mirrors `src/core/`
+- `test/unit/compiler_core/` mirrors `src/compiler_core/`
 - `test/system/spec/` mirrors `src/spec/`
 - Makes test discovery automatic and intuitive
 
@@ -648,7 +648,7 @@ simple/std_lib/src/ui/gui/vulkan/
 
 **core/text.spl (806 lines) →**
 ```
-simple/std_lib/src/core/string/
+simple/std_lib/src/compiler_core/string/
 ├── __init__.spl
 ├── core.spl                  # String struct (150 lines)
 ├── operations.spl            # concat, split, join, etc. (250 lines)
@@ -659,7 +659,7 @@ simple/std_lib/src/core/string/
 
 **core/list.spl (602 lines) →**
 ```
-simple/std_lib/src/core/list/
+simple/std_lib/src/compiler_core/list/
 ├── __init__.spl
 ├── core.spl                  # List struct (100 lines)
 ├── operations.spl            # append, extend, insert, etc. (200 lines)

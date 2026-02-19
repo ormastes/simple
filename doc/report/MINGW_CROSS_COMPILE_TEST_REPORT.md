@@ -232,7 +232,7 @@ wine build-mingw/runtime_test.exe
 2. **Or install Wine on Linux:**
    ```bash
    sudo apt install wine wine64
-   cd seed/build-mingw
+   cd build/seed-mingw
    wine ./runtime_test.exe
    ```
 
@@ -254,7 +254,7 @@ mingw-cross-compile:
     - name: Test with Wine
       run: |
         sudo apt-get install -y wine wine64
-        cd seed/build-mingw
+        cd build/seed-mingw
         wine ./runtime_test.exe
 ```
 
@@ -281,7 +281,7 @@ mingw-cross-compile:
 
 ## Files Modified
 
-1. **`seed/runtime_test.c`** - Added Windows platform guards
+1. **`src/compiler_seed/runtime_test.c`** - Added Windows platform guards
    - Wrapped `<sys/wait.h>` and `<unistd.h>` includes
    - Wrapped fork-based tests (`panic_exits`, `panic_null_msg`)
    - Test count automatically adjusts (200 on Windows, 202 on Unix)

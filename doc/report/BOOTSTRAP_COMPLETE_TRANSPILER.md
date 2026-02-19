@@ -8,7 +8,7 @@
 
 ## Summary
 
-The seed_cpp transpiler is **fully functional and production-ready**. All generics, type system, and code generation issues have been resolved. The bootstrap now fails only due to bugs in Simple source files in `src/compiler_core/`.
+The seed_cpp transpiler is **fully functional and production-ready**. All generics, type system, and code generation issues have been resolved. The bootstrap now fails only due to bugs in Simple source files in `src/compiler_core_legacy/`.
 
 ---
 
@@ -17,8 +17,8 @@ The seed_cpp transpiler is **fully functional and production-ready**. All generi
 ### 1. Invalid Parameter Syntax ✅
 
 **Files Fixed**:
-- `src/compiler_core/backend/vulkan_backend.spl:190`
-- `src/compiler_core/blocks/highlighting.spl:101-102`
+- `src/compiler_core_legacy/backend/vulkan_backend.spl:190`
+- `src/compiler_core_legacy/blocks/highlighting.spl:101-102`
 
 **Before**:
 ```simple
@@ -124,7 +124,7 @@ while (*p && ret_len < MAX_IDENT - 1) {
 
 ## Code Changes Summary
 
-### seed/seed.cpp (+350 lines total)
+### src/compiler_seed/seed.cpp (+350 lines total)
 
 **Session 1** (+250 lines):
 - Generic parameter extraction
@@ -143,8 +143,8 @@ while (*p && ret_len < MAX_IDENT - 1) {
 
 ### Simple Source Files Fixed
 
-1. `src/compiler_core/backend/vulkan_backend.spl` - Parameter syntax
-2. `src/compiler_core/blocks/highlighting.spl` - Parameter syntax
+1. `src/compiler_core_legacy/backend/vulkan_backend.spl` - Parameter syntax
+2. `src/compiler_core_legacy/blocks/highlighting.spl` - Parameter syntax
 
 ---
 
@@ -164,11 +164,11 @@ while (*p && ret_len < MAX_IDENT - 1) {
 
 ## Remaining Simple Source Bugs
 
-All remaining errors are in `src/compiler_core/` files and represent bugs in the Simple code itself:
+All remaining errors are in `src/compiler_core_legacy/` files and represent bugs in the Simple code itself:
 
 ### High Priority (Syntax Errors)
 
-1. **AOP Framework** (`src/compiler_core/aop.spl` or similar)
+1. **AOP Framework** (`src/compiler_core_legacy/aop.spl` or similar)
    - Missing variables: `preconditions`, `postconditions`, `self`
    - Missing functions: `ctx_verify`, `create_around_advice_context`
    - Pattern matching not supported: `case Ok(())`, `case Err(error)`
@@ -205,7 +205,7 @@ All remaining errors are in `src/compiler_core/` files and represent bugs in the
 
 ### Option B: Use src/compiler Instead (10 minutes)
 
-The `src/compiler/` directory has newer, cleaner code without these bugs. Try bootstrapping from there instead of `src/compiler_core/`.
+The `src/compiler/` directory has newer, cleaner code without these bugs. Try bootstrapping from there instead of `src/compiler_core_legacy/`.
 
 ### Option C: Minimal Core Build (30 minutes)
 
@@ -243,9 +243,9 @@ Identify and exclude problematic files, bootstrap with minimal feature set.
 
 ## Files Modified
 
-- ✅ `seed/seed.cpp` (+350 lines)
-- ✅ `src/compiler_core/backend/vulkan_backend.spl` (parameter fix)
-- ✅ `src/compiler_core/blocks/highlighting.spl` (parameter fix)
+- ✅ `src/compiler_seed/seed.cpp` (+350 lines)
+- ✅ `src/compiler_core_legacy/backend/vulkan_backend.spl` (parameter fix)
+- ✅ `src/compiler_core_legacy/blocks/highlighting.spl` (parameter fix)
 
 ## Documentation Created
 

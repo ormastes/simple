@@ -213,7 +213,7 @@ Results: [42, 100]
 
 | File | Purpose | Status |
 |------|---------|--------|
-| `src/lib/std/src/core/primitives.spl` | .fdiv() method | ⚠️ Not loading |
+| `src/lib/std/src/compiler_core/primitives.spl` | .fdiv() method | ⚠️ Not loading |
 
 ### Tests (2 files)
 

@@ -240,9 +240,9 @@ val time = Milliseconds::from_u64(5000)
 
 **To primitives**:
 ```simple
-val count_val = count.value()         // i64
-val bytes_val = bytes.value()         // u64
-val time_val = time.value()           // u64
+val count_val = count.value()         # i64
+val bytes_val = bytes.value()         # u64
+val time_val = time.value()           # u64
 ```
 
 **Literal syntax**:
@@ -363,40 +363,40 @@ Type::initial()                      # Initial/default value
 
 **Milliseconds**:
 ```simple
-.to_duration()                      // Convert to Duration
-.to_secs()                          // Convert to seconds (u64)
+.to_duration()                      # Convert to Duration
+.to_secs()                          # Convert to seconds (u64)
 ```
 
 **Metallic**:
 ```simple
-.is_metal()                         // Check if metallic (>= 0.9)
-.is_dielectric()                    // Check if non-metallic (<= 0.1)
+.is_metal()                         # Check if metallic (>= 0.9)
+.is_dielectric()                    # Check if non-metallic (<= 0.1)
 ```
 
 **PixelDimension**:
 ```simple
-.clamp(min, max)                    // Clamp to range
-.max_with(other)                    // Get maximum
-.min_with(other)                    // Get minimum
-.abs()                              // Absolute value
+.clamp(min, max)                    # Clamp to range
+.max_with(other)                    # Get maximum
+.min_with(other)                    # Get minimum
+.abs()                              # Absolute value
 ```
 
 **TokenCount**:
 ```simple
-.limit_gpt3()                       // 4096 tokens
-.limit_gpt4()                       // 8192 tokens
-.limit_claude()                     // 100k tokens
-.percentage_of(total)               // Calculate percentage
-.remaining(limit)                   // Calculate remaining
+.limit_gpt3()                       # 4096 tokens
+.limit_gpt4()                       # 8192 tokens
+.limit_claude()                     # 100k tokens
+.percentage_of(total)               # Calculate percentage
+.remaining(limit)                   # Calculate remaining
 ```
 
 **Temperature**:
 ```simple
-.deterministic()                    // 0.0
-.balanced()                         // 0.7
-.creative()                         // 1.0
-.is_deterministic()                 // Check if < 0.01
-.is_high()                          // Check if > 1.2
+.deterministic()                    # 0.0
+.balanced()                         # 0.7
+.creative()                         # 1.0
+.is_deterministic()                 # Check if < 0.01
+.is_high()                          # Check if > 1.2
 ```
 
 ---

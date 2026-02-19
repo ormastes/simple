@@ -204,7 +204,7 @@ bin/simple compile --backend=llvm --release program.spl
 
 ## Implementation Details
 
-**File:** `src/compiler_core/backend/backend_factory.spl`
+**File:** `src/compiler_core_legacy/backend/backend_factory.spl`
 
 ```simple
 # Backend selection logic
@@ -232,5 +232,5 @@ fn create(target: CodegenTarget, options: CompileOptions) -> Backend:
 
 - `doc/guide/jit_compilation.md` - JIT compilation guide
 - `doc/guide/optimization_levels.md` - Optimization flags
-- `src/compiler_core/backend/backend_factory.spl` - Implementation
-- `src/compiler_core/backend_types.spl` - Backend types
+- `src/compiler_core_legacy/backend/backend_factory.spl` - Implementation
+- `src/compiler_core_legacy/backend_types.spl` - Backend types

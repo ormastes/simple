@@ -85,7 +85,7 @@ TEST(panic_null_msg) { ... }
 
 ### Binary Format
 ```bash
-$ file seed/build-mingw/runtime_test.exe
+$ file build/seed-mingw/runtime_test.exe
 PE32+ executable (console) x86-64, for MS Windows, 19 sections
 ```
 ✅ **Correct Windows PE format**
@@ -169,7 +169,7 @@ C++: -static-libgcc -static-libstdc++ -std=c++20 -O2
 sudo apt install wine wine64
 
 # Test
-cd seed/build-mingw
+cd build/seed-mingw
 wine ./runtime_test.exe
 # Expected: === All 200 tests passed ===
 ```
@@ -178,7 +178,7 @@ wine ./runtime_test.exe
 
 ```bash
 # Transfer to Windows
-scp seed/build-mingw/*.exe user@windows:/path/
+scp build/seed-mingw/*.exe user@windows:/path/
 
 # On Windows
 runtime_test.exe

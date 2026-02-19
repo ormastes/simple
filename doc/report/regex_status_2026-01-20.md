@@ -171,7 +171,7 @@ The regex module was implemented but not announced/documented:
 ## Files to Update
 
 ### Test Files
-- `simple/std_lib/test/unit/core/regex_spec.spl` - Remove SKIPPED comment, enable tests
+- `simple/std_lib/test/unit/compiler_core/regex_spec.spl` - Remove SKIPPED comment, enable tests
 - `simple/std_lib/test/unit/tooling/regex_utils_spec.spl` - Check if needs updates
 
 ### Documentation
@@ -287,7 +287,7 @@ val comments = extract_all(r"//.*", code)
 | Runtime Symbols | ✅ Registered | `src/common/src/runtime_symbols.rs` |
 | Stdlib Export | ✅ Exported | `simple/std_lib/src/__init__.spl` |
 | Documentation | ⚠️ This report | `doc/report/regex_status_2026-01-20.md` |
-| Tests | ⚠️ Skipped | `simple/std_lib/test/unit/core/regex_spec.spl` |
+| Tests | ⚠️ Skipped | `simple/std_lib/test/unit/compiler_core/regex_spec.spl` |
 
 ## Conclusion
 
@@ -310,7 +310,7 @@ All 14 regex-related TODOs can be considered resolved since the module has been 
 - `simple/std_lib/src/__init__.spl` - Stdlib export
 
 **Tests:**
-- `simple/std_lib/test/unit/core/regex_spec.spl` - BDD tests (currently skipped)
+- `simple/std_lib/test/unit/compiler_core/regex_spec.spl` - BDD tests (currently skipped)
 - `simple/std_lib/test/unit/tooling/regex_utils_spec.spl` - Utility tests
 - `src/runtime/src/value/ffi/regex.rs` - Rust unit tests (4 tests)
 

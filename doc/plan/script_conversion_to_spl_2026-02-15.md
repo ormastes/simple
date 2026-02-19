@@ -8,28 +8,15 @@
 
 ## Classification
 
-### KEEP - Bootstrap Scripts (15 files)
+### KEEP - Bootstrap Scripts (3 files)
 
-These run BEFORE Simple compiler exists and must remain as shell:
+These run before a working Simple runtime is available and remain shell/batch:
 
 | Script | Purpose | Status |
 |--------|---------|--------|
-| `scripts/bootstrap-from-scratch.sh` | Main bootstrap (Linux/macOS) | **KEEP** |
-| `scripts/bootstrap-from-scratch-freebsd.sh` | FreeBSD bootstrap | **KEEP** |
-| `scripts/bootstrap-from-scratch.bat` | Windows bootstrap | **KEEP** |
-| `scripts/bootstrap-minimal.sh` | Minimal bootstrap variant | **KEEP** |
-| `scripts/bootstrap-ultra-minimal.sh` | Ultra-minimal variant | **KEEP** |
-| `scripts/bootstrap-fixed.sh` | Fixed variant | **KEEP** |
-| `scripts/bootstrap-types-only.sh` | Types-only variant | **KEEP** |
-| `scripts/bootstrap-core-only.sh` | Core-only variant | **KEEP** |
-| `scripts/bootstrap-full-core.sh` | Full core variant | **KEEP** |
-| `scripts/install.sh` | Web installer (`curl \| sh`) | **KEEP** |
-| `scripts/build-bootstrap.sh` | Multi-step bootstrap build | **KEEP** |
-| `scripts/build-bootstrap-multi-platform.sh` | Multi-platform bootstrap | **KEEP** |
-| `scripts/setup-bootstrap-binaries.sh` | Pre-built bootstrap setup | **KEEP** |
-| `bin/build-minimal-bootstrap.sh` | Minimal bootstrap build | **KEEP** |
-| `seed/run_coverage.sh` | Seed compiler coverage | **KEEP** |
-| `seed/test-windows-builds.sh` | Seed build testing | **KEEP** |
+| `scripts/bootstrap/bootstrap-from-scratch.sh` | Unified bootstrap (Linux/macOS/FreeBSD/MinGW/cross) | **KEEP** |
+| `scripts/bootstrap/bootstrap-from-scratch.bat` | Unified Windows bootstrap (MSVC/clang-cl/MinGW) | **KEEP** |
+| `scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh` | QEMU FreeBSD environment wrapper | **KEEP** |
 
 ---
 
@@ -55,7 +42,7 @@ These run BEFORE Simple compiler exists and must remain as shell:
 | `scripts/build_type_database.sh` | `src/app/build/type_db.spl` | ✅ **DONE** |
 | `scripts/build-full.sh` | `src/app/build/full.spl` | ✅ **DONE** |
 | `test_mcp_working.sh` | `src/app/mcp/health_check.spl` | ✅ **DONE** |
-| `src/tools/test_desugared.sh` | `src/app/test/test_desugared.spl` | ✅ **DONE** |
+| `scripts/tools/test_desugared.sh` | `src/app/test/test_desugared.spl` | ✅ **DONE** |
 
 ### Batch 3: Code Fix/Migration Tools ✅
 

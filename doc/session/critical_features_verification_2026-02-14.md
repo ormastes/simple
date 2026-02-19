@@ -356,7 +356,7 @@ process_is_running, process_kill
 - `src/app/io/process_ops.spl` - Process management
 - `src/std/src/infra.spl` - File I/O
 - `src/app/package/*.spl` - Package management (20 files)
-- `src/core/parser.spl` - Parser (bug identified)
+- `src/compiler_core/parser.spl` - Parser (bug identified)
 
 ---
 

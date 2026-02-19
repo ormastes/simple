@@ -106,7 +106,7 @@ Discovery: FreeBSD binaries already exist from cross-compilation!
 ```
 
 ### Key Findings
-1. **native.spl won't work** for compiler_core (439 files)
+1. **native.spl won't work** for compiler_core_legacy (439 files)
    - Designed for simple programs (<50 files)
    - Full compiler needs incremental build (core → full)
 

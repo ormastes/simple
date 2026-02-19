@@ -77,7 +77,7 @@ Phase E: Result types
 
 ### 1. Invalid Parameter Syntax (Quick Fix - 5 minutes)
 
-**File**: `src/compiler_core/backend/vulkan_backend.spl:190`
+**File**: `src/compiler_core_legacy/backend/vulkan_backend.spl:190`
 
 **Problem**:
 ```simple
@@ -95,7 +95,7 @@ types: (i64, i64, i64, i64, i64, i64, i64, i64, i64)
 
 ### 2. AOP Framework Issues (Skip or Fix - 30-60 minutes)
 
-**File**: `src/core/aop.spl` or similar
+**File**: `src/compiler_core_legacy/aop.spl` or similar
 
 **Problems**:
 - Undeclared variables: `proceed_ctx`, `base_ctx`
@@ -120,16 +120,16 @@ types: (i64, i64, i64, i64, i64, i64, i64, i64, i64)
 
 ```bash
 # 1. Fix vulkan_backend.spl parameter syntax (5 min)
-vim src/compiler_core/backend/vulkan_backend.spl  # Line 190
+vim src/compiler_core_legacy/backend/vulkan_backend.spl  # Line 190
 # Change: val _tv_3 = [i64, ...]
 # To:     types: (i64, i64, i64, i64, i64, i64, i64, i64, i64)
 
 # 2. Fix or exclude AOP (30-60 min)
-# Either fix src/core/aop.spl bugs
+# Either fix src/compiler_core_legacy/aop.spl bugs
 # OR remove AOP files from bootstrap file list
 
 # 3. Retry bootstrap (2 min)
-bash scripts/bootstrap-fixed.sh
+bash scripts/bootstrap/bootstrap-from-scratch.sh --step=core1
 ```
 
 ### Option 2: Use Subset Build (15 minutes)
@@ -144,7 +144,7 @@ bash scripts/bootstrap-fixed.sh
 
 ```bash
 # The src/compiler/ directory has cleaner code
-# Try bootstrapping from there instead of src/compiler_core/
+# Try bootstrapping from there instead of src/compiler_core_legacy/
 ```
 
 ---
@@ -153,7 +153,7 @@ bash scripts/bootstrap-fixed.sh
 
 ### Files Modified
 
-**seed/seed.cpp** (+250 lines):
+**src/compiler_seed/seed.cpp** (+250 lines):
 - Generic parameter extraction
 - Result type registry
 - Option<T>/Result<T,E> monomorphization

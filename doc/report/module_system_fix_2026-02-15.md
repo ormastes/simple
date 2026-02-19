@@ -93,7 +93,7 @@ The module loader resolved the module file path correctly via `SIMPLE_LIB`, but 
 
 #### Module Loader
 
-**`src/core/interpreter/module_loader.spl`** (New file, ~300 lines)
+**`src/compiler_core/interpreter/module_loader.spl`** (New file, ~300 lines)
 - Function registry: `var loaded_modules: [text] = []`
 - Export tracking: `var module_exports: [[text]] = []`
 - Path resolution with SIMPLE_LIB fallback
@@ -138,7 +138,7 @@ fn import_symbols(module_path: text, symbols: [text]):
 
 #### Parser Integration
 
-**`src/core/parser.spl`** (Modified)
+**`src/compiler_core/parser.spl`** (Modified)
 - Added `use` statement parsing (keyword already existed)
 - Import syntax: `use module.path.{symbol1, symbol2}`
 - Export syntax: `export symbol_name`
@@ -291,7 +291,7 @@ export lower
 ### Test Coverage
 
 **Unit Tests:**
-- `test/unit/core/module_loader_spec.spl` - 60 tests
+- `test/unit/compiler_core/module_loader_spec.spl` - 60 tests
   - Path resolution (15 tests)
   - Module loading (15 tests)
   - Symbol binding (15 tests)
@@ -506,12 +506,12 @@ val strip = trim  # Create alias manually
 ### Related Files
 
 **Core Implementation:**
-- `src/core/interpreter/module_loader.spl` - Module loading
-- `src/core/parser.spl` - Import/export parsing
-- `src/core/interpreter/eval.spl` - Symbol resolution
+- `src/compiler_core/interpreter/module_loader.spl` - Module loading
+- `src/compiler_core/parser.spl` - Import/export parsing
+- `src/compiler_core/interpreter/eval.spl` - Symbol resolution
 
 **Tests:**
-- `test/unit/core/module_loader_spec.spl` - Loader tests
+- `test/unit/compiler_core/module_loader_spec.spl` - Loader tests
 - `test/integration/imports_spec.spl` - Import integration
 
 **Documentation:**

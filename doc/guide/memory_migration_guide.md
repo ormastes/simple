@@ -263,7 +263,7 @@ simple check --memory-mode=strict src/
 
 Start with one module at a time:
 ```bash
-simple check --memory-warnings src/core/
+simple check --memory-warnings src/compiler_core/
 ```
 
 ### "Can't use COW, need mutation"

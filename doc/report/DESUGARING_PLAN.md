@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-**Problem:** Full Simple (src/compiler/, 52K lines) uses advanced language features that Core Simple (src/core/, 8.8K lines) cannot parse or compile.
+**Problem:** Full Simple (src/compiler/, 52K lines) uses advanced language features that Core Simple (src/compiler_core_legacy/, 8.8K lines) cannot parse or compile.
 
 **Solution:** Desugar Full Simple → Core Simple compatible code via systematic transformations.
 
@@ -29,7 +29,7 @@
                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ CORE SIMPLE (Seed-Compilable Subset)                            │
-│ - src/core/ (~8.8K lines)                                       │
+│ - src/compiler_core_legacy/ (~8.8K lines)                                       │
 │ - RESTRICTIONS (no syntactic sugar):                            │
 │   ❌ No impl blocks                                             │
 │   ❌ No generics (<T>)                                          │
@@ -321,7 +321,7 @@ Write a compiler pass that transforms Full → Core:
 
 **Tool structure:**
 ```simple
-# src/tools/desugarer/main.spl
+# scripts/tools/desugarer/main.spl
 fn desugar_file(input_path: text, output_path: text):
     val full_ast = parse_full_simple(input_path)
     val core_ast = transform_to_core(full_ast)
@@ -380,10 +380,10 @@ fn transform_to_core(ast: Module) -> Module:
 **Build pipeline:**
 ```bash
 # Step 1: Desugar Full Simple
-simple-desugarer src/compiler/*.spl --output src/compiler_core/
+simple-desugarer src/compiler/*.spl --output src/compiler_core_legacy/
 
 # Step 2: Compile with seed
-seed_compiler src/compiler_core/*.spl --output build/compiler.cpp
+seed_compiler src/compiler_core_legacy/*.spl --output build/compiler.cpp
 
 # Step 3: Compile C++ → Binary
 g++ build/compiler.cpp -o bin/simple-compiler
@@ -476,7 +476,7 @@ bin/simple-compiler src/compiler/*.spl
 ## References
 
 - **Architecture:** `doc/design/core_full_unified_architecture.md`
-- **Core Simple:** `src/core/` (8.8K lines)
+- **Core Simple:** `src/compiler_core_legacy/` (8.8K lines)
 - **Full Simple:** `src/compiler/` (52K lines)
 - **Seed Bootstrap:** `bootstrap/seed.cpp` (143K lines)
 

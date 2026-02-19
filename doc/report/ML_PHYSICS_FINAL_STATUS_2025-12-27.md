@@ -227,7 +227,7 @@ But NOT yet in:
 
 4. **Simple Spec DSL Tests**
    ```bash
-   ./target/debug/simple simple/std_lib/test/unit/core/arithmetic_spec.spl
+   ./target/debug/simple simple/std_lib/test/unit/compiler_core/arithmetic_spec.spl
    # ✅ Works perfectly for basic tests
    ```
 

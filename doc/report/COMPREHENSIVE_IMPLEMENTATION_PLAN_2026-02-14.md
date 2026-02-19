@@ -67,8 +67,8 @@ We'll spawn 6 specialized agents working in parallel:
 **Goal:** Complete runtime support for generics, union, intersection, and refinement types
 
 **Current State:**
-- ✅ Generic syntax parsing (test/unit/core/generic_syntax_spec.spl - 30/30 passing)
-- ✅ Type registry functions in src/core/types.spl (union_type_register, intersection_type_register, refinement_type_register)
+- ✅ Generic syntax parsing (test/unit/compiler_core/generic_syntax_spec.spl - 30/30 passing)
+- ✅ Type registry functions in src/compiler_core/types.spl (union_type_register, intersection_type_register, refinement_type_register)
 - ❌ No runtime type checking
 - ❌ No type inference engine
 - ❌ No monomorphization
@@ -93,14 +93,14 @@ We'll spawn 6 specialized agents working in parallel:
    - Tests: test/unit/type/type_inference_spec.spl (100 tests)
 
 4. **Integration** (1 day)
-   - Hook into parser (src/core/parser.spl)
-   - Hook into interpreter (src/core/interpreter/eval.spl)
+   - Hook into parser (src/compiler_core/parser.spl)
+   - Hook into interpreter (src/compiler_core/interpreter/eval.spl)
    - End-to-end tests: test/integration/advanced_types_spec.spl (40 tests)
 
 **Deliverables:**
-- src/core/type_checker.spl (~800 lines)
-- src/core/type_erasure.spl (~600 lines)
-- src/core/type_inference.spl (~1200 lines)
+- src/compiler_core/type_checker.spl (~800 lines)
+- src/compiler_core/type_erasure.spl (~600 lines)
+- src/compiler_core/type_inference.spl (~1200 lines)
 - test/unit/type/ (250 tests)
 - doc/guide/advanced_types.md
 

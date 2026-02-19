@@ -118,14 +118,14 @@ pub extern "C" fn simple_array_push(arr: RuntimeValue, val: RuntimeValue) -> Run
 ```
 
 ```simple
-# simple/std_lib/src/core/array.spl
+# simple/std_lib/src/compiler_core/array.spl
 fn push(self, value: T):
     # Calls simple_array_push via FFI
     __builtin_array_push(self, value)
 ```
 
 ```simple
-# simple/std_lib/test/unit/core/array_spec.spl
+# simple/std_lib/test/unit/compiler_core/array_spec.spl
 describe "Array.push":
     it "adds element":
         let arr = [1, 2, 3]
@@ -136,7 +136,7 @@ describe "Array.push":
 **Problem:**
 - Rust FFI function `simple_array_push` has 100% coverage via Rust tests
 - Simple wrapper `Array.push()` is tested (test passes)
-- But we have **NO DATA** showing which lines in `simple/std_lib/src/core/array.spl` were executed!
+- But we have **NO DATA** showing which lines in `simple/std_lib/src/compiler_core/array.spl` were executed!
 - Can't tell if the FFI call path is actually exercised
 
 ---
@@ -227,7 +227,7 @@ cargo test -p simple-driver -- simple_stdlib \
 
 # Produces:
 # - simple_coverage.json (custom format)
-# - Tracks: simple/std_lib/src/core/array.spl:15-23
+# - Tracks: simple/std_lib/src/compiler_core/array.spl:15-23
 ```
 
 ### 3.2 Coverage Instrumentation for Simple
@@ -470,7 +470,7 @@ impl CoverageMerger {
 {
   "version": "1.0",
   "files": {
-    "simple/std_lib/src/core/array.spl": {
+    "simple/std_lib/src/compiler_core/array.spl": {
       "lines_executed": [1, 2, 5, 6, 7, 15, 16, 23],
       "functions": {
         "Array.push": { "calls": 5, "lines": [15, 16] },
@@ -513,7 +513,7 @@ impl CoverageMerger {
       "rust_ffi": "simple_array_push",
       "rust_file": "src/runtime/src/value/collections.rs",
       "rust_line": 142,
-      "simple_file": "simple/std_lib/src/core/array.spl",
+      "simple_file": "simple/std_lib/src/compiler_core/array.spl",
       "simple_line": 15,
       "status": "both_tested",
       "simple_calls": 5,
@@ -543,7 +543,7 @@ impl CoverageMerger {
     {
       "type": "untested_simple_wrapper",
       "function": "Array.filter",
-      "recommendation": "Add test to simple/std_lib/test/unit/core/array_spec.spl"
+      "recommendation": "Add test to simple/std_lib/test/unit/compiler_core/array_spec.spl"
     }
   ]
 }
@@ -753,7 +753,7 @@ fn main() -> Result<()> {
     <ul class="gaps">
         <li class="ffi-gap">
             Array.filter - Rust tested (100%) but Simple wrapper not tested
-            <a href="#simple/std_lib/test/unit/core/array_spec.spl">Add test</a>
+            <a href="#simple/std_lib/test/unit/compiler_core/array_spec.spl">Add test</a>
         </li>
     </ul>
 
@@ -938,8 +938,8 @@ jobs:
 │   ✅ src/compiler/src/codegen/instr_collections.rs           │
 │                                                              │
 │ Simple Stdlib: 68.0% (102/150 lines)                         │
-│   ✅ simple/std_lib/src/core/array.spl (80%)                 │
-│   ⚠️  simple/std_lib/src/core/dict.spl (55%)                 │
+│   ✅ simple/std_lib/src/compiler_core/array.spl (80%)                 │
+│   ⚠️  simple/std_lib/src/compiler_core/dict.spl (55%)                 │
 │                                                              │
 │ System Tests: 3 tests                                        │
 │   ✅ array_types_spec.spl                                    │
@@ -981,7 +981,7 @@ Gaps detected:
   - Actor.send: FFI binding not verified
 
 Recommendations:
-  1. Add test to simple/std_lib/test/unit/core/array_spec.spl for Array.filter
+  1. Add test to simple/std_lib/test/unit/compiler_core/array_spec.spl for Array.filter
   2. Add system test for Actor.send in simple/test/system/features/actors/
 
 View full report: https://github.com/.../actions/runs/12345
@@ -998,7 +998,7 @@ src/runtime/src/value/collections.rs
   Branches: 48/60 → 52/60 (+4)
   Coverage: 92.5% → 96.0% (+3.5%) ✅
 
-simple/std_lib/src/core/array.spl
+simple/std_lib/src/compiler_core/array.spl
   Lines:    102/150 → 120/150 (+18)
   Coverage: 68.0% → 80.0% (+12.0%) ✅
 
@@ -1048,8 +1048,8 @@ cargo run -p simple-coverage-tools --bin feature-coverage \
 ### Simple Stdlib
 - **Coverage:** 68.0% (102/150 lines)
 - **Files:**
-  - simple/std_lib/src/core/array.spl (80%)
-  - simple/std_lib/src/core/dict.spl (55%)
+  - simple/std_lib/src/compiler_core/array.spl (80%)
+  - simple/std_lib/src/compiler_core/dict.spl (55%)
 
 ### System Tests
 - **Count:** 3 tests

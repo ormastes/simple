@@ -16,7 +16,7 @@ This document lists all features with ignored tests that can be implemented, org
 ### 1.1 Math Module ⭐⭐⭐
 
 **Status:** ✅ ALL FUNCTIONS IMPLEMENTED
-**Implementation:** `src/lib/std/src/core/math.spl:1` (412 lines, 44 exports)
+**Implementation:** `src/lib/std/src/compiler_core/math.spl:1` (412 lines, 44 exports)
 **Tests:** `test/lib/std/unit/core/math_spec.spl:1` (152 lines, 29 tests)
 **Effort:** ~2 hours (remove skip tags, verify tests)
 
@@ -88,7 +88,7 @@ This document lists all features with ignored tests that can be implemented, org
 ### 1.2 Random Module ⭐⭐
 
 **Status:** ✅ ALL FUNCTIONS IMPLEMENTED
-**Implementation:** `src/lib/std/src/core/random.spl:1` (272 lines, 16 exports)
+**Implementation:** `src/lib/std/src/compiler_core/random.spl:1` (272 lines, 16 exports)
 **Tests:** `test/lib/std/unit/core/random_spec.spl:1` (86 lines, 12 tests)
 **Effort:** ~1.5 hours (remove skip tags, verify tests)
 
@@ -131,7 +131,7 @@ This document lists all features with ignored tests that can be implemented, org
 ### 1.3 Regex Module ✅
 
 **Status:** ✅ FULLY IMPLEMENTED
-**Implementation:** `src/lib/std/src/core/regex.spl:1` (1400 lines, 25 exports)
+**Implementation:** `src/lib/std/src/compiler_core/regex.spl:1` (1400 lines, 25 exports)
 **Tests:** `test/lib/std/unit/core/regex_spec.spl:91` (1 skip)
 **Effort:** ~15 minutes (define behavior + implement test)
 
@@ -272,7 +272,7 @@ This document lists all features with ignored tests that can be implemented, org
 ### 4.1 Decorators Module
 
 **Status:** 🔴 PARSING ERROR + INCOMPLETE IMPLEMENTATION
-**Implementation:** `src/lib/std/src/core/decorators.spl` (has syntax errors)
+**Implementation:** `src/lib/std/src/compiler_core/decorators.spl` (has syntax errors)
 **Tests:** `test/lib/std/unit/core/decorators_spec.spl` (10 skip tests)
 **Effort:** ~4-6 hours (fix parsing + implement missing decorators)
 
@@ -305,7 +305,7 @@ This document lists all features with ignored tests that can be implemented, org
 ### 4.2 Synchronization Module
 
 **Status:** ✅ IMPLEMENTED but ⚠️ TESTS HAVE CHALLENGES
-**Implementation:** `src/lib/std/src/core/synchronization.spl` (324 lines, 4 classes)
+**Implementation:** `src/lib/std/src/compiler_core/synchronization.spl` (324 lines, 4 classes)
 **Tests:** `test/lib/std/unit/core/synchronization_spec.spl` (4 skip tests)
 **Effort:** ~2-3 hours (design testable API or add test hooks)
 

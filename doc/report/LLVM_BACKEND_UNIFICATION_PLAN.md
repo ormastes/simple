@@ -7,11 +7,11 @@
 
 ## Executive Summary
 
-Create a shared LLVM backend infrastructure that eliminates ~50% code duplication between `compiler/` (Full Simple) and `compiler_core/` (Core Simple), while maintaining compatibility with both feature-rich Full Simple and desugared Core Simple.
+Create a shared LLVM backend infrastructure that eliminates ~50% code duplication between `compiler/` (Full Simple) and `compiler_core_legacy/` (Core Simple), while maintaining compatibility with both feature-rich Full Simple and desugared Core Simple.
 
 **Key Metrics:**
 - **Current duplication**: ~1,300 lines duplicated LLVM code
-- **Files affected**: 10 LLVM-related files (5 in compiler, 5 in compiler_core)
+- **Files affected**: 10 LLVM-related files (5 in compiler, 5 in compiler_core_legacy)
 - **Estimated reduction**: 40-50% fewer lines via shared library
 - **Complexity**: Medium (requires abstraction over generics/no-generics)
 
@@ -30,11 +30,11 @@ Create a shared LLVM backend infrastructure that eliminates ~50% code duplicatio
 | llvm_type_mapper.spl | compiler/backend/ | 304 | Generic types |
 | llvm_tools.spl | compiler/backend/ | 85 | Shared utilities |
 | **Core Simple LLVM** ||||
-| llvm_backend.spl | compiler_core/backend/ | 289 | Desugared (no Option) |
-| llvm_ir_builder.spl | compiler_core/backend/ | 386 | Basic optimizations |
-| llvm_target.spl | compiler_core/backend/ | 230 | Limited architectures |
-| llvm_type_mapper.spl | compiler_core/backend/ | 108 | No generics |
-| llvm_tools.spl | compiler_core/backend/ | 85 | **Identical to Full** |
+| llvm_backend.spl | compiler_core_legacy/backend/ | 289 | Desugared (no Option) |
+| llvm_ir_builder.spl | compiler_core_legacy/backend/ | 386 | Basic optimizations |
+| llvm_target.spl | compiler_core_legacy/backend/ | 230 | Limited architectures |
+| llvm_type_mapper.spl | compiler_core_legacy/backend/ | 108 | No generics |
+| llvm_tools.spl | compiler_core_legacy/backend/ | 85 | **Identical to Full** |
 | **App-level Integration** ||||
 | llvm_direct.spl | app/compile/ | ~200 | Hybrid C→LLVM path |
 | compile_to_llvm.spl | app/build/ | ~150 | Build integration |
@@ -67,7 +67,7 @@ compiler/backend/llvm_backend.spl
   ├─ Use compiler.backend.llvm_ir_builder
   └─ Class LlvmBackend (Full Simple features)
 
-compiler_core/backend/llvm_backend.spl
+compiler_core_legacy/backend/llvm_backend.spl
   ├─ Use compiler.mir_data.*
   ├─ Use compiler.backend.llvm_target  (DUPLICATE)
   ├─ Use compiler.backend.llvm_ir_builder  (DUPLICATE)
@@ -117,7 +117,7 @@ Extract in phases to minimize risk:
 
 ```
 src/
-├── llvm_shared/              # NEW: Shared LLVM infrastructure
+├── shared/llvm/              # NEW: Shared LLVM infrastructure
 │   ├── mod.spl               # Public API
 │   ├── target.spl            # Target triples, CPU configs
 │   ├── tools.spl             # LLVM tool invocations (llc, opt, clang)
@@ -126,34 +126,34 @@ src/
 │   └── ir_primitives.spl     # Basic IR building blocks
 │
 ├── compiler/backend/
-│   ├── llvm_backend.spl      # REFACTORED: Uses llvm_shared.*
+│   ├── llvm_backend.spl      # REFACTORED: Uses shared.llvm.*
 │   ├── llvm_ir_builder.spl   # REFACTORED: Compiler-specific MIR→LLVM
 │   └── llvm_type_mapper.spl  # REFACTORED: Compiler-specific type mapping
 │
-├── compiler_core/backend/
-│   ├── llvm_backend.spl      # REFACTORED: Uses llvm_shared.* (desugared wrapper)
+├── compiler_core_legacy/backend/
+│   ├── llvm_backend.spl      # REFACTORED: Uses shared.llvm.* (desugared wrapper)
 │   ├── llvm_ir_builder.spl   # REFACTORED: Core-specific MIR→LLVM
 │   └── llvm_type_mapper.spl  # REFACTORED: Core-specific type mapping
 │
 └── app/compile/
-    └── llvm_direct.spl       # REFACTORED: Uses llvm_shared.tools
+    └── llvm_direct.spl       # REFACTORED: Uses shared.llvm.tools
 ```
 
 ### Shared Module API
 
-**src/llvm_shared/mod.spl**:
+**src/shared/llvm/mod.spl**:
 ```simple
 # Shared LLVM infrastructure for Core and Full Simple compilers.
 # Bootstrap-compatible: No generics, no Option types, seed_cpp compilable.
 
 # Re-exports
-export llvm_shared.target.*
-export llvm_shared.tools.*
-export llvm_shared.types.*
-export llvm_shared.passes.*
+export shared.llvm.target.*
+export shared.llvm.tools.*
+export shared.llvm.types.*
+export shared.llvm.passes.*
 ```
 
-**src/llvm_shared/target.spl** (extracted from compiler/backend/llvm_target.spl):
+**src/shared/llvm/target.spl** (extracted from compiler/backend/llvm_target.spl):
 ```simple
 # Target triple and CPU configuration (shared by Core and Full)
 
@@ -169,10 +169,10 @@ fn llvm_cpu_for_target(target: CodegenTarget, compat_mode: bool) -> text
 fn llvm_features_for_target(target: CodegenTarget) -> text
 ```
 
-**src/llvm_shared/tools.spl** (extracted from compiler/backend/llvm_tools.spl):
+**src/shared/llvm/tools.spl** (extracted from compiler/backend/llvm_tools.spl):
 ```simple
 # LLVM tool invocations (shared by Core and Full)
-# This file is 100% identical in compiler and compiler_core
+# This file is 100% identical in compiler and compiler_core_legacy
 
 fn find_llvm_tool(tool: text) -> text
 fn invoke_llc(input_ll: text, output_o: text, triple: text, cpu: text, features: text, opt_level: text) -> i64
@@ -180,7 +180,7 @@ fn invoke_opt(input_ll: text, output_ll: text, passes: [text]) -> i64
 fn invoke_clang(input_files: [text], output: text, triple: text, opt_level: text) -> i64
 ```
 
-**src/llvm_shared/types.spl** (extracted common parts):
+**src/shared/llvm/types.spl** (extracted common parts):
 ```simple
 # LLVM type mapping (primitive types only - shared)
 
@@ -191,11 +191,11 @@ fn llvm_type_bool() -> text: "i1"
 fn llvm_type_ptr() -> text: "ptr"  # LLVM 15+ opaque pointers
 fn llvm_type_void() -> text: "void"
 
-# Compiler-specific type mapping stays in compiler/compiler_core
+# Compiler-specific type mapping stays in compiler/compiler_core_legacy
 # (handles structs, enums, generic types)
 ```
 
-**src/llvm_shared/passes.spl** (extracted pass definitions):
+**src/shared/llvm/passes.spl** (extracted pass definitions):
 ```simple
 # LLVM optimization pass definitions
 
@@ -218,11 +218,11 @@ fn passes_for_opt_level(level: i64) -> [LlvmPass]
 **compiler/backend/llvm_backend.spl** (after refactoring):
 ```simple
 # Full Simple LLVM Backend
-# Uses shared llvm_shared.* infrastructure
+# Uses shared shared.llvm.* infrastructure
 
-use llvm_shared.target.{llvm_triple_for_target, llvm_cpu_for_target}
-use llvm_shared.tools.{invoke_llc, invoke_opt, invoke_clang}
-use llvm_shared.passes.{passes_for_opt_level}
+use shared.llvm.target.{llvm_triple_for_target, llvm_cpu_for_target}
+use shared.llvm.tools.{invoke_llc, invoke_opt, invoke_clang}
+use shared.llvm.passes.{passes_for_opt_level}
 use compiler.backend.llvm_ir_builder.{MirToLlvmFull}  # Compiler-specific
 use compiler.backend.llvm_type_mapper.{FullTypeMapper}  # Compiler-specific
 
@@ -248,16 +248,16 @@ class LlvmBackend:
         invoke_llc(output_ir, output_o, triple, cpu, features, opt_level)
 ```
 
-**compiler_core/backend/llvm_backend.spl** (after refactoring):
+**compiler_core_legacy/backend/llvm_backend.spl** (after refactoring):
 ```simple
 # Core Simple LLVM Backend (desugared, bootstrap-safe)
-# Uses shared llvm_shared.* infrastructure
+# Uses shared shared.llvm.* infrastructure
 
-use llvm_shared.target.{llvm_triple_for_target, llvm_cpu_for_target}
-use llvm_shared.tools.{invoke_llc, invoke_opt, invoke_clang}
-use llvm_shared.passes.{passes_for_opt_level}
-use compiler_core.backend.llvm_ir_builder.{MirToLlvmCore}  # Core-specific
-use compiler_core.backend.llvm_type_mapper.{CoreTypeMapper}  # Core-specific
+use shared.llvm.target.{llvm_triple_for_target, llvm_cpu_for_target}
+use shared.llvm.tools.{invoke_llc, invoke_opt, invoke_clang}
+use shared.llvm.passes.{passes_for_opt_level}
+use compiler_core_legacy.backend.llvm_ir_builder.{MirToLlvmCore}  # Core-specific
+use compiler_core_legacy.backend.llvm_type_mapper.{CoreTypeMapper}  # Core-specific
 
 class LlvmBackend:
     target: CodegenTarget
@@ -295,12 +295,12 @@ class LlvmBackend:
 **Goal**: Extract 100% identical llvm_tools.spl
 
 **Steps**:
-1. Create `src/llvm_shared/` directory
-2. Move `compiler/backend/llvm_tools.spl` → `src/llvm_shared/tools.spl`
+1. Create `src/shared/llvm/` directory
+2. Move `compiler/backend/llvm_tools.spl` → `src/shared/llvm/tools.spl`
 3. Update imports in:
    - `compiler/backend/llvm_backend.spl`
-   - `compiler_core/backend/llvm_backend.spl`
-4. Delete `compiler_core/backend/llvm_tools.spl`
+   - `compiler_core_legacy/backend/llvm_backend.spl`
+4. Delete `compiler_core_legacy/backend/llvm_tools.spl`
 5. Run tests: `bin/simple test test/feature/llvm_backend*`
 
 **Files changed**: 4 files (1 created, 1 deleted, 2 imports updated)
@@ -312,7 +312,7 @@ class LlvmBackend:
 **Goal**: Extract target triple and CPU configuration logic
 
 **Steps**:
-1. Create `src/llvm_shared/target.spl`
+1. Create `src/shared/llvm/target.spl`
 2. Extract shared functions from `llvm_target.spl`:
    - `llvm_triple_for_target()`
    - `llvm_cpu_for_target()`
@@ -321,7 +321,7 @@ class LlvmBackend:
 3. Update `compiler/backend/llvm_target.spl`:
    - Keep Full Simple-specific target configs
    - Import and delegate to shared functions
-4. Update `compiler_core/backend/llvm_target.spl`:
+4. Update `compiler_core_legacy/backend/llvm_target.spl`:
    - Keep Core Simple-specific target configs
    - Import and delegate to shared functions
 5. Run tests
@@ -335,7 +335,7 @@ class LlvmBackend:
 **Goal**: Extract primitive type mappings (i64, f64, bool, ptr, void)
 
 **Steps**:
-1. Create `src/llvm_shared/types.spl`
+1. Create `src/shared/llvm/types.spl`
 2. Extract primitive type functions from `llvm_type_mapper.spl`:
    - `llvm_type_i64()`, `llvm_type_i32()`, etc.
    - Array type construction
@@ -354,7 +354,7 @@ class LlvmBackend:
 **Goal**: Extract optimization pass definitions and configurations
 
 **Steps**:
-1. Create `src/llvm_shared/passes.spl`
+1. Create `src/shared/llvm/passes.spl`
 2. Extract from `llvm_ir_builder.spl`:
    - `LlvmPass` enum (pass names)
    - `passes_for_opt_level()` (pass selection)
@@ -372,10 +372,10 @@ class LlvmBackend:
 
 **Steps**:
 1. Refactor `compiler/backend/llvm_backend.spl`:
-   - Replace direct LLVM tool calls with `llvm_shared.tools.*`
-   - Replace target config with `llvm_shared.target.*`
-   - Replace pass selection with `llvm_shared.passes.*`
-2. Refactor `compiler_core/backend/llvm_backend.spl`:
+   - Replace direct LLVM tool calls with `shared.llvm.tools.*`
+   - Replace target config with `shared.llvm.target.*`
+   - Replace pass selection with `shared.llvm.passes.*`
+2. Refactor `compiler_core_legacy/backend/llvm_backend.spl`:
    - Same refactoring as Full
    - Ensure desugared patterns preserved
 3. Update IR builders to use shared primitives
@@ -419,7 +419,7 @@ bin/simple build --backend=llvm-core         # Core Simple backend (if exposed)
 **Bootstrap compilation test**:
 ```bash
 # 1. Core Simple bootstrap
-scripts/bootstrap-from-scratch.sh
+scripts/bootstrap/bootstrap-from-scratch.sh
 
 # 2. Full Simple self-compilation
 bin/simple build --backend=llvm src/compiler/*.spl
@@ -432,7 +432,7 @@ diff compiler_v1 compiler_v2  # Should be identical
 ### Regression Tests
 
 Create new tests:
-1. **test/system/llvm_shared_backend_spec.spl**
+1. **test/system/shared_llvm_backend_spec.spl**
    - Verify shared library functions work correctly
    - Test target triple generation for all platforms
    - Test CPU selection logic
@@ -451,13 +451,13 @@ Create new tests:
 
 **Current**:
 - compiler/backend/llvm_*.spl: ~2,377 lines
-- compiler_core/backend/llvm_*.spl: ~1,098 lines
+- compiler_core_legacy/backend/llvm_*.spl: ~1,098 lines
 - **Total**: ~3,475 lines
 
 **After refactoring**:
-- src/llvm_shared/*.spl: ~800 lines (shared)
+- src/shared/llvm/*.spl: ~800 lines (shared)
 - compiler/backend/llvm_*.spl: ~1,200 lines (Full-specific)
-- compiler_core/backend/llvm_*.spl: ~500 lines (Core-specific)
+- compiler_core_legacy/backend/llvm_*.spl: ~500 lines (Core-specific)
 - **Total**: ~2,500 lines
 
 **Reduction**: ~975 lines eliminated (~28% reduction)
@@ -465,7 +465,7 @@ Create new tests:
 ### Maintenance Benefits
 
 **Before**:
-- Bug fix requires updating 2 places (compiler + compiler_core)
+- Bug fix requires updating 2 places (compiler + compiler_core_legacy)
 - New architecture support requires 2 implementations
 - Target triple updates need 2 changes
 - Optimization pass changes need 2 updates
@@ -552,27 +552,27 @@ Create new tests:
 - ✅ OptimizationLevel enum
 
 **Will create during refactoring**:
-- src/llvm_shared/ module
+- src/shared/llvm/ module
 - Shared LLVM infrastructure
 
 ---
 
 ## Alternative Approaches Considered
 
-### Alternative 1: Merge compiler_core into compiler
+### Alternative 1: Merge compiler_core_legacy into compiler
 
 **Pros**:
 - Complete elimination of duplication
 - Single codebase
 
 **Cons**:
-- Breaks bootstrap (compiler_core must be seed_cpp compatible)
+- Breaks bootstrap (compiler_core_legacy must be seed_cpp compatible)
 - Full Simple uses features Core Simple can't have
 - Would require reverting 6-phase core refactoring
 
 **Decision**: REJECTED (breaks bootstrap compatibility)
 
-### Alternative 2: Generate compiler_core from compiler
+### Alternative 2: Generate compiler_core_legacy from compiler
 
 **Pros**:
 - Single source of truth (compiler/)
@@ -681,7 +681,7 @@ Create new tests:
 
 ## Questions for Review
 
-1. Should `llvm_shared/` be under `src/` or `src/std/`?
+1. Should `shared/llvm/` be under `src/` or `src/std/`?
 2. Should we expose `--backend=llvm-core` CLI flag, or keep it internal?
 3. Should we extract IR building primitives, or keep them compiler-specific?
 4. What's the minimum LLVM version we want to support (15, 16, 17)?

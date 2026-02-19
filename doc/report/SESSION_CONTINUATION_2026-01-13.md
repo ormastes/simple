@@ -228,15 +228,15 @@ Multiple limitations around advanced generic type usage:
 ## Files Modified
 
 **This Session:**
-- `simple/std_lib/src/core/graph.spl` - Nested generics workaround
+- `simple/std_lib/src/compiler_core/graph.spl` - Nested generics workaround
 
 **Previous Sessions:**
-- `simple/std_lib/src/core/array.spl` - Const generics workaround
-- `simple/std_lib/src/core/primitives.spl` - Impl docstrings fix
-- `simple/std_lib/src/core/traits.spl` - Multiple limitations documented
-- `simple/std_lib/src/core/result.spl` - Reserved keywords fix
-- `simple/std_lib/src/core/option.spl` - Reserved keywords fix
-- `simple/std_lib/src/core/list.spl` - Variadic parameters enabled
+- `simple/std_lib/src/compiler_core/array.spl` - Const generics workaround
+- `simple/std_lib/src/compiler_core/primitives.spl` - Impl docstrings fix
+- `simple/std_lib/src/compiler_core/traits.spl` - Multiple limitations documented
+- `simple/std_lib/src/compiler_core/result.spl` - Reserved keywords fix
+- `simple/std_lib/src/compiler_core/option.spl` - Reserved keywords fix
+- `simple/std_lib/src/compiler_core/list.spl` - Variadic parameters enabled
 
 ---
 

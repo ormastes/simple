@@ -24,7 +24,7 @@ $ timeout 30 bin/simple test test/unit/std/env_spec.spl
 $ timeout 30 bin/simple test test/feature/array_literal_spec.spl
 # Timeout after 2min
 
-$ timeout 30 bin/simple test test/unit/core/interpreter/factorial_spec.spl
+$ timeout 30 bin/simple test test/unit/compiler_core/interpreter/factorial_spec.spl
 # Timeout after 2min
 ```
 

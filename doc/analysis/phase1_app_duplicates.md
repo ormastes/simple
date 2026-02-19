@@ -441,9 +441,9 @@ fn print_help():
 
 ### Refactoring Opportunity
 
-**Create:** `src/app/cli_util.spl` (already exists! needs extension)
+**Create:** `src/lib/cli/cli_util.spl` (already exists! needs extension)
 
-Current `src/app/cli_util.spl` has 4,393 bytes but lacks:
+Current `src/lib/cli/cli_util.spl` has 4,393 bytes but lacks:
 - Declarative argument parser
 - Auto-generated help text
 - Type-safe config builders
@@ -676,7 +676,7 @@ fn generate_example(fn_name: text, params: [(text, text)]) -> text
    - Enum converter generators
    - Reduces FFI wrappers by 75%
 
-3. **`src/app/cli_parser.spl`** (400 lines)
+3. **`src/lib/cli/cli_parser.spl`** (400 lines)
    - Declarative argument parsing
    - Auto-generated help text
    - Type-safe config builders

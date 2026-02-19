@@ -1,0 +1,273 @@
+# Core Simple — Parser Intensive Tests
+use compiler_core.parser.{parser_init, parser_has_errors, parser_error_count, parse_expr, parse_module}
+use std.text.{NL}
+use compiler_core.ast.{ast_reset, expr_get_tag, expr_get_int}
+use compiler_core.ast.*
+use compiler_core.tokens.*
+
+fn parse_expr_src(src: text) -> i64:
+    ast_reset()
+    parser_init(src)
+    parse_expr()
+
+fn parse_module_src(src: text, path: text) -> bool:
+    ast_reset()
+    parse_module(src, path)
+    parser_has_errors()
+
+
+describe "core.parser (intensive)":
+    it "parses assignments and compound assignments":
+        val a1 = parse_expr_src("x = 1")
+        expect(expr_get_tag(a1)).to_equal(EXPR_ASSIGN)
+        val a2 = parse_expr_src("x += 2")
+        expect(expr_get_tag(a2)).to_equal(EXPR_COMPOUND_ASSIGN)
+        expect(expr_get_int(a2)).to_equal(TOK_PLUS)
+        val a3 = parse_expr_src("x -= 2")
+        expect(expr_get_tag(a3)).to_equal(EXPR_COMPOUND_ASSIGN)
+        expect(expr_get_int(a3)).to_equal(TOK_MINUS)
+        val a4 = parse_expr_src("x *= 2")
+        expect(expr_get_tag(a4)).to_equal(EXPR_COMPOUND_ASSIGN)
+        expect(expr_get_int(a4)).to_equal(TOK_STAR)
+        val a5 = parse_expr_src("x /= 2")
+        expect(expr_get_tag(a5)).to_equal(EXPR_COMPOUND_ASSIGN)
+        expect(expr_get_int(a5)).to_equal(TOK_SLASH)
+
+    it "parses logical, comparison, and coalesce operators":
+        val e1 = parse_expr_src("a and b")
+        expect(expr_get_tag(e1)).to_equal(EXPR_BINARY)
+        val e2 = parse_expr_src("a or b")
+        expect(expr_get_tag(e2)).to_equal(EXPR_BINARY)
+        val e3 = parse_expr_src("a ?? b")
+        expect(expr_get_tag(e3)).to_equal(EXPR_NULL_COALESCE)
+        val e4 = parse_expr_src("1 == 2")
+        expect(expr_get_tag(e4)).to_equal(EXPR_BINARY)
+        val e5 = parse_expr_src("1 != 2")
+        expect(expr_get_tag(e5)).to_equal(EXPR_BINARY)
+        val e6 = parse_expr_src("1 < 2")
+        expect(expr_get_tag(e6)).to_equal(EXPR_BINARY)
+        val e7 = parse_expr_src("1 > 2")
+        expect(expr_get_tag(e7)).to_equal(EXPR_BINARY)
+        val e8 = parse_expr_src("1 <= 2")
+        expect(expr_get_tag(e8)).to_equal(EXPR_BINARY)
+        val e9 = parse_expr_src("1 >= 2")
+        expect(expr_get_tag(e9)).to_equal(EXPR_BINARY)
+
+    it "parses unary forms":
+        val e1 = parse_expr_src("-x")
+        expect(expr_get_tag(e1)).to_equal(EXPR_UNARY)
+        val e2 = parse_expr_src("not x")
+        expect(expr_get_tag(e2)).to_equal(EXPR_UNARY)
+        val e3 = parse_expr_src("!x")
+        expect(expr_get_tag(e3)).to_equal(EXPR_UNARY)
+
+    it "parses postfix calls, fields, indexes, slices":
+        val f1 = parse_expr_src("obj.field")
+        expect(expr_get_tag(f1)).to_equal(EXPR_FIELD_ACCESS)
+        val f2 = parse_expr_src("obj.method(1, 2)")
+        expect(expr_get_tag(f2)).to_equal(EXPR_METHOD_CALL)
+        val f3 = parse_expr_src("f(1, 2)")
+        expect(expr_get_tag(f3)).to_equal(EXPR_CALL)
+        val f4 = parse_expr_src("arr[1]")
+        expect(expr_get_tag(f4)).to_equal(EXPR_INDEX)
+        val f5 = parse_expr_src("arr[:2]")
+        expect(expr_get_tag(f5)).to_equal(EXPR_SLICE)
+        val f6 = parse_expr_src("arr[1:]")
+        expect(expr_get_tag(f6)).to_equal(EXPR_SLICE)
+        val f7 = parse_expr_src("arr[1:2]")
+        expect(expr_get_tag(f7)).to_equal(EXPR_SLICE)
+        val f8 = parse_expr_src("obj?.field")
+        expect(expr_get_tag(f8)).to_equal(EXPR_FIELD_ACCESS)
+
+    it "parses strings with and without interpolation":
+        val s1 = parse_expr_src("\"hello\"")
+        expect(expr_get_tag(s1)).to_equal(EXPR_STRING_LIT)
+        val s2 = parse_expr_src("\"hello {name}!\"")
+        expect(expr_get_tag(s2)).to_equal(EXPR_INTERPOLATED_STRING)
+        val s3 = parse_expr_src("\"hello {name\"")
+        expect(expr_get_tag(s3)).to_equal(EXPR_INTERPOLATED_STRING)
+
+    it "parses primary keywords and underscore":
+        val r = parse_expr_src("return")
+        expect(expr_get_tag(r)).to_equal(EXPR_RETURN)
+        val b = parse_expr_src("break")
+        expect(expr_get_tag(b)).to_equal(EXPR_BREAK)
+        val c = parse_expr_src("continue")
+        expect(expr_get_tag(c)).to_equal(EXPR_CONTINUE)
+        val p = parse_expr_src("pass")
+        expect(expr_get_tag(p)).to_equal(EXPR_PASS)
+        val u = parse_expr_src("_")
+        expect(expr_get_tag(u)).to_equal(EXPR_IDENT)
+
+    it "parses full module declarations":
+        val src = "use a.b.{c, d}{NL}" +
+            "export c, d{NL}" +
+            "extern fn ext(x: i64) -> i64{NL}" +
+            "struct Point:{NL}" +
+            "    x: i64{NL}" +
+            "    y: i64{NL}" +
+            "enum Color:{NL}" +
+            "    Red{NL}" +
+            "    Green{NL}" +
+            "fn add(a: i64, b: i64) -> i64:{NL}" +
+            "    return a + b{NL}" +
+            "val x: i64 = 1{NL}" +
+            "var y = 2{NL}" +
+            "if x == 1:{NL}" +
+            "    pass{NL}" +
+            "elif x == 2:{NL}" +
+            "    pass{NL}" +
+            "else:{NL}" +
+            "    pass{NL}" +
+            "match x:{NL}" +
+            "    case 1:{NL}" +
+            "        pass{NL}"
+        val had_err = parse_module_src(src, "full.spl")
+        expect(had_err).to_equal(false)
+
+    it "reports errors for malformed match":
+        val bad = "match x:{NL}    nope 1{NL}"
+        val had_err = parse_module_src(bad, "bad_match.spl")
+        expect(had_err).to_equal(true)
+        expect(parser_error_count() > 0).to_equal(true)
+
+    # === Additional branch coverage ===
+
+    it "parses hex literals":
+        val e = parse_expr_src("0xFF")
+        expect(expr_get_tag(e)).to_equal(EXPR_INT_LIT)
+
+    it "parses binary literals":
+        val e = parse_expr_src("0b1010")
+        expect(expr_get_tag(e)).to_equal(EXPR_INT_LIT)
+
+    it "parses octal literals":
+        val e = parse_expr_src("0o755")
+        expect(expr_get_tag(e)).to_equal(EXPR_INT_LIT)
+
+    it "parses float literals":
+        val e = parse_expr_src("3.14")
+        expect(expr_get_tag(e)).to_equal(EXPR_FLOAT_LIT)
+
+    it "parses nil literal":
+        val e = parse_expr_src("nil")
+        expect(expr_get_tag(e)).to_equal(EXPR_NIL_LIT)
+
+    it "parses true literal":
+        val e = parse_expr_src("true")
+        expect(expr_get_tag(e)).to_equal(EXPR_BOOL_LIT)
+
+    it "parses false literal":
+        val e = parse_expr_src("false")
+        expect(expr_get_tag(e)).to_equal(EXPR_BOOL_LIT)
+
+    it "parses self keyword":
+        val e = parse_expr_src("self")
+        expect(expr_get_tag(e)).to_equal(EXPR_IDENT)
+
+    it "parses empty parentheses as unit":
+        val e = parse_expr_src("()")
+        expect(expr_get_tag(e)).to_equal(EXPR_UNIT)
+
+    it "parses empty array literal":
+        val e = parse_expr_src("[]")
+        expect(expr_get_tag(e)).to_equal(EXPR_ARRAY_LIT)
+
+    it "parses array literal with trailing comma":
+        val e = parse_expr_src("[1, 2,]")
+        expect(expr_get_tag(e)).to_equal(EXPR_ARRAY_LIT)
+
+    it "parses return without value":
+        val e = parse_expr_src("return")
+        expect(expr_get_tag(e)).to_equal(EXPR_RETURN)
+
+    it "parses return with value":
+        val e = parse_expr_src("return 42")
+        expect(expr_get_tag(e)).to_equal(EXPR_RETURN)
+
+    it "parses slice with start only":
+        val e = parse_expr_src("arr[1:]")
+        expect(expr_get_tag(e)).to_equal(EXPR_SLICE)
+
+    it "parses slice with end only":
+        val e = parse_expr_src("arr[:5]")
+        expect(expr_get_tag(e)).to_equal(EXPR_SLICE)
+
+    it "parses range exclusive":
+        val e = parse_expr_src("0..10")
+        expect(expr_get_tag(e)).to_equal(EXPR_RANGE)
+
+    it "parses range inclusive":
+        val e = parse_expr_src("0..=10")
+        expect(expr_get_tag(e)).to_equal(EXPR_RANGE)
+
+    it "parses power operator":
+        val e = parse_expr_src("2 ** 3")
+        expect(expr_get_tag(e)).to_equal(EXPR_BINARY)
+
+    it "parses modulo operator":
+        val e = parse_expr_src("7 % 3")
+        expect(expr_get_tag(e)).to_equal(EXPR_BINARY)
+
+    it "parses optional chaining":
+        val e = parse_expr_src("obj?.field")
+        expect(expr_get_tag(e)).to_equal(EXPR_FIELD_ACCESS)
+
+    it "parses simple string without interpolation":
+        val e = parse_expr_src("\"hello\"")
+        expect(expr_get_tag(e)).to_equal(EXPR_STRING_LIT)
+
+    it "parses array type annotation":
+        val src = "fn f(arr: [i64]) -> [text]:{NL}    pass{NL}"
+        val had_err = parse_module_src(src, "arr_type.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses Option type annotation":
+        val src = "fn f() -> Option<i64>:{NL}    return nil{NL}"
+        val had_err = parse_module_src(src, "opt_type.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses postfix ? type annotation":
+        val src = "fn f() -> i64?:{NL}    return nil{NL}"
+        val had_err = parse_module_src(src, "postfix_type.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses text? option type":
+        val src = "fn f() -> text?:{NL}    return nil{NL}"
+        val had_err = parse_module_src(src, "text_opt.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses f64? option type":
+        val src = "fn f() -> f64?:{NL}    return nil{NL}"
+        val had_err = parse_module_src(src, "f64_opt.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses bool? option type":
+        val src = "fn f() -> bool?:{NL}    return nil{NL}"
+        val had_err = parse_module_src(src, "bool_opt.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses Result type":
+        val src = "fn f() -> Result<i64>:{NL}    return nil{NL}"
+        val had_err = parse_module_src(src, "result_type.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses while loop":
+        val src = "while x > 0:{NL}    x = x - 1{NL}"
+        val had_err = parse_module_src(src, "while.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses for loop":
+        val src = "for i in 0..10:{NL}    pass{NL}"
+        val had_err = parse_module_src(src, "for.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses class declaration":
+        val src = "class Point:{NL}    x: i64{NL}    y: i64{NL}"
+        val had_err = parse_module_src(src, "class.spl")
+        expect(had_err).to_equal(false)
+
+    it "parses impl block":
+        val src = "impl Point:{NL}    fn get_x() -> i64:{NL}        return self.x{NL}"
+        val had_err = parse_module_src(src, "impl.spl")
+        expect(had_err).to_equal(false)

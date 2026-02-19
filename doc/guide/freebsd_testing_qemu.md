@@ -25,11 +25,11 @@ Run basic Simple language tests in FreeBSD QEMU VM to verify cross-platform comp
 Tests core functionality + essential stdlib:
 
 **Core Tests (~50 tests):**
-- `test/unit/core/tokens_spec.spl` - Token recognition
-- `test/unit/core/types_spec.spl` - Type system
-- `test/unit/core/lexer_spec.spl` - Lexical analysis
-- `test/unit/core/parser_spec.spl` - Syntax parsing
-- `test/unit/core/ast_spec.spl` - AST operations
+- `test/unit/compiler_core/tokens_spec.spl` - Token recognition
+- `test/unit/compiler_core/types_spec.spl` - Type system
+- `test/unit/compiler_core/lexer_spec.spl` - Lexical analysis
+- `test/unit/compiler_core/parser_spec.spl` - Syntax parsing
+- `test/unit/compiler_core/ast_spec.spl` - AST operations
 
 **Stdlib Tests (~30 tests):**
 - `test/unit/std/string_spec.spl` - String operations
@@ -105,7 +105,7 @@ Rsync project files to VM:
 ### Step 3: Build Compiler
 
 Bootstrap Simple compiler in FreeBSD:
-- Uses `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
+- Uses `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 - CMake + Clang 19+ + C++20
 - Skipped if `--skip-build` flag used
 - Verifies binary is FreeBSD ELF
@@ -153,7 +153,7 @@ Download compiled binary from VM:
 #
 # [test-freebsd-basic] Step 4: Running basic test suite
 # Found 87 tests to run
-# Testing: test/unit/core/
+# Testing: test/unit/compiler_core/
 #   ✓ 50 tests passed
 # Testing: test/unit/std/string_spec.spl
 #   ✓ 12 tests passed
@@ -209,7 +209,7 @@ ssh -p 2222 freebsd@localhost
 # Inside VM:
 cd ~/simple
 bin/simple --version
-bin/simple test test/unit/core/lexer_spec.spl
+bin/simple test test/unit/compiler_core/lexer_spec.spl
 bin/simple test test/unit/std/
 exit
 ```
@@ -255,7 +255,7 @@ cmake --version    # Should be 3.20+
 
 # Run bootstrap manually with verbose output
 cd ~/simple
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --verbose
 ```
 
 ### Issue: Tests Fail
@@ -268,10 +268,10 @@ cd ~/simple
 ./scripts/test-freebsd-qemu-basic.sh --skip-build --verbose
 
 # Run specific failing test manually
-ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/core/parser_spec.spl"
+ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/compiler_core/parser_spec.spl"
 
 # Compare with Linux results
-bin/simple test test/unit/core/parser_spec.spl
+bin/simple test test/unit/compiler_core/parser_spec.spl
 ```
 
 ### Issue: Binary Not FreeBSD ELF
@@ -342,7 +342,7 @@ time ./scripts/test-freebsd-qemu-basic.sh --skip-build --core-only
 FreeBSD VM can run tests in parallel if Simple supports it:
 
 ```bash
-ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test --parallel=4 test/unit/core/"
+ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test --parallel=4 test/unit/compiler_core/"
 ```
 
 ## Integration with CI/CD
@@ -456,6 +456,6 @@ ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test <path>"
 
 - **Full QEMU Guide:** `doc/guide/freebsd_qemu_bootstrap.md`
 - **Quick Start:** `README_FREEBSD_QEMU.md`
-- **Bootstrap Script:** `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
+- **Bootstrap Script:** `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 - **Setup Test:** `scripts/test-freebsd-qemu-setup.sh`
 - **Basic Test:** `scripts/test-freebsd-qemu-basic.sh`

@@ -17,7 +17,7 @@
 **Solution:** Change `fn` to `me` for methods that modify state
 
 **Files to fix:**
-- `src/lib/std/src/core/decorators.spl`
+- `src/lib/std/src/compiler_core/decorators.spl`
 
 **Specific methods:**
 1. CachedFunction.__call__ - modifies `self.misses`

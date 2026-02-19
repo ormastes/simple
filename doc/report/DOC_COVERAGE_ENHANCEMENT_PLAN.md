@@ -62,7 +62,7 @@ doc:incomplete                # Partial documentation
 
 # Scope Tags (auto-generated from file path)
 scope:stdlib      # src/std/
-scope:core        # src/core/
+scope:core        # src/compiler_core/
 scope:lib         # src/lib/
 scope:app         # src/app/
 scope:compiler    # src/compiler/
@@ -140,7 +140,7 @@ doc_coverage {
 
     thresholds {
         "src/std/" 90
-        "src/core/" 75
+        "src/compiler_core/" 75
         "src/lib/" 80
         "src/app/" 50
         "src/compiler/" 60

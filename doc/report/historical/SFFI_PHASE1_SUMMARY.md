@@ -16,7 +16,7 @@ Successfully implemented **Phase 1** of the SFFI fix plan, replacing shell-based
 
 ### 1. Runtime Functions Added (C)
 
-**New functions in `seed/runtime.h` and `seed/platform/unix_common.h`:**
+**New functions in `src/compiler_seed/runtime.h` and `src/compiler_seed/platform/unix_common.h`:**
 
 - `rt_dir_create(path, recursive)` - Create directories natively
 - `rt_dir_list(path, out_count)` - List directory contents
@@ -136,10 +136,10 @@ All tests passed!
 
 ```
 Modified:
-  seed/runtime.h                      +6 declarations
-  seed/runtime.c                      +25 lines
-  seed/platform/unix_common.h         +115 lines
-  seed/platform/platform_win.h        +20 lines
+  src/compiler_seed/runtime.h                      +6 declarations
+  src/compiler_seed/runtime.c                      +25 lines
+  src/compiler_seed/platform/unix_common.h         +115 lines
+  src/compiler_seed/platform/platform_win.h        +20 lines
   src/app/io/dir_ops.spl             -12 shell calls
   src/app/io/file_ops.spl            -35 shell calls
   

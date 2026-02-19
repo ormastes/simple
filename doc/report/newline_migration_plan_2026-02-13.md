@@ -42,8 +42,8 @@ Replace all hardcoded `"\n"` string literals with the `NL` constant from `src/st
 - Focus: linker/, loader/, backend/, driver.spl
 - Files: ~150 occurrences
 
-### Agent 2: src/compiler_core/ (250 files)
-- Focus: All compiler_core modules
+### Agent 2: src/compiler_core_legacy/ (250 files)
+- Focus: All compiler_core_legacy modules
 - Files: ~300 occurrences
 
 ### Agent 3: src/app/ (150 files)

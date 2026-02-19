@@ -108,7 +108,7 @@
 - **Risk:** MEDIUM-LOW (depends on bugdb API stability)
 
 #### Day 13-14: Async State Machine
-- **File:** `src/core/interpreter/eval.spl`
+- **File:** `src/compiler_core/interpreter/eval.spl`
 - **TODO:** "Full state machine support requires desugaring"
 - **Work:**
   1. Transform `async fn foo() -> T:` into:
@@ -134,7 +134,7 @@
 
 ### Item #1: Test Assertions (468 items)
 - **Status:** BLOCKED on compiler phases
-- **Files:** `test/compiler_core/variance_phase6a.spl` (41), `const_keys_phase8b.spl` (26), etc.
+- **Files:** `test/compiler_core_legacy/variance_phase6a.spl` (41), `const_keys_phase8b.spl` (26), etc.
 - **Action:** Monitor phase completion
 - **When ready:** Uncomment `# TODO: assert` lines, enable tests
 - **Effort when ready:** 1-2 days per phase

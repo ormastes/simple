@@ -224,16 +224,16 @@ Complete inventory of skipped/ignored tests across Rust and Simple (.spl) codeba
 **Reason**: Various core modules not yet implemented
 
 **Files**:
-1. `simple/std_lib/test/unit/core/decorators_spec.spl`
-2. `simple/std_lib/test/unit/core/sync_spec.spl`
-3. `simple/std_lib/test/unit/core/random_spec.spl`
-4. `simple/std_lib/test/unit/core/regex_spec.spl`
-5. `simple/std_lib/test/unit/core/context_spec.spl` - Multiple issues
-6. `simple/std_lib/test/unit/core/math_spec.spl`
-7. `simple/std_lib/test/unit/core/dsl_spec.spl`
-8. `simple/std_lib/test/unit/core/pattern_analysis_spec.spl` - BDD framework scoping bug
-9. `simple/std_lib/test/unit/core/attributes_spec.spl` - BDD framework scoping bug
-10. `simple/std_lib/test/unit/core/fluent_interface_spec.spl` - BDD mutable variable bug
+1. `simple/std_lib/test/unit/compiler_core/decorators_spec.spl`
+2. `simple/std_lib/test/unit/compiler_core/sync_spec.spl`
+3. `simple/std_lib/test/unit/compiler_core/random_spec.spl`
+4. `simple/std_lib/test/unit/compiler_core/regex_spec.spl`
+5. `simple/std_lib/test/unit/compiler_core/context_spec.spl` - Multiple issues
+6. `simple/std_lib/test/unit/compiler_core/math_spec.spl`
+7. `simple/std_lib/test/unit/compiler_core/dsl_spec.spl`
+8. `simple/std_lib/test/unit/compiler_core/pattern_analysis_spec.spl` - BDD framework scoping bug
+9. `simple/std_lib/test/unit/compiler_core/attributes_spec.spl` - BDD framework scoping bug
+10. `simple/std_lib/test/unit/compiler_core/fluent_interface_spec.spl` - BDD mutable variable bug
 
 **Action Needed**: Implement missing core modules.
 
@@ -242,9 +242,9 @@ Complete inventory of skipped/ignored tests across Rust and Simple (.spl) codeba
 
 **Files**:
 1. `simple/std_lib/test/unit/sdn/lexer_spec.spl` - Scoping bug
-2. `simple/std_lib/test/unit/core/pattern_analysis_spec.spl` - Enum definitions in it blocks
-3. `simple/std_lib/test/unit/core/attributes_spec.spl` - Class/function definitions in it blocks
-4. `simple/std_lib/test/unit/core/fluent_interface_spec.spl` - Mutable variable bug
+2. `simple/std_lib/test/unit/compiler_core/pattern_analysis_spec.spl` - Enum definitions in it blocks
+3. `simple/std_lib/test/unit/compiler_core/attributes_spec.spl` - Class/function definitions in it blocks
+4. `simple/std_lib/test/unit/compiler_core/fluent_interface_spec.spl` - Mutable variable bug
 5. `simple/std_lib/test/unit/spec/given_working_spec.spl` - Given/given_lazy not fully implemented
 6. `simple/std_lib/test/unit/spec/mock_spec.spl` - Mock library features not implemented
 

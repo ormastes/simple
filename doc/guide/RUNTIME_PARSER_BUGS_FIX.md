@@ -12,7 +12,7 @@ The issue was that `EXPR_SLICE` was not handled in the interpreter's expression 
 
 ### Fix Implemented
 
-**File:** `src/core/interpreter/eval.spl`
+**File:** `src/compiler_core/interpreter/eval.spl`
 
 1. **Added EXPR_SLICE dispatch** (line ~131):
 ```simple
@@ -89,7 +89,7 @@ fn eval_slice_expr(eid: i64) -> i64:
 
 ### Status
 
-- ✅ Code changes implemented in `src/core/interpreter/eval.spl`
+- ✅ Code changes implemented in `src/compiler_core/interpreter/eval.spl`
 - ✅ Build succeeds with changes
 - ⏸️ **Requires runtime rebuild** to take effect
 - The current `bin/simple` is a pre-built Rust binary

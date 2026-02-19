@@ -2,7 +2,7 @@
 
 ## Problem
 
-The `must_use_scan_source()` function in `src/core/interpreter/eval.spl` (lines 309-397) had a critical O(n⁴) performance issue due to repeated string concatenation in nested loops.
+The `must_use_scan_source()` function in `src/compiler_core/interpreter/eval.spl` (lines 309-397) had a critical O(n⁴) performance issue due to repeated string concatenation in nested loops.
 
 ## Original Code Issues
 
@@ -108,14 +108,14 @@ For a 10,000 character file:
 ## Verification
 
 All tests pass with zero regressions:
-- `test/unit/core/must_use_spec.spl` - 1/1 passing (5ms)
-- `test/unit/core/interpreter/` - 8/8 passing (34ms)
-- `test/unit/core/` - 77/77 passing (370ms)
+- `test/unit/compiler_core/must_use_spec.spl` - 1/1 passing (5ms)
+- `test/unit/compiler_core/interpreter/` - 8/8 passing (34ms)
+- `test/unit/compiler_core/` - 77/77 passing (370ms)
 - `test/unit/compiler/` - 227/227 passing (956ms)
 
 ## Files Modified
 
-- `src/core/interpreter/eval.spl` - Lines 309-399 optimized
+- `src/compiler_core/interpreter/eval.spl` - Lines 309-399 optimized
 - Total changes: 4 string variables → array variables, 4 concat loops → push loops
 
 ## Related Documentation

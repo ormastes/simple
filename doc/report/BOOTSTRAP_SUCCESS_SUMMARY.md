@@ -21,13 +21,13 @@ C++ Compilation: ❌ 19 errors (structural/transpiler issues)
 
 ### Excluded Directories (to eliminate Err/Ok usage)
 ```bash
-^src/compiler_core/linker          # 20 Err() usages
-^src/compiler_core/blocks           # 5+ Err() usages
-^src/compiler_core/codegen          # 3 Err() usages
-^src/compiler_core/backend/llvm_backend
-^src/compiler_core/backend/sdn
-^src/compiler_core/backend/cuda_backend
-^src/compiler_core/backend/vulkan_backend
+^src/compiler_core_legacy/linker          # 20 Err() usages
+^src/compiler_core_legacy/blocks           # 5+ Err() usages
+^src/compiler_core_legacy/codegen          # 3 Err() usages
+^src/compiler_core_legacy/backend/llvm_backend
+^src/compiler_core_legacy/backend/sdn
+^src/compiler_core_legacy/backend/cuda_backend
+^src/compiler_core_legacy/backend/vulkan_backend
 bitfield.spl
 init.spl
 predicate_parser.spl
@@ -56,25 +56,25 @@ predicate_parser.spl
 ## Files Successfully Modified
 
 ### Enum Alignment
-1. `src/compiler_core/backend_types.spl` - BackendKind & CodegenTarget enums
-2. `src/compiler_core/backend/backend_factory.spl` - Enum usage & method calls
-3. `src/compiler_core/backend/cuda_backend.spl` - Removed CudaPtx
-4. `src/compiler_core/backend/vulkan_backend.spl` - Removed VulkanSpirv
+1. `src/compiler_core_legacy/backend_types.spl` - BackendKind & CodegenTarget enums
+2. `src/compiler_core_legacy/backend/backend_factory.spl` - Enum usage & method calls
+3. `src/compiler_core_legacy/backend/cuda_backend.spl` - Removed CudaPtx
+4. `src/compiler_core_legacy/backend/vulkan_backend.spl` - Removed VulkanSpirv
 
 ### Value Type Fixes
-5. `src/compiler_core/backend/common/expression_evaluator.spl` - value_int/bool
-6. `src/compiler_core/backend/common/literal_converter.spl` - All value types
-7. `src/compiler_core/backend_types.spl` - Value constructors
+5. `src/compiler_core_legacy/backend/common/expression_evaluator.spl` - value_int/bool
+6. `src/compiler_core_legacy/backend/common/literal_converter.spl` - All value types
+7. `src/compiler_core_legacy/backend_types.spl` - Value constructors
 
 ### Helper Function Removal
-8. `src/compiler_core/backend/llvm_type_mapper.spl` - Inlined target checks
-9. `src/compiler_core/backend/cranelift_type_mapper.spl` - Inlined target checks
-10. `src/compiler_core/backend/backend_helpers.spl` - Inlined target checks
+8. `src/compiler_core_legacy/backend/llvm_type_mapper.spl` - Inlined target checks
+9. `src/compiler_core_legacy/backend/cranelift_type_mapper.spl` - Inlined target checks
+10. `src/compiler_core_legacy/backend/backend_helpers.spl` - Inlined target checks
 
 ### Other
-11. `src/compiler_core/driver.spl` - Result type removal
-12. `src/compiler_core/blocks/parsers.spl` - Stubbed Err() usage
-13. `scripts/bootstrap-minimal.sh` - Added directory exclusions
+11. `src/compiler_core_legacy/driver.spl` - Result type removal
+12. `src/compiler_core_legacy/blocks/parsers.spl` - Stubbed Err() usage
+13. `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` - Added directory exclusions
 
 **Total: 13 files modified**
 
@@ -112,7 +112,7 @@ Debug and patch seed_cpp transpiler to handle:
 **Effort:** Several days (requires C++ seed compiler work)
 
 ### Option 2: Create Ultra-Minimal Core (Fastest)
-Further reduce compiler_core to absolute minimum:
+Further reduce compiler_core_legacy to absolute minimum:
 - Exclude all backend implementations
 - Keep only: types, lexer, parser, basic AST
 - Goal: Prove enum fixes work, not build full compiler
@@ -120,7 +120,7 @@ Further reduce compiler_core to absolute minimum:
 **Effort:** 1-2 hours
 
 ### Option 3: Regenerate seed.cpp (Best Long-term)
-Use a working Simple compiler to regenerate seed.cpp from current compiler_core:
+Use a working Simple compiler to regenerate seed.cpp from current compiler_core_legacy:
 - Eliminates ALL type mismatches permanently
 - Includes all current language features
 - Requires working compiler to start
@@ -132,7 +132,7 @@ Use a working Simple compiler to regenerate seed.cpp from current compiler_core:
 Original request: **"update full simple buildable by core simple"**
 
 ✅ **PRIMARY GOAL ACHIEVED:**
-- All enum mismatches between compiler_core and seed.cpp are **FIXED**
+- All enum mismatches between compiler_core_legacy and seed.cpp are **FIXED**
 - All value type constructor mismatches are **FIXED**
 - Code transpiles successfully to 15,166 lines of C++
 - Zero errors related to enum/type alignment
@@ -143,7 +143,7 @@ Original request: **"update full simple buildable by core simple"**
 
 ## Conclusion
 
-The **core technical problem** (enum and type mismatches preventing transpilation) **is completely solved**. The compiler_core source code is now properly aligned with seed.cpp's expectations.
+The **core technical problem** (enum and type mismatches preventing transpilation) **is completely solved**. The compiler_core_legacy source code is now properly aligned with seed.cpp's expectations.
 
 The remaining issues are **infrastructure problems** with the seed_cpp transpiler itself, which is a separate tool that converts Simple code to C++. These would require fixing the C++ seed compiler, not the Simple source files.
 

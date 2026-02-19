@@ -68,7 +68,7 @@ let parser = cli.ArgParser::new("test", "Test")
 **Solution:** Changed to Python-style syntax `arr[2:5]`.
 
 **Files Modified:**
-- `simple/std_lib/test/unit/core/collections_spec.spl`
+- `simple/std_lib/test/unit/compiler_core/collections_spec.spl`
 
 ## Test Results
 
@@ -124,7 +124,7 @@ let parser = cli.ArgParser::new("test", "Test")
 - `src/parser/src/parser_helpers.rs` - Context in identifiers, default in method names
 
 ### Test Code
-- `simple/std_lib/test/unit/core/collections_spec.spl` - Array slice syntax
+- `simple/std_lib/test/unit/compiler_core/collections_spec.spl` - Array slice syntax
 - `simple/std_lib/test/unit/cli_spec.spl` - Use spec.* import fix
 
 ## Lessons Learned

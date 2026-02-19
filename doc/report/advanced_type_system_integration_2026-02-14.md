@@ -23,7 +23,7 @@ Successfully integrated the Advanced Type System into the Simple language compil
 
 ### Implementation
 
-**File:** `src/core/interpreter/eval.spl`
+**File:** `src/compiler_core/interpreter/eval.spl`
 
 **Added Functions:**
 ```simple
@@ -59,7 +59,7 @@ if param_types.len() > 0:
 - Supports all basic Simple types: bool, i64, f64, text
 
 **Test Coverage:**
-- `test/unit/core/interpreter/type_checking_spec.spl` (10 tests)
+- `test/unit/compiler_core/interpreter/type_checking_spec.spl` (10 tests)
 - Tests for each type: bool, i64, f64, text
 - Edge cases: nil values, nested calls, arrays
 
@@ -69,7 +69,7 @@ if param_types.len() > 0:
 
 ### Implementation
 
-**File:** `src/core/interpreter/eval.spl`
+**File:** `src/compiler_core/interpreter/eval.spl`
 
 **Added Monomorphization Cache:**
 ```simple
@@ -112,7 +112,7 @@ if type_params.len() > 0:
 - Cache key format: `function_name__type1_type2_type3`
 
 **Test Coverage:**
-- `test/unit/core/type_system_integration_spec.spl` - Monomorphization section
+- `test/unit/compiler_core/type_system_integration_spec.spl` - Monomorphization section
 - Tests for same-type caching and different-type instantiations
 
 ---
@@ -121,7 +121,7 @@ if type_params.len() > 0:
 
 ### Implementation
 
-**File:** `src/core/parser.spl`
+**File:** `src/compiler_core/parser.spl`
 
 **Added Type Inference Function:**
 ```simple
@@ -168,7 +168,7 @@ fn parse_val_decl_stmt() -> i64:
 - Unary `not` → TYPE_BOOL
 
 **Test Coverage:**
-- `test/unit/core/type_system_integration_spec.spl` - Type Inference section
+- `test/unit/compiler_core/type_system_integration_spec.spl` - Type Inference section
 - Tests for all literal types
 - Tests for operator type inference
 - Tests for explicit vs inferred types
@@ -180,13 +180,13 @@ fn parse_val_decl_stmt() -> i64:
 ### Module Dependencies
 
 ```
-src/core/type_checker.spl      (443 lines)
+src/compiler_core/type_checker.spl      (443 lines)
     ↓ (provides runtime type validation)
-src/core/interpreter/eval.spl  (+ type_check_value, + mono cache)
+src/compiler_core/interpreter/eval.spl  (+ type_check_value, + mono cache)
     ↓ (validates function parameters at runtime)
-src/core/parser.spl            (+ infer_expr_type_from_parse)
+src/compiler_core/parser.spl            (+ infer_expr_type_from_parse)
     ↓ (infers types during parsing)
-src/core/ast_types.spl         (CoreDecl.param_types, CoreDecl.type_params)
+src/compiler_core/ast_types.spl         (CoreDecl.param_types, CoreDecl.type_params)
 ```
 
 ### Type Flow
@@ -232,10 +232,10 @@ Interpreter Phase:
 
 ### Unit Tests
 ```bash
-$ bin/simple test test/unit/core/interpreter/type_checking_spec.spl
+$ bin/simple test test/unit/compiler_core/interpreter/type_checking_spec.spl
 Results: 10/10 passed (100%)
 
-$ bin/simple test test/unit/core/type_system_integration_spec.spl
+$ bin/simple test test/unit/compiler_core/type_system_integration_spec.spl
 Results: 20/20 passed (100%)
 
 $ bin/simple test test/unit/type/
@@ -250,7 +250,7 @@ Results: 40/40 passed (100%)
 
 ### Regression Tests
 ```bash
-$ bin/simple test test/unit/core/interpreter/
+$ bin/simple test test/unit/compiler_core/interpreter/
 Results: 8/8 passed (100%)
 
 $ bin/simple test test/unit/parser/
@@ -375,20 +375,20 @@ fn infer_expr_type_from_parse(expr_id: i64) -> i64
 ## Files Modified
 
 ### Core Changes
-1. `src/core/interpreter/eval.spl` (+70 lines)
+1. `src/compiler_core/interpreter/eval.spl` (+70 lines)
    - Added type_check_value() function
    - Added monomorphization cache (3 functions)
    - Modified eval_function_call() for type checking
    - Modified eval_function_call() for generic function support
 
-2. `src/core/parser.spl` (+50 lines)
+2. `src/compiler_core/parser.spl` (+50 lines)
    - Added infer_expr_type_from_parse() function
    - Modified parse_val_decl_stmt() for type inference
    - Modified parse_var_decl_stmt() documentation
 
 ### Test Files Created
-3. `test/unit/core/interpreter/type_checking_spec.spl` (10 tests)
-4. `test/unit/core/type_system_integration_spec.spl` (20 tests)
+3. `test/unit/compiler_core/interpreter/type_checking_spec.spl` (10 tests)
+4. `test/unit/compiler_core/type_system_integration_spec.spl` (20 tests)
 
 ### Documentation
 5. `doc/report/advanced_type_system_integration_2026-02-14.md` (this file)
@@ -442,10 +442,10 @@ To verify the integration:
 
 ```bash
 # 1. Run type checker tests
-bin/simple test test/unit/core/interpreter/type_checking_spec.spl
+bin/simple test test/unit/compiler_core/interpreter/type_checking_spec.spl
 
 # 2. Run type inference tests
-bin/simple test test/unit/core/type_system_integration_spec.spl
+bin/simple test test/unit/compiler_core/type_system_integration_spec.spl
 
 # 3. Run all type system tests
 bin/simple test test/unit/type/
@@ -454,7 +454,7 @@ bin/simple test test/unit/type/
 bin/simple test test/integration/advanced_types_spec.spl
 
 # 5. Verify no regressions
-bin/simple test test/unit/core/interpreter/
+bin/simple test test/unit/compiler_core/interpreter/
 bin/simple test test/unit/parser/
 ```
 

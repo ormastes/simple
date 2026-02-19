@@ -143,7 +143,7 @@ Quick reference for implementable features organized by effort and impact.
 - 🔴 Composition - not implemented
 
 **Blockers:**
-1. Syntax error in `src/lib/std/src/core/decorators.spl`
+1. Syntax error in `src/lib/std/src/compiler_core/decorators.spl`
 2. Missing decorator implementations
 
 **Action:**
@@ -270,10 +270,10 @@ cargo test --doc --workspace 2>&1 | grep " ... ignored" | wc -l
 - Various infrastructure crates - 17 doc-tests
 
 ### Priority 3 (Blocked)
-- `src/lib/std/src/core/decorators.spl` - Fix parsing + implement
+- `src/lib/std/src/compiler_core/decorators.spl` - Fix parsing + implement
 - `test/lib/std/unit/core/decorators_spec.spl` - Enable tests
 - `test/lib/std/unit/core/synchronization_spec.spl` - Implement tests
-- `src/lib/std/src/core/synchronization.spl` - Add test hooks (maybe)
+- `src/lib/std/src/compiler_core/synchronization.spl` - Add test hooks (maybe)
 
 ---
 

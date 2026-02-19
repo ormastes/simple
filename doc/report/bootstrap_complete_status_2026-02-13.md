@@ -175,13 +175,13 @@ The pre-built `bin/release/simple` WAS bootstrapped from Simple sources at some 
 
 ## Files Changed
 
-### seed/seed.cpp
+### src/compiler_seed/seed.cpp
 - Line 485: Added `has_main_func` flag
 - Line 3076: Set flag when detecting main
 - Line 4277: Call spl_main() if flag true
 - Line 3368: Added NL constant
 
-### scripts/bootstrap-fixed.sh
+### scripts/bootstrap/bootstrap-from-scratch.sh --step=core1
 - Lines 29-44: Exclude test files, problematic modules
 - Result: 383 → 317 files
 

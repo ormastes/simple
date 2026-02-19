@@ -27,9 +27,9 @@
 **Agent ID:** aff40f2 | **Time:** 14 hours | **Status:** Core implementation done
 
 **Deliverables:**
-- ✅ `src/core/type_checker.spl` (575 lines) - Runtime validation for union/intersection/refinement types
-- ✅ `src/core/type_erasure.spl` (348 lines) - Generic monomorphization with caching
-- ✅ `src/core/type_inference.spl` (513 lines) - Hindley-Milner unification algorithm
+- ✅ `src/compiler_core/type_checker.spl` (575 lines) - Runtime validation for union/intersection/refinement types
+- ✅ `src/compiler_core/type_erasure.spl` (348 lines) - Generic monomorphization with caching
+- ✅ `src/compiler_core/type_inference.spl` (513 lines) - Hindley-Milner unification algorithm
 - ✅ `test/unit/type/runtime_type_check_spec.spl` (~800 lines, 60 tests)
 - ✅ `test/unit/type/basic_type_check_spec.spl` (~200 lines, 24 tests)
 - ✅ Documentation: 1,630 lines across 4 files
@@ -132,7 +132,7 @@ C4 E1 74 58 C2
 - ✅ `test/unit/std/thread_safe_queue_spec.spl` (40 tests)
 - ✅ Fixed `src/std/async_host/thread_safe_queue.spl` (removed generic syntax)
 - ✅ Updated `seed/CMakeLists.txt` (added runtime_thread.c)
-- ✅ Rebuilt `seed/build/libspl_runtime.a` with threading support
+- ✅ Rebuilt `build/seed/libspl_runtime.a` with threading support
 - ✅ Created test symlinks for imports
 
 **Key Findings:**

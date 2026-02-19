@@ -56,7 +56,7 @@ trait Add<Rhs = Self>:
 ```
 
 **Files Changed:**
-- `simple/std_lib/src/core/traits.spl` - Updated Add, Sub, Mul, Div traits to use default type parameters
+- `simple/std_lib/src/compiler_core/traits.spl` - Updated Add, Sub, Mul, Div traits to use default type parameters
 
 **Test:** `test_parser_default_type_parameters`
 
@@ -86,7 +86,7 @@ trait Into<T>:
 **Note:** `from` is a keyword but `expect_identifier()` already handled it as a valid trait name. `into` is not a keyword at all.
 
 **Files Changed:**
-- `simple/std_lib/src/core/traits.spl` - Uncommented From and Into trait definitions
+- `simple/std_lib/src/compiler_core/traits.spl` - Uncommented From and Into trait definitions
 
 **Test:** `test_parser_from_into_trait_names`
 

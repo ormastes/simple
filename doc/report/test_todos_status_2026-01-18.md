@@ -46,7 +46,7 @@ The `verification.regenerate` module exists and is fully functional (as of imple
 
 ## Blocked: collections_spec.spl ⛔
 
-**File:** `simple/std_lib/test/unit/core/collections_spec.spl`
+**File:** `simple/std_lib/test/unit/compiler_core/collections_spec.spl`
 
 **Blocked TODOs:** 10 tests (lines 182-224)
 
@@ -211,7 +211,7 @@ To verify the implemented tests:
 ./target/debug/simple test simple/std_lib/test/unit/verification/regeneration_spec.spl
 
 # Verify collections tests still skip properly
-./target/debug/simple test simple/std_lib/test/unit/core/collections_spec.spl
+./target/debug/simple test simple/std_lib/test/unit/compiler_core/collections_spec.spl
 
 # Confirm experiment tracking tests pass
 ./target/debug/simple test simple/std_lib/test/features/ml/experiment_tracking_spec.spl

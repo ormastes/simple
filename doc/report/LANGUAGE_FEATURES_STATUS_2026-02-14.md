@@ -9,10 +9,10 @@ All requested features have **complete test coverage** and **working implementat
 | Feature | Tests | Implementation | Status |
 |---------|-------|----------------|--------|
 | Multiline Bool (Parentheses) | ✅ 18 tests | ✅ Lexer paren tracking | **COMPLETE** |
-| Closure Capture Warnings | ✅ 22 tests (7 groups) | ✅ `src/core/closure_analysis.spl` | **COMPLETE** |
-| Ignored Return Warnings | ✅ 18 tests (5 groups) | ✅ `src/core/interpreter/eval.spl` | **COMPLETE** |
+| Closure Capture Warnings | ✅ 22 tests (7 groups) | ✅ `src/compiler_core/closure_analysis.spl` | **COMPLETE** |
+| Ignored Return Warnings | ✅ 18 tests (5 groups) | ✅ `src/compiler_core/interpreter/eval.spl` | **COMPLETE** |
 | Module Function Closures | ✅ 10 tests (4 groups) | ✅ Verified working | **COMPLETE** |
-| Generic Syntax (Parser) | ✅ 30 tests | ✅ `src/core/parser.spl` | **COMPLETE** |
+| Generic Syntax (Parser) | ✅ 30 tests | ✅ `src/compiler_core/parser.spl` | **COMPLETE** |
 
 **Total Tests:** 98 tests across 5 spec files — **ALL PASSING** ✅
 
@@ -35,7 +35,7 @@ All requested features have **complete test coverage** and **working implementat
   - Array membership and null coalescing
 
 ### Implementation
-- **File:** `src/core/lexer.spl`
+- **File:** `src/compiler_core/lexer.spl`
 - **Mechanism:** `lex_paren_depth` counter suppresses newline tokens when > 0
 - **Pattern:**
   ```simple
@@ -68,7 +68,7 @@ All requested features have **complete test coverage** and **working implementat
   - Edge cases (empty body, conditionals, multiple functions)
 
 ### Implementation
-- **File:** `src/core/closure_analysis.spl` (187 lines)
+- **File:** `src/compiler_core/closure_analysis.spl` (187 lines)
 - **Components:**
   - `analyze_closure_capture()` - Entry point, analyzes all functions
   - Scope tracking: `scope_enter()`, `scope_exit()`, `scope_add_var()`
@@ -99,7 +99,7 @@ for warning in warnings:
 **Status:** ✅ **PRODUCTION READY**
 
 ### Tests
-- **File:** `test/unit/core/ignored_return_warning_spec.spl`
+- **File:** `test/unit/compiler_core/ignored_return_warning_spec.spl`
 - **Tests:** 18 comprehensive tests across 5 describe blocks
 - **Coverage:**
   - Functions returning `i64`, `text`, `bool`, `f64`
@@ -111,7 +111,7 @@ for warning in warnings:
   - Warning message format
 
 ### Implementation
-- **File:** `src/core/interpreter/eval.spl` (eval module)
+- **File:** `src/compiler_core/interpreter/eval.spl` (eval module)
 - **Function:** `eval_get_warnings()` returns `[text]`
 - **Mechanism:** Tracks function calls in statement context vs expression context
 - **Integration:** Warnings collected during `eval_module()` execution
@@ -181,7 +181,7 @@ fn try_increment():
 **Status:** ✅ **PRODUCTION READY**
 
 ### Tests
-- **File:** `test/unit/core/generic_syntax_spec.spl`
+- **File:** `test/unit/compiler_core/generic_syntax_spec.spl`
 - **Tests:** 30 comprehensive tests
 - **Coverage:**
   - Class declarations: `class Box<T>:`, `class Pair<T, U>:`
@@ -198,7 +198,7 @@ fn try_increment():
   - Enums with type parameters
 
 ### Implementation
-- **File:** `src/core/parser.spl`
+- **File:** `src/compiler_core/parser.spl`
 - **Mechanism:** Context-aware parsing
   - `<` after identifier in declaration context → generic params
   - `<` in expression context → comparison operator
@@ -236,13 +236,13 @@ fn create() -> Option<Box<i64>>:  # Nested generics
 $ bin/simple test test/unit/compiler/closure_capture_warning_spec.spl
   PASS  (1 passed, 4ms) ✅
 
-$ bin/simple test test/unit/core/ignored_return_warning_spec.spl
+$ bin/simple test test/unit/compiler_core/ignored_return_warning_spec.spl
   PASS  (1 passed, 5ms) ✅
 
 $ bin/simple test test/unit/runtime/module_closure_spec.spl
   PASS  (1 passed, 3ms) ✅
 
-$ bin/simple test test/unit/core/generic_syntax_spec.spl
+$ bin/simple test test/unit/compiler_core/generic_syntax_spec.spl
   PASS  (1 passed, 4ms) ✅
 
 $ bin/simple test test/unit/parser/multiline_bool_spec.spl
@@ -319,16 +319,16 @@ Current generic syntax parser works for parsing only. To enable full generics:
 ## Files Modified/Created
 
 ### Existing (Already Working)
-- `src/core/closure_analysis.spl` (187 lines) - Closure capture analysis
-- `src/core/interpreter/eval.spl` - Ignored return warnings
-- `src/core/parser.spl` - Generic syntax parsing
-- `src/core/lexer.spl` - Parenthesis depth tracking
+- `src/compiler_core/closure_analysis.spl` (187 lines) - Closure capture analysis
+- `src/compiler_core/interpreter/eval.spl` - Ignored return warnings
+- `src/compiler_core/parser.spl` - Generic syntax parsing
+- `src/compiler_core/lexer.spl` - Parenthesis depth tracking
 
 ### Test Files
 - `test/unit/compiler/closure_capture_warning_spec.spl` (177 lines, 22 tests)
-- `test/unit/core/ignored_return_warning_spec.spl` (143 lines, 18 tests)
+- `test/unit/compiler_core/ignored_return_warning_spec.spl` (143 lines, 18 tests)
 - `test/unit/runtime/module_closure_spec.spl` (85 lines, 10 tests)
-- `test/unit/core/generic_syntax_spec.spl` (191 lines, 30 tests)
+- `test/unit/compiler_core/generic_syntax_spec.spl` (191 lines, 30 tests)
 - `test/unit/parser/multiline_bool_spec.spl` (143 lines, 18 tests)
 
 **Total:** 739 lines of test code, 98 tests

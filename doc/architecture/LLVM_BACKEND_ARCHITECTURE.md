@@ -20,7 +20,7 @@
 │  Full Simple   │  │  Core Simple   │  │ llvm_direct │
 │    Backend     │  │    Backend     │  │  (hybrid)   │
 │                │  │                │  │             │
-│  compiler/     │  │ compiler_core/ │  │ app/compile/│
+│  compiler/     │  │ compiler_core_legacy/ │  │ app/compile/│
 │  backend/      │  │ backend/       │  │             │
 │                │  │                │  │             │
 │ ├─ llvm_backend│  │├─ llvm_backend │  │ C→LLVM path │
@@ -64,7 +64,7 @@
 ┌───────▼─────────────────────────────┐  ┌──────▼──────┐
 │    Shared LLVM Infrastructure       │  │ llvm_direct │
 │                                     │  │  (hybrid)   │
-│    src/llvm_shared/                 │  │             │
+│    src/shared/llvm/                 │  │             │
 │                                     │  │ app/compile/│
 │  ├─ mod.spl (public API)            │  │             │
 │  ├─ target.spl (triples, CPUs)      │  │ C→LLVM path │
@@ -83,7 +83,7 @@
 │  Full Simple   │  │  Core Simple   │
 │  LLVM Wrapper  │  │  LLVM Wrapper  │
 │                │  │                │
-│  compiler/     │  │ compiler_core/ │
+│  compiler/     │  │ compiler_core_legacy/ │
 │  backend/      │  │ backend/       │
 │                │  │                │
 │ ├─ llvm_backend│  │├─ llvm_backend │
@@ -114,7 +114,7 @@
 
 ## Component Responsibilities
 
-### Shared Library (llvm_shared/)
+### Shared Library (shared/llvm/)
 
 **Responsibilities**:
 - Target configuration (triples, CPU selection, features)
@@ -164,7 +164,7 @@ fn invoke_llc(input: text, output: text, triple: text, cpu: text, opt: text) -> 
 - Advanced pattern matching codegen
 - Full Simple-specific optimizations
 
-### Core Simple Backend (compiler_core/backend/)
+### Core Simple Backend (compiler_core_legacy/backend/)
 
 **Responsibilities**:
 - Core Simple MIR → LLVM IR translation
@@ -216,8 +216,8 @@ fn invoke_llc(input: text, output: text, triple: text, cpu: text, opt: text) -> 
          │ │  (Compiler-specific)                     │
          │ │                                          │
          │ │  Uses shared:                            │
-         │ │  - llvm_shared.types (primitives)        │
-         │ │  - llvm_shared.target (triple, CPU)      │
+         │ │  - shared.llvm.types (primitives)        │
+         │ │  - shared.llvm.target (triple, CPU)      │
          │ └──────────────────────────────────────────┘
          │
     ┌────▼─────┐
@@ -226,7 +226,7 @@ fn invoke_llc(input: text, output: text, triple: text, cpu: text, opt: text) -> 
          │
          │ ┌──────────────────────────────────────────┐
          ├─► Optimization                             │
-         │ │  (llvm_shared.passes)                    │
+         │ │  (shared.llvm.passes)                    │
          │ │                                          │
          │ │  Uses shared:                            │
          │ │  - passes_for_opt_level()                │
@@ -240,7 +240,7 @@ fn invoke_llc(input: text, output: text, triple: text, cpu: text, opt: text) -> 
          │
          │ ┌──────────────────────────────────────────┐
          ├─► Code Generation                          │
-         │ │  (llvm_shared.tools)                     │
+         │ │  (shared.llvm.tools)                     │
          │ │                                          │
          │ │  Uses shared:                            │
          │ │  - invoke_llc()                          │
@@ -271,12 +271,12 @@ fn invoke_llc(input: text, output: text, triple: text, cpu: text, opt: text) -> 
 ```
 Before:
   compiler/backend/llvm_tools.spl (85 lines)
-  compiler_core/backend/llvm_tools.spl (85 lines)
+  compiler_core_legacy/backend/llvm_tools.spl (85 lines)
 
 After:
-  llvm_shared/tools.spl (85 lines)
+  shared/llvm/tools.spl (85 lines)
   compiler/backend/llvm_backend.spl (imports tools)
-  compiler_core/backend/llvm_backend.spl (imports tools)
+  compiler_core_legacy/backend/llvm_backend.spl (imports tools)
 
 Savings: 85 lines (50% reduction in tools)
 ```
@@ -285,12 +285,12 @@ Savings: 85 lines (50% reduction in tools)
 ```
 Before:
   compiler/backend/llvm_target.spl (363 lines)
-  compiler_core/backend/llvm_target.spl (230 lines)
+  compiler_core_legacy/backend/llvm_target.spl (230 lines)
 
 After:
-  llvm_shared/target.spl (~200 lines shared)
+  shared/llvm/target.spl (~200 lines shared)
   compiler/backend/llvm_target.spl (~100 lines Full-specific)
-  compiler_core/backend/llvm_target.spl (~50 lines Core-specific)
+  compiler_core_legacy/backend/llvm_target.spl (~50 lines Core-specific)
 
 Savings: ~240 lines (40% reduction in target)
 ```
@@ -299,12 +299,12 @@ Savings: ~240 lines (40% reduction in target)
 ```
 Before:
   compiler/backend/llvm_type_mapper.spl (304 lines)
-  compiler_core/backend/llvm_type_mapper.spl (108 lines)
+  compiler_core_legacy/backend/llvm_type_mapper.spl (108 lines)
 
 After:
-  llvm_shared/types.spl (~80 lines shared primitives)
+  shared/llvm/types.spl (~80 lines shared primitives)
   compiler/backend/llvm_type_mapper.spl (~220 lines Full types)
-  compiler_core/backend/llvm_type_mapper.spl (~60 lines Core types)
+  compiler_core_legacy/backend/llvm_type_mapper.spl (~60 lines Core types)
 
 Savings: ~50 lines (12% reduction in types)
 ```
@@ -315,7 +315,7 @@ Before:
   Passes embedded in llvm_ir_builder.spl (~200 lines in each)
 
 After:
-  llvm_shared/passes.spl (~150 lines shared)
+  shared/llvm/passes.spl (~150 lines shared)
   Passes configuration in backends (~50 lines each)
 
 Savings: ~200 lines (50% reduction in pass logic)
@@ -328,7 +328,7 @@ Savings: ~200 lines (50% reduction in pass logic)
 ### Unit Tests
 
 ```
-test/unit/llvm_shared/
+test/unit/shared/llvm/
   ├── target_spec.spl       # Target triple generation
   ├── tools_spec.spl        # Tool invocation
   ├── types_spec.spl        # Type mapping
@@ -408,8 +408,8 @@ diff <(bin/simple build test.spl --emit-llvm-ir --backend=llvm-before) \
 
 ## Open Questions
 
-1. **Module Location**: `src/llvm_shared/` or `src/std/llvm/`?
-   - **Recommendation**: `src/llvm_shared/` (not part of std library)
+1. **Module Location**: `src/shared/llvm/` or `src/std/llvm/`?
+   - **Recommendation**: `src/shared/llvm/` (not part of std library)
 
 2. **CLI Exposure**: Expose `--backend=llvm-core` flag?
    - **Recommendation**: No (keep internal, both use same shared code)

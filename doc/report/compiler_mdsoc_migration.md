@@ -50,7 +50,7 @@
 - `src/compiler_shared/` — 28 shared compiler files extracted
 
 ### Phase 1: Entity Dimension
-**New directory:** `src/core/entity/`
+**New directory:** `src/compiler_core/entity/`
 - `token/kinds.spl` — all TOK_* constants + helpers
 - `token/stream.spl` — CoreLexer struct
 - `ast/nodes.spl` — CoreExpr/CoreStmt/CoreDecl structs
@@ -63,7 +63,7 @@
 - `mir/func.spl` — CoreMirFunction
 - `types/core_types.spl` — TYPE_* constants
 - `types/generic.spl` — GenericParam/GenericInst
-- Tests: `test/unit/core/entity/entity_structure_spec.spl`
+- Tests: `test/unit/compiler_core/entity/entity_structure_spec.spl`
 
 ### Phase 2: Feature Dimension
 **New directory:** `src/compiler/feature/`
@@ -163,7 +163,7 @@ src/
 ## Dependency Rules (Enforced by check-arch)
 
 ```
-core/entity/**          ← can only import core/entity/** or shared/**
+compiler_core/entity/**          ← can only import compiler_core/entity/** or shared/**
 compiler/feature/**     ← imports via transform/ or own entity types
 compiler/transform/**   ← imports entity types only, no feature imports
 compiler/adapters/**    ← implements feature ports, no cross-adapter imports

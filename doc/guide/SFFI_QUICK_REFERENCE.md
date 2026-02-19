@@ -27,7 +27,7 @@ dir_create(path, rec) →  rt_dir_create(path, rec)
 ## New Runtime Functions
 
 ```c
-// In seed/runtime.h, seed/platform/unix_common.h
+// In src/compiler_seed/runtime.h, src/compiler_seed/platform/unix_common.h
 bool        rt_dir_create(const char* path, bool recursive);
 const char** rt_dir_list(const char* path, int64_t* out_count);
 void        rt_dir_list_free(const char** entries, int64_t count);
@@ -51,10 +51,10 @@ bin/simple test test/system/ffi/syscalls_test.spl   # Existing tests
 
 ## Files Modified
 
-- `seed/runtime.h` - Function declarations
-- `seed/platform/unix_common.h` - Unix implementations  
-- `seed/platform/platform_win.h` - Windows stubs
-- `seed/runtime.c` - `rt_file_copy` helper
+- `src/compiler_seed/runtime.h` - Function declarations
+- `src/compiler_seed/platform/unix_common.h` - Unix implementations  
+- `src/compiler_seed/platform/platform_win.h` - Windows stubs
+- `src/compiler_seed/runtime.c` - `rt_file_copy` helper
 - `src/app/io/dir_ops.spl` - Use native calls
 - `src/app/io/file_ops.spl` - Use native calls
 

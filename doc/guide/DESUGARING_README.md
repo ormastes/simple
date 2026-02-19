@@ -24,12 +24,12 @@ All 413 Full Simple compiler files have been automatically desugared into Core S
 - **-19.7% code size** (simpler syntax)
 
 ### 🛠️ Tools Created
-- **`src/tools/desugarer.py`** - Main desugarer (Python, 15 KB)
-- **`src/tools/analyze_desugaring.py`** - Statistics generator
-- **`src/tools/test_desugared.sh`** - Test script
+- **`scripts/tools/desugarer.py`** - Main desugarer (Python, 15 KB)
+- **`scripts/tools/analyze_desugaring.py`** - Statistics generator
+- **`scripts/tools/test_desugared.sh`** - Test script
 
 ### 📂 Output
-- **`src/compiler_core/`** - All 416 desugared files
+- **`src/compiler_core_legacy/`** - All 416 desugared files
 - Ready for seed compiler
 - Core Simple compatible
 
@@ -40,20 +40,20 @@ All 413 Full Simple compiler files have been automatically desugared into Core S
 ### Run the Desugarer
 ```bash
 # Single file
-python3 src/tools/desugarer.py input.spl output.spl
+python3 scripts/tools/desugarer.py input.spl output.spl
 
 # All files (already done)
-python3 src/tools/desugarer.py --dir src/compiler --output-dir src/compiler_core
+python3 scripts/tools/desugarer.py --dir src/compiler --output-dir src/compiler_core_legacy
 ```
 
 ### View Statistics
 ```bash
-python3 src/tools/analyze_desugaring.py
+python3 scripts/tools/analyze_desugaring.py
 ```
 
 ### Test Output
 ```bash
-bash src/tools/test_desugared.sh
+bash scripts/tools/test_desugared.sh
 ```
 
 ---
@@ -88,7 +88,7 @@ bash src/tools/test_desugared.sh
 ### 2. Files Generated
 
 ```
-src/compiler_core/
+src/compiler_core_legacy/
 ├── lexer.spl (desugared)
 ├── parser.spl (desugared)
 ├── backend.spl (desugared)
@@ -112,7 +112,7 @@ src/compiler_core/
              ▼
 ┌──────────────────────────────────────────┐
 │ CORE SIMPLE (Restricted Subset)          │
-│ src/core/ (8.8K lines)                   │
+│ src/compiler_core_legacy/ (8.8K lines)                   │
 │ ✅ Only: functions, concrete types       │
 │ ❌ No: impl, generics, closures          │
 └────────────┬─────────────────────────────┘
@@ -120,7 +120,7 @@ src/compiler_core/
              ▼
 ┌──────────────────────────────────────────┐
 │ DESUGARED FULL SIMPLE (Generated)        │
-│ src/compiler_core/ (99K lines)           │
+│ src/compiler_core_legacy/ (99K lines)           │
 │ ✅ Core-compatible                        │
 │ ✅ Semantically equivalent to Full       │
 └────────────┬─────────────────────────────┘
@@ -172,7 +172,7 @@ fn lexer_next(self: Lexer) -> Token:
 ## 📈 Statistics
 
 ```
-ORIGINAL (src/compiler/)      DESUGARED (src/compiler_core/)
+ORIGINAL (src/compiler/)      DESUGARED (src/compiler_core_legacy/)
 ━━━━━━━━━━━━━━━━━━━━━━━━      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Files:         413             Files:         416
 Lines:     123,913             Lines:      99,460
@@ -207,7 +207,7 @@ Size:      100%                Size:       80.3% (-19.7%)
 ```bash
 # Test with seed compiler (TODO)
 cd bootstrap/build
-./seed ../../src/compiler_core/lexer.spl
+./seed ../../src/compiler_core_legacy/lexer.spl
 ```
 
 ---

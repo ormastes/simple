@@ -11,7 +11,7 @@ Implemented forward declarations for imported functions in the Core Simple C++ c
 
 ## Changes Made
 
-### 1. Added Parameter Accessor Functions (`src/core/types.spl`)
+### 1. Added Parameter Accessor Functions (`src/compiler_core/types.spl`)
 
 Added two new functions to access function signature parameters:
 
@@ -25,7 +25,7 @@ fn fn_sig_get_param_types(sig_id: i64) -> [i64]:
 
 **Exported**: Added to module exports for use by c_codegen
 
-### 2. Implemented DECL_USE Handling (`src/core/compiler/c_codegen.spl`)
+### 2. Implemented DECL_USE Handling (`src/compiler_core/compiler/c_codegen.spl`)
 
 **Location**: `cg_emit_forward_decls()` function (after DECL_EXTERN_FN, before DECL_FN)
 
@@ -75,18 +75,18 @@ The two-pass design enables this:
 
 ## Files Modified
 
-- `src/core/types.spl` (+8 lines)
+- `src/compiler_core/types.spl` (+8 lines)
   - Added `fn_sig_get_param_names()`
   - Added `fn_sig_get_param_types()`
   - Added exports
 
-- `src/core/compiler/c_codegen.spl` (+31 lines)
+- `src/compiler_core/compiler/c_codegen.spl` (+31 lines)
   - Added imports for new accessor functions
   - Implemented `DECL_USE` handling in `cg_emit_forward_decls()`
 
 ## Testing Status
 
-**Note**: Pre-existing test failures observed in `test/unit/core/types_spec.spl` (11/21 tests failing). These failures are **NOT related to this fix**:
+**Note**: Pre-existing test failures observed in `test/unit/compiler_core/types_spec.spl` (11/21 tests failing). These failures are **NOT related to this fix**:
 - Failures involve string helper functions (`str_index_of`, etc.)
 - New accessor functions follow same pattern as existing functions
 - No new syntax introduced that would break runtime

@@ -4,6 +4,7 @@
 
 use std.async_core.*
 use std.async_host.waker.{Waker, Context}
+use ffi.system.{time_now_unix_millis}
 
 class HostFuture<T>:
     """Heap-allocated future with waker support.
@@ -16,6 +17,7 @@ class HostFuture<T>:
     """
     state: FutureState<T>
     wakers: [Waker]
+    deadline: i64
 
 enum FutureState<T>:
     Pending
@@ -25,18 +27,33 @@ enum FutureState<T>:
 impl HostFuture<T>:
     static fn ready(value: T) -> HostFuture<T>:
         """Create completed future."""
-        HostFuture(state: FutureState.Ready(value), wakers: [])
+        HostFuture(state: FutureState.Ready(value), wakers: [], deadline: 0)
 
     static fn pending() -> HostFuture<T>:
         """Create pending future."""
-        HostFuture(state: FutureState.Pending, wakers: [])
+        HostFuture(state: FutureState.Pending, wakers: [], deadline: 0)
 
     static fn failed(err: AsyncError) -> HostFuture<T>:
         """Create failed future."""
-        HostFuture(state: FutureState.Failed(err), wakers: [])
+        HostFuture(state: FutureState.Failed(err), wakers: [], deadline: 0)
+
+    static fn delay(millis: i64) -> HostFuture<()>:
+        """Create a future that completes after millis milliseconds."""
+        if millis <= 0:
+            return HostFuture.ready(())
+        val deadline = time_now_unix_millis() + millis
+        HostFuture(state: FutureState.Pending, wakers: [], deadline: deadline)
 
     fn poll(cx: Context) -> Poll<T>:
         """Poll with context (waker)."""
+        # Auto-complete deadline-based futures
+        if self.deadline > 0 and time_now_unix_millis() >= self.deadline:
+            self.deadline = 0
+            self.state = FutureState.Ready(())
+            for waker in self.wakers:
+                waker.wake()
+            self.wakers = []
+            return Poll.Ready(())
         match self.state:
             case FutureState.Ready(v):
                 Poll.Ready(v)
@@ -48,6 +65,8 @@ impl HostFuture<T>:
                 panic("Future failed: {e.message()}")
 
     fn is_ready() -> bool:
+        if self.deadline > 0 and time_now_unix_millis() >= self.deadline:
+            return true
         match self.state:
             case FutureState.Ready(_): true
             case _: false
@@ -73,8 +92,9 @@ impl HostFuture<T>:
                 val result: HostFuture<U> = HostFuture.ready(f(v))
                 result
             case FutureState.Pending:
-                # Create mapped future
-                val pending: HostFuture<U> = HostFuture.pending()
+                # Create mapped future, propagate deadline
+                val pending: HostFuture<U> = HostFuture(
+                    state: FutureState.Pending, wakers: [], deadline: self.deadline)
                 pending
             case FutureState.Failed(e):
                 val failed: HostFuture<U> = HostFuture.failed(e)
@@ -86,7 +106,8 @@ impl HostFuture<T>:
             case FutureState.Ready(v):
                 f(v)
             case FutureState.Pending:
-                val pending: HostFuture<U> = HostFuture.pending()
+                val pending: HostFuture<U> = HostFuture(
+                    state: FutureState.Pending, wakers: [], deadline: self.deadline)
                 pending
             case FutureState.Failed(e):
                 val failed: HostFuture<U> = HostFuture.failed(e)

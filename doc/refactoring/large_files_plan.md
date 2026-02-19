@@ -214,11 +214,11 @@ simple/app/interpreter/
 │   └── pattern.spl           # Pattern conversion (150 lines)
 ```
 
-### 6. `simple/std_lib/src/core/regex.spl` - 1401 lines
+### 6. `simple/std_lib/src/compiler_core/regex.spl` - 1401 lines
 
 **Refactoring Strategy:**
 ```
-std_lib/src/core/regex/
+std_lib/src/compiler_core/regex/
 ├── __init__.spl              # Re-exports (50 lines)
 ├── engine.spl                # Regex engine core (400 lines)
 ├── parser.spl                # Pattern parser (350 lines)
@@ -387,7 +387,7 @@ jj git push --bookmark main
 16. `simple/std_lib/src/ml/torch/transforms.spl` (1013 lines)
 
 ### Phase 7: Standard Library - Core (Week 10)
-17. `simple/std_lib/src/core/regex.spl` (1401 lines)
+17. `simple/std_lib/src/compiler_core/regex.spl` (1401 lines)
 18. Remaining stdlib files
 
 ### Phase 8: Tests (Week 11-12)

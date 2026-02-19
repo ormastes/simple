@@ -2,7 +2,7 @@
 
 ## Summary
 
-**Finding**: `src/compiler/` and `src/compiler_core/` are **NOT compatible** - they have completely different backend type definitions and appear to be separate implementations.
+**Finding**: `src/compiler/` and `src/compiler_core_legacy/` are **NOT compatible** - they have completely different backend type definitions and appear to be separate implementations.
 
 ## Key Differences
 
@@ -20,7 +20,7 @@ enum BackendKind:
     Custom(name: text)
 ```
 
-**src/compiler_core/backend_types.spl**:
+**src/compiler_core_legacy/backend_types.spl**:
 ```simple
 enum BackendKind:
     Cranelift
@@ -51,7 +51,7 @@ enum CodegenTarget:
     Host
 ```
 
-**src/compiler_core/backend/backend_types.spl**:
+**src/compiler_core_legacy/backend/backend_types.spl**:
 ```simple
 enum CodegenTarget:
     X86_64
@@ -60,12 +60,12 @@ enum CodegenTarget:
     Native
     Host
 ```
-(Note: compiler_core already has simplified enums for seed.cpp compatibility)
+(Note: compiler_core_legacy already has simplified enums for seed.cpp compatibility)
 
 ## File Counts
 
 - `src/compiler/`: 415 .spl files
-- `src/compiler_core/`: 441 .spl files
+- `src/compiler_core_legacy/`: 441 .spl files
 
 ## Parse Error Issue
 
@@ -83,7 +83,7 @@ These appear to be **two different compiler implementations**:
    - SDN backend
    - All target architectures (32-bit, 64-bit, WebAssembly, GPU)
 
-2. **src/compiler_core/** - Core compiler with:
+2. **src/compiler_core_legacy/** - Core compiler with:
    - AOT backends (Cranelift, Llvm, Native)
    - Lean verification export
    - Simplified targets (64-bit only, Native, Host)
@@ -101,7 +101,7 @@ The two compilers have:
 
 ## Recommendations
 
-### Option 1: Use compiler_core (Recommended)
+### Option 1: Use compiler_core_legacy (Recommended)
 - Already has seed.cpp-compatible types
 - Successfully transpiles (375 files → 20,005 C++ lines)
 - Only blocked by seed_cpp transpiler bugs
@@ -114,7 +114,7 @@ The two compilers have:
 - Not aligned with seed.cpp (has GPU targets, 32-bit, etc.)
 
 ### Option 3: Merge/Align
-- Align src/compiler/ enums with src/compiler_core/
+- Align src/compiler/ enums with src/compiler_core_legacy/
 - Fix parse error in src/compiler/lexer.spl
 - Significant refactoring required
 
@@ -129,5 +129,5 @@ The two compilers have:
 - ✅ bin/release/simple - Works for basic code
 - ❌ bin/release/simple src/compiler/main.spl - Parse error
 - ✅ bin/release/simple -c "print('test')" - Works
-- ✅ compiler_core transpilation - Works (seed_cpp bugs only)
+- ✅ compiler_core_legacy transpilation - Works (seed_cpp bugs only)
 - ❌ compiler compilation - Blocked by parse error

@@ -312,8 +312,8 @@ simple mutate src/ --report mutants.html
 See these specs for more examples:
 
 - `simple/std_lib/test/unit/testing/fuzz_spec.spl` - Basic fuzzing
-- `simple/std_lib/test/unit/core/list_fuzz_spec.spl` - List properties (TODO)
-- `simple/std_lib/test/unit/core/string_fuzz_spec.spl` - String properties (TODO)
+- `simple/std_lib/test/unit/compiler_core/list_fuzz_spec.spl` - List properties (TODO)
+- `simple/std_lib/test/unit/compiler_core/string_fuzz_spec.spl` - String properties (TODO)
 
 ## Further Reading
 

@@ -25,13 +25,13 @@ Successfully eliminated **118 code duplication instances** across the Simple com
 ### Round 1: Initial Refactoring (70 duplications)
 
 #### 1. Lexer Initialization
-- **Files**: `src/compiler_core/lexer.spl`
+- **Files**: `src/compiler_core_legacy/lexer.spl`
 - **Duplications**: 4 instances
 - **Solution**: Created `lexer_create_internal()` helper
 - **Savings**: ~60 lines
 
 #### 2. Poll Generator  
-- **Files**: `src/compiler_core/desugar/poll_generator.spl`
+- **Files**: `src/compiler_core_legacy/desugar/poll_generator.spl`
 - **Duplications**: 6 instances
 - **Solution**: Created `make_match_arm()` and `make_expr_stmt()` helpers
 - **Savings**: ~35 lines
@@ -62,7 +62,7 @@ Successfully eliminated **118 code duplication instances** across the Simple com
 ## Helper Functions Created
 
 ### 1. `lexer_create_internal(source, block_registry)` 
-**Location**: `src/compiler_core/lexer.spl`
+**Location**: `src/compiler_core_legacy/lexer.spl`
 
 Centralizes Lexer struct initialization with 20+ fields.
 
@@ -91,7 +91,7 @@ fn lexer_create_internal(source: text, block_registry) -> Lexer:
 ```
 
 ### 2. `make_match_arm(pattern, body_stmts)`
-**Location**: `src/compiler_core/desugar/poll_generator.spl`
+**Location**: `src/compiler_core_legacy/desugar/poll_generator.spl`
 
 Creates MatchArm structures for async state machine generation.
 
@@ -107,7 +107,7 @@ fn make_match_arm(pattern: Pattern, body_stmts: [Stmt]) -> MatchArm:
 ```
 
 ### 3. `make_expr_stmt(expr)`
-**Location**: `src/compiler_core/desugar/poll_generator.spl`
+**Location**: `src/compiler_core_legacy/desugar/poll_generator.spl`
 
 Creates statement from expression.
 
@@ -153,8 +153,8 @@ fn handle_jj_result_stdout(id: String, result: JjResult) -> String:
 ## Files Modified
 
 ### Compiler Core (2 files)
-- ✏️ `src/compiler_core/lexer.spl` - Lexer initialization refactoring
-- ✏️ `src/compiler_core/desugar/poll_generator.spl` - Async state machine helpers
+- ✏️ `src/compiler_core_legacy/lexer.spl` - Lexer initialization refactoring
+- ✏️ `src/compiler_core_legacy/desugar/poll_generator.spl` - Async state machine helpers
 
 ### MCP JJ Tools (8 files)
 - ✏️ `src/app/mcp_jj/helpers.spl` - Added result handling helpers
@@ -232,7 +232,7 @@ fn handle_jj_result_stdout(id: String, result: JjResult) -> String:
 
 **Type System Phase Files** (16+ locations)
 - **Reason**: Intentional versioning for compiler phase development
-- **Files**: `compiler/trait_impl.spl`, `compiler_core/trait_impl.spl`, etc.
+- **Files**: `compiler/trait_impl.spl`, `compiler_core_legacy/trait_impl.spl`, etc.
 - **Recommendation**: Review if phase system is still needed
 
 **Git Compatibility Tools** (68 locations)

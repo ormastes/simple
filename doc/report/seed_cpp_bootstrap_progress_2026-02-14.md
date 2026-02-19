@@ -124,7 +124,7 @@ FnPtr_Option_Result_BlockValue_ _parser;
 - `allow_multiple` field missing from `ProceedContext`
 - `self` and other variables undeclared
 
-**Category**: Simple source code bugs in `src/core/aop.spl`
+**Category**: Simple source code bugs in `src/compiler_core_legacy/aop.spl`
 
 ### 3. Pattern Matching with Data Extraction (Lines 8108-8116)
 ```simple
@@ -138,7 +138,7 @@ switch ctx_verify(ctx):
 
 ## Files Modified
 
-1. **seed/seed.cpp** (+200 lines total)
+1. **src/compiler_seed/seed.cpp** (+200 lines total)
    - Added `is_struct_array_type()` helper (lines ~820-835)
    - Modified struct constructor to handle empty struct arrays (lines ~1950)
    - Added Phase 0 pre-scan (lines ~3725-3735)
@@ -157,7 +157,7 @@ switch ctx_verify(ctx):
 - ✅ No more circular dependencies between Options and structs
 
 ### Remaining Work:
-1. Fix Simple source code bugs in `src/core/aop.spl` (AOP/contract framework)
+1. Fix Simple source code bugs in `src/compiler_core_legacy/aop.spl` (AOP/contract framework)
 2. Add support for complex nested generics (fn → Option → Result)
 3. Add support for pattern matching with data extraction
 4. OR: Skip problematic files and bootstrap with subset of core
@@ -167,7 +167,7 @@ switch ctx_verify(ctx):
 ## Next Steps
 
 ### Option A: Fix Simple Source Bugs (Recommended)
-1. Review `src/core/aop.spl` and fix AOP/contract implementation
+1. Review `src/compiler_core_legacy/aop.spl` and fix AOP/contract implementation
 2. Add missing struct fields (`allow_multiple`, `logger_log` field vs method)
 3. Simplify pattern matching to use `.is_ok` checks instead of `case Ok(())`
 4. Re-run bootstrap with fixed source

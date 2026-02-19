@@ -202,7 +202,7 @@ doc_coverage {
     # Per-scope thresholds
     thresholds {
         "src/std/" 90     # Stdlib: high standard
-        "src/core/" 75    # Core: medium-high
+        "src/compiler_core/" 75    # Core: medium-high
         "src/lib/" 80     # Libraries: high
         "src/app/" 50     # Applications: lower
         "src/compiler/" 60
@@ -237,7 +237,7 @@ doc_coverage {
 
 ```simple
 struct ThresholdResult:
-    scope: text           # "src/std/", "src/core/", etc.
+    scope: text           # "src/std/", "src/compiler_core/", etc.
     threshold: i64        # Required percentage (0-100)
     actual: i64           # Actual coverage percentage
     passed: bool          # actual >= threshold
@@ -248,7 +248,7 @@ struct ThresholdResult:
 fn calculate_coverage(files: [text], config: ThresholdConfig) -> [ThresholdResult]:
     var results = []
 
-    # Group files by scope (src/std/, src/core/, etc.)
+    # Group files by scope (src/std/, src/compiler_core/, etc.)
     val groups = group_by_scope(files)
 
     for scope in groups.keys():
@@ -316,7 +316,7 @@ Generated: 2026-02-14 10:30:00
 - **Status:** PASS
 - **Missing:** 13 functions
 
-### ✅ src/core/ (PASSED)
+### ✅ src/compiler_core/ (PASSED)
 - **Threshold:** 75%
 - **Actual:** 78% (89/114 functions)
 - **Status:** PASS
@@ -420,7 +420,7 @@ simple doc-coverage --thresholds --tag-file=coverage_tags.txt
       "covered_functions": 147,
       "missing_functions": ["str_reverse", "str_trim", ...]
     },
-    "src/core/": { ... }
+    "src/compiler_core/": { ... }
   },
   "functions": [
     {
@@ -599,4 +599,4 @@ simple doc-coverage --thresholds --list-missing
 - **Phase 4:** JSON/CSV export used in CI pipelines
 - **Phase 5:** 100% test coverage for new modules
 
-**End Goal:** 90%+ public function sdoctest coverage across `src/std/` and `src/core/`
+**End Goal:** 90%+ public function sdoctest coverage across `src/std/` and `src/compiler_core/`

@@ -284,7 +284,7 @@ bin/simple test --self-protect test/
 # Triggers graceful shutdown automatically
 ```
 
-**Fix Needed:** 2-3 hours to implement SFFI in `seed/runtime.c`
+**Fix Needed:** 2-3 hours to implement SFFI in `src/compiler_seed/runtime.c`
 
 ---
 
@@ -391,7 +391,7 @@ bin/simple test --self-protect test/
 
 ### 3. Implement SFFI Signal Handlers (2-3 hours) - OPTIONAL
 ```c
-// Add to seed/runtime.c
+// Add to src/compiler_seed/runtime.c
 bool rt_signal_handler_available();
 void rt_signal_handler_install(int64_t signal, void (*handler)(void));
 void rt_atexit_register(void (*handler)(void));

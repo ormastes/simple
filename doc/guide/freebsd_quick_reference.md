@@ -151,7 +151,7 @@ cd simple
 pkg install cmake llvm gmake
 
 # Bootstrap
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # Test
 bin/simple --version
@@ -163,19 +163,19 @@ bin/simple test
 
 ```bash
 # Fast build (skip verification)
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --skip-verify
 
 # Parallel build
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --jobs=8
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --jobs=8
 
 # Custom compiler
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --cc=g++
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --cc=clang++
 
 # Keep artifacts
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --keep-artifacts
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --keep-artifacts
 
 # Verbose
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --verbose
 ```
 
 ---

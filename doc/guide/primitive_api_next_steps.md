@@ -429,7 +429,7 @@ pub enum SeekFrom:
     End(i64)        # Signed: can be negative offset
     Current(i64)    # Signed: can be negative offset
 
-# simple/std_lib/src/core/json.spl
+# simple/std_lib/src/compiler_core/json.spl
 
 #[allow(primitive_api)]  // JSON specification requires primitives
 pub enum JsonValue:

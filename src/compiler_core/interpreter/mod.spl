@@ -1,0 +1,308 @@
+# Core Interpreter — Module Root
+#
+# @tag:compiler
+# @tag:internal
+#
+# Three-tier interpreter architecture for the Simple language compiler:
+#
+# 1. **Core JIT Interpreter** (this module) — seed-compilable, runtime-compatible
+#    - Tree-walking evaluator with adaptive JIT compilation
+#    - Arena-based value representation (parallel arrays, no generics)
+#    - Threshold-based hot function detection and native compilation
+#    - Location: src/core/interpreter/ (eval, env, ops, value, jit, mod)
+#
+# 2. **Compiler JIT Backend** (compiled-only) — full HIR-level JIT
+#    - MIR lowering, Cranelift/LLVM backends, register allocation
+#    - Delegates cold path to InterpreterBackendImpl
+#    - Location: src/compiler/backend/jit_interpreter.spl
+#
+# 3. **Legacy Interpreter** (DELETED 2026-02-10)
+#    - Old ~23K line tree-walker, replaced by this module
+#    - Location: src/app/interpreter/ (removed)
+#
+# **Entry Points:**
+#
+# - `core_interpret(source, path)` — JIT-enabled, reads env vars for config
+# - `core_jit_interpret(source, path, threshold)` — JIT with custom threshold
+# - `core_jit_interpret_verbose(source, path, threshold, backend)` — Debug mode
+# - `core_interpret_expr(source)` — Evaluate single expression
+#
+# **Environment Variables (set by CLI via apply_jit_env_vars):**
+#
+# - `SIMPLE_NO_JIT=1` — Disable JIT (pure tree-walk interpretation)
+# - `SIMPLE_JIT_THRESHOLD=N` — JIT compile after N calls (default: 10)
+# - `SIMPLE_JIT_BACKEND=X` — JIT backend: auto, cranelift, llvm
+# - `SIMPLE_JIT_VERBOSE=1` — Enable JIT debug output
+#
+# **Submodules:**
+#
+# - `eval.spl` — Tree-walking evaluator, dispatches on AST node tags
+# - `env.spl` — Scope stack and variable binding (parallel arrays)
+# - `ops.spl` — Arithmetic, comparison, logical operators on value_ids
+# - `value.spl` — Arena-based value representation (8 kinds)
+# - `jit.spl` — JIT engine, call tracking, SFFI compilation
+#
+# **Seed Compilation:**
+#
+# This module is seed-compilable for bootstrapping:
+#
+#     seed tokens.spl lexer.spl parser.spl ast.spl \
+#          interpreter/value.spl interpreter/env.spl \
+#          interpreter/ops.spl interpreter/eval.spl \
+#          interpreter/jit.spl interpreter/mod.spl > interp.cpp
+#
+# All modules share globals when compiled by seed (no explicit imports needed).
+#
+# **Architecture Notes:**
+#
+# - **Interpreter mode:** Tree-walk AST, eval_expr/eval_stmt dispatch on node tags
+# - **JIT mode:** Track function call counts, compile hot functions to native code
+# - **Hybrid execution:** JIT-compiled functions call back to interpreter for cold paths
+# - **No exceptions:** Uses global flags (eval_returning, eval_breaking, eval_had_error)
+# - **No generics:** Uses parallel arrays (arena pattern) for seed compatibility
+#
+# **Examples:**
+#
+# ```simple
+# # Basic interpretation (pure tree-walk)
+# use compiler_core.interpreter.mod.{core_interpret}
+# use app.io.mod.{env_set}
+#
+# env_set("SIMPLE_NO_JIT", "1")
+# val result = core_interpret("fn square(x): x * x; square(7)", "example.spl")
+# # Returns value_id (use val_get_int to extract 49)
+# ```
+#
+# ```simple
+# # JIT compilation (threshold = 3 calls)
+# use compiler_core.interpreter.mod.{core_jit_interpret}
+#
+# val source = "
+#   fn fib(n):
+#       if n < 2: n
+#       else: fib(n - 1) + fib(n - 2)
+#   fib(10)
+# "
+# val result = core_jit_interpret(source, "fib.spl", 3)
+# # First 3 calls use tree-walk, subsequent calls use native code
+# ```
+#
+# ```simple
+# # Environment management
+# use compiler_core.interpreter.env.{env_init, env_define, env_lookup}
+# use compiler_core.interpreter.value.{val_make_int, val_get_int}
+#
+# env_init()
+# val forty_two = val_make_int(42)
+# env_define("answer", forty_two)
+# val retrieved = env_lookup("answer")
+# val answer = val_get_int(retrieved)  # 42
+# ```
+#
+# ```simple
+# # Value conversions (interpreter ↔ native types)
+# use compiler_core.interpreter.value.{val_make_int, val_make_text, val_make_array}
+# use compiler_core.interpreter.value.{val_get_int, val_get_text, val_get_array}
+#
+# # Create values
+# val int_val = val_make_int(123)
+# val text_val = val_make_text("hello")
+# val arr_val = val_make_array([int_val, int_val, int_val])
+#
+# # Extract values
+# val n = val_get_int(int_val)        # 123
+# val s = val_get_text(text_val)      # "hello"
+# val arr = val_get_array(arr_val)    # [value_id, value_id, value_id]
+# ```
+#
+# This file provides the top-level entry points.
+
+use compiler_core.frontend.{core_frontend_parse_reset}
+
+extern fn rt_env_get(key: text) -> text
+
+# ===== Shared Pipeline =====
+
+# Internal: Shared interpreter pipeline (lex → parse → eval).
+#
+# Shared by all entry points. Runs the full compilation pipeline:
+# 1. Initialize evaluator and AST arena
+# 2. Lex source into token stream
+# 3. Parse tokens into AST
+# 4. Check for parse errors
+# 5. Evaluate AST (with JIT if enabled)
+#
+# **Parameters:**
+# - source: Simple source code
+# - path: File path for error reporting
+#
+# **Returns:**
+# - value_id (i64) of the last module-level expression
+# - -1 (VAL_NONE) if parse error or runtime error
+#
+# **Error Handling:**
+# - Parse errors → eval_set_error("parse error"), return -1
+# - Runtime errors → eval_set_error(msg), return -1 (set by eval_module)
+fn _core_run_pipeline(source: text, path: text) -> i64:
+    eval_init()    # Reset evaluation state (env, value arena, control flags)
+    ast_reset()    # Reset AST arena (expr, stmt, decl pools)
+
+    # Scan for @must_use / @profile(critical) annotations (R9)
+    must_use_scan_source(source)
+
+    # Parse using shared core frontend runner
+    if not core_frontend_parse_reset(source, path):
+        eval_set_error("parse error")
+        return -1
+
+    # Resolve local variable indices (LOAD_FAST optimization)
+    resolve_module_locals()
+
+    # Evaluate (eval_module returns value_id of last top-level expression)
+    eval_module()
+
+# ===== Public Entry Points =====
+
+# Entry point for JIT-enabled interpretation with environment variable configuration.
+#
+# Reads JIT settings from environment variables and runs the interpreter pipeline.
+# This is the primary entry point used by the CLI and test runner.
+#
+# **Environment Variables:**
+# - SIMPLE_NO_JIT=1          → Disable JIT (threshold = 999999)
+# - SIMPLE_JIT_THRESHOLD=N   → Compile after N calls (default: 10)
+# - SIMPLE_JIT_BACKEND=X     → Backend: auto, cranelift, llvm
+# - SIMPLE_JIT_VERBOSE=1     → Enable debug output
+#
+# **Parameters:**
+# - source: Simple source code to interpret
+# - path: File path for error reporting
+#
+# **Returns:**
+# - value_id (i64) of the last evaluated expression
+# - -1 (VAL_NONE) if parse error or runtime error
+#
+# **Mode Selection:**
+# - If SIMPLE_NO_JIT=1 → Pure tree-walk interpretation (no JIT)
+# - Otherwise → Adaptive JIT (compile hot functions after threshold calls)
+fn core_interpret(source: text, path: text) -> i64:
+    # Read JIT configuration from environment variables
+    val env_no_jit = rt_env_get("SIMPLE_NO_JIT")
+    val env_threshold = rt_env_get("SIMPLE_JIT_THRESHOLD")
+    val env_backend = rt_env_get("SIMPLE_JIT_BACKEND")
+    val env_verbose = rt_env_get("SIMPLE_JIT_VERBOSE")
+
+    # Determine threshold (default: 10 calls, or 999999 if JIT disabled)
+    var threshold = 10
+    val has_no_jit = env_no_jit == "1"
+    if has_no_jit:
+        threshold = 999999
+
+    val has_threshold = env_threshold != ""
+    val threshold_not_nil = env_threshold != nil
+    val use_threshold = has_threshold and threshold_not_nil
+    if use_threshold:
+        threshold = int(env_threshold)
+
+    # Determine verbose mode (0 = silent, 1 = debug output)
+    var verbose = 0
+    val has_verbose = env_verbose == "1"
+    if has_verbose:
+        verbose = 1
+
+    # Determine backend ("auto" = runtime detection, "cranelift", "llvm")
+    var backend = "auto"
+    val has_backend = env_backend != ""
+    val backend_not_nil = env_backend != nil
+    val use_backend = has_backend and backend_not_nil
+    if use_backend:
+        backend = env_backend
+
+    # Initialize JIT with resolved configuration
+    jit_init_with_backend(threshold, verbose, backend)
+
+    # Run shared pipeline (lex → parse → eval)
+    val result = _core_run_pipeline(source, path)
+    if verbose == 1:
+        jit_cleanup()
+    result
+
+# Entry point for JIT interpretation with explicit threshold.
+#
+# Use this when you want precise control over JIT compilation behavior.
+# Does not read environment variables (silent mode, no verbose output).
+#
+# **Parameters:**
+# - source: Simple source code to interpret
+# - path: File path for error reporting
+# - threshold: Compile functions after N calls (10 = aggressive, 100 = conservative)
+#
+# **Returns:**
+# - value_id (i64) of the last evaluated expression
+# - -1 (VAL_NONE) if parse error or runtime error
+#
+# **Example:** `core_jit_interpret(code, "test.spl", 5)` compiles after 5 calls
+fn core_jit_interpret(source: text, path: text, threshold: i64) -> i64:
+    jit_init(threshold, 0)  # verbose = 0 (silent)
+    _core_run_pipeline(source, path)
+
+# Entry point for JIT interpretation with debug output.
+#
+# Enables verbose JIT logging and allows explicit backend selection.
+# Used for debugging JIT compilation issues and performance analysis.
+#
+# **Parameters:**
+# - source: Simple source code to interpret
+# - path: File path for error reporting
+# - threshold: Compile functions after N calls
+# - backend: JIT backend ("auto", "cranelift", "llvm")
+#
+# **Returns:**
+# - value_id (i64) of the last evaluated expression
+# - -1 (VAL_NONE) if parse error or runtime error
+#
+# **Debug output includes:**
+# - JIT compilation events ("[jit] Compiling function X")
+# - Native execution events ("[jit] Executing native X")
+# - Call count tracking ("[jit] Function X: 10 calls")
+fn core_jit_interpret_verbose(source: text, path: text, threshold: i64, backend: text) -> i64:
+    jit_init_with_backend(threshold, 1, backend)  # verbose = 1
+    val result = _core_run_pipeline(source, path)
+    jit_cleanup()
+    result
+
+# Entry point for evaluating single expressions.
+#
+# Lightweight entry point for REPL-style evaluation. Parses and evaluates
+# a single expression without full module parsing. No JIT compilation.
+#
+# **Parameters:**
+# - source: Single Simple expression (e.g., "2 + 2", "square(7)")
+#
+# **Returns:**
+# - value_id (i64) of the expression result
+# - -1 (VAL_NONE) if parse error or runtime error
+#
+# **Use cases:**
+# - REPL (read-eval-print loop)
+# - Interactive debugging
+# - Configuration file evaluation
+# - Constant expression evaluation
+fn core_interpret_expr(source: text) -> i64:
+    # Initialize subsystems
+    eval_init()
+    ast_reset()
+
+    # Lex and parse a single expression (not a full module)
+    lex_init(source)
+    parser_init(source)
+    val eid = parse_expr()
+
+    if par_had_error:
+        eval_set_error("parse error")
+        return -1
+
+    eval_expr(eid)
+
+export core_interpret, core_jit_interpret, core_jit_interpret_verbose
+export core_interpret_expr

@@ -158,7 +158,7 @@ use compiler.treesitter.*
 
 ### Locations:
 - `compiler/test_*.spl` (11 instances)
-- `compiler_core/test_*.spl` (11 instances)
+- `compiler_core_legacy/test_*.spl` (11 instances)
 
 ### Why Not Refactored:
 ✅ **Can be refactored easily!**
@@ -261,8 +261,8 @@ while i < len:
 
 ### Pattern:
 Entire files duplicated with slight variations:
-- `compiler/trait_impl.spl` vs `compiler_core/trait_impl.spl`
-- `compiler/trait_solver.spl` vs `compiler_core/trait_solver.spl`
+- `compiler/trait_impl.spl` vs `compiler_core_legacy/trait_impl.spl`
+- `compiler/trait_solver.spl` vs `compiler_core_legacy/trait_solver.spl`
 - Multiple `associated_types_phase*.spl` files
 - Multiple `higher_rank_poly_phase*.spl` files
 

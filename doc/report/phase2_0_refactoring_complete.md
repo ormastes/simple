@@ -32,7 +32,7 @@ Successfully refactored **all 3 critical P0 files** (>1400 lines) into smaller, 
 
 ---
 
-### 2. Regex Library (`src/lib/std/src/core/regex.spl`)
+### 2. Regex Library (`src/lib/std/src/compiler_core/regex.spl`)
 
 **Original**: 1408 lines
 

@@ -48,7 +48,7 @@ All actual TODO comments in the codebase are now properly tagged with `[area][pr
 
 | File | TODOs Tagged | Area |
 |------|--------------|------|
-| `simple/std_lib/src/core/traits.spl` | 5 | parser |
+| `simple/std_lib/src/compiler_core/traits.spl` | 5 | parser |
 | `simple/std_lib/test/features/ml/experiment_tracking_spec.spl` | 1 | test |
 | `tests/specs/sandboxing_spec.spl` | 1 | test |
 | `simple/std_lib/src/ml/torch/validation/__init__.spl` | 1 | stdlib |

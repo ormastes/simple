@@ -192,7 +192,7 @@ Build succeeded in 0ms ✅
 bin/simple test
 
 # Specific path
-bin/simple test test/unit/core/
+bin/simple test test/unit/compiler_core/
 
 # With verbose output
 bin/simple test --verbose

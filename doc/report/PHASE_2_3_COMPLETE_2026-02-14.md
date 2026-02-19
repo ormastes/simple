@@ -22,7 +22,7 @@
 
 3. **`doc/guide/signal_handler_sffi_spec.md`** (300 lines)
    - Complete SFFI specification
-   - C implementation guide for `seed/runtime.c`
+   - C implementation guide for `src/compiler_seed/runtime.c`
    - Platform support matrix (Linux/macOS/Windows)
    - Security considerations and testing guide
 
@@ -53,7 +53,7 @@ val installed = install_signal_handlers(cleanup_fn)
 
 ### SFFI Implementation Needed:
 
-Add to `seed/runtime.c`:
+Add to `src/compiler_seed/runtime.c`:
 ```c
 bool rt_signal_handler_available();
 void rt_signal_handler_install(int64_t signal, void (*handler)(void));
@@ -465,7 +465,7 @@ bin/simple test --parallel --self-protect test/
 # Triggers graceful shutdown if limits exceeded
 ```
 
-**Fix:** Implement SFFI in `seed/runtime.c` per spec in `doc/guide/signal_handler_sffi_spec.md`
+**Fix:** Implement SFFI in `src/compiler_seed/runtime.c` per spec in `doc/guide/signal_handler_sffi_spec.md`
 
 ### 2. Windows Resource Limits
 
@@ -538,7 +538,7 @@ bin/simple test --self-protect --cpu-limit=60 --mem-limit=70 test/
    ```
 
 3. **Implement SFFI** (optional, 2-3 hours)
-   - Add functions to `seed/runtime.c`
+   - Add functions to `src/compiler_seed/runtime.c`
    - Replace stubs in `signal_stubs.spl`
    - Test signal handling
 

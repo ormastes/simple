@@ -722,7 +722,7 @@ text.parse_float()        # Parse to float
 **Status:** ✅ Implemented (2026-01-05)
 
 **Implementation:**
-Full JSON library implemented in `simple/std_lib/src/core/json.spl` (448 lines):
+Full JSON library implemented in `simple/std_lib/src/compiler_core/json.spl` (448 lines):
 
 **Features:**
 - `JsonValue` enum: Null, Bool, Number, Integer, String, Array, Object
@@ -756,8 +756,8 @@ json.stringify(val)  # {"key": "value"}
 ```
 
 **Files:**
-- Implementation: `simple/std_lib/src/core/json.spl`
-- Tests: `simple/std_lib/test/unit/core/json_spec.spl`
+- Implementation: `simple/std_lib/src/compiler_core/json.spl`
+- Tests: `simple/std_lib/test/unit/compiler_core/json_spec.spl`
 
 ---
 
@@ -801,7 +801,7 @@ result = compute(100, 0, 2)  # Err("division by zero")
 
 **Tests:**
 - Rust tests: `src/driver/tests/interpreter_advanced_features_tests.rs:221-290`
-- Simple tests: `simple/std_lib/test/unit/core/try_operator_spec.spl`
+- Simple tests: `simple/std_lib/test/unit/compiler_core/try_operator_spec.spl`
 
 **Benefits:**
 - Cleaner error handling code

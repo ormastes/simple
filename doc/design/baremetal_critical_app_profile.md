@@ -1028,7 +1028,7 @@ error[R14]: mixed signed/unsigned arithmetic
 | **8** | R11 (dispatch cycles) | Medium | Medium | Extends R2 call graph |
 
 ### Phase 1 is fastest ROI:
-- R9 builds directly on existing `ignored_return_warning` in `src/core/interpreter/eval.spl`
+- R9 builds directly on existing `ignored_return_warning` in `src/compiler_core/interpreter/eval.spl`
 - Add `@must_use` to attribute parser (already supports `@name("arg")`)
 - Change warning to error in `@profile(critical)` context
 

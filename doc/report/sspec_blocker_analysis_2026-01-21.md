@@ -85,7 +85,7 @@ describe "Feature Name":
         expect some_value == expected
 ```
 
-**Example:** `simple/std_lib/test/unit/core/arithmetic_spec.spl`
+**Example:** `simple/std_lib/test/unit/compiler_core/arithmetic_spec.spl`
 ```simple
 import std.spec
 

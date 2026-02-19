@@ -7,7 +7,7 @@ Fixed two critical bugs in seed_cpp that prevented function bodies from being ge
 ## Problems Solved
 
 ### Bug #1: Main Function Lookup Mismatch
-**Location:** `seed/seed.cpp` lines 3648-3651
+**Location:** `src/compiler_seed/seed.cpp` lines 3648-3651
 **Symptom:** Main function body always stubbed even when translation succeeded
 **Root Cause:** Second pass extracts "main" from source but function was registered as "spl_main" in first pass
 
@@ -20,7 +20,7 @@ if (!fi) { continue; }
 ```
 
 ### Bug #2: Universal Stub Generation
-**Location:** `seed/seed.cpp` line 833
+**Location:** `src/compiler_seed/seed.cpp` line 833
 **Symptom:** ALL function bodies stubbed, not just problematic ones
 **Root Cause:** `output_has_problems()` had hardcoded `return true;` left over from development
 
@@ -70,8 +70,8 @@ int32_t spl_main() {
 
 ### Runtime Test:
 ```bash
-$ ./seed/build/seed_cpp src/compiler_core/bootstrap_main.spl > /tmp/test.cpp
-$ clang++ -std=c++20 -O2 -o /tmp/test /tmp/test.cpp -Iseed -Lseed/build -lspl_runtime -lm -lpthread -ldl
+$ ./build/seed/seed_cpp src/compiler_core_legacy/bootstrap_main.spl > /tmp/test.cpp
+$ clang++ -std=c++20 -O2 -o /tmp/test /tmp/test.cpp -Isrc/compiler_seed -Lbuild/seed -lspl_runtime -lm -lpthread -ldl
 $ /tmp/test
 Simple Bootstrap Compiler v0.1
 Usage: core1 <file.spl>
@@ -108,9 +108,9 @@ These are **translation limitations**, not main() bugs. Full compiler bootstrap 
 
 ## Files Modified
 
-- `seed/seed.cpp` (2 bug fixes)
-- `scripts/bootstrap-fixed.sh` (updated bootstrap script)
-- `scripts/bootstrap-minimal.sh` (created, excludes complex features)
+- `src/compiler_seed/seed.cpp` (2 bug fixes)
+- `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` (updated bootstrap script)
+- `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` (created, excludes complex features)
 
 ## Test Results
 

@@ -29,7 +29,7 @@ Successfully implemented a complete automated desugarer that transforms Full Sim
 | Code Base | Files | Lines | Notes |
 |-----------|-------|-------|-------|
 | **Original (src/compiler/)** | 413 | 123,913 | Full Simple with all features |
-| **Desugared (src/compiler_core/)** | 416 | 99,460 | Core Simple compatible |
+| **Desugared (src/compiler_core_legacy/)** | 416 | 99,460 | Core Simple compatible |
 | **Change** | +3 | **-19.7%** | Smaller due to simpler syntax |
 
 ---
@@ -38,7 +38,7 @@ Successfully implemented a complete automated desugarer that transforms Full Sim
 
 ### 1. Automated Desugarer Tool
 
-**File:** `src/tools/desugarer.py` (15 KB Python script)
+**File:** `scripts/tools/desugarer.py` (15 KB Python script)
 
 **Capabilities:**
 - ✅ **Pass 1:** Extract and convert `impl` blocks to module functions
@@ -51,20 +51,20 @@ Successfully implemented a complete automated desugarer that transforms Full Sim
 **Usage:**
 ```bash
 # Single file
-python3 src/tools/desugarer.py input.spl output.spl
+python3 scripts/tools/desugarer.py input.spl output.spl
 
 # Batch mode (all files)
-python3 src/tools/desugarer.py --dir src/compiler --output-dir src/compiler_core
+python3 scripts/tools/desugarer.py --dir src/compiler --output-dir src/compiler_core_legacy
 ```
 
 ### 2. Test and Analysis Scripts
 
-- **`src/tools/test_desugared.sh`** - Validation script for desugared code
-- **`src/tools/analyze_desugaring.py`** - Statistics generator
+- **`scripts/tools/test_desugared.sh`** - Validation script for desugared code
+- **`scripts/tools/analyze_desugaring.py`** - Statistics generator
 
 ### 3. Complete Desugared Codebase
 
-- **`src/compiler_core/`** - 416 Core Simple compatible files
+- **`src/compiler_core_legacy/`** - 416 Core Simple compatible files
 - All transformations applied automatically
 - Ready for compilation with seed compiler
 
@@ -143,7 +143,7 @@ simple/
 │
 ├── src/
 │   ├── compiler/                       ← Original Full Simple (413 files, 124K lines)
-│   ├── compiler_core/                  ← ✨ NEW: Desugared (416 files, 99K lines)
+│   ├── compiler_core_legacy/                  ← ✨ NEW: Desugared (416 files, 99K lines)
 │   ├── core/                            ← Core Simple implementation (8.8K lines)
 │   └── tools/                           ← ✨ NEW: Desugarer tools
 │       ├── desugarer.py                 ← Main desugarer (15 KB)
@@ -201,7 +201,7 @@ simple/
    cmake .. && make -j$(nproc)
    
    # Test compiling a desugared file
-   ./seed src/compiler_core/lexer.spl --output build/lexer.cpp
+   ./seed src/compiler_core_legacy/lexer.spl --output build/lexer.cpp
    ```
 
 2. **Run Test Suite**
@@ -352,7 +352,7 @@ simple/
 4. **LEXER_DESUGARING_EXAMPLE.md** - Detailed examples (11.5 KB)
 5. **CORE_FULL_COMPILATION_PLAN.md** - Quick reference (9.3 KB)
 6. **QUICK_START_DESUGARING.md** - Quick guide (5.1 KB)
-7. **src/tools/DESUGARER_README.md** - Tool docs (1 KB)
+7. **scripts/tools/DESUGARER_README.md** - Tool docs (1 KB)
 
 **Total documentation: ~50 KB**
 
@@ -361,10 +361,10 @@ simple/
 ## 🔗 References
 
 ### Code
-- **Desugarer:** `src/tools/desugarer.py`
-- **Analysis:** `src/tools/analyze_desugaring.py`
-- **Tests:** `src/tools/test_desugared.sh`
-- **Output:** `src/compiler_core/` (416 files)
+- **Desugarer:** `scripts/tools/desugarer.py`
+- **Analysis:** `scripts/tools/analyze_desugaring.py`
+- **Tests:** `scripts/tools/test_desugared.sh`
+- **Output:** `src/compiler_core_legacy/` (416 files)
 
 ### Documentation
 - **Quick Start:** [QUICK_START_DESUGARING.md](QUICK_START_DESUGARING.md)

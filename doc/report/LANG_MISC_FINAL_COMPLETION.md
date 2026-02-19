@@ -15,7 +15,7 @@ Successfully completed ALL 9 miscellaneous language features, achieving 100% com
 ### #1385 - Persistent List ✅
 
 **Implementation:**
-- Created `simple/std_lib/src/core/persistent_list.spl` (4.5KB, 180 lines)
+- Created `simple/std_lib/src/compiler_core/persistent_list.spl` (4.5KB, 180 lines)
 - Functional persistent list using cons cells
 - Full structural sharing via GC
 - Complete functional programming API
@@ -54,7 +54,7 @@ let list2 = list1.prepend(0)
 ### #1387 - Primitive Methods ✅
 
 **Implementation:**
-- Created `simple/std_lib/src/core/primitives.spl` (6KB, 200 lines)
+- Created `simple/std_lib/src/compiler_core/primitives.spl` (6KB, 200 lines)
 - Extension methods for i64, f64, bool
 - Math operations, comparisons, conversions
 - Mathematical constants
@@ -94,12 +94,12 @@ false.then(42)        // None
 ## Files Created (Final Session)
 
 ### New Stdlib Files (3)
-1. `simple/std_lib/src/core/persistent_list.spl` (4.5KB)
+1. `simple/std_lib/src/compiler_core/persistent_list.spl` (4.5KB)
    - PList[T] functional list
    - map, filter, fold operations
    - Full iteration support
 
-2. `simple/std_lib/src/core/primitives.spl` (6KB)
+2. `simple/std_lib/src/compiler_core/primitives.spl` (6KB)
    - i64 methods (abs, pow, clamp, etc.)
    - f64 methods (sqrt, round, trig, etc.)
    - bool methods (then, to_int, etc.)

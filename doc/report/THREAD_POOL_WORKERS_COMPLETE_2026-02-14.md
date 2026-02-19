@@ -36,7 +36,7 @@ Created a C helper function `spl_thread_pool_spawn_worker()` that:
 
 ## Implementation
 
-### 1. Runtime Thread Header (`seed/runtime_thread.h`)
+### 1. Runtime Thread Header (`src/compiler_seed/runtime_thread.h`)
 
 **Added:** Thread pool worker spawn function declaration
 
@@ -62,7 +62,7 @@ spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id);
 
 ---
 
-### 2. Runtime Thread Implementation (`seed/runtime_thread.c`)
+### 2. Runtime Thread Implementation (`src/compiler_seed/runtime_thread.c`)
 
 **Added:** C wrapper implementation with weak symbol support
 
@@ -163,7 +163,7 @@ for i in 0..workers:
 
 ### Runtime Library Rebuild
 
-**Command:** `cd seed/build && ninja`
+**Command:** `cd build/seed && ninja`
 
 **Output:**
 ```
@@ -181,7 +181,7 @@ for i in 0..workers:
 
 **Runtime Library Symbols:**
 ```bash
-$ nm seed/build/libspl_runtime.a | grep -E "spl_thread_pool_spawn_worker|worker_loop_entry"
+$ nm build/seed/libspl_runtime.a | grep -E "spl_thread_pool_spawn_worker|worker_loop_entry"
 0000000000001010 T spl_thread_pool_spawn_worker
                  w worker_loop_entry
 ```
@@ -351,7 +351,7 @@ fn worker_loop_entry(pool_id: i64):
 1. **Rebuild Runtime Binary** (2-4 hours on CI)
    - Current binary built with old runtime library
    - New binary needs `libspl_runtime.a` with worker spawn
-   - Command: `scripts/bootstrap-from-scratch.sh --output=bin/simple`
+   - Command: `scripts/bootstrap/bootstrap-from-scratch.sh --output=bin/simple`
    - **Blocker:** Compiler_core transpilation bugs (not thread pool related)
 
 2. **Run Thread Pool Tests**
@@ -460,8 +460,8 @@ fn destroy()                           # Clean up
 
 | File | Lines Changed | Purpose |
 |------|--------------|---------|
-| `seed/runtime_thread.h` | +18 | Add spl_thread_pool_spawn_worker() declaration |
-| `seed/runtime_thread.c` | +76 | Implement worker spawn + weak symbol wrapper |
+| `src/compiler_seed/runtime_thread.h` | +18 | Add spl_thread_pool_spawn_worker() declaration |
+| `src/compiler_seed/runtime_thread.c` | +76 | Implement worker spawn + weak symbol wrapper |
 | `src/std/thread_pool.spl` | +12 | Add extern declaration + use helper function |
 
 **Total:** 106 lines added, 9 lines removed (was TODO comments)
@@ -480,7 +480,7 @@ fn destroy()                           # Clean up
 ✅ All 202 runtime tests passing
 ✅ Zero regressions
 
-⚠️ Runtime binary rebuild pending (blocked by compiler_core bugs)
+⚠️ Runtime binary rebuild pending (blocked by compiler_core_legacy bugs)
 ⚠️ Thread pool tests pending (requires runtime binary)
 
 ---
@@ -503,7 +503,7 @@ fn destroy()                           # Clean up
 
 The C helper function successfully bridges the gap between Simple's high-level thread pool API and the low-level SFFI threading primitives. All code is written, all tests are written, and the runtime library has been rebuilt.
 
-**The only remaining step is rebuilding the full Simple runtime binary**, which is blocked by unrelated compiler_core transpilation bugs. Once the binary is rebuilt, all 65 thread pool tests (45 unit + 20 integration) can run and validate the complete implementation.
+**The only remaining step is rebuilding the full Simple runtime binary**, which is blocked by unrelated compiler_core_legacy transpilation bugs. Once the binary is rebuilt, all 65 thread pool tests (45 unit + 20 integration) can run and validate the complete implementation.
 
 ---
 

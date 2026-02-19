@@ -384,8 +384,8 @@ var GRADIENTS: Dict<i64, TensorF64> = {}
 - `ast.spl` (116 lines)
 - Total: **1,418 lines**
 
-**Comparison with src/core/parser.spl (2,135 lines):**
-- lib/parser is ~66% of core/parser size
+**Comparison with src/compiler_core/parser.spl (2,135 lines):**
+- lib/parser is ~66% of compiler_core/parser size
 - May be simplified copy for lib use
 - **Validation Status:** Phase 1 parser/lexer refactoring complete (ast.spl split into separate file as expected)
 

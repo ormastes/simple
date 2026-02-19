@@ -1,13 +1,13 @@
 # Testing Core Simple Modules
 
 **Date:** 2026-02-11
-**Purpose:** Guide for testing and improving coverage of core Simple library (`src/core/*.spl`)
+**Purpose:** Guide for testing and improving coverage of core Simple library (`src/compiler_core/*.spl`)
 
 ---
 
 ## Overview
 
-The **core Simple library** (`src/core/`) contains the foundational compiler components written in Simple:
+The **core Simple library** (`src/compiler_core/`) contains the foundational compiler components written in Simple:
 - **Lexer** (`lexer.spl`, `lexer_types.spl`, `lexer_struct.spl`) - Tokenization
 - **Parser** (`parser.spl`) - AST construction
 - **AST** (`ast.spl`, `ast_types.spl`) - Abstract syntax tree
@@ -24,7 +24,7 @@ These modules are tested using **full Simple** test framework (SSpec).
 
 ### Test Location
 ```
-test/unit/core/
+test/unit/compiler_core/
 ├── lexer_spec.spl           # Lexer unit tests
 ├── parser_spec.spl          # Parser unit tests
 ├── ast_spec.spl             # AST tests
@@ -45,19 +45,19 @@ test/unit/core/
 
 ```bash
 # Run all core tests
-bin/simple test test/unit/core/
+bin/simple test test/unit/compiler_core/
 
 # Run specific test file
-bin/simple test test/unit/core/lexer_spec.spl
+bin/simple test test/unit/compiler_core/lexer_spec.spl
 
 # Run with coverage tracking
-bin/simple test test/unit/core/ --coverage
+bin/simple test test/unit/compiler_core/ --coverage
 
 # Run only slow tests
-bin/simple test test/unit/core/ --only-slow
+bin/simple test test/unit/compiler_core/ --only-slow
 
 # List all tests
-bin/simple test test/unit/core/ --list
+bin/simple test test/unit/compiler_core/ --list
 ```
 
 ---
@@ -105,7 +105,7 @@ Shows which modules need more test coverage:
 ```markdown
 | File | Dec Covered | Dec Total | Dec % | Cond Covered | Cond Total | Cond % |
 |------|-------------|-----------|-------|--------------|------------|--------|
-| src/core/lexer.spl | 45 | 50 | 90% | 60 | 65 | 92% |
+| src/compiler_core/lexer.spl | 45 | 50 | 90% | 60 | 65 | 92% |
 ```
 
 ---
@@ -178,7 +178,7 @@ describe "Lexer - String Tokenization":
 
 ### Seed Compiler Coverage (C++)
 
-The bootstrap seed compiler (`seed/seed.cpp`) coverage:
+The bootstrap seed compiler (`src/compiler_seed/seed.cpp`) coverage:
 - **seed.cpp:** 87.21% branch coverage (2086/2392 branches)
 - **runtime.c:** 99.26% branch coverage (405/408 branches)
 - **c_runtime.c:** 100% branch coverage (234/234 branches)
@@ -223,7 +223,7 @@ Based on seed.cpp coverage gaps (~13% uncovered):
 
 ### Example: Adding New Branch Coverage Test
 
-Create `test/unit/core/branch_coverage_26_spec.spl`:
+Create `test/unit/compiler_core/branch_coverage_26_spec.spl`:
 
 ```simple
 """

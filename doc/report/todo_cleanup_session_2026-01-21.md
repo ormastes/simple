@@ -84,7 +84,7 @@ Discovered that "TODO" features were actually complete:
 - RwLock: 3 tests (create, multiple readers, write access)
 
 **Infrastructure:**
-- Simple wrapper: `src/lib/std/src/core/synchronization.spl`
+- Simple wrapper: `src/lib/std/src/compiler_core/synchronization.spl`
 - Rust FFI runtime: `src/rust/runtime/src/value/sync.rs`
 - Status: Fully implemented, tests were incorrectly skipped
 

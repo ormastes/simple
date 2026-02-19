@@ -335,7 +335,7 @@ training:
 - ✅ Memory management (patterns shown)
 
 **Backend Infrastructure:**
-- `src/compiler_core/backend/cuda_backend.spl`
+- `src/compiler_core_legacy/backend/cuda_backend.spl`
 - `src/lib/cuda/` (10+ functions)
 - `src/std/gpu/` (context, memory, streams)
 
@@ -471,7 +471,7 @@ Output: models/phase0/lora_0
 ### **Priority 1: High Impact (Enables Multiple Examples)**
 
 1. **Fix Runtime Parser for Generics** (Enables 7 examples)
-   - Update src/core/parser.spl to support `Type<Param>` syntax
+   - Update src/compiler_core/parser.spl to support `Type<Param>` syntax
    - OR create non-generic wrapper classes for interpreter
    - Impact: Pure NN examples become fully functional
 

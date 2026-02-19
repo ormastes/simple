@@ -117,13 +117,13 @@ Code commented out waiting for:
 | File | Lines | Type |
 |------|-------|------|
 | `compiler/parser.spl` | 2,453 | impl Parser |
-| `compiler_core/parser.spl` | 2,322 | impl Parser |
-| `core/compiler/c_codegen.spl` | 2,267 | impl CCodegen |
+| `compiler_core_legacy/parser.spl` | 2,322 | impl Parser |
+| `compiler_core_legacy/compiler/c_codegen.spl` | 2,267 | impl CCodegen |
 | `app/compile/c_translate.spl` | 1,871 | impl CTranslator |
-| `core/parser.spl` | 1,862 | impl Parser |
+| `compiler_core_legacy/parser.spl` | 1,862 | impl Parser |
 | `app/mcp/main.spl` | 1,854 | MCP orchestration |
 | `compiler/treesitter/outline.spl` | 1,823 | impl TreeSitter |
-| `core/interpreter/eval.spl` | 1,619 | impl Interpreter |
+| `compiler_core_legacy/interpreter/eval.spl` | 1,619 | impl Interpreter |
 | `compiler/mir_lowering.spl` | 1,503 | impl MirLowering |
 | `compiler/lexer.spl` | 1,430 | impl Lexer |
 

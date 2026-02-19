@@ -13,18 +13,18 @@ The COMPREHENSIVE_IMPLEMENTATION_PLAN_2026-02-14.md Section 6 requests documenta
 ### 1. Advanced Type System (Planned: ~2600 lines, Reality: ~150 lines)
 
 **What EXISTS:**
-- `src/core/types.spl`: Type registry functions (lines 439-581)
+- `src/compiler_core/types.spl`: Type registry functions (lines 439-581)
   - `generic_param_register()`, `generic_param_find()` - Generic parameter tracking
   - `union_type_register()`, `union_type_get_members()` - Union type registry
   - `intersection_type_register()`, `intersection_type_get_members()` - Intersection type registry
   - `refinement_type_register()`, `refinement_type_base()`, `refinement_type_predicate()` - Refinement type registry
-- `test/unit/core/generic_syntax_spec.spl`: Parser tests (30 tests) - tests don't run
+- `test/unit/compiler_core/generic_syntax_spec.spl`: Parser tests (30 tests) - tests don't run
 
 **What DOES NOT EXIST:**
 - ❌ Runtime type checking (`type_check_union()`, `type_check_intersection()`, `type_check_refinement()`)
-- ❌ Type erasure/monomorphization (`src/core/type_erasure.spl` - planned 600 lines)
-- ❌ Type inference engine (`src/core/type_inference.spl` - planned 1200 lines)
-- ❌ Type checker (`src/core/type_checker.spl` - planned 800 lines)
+- ❌ Type erasure/monomorphization (`src/compiler_core/type_erasure.spl` - planned 600 lines)
+- ❌ Type inference engine (`src/compiler_core/type_inference.spl` - planned 1200 lines)
+- ❌ Type checker (`src/compiler_core/type_checker.spl` - planned 800 lines)
 - ❌ Any working tests or examples
 
 **Implementation Status: ~5%** (registry only, no actual functionality)
@@ -233,7 +233,7 @@ Rather than documenting non-existent features, write **implementation guides** t
 
 ```bash
 # Generic syntax tests don't complete
-$ bin/simple test test/unit/core/generic_syntax_spec.spl
+$ bin/simple test test/unit/compiler_core/generic_syntax_spec.spl
 Completed tests: 0
 # (Test runner hangs or fails to discover tests)
 

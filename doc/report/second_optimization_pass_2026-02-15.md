@@ -48,7 +48,7 @@ Conducted three parallel analysis agents searching for:
 
 ### 1. String Interpolation - O(n²) → O(n)
 
-**File:** `src/core/interpreter/eval.spl` (lines 1481-1489)
+**File:** `src/compiler_core/interpreter/eval.spl` (lines 1481-1489)
 
 **Before:**
 ```simple
@@ -249,7 +249,7 @@ while true:
 
 ## Files Modified
 
-1. `src/core/interpreter/eval.spl` - String interpolation
+1. `src/compiler_core/interpreter/eval.spl` - String interpolation
 2. `src/compiler/dependency/graph.spl` - Queue dequeue + cycle detection
 3. `src/compiler/linker/symbol_analysis.spl` - Visited Dict + worklist
 4. `src/compiler/driver/parallel.spl` - Topological sort visited

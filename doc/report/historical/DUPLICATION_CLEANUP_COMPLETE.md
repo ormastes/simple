@@ -172,8 +172,8 @@ These were placeholder tests created to simulate coverage but provided no unique
 ### Documentation Added
 
 Created two README files explaining intentional duplications:
-- `src/compiler/README.md` - Explains compiler/ vs compiler_core/ duplication (bootstrap requirement)
-- `src/compiler_core/README.md` - Documents Core Simple constraints and transformation rules
+- `src/compiler/README.md` - Explains compiler/ vs compiler_core_legacy_legacy/ duplication (bootstrap requirement)
+- `src/compiler_core_legacy_legacy/README.md` - Documents Core Simple constraints and transformation rules
 
 These prevent future confusion about the ~15,000 lines of intentional duplication
 between Full Simple and Core Simple implementations.

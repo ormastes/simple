@@ -167,7 +167,7 @@ fn find(items: [Item], id: i64) -> Item?:
 
 ### Baremetal Note
 
-In `@safe` modules, `Result`/`Option` must be checked — unchecked error values are compile errors (see existing ignored return value warnings in `src/core/interpreter/eval.spl`).
+In `@safe` modules, `Result`/`Option` must be checked — unchecked error values are compile errors (see existing ignored return value warnings in `src/compiler_core/interpreter/eval.spl`).
 
 ---
 
@@ -480,7 +480,7 @@ fn parse_expr(tokens: [Token], depth: i64) -> Expr:
 ### Phase 1 Implementation Sketch
 
 ```simple
-# src/core/call_graph.spl
+# src/compiler_core/call_graph.spl
 
 class CallGraph:
     nodes: [text]           # function names

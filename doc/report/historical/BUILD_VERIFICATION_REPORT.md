@@ -12,7 +12,7 @@ The desugared Core Simple code **passes compilation tests** when tested independ
 
 **Key Finding:** Module imports resolve to original `src/compiler/` files, not desugared ones. For full compilation, either:
 1. Build standalone (no imports)
-2. Replace `src/compiler/` with `src/compiler_core/`
+2. Replace `src/compiler/` with `src/compiler_core_legacy/`
 3. Use custom module path configuration
 
 ---
@@ -73,19 +73,19 @@ fn main() -> i64:
 
 **Problem found:**
 ```bash
-$ simple compile src/compiler_core/backend.spl
+$ simple compile src/compiler_core_legacy/backend.spl
 error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/compiler/backend/interpreter.spl"
 ```
 
 **Analysis:**
 - Compiler resolves `use backend.interpreter` to `src/compiler/` (original)
-- Not to `src/compiler_core/` (desugared)
+- Not to `src/compiler_core_legacy/` (desugared)
 - Original files still have Full Simple syntax
 - **This is a module path issue, not a desugaring problem**
 
 **Solution options:**
 1. Replace `src/compiler/` with desugared files
-2. Configure module search path to use `src/compiler_core/`
+2. Configure module search path to use `src/compiler_core_legacy/`
 3. Build as standalone library without cross-file imports
 
 ---
@@ -188,7 +188,7 @@ Lexer(
 mv src/compiler src/compiler_original
 
 # Use desugared version
-mv src/compiler_core src/compiler
+mv src/compiler_core_legacy src/compiler
 
 # Now build
 simple compile src/compiler/backend.spl
@@ -207,10 +207,10 @@ simple compile src/compiler/backend.spl
 
 ```bash
 # Set environment variable for module search
-export SIMPLE_MODULE_PATH=src/compiler_core:src/std
+export SIMPLE_MODULE_PATH=src/compiler_core_legacy:src/std
 
 # Or use compiler flag
-simple compile --module-path src/compiler_core src/compiler_core/backend.spl
+simple compile --module-path src/compiler_core_legacy src/compiler_core_legacy/backend.spl
 ```
 
 **Pros:**
@@ -225,7 +225,7 @@ simple compile --module-path src/compiler_core src/compiler_core/backend.spl
 
 ```bash
 # Build each file independently
-for file in src/compiler_core/*.spl; do
+for file in src/compiler_core_legacy/*.spl; do
     simple compile "$file" -o "build/$(basename $file .spl).smf"
 done
 ```
@@ -284,7 +284,7 @@ done
    # Option 1: Replace (recommended for testing)
    cp -r src/compiler src/compiler.backup
    rm -rf src/compiler
-   mv src/compiler_core src/compiler
+   mv src/compiler_core_legacy src/compiler
    ```
 
 2. **Test compilation:**
@@ -361,7 +361,7 @@ The desugared Core Simple code is **fully verified and compilation-ready**:
 - ✅ **Structure:** Fully preserved
 - ✅ **Ready for:** Full build after module path setup
 
-**Recommendation:** Replace `src/compiler/` with `src/compiler_core/` and proceed with full build.
+**Recommendation:** Replace `src/compiler/` with `src/compiler_core_legacy/` and proceed with full build.
 
 **Confidence Level:** 100% ✅
 

@@ -211,7 +211,7 @@ val emails = extract_all(r"\b[\w.]+@[\w.]+\b", document)
 | Stdlib Export | ✅ Exported | `simple/std_lib/src/__init__.spl` |
 | Module Entry | ✅ Complete | `simple/std_lib/src/regex/__init__.spl` |
 | Tests (Rust) | ✅ Passing | `src/runtime/src/value/ffi/regex.rs` |
-| Tests (Simple) | ⚠️ Skipped | `simple/std_lib/test/unit/core/regex_spec.spl` |
+| Tests (Simple) | ⚠️ Skipped | `simple/std_lib/test/unit/compiler_core/regex_spec.spl` |
 | Documentation | ✅ This report | `doc/report/regex_*.md` |
 
 ## Files Already Using Regex
@@ -373,7 +373,7 @@ The regex module is **production-ready and has been available all along**. This 
 - `doc/report/regex_implementation_2026-01-20.md` - This implementation report
 
 **Tests:**
-- `simple/std_lib/test/unit/core/regex_spec.spl` - BDD tests (updated comment)
+- `simple/std_lib/test/unit/compiler_core/regex_spec.spl` - BDD tests (updated comment)
 - `src/runtime/src/value/ffi/regex.rs` - Rust unit tests (4 tests passing)
 
 **Usage:**

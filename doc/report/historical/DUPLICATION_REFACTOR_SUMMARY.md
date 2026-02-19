@@ -96,7 +96,7 @@ fn handle_jj_new(id: String, body: String, repo_path: String) -> String:
     handle_jj_result(id, jj_run(cmd, repo_path))
 ```
 
-### 2. Lexer Initialization (`src/compiler_core/lexer.spl`)
+### 2. Lexer Initialization (`src/compiler_core_legacy/lexer.spl`)
 
 **Problem**: Lexer constructor with 20+ fields was duplicated in 4 places:
 - `lexer_new()`
@@ -173,7 +173,7 @@ fn create_lexer(src: text) -> Lexer:
     lexer_new(src)
 ```
 
-### 2. Poll Generator Match Arms (`src/compiler_core/desugar/poll_generator.spl`)
+### 2. Poll Generator Match Arms (`src/compiler_core_legacy/desugar/poll_generator.spl`)
 
 **Problem**: Repeated patterns for creating MatchArm and Stmt structures in async state machine generation. The pattern appeared 6+ times:
 ```simple
@@ -270,8 +270,8 @@ while i < len:
 ### Type System Duplications (16+ locations)
 
 Files with identical type definitions across phases:
-- `compiler/trait_impl.spl` vs `compiler_core/trait_impl.spl`
-- `compiler/trait_solver.spl` vs `compiler_core/trait_solver.spl`
+- `compiler/trait_impl.spl` vs `compiler_core_legacy/trait_impl.spl`
+- `compiler/trait_solver.spl` vs `compiler_core_legacy/trait_solver.spl`
 - Multiple `associated_types_phase*.spl` files
 - Multiple `higher_rank_poly_phase*.spl` files
 

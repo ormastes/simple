@@ -146,7 +146,7 @@ bin/simple test --integration --tag=database --only-slow test/
 - `src/app/io/signal_handlers.spl` (200 lines)
 - `doc/guide/signal_handler_sffi_spec.md` (300 lines)
 
-**Issue:** Needs 3 functions added to `seed/runtime.c`
+**Issue:** Needs 3 functions added to `src/compiler_seed/runtime.c`
 
 **Timeline:** 2-3 hours to implement SFFI
 

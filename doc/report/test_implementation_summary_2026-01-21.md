@@ -10,7 +10,7 @@
 
 ### Math Module ✅ 62% Passing
 
-**Implementation:** `src/lib/std/src/core/math.spl` (308 lines, 44 exports)
+**Implementation:** `src/lib/std/src/compiler_core/math.spl` (308 lines, 44 exports)
 **Tests:** `test/lib/std/unit/core/math_spec.spl` (29 tests)
 
 **Status:** 18/29 tests passing (62%)
@@ -44,7 +44,7 @@
 
 ### Random Module ❌ 0% Passing
 
-**Implementation:** `src/lib/std/src/core/random.spl` (271 lines, 16 exports)
+**Implementation:** `src/lib/std/src/compiler_core/random.spl` (271 lines, 16 exports)
 **Tests:** `test/lib/std/unit/core/random_spec.spl` (12 tests)
 
 **Status:** 0/12 tests passing (0%)

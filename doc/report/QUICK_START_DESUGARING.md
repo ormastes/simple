@@ -33,7 +33,7 @@ Solution: **Desugar** Full → Core by mechanical transformations.
 - Success criteria and verification strategy
 
 ### ✅ Prototype Started
-- **src/compiler_core/lexer_desugared.spl** - 150 lines of Core-compatible code
+- **src/compiler_core_legacy/lexer_desugared.spl** - 150 lines of Core-compatible code
 - Demonstrates all major transformations:
   - `impl` blocks → module functions
   - `Option<T>` → tagged fields
@@ -107,7 +107,7 @@ fn lexer_next(self: Lexer) -> Token:
 ### Immediate (Today)
 ```bash
 # View the prototype
-cat src/compiler_core/lexer_desugared.spl
+cat src/compiler_core_legacy/lexer_desugared.spl
 
 # Read the status
 cat IMPLEMENTATION_STATUS.md
@@ -152,7 +152,7 @@ simple/
 │
 ├── src/
 │   ├── compiler/                       ← Full Simple (52K lines)
-│   ├── compiler_core/                  ← Desugared output ✨ NEW
+│   ├── compiler_core_legacy/                  ← Desugared output ✨ NEW
 │   │   └── lexer_desugared.spl         ← Prototype (150 lines)
 │   ├── core/                            ← Core Simple (8.8K lines)
 │   └── tools/                           ← Desugarer tool ✨ NEW
@@ -168,7 +168,7 @@ simple/
 
 1. **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)** - Detailed progress report
 2. **[CORE_FULL_COMPILATION_PLAN.md](CORE_FULL_COMPILATION_PLAN.md)** - Quick reference
-3. **[src/compiler_core/lexer_desugared.spl](src/compiler_core/lexer_desugared.spl)** - Prototype code
+3. **[src/compiler_core_legacy/lexer_desugared.spl](src/compiler_core_legacy/lexer_desugared.spl)** - Prototype code
 
 ---
 

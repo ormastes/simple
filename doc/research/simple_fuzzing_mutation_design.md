@@ -611,7 +611,7 @@ simple/std_lib/src/testing/
 ### Use Case 1: Property-Based Tests for Stdlib
 
 ```simple
-# simple/std_lib/test/unit/core/list_fuzz_spec.spl
+# simple/std_lib/test/unit/compiler_core/list_fuzz_spec.spl
 import std.fuzz
 import std.spec
 

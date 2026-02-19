@@ -162,7 +162,7 @@ This analysis covers all skipped tests in the codebase and categorizes them by f
 
 ### 8. Linker and Library Format (20+ tests)
 **Files:**
-- `src/compiler_core/linker/test/lib_smf_spec.spl` - 8 tests
+- `src/compiler_core_legacy/linker/test/lib_smf_spec.spl` - 8 tests
 - `src/compiler/linker/test/lib_smf_spec.spl` - 8 tests
 - `test/unit/compiler/linker/lib_smf_spec.spl` - 8 tests
 

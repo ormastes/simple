@@ -259,18 +259,18 @@ Some BDD framework files contained `try/catch` syntax that is not part of Simple
 - `vulkan-backend/src/runtime/src/value/ffi.rs` - Added atomic operations FFI
 
 ### Standard Library Helper Methods (12 batches):
-- `simple/std_lib/src/core/sync.spl` - Batch 73 (25 methods)
-- `simple/std_lib/src/core/collections/hash.spl` - Batch 74 (21 methods)
-- `simple/std_lib/src/core/context.spl` - Batch 75 (12 methods)
-- `simple/std_lib/src/core/option.spl` - Batch 76 (8 methods)
-- `simple/std_lib/src/core/result.spl` - Batch 76 (7 methods)
-- `simple/std_lib/src/core/random.spl` - Batch 77 (6 methods)
-- `simple/std_lib/src/core/regex.spl` - Batch 79 (12 methods)
-- `simple/std_lib/src/core/collections/array.spl` - Batch 80 (20 methods)
-- `simple/std_lib/src/core/primitives.spl` - Batch 81 (32 methods)
-- `simple/std_lib/src/core/dsl.spl` - Batch 82 (30 methods)
-- `simple/std_lib/src/core/persistent_list.spl` - Batch 83 (15 methods)
-- `simple/std_lib/src/core/json.spl` - JsonParser (6 methods)
+- `simple/std_lib/src/compiler_core/sync.spl` - Batch 73 (25 methods)
+- `simple/std_lib/src/compiler_core/collections/hash.spl` - Batch 74 (21 methods)
+- `simple/std_lib/src/compiler_core/context.spl` - Batch 75 (12 methods)
+- `simple/std_lib/src/compiler_core/option.spl` - Batch 76 (8 methods)
+- `simple/std_lib/src/compiler_core/result.spl` - Batch 76 (7 methods)
+- `simple/std_lib/src/compiler_core/random.spl` - Batch 77 (6 methods)
+- `simple/std_lib/src/compiler_core/regex.spl` - Batch 79 (12 methods)
+- `simple/std_lib/src/compiler_core/collections/array.spl` - Batch 80 (20 methods)
+- `simple/std_lib/src/compiler_core/primitives.spl` - Batch 81 (32 methods)
+- `simple/std_lib/src/compiler_core/dsl.spl` - Batch 82 (30 methods)
+- `simple/std_lib/src/compiler_core/persistent_list.spl` - Batch 83 (15 methods)
+- `simple/std_lib/src/compiler_core/json.spl` - JsonParser (6 methods)
 - `simple/std_lib/src/units/size.spl` - SizeError.summary()
 
 ### Test Files Created (17 files):

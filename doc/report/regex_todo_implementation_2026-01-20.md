@@ -9,7 +9,7 @@ Attempted to implement regex support across tooling modules to resolve 29 outsta
 ## Regex Library Status
 
 ✅ **Complete and Ready**
-- Location: `simple/std_lib/src/core/regex.spl` (1,402 lines)
+- Location: `simple/std_lib/src/compiler_core/regex.spl` (1,402 lines)
 - Features:
   - NFA-based regex engine
   - Pattern matching (match, search, fullmatch)

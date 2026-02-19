@@ -40,7 +40,7 @@ Replaced shell-based `stat` calls with direct SFFI syscall wrapper.
    - Updated `get_file_mtime()` to use `file_stat(path)` instead of `shell("stat...")`
 
 **Runtime Layer:**
-4. `seed/runtime.c` (after line ~939)
+4. `src/compiler_seed/runtime.c` (after line ~939)
    ```c
    int64_t rt_file_stat(const char* path) {
        struct stat st;
@@ -51,7 +51,7 @@ Replaced shell-based `stat` calls with direct SFFI syscall wrapper.
    }
    ```
 
-5. `seed/runtime.h` (after line ~253)
+5. `src/compiler_seed/runtime.h` (after line ~253)
    ```c
    int64_t     rt_file_stat(const char* path);
    ```
@@ -103,7 +103,7 @@ fn get_file_mtime(file_path: text) -> i64:
 
 ### Bootstrap Build Issues
 
-Attempted `scripts/bootstrap-from-scratch.sh` but encountered compilation errors in seed compiler output (unrelated to rt_file_stat changes). These appear to be pre-existing issues in the compiler pipeline.
+Attempted `scripts/bootstrap/bootstrap-from-scratch.sh` but encountered compilation errors in seed compiler output (unrelated to rt_file_stat changes). These appear to be pre-existing issues in the compiler pipeline.
 
 ---
 

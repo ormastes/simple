@@ -273,12 +273,12 @@ Time:    17116ms
 
 ### Core Interpreter (6 files)
 ```
-✅ test/unit/core/interpreter/env_spec.spl (6ms)
-✅ test/unit/core/interpreter/eval_spec.spl (4ms)
-✅ test/unit/core/interpreter/intensive_spec.spl (5ms)
-✅ test/unit/core/interpreter/jit_spec.spl (4ms)
-✅ test/unit/core/interpreter/ops_spec.spl (5ms)
-✅ test/unit/core/interpreter/value_spec.spl (6ms)
+✅ test/unit/compiler_core/interpreter/env_spec.spl (6ms)
+✅ test/unit/compiler_core/interpreter/eval_spec.spl (4ms)
+✅ test/unit/compiler_core/interpreter/intensive_spec.spl (5ms)
+✅ test/unit/compiler_core/interpreter/jit_spec.spl (4ms)
+✅ test/unit/compiler_core/interpreter/ops_spec.spl (5ms)
+✅ test/unit/compiler_core/interpreter/value_spec.spl (6ms)
 ```
 
 ### Package Management (4 files)

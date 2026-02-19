@@ -133,7 +133,7 @@ match load_and_merge_module(use_stmt, current_file.as_deref(), ...) {  // ✅ Pa
 2. `evaluate_module` is called without the file path being set
 3. `load_and_merge_module` receives `current_file: None`
 4. Module resolution uses `base_dir = "."` instead of the actual file directory
-5. Cannot find `simple/std_lib/src/core/json.spl` from relative path "."
+5. Cannot find `simple/std_lib/src/compiler_core/json.spl` from relative path "."
 6. Module loading fails, returns empty Dict
 7. Method calls fail because module has no exports
 

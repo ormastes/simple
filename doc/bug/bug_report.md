@@ -1506,7 +1506,7 @@ match result:
 
 ### Files Affected
 
-1. `simple/std_lib/test/unit/core/context_spec.spl`
+1. `simple/std_lib/test/unit/compiler_core/context_spec.spl`
    - Line 5: `use core.context.*` - Cannot import module named `context`
    
 2. `simple/std_lib/test/unit/lsp/references_spec.spl`
@@ -2871,9 +2871,9 @@ val result2 = pattern2.search("hello world")
 ### Files Affected
 
 **Core Implementation:**
-- `simple/std_lib/src/core/regex.spl:714-790` - `NFAMatcher.match_at()` method
-- `simple/std_lib/src/core/regex.spl:792-829` - `NFAMatcher.epsilon_closure()` method
-- `simple/std_lib/src/core/regex.spl:557-703` - `NFABuilder.build_fragment()` (NFA construction)
+- `simple/std_lib/src/compiler_core/regex.spl:714-790` - `NFAMatcher.match_at()` method
+- `simple/std_lib/src/compiler_core/regex.spl:792-829` - `NFAMatcher.epsilon_closure()` method
+- `simple/std_lib/src/compiler_core/regex.spl:557-703` - `NFABuilder.build_fragment()` (NFA construction)
 
 **Test Files:**
 - `test_regex_simple.spl` - Basic literal matching tests (both failing)
@@ -2931,7 +2931,7 @@ while current_pos <= self.text.len() and iteration_count < max_iterations:
 
 **Root Cause:** The `match_at()` function was using the wrong position variable when an accepting state was found. The state tuples track `(state_id, groups, position)`, but line 743 was using the loop variable `current_pos` instead of extracting the position from the state tuple.
 
-**Changes Made** (`simple/std_lib/src/core/regex.spl:739-744`):
+**Changes Made** (`simple/std_lib/src/compiler_core/regex.spl:739-744`):
 
 ```simple
 # Before:
@@ -3206,7 +3206,7 @@ The MCP dependencies test file fails with parse error: "expected expression, fou
 **Priority:** Medium  
 **Discovered:** 2026-02-16  
 **Status:** Open  
-**Component:** Runtime Parser (`src/core/parser.spl`, lexer)
+**Component:** Runtime Parser (`src/compiler_core/parser.spl`, lexer)
 
 ### Description
 

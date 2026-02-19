@@ -9,7 +9,7 @@ Successfully implemented parser support for async/await syntax in the Simple lan
 
 ## Implementation Details
 
-### 1. AST Changes (src/core/ast.spl)
+### 1. AST Changes (src/compiler_core/ast.spl)
 
 **Added async function support:**
 - Added `var decl_is_async: [i64] = []` to track async functions
@@ -38,7 +38,7 @@ fn expr_spawn(call_expr: i64, span_id: i64) -> i64:
     idx
 ```
 
-### 2. Parser Changes (src/core/parser.spl)
+### 2. Parser Changes (src/compiler_core/parser.spl)
 
 **Imported async tokens:**
 ```simple
@@ -149,8 +149,8 @@ The parser and basic interpreter integration are complete. To fully enable async
 
 ## Files Modified
 
-- `src/core/ast.spl` - Added async support to declarations and expressions
-- `src/core/parser.spl` - Added async parsing logic
+- `src/compiler_core/ast.spl` - Added async support to declarations and expressions
+- `src/compiler_core/parser.spl` - Added async parsing logic
 - `src/std/src/dl/config_loader.spl` - Fixed module-level variable issues
 
 ## Files Created

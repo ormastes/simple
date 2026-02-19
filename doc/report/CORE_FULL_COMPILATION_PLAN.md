@@ -121,7 +121,7 @@ list_filter(list, is_greater_than_10)
 - [ ] Test compilation with seed
 - [ ] Verify functional equivalence
 
-**Output:** `src/compiler_core/lexer.spl` (Core-compatible)
+**Output:** `src/compiler_core_legacy/lexer.spl` (Core-compatible)
 
 ---
 
@@ -130,7 +130,7 @@ list_filter(list, is_greater_than_10)
 
 **Tool Structure:**
 ```simple
-# src/tools/desugarer/main.spl
+# scripts/tools/desugarer/main.spl
 fn desugar_file(input: text, output: text):
     val ast = parse_full_simple(input)
     val core_ast = transform_ast(ast)
@@ -187,10 +187,10 @@ fn transform_ast(ast: Module) -> Module:
 **Build Pipeline:**
 ```bash
 # Step 1: Desugar Full → Core
-simple-desugarer src/compiler/*.spl --output src/compiler_core/
+simple-desugarer src/compiler/*.spl --output src/compiler_core_legacy/
 
 # Step 2: Compile with seed
-seed_compiler src/compiler_core/*.spl --output build/compiler.cpp
+seed_compiler src/compiler_core_legacy/*.spl --output build/compiler.cpp
 
 # Step 3: Build C++ binary
 g++ build/compiler.cpp -o bin/simple-compiler
@@ -242,7 +242,7 @@ bin/simple-compiler src/compiler/*.spl --output bin/simple-final
 
 ## File Statistics
 
-### Core Simple (src/core/):
+### Core Simple (src/compiler_core_legacy/):
 ```
 Total: 8,823 lines
 - lexer_struct.spl: 719 lines
@@ -282,16 +282,16 @@ Total: 52,414 lines
 **Steps:**
 ```bash
 # 1. Copy file
-cp src/compiler/lexer.spl src/compiler_core/lexer.spl
+cp src/compiler/lexer.spl src/compiler_core_legacy/lexer.spl
 
-# 2. Edit src/compiler_core/lexer.spl
+# 2. Edit src/compiler_core_legacy/lexer.spl
 # - Remove impl Lexer: block
 # - Convert methods to functions
 # - Desugar Option types
 # - Replace pattern matching
 
 # 3. Test compilation
-seed_cpp src/compiler_core/lexer.spl --output build/lexer.cpp
+seed_cpp src/compiler_core_legacy/lexer.spl --output build/lexer.cpp
 
 # 4. Test functionality
 simple test test/unit/compiler/lexer_spec.spl

@@ -128,7 +128,7 @@ fn run_single_test(file_path: text, ...):
 ### Agent 3: `code` agent - Ignored Return Warnings
 **Task:** Implement ignored return value warnings in eval.spl
 
-**File:** `src/core/interpreter/eval.spl`
+**File:** `src/compiler_core/interpreter/eval.spl`
 
 **Implementation:**
 
@@ -207,7 +207,7 @@ fn function_get_return_type(fn_name: text) -> text:
 ### Agent 4: `code` agent - Generic Syntax Lexer
 **Task:** Update lexer to track generic context
 
-**File:** `src/core/lexer.spl` or `src/core/lexer_struct.spl`
+**File:** `src/compiler_core/lexer.spl` or `src/compiler_core/lexer_struct.spl`
 
 **Changes:**
 
@@ -264,7 +264,7 @@ fn lex_less_than() -> Token:
 ### Agent 5: `code` agent - Generic Syntax Parser
 **Task:** Add parser support for generic type parameters/arguments
 
-**File:** `src/core/parser.spl`
+**File:** `src/compiler_core/parser.spl`
 
 **Changes:**
 
@@ -364,7 +364,7 @@ fn parse_function_decl() -> i64:
 ```bash
 bin/simple test                          # All 4067+ tests
 bin/simple test test/unit/compiler/     # Closure warnings
-bin/simple test test/unit/core/         # Generic + ignored return
+bin/simple test test/unit/compiler_core/         # Generic + ignored return
 bin/simple test test/unit/parser/       # Multiline bool
 bin/simple test test/unit/runtime/      # Module closures
 ```
@@ -467,16 +467,16 @@ bin/simple test test/unit/runtime/      # Module closures
 ## Deliverables Summary
 
 **Code:**
-- `src/core/closure_analysis.spl` (187 lines - already done)
-- `src/core/interpreter/eval.spl` (+ ~100 lines for warnings)
-- `src/core/lexer.spl` (+ ~50 lines for context tracking)
-- `src/core/parser.spl` (+ ~200 lines for generics)
+- `src/compiler_core/closure_analysis.spl` (187 lines - already done)
+- `src/compiler_core/interpreter/eval.spl` (+ ~100 lines for warnings)
+- `src/compiler_core/lexer.spl` (+ ~50 lines for context tracking)
+- `src/compiler_core/parser.spl` (+ ~200 lines for generics)
 - `src/app/test_runner_new/test_runner_main.spl` (+ ~50 lines for integration)
 
 **Tests:**
 - `test/unit/compiler/closure_capture_warning_spec.spl` (150+ lines)
-- `test/unit/core/ignored_return_warning_spec.spl` (124 lines - done)
-- `test/unit/core/generic_syntax_spec.spl` (191 lines - done)
+- `test/unit/compiler_core/ignored_return_warning_spec.spl` (124 lines - done)
+- `test/unit/compiler_core/generic_syntax_spec.spl` (191 lines - done)
 - `test/unit/parser/multiline_bool_spec.spl` (143 lines - done)
 - `test/unit/runtime/module_closure_spec.spl` (85 lines - done)
 

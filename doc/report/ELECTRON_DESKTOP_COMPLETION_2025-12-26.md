@@ -134,7 +134,7 @@ worker.run_worker(
 
 ### 3. Enhanced JSON Parser ✅
 
-**File:** `simple/std_lib/src/core/json.spl` (360 lines, up from 34)
+**File:** `simple/std_lib/src/compiler_core/json.spl` (360 lines, up from 34)
 
 **Previous State:** Stub implementation with TODO comments
 **Current State:** Full-featured JSON parser and serializer
@@ -1130,7 +1130,7 @@ doc/report/ELECTRON_DESKTOP_COMPLETION_2025-12-26.md (this file)
 ### Modified Files
 
 ```
-simple/std_lib/src/core/json.spl (+326 lines)
+simple/std_lib/src/compiler_core/json.spl (+326 lines)
 simple/std_lib/src/electron/__init__.spl (+1 line)
 ```
 

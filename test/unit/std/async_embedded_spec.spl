@@ -2,107 +2,244 @@
 Async Embedded Runtime Tests
 Feature: Lightweight async runtime for embedded systems
 Category: Runtime
-Status: In Progress
+Status: Active
 
 Tests for the embedded async runtime including fixed-capacity
 JoinSet, FuturesUnordered, and cooperative scheduler.
 
-All tests skipped because async/await syntax and related types
-(Poll, EmbeddedFuture, EmbeddedScheduler, etc.) are not supported
-by the runtime parser.
+All implementations are 100% Pure Simple (no external FFI needed).
 """
 
 use std.spec
-
-# All tests skipped - async/embedded runtime types not available in parser
+use std.async_core.{Poll, TaskState, Priority, AsyncError, CancellationToken}
+use std.async_embedded.{
+    EmbeddedFuture, EmbeddedPromise, EmbeddedTaskHandle,
+    EmbeddedJoinSet, EmbeddedFuturesUnordered,
+    EmbeddedScheduler, yield_now, ready, pending,
+    MAX_TASKS, MAX_FUTURES
+}
 
 describe "EmbeddedFuture":
-    skip_it "creates ready future":
-        pass
+    it "creates ready future":
+        val f = EmbeddedFuture.ready(42)
+        expect(f.is_ready()).to_equal(true)
+        val result = f.poll()
+        expect(result.is_ready()).to_equal(true)
+        expect(result.unwrap()).to_equal(42)
 
-    skip_it "creates pending future":
-        pass
+    it "creates pending future":
+        val f = EmbeddedFuture.pending()
+        expect(f.is_ready()).to_equal(false)
+        val result = f.poll()
+        expect(result.is_pending()).to_equal(true)
 
-    skip_it "completes pending future":
-        pass
+    it "completes pending future":
+        var f = EmbeddedFuture.pending()
+        expect(f.is_ready()).to_equal(false)
+        f.complete(99)
+        expect(f.is_ready()).to_equal(true)
+        val result = f.poll()
+        expect(result.unwrap()).to_equal(99)
 
 describe "EmbeddedTaskHandle":
-    skip_it "reports finished state":
-        pass
+    it "reports finished state":
+        val handle = EmbeddedTaskHandle(
+            task_id: 0,
+            state: TaskState.Completed,
+            result: Some(42),
+            priority: Priority.Normal
+        )
+        expect(handle.is_finished()).to_equal(true)
 
-    skip_it "reports unfinished state":
-        pass
+    it "reports unfinished state":
+        val handle = EmbeddedTaskHandle(
+            task_id: 0,
+            state: TaskState.Pending,
+            result: nil,
+            priority: Priority.Normal
+        )
+        expect(handle.is_finished()).to_equal(false)
 
-    skip_it "try_join returns result when finished":
-        pass
+    it "try_join returns result when finished":
+        val handle = EmbeddedTaskHandle(
+            task_id: 0,
+            state: TaskState.Completed,
+            result: Some(42),
+            priority: Priority.Normal
+        )
+        match handle.try_join():
+            case Some(v): expect(v).to_equal(42)
+            case nil: expect(true).to_equal(false)
 
-    skip_it "try_join returns nil when not finished":
-        pass
+    it "try_join returns nil when not finished":
+        val handle = EmbeddedTaskHandle(
+            task_id: 0,
+            state: TaskState.Pending,
+            result: nil,
+            priority: Priority.Normal
+        )
+        expect(handle.try_join()).to_be_nil()
 
 describe "EmbeddedJoinSet":
-    skip_it "creates empty set":
-        pass
+    it "creates empty set":
+        var set = EmbeddedJoinSet.new()
+        expect(set.len()).to_equal(0)
+        expect(set.is_empty()).to_equal(true)
 
-    skip_it "tracks spawned tasks":
-        pass
+    it "tracks spawned tasks":
+        var set = EmbeddedJoinSet.new()
+        set.add_task(0)
+        set.add_task(1)
+        expect(set.len()).to_equal(2)
 
-    skip_it "returns completed results":
-        pass
+    it "returns completed results":
+        var set = EmbeddedJoinSet.new()
+        set.add_task(0)
+        set.mark_completed(0, 42)
+        match set.try_join_next():
+            case Some((id, result)):
+                expect(id).to_equal(0)
+                expect(result).to_equal(42)
+            case nil:
+                expect(true).to_equal(false)
 
-    skip_it "respects capacity limit":
-        pass
+    it "respects capacity limit":
+        var set = EmbeddedJoinSet.new()
+        for i in 0..MAX_FUTURES:
+            set.add_task(i)
+        expect(set.len()).to_equal(MAX_FUTURES)
+        val result = set.add_task(999)
+        match result:
+            case Err(_): expect(true).to_equal(true)
+            case Ok(_): expect(true).to_equal(false)
 
-    skip_it "tracks pending count":
-        pass
+    it "tracks pending count":
+        var set = EmbeddedJoinSet.new()
+        set.add_task(0)
+        set.add_task(1)
+        set.add_task(2)
+        expect(set.pending_count()).to_equal(3)
+        set.mark_completed(0, 10)
+        expect(set.pending_count()).to_equal(2)
 
 describe "EmbeddedFuturesUnordered":
-    skip_it "creates empty collection":
-        pass
+    it "creates empty collection":
+        var futs = EmbeddedFuturesUnordered.new()
+        expect(futs.len()).to_equal(0)
+        expect(futs.is_empty()).to_equal(true)
 
-    skip_it "pushes futures":
-        pass
+    it "pushes futures":
+        var futs = EmbeddedFuturesUnordered.new()
+        futs.push(EmbeddedFuture.ready(1))
+        futs.push(EmbeddedFuture.ready(2))
+        expect(futs.len()).to_equal(2)
 
-    skip_it "returns ready futures":
-        pass
+    it "returns ready futures":
+        var futs = EmbeddedFuturesUnordered.new()
+        futs.push(EmbeddedFuture.ready(42))
+        match futs.try_next():
+            case Some(v): expect(v).to_equal(42)
+            case nil: expect(true).to_equal(false)
 
-    skip_it "skips pending futures":
-        pass
+    it "skips pending futures":
+        var futs = EmbeddedFuturesUnordered.new()
+        futs.push(EmbeddedFuture.pending())
+        expect(futs.try_next()).to_be_nil()
 
-    skip_it "respects capacity":
-        pass
+    it "respects capacity":
+        var futs = EmbeddedFuturesUnordered.new()
+        for i in 0..MAX_FUTURES:
+            futs.push(EmbeddedFuture.ready(i))
+        val result = futs.push(EmbeddedFuture.ready(999))
+        match result:
+            case Err(_): expect(true).to_equal(true)
+            case Ok(_): expect(true).to_equal(false)
 
 describe "EmbeddedScheduler":
-    skip_it "creates empty scheduler":
-        pass
+    it "creates empty scheduler":
+        var scheduler = EmbeddedScheduler.new()
+        expect(scheduler.task_count()).to_equal(0)
+        expect(scheduler.is_idle()).to_equal(true)
 
-    skip_it "spawns tasks":
-        pass
+    it "spawns tasks":
+        var scheduler = EmbeddedScheduler.new()
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        expect(scheduler.task_count()).to_equal(1)
 
-    skip_it "runs tasks to completion":
-        pass
+    it "runs tasks to completion":
+        var scheduler = EmbeddedScheduler.new()
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        scheduler.run()
+        expect(scheduler.is_idle()).to_equal(true)
 
-    skip_it "respects priority":
-        pass
+    it "respects priority":
+        var scheduler = EmbeddedScheduler.new()
+        scheduler.schedule(Priority.Low, \: Poll.Ready(()))
+        scheduler.schedule(Priority.High, \: Poll.Ready(()))
+        # High priority runs first; after one step, one remains
+        scheduler.run_one()
+        expect(scheduler.active_count()).to_equal(1)
+        scheduler.run_one()
+        expect(scheduler.is_idle()).to_equal(true)
 
-    skip_it "handles cooperative yield":
-        pass
+    it "handles cooperative yield":
+        var scheduler = EmbeddedScheduler.new()
+        scheduler.schedule(Priority.Normal, \: yield_now())
+        # Task returns Pending, transitions to Suspended
+        val did_work = scheduler.run_one()
+        expect(did_work).to_equal(true)
+        # Suspended tasks are still runnable
+        expect(scheduler.has_runnable()).to_equal(true)
 
-    skip_it "respects task capacity":
-        pass
+    it "respects task capacity":
+        var scheduler = EmbeddedScheduler.new()
+        for i in 0..MAX_TASKS:
+            scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        val result = scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        match result:
+            case Err(_): expect(true).to_equal(true)
+            case Ok(_): expect(true).to_equal(false)
 
 describe "Embedded Integration":
-    skip_it "runs parallel tasks with JoinSet":
-        pass
+    it "runs parallel tasks with JoinSet":
+        var scheduler = EmbeddedScheduler.new()
+        var set = EmbeddedJoinSet.new()
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        set.add_task(0)
+        set.add_task(1)
+        scheduler.run()
+        set.mark_completed(0, 10)
+        set.mark_completed(1, 20)
+        expect(set.all_completed()).to_equal(true)
 
-    skip_it "streams results with FuturesUnordered":
-        pass
+    it "streams results with FuturesUnordered":
+        var futs = EmbeddedFuturesUnordered.new()
+        futs.push(EmbeddedFuture.ready(10))
+        futs.push(EmbeddedFuture.ready(20))
+        match futs.try_next():
+            case Some(v): expect(v).to_equal(10)
+            case nil: expect(true).to_equal(false)
+        match futs.try_next():
+            case Some(v): expect(v).to_equal(20)
+            case nil: expect(true).to_equal(false)
 
-    skip_it "handles mixed ready and pending":
-        pass
+    it "handles mixed ready and pending":
+        var futs = EmbeddedFuturesUnordered.new()
+        futs.push(EmbeddedFuture.pending())
+        futs.push(EmbeddedFuture.ready(42))
+        # try_next should skip pending, return ready
+        match futs.try_next():
+            case Some(v): expect(v).to_equal(42)
+            case nil: expect(true).to_equal(false)
+        # Only pending future remains
+        expect(futs.try_next()).to_be_nil()
 
 describe "Embedded Memory":
-    skip_it "uses fixed capacity":
-        pass
+    it "uses fixed capacity":
+        expect(MAX_TASKS).to_equal(16)
+        expect(MAX_FUTURES).to_equal(32)
 
-    skip_it "reports capacity":
-        pass
+    it "reports capacity":
+        var set = EmbeddedJoinSet.new()
+        expect(set.capacity()).to_equal(MAX_FUTURES)

@@ -5,7 +5,7 @@
 
 ## Problem Summary
 
-seed_cpp segfaulted when processing compiler_core (439 files, 46K lines). Multiple issues discovered and fixed.
+seed_cpp segfaulted when processing compiler_core_legacy (439 files, 46K lines). Multiple issues discovered and fixed.
 
 ## Root Cause Analysis
 
@@ -35,7 +35,7 @@ seed_cpp segfaulted when processing compiler_core (439 files, 46K lines). Multip
 
 ## Files Changed
 
-### seed/seed.cpp
+### src/compiler_seed/seed.cpp
 - Increased MAX_* limits (2x across the board)
 - Changed `output` from static array to dynamic pointer
 - Added diagnostic logging (fprintf to stderr)
@@ -43,7 +43,7 @@ seed_cpp segfaulted when processing compiler_core (439 files, 46K lines). Multip
 ### seed/CMakeLists.txt
 - Added `-mcmodel=large` compiler flag
 
-### scripts/bootstrap-fixed.sh (NEW)
+### scripts/bootstrap/bootstrap-from-scratch.sh --step=core1 (NEW)
 - Complete bootstrap script with all fixes applied
 - 89 lines, fully automated
 
@@ -65,16 +65,16 @@ seed_cpp segfaulted when processing compiler_core (439 files, 46K lines). Multip
 ## Usage
 
 ```bash
-./scripts/bootstrap-fixed.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --step=core1
 
 # Or manual steps:
 ulimit -s 65536
-perl -e 'my @f=map{chomp;$_}<STDIN>; exec "./seed/build/seed_cpp",@f' \
+perl -e 'my @f=map{chomp;$_}<STDIN>; exec "./build/seed/seed_cpp",@f' \
     < filelist.txt 2>/dev/null | \
     sed '/CodegenTarget_val = 12/d' > core1.cpp
 
 clang++ -std=c++20 -O2 -o core1 core1.cpp \
-    -Iseed -Lseed/build -lspl_runtime -lm -lpthread -ldl
+    -Isrc/compiler_seed -Lbuild/seed -lspl_runtime -lm -lpthread -ldl
 ```
 
 ## Verification

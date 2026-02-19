@@ -128,7 +128,7 @@ src/app/test_runner/
 
 ## 3. Core Module Design
 
-### 3.1 Types (`core/types.spl`)
+### 3.1 Types (`compiler_core/types.spl`)
 
 ```simple
 # Test case status
@@ -294,7 +294,7 @@ fn decode_u32(b0: i32, b1: i32, b2: i32, b3: i32) -> i32:
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 ```
 
-### 3.3 Output Formatting (`core/format.spl`)
+### 3.3 Output Formatting (`compiler_core/format.spl`)
 
 ```simple
 # Format test results for display
@@ -846,10 +846,10 @@ class EmbeddedTestConfig:
 ```
 src/app/test_runner_new/
 ├── main.spl                   # Entry point (unchanged)
-├── test_runner_files.spl      # → Uses core/discovery.spl
-├── test_runner_execute.spl    # → Uses core/executor.spl
-├── test_runner_types.spl      # → Imports from core/types.spl
-├── test_runner_output.spl     # → Uses core/format.spl
+├── test_runner_files.spl      # → Uses compiler_core/discovery.spl
+├── test_runner_execute.spl    # → Uses compiler_core/executor.spl
+├── test_runner_types.spl      # → Imports from compiler_core/types.spl
+├── test_runner_output.spl     # → Uses compiler_core/format.spl
 └── embedded/                  # NEW: Embedded test support
     └── runner.spl             # Calls driver/main.spl
 ```

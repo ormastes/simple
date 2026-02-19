@@ -9,14 +9,8 @@
 ## Overview
 
 Debug support for Simple interpreter with breakpoints, stepping,
-watch expressions, and REPL commands. Provides comprehensive debugging
-facilities including:
-- Multi-level debug output (Off, Error, Warn, Info, Debug, Trace)
-- Breakpoint management with conditional breakpoints
-- Stepping control (step into, step over, step out, continue)
-- Watch expressions for variable monitoring
-- Call stack tracking and backtrace
-- Interactive REPL debug commands
+watch expressions, and REPL commands. Tests target std.debug module
+which provides the shared core debug implementation.
 
 ## Key Components
 
@@ -39,36 +33,21 @@ facilities including:
 | next | n | Step over function calls |
 | finish | f | Step out of current function |
 | backtrace | bt | Show call stack |
-| print <expr> | p | Evaluate and print expression |
+| print <expr> | p | Echo expression (simplified) |
 | watch <expr> | w | Add watch expression |
 | help | h | Show command help |
-
-## Branch Coverage
-
-This specification provides 100% branch coverage with 71 total branches:
-- DebugLevel enum: 6 branches (level_to_int)
-- Global state: 4 branches (set/get debug level, trace)
-- Level filtering: 2 branches (should_print)
-- Debug printing: 8 branches (all level prefixes + filtering)
-- Debugger construction: 1 branch (new)
-- Breakpoint management: 7 branches (add, remove, toggle, has)
-- Watch expressions: 5 branches (add, remove, evaluate)
-- Call stack: 4 branches (push, pop, current_frame, get_stack_trace)
-- Stepping control: 4 branches (step_over, step_into, step_out, continue)
-- should_break logic: 9 branches (breakpoint hit, stepping modes, combinations)
-- Command handler: 34 branches (all commands + error handling)
-
-## Related Specifications
-
-- [Interpreter Core](../../core/(match interpreter_spec: case Some(x): x.spl case None: fail "interpreter_spec not found")) - Core interpreter functionality
-- [Error Handling](../../errors/(match error_spec: case Some(x): x.spl case None: fail "error_spec not found")) - Error types and handling
 """
-# Skipped: 'from' import syntax not supported in runtime; module dependencies unavailable
-# Original imports:
-# from .debug import {DebugLevel, Debugger, Breakpoint, StackFrame, StepMode, debug_print, set_debug_level, get_debug_level, set_trace, is_trace_enabled, should_print, level_to_int, handle_debug_command}
-# from ..core import {Interpreter, Value, InterpreterError}
 
-use (match std: case Some(x): x.spec case None: fail "std not found")
+use std.spec.{check, skip_it}
+use std.debug.{DebugLevel, StepMode, Breakpoint, StackFrame, Debugger}
+use std.debug.{level_to_int, should_print, debug_print, debugger_new, handle_debug_command}
+
+# ============================================================================
+# Helper: create StackFrame for tests
+# ============================================================================
+
+fn create_frame(name: text, file: text, line: i64) -> StackFrame:
+    StackFrame(fn_name: name, file: file, line: line, locals: [])
 
 
 # ============================================================================
@@ -76,122 +55,73 @@ use (match std: case Some(x): x.spec case None: fail "std not found")
 # ============================================================================
 
 describe "DebugLevel enum - level_to_int() mapping":
-    """
-    ## DebugLevel Integer Mapping
 
-    Each debug level maps to an integer for comparison:
-    - Off: 0 (no output)
-    - Error: 1 (critical errors only)
-    - Warn: 2 (warnings and errors)
-    - Info: 3 (informational messages)
-    - Debug: 4 (debug details)
-    - Trace: 5 (verbose tracing)
+    it "maps Off to 0":
+        val level = level_to_int(DebugLevel.Off)
+        check(level == 0)
 
-    **Branch Coverage:** 6 branches (one per level variant)
-    """
+    it "maps Error to 1":
+        val level = level_to_int(DebugLevel.Error)
+        check(level == 1)
 
-    skip_it "maps Off to 0":
-        """Branch 1/6: Off variant"""
-        val level = level_to_int((match DebugLevel: case Some(x): x.Off case None: fail "DebugLevel not found"))
-        expect level == 0
+    it "maps Warn to 2":
+        val level = level_to_int(DebugLevel.Warn)
+        check(level == 2)
 
-    skip_it "maps Error to 1":
-        """Branch 2/6: Error variant"""
-        val level = level_to_int((match DebugLevel: case Some(x): x.Error case None: fail "DebugLevel not found"))
-        expect level == 1
+    it "maps Info to 3":
+        val level = level_to_int(DebugLevel.Info)
+        check(level == 3)
 
-    skip_it "maps Warn to 2":
-        """Branch 3/6: Warn variant"""
-        val level = level_to_int((match DebugLevel: case Some(x): x.Warn case None: fail "DebugLevel not found"))
-        expect level == 2
+    it "maps Debug to 4":
+        val level = level_to_int(DebugLevel.Debug)
+        check(level == 4)
 
-    skip_it "maps Info to 3":
-        """Branch 4/6: Info variant"""
-        val level = level_to_int((match DebugLevel: case Some(x): x.Info case None: fail "DebugLevel not found"))
-        expect level == 3
-
-    skip_it "maps Debug to 4":
-        """Branch 5/6: Debug variant"""
-        val level = level_to_int((match DebugLevel: case Some(x): x.Debug case None: fail "DebugLevel not found"))
-        expect level == 4
-
-    skip_it "maps Trace to 5":
-        """Branch 6/6: Trace variant"""
-        val level = level_to_int((match DebugLevel: case Some(x): x.Trace case None: fail "DebugLevel not found"))
-        expect level == 5
+    it "maps Trace to 5":
+        val level = level_to_int(DebugLevel.Trace)
+        check(level == 5)
 
 
 # ============================================================================
-# Test Group 2: Global Debug State
+# Test Group 2: Global Debug State (via Debugger instance methods)
 # ============================================================================
 
-describe "Global debug state management":
-    """
-    ## Global State Functions
-
-    The debug module maintains global state for:
-    - Current debug level (affects all debug output)
-    - Trace enabled flag (for detailed tracing)
-
-    State is stored in static mut globals and accessed via safe functions.
-
-    **Branch Coverage:** 4 branches (set/get level, set/get trace)
-    """
-
-    # before_each disabled: set_debug_level/set_trace not available
-    # before_each:
-    #     set_debug_level((match DebugLevel: case Some(x): x.Off case None: fail "DebugLevel not found"))
-    #     set_trace(false)
+describe "Debugger debug state management":
 
     context "debug level management":
-        """
-        ### Set and Get Debug Level
 
-        set_debug_level() modifies global DEBUG_LEVEL.
-        get_debug_level() reads current level.
-        """
+        it "sets and gets debug level":
+            var dbg = debugger_new()
+            dbg.set_debug_level(DebugLevel.Debug)
+            val current = dbg.get_debug_level()
+            check(current == DebugLevel.Debug)
 
-        skip_it "sets and gets debug level":
-            """Branch 1-2/4: set_debug_level, get_debug_level"""
-            set_debug_level((match DebugLevel: case Some(x): x.Debug case None: fail "DebugLevel not found"))
-            val current = get_debug_level()
-            expect current == (match DebugLevel: case Some(x): x.Debug case None: fail "DebugLevel not found")
+            dbg.set_debug_level(DebugLevel.Error)
+            val new_level = dbg.get_debug_level()
+            check(new_level == DebugLevel.Error)
 
-            # Change to different level
-            set_debug_level((match DebugLevel: case Some(x): x.Error case None: fail "DebugLevel not found"))
-            val new_level = get_debug_level()
-            expect new_level == (match DebugLevel: case Some(x): x.Error case None: fail "DebugLevel not found")
-
-        skip_it "persists across multiple gets":
-            """Verify global state persistence"""
-            set_debug_level((match DebugLevel: case Some(x): x.Info case None: fail "DebugLevel not found"))
-            val level1 = get_debug_level()
-            val level2 = get_debug_level()
-            val level3 = get_debug_level()
-
-            expect level1 == (match DebugLevel: case Some(x): x.Info case None: fail "DebugLevel not found")
-            expect level2 == (match DebugLevel: case Some(x): x.Info case None: fail "DebugLevel not found")
-            expect level3 == (match DebugLevel: case Some(x): x.Info case None: fail "DebugLevel not found")
+        it "persists across multiple gets":
+            var dbg = debugger_new()
+            dbg.set_debug_level(DebugLevel.Info)
+            val level1 = dbg.get_debug_level()
+            val level2 = dbg.get_debug_level()
+            val level3 = dbg.get_debug_level()
+            check(level1 == DebugLevel.Info)
+            check(level2 == DebugLevel.Info)
+            check(level3 == DebugLevel.Info)
 
     context "trace management":
-        """
-        ### Set and Get Trace Flag
 
-        set_trace() modifies global TRACE_ENABLED.
-        is_trace_enabled() reads current flag.
-        """
+        it "enables and disables trace":
+            var dbg = debugger_new()
+            dbg.set_trace(true)
+            check(dbg.is_trace_enabled())
 
-        skip_it "enables and disables trace":
-            """Branch 3-4/4: set_trace, is_trace_enabled"""
-            set_trace(true)
-            expect is_trace_enabled()
+            dbg.set_trace(false)
+            check(not dbg.is_trace_enabled())
 
-            set_trace(false)
-            expect not is_trace_enabled()
-
-        skip_it "starts disabled by default":
-            """Verify initial state"""
-            expect not is_trace_enabled()
+        it "starts disabled by default":
+            var dbg = debugger_new()
+            check(not dbg.is_trace_enabled())
 
 
 # ============================================================================
@@ -199,117 +129,58 @@ describe "Global debug state management":
 # ============================================================================
 
 describe "Debug level filtering - should_print()":
-    """
-    ## Level Comparison Logic
 
-    should_print(level) returns true if:
-        level_to_int(level) <= level_to_int(current_level)
+    it "returns true when level at or below current":
+        check(should_print(DebugLevel.Debug, DebugLevel.Off))
+        check(should_print(DebugLevel.Debug, DebugLevel.Error))
+        check(should_print(DebugLevel.Debug, DebugLevel.Warn))
+        check(should_print(DebugLevel.Debug, DebugLevel.Info))
+        check(should_print(DebugLevel.Debug, DebugLevel.Debug))
 
-    Examples:
-    - Current=Debug(4), Check=Error(1) → true (1 <= 4)
-    - Current=Debug(4), Check=Trace(5) → false (5 > 4)
+    it "returns false when level above current":
+        check(not should_print(DebugLevel.Debug, DebugLevel.Trace))
 
-    **Branch Coverage:** 2 branches (true/false return paths)
-    """
+    it "handles boundary conditions":
+        check(should_print(DebugLevel.Warn, DebugLevel.Error))
+        check(should_print(DebugLevel.Warn, DebugLevel.Warn))
+        check(not should_print(DebugLevel.Warn, DebugLevel.Info))
 
-    # before_each disabled: set_debug_level not available
-    # before_each:
-    #     set_debug_level((match DebugLevel: case Some(x): x.Debug case None: fail "DebugLevel not found"))
+    it "handles extreme level differences":
+        check(not should_print(DebugLevel.Off, DebugLevel.Error))
+        check(not should_print(DebugLevel.Off, DebugLevel.Trace))
 
-    skip_it "returns true when level at or below current":
-        """Branch 1/2: should_print returns true"""
-        expect should_print((match DebugLevel: case Some(x): x.Off case None: fail "DebugLevel not found"))
-        expect should_print((match DebugLevel: case Some(x): x.Error case None: fail "DebugLevel not found"))
-        expect should_print((match DebugLevel: case Some(x): x.Warn case None: fail "DebugLevel not found"))
-        expect should_print((match DebugLevel: case Some(x): x.Info case None: fail "DebugLevel not found"))
-        expect should_print((match DebugLevel: case Some(x): x.Debug case None: fail "DebugLevel not found"))
-
-    skip_it "returns false when level above current":
-        """Branch 2/2: should_print returns false"""
-        expect not should_print((match DebugLevel: case Some(x): x.Trace case None: fail "DebugLevel not found"))
-
-    skip_it "handles boundary conditions":
-        """Test exact match at boundary"""
-        set_debug_level((match DebugLevel: case Some(x): x.Warn case None: fail "DebugLevel not found"))
-
-        expect should_print((match DebugLevel: case Some(x): x.Error case None: fail "DebugLevel not found"))  # Below
-        expect should_print((match DebugLevel: case Some(x): x.Warn case None: fail "DebugLevel not found"))   # Equal
-        expect not should_print((match DebugLevel: case Some(x): x.Info case None: fail "DebugLevel not found"))  # Above
-
-    skip_it "handles extreme level differences":
-        """Test with Off and Trace extremes"""
-        set_debug_level((match DebugLevel: case Some(x): x.Off case None: fail "DebugLevel not found"))
-        expect not should_print((match DebugLevel: case Some(x): x.Error case None: fail "DebugLevel not found"))
-        expect not should_print((match DebugLevel: case Some(x): x.Trace case None: fail "DebugLevel not found"))
-
-        set_debug_level((match DebugLevel: case Some(x): x.Trace case None: fail "DebugLevel not found"))
-        expect should_print((match DebugLevel: case Some(x): x.Off case None: fail "DebugLevel not found"))
-        expect should_print((match DebugLevel: case Some(x): x.Trace case None: fail "DebugLevel not found"))
+        check(should_print(DebugLevel.Trace, DebugLevel.Off))
+        check(should_print(DebugLevel.Trace, DebugLevel.Trace))
 
 
 describe "Debug printing - debug_print()":
-    """
-    ## Debug Output with Level Prefixes
+    # debug_print(current_level, msg_level, msg) prints if msg_level <= current_level
 
-    debug_print(level, msg) prints message with prefix if should_print(level).
+    it "formats Error level with [ERROR] prefix":
+        debug_print(DebugLevel.Trace, DebugLevel.Error, "test error")
 
-    Prefixes:
-    - Error: "[ERROR]"
-    - Warn: "[WARN]"
-    - Info: "[INFO]"
-    - Debug: "[DEBUG]"
-    - Trace: "[TRACE]"
-    - Off: "" (no prefix)
+    it "formats Warn level with [WARN] prefix":
+        debug_print(DebugLevel.Trace, DebugLevel.Warn, "test warning")
 
-    **Branch Coverage:** 8 branches
-    - 6 branches for prefix match cases (all DebugLevel variants)
-    - 1 branch for should_print() check
-    - 1 branch for default case (Off → empty prefix)
+    it "formats Info level with [INFO] prefix":
+        debug_print(DebugLevel.Trace, DebugLevel.Info, "test info")
 
-    **Note:** Output testing requires capturing stdout, which is not
-    implemented in this spec. Tests verify the logic paths are exercised.
-    """
+    it "formats Debug level with [DEBUG] prefix":
+        debug_print(DebugLevel.Trace, DebugLevel.Debug, "test debug")
 
-    # before_each disabled: set_debug_level not available
-    # before_each:
-    #     set_debug_level((match DebugLevel: case Some(x): x.Trace case None: fail "DebugLevel not found"))
+    it "formats Trace level with [TRACE] prefix":
+        debug_print(DebugLevel.Trace, DebugLevel.Trace, "test trace")
 
-    skip_it "formats Error level with [ERROR] prefix":
-        """Branch 1/6: Error prefix"""
-        # This calls debug_print which hits Error case in match
-        debug_print(DebugLevel.Error, "test error")
+    it "formats Off level with no prefix":
+        debug_print(DebugLevel.Trace, DebugLevel.Off, "test off")
 
-    skip_it "formats Warn level with [WARN] prefix":
-        """Branch 2/6: Warn prefix"""
-        debug_print(DebugLevel.Warn, "test warning")
+    it "suppresses output when level too high":
+        # Trace > Error, so this should not print
+        debug_print(DebugLevel.Error, DebugLevel.Trace, "should not print")
 
-    skip_it "formats Info level with [INFO] prefix":
-        """Branch 3/6: Info prefix"""
-        debug_print(DebugLevel.Info, "test info")
-
-    skip_it "formats Debug level with [DEBUG] prefix":
-        """Branch 4/6: Debug prefix"""
-        debug_print(DebugLevel.Debug, "test debug")
-
-    skip_it "formats Trace level with [TRACE] prefix":
-        """Branch 5/6: Trace prefix"""
-        debug_print(DebugLevel.Trace, "test trace")
-
-    skip_it "formats Off level with no prefix":
-        """Branch 6/6: Off (default case) → empty prefix"""
-        debug_print(DebugLevel.Off, "test off")
-
-    skip_it "suppresses output when level too high":
-        """Branch 7/8: should_print returns false"""
-        set_debug_level((match DebugLevel: case Some(x): x.Error case None: fail "DebugLevel not found"))
-        # This should not print (Trace > Error)
-        debug_print(DebugLevel.Trace, "should not print")
-
-    skip_it "prints output when level allowed":
-        """Branch 8/8: should_print returns true"""
-        set_debug_level((match DebugLevel: case Some(x): x.Info case None: fail "DebugLevel not found"))
-        # This should print (Error < Info)
-        debug_print(DebugLevel.Error, "should print")
+    it "prints output when level allowed":
+        # Error < Info, so this should print
+        debug_print(DebugLevel.Info, DebugLevel.Error, "should print")
 
 
 # ============================================================================
@@ -317,27 +188,14 @@ describe "Debug printing - debug_print()":
 # ============================================================================
 
 describe "Debugger - Construction":
-    """
-    ## Debugger.new() Initialization
 
-    Creates a new debugger with empty state:
-    - No breakpoints
-    - No watch expressions
-    - Empty call stack
-    - Not stepping (continue mode)
-
-    **Branch Coverage:** 1 branch (return statement)
-    """
-
-    skip_it "creates debugger with empty state":
-        """Branch 1/1: Debugger construction"""
-        val debugger = Debugger.new()
-
-        expect debugger.breakpoints.len() == 0
-        expect debugger.watch_expressions.len() == 0
-        expect debugger.call_stack.len() == 0
-        expect not (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-        expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.Continue case None: fail "StepMode not found")
+    it "creates debugger with empty state":
+        var debugger = debugger_new()
+        check(debugger.breakpoints.len() == 0)
+        check(debugger.watch_expressions.len() == 0)
+        check(debugger.call_stack.len() == 0)
+        check(not debugger.is_stepping)
+        check(debugger.step_mode == StepMode.Continue)
 
 
 # ============================================================================
@@ -345,159 +203,83 @@ describe "Debugger - Construction":
 # ============================================================================
 
 describe "Debugger - Breakpoint Management":
-    """
-    ## Breakpoint Operations
-
-    Breakpoints are stored in a Dict with key format "file:line".
-    Operations:
-    - add_breakpoint: Insert new breakpoint (enabled by default)
-    - remove_breakpoint: Delete breakpoint by location
-    - toggle_breakpoint: Flip enabled/disabled state
-    - has_breakpoint: Check if location has enabled breakpoint
-
-    **Branch Coverage:** 7 branches
-    - add_breakpoint: 1 branch (always inserts)
-    - remove_breakpoint: 1 branch (always removes)
-    - toggle_breakpoint: 2 branches (Some → flip, nil → no-op)
-    - has_breakpoint: 3 branches (Some+enabled, Some+disabled, nil)
-    """
 
     context "adding breakpoints":
-        """
-        ### Add Breakpoint
 
-        Stores breakpoint in dict with initial hit_count=0, enabled=true.
-        """
+        it "adds breakpoint with condition":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "x > 0")
+            check(debugger.has_breakpoint("test.spl", 42))
 
-        skip_it "adds breakpoint with condition":
-            """Branch 1/7: add_breakpoint with Some(condition)"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 42, Some("x > 0"))
+        it "adds breakpoint without condition":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 10, "")
+            check(debugger.has_breakpoint("test.spl", 10))
 
-            expect debugger.has_breakpoint("test.spl", 42)
-
-            # Check internal state
-            val key = "test.spl:42"
-            val bp = debugger.breakpoints.get(&key)
-            match bp:
-                Some(b):
-                    expect b.enabled
-                    expect b.hit_count == 0
-                    expect b.condition == Some("x > 0")
-                nil: fail "breakpoint not found"
-
-        skip_it "adds breakpoint without condition":
-            """Branch 1/7: add_breakpoint with nil condition"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 10, nil)
-
-            expect debugger.has_breakpoint("test.spl", 10)
-
-            val key = "test.spl:10"
-            val bp = debugger.breakpoints.get(&key)
-            match bp:
-                Some(b): expect b.condition == nil
-                nil: fail "breakpoint not found"
-
-        skip_it "adds multiple breakpoints":
-            """Verify multiple breakpoints coexist"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("a.spl", 1, nil)
-            debugger.add_breakpoint("b.spl", 2, nil)
-            debugger.add_breakpoint("c.spl", 3, nil)
-
-            expect debugger.breakpoints.len() == 3
-            expect debugger.has_breakpoint("a.spl", 1)
-            expect debugger.has_breakpoint("b.spl", 2)
-            expect debugger.has_breakpoint("c.spl", 3)
+        it "adds multiple breakpoints":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("a.spl", 1, "")
+            debugger.add_breakpoint("b.spl", 2, "")
+            debugger.add_breakpoint("c.spl", 3, "")
+            check(debugger.breakpoints.len() == 3)
+            check(debugger.has_breakpoint("a.spl", 1))
+            check(debugger.has_breakpoint("b.spl", 2))
+            check(debugger.has_breakpoint("c.spl", 3))
 
     context "removing breakpoints":
-        """
-        ### Remove Breakpoint
 
-        Deletes breakpoint from dict. No-op if not found.
-        """
-
-        skip_it "removes existing breakpoint":
-            """Branch 2/7: remove_breakpoint on existing key"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 42, nil)
-            expect debugger.has_breakpoint("test.spl", 42)
-
+        it "removes existing breakpoint":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "")
+            check(debugger.has_breakpoint("test.spl", 42))
             debugger.remove_breakpoint("test.spl", 42)
-            expect not debugger.has_breakpoint("test.spl", 42)
-            expect debugger.breakpoints.len() == 0
+            check(not debugger.has_breakpoint("test.spl", 42))
+            check(debugger.breakpoints.len() == 0)
 
-        skip_it "removes non-existent breakpoint (no-op)":
-            """Branch 2/7: remove_breakpoint on missing key"""
-            var debugger = Debugger.new()
-            expect debugger.breakpoints.len() == 0
-
-            # Should not crash
+        it "removes non-existent breakpoint (no-op)":
+            var debugger = debugger_new()
+            check(debugger.breakpoints.len() == 0)
             debugger.remove_breakpoint("missing.spl", 999)
-            expect debugger.breakpoints.len() == 0
+            check(debugger.breakpoints.len() == 0)
 
     context "toggling breakpoints":
-        """
-        ### Toggle Breakpoint
 
-        Flips enabled flag if breakpoint exists. No-op if not found.
-        """
-
-        skip_it "toggles enabled breakpoint to disabled":
-            """Branch 3/7: toggle_breakpoint Some case, enabled → disabled"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 10, nil)
-            expect debugger.has_breakpoint("test.spl", 10)
-
+        it "toggles enabled breakpoint to disabled":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 10, "")
+            check(debugger.has_breakpoint("test.spl", 10))
             debugger.toggle_breakpoint("test.spl", 10)
-            expect not debugger.has_breakpoint("test.spl", 10)  # Now disabled
+            check(not debugger.has_breakpoint("test.spl", 10))
 
-        skip_it "toggles disabled breakpoint to enabled":
-            """Branch 4/7: toggle_breakpoint Some case, disabled → enabled"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 10, nil)
-            debugger.toggle_breakpoint("test.spl", 10)  # Disable
-            expect not debugger.has_breakpoint("test.spl", 10)
+        it "toggles disabled breakpoint to enabled":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 10, "")
+            debugger.toggle_breakpoint("test.spl", 10)
+            check(not debugger.has_breakpoint("test.spl", 10))
+            debugger.toggle_breakpoint("test.spl", 10)
+            check(debugger.has_breakpoint("test.spl", 10))
 
-            debugger.toggle_breakpoint("test.spl", 10)  # Enable again
-            expect debugger.has_breakpoint("test.spl", 10)
-
-        skip_it "toggles non-existent breakpoint (no-op)":
-            """Branch 5/7: toggle_breakpoint nil case"""
-            var debugger = Debugger.new()
-
-            # Should not crash
+        it "toggles non-existent breakpoint (no-op)":
+            var debugger = debugger_new()
             debugger.toggle_breakpoint("missing.spl", 999)
-            expect debugger.breakpoints.len() == 0
+            check(debugger.breakpoints.len() == 0)
 
     context "checking breakpoints":
-        """
-        ### Has Breakpoint
 
-        Returns true only if breakpoint exists AND is enabled.
-        """
+        it "returns true for enabled breakpoint":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "")
+            check(debugger.has_breakpoint("test.spl", 42))
 
-        skip_it "returns true for enabled breakpoint":
-            """Branch 6/7: has_breakpoint Some + enabled"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 42, nil)
+        it "returns false for disabled breakpoint":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "")
+            debugger.toggle_breakpoint("test.spl", 42)
+            check(not debugger.has_breakpoint("test.spl", 42))
 
-            expect debugger.has_breakpoint("test.spl", 42)
-
-        skip_it "returns false for disabled breakpoint":
-            """Branch 7/7: has_breakpoint Some + disabled"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 42, nil)
-            debugger.toggle_breakpoint("test.spl", 42)  # Disable
-
-            expect not debugger.has_breakpoint("test.spl", 42)
-
-        skip_it "returns false for non-existent breakpoint":
-            """Branch 7/7: has_breakpoint nil case"""
-            var debugger = Debugger.new()
-
-            expect not debugger.has_breakpoint("missing.spl", 999)
+        it "returns false for non-existent breakpoint":
+            var debugger = debugger_new()
+            check(not debugger.has_breakpoint("missing.spl", 999))
 
 
 # ============================================================================
@@ -505,153 +287,62 @@ describe "Debugger - Breakpoint Management":
 # ============================================================================
 
 describe "Debugger - Watch Expressions":
-    """
-    ## Watch Expression Management
-
-    Watch expressions are stored in an array and evaluated on demand.
-    Operations:
-    - add_watch: Append expression to array
-    - remove_watch: Remove by index (bounds checked)
-    - evaluate_watches: Evaluate all expressions and return results
-
-    **Branch Coverage:** 5 branches
-    - add_watch: 1 branch (always appends)
-    - remove_watch: 2 branches (idx < len, idx >= len)
-    - evaluate_watches: 3 branches (empty array, Ok result, Err result)
-    """
 
     context "adding watch expressions":
-        """
-        ### Add Watch
 
-        Appends expression string to watch_expressions array.
-        """
-
-        skip_it "adds single watch expression":
-            """Branch 1/5: add_watch"""
-            var debugger = Debugger.new()
+        it "adds single watch expression":
+            var debugger = debugger_new()
             debugger.add_watch("x + y")
+            check(debugger.watch_expressions.len() == 1)
+            check(debugger.watch_expressions[0] == "x + y")
 
-            expect debugger.watch_expressions.len() == 1
-            expect debugger.watch_expressions[0] == "x + y"
-
-        skip_it "adds multiple watch expressions":
-            """Verify multiple watches"""
-            var debugger = Debugger.new()
+        it "adds multiple watch expressions":
+            var debugger = debugger_new()
             debugger.add_watch("x")
             debugger.add_watch("y")
             debugger.add_watch("z")
-
-            expect debugger.watch_expressions.len() == 3
-            expect debugger.watch_expressions[0] == "x"
-            expect debugger.watch_expressions[1] == "y"
-            expect debugger.watch_expressions[2] == "z"
+            check(debugger.watch_expressions.len() == 3)
+            check(debugger.watch_expressions[0] == "x")
+            check(debugger.watch_expressions[1] == "y")
+            check(debugger.watch_expressions[2] == "z")
 
     context "removing watch expressions":
-        """
-        ### Remove Watch
 
-        Removes expression at index if valid. No-op if out of bounds.
-        """
-
-        skip_it "removes valid index":
-            """Branch 2/5: remove_watch idx < len"""
-            var debugger = Debugger.new()
+        it "removes valid index":
+            var debugger = debugger_new()
             debugger.add_watch("x")
             debugger.add_watch("y")
             debugger.add_watch("z")
+            debugger.remove_watch(1)
+            check(debugger.watch_expressions.len() == 2)
+            check(debugger.watch_expressions[0] == "x")
+            check(debugger.watch_expressions[1] == "z")
 
-            debugger.remove_watch(1)  # Remove "y"
-
-            expect debugger.watch_expressions.len() == 2
-            expect debugger.watch_expressions[0] == "x"
-            expect debugger.watch_expressions[1] == "z"
-
-        skip_it "removes invalid index (no-op)":
-            """Branch 3/5: remove_watch idx >= len"""
-            var debugger = Debugger.new()
+        it "removes invalid index (no-op)":
+            var debugger = debugger_new()
             debugger.add_watch("x")
-
-            # Should not crash
             debugger.remove_watch(999)
+            check(debugger.watch_expressions.len() == 1)
 
-            expect debugger.watch_expressions.len() == 1
-
-        skip_it "removes from empty array (no-op)":
-            """Edge case: remove from empty"""
-            var debugger = Debugger.new()
-
+        it "removes from empty array (no-op)":
+            var debugger = debugger_new()
             debugger.remove_watch(0)
-
-            expect debugger.watch_expressions.len() == 0
+            check(debugger.watch_expressions.len() == 0)
 
     context "evaluating watch expressions":
-        """
-        ### Evaluate Watches
-
-        Calls interp.eval_expression_string() for each watch.
-        Returns array of (expr, Result<Value, String>) tuples.
-
-        **Note:** Requires mock Interpreter for testing.
-        """
+        # NOTE: evaluate_watches requires a mock interpreter (not available)
 
         skip_it "returns empty array for no watches":
-            """Branch 4/5: evaluate_watches with empty watch list"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val results = debugger.evaluate_watches(&interp)
-
-            expect results.len() == 0
+            pass_do_nothing
 
         skip_it "evaluates successful expressions":
-            """Branch 5/5: evaluate_watches Ok case"""
-            var debugger = Debugger.new()
-            debugger.add_watch("x")
-            debugger.add_watch("y")
-
-            var interp = MockInterpreter.new()
-            interp.set_value("x", Value.int(42))
-            interp.set_value("y", Value.int(100))
-
-            val results = debugger.evaluate_watches(&interp)
-
-            expect results.len() == 2
-            expect results[0].0 == "x"
-            expect results[0].1.ok.? == true
-            expect results[1].0 == "y"
-            expect results[1].1.ok.? == true
+            pass_do_nothing
 
         skip_it "handles evaluation errors":
-            """Branch 5/5: evaluate_watches Err case"""
-            var debugger = Debugger.new()
-            debugger.add_watch("unknown_var")
-
-            var interp = MockInterpreter.new()
-
-            val results = debugger.evaluate_watches(&interp)
-
-            expect results.len() == 1
-            expect results[0].0 == "unknown_var"
-            expect results[0].1.err.? == true
+            pass_do_nothing
 
         skip_it "handles mixed Ok and Err results":
-            """Mixed success and failure"""
-            var debugger = Debugger.new()
-            debugger.add_watch("x")
-            debugger.add_watch("bad")
-            debugger.add_watch("y")
-
-            var interp = MockInterpreter.new()
-            interp.set_value("x", Value.int(1))
-            interp.set_value("y", Value.int(2))
-
-            val results = debugger.evaluate_watches(&interp)
-
-            expect results.len() == 3
-            expect results[0].1.ok.?
-            expect results[1].1.err.?
-            expect results[2].1.ok.?
+            pass_do_nothing
 
 
 # ============================================================================
@@ -659,163 +350,86 @@ describe "Debugger - Watch Expressions":
 # ============================================================================
 
 describe "Debugger - Call Stack Management":
-    """
-    ## Call Stack Operations
-
-    Call stack is an array of StackFrame structs.
-    Operations:
-    - push_frame: Append frame to stack
-    - pop_frame: Remove last frame
-    - current_frame: Get reference to top frame (nil if empty)
-    - get_stack_trace: Format all frames as strings
-
-    **Branch Coverage:** 4 branches
-    - push_frame: 1 branch (always appends)
-    - pop_frame: 1 branch (always pops)
-    - current_frame: 2 branches (empty → nil, non-empty → Some)
-    - get_stack_trace: 1 branch (iteration over frames)
-    """
 
     context "push and pop operations":
-        """
-        ### Push and Pop Frames
 
-        Stack grows with push_frame, shrinks with pop_frame.
-        """
-
-        skip_it "pushes frame and increases length":
-            """Branch 1/4: push_frame"""
-            var debugger = Debugger.new()
-            val frame = StackFrame {
-                fn_name: "main",
-                file: "test.spl",
-                line: 10,
-                locals: Dict.new()
-            }
-
+        it "pushes frame and increases length":
+            var debugger = debugger_new()
+            val frame = create_frame("main", "test.spl", 10)
             debugger.push_frame(frame)
+            check(debugger.call_stack.len() == 1)
 
-            expect debugger.call_stack.len() == 1
-
-        skip_it "pops frame and decreases length":
-            """Branch 2/4: pop_frame"""
-            var debugger = Debugger.new()
-            val frame = StackFrame {
-                fn_name: "main",
-                file: "test.spl",
-                line: 10,
-                locals: Dict.new()
-            }
+        it "pops frame and decreases length":
+            var debugger = debugger_new()
+            val frame = create_frame("main", "test.spl", 10)
             debugger.push_frame(frame)
-
             debugger.pop_frame()
+            check(debugger.call_stack.len() == 0)
 
-            expect debugger.call_stack.len() == 0
-
-        skip_it "handles multiple push and pop":
-            """Stack behavior with multiple operations"""
-            var debugger = Debugger.new()
-            val frame1 = create_frame("fn1", "a.spl", 1)
-            val frame2 = create_frame("fn2", "b.spl", 2)
-            val frame3 = create_frame("fn3", "c.spl", 3)
-
-            debugger.push_frame(frame1)
-            debugger.push_frame(frame2)
-            debugger.push_frame(frame3)
-            expect debugger.call_stack.len() == 3
-
+        it "handles multiple push and pop":
+            var debugger = debugger_new()
+            debugger.push_frame(create_frame("fn1", "a.spl", 1))
+            debugger.push_frame(create_frame("fn2", "b.spl", 2))
+            debugger.push_frame(create_frame("fn3", "c.spl", 3))
+            check(debugger.call_stack.len() == 3)
             debugger.pop_frame()
-            expect debugger.call_stack.len() == 2
-
+            check(debugger.call_stack.len() == 2)
             debugger.pop_frame()
-            expect debugger.call_stack.len() == 1
+            check(debugger.call_stack.len() == 1)
 
     context "current_frame access":
-        """
-        ### Current Frame
 
-        Returns reference to top of stack, or nil if empty.
-        """
-
-        skip_it "returns nil for empty stack":
-            """Branch 3/4: current_frame empty case"""
-            var debugger = Debugger.new()
-
+        it "returns default frame for empty stack":
+            var debugger = debugger_new()
             val frame = debugger.current_frame()
+            # current_frame returns default StackFrame with empty fn_name when stack is empty
+            check(frame.fn_name == "")
 
-            expect frame == nil
-
-        skip_it "returns Some for non-empty stack":
-            """Branch 4/4: current_frame non-empty case"""
-            var debugger = Debugger.new()
+        it "returns top frame for non-empty stack":
+            var debugger = debugger_new()
             val test_frame = create_frame("main", "test.spl", 42)
             debugger.push_frame(test_frame)
-
             val frame = debugger.current_frame()
+            check(frame.fn_name == "main")
+            check(frame.file == "test.spl")
+            check(frame.line == 42)
 
-            match frame:
-                Some(f):
-                    expect f.fn_name == "main"
-                    expect f.file == "test.spl"
-                    expect f.line == 42
-                nil: fail "frame not found"
-
-        skip_it "returns last frame with multiple frames":
-            """Top of stack with multiple frames"""
-            var debugger = Debugger.new()
+        it "returns last frame with multiple frames":
+            var debugger = debugger_new()
             debugger.push_frame(create_frame("fn1", "a.spl", 1))
             debugger.push_frame(create_frame("fn2", "b.spl", 2))
             debugger.push_frame(create_frame("fn3", "c.spl", 3))
-
             val frame = debugger.current_frame()
-
-            match frame:
-                Some(f):
-                    expect f.fn_name == "fn3"
-                    expect f.line == 3
-                nil: fail "frame not found"
+            check(frame.fn_name == "fn3")
+            check(frame.line == 3)
 
     context "stack trace generation":
-        """
-        ### Get Stack Trace
 
-        Formats all frames as array of strings (reversed order).
-        """
-
-        skip_it "returns empty array for empty stack":
-            """Branch 4/4: get_stack_trace empty case"""
-            var debugger = Debugger.new()
-
+        it "returns empty array for empty stack":
+            var debugger = debugger_new()
             val trace = debugger.get_stack_trace()
+            check(trace.len() == 0)
 
-            expect trace.len() == 0
-
-        skip_it "formats single frame":
-            """Single frame trace"""
-            var debugger = Debugger.new()
+        it "formats single frame":
+            var debugger = debugger_new()
             debugger.push_frame(create_frame("main", "test.spl", 42))
-
             val trace = debugger.get_stack_trace()
+            check(trace.len() == 1)
+            check(trace[0].contains("main"))
+            check(trace[0].contains("test.spl"))
+            check(trace[0].contains("42"))
 
-            expect trace.len() == 1
-            expect trace[0].contains("main")
-            expect trace[0].contains("test.spl")
-            expect trace[0].contains("42")
-
-        skip_it "formats multiple frames with indices":
-            """Multiple frames in reverse order"""
-            var debugger = Debugger.new()
+        it "formats multiple frames with indices":
+            var debugger = debugger_new()
             debugger.push_frame(create_frame("fn1", "a.spl", 1))
             debugger.push_frame(create_frame("fn2", "b.spl", 2))
             debugger.push_frame(create_frame("fn3", "c.spl", 3))
-
             val trace = debugger.get_stack_trace()
-
-            expect trace.len() == 3
+            check(trace.len() == 3)
             # Reversed: fn3, fn2, fn1
-            expect trace[0].contains("fn3")
-            expect trace[1].contains("fn2")
-            expect trace[2].contains("fn1")
+            check(trace[0].contains("fn3"))
+            check(trace[1].contains("fn2"))
+            check(trace[2].contains("fn1"))
 
 
 # ============================================================================
@@ -823,78 +437,44 @@ describe "Debugger - Call Stack Management":
 # ============================================================================
 
 describe "Debugger - Stepping Control":
-    """
-    ## Step Mode Transitions
-
-    Stepping control modifies is_stepping and step_mode fields.
-    Modes:
-    - Continue: Normal execution (is_stepping=false)
-    - StepOver: Step to next line at same level (is_stepping=true)
-    - StepInto: Step into function calls (is_stepping=true)
-    - StepOut: Step out of current function (is_stepping=true)
-
-    **Branch Coverage:** 4 branches (one per mode setter)
-    """
 
     context "step mode setters":
-        """
-        ### Mode Transitions
 
-        Each setter modifies both is_stepping and step_mode.
-        """
-
-        skip_it "enters step over mode":
-            """Branch 1/4: step_over"""
-            var debugger = Debugger.new()
-
+        it "enters step over mode":
+            var debugger = debugger_new()
             debugger.step_over()
+            check(debugger.is_stepping)
+            check(debugger.step_mode == StepMode.StepOver)
 
-            expect (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepOver case None: fail "StepMode not found")
-
-        skip_it "enters step into mode":
-            """Branch 2/4: step_into"""
-            var debugger = Debugger.new()
-
+        it "enters step into mode":
+            var debugger = debugger_new()
             debugger.step_into()
+            check(debugger.is_stepping)
+            check(debugger.step_mode == StepMode.StepInto)
 
-            expect (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepInto case None: fail "StepMode not found")
-
-        skip_it "enters step out mode":
-            """Branch 3/4: step_out"""
-            var debugger = Debugger.new()
-
+        it "enters step out mode":
+            var debugger = debugger_new()
             debugger.step_out()
+            check(debugger.is_stepping)
+            check(debugger.step_mode == StepMode.StepOut)
 
-            expect (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepOut case None: fail "StepMode not found")
-
-        skip_it "enters continue mode":
-            """Branch 4/4: continue_execution"""
-            var debugger = Debugger.new()
-            debugger.step_into()  # First enter stepping mode
-
-            debugger.continue_execution()
-
-            expect not (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.Continue case None: fail "StepMode not found")
-
-        skip_it "transitions between modes":
-            """Multiple mode changes"""
-            var debugger = Debugger.new()
-
+        it "enters continue mode":
+            var debugger = debugger_new()
             debugger.step_into()
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepInto case None: fail "StepMode not found")
+            debugger.continue_execution()
+            check(not debugger.is_stepping)
+            check(debugger.step_mode == StepMode.Continue)
 
+        it "transitions between modes":
+            var debugger = debugger_new()
+            debugger.step_into()
+            check(debugger.step_mode == StepMode.StepInto)
             debugger.step_over()
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepOver case None: fail "StepMode not found")
-
+            check(debugger.step_mode == StepMode.StepOver)
             debugger.step_out()
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepOut case None: fail "StepMode not found")
-
+            check(debugger.step_mode == StepMode.StepOut)
             debugger.continue_execution()
-            expect not (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
+            check(not debugger.is_stepping)
 
 
 # ============================================================================
@@ -902,697 +482,303 @@ describe "Debugger - Stepping Control":
 # ============================================================================
 
 describe "Debugger - should_break() logic":
-    """
-    ## Break Decision Logic
-
-    should_break(file, line) returns true if:
-    1. Location has enabled breakpoint, OR
-    2. Stepping mode requires break (StepInto, StepOver)
-
-    When breakpoint hit, increments hit_count.
-
-    **Branch Coverage:** 9 branches
-    - has_breakpoint check: 1 branch (if condition)
-    - Breakpoint hit: 2 branches (Some → increment, nil → edge case)
-    - is_stepping check: 1 branch (if condition)
-    - StepMode match: 4 branches (StepInto, StepOver, StepOut, Continue)
-    - Final return: 1 branch (false)
-    """
 
     context "breakpoint hit detection":
-        """
-        ### Breakpoint Triggers
 
-        should_break returns true and increments hit_count.
-        """
+        it "breaks at enabled breakpoint":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "")
+            val result = debugger.should_break("test.spl", 42)
+            check(result)
 
-        skip_it "breaks at enabled breakpoint":
-            """Branch 1/9: has_breakpoint true, Some case"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 42, nil)
+        it "does not break at disabled breakpoint":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "")
+            debugger.toggle_breakpoint("test.spl", 42)
+            val result = debugger.should_break("test.spl", 42)
+            check(not result)
 
-            val should_break = debugger.should_break("test.spl", 42)
+        it "does not break at non-existent breakpoint":
+            var debugger = debugger_new()
+            val result = debugger.should_break("test.spl", 999)
+            check(not result)
 
-            expect should_break
-
-            # Check hit count incremented
-            val key = "test.spl:42"
-            val bp = debugger.breakpoints.get(&key)
-            match bp:
-                Some(b): expect b.hit_count == 1
-                nil: fail "breakpoint not found"
-
-        skip_it "does not break at disabled breakpoint":
-            """Disabled breakpoint should not trigger"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 42, nil)
-            debugger.toggle_breakpoint("test.spl", 42)  # Disable
-
-            val should_break = debugger.should_break("test.spl", 42)
-
-            expect not should_break
-
-        skip_it "does not break at non-existent breakpoint":
-            """No breakpoint at location"""
-            var debugger = Debugger.new()
-
-            val should_break = debugger.should_break("test.spl", 999)
-
-            expect not should_break
-
-        skip_it "increments hit count on multiple hits":
-            """Hit count tracking"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 42, nil)
-
+        it "increments hit count on multiple hits":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "")
             debugger.should_break("test.spl", 42)
             debugger.should_break("test.spl", 42)
             debugger.should_break("test.spl", 42)
-
-            val key = "test.spl:42"
-            val bp = debugger.breakpoints.get(&key)
-            match bp:
-                Some(b): expect b.hit_count == 3
-                nil: fail "breakpoint not found"
+            # Verify hit count via breakpoint list display
+            val bps = debugger.list_breakpoints()
+            check(bps.len() == 1)
+            check(bps[0].contains("hit 3 times"))
 
     context "stepping mode detection":
-        """
-        ### Stepping Triggers
 
-        Different step modes control when to break.
-        """
-
-        skip_it "breaks when step into":
-            """Branch 4/9: StepMode.StepInto"""
-            var debugger = Debugger.new()
+        it "breaks when step into":
+            var debugger = debugger_new()
             debugger.step_into()
+            val result = debugger.should_break("any.spl", 1)
+            check(result)
 
-            val should_break = debugger.should_break("any.spl", 1)
-
-            expect should_break
-
-        skip_it "breaks when step over":
-            """Branch 5/9: StepMode.StepOver"""
-            var debugger = Debugger.new()
+        it "breaks when step over":
+            var debugger = debugger_new()
             debugger.step_over()
+            val result = debugger.should_break("any.spl", 1)
+            check(result)
 
-            val should_break = debugger.should_break("any.spl", 1)
-
-            expect should_break
-
-        skip_it "does not break when step out":
-            """Branch 6/9: StepMode.StepOut"""
-            var debugger = Debugger.new()
+        it "does not break when step out":
+            var debugger = debugger_new()
             debugger.step_out()
+            val result = debugger.should_break("any.spl", 1)
+            check(not result)
 
-            val should_break = debugger.should_break("any.spl", 1)
-
-            expect not should_break
-
-        skip_it "does not break when continue":
-            """Branch 7/9: StepMode.Continue"""
-            var debugger = Debugger.new()
+        it "does not break when continue":
+            var debugger = debugger_new()
             debugger.continue_execution()
+            val result = debugger.should_break("any.spl", 1)
+            check(not result)
 
-            val should_break = debugger.should_break("any.spl", 1)
-
-            expect not should_break
-
-        skip_it "does not break when not stepping":
-            """Branch 8/9: is_stepping false"""
-            var debugger = Debugger.new()
-            # Never entered stepping mode
-            expect not (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-
-            val should_break = debugger.should_break("any.spl", 1)
-
-            expect not should_break
+        it "does not break when not stepping":
+            var debugger = debugger_new()
+            check(not debugger.is_stepping)
+            val result = debugger.should_break("any.spl", 1)
+            check(not result)
 
     context "combined conditions":
-        """
-        ### Breakpoint and Stepping Combined
 
-        Breakpoint takes precedence over stepping mode.
-        """
-
-        skip_it "breaks at breakpoint while stepping":
-            """Breakpoint hit during stepping"""
-            var debugger = Debugger.new()
-            debugger.add_breakpoint("test.spl", 42, nil)
+        it "breaks at breakpoint while stepping":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "")
             debugger.step_into()
+            val result = debugger.should_break("test.spl", 42)
+            check(result)
 
-            val should_break = debugger.should_break("test.spl", 42)
-
-            expect should_break
-
-        skip_it "breaks while stepping without breakpoint":
-            """Step mode alone triggers break"""
-            var debugger = Debugger.new()
+        it "breaks while stepping without breakpoint":
+            var debugger = debugger_new()
             debugger.step_into()
-
-            val should_break = debugger.should_break("no_bp.spl", 100)
-
-            expect should_break
+            val result = debugger.should_break("no_bp.spl", 100)
+            check(result)
 
 
 # ============================================================================
 # Test Group 10: Command Handler - handle_debug_command()
 # ============================================================================
+# handle_debug_command(debugger, cmd) returns text.
+# Error responses start with "ERROR:".
 
 describe "Debug Command Handler - handle_debug_command()":
-    """
-    ## Interactive Debug Commands
-
-    handle_debug_command(debugger, interp, cmd) parses and executes commands.
-    Returns Result<String, String> with success/error message.
-
-    **Branch Coverage:** 34 branches
-    - Empty input: 1 branch
-    - break/b: 6 branches (no args, invalid format, parse error, success, alias)
-    - delete/d: 6 branches (same structure as break)
-    - continue/c: 2 branches (command, alias)
-    - step/s: 2 branches (command, alias)
-    - next/n: 2 branches (command, alias)
-    - finish/f: 2 branches (command, alias)
-    - backtrace/bt: 3 branches (empty stack, with frames, alias)
-    - print/p: 4 branches (no args, Ok, Err, alias)
-    - watch/w: 3 branches (no args, success, alias)
-    - help/h: 2 branches (command, alias)
-    - unknown: 1 branch
-    """
 
     context "empty input handling":
-        """
-        ### Empty Command
 
-        Empty string returns Ok("").
-        """
-
-        skip_it "returns empty string for empty input":
-            """Branch 1/34: parts.is_empty()"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "")
-
-            expect result.ok.? == true
-            expect result.unwrap() == ""
-
-        skip_it "returns empty string for whitespace only":
-            """Whitespace-only input"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "   ")
-
-            expect result.ok.? == true
+        it "returns empty string for empty input":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "")
+            check(result == "")
 
     context "break command":
-        """
-        ### Set Breakpoint Command
 
-        Format: break <file>:<line>
-        Alias: b
-        """
+        it "sets breakpoint with valid format":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "break test.spl:42")
+            check(result.contains("Breakpoint set"))
+            check(debugger.has_breakpoint("test.spl", 42))
 
-        skip_it "sets breakpoint with valid format":
-            """Branch 2/34: break success case"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
+        it "uses b alias":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "b test.spl:10")
+            check(result.contains("Breakpoint set"))
+            check(debugger.has_breakpoint("test.spl", 10))
 
-            val result = handle_debug_command(&debugger, &interp, "break test.spl:42")
+        it "returns error for missing arguments":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "break")
+            check(result.starts_with("ERROR"))
 
-            expect result.ok.?
-            expect result.unwrap().contains("Breakpoint set")
-            expect debugger.has_breakpoint("test.spl", 42)
+        it "returns error for invalid format (no colon)":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "break invalid")
+            check(result.starts_with("ERROR"))
 
-        skip_it "uses 'b' alias":
-            """Branch 3/34: b alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "b test.spl:10")
-
-            expect result.ok.?
-            expect debugger.has_breakpoint("test.spl", 10)
-
-        skip_it "returns error for missing arguments":
-            """Branch 4/34: break no args"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "break")
-
-            expect result.err.?
-            expect result.unwrap_err().contains("Usage")
-
-        skip_it "returns error for invalid format (no colon)":
-            """Branch 5/34: break invalid format"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "break invalid")
-
-            expect result.err.?
-            expect result.unwrap_err().contains("Invalid")
-
-        skip_it "returns error for invalid line number":
-            """Branch 6/34: break parse error"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "break test.spl:abc")
-
-            expect result.err.?
-            expect result.unwrap_err().contains("Invalid line number")
-
-        skip_it "handles file paths with special characters":
-            """Valid file path with complex name"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "break src/app/interpreter/helpers/debug.spl:100")
-
-            expect result.ok.?
+        it "handles file paths with special characters":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "break src/app/interpreter/helpers/debug.spl:100")
+            check(not result.starts_with("ERROR"))
 
     context "delete command":
-        """
-        ### Remove Breakpoint Command
 
-        Format: delete <file>:<line>
-        Alias: d
-        """
+        it "removes breakpoint with valid format":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 42, "")
+            val result = handle_debug_command(debugger, "delete test.spl:42")
+            check(result.contains("removed"))
+            check(not debugger.has_breakpoint("test.spl", 42))
 
-        skip_it "removes breakpoint with valid format":
-            """Branch 7/34: delete success case"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-            debugger.add_breakpoint("test.spl", 42, nil)
+        it "uses d alias":
+            var debugger = debugger_new()
+            debugger.add_breakpoint("test.spl", 10, "")
+            val result = handle_debug_command(debugger, "d test.spl:10")
+            check(result.contains("removed"))
+            check(not debugger.has_breakpoint("test.spl", 10))
 
-            val result = handle_debug_command(&debugger, &interp, "delete test.spl:42")
+        it "returns error for missing arguments":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "delete")
+            check(result.starts_with("ERROR"))
 
-            expect result.ok.?
-            expect result.unwrap().contains("removed")
-            expect not debugger.has_breakpoint("test.spl", 42)
-
-        skip_it "uses 'd' alias":
-            """Branch 8/34: d alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-            debugger.add_breakpoint("test.spl", 10, nil)
-
-            val result = handle_debug_command(&debugger, &interp, "d test.spl:10")
-
-            expect result.ok.?
-            expect not debugger.has_breakpoint("test.spl", 10)
-
-        skip_it "returns error for missing arguments":
-            """Branch 9/34: delete no args"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "delete")
-
-            expect result.err.?
-            expect result.unwrap_err().contains("Usage")
-
-        skip_it "returns error for invalid format":
-            """Branch 10/34: delete invalid format"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "delete invalid")
-
-            expect result.err.?
-
-        skip_it "returns error for invalid line number":
-            """Branch 11/34: delete parse error"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "delete test.spl:xyz")
-
-            expect result.err.?
+        it "returns error for invalid format":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "delete invalid")
+            check(result.starts_with("ERROR"))
 
     context "continue command":
-        """
-        ### Continue Execution Command
 
-        Sets continue mode.
-        Alias: c
-        """
+        it "sets continue mode":
+            var debugger = debugger_new()
+            debugger.step_into()
+            val result = handle_debug_command(debugger, "continue")
+            check(result.contains("Continuing"))
+            check(not debugger.is_stepping)
 
-        skip_it "sets continue mode":
-            """Branch 12/34: continue command"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-            debugger.step_into()  # First enter stepping
-
-            val result = handle_debug_command(&debugger, &interp, "continue")
-
-            expect result.ok.?
-            expect result.unwrap().contains("Continuing")
-            expect not (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-
-        skip_it "uses 'c' alias":
-            """Branch 13/34: c alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "c")
-
-            expect result.ok.?
+        it "uses c alias":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "c")
+            check(result.contains("Continuing"))
 
     context "step command":
-        """
-        ### Step Into Command
 
-        Sets step into mode.
-        Alias: s
-        """
+        it "sets step into mode":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "step")
+            check(result.contains("Stepping into"))
+            check(debugger.is_stepping)
+            check(debugger.step_mode == StepMode.StepInto)
 
-        skip_it "sets step into mode":
-            """Branch 14/34: step command"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "step")
-
-            expect result.ok.?
-            expect result.unwrap().contains("Stepping into")
-            expect (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepInto case None: fail "StepMode not found")
-
-        skip_it "uses 's' alias":
-            """Branch 15/34: s alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "s")
-
-            expect result.ok.?
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepInto case None: fail "StepMode not found")
+        it "uses s alias":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "s")
+            check(debugger.step_mode == StepMode.StepInto)
 
     context "next command":
-        """
-        ### Step Over Command
 
-        Sets step over mode.
-        Alias: n
-        """
+        it "sets step over mode":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "next")
+            check(result.contains("Stepping over"))
+            check(debugger.is_stepping)
+            check(debugger.step_mode == StepMode.StepOver)
 
-        skip_it "sets step over mode":
-            """Branch 16/34: next command"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "next")
-
-            expect result.ok.?
-            expect result.unwrap().contains("Stepping over")
-            expect (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepOver case None: fail "StepMode not found")
-
-        skip_it "uses 'n' alias":
-            """Branch 17/34: n alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "n")
-
-            expect result.ok.?
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepOver case None: fail "StepMode not found")
+        it "uses n alias":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "n")
+            check(debugger.step_mode == StepMode.StepOver)
 
     context "finish command":
-        """
-        ### Step Out Command
 
-        Sets step out mode.
-        Alias: f
-        """
+        it "sets step out mode":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "finish")
+            check(result.contains("Stepping out"))
+            check(debugger.is_stepping)
+            check(debugger.step_mode == StepMode.StepOut)
 
-        skip_it "sets step out mode":
-            """Branch 18/34: finish command"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "finish")
-
-            expect result.ok.?
-            expect result.unwrap().contains("Stepping out")
-            expect (match debugger: case Some(x): x.is_stepping case None: fail "debugger not found")
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepOut case None: fail "StepMode not found")
-
-        skip_it "uses 'f' alias":
-            """Branch 19/34: f alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "f")
-
-            expect result.ok.?
-            expect (match debugger: case Some(x): x.step_mode case None: fail "debugger not found") == (match StepMode: case Some(x): x.StepOut case None: fail "StepMode not found")
+        it "uses f alias":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "f")
+            check(debugger.step_mode == StepMode.StepOut)
 
     context "backtrace command":
-        """
-        ### Show Call Stack Command
 
-        Returns formatted stack trace.
-        Alias: bt
-        """
+        it "returns trace for empty stack":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "backtrace")
+            check(result.contains("Call stack"))
 
-        skip_it "returns empty trace for empty stack":
-            """Branch 20/34: backtrace with empty stack"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "backtrace")
-
-            expect result.ok.?
-            expect result.unwrap() == ""
-
-        skip_it "returns formatted trace with frames":
-            """Branch 21/34: backtrace with frames"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
+        it "returns formatted trace with frames":
+            var debugger = debugger_new()
             debugger.push_frame(create_frame("main", "test.spl", 10))
             debugger.push_frame(create_frame("helper", "lib.spl", 42))
+            val result = handle_debug_command(debugger, "backtrace")
+            check(result.contains("main"))
+            check(result.contains("helper"))
 
-            val result = handle_debug_command(&debugger, &interp, "backtrace")
-
-            expect result.ok.?
-            val trace = result.unwrap()
-            expect trace.contains("main")
-            expect trace.contains("helper")
-
-        skip_it "uses 'bt' alias":
-            """Branch 22/34: bt alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
+        it "uses bt alias":
+            var debugger = debugger_new()
             debugger.push_frame(create_frame("fn", "a.spl", 1))
-
-            val result = handle_debug_command(&debugger, &interp, "bt")
-
-            expect result.ok.?
-            expect result.unwrap().contains("fn")
+            val result = handle_debug_command(debugger, "bt")
+            check(result.contains("fn"))
 
     context "print command":
-        """
-        ### Evaluate Expression Command
 
-        Evaluates expression and returns result.
-        Alias: p
-        """
+        it "returns error for missing expression":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "print")
+            check(result.starts_with("ERROR"))
 
-        skip_it "returns error for missing expression":
-            """Branch 23/34: print no args"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
+        it "echoes expression":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "print x")
+            check(result.contains("EXPR"))
+            check(result.contains("x"))
 
-            val result = handle_debug_command(&debugger, &interp, "print")
+        it "uses p alias":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "p y")
+            check(result.contains("EXPR"))
+            check(result.contains("y"))
 
-            expect result.err.?
-            expect result.unwrap_err().contains("Usage")
-
-        skip_it "evaluates successful expression":
-            """Branch 24/34: print Ok case"""
-            var debugger = Debugger.new()
-            var interp = MockInterpreter.new()
-            interp.set_value("x", Value.int(42))
-
-            val result = handle_debug_command(&debugger, &interp, "print x")
-
-            expect result.ok.?
-            expect result.unwrap().contains("42")
-
-        skip_it "returns error for failed expression":
-            """Branch 25/34: print Err case"""
-            var debugger = Debugger.new()
-            var interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "print unknown")
-
-            expect result.err.?
-
-        skip_it "uses 'p' alias":
-            """Branch 26/34: p alias"""
-            var debugger = Debugger.new()
-            var interp = MockInterpreter.new()
-            interp.set_value("y", Value.int(100))
-
-            val result = handle_debug_command(&debugger, &interp, "p y")
-
-            expect result.ok.?
-
-        skip_it "handles multi-word expressions":
-            """Expression with spaces"""
-            var debugger = Debugger.new()
-            var interp = MockInterpreter.new()
-            interp.set_value("x + y", Value.int(42))
-
-            val result = handle_debug_command(&debugger, &interp, "print x + y")
-
-            expect result.ok.?
+        it "handles multi-word expressions":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "print x + y")
+            check(result.contains("EXPR"))
+            check(result.contains("x + y"))
 
     context "watch command":
-        """
-        ### Add Watch Expression Command
 
-        Adds expression to watch list.
-        Alias: w
-        """
+        it "returns error for missing expression":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "watch")
+            check(result.starts_with("ERROR"))
 
-        skip_it "returns error for missing expression":
-            """Branch 27/34: watch no args"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
+        it "adds watch expression":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "watch x + y")
+            check(result.contains("Watch added"))
+            check(debugger.watch_expressions.len() == 1)
+            check(debugger.watch_expressions[0] == "x + y")
 
-            val result = handle_debug_command(&debugger, &interp, "watch")
-
-            expect result.err.?
-            expect result.unwrap_err().contains("Usage")
-
-        skip_it "adds watch expression":
-            """Branch 28/34: watch success"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "watch x + y")
-
-            expect result.ok.?
-            expect result.unwrap().contains("Watch added")
-            expect debugger.watch_expressions.len() == 1
-            expect debugger.watch_expressions[0] == "x + y"
-
-        skip_it "uses 'w' alias":
-            """Branch 29/34: w alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "w z")
-
-            expect result.ok.?
-            expect debugger.watch_expressions[0] == "z"
+        it "uses w alias":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "w z")
+            check(result.contains("Watch added"))
+            check(debugger.watch_expressions[0] == "z")
 
     context "help command":
-        """
-        ### Show Help Command
 
-        Returns help text with all commands.
-        Alias: h
-        """
+        it "returns help text":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "help")
+            check(result.contains("Debug commands"))
+            check(result.contains("break"))
+            check(result.contains("continue"))
+            check(result.contains("step"))
 
-        skip_it "returns help text":
-            """Branch 30/34: help command"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "help")
-
-            expect result.ok.?
-            val help = result.unwrap()
-            expect help.contains("Debug commands")
-            expect help.contains("break")
-            expect help.contains("continue")
-            expect help.contains("step")
-
-        skip_it "uses 'h' alias":
-            """Branch 31/34: h alias"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "h")
-
-            expect result.ok.?
-            expect result.unwrap().contains("Debug commands")
+        it "uses h alias":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "h")
+            check(result.contains("Debug commands"))
 
     context "unknown command handling":
-        """
-        ### Unknown Command Error
 
-        Returns error with help hint.
-        """
+        it "returns error for unknown command":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "invalid")
+            check(result.starts_with("ERROR"))
+            check(result.contains("Unknown command"))
+            check(result.contains("help"))
 
-        skip_it "returns error for unknown command":
-            """Branch 32-34/34: default case"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "invalid")
-
-            expect result.err.?
-            val err = result.unwrap_err()
-            expect err.contains("Unknown command")
-            expect err.contains("help")
-
-        skip_it "handles typos":
-            """Common typos"""
-            var debugger = Debugger.new()
-            val interp = MockInterpreter.new()
-
-            val result = handle_debug_command(&debugger, &interp, "breek")
-
-            expect result.err.?
-
-
-# ============================================================================
-# Helper Code
-# ============================================================================
-
-# Mock Interpreter
-#
-# Minimal mock for testing command handler.
-# Provides eval_expression_string() with pre-configured values.
-
-class MockInterpreter:
-    values: Dict<String, Value>
-
-    static fn new() -> MockInterpreter:
-        MockInterpreter {
-            values: Dict.new()
-        }
-
-    me set_value(expr: &str, value: Value):
-        self.values.set(expr.to_string(), value)
-
-    fn eval_expression_string(expr: &str) -> Result<Value, InterpreterError>:
-        if val Some(v) = self.values.get(expr):
-            return Ok(v.clone())
-        else:
-            val err = InterpreterError {
-                message: format!("Unknown expression: {}", expr)
-            }
-            return Err(err)
-
-
-# Stack Frame Helper
-#
-# Creates StackFrame for testing.
-
-fn create_frame(fn_name: &str, file: &str, line: u32) -> StackFrame:
-    StackFrame {
-        fn_name: fn_name.to_string(),
-        file: file.to_string(),
-        line: line,
-        locals: Dict.new()
-    }
+        it "handles typos":
+            var debugger = debugger_new()
+            val result = handle_debug_command(debugger, "breek")
+            check(result.starts_with("ERROR"))

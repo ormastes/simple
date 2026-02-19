@@ -99,7 +99,7 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Pattern types: literal (int/bool/string), bind, wildcard, struct, tuple, array, enum (single and multi-payload), range, or-patterns, guards
 - `if-let` pattern matching
 - MIR instructions: PatternTest, PatternBind
-- **BDD Tests:** 79 passing (`simple/std_lib/test/unit/core/pattern_matching_spec.spl`)
+- **BDD Tests:** 79 passing (`simple/std_lib/test/unit/compiler_core/pattern_matching_spec.spl`)
 
 ### #13: Type Inference 🔄
 **Status:** IN PROGRESS  

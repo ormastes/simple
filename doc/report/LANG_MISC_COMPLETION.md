@@ -41,7 +41,7 @@ Successfully verified and documented 6 out of 9 miscellaneous language features.
 - Syntax: `with resource as name:` with automatic cleanup
 
 **#1380 - ContextManager trait:**
-- Location: `simple/std_lib/src/core/context.spl`
+- Location: `simple/std_lib/src/compiler_core/context.spl`
 - Methods: `__enter__()` and `__exit__(exc_type, exc_value, traceback)`
 - Fully documented with examples
 
@@ -68,17 +68,17 @@ let closure = move \: x + 10  # captures x by value
 ### Primitive Unification (Complete) ✅
 
 **#1382 - List[T]:**
-- File: `simple/std_lib/src/core/list.spl`
+- File: `simple/std_lib/src/compiler_core/list.spl`
 - Dynamic growable sequence
 - Full collection trait implementations
 
 **#1383 - Array[T, N]:**
-- File: `simple/std_lib/src/core/array.spl`
+- File: `simple/std_lib/src/compiler_core/array.spl`
 - Fixed-size array type
 - Const generic size parameter
 
 **#1384 - String:**
-- File: `simple/std_lib/src/core/text.spl`
+- File: `simple/std_lib/src/compiler_core/text.spl`
 - UTF-8 string with full manipulation methods
 - Unifies `str` and string literal syntax
 
@@ -91,10 +91,10 @@ let closure = move \: x + 10  # captures x by value
 - `src/parser/src/ast/enums.rs` - MoveMode enum
 
 ### Stdlib (Verified Existing)
-- `simple/std_lib/src/core/context.spl` - ContextManager trait
-- `simple/std_lib/src/core/list.spl` - List[T] implementation
-- `simple/std_lib/src/core/array.spl` - Array[T, N] implementation
-- `simple/std_lib/src/core/text.spl` - String implementation
+- `simple/std_lib/src/compiler_core/context.spl` - ContextManager trait
+- `simple/std_lib/src/compiler_core/list.spl` - List[T] implementation
+- `simple/std_lib/src/compiler_core/array.spl` - Array[T, N] implementation
+- `simple/std_lib/src/compiler_core/text.spl` - String implementation
 
 ### Documentation (Updated)
 - `doc/features/LANG_MISC_STATUS.md` - Detailed status report

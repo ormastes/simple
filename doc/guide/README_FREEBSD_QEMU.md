@@ -60,7 +60,7 @@ build/freebsd/vm/
   qemu.pid                           # VM process ID (when running)
 
 scripts/
-  bootstrap-from-scratch-freebsd.sh  # FreeBSD-native bootstrap (521 lines)
+  bootstrap-from-scratch.sh --target=freebsd-x86_64  # FreeBSD-native bootstrap (521 lines)
   test-freebsd-qemu-setup.sh         # QEMU setup verification
   configure_freebsd_vm_ssh.sh        # SSH configuration helper
 
@@ -94,7 +94,7 @@ rsync -az --delete -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
     --exclude='.git' --exclude='build' --exclude='.jj' . freebsd@localhost:~/simple/
 
 # 3. Run bootstrap in VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64"
 
 # 4. Retrieve binary
 rsync -az -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
@@ -162,7 +162,7 @@ ssh -p 2222 freebsd@localhost "sudo growfs /dev/vtbd0s1a"
 **Bootstrap fails:**
 ```bash
 # Run with verbose output
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --verbose"
 
 # Check disk space
 ssh -p 2222 freebsd@localhost "df -h"
@@ -181,7 +181,7 @@ ssh -p 2222 freebsd@localhost "sysctl hw.physmem"
 **Parallel Builds:**
 ```bash
 # Use more CPU cores in VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --jobs=8"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --jobs=8"
 ```
 
 **Memory Tuning:**
@@ -231,7 +231,7 @@ After building, you can run basic tests in the FreeBSD VM:
 ./scripts/test-freebsd-qemu-basic.sh --verbose
 
 # Manual testing in VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/core/"
+ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/compiler_core/"
 ```
 
 **Expected results:**
@@ -246,7 +246,7 @@ ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/core/"
 - **Complete Guide:** `doc/guide/freebsd_qemu_bootstrap.md`
 - **Testing Guide:** `doc/guide/freebsd_testing_qemu.md`
 - **Bootstrap Pipeline:** `doc/build/bootstrap_pipeline.md`
-- **Native FreeBSD Script:** `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
+- **Native FreeBSD Script:** `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 - **QEMU Setup Test:** `scripts/test-freebsd-qemu-setup.sh`
 - **QEMU Basic Test:** `scripts/test-freebsd-qemu-basic.sh`
 

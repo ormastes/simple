@@ -42,7 +42,7 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # Bootstrap from scratch (native FreeBSD build)
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # Verify
 bin/simple --version
@@ -209,11 +209,11 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # Run FreeBSD-specific bootstrap
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 ```
 
 **Bootstrap steps:**
-1. **Build seed compiler** - cmake compiles `seed/seed.cpp` → `seed_cpp`
+1. **Build seed compiler** - cmake compiles `src/compiler_seed/seed.cpp` → `seed_cpp`
 2. **Transpile compiler** - `seed_cpp` transpiles `.spl` → `.cpp`
 3. **Compile Core1** - clang++ compiles C++ + runtime → minimal compiler
 4. **Self-host Core2** - Core1 recompiles itself (verification)
@@ -225,22 +225,22 @@ cd simple
 
 ```bash
 # Skip verification (faster)
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --skip-verify
 
 # Use specific compiler
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --cc=g++
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --cc=clang++
 
 # Custom output location
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --output=/usr/local/bin/simple
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --output=/usr/local/bin/simple
 
 # Parallel jobs
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --jobs=8
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --jobs=8
 
 # Keep build artifacts
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --keep-artifacts
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --keep-artifacts
 
 # Verbose output
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --verbose
 ```
 
 ### Verify Installation
@@ -289,7 +289,7 @@ This is expected if:
 
 Skip verification if acceptable:
 ```bash
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --skip-verify
 ```
 
 ---
@@ -349,7 +349,7 @@ mkdir -p /tmp/freebsd-sysroot/usr/lib
 # Build seed compiler with FreeBSD toolchain
 cd build
 cmake ../seed \
-    -DCMAKE_TOOLCHAIN_FILE=../seed/cmake/toolchains/freebsd-x86_64.cmake \
+    -DCMAKE_TOOLCHAIN_FILE=../src/compiler_seed/cmake/toolchains/freebsd-x86_64.cmake \
     -DCMAKE_BUILD_TYPE=Release
 
 make -j$(nproc)
@@ -574,7 +574,7 @@ scp file.txt freebsd-vm:/tmp/
 
 **System headers:**
 - FreeBSD requires `#define __BSD_VISIBLE 1` for POSIX extensions
-- Handled by `seed/platform/platform_freebsd.h`
+- Handled by `src/compiler_seed/platform/platform_freebsd.h`
 
 **Linking:**
 - FreeBSD uses `lld` (LLVM linker) by default
@@ -685,7 +685,7 @@ service sshd start
 
 ### Bootstrap Fails on FreeBSD
 
-**Symptom:** `bootstrap-from-scratch-freebsd.sh` fails at Step 1/3
+**Symptom:** `bootstrap-from-scratch.sh --target=freebsd-x86_64` fails at Step 1/3
 
 **Checks:**
 
@@ -702,7 +702,7 @@ gmake --version
 df -h
 
 # 4. Re-run with verbose
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --verbose
 ```
 
 **Common errors:**
@@ -741,10 +741,10 @@ pkg install linux-c7
 
 - **VM Setup:** `scripts/setup_freebsd_vm.spl`
 - **FreeBSD Test:** `scripts/test_freebsd_qemu.spl`
-- **Bootstrap:** `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
+- **Bootstrap:** `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 - **VM Manager:** `src/app/vm/qemu_manager.spl`
-- **Toolchain:** `seed/cmake/toolchains/freebsd-x86_64.cmake`
-- **Platform Header:** `seed/platform/platform_freebsd.h`
+- **Toolchain:** `src/compiler_seed/cmake/toolchains/freebsd-x86_64.cmake`
+- **Platform Header:** `src/compiler_seed/platform/platform_freebsd.h`
 
 ### External Documentation
 
@@ -774,7 +774,7 @@ bin/release/simple scripts/test_freebsd_qemu.spl
 pkg install cmake llvm gmake git
 
 # 2. Bootstrap
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # 3. Verify
 bin/simple --version

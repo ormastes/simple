@@ -66,7 +66,7 @@ args.push(Argument { name, value });
 
 ### 3. Stdlib Module Updates
 
-**File Modified:** `simple/std_lib/src/core/decorators.spl` (8 changes)
+**File Modified:** `simple/std_lib/src/compiler_core/decorators.spl` (8 changes)
 
 Updated all 4 decorator classes:
 - `*args` → `args...` in parameters (4 occurrences)

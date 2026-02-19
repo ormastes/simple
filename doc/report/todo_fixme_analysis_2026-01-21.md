@@ -122,7 +122,7 @@ These are in scaffolding tools and don't affect production code.
 ---
 
 ### 4. Response Body Handling (1 item)
-- **Files:** `src/lib/std/src/core/net/http_client.spl:104`
+- **Files:** `src/lib/std/src/compiler_core/net/http_client.spl:104`
 - **Issue:** HTTP response body capture not fully implemented
 - **Current:** Stub that returns empty response
 - **Effort:** Low-Medium once HttpClient is mature

@@ -10,7 +10,7 @@
 
 ### 1. Math Module ⭐⭐⭐
 **Status:** ✅ FULLY IMPLEMENTED
-**Implementation:** `src/lib/std/src/core/math.spl` (308 lines, 44 exports)
+**Implementation:** `src/lib/std/src/compiler_core/math.spl` (308 lines, 44 exports)
 **Skipped Tests:** 29
 **Effort:** Low (tests only, ~2 hours)
 
@@ -38,7 +38,7 @@
 
 ### 2. Random Module ⭐⭐
 **Status:** ✅ FULLY IMPLEMENTED
-**Implementation:** `src/lib/std/src/core/random.spl` (271 lines, 16 exports)
+**Implementation:** `src/lib/std/src/compiler_core/random.spl` (271 lines, 16 exports)
 **Skipped Tests:** 12
 **Effort:** Low (tests only, ~1.5 hours)
 
@@ -59,7 +59,7 @@
 
 ### 3. Synchronization Module ⭐
 **Status:** ✅ FULLY IMPLEMENTED
-**Implementation:** `src/lib/std/src/core/synchronization.spl` (324 lines)
+**Implementation:** `src/lib/std/src/compiler_core/synchronization.spl` (324 lines)
 **Skipped Tests:** 4
 **Effort:** Low (tests only, ~1 hour)
 
@@ -79,7 +79,7 @@
 
 ### 4. Regex Module ✅
 **Status:** ✅ FULLY IMPLEMENTED
-**Implementation:** `src/lib/std/src/core/regex.spl` (1400 lines, 25 exports)
+**Implementation:** `src/lib/std/src/compiler_core/regex.spl` (1400 lines, 25 exports)
 **Skipped Tests:** 1 (overlapping matches)
 **Effort:** Very Low (~15 minutes)
 
@@ -92,7 +92,7 @@
 
 ### 5. Decorators Module ⭐
 **Status:** 🟡 PARTIAL
-**Implementation:** `src/lib/std/src/core/decorators.spl` (261 lines, partial)
+**Implementation:** `src/lib/std/src/compiler_core/decorators.spl` (261 lines, partial)
 **Skipped Tests:** 10
 **Effort:** Medium (~3-4 hours - complete implementation + tests)
 
@@ -114,13 +114,13 @@
 
 ### 6. Context Module
 **Status:** 🟡 PARTIAL
-**Implementation:** `src/lib/std/src/core/context.spl` (396 lines)
+**Implementation:** `src/lib/std/src/compiler_core/context.spl` (396 lines)
 **Skipped Tests:** 7
 **Effort:** Medium (~2-3 hours)
 
 ### 7. DSL Module
 **Status:** 🟡 PARTIAL
-**Implementation:** `src/lib/std/src/core/dsl.spl` (691 lines)
+**Implementation:** `src/lib/std/src/compiler_core/dsl.spl` (691 lines)
 **Skipped Tests:** 6
 **Effort:** Medium (~2-3 hours)
 

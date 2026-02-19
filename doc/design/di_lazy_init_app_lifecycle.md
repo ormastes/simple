@@ -364,6 +364,70 @@ async function getDatabase() {
 
 ---
 
+## 9. Optional Feature Ports (SFFI Integration)
+
+The typed port pattern from CompilerServices (Feature 2) extends to optional
+SFFI features. Each optional feature has:
+
+- A **port struct** (e.g. `GpuComputePort`) with fn-fields defining the contract
+- A **noop factory** for when the feature is unavailable (safe fallback)
+- A **runtime availability check** (`*_available() -> bool` in each FFI module)
+- **Registration** in `feature_registry.spl` during `init_features()`
+
+### Port structs (`src/app/io/feature_ports.spl`)
+
+```simple
+struct GpuComputePort:
+    name: text
+    is_available_fn: fn() -> bool
+    device_count_fn: fn() -> i64
+    device_name_fn: fn(i64) -> text
+    alloc_fn: fn(i64) -> i64
+    free_fn: fn(i64) -> bool
+    sync_fn: fn() -> bool
+```
+
+### Registry (`src/app/io/feature_registry.spl`)
+
+```simple
+var _gpu = nil
+
+fn noop_gpu_port() -> GpuComputePort:
+    GpuComputePort(name: "none", is_available_fn: \: false, ...)
+
+fn gpu_port() -> GpuComputePort:
+    _gpu ?? noop_gpu_port()
+
+fn init_features():
+    if cuda_available():
+        register_gpu(make_cuda_port())
+    elif vulkan_available():
+        register_gpu(make_vulkan_port())
+```
+
+### Accessing features at call site
+
+```simple
+use app.io.{gpu_port, init_features}
+
+fn my_computation():
+    val gpu = gpu_port()
+    if gpu.is_available_fn():
+        val ptr = gpu.alloc_fn(1024)
+        # ... do GPU work ...
+        gpu.sync_fn()
+        gpu.free_fn(ptr)
+    else:
+        # fall back to CPU
+```
+
+This is the same structural pattern as `CompilerServices` (typed ports with
+fn-fields), extended to runtime I/O optional features.
+
+See: `doc/design/platform_sffi_optional_features.md` for full documentation.
+
+---
+
 ## References
 
 - [PEP 302 - New Import Hooks](https://peps.python.org/pep-0302/)

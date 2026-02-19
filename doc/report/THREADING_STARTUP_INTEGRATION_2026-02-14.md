@@ -13,7 +13,7 @@ Successfully integrated cross-platform threading initialization into the Simple 
 
 ## Changes Made
 
-### 1. Runtime Thread Header (`seed/runtime_thread.h`)
+### 1. Runtime Thread Header (`src/compiler_seed/runtime_thread.h`)
 
 **Added:** Public initialization function declaration
 ```c
@@ -29,7 +29,7 @@ void spl_thread_init(void);
 
 ---
 
-### 2. Runtime Thread Implementation (`seed/runtime_thread.c`)
+### 2. Runtime Thread Implementation (`src/compiler_seed/runtime_thread.c`)
 
 **Added:** Public initialization function implementation
 ```c
@@ -92,7 +92,7 @@ void __spl_start(int argc, char **argv, char **envp) {
 
 ### Runtime Library Rebuild
 
-**Command:** `cd seed/build && ninja`
+**Command:** `cd build/seed && ninja`
 
 **Output:**
 ```
@@ -113,14 +113,14 @@ void __spl_start(int argc, char **argv, char **envp) {
 
 **Runtime Library (`libspl_runtime.a`):**
 ```bash
-$ nm seed/build/libspl_runtime.a | grep spl_thread_init
+$ nm build/seed/libspl_runtime.a | grep spl_thread_init
 0000000000000000 T spl_thread_init
 ```
 ✅ `spl_thread_init` exported as public symbol (T = text section)
 
 **CRT Library (`libspl_crt_linux_x86_64.a`):**
 ```bash
-$ nm seed/build/startup/libspl_crt_linux_x86_64.a | grep -E "spl_thread_init|__spl_start"
+$ nm build/seed/startup/libspl_crt_linux_x86_64.a | grep -E "spl_thread_init|__spl_start"
 0000000000000050 T __spl_start
                  U spl_thread_init
 ```
@@ -219,7 +219,7 @@ void spl_thread_yield(void);
 
 1. **Rebuild Runtime Binary** (2-4 hours on CI)
    - Requires: 8GB+ RAM or GitHub Actions
-   - Command: `scripts/bootstrap-from-scratch.sh --output=bin/simple`
+   - Command: `scripts/bootstrap/bootstrap-from-scratch.sh --output=bin/simple`
    - Impact: Unlocks all 145 thread SFFI tests + 45 thread pool tests
 
 2. **Run Thread Tests**
@@ -296,8 +296,8 @@ typedef enum {
 
 | File | Lines Changed | Purpose |
 |------|--------------|---------|
-| `seed/runtime_thread.h` | +8 | Add spl_thread_init() declaration |
-| `seed/runtime_thread.c` | +9 | Implement spl_thread_init() |
+| `src/compiler_seed/runtime_thread.h` | +8 | Add spl_thread_init() declaration |
+| `src/compiler_seed/runtime_thread.c` | +9 | Implement spl_thread_init() |
 | `seed/startup/common/crt_common.h` | +3 | Declare threading init for CRT |
 | `seed/startup/common/crt_common.c` | +3 | Call spl_thread_init() at startup |
 
@@ -320,15 +320,15 @@ typedef enum {
 
 ```bash
 # Runtime provides the function
-$ nm seed/build/libspl_runtime.a | grep spl_thread_init
+$ nm build/seed/libspl_runtime.a | grep spl_thread_init
 0000000000000000 T spl_thread_init  ✅
 
 # CRT calls the function
-$ nm seed/build/startup/libspl_crt_linux_x86_64.a | grep spl_thread_init
+$ nm build/seed/startup/libspl_crt_linux_x86_64.a | grep spl_thread_init
                  U spl_thread_init  ✅
 
 # Function pointers work
-$ nm seed/build/libspl_runtime.a | grep -E "spl_thread_(create|join)"
+$ nm build/seed/libspl_runtime.a | grep -E "spl_thread_(create|join)"
 0000000000000150 T spl_thread_create  ✅
 0000000000000280 T spl_thread_join    ✅
 ```

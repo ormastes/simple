@@ -8,7 +8,7 @@ Complete FreeBSD workspace created for Simple compiler development and testing.
 
 ### 1. Bootstrap Script (NEW!)
 
-**`scripts/bootstrap-from-scratch-freebsd.sh`** (16KB)
+**`scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`** (16KB)
 - Native FreeBSD bootstrap script
 - Builds Simple from scratch on FreeBSD
 - FreeBSD-specific: uses `gmake`, `sha256`, detects FreeBSD platform
@@ -17,7 +17,7 @@ Complete FreeBSD workspace created for Simple compiler development and testing.
 **Usage:**
 ```bash
 # Inside FreeBSD VM
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 ```
 
 ---
@@ -72,8 +72,8 @@ These files were already in the project:
 - `src/app/vm/qemu_manager.spl` - VM lifecycle management
 
 **Platform Support:**
-- `seed/platform/platform_freebsd.h` - FreeBSD platform header
-- `seed/cmake/toolchains/freebsd-x86_64.cmake` - Cross-compile toolchain
+- `src/compiler_seed/platform/platform_freebsd.h` - FreeBSD platform header
+- `src/compiler_seed/cmake/toolchains/freebsd-x86_64.cmake` - Cross-compile toolchain
 - `seed/startup/freebsd/crt_freebsd.c` - FreeBSD CRT startup
 
 ---
@@ -158,7 +158,7 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # Bootstrap from scratch
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # Verify
 bin/simple --version
@@ -176,7 +176,7 @@ simple/
 ├── FREEBSD_SETUP_SUMMARY.md                 # This file (NEW!)
 │
 ├── scripts/
-│   ├── bootstrap-from-scratch-freebsd.sh    # FreeBSD bootstrap (NEW!)
+│   ├── bootstrap-from-scratch.sh --target=freebsd-x86_64    # FreeBSD bootstrap (NEW!)
 │   ├── verify_freebsd_workspace.spl         # Verification script (NEW!)
 │   ├── setup_freebsd_vm.spl                 # VM setup (existing)
 │   └── test_freebsd_qemu.spl                # FreeBSD test (existing)
@@ -215,7 +215,7 @@ simple/
 | **verify_freebsd_workspace.spl** | Check setup | `bin/release/simple scripts/verify_freebsd_workspace.spl` |
 | **setup_freebsd_vm.spl** | Setup VM | `bin/release/simple scripts/setup_freebsd_vm.spl` |
 | **test_freebsd_qemu.spl** | Test FreeBSD | `bin/release/simple scripts/test_freebsd_qemu.spl` |
-| **bootstrap-from-scratch-freebsd.sh** | Native build | `./scripts/bootstrap-from-scratch-freebsd.sh` |
+| **bootstrap-from-scratch.sh --target=freebsd-x86_64** | Native build | `./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` |
 | **start-freebsd-daemon.sh** | Start VM | `~/vms/freebsd/start-freebsd-daemon.sh` |
 
 ---
@@ -275,7 +275,7 @@ FreeBSD Workspace Verification
    ✓ QEMU found: /usr/bin/qemu-system-x86_64
 
 2. Checking FreeBSD bootstrap script...
-   ✓ Found: scripts/bootstrap-from-scratch-freebsd.sh
+   ✓ Found: scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
      ✓ Executable
 
 3. Checking VM setup script...
@@ -341,7 +341,7 @@ ssh -p 2222 root@localhost
 # Clone and bootstrap
 git clone <repo-url> simple
 cd simple
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # Expected output:
 # ========================================================

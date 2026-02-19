@@ -1,0 +1,152 @@
+# Core Simple — @must_use / R9 Must-Use Return Value Tests
+
+use compiler_core.lexer.{lex_init}
+use compiler_core.parser.{parse_module, parser_has_errors}
+use compiler_core.ast.{ast_reset}
+use compiler_core.interpreter.eval.{eval_reset, eval_module, eval_get_warnings, must_use_scan_source}
+use compiler_core.interpreter.env.{env_init}
+use compiler_core.interpreter.value.{val_reset}
+
+describe "@must_use annotation":
+    it "emits error[R9] for must_use function":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_r9 = warnings[0].contains("error[R9]")
+        expect(has_r9).to_equal(true)
+
+    it "includes function name in error":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        val has_name = warnings[0].contains("get_value")
+        expect(has_name).to_equal(true)
+
+    it "includes must be used text":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        val has_must = warnings[0].contains("must be used")
+        expect(has_must).to_equal(true)
+
+    it "includes help message":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        var has_help: bool = false
+        for w in warnings:
+            if w.contains("val _ ="): has_help = true
+        expect(has_help).to_equal(true)
+
+describe "@must_use with reason":
+    it "includes reason in note line":
+        val code = "# @must_use(\"error must be handled\")\nfn get_result() -> i64: 42\nget_result()"
+        val warnings = check_warnings(code)
+        var has_note: bool = false
+        for w in warnings:
+            if w.contains("error must be handled"): has_note = true
+        expect(has_note).to_equal(true)
+
+    it "reason appears in note prefix":
+        val code = "# @must_use(\"check this\")\nfn compute() -> i64: 1\ncompute()"
+        val warnings = check_warnings(code)
+        var has_note_prefix: bool = false
+        for w in warnings:
+            if w.starts_with("  = note:"): has_note_prefix = true
+        expect(has_note_prefix).to_equal(true)
+
+    it "no note line when no reason given":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        var has_note: bool = false
+        for w in warnings:
+            if w.starts_with("  = note:"): has_note = true
+        expect(has_note).to_equal(false)
+
+describe "@must_use suppression":
+    it "val assignment suppresses error":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nval x = get_value()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "val _ discard suppresses error":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nval _ = get_value()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "var assignment suppresses error":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nvar x = 0\nx = get_value()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "use in expression suppresses error":
+        val code = "# @must_use\nfn get_value() -> i64: 42\nval x = get_value() + 1"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_equal(0)
+
+describe "@profile(critical)":
+    it "emits error[R9] for non-void return in critical mode":
+        val code = "# @profile(critical)\nfn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_r9 = warnings[0].contains("error[R9]")
+        expect(has_r9).to_equal(true)
+
+    it "includes critical profile mention":
+        val code = "# @profile(critical)\nfn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        val has_critical = warnings[0].contains("@profile(critical)")
+        expect(has_critical).to_equal(true)
+
+    it "does not error for void functions in critical mode":
+        val code = "# @profile(critical)\nfn do_work(): print \"ok\"\ndo_work()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "val assignment suppresses critical error":
+        val code = "# @profile(critical)\nfn get_value() -> i64: 42\nval x = get_value()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_equal(0)
+
+describe "backward compatibility":
+    it "non-must_use functions still emit warning prefix":
+        val code = "fn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_equal(1)
+        val starts_warning = warnings[0].starts_with("warning:")
+        expect(starts_warning).to_equal(true)
+
+    it "non-must_use functions do not emit error[R9]":
+        val code = "fn get_value() -> i64: 42\nget_value()"
+        val warnings = check_warnings(code)
+        val has_r9 = warnings[0].contains("error[R9]")
+        expect(has_r9).to_equal(false)
+
+    it "void functions still produce no warnings":
+        val code = "fn do_work(): print \"ok\"\ndo_work()"
+        val warnings = check_warnings(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "must_use on one function does not affect others":
+        val code = "# @must_use\nfn important() -> i64: 1\nfn normal() -> i64: 2\nimportant()\nnormal()"
+        val warnings = check_warnings(code)
+        var r9_count: i64 = 0
+        var warn_count: i64 = 0
+        for w in warnings:
+            if w.contains("error[R9]"): r9_count = r9_count + 1
+            if w.starts_with("warning:"): warn_count = warn_count + 1
+        expect(r9_count).to_equal(1)
+        expect(warn_count).to_equal(1)
+
+# Helper function to parse, evaluate, and collect warnings
+fn check_warnings(code: text) -> [text]:
+    ast_reset()
+    val_reset()
+    env_init()
+    eval_reset()
+
+    must_use_scan_source(code)
+    parse_module(code, "test.spl")
+    if parser_has_errors():
+        return []
+
+    eval_module()
+
+    eval_get_warnings()

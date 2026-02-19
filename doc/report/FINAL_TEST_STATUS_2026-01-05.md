@@ -32,7 +32,7 @@ Investigated all 4 failing Simple stdlib tests. Fixed 2 with code changes, ident
 
 **Verification**:
 ```bash
-./target/release/simple simple/std_lib/test/unit/core/json_spec.spl
+./target/release/simple simple/std_lib/test/unit/compiler_core/json_spec.spl
 # 29 examples, 0 failures ✅
 ```
 

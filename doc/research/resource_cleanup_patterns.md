@@ -554,7 +554,7 @@ trait Resource:
     fn resource_name(self) -> text
 ```
 
-**Implementation:** Add to `src/lib/std/src/core/resource.spl`
+**Implementation:** Add to `src/lib/std/src/compiler_core/resource.spl`
 
 #### 0.2 Add `LeakTracked` Mixin
 
@@ -563,7 +563,7 @@ mixin LeakTracked:
     # ... as defined above
 ```
 
-**Implementation:** Add to `src/lib/std/src/core/resource.spl`
+**Implementation:** Add to `src/lib/std/src/compiler_core/resource.spl`
 
 #### 0.3 Update All Resource Types
 
@@ -723,7 +723,7 @@ warning[test_resource_leak]: Resource created in test without cleanup
 
 ### Phase 0: Resource Trait Foundation (FIRST)
 
-1. Define `Resource` trait in `src/lib/std/src/core/resource.spl`
+1. Define `Resource` trait in `src/lib/std/src/compiler_core/resource.spl`
 2. Implement `LeakTracked` mixin with allocation tracking
 3. Create `ResourceRegistry` for centralized management
 4. Update `File` to implement `Resource` with `LeakTracked`

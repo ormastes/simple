@@ -19,5 +19,5 @@ seed.cpp (C++ seed compiler)
 
 ## Notes
 
-- Shared cross-cutting modules remain in `src/compiler_shared/` and `src/llvm_shared/`.
+- Shared cross-cutting modules remain in `src/compiler_shared/` and `src/shared/llvm/`.
 - Legacy desugared-core tooling notes are historical and should not be used as the primary build path.

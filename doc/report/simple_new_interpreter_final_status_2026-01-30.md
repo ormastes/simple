@@ -91,8 +91,8 @@ class CachedFunction:
 3. No working examples of variadic forwarding exist in the codebase
 
 **Evidence:**
-- DynamicProxy (src/lib/std/src/core/dsl.spl) works with fixed parameters: `handler(name, args)`
-- Iterators (src/lib/std/src/core/iter.spl) work with fixed parameters: `predicate(item)`
+- DynamicProxy (src/lib/std/src/compiler_core/dsl.spl) works with fixed parameters: `handler(name, args)`
+- Iterators (src/lib/std/src/compiler_core/iter.spl) work with fixed parameters: `predicate(item)`
 - Only decorators.spl attempts variadic forwarding - no other successful examples
 
 **Impact:** 7/7 decorator tests fail
@@ -176,13 +176,13 @@ Both runners show **identical behavior** (perfect consistency):
 
 ### Core Library Fixes
 
-1. **src/lib/std/src/core/random.spl**
+1. **src/lib/std/src/compiler_core/random.spl**
    - Line 5: Changed import to `use core.math.{sqrt, log, cos, PI}`
    - Lines 35-47: Added `pub fn` to all exported functions
    - Lines 108, 119: Changed qualified to direct calls (gauss, expovariate)
    - Added local sqrt implementation to avoid abs conflict
 
-2. **src/lib/std/src/core/decorators.spl**
+2. **src/lib/std/src/compiler_core/decorators.spl**
    - Lines 24, 30, 46: Changed CachedFunction methods `fn` → `me`
    - Line 83: Changed LoggedFunction.__init__ `fn` → `me`
    - Lines 117, 123: Changed DeprecatedFunction methods `fn` → `me`

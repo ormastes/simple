@@ -4,11 +4,11 @@ This guide is the quick bootstrap reference for the current repository layout.
 
 ## Current Layout
 
-- Core sources: `src/core/`
+- Core sources: `src/compiler_core/`
 - Full compiler sources: `src/compiler/`
 - Bootstrap scripts: `scripts/bootstrap/`
 
-`src/compiler_core/` is retired. Bootstrap and docs should use `src/compiler/`.
+`src/compiler_core_legacy/` is retired. Bootstrap and docs should use `src/compiler/`.
 
 ## Bootstrap Pipeline
 
@@ -24,7 +24,7 @@ See detailed pipeline: `doc/build/bootstrap_pipeline.md`.
 
 Frontend logic is shared, not duplicated:
 
-- Core frontend runner: `src/core/frontend.spl`
+- Core frontend runner: `src/compiler_core/frontend.spl`
 - Full frontend runner: `src/compiler/frontend.spl`
 
 Core compiler/interpreter and full compiler paths must call these shared entrypoints.
@@ -42,8 +42,8 @@ Trailing `:` is also accepted (`#if linux:`, `#else:`), matching Simple block st
 
 Common conditions:
 
-- OS: `win`, `windows`, `linux`, `macos`, `freebsd`
-- CPU/arch: `x86_64`, `aarch64`, `riscv64`
+- OS: `win`, `windows`, `linux`, `mac`, `macos`, `darwin`, `freebsd`, `openbsd`, `netbsd`, `android`, `unix`
+- CPU/arch: `x86_64`, `x86`, `aarch64`, `arm`, `riscv64`, `riscv32`, `ppc64le`
 - Key/value: `os=linux`, `arch=x86_64`, `cpu=arm64`
 
 Override target detection during bootstrap with:
@@ -56,6 +56,9 @@ Full compiler frontend also uses the same core conditional preprocessing path
 (`src/compiler/frontend.spl` -> `core.parser.preprocess_conditionals`) so
 `#if/#elif/#else/#endif` behavior is consistent across core and full runs.
 
+OpenBSD/NetBSD currently share the POSIX runtime path and use the FreeBSD
+startup CRT path in seed bootstrap (Tier 2 support).
+
 ## Quick Commands
 
 Linux/macOS full bootstrap:
@@ -67,7 +70,7 @@ Linux/macOS full bootstrap:
 FreeBSD native bootstrap:
 
 ```bash
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 ```
 
 Windows bootstrap:
@@ -76,24 +79,22 @@ Windows bootstrap:
 scripts\bootstrap\bootstrap-from-scratch.bat
 ```
 
-Multi-phase bootstrap:
+QEMU FreeBSD bootstrap wrapper:
 
 ```bash
-bin/simple scripts/bootstrap/bootstrap-multiphase.spl
+./scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --step=full2 --deploy
 ```
 
 ## Script Map
 
 - `scripts/bootstrap/bootstrap-from-scratch.sh`: end-to-end bootstrap
-- `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`: native FreeBSD flow
+- `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`: FreeBSD target flow
 - `scripts/bootstrap/bootstrap-from-scratch.bat`: Windows flow
-- `scripts/bootstrap/bootstrap-multiphase.spl`: multi-phase bootstrap runner
-- `scripts/bootstrap/bootstrap-minimal.sh`: minimal bootstrap path
-- `scripts/bootstrap/bootstrap-core-only.sh`: core-only path
+- `scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh`: QEMU FreeBSD environment wrapper
 
 ## Expected Output
 
-- Final binary: `bin/simple`
+- Final binary: `bin/release/simple`
 - Intermediate artifacts: `build/bootstrap/`
 
 ## Related Docs

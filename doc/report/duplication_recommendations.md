@@ -10,7 +10,7 @@
 ### ✅ Completed Work
 
 1. **Phase 3: Documentation** (2026-02-11)
-   - Created `src/compiler/README.md` and `src/compiler_core/README.md`
+   - Created `src/compiler/README.md` and `src/compiler_core_legacy/README.md`
    - Documented ~15K lines of intentional duplication (bootstrap requirement)
    - Updated `DUPLICATION_CLEANUP_COMPLETE.md` with Phase 4 history
 
@@ -26,7 +26,7 @@
 
 2. **Phase 2: Type Mapper Abstraction**
    - Decision: Skipped due to bootstrap constraints
-   - Rationale: Would break compiler/ ↔ compiler_core/ separation
+   - Rationale: Would break compiler/ ↔ compiler_core_legacy/ separation
 
 ---
 
@@ -212,20 +212,20 @@ trait ISA:
 
 6. **Automated Desugaring**
    - Complete the desugaring pipeline
-   - Eliminate compiler/ ↔ compiler_core/ duplication
+   - Eliminate compiler/ ↔ compiler_core_legacy/ duplication
    - Massive impact (~15K lines), requires full bootstrap redesign
 
 ---
 
 ## Duplication That Should NOT Be Removed
 
-### 1. **compiler/ vs compiler_core/** (~15K lines)
+### 1. **compiler/ vs compiler_core_legacy/** (~15K lines)
 - **Why:** Bootstrap requirement (Full Simple vs Core Simple)
 - **Status:** Documented in READMEs (2026-02-11)
 
 ### 2. **Type Mappers** (6 files, ~1.5K lines)
 - **Why:** Backend-specific type representations
-- **Status:** Part of intentional compiler/compiler_core split
+- **Status:** Part of intentional compiler/compiler_core_legacy split
 
 ### 3. **Test Fixtures** (various)
 - **Why:** Explicit test scenarios for different edge cases
@@ -236,7 +236,7 @@ trait ISA:
 ## Metrics
 
 ### Current Duplication Estimate
-- **Intentional (documented):** ~15,000 lines (compiler/compiler_core)
+- **Intentional (documented):** ~15,000 lines (compiler/compiler_core_legacy)
 - **Phase files (development):** ~12,000 lines
 - **Validators (structural):** ~2,000 lines
 - **Builders (pattern):** ~500 lines
@@ -278,4 +278,4 @@ The codebase has been cleaned of trivial duplications (test files) and intention
 - Preventing new trivial duplications (pre-commit hooks)
 - Addressing phase file consolidation as a separate low-priority task
 
-Future work should focus on completing the desugaring pipeline to eliminate the ~15K lines of compiler/compiler_core duplication automatically.
+Future work should focus on completing the desugaring pipeline to eliminate the ~15K lines of compiler/compiler_core_legacy duplication automatically.

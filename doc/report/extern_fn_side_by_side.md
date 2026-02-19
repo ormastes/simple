@@ -158,13 +158,13 @@ val content = rt_file_read_text("/tmp/test.txt")
 
 If you only want to copy-paste the changes:
 
-**File 1:** `src/core/interpreter/eval.spl`
+**File 1:** `src/compiler_core/interpreter/eval.spl`
 ```simple
 # INSERT after line 1769:
             func_table_register(d_node.name, did)
 ```
 
-**File 2:** `src/core/interpreter/module_loader.spl`
+**File 2:** `src/compiler_core/interpreter/module_loader.spl`
 ```simple
 # INSERT after line 217:
             func_table_register(name, did)
@@ -178,8 +178,8 @@ If you only want to copy-paste the changes:
 
 ```bash
 # Apply fixes
-edit src/core/interpreter/eval.spl  # Add line 1770
-edit src/core/interpreter/module_loader.spl  # Add line 218
+edit src/compiler_core/interpreter/eval.spl  # Add line 1770
+edit src/compiler_core/interpreter/module_loader.spl  # Add line 218
 
 # Rebuild
 bin/simple build

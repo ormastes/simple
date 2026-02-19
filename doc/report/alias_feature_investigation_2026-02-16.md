@@ -62,11 +62,11 @@ When trying to use `fn parse_i64 = parse_i64_safe`, the **runtime parser** (used
 ### 4. Core Parser Has No Implementation
 
 ```bash
-$ grep -rn "FunctionAlias" src/core/
+$ grep -rn "FunctionAlias" src/compiler_core/
 # (no results)
 ```
 
-The core/runtime parser (`src/core/parser.spl`) doesn't know about function aliases.
+The core/runtime parser (`src/compiler_core/parser.spl`) doesn't know about function aliases.
 
 ---
 
@@ -117,7 +117,7 @@ This works for whole-module re-exports.
 
 To make `fn name = target` work:
 
-1. **Core parser update** (`src/core/parser.spl`)
+1. **Core parser update** (`src/compiler_core/parser.spl`)
    - Add function alias parsing after `TokenKind.Fn`
    - Check for `=` instead of `(`
 

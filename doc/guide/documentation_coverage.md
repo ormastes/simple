@@ -356,7 +356,7 @@ By Module:
 Missing Documentation (37 items):
   src/std/array.spl:chunk_by
   src/std/text.spl:levenshtein
-  src/core/parser.spl:parse_match_arm
+  src/compiler_core/parser.spl:parse_match_arm
   ...
 ```
 

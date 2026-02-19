@@ -394,7 +394,7 @@ Categories:
 
 | Component | File |
 |-----------|------|
-| CoreBackendKind (Vhdl variant) | `src/core/backend_types.spl` |
+| CoreBackendKind (Vhdl variant) | `src/compiler_core/backend_types.spl` |
 | BackendKind (Vhdl variant) | `src/compiler/backend/backend_types.spl` |
 | Backend helpers (vhdl name) | `src/compiler/backend/backend_helpers.spl` |
 | Backend factory (Vhdl case) | `src/compiler/backend/backend_factory.spl` |

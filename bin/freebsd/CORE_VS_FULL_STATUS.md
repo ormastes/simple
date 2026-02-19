@@ -63,7 +63,7 @@
 
 | Approach | Status | Result |
 |----------|--------|--------|
-| Use native.spl to generate C | ❌ Failed | Doesn't support compiler_core features |
+| Use native.spl to generate C | ❌ Failed | Doesn't support compiler_core_legacy features |
 | Cross-compile with seed_cpp | ❌ Failed | Segfaults on 411 files |
 | Native C backend | ❌ Failed | Missing advanced feature support |
 

@@ -49,7 +49,7 @@ When Simple code is compiled or interpreted, the compiler/interpreter does NOT i
 ### Test Results
 
 ```bash
-$ bin/simple test test/unit/core/ --coverage
+$ bin/simple test test/unit/compiler_core/ --coverage
 
 Decision coverage: 0% (0/0 decisions)
 Condition coverage: 0% (0/0 conditions)
@@ -105,7 +105,7 @@ if (evaluate(condition)) {
 
 ### Why Interpreter Mode Doesn't Work
 
-The interpreter (`src/core/interpreter/eval.spl`) evaluates AST nodes but doesn't call coverage functions:
+The interpreter (`src/compiler_core/interpreter/eval.spl`) evaluates AST nodes but doesn't call coverage functions:
 
 **Current `eval_if_expr` function:**
 ```simple
@@ -181,7 +181,7 @@ Writing diverse Simple tests improves seed compiler coverage by exercising diffe
    ```
 
 2. **Write targeted tests**
-   - Create `test/unit/core/branch_coverage_26_spec.spl` and beyond
+   - Create `test/unit/compiler_core/branch_coverage_26_spec.spl` and beyond
    - Focus on error cases, edge inputs, rare constructs
    - Test parser edge cases (deeply nested, malformed input)
    - Test expression evaluation corner cases
@@ -223,7 +223,7 @@ if temp_cond:
 
 #### 2.2 Interpreter Instrumentation
 
-**File:** `src/core/interpreter/eval.spl`
+**File:** `src/compiler_core/interpreter/eval.spl`
 
 Modify evaluation functions:
 - `eval_if_expr` - Record which branch taken
@@ -267,13 +267,13 @@ Need to track source locations for AST nodes:
 
 1. **Test interpreter coverage**
    ```bash
-   bin/simple test test/unit/core/ --coverage
+   bin/simple test test/unit/compiler_core/ --coverage
    # Should show >0% coverage
    ```
 
 2. **Test compiled coverage**
    ```bash
-   bin/simple test test/unit/core/ --mode smf --coverage
+   bin/simple test test/unit/compiler_core/ --mode smf --coverage
    # Should show coverage for test code
    ```
 
@@ -299,7 +299,7 @@ Focus on improving seed.cpp coverage by writing tests for uncovered paths:
 
 ```bash
 # Create new branch coverage test
-cat > test/unit/core/branch_coverage_26_spec.spl <<'EOF'
+cat > test/unit/compiler_core/branch_coverage_26_spec.spl <<'EOF'
 """
 # Branch Coverage - Parser Edge Cases
 

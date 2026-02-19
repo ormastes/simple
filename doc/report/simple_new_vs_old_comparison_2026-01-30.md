@@ -37,7 +37,7 @@ Both runners show the **same 2 failing tests**:
 
 **Root Cause:** The `use core.math` import at module level doesn't make `math` available as a variable reference inside functions.
 
-**Location:** `src/lib/std/src/core/random.spl` lines 100-119
+**Location:** `src/lib/std/src/compiler_core/random.spl` lines 100-119
 
 ---
 

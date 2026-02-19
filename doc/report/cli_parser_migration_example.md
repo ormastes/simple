@@ -53,7 +53,7 @@ fn run_notify_test(args: [text]):
 ### After (Using cli_parser - 35 lines)
 
 ```simple
-use app.cli_parser.{cli_spec, cli_spec_option, cli_spec_flag, parse_cli_args, parsed_option, parsed_flag}
+use lib.cli.cli_parser.{cli_spec, cli_spec_option, cli_spec_flag, parse_cli_args, parsed_option, parsed_flag}
 
 fn run_notify_test(args: [text]):
     print "{NL}=== C1 Notification Testing ==={NL}"
@@ -141,7 +141,7 @@ fn handle_rust_test(args: [text]) -> i64:
 ### After (Using cli_parser - 25 lines)
 
 ```simple
-use app.cli_parser.{cli_spec, cli_spec_flag, cli_spec_option, cli_spec_positional, parse_cli_args, parsed_flag, parsed_option, parsed_positional}
+use lib.cli.cli_parser.{cli_spec, cli_spec_flag, cli_spec_option, cli_spec_positional, parse_cli_args, parsed_flag, parsed_option, parsed_positional}
 
 fn handle_rust_test(args: [text]) -> i64:
     val spec = cli_spec()
@@ -208,7 +208,7 @@ fn run_compare(args: [text]):
 ### After (Using cli_parser - 22 lines)
 
 ```simple
-use app.cli_parser.{cli_spec, cli_spec_option, parse_cli_args, parsed_option, validate_args, print_help}
+use lib.cli.cli_parser.{cli_spec, cli_spec_option, parse_cli_args, parsed_option, validate_args, print_help}
 
 fn run_compare(args: [text]):
     print "{NL}=== C3 Comparative Analysis ==={NL}"
@@ -301,7 +301,7 @@ fn handle_baremetal_build(args: [text]) -> i64:
 ### After (Using cli_parser - 38 lines)
 
 ```simple
-use app.cli_parser.*
+use lib.cli.cli_parser.*
 
 fn handle_baremetal_build(args: [text]) -> i64:
     val spec = cli_spec()

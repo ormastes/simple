@@ -28,7 +28,7 @@ Completed Phase 1 cleanup tasks and integrated the bug database with the optimiz
 
 ## Task 2: Deleted Interpreter References (COMPLETED)
 
-**Problem:** 8 TODOs in `src/shared/` referenced deleted `src/app/interpreter/` module (migrated to `src/core/interpreter/` on 2026-02-10).
+**Problem:** 8 TODOs in `src/shared/` referenced deleted `src/app/interpreter/` module (migrated to `src/compiler_core/interpreter/` on 2026-02-10).
 
 **Files updated:**
 1. `src/shared/mod.spl` - Updated module comment
@@ -38,7 +38,7 @@ Completed Phase 1 cleanup tasks and integrated the bug database with the optimiz
 5. `src/shared/errors.spl` - Updated comment line 8
 
 **Changes:**
-- `src/app/interpreter/` → `src/core/interpreter/`
+- `src/app/interpreter/` → `src/compiler_core/interpreter/`
 - All references now point to correct module location
 
 **Outcome:** Documentation accurately reflects current architecture.

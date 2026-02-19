@@ -23,7 +23,7 @@ This document analyzes the proposed SDN Table, TQL, and Statistics specification
 | Database Schema | Complete | `src/db/src/schema.rs` | Column introspection |
 | Query DSL (SQP) | Complete | `src/sqp/` | Type-safe query builder |
 | Tensor Statistics | Complete | `simple/std_lib/src/ml/torch/tensor_class.spl` | mean, std, var, min, max, norm |
-| Basic Math | Complete | `simple/std_lib/src/core/math.spl` | 265 lines, trig/log/exp |
+| Basic Math | Complete | `simple/std_lib/src/compiler_core/math.spl` | 265 lines, trig/log/exp |
 
 ### 1.2 What's Missing
 

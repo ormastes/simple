@@ -43,8 +43,8 @@ Placeholder tests awaiting language feature implementation:
 - `vulkan/layout.spl` (1 item) - Layout algorithm
 
 #### Compiler/Parser (11 items)
-- `watch.spl` (3 items) - File watching, formatting, linting
-- `build.spl` (1 item) - File watching
+- `watch.spl` (3 items) - File watching, formatting, linting *(old `src/watch.spl` deleted 2026-02-19; see `src/app/watch/main.spl`)*
+- `build.spl` (1 item) - File watching *(old `src/build.spl` deleted 2026-02-19; see `src/app/build/main.spl`)*
 - `parser/treesitter/` (4 items) - Sibling/parent navigation, grammar loading
 - `mode_config_parser.spl` (3 items) - SDN/TOML/attribute parsing
 

@@ -53,8 +53,8 @@ The lexer correctly handles newlines after migrating from `NL` to `_NL`.
 | File | Change | Lines | Status |
 |------|--------|-------|--------|
 | `src/std/text.spl` | Distinguished `_NL` vs `NL` | 5 | ✅ Working |
-| `src/core/lexer_struct.spl` | `NL` → `_NL` (9 occurrences) | 9 | ✅ Working |
-| `src/core/lexer.spl` | `NL` → `_NL` (9 occurrences) | 9 | ✅ Working |
+| `src/compiler_core/lexer_struct.spl` | `NL` → `_NL` (9 occurrences) | 9 | ✅ Working |
+| `src/compiler_core/lexer.spl` | `NL` → `_NL` (9 occurrences) | 9 | ✅ Working |
 
 **Total changes:** 23 lines across 3 files
 

@@ -24,9 +24,9 @@ Result: Promise(callbacks: [], state: PromiseState::Resolved(42))
 5. ✅ Created comprehensive documentation
 
 ### Files Modified
-- src/core/ast.spl - Async AST support
-- src/core/parser.spl - Async parsing
-- src/core/interpreter/eval.spl - Async evaluators
+- src/compiler_core/ast.spl - Async AST support
+- src/compiler_core/parser.spl - Async parsing
+- src/compiler_core/interpreter/eval.spl - Async evaluators
 
 ### Files Discovered
 - src/compiler/desugar_async.spl - 420 lines (complete)

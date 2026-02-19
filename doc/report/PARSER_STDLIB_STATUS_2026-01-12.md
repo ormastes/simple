@@ -326,9 +326,9 @@ fn slice(start: usize, end: usize) -> Slice<T>:
 - `src/compiler/src/macro_contracts.rs`
 
 **Stdlib:**
-- `simple/std_lib/src/core/option.spl`
-- `simple/std_lib/src/core/list.spl`
-- `simple/std_lib/src/core/result.spl`
+- `simple/std_lib/src/compiler_core/option.spl`
+- `simple/std_lib/src/compiler_core/list.spl`
+- `simple/std_lib/src/compiler_core/result.spl`
 
 ---
 

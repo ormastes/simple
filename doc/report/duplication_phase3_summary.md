@@ -12,13 +12,13 @@
 Created comprehensive documentation explaining intentional duplications in the codebase:
 
 #### 1. **src/compiler/README.md** (NEW)
-- Explains why `compiler/` and `compiler_core/` contain duplicated code
+- Explains why `compiler/` and `compiler_core_legacy/` contain duplicated code
 - Documents Full Simple vs Core Simple architectural decision
 - Details bootstrap process: seed.cpp → Core Simple → Full Simple → self-hosting
 - Lists type mapper files in both directories
 - ~51 lines
 
-#### 2. **src/compiler_core/README.md** (NEW)
+#### 2. **src/compiler_core_legacy/README.md** (NEW)
 - Documents Core Simple constraints (no generics, traits, closures, etc.)
 - Shows transformation examples: Full Simple → Core Simple desugaring
 - Explains bootstrap role as first stage compiler
@@ -71,7 +71,7 @@ When Phase 1 attempted to remove these files:
 
 **Files Changed:**
 1. `src/compiler/README.md` - Added (+51 lines)
-2. `src/compiler_core/README.md` - Added (+75 lines)
+2. `src/compiler_core_legacy/README.md` - Added (+75 lines)
 3. `DUPLICATION_CLEANUP_COMPLETE.md` - Modified (+70 lines)
 4. `doc/test/test_db.sdn` - Auto-updated by test system
 
@@ -87,9 +87,9 @@ When Phase 1 attempted to remove these files:
 
 **Decision:** Skipped Phase 2 for the following reasons:
 
-1. **Bootstrap Constraint:** Type mappers exist in both `compiler/` and `compiler_core/` directories
+1. **Bootstrap Constraint:** Type mappers exist in both `compiler/` and `compiler_core_legacy/` directories
    - compiler/: Uses trait implementations (Full Simple)
-   - compiler_core/: Uses module-level functions (Core Simple)
+   - compiler_core_legacy/: Uses module-level functions (Core Simple)
    - Merging would break bootstrap process
 
 2. **Intentional Duplication:** The duplication is architectural, not accidental
@@ -136,7 +136,7 @@ git ls-files test/app_extended/ | grep "_advanced_spec\|_edge_spec" | wc -l
 ## Success Metrics
 
 ### Documentation Goals ✅
-- ✅ Explained compiler/ vs compiler_core/ duplication (bootstrap requirement)
+- ✅ Explained compiler/ vs compiler_core_legacy/ duplication (bootstrap requirement)
 - ✅ Documented Core Simple constraints and transformation rules
 - ✅ Updated cleanup history with Phase 4 details
 - ✅ Prevent future confusion about intentional duplications
@@ -167,7 +167,7 @@ git ls-files test/app_extended/ | grep "_advanced_spec\|_edge_spec" | wc -l
    - Large files with >80% similarity
 
 3. **Bootstrap Automation:** When desugaring pipeline is complete:
-   - Automatically transform compiler/ → compiler_core/
+   - Automatically transform compiler/ → compiler_core_legacy/
    - Eliminate ~15K lines of manual duplication
    - Single source of truth for compiler implementation
 

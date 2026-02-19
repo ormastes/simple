@@ -11,10 +11,10 @@
 ### Runtime Additions (C Code)
 
 **Files Modified:**
-- `seed/runtime.h` - Added function declarations
-- `seed/platform/unix_common.h` - Implemented Unix/POSIX versions
-- `seed/platform/platform_win.h` - Added Windows stubs
-- `seed/runtime.c` - Added `rt_file_copy` implementation
+- `src/compiler_seed/runtime.h` - Added function declarations
+- `src/compiler_seed/platform/unix_common.h` - Implemented Unix/POSIX versions
+- `src/compiler_seed/platform/platform_win.h` - Added Windows stubs
+- `src/compiler_seed/runtime.c` - Added `rt_file_copy` implementation
 
 **Functions Added:**
 1. `rt_dir_create(path, recursive)` - Create directories with optional recursive mode
@@ -221,10 +221,10 @@ Each requires:
 ## Files Changed
 
 ```
-seed/runtime.h                          +4 declarations
-seed/runtime.c                          +25 lines (rt_file_copy)
-seed/platform/unix_common.h             +115 lines (dir functions)
-seed/platform/platform_win.h            +20 lines (stubs)
+src/compiler_seed/runtime.h                          +4 declarations
+src/compiler_seed/runtime.c                          +25 lines (rt_file_copy)
+src/compiler_seed/platform/unix_common.h             +115 lines (dir functions)
+src/compiler_seed/platform/platform_win.h            +20 lines (stubs)
 src/app/io/dir_ops.spl                  -12 shell calls
 src/app/io/file_ops.spl                 -35 shell calls
 test/system/io/native_ops_spec.spl      +68 lines (new)

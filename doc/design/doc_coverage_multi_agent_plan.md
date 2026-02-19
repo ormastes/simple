@@ -178,7 +178,7 @@ Functions:
 ```
 Example output:
 warning[doc-missing]: missing documentation for function `parse_expr`
-  --> src/core/parser.spl:145
+  --> src/compiler_core/parser.spl:145
   |
 145| fn parse_expr():
   |    ^^^^^^^^^^

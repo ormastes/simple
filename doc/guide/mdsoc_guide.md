@@ -112,7 +112,7 @@ Carets define aspect roots with different directory layouts:
 ```sdn
 roots:
   - name: core
-    path: src/core/       # Business logic
+    path: src/compiler_core/       # Business logic
 
   - name: ui
     path: src/ui/         # User interface
@@ -560,7 +560,7 @@ src/
 ```sdn
 roots:
   - name: core
-    path: src/core/
+    path: src/compiler_core/
 
   - name: posix
     path: src/posix/
@@ -592,7 +592,7 @@ dimension:
 ### Surface Composition
 
 ```simple
-# src/core/platform/filesystem/__init__.spl
+# src/compiler_core/platform/filesystem/__init__.spl
 
 use filesystem.interface.{FileSystem}
 

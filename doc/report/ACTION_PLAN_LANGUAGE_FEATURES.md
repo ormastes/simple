@@ -9,7 +9,7 @@
 All requested features have **complete implementations** with **comprehensive test coverage**:
 
 ### 1. ✅ Multiline Boolean Expressions (Parentheses)
-- **Implementation:** `src/core/lexer.spl` - paren depth tracking
+- **Implementation:** `src/compiler_core/lexer.spl` - paren depth tracking
 - **Tests:** `test/unit/parser/multiline_bool_spec.spl` - 18 tests
 - **Status:** PRODUCTION READY
 - **Usage:**
@@ -21,7 +21,7 @@ All requested features have **complete implementations** with **comprehensive te
   ```
 
 ### 2. ✅ Closure Capture Warnings
-- **Implementation:** `src/core/closure_analysis.spl` (187 lines)
+- **Implementation:** `src/compiler_core/closure_analysis.spl` (187 lines)
 - **Tests:** `test/unit/compiler/closure_capture_warning_spec.spl` - 22 tests
 - **Status:** PRODUCTION READY
 - **API:**
@@ -32,8 +32,8 @@ All requested features have **complete implementations** with **comprehensive te
   ```
 
 ### 3. ✅ Ignored Return Value Warnings
-- **Implementation:** `src/core/interpreter/eval.spl`
-- **Tests:** `test/unit/core/ignored_return_warning_spec.spl` - 18 tests
+- **Implementation:** `src/compiler_core/interpreter/eval.spl`
+- **Tests:** `test/unit/compiler_core/ignored_return_warning_spec.spl` - 18 tests
 - **Status:** PRODUCTION READY
 - **API:**
   ```simple
@@ -49,8 +49,8 @@ All requested features have **complete implementations** with **comprehensive te
 - **Finding:** Module closures work; only nested function closures are limited
 
 ### 5. ✅ Generic Syntax Parser
-- **Implementation:** `src/core/parser.spl`
-- **Tests:** `test/unit/core/generic_syntax_spec.spl` - 30 tests
+- **Implementation:** `src/compiler_core/parser.spl`
+- **Tests:** `test/unit/compiler_core/generic_syntax_spec.spl` - 30 tests
 - **Status:** PRODUCTION READY (parsing only, type checking is future work)
 - **Examples:**
   ```simple
@@ -165,16 +165,16 @@ If you want enhancements:
 ## Files to Review
 
 ### Implementation
-- `src/core/closure_analysis.spl` - Closure warning system
-- `src/core/interpreter/eval.spl` - Return value tracking
-- `src/core/parser.spl` - Generic syntax parsing
-- `src/core/lexer.spl` - Parenthesis depth tracking
+- `src/compiler_core/closure_analysis.spl` - Closure warning system
+- `src/compiler_core/interpreter/eval.spl` - Return value tracking
+- `src/compiler_core/parser.spl` - Generic syntax parsing
+- `src/compiler_core/lexer.spl` - Parenthesis depth tracking
 
 ### Tests
 - `test/unit/compiler/closure_capture_warning_spec.spl`
-- `test/unit/core/ignored_return_warning_spec.spl`
+- `test/unit/compiler_core/ignored_return_warning_spec.spl`
 - `test/unit/runtime/module_closure_spec.spl`
-- `test/unit/core/generic_syntax_spec.spl`
+- `test/unit/compiler_core/generic_syntax_spec.spl`
 - `test/unit/parser/multiline_bool_spec.spl`
 
 ### Documentation

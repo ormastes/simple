@@ -13,7 +13,7 @@
 ## Guiding Constraints
 
 1. **Zero regressions** — All 4,067 tests must pass after each phase.
-2. **Seed compatibility** — `src/core/entity/` types must remain seed-compilable.
+2. **Seed compatibility** — `src/compiler_core/entity/` types must remain seed-compilable.
 3. **Incremental** — Symlink shims keep old paths alive during migration.
 4. **Smallest delta** — One phase = one PR/commit; each individually reversible.
 
@@ -21,7 +21,7 @@
 
 ## Phase 1: Entity Dimension — Extract IR Types
 
-**Goal:** Create `src/core/entity/` as the stable domain of the compiler.
+**Goal:** Create `src/compiler_core/entity/` as the stable domain of the compiler.
 No logic changes — pure file reorganization.
 
 ### 1a. Token Entity
@@ -29,22 +29,22 @@ No logic changes — pure file reorganization.
 **Files to create:**
 
 ```
-src/core/entity/
+src/compiler_core/entity/
   token/
     __init__.spl
-    kinds.spl      ← content from src/core/tokens.spl (constants only)
-    stream.spl     ← content from src/core/lexer_struct.spl (state struct)
+    kinds.spl      ← content from src/compiler_core/tokens.spl (constants only)
+    stream.spl     ← content from src/compiler_core/lexer_struct.spl (state struct)
   __init__.spl
 ```
 
-**`src/core/entity/token/__init__.spl`:**
+**`src/compiler_core/entity/token/__init__.spl`:**
 
 ```simple
 arch {
   dimension = "entity"
   layer = "entity"
   imports {
-    allow = ["core/entity/**", "shared/**"]
+    allow = ["compiler_core/entity/**", "shared/**"]
     deny  = ["compiler/**", "feature/**"]
   }
   exports {
@@ -56,10 +56,10 @@ export ./stream.*
 ```
 
 **Migration steps:**
-1. Create `src/core/entity/token/kinds.spl` — copy token constants from `tokens.spl`
-2. Create `src/core/entity/token/stream.spl` — copy lexer structs from `lexer_struct.spl`
+1. Create `src/compiler_core/entity/token/kinds.spl` — copy token constants from `tokens.spl`
+2. Create `src/compiler_core/entity/token/stream.spl` — copy lexer structs from `lexer_struct.spl`
 3. Create `__init__.spl` configs
-4. Add symlinks: `src/core/tokens.spl → entity/token/kinds.spl`
+4. Add symlinks: `src/compiler_core/tokens.spl → entity/token/kinds.spl`
 5. Run tests — must pass
 
 ### 1b. AST Entity
@@ -67,22 +67,22 @@ export ./stream.*
 **Files to create:**
 
 ```
-src/core/entity/
+src/compiler_core/entity/
   ast/
     __init__.spl
-    arena.spl      ← parallel-array arenas from src/core/ast.spl
-    nodes.spl      ← CoreExpr/CoreStmt/CoreDecl from src/core/ast_types.spl
+    arena.spl      ← parallel-array arenas from src/compiler_core/ast.spl
+    nodes.spl      ← CoreExpr/CoreStmt/CoreDecl from src/compiler_core/ast_types.spl
     tags.spl       ← EXPR_*/STMT_*/DECL_* constants
 ```
 
-**`src/core/entity/ast/__init__.spl`:**
+**`src/compiler_core/entity/ast/__init__.spl`:**
 
 ```simple
 arch {
   dimension = "entity"
   layer = "entity"
   imports {
-    allow = ["core/entity/**", "shared/**"]
+    allow = ["compiler_core/entity/**", "shared/**"]
     deny  = ["compiler/**", "feature/**"]
   }
   exports {
@@ -94,20 +94,20 @@ arch {
 ### 1c. HIR Entity
 
 ```
-src/core/entity/
+src/compiler_core/entity/
   hir/
     __init__.spl
-    types.spl      ← CoreHirType + HIR_TYPE_* from src/core/hir_types.spl
-    symbol_table.spl ← CoreSymbolTable/Entry from src/core/hir_types.spl
+    types.spl      ← CoreHirType + HIR_TYPE_* from src/compiler_core/hir_types.spl
+    symbol_table.spl ← CoreSymbolTable/Entry from src/compiler_core/hir_types.spl
 ```
 
 ### 1d. MIR Entity
 
 ```
-src/core/entity/
+src/compiler_core/entity/
   mir/
     __init__.spl
-    inst.spl       ← CoreMirInst + MIR_* from src/core/mir_types.spl
+    inst.spl       ← CoreMirInst + MIR_* from src/compiler_core/mir_types.spl
     block.spl      ← CoreBasicBlock
     func.spl       ← CoreMirFunction
 ```
@@ -115,16 +115,16 @@ src/core/entity/
 ### 1e. Type System Entity
 
 ```
-src/core/entity/
+src/compiler_core/entity/
   types/
     __init__.spl
-    core_types.spl ← TYPE_* constants from src/core/types.spl
+    core_types.spl ← TYPE_* constants from src/compiler_core/types.spl
     generic.spl    ← Generic type representation
 ```
 
 ### Phase 1 Acceptance Criteria
 
-- [ ] `src/core/entity/` exists with all subdirectories
+- [ ] `src/compiler_core/entity/` exists with all subdirectories
 - [ ] All `__init__.spl` files have arch configs
 - [ ] Old paths still work via symlinks
 - [ ] `bin/simple test` — 4,067/4,067 passing
@@ -143,7 +143,7 @@ Isolates stages from each other.
 ```
 src/compiler/feature/lexing/
   app/
-    lexer.spl          ← thin wrapper/delegate to core/lexer.spl
+    lexer.spl          ← thin wrapper/delegate to compiler_core/lexer.spl
     ports.spl          ← LexerInputPort, LexerOutputPort
   __init__.spl
 ```
@@ -178,13 +178,13 @@ arch {
 
   imports {
     allow = [
-      "core/entity/token/**",    # Own output type
+      "compiler_core/entity/token/**",    # Own output type
       "shared/**"
     ]
     deny = [
       "compiler/feature/parsing/**",    # Stage isolation
       "compiler/feature/desugaring/**",
-      "core/entity/ast/**"              # Don't skip ahead
+      "compiler_core/entity/ast/**"              # Don't skip ahead
     ]
   }
 
@@ -201,7 +201,7 @@ arch {
 ```
 src/compiler/feature/parsing/
   app/
-    parser.spl         ← delegate to src/core/parser.spl
+    parser.spl         ← delegate to src/compiler_core/parser.spl
     ports.spl          ← ParserInputPort, ParserOutputPort
   __init__.spl
 ```
@@ -422,17 +422,17 @@ arch {
     from = "feature/type_checking"
     to   = "feature/hir_lowering"
     allow_from = [
-      "core/entity/ast/**",
-      "core/entity/types/**",
-      "core/entity/hir/**"
+      "compiler_core/entity/ast/**",
+      "compiler_core/entity/types/**",
+      "compiler_core/entity/hir/**"
     ]
   }
 
   imports {
     allow = [
-      "core/entity/ast/**",
-      "core/entity/types/**",
-      "core/entity/hir/**",
+      "compiler_core/entity/ast/**",
+      "compiler_core/entity/types/**",
+      "compiler_core/entity/hir/**",
       "shared/**"
     ]
     deny = [
@@ -463,15 +463,15 @@ arch {
     from = "feature/hir_lowering"
     to   = "feature/mir_lowering"
     allow_from = [
-      "core/entity/hir/**",
-      "core/entity/mir/**"
+      "compiler_core/entity/hir/**",
+      "compiler_core/entity/mir/**"
     ]
   }
 
   imports {
     allow = [
-      "core/entity/hir/**",
-      "core/entity/mir/**",
+      "compiler_core/entity/hir/**",
+      "compiler_core/entity/mir/**",
       "shared/**"
     ]
     deny = ["compiler/feature/**"]
@@ -493,11 +493,11 @@ arch {
   transform {
     from = "feature/mir_lowering"
     to   = "feature/codegen"
-    allow_from = ["core/entity/mir/**"]
+    allow_from = ["compiler_core/entity/mir/**"]
   }
 
   imports {
-    allow = ["core/entity/mir/**", "shared/**"]
+    allow = ["compiler_core/entity/mir/**", "shared/**"]
     deny  = ["compiler/feature/**"]
   }
 }
@@ -516,8 +516,8 @@ src/compiler/transform/feature/parsing_to_desugaring/
 **`AstDesugarView.spl`** bridges the raw AST output to desugar's source-text-first model:
 
 ```simple
-reexport core/entity/ast/arena.*
-reexport core/entity/ast/tags.*
+reexport compiler_core/entity/ast/arena.*
+reexport compiler_core/entity/ast/tags.*
 
 struct AstDesugarView:
     """
@@ -688,7 +688,7 @@ src/compiler/adapters/out/
 ```
 src/compiler/feature/codegen/backends/interpreter/
   backend.spl      ← implements BackendPort
-  evaluator.spl    ← tree-walk eval (from src/core/interpreter/eval.spl)
+  evaluator.spl    ← tree-walk eval (from src/compiler_core/interpreter/eval.spl)
   env.spl          ← scope management
   value.spl        ← runtime values
   ops.spl          ← operations

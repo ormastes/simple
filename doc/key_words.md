@@ -191,7 +191,7 @@ source -> shared lexer -> shared treesitter(CST) -> shared parser(AST/HIR)
 ```
 
 ### Current shared entrypoints (2026-02-18)
-- Core frontend runner: `src/core/frontend.spl`
+- Core frontend runner: `src/compiler_core/frontend.spl`
 - Full frontend runner: `src/compiler/frontend.spl`
 - Core consumers now call shared core frontend entrypoints:
   - `core_frontend_parse_reset`

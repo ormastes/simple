@@ -3,7 +3,7 @@
 ## Current Status
 
 ### ✅ Completed
-- **Enum/Type Alignment**: All 375 compiler_core files align with seed.cpp
+- **Enum/Type Alignment**: All 375 compiler_core_legacy files align with seed.cpp
 - **Transpilation**: Successfully generates 20,005 lines of C++
 - **Types Proof**: 3-file minimal bootstrap compiles and runs perfectly
 
@@ -40,11 +40,11 @@ cd seed/
 
 ### Phase 2: Remove Result Type Dependencies (Simple Work)
 
-**Goal**: Eliminate all Err()/Ok() usage from compiler_core
+**Goal**: Eliminate all Err()/Ok() usage from compiler_core_legacy
 
 **Current Usage**:
 - Minimal bootstrap: Already excluded via directory filters
-- Full compiler_core: Would need refactoring
+- Full compiler_core_legacy: Would need refactoring
 
 **Approach**:
 1. Replace `Result<T>` with `Option<T>` or error flags
@@ -72,43 +72,43 @@ fn parse(text: text) -> ParseResult:
 
 **Effort**: 1-2 weeks (669 Err() usages in src/compiler/)
 
-**Alternative**: Use the existing Simple compiler (bin/release/simple) to build compiler_core with full Result support
+**Alternative**: Use the existing Simple compiler (bin/release/simple) to build compiler_core_legacy with full Result support
 
 ---
 
 ### Phase 3: Bootstrap Build Pipeline
 
-**Goal**: Create a working compiler from compiler_core
+**Goal**: Create a working compiler from compiler_core_legacy
 
 **Option A: seed_cpp Path (After Phase 1+2)**
 ```bash
 # Once seed_cpp bugs are fixed and Result types removed:
-./seed/build/seed_cpp src/compiler_core/**/*.spl > bootstrap.cpp
+./build/seed/seed_cpp src/compiler_core_legacy/**/*.spl > bootstrap.cpp
 clang++ bootstrap.cpp -o simple_compiler
 ./simple_compiler --version  # Success!
 ```
 
 **Option B: Existing Compiler Path (Immediate)**
 ```bash
-# Use the working Simple compiler to build compiler_core:
-bin/release/simple compile src/compiler_core/main.spl -o build/core_compiler
+# Use the working Simple compiler to build compiler_core_legacy:
+bin/release/simple compile src/compiler_core_legacy/main.spl -o build/core_compiler
 
-# This works if compiler_core/main.spl has a proper CLI interface
+# This works if compiler_core_legacy/main.spl has a proper CLI interface
 ```
 
 **Option C: Hybrid Path (Best)**
 ```bash
 # 1. Use existing Simple to compile a minimal working subset
-bin/release/simple compile src/compiler_core/minimal_cli.spl -o build/stage1
+bin/release/simple compile src/compiler_core_legacy/minimal_cli.spl -o build/stage1
 
-# 2. Use stage1 to compile more of compiler_core
-./build/stage1 compile src/compiler_core/main.spl -o build/stage2
+# 2. Use stage1 to compile more of compiler_core_legacy
+./build/stage1 compile src/compiler_core_legacy/main.spl -o build/stage2
 
-# 3. Use stage2 to compile the full compiler_core
-./build/stage2 compile src/compiler_core/*.spl -o build/full_compiler
+# 3. Use stage2 to compile the full compiler_core_legacy
+./build/stage2 compile src/compiler_core_legacy/*.spl -o build/full_compiler
 
 # 4. Validate self-hosting
-./build/full_compiler compile src/compiler_core/*.spl -o build/full_compiler_v2
+./build/full_compiler compile src/compiler_core_legacy/*.spl -o build/full_compiler_v2
 diff build/full_compiler build/full_compiler_v2  # Should be identical
 ```
 
@@ -118,9 +118,9 @@ diff build/full_compiler build/full_compiler_v2  # Should be identical
 
 **Steps**:
 
-1. **Create compiler_core CLI wrapper**:
+1. **Create compiler_core_legacy CLI wrapper**:
 ```simple
-# src/compiler_core/cli_main.spl
+# src/compiler_core_legacy/cli_main.spl
 use driver.*
 use backend.*
 
@@ -136,7 +136,7 @@ fn main():
 
 2. **Build with existing compiler**:
 ```bash
-bin/release/simple compile src/compiler_core/cli_main.spl -o build/core_compiler
+bin/release/simple compile src/compiler_core_legacy/cli_main.spl -o build/core_compiler
 ```
 
 3. **Test the compiler**:
@@ -147,7 +147,7 @@ bin/release/simple compile src/compiler_core/cli_main.spl -o build/core_compiler
 
 4. **Self-host test**:
 ```bash
-./build/core_compiler src/compiler_core/cli_main.spl -o build/core_compiler_v2
+./build/core_compiler src/compiler_core_legacy/cli_main.spl -o build/core_compiler_v2
 diff build/core_compiler build/core_compiler_v2
 ```
 
@@ -156,14 +156,14 @@ diff build/core_compiler build/core_compiler_v2
 ## Success Criteria
 
 ✅ **Immediate Success** (Option B):
-- compiler_core compiles with bin/release/simple
+- compiler_core_legacy compiles with bin/release/simple
 - Produces working binary
 - Can compile Simple programs
 - Self-hosting validated
 
 ✅ **Complete Success** (Option A or C):
 - seed_cpp bugs fixed OR multi-stage bootstrap works
-- compiler_core fully self-hosting
+- compiler_core_legacy fully self-hosting
 - No dependency on bin/release/simple
 - All 375 files compile cleanly
 
@@ -174,11 +174,11 @@ diff build/core_compiler build/core_compiler_v2
 **Recommended**: Try Option B first (use existing compiler)
 
 ```bash
-# 1. Check if compiler_core has a CLI entry point
-ls -la src/compiler_core/*main*.spl
+# 1. Check if compiler_core_legacy has a CLI entry point
+ls -la src/compiler_core_legacy/*main*.spl
 
 # 2. Try compiling it
-bin/release/simple compile src/compiler_core/bootstrap_main.spl -o build/test_core
+bin/release/simple compile src/compiler_core_legacy/bootstrap_main.spl -o build/test_core
 
 # 3. If successful, create proper CLI wrapper
 # 4. Build and validate

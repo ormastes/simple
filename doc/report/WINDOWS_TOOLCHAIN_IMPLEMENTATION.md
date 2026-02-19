@@ -19,13 +19,13 @@ Both toolchains can build the seed compiler (`seed.cpp`, `runtime.c`) and produc
 
 ### New Files (5)
 
-1. **`seed/cmake/toolchains/windows-x86_64-clangcl.cmake`** (49 lines)
+1. **`src/compiler_seed/cmake/toolchains/windows-x86_64-clangcl.cmake`** (49 lines)
    - CMake toolchain for ClangCL (MSVC ABI)
    - Compiler: `clang-cl.exe`
    - Flags: `/MD /EHsc /O2` (MSVC-style)
    - Runtime: UCRT (Universal C Runtime)
 
-2. **`seed/cmake/toolchains/windows-x86_64-mingw.cmake`** (64 lines)
+2. **`src/compiler_seed/cmake/toolchains/windows-x86_64-mingw.cmake`** (64 lines)
    - CMake toolchain for MinGW Clang (GCC ABI)
    - Compiler: `clang` with MinGW target or `x86_64-w64-mingw32-gcc` (cross-compile)
    - Flags: `-static-libgcc -static-libstdc++` (GCC-style)
@@ -49,7 +49,7 @@ Both toolchains can build the seed compiler (`seed.cpp`, `runtime.c`) and produc
 
 ### Modified Files (5)
 
-1. **`seed/seed.cpp`** (lines 53-60)
+1. **`src/compiler_seed/seed.cpp`** (lines 53-60)
    - Added Windows compatibility section
    - Distinguishes ClangCL (`_MSC_VER` or `SPL_TOOLCHAIN_CLANGCL`) from MinGW
    - ClangCL: `#define strdup _strdup` (MSVC naming)
@@ -64,7 +64,7 @@ Both toolchains can build the seed compiler (`seed.cpp`, `runtime.c`) and produc
      - Windows: No pthread, no dl (uses Windows API)
      - Unix/macOS: Link pthread (and dl on Linux)
 
-3. **`seed/platform/platform_win.h`** (lines 1-25)
+3. **`src/compiler_seed/platform/platform_win.h`** (lines 1-25)
    - Added toolchain detection comments
    - Separate include paths for ClangCL vs MinGW:
      - ClangCL: Windows SDK headers (`<io.h>`, `<process.h>`)
@@ -78,7 +78,7 @@ Both toolchains can build the seed compiler (`seed.cpp`, `runtime.c`) and produc
      - Windows x86_64 cross: ✅ Supported
    - Added reference to `WINDOWS_BUILD.md` (line 239)
 
-5. **`seed/cmake/toolchains/windows-x86_64.cmake`** → **`windows-x86_64-mingw-legacy.cmake`**
+5. **`src/compiler_seed/cmake/toolchains/windows-x86_64.cmake`** → **`windows-x86_64-mingw-legacy.cmake`**
    - Renamed to indicate legacy status
    - New users should use `windows-x86_64-mingw.cmake` instead
 
@@ -219,14 +219,14 @@ When validated on Windows:
 
 ```bash
 # ClangCL build
-cd seed/build-clangcl
+cd build/seed-clangcl
 cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/windows-x86_64-clangcl.cmake ..
 ninja
 ./runtime_test.exe
 # Expected: === All 202 tests passed ===
 
 # MinGW build
-cd seed/build-mingw
+cd build/seed-mingw
 cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/windows-x86_64-mingw.cmake ..
 ninja
 ./runtime_test.exe

@@ -11,7 +11,7 @@
 
 ### 1.1 Fully Implemented — Parser + Runtime Verified
 
-These keywords exist in `src/core/tokens.spl`, are in `keyword_lookup()`, are parsed, and have test coverage.
+These keywords exist in `src/compiler_core/tokens.spl`, are in `keyword_lookup()`, are parsed, and have test coverage.
 
 | Keyword / Feature | Token | Parser fn | Test file |
 |-------------------|-------|-----------|-----------|
@@ -62,7 +62,7 @@ These use the `@` prefix and need no new keyword tokens, but are not yet resolve
 
 ### 2.1 Current State
 
-`keyword_lookup()` in `src/core/tokens.spl` (lines 313–369) uses **56 sequential string comparisons**:
+`keyword_lookup()` in `src/compiler_core/tokens.spl` (lines 313–369) uses **56 sequential string comparisons**:
 
 ```
 keyword_lookup(name):
@@ -171,14 +171,14 @@ fn assert_positive(x: i64):
 - Type checker: Recognize these 3 annotation names as intrinsic expressions
 - Lowering: Replace `@file` → `TEXT_LIT(current_file)`, `@line` → `INT_LIT(current_line)`, `@function` → `TEXT_LIT(current_fn_name)`
 - No runtime cost: resolved entirely during compilation
-- Integration point: `src/core/parser.spl` annotation handling + `src/core/interpreter/eval.spl` constant folding
+- Integration point: `src/compiler_core/parser.spl` annotation handling + `src/compiler_core/interpreter/eval.spl` constant folding
 
 **Implementation files:**
-- `src/core/parser.spl` — recognize `@file`/`@line`/`@function` in expression position
-- `src/core/interpreter/eval.spl` — resolve to constants during eval
+- `src/compiler_core/parser.spl` — recognize `@file`/`@line`/`@function` in expression position
+- `src/compiler_core/interpreter/eval.spl` — resolve to constants during eval
 - `src/std/intrinsics.spl` — NEW: document the intrinsic set
 
-**Tests:** `test/unit/core/source_location_spec.spl`
+**Tests:** `test/unit/compiler_core/source_location_spec.spl`
 
 #### 1.2 Static Assert (`@static_assert`)
 
@@ -196,11 +196,11 @@ fn assert_positive(x: i64):
 - Soft start: Only evaluate when condition is trivially constant; skip silently if runtime-dependent
 
 **Implementation files:**
-- `src/core/interpreter/eval.spl` — constant expression evaluator
-- `src/core/compiler/driver.spl` — emit compile error from static assert failure
+- `src/compiler_core/interpreter/eval.spl` — constant expression evaluator
+- `src/compiler_core/compiler/driver.spl` — emit compile error from static assert failure
 - `src/std/intrinsics.spl` — export `@static_assert` behavior docs
 
-**Tests:** `test/unit/core/static_assert_spec.spl`
+**Tests:** `test/unit/compiler_core/static_assert_spec.spl`
 
 #### 1.3 Exhaustiveness Checking Improvements
 
@@ -218,15 +218,15 @@ fn handle(s: Status):
 
 **Design:**
 - Type checker: collect all enum variants; check all `case` arms; warn on missing
-- Integration: `src/core/parser.spl` already builds match AST; add variant coverage check in eval
+- Integration: `src/compiler_core/parser.spl` already builds match AST; add variant coverage check in eval
 - `case _:` disables the warning (wildcard = explicit "catch all")
 - Error format: `warning: non-exhaustive match on 'Status' — missing: Error`
 
 **Implementation files:**
-- `src/core/interpreter/eval.spl` — track enum variants per type
+- `src/compiler_core/interpreter/eval.spl` — track enum variants per type
 - Add `match_exhaustive_check()` helper
 
-**Tests:** `test/unit/core/exhaustiveness_spec.spl`
+**Tests:** `test/unit/compiler_core/exhaustiveness_spec.spl`
 
 ---
 
@@ -284,8 +284,8 @@ var _current_error_trace: ErrorTrace = ErrorTrace(sites: [], depth: 0)
 
 **Implementation files:**
 - `src/std/error_trace.spl` — NEW: `ErrorSite`, `ErrorTrace`, trace management
-- `src/core/parser.spl` — `?` operator desugaring to include trace append
-- `src/core/interpreter/eval.spl` — `?` eval path calls `error_trace_push()`
+- `src/compiler_core/parser.spl` — `?` operator desugaring to include trace append
+- `src/compiler_core/interpreter/eval.spl` — `?` eval path calls `error_trace_push()`
 
 **Tests:** `test/unit/std/error_trace_spec.spl`
 
@@ -312,15 +312,15 @@ val n = parse_int("42")  # OK
 **Design:**
 - Parser: Already parses `@must_use` as annotation on `fn` declarations
 - Type checker: When a function call appears as a statement (not assigned), check if callee has `@must_use`; if yes, emit warning
-- Existing infrastructure: `eval_get_warnings()` in `src/core/interpreter/eval.spl` — already used for ignored return value warnings
+- Existing infrastructure: `eval_get_warnings()` in `src/compiler_core/interpreter/eval.spl` — already used for ignored return value warnings
 - `@must_use` is the **opt-in explicit version** of the existing ignored-return warning system
 
 **Implementation files:**
-- `src/core/parser.spl` — store `@must_use` in fn declaration AST node
-- `src/core/interpreter/eval.spl` — check annotation in `eval_function_call()`
+- `src/compiler_core/parser.spl` — store `@must_use` in fn declaration AST node
+- `src/compiler_core/interpreter/eval.spl` — check annotation in `eval_function_call()`
 - `src/std/intrinsics.spl` — document `@must_use`
 
-**Tests:** `test/unit/core/must_use_spec.spl`
+**Tests:** `test/unit/compiler_core/must_use_spec.spl`
 
 #### 3.2 Phantom Types (`@phantom struct`)
 
@@ -354,7 +354,7 @@ send(raw, [1, 2, 3])    # COMPILE ERROR: Socket<Disconnected> is not Socket<Conn
 - The type checker enforces substitution — already done by generic monomorphization
 - `@phantom` annotation tells the compiler: "this struct has no data fields; it exists only as a type tag"
 
-**Key insight:** The existing generic system (`src/core/generic_runtime.spl`) already does monomorphization. `Socket<Connected>` and `Socket<Disconnected>` are already distinct types. The only new work is:
+**Key insight:** The existing generic system (`src/compiler_core/generic_runtime.spl`) already does monomorphization. `Socket<Connected>` and `Socket<Disconnected>` are already distinct types. The only new work is:
 1. `@phantom` annotation declaration — marks struct as zero-size (no fields needed)
 2. Error messages using `@state_description` to make type errors human-readable
 
@@ -367,11 +367,11 @@ struct Socket<State: SocketState>:
 ```
 
 **Implementation files:**
-- `src/core/parser.spl` — recognize `@phantom` on struct declarations
-- `src/core/generic_runtime.spl` — skip field construction for `@phantom` structs
+- `src/compiler_core/parser.spl` — recognize `@phantom` on struct declarations
+- `src/compiler_core/generic_runtime.spl` — skip field construction for `@phantom` structs
 - `src/std/phantom.spl` — NEW: common phantom marker types (`Owned`, `Borrowed`, `ReadOnly`, etc.)
 
-**Tests:** `test/unit/core/phantom_types_spec.spl`
+**Tests:** `test/unit/compiler_core/phantom_types_spec.spl`
 
 ---
 
@@ -409,12 +409,12 @@ fn get_field(cfg: Config, key: keyof Config) -> text:
 - Interaction with `@static_assert`: `@static_assert(keyof Config contains "host", "...")`
 
 **Implementation files:**
-- `src/core/tokens.spl` — add `TOK_KW_KEYOF = 200`
-- `src/core/tokens.spl` `keyword_lookup()` — add `if name == "keyof": return TOK_KW_KEYOF`
-- `src/core/parser.spl` — `parse_type_expr()` handles `keyof` prefix
-- `src/core/interpreter/eval.spl` — resolve `keyof T` to field name list at eval time
+- `src/compiler_core/tokens.spl` — add `TOK_KW_KEYOF = 200`
+- `src/compiler_core/tokens.spl` `keyword_lookup()` — add `if name == "keyof": return TOK_KW_KEYOF`
+- `src/compiler_core/parser.spl` — `parse_type_expr()` handles `keyof` prefix
+- `src/compiler_core/interpreter/eval.spl` — resolve `keyof T` to field name list at eval time
 
-**Tests:** `test/unit/core/keyof_spec.spl`
+**Tests:** `test/unit/compiler_core/keyof_spec.spl`
 
 #### 4.2 Mapped Types
 
@@ -437,11 +437,11 @@ type Omit<T, Keys in keyof T> = struct { for K in (keyof T - Keys): K: T[K] }  #
 - No runtime cost: all expansion happens at compile time
 
 **Implementation files:**
-- `src/core/parser.spl` — type expression parser handles `{ for K in keyof T: K: T[K]? }`
-- `src/core/interpreter/eval.spl` — expand mapped types at type-check time
+- `src/compiler_core/parser.spl` — type expression parser handles `{ for K in keyof T: K: T[K]? }`
+- `src/compiler_core/interpreter/eval.spl` — expand mapped types at type-check time
 - `src/std/types/mapped.spl` — NEW: `Partial<T>`, `Readonly<T>`, `Stringify<T>`, `Pick`, `Omit`
 
-**Tests:** `test/unit/core/mapped_types_spec.spl`
+**Tests:** `test/unit/compiler_core/mapped_types_spec.spl`
 
 ---
 
@@ -476,7 +476,7 @@ type Omit<T, Keys in keyof T> = struct { for K in (keyof T - Keys): K: T[K] }  #
 
 ### 4.1 Recommended Change to `keyword_lookup()`
 
-Rewrite `src/core/tokens.spl` `keyword_lookup()` to dispatch on first character before comparing full strings. This reduces worst-case from 56 to 7 comparisons (worst group is 'e' with 7 keywords).
+Rewrite `src/compiler_core/tokens.spl` `keyword_lookup()` to dispatch on first character before comparing full strings. This reduces worst-case from 56 to 7 comparisons (worst group is 'e' with 7 keywords).
 
 **When to do this:** When keyword count reaches 70+ OR when a profiler shows keyword lookup is hot (unlikely). For now, document the plan; implement when adding `keyof`.
 
@@ -484,8 +484,8 @@ Rewrite `src/core/tokens.spl` `keyword_lookup()` to dispatch on first character 
 
 **Minimal change** (when `keyof` is implemented in Phase 4):
 
-1. `src/core/tokens.spl` line ~200: add `val TOK_KW_KEYOF: i64 = 200`
-2. `src/core/tokens.spl` `keyword_lookup()`: append `if name == "keyof": return TOK_KW_KEYOF`
+1. `src/compiler_core/tokens.spl` line ~200: add `val TOK_KW_KEYOF: i64 = 200`
+2. `src/compiler_core/tokens.spl` `keyword_lookup()`: append `if name == "keyof": return TOK_KW_KEYOF`
 3. The 'k' group has zero existing keywords — `keyof` is O(1) to look up after first-char check
 4. Optionally apply first-char optimization to the entire function at the same time
 
@@ -528,25 +528,25 @@ src/std/types/mapped.spl        # Partial<T>, Readonly<T>, Stringify<T>, Pick<T,
 ### Existing files to modify (in implementation order):
 
 ```
-src/core/tokens.spl             # Phase 4: add TOK_KW_KEYOF; optional: first-char optimization
-src/core/parser.spl             # Phase 1: @file/@line/@function; Phase 4: keyof type expr
-src/core/interpreter/eval.spl   # Phase 1: intrinsic resolution, @static_assert eval, @must_use check
+src/compiler_core/tokens.spl             # Phase 4: add TOK_KW_KEYOF; optional: first-char optimization
+src/compiler_core/parser.spl             # Phase 1: @file/@line/@function; Phase 4: keyof type expr
+src/compiler_core/interpreter/eval.spl   # Phase 1: intrinsic resolution, @static_assert eval, @must_use check
                                  # Phase 2: ? operator trace push; Phase 3: @phantom handling
                                  # Phase 4: keyof expansion
-src/core/generic_runtime.spl    # Phase 3: skip field construction for @phantom structs
+src/compiler_core/generic_runtime.spl    # Phase 3: skip field construction for @phantom structs
 ```
 
 ### New test files:
 
 ```
-test/unit/core/source_location_spec.spl   # @file, @line, @function
-test/unit/core/static_assert_spec.spl     # @static_assert
-test/unit/core/exhaustiveness_spec.spl    # match exhaustiveness
+test/unit/compiler_core/source_location_spec.spl   # @file, @line, @function
+test/unit/compiler_core/static_assert_spec.spl     # @static_assert
+test/unit/compiler_core/exhaustiveness_spec.spl    # match exhaustiveness
 test/unit/std/error_trace_spec.spl        # Mode D error propagation traces
-test/unit/core/must_use_spec.spl          # @must_use annotation
-test/unit/core/phantom_types_spec.spl     # @phantom struct + generic state machines
-test/unit/core/keyof_spec.spl             # keyof T operator
-test/unit/core/mapped_types_spec.spl      # Partial<T> etc.
+test/unit/compiler_core/must_use_spec.spl          # @must_use annotation
+test/unit/compiler_core/phantom_types_spec.spl     # @phantom struct + generic state machines
+test/unit/compiler_core/keyof_spec.spl             # keyof T operator
+test/unit/compiler_core/mapped_types_spec.spl      # Partial<T> etc.
 ```
 
 ---

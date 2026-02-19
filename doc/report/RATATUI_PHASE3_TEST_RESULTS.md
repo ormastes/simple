@@ -137,7 +137,7 @@ let result = REPL_RUNNER.with(|r| {
 - [ ] `simple/app/repl/main.spl`
 
 **Approach**:
-1. Study working Simple code (e.g., `simple/std_lib/src/core/result.spl`)
+1. Study working Simple code (e.g., `simple/std_lib/src/compiler_core/result.spl`)
 2. Identify correct syntax patterns:
    - Array initialization
    - Function definitions

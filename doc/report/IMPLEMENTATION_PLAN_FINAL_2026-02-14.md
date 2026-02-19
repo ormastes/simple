@@ -112,14 +112,14 @@ if (a and
     do_something()
 ```
 
-**Implementation:** `src/core/lexer.spl` suppresses newlines when `lex_paren_depth > 0`
+**Implementation:** `src/compiler_core/lexer.spl` suppresses newlines when `lex_paren_depth > 0`
 **Test:** `test/unit/parser/multiline_bool_spec.spl` (1 passed)
 
 ---
 
 ### 6. **Closure Capture Warnings** ✅ **COMPLETE**
 
-**File:** `src/core/closure_analysis.spl` (186 lines)
+**File:** `src/compiler_core/closure_analysis.spl` (186 lines)
 **Test:** `test/unit/compiler/closure_capture_warning_spec.spl` (✅ 1 passed, 4ms)
 
 **Warning Example:**
@@ -193,7 +193,7 @@ val has_any_doc = item.has_inline_comment or item.has_docstring  # ✅ Correct
 error: semantic: unknown extern function: rt_file_write
 ```
 
-**Solution:** Add to `seed/runtime.c`:
+**Solution:** Add to `src/compiler_seed/runtime.c`:
 ```c
 // Write text to file
 void rt_file_write(const char* path, const char* content) {
@@ -211,7 +211,7 @@ void rt_file_write(const char* path, const char* content) {
 
 ### Fix 3: Verify Ignored Return Warnings ⚠️ **30 MIN**
 
-**Test:** `test/unit/core/ignored_return_warning_spec.spl`
+**Test:** `test/unit/compiler_core/ignored_return_warning_spec.spl`
 
 **Issue:** Runtime compatibility error during test:
 ```
@@ -220,7 +220,7 @@ error: semantic: method `split` not found on type `enum`
 
 **Action:** Fix test to use runtime-compatible patterns
 
-**Implementation:** Likely already exists in `src/core/interpreter/eval.spl`
+**Implementation:** Likely already exists in `src/compiler_core/interpreter/eval.spl`
 
 ---
 
@@ -239,7 +239,7 @@ Test: bin/simple build --warn-docs test_hello.spl
 **Agent: infra (build agent)**
 ```
 Task: Add rt_file_write SFFI
-Files: seed/runtime.c, seed/runtime.h
+Files: src/compiler_seed/runtime.c, src/compiler_seed/runtime.h
 Function: rt_file_write(path, content)
 Test: bin/simple test test/unit/app/doc_coverage/threshold_*_spec.spl
 ```
@@ -247,9 +247,9 @@ Test: bin/simple test test/unit/app/doc_coverage/threshold_*_spec.spl
 **Agent: test**
 ```
 Task: Fix ignored return warning test
-File: test/unit/core/ignored_return_warning_spec.spl
+File: test/unit/compiler_core/ignored_return_warning_spec.spl
 Fix: Runtime compatibility (avoid split on enum)
-Test: bin/simple test test/unit/core/ignored_return_warning_spec.spl
+Test: bin/simple test test/unit/compiler_core/ignored_return_warning_spec.spl
 ```
 
 ---

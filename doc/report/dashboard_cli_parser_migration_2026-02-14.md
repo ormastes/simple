@@ -134,7 +134,7 @@ simple dashboard query 'features where status=complete' -f json
 
 ### Files Changed
 - `/home/ormastes/dev/pub/simple/src/app/dashboard/main.spl`
-  - Added import: `use app.cli_parser.{...}`
+  - Added import: `use lib.cli.cli_parser.{...}`
   - Modified 7 command handler functions
   - Net change: -1 line (1271 lines, was 1272)
 

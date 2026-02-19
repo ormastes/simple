@@ -1,0 +1,429 @@
+# Core Type Checker — Runtime Type Checking
+#
+# Runtime validation for advanced types: union, intersection, refinement
+# Uses arena pattern (parallel arrays) compatible with seed compiler
+#
+# Type checking returns bool (true = type check passed, false = failed)
+# Does NOT throw exceptions (not supported in runtime)
+
+# ===== Dependencies =====
+# Imports from types.spl and interpreter/value.spl
+# These must be available in the runtime environment
+
+use compiler_core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT}
+use compiler_core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_ANY, TYPE_STRUCT, TYPE_FN, TYPE_ANY, TYPE_NIL}
+use compiler_core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE}
+
+# ===== Type Checker State =====
+# Track checked values to detect infinite recursion in structural types
+var type_check_depth: i64 = 0
+var type_check_max_depth: i64 = 100
+var type_check_visited: [i64] = []  # Stack of value_ids being checked
+
+fn type_check_enter(value_id: i64) -> bool:
+    type_check_depth = type_check_depth + 1
+    if type_check_depth > type_check_max_depth:
+        return false
+    type_check_visited.push(value_id)
+    true
+
+fn type_check_exit():
+    type_check_depth = type_check_depth - 1
+    if type_check_visited.len() > 0:
+        val last_idx = type_check_visited.len() - 1
+        var new_visited: [i64] = []
+        for i in range(0, last_idx):
+            new_visited.push(type_check_visited[i])
+        type_check_visited = new_visited
+
+fn type_check_reset():
+    type_check_depth = 0
+    type_check_visited = []
+
+fn type_check_is_visiting(value_id: i64) -> bool:
+    for vid in type_check_visited:
+        if vid == value_id:
+            return true
+    false
+
+# ===== Basic Type Tag Extraction =====
+# Extract type tag from a runtime value
+# Uses value.spl arena accessors
+
+extern fn val_kind(value_id: i64) -> i64
+extern fn val_get_int(value_id: i64) -> i64
+extern fn val_get_float(value_id: i64) -> f64
+extern fn val_get_text(value_id: i64) -> text
+extern fn val_get_array(value_id: i64) -> [i64]
+extern fn val_get_struct_name(value_id: i64) -> text
+extern fn val_get_struct_fields(value_id: i64) -> [text]
+extern fn val_get_struct_values(value_id: i64) -> [i64]
+
+# Value kind constants (from value.spl)
+val VAL_NIL: i64 = 0
+val VAL_BOOL: i64 = 1
+val VAL_INT: i64 = 2
+val VAL_FLOAT: i64 = 3
+val VAL_TEXT: i64 = 4
+val VAL_ARRAY: i64 = 5
+val VAL_STRUCT: i64 = 6
+val VAL_FUNCTION: i64 = 7
+
+fn value_to_type_tag(value_id: i64) -> i64:
+    val kind = val_kind(value_id)
+    if kind == VAL_NIL:
+        return TYPE_NIL
+    if kind == VAL_BOOL:
+        return TYPE_BOOL
+    if kind == VAL_INT:
+        return TYPE_I64
+    if kind == VAL_FLOAT:
+        return TYPE_F64
+    if kind == VAL_TEXT:
+        return TYPE_TEXT
+    if kind == VAL_ARRAY:
+        return TYPE_ARRAY_ANY
+    if kind == VAL_STRUCT:
+        return TYPE_STRUCT
+    if kind == VAL_FUNCTION:
+        return TYPE_FN
+    TYPE_ANY
+
+# ===== Named Type Resolution =====
+# Check if value matches a named struct/enum type
+
+extern fn named_type_find(name: text) -> i64
+extern fn named_type_name(type_id: i64) -> text
+extern fn named_type_fields(type_id: i64) -> [text]
+extern fn named_type_field_type_tags(type_id: i64) -> [i64]
+
+fn type_check_named(value_id: i64, type_name: text) -> bool:
+    val kind = val_kind(value_id)
+    if kind != VAL_STRUCT:
+        return false
+    val struct_name = val_get_struct_name(value_id)
+    if struct_name != type_name:
+        return false
+    # Check field types match
+    val type_id = named_type_find(type_name)
+    if type_id == -1:
+        return true  # Unknown type, assume valid
+    val expected_fields = named_type_fields(type_id)
+    val expected_types = named_type_field_type_tags(type_id)
+    val actual_fields = val_get_struct_fields(value_id)
+    val actual_values = val_get_struct_values(value_id)
+    if expected_fields.len() != actual_fields.len():
+        return false
+    # Validate each field
+    for i in range(0, expected_fields.len()):
+        val expected_field = expected_fields[i]
+        val expected_type = expected_types[i]
+        val actual_field = actual_fields[i]
+        if expected_field != actual_field:
+            return false
+        val field_value = actual_values[i]
+        val matches = type_check_single(field_value, expected_type)
+        if not matches:
+            return false
+    true
+
+# ===== Single Type Checking =====
+# Check if value matches a single type tag (non-composite)
+
+fn type_check_single(value_id: i64, type_tag: i64) -> bool:
+    # Check for infinite recursion
+    if type_check_is_visiting(value_id):
+        return true  # Assume valid for cyclic structures
+    if not type_check_enter(value_id):
+        return false  # Max depth exceeded
+    val actual_tag = value_to_type_tag(value_id)
+    var result: bool = false
+    # Handle ANY type (matches everything)
+    if type_tag == TYPE_ANY:
+        result = true
+    # Handle NIL
+    else:
+        if type_tag == TYPE_NIL:
+            result = actual_tag == TYPE_NIL
+        # Handle basic types
+        else:
+            if type_tag == TYPE_BOOL:
+                result = actual_tag == TYPE_BOOL
+            else:
+                if type_tag == TYPE_I64:
+                    result = actual_tag == TYPE_I64
+                else:
+                    if type_tag == TYPE_F64:
+                        result = actual_tag == TYPE_F64
+                    else:
+                        if type_tag == TYPE_TEXT:
+                            result = actual_tag == TYPE_TEXT
+                        else:
+                            if type_tag == TYPE_ARRAY_ANY or type_tag == TYPE_ARRAY_I64:
+                                result = actual_tag == TYPE_ARRAY_ANY
+                            else:
+                                if type_tag == TYPE_FN:
+                                    result = actual_tag == TYPE_FN
+                                # Handle named types (structs/enums)
+                                else:
+                                    if type_tag >= TYPE_NAMED_BASE:
+                                        val type_id = type_tag - TYPE_NAMED_BASE
+                                        val type_name = named_type_name(type_id)
+                                        result = type_check_named(value_id, type_name)
+                                    else:
+                                        result = false
+    type_check_exit()
+    result
+
+# ===== Union Type Checking =====
+# Check if value matches ANY member of the union (A | B | C)
+# union_id is the index into union_type_members array
+
+extern fn union_type_get_members(union_id: i64) -> [i64]
+
+fn type_check_union(value_id: i64, union_id: i64) -> bool:
+    type_check_reset()
+    val member_types = union_type_get_members(union_id)
+    if member_types.len() == 0:
+        return false  # Empty union never matches
+    # Check if value matches at least one member type
+    for member_type in member_types:
+        val matches = type_check_single(value_id, member_type)
+        if matches:
+            return true
+    false
+
+# ===== Intersection Type Checking =====
+# Check if value matches ALL members of the intersection (A & B & C)
+# inter_id is the index into intersection_type_members array
+
+extern fn intersection_type_get_members(inter_id: i64) -> [i64]
+
+fn type_check_intersection(value_id: i64, inter_id: i64) -> bool:
+    type_check_reset()
+    val member_types = intersection_type_get_members(inter_id)
+    if member_types.len() == 0:
+        return true  # Empty intersection matches everything
+    # Check if value matches all member types
+    for member_type in member_types:
+        val matches = type_check_single(value_id, member_type)
+        if not matches:
+            return false
+    true
+
+# ===== Refinement Type Checking =====
+# Check if value matches base type AND satisfies predicate
+# ref_id is the index into refinement_base_types/refinement_predicates arrays
+#
+# Predicates are text expressions like "x > 0" or "len(s) > 0"
+# We evaluate them by substituting the value and using eval
+
+extern fn refinement_type_base(ref_id: i64) -> i64
+extern fn refinement_type_predicate(ref_id: i64) -> text
+
+fn type_check_refinement(value_id: i64, ref_id: i64) -> bool:
+    type_check_reset()
+    # First check base type
+    val base_type = refinement_type_base(ref_id)
+    val base_matches = type_check_single(value_id, base_type)
+    if not base_matches:
+        return false
+    # Then check predicate
+    val predicate = refinement_type_predicate(ref_id)
+    if predicate == "":
+        return true  # No predicate = always satisfied
+    # Evaluate predicate with value substituted
+    val predicate_result = type_check_eval_predicate(value_id, predicate)
+    predicate_result
+
+# ===== Predicate Evaluation =====
+# Evaluate refinement type predicate expressions
+# Supports simple predicates: "x > 0", "x < 100", "len(s) > 0", etc.
+
+fn type_check_eval_predicate(value_id: i64, predicate: text) -> bool:
+    # Simple predicate parser for common patterns
+    # Supports: "x OP value" where OP is >, <, >=, <=, ==, !=
+    # Also supports: "len(x) OP value" for arrays/text
+    val trimmed = predicate.trim()
+    if trimmed == "":
+        return true
+    # Parse "len(x) OP value" pattern
+    if trimmed.starts_with("len("):
+        return type_check_eval_length_predicate(value_id, trimmed)
+    # Parse "x OP value" pattern
+    return type_check_eval_comparison_predicate(value_id, trimmed)
+
+fn type_check_eval_length_predicate(value_id: i64, predicate: text) -> bool:
+    # Extract operator and compare value from "len(x) OP value"
+    val kind = val_kind(value_id)
+    var length: i64 = 0
+    if kind == VAL_ARRAY:
+        val arr = val_get_array(value_id)
+        length = arr.len()
+    else:
+        if kind == VAL_TEXT:
+            val txt = val_get_text(value_id)
+            length = txt.len()
+        else:
+            return false  # len() only works on arrays/text
+    # Find operator position
+    var op_pos: i64 = -1
+    var operator: text = ""
+    if predicate.contains(" > "):
+        op_pos = predicate.index_of(" > ")
+        operator = ">"
+    else:
+        if predicate.contains(" < "):
+            op_pos = predicate.index_of(" < ")
+            operator = "<"
+        else:
+            if predicate.contains(" >= "):
+                op_pos = predicate.index_of(" >= ")
+                operator = ">="
+            else:
+                if predicate.contains(" <= "):
+                    op_pos = predicate.index_of(" <= ")
+                    operator = "<="
+                else:
+                    if predicate.contains(" == "):
+                        op_pos = predicate.index_of(" == ")
+                        operator = "=="
+                    else:
+                        if predicate.contains(" != "):
+                            op_pos = predicate.index_of(" != ")
+                            operator = "!="
+                        else:
+                            return false  # Unknown operator
+    if op_pos == -1:
+        return false
+    # Extract compare value
+    val op_len = operator.len()
+    val after_op = predicate[op_pos + op_len + 2:]
+    val compare_val = after_op.trim()
+    val compare_int = int(compare_val)
+    # Perform comparison
+    if operator == ">":
+        return length > compare_int
+    if operator == "<":
+        return length < compare_int
+    if operator == ">=":
+        return length >= compare_int
+    if operator == "<=":
+        return length <= compare_int
+    if operator == "==":
+        return length == compare_int
+    if operator == "!=":
+        return length != compare_int
+    false
+
+fn type_check_eval_comparison_predicate(value_id: i64, predicate: text) -> bool:
+    # Extract operator and compare value from "x OP value"
+    val kind = val_kind(value_id)
+    var val_int: i64 = 0
+    var val_float: f64 = 0.0
+    var is_int: bool = false
+    var is_float: bool = false
+    if kind == VAL_INT:
+        val_int = val_get_int(value_id)
+        is_int = true
+    else:
+        if kind == VAL_FLOAT:
+            val_float = val_get_float(value_id)
+            is_float = true
+        else:
+            return false  # Comparison only works on numbers
+    # Find operator position
+    var op_pos: i64 = -1
+    var operator: text = ""
+    if predicate.contains(" > "):
+        op_pos = predicate.index_of(" > ")
+        operator = ">"
+    else:
+        if predicate.contains(" < "):
+            op_pos = predicate.index_of(" < ")
+            operator = "<"
+        else:
+            if predicate.contains(" >= "):
+                op_pos = predicate.index_of(" >= ")
+                operator = ">="
+            else:
+                if predicate.contains(" <= "):
+                    op_pos = predicate.index_of(" <= ")
+                    operator = "<="
+                else:
+                    if predicate.contains(" == "):
+                        op_pos = predicate.index_of(" == ")
+                        operator = "=="
+                    else:
+                        if predicate.contains(" != "):
+                            op_pos = predicate.index_of(" != ")
+                            operator = "!="
+                        else:
+                            return false  # Unknown operator
+    if op_pos == -1:
+        return false
+    # Extract compare value
+    val op_len = operator.len()
+    val after_op = predicate[op_pos + op_len + 2:]
+    val compare_str = after_op.trim()
+    # Perform comparison
+    if is_int:
+        val compare_int = int(compare_str)
+        if operator == ">":
+            return val_int > compare_int
+        if operator == "<":
+            return val_int < compare_int
+        if operator == ">=":
+            return val_int >= compare_int
+        if operator == "<=":
+            return val_int <= compare_int
+        if operator == "==":
+            return val_int == compare_int
+        if operator == "!=":
+            return val_int != compare_int
+    if is_float:
+        val compare_float = float(compare_str)
+        if operator == ">":
+            return val_float > compare_float
+        if operator == "<":
+            return val_float < compare_float
+        if operator == ">=":
+            return val_float >= compare_float
+        if operator == "<=":
+            return val_float <= compare_float
+        if operator == "==":
+            return val_float == compare_float
+        if operator == "!=":
+            return val_float != compare_float
+    false
+
+# ===== Public API =====
+# Main entry points for type checking
+
+fn type_check(value_id: i64, type_tag: i64) -> bool:
+    # Dispatch based on type tag kind
+    if type_tag == TYPE_UNION:
+        # Union types need union_id, not type_tag
+        # Caller should use type_check_union directly
+        return false
+    if type_tag == TYPE_INTERSECTION:
+        # Intersection types need inter_id, not type_tag
+        # Caller should use type_check_intersection directly
+        return false
+    if type_tag == TYPE_REFINEMENT:
+        # Refinement types need ref_id, not type_tag
+        # Caller should use type_check_refinement directly
+        return false
+    # Regular type checking
+    type_check_reset()
+    type_check_single(value_id, type_tag)
+
+# ===== Exports =====
+export type_check
+export type_check_union
+export type_check_intersection
+export type_check_refinement
+export type_check_single
+export type_check_reset
+export value_to_type_tag
+export type_check_named

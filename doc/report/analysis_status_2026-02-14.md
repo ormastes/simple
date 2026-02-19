@@ -88,7 +88,7 @@ print count  # Still 0 ❌
 **Status:** Implementation complete, tests need work
 
 **Files:**
-- Implementation: `src/core/closure_analysis.spl` (187 lines)
+- Implementation: `src/compiler_core/closure_analysis.spl` (187 lines)
 - Tests: `test/unit/compiler/closure_capture_warning_spec.spl` (33 lines - INCOMPLETE)
 
 **Features Implemented:**
@@ -123,8 +123,8 @@ WARN: Closure in 'inner' modifies outer variable 'count'
 **Status:** Tests written, parser implementation needed
 
 **Files:**
-- Tests: `test/unit/core/generic_syntax_spec.spl` (191 lines, 52 tests)
-- Parser: `src/core/parser.spl` (needs updates)
+- Tests: `test/unit/compiler_core/generic_syntax_spec.spl` (191 lines, 52 tests)
+- Parser: `src/compiler_core/parser.spl` (needs updates)
 
 **Test Coverage:**
 - ✅ Class/struct with type parameters: `class Box<T>:`
@@ -159,8 +159,8 @@ NO generics in runtime parser: `class Foo<T>:` fails with "expected identifier, 
 **Status:** Tests written, implementation needed
 
 **Files:**
-- Tests: `test/unit/core/ignored_return_warning_spec.spl` (124 lines, 20+ tests)
-- Implementation: `src/core/interpreter/eval.spl` (needs updates)
+- Tests: `test/unit/compiler_core/ignored_return_warning_spec.spl` (124 lines, 20+ tests)
+- Implementation: `src/compiler_core/interpreter/eval.spl` (needs updates)
 
 **Test Coverage:**
 - ✅ Warns when returning i64/text/bool/f64 is ignored
@@ -228,7 +228,7 @@ warning: return value of type 'i64' from function 'get_value' is ignored
 
 **Files to modify:**
 - `test/unit/compiler/closure_capture_warning_spec.spl` (expand tests)
-- `src/core/parser.spl` or `src/app/cli/main.spl` (integration)
+- `src/compiler_core/parser.spl` or `src/app/cli/main.spl` (integration)
 - `src/app/test_runner_new/test_runner_main.spl` (warning display)
 
 ---
@@ -250,8 +250,8 @@ warning: return value of type 'i64' from function 'get_value' is ignored
 4. Update tests to use real implementation
 
 **Files to modify:**
-- `src/core/interpreter/eval.spl` (add warning system)
-- `test/unit/core/ignored_return_warning_spec.spl` (verify tests pass)
+- `src/compiler_core/interpreter/eval.spl` (add warning system)
+- `test/unit/compiler_core/ignored_return_warning_spec.spl` (verify tests pass)
 
 ---
 
@@ -272,10 +272,10 @@ warning: return value of type 'i64' from function 'get_value' is ignored
 4. Verify tests pass
 
 **Files to modify:**
-- `src/core/lexer.spl` (context tracking)
-- `src/core/parser.spl` (type param/arg parsing)
-- `src/core/ast.spl` (new AST nodes)
-- `test/unit/core/generic_syntax_spec.spl` (verify real parsing)
+- `src/compiler_core/lexer.spl` (context tracking)
+- `src/compiler_core/parser.spl` (type param/arg parsing)
+- `src/compiler_core/ast.spl` (new AST nodes)
+- `test/unit/compiler_core/generic_syntax_spec.spl` (verify real parsing)
 
 ---
 

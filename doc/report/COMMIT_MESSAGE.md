@@ -51,7 +51,7 @@ Created `test_common.spl` modules to eliminate repeated imports.
 
 **Files**:
 - `src/compiler/test_common.spl` - Created
-- `src/compiler_core/test_common.spl` - Created
+- `src/compiler_core_legacy/test_common.spl` - Created
 - 22 test files refactored
 
 **Before** (repeated 22 times):
@@ -85,14 +85,14 @@ Created `lexer_create_internal()` to consolidate Lexer struct
 initialization across multiple functions.
 
 **Files**:
-- `src/compiler_core/lexer.spl`
+- `src/compiler_core_legacy/lexer.spl`
 
 **Poll generator** (6 duplications):
 Created `make_match_arm()` and `make_expr_stmt()` helpers for async
 state machine generation.
 
 **Files**:
-- `src/compiler_core/desugar/poll_generator.spl`
+- `src/compiler_core_legacy/desugar/poll_generator.spl`
 
 **Bugs fixed**:
 - Fixed Block field name: `statements` → `stmts`
@@ -116,17 +116,17 @@ state machine generation.
    - Impact: 14 duplications eliminated
 
 4. **lexer_create_internal(source, block_registry)**
-   - Location: `src/compiler_core/lexer.spl`
+   - Location: `src/compiler_core_legacy/lexer.spl`
    - Purpose: Lexer initialization
    - Impact: 4 duplications eliminated
 
 5. **make_match_arm(pattern, body_stmts)**
-   - Location: `src/compiler_core/desugar/poll_generator.spl`
+   - Location: `src/compiler_core_legacy/desugar/poll_generator.spl`
    - Purpose: MatchArm construction
    - Impact: 4 duplications eliminated
 
 6. **make_expr_stmt(expr)**
-   - Location: `src/compiler_core/desugar/poll_generator.spl`
+   - Location: `src/compiler_core_legacy/desugar/poll_generator.spl`
    - Purpose: Statement creation
    - Impact: 2 duplications eliminated
 
@@ -134,7 +134,7 @@ state machine generation.
    - Purpose: Shared test imports
    - Impact: 11 duplications eliminated
 
-8. **compiler_core/test_common.spl**
+8. **compiler_core_legacy/test_common.spl**
    - Purpose: Shared test imports
    - Impact: 11 duplications eliminated
 

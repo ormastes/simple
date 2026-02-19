@@ -105,7 +105,7 @@ fn generate_coverage_markdown(coverage: CoverageReport) -> text
 
 **Report Sections:**
 1. **Summary:** Overall statistics with status emoji
-2. **Coverage by Scope:** Table grouped by src/std/, src/core/, etc.
+2. **Coverage by Scope:** Table grouped by src/std/, src/compiler_core/, etc.
 3. **Top 10 Files Needing Documentation:** Sorted by missing_docs count
 4. **Missing SDoctest Examples:** Up to 50 functions without sdoctests
 
@@ -329,7 +329,7 @@ All modules follow MEMORY.md constraints:
 
 **Scope Extraction (`_extract_scope`):**
 - `src/std/` → "src/std"
-- `src/core/` → "src/core"
+- `src/compiler_core/` → "src/core"
 - `src/lib/` → "src/lib"
 - `src/app/` → "src/app"
 - `src/compiler/` → "src/compiler"

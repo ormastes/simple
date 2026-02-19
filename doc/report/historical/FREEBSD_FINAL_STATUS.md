@@ -13,7 +13,7 @@
 - ✅ `FREEBSD_FINAL_STATUS.md` - This file
 
 **Scripts:**
-- ✅ `scripts/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap
+- ✅ `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` - Native FreeBSD bootstrap
 - ✅ `scripts/verify_freebsd_workspace.spl` - Verification tool
 - ✅ `scripts/setup_freebsd_vm.spl` - VM setup automation
 - ✅ `scripts/test_freebsd_qemu.spl` - FreeBSD testing
@@ -53,14 +53,14 @@ for FreeBSD 14.1, FreeBSD-style, with debug_info, not stripped
 ### 4. Transpilation Attempt
 
 - ✅ Linux seed_cpp built and working
-- ✅ Transpiled all 439 compiler_core/*.spl files → single 4.1MB C++ file
+- ✅ Transpiled all 439 compiler_core_legacy/*.spl files → single 4.1MB C++ file
 - ⚠️ C++ compilation failed due to transpiler limitations
 
 ---
 
 ## ⚠️ Current Limitation
 
-**Issue:** The seed_cpp transpiler generates C++ with errors when transpiling the full compiler_core:
+**Issue:** The seed_cpp transpiler generates C++ with errors when transpiling the full compiler_core_legacy:
 
 ```
 - Duplicate constant definitions
@@ -106,7 +106,7 @@ ssh -p 2222 root@localhost
 # 7. Clone and bootstrap
 git clone <repo-url> simple
 cd simple
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # ✅ Full FreeBSD Simple compiler ready in bin/simple!
 ```
@@ -257,7 +257,7 @@ g++ -std=c++20 -I seed -L build/linux -o test test.cpp -lspl_runtime -lm -lpthre
 The seed_cpp transpiler:
 - ✅ Works for simple programs
 - ✅ Works for individual modules
-- ⚠️ Has issues with full compiler_core (439 files, complex types)
+- ⚠️ Has issues with full compiler_core_legacy (439 files, complex types)
 - ⚠️ Generates duplicate definitions
 - ⚠️ Has syntax errors in output
 
@@ -317,7 +317,7 @@ The native bootstrap inside FreeBSD:
 - `doc/guide/freebsd_quick_reference.md`
 
 **Scripts:**
-- `scripts/bootstrap-from-scratch-freebsd.sh`
+- `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 - `scripts/verify_freebsd_workspace.spl`
 
 **Binaries (FreeBSD):**

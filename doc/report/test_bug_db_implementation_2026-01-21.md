@@ -185,7 +185,7 @@ Implemented a comprehensive test result and bug tracking database system with st
       "build_impact": {
         "causes_errors": true,
         "error_codes": ["E0308", "E0425"],
-        "affected_files": ["src/lib/std/src/core/net/http_client.spl"]
+        "affected_files": ["src/lib/std/src/compiler_core/net/http_client.spl"]
       },
 
       "related_tests": ["test_001", "test_045", "test_067"],
@@ -580,7 +580,7 @@ simple bug-gen
 
 ```bash
 # Fix the bug in code
-vim src/lib/std/src/core/net/http_client.spl
+vim src/lib/std/src/compiler_core/net/http_client.spl
 
 # Run test to verify
 simple test test/lib/std/unit/core/net/http_client_spec.spl

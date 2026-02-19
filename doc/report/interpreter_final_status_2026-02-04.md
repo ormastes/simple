@@ -23,13 +23,13 @@ The Simple interpreter is **essentially complete** and ready for production use.
 ## Complete Module Breakdown
 
 ### Core Modules (100% Complete) ✅
-- `core/eval.spl` - Main evaluation loop
-- `core/environment.spl` - Variable bindings with symbol interning
-- `core/value.spl` - Runtime values
-- `core/symbol.spl` - Symbol interning system
-- `core/contract.spl` - Pre/post conditions
-- `core/execution_guard.spl` - Execution limits
-- `core/watchdog.spl` - Timeout handling
+- `compiler_core/eval.spl` - Main evaluation loop
+- `compiler_core/environment.spl` - Variable bindings with symbol interning
+- `compiler_core/value.spl` - Runtime values
+- `compiler_core/symbol.spl` - Symbol interning system
+- `compiler_core/contract.spl` - Pre/post conditions
+- `compiler_core/execution_guard.spl` - Execution limits
+- `compiler_core/watchdog.spl` - Timeout handling
 
 ### Expression Evaluation (100% Complete) ✅
 - `expr/arithmetic.spl` - All math operations

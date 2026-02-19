@@ -18,13 +18,13 @@ Found **MASSIVE duplication** across three parser and four lexer implementations
 
 | File | Type | Lines | Purpose | Status |
 |------|------|-------|---------|--------|
-| `src/core/parser.spl` | Parser | 2,136 | Core parser (module-level state) | **PRIMARY** |
+| `src/compiler_core/parser.spl` | Parser | 2,136 | Core parser (module-level state) | **PRIMARY** |
 | `src/compiler/parser.spl` | Parser | 2,161 | Full compiler parser (OOP) | Deprecated |
-| `src/compiler_core/parser.spl` | Parser | 2,164 | Desugared compiler parser | Deprecated |
-| `src/core/lexer.spl` | Lexer | 830 | Core lexer (module-level state) | **PRIMARY** |
+| `src/compiler_core_legacy/parser.spl` | Parser | 2,164 | Desugared compiler parser | Deprecated |
+| `src/compiler_core/lexer.spl` | Lexer | 830 | Core lexer (module-level state) | **PRIMARY** |
 | `src/compiler/lexer.spl` | Lexer | 1,383 | Full compiler lexer (OOP) | Deprecated |
-| `src/compiler_core/lexer.spl` | Lexer | 1,492 | Desugared compiler lexer | Deprecated |
-| `src/core/lexer_struct.spl` | Lexer | 721 | Struct-based core lexer | Deprecated |
+| `src/compiler_core_legacy/lexer.spl` | Lexer | 1,492 | Desugared compiler lexer | Deprecated |
+| `src/compiler_core_legacy/lexer_struct.spl` | Lexer | 721 | Struct-based core lexer | Deprecated |
 
 ---
 
@@ -36,7 +36,7 @@ Found **MASSIVE duplication** across three parser and four lexer implementations
 **Location:** All 3 parsers
 **Pattern:** Binary operator precedence climbing
 
-**src/core/parser.spl:298-327**
+**src/compiler_core/parser.spl:298-327**
 ```simple
 fn parse_assignment() -> i64:
     val left = parse_or()
@@ -53,7 +53,7 @@ fn parse_assignment() -> i64:
 ```
 
 **src/compiler/parser.spl:298-327** (IDENTICAL)
-**src/compiler_core/parser.spl:298-327** (IDENTICAL with different function calls)
+**src/compiler_core_legacy/parser.spl:298-327** (IDENTICAL with different function calls)
 
 **Recommendation:** Extract to shared `ExpressionParser` module
 
@@ -63,7 +63,7 @@ fn parse_assignment() -> i64:
 **Location:** All 3 parsers
 **Pattern:** Recursive type annotation parsing
 
-**src/core/parser.spl:156-291**
+**src/compiler_core/parser.spl:156-291**
 ```simple
 fn parser_parse_type() -> i64:
     val type_name = par_text
@@ -97,7 +97,7 @@ fn parser_parse_type() -> i64:
 **Location:** All 3 parsers
 **Pattern:** Indented block statement collection
 
-**src/core/parser.spl:1030-1050**
+**src/compiler_core/parser.spl:1030-1050**
 ```simple
 fn parse_block() -> [i64]:
     var stmts: [i64] = []
@@ -132,7 +132,7 @@ fn parse_block() -> [i64]:
 **Pattern:** Function/struct/enum/use/export declaration parsing
 
 **Example: Function Declaration Parsing**
-**src/core/parser.spl:1410-1462**
+**src/compiler_core/parser.spl:1410-1462**
 ```simple
 fn parse_fn_decl(is_async: i64) -> i64:
     parser_advance()
@@ -185,7 +185,7 @@ fn parse_fn_decl(is_async: i64) -> i64:
 **Pattern:** if/for/while/match/return/break/continue
 
 **Example: Match Statement**
-**src/core/parser.spl:1288-1355**
+**src/compiler_core/parser.spl:1288-1355**
 ```simple
 fn parse_match_stmt() -> i64:
     parser_advance()
@@ -245,7 +245,7 @@ fn parse_match_stmt() -> i64:
 **Location:** All 4 lexers
 **Pattern:** Decimal/hex/binary/octal with underscores
 
-**src/core/lexer.spl:156-301**
+**src/compiler_core/lexer.spl:156-301**
 ```simple
 fn lex_scan_number():
     val start: i64 = lex_pos
@@ -290,7 +290,7 @@ fn lex_scan_number():
 **Location:** All 4 lexers
 **Pattern:** Quote handling, escape sequences, triple-quotes
 
-**src/core/lexer.spl:305-341**
+**src/compiler_core/lexer.spl:305-341**
 ```simple
 fn lex_scan_string():
     val start_line: i64 = lex_line
@@ -338,7 +338,7 @@ fn lex_scan_string():
 **Location:** All 4 lexers
 **Pattern:** Indent stack management, dedent emission
 
-**src/core/lexer.spl:432-501**
+**src/compiler_core/lexer.spl:432-501**
 ```simple
 fn lex_handle_indentation():
     # Count leading whitespace
@@ -395,7 +395,7 @@ fn lex_handle_indentation():
 **Location:** All 4 lexers
 **Pattern:** Two-character operator lookahead
 
-**src/core/lexer.spl:611-777**
+**src/compiler_core/lexer.spl:611-777**
 ```simple
 # Two+ character operators
 if c == "=":
@@ -435,7 +435,7 @@ if c == "<":
 **Location:** All 4 lexers
 **Pattern:** Keyword lookup with special cases
 
-**src/core/lexer.spl:385-416**
+**src/compiler_core/lexer.spl:385-416**
 ```simple
 fn lex_scan_ident():
     val start: i64 = lex_pos
@@ -532,10 +532,10 @@ fn lex_scan_ident():
 ### Why This Duplication Exists
 
 1. **Historical Development**
-   - Started with `src/core/` (module-level state) for bootstrap
+   - Started with `src/compiler_core/` (module-level state) for bootstrap
    - Added `src/compiler/` (OOP) for full compiler features
-   - Created `src/compiler_core/` as desugared version of `src/compiler/`
-   - Added `src/core/lexer_struct.spl` as struct-based variant
+   - Created `src/compiler_core_legacy/` as desugared version of `src/compiler/`
+   - Added `src/compiler_core_legacy/lexer_struct.spl` as struct-based variant
 
 2. **Design Evolution**
    - Core parser: Works with interpreter (no closures)
@@ -554,24 +554,24 @@ fn lex_scan_ident():
 
 ### Phase 1: Immediate Wins (Delete 4,500 lines)
 1. **Delete** `src/compiler/parser.spl` (2,161 lines)
-2. **Delete** `src/compiler_core/parser.spl` (2,164 lines)
+2. **Delete** `src/compiler_core_legacy/parser.spl` (2,164 lines)
 3. **Delete** `src/compiler/lexer.spl` (1,383 lines)
-4. **Delete** `src/compiler_core/lexer.spl` (1,492 lines)
+4. **Delete** `src/compiler_core_legacy/lexer.spl` (1,492 lines)
 5. **Keep only:**
-   - `src/core/parser.spl` (PRIMARY)
-   - `src/core/lexer.spl` (PRIMARY)
+   - `src/compiler_core/parser.spl` (PRIMARY)
+   - `src/compiler_core/lexer.spl` (PRIMARY)
 
 **Rationale:** These are 100% duplicates. No unique functionality.
 
 ### Phase 2: Consolidate Lexer Variants (Delete 721 lines)
-1. **Merge** `src/core/lexer_struct.spl` into `src/core/lexer.spl`
+1. **Merge** `src/compiler_core/lexer_struct.spl` into `src/compiler_core/lexer.spl`
 2. Use conditional compilation or adapter pattern
-3. Extract shared utilities to `src/core/lexer_common.spl`
+3. Extract shared utilities to `src/compiler_core/lexer_common.spl`
 
 ### Phase 3: Extract Shared Parsers (Reduce to ~1,500 lines)
 Create modular parser utilities:
 ```
-src/core/parser/
+src/compiler_core/parser/
   mod.spl              # Main entry point (200 lines)
   expression.spl       # Expression parsing (400 lines)
   type.spl            # Type annotation parsing (150 lines)
@@ -583,7 +583,7 @@ src/core/parser/
 ### Phase 4: Extract Shared Lexers (Reduce to ~600 lines)
 Create modular lexer utilities:
 ```
-src/core/lexer/
+src/compiler_core/lexer/
   mod.spl              # Main entry point (150 lines)
   number.spl          # Number scanning (120 lines)
   text.spl          # String scanning (80 lines)
@@ -621,7 +621,7 @@ src/core/lexer/
 
 ## Next Steps
 
-1. **Immediate:** Delete `src/compiler/` and `src/compiler_core/` parsers/lexers
+1. **Immediate:** Delete `src/compiler/` and `src/compiler_core_legacy/` parsers/lexers
 2. **Week 1:** Consolidate lexer variants
 3. **Week 2:** Extract parser utilities
 4. **Week 3:** Extract lexer utilities
@@ -633,13 +633,13 @@ src/core/lexer/
 
 | File 1 | File 2 | Similarity | Unique to File 1 | Unique to File 2 |
 |--------|--------|------------|------------------|------------------|
-| core/parser.spl | compiler/parser.spl | 95% | ~100 lines | ~100 lines |
-| core/parser.spl | compiler_core/parser.spl | 92% | ~150 lines | ~150 lines |
-| compiler/parser.spl | compiler_core/parser.spl | 98% | ~40 lines | ~40 lines |
-| core/lexer.spl | compiler/lexer.spl | 90% | ~80 lines | ~500 lines |
-| core/lexer.spl | compiler_core/lexer.spl | 88% | ~80 lines | ~600 lines |
-| core/lexer.spl | lexer_struct.spl | 85% | ~100 lines | ~100 lines |
-| compiler/lexer.spl | compiler_core/lexer.spl | 95% | ~70 lines | ~70 lines |
+| compiler_core/parser.spl | compiler/parser.spl | 95% | ~100 lines | ~100 lines |
+| compiler_core/parser.spl | compiler_core_legacy/parser.spl | 92% | ~150 lines | ~150 lines |
+| compiler/parser.spl | compiler_core_legacy/parser.spl | 98% | ~40 lines | ~40 lines |
+| compiler_core/lexer.spl | compiler/lexer.spl | 90% | ~80 lines | ~500 lines |
+| compiler_core/lexer.spl | compiler_core_legacy/lexer.spl | 88% | ~80 lines | ~600 lines |
+| compiler_core/lexer.spl | lexer_struct.spl | 85% | ~100 lines | ~100 lines |
+| compiler/lexer.spl | compiler_core_legacy/lexer.spl | 95% | ~70 lines | ~70 lines |
 
 **Legend:**
 - **Similarity:** Percentage of identical/near-identical code
@@ -650,4 +650,4 @@ src/core/lexer/
 **Analysis Complete**
 **Total Duplicate Groups:** 20
 **Total Duplicate Lines:** ~9,710 (87% of codebase)
-**Primary Recommendation:** DELETE `src/compiler/` and `src/compiler_core/` parser/lexer files immediately
+**Primary Recommendation:** DELETE `src/compiler/` and `src/compiler_core_legacy/` parser/lexer files immediately

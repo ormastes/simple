@@ -10,17 +10,17 @@ seed (C++)  -->  core (Simple)  -->  full (Simple)
 
 | Layer | Language | Source | Output | Purpose |
 |-------|----------|--------|--------|---------|
-| **seed** | C++ | `seed/seed.cpp` (3,437 lines) | C++ transpiler binary | Transpile Core Simple to C++ |
-| **core** | Core Simple | `src/core/` (20,053 lines, 31 files) | Native compiler binary | Compile Full Simple |
+| **seed** | C++ | `src/compiler_seed/seed.cpp` (3,437 lines) | C++ transpiler binary | Transpile Core Simple to C++ |
+| **core** | Core Simple | `src/compiler_core/` (20,053 lines, 31 files) | Native compiler binary | Compile Full Simple |
 | **full** | Full Simple | `src/compiler/` (127,284 lines, 409 files) | Self-hosting compiler | The production compiler |
 
 ### Bootstrap Chain
 
 ```
 Step 1 (bootstrap):  clang++ seed.cpp --> seed binary (Mach-O/ELF)
-Step 2 (seed):       seed reads src/core/*.spl --> core_compiler.cpp (C++)
+Step 2 (seed):       seed reads src/compiler_core/*.spl --> core_compiler.cpp (C++)
 Step 3 (core1):      clang++ core_compiler.cpp + runtime.c --> core_compiler binary
-Step 4 (core2):      core_compiler compiles src/core/*.spl --> core_self.cpp (self-check)
+Step 4 (core2):      core_compiler compiles src/compiler_core/*.spl --> core_self.cpp (self-check)
 Step 5 (full1):      core_compiler compiles src/compiler/*.spl --> full compiler
 Step 6 (full2):      full compiler compiles src/compiler/*.spl --> full compiler v2 (self-check)
 Step 7 (simple):     SHA256(full1) == SHA256(full2) --> verified self-hosting binary
@@ -54,12 +54,12 @@ Step 8 (build):      Copy verified binary --> bin/release/<platform>/simple
 **Build command:**
 ```bash
 cd build/cmake && cmake ../../seed && make
-# or: clang++ -std=c++20 -o build/bootstrap/seed seed/seed.cpp
+# or: clang++ -std=c++20 -o build/bootstrap/seed src/compiler_seed/seed.cpp
 ```
 
 ## Core Layer (Pure Simple)
 
-**Directory:** `src/core/` — 31 .spl files, 20,053 lines
+**Directory:** `src/compiler_core/` — 31 .spl files, 20,053 lines
 
 **Key modules:**
 - `ast.spl`, `ast_types.spl` — Abstract Syntax Tree
@@ -78,11 +78,11 @@ cd build/cmake && cmake ../../seed && make
 **Build process:**
 ```bash
 # seed transpiles Core Simple to C++
-build/bootstrap/seed src/core/__init__.spl > build/bootstrap/core_compiler.cpp
+build/bootstrap/seed src/compiler_core/__init__.spl > build/bootstrap/core_compiler.cpp
 
 # Compile C++ to native binary
 clang++ -std=c++20 -o build/bootstrap/core_compiler \
-    build/bootstrap/core_compiler.cpp seed/runtime.c -Iseed
+    build/bootstrap/core_compiler.cpp src/compiler_seed/runtime.c -Isrc/compiler_seed
 ```
 
 **Generated output:** `core_compiler.cpp` (~9,747 lines C++, 370 KB)
@@ -113,12 +113,12 @@ clang++ -std=c++20 -o build/bootstrap/core_compiler \
 # Core compiler compiles Full Simple
 build/bootstrap/core_compiler src/compiler/main.spl > build/bootstrap/full_compiler.cpp
 clang++ -std=c++20 -o build/bootstrap/full1 \
-    build/bootstrap/full_compiler.cpp seed/runtime.c -Iseed
+    build/bootstrap/full_compiler.cpp src/compiler_seed/runtime.c -Isrc/compiler_seed
 
 # Self-hosting verification
 build/bootstrap/full1 src/compiler/main.spl > build/bootstrap/full2_compiler.cpp
 clang++ -std=c++20 -o build/bootstrap/full2 \
-    build/bootstrap/full2_compiler.cpp seed/runtime.c -Iseed
+    build/bootstrap/full2_compiler.cpp src/compiler_seed/runtime.c -Isrc/compiler_seed
 
 # Verify reproducibility
 sha256sum build/bootstrap/full1 build/bootstrap/full2  # Must match
@@ -129,8 +129,8 @@ sha256sum build/bootstrap/full1 build/bootstrap/full2  # Must match
 ### Pipeline
 
 ```
-seed/seed.cpp ──g++──> build/bootstrap/seed_cpp.exe
-seed_cpp.exe + src/core/*.spl + build/bootstrap/shim_nl.spl ──> core1.cpp ──g++──> core1.exe
+src/compiler_seed/seed.cpp ──g++──> build/bootstrap/seed_cpp.exe
+seed_cpp.exe + src/compiler_core/*.spl + build/bootstrap/shim_nl.spl ──> core1.cpp ──g++──> core1.exe
 core1.exe copied as core2_new.exe (core2 self-host hangs at runtime)
 core2_new.exe + src/compiler/*.spl ──build_win.py──> cc_v2_raw.cpp
 fix_cpp.py ──> cc_v2_fixed.cpp (struct dedup, reserved words, type fixes, stubs)
@@ -153,19 +153,19 @@ g++ -fpermissive ──> compiler_v2.exe (388KB, SUCCESS)
 
 | File | Purpose |
 |------|---------|
-| `seed/seed.cpp` | C++ seed transpiler (~4800 lines) |
-| `seed/runtime.h`, `seed/runtime.c` | Runtime library (arrays, strings, dicts, GC) |
-| `seed/platform/platform_win.h` | Windows platform layer (MinGW/MSVC/ClangCL) |
-| `seed/build/libspl_runtime.a` | Pre-built MinGW runtime static library |
+| `src/compiler_seed/seed.cpp` | C++ seed transpiler (~4800 lines) |
+| `src/compiler_seed/runtime.h`, `src/compiler_seed/runtime.c` | Runtime library (arrays, strings, dicts, GC) |
+| `src/compiler_seed/platform/platform_win.h` | Windows platform layer (MinGW/MSVC/ClangCL) |
+| `build/seed/libspl_runtime.a` | Pre-built MinGW runtime static library |
 | `build/bootstrap/shim_nl.spl` | Provides `NL`/`_NL` constants for bootstrap |
-| `src/core/types.spl` | Core type definitions |
-| `src/core/tokens.spl` | Token definitions |
-| `src/core/ast_types.spl` | AST node types (CoreExpr, CoreStmt, CoreDecl) |
-| `src/core/ast.spl` | AST node constructors/accessors |
-| `src/core/lexer.spl` | Lexer (tokenizer) |
-| `src/core/parser.spl` | Parser (arena-based AST) |
-| `src/core/compiler/c_codegen.spl` | C++ code generation |
-| `src/core/compiler/driver.spl` | Main entry point |
+| `src/compiler_core/types.spl` | Core type definitions |
+| `src/compiler_core/tokens.spl` | Token definitions |
+| `src/compiler_core/ast_types.spl` | AST node types (CoreExpr, CoreStmt, CoreDecl) |
+| `src/compiler_core/ast.spl` | AST node constructors/accessors |
+| `src/compiler_core/lexer.spl` | Lexer (tokenizer) |
+| `src/compiler_core/parser.spl` | Parser (arena-based AST) |
+| `src/compiler_core/compiler/c_codegen.spl` | C++ code generation |
+| `src/compiler_core/compiler/driver.spl` | Main entry point |
 | `src/compiler/` | Full compiler source (~292 files) |
 | `src/compiler_core_win/build_win.py` | Build orchestrator script |
 | `src/compiler_core_win/fix_cpp.py` | C++ post-processor (struct dedup, reserved words) |
@@ -178,15 +178,15 @@ g++ -fpermissive ──> compiler_v2.exe (388KB, SUCCESS)
 # Prerequisites: MinGW g++ (MSYS2), Python 3
 # 1. Build seed
 cd build/bootstrap
-g++ -std=c++20 -O2 -I../../seed ../../seed/seed.cpp -o seed_cpp.exe
+g++ -std=c++20 -O2 -I../../seed ../../src/compiler_seed/seed.cpp -o seed_cpp.exe
 
 # 2. Build core1
-./seed_cpp.exe ../../src/core/types.spl ../../src/core/tokens.spl \
-  ../../src/core/ast_types.spl ../../src/core/ast.spl \
-  ./shim_nl.spl ../../src/core/lexer.spl ../../src/core/parser.spl \
-  ../../src/core/compiler/c_codegen.spl ../../src/core/compiler/driver.spl \
+./seed_cpp.exe ../../src/compiler_core/types.spl ../../src/compiler_core/tokens.spl \
+  ../../src/compiler_core/ast_types.spl ../../src/compiler_core/ast.spl \
+  ./shim_nl.spl ../../src/compiler_core/lexer.spl ../../src/compiler_core/parser.spl \
+  ../../src/compiler_core/compiler/c_codegen.spl ../../src/compiler_core/compiler/driver.spl \
   > core1.cpp
-g++ -std=c++20 -O2 -I../../seed core1.cpp ../../seed/build/libspl_runtime.a -o core1.exe
+g++ -std=c++20 -O2 -I../../seed core1.cpp ../../build/seed/libspl_runtime.a -o core1.exe
 
 # 3. Use core1 as core2 (core2 self-host hangs)
 cp core1.exe core2_new.exe
@@ -220,8 +220,8 @@ python src/compiler_core_win/build_win.py
 ### Pipeline
 
 ```
-seed/seed.cpp ──clang++/g++──> build/bootstrap/seed_cpp (ELF)
-seed_cpp + src/core/*.spl ──> core1.cpp ──clang++──> core1 (ELF)
+src/compiler_seed/seed.cpp ──clang++/g++──> build/bootstrap/seed_cpp (ELF)
+seed_cpp + src/compiler_core/*.spl ──> core1.cpp ──clang++──> core1 (ELF)
 core1 + src/compiler/*.spl ──> core2 (ELF, self-host check)
 core2 + src/app/cli/*.spl ──> full1 (ELF, full compiler)
 full1 + src/app/cli/*.spl ──> full2 (ELF, reproducibility check)
@@ -232,7 +232,7 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
 
 | Stage | Status | Artifact | Size |
 |-------|--------|----------|------|
-| seed | **PASS** | `seed/build/seed_cpp` | ~200K |
+| seed | **PASS** | `build/seed/seed_cpp` | ~200K |
 | core1 | **PASS** | `build/bootstrap/core1` | ~326K |
 | core2 | **PASS** | `build/bootstrap/core2` | ~326K |
 | full1 | **PASS** | `build/bootstrap/full1` | ~33M |
@@ -242,17 +242,17 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
 ### Files and Folders Used
 
 **Seed Layer:**
-- `seed/seed.cpp` - C++ seed transpiler (~3,437 lines)
-- `seed/runtime.c` - C runtime library (970 lines)
-- `seed/runtime.h` - Runtime API headers (244 lines)
+- `src/compiler_seed/seed.cpp` - C++ seed transpiler (~3,437 lines)
+- `src/compiler_seed/runtime.c` - C runtime library (970 lines)
+- `src/compiler_seed/runtime.h` - Runtime API headers (244 lines)
 - `seed/CMakeLists.txt` - CMake build configuration
-- `seed/build/` - Build output directory (cmake artifacts)
+- `build/seed/` - Build output directory (cmake artifacts)
   - `seed_cpp` - Seed compiler binary
   - `libspl_runtime.a` - Runtime static library
   - `startup/libspl_crt_linux_*.a` - Startup CRT (platform-specific)
 
 **Core Layer:**
-- `src/core/` - Core Simple source (31 files, 20,053 lines)
+- `src/compiler_core/` - Core Simple source (31 files, 20,053 lines)
   - `types.spl`, `tokens.spl` - Type and token definitions
   - `ast_types.spl`, `ast.spl` - AST node types and constructors
   - `lexer.spl`, `lexer_struct.spl`, `lexer_types.spl` - Lexer
@@ -304,7 +304,7 @@ git clone https://github.com/simple-lang/simple.git
 cd simple
 
 # Run bootstrap from scratch
-./scripts/bootstrap-from-scratch.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh
 
 # Output: bin/simple (~33 MB, ELF x86-64)
 ```
@@ -312,19 +312,19 @@ cd simple
 **Manual Step-by-Step:**
 ```bash
 # 1. Build seed compiler
-mkdir -p seed/build
-cd seed/build
+mkdir -p build/seed
+cd build/seed
 cmake -G Ninja -DCMAKE_CXX_COMPILER=clang++-20 ..
 ninja
 cd ../..
 
 # 2. Transpile Core Simple to C++
-seed/build/seed_cpp src/core/__init__.spl > build/bootstrap/core1.cpp
+build/seed/seed_cpp src/compiler_core/__init__.spl > build/bootstrap/core1.cpp
 
 # 3. Compile core1
 clang++ -std=c++20 -O2 -o build/bootstrap/core1 \
     build/bootstrap/core1.cpp \
-    -Iseed -Lseed/build -lspl_runtime -lm -lpthread -ldl
+    -Isrc/compiler_seed -Lbuild/seed -lspl_runtime -lm -lpthread -ldl
 
 # 4. Self-host check (core2)
 build/bootstrap/core1 compile src/compiler/main.spl \
@@ -352,7 +352,7 @@ sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
 # Build with cross-compilation toolchain
 CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
-    ./scripts/bootstrap-from-scratch.sh \
+    ./scripts/bootstrap/bootstrap-from-scratch.sh \
     --output=bin/release/linux-arm64/simple
 ```
 
@@ -363,7 +363,7 @@ sudo apt install gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
 
 # Build with cross-compilation toolchain
 CC=riscv64-linux-gnu-gcc CXX=riscv64-linux-gnu-g++ \
-    ./scripts/bootstrap-from-scratch.sh \
+    ./scripts/bootstrap/bootstrap-from-scratch.sh \
     --output=bin/release/linux-riscv64/simple
 ```
 
@@ -392,8 +392,8 @@ CC=riscv64-linux-gnu-gcc CXX=riscv64-linux-gnu-g++ \
 ### Pipeline
 
 ```
-seed/seed.cpp ──clang++──> seed/build/seed_cpp (FreeBSD ELF)
-seed_cpp + src/core/*.spl ──> core1.cpp ──clang++──> core1 (FreeBSD ELF)
+src/compiler_seed/seed.cpp ──clang++──> build/seed/seed_cpp (FreeBSD ELF)
+seed_cpp + src/compiler_core/*.spl ──> core1.cpp ──clang++──> core1 (FreeBSD ELF)
 core1 + src/compiler/*.spl ──> core2 (FreeBSD ELF, self-host check)
 core2 + src/app/cli/*.spl ──> full1 (FreeBSD ELF, full compiler)
 full1 + src/app/cli/*.spl ──> full2 (FreeBSD ELF, reproducibility check)
@@ -413,18 +413,18 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
 ### Files and Folders Used
 
 **Seed Layer:**
-- `seed/seed.cpp` - C++ seed transpiler (~3,437 lines)
-- `seed/runtime.c` - C runtime library (970 lines)
-- `seed/runtime.h` - Runtime API headers (244 lines)
-- `seed/runtime_thread.c` - Thread/atomic operations
+- `src/compiler_seed/seed.cpp` - C++ seed transpiler (~3,437 lines)
+- `src/compiler_seed/runtime.c` - C runtime library (970 lines)
+- `src/compiler_seed/runtime.h` - Runtime API headers (244 lines)
+- `src/compiler_seed/runtime_thread.c` - Thread/atomic operations
 - `seed/CMakeLists.txt` - CMake configuration (auto-detects Clang, enforces C++20)
-- `seed/build/` - CMake build output directory
+- `build/seed/` - CMake build output directory
   - `seed_cpp` - Seed compiler binary (FreeBSD ELF)
   - `libspl_runtime.a` - Runtime static library
   - `startup/libspl_crt_freebsd_*.a` - FreeBSD startup CRT (platform-specific)
 
 **Core Layer:**
-- `src/core/` - Core Simple source (31 files, 20,053 lines total)
+- `src/compiler_core/` - Core Simple source (31 files, 20,053 lines total)
   - `tokens.spl`, `types.spl`, `error.spl` - Foundation types
   - `ast_types.spl`, `hir_types.spl`, `mir_types.spl`, `backend_types.spl` - IR types
   - `lexer_struct.spl`, `lexer.spl` - Lexical analysis
@@ -452,7 +452,7 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
 - `bin/release/freebsd-x86_64/simple` - Release binary for distribution
 
 **Bootstrap Scripts (FreeBSD-specific):**
-- `scripts/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap (521 lines)
+- `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` - Native FreeBSD bootstrap (521 lines)
 - `scripts/configure_freebsd_vm_ssh.sh` - QEMU VM SSH setup
 - `scripts/setup_freebsd_vm.spl` - VM creation helper
 - `scripts/test_freebsd_qemu.spl` - QEMU integration tests
@@ -485,7 +485,7 @@ git clone https://github.com/simple-lang/simple.git
 cd simple
 
 # Run FreeBSD-specific bootstrap
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # Options:
 #   --skip-verify     Skip reproducibility checks (faster)
@@ -501,8 +501,8 @@ cd simple
 **Manual Step-by-Step (FreeBSD):**
 ```bash
 # 1. Build seed compiler
-mkdir -p seed/build
-cd seed/build
+mkdir -p build/seed
+cd build/seed
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_CXX_STANDARD=20 \
@@ -512,15 +512,15 @@ cd ../..
 
 # 2. Transpile Core Simple to C++
 mkdir -p build/bootstrap/core_cpp
-seed/build/seed_cpp src/core/tokens.spl > build/bootstrap/core_cpp/tokens.cpp
-seed/build/seed_cpp src/core/parser.spl > build/bootstrap/core_cpp/parser.cpp
-# ... (repeat for all src/core/*.spl files)
+build/seed/seed_cpp src/compiler_core/tokens.spl > build/bootstrap/core_cpp/tokens.cpp
+build/seed/seed_cpp src/compiler_core/parser.spl > build/bootstrap/core_cpp/parser.cpp
+# ... (repeat for all src/compiler_core/*.spl files)
 
 # 3. Compile core1
 clang++ -std=c++20 -O2 -DSPL_PLATFORM_FREEBSD \
     -o build/bootstrap/core1/simple_core1 \
-    build/bootstrap/core_cpp/*.cpp seed/runtime.c \
-    -Iseed/platform -lpthread -lm
+    build/bootstrap/core_cpp/*.cpp src/compiler_seed/runtime.c \
+    -Isrc/compiler_seed/platform -lpthread -lm
 
 # 4. Self-host check (core2)
 build/bootstrap/core1/simple_core1 src/compiler \
@@ -592,11 +592,11 @@ qemu-system-x86_64 \
 **Bootstrap in QEMU VM:**
 ```bash
 # From Linux host, run full QEMU bootstrap
-./scripts/bootstrap-from-scratch.sh --platform=freebsd
+./scripts/bootstrap/bootstrap-from-scratch.sh --platform=freebsd
 
 # Or use direct QEMU function
 QEMU_PORT=2222 QEMU_USER=freebsd \
-./scripts/bootstrap-from-scratch.sh --freebsd-vm
+./scripts/bootstrap/bootstrap-from-scratch.sh --freebsd-vm
 
 # Output: bin/simple (FreeBSD binary, synced from VM)
 ```
@@ -623,7 +623,7 @@ QEMU_PORT=2222 QEMU_USER=freebsd \
 **Compiler Flags (FreeBSD-specific):**
 ```bash
 -DSPL_PLATFORM_FREEBSD    # Platform detection macro
--Iseed/platform           # Platform abstraction headers
+-Isrc/compiler_seed/platform           # Platform abstraction headers
 -lpthread                 # POSIX threads (standard on FreeBSD)
 -lm                       # Math library
 ```
@@ -647,7 +647,7 @@ QEMU_PORT=2222 QEMU_USER=freebsd \
 
 | Stage | Status | Artifact | Notes |
 |-------|--------|----------|-------|
-| seed | **PASS** | `seed/build/seed_cpp` | ELF x86-64 |
+| seed | **PASS** | `build/seed/seed_cpp` | ELF x86-64 |
 | core1 | **PASS** | `build/bootstrap/core1` | ~326K |
 | core2 | **PASS** | `build/bootstrap/core2` | Self-host verified |
 | full1 | **PASS** | `build/bootstrap/full1` | ~33M |
@@ -701,7 +701,7 @@ Only 2 unique binaries exist (different hashes). Non-linux-x86_64 are placeholde
 
 | Stage | Status | Artifact | Notes |
 |-------|--------|----------|-------|
-| seed | **PASS** | `seed/build/seed_cpp` | FreeBSD ELF (x86-64/arm64/riscv64) |
+| seed | **PASS** | `build/seed/seed_cpp` | FreeBSD ELF (x86-64/arm64/riscv64) |
 | core1 | **PASS** | `build/bootstrap/core1/simple_core1` | ~326K FreeBSD ELF |
 | core2 | **PASS** | `build/bootstrap/core2/simple_core2` | Self-host verified |
 | full1 | **PASS** | `build/bootstrap/full1/simple_full1` | ~33M FreeBSD ELF |
@@ -726,7 +726,7 @@ Only 2 unique binaries exist (different hashes). Non-linux-x86_64 are placeholde
 - 📝 Tested: Ubuntu 22.04 LTS host + FreeBSD 14.3 QEMU VM
 
 **FreeBSD-Specific Scripts:**
-- `scripts/bootstrap-from-scratch-freebsd.sh` - Native bootstrap (521 lines)
+- `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` - Native bootstrap (521 lines)
 - `scripts/configure_freebsd_vm_ssh.sh` - SSH setup for QEMU
 - `scripts/setup_freebsd_vm.spl` - VM provisioning helper
 - `scripts/test_freebsd_qemu.spl` - QEMU tests
@@ -738,7 +738,7 @@ Only 2 unique binaries exist (different hashes). Non-linux-x86_64 are placeholde
 build/bootstrap/
   seed                      67K   Mach-O arm64  -- C++ seed compiler
   seed_cpp                  84K   Mach-O arm64  -- Alternative seed
-  core_compiler.cpp         370K  C++ source    -- Generated by seed from src/core/
+  core_compiler.cpp         370K  C++ source    -- Generated by seed from src/compiler_core/
   core_compiler             326K  Mach-O arm64  -- Compiled core (stage 1)
   core_self_minimal2.cpp    310K  C++ source    -- core_compiler self-compile (9 minimal files, 8016 lines)
   core_compiler_v2_minimal  207K  Mach-O arm64  -- Self-hosted core v2 (WORKING)
@@ -773,13 +773,13 @@ Replace Linux ELF placeholders in `bin/release/` with actual native binaries for
 
 | File | Purpose |
 |------|---------|
-| `seed/seed.cpp` | C++ seed transpiler |
-| `seed/runtime.c` | C runtime library |
+| `src/compiler_seed/seed.cpp` | C++ seed transpiler |
+| `src/compiler_seed/runtime.c` | C runtime library |
 | `seed/CMakeLists.txt` | CMake build config for seed |
-| `src/core/` | Core Simple source (compiled by seed) |
+| `src/compiler_core/` | Core Simple source (compiled by seed) |
 | `src/compiler/` | Full Simple source (compiled by core) |
 | `src/compiler/main.spl` | Full compiler entry point |
-| `src/core/compiler/c_codegen.spl` | C code generation in Core Simple |
-| `src/core/compiler/driver.spl` | Compilation driver in Core Simple |
+| `src/compiler_core/compiler/c_codegen.spl` | C code generation in Core Simple |
+| `src/compiler_core/compiler/driver.spl` | Compilation driver in Core Simple |
 | `build/bootstrap/` | Build artifacts |
 | `build/cmake/` | CMake build directory |

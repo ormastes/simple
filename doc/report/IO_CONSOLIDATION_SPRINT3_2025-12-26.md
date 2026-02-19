@@ -82,11 +82,13 @@ async fn lint_file(self, path: String) -> Result[List[LintResult], String]:
 
 **Conclusion:** LSP communicates via JSON-RPC over stdin/stdout, not file I/O or networking. No migration needed for this sprint. The `io.stdio` module is separate from file I/O and networking consolidation.
 
-### ⏸️ Sprint 3.4: Build Scripts (Deferred)
+### ⏸️ Sprint 3.4: Build Scripts (Deferred -> Resolved)
 **Files Identified:**
 - `simple/build.spl` - Build system script
 - `simple/task.spl` - Task runner script
 - `simple/watch.spl` - File watcher script
+
+> **Resolved (2026-02-19):** These obsolete prototype scripts were deleted. They used non-working syntax (`import std.io`, `io.println()`, `${var}`) and were fully superseded by `src/app/build/`, `src/app/task/main.spl`, and `src/app/watch/main.spl`.
 
 **Current State:** These scripts use old `std.io` and `std.fs` imports
 
@@ -157,7 +159,7 @@ let content = await fs.read_text(path_fp)?
 4. `simple/app/lsp/main.spl` - No changes needed
 5. `simple/app/lsp/transport.spl` - Uses io.stdio
 
-### Deferred (3 files)
+### Deferred (3 files) *(Deleted 2026-02-19; superseded by src/app/ implementations)*
 6. `simple/build.spl` - Needs io.stdio
 7. `simple/task.spl` - Needs io.stdio
 8. `simple/watch.spl` - Needs io.stdio

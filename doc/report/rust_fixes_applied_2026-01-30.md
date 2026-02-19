@@ -51,7 +51,7 @@ Replaced non-existent matchers with spec framework matchers:
 ---
 
 ### 4. Random Module Code Fixes
-**File:** `src/lib/std/src/core/random.spl`
+**File:** `src/lib/std/src/compiler_core/random.spl`
 
 1. Moved `use core.math` to module level (from function scope)
 2. Added `pub` visibility to all 16 functions
@@ -111,7 +111,7 @@ Module evaluator at `module_evaluator/evaluation_helpers.rs:442` should export p
 
 ### Simple Language (2 files)
 4. `test/lib/std/unit/core/time_spec.spl`
-5. `src/lib/std/src/core/random.spl`
+5. `src/lib/std/src/compiler_core/random.spl`
 
 ---
 

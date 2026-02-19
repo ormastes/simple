@@ -12,7 +12,7 @@
 4. ❌ **Core → full build** - **BLOCKED** (depends on #3)
 5. ❌ **Full → full self build** - **BLOCKED** (depends on #3-4)
 
-**Script Status:** `scripts/bootstrap-fixed.sh` automates steps 1-2 only, NOT the full chain.
+**Script Status:** `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` automates steps 1-2 only, NOT the full chain.
 
 ---
 
@@ -24,7 +24,7 @@
 
 **Source code has full compiler logic:**
 ```simple
-# src/compiler_core/main.spl:366
+# src/compiler_core_legacy/main.spl:366
 fn main() -> i32:
     val args = sys_get_args()
     # ... full CLI parsing and compilation logic ...
@@ -79,7 +79,7 @@ This means seed_cpp can create **libraries** but not **executables**.
 
 ### Option B: Use pre-built compiler for bootstrap
 **Effort:** Immediate
-**Approach:** Use `bin/release/simple` (33MB pre-built) to compile compiler_core
+**Approach:** Use `bin/release/simple` (33MB pre-built) to compile compiler_core_legacy
 **Status:** This already works - it's how the project normally builds
 
 ### Option C: Document seed_cpp as library-only transpiler
