@@ -155,31 +155,37 @@ fn start_server():
         else:
             var method = extract_field(line, "method")
             var id = extract_id(line)
-            var response = ""
-            if method == "initialize":
-                response = make_init_response(id)
-            elif method == "initialized" or method == "notifications/initialized":
-                response = ""
-            elif method == "shutdown":
-                response = make_json_result(id, "null")
-            elif method == "tools/list":
-                response = make_tools_list(id)
-            elif method == "tools/call":
-                var tool_name = extract_nested(line, "name")
-                response = dispatch_tool(id, tool_name, line)
-            elif method == "resources/list":
-                response = make_json_result(id, jo1(jp("resources", SB_L() + SB_R())))
-            elif method == "prompts/list":
-                response = make_json_result(id, jo1(jp("prompts", SB_L() + SB_R())))
-            elif method == "ping":
-                response = make_json_result(id, LB() + RB())
-            elif method == "notifications/cancelled":
-                response = ""
+            # Bug B: malformed JSON - no method or id extractable → parse error
+            if method == "" and id == "":
+                write_stdout_message(make_error("null", -32700, "Parse error"))
+            elif id == "":
+                # Bug C: JSON-RPC notification (no id) → no response
+                pass_do_nothing
             else:
-                if id != "" and id != "null":
+                var response = ""
+                if method == "initialize":
+                    response = make_init_response(id)
+                elif method == "initialized" or method == "notifications/initialized":
+                    response = ""
+                elif method == "shutdown":
+                    response = make_json_result(id, "null")
+                elif method == "tools/list":
+                    response = make_tools_list(id)
+                elif method == "tools/call":
+                    var tool_name = extract_nested(line, "name")
+                    response = dispatch_tool(id, tool_name, line)
+                elif method == "resources/list":
+                    response = make_json_result(id, jo1(jp("resources", SB_L() + SB_R())))
+                elif method == "prompts/list":
+                    response = make_json_result(id, jo1(jp("prompts", SB_L() + SB_R())))
+                elif method == "ping":
+                    response = make_json_result(id, LB() + RB())
+                elif method == "notifications/cancelled":
+                    response = ""
+                else:
                     response = make_error(id, -32601, "Method not found: " + method)
-            if response != "":
-                write_stdout_message(response)
+                if response != "":
+                    write_stdout_message(response)
 
 # --- MCP protocol I/O ---
 
@@ -307,7 +313,8 @@ fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
 
 fn handle_simple_read(id: text, body: text) -> text:
     val path = extract_arg(body, "path")
-    if path == "":
+    # Bug A: JSON null value is extracted as literal string "null"
+    if path == "" or path == "null":
         return make_error(id, -32602, "Missing required parameter: path")
 
     val content_opt = rt_file_read_text(path)
@@ -344,7 +351,8 @@ fn handle_simple_list(id: text, body: text) -> text:
 
 fn handle_simple_search(id: text, body: text) -> text:
     val pattern = extract_arg(body, "pattern")
-    if pattern == "":
+    # Bug A: JSON null value is extracted as literal string "null"
+    if pattern == "" or pattern == "null":
         return make_error(id, -32602, "Missing required parameter: pattern")
 
     var directory = extract_arg(body, "directory")
