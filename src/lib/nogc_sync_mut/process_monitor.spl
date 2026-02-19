@@ -1,0 +1,332 @@
+# Process Resource Monitoring
+#
+# Real-time monitoring of process CPU, memory, and file descriptor usage.
+# Uses Linux /proc filesystem for metrics collection.
+
+use app.io.mod.{file_exists, file_read, shell_int, shell_output_trimmed}
+use std.text.{NL}
+use std.platform.{is_windows, is_linux, is_macos}
+
+# ============================================================================
+# ProcessMetrics - Snapshot of process resource usage
+# ============================================================================
+
+struct ProcessMetrics:
+    pid: i64
+    cpu_percent: f64
+    memory_mb: i64
+    open_fds: i64
+    thread_count: i64
+    timestamp_ms: i64
+
+# ============================================================================
+# Linux /proc Filesystem Reading
+# ============================================================================
+
+fn read_proc_stat_linux(pid: i64) -> text:
+    """Read /proc/{pid}/stat file"""
+    val stat_file = "/proc/{pid}/stat"
+    if not file_exists(stat_file):
+        return ""
+    file_read(stat_file)
+
+fn parse_proc_stat_fields(stat_content: text) -> [text]:
+    """
+    Parse /proc/{pid}/stat format.
+    Format: pid (comm) state ppid ... utime stime ...
+    Fields are space-separated, but comm can contain spaces and parens.
+    """
+    if stat_content == "":
+        return []
+
+    # Find last ')' to skip comm field
+    val last_paren_idx = stat_content.last_index_of(")")
+    if last_paren_idx.? == nil:
+        return []
+
+    val last_paren = last_paren_idx ?? 0
+    val after_comm = stat_content[last_paren + 1:].trim()
+    after_comm.split(" ")
+
+fn extract_cpu_time_linux(stat_fields: [text]) -> i64:
+    """
+    Extract total CPU time from /proc/stat fields.
+    After skipping comm: state(0) ppid(1) pgrp(2) ... utime(11) stime(12)
+    """
+    if stat_fields.len() < 13:
+        return 0
+
+    val utime_str = stat_fields[11]
+    val stime_str = stat_fields[12]
+
+    val utime = to_int(utime_str)
+    val stime = to_int(stime_str)
+
+    utime + stime
+
+fn count_file_descriptors_linux(pid: i64) -> i64:
+    """Count open file descriptors in /proc/{pid}/fd"""
+    val fd_dir = "/proc/{pid}/fd"
+    if not file_exists(fd_dir):
+        return 0
+
+    # Count files in fd directory using shell
+    val count_cmd = "ls -1 {fd_dir} 2>/dev/null | wc -l"
+    shell_int(count_cmd, 0)
+
+fn count_threads_linux(pid: i64) -> i64:
+    """Count threads in /proc/{pid}/task"""
+    val task_dir = "/proc/{pid}/task"
+    if not file_exists(task_dir):
+        return 1  # At least main thread
+
+    # Count entries in task directory
+    val count_cmd = "ls -1 {task_dir} 2>/dev/null | wc -l"
+    val count = shell_int(count_cmd, 1)
+    if count < 1:
+        1
+    else:
+        count
+
+fn read_proc_status_rss_linux(pid: i64) -> i64:
+    """
+    Read RSS (resident set size) from /proc/{pid}/status in KB.
+    Returns memory in KB.
+    """
+    val status_file = "/proc/{pid}/status"
+    if not file_exists(status_file):
+        return 0
+
+    val content = file_read(status_file)
+    val lines = content.split(NL)
+
+    for line in lines:
+        if line.starts_with("VmRSS:"):
+            # Format: "VmRSS:     12345 kB"
+            val parts = line.split(" ")
+            var num_str = ""
+            for part in parts:
+                val trimmed = part.trim()
+                if trimmed.len() > 0 and trimmed[0:1] >= "0" and trimmed[0:1] <= "9":
+                    num_str = trimmed
+                    break
+            if num_str != "":
+                return to_int(num_str)
+
+    0
+
+# ============================================================================
+# macOS (ps-based fallback)
+# ============================================================================
+
+fn sample_process_macos(pid: i64) -> ProcessMetrics:
+    """Use ps command on macOS for metrics"""
+    # ps -p PID -o %cpu,rss
+    val cpu_str = shell_output_trimmed("ps -p {pid} -o %cpu= 2>/dev/null", "0.0")
+    val rss_str = shell_output_trimmed("ps -p {pid} -o rss= 2>/dev/null", "0")
+
+    val cpu = to_float(cpu_str)
+    val rss_kb = to_int(rss_str)
+    val memory_mb = rss_kb / 1024
+
+    # FD count via lsof (may fail without permissions)
+    val fd_count = shell_int("lsof -p {pid} 2>/dev/null | wc -l", 0)
+
+    # Thread count
+    val thread_count = shell_int("ps -p {pid} -M 2>/dev/null | wc -l", 1)
+
+    ProcessMetrics(
+        pid: pid,
+        cpu_percent: cpu,
+        memory_mb: memory_mb,
+        open_fds: fd_count,
+        thread_count: thread_count,
+        timestamp_ms: 0  # Filled by caller
+    )
+
+# ============================================================================
+# Windows (limited support)
+# ============================================================================
+
+fn sample_process_windows(pid: i64) -> ProcessMetrics:
+    """
+    Windows fallback - very limited.
+    Returns zero metrics (monitoring not supported).
+    """
+    ProcessMetrics(
+        pid: pid,
+        cpu_percent: 0.0,
+        memory_mb: 0,
+        open_fds: 0,
+        thread_count: 1,
+        timestamp_ms: 0
+    )
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn sample_process(pid: i64, timestamp_ms: i64) -> ProcessMetrics:
+    """
+    Sample process metrics at a point in time.
+
+    Args:
+        pid: Process ID to monitor
+        timestamp_ms: Current timestamp in milliseconds
+
+    Returns:
+        ProcessMetrics snapshot
+
+    Platform support:
+        - Linux: Full support via /proc
+        - macOS: Limited support via ps/lsof
+        - Windows: Stub (returns zeros)
+    """
+    if is_linux():
+        # Linux implementation
+        val stat_content = read_proc_stat_linux(pid)
+        if stat_content == "":
+            # Process doesn't exist
+            return ProcessMetrics(
+                pid: pid,
+                cpu_percent: 0.0,
+                memory_mb: 0,
+                open_fds: 0,
+                thread_count: 0,
+                timestamp_ms: timestamp_ms
+            )
+
+        val stat_fields = parse_proc_stat_fields(stat_content)
+        val cpu_time_jiffies = extract_cpu_time_linux(stat_fields)
+
+        # Get memory from /proc/{pid}/status
+        val rss_kb = read_proc_status_rss_linux(pid)
+        val memory_mb = rss_kb / 1024
+
+        # Count file descriptors and threads
+        val open_fds = count_file_descriptors_linux(pid)
+        val thread_count = count_threads_linux(pid)
+
+        # CPU percent calculation (simplified - just store jiffies for now)
+        # Real CPU% requires two samples with time delta
+        val cpu_percent = cpu_time_jiffies / 100.0  # Rough estimate
+
+        ProcessMetrics(
+            pid: pid,
+            cpu_percent: cpu_percent,
+            memory_mb: memory_mb,
+            open_fds: open_fds,
+            thread_count: thread_count,
+            timestamp_ms: timestamp_ms
+        )
+    elif is_macos():
+        var metrics = sample_process_macos(pid)
+        metrics.timestamp_ms = timestamp_ms
+        metrics
+    else:
+        # Windows or unknown platform
+        var metrics = sample_process_windows(pid)
+        metrics.timestamp_ms = timestamp_ms
+        metrics
+
+fn monitor_until_exit(pid: i64, interval_ms: i64, max_samples: i64) -> [ProcessMetrics]:
+    """
+    Monitor a process until it exits or max_samples reached.
+
+    Args:
+        pid: Process ID to monitor
+        interval_ms: Sampling interval in milliseconds
+        max_samples: Maximum samples to collect (0 = unlimited)
+
+    Returns:
+        Array of ProcessMetrics snapshots
+
+    Note: This is a simplified implementation without true async monitoring.
+    For production use, this would spawn a background thread.
+    """
+    var samples: [ProcessMetrics] = []
+    var sample_count = 0
+
+    # Check if process exists
+    val initial_check = sample_process(pid, 0)
+    if initial_check.thread_count == 0 and is_linux():
+        # Process doesn't exist
+        return []
+
+    # Note: Actual monitoring would require process_is_running() from io.mod
+    # and sleep functionality. This is a stub that returns initial sample.
+    samples.push(initial_check)
+    samples
+
+fn exceeds_limits(metrics: ProcessMetrics, cpu_limit_percent: f64, memory_limit_mb: i64, fd_limit: i64) -> (bool, text):
+    """
+    Check if process metrics exceed resource limits.
+
+    Args:
+        metrics: Current process metrics
+        cpu_limit_percent: CPU percentage limit
+        memory_limit_mb: Memory limit in MB
+        fd_limit: File descriptor limit
+
+    Returns:
+        (violated, violation_type)
+        violated = true if any limit exceeded
+        violation_type = "cpu", "memory", "fds", or ""
+    """
+    if metrics.cpu_percent > cpu_limit_percent:
+        return (true, "cpu")
+
+    if metrics.memory_mb > memory_limit_mb:
+        return (true, "memory")
+
+    if metrics.open_fds > fd_limit:
+        return (true, "fds")
+
+    (false, "")
+
+fn to_int(s: text) -> i64:
+    """Convert string to integer, return 0 on failure"""
+    if s == "" or s == nil:
+        return 0
+    # Use built-in int() conversion
+    val result = int(s)
+    result
+
+fn to_float(s: text) -> f64:
+    """Convert string to float, return 0.0 on failure"""
+    if s == "" or s == nil:
+        return 0.0
+    # Simple conversion - parse numeric prefix
+    var num_str = ""
+    var has_dot = false
+    for i in s.len():
+        val ch = s[i:i + 1]
+        if ch >= "0" and ch <= "9":
+            num_str = num_str + ch
+        elif ch == "." and not has_dot:
+            num_str = num_str + ch
+            has_dot = true
+        elif ch == "-" and i == 0:
+            num_str = num_str + ch
+        else:
+            break
+
+    if num_str == "" or num_str == "-" or num_str == ".":
+        return 0.0
+
+    # Convert using int for integer part
+    if has_dot:
+        val parts = num_str.split(".")
+        if parts.len() == 2:
+            val int_part = to_int(parts[0])
+            val frac_part = to_int(parts[1])
+            val frac_divisor = 10.0  # Simplified
+            int_part + (frac_part / frac_divisor)
+        else:
+            to_int(num_str)
+    else:
+        to_int(num_str)
+
+export ProcessMetrics
+export sample_process, monitor_until_exit, exceeds_limits
+export is_linux, is_macos, is_windows

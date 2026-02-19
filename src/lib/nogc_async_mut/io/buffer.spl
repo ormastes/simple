@@ -1,0 +1,362 @@
+"""
+# Buffered I/O - Async
+
+AsyncBufferedReader and AsyncBufferedWriter wrapping any AsyncRead/AsyncWrite.
+Same structure as sync variants, with Future-wrapped operations.
+
+## Components
+
+| Type | Traits | Description |
+|------|--------|-------------|
+| AsyncBufferedReader | AsyncRead, AsyncClose | Buffered async read (default 8KB) |
+| AsyncBufferedWriter | AsyncWrite, AsyncClose | Buffered async write (default 8KB) |
+
+## Buffered Async Reading
+
+```simple
+# val raw = await AsyncFileHandle.read_file("big.bin")?
+# val reader = AsyncBufferedReader.new(raw)
+# val line = await reader.read_line()?
+# await reader.close()?
+```
+
+## Buffered Async Writing
+
+```simple
+# val raw = await AsyncFileHandle.create("output.log")?
+# val writer = AsyncBufferedWriter.new(raw)
+# await writer.write_text("line 1\\n")?
+# await writer.write_text("line 2\\n")?
+# await writer.flush()?
+# await writer.close()?
+```
+
+## Custom Buffer Size
+
+```simple
+# val raw = await AsyncFileHandle.read_file("data.csv")?
+# val reader = AsyncBufferedReader.with_capacity(raw, 16384)
+# val all = await reader.read_all()?
+```
+"""
+
+use std.common.io.async_traits.{AsyncRead, AsyncWrite, AsyncClose}
+use std.common.io.error.{IoError, IoErrorKind}
+use std.async.future.{Future}
+
+val DEFAULT_BUF_SIZE: i64 = 8192
+
+# ============================================================================
+# AsyncBufferedReader - Async Buffered Read Wrapper
+# ============================================================================
+
+class AsyncBufferedReader with AsyncRead, AsyncClose:
+    """Buffered wrapper around any AsyncRead implementor.
+
+    Reduces async read calls by maintaining an in-memory buffer.
+
+    Example:
+        val raw = await AsyncFileHandle.read_file("data.csv")?
+        val reader = AsyncBufferedReader.new(raw)
+        val line = await reader.read_line()?
+    """
+    inner: AsyncRead
+    buf: [u8]
+    buf_size: i64
+    pos: i64
+    filled: i64
+
+    static fn new(inner: AsyncRead) -> AsyncBufferedReader:
+        """Create async buffered reader with default 8KB buffer.
+
+        Args:
+            inner: Underlying AsyncRead source
+
+        Returns:
+            AsyncBufferedReader
+        """
+        AsyncBufferedReader(
+            inner: inner,
+            buf: [],
+            buf_size: DEFAULT_BUF_SIZE,
+            pos: 0,
+            filled: 0
+        )
+
+    static fn with_capacity(inner: AsyncRead, cap: i64) -> AsyncBufferedReader:
+        """Create async buffered reader with custom capacity.
+
+        Args:
+            inner: Underlying AsyncRead source
+            cap: Buffer capacity in bytes
+
+        Returns:
+            AsyncBufferedReader
+        """
+        AsyncBufferedReader(
+            inner: inner,
+            buf: [],
+            buf_size: cap,
+            pos: 0,
+            filled: 0
+        )
+
+    # --- Internal ---
+
+    fn buffered_bytes() -> i64:
+        """Number of bytes available in buffer."""
+        self.filled - self.pos
+
+    # --- AsyncRead trait ---
+
+    fn read(size: i64) -> Future<Result<[u8], IoError>>:
+        """Read up to size bytes (from buffer, then inner).
+
+        Args:
+            size: Maximum bytes to read
+
+        Returns:
+            Future with Result containing bytes
+        """
+        # If buffer has data, serve from it
+        if self.buffered_bytes() > 0:
+            val avail = self.buffered_bytes()
+            val take = if size < avail: size else: avail
+            val data = self.buf.slice(self.pos, self.pos + take)
+            self.pos = self.pos + take
+            return Future.from_value(Ok(data))
+        # Otherwise refill from inner
+        self.inner.read(self.buf_size).then(\result:
+            match result:
+                case Ok(data):
+                    self.buf = data
+                    self.pos = 0
+                    self.filled = data.len()
+                    val take = if size < self.filled: size else: self.filled
+                    val slice = data.slice(0, take)
+                    self.pos = take
+                    Future.from_value(Ok(slice))
+                case Err(e):
+                    Future.from_value(Err(e))
+        )
+
+    fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
+        """Read exactly size bytes."""
+        # Delegate to inner for simplicity (buffer may not suffice)
+        self.inner.read_exact(size)
+
+    fn read_all() -> Future<Result<[u8], IoError>>:
+        """Read all remaining bytes."""
+        # Drain buffer first, then delegate
+        if self.buffered_bytes() > 0:
+            val prefix = self.buf.slice(self.pos, self.filled)
+            self.pos = self.filled
+            return self.inner.read_all().then(\result:
+                match result:
+                    case Ok(rest):
+                        Future.from_value(Ok(prefix + rest))
+                    case Err(e):
+                        Future.from_value(Err(e))
+            )
+        self.inner.read_all()
+
+    fn read_text() -> Future<Result<text, IoError>>:
+        """Read all remaining content as text."""
+        self.read_all().then(\result:
+            match result:
+                case Ok(bytes):
+                    Future.from_value(Ok(rt_bytes_to_text(bytes)))
+                case Err(e):
+                    Future.from_value(Err(e))
+        )
+
+    fn read_line() -> Future<Result<text, IoError>>:
+        """Read a single line."""
+        # Scan buffer for newline
+        if self.buffered_bytes() > 0:
+            var i = self.pos
+            while i < self.filled:
+                if self.buf[i] == 10:  # '\n'
+                    val line = self.buf.slice(self.pos, i + 1)
+                    self.pos = i + 1
+                    return Future.from_value(Ok(rt_bytes_to_text(line)))
+                i = i + 1
+        # No newline in buffer, delegate to inner
+        self.inner.read_line()
+
+    # --- AsyncClose trait ---
+
+    me close() -> Future<Result<(), IoError>>:
+        """Close underlying reader."""
+        if val close_inner = self.inner as AsyncClose:
+            close_inner.close()
+        else:
+            Future.from_value(Ok(()))
+
+    fn is_open() -> bool:
+        """Check if underlying reader is open."""
+        if val close_inner = self.inner as AsyncClose:
+            close_inner.is_open()
+        else:
+            true
+
+# ============================================================================
+# AsyncBufferedWriter - Async Buffered Write Wrapper
+# ============================================================================
+
+class AsyncBufferedWriter with AsyncWrite, AsyncClose:
+    """Buffered wrapper around any AsyncWrite implementor.
+
+    Batches writes in an in-memory buffer. Flushes when full or on explicit flush/close.
+
+    Example:
+        val raw = await AsyncFileHandle.create("output.log")?
+        val writer = AsyncBufferedWriter.new(raw)
+        await writer.write_text("line 1\\n")?
+        await writer.flush()?
+        await writer.close()?
+    """
+    inner: AsyncWrite
+    buf: [u8]
+    buf_size: i64
+    pos: i64
+
+    static fn new(inner: AsyncWrite) -> AsyncBufferedWriter:
+        """Create async buffered writer with default 8KB buffer.
+
+        Args:
+            inner: Underlying AsyncWrite destination
+
+        Returns:
+            AsyncBufferedWriter
+        """
+        AsyncBufferedWriter(
+            inner: inner,
+            buf: [],
+            buf_size: DEFAULT_BUF_SIZE,
+            pos: 0
+        )
+
+    static fn with_capacity(inner: AsyncWrite, cap: i64) -> AsyncBufferedWriter:
+        """Create async buffered writer with custom capacity.
+
+        Args:
+            inner: Underlying AsyncWrite destination
+            cap: Buffer capacity in bytes
+
+        Returns:
+            AsyncBufferedWriter
+        """
+        AsyncBufferedWriter(
+            inner: inner,
+            buf: [],
+            buf_size: cap,
+            pos: 0
+        )
+
+    # --- AsyncWrite trait ---
+
+    fn write(data: [u8]) -> Future<Result<i64, IoError>>:
+        """Write bytes (buffers, may not flush immediately).
+
+        Args:
+            data: Bytes to write
+
+        Returns:
+            Future with bytes accepted
+        """
+        # Large writes bypass buffer
+        if data.len() >= self.buf_size:
+            if self.pos > 0:
+                val buffered = self.buf.slice(0, self.pos)
+                self.buf = []
+                self.pos = 0
+                return self.inner.write_all(buffered).then(\result:
+                    match result:
+                        case Ok(_):
+                            self.inner.write(data)
+                        case Err(e):
+                            Future.from_value(Err(e))
+                )
+            return self.inner.write(data)
+        # If data won't fit, flush first
+        if self.pos + data.len() > self.buf_size:
+            val buffered = self.buf.slice(0, self.pos)
+            self.buf = data
+            self.pos = data.len()
+            return self.inner.write_all(buffered).then(\result:
+                match result:
+                    case Ok(_):
+                        Future.from_value(Ok(data.len()))
+                    case Err(e):
+                        Future.from_value(Err(e))
+            )
+        self.buf = self.buf + data
+        self.pos = self.pos + data.len()
+        Future.from_value(Ok(data.len()))
+
+    fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
+        """Write all bytes."""
+        self.write(data).then(\result:
+            match result:
+                case Ok(_):
+                    Future.from_value(Ok(()))
+                case Err(e):
+                    Future.from_value(Err(e))
+        )
+
+    fn write_text(s: text) -> Future<Result<(), IoError>>:
+        """Write text string."""
+        val bytes = rt_text_to_bytes(s)
+        self.write_all(bytes)
+
+    fn flush() -> Future<Result<(), IoError>>:
+        """Flush buffer and inner writer."""
+        if self.pos > 0:
+            val data = self.buf.slice(0, self.pos)
+            self.buf = []
+            self.pos = 0
+            return self.inner.write_all(data).then(\result:
+                match result:
+                    case Ok(_):
+                        self.inner.flush()
+                    case Err(e):
+                        Future.from_value(Err(e))
+            )
+        self.inner.flush()
+
+    # --- AsyncClose trait ---
+
+    me close() -> Future<Result<(), IoError>>:
+        """Flush buffer, then close underlying writer."""
+        self.flush().then(\result:
+            match result:
+                case Ok(_):
+                    if val close_inner = self.inner as AsyncClose:
+                        close_inner.close()
+                    else:
+                        Future.from_value(Ok(()))
+                case Err(e):
+                    Future.from_value(Err(e))
+        )
+
+    fn is_open() -> bool:
+        """Check if underlying writer is open."""
+        if val close_inner = self.inner as AsyncClose:
+            close_inner.is_open()
+        else:
+            true
+
+# ============================================================================
+# FFI Functions
+# ============================================================================
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export AsyncBufferedReader
+export AsyncBufferedWriter

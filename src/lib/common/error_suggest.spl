@@ -1,0 +1,216 @@
+# Error Suggestion Utilities
+#
+# Provides "did you mean?" suggestions for common interpreter errors.
+# Helps developers get actionable guidance when variables, functions,
+# methods or fields are not found.
+#
+# Design:
+# - Pure functions with no side effects
+# - Prefix and substring matching for fast suggestions
+# - No Levenshtein distance required - simple heuristics suffice
+# - All functions return text (empty string = no suggestion)
+#
+# Usage:
+#   val suggestion = did_you_mean("pritn", ["print", "println", "printf"])
+#   # -> "Did you mean: print?"
+#
+#   val matches = suggest_similar("prit", ["print", "println", "write"])
+#   # -> ["print", "println"]
+
+# ============================================================================
+# Core Suggestion Logic
+# ============================================================================
+
+fn suggest_similar(name: text, candidates: [text]) -> [text]:
+    """Find candidates similar to the given name using prefix/substring matching.
+
+    Matching strategy (in priority order):
+    1. Candidate starts with the same first character as name
+    2. Candidate contains the first two characters of name (when name.len() >= 2)
+
+    Args:
+        name: The name that was not found
+        candidates: List of available names to search
+
+    Returns:
+        List of candidates that are similar to name (may be empty)
+
+    Example:
+        val matches = suggest_similar("pritn", ["print", "println", "write"])
+        # -> ["print", "println"]
+    """
+    var matches: [text] = []
+    if name.len() == 0:
+        return matches
+    val first_char = name[0:1]
+    var prefix2 = ""
+    if name.len() >= 2:
+        prefix2 = name[0:2]
+    for candidate in candidates:
+        if candidate.len() == 0:
+            pass
+        elif candidate.starts_with(first_char):
+            matches = matches + [candidate]
+        elif prefix2 != "" and candidate.contains(prefix2):
+            matches = matches + [candidate]
+    matches
+
+fn did_you_mean(name: text, candidates: [text]) -> text:
+    """Generate a 'Did you mean: X?' hint for a not-found name.
+
+    Args:
+        name: The name that was not found
+        candidates: List of available names to search for suggestions
+
+    Returns:
+        A hint string like "Did you mean: print?" or "" if no suggestion found
+
+    Example:
+        val hint = did_you_mean("pritn", ["print", "write"])
+        # -> "Did you mean: print?"
+    """
+    val similar = suggest_similar(name, candidates)
+    if similar.len() == 0:
+        return ""
+    "Did you mean: " + similar[0] + "?"
+
+# ============================================================================
+# Specific Error Message Builders
+# ============================================================================
+
+fn suggest_variable(name: text, in_scope: [text]) -> text:
+    """Build a helpful error message for 'undefined variable: X'.
+
+    Args:
+        name: The variable name that was not found
+        in_scope: List of variable names currently in scope
+
+    Returns:
+        Formatted error message with optional suggestion
+
+    Example:
+        val msg = suggest_variable("coun", ["count", "total", "index"])
+        # -> "undefined variable: coun. Did you mean: count?"
+    """
+    val base = "undefined variable: " + name
+    val hint = did_you_mean(name, in_scope)
+    if hint == "":
+        return base
+    base + ". " + hint
+
+fn suggest_function(name: text, available: [text]) -> text:
+    """Build a helpful error message for 'undefined function: X'.
+
+    Args:
+        name: The function name that was not found
+        available: List of known function names
+
+    Returns:
+        Formatted error message with optional suggestion
+
+    Example:
+        val msg = suggest_function("pritn", ["print", "write", "format"])
+        # -> "undefined function: pritn. Did you mean: print?"
+    """
+    val base = "undefined function: " + name
+    val hint = did_you_mean(name, available)
+    if hint == "":
+        return base
+    base + ". " + hint
+
+fn suggest_field(field_name: text, struct_name: text, available_fields: [text]) -> text:
+    """Build a helpful error message for 'no field X on struct Y'.
+
+    Args:
+        field_name: The field that was not found
+        struct_name: The struct type name
+        available_fields: List of fields on the struct
+
+    Returns:
+        Formatted error message listing available fields
+
+    Example:
+        val msg = suggest_field("nme", "User", ["name", "age", "email"])
+        # -> "no field 'nme' on struct User. Available fields: name, age, email. Did you mean: name?"
+    """
+    val base = "no field '" + field_name + "' on struct " + struct_name
+    if available_fields.len() == 0:
+        return base
+    val fields_list = join_text_list(available_fields, ", ")
+    val hint = did_you_mean(field_name, available_fields)
+    var result = base + ". Available fields: " + fields_list
+    if hint != "":
+        result = result + ". " + hint
+    result
+
+fn suggest_method(method_name: text, type_name: text, available_methods: [text]) -> text:
+    """Build a helpful error message for 'no method X on Y'.
+
+    Args:
+        method_name: The method name that was not found
+        type_name: The type name (e.g. "struct User", "array", "text")
+        available_methods: List of known methods on the type
+
+    Returns:
+        Formatted error message with optional suggestion
+
+    Example:
+        val msg = suggest_method("leng", "array", ["len", "push", "pop"])
+        # -> "no method 'leng' on array. Did you mean: len?"
+    """
+    val base = "no method '" + method_name + "' on " + type_name
+    if available_methods.len() == 0:
+        return base
+    val hint = did_you_mean(method_name, available_methods)
+    if hint == "":
+        return base
+    base + ". " + hint
+
+fn format_index_error(idx: i64, length: i64) -> text:
+    """Build a helpful error message for index out of bounds.
+
+    Args:
+        idx: The index that was used
+        length: The actual length of the array or string
+
+    Returns:
+        Formatted error message showing the valid range
+
+    Example:
+        val msg = format_index_error(10, 3)
+        # -> "index out of bounds: index 10 is out of range [0, 3)"
+    """
+    "index out of bounds: index " + "{idx}" + " is out of range [0, " + "{length}" + ")"
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn join_text_list(items: [text], sep: text) -> text:
+    """Join a list of text items with a separator.
+
+    Args:
+        items: List of text items
+        sep: Separator string
+
+    Returns:
+        Joined string, or empty string if items is empty
+
+    Example:
+        val s = join_text_list(["a", "b", "c"], ", ")
+        # -> "a, b, c"
+    """
+    if items.len() == 0:
+        return ""
+    var result = items[0]
+    for i in 1..items.len():
+        result = result + sep + items[i]
+    result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export suggest_similar, did_you_mean
+export suggest_variable, suggest_function, suggest_field, suggest_method
+export format_index_error, join_text_list

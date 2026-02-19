@@ -94,7 +94,7 @@ start_vm() {
     qemu-system-x86_64 \
         "${accel[@]}" \
         -cpu host \
-        -m 4G \
+        -m 16G \
         -smp 4 \
         -drive "file=$QEMU_VM_PATH,format=qcow2,if=virtio" \
         -net nic,model=virtio \

@@ -1,0 +1,185 @@
+# Unified Configuration Parser
+#
+# Provides a shared SDN format parser for all config files across the project.
+# Eliminates duplication of config parsing logic.
+#
+# Format:
+#     section-name:
+#         key1: value1
+#         key2: "quoted value"
+#         nested-key: 123
+#
+# Features:
+# - Section-based parsing
+# - Quote stripping
+# - Type-safe getters (int, bool, float, list)
+# - Error tracking
+# - Comment and empty line handling
+
+# No imports needed - uses only built-in functions
+
+# Core types
+struct ConfigSection:
+    """Represents a section in SDN config file."""
+    name: text
+    fields: {text: text}
+
+struct ConfigParseResult:
+    """Result of parsing config file."""
+    sections: [ConfigSection]
+    errors: [text]
+
+# Main parser
+fn parse_sdn_config(content: text) -> ConfigParseResult:
+    """Parse Simple Data Notation config format.
+
+    Format:
+        section-name:
+            key1: value1
+            key2: "quoted value"
+            nested-key: 123
+
+    Returns:
+        ConfigParseResult with sections and any parse errors
+    """
+    var sections = []
+    var errors = []
+    var current_section_name = ""
+    var current_fields = {}
+    var line_num = 0
+
+    val lines = content.split("\n")
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Skip empty lines and comments
+        if (trimmed.len() == 0 or
+            trimmed.starts_with("#")):
+            continue
+
+        # Section header: "name:" with no leading spaces in trimmed
+        val is_section_header = (trimmed.ends_with(":") and
+                                 not trimmed.contains(" "))
+
+        if is_section_header:
+            # Save previous section
+            if current_section_name != "":
+                val section = ConfigSection(
+                    name: current_section_name,
+                    fields: current_fields
+                )
+                sections = sections + [section]
+
+            # Start new section
+            val name_len = trimmed.len() - 1
+            current_section_name = trimmed[0:name_len]
+            current_fields = {}
+            continue
+
+        # Key-value pair
+        if trimmed.contains(":"):
+            if current_section_name == "":
+                val err = "Line {line_num}: key-value outside section"
+                errors = errors + [err]
+                continue
+
+            val colon_idx = trimmed.index_of(":") ?? -1
+            if colon_idx < 0:
+                continue
+
+            val key = trimmed[0:colon_idx].trim()
+            val rest = trimmed[colon_idx + 1:]
+            val value = rest.trim()
+
+            current_fields[key] = strip_quotes(value)
+        else:
+            # Unrecognized format
+            val err = "Line {line_num}: unrecognized format"
+            errors = errors + [err]
+
+    # Add final section
+    if current_section_name != "":
+        val section = ConfigSection(
+            name: current_section_name,
+            fields: current_fields
+        )
+        sections = sections + [section]
+
+    ConfigParseResult(sections: sections, errors: errors)
+
+# Utility functions
+fn strip_quotes(s: text) -> text:
+    """Remove leading/trailing quotes from value."""
+    var result = s
+    if result.len() >= 2:
+        val first = result[0:1]
+        val last_idx = result.len() - 1
+        val last = result[last_idx:]
+        val both_double = (first == "\"" and last == "\"")
+        val both_single = (first == "'" and last == "'")
+        if both_double or both_single:
+            result = result[1:last_idx]
+    result
+
+fn find_section(result: ConfigParseResult, name: text) -> ConfigSection?:
+    """Find section by name."""
+    for section in result.sections:
+        if section.name == name:
+            return section
+    nil
+
+# Type-safe getters
+fn get_config_field(section: ConfigSection, key: text, default_val: text) -> text:
+    """Get string field with default."""
+    if section.fields.contains_key(key):
+        section.fields[key]
+    else:
+        default_val
+
+fn get_config_int(section: ConfigSection, key: text, default_val: i64) -> i64:
+    """Get integer field with default."""
+    val str_val = get_config_field(section, key, "")
+    if str_val.len() > 0:
+        int(str_val)
+    else:
+        default_val
+
+fn get_config_bool(section: ConfigSection, key: text, default_val: bool) -> bool:
+    """Get boolean field with default."""
+    val str_val = get_config_field(section, key, "")
+    if str_val == "true":
+        true
+    elif str_val == "false":
+        false
+    else:
+        default_val
+
+fn get_config_float(section: ConfigSection, key: text, default_val: f64) -> f64:
+    """Get float field with default."""
+    val str_val = get_config_field(section, key, "")
+    if str_val.len() > 0:
+        float(str_val)
+    else:
+        default_val
+
+fn get_config_list(section: ConfigSection, key: text, separator: text) -> [text]:
+    """Get comma-separated list field."""
+    val str_val = get_config_field(section, key, "")
+    if str_val.len() == 0:
+        return []
+
+    # Split and trim each item
+    val parts = str_val.split(separator)
+    var result = []
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.len() > 0:
+            result = result + [trimmed]
+    result
+
+# Export all
+export ConfigSection, ConfigParseResult
+export parse_sdn_config, strip_quotes, find_section
+export get_config_field, get_config_int, get_config_bool, get_config_float, get_config_list
