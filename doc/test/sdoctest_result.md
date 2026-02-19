@@ -6,12 +6,12 @@
 
 | Metric | Count |
 |--------|-------|
-| Total blocks | 16 |
-| Passed | 16 |
+| Total blocks | 2 |
+| Passed | 2 |
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Duration | 1030ms |
+| Duration | 67ms |
 
 **Status: PASS**
 
@@ -19,17 +19,6 @@
 
 | File | Total | Passed | Failed | Skipped | Duration |
 |------|-------|--------|--------|---------|----------|
-| test/unit/std/io/async_buffer_spec.spl | 2 | 2 | 0 | 0 | 8ms |
-| test/unit/std/io/async_file_spec.spl | 2 | 2 | 0 | 0 | 8ms |
-| test/unit/std/io/async_tcp_spec.spl | 2 | 2 | 0 | 0 | 8ms |
-| test/unit/std/io/async_udp_spec.spl | 2 | 2 | 0 | 0 | 8ms |
-| test/unit/std/io/event_loop_spec.spl | 1 | 1 | 0 | 0 | 5ms |
-| test/unit/std/io/io_error_spec.spl | 1 | 1 | 0 | 0 | 5ms |
-| test/unit/std/io/io_traits_spec.spl | 1 | 1 | 0 | 0 | 5ms |
-| test/unit/std/io/sync_buffer_spec.spl | 1 | 1 | 0 | 0 | 5ms |
-| test/unit/std/io/sync_file_spec.spl | 1 | 1 | 0 | 0 | 5ms |
-| test/unit/std/io/sync_pipe_spec.spl | 1 | 1 | 0 | 0 | 5ms |
-| test/unit/std/io/sync_tcp_spec.spl | 1 | 1 | 0 | 0 | 5ms |
-| test/unit/std/io/sync_udp_spec.spl | 1 | 1 | 0 | 0 | 5ms |
+| test/unit/app/mcp/mcp_jj_commit_spec.spl | 2 | 2 | 0 | 0 | 10ms |
 
 

@@ -1,0 +1,95 @@
+# DI Config Specification
+#
+# Tests for SDN-based DI configuration loading, profile resolution,
+# and auto/true/false lazy mode logic.
+
+use compiler.di_config.{DiServiceConfig, DiProfileConfig, DiConfig, load_di_config, should_be_lazy}
+
+describe "DI Config":
+
+    describe "should_be_lazy":
+        it "returns true when lazy_mode is 'true'":
+            val svc = DiServiceConfig(name: "s1", module_path: "m", factory_name: "f", lazy_mode: "true", is_singleton: true)
+            val prof = DiProfileConfig(name: "dev", lazy_default: false)
+            expect(should_be_lazy(svc, prof)).to_equal(true)
+
+        it "returns false when lazy_mode is 'false'":
+            val svc = DiServiceConfig(name: "s2", module_path: "m", factory_name: "f", lazy_mode: "false", is_singleton: true)
+            val prof = DiProfileConfig(name: "prod", lazy_default: true)
+            expect(should_be_lazy(svc, prof)).to_equal(false)
+
+        it "follows profile default when lazy_mode is 'auto' and profile is eager":
+            val svc = DiServiceConfig(name: "s3", module_path: "m", factory_name: "f", lazy_mode: "auto", is_singleton: true)
+            val prof = DiProfileConfig(name: "dev", lazy_default: false)
+            expect(should_be_lazy(svc, prof)).to_equal(false)
+
+        it "follows profile default when lazy_mode is 'auto' and profile is lazy":
+            val svc = DiServiceConfig(name: "s4", module_path: "m", factory_name: "f", lazy_mode: "auto", is_singleton: true)
+            val prof = DiProfileConfig(name: "prod", lazy_default: true)
+            expect(should_be_lazy(svc, prof)).to_equal(true)
+
+    describe "load_di_config":
+        it "loads the real config file":
+            val config = load_di_config("config/di.sdn")
+            expect(config.default_profile).to_equal("dev")
+            expect(config.profiles.len()).to_be_greater_than(0)
+            expect(config.services.len()).to_be_greater_than(0)
+
+        it "parses profile definitions":
+            val config = load_di_config("config/di.sdn")
+            var found_dev = false
+            var found_prod = false
+            var idx = 0
+            while idx < config.profiles.len():
+                val p = config.profiles[idx]
+                if p.name == "dev":
+                    found_dev = true
+                    expect(p.lazy_default).to_equal(false)
+                if p.name == "prod":
+                    found_prod = true
+                    expect(p.lazy_default).to_equal(true)
+                idx = idx + 1
+            expect(found_dev).to_equal(true)
+            expect(found_prod).to_equal(true)
+
+        it "parses service definitions":
+            val config = load_di_config("config/di.sdn")
+            var found_json = false
+            var found_protocol = false
+            var idx = 0
+            while idx < config.services.len():
+                val s = config.services[idx]
+                if s.name == "json_helpers":
+                    found_json = true
+                    expect(s.module_path).to_equal("app.mcp.helpers")
+                    expect(s.lazy_mode).to_equal("auto")
+                if s.name == "protocol":
+                    found_protocol = true
+                    expect(s.module_path).to_equal("std.mcp.protocol")
+                idx = idx + 1
+            expect(found_json).to_equal(true)
+            expect(found_protocol).to_equal(true)
+
+        it "handles session_mgr with always-lazy mode":
+            val config = load_di_config("config/di.sdn")
+            var idx = 0
+            while idx < config.services.len():
+                val s = config.services[idx]
+                if s.name == "session_mgr":
+                    expect(s.lazy_mode).to_equal("true")
+                idx = idx + 1
+
+        it "returns default config for missing file":
+            val config = load_di_config("nonexistent/path.sdn")
+            expect(config.default_profile).to_equal("dev")
+            expect(config.profiles.len()).to_be_greater_than(0)
+
+    describe "DiConfig struct":
+        it "creates a config with all fields":
+            val config = DiConfig(
+                default_profile: "test",
+                profiles: [DiProfileConfig(name: "test", lazy_default: false)],
+                services: [DiServiceConfig(name: "s", module_path: "m", factory_name: "f", lazy_mode: "auto", is_singleton: true)])
+            expect(config.default_profile).to_equal("test")
+            expect(config.profiles.len()).to_equal(1)
+            expect(config.services.len()).to_equal(1)
