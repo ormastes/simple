@@ -1,27 +1,49 @@
-# AOP Proceed Enforcement (bootstrap-safe implementation)
+# AOP Proceed Enforcement
+# tier: full
 #
-# This module keeps the same exported API surface but uses a minimal,
-# transpiler-friendly implementation to avoid enum-pattern and Result
-# constructs that currently break core bootstrap C++ generation.
+# Runtime verification for `around` advice to ensure `proceed()` is called exactly once.
+# This prevents common errors like:
+# - Forgetting to call proceed() (blocks execution)
+# - Calling proceed() multiple times (duplicate execution)
 
 export ProceedError, ProceedContext, AroundAdviceContext, ConditionalProceedContext
 export verify_proceed_called, create_proceed_context, create_proceed_context_internal
 export create_around_advice_context, create_conditional_proceed_context
 
-struct ProceedError:
-    message: text
+# ============================================================================
+# Error Types
+# ============================================================================
+
+enum ProceedError:
+    """Errors related to proceed() calls in around advice."""
+    NeverCalled(advice_name: text)
+    CalledMultipleTimes(advice_name: text, count: i64)
+    CalledAfterError(advice_name: text)
 
 impl ProceedError:
     fn format() -> text:
-        self.message
+        """Format error for display."""
+        match self:
+            case NeverCalled(name):
+                "Around advice '{name}' must call proceed() exactly once (called 0 times)"
+            case CalledMultipleTimes(name, count):
+                "Around advice '{name}' must call proceed() exactly once (called {count} times)"
+            case CalledAfterError(name):
+                "Around advice '{name}' called proceed() after error occurred"
 
-struct ProceedContext:
+# ============================================================================
+# Proceed Context
+# ============================================================================
+
+class ProceedContext:
+    """Tracks proceed() calls within an around advice execution."""
     advice_name: text
     proceed_count: i64
     has_error: bool
-    allow_multiple: bool
+    allow_multiple: bool    # For special cases (usually false)
 
 fn create_proceed_context_internal(advice_name: text) -> ProceedContext:
+    """Create a new proceed context for advice execution."""
     ProceedContext(
         advice_name: advice_name,
         proceed_count: 0,
@@ -32,54 +54,54 @@ fn create_proceed_context_internal(advice_name: text) -> ProceedContext:
 impl ProceedContext:
 
     me mark_proceed_called():
+        """Record that proceed() was called."""
         self.proceed_count = self.proceed_count + 1
 
     me mark_error():
+        """Record that an error occurred during execution."""
         self.has_error = true
 
-    fn verify() -> bool:
+    fn verify() -> Result<(), ProceedError>:
+        """Verify that proceed() was called exactly once."""
+        # Check if never called
         if self.proceed_count == 0:
-            return false
+            return Err(ProceedError.NeverCalled(self.advice_name))
 
+        # Check if called multiple times (unless explicitly allowed)
         if not self.allow_multiple and self.proceed_count > 1:
-            return false
+            return Err(ProceedError.CalledMultipleTimes(
+                self.advice_name, self.proceed_count))
 
+        # Check if called after error
         if self.has_error and self.proceed_count > 0:
-            return false
+            return Err(ProceedError.CalledAfterError(self.advice_name))
 
-        true
+        Ok(())
 
     fn was_called() -> bool:
+        """Check if proceed() was called at least once."""
         self.proceed_count > 0
 
     fn call_count() -> i64:
+        """Get the number of times proceed() was called."""
         self.proceed_count
 
-    fn error() -> ProceedError:
-        if self.proceed_count == 0:
-            return ProceedError(
-                message: "Around advice '" + self.advice_name + "' must call proceed() exactly once (called 0 times)"
-            )
+# ============================================================================
+# Around Advice Context
+# ============================================================================
 
-        if not self.allow_multiple and self.proceed_count > 1:
-            return ProceedError(
-                message: "Around advice '" + self.advice_name + "' must call proceed() exactly once (called multiple times)"
-            )
+class AroundAdviceContext:
+    """Context for executing around advice with proceed tracking.
 
-        if self.has_error and self.proceed_count > 0:
-            return ProceedError(
-                message: "Around advice '" + self.advice_name + "' called proceed() after error occurred"
-            )
-
-        ProceedError(message: "")
-
-struct AroundAdviceContext:
+    This wraps the execution of around advice and tracks proceed() calls.
+    """
     proceed_ctx: ProceedContext
-    target_fn: Any
-    before_proceed: Any
-    after_proceed: Any
+    target_fn: Any  # Function: () -> Any
+    before_proceed: Any?
+    after_proceed: Any?
 
-fn create_around_advice_context(advice_name: text, target_fn: Any) -> AroundAdviceContext:
+fn create_around_advice_context(advice_name: text, target_fn: fn() -> Any) -> AroundAdviceContext:
+    """Create context for around advice execution."""
     AroundAdviceContext(
         proceed_ctx: create_proceed_context_internal(advice_name),
         target_fn: target_fn,
@@ -90,40 +112,105 @@ fn create_around_advice_context(advice_name: text, target_fn: Any) -> AroundAdvi
 impl AroundAdviceContext:
 
     me proceed() -> Any:
+        """Call the original function (wrapped join point).
+
+        This should be called exactly once by the around advice.
+        """
+        # Mark proceed as called
         self.proceed_ctx.mark_proceed_called()
-        0
+
+        # Execute hooks (commented out - needs lambda support)
+        # if self.before_proceed.?:
+        #     self.before_proceed.unwrap()()
+
+        # Call target function
+        val result = self.target_fn()
+
+        # Execute hooks (commented out - needs lambda support)
+        # if self.after_proceed.?:
+        #     self.after_proceed.unwrap()()
+
+        result
 
     me set_before_proceed(hook: Any):
-        self.before_proceed = hook
+        """Set hook to execute before proceed() calls target."""
+        self.before_proceed = Some(hook)
 
     me set_after_proceed(hook: Any):
-        self.after_proceed = hook
+        """Set hook to execute after proceed() calls target."""
+        self.after_proceed = Some(hook)
 
-    fn verify() -> bool:
+    fn verify() -> Result<(), ProceedError>:
+        """Verify that proceed() was called correctly."""
         self.proceed_ctx.verify()
 
     fn was_proceed_called() -> bool:
+        """Check if proceed() was called."""
         self.proceed_ctx.was_called()
 
     fn proceed_call_count() -> i64:
+        """Get number of times proceed() was called."""
         self.proceed_ctx.call_count()
 
-fn verify_proceed_called(ctx: AroundAdviceContext) -> text:
-    if ctx.verify():
-        return ""
-    ctx.proceed_ctx.error().format()
+# ============================================================================
+# Verification Functions
+# ============================================================================
 
-fn create_proceed_context(advice_name: text, target_fn: Any) -> AroundAdviceContext:
+fn verify_proceed_called(ctx: AroundAdviceContext) -> Result<(), text>:
+    """Verify that proceed() was called exactly once.
+
+    Returns Err with formatted message if verification fails.
+    """
+    match ctx.verify():
+        case Ok(()):
+            Ok(())
+        case Err(error):
+            Err(error.format())
+
+fn create_proceed_context(advice_name: text, target_fn: fn() -> Any) -> AroundAdviceContext:
+    """Create a proceed context for around advice execution."""
     create_around_advice_context(advice_name, target_fn)
 
-struct ConditionalProceedContext:
-    base_ctx: AroundAdviceContext
-    condition_fn: Any
-    fallback_fn: Any
+# ============================================================================
+# Runtime Integration Example
+# ============================================================================
 
-fn create_conditional_proceed_context(advice_name: text, target_fn: Any,
-                                     condition_fn: Any,
-                                     fallback_fn: Any) -> ConditionalProceedContext:
+# Example usage in AOP runtime:
+#
+# fn execute_around_advice(advice: Advice, target_fn: fn() -> Any) -> Any:
+#     # Create proceed context
+#     val ctx = create_proceed_context(advice.name, target_fn)
+#
+#     # Execute advice with proceed callback
+#     val result = advice.handler(ctx.proceed)
+#
+#     # Verify proceed was called
+#     match verify_proceed_called(ctx):
+#         case Err(error):
+#             panic(error)  # Or emit diagnostic
+#         case Ok(()):
+#             result
+
+# ============================================================================
+# Advanced: Conditional Proceed
+# ============================================================================
+
+class ConditionalProceedContext:
+    """Context for around advice with conditional proceed.
+
+    Allows proceed() to be called 0 or 1 times based on runtime conditions.
+    Used for conditional execution patterns like:
+    - Circuit breaker: Skip proceed if too many failures
+    - Rate limiting: Skip proceed if rate exceeded
+    - Authorization: Skip proceed if not authorized
+    """
+    base_ctx: AroundAdviceContext
+    condition_fn: Any  # Function: () -> bool
+    fallback_fn: Any   # Function: () -> Any
+
+fn create_conditional_proceed_context(advice_name: text, target_fn: fn() -> Any,
+                                     condition_fn: fn() -> bool,
+                                     fallback_fn: fn() -> Any) -> ConditionalProceedContext:
     ConditionalProceedContext(
         base_ctx: create_around_advice_context(advice_name, target_fn),
         condition_fn: condition_fn,
@@ -133,7 +220,70 @@ fn create_conditional_proceed_context(advice_name: text, target_fn: Any,
 impl ConditionalProceedContext:
 
     me proceed_if_allowed() -> Any:
-        self.base_ctx.proceed()
+        """Call proceed() only if condition is true, otherwise use fallback."""
+        if self.condition_fn():
+            self.base_ctx.proceed()
+        else:
+            self.fallback_fn()
 
-    fn verify() -> bool:
-        self.base_ctx.proceed_call_count() <= 1
+    fn verify() -> Result<(), ProceedError>:
+        """Verify proceed was called 0 or 1 times (both valid)."""
+        val count = self.base_ctx.proceed_call_count()
+        if count > 1:
+            Err(ProceedError.CalledMultipleTimes(
+                self.base_ctx.proceed_ctx.advice_name, count))
+        else:
+            Ok(())  # 0 or 1 is valid
+
+# ============================================================================
+# Testing Utilities
+# ============================================================================
+
+fn test_proceed_enforcement():
+    """Test proceed enforcement."""
+
+    # Test 1: Valid proceed (called once)
+    var target_called = false
+    val target = \: { target_called = true; 42 }
+    val ctx1 = create_proceed_context("test_advice", target)
+    val result1 = ctx1.proceed()
+    assert(result1 == 42)
+    assert(target_called)
+    assert(ctx1.verify().is_ok())
+
+    # Test 2: Never called proceed
+    val ctx2 = create_proceed_context("test_advice", target)
+    # Don't call proceed
+    assert(ctx2.verify().is_err())
+    match ctx2.verify():
+        case Err(ProceedError.NeverCalled(name)):
+            assert(name == "test_advice")
+        case _:
+            panic("Expected NeverCalled error")
+
+    # Test 3: Multiple proceed calls
+    val ctx3 = create_proceed_context("test_advice", target)
+    ctx3.proceed()
+    ctx3.proceed()  # Called twice!
+    assert(ctx3.verify().is_err())
+    match ctx3.verify():
+        case Err(ProceedError.CalledMultipleTimes(name, count)):
+            assert(name == "test_advice")
+            assert(count == 2)
+        case _:
+            panic("Expected CalledMultipleTimes error")
+
+# ============================================================================
+# Integration Points
+# ============================================================================
+
+# This module integrates with:
+# 1. src/compiler/aop.spl - AOP weaver
+# 2. rust/compiler/src/interpreter_call/core/aop_advice.rs - Runtime advice execution
+# 3. Runtime value system - For proceed() callback handling
+#
+# When implementing around advice:
+# 1. Create AroundAdviceContext with target function
+# 2. Pass ctx.proceed as callback to advice handler
+# 3. After advice completes, call ctx.verify()
+# 4. Emit error if verification fails

@@ -1,0 +1,144 @@
+# DWARF Debug Information Reader
+# Reads DWARF debug info from ELF binaries for source-level debugging.
+# Two-tier SFFI: extern fn rt_dwarf_* -> DwarfInfo class wrappers
+# Uses Option pattern for error handling.
+
+use std.ffi.debug.{rt_dwarf_load, rt_dwarf_free, rt_dwarf_addr_to_line,
+    rt_dwarf_line_to_addr, rt_dwarf_function_at}
+
+# Source location resolved from DWARF debug info
+class SourceLocation:
+    file: text
+    line: i64
+    column: i64
+
+    static fn at(file: text, line: i64, column: i64) -> SourceLocation:
+        SourceLocation(file: file, line: line, column: column)
+
+    static fn at_line(file: text, line: i64) -> SourceLocation:
+        SourceLocation(file: file, line: line, column: 0)
+
+    fn to_string() -> text:
+        if self.column > 0:
+            "{self.file}:{self.line}:{self.column}"
+        else:
+            "{self.file}:{self.line}"
+
+    fn is_valid() -> bool:
+        self.file.len() > 0 and self.line > 0
+
+# DWARF debug information handle for an ELF binary
+class DwarfInfo:
+    handle: i64
+    binary_path: text
+    loaded: bool
+
+impl DwarfInfo:
+    # Load DWARF info from an ELF binary.
+    # Returns nil if loading fails (no debug info, file not found, etc.)
+    static fn load(path: text) -> DwarfInfo:
+        val h = rt_dwarf_load(path)
+        if h == 0:
+            return nil
+        DwarfInfo(
+            handle: h,
+            binary_path: path,
+            loaded: true
+        )
+
+    # Resolve a code address to a source location.
+    # Returns nil if the address cannot be resolved.
+    fn addr_to_source(addr: i64) -> SourceLocation:
+        if not self.loaded:
+            return nil
+
+        val result = rt_dwarf_addr_to_line(self.handle, addr)
+        if result.len() == 0:
+            return nil
+
+        # Parse "file:line" format returned by the FFI
+        val parts = result.split(":")
+        if parts.len() < 2:
+            return nil
+
+        val file = parts[0]
+        val line = parts[1].parse_int() ?? 0
+        if line == 0:
+            return nil
+
+        var column = 0
+        if parts.len() >= 3:
+            column = parts[2].parse_int() ?? 0
+
+        SourceLocation(file: file, line: line, column: column)
+
+    # Resolve a source file and line to a code address.
+    # Returns 0 if the location cannot be resolved.
+    fn source_to_addr(file: text, line: i64) -> i64:
+        if not self.loaded:
+            return 0
+
+        val addr = rt_dwarf_line_to_addr(self.handle, file, line)
+        addr
+
+    # Get the function name at a code address.
+    # Returns empty string if no function is found.
+    fn function_name_at(addr: i64) -> text:
+        if not self.loaded:
+            return ""
+
+        val name = rt_dwarf_function_at(self.handle, addr)
+        name
+
+    # Get a fully detailed source location including function name.
+    # Returns nil if the address cannot be resolved.
+    fn detailed_location(addr: i64) -> SourceLocation:
+        val loc = self.addr_to_source(addr)
+        if loc == nil:
+            return nil
+        loc
+
+    # Check if the DWARF info is loaded and valid
+    fn is_loaded() -> bool:
+        self.loaded and self.handle != 0
+
+    # Get the binary path this DWARF info was loaded from
+    fn get_binary_path() -> text:
+        self.binary_path
+
+    # Close and free the DWARF handle.
+    # After calling this, no further operations should be performed.
+    me close():
+        if self.loaded:
+            rt_dwarf_free(self.handle)
+            self.loaded = false
+            self.handle = 0
+
+# --- Standalone convenience functions ---
+
+# Load DWARF info from a binary path. Returns handle (0 on error).
+fn dwarf_load(path: text) -> i64:
+    rt_dwarf_load(path)
+
+# Free a DWARF info handle.
+fn dwarf_free(handle: i64):
+    rt_dwarf_free(handle)
+
+# Resolve address to "file:line" string. Returns empty string on failure.
+fn dwarf_addr_to_line(handle: i64, addr: i64) -> text:
+    rt_dwarf_addr_to_line(handle, addr)
+
+# Resolve file:line to code address. Returns 0 on failure.
+fn dwarf_line_to_addr(handle: i64, file: text, line: i64) -> i64:
+    rt_dwarf_line_to_addr(handle, file, line)
+
+# Get function name at address. Returns empty string on failure.
+fn dwarf_function_at(handle: i64, addr: i64) -> text:
+    rt_dwarf_function_at(handle, addr)
+
+# --- Exports ---
+
+export SourceLocation
+export DwarfInfo
+export dwarf_load, dwarf_free
+export dwarf_addr_to_line, dwarf_line_to_addr, dwarf_function_at

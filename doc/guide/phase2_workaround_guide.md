@@ -11,7 +11,7 @@
 Phase 2 implemented 415 lines of SFFI wrappers (65+ functions) across three domains:
 - **String Methods** (`src/std/text.spl`) - 8 functions
 - **Array Methods** (`src/std/array.spl`) - 7 functions
-- **System/Process** (`src/ffi/system.spl`) - 50+ functions
+- **System/Process** (`src/lib/ffi/system.spl`) - 50+ functions
 
 All implementations are correct and tested, but the runtime import system prevents using them:
 
@@ -335,7 +335,7 @@ Once the runtime import system is fixed, all Phase 2 functions will be immediate
 - **Phase 2 Implementations:**
   - `src/std/text.spl` - String SFFI (+70 lines)
   - `src/std/array.spl` - Array SFFI (+85 lines)
-  - `src/ffi/system.spl` - System/Process SFFI (260 lines)
+  - `src/lib/ffi/system.spl` - System/Process SFFI (260 lines)
 
 - **Inline Helpers:**
   - `src/std/helpers.spl` - Copy-paste inline implementations

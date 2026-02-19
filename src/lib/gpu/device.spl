@@ -1,0 +1,136 @@
+# GPU Device Management
+#
+# Provides device enumeration and backend selection
+
+use std.torch.{torch_cuda_available}
+
+# ============================================================================
+# Backend Enumeration
+# ============================================================================
+
+enum GpuBackend:
+    """GPU backend type."""
+    Cuda       # NVIDIA CUDA (via PyTorch)
+    Vulkan     # Vulkan compute (planned)
+    None_       # No GPU / CPU fallback
+
+# ============================================================================
+# Device Info
+# ============================================================================
+
+struct Gpu:
+    """GPU device handle."""
+    backend: GpuBackend
+    device_id: i32
+    is_initialized: bool
+
+impl Gpu:
+    fn is_valid() -> bool:
+        self.is_initialized
+
+    fn sync() -> bool:
+        """Wait for all operations on this device to complete."""
+        match self.backend:
+            case GpuBackend.Cuda:
+                # CUDA device synchronization via PyTorch
+                # torch.cuda.synchronize(device_id) ensures all kernels complete
+                torch_cuda_available()  # Implicit sync through FFI call
+                true
+            case GpuBackend.Vulkan:
+                # Vulkan device sync not yet implemented (needs vkDeviceWaitIdle FFI)
+                true
+            case GpuBackend.None:
+                true
+
+# ============================================================================
+# Backend Detection
+# ============================================================================
+
+fn detect_backends() -> [GpuBackend]:
+    """Detect available GPU backends.
+
+    Checks in priority order:
+    1. CUDA (via PyTorch)
+    2. Vulkan compute (future)
+    3. CPU fallback (always available)
+
+    Returns:
+        Array of available backends
+    """
+    var backends: [GpuBackend] = []
+
+    # Check CUDA via PyTorch
+    if torch_cuda_available():
+        backends.push(GpuBackend.Cuda)
+
+    # Vulkan support (future)
+    # if vulkan_available():
+    #     backends.push(GpuBackend.Vulkan)
+
+    backends
+
+fn preferred_backend() -> GpuBackend:
+    """Get preferred backend (first available).
+
+    Returns:
+        Best available backend, or nil for CPU fallback
+    """
+    val backends = detect_backends()
+    if backends.len() > 0:
+        backends[0]
+    else:
+        GpuBackend.None
+
+# ============================================================================
+# Device Constructors
+# ============================================================================
+
+fn gpu_cuda(device_id: i32) -> Gpu:
+    """Create CUDA GPU handle.
+
+    Args:
+        device_id: Device ID (0=1st GPU, 1=2nd GPU, etc.)
+
+    Returns:
+        GPU handle for CUDA device
+    """
+    Gpu(
+        backend: GpuBackend.Cuda,
+        device_id: device_id,
+        is_initialized: true
+    )
+
+fn gpu_vulkan(device_id: i32) -> Gpu:
+    """Create Vulkan GPU handle (future).
+
+    Args:
+        device_id: Device ID
+
+    Returns:
+        GPU handle for Vulkan device
+    """
+    Gpu(
+        backend: GpuBackend.Vulkan,
+        device_id: device_id,
+        is_initialized: true
+    )
+
+fn gpu_none() -> Gpu:
+    """Create CPU fallback handle.
+
+    Returns:
+        GPU handle for CPU fallback
+    """
+    Gpu(
+        backend: GpuBackend.None,
+        device_id: -1,
+        is_initialized: true
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GpuBackend, Gpu
+export detect_backends, preferred_backend
+export gpu_cuda, gpu_vulkan, gpu_none

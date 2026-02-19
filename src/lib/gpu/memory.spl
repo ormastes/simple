@@ -1,0 +1,177 @@
+# GPU Memory Management
+#
+# Provides typed GPU arrays with automatic memory management
+
+use std.gpu.device.{Gpu, GpuBackend}
+use std.torch.{TorchTensorWrapper}
+
+# ============================================================================
+# GPU Array Type
+# ============================================================================
+
+class GpuArray[T]:
+    """Typed GPU array with automatic memory management.
+
+    Wraps backend-specific memory (PyTorch tensors, Vulkan buffers, etc.)
+    and provides unified interface for data transfer.
+
+    Memory is automatically freed when array goes out of scope (RAII).
+
+    Example:
+        val arr = ctx.alloc[f32](1024)
+        arr.upload([1.0, 2.0, 3.0, ...])
+        val result = arr.download()
+    """
+
+    backend: GpuBackend
+    device_id: i32
+    count: i64
+    torch_tensor: TorchTensorWrapper?
+
+    fn size_bytes() -> i64:
+        """Get size in bytes."""
+        # Default to 8 bytes per element until sizeof[T]() is available
+        eprint("Warning: size_bytes() using default 8 bytes per element, sizeof[T]() not yet available")
+        self.count * 8
+
+    fn upload(data: [T]) -> bool:
+        """Upload data from host to device (async).
+
+        Args:
+            data: Host array to upload
+
+        Returns:
+            true on success
+        """
+        match self.backend:
+            case GpuBackend.Cuda:
+                # Upload via tensor operations not yet wired to PyTorch backend
+                eprint("Warning: GPU upload stubbed - tensor upload operations not yet implemented")
+                true
+            case _:
+                false
+
+    fn download() -> [T]:
+        """Download data from device to host (blocking).
+
+        Returns:
+            Host array with device data
+        """
+        match self.backend:
+            case GpuBackend.Cuda:
+                # Download via tensor operations not yet wired to PyTorch backend
+                eprint("Warning: GPU download stubbed - tensor download operations not yet implemented, returning empty array")
+                var result: [T] = []
+                result
+            case _:
+                var result: [T] = []
+                result
+
+    fn copy_to(other: GpuArray[T]) -> bool:
+        """Copy device to device.
+
+        Args:
+            other: Destination array
+
+        Returns:
+            true on success
+        """
+        match self.backend:
+            case GpuBackend.Cuda:
+                # Device-to-device copy not yet wired to PyTorch backend
+                eprint("Warning: GPU copy_to stubbed - tensor copy operations not yet implemented")
+                true
+            case _:
+                false
+
+    fn drop():
+        """Automatically free memory when object goes out of scope."""
+        match self.backend:
+            case GpuBackend.Cuda:
+                # PyTorch tensor handles its own memory
+                # Wrapper's drop() will be called automatically
+                ()
+            case _:
+                ()
+
+# ============================================================================
+# Memory Allocation Functions
+# ============================================================================
+
+fn gpu_alloc[T](gpu: Gpu, count: i64) -> GpuArray[T]:
+    """Allocate uninitialized GPU array.
+
+    Args:
+        gpu: GPU device
+        count: Number of elements
+
+    Returns:
+        GPU array (uninitialized)
+    """
+    match gpu.backend:
+        case GpuBackend.Cuda:
+            # Tensor creation on GPU device not yet wired to PyTorch backend
+            eprint("Warning: gpu_alloc stubbed - GPU tensor creation not yet implemented, using nil handle")
+            GpuArray[T](
+                backend: GpuBackend.Cuda,
+                device_id: gpu.device_id,
+                count: count,
+                torch_tensor: nil
+            )
+        case _:
+            GpuArray[T](
+                backend: GpuBackend.None,
+                device_id: -1,
+                count: count,
+                torch_tensor: nil
+            )
+
+fn gpu_alloc_upload[T](gpu: Gpu, data: [T]) -> GpuArray[T]:
+    """Allocate and upload data to GPU in one call.
+
+    Args:
+        gpu: GPU device
+        data: Host data to upload
+
+    Returns:
+        GPU array with uploaded data
+    """
+    val arr = gpu_alloc[T](gpu, data.len())
+    arr.upload(data)
+    arr
+
+fn gpu_alloc_zeros[T](gpu: Gpu, count: i64) -> GpuArray[T]:
+    """Allocate zero-initialized GPU array.
+
+    Args:
+        gpu: GPU device
+        count: Number of elements
+
+    Returns:
+        GPU array filled with zeros
+    """
+    match gpu.backend:
+        case GpuBackend.Cuda:
+            # Use PyTorch zeros tensor
+            val tensor = TorchTensorWrapper.tensor_zeros([count])
+            val gpu_tensor = tensor.cuda(gpu.device_id)
+            GpuArray[T](
+                backend: GpuBackend.Cuda,
+                device_id: gpu.device_id,
+                count: count,
+                torch_tensor: Some(gpu_tensor)
+            )
+        case _:
+            GpuArray[T](
+                backend: GpuBackend.None,
+                device_id: -1,
+                count: count,
+                torch_tensor: nil
+            )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GpuArray
+export gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros

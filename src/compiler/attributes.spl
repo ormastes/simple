@@ -46,6 +46,12 @@ struct VolatileAttr:
 # Volatile Attribute Parsing
 # ============================================================================
 
+@when(tier=core):
+fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
+    """Core-tier parser: ignore detailed volatile attributes."""
+    VolatileAttr(mode: VolatileMode.None_, address: nil, barriers: false)
+
+@else:
 fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
     """Extract volatile attributes from a list of attributes.
 
@@ -57,59 +63,47 @@ fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
 
     Returns default VolatileAttr if no volatile attributes found.
     """
-    var mode = VolatileMode.None
+    var mode = VolatileMode.None_
     var address: i64? = nil
     var barriers = false
 
     for attr in attrs:
-        match attr.name:
-            case "volatile":
-                mode = VolatileMode.Full
-                # Check for @volatile(barriers: true)
-                if attr.args.len() > 0:
-                    barriers = extract_barriers_arg(attr.args)
-
-            case "volatile_read":
-                mode = VolatileMode.ReadOnly
-
-            case "volatile_write":
-                mode = VolatileMode.WriteOnly
-
-            case "nonvolatile":
-                mode = VolatileMode.Explicit
-
-            case "address" | "addr":
-                # @address(0x40020000) - fixed memory address
-                if attr.args.len() > 0:
-                    address = extract_int_arg(attr.args[0])
-
-            case _:
-                # Ignore other attributes
-                pass
+        if attr.name == "volatile":
+            mode = VolatileMode.Full
+            # Check for @volatile(barriers: true)
+            if attr.args.len() > 0:
+                barriers = extract_barriers_arg(attr.args)
+        elif attr.name == "volatile_read":
+            mode = VolatileMode.ReadOnly
+        elif attr.name == "volatile_write":
+            mode = VolatileMode.WriteOnly
+        elif attr.name == "nonvolatile":
+            mode = VolatileMode.Explicit
+        elif attr.name == "address" or attr.name == "addr":
+            # @address(0x40020000) - fixed memory address
+            if attr.args.len() > 0:
+                address = extract_int_arg(attr.args[0])
 
     VolatileAttr(
         mode: mode,
         address: address,
         barriers: barriers
     )
+@end
 
 fn is_volatile(attr: VolatileAttr) -> bool:
     """Check if volatile access is required."""
-    match attr.mode:
-        case Full | ReadOnly | WriteOnly: true
-        case _: false
+    attr.mode == VolatileMode.Full or
+    attr.mode == VolatileMode.ReadOnly or
+    attr.mode == VolatileMode.WriteOnly
 
 fn is_read_volatile(attr: VolatileAttr) -> bool:
     """Check if volatile reads are required."""
-    match attr.mode:
-        case Full | ReadOnly: true
-        case _: false
+    attr.mode == VolatileMode.Full or attr.mode == VolatileMode.ReadOnly
 
 fn is_write_volatile(attr: VolatileAttr) -> bool:
     """Check if volatile writes are required."""
-    match attr.mode:
-        case Full | WriteOnly: true
-        case _: false
+    attr.mode == VolatileMode.Full or attr.mode == VolatileMode.WriteOnly
 
 # ============================================================================
 # Function Attribute Types
@@ -124,6 +118,12 @@ struct FunctionAttr:
     is_interrupt: bool      # @interrupt - interrupt handler
     is_boot: bool           # @boot - init-phase function (runs before scheduler)
 
+@when(tier=core):
+fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
+    """Core-tier parser: keep default function attributes."""
+    FunctionAttr__default()
+
+@else:
 fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     """Extract function attributes from a list of attributes.
 
@@ -142,24 +142,21 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     var is_boot = false
 
     for attr in attrs:
-        match attr.name:
-            case "entry":
-                is_entry = true
-            case "naked":
-                is_naked = true
-            case "noreturn":
-                is_noreturn = true
-            case "section":
-                if attr.args.len() > 0:
-                    val section_name = extract_string_arg(attr.args[0])
-                    if section_name.len() > 0:
-                        section = Some(section_name)
-            case "interrupt":
-                is_interrupt = true
-            case "boot":
-                is_boot = true
-            case _:
-                pass
+        if attr.name == "entry":
+            is_entry = true
+        elif attr.name == "naked":
+            is_naked = true
+        elif attr.name == "noreturn":
+            is_noreturn = true
+        elif attr.name == "section":
+            if attr.args.len() > 0:
+                val section_name = extract_string_arg(attr.args[0])
+                if section_name.len() > 0:
+                    section = section_name
+        elif attr.name == "interrupt":
+            is_interrupt = true
+        elif attr.name == "boot":
+            is_boot = true
 
     FunctionAttr(
         is_entry: is_entry,
@@ -169,6 +166,7 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         is_interrupt: is_interrupt,
         is_boot: is_boot
     )
+@end
 
 fn FunctionAttr__default() -> FunctionAttr:
     """Default function attributes (no special attributes)."""
@@ -202,6 +200,15 @@ struct TaskAttr:
     frame: i64?
     wait_nodes: i64
 
+@when(tier=core):
+fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
+    """Core-tier parser: detect @task and apply defaults (no named arg parsing)."""
+    for attr in attrs:
+        if attr.name == "task":
+            return Some(TaskAttr(instances: 1, group: nil, frame: nil, wait_nodes: 0))
+    nil
+
+@else:
 fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
     """Extract @task attributes from a list of attributes.
 
@@ -224,9 +231,9 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
             found = true
             for arg in attr.args:
                 match arg.kind:
-                    case ExprKind.Assign(left, _, right):
+                    case Assign(left, op, right):
                         match left.kind:
-                            case ExprKind.Ident(name):
+                            case Ident(name):
                                 if name == "instances":
                                     val v = extract_int_arg(right)
                                     if v != nil:
@@ -234,7 +241,7 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
                                 elif name == "group":
                                     val g = extract_string_arg(right)
                                     if g.len() > 0:
-                                        group = Some(g)
+                                        group = g
                                 elif name == "frame":
                                     frame = extract_int_arg(right)
                                 elif name == "wait_nodes":
@@ -242,7 +249,7 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
                                     if w != nil:
                                         wait_nodes = w ?? 0
                             case _: ()
-                    case ExprKind.IntLit(value):
+                    case IntLit(value):
                         # Bare integer: @task(4) means instances=4
                         instances = value
                     case _: ()
@@ -256,12 +263,19 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
         frame: frame,
         wait_nodes: wait_nodes
     )
+@end
 
 # ============================================================================
 # Layout Attribute Parsing
 # ============================================================================
 
 # Parse layout attributes from a list of attributes
+@when(tier=core):
+fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
+    """Core-tier parser: keep default layout attributes."""
+    LayoutAttr(layout_kind: LayoutKind.Simple, explicit_align: nil, is_packed: false)
+
+@else:
 fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
     """Extract layout attributes from a list of attributes.
 
@@ -279,78 +293,75 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
     var is_packed = false
 
     for attr in attrs:
-        match attr.name:
-            case "repr":
-                # @repr("C"), @repr("packed"), @repr("transparent")
-                if attr.args.len() > 0:
-                    val repr_kind = extract_string_arg(attr.args[0])
-                    match repr_kind:
-                        case "C":
-                            layout_kind = LayoutKind.C
-                        case "packed":
-                            layout_kind = LayoutKind.Packed
-                            is_packed = true
-                        case "transparent":
-                            layout_kind = LayoutKind.Transparent
-                        case _:
-                            # Unknown repr, keep default
-                            pass
-
-            case "packed":
-                # @packed shorthand
-                layout_kind = LayoutKind.Packed
-                is_packed = true
-
-            case "align":
-                # @align(N) - alignment must be power of 2
-                if attr.args.len() > 0:
-                    val align_val = extract_int_arg(attr.args[0])
-                    if align_val.? and is_power_of_two(align_val.unwrap()):
-                        explicit_align = align_val
-
-            case _:
-                # Ignore other attributes
-                pass
+        if attr.name == "repr":
+            # @repr("C"), @repr("packed"), @repr("transparent")
+            if attr.args.len() > 0:
+                val repr_kind = extract_string_arg(attr.args[0])
+                if repr_kind == "C":
+                    layout_kind = LayoutKind.C
+                elif repr_kind == "packed":
+                    layout_kind = LayoutKind.Packed
+                    is_packed = true
+                elif repr_kind == "transparent":
+                    layout_kind = LayoutKind.Transparent
+        elif attr.name == "packed":
+            # @packed shorthand
+            layout_kind = LayoutKind.Packed
+            is_packed = true
+        elif attr.name == "align":
+            # @align(N) - alignment must be power of 2
+            if attr.args.len() > 0:
+                val align_val = extract_int_arg(attr.args[0])
+                if align_val.? and is_power_of_two(align_val.unwrap()):
+                    explicit_align = align_val
 
     LayoutAttr(
         layout_kind: layout_kind,
         explicit_align: explicit_align,
         is_packed: is_packed
     )
+@end
 
 # Extract string value from an expression (for @repr("C"))
 fn extract_string_arg(expr: Expr) -> text:
     match expr.kind:
-        case ExprKind.StringLit(value, _):
+        case StringLit(value, _):
             value
         case _:
             ""
 
 # Extract barriers option from attribute args
 # Handles: @volatile(true), @volatile(barriers: true)
+@when(tier=core):
+fn extract_barriers_arg(args: [Expr]) -> bool:
+    """Core-tier parser: ignore named attribute args."""
+    false
+
+@else:
 fn extract_barriers_arg(args: [Expr]) -> bool:
     for arg in args:
         # Check for bare true literal: @volatile(true)
         match arg.kind:
-            case ExprKind.BoolLit(v):
+            case BoolLit(v):
                 return v
-            case ExprKind.Assign(left, _, right):
+            case Assign(left, op, right):
                 # Check for named arg: barriers = true
                 match left.kind:
-                    case ExprKind.Ident(name):
+                    case Ident(name):
                         if name == "barriers":
                             match right.kind:
-                                case ExprKind.BoolLit(v):
+                                case BoolLit(v):
                                     return v
                                 case _: ()
                     case _: ()
             case _: ()
     false
+@end
 
 # Extract integer value from an expression (for @align(16))
 fn extract_int_arg(expr: Expr) -> i64?:
     match expr.kind:
-        case ExprKind.IntLit(value):
+        case IntLit(value):
             Some(value)
         case _:
             nil

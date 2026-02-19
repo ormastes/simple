@@ -219,7 +219,7 @@ describe "Feature":
 
 All tests should **PASS** when:
 - ✅ Rust FFI is built (`bootstrap_ffi_debug.rs`)
-- ✅ Simple FFI wrappers are loaded (`src/ffi/debug.spl`)
+- ✅ Simple FFI wrappers are loaded (`src/lib/ffi/debug.spl`)
 - ✅ Debug infrastructure is properly initialized
 
 ## Troubleshooting

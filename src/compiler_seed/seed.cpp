@@ -577,9 +577,20 @@ static void detect_target_cpu(char *out, int outsz) {
     detect_target_arch(out, outsz);
 }
 
+static void detect_target_tier(char *out, int outsz) {
+    const char *tier = env_or_empty("SIMPLE_TIER");
+    if (!tier || tier[0] == '\0') tier = "full";
+    ascii_lower_copy(tier, out, outsz);
+    if (strcmp(out, "seed") != 0 && strcmp(out, "core") != 0 && strcmp(out, "full") != 0) {
+        strncpy(out, "full", outsz - 1);
+        out[outsz - 1] = '\0';
+    }
+}
+
 /* Global target info for asm match/assert (populated in preprocess_conditional_directives) */
 static char g_host_arch[64];
 static char g_host_os[64];
+static char g_host_tier[16];
 
 #define MAX_COND_TOKENS 128
 #define MAX_COND_TOKEN_LEN 96
@@ -696,6 +707,8 @@ static bool eval_key_value_condition(
     char value[MAX_COND_TOKEN_LEN];
     strip_quotes_copy(key_raw, key, sizeof(key));
     strip_quotes_copy(value_raw, value, sizeof(value));
+    char value_lower[MAX_COND_TOKEN_LEN];
+    ascii_lower_copy(value, value_lower, sizeof(value_lower));
 
     char key_lower[MAX_COND_TOKEN_LEN];
     ascii_lower_copy(key, key_lower, sizeof(key_lower));
@@ -724,6 +737,9 @@ static bool eval_key_value_condition(
         normalize_arch_token(value, norm, sizeof(norm));
         return norm[0] != '\0' && strcmp(host_cpu, norm) == 0;
     }
+    if (strcmp(key_lower, "tier") == 0 || strcmp(key_lower, "stage") == 0) {
+        return strcmp(g_host_tier, value_lower) == 0;
+    }
     return false;
 }
 
@@ -745,6 +761,9 @@ static bool eval_atom_condition(
     if (strcmp(token, "release") == 0) return false;
     if (strcmp(token, "compiled") == 0) return true;
     if (strcmp(token, "interpreter") == 0) return false;
+    if (strcmp(token, "seed") == 0 || strcmp(token, "core") == 0 || strcmp(token, "full") == 0) {
+        return strcmp(g_host_tier, token) == 0;
+    }
 
     if (strcmp(token, "win") == 0 || strcmp(token, "windows") == 0) return strcmp(host_os, "windows") == 0;
     if (strcmp(token, "linux") == 0) return strcmp(host_os, "linux") == 0;
@@ -876,15 +895,55 @@ static void preprocess_conditional_directives() {
     char host_os[32];
     char host_arch[32];
     char host_cpu[32];
+    char host_tier[16];
     detect_target_os(host_os, sizeof(host_os));
     detect_target_arch(host_arch, sizeof(host_arch));
     detect_target_cpu(host_cpu, sizeof(host_cpu));
+    detect_target_tier(host_tier, sizeof(host_tier));
 
-    /* Populate global arch/os for asm match/assert */
+    /* Populate global arch/os/tier for asm match/assert and cfg evaluation */
     strncpy(g_host_arch, host_arch, sizeof(g_host_arch)-1);
     g_host_arch[sizeof(g_host_arch)-1] = '\0';
     strncpy(g_host_os, host_os, sizeof(g_host_os)-1);
     g_host_os[sizeof(g_host_os)-1] = '\0';
+    strncpy(g_host_tier, host_tier, sizeof(g_host_tier)-1);
+    g_host_tier[sizeof(g_host_tier)-1] = '\0';
+
+    /* First pass: strip architecture metadata blocks (arch { ... }).
+       These are declarative constraints and are not executable syntax. */
+    {
+        bool in_arch_block = false;
+        int arch_depth = 0;
+        for (int i = 0; i < num_lines; i++) {
+            char line_copy[MAX_LINE * 4];
+            strncpy(line_copy, source_lines[i], sizeof(line_copy) - 1);
+            line_copy[sizeof(line_copy) - 1] = '\0';
+            char *t = trim(line_copy);
+
+            if (!in_arch_block) {
+                if (starts_with(t, "arch {")) {
+                    in_arch_block = true;
+                    arch_depth = 1;
+                    replace_source_line(i, "");
+                    continue;
+                }
+                continue;
+            }
+
+            replace_source_line(i, "");
+            int opens = 0;
+            int closes = 0;
+            for (const char *p = t; *p; p++) {
+                if (*p == '{') opens++;
+                else if (*p == '}') closes++;
+            }
+            arch_depth += opens - closes;
+            if (arch_depth <= 0) {
+                in_arch_block = false;
+                arch_depth = 0;
+            }
+        }
+    }
 
     const int MAX_IF_DEPTH = 128;
     bool stack_parent_active[MAX_IF_DEPTH];

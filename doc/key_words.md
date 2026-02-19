@@ -1,5 +1,14 @@
 # Key words and key points
 
+## Crate
+Package and module are used in many different meaning across different languages.
+Crate is simple.sdn exist deployment package unit.
+
+## Virtual Crate
+In a crate, there are one or many virtual crates.
+Virtual crate is a top most dir with __init__.spl. 
+It is not crate but have own export rule and configs.
+
 ## Linker Wrapper
 Linker wrapper is the native link entry point.
 

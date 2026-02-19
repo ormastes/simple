@@ -1,0 +1,87 @@
+"""
+# Pipeline Native Specification
+
+**Feature IDs:** #TBD
+**Category:** Compiler
+**Status:** In Progress
+
+## Overview
+
+Tests the full Pure Simple compilation pipeline:
+Source → Parse → HIR → MIR → ISel → RegAlloc → Encode → ELF → Link → Run
+"""
+
+use std.spec
+use compiler_core.parser.*
+use compiler.parser_types.*
+use compiler_core.lexer.*
+use compiler.blocks.*
+use compiler.treesitter.*
+use compiler.hir_lowering.*
+use compiler.mir_lowering.*
+use compiler.mir_data.*
+use compiler.backend.native.mod.{compile_native}
+use compiler_core.backend_types.{CodegenTarget}
+
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+fn byte_to_hex(b: i64) -> text:
+    val digits = "0123456789abcdef"
+    "{digits[b / 16]}{digits[b % 16]}"
+
+fn compile_and_link(source: text) -> (i64, text):
+    var parser = Parser.new(source)
+    val ast_module = parser.parse()
+    var hir_lowering = HirLowering.new()
+    val hir_module = hir_lowering.lower_module(ast_module)
+    var mir_lowering_ctx = MirLowering.new(hir_lowering.symbols)
+    val mir_module = mir_lowering_ctx.lower_module(hir_module)
+    val elf_bytes = compile_native(mir_module, CodegenTarget.X86_64)
+
+    var offset = 0
+    while offset < elf_bytes.len():
+        var chunk = ""
+        var end_idx = offset + 800
+        if end_idx > elf_bytes.len():
+            end_idx = elf_bytes.len()
+        var j = offset
+        while j < end_idx:
+            chunk = chunk + byte_to_hex(elf_bytes[j])
+            j = j + 1
+        if offset == 0:
+            shell("echo -n '{chunk}' > /tmp/pipeline_native_spec.hex")
+        else:
+            shell("echo -n '{chunk}' >> /tmp/pipeline_native_spec.hex")
+        offset = end_idx
+
+    shell("xxd -r -p /tmp/pipeline_native_spec.hex /tmp/pipeline_native_spec.o")
+    shell("rm -f /tmp/pipeline_native_spec.hex")
+    val link_r = rt_process_run("cc", ["-o", "/tmp/pipeline_native_spec", "/tmp/pipeline_native_spec.o", "-no-pie"])
+    if link_r[2] != 0:
+        return (-1, link_r[1])
+    val run_r = rt_process_run("/tmp/pipeline_native_spec", [])
+    (run_r[2], run_r[0])
+
+
+describe "Pipeline Native":
+    it "compiles fn main() -> exit 0":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_link("fn main():\n    0\n")
+            expect(code).to_equal(0)
+
+    it "produces non-empty ELF bytes":
+        skip_on_interpreter "requires native backend":
+            val source = "fn main():\n    0\n"
+            var parser = Parser.new(source)
+            val ast_module = parser.parse()
+            var hir_lowering = HirLowering.new()
+            val hir_module = hir_lowering.lower_module(ast_module)
+            var mir_lowering_ctx = MirLowering.new(hir_lowering.symbols)
+            val mir_module = mir_lowering_ctx.lower_module(hir_module)
+            val elf_bytes = compile_native(mir_module, CodegenTarget.X86_64)
+            expect(elf_bytes.len() > 0).to_equal(true)
