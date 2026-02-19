@@ -198,24 +198,41 @@ See `doc/guide/syntax_quick_reference.md` for complete reference.
 ```
 src/
   app/              # Applications (cli, build, mcp, mcp_jj, io, test_runner_new, desugar)
-  lib/              # Libraries (database, ffi, mcp, mcp_sdk, cuda, torch, etc.)
-    ffi/            # Centralized FFI declarations (io, system, codegen, cli, runtime, etc.)
-    mcp/            # MCP library (core types, helpers, schema, handler registry, protocol)
-  std/              # Standard library (spec, text, math, path, array, platform)
+  lib/              # Standard library + all ecosystem libs — use std.X imports resolve here
+    ffi/            # FFI declarations (io, system, codegen, cli, runtime, ast, debug, etc.)
+    mcp/            # MCP server library (core, protocol, schema, handler_registry, helpers)
+    mcp_sdk/        # MCP SDK (jsonrpc, server builder, transport)
+    database/       # BugDB, TestDB, FeatureDB, query builder
+    pure/           # ML tensor library (autograd, nn, training, data, optim — 60+ files)
+    cuda/           # CUDA integration
+    torch/          # PyTorch FFI bindings
+    baremetal/      # Bare-metal support (arm, arm64, riscv, riscv32, x86, x86_64, common)
+    collections/    # Advanced collections (lazy_seq, persistent_dict, persistent_vec)
+    execution/      # Execution engine (semihost capture, string table)
+    hooks/          # Event hooks (build, feature, task, todo detectors)
+    memory/         # Memory management (refc_binary)
+    diagnostics/    # Diagnostic formatters (json, simple, text)
+    qemu/           # QEMU boot/debug runner
+    ...             # + full stdlib: text, math, json, crypto, net, async, date, regex, etc.
+  std -> lib        # Symlink: `use std.X` resolves to src/lib/X (both namespaces work)
   compiler_core/    # Core (seed-compilable: lexer, parser, AST, AOP, interpreter, C codegen)
-  compiler_shared/  # Shared infra (treesitter, blocks, backend API, type system, MIR opt)
+  compiler_shared/  # Shared infra (treesitter, backend API, type system, MIR opt)
+    blocks/         # Block definition system (real impl — no more src/blocks/ shim)
     interpreter/    # Shared compiler/interpreter code (contracts, operators, pattern, llvm)
   compiler/         # Full compiler (backends, HIR/MIR lowering, linker, loader, MDSOC)
     mdsoc/          # Multi-Dimensional Separation of Concerns (virtual capsules, 3-tier visibility)
     feature/        # MDSOC pipeline stages (typed port contracts)
     transform/      # MDSOC stage boundary adapters (entity views)
-test/               # Test files (std, lib, app, compiler, benchmarks)
+  i18n/             # Internationalization
+test/               # Test files (lib, app, compiler, benchmarks)
 doc/                # Documentation (report, design, guide, research, feature, test, bug)
 bin/                # Binaries (simple, release/simple)
-tools/              # Development tools (seed bootstrap compiler, docker containers)
+tools/              # Development tools (docker containers, windows/ build helpers)
 scripts/            # Bootstrap bash scripts (3 only)
 .claude/            # Agents, skills, templates
 ```
+
+**Import namespace:** `use std.X` and `use lib.X` both resolve from `src/lib/` (via `src/std -> lib` symlink). Prefer `use std.X` in new code.
 
 **Detailed Structure:** See [`doc/architecture/file_class_structure.md`](doc/architecture/file_class_structure.md) for comprehensive codebase inventory (2,649 files, 623K lines, duplication analysis, refactoring recommendations).
 
