@@ -448,7 +448,7 @@ lints:
     paths:
         test/**:
             allow: [unused_variable, dead_code]
-        src/ffi/**:
+        src/lib/ffi/**:
             allow: [unsafe_without_context]
 
 formatter:
