@@ -42,15 +42,16 @@
 | Exported Enum Scope Loss Across Tests | ✅ FIXED | Critical |
 | Multi-Mode Feature Parse Errors | ✅ FIXED | Critical |
 | Regex NFA Matcher Returns Empty Matches | ✅ FIXED | High |
-| MCP dispatch_to_simple_app arg offset | 🔍 OPEN | High |
+| MCP dispatch_to_simple_app arg offset | ❌ INVALID | High |
 | simple_new1 help output missing newlines | 🔍 OPEN | Medium |
 | simple_new1 segfault in interpreter mode | 🔍 OPEN | Critical |
 | Bootstrap stage 2 MIR lowering produces 0 modules | 🔍 OPEN | Critical |
-| Rust MCP backend returns empty text | 🔍 OPEN | Medium |
-| MCP dependencies_spec.spl parse error | 🔍 OPEN | Low |
-| **`export...as` and `use...as` syntax breaks runtime parser** | 🔍 OPEN | Medium |
+| Rust MCP backend returns empty text | ❌ INVALID | Medium |
+| MCP dependencies_spec.spl parse error | ✅ CLOSED | Low |
+| **`export...as` syntax breaks runtime parser** | ✅ FIXED | Medium |
+| `bin/simple bug-add` fails: LOG_ERROR not found + build help shown | ✅ FIXED | Medium |
 
-**Summary:** 37 fixed, 7 open, 1 investigating, 1 workaround (Updated 2026-02-16)
+**Summary:** 41 fixed, 3 open, 1 investigating, 1 workaround, 2 invalid (Updated 2026-02-19)
 
 ---
 
@@ -3052,8 +3053,10 @@ This is separate from the "expected expression, found Colon" errors that were fi
 
 **Date:** 2026-01-29
 **Severity:** High
-**Status:** Open
+**Status:** INVALID
 **Component:** `src/rust/driver/src/main.rs:283-288`
+
+> ❌ **INVALID (2026-02-19):** References `src/rust/driver/src/main.rs:283` which does not exist. Project is 100% Pure Simple with no Rust source files. This was an obsolete Rust-era bug report.
 
 ### Description
 
@@ -3157,14 +3160,20 @@ When `simple_new1` compiles itself (`-c -o simple_new2 simple/compiler/main.spl`
 
 HIR lowering and method resolution succeed. The MIR lowering silently drops all modules without reporting errors — likely a missing case or incorrect module passing between phases.
 
+### Investigation (2026-02-19)
+
+`target/bootstrap/` directory does not exist on current machine. Bootstrap process has not been run. These bugs cannot be reproduced or investigated without first running `bin/simple build bootstrap` to create the bootstrap binaries. Requires a dedicated bootstrap session.
+
 ---
 
 ## Rust MCP Backend Returns Empty Text
 
 **Date:** 2026-01-29
 **Severity:** Medium
-**Status:** Open
+**Status:** INVALID
 **Component:** `src/rust/driver/src/cli/llm_tools.rs:187`
+
+> ❌ **INVALID (2026-02-19):** References `src/rust/driver/src/cli/llm_tools.rs` which does not exist. Project is 100% Pure Simple with no Rust source files. This was an obsolete Rust-era bug report.
 
 ### Description
 
@@ -3183,8 +3192,10 @@ SIMPLE_MCP_RUST=1 ./target/debug/simple_old mcp src/app/mcp/main.spl
 
 **Date:** 2026-01-29
 **Severity:** Low
-**Status:** Open
+**Status:** CLOSED
 **Component:** `test/lib/std/unit/mcp/dependencies_spec.spl`
+
+> ✅ **CLOSED (2026-02-19):** Test passes 1/1 today; already fixed in a prior session.
 
 ### Description
 
@@ -3200,13 +3211,14 @@ The MCP dependencies test file fails with parse error: "expected expression, fou
 
 ---
 
-## `export...as` and `use...as` Syntax Breaks Runtime Parser 🔍 OPEN
+## `export...as` Syntax Breaks Runtime Parser ✅ FIXED
 
-**Type:** Bug - Parser Error  
-**Priority:** Medium  
-**Discovered:** 2026-02-16  
-**Status:** Open  
-**Component:** Runtime Parser (`src/compiler_core/parser.spl`, lexer)
+**Type:** Bug - Parser Error
+**Priority:** Medium
+**Discovered:** 2026-02-16
+**Fixed:** 2026-02-19
+**Status:** Fixed
+**Component:** Runtime Parser (`src/compiler_core/parser.spl`)
 
 ### Description
 

@@ -114,6 +114,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 
 use app.desugar.forwarding (desugar_forwarding)
 use app.desugar.trait_desugar (desugar_traits)
+use app.desugar.lazy_proxy_gen (desugar_lazy_proxies)
 use app.desugar.static_constants (desugar_static_constants)
 use app.desugar.static_methods (desugar_static_methods)
 use app.desugar.enum_constructors (desugar_enum_constructors)
@@ -197,12 +198,21 @@ fn desugar_source(source: text) -> text:
     #       -> "struct Repo:\n    find_fn: fn(text) -> Item"
     val pass_trait = desugar_traits(pass_ctx)
 
+    # Pass -0.5: Generate lazy proxy delegation functions for traits
+    #            annotated with # @lazy_proxy("service_name").
+    #            Must run after trait desugar (needs trait scanning) and
+    #            before forwarding (generates standalone functions).
+    #
+    # Example: "# @lazy_proxy(\"json\")\ntrait JsonSvc:\n    fn escape(s: text) -> text"
+    #       -> generates __lazy_json_escape() + make_lazy_JsonSvc()
+    val pass_proxy = desugar_lazy_proxies(pass_trait)
+
     # Pass 0: Generate delegation methods from alias-based forwarding
     #         declarations in class/struct bodies.
     #
     # Example: "class Stack:\n    inner: [i64]\n    alias fn push(item) = inner.push"
     #       -> "class Stack:\n    inner: [i64]\n    fn push(item):\n        self.inner.push(item)"
-    val pass0 = desugar_forwarding(pass_trait)
+    val pass0 = desugar_forwarding(pass_proxy)
 
     # Pass 1: Extract static constant definitions from impl blocks,
     #         hoist them as module-level values named TypeName__CONSTANT
