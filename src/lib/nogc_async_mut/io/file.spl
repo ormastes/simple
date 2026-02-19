@@ -2,7 +2,7 @@
 # Async File I/O
 
 Async file handle using thread pool offload (files don't support epoll).
-Wraps sync FileHandle and dispatches operations to a thread pool.
+Owns a raw fd directly and dispatches FFI operations to a thread pool.
 
 ## Components
 
@@ -50,9 +50,34 @@ Wraps sync FileHandle and dispatches operations to a thread pool.
 """
 
 use std.common.io.async_traits.{AsyncRead, AsyncWrite, AsyncSeek, AsyncClose}
-use std.common.io.error.{IoError, IoErrorKind, SeekFrom}
-use std.nogc_sync_mut.io.file.{FileHandle, FileMode, FileMetadata}
+use std.common.io.types.{IoError, IoErrorKind, SeekFrom, FileMode, FileMetadata}
 use std.async.future.{Future}
+
+# ============================================================================
+# FFI Functions
+# ============================================================================
+
+# Thread pool
+extern fn rt_thread_pool_create(size: i64)
+extern fn rt_thread_pool_spawn<T>(task: fn() -> T) -> Future<T>
+
+# File handle operations
+extern fn rt_io_file_open(path: text, mode: i64) -> i64
+extern fn rt_io_file_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_file_read_all(fd: i64) -> [u8]
+extern fn rt_io_file_read_line(fd: i64) -> text?
+extern fn rt_io_file_write(fd: i64, data: [u8]) -> i64
+extern fn rt_io_file_write_all(fd: i64, data: [u8]) -> bool
+extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
+extern fn rt_io_file_flush(fd: i64) -> bool
+extern fn rt_io_file_close(fd: i64) -> bool
+extern fn rt_io_file_metadata(fd: i64) -> FileMetadata?
+extern fn rt_io_file_exists(path: text) -> bool
+extern fn rt_io_file_delete(path: text) -> bool
+
+# Text/bytes conversion
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # ============================================================================
 # ThreadPool - Minimal Thread Pool for File I/O
@@ -104,6 +129,18 @@ fn get_pool() -> ThreadPool:
     global_pool.unwrap()
 
 # ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn file_mode_to_int(mode: FileMode) -> i64:
+    """Convert FileMode to integer for FFI."""
+    match mode:
+        case FileMode.ReadOnly: 0
+        case FileMode.WriteOnly: 1
+        case FileMode.ReadWrite: 2
+        case FileMode.Append: 3
+
+# ============================================================================
 # AsyncFileHandle - Async File Handle
 # ============================================================================
 
@@ -112,13 +149,16 @@ class AsyncFileHandle with AsyncRead, AsyncWrite, AsyncSeek, AsyncClose:
 
     All operations are dispatched to a thread pool since
     regular files don't support epoll/non-blocking I/O.
+    Owns the raw fd directly — no sync wrapper dependency.
 
     Example:
         val fh = await AsyncFileHandle.open("data.txt", FileMode.ReadOnly)?
         val text = await fh.read_text()?
         await fh.close()?
     """
-    inner: FileHandle
+    fd: i64
+    mode: FileMode
+    open: bool
     pool: ThreadPool
 
     # --- Factory ---
@@ -135,8 +175,11 @@ class AsyncFileHandle with AsyncRead, AsyncWrite, AsyncSeek, AsyncClose:
         """
         val pool = get_pool()
         pool.spawn(\:
-            val inner = FileHandle.open(path, mode)?
-            Ok(AsyncFileHandle(inner: inner, pool: pool))
+            val mode_int = file_mode_to_int(mode)
+            val fd = rt_io_file_open(path, mode_int)
+            if fd < 0:
+                return Err(IoError.new(IoErrorKind.NotFound, "failed to open: {path}"))
+            Ok(AsyncFileHandle(fd: fd, mode: mode, open: true, pool: pool))
         )
 
     static fn read_file(path: text) -> Future<Result<AsyncFileHandle, IoError>>:
@@ -151,75 +194,162 @@ class AsyncFileHandle with AsyncRead, AsyncWrite, AsyncSeek, AsyncClose:
 
     fn read(size: i64) -> Future<Result<[u8], IoError>>:
         """Read up to size bytes asynchronously."""
-        self.pool.spawn(\: self.inner.read(size))
+        val fd = self.fd
+        self.pool.spawn(\:
+            val data = rt_io_file_read(fd, size)
+            if data.len() < 0:
+                return Err(IoError.new(IoErrorKind.Other, "read failed"))
+            Ok(data)
+        )
 
     fn read_exact(size: i64) -> Future<Result<[u8], IoError>>:
         """Read exactly size bytes asynchronously."""
-        self.pool.spawn(\: self.inner.read_exact(size))
+        val fd = self.fd
+        self.pool.spawn(\:
+            val data = rt_io_file_read(fd, size)
+            if data.len() != size:
+                return Err(IoError.new(IoErrorKind.UnexpectedEof, "read_exact: got {data.len()} of {size} bytes"))
+            Ok(data)
+        )
 
     fn read_all() -> Future<Result<[u8], IoError>>:
         """Read all remaining bytes asynchronously."""
-        self.pool.spawn(\: self.inner.read_all())
+        val fd = self.fd
+        self.pool.spawn(\:
+            val data = rt_io_file_read_all(fd)
+            Ok(data)
+        )
 
     fn read_text() -> Future<Result<text, IoError>>:
         """Read all content as text asynchronously."""
-        self.pool.spawn(\: self.inner.read_text())
+        val fd = self.fd
+        self.pool.spawn(\:
+            val data = rt_io_file_read_all(fd)
+            val s = rt_bytes_to_text(data)
+            Ok(s)
+        )
 
     fn read_line() -> Future<Result<text, IoError>>:
         """Read a single line asynchronously."""
-        self.pool.spawn(\: self.inner.read_line())
+        val fd = self.fd
+        self.pool.spawn(\:
+            val line = rt_io_file_read_line(fd)
+            if line == nil:
+                return Err(IoError.new(IoErrorKind.UnexpectedEof, "end of file"))
+            Ok(line)
+        )
 
     # --- AsyncWrite (thread pool offload) ---
 
     fn write(data: [u8]) -> Future<Result<i64, IoError>>:
         """Write bytes asynchronously."""
-        self.pool.spawn(\: self.inner.write(data))
+        val fd = self.fd
+        self.pool.spawn(\:
+            val written = rt_io_file_write(fd, data)
+            if written < 0:
+                return Err(IoError.new(IoErrorKind.Other, "write failed"))
+            Ok(written)
+        )
 
     fn write_all(data: [u8]) -> Future<Result<(), IoError>>:
         """Write all bytes asynchronously."""
-        self.pool.spawn(\: self.inner.write_all(data))
+        val fd = self.fd
+        self.pool.spawn(\:
+            val ok = rt_io_file_write_all(fd, data)
+            if not ok:
+                return Err(IoError.new(IoErrorKind.Other, "write_all failed"))
+            Ok(())
+        )
 
     fn write_text(s: text) -> Future<Result<(), IoError>>:
         """Write text asynchronously."""
-        self.pool.spawn(\: self.inner.write_text(s))
+        val fd = self.fd
+        self.pool.spawn(\:
+            val bytes = rt_text_to_bytes(s)
+            val ok = rt_io_file_write_all(fd, bytes)
+            if not ok:
+                return Err(IoError.new(IoErrorKind.Other, "write_text failed"))
+            Ok(())
+        )
 
     fn flush() -> Future<Result<(), IoError>>:
         """Flush to disk asynchronously."""
-        self.pool.spawn(\: self.inner.flush())
+        val fd = self.fd
+        self.pool.spawn(\:
+            val ok = rt_io_file_flush(fd)
+            if not ok:
+                return Err(IoError.new(IoErrorKind.Other, "flush failed"))
+            Ok(())
+        )
 
     # --- AsyncSeek (thread pool offload) ---
 
     fn seek(pos: SeekFrom) -> Future<Result<i64, IoError>>:
         """Seek to position asynchronously."""
-        self.pool.spawn(\: self.inner.seek(pos))
+        val fd = self.fd
+        self.pool.spawn(\:
+            val (offset, whence) = match pos:
+                case SeekFrom.Start(o): (o, 0)
+                case SeekFrom.Current(o): (o, 1)
+                case SeekFrom.End(o): (o, 2)
+            val new_pos = rt_io_file_seek(fd, offset, whence)
+            if new_pos < 0:
+                return Err(IoError.new(IoErrorKind.Other, "seek failed"))
+            Ok(new_pos)
+        )
 
     fn position() -> Future<Result<i64, IoError>>:
         """Get current position asynchronously."""
-        self.pool.spawn(\: self.inner.position())
+        self.seek(SeekFrom.Current(0))
 
     fn rewind() -> Future<Result<(), IoError>>:
         """Seek to beginning asynchronously."""
-        self.pool.spawn(\: self.inner.rewind())
+        val fd = self.fd
+        self.pool.spawn(\:
+            val new_pos = rt_io_file_seek(fd, 0, 0)
+            if new_pos < 0:
+                return Err(IoError.new(IoErrorKind.Other, "rewind failed"))
+            Ok(())
+        )
 
     # --- AsyncClose (thread pool offload) ---
 
     me close() -> Future<Result<(), IoError>>:
         """Close file handle asynchronously."""
-        self.pool.spawn(\: self.inner.close())
+        val fd = self.fd
+        self.open = false
+        self.pool.spawn(\:
+            val ok = rt_io_file_close(fd)
+            if not ok:
+                return Err(IoError.new(IoErrorKind.Other, "close failed"))
+            Ok(())
+        )
 
     fn is_open() -> bool:
         """Check if file handle is open (sync)."""
-        self.inner.is_open()
+        self.open
 
     # --- File-specific ---
 
     fn metadata() -> Future<Result<FileMetadata, IoError>>:
         """Get file metadata asynchronously."""
-        self.pool.spawn(\: self.inner.metadata())
+        val fd = self.fd
+        self.pool.spawn(\:
+            val meta = rt_io_file_metadata(fd)
+            if meta == nil:
+                return Err(IoError.new(IoErrorKind.Other, "metadata failed"))
+            Ok(meta)
+        )
 
     fn size() -> Future<Result<i64, IoError>>:
         """Get file size asynchronously."""
-        self.pool.spawn(\: self.inner.size())
+        val fd = self.fd
+        self.pool.spawn(\:
+            val meta = rt_io_file_metadata(fd)
+            if meta == nil:
+                return Err(IoError.new(IoErrorKind.Other, "metadata failed"))
+            Ok(meta.size)
+        )
 
 # ============================================================================
 # AsyncFile - Static Convenience
@@ -237,9 +367,13 @@ class AsyncFile:
         """Read entire file as text asynchronously."""
         val pool = get_pool()
         pool.spawn(\:
-            val fh = FileHandle.read_file(path)?
-            val content = fh.read_text()?
-            fh.close()?
+            val mode_int = file_mode_to_int(FileMode.ReadOnly)
+            val fd = rt_io_file_open(path, mode_int)
+            if fd < 0:
+                return Err(IoError.new(IoErrorKind.NotFound, "failed to open: {path}"))
+            val data = rt_io_file_read_all(fd)
+            val content = rt_bytes_to_text(data)
+            rt_io_file_close(fd)
             Ok(content)
         )
 
@@ -247,9 +381,12 @@ class AsyncFile:
         """Read entire file as bytes asynchronously."""
         val pool = get_pool()
         pool.spawn(\:
-            val fh = FileHandle.read_file(path)?
-            val data = fh.read_all()?
-            fh.close()?
+            val mode_int = file_mode_to_int(FileMode.ReadOnly)
+            val fd = rt_io_file_open(path, mode_int)
+            if fd < 0:
+                return Err(IoError.new(IoErrorKind.NotFound, "failed to open: {path}"))
+            val data = rt_io_file_read_all(fd)
+            rt_io_file_close(fd)
             Ok(data)
         )
 
@@ -257,9 +394,15 @@ class AsyncFile:
         """Write text to file asynchronously."""
         val pool = get_pool()
         pool.spawn(\:
-            val fh = FileHandle.create(path)?
-            fh.write_text(content)?
-            fh.close()?
+            val mode_int = file_mode_to_int(FileMode.WriteOnly)
+            val fd = rt_io_file_open(path, mode_int)
+            if fd < 0:
+                return Err(IoError.new(IoErrorKind.NotFound, "failed to create: {path}"))
+            val bytes = rt_text_to_bytes(content)
+            val ok = rt_io_file_write_all(fd, bytes)
+            rt_io_file_close(fd)
+            if not ok:
+                return Err(IoError.new(IoErrorKind.Other, "write failed"))
             Ok(())
         )
 
@@ -267,9 +410,14 @@ class AsyncFile:
         """Write bytes to file asynchronously."""
         val pool = get_pool()
         pool.spawn(\:
-            val fh = FileHandle.create(path)?
-            fh.write_all(data)?
-            fh.close()?
+            val mode_int = file_mode_to_int(FileMode.WriteOnly)
+            val fd = rt_io_file_open(path, mode_int)
+            if fd < 0:
+                return Err(IoError.new(IoErrorKind.NotFound, "failed to create: {path}"))
+            val ok = rt_io_file_write_all(fd, data)
+            rt_io_file_close(fd)
+            if not ok:
+                return Err(IoError.new(IoErrorKind.Other, "write_bytes failed"))
             Ok(())
         )
 
@@ -287,15 +435,6 @@ class AsyncFile:
                 return Err(IoError.new(IoErrorKind.NotFound, "delete failed: {path}"))
             Ok(())
         )
-
-# ============================================================================
-# FFI Functions
-# ============================================================================
-
-extern fn rt_thread_pool_create(size: i64)
-extern fn rt_thread_pool_spawn<T>(task: fn() -> T) -> Future<T>
-extern fn rt_io_file_exists(path: text) -> bool
-extern fn rt_io_file_delete(path: text) -> bool
 
 # ============================================================================
 # Exports

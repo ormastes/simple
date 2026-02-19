@@ -1,7 +1,55 @@
 """
 # I/O Types
 
-Shared types for I/O operations: modes, interest flags, ready state, events.
+Shared types for all I/O operations: errors, modes, interest flags, events,
+file metadata, and seek/shutdown enums. This is the single common types module
+imported by both sync and async I/O layers.
+
+## Error Handling
+
+```simple
+val err = IoError.new(IoErrorKind.NotFound, "config.sdn not found")
+expect err.kind == IoErrorKind.NotFound
+expect err.is_not_found() == true
+expect err.to_string() == "not found: config.sdn not found"
+```
+
+## Error Kind String Conversion
+
+```simple
+val kind = IoErrorKind.PermissionDenied
+expect kind.to_string() == "permission denied"
+
+val kind2 = IoErrorKind.TimedOut
+expect kind2.to_string() == "timed out"
+```
+
+## Error Chaining with Source
+
+```simple
+val cause = IoError.new(IoErrorKind.ConnectionReset, "peer reset")
+val err = IoError.from(IoErrorKind.Other, "request failed", cause)
+expect err.source.? == true
+expect err.source.unwrap().message == "peer reset"
+```
+
+## SeekFrom Variants
+
+```simple
+val start = SeekFrom.Start(0)
+val mid = SeekFrom.Current(-10)
+val end = SeekFrom.End(0)
+```
+
+## Checking Error Predicates
+
+```simple
+val e1 = IoError.new(IoErrorKind.WouldBlock, "try again")
+expect e1.is_would_block() == true
+
+val e2 = IoError.new(IoErrorKind.Interrupted, "signal")
+expect e2.is_interrupted() == true
+```
 
 ## IoMode
 
@@ -21,7 +69,191 @@ val interest = Interest.ReadWrite
 val event = IoEvent(fd: 5, ready: Interest.Read)
 expect event.fd == 5
 ```
+
+## FileMode
+
+```simple
+val fm = FileMode.ReadOnly
+val fm2 = FileMode.Append
+```
+
+## Shutdown Direction
+
+```simple
+val read_shutdown = Shutdown.Read
+val write_shutdown = Shutdown.Write
+val both_shutdown = Shutdown.Both
+```
 """
+
+# ============================================================================
+# IoErrorKind - Error Categories
+# ============================================================================
+
+enum IoErrorKind:
+    """Categorized I/O error types.
+
+    Covers file, network, and general I/O failure modes.
+
+    ```simple
+    val kind = IoErrorKind.NotFound
+    expect kind.to_string() == "not found"
+    ```
+    """
+    NotFound
+    PermissionDenied
+    ConnectionRefused
+    ConnectionReset
+    ConnectionAborted
+    AddrInUse
+    AddrNotAvailable
+    BrokenPipe
+    AlreadyExists
+    WouldBlock
+    TimedOut
+    Interrupted
+    InvalidInput
+    InvalidData
+    UnexpectedEof
+    Unsupported
+    Other
+
+impl IoErrorKind:
+    fn to_string() -> text:
+        """Convert error kind to human-readable string.
+
+        ```simple
+        expect IoErrorKind.BrokenPipe.to_string() == "broken pipe"
+        expect IoErrorKind.UnexpectedEof.to_string() == "unexpected end of file"
+        ```
+        """
+        match self:
+            case IoErrorKind.NotFound: "not found"
+            case IoErrorKind.PermissionDenied: "permission denied"
+            case IoErrorKind.ConnectionRefused: "connection refused"
+            case IoErrorKind.ConnectionReset: "connection reset"
+            case IoErrorKind.ConnectionAborted: "connection aborted"
+            case IoErrorKind.AddrInUse: "address in use"
+            case IoErrorKind.AddrNotAvailable: "address not available"
+            case IoErrorKind.BrokenPipe: "broken pipe"
+            case IoErrorKind.AlreadyExists: "already exists"
+            case IoErrorKind.WouldBlock: "would block"
+            case IoErrorKind.TimedOut: "timed out"
+            case IoErrorKind.Interrupted: "interrupted"
+            case IoErrorKind.InvalidInput: "invalid input"
+            case IoErrorKind.InvalidData: "invalid data"
+            case IoErrorKind.UnexpectedEof: "unexpected end of file"
+            case IoErrorKind.Unsupported: "unsupported"
+            case IoErrorKind.Other: "other error"
+
+# ============================================================================
+# IoError - I/O Error
+# ============================================================================
+
+class IoError:
+    """Structured I/O error with kind, message, and optional source chain.
+
+    ```simple
+    val err = IoError.new(IoErrorKind.NotFound, "config.sdn not found")
+    expect err.kind == IoErrorKind.NotFound
+    expect err.message == "config.sdn not found"
+    expect err.source == nil
+    expect err.to_string() == "not found: config.sdn not found"
+    ```
+    """
+    kind: IoErrorKind
+    message: text
+    source: IoError?
+
+    static fn new(kind: IoErrorKind, message: text) -> IoError:
+        """Create a new IoError.
+
+        Args:
+            kind: Error category
+            message: Human-readable description
+
+        Returns:
+            IoError
+
+        ```simple
+        val err = IoError.new(IoErrorKind.InvalidInput, "bad data")
+        expect err.kind == IoErrorKind.InvalidInput
+        expect err.source == nil
+        ```
+        """
+        IoError(kind: kind, message: message, source: nil)
+
+    static fn from(kind: IoErrorKind, message: text, source: IoError) -> IoError:
+        """Create an IoError with a source cause.
+
+        Args:
+            kind: Error category
+            message: Description of this error
+            source: Underlying cause
+
+        Returns:
+            IoError with source chain
+
+        ```simple
+        val inner = IoError.new(IoErrorKind.ConnectionReset, "reset")
+        val outer = IoError.from(IoErrorKind.Other, "request failed", inner)
+        expect outer.source.? == true
+        ```
+        """
+        IoError(kind: kind, message: message, source: Some(source))
+
+    fn is_not_found() -> bool:
+        """Check if error is NotFound.
+
+        ```simple
+        val err = IoError.new(IoErrorKind.NotFound, "missing")
+        expect err.is_not_found() == true
+        expect err.is_timed_out() == false
+        ```
+        """
+        self.kind == IoErrorKind.NotFound
+
+    fn is_would_block() -> bool:
+        """Check if error is WouldBlock."""
+        self.kind == IoErrorKind.WouldBlock
+
+    fn is_timed_out() -> bool:
+        """Check if error is TimedOut."""
+        self.kind == IoErrorKind.TimedOut
+
+    fn is_interrupted() -> bool:
+        """Check if error is Interrupted."""
+        self.kind == IoErrorKind.Interrupted
+
+    fn to_string() -> text:
+        """Format error as string.
+
+        Returns:
+            "{kind}: {message}"
+
+        ```simple
+        val err = IoError.new(IoErrorKind.TimedOut, "connect timeout")
+        expect err.to_string() == "timed out: connect timeout"
+        ```
+        """
+        "{self.kind.to_string()}: {self.message}"
+
+# ============================================================================
+# SeekFrom - Seek Position
+# ============================================================================
+
+enum SeekFrom:
+    """Specifies where to seek in a stream.
+
+    ```simple
+    val start = SeekFrom.Start(0)
+    val back = SeekFrom.Current(-10)
+    val end = SeekFrom.End(0)
+    ```
+    """
+    Start(offset: i64)
+    Current(offset: i64)
+    End(offset: i64)
 
 # ============================================================================
 # IoMode - General I/O Mode
@@ -97,10 +329,64 @@ struct IoEvent:
     ready: Interest
 
 # ============================================================================
+# FileMode - File Open Modes
+# ============================================================================
+
+enum FileMode:
+    """File open mode.
+
+    Example:
+        val fh = FileHandle.open("log.txt", FileMode.Append)?
+    """
+    ReadOnly
+    WriteOnly
+    ReadWrite
+    Append
+
+# ============================================================================
+# FileMetadata
+# ============================================================================
+
+struct FileMetadata:
+    """File metadata information.
+
+    Example:
+        val meta = fh.metadata()?
+        print "Size: {meta.size} bytes"
+    """
+    size: i64
+    is_file: bool
+    is_dir: bool
+    is_symlink: bool
+    readonly: bool
+    modified: i64
+    created: i64
+
+# ============================================================================
+# Shutdown - TCP Shutdown Direction
+# ============================================================================
+
+enum Shutdown:
+    """Direction for TCP shutdown.
+
+    Example:
+        stream.shutdown(Shutdown.Write)?  # done sending
+    """
+    Read
+    Write
+    Both
+
+# ============================================================================
 # Exports
 # ============================================================================
 
+export IoErrorKind
+export IoError
+export SeekFrom
 export IoMode
 export Interest
 export ReadyState
 export IoEvent
+export FileMode
+export FileMetadata
+export Shutdown

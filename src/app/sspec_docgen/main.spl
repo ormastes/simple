@@ -7,21 +7,46 @@
 #
 # Features:
 # - Metadata Extraction: Parses Feature ID, Category, Status, Difficulty
+# - Test Structure: Extracts describe/context/it hierarchy
 # - Categorized INDEX: Groups features by category
 # - Validation: Warns about missing documentation and incomplete specs
 # - Statistics: Tracks documentation coverage and quality metrics
 
 # I/O imports
-use app.io.mod (file_read, file_write, file_exists, dir_create)
+use app.io.mod (file_read, file_write, file_exists, dir_create, env_get)
 use std.cli.cli_util (get_cli_args)
 use std.text.{NL}
-use std.log.{error, warn}
+
+# Local log helpers — std.log.debug/info/warn/error are broken in interpreter mode
+# (GLOBAL_LOG_LEVEL undefined due to type annotation issue, causes crash at runtime).
+# Per log.spl docs, use inline env_get pattern for CLI-mode files.
+# Using prefixed names (sspec_*) to avoid conflict with std.log transitively imported.
+fn sspec_dbg(msg: text):
+    val level = env_get("SIMPLE_LOG")
+    if level == "debug" or level == "trace" or level == "all":
+        print "[DEBUG] [sspec_docgen] {msg}"
+
+fn sspec_info(msg: text):
+    val level = env_get("SIMPLE_LOG")
+    if level == "info" or level == "debug" or level == "trace" or level == "all":
+        print "[INFO] [sspec_docgen] {msg}"
+
+fn sspec_warn(msg: text):
+    val level = env_get("SIMPLE_LOG")
+    if level != "" and level != "off" and level != "error":
+        print "[WARN] [sspec_docgen] {msg}"
+
+fn sspec_err(msg: text):
+    val level = env_get("SIMPLE_LOG")
+    if level != "" and level != "off":
+        print "[ERROR] [sspec_docgen] {msg}"
 
 # Compatibility aliases for native_fs_* -> io module
 fn native_fs_read_string(path: str) -> text:
-    file_read(path)
+    val result = file_read(path)
+    result ?? ""
 
-fn native_fs_write_string(path: str, content: str):
+fn native_fs_write_string(path: str, content: str) -> bool:
     file_write(path, content)
 
 fn native_fs_exists(path: str) -> bool:
@@ -49,6 +74,7 @@ struct FeatureMetadata:
 # Parsed sspec file with documentation and test structure
 struct SspecDoc:
     file_path: str
+    raw_content: str
     doc_blocks: [DocBlock]
     feature_title: str
     feature_ids: [str]
@@ -93,6 +119,7 @@ struct FeatureEntry:
     coverage: str
     doc_lines: i64
     category: str
+    test_count: i64
 
 # ============================================================================
 # PARSER MODULE
@@ -115,72 +142,74 @@ fn parse_id_attr(line: str) -> str:
         ""
 
 fn parse_sspec_file(path: str) -> Result<SspecDoc, str>:
-    val content_result = native_fs_read_string(path)
-    match content_result:
-        case Err(e):
-            return Err("Failed to read file: {e}")
-        case Ok(content):
-            val lines = content.split(NL)
-            var doc_blocks = []
-            var feature_title = ""
-            var feature_ids = []
+    sspec_dbg("reading file: {path}")
+    val content = native_fs_read_string(path)
+    sspec_dbg("file read, splitting lines")
+    val lines = content.split(NL)
+    val lines_len = lines.len()
+    sspec_dbg("got {lines_len} lines")
+    var doc_blocks = []
+    var feature_title = ""
+    var feature_ids = []
 
-            var i = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Extract feature IDs from #[id(...)] attributes
+        if trimmed.starts_with("#[id("):
+            val id = parse_id_attr(trimmed)
+            if id != "":
+                feature_ids.push(id)
+
+        # Check for doc block start (standalone """ on its own line)
+        if trimmed == "\"\"\"":
+            val start_line = i
+            i = i + 1
+
+            var block_content = ""
+            var found_end = false
+
+            # Collect lines until closing """
             while i < lines.len():
-                val line = lines[i]
-                val trimmed = line.trim()
+                val block_line = lines[i]
 
-                # Extract feature IDs from #[id(...)] attributes
-                if trimmed.starts_with("#[id("):
-                    val id = parse_id_attr(trimmed)
-                    if id != "":
-                        feature_ids.push(id)
+                if block_line.trim() == "\"\"\"":
+                    found_end = true
+                    break
 
-                # Check for doc block start
-                if trimmed == "\"\"\"":
-                    val start_line = i
-                    i = i + 1
-
-                    var block_content = ""
-                    var found_end = false
-
-                    # Collect lines until closing """
-                    while i < lines.len():
-                        val block_line = lines[i]
-
-                        if block_line.trim() == "\"\"\"":
-                            found_end = true
-                            break
-
-                        block_content = block_content + block_line + NL
-                        i = i + 1
-
-                    if found_end:
-                        # Extract feature title from first doc block if present
-                        if feature_title == "" and block_content.contains("# "):
-                            val block_lines = block_content.split(NL)
-                            for bl in block_lines:
-                                val bl_trimmed = bl.trim()
-                                if bl_trimmed.starts_with("# "):
-                                    feature_title = bl_trimmed[2:].trim()
-                                    break
-
-                        doc_blocks.push(DocBlock(
-                            content: block_content.trim(),
-                            line_start: start_line,
-                            line_end: i
-                        ))
-
+                block_content = block_content + block_line + NL
                 i = i + 1
 
-            val doc = SspecDoc(
-                file_path: path,
-                doc_blocks: doc_blocks,
-                feature_title: feature_title,
-                feature_ids: feature_ids,
-                metadata: FeatureMetadata.empty()
-            )
-            return Ok(doc)
+            if found_end:
+                # Extract feature title from first doc block if present
+                if feature_title == "" and block_content.contains("# "):
+                    val block_lines = block_content.split(NL)
+                    for bl in block_lines:
+                        val bl_trimmed = bl.trim()
+                        if bl_trimmed.starts_with("# "):
+                            feature_title = bl_trimmed[2:].trim()
+                            break
+
+                doc_blocks.push(DocBlock(
+                    content: block_content.trim(),
+                    line_start: start_line,
+                    line_end: i
+                ))
+
+        i = i + 1
+
+    val doc = SspecDoc(
+        file_path: path,
+        raw_content: content,
+        doc_blocks: doc_blocks,
+        feature_title: feature_title,
+        feature_ids: feature_ids,
+        metadata: FeatureMetadata.empty()
+    )
+    sspec_dbg("parse_sspec_file done: {doc_blocks.len()} doc blocks, title={feature_title}")
+    return Ok(doc)
 
 # ============================================================================
 # METADATA MODULE
@@ -207,9 +236,18 @@ fn extract_metadata(doc: SspecDoc) -> FeatureMetadata:
     for line in lines:
         val trimmed = line.trim()
 
-        # Match patterns like "**Feature ID:** #20"
+        # Match patterns like "**Feature ID:** #20" or "**Feature IDs:** #20"
         if trimmed.starts_with("**Feature ID:**"):
             val value = extract_field_value(trimmed, "**Feature ID:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: value,
+                    category: metadata.category,
+                    difficulty: metadata.difficulty,
+                    status: metadata.status
+                )
+        elif trimmed.starts_with("**Feature IDs:**"):
+            val value = extract_field_value(trimmed, "**Feature IDs:**")
             if value != "":
                 metadata = FeatureMetadata(
                     id: value,
@@ -306,6 +344,111 @@ fn validate_spec(doc: SspecDoc) -> ValidationResult:
     )
 
 # ============================================================================
+# TEST STRUCTURE EXTRACTION
+# ============================================================================
+
+fn extract_quoted_name(line: str) -> str:
+    # Extract text between first and last double-quote in a line
+    # e.g. describe "Null Coalescing (??)"": -> "Null Coalescing (??)"
+    if not line.contains("\""):
+        return line
+    val parts = line.split("\"")
+    if parts.len() >= 2:
+        parts[1]
+    else:
+        line
+
+fn extract_inline_docstring(trimmed: str) -> str:
+    # Extract content from """single line content""" (both open and close on same line)
+    if trimmed.starts_with("\"\"\"") and trimmed.ends_with("\"\"\"") and trimmed.len() > 6:
+        trimmed[3:-3].trim()
+    else:
+        ""
+
+fn extract_test_structure(content: str) -> str:
+    val lines = content.split(NL)
+    var result = ""
+    var i = 0
+    var in_docstring = false
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Handle multi-line docstring content — skip until closing """
+        if in_docstring:
+            if trimmed == "\"\"\"" or trimmed.ends_with("\"\"\""):
+                in_docstring = false
+            i = i + 1
+            continue
+
+        # Detect standalone """ opening (multi-line block)
+        if trimmed == "\"\"\"":
+            in_docstring = true
+            i = i + 1
+            continue
+
+        # Detect inline multi-line start: """text (no closing """ on same line)
+        if trimmed.starts_with("\"\"\"") and not (trimmed.ends_with("\"\"\"") and trimmed.len() > 6):
+            in_docstring = true
+            i = i + 1
+            continue
+
+        # describe block → H3
+        if trimmed.starts_with("describe ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result = result + "### {name}{NL}"
+
+            # Check next line for single-line docstring
+            if i + 1 < lines.len():
+                val next_trimmed = lines[i + 1].trim()
+                val doc = extract_inline_docstring(next_trimmed)
+                if doc != "":
+                    result = result + "_{doc}_{NL}"
+                    i = i + 1
+
+            result = result + NL
+
+        # skip context block → H4 with skipped marker
+        elif trimmed.starts_with("skip context ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result = result + "#### {name} _(skipped)_{NL}"
+
+        # regular context block → H4
+        elif trimmed.starts_with("context ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result = result + "#### {name}{NL}"
+
+            # Check next line for single-line docstring
+            if i + 1 < lines.len():
+                val next_trimmed = lines[i + 1].trim()
+                val doc = extract_inline_docstring(next_trimmed)
+                if doc != "":
+                    result = result + "_{doc}_{NL}"
+                    i = i + 1
+
+            result = result + NL
+
+        # skip it → skipped bullet
+        elif trimmed.starts_with("skip it ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result = result + "- ⏭ {name} (skipped){NL}"
+
+        # pending → pending bullet
+        elif trimmed.starts_with("pending ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result = result + "- 📋 {name} (pending){NL}"
+
+        # regular it → check bullet
+        elif trimmed.starts_with("it ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            result = result + "- ✅ {name}{NL}"
+
+        i = i + 1
+
+    result.trim()
+
+# ============================================================================
 # GENERATOR MODULE
 # ============================================================================
 
@@ -319,88 +462,252 @@ fn get_file_stem(path: str) -> str:
     else:
         filename
 
+fn humanize_filename(stem: str) -> str:
+    # Convert file_name_spec -> "File Name Specification"
+    var name = stem
+    # Strip _spec suffix
+    if name.ends_with("_spec"):
+        name = name[:-5]
+    # Replace underscores with spaces and capitalize each word
+    val words = name.split("_")
+    var result = ""
+    for word in words:
+        if word == "":
+            continue
+        if result != "":
+            result = result + " "
+        # Capitalize first letter
+        if word.len() > 0:
+            val first = word[0:1].upper()
+            val rest = word[1:]
+            result = result + first + rest
+    result + " Specification"
+
+fn count_test_items(content: str) -> (i64, i64, i64):
+    # Returns (total_it, skipped_it, pending_it)
+    val lines = content.split(NL)
+    var total = 0
+    var skipped = 0
+    var pending = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("it ") and trimmed.contains("\""):
+            total = total + 1
+        elif trimmed.starts_with("skip it ") and trimmed.contains("\""):
+            skipped = skipped + 1
+        elif trimmed.starts_with("pending ") and trimmed.contains("\""):
+            pending = pending + 1
+    (total, skipped, pending)
+
+fn build_auto_overview(content: str) -> str:
+    # Auto-generate an overview from describe block names
+    val lines = content.split(NL)
+    var describes = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("describe ") and trimmed.contains("\""):
+            val name = extract_quoted_name(trimmed)
+            describes.push(name)
+    if describes.len() == 0:
+        return ""
+    var result = "Tests covering:"
+    for d in describes:
+        result = result + NL + "- " + d
+    result
+
 fn get_current_date() -> str:
     use app.io.{shell_output_trimmed}
     shell_output_trimmed("date -u +%Y-%m-%d", "2026-01-25")
 
+fn build_metadata_line(metadata: FeatureMetadata) -> str:
+    # Build compact pipe-separated metadata line
+    var result = ""
+    if metadata.id != "":
+        result = result + "**Feature ID:** {metadata.id}"
+    if metadata.category != "":
+        if result != "":
+            result = result + " | "
+        result = result + "**Category:** {metadata.category}"
+    if metadata.difficulty != "":
+        if result != "":
+            result = result + " | "
+        result = result + "**Difficulty:** {metadata.difficulty}"
+    if metadata.status != "":
+        if result != "":
+            result = result + " | "
+        result = result + "**Status:** {metadata.status}"
+    result
+
+fn extract_content_section(block_content: str) -> str:
+    # Extract content from first doc block, skipping title and metadata lines.
+    # Returns everything from the first "## " heading onward.
+    # If no "## " heading, strips title/metadata lines and returns the rest.
+    val lines = block_content.split(NL)
+
+    # Find the first ## heading
+    var section_start = -1
+    var j = 0
+    while j < lines.len():
+        val trimmed = lines[j].trim()
+        if trimmed.starts_with("## "):
+            section_start = j
+            break
+        j = j + 1
+
+    if section_start >= 0:
+        # Build from first ## heading to end
+        var result = ""
+        var k = section_start
+        while k < lines.len():
+            result = result + lines[k] + NL
+            k = k + 1
+        return result.trim()
+
+    # No ## heading: strip title/metadata lines
+    var result = ""
+    var found_content = false
+    for line in lines:
+        val trimmed = line.trim()
+        var is_meta = false
+        if trimmed.starts_with("# ") and not trimmed.starts_with("## "):
+            is_meta = true
+        elif trimmed.starts_with("**Feature"):
+            is_meta = true
+        elif trimmed.starts_with("**Category"):
+            is_meta = true
+        elif trimmed.starts_with("**Difficulty"):
+            is_meta = true
+        elif trimmed.starts_with("**Status"):
+            is_meta = true
+
+        if not is_meta:
+            if trimmed != "" or found_content:
+                found_content = true
+                result = result + line + NL
+
+    result.trim()
+
 fn generate_feature_doc(doc: SspecDoc, output_dir: str) -> Result<str, str>:
     val file_name = get_file_stem(doc.file_path)
-    val feature_name = if doc.feature_title != "": doc.feature_title else: file_name
+    val has_docstring = doc.doc_blocks.len() > 0
+
+    # Title: from docstring, or auto-generate from filename
+    var feature_name = file_name
+    if doc.feature_title != "":
+        feature_name = doc.feature_title
+    elif not has_docstring:
+        feature_name = humanize_filename(file_name)
 
     var md = ""
 
-    # Check if first doc block already has a title header
-    var has_title_in_content = false
-    if doc.doc_blocks.len() > 0:
-        val first_content = doc.doc_blocks[0].content.trim()
-        if first_content.starts_with("#"):
-            has_title_in_content = true
+    # H1 title
+    md = md + "# {feature_name}{NL}{NL}"
 
-    # Add header only if content doesn't already have one
-    if not has_title_in_content:
-        md = md + "# {feature_name}{NL}{NL}"
+    # Metadata line: from docstring or auto-generated
+    var meta = doc.metadata
+    if meta.category == "":
+        meta = FeatureMetadata(
+            id: meta.id,
+            category: infer_category_from_path(doc.file_path),
+            difficulty: meta.difficulty,
+            status: meta.status
+        )
+    if meta.status == "":
+        # Auto-detect status from test content
+        val counts = count_test_items(doc.raw_content)
+        val skip_count = counts[1]
+        val pending_count = counts[2]
+        var auto_status = "Active"
+        if skip_count > 0 or pending_count > 0:
+            auto_status = "In Progress"
+        meta = FeatureMetadata(
+            id: meta.id,
+            category: meta.category,
+            difficulty: meta.difficulty,
+            status: auto_status
+        )
 
-    # Add metadata with timestamp
-    val now = get_current_date()
-    md = md + "*Source: `{doc.file_path}`*{NL}"
-    md = md + "*Last Updated: {now}*{NL}{NL}"
+    val meta_line = build_metadata_line(meta)
+    if meta_line != "":
+        md = md + "{meta_line}{NL}{NL}"
 
-    # Add feature IDs if present
-    if doc.feature_ids.len() > 0:
-        md = md + "## Feature IDs{NL}{NL}"
-        for id in doc.feature_ids:
-            val anchor = id.replace(".", "-")
-            md = md + "- <a id=\"feature-{anchor}\"></a>{id}{NL}"
-        md = md + NL
+    # Source reference
+    md = md + "_Source: `{doc.file_path}`_{NL}{NL}"
 
     md = md + "---{NL}{NL}"
 
-    # Add all documentation blocks
-    var idx = 0
-    for doc_block in doc.doc_blocks:
-        if idx > 0:
-            md = md + NL
-        md = md + doc_block.content
+    # Content from docstring OR auto-generated overview
+    if has_docstring:
+        val first_block = doc.doc_blocks[0]
+        val content = extract_content_section(first_block.content)
+        if content != "":
+            md = md + content + NL
+            md = md + "{NL}---{NL}{NL}"
+    else:
+        # Auto-generate overview from test structure
+        val overview = build_auto_overview(doc.raw_content)
+        if overview != "":
+            md = md + "## Overview{NL}{NL}"
+            md = md + overview + NL
+            md = md + "{NL}---{NL}{NL}"
+
+    # Test stats summary
+    val counts = count_test_items(doc.raw_content)
+    val total_tests = counts[0]
+    val skip_tests = counts[1]
+    val pending_tests = counts[2]
+    if total_tests > 0 or skip_tests > 0 or pending_tests > 0:
+        md = md + "## Test Summary{NL}{NL}"
+        md = md + "| Metric | Count |{NL}"
+        md = md + "|--------|-------|{NL}"
+        md = md + "| Tests | {total_tests} |{NL}"
+        if skip_tests > 0:
+            md = md + "| Skipped | {skip_tests} |{NL}"
+        if pending_tests > 0:
+            md = md + "| Pending | {pending_tests} |{NL}"
         md = md + NL
-        idx = idx + 1
+
+    # Test structure section
+    val structure = extract_test_structure(doc.raw_content)
+    if structure != "":
+        md = md + "## Test Structure{NL}{NL}"
+        md = md + structure + NL
 
     # Write to file
     val output_path = "{output_dir}/{file_name}.md"
-    val write_result = native_fs_write_string(output_path, md)
-    match write_result:
-        case Err(e):
-            return Err("Failed to write {output_path}: {e}")
-        case Ok(_):
-            return Ok(output_path)
+    val ok = native_fs_write_string(output_path, md)
+    if not ok:
+        return Err("Failed to write {output_path}")
+    return Ok(output_path)
 
 # ============================================================================
 # INDEX MODULE
 # ============================================================================
 
 fn infer_category_from_path(path: str) -> str:
-    # Infer category from file path
-    if path.contains("/infrastructure/"):
-        "Infrastructure"
-    elif path.contains("/language/"):
+    # Infer category from test/feature/ subdirectory name
+    if path.contains("/usage/"):
         "Language Features"
-    elif path.contains("/types/"):
-        "Type System"
-    elif path.contains("/data_structures/"):
-        "Data Structures"
-    elif path.contains("/control_flow/"):
-        "Control Flow"
-    elif path.contains("/concurrency/"):
-        "Concurrency"
-    elif path.contains("/codegen/"):
-        "Code Generation"
-    elif path.contains("/testing_framework/"):
-        "Testing Framework"
-    elif path.contains("/stdlib/"):
+    elif path.contains("/app/"):
+        "Application"
+    elif path.contains("/compiler/"):
+        "Compiler"
+    elif path.contains("/interpreter/"):
+        "Runtime"
+    elif path.contains("/lib/"):
         "Standard Library"
-    elif path.contains("/ml/"):
-        "ML/AI Infrastructure"
-    elif path.contains("/syntax/"):
-        "Syntax Features"
+    elif path.contains("/baremetal/"):
+        "Baremetal"
+    elif path.contains("/dap/"):
+        "Developer Tools"
+    elif path.contains("/ffi/"):
+        "FFI"
+    elif path.contains("/io/"):
+        "I/O"
+    elif path.contains("/platform/"):
+        "Platform"
+    elif path.contains("/watcher/"):
+        "Tooling"
     else:
         "Other"
 
@@ -453,22 +760,20 @@ fn generate_index_page(entries: [FeatureEntry], output_dir: str, stats: DocStats
     for cat_name in cat_names:
         val cat_entries = categories[cat_name]
         md = md + "## {cat_name} ({cat_entries.len()} features){NL}{NL}"
-        md = md + "| Feature | Status | Difficulty | Coverage | Details |{NL}"
-        md = md + "|---------|--------|------------|----------|----------|{NL}"
+        md = md + "| Feature | Status | Tests | Coverage | Details |{NL}"
+        md = md + "|---------|--------|-------|----------|----------|{NL}"
 
         for entry in cat_entries:
-            md = md + "| [{entry.title}]({entry.filename}) | {entry.status} | {entry.difficulty} | {entry.coverage} | {entry.doc_lines} lines |{NL}"
+            md = md + "| [{entry.title}]({entry.filename}) | {entry.status} | {entry.test_count} | {entry.coverage} | {entry.doc_lines} lines |{NL}"
 
         md = md + NL
 
     # Write to file
     val output_path = "{output_dir}/INDEX.md"
-    val write_result = native_fs_write_string(output_path, md)
-    match write_result:
-        case Err(e):
-            return Err("Failed to write {output_path}: {e}")
-        case Ok(_):
-            return Ok(output_path)
+    val ok = native_fs_write_string(output_path, md)
+    if not ok:
+        return Err("Failed to write {output_path}")
+    return Ok(output_path)
 
 # ============================================================================
 # MAIN ENTRY POINT
@@ -485,7 +790,7 @@ fn print_spec_status(doc: SspecDoc, validation: ValidationResult):
             for warning in validation.warnings:
                 print "      -> {warning}"
     else:
-        print "  FAIL {filename} - No documentation blocks found"
+        print "  AUTO {filename} - Auto-generated from test structure"
 
 fn print_summary(stats: DocStats):
     print ""
@@ -523,6 +828,7 @@ fn print_usage():
     print "  - Extracts \"\"\"...\"\"\" documentation blocks"
     print "  - Parses #[id(...)] feature attributes"
     print "  - Extracts metadata (Feature ID, Category, Status, Difficulty)"
+    print "  - Extracts describe/context/it test structure"
     print "  - Generates per-feature .md files"
     print "  - Generates categorized INDEX.md"
     print "  - Validates documentation quality"
@@ -532,15 +838,8 @@ fn print_usage():
     print "  sspec-docgen tests/specs/*.spl --output doc/spec/generated"
 
 fn main() -> i64:
-    val all_args = get_cli_args()
-
-    # Skip program name and script name
-    # When running `simple script.spl arg1`, args are ["simple", "script.spl", "arg1"]
-    var args = []
-    var i = 2
-    while i < all_args.len():
-        args.push(all_args[i])
-        i = i + 1
+    # get_cli_args() already strips program name and script path
+    val args = get_cli_args()
 
     # Parse arguments
     if args.len() == 0 or args.contains("--help") or args.contains("-h"):
@@ -558,25 +857,22 @@ fn main() -> i64:
             if j + 1 < args.len():
                 output_dir = args[j + 1]
                 j = j + 2
-                continue
+            else:
+                j = j + 1
         elif not arg.starts_with("-"):
             spec_files.push(arg)
-        j = j + 1
+            j = j + 1
+        else:
+            j = j + 1
 
     if spec_files.len() == 0:
-        error("sspec_docgen", "No spec files provided")
+        sspec_err("No spec files provided")
         print ""
         print_usage()
         return 1
 
-    # Create output directory
-    val mkdir_result = native_fs_create_dir(output_dir)
-    match mkdir_result:
-        case Err(e):
-            # Ignore if directory exists
-            pass
-        case _:
-            pass
+    # Create output directory (ignore errors if it already exists)
+    native_fs_create_dir(output_dir)
 
     print ""
     print "Generating BDD documentation..."
@@ -590,15 +886,20 @@ fn main() -> i64:
 
     # Parse and process all sspec files
     for file_path in spec_files:
+        sspec_dbg("processing: {file_path}")
         val parse_result = parse_sspec_file(file_path)
+        sspec_dbg("parse complete for: {file_path}")
         match parse_result:
             case Err(e):
-                error("sspec_docgen", "Failed to parse {file_path}: {e}")
+                sspec_err("Failed to parse {file_path}: {e}")
             case Ok(parsed):
+                sspec_dbg("matched Ok, extracting metadata")
                 # Extract metadata
                 val metadata = extract_metadata(parsed)
+                sspec_dbg("metadata extracted")
                 val doc_with_meta = SspecDoc(
                     file_path: parsed.file_path,
+                    raw_content: parsed.raw_content,
                     doc_blocks: parsed.doc_blocks,
                     feature_title: parsed.feature_title,
                     feature_ids: parsed.feature_ids,
@@ -624,25 +925,33 @@ fn main() -> i64:
                 val gen_result = generate_feature_doc(doc_with_meta, output_dir)
                 match gen_result:
                     case Err(e):
-                        warn("sspec_docgen", "Failed to generate doc for {file_path}: {e}")
+                        sspec_warn("Failed to generate doc for {file_path}: {e}")
                     case Ok(_):
                         pass
 
                 # Create feature entry for INDEX
                 val file_name = get_file_stem(file_path)
-                var title = file_name
+                var title = humanize_filename(file_name)
                 if doc_with_meta.feature_title != "":
                     title = doc_with_meta.feature_title
                 var category = infer_category_from_path(file_path)
                 if metadata.category != "":
                     category = metadata.category
 
-                var status_str = "FAIL Stub"
+                # Compute test counts for status
+                val test_counts = count_test_items(parsed.raw_content)
+                val total_it = test_counts[0]
+                val skip_it = test_counts[1]
+                val pending_it = test_counts[2]
+
+                var status_str = "Auto-generated"
                 if validation.has_docs:
                     if validation.doc_lines >= 200:
-                        status_str = "OK Complete"
+                        status_str = "Complete"
+                    elif validation.doc_lines >= 50:
+                        status_str = "Partial"
                     else:
-                        status_str = "WARN Partial"
+                        status_str = "Minimal"
 
                 var difficulty_str = "N/A"
                 if metadata.difficulty != "":
@@ -656,14 +965,15 @@ fn main() -> i64:
                     difficulty: difficulty_str,
                     coverage: "{coverage_val}%",
                     doc_lines: validation.doc_lines,
-                    category: category
+                    category: category,
+                    test_count: total_it + skip_it + pending_it
                 ))
 
     # Generate INDEX.md
     val index_result = generate_index_page(entries, output_dir, stats)
     match index_result:
         case Err(e):
-            warn("sspec_docgen", "Failed to generate INDEX.md: {e}")
+            sspec_warn("Failed to generate INDEX.md: {e}")
         case Ok(_):
             pass
 
