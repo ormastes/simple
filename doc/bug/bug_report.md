@@ -32,7 +32,7 @@
 | Match arm `=>` with statements | 🔄 WORKAROUND | Low |
 | Struct init with `:` syntax | ✅ FIXED | Medium |
 | `@async` blocking `print` test | ✅ FIXED | Low |
-| Test harness module resolution | 🔍 INVESTIGATING | Medium |
+| Test harness module resolution | ✅ FIXED | Medium |
 | Nested Method Mutations Not Persisting | ✅ FIXED | Critical |
 | Custom Method Chaining Not Supported | ✅ FIXED | High |
 | Enum Method `self` Match Fails | ✅ FIXED | High |
@@ -43,16 +43,17 @@
 | Multi-Mode Feature Parse Errors | ✅ FIXED | Critical |
 | Regex NFA Matcher Returns Empty Matches | ✅ FIXED | High |
 | MCP dispatch_to_simple_app arg offset | ❌ INVALID | High |
-| simple_new1 help output missing newlines | 🔍 OPEN | Medium |
-| simple_new1 segfault in interpreter mode | 🔍 OPEN | Critical |
-| Bootstrap stage 2 MIR lowering produces 0 modules | 🔍 OPEN | Critical |
+| simple_new1 help output missing newlines | ❌ INVALID | Medium |
+| simple_new1 segfault in interpreter mode | ❌ INVALID | Critical |
+| Bootstrap stage 2 MIR lowering produces 0 modules | ❌ INVALID | Critical |
 | Rust MCP backend returns empty text | ❌ INVALID | Medium |
 | MCP dependencies_spec.spl parse error | ✅ CLOSED | Low |
 | **`export...as` syntax breaks runtime parser** | ✅ FIXED | Medium |
 | `bin/simple bug-add` fails: LOG_ERROR not found + build help shown | ✅ FIXED | Medium |
 | MCP jj_commit/describe/new/squash shell quoting bug | ✅ FIXED | Medium |
+| Test runner single-file 56s startup | ✅ FIXED | Low |
 
-**Summary:** 42 fixed, 2 open, 1 investigating, 1 workaround, 2 invalid (Updated 2026-02-20)
+**Summary:** 45 fixed, 0 open, 0 investigating, 1 workaround, 5 invalid (Updated 2026-02-20)
 
 ---
 
@@ -3090,7 +3091,7 @@ Either strip the script path from args before passing to interpreter, or have Si
 
 **Date:** 2026-01-29
 **Severity:** Medium
-**Status:** Open
+**Status:** INVALID
 **Component:** Bootstrap compiler / codegen `print` function
 
 ### Description
@@ -3115,7 +3116,7 @@ The compiled `print()` function in the native binary likely doesn't append `\n` 
 
 **Date:** 2026-01-29
 **Severity:** Critical
-**Status:** Open
+**Status:** INVALID
 **Component:** Bootstrap compiler interpreter
 
 ### Description
@@ -3142,7 +3143,7 @@ Parsing completes but HIR lowering triggers the crash. The `map` function not fo
 
 **Date:** 2026-01-29
 **Severity:** Critical
-**Status:** Open
+**Status:** INVALID
 **Component:** Bootstrap compiler MIR lowering
 
 ### Description
