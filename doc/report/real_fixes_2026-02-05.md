@@ -17,7 +17,7 @@ Completed **real implementations** to fix failing tests:
 
 ## 1. Decorators Module - Mutability Fixes
 
-**File:** `src/std/src/compiler_core/decorators.spl`
+**File:** `src/lib/src/compiler_core/decorators.spl`
 
 **Problem:** Methods modifying `self` fields were declared as `fn` (immutable) instead of `me` (mutable)
 
@@ -58,7 +58,7 @@ me __call__(*args):
 
 ## 2. Context Manager - Missing API
 
-**File:** `src/std/src/compiler_core/context_manager.spl`
+**File:** `src/lib/src/compiler_core/context_manager.spl`
 
 **Problem:** Tests call `TimerContext.new()` but only `.create()` existed
 
@@ -115,7 +115,7 @@ fn rt_time_now_seconds() -> f64:
 ## 4. Pure Simple LSP & Treesitter
 
 **Files:**
-- `src/std/src/parser/treesitter.spl` (~600 lines)
+- `src/lib/src/parser/treesitter.spl` (~600 lines)
 - `src/app/lsp/handlers/completion.spl` (~480 lines)
 - `src/app/lsp/handlers/hover.spl` (stub)
 - `src/app/lsp/handlers/definition.spl` (stub)
@@ -227,12 +227,12 @@ Warnings present are pre-existing (undefined exports for MAX_LOOP_ITERATIONS, Le
 ## Files Modified
 
 ### Core Implementations
-1. `src/std/src/compiler_core/decorators.spl` - Fixed mutability (2 methods)
-2. `src/std/src/compiler_core/context_manager.spl` - Added .new() API
+1. `src/lib/src/compiler_core/decorators.spl` - Fixed mutability (2 methods)
+2. `src/lib/src/compiler_core/context_manager.spl` - Added .new() API
 3. `src/app/io/mod.spl` - Added rt_time_now_seconds()
 
 ### LSP/Treesitter (Pure Simple)
-4. `src/std/src/parser/treesitter.spl` - Complete wrapper (600 lines)
+4. `src/lib/src/parser/treesitter.spl` - Complete wrapper (600 lines)
 5. `src/app/lsp/handlers/completion.spl` - Full completion (480 lines)
 6. `src/app/lsp/handlers/*.spl` - 6 handler files (stubs for now)
 7. `src/app/lsp/server.spl` - Updated for new API
@@ -257,7 +257,7 @@ Warnings present are pre-existing (undefined exports for MAX_LOOP_ITERATIONS, Le
    - Impact: Real autocomplete names
 
 3. **Node Position Lookup**
-   - File: `src/std/src/parser/treesitter.spl`
+   - File: `src/lib/src/parser/treesitter.spl`
    - Fix: Line 445 returns root instead of node at position
    - Impact: Hover, definition, references
 

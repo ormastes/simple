@@ -24,7 +24,7 @@ Fixed 9 critical bugs improving test stability and reducing failures by 74 tests
 - **Impact**: TreeSitter module failing to compile
 - **Fix**: Renamed to `QueryResult` and `CapturedNode`
 - **Files Changed**:
-  - `src/std/src/parser/treesitter.spl`
+  - `src/lib/src/parser/treesitter.spl`
   - `test/system/features/treesitter/treesitter_query_spec.spl`
 
 **Bug 1.3: Variable Name Keyword Conflict**  
@@ -32,7 +32,7 @@ Fixed 9 critical bugs improving test stability and reducing failures by 74 tests
 - **Root Cause**: Variable `val match = ...` uses reserved keyword
 - **Impact**: TreeSitter cursor code failing to parse
 - **Fix**: Renamed variable to `result`
-- **Files Changed**: `src/std/src/parser/treesitter.spl:695`
+- **Files Changed**: `src/lib/src/parser/treesitter.spl:695`
 
 ### 2. Module Import Path Bug (1 bug - HIGH PRIORITY) ✅
 

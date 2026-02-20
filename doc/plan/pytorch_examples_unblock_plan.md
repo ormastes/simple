@@ -40,7 +40,7 @@ enum Device:
 
 #### Step 1.1: Edit config.spl
 ```simple
-# File: src/std/src/dl/config.spl
+# File: src/lib/src/dl/config.spl
 # Line 62-66
 
 # BEFORE:
@@ -58,7 +58,7 @@ enum Device:
 
 #### Step 1.2: Update Device impl methods
 ```simple
-# File: src/std/src/dl/config.spl
+# File: src/lib/src/dl/config.spl
 # Line 74-77
 
 # BEFORE:
@@ -75,7 +75,7 @@ fn is_gpu() -> bool:
 ```
 
 ```simple
-# File: src/std/src/dl/config.spl
+# File: src/lib/src/dl/config.spl
 # Line 79-84
 
 # BEFORE:
@@ -94,7 +94,7 @@ fn cuda_id() -> i32?:
 ```
 
 ```simple
-# File: src/std/src/dl/config.spl
+# File: src/lib/src/dl/config.spl
 # Line 86-90
 
 # BEFORE:
@@ -113,7 +113,7 @@ fn to_string() -> text:
 
 #### Step 1.3: Update config_loader.spl
 ```simple
-# File: src/std/src/dl/config_loader.spl
+# File: src/lib/src/dl/config_loader.spl
 # Find device parsing logic (around line 100-120)
 
 # BEFORE:

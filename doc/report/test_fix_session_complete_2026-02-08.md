@@ -21,7 +21,7 @@
 - Lambda empty body `fn(): pass` → `fn(): ()`
 
 **Files Modified:**
-- `src/std/concurrent.spl` - Fixed keyword, added factory exports
+- `src/lib/concurrent.spl` - Fixed keyword, added factory exports
 - `test/lib/std/unit/concurrent_spec.spl` - Fixed lambda syntax
 
 **Report:** `doc/report/test_fix_session_phase1c_2026-02-08.md` (from summary)
@@ -37,7 +37,7 @@
 - Workaround: Instance-based state using classes
 
 **Implementation:**
-- Created `src/std/debug.spl` (298 lines) - Complete debug module
+- Created `src/lib/debug.spl` (298 lines) - Complete debug module
 - Moved from `src/app/interpreter.helpers/debug.spl` (Rust-style)
 - Applied mutable method pattern (`me` keyword) to 14 methods
 - Factory function pattern (`debugger_new()`)
@@ -48,7 +48,7 @@
 - Breakpoint, StackFrame, Debugger classes
 
 **Files Modified:**
-- `src/std/debug.spl` - New module (298 lines)
+- `src/lib/debug.spl` - New module (298 lines)
 - `test/std/debug_spec.spl` - New tests (1,585 lines, 98 tests)
 
 **Report:** `doc/report/test_fix_session_phase2a_2026-02-08.md`
@@ -102,8 +102,8 @@
 
 **Fixed Issues:**
 1. **Module conflict:** Duplicate `treesitter.spl` in wrong location
-   - Correct: `src/std/parser/treesitter.spl`
-   - Duplicate: `src/std/src/parser/treesitter.spl` → renamed to `.backup`
+   - Correct: `src/lib/parser/treesitter.spl`
+   - Duplicate: `src/lib/src/parser/treesitter.spl` → renamed to `.backup`
 
 2. **Span structure:** Added position fields
    ```simple
@@ -142,9 +142,9 @@
 - Multiple days of implementation required
 
 **Files Modified:**
-- `src/std/parser/treesitter.spl` - API updates, position tracking
+- `src/lib/parser/treesitter.spl` - API updates, position tracking
 - `test/system/features/treesitter/treesitter_lexer_spec.spl` - Fixed imports
-- `src/std/src/parser/treesitter_full.spl.backup` - Renamed duplicate
+- `src/lib/src/parser/treesitter_full.spl.backup` - Renamed duplicate
 
 **Report:** `doc/report/test_fix_session_phase3a_2026-02-08.md`
 
@@ -177,13 +177,13 @@
 - 2 tests: Need JIT compiler (compiled-only)
 
 **Module Structure:**
-- `src/std/failsafe/core.spl` - Error types, result types
-- `src/std/failsafe/panic.spl` - Panic handling
-- `src/std/failsafe/ratelimit.spl` - Rate limiting
-- `src/std/failsafe/circuit.spl` - Circuit breaker
-- `src/std/failsafe/timeout.spl` - Timeout management
-- `src/std/failsafe/resource_monitor.spl` - Resource monitoring
-- `src/std/failsafe/mod.spl` - Integration
+- `src/lib/failsafe/core.spl` - Error types, result types
+- `src/lib/failsafe/panic.spl` - Panic handling
+- `src/lib/failsafe/ratelimit.spl` - Rate limiting
+- `src/lib/failsafe/circuit.spl` - Circuit breaker
+- `src/lib/failsafe/timeout.spl` - Timeout management
+- `src/lib/failsafe/resource_monitor.spl` - Resource monitoring
+- `src/lib/failsafe/mod.spl` - Integration
 
 ---
 
@@ -199,7 +199,7 @@
 - Require JIT compiler to run
 
 **Module Location:**
-- `src/std/src/table.spl`
+- `src/lib/src/table.spl`
 
 **Blocker:**
 - Cannot fix without JIT compiler support
@@ -303,18 +303,18 @@ use app.mcp.featuredb_resource
 ## Critical Files Modified
 
 ### New Files Created (2)
-1. `src/std/debug.spl` (298 lines) - Complete debug module
+1. `src/lib/debug.spl` (298 lines) - Complete debug module
 2. `test/std/debug_spec.spl` (1,585 lines) - 98 comprehensive tests
 
 ### Files Modified (4)
-1. `src/std/concurrent.spl` - Fixed keyword, exports
-2. `src/std/parser/treesitter.spl` - API updates, position tracking
+1. `src/lib/concurrent.spl` - Fixed keyword, exports
+2. `src/lib/parser/treesitter.spl` - API updates, position tracking
 3. `test/lib/std/unit/concurrent_spec.spl` - Lambda fixes
 4. `test/system/features/mcp/database_resource_spec.spl` - Import fixes
 5. `test/system/features/treesitter/treesitter_lexer_spec.spl` - Import fixes
 
 ### Files Renamed/Backup (1)
-1. `src/std/src/parser/treesitter_full.spl.backup` - Resolved module conflict
+1. `src/lib/src/parser/treesitter_full.spl.backup` - Resolved module conflict
 
 ---
 

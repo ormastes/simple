@@ -87,7 +87,7 @@ use std.spec.{skip_it}  # ❌ ERROR: function `skip_it` not found
 
 **Working Case:**
 ```simple
-# Create local symlink: ln -s src/std/spec.spl spec.spl
+# Create local symlink: ln -s src/lib/spec.spl spec.spl
 use spec.{skip_it}  # ✅ WORKS!
 ```
 
@@ -123,7 +123,7 @@ From `doc/report/import_system_update_2026-02-09.md`:
 | Import Type | Path | Behavior | Status |
 |-------------|------|----------|--------|
 | **Local** | Current dir | Auto-exposes all functions | ✅ Works |
-| **SIMPLE_LIB** | `src/std/`, `src/app/` | Requires export processing | ❌ Broken |
+| **SIMPLE_LIB** | `src/lib/`, `src/app/` | Requires export processing | ❌ Broken |
 
 **Why:**
 - Bootstrap binary (`bin/simple`) has broken export processing in Rust interpreter
@@ -134,7 +134,7 @@ From `doc/report/import_system_update_2026-02-09.md`:
 Symlink stdlib modules to test directory:
 ```bash
 cd test/lib/std
-ln -s ../../../src/std/spec.spl spec.spl
+ln -s ../../../src/lib/spec.spl spec.spl
 ```
 
 Then import as local:
@@ -180,7 +180,7 @@ use spec.{skip_it}  # Works via local path!
 
 **REPLACE WITH:**
 ```
-- **SIMPLE_LIB import path broken:** Imports from src/std/ and src/app/ via
+- **SIMPLE_LIB import path broken:** Imports from src/lib/ and src/app/ via
   `use std.module.{func}` fail with "function not found" for non-built-in functions.
   Workaround: Use symlinks to import as local modules (see import_system_update_2026-02-09.md).
 ```
@@ -194,7 +194,7 @@ use spec.{skip_it}  # Works via local path!
 
 ### Code Comments to Update
 
-**src/std/spec.spl lines 41, 108, 131, 135:**
+**src/lib/spec.spl lines 41, 108, 131, 135:**
 
 Current:
 ```simple
@@ -239,7 +239,7 @@ Should be:
 
 **Files Referenced:**
 - `doc/report/import_system_update_2026-02-09.md` - Original SIMPLE_LIB bug report
-- `src/std/spec.spl` - Test framework with misleading comments
+- `src/lib/spec.spl` - Test framework with misleading comments
 - `memory/MEMORY.md` - User memory with inaccurate limitation note
 
 **Status:** Investigation complete, ready for documentation updates

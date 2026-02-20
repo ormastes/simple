@@ -12,7 +12,7 @@ use app.io.mod (file_read, file_write, file_exists, dir_create, env_get)
 use std.cli.cli_util (get_cli_args)
 
 # Re-export generator & index modules (extracted to generator.spl)
-use app.sspec_docgen.generator.{*}
+use app.sspec_docgen.generator.*
 
 # Local log helpers — std.log.debug/info/warn/error are broken in interpreter mode
 # (GLOBAL_LOG_LEVEL undefined due to type annotation issue, causes crash at runtime).
@@ -64,9 +64,14 @@ struct FeatureMetadata:
     category: str
     difficulty: str
     status: str
+    requirement: str   # link to requirement doc
+    plan: str          # link to plan doc
+    design: str        # link to design/architecture doc
+    research: str      # link to research doc
 
     static fn empty() -> FeatureMetadata:
-        FeatureMetadata(id: "", category: "", difficulty: "", status: "")
+        FeatureMetadata(id: "", category: "", difficulty: "", status: "",
+                        requirement: "", plan: "", design: "", research: "")
 
 # Parsed sspec file with documentation and test structure
 struct SspecDoc:
@@ -241,7 +246,11 @@ fn extract_metadata(doc: SspecDoc) -> FeatureMetadata:
                     id: value,
                     category: metadata.category,
                     difficulty: metadata.difficulty,
-                    status: metadata.status
+                    status: metadata.status,
+                    requirement: metadata.requirement,
+                    plan: metadata.plan,
+                    design: metadata.design,
+                    research: metadata.research
                 )
         elif trimmed.starts_with("**Feature IDs:**"):
             val value = extract_field_value(trimmed, "**Feature IDs:**")
@@ -250,7 +259,11 @@ fn extract_metadata(doc: SspecDoc) -> FeatureMetadata:
                     id: value,
                     category: metadata.category,
                     difficulty: metadata.difficulty,
-                    status: metadata.status
+                    status: metadata.status,
+                    requirement: metadata.requirement,
+                    plan: metadata.plan,
+                    design: metadata.design,
+                    research: metadata.research
                 )
         elif trimmed.starts_with("**Category:**"):
             val value = extract_field_value(trimmed, "**Category:**")
@@ -259,7 +272,11 @@ fn extract_metadata(doc: SspecDoc) -> FeatureMetadata:
                     id: metadata.id,
                     category: value,
                     difficulty: metadata.difficulty,
-                    status: metadata.status
+                    status: metadata.status,
+                    requirement: metadata.requirement,
+                    plan: metadata.plan,
+                    design: metadata.design,
+                    research: metadata.research
                 )
         elif trimmed.starts_with("**Difficulty:**"):
             val value = extract_field_value(trimmed, "**Difficulty:**")
@@ -268,7 +285,11 @@ fn extract_metadata(doc: SspecDoc) -> FeatureMetadata:
                     id: metadata.id,
                     category: metadata.category,
                     difficulty: value,
-                    status: metadata.status
+                    status: metadata.status,
+                    requirement: metadata.requirement,
+                    plan: metadata.plan,
+                    design: metadata.design,
+                    research: metadata.research
                 )
         elif trimmed.starts_with("**Status:**"):
             val value = extract_field_value(trimmed, "**Status:**")
@@ -277,7 +298,63 @@ fn extract_metadata(doc: SspecDoc) -> FeatureMetadata:
                     id: metadata.id,
                     category: metadata.category,
                     difficulty: metadata.difficulty,
-                    status: value
+                    status: value,
+                    requirement: metadata.requirement,
+                    plan: metadata.plan,
+                    design: metadata.design,
+                    research: metadata.research
+                )
+        elif trimmed.starts_with("**Requirements:**"):
+            val value = extract_field_value(trimmed, "**Requirements:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id,
+                    category: metadata.category,
+                    difficulty: metadata.difficulty,
+                    status: metadata.status,
+                    requirement: value,
+                    plan: metadata.plan,
+                    design: metadata.design,
+                    research: metadata.research
+                )
+        elif trimmed.starts_with("**Plan:**"):
+            val value = extract_field_value(trimmed, "**Plan:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id,
+                    category: metadata.category,
+                    difficulty: metadata.difficulty,
+                    status: metadata.status,
+                    requirement: metadata.requirement,
+                    plan: value,
+                    design: metadata.design,
+                    research: metadata.research
+                )
+        elif trimmed.starts_with("**Design:**"):
+            val value = extract_field_value(trimmed, "**Design:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id,
+                    category: metadata.category,
+                    difficulty: metadata.difficulty,
+                    status: metadata.status,
+                    requirement: metadata.requirement,
+                    plan: metadata.plan,
+                    design: value,
+                    research: metadata.research
+                )
+        elif trimmed.starts_with("**Research:**"):
+            val value = extract_field_value(trimmed, "**Research:**")
+            if value != "":
+                metadata = FeatureMetadata(
+                    id: metadata.id,
+                    category: metadata.category,
+                    difficulty: metadata.difficulty,
+                    status: metadata.status,
+                    requirement: metadata.requirement,
+                    plan: metadata.plan,
+                    design: metadata.design,
+                    research: value
                 )
 
     # Extract feature ID from feature_ids if metadata.id is not set
@@ -286,7 +363,11 @@ fn extract_metadata(doc: SspecDoc) -> FeatureMetadata:
             id: doc.feature_ids[0],
             category: metadata.category,
             difficulty: metadata.difficulty,
-            status: metadata.status
+            status: metadata.status,
+            requirement: metadata.requirement,
+            plan: metadata.plan,
+            design: metadata.design,
+            research: metadata.research
         )
 
     metadata
@@ -332,6 +413,32 @@ fn validate_spec(doc: SspecDoc) -> ValidationResult:
             warnings.push("Missing '## Overview' or '## Description' section")
         if not has_syntax:
             warnings.push("Missing '## Syntax' or '## Examples' section")
+
+        # Doc-link validation: check presence and file existence
+        # Use "N/A" as the value to suppress a warning for links genuinely not applicable
+        val req_link = doc.metadata.requirement
+        if req_link == "":
+            warnings.push("Missing '**Requirements:**' link (use doc/requirement/xxx.md or N/A)")
+        elif req_link != "N/A" and not native_fs_exists(req_link):
+            warnings.push("Requirements link not found: '{req_link}'")
+
+        val plan_link = doc.metadata.plan
+        if plan_link == "":
+            warnings.push("Missing '**Plan:**' link (use doc/plan/xxx.md or N/A)")
+        elif plan_link != "N/A" and not native_fs_exists(plan_link):
+            warnings.push("Plan link not found: '{plan_link}'")
+
+        val design_link = doc.metadata.design
+        if design_link == "":
+            warnings.push("Missing '**Design:**' link (use doc/design/xxx.md or N/A)")
+        elif design_link != "N/A" and not native_fs_exists(design_link):
+            warnings.push("Design link not found: '{design_link}'")
+
+        val research_link = doc.metadata.research
+        if research_link == "":
+            warnings.push("Missing '**Research:**' link (use doc/research/xxx.md or N/A)")
+        elif research_link != "N/A" and not native_fs_exists(research_link):
+            warnings.push("Research link not found: '{research_link}'")
 
     ValidationResult(
         file_path: doc.file_path,

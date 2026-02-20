@@ -174,7 +174,7 @@ The `newtype` feature creates a zero-overhead wrapper with a single `value` fiel
 
 ### 3.5 Existing `phantom.spl` Pattern
 
-From `src/std/phantom.spl`, Simple already has phantom type markers:
+From `src/lib/phantom.spl`, Simple already has phantom type markers:
 
 ```simple
 struct Validated:
@@ -655,11 +655,11 @@ From `doc/research/missing_language_features_2026-02-17.md` — safety profile a
 
 ## Implementation Roadmap
 
-### Phase 1 — Immediate: `CStr` Newtype in `src/std/`
+### Phase 1 — Immediate: `CStr` Newtype in `src/lib/`
 
 **Effort:** Low (1-2 hours)
 **Requires:** No compiler changes. Uses existing `newtype` syntax, `[i64]` arrays, `while` loops.
-**Deliverable:** `src/std/cstr.spl` module with:
+**Deliverable:** `src/lib/cstr.spl` module with:
 
 ```simple
 newtype CStr = [i64]
@@ -690,7 +690,7 @@ extern fn rt_cstr_strlen(s: CStr) -> i64
 **Strategy:** Define `SentinelSlice` as a standard library struct rather than a true generic with value parameters.
 
 ```simple
-# src/std/sentinel_slice.spl
+# src/lib/sentinel_slice.spl
 
 struct SentinelSlice:
     """A slice with a sentinel value at the end.
@@ -787,14 +787,14 @@ val EXPR_SENTINEL_SLICE_TYPE = 47   # [T:N] sentinel-terminated slice type node
 
 | Phase | Action | Effort | Compiler Change? |
 |-------|--------|--------|-----------------|
-| 1 (now) | Create `src/std/cstr.spl` — `CStr` newtype + API | Low | None |
+| 1 (now) | Create `src/lib/cstr.spl` — `CStr` newtype + API | Low | None |
 | 1 (now) | Create `test/unit/std/cstr_spec.spl` | Low | None |
-| 2 (soon) | Create `src/std/sentinel_slice.spl` — generic struct | Low | None |
+| 2 (soon) | Create `src/lib/sentinel_slice.spl` — generic struct | Low | None |
 | 2 (soon) | Add `@sentinel(N)` annotation support in SFFI layer | Low | Annotation wiring only |
 | 3 (later) | Grammar-level `[T:N]` syntax | Medium-High | Parser + AST + Eval |
 | 3 (later) | Value generics for `SentinelSlice<T, N>` | High | Type system change |
 
-**Immediate action:** Implement `src/std/cstr.spl` as a `newtype CStr = [i64]` with a complete API for null-terminated byte sequences. This unblocks C interop use cases today and provides a reference implementation for the future grammar-level design.
+**Immediate action:** Implement `src/lib/cstr.spl` as a `newtype CStr = [i64]` with a complete API for null-terminated byte sequences. This unblocks C interop use cases today and provides a reference implementation for the future grammar-level design.
 
 ### Related Design Docs
 

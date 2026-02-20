@@ -481,7 +481,7 @@ Categories:
 
 ### Standard Library
 
-Location: `src/std/gpu/`
+Location: `src/lib/gpu/`
 
 Unified high-level API:
 
@@ -575,8 +575,8 @@ kernel fn loss_kernel(pred: [f32]_gpu, target: [f32]_gpu) -> f32:
 | GPU intrinsics | `src/compiler/gpu_intrinsics.spl` |
 | CUDA FFI | `src/app/io/cuda_ffi.spl` |
 | Vulkan FFI | `src/app/io/vulkan_ffi.spl` |
-| GPU stdlib | `src/std/gpu/*.spl` |
-| GPU test helpers | `src/std/src/testing/gpu_helpers.spl` |
+| GPU stdlib | `src/lib/gpu/*.spl` |
+| GPU test helpers | `src/lib/src/testing/gpu_helpers.spl` |
 | GPU tests | `test/system/features/gpu/*.spl` |
 
 ---

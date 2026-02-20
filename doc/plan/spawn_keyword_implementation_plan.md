@@ -129,7 +129,7 @@ fn parse_spawn() -> Expr:
 **Actor Runtime:**
 
 ```simple
-# src/std/actors/runtime.spl
+# src/lib/actors/runtime.spl
 struct ActorRuntime:
     actors: Map<ActorId, ActorContext>
     scheduler: Scheduler
@@ -171,7 +171,7 @@ struct ActorRuntime:
 **Mailbox:**
 
 ```simple
-# src/std/actors/mailbox.spl
+# src/lib/actors/mailbox.spl
 struct Mailbox:
     queue: Queue<Message>
     capacity: i64
@@ -192,7 +192,7 @@ struct Mailbox:
 **Scheduler:**
 
 ```simple
-# src/std/actors/scheduler.spl
+# src/lib/actors/scheduler.spl
 struct Scheduler:
     ready_queue: Queue<ActorId>
     thread_pool: ThreadPool
@@ -287,7 +287,7 @@ actor Worker:
 **Actor Utilities:**
 
 ```simple
-# src/std/actors/utils.spl
+# src/lib/actors/utils.spl
 
 # Spawn N actors
 fn spawn_pool<T>(count: i64, factory: fn() -> T) -> [ActorRef<T>]:

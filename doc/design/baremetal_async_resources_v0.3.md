@@ -2,7 +2,7 @@
 
 **Date**: 2026-02-15
 **Status**: Design Specification
-**Prereqs**: `doc/design/baremetal_features_examples.md`, `src/std/async_core.spl`, `src/std/async_embedded.spl`
+**Prereqs**: `doc/design/baremetal_features_examples.md`, `src/lib/async_core.spl`, `src/lib/async_embedded.spl`
 
 ---
 
@@ -1055,13 +1055,13 @@ async fn main() -> Never:
 
 | Existing code | Role in v0.3 |
 |---------------|--------------|
-| `src/std/async_core.spl` | Base types (Poll, TaskState, Priority) — reused |
-| `src/std/async_embedded.spl` | EmbeddedScheduler — extended with frame pools |
+| `src/lib/async_core.spl` | Base types (Poll, TaskState, Priority) — reused |
+| `src/lib/async_embedded.spl` | EmbeddedScheduler — extended with frame pools |
 | `src/compiler/desugar_async.spl` | State machine generation — extended with liveness |
 | `src/compiler/hir_lowering/async.spl` | Async validation — extended with reservation checks |
-| `src/std/baremetal/allocator.spl` | FixedBlockAllocator — basis for task pool |
-| `src/std/baremetal/interrupt.spl` | Interrupt handlers — integrate with async wakers |
-| `src/std/baremetal/syscall.spl` | Timer syscalls — basis for Timer.after_ms() |
+| `src/lib/baremetal/allocator.spl` | FixedBlockAllocator — basis for task pool |
+| `src/lib/baremetal/interrupt.spl` | Interrupt handlers — integrate with async wakers |
+| `src/lib/baremetal/syscall.spl` | Timer syscalls — basis for Timer.after_ms() |
 
 ## Appendix B: References
 

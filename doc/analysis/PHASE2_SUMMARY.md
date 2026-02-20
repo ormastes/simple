@@ -83,7 +83,7 @@ Focuses on src/compiler/ duplication:
 ### 4. **phase2_std_duplicates.md** (583 lines)
 **Standard Library Analysis** (Pre-existing)
 
-Focuses on src/std/ duplication:
+Focuses on src/lib/ duplication:
 - String handling functions
 - Array utilities
 - Math operations

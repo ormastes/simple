@@ -26,7 +26,7 @@
 ### Week 1: Low-Risk Refactoring (5 days)
 
 #### Day 1-2: bcrypt Module Split
-- **File:** `src/std/bcrypt/core.spl`
+- **File:** `src/lib/bcrypt/core.spl`
 - **Current:** Monolithic 1000+ lines
 - **Split into:**
   - `types.spl` - BcryptHash, Salt types
@@ -40,7 +40,7 @@
 - **Risk:** LOW (pure refactor, no logic changes)
 
 #### Day 3-4: CBOR Module Split
-- **File:** `src/std/cbor/core.spl`
+- **File:** `src/lib/cbor/core.spl`
 - **Apply same pattern as bcrypt**
 - **Split into:**
   - `types.spl` - CborValue, CborTag types

@@ -164,11 +164,12 @@ See [physics/README.md](physics/README.md) for details.
 
 ## Related Documentation
 
-- **[doc/spec/](../spec/)** - Stable language specifications
-- **[doc/status/](../status/)** - Implementation status tracking
-- **[doc/plans/](../plans/)** - Implementation roadmaps
-- **[doc/design/](../design/)** - Design documents
-- **[doc/architecture/](../architecture/)** - Architecture principles
+- **[doc/design/](../design/)** — Design documents (where research conclusions land)
+- **[doc/adr/](../adr/)** — Architecture Decision Records (extracted from design)
+- **[doc/plan/](../plan/)** — Implementation roadmaps
+- **[doc/requirement/](../requirement/)** — Functional requirements that drive research topics
+- **[doc/architecture/](../architecture/)** — Architecture principles
+- **[doc/spec/](../spec/)** — Stable language specifications
 
 ---
 
@@ -183,8 +184,8 @@ When adding new research documents:
 
 **Avoid:**
 - Splitting documents into part1/part2 (merge into single file)
-- Session notes (those go in doc/report/)
-- Status tracking (use doc/status/)
+- Session notes (those go in `doc/report/`)
+- Status tracking (use `doc/feature/` for feature status, `doc/design/` for implementation status)
 
 ---
 

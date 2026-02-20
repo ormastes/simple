@@ -51,12 +51,12 @@ Results: 1 total, 1 passed, 0 failed ✅
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/std/platform/config.spl` | 72 | PlatformConfig struct, auto-detection, factories |
-| `src/std/platform/convert.spl` | 157 | send/recv conversion (endian, newline, bytes) |
-| `src/std/platform/newline.spl` | 31 | TextMode enum, translation functions |
-| `src/std/platform/wire.spl` | 101 | WireWriter/WireReader serialization |
-| `src/std/platform/text_io.spl` | 29 | Platform-aware file I/O |
-| `src/std/platform/mod.spl` | 24 | Public API re-exports |
+| `src/lib/platform/config.spl` | 72 | PlatformConfig struct, auto-detection, factories |
+| `src/lib/platform/convert.spl` | 157 | send/recv conversion (endian, newline, bytes) |
+| `src/lib/platform/newline.spl` | 31 | TextMode enum, translation functions |
+| `src/lib/platform/wire.spl` | 101 | WireWriter/WireReader serialization |
+| `src/lib/platform/text_io.spl` | 29 | Platform-aware file I/O |
+| `src/lib/platform/mod.spl` | 24 | Public API re-exports |
 
 ### Test Suite (506 lines, 80 tests)
 
@@ -75,7 +75,7 @@ Results: 1 total, 1 passed, 0 failed ✅
 | File | Lines | Purpose |
 |------|-------|---------|
 | `README_PLATFORM_LIBRARY.md` | 335 | Comprehensive user guide with examples |
-| `src/std/platform/README.md` | 82 | Quick reference for developers |
+| `src/lib/platform/README.md` | 82 | Quick reference for developers |
 | `doc/report/platform_abstraction_implementation_2026-02-13.md` | 283 | Technical implementation details |
 | `doc/report/platform_library_verification_2026-02-13.md` | 159 | Verification and test results |
 
@@ -83,7 +83,7 @@ Results: 1 total, 1 passed, 0 failed ✅
 
 | File | Change | Status |
 |------|--------|--------|
-| `src/std/text.spl` | Distinguished `_NL` (explicit LF) from `NL` (default) | ✅ Working |
+| `src/lib/text.spl` | Distinguished `_NL` (explicit LF) from `NL` (default) | ✅ Working |
 | `src/compiler_core/lexer_struct.spl` | `NL` → `_NL` (9 occurrences) | ✅ Verified |
 | `src/compiler_core/lexer.spl` | `NL` → `_NL` (9 occurrences) | ✅ Verified |
 

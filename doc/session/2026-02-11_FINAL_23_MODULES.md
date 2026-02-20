@@ -320,7 +320,7 @@ val decrypted = rot13_decode(encrypted)  # "secret"
 
 ### All 23 Modules
 ```
-src/std/{
+src/lib/{
   # Core (6)
   string_extra, validation, numeric,
   collection_utils, functional, option_helpers,

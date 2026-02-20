@@ -207,7 +207,7 @@ These parsers handle specific formats/languages, NOT Simple language. They are d
 
 #### 1. SDN Parser
 
-**Location:** `src/std/sdn/parser.spl`
+**Location:** `src/lib/sdn/parser.spl`
 **Size:** 683 lines
 **Purpose:** Parse SDN data format (Simple's config/data format)
 **Language:** SDN (not Simple)
@@ -217,7 +217,7 @@ These parsers handle specific formats/languages, NOT Simple language. They are d
 
 #### 2. SDN Lexer
 
-**Location:** `src/std/sdn/lexer.spl`
+**Location:** `src/lib/sdn/lexer.spl`
 **Size:** 411 lines
 **Purpose:** Tokenize SDN format
 **Language:** SDN (not Simple)
@@ -283,8 +283,8 @@ These parsers handle specific formats/languages, NOT Simple language. They are d
 | `src/app/parser/lexer.spl` | 1,654 | Full Lexer | ⚠️ 70% Duplicate | **MERGE → compiler** |
 | `src/compiler/treesitter.spl` | 1,444 | Outline Parser | ✅ Canonical | Keep |
 | `src/compiler/parser/treesitter.spl` | 509 | Outline Parser | ⚠️ 40% Overlap | **DECIDE** |
-| `src/std/sdn/parser.spl` | 683 | SDN Format | ✅ Separate Language | Keep |
-| `src/std/sdn/lexer.spl` | 411 | SDN Format | ✅ Separate Language | Keep |
+| `src/lib/sdn/parser.spl` | 683 | SDN Format | ✅ Separate Language | Keep |
+| `src/lib/sdn/lexer.spl` | 411 | SDN Format | ✅ Separate Language | Keep |
 | `src/app/depgraph/parser.spl` | 271 | Import Scanner | ✅ Specialized | Keep |
 | `src/app/ffi_gen/parser.spl` | 310 | Annotation Scanner | ✅ Specialized | Keep |
 | `src/app/test_runner_new/test_db_parser.spl` | 267 | Test DB | ✅ Specialized | Keep |
@@ -439,7 +439,7 @@ src/compiler/
 ### Specialized Parsers (Domain-Specific)
 
 ```
-src/std/sdn/
+src/lib/sdn/
 ├── parser.spl                   (683 lines)   - ✅ SDN format parser
 └── lexer.spl                    (411 lines)   - ✅ SDN format lexer
 

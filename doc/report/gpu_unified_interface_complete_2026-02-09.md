@@ -105,7 +105,7 @@ stream2.sync()
 
 **Goal:** Create unified, backend-agnostic GPU interface
 
-**Implementation:** Three-module architecture in `src/std/gpu/`
+**Implementation:** Three-module architecture in `src/lib/gpu/`
 
 ### Module Structure
 
@@ -522,10 +522,10 @@ train_loop(
 ### Phase 2: Context API
 | File | Lines | Status |
 |------|-------|--------|
-| `src/std/gpu/device.spl` | ~150 | Created |
-| `src/std/gpu/memory.spl` | ~150 | Created |
-| `src/std/gpu/context.spl` | ~200 | Created |
-| `src/std/gpu/mod.spl` | ~30 | Created |
+| `src/lib/gpu/device.spl` | ~150 | Created |
+| `src/lib/gpu/memory.spl` | ~150 | Created |
+| `src/lib/gpu/context.spl` | ~200 | Created |
+| `src/lib/gpu/mod.spl` | ~30 | Created |
 | `examples/gpu/context_basic.spl` | ~150 | Created |
 | **Subtotal** | **~680** | **✅ Complete** |
 

@@ -171,7 +171,7 @@ simple sffi-gen --gen-intern src/app/ffi_gen/specs/treesitter.spl
 This generates: `build/rust/ffi_gen/src/treesitter.rs`
 
 ### Step 2: Implement Simple Wrappers
-Create: `src/std/src/parser/treesitter.spl`
+Create: `src/lib/src/parser/treesitter.spl`
 
 **Structure:**
 ```simple

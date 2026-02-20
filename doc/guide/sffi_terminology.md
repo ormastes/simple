@@ -62,7 +62,7 @@ fn file_read(path: text) -> text:
 | Path | Purpose |
 |------|---------|
 | `src/app/io/mod.spl` | Main SFFI wrapper module |
-| `src/std/io/*.spl` | Stdlib SFFI wrappers |
+| `src/lib/io/*.spl` | Stdlib SFFI wrappers |
 | `src/app/ffi_gen/specs/*.spl` | SFFI generation specs |
 
 ### Raw FFI Files (Rust)

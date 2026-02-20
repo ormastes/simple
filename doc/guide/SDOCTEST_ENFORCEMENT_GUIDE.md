@@ -59,7 +59,7 @@ use doc_coverage.analysis.group_sdoctest.{check_group_sdoctest}
 use doc_coverage.analysis.sdoctest_coverage.{load_sdoctest_blocks}
 
 # 1. Parse __init__.spl
-val result = parse_init_file("src/std/io/__init__.spl")
+val result = parse_init_file("src/lib/io/__init__.spl")
 val groups = result.0
 val individual_items = result.1
 
@@ -211,7 +211,7 @@ val files = dir_list("mydir")
 
 ### 1. Update __init__.spl
 ```
-src/std/mymodule/__init__.spl
+src/lib/mymodule/__init__.spl
 ```
 
 ### 2. Add SDoctest Examples

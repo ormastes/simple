@@ -154,7 +154,7 @@ $ nm build/seed/startup/libspl_crt_linux_x86_64.a | grep spl_thread_init
 **Files Modified:**
 1. `src/compiler_seed/runtime_thread.h` - Added spl_thread_pool_spawn_worker() (+18 lines)
 2. `src/compiler_seed/runtime_thread.c` - Implemented worker spawn + wrappers (+76 lines)
-3. `src/std/thread_pool.spl` - Added extern + use helper function (+12 lines)
+3. `src/lib/thread_pool.spl` - Added extern + use helper function (+12 lines)
 
 **Architecture:**
 ```

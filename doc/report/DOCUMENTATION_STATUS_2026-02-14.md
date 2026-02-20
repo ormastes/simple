@@ -73,7 +73,7 @@ Advanced Types (src/compiler_core/types.spl):
 - Lines 439-581: Type registry functions (143 lines)
 - Missing: type_checker.spl, type_erasure.spl, type_inference.spl (~2,600 lines)
 
-SIMD (src/std/simd.spl):
+SIMD (src/lib/simd.spl):
 - Total: 390 lines (API design only)
 - Missing: x86_64_simd.spl, arm_neon.spl, auto_vectorize logic (~2,700 lines)
 
@@ -81,7 +81,7 @@ Baremetal (src/baremetal/):
 - system_api.spl: Constants and type definitions
 - Missing: crt0.s, allocator.spl, syscall.spl, interrupt.spl (~2,700 lines)
 
-Thread Pool (src/std/):
+Thread Pool (src/lib/):
 - thread_pool.spl: 206 lines (implementation exists)
 - thread_sffi.spl: 285 lines (SFFI primitives exist)
 - Tests exist but crash when run

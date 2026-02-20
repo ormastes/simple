@@ -25,7 +25,7 @@ Verified 2026-02-18 by codebase search.
 | 6 | C header import / wffi-wrapper infra | **IMPL** — wffi_bindgen.spl (src/compiler_core/) | MEDIUM | MEDIUM | [→](#6-c-header-import--wffi-wrapper-infra) |
 | 7 | Built-in cross-compilation (`-target`) | **IMPL** — target_presets.spl (8 presets) | HIGH | MEDIUM | [→](#7-built-in-cross-compilation) |
 | 8 | Inline test{} / debug{} blocks | **IMPL** — __builtin_test_mode / __builtin_debug_mode in eval.spl | MEDIUM | LOW | [→](#8-inline-test--debug-blocks) |
-| 9 | Error return traces (not stack unwinding) | **IMPL** — error_trace.spl (src/std/) | MEDIUM | MEDIUM | [→](#9-error-return-traces) |
+| 9 | Error return traces (not stack unwinding) | **IMPL** — error_trace.spl (src/lib/) | MEDIUM | MEDIUM | [→](#9-error-return-traces) |
 | 10 | Sentinel-terminated types | **RESEARCH** — sentinel_types_design_2026-02-18.md | MEDIUM | HIGH | [→](#10-sentinel-terminated-types) |
 
 **Highest embedded ROI (steal first):**
@@ -393,7 +393,7 @@ fn reset_handler() -> !:
 - **Runtime enforcement:** ❌ `eval.spl` (interpreter) **ignores volatile annotations** — no volatile load/store semantics at runtime.
 - **Compiler backend:** ⚠️ Partially implemented — LLVM backend would need to emit volatile IR nodes; integration incomplete.
 - **SFFI builtins:** ❌ `rt_volatile_read_u32` etc. do NOT yet exist in `src/app/io/mod.spl` — still need adding.
-- **Atomics:** ✅ `src/std/atomic.spl` — full memory ordering (`Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`), `fence()`, atomic load/store/fetch_add etc. WORKING.
+- **Atomics:** ✅ `src/lib/atomic.spl` — full memory ordering (`Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`), `fence()`, atomic load/store/fetch_add etc. WORKING.
 
 ### 5.2 Zig Approach
 
@@ -453,7 +453,7 @@ JSF++/NASA rule: **volatile is NOT synchronization**.
 | `atomic` | Memory ordering between CPU cores / ISR+main | Single-threaded MMIO |
 | Both together | MMIO shared with another CPU core / DMA | — |
 
-Simple's existing atomics (`src/std/atomic.spl`) cover the synchronization case. Volatile covers MMIO. Both are needed and distinct.
+Simple's existing atomics (`src/lib/atomic.spl`) cover the synchronization case. Volatile covers MMIO. Both are needed and distinct.
 
 ### 5.5 Safety Profile
 
@@ -681,7 +681,7 @@ build-provenance:
 
 ### 8.1 Current Status
 
-Simple has SSpec (`src/std/spec.spl`) for BDD-style tests in separate `_spec.spl` files. There are NO inline test blocks in production code. There is no `debug{}` block concept.
+Simple has SSpec (`src/lib/spec.spl`) for BDD-style tests in separate `_spec.spl` files. There are NO inline test blocks in production code. There is no `debug{}` block concept.
 
 ### 8.2 Zig Approach
 
@@ -790,7 +790,7 @@ But `@test` and `@debug` look less clean than keywords. For embedded where test 
 ### 9.1 Current Status — PARTIAL (verified, better than expected)
 
 Verification found more infrastructure than previously known:
-- **Panic stack traces:** ✅ `src/std/report/runtime/panic.spl` — full `StackFrame`, `StackTrace`, `PanicReport` structs with stack capture. `src/std/debug.spl` exports `debug_stack_trace()`. SFFI: `src/ffi/debug.spl` → `rt_debug_stack_trace()`.
+- **Panic stack traces:** ✅ `src/lib/report/runtime/panic.spl` — full `StackFrame`, `StackTrace`, `PanicReport` structs with stack capture. `src/lib/debug.spl` exports `debug_stack_trace()`. SFFI: `src/ffi/debug.spl` → `rt_debug_stack_trace()`.
 - **Error-return trace (Zig-style):** ❌ NOT implemented — no per-`Result`/`Option` propagation trace; no automatic source-location capture when `?` propagates an error
 - **Gap:** What exists is panic traces (for unrecoverable errors). Zig's error return trace captures the chain of `try` return sites for recoverable errors. That chain mechanism is missing.
 - `errdefer` is planned (see `missing_language_features_2026-02-17.md` #3)
@@ -998,7 +998,7 @@ All 10 Zig embedded features have been implemented or researched:
 | 6 | @wffi bindgen annotation | ✅ IMPL | `src/compiler_core/wffi_bindgen.spl` |
 | 7 | cross-compilation presets | ✅ IMPL | `src/compiler_core/target_presets.spl` |
 | 8 | @test/@debug blocks | ✅ IMPL | `src/compiler_core/interpreter/eval.spl` |
-| 9 | error return traces | ✅ IMPL | `src/std/error_trace.spl` |
+| 9 | error return traces | ✅ IMPL | `src/lib/error_trace.spl` |
 | 10 | sentinel types | 📄 RESEARCH | `doc/research/sentinel_types_design_2026-02-18.md` |
 
 **Tests:** 13 new spec files added across `test/unit/compiler/`, `test/unit/app/`, `test/unit/std/`, and `test/integration/`

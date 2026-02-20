@@ -408,7 +408,7 @@ diff <(bin/simple build test.spl --emit-llvm-ir --backend=llvm-before) \
 
 ## Open Questions
 
-1. **Module Location**: `src/shared/llvm/` or `src/std/llvm/`?
+1. **Module Location**: `src/shared/llvm/` or `src/lib/llvm/`?
    - **Recommendation**: `src/shared/llvm/` (not part of std library)
 
 2. **CLI Exposure**: Expose `--backend=llvm-core` flag?

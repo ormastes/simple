@@ -1,6 +1,6 @@
 # Platform Abstraction Library
 
-**Location:** `src/std/platform/`
+**Location:** `src/lib/nogc_sync_mut/platform/`
 **Status:** ✅ Production Ready
 **Tests:** 5/5 files passing (80 individual tests)
 

@@ -147,9 +147,9 @@ import module         # OLD (deprecated)
 ## Files Changed Summary
 
 ### Code (5 files)
-1. `src/std/shell/env.spl` - Lazy init
-2. `src/std/effects.spl` - NEW (73 lines)
-3. `src/std/parser.spl` - NEW (179 lines)
+1. `src/lib/shell/env.spl` - Lazy init
+2. `src/lib/effects.spl` - NEW (73 lines)
+3. `src/lib/parser.spl` - NEW (179 lines)
 4. `test/unit/app/mcp/prompts_spec.spl` - Import fix
 5. `test/unit/app/diagram/call_flow_profiling_spec.spl` - Extern decl
 

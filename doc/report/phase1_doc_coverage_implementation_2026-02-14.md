@@ -317,8 +317,8 @@ Expected output structure:
   "coverage_percent": 87,
   "sdoctest_percent": 46,
   "missing_sdoctest": [
-    "src/std/text.spl:split_lines",
-    "src/std/array.spl:flatten",
+    "src/lib/text.spl:split_lines",
+    "src/lib/array.spl:flatten",
     ...
   ]
 }

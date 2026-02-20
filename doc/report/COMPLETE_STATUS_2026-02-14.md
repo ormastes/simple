@@ -93,7 +93,7 @@ Standard Tags:
 - @tag:perf            Performance-sensitive
 
 Auto-Generated:
-- stdlib:string        (from file path src/std/text.spl)
+- stdlib:string        (from file path src/lib/text.spl)
 - core:parser          (from file path src/compiler_core/parser.spl)
 - compiler:backend     (from file path src/compiler/backend/)
 - feature:testing      (from file path src/app/test_runner_new/)

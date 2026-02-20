@@ -52,7 +52,7 @@ waiting for the module to be fixed. There are **0 skipped tests** in the rest of
 
 ### Root Cause Analysis
 
-**Module Location**: `src/std/src/parser/treesitter.spl`
+**Module Location**: `src/lib/src/parser/treesitter.spl`
 
 **Three Critical Issues**:
 
@@ -97,7 +97,7 @@ Created 6 tasks to track the work:
 
 ### Fix 1: Corrected Import Syntax
 
-**File**: `src/std/src/parser/treesitter.spl` (lines 13-15)
+**File**: `src/lib/src/parser/treesitter.spl` (lines 13-15)
 
 **Before**:
 ```simple
@@ -114,7 +114,7 @@ use lib.pure.lexer (Token, TokenKind, lex_source)  # ADDED
 
 ### Fix 2: Added Missing Exports
 
-**File**: `src/std/src/parser/treesitter.spl` (line 11)
+**File**: `src/lib/src/parser/treesitter.spl` (line 11)
 
 **Before**:
 ```simple
@@ -133,7 +133,7 @@ export Lexer, Token, TokenKind  # ADDED
 
 ### Fix 3: Implemented Lexer Class
 
-**File**: `src/std/src/parser/treesitter.spl` (after line 40)
+**File**: `src/lib/src/parser/treesitter.spl` (after line 40)
 
 **Added ~20 lines**:
 ```simple
@@ -241,7 +241,7 @@ test/system/features/treesitter/
 The module now parses successfully:
 
 ```bash
-$ head -20 src/std/src/parser/treesitter.spl
+$ head -20 src/lib/src/parser/treesitter.spl
 export TreeSitterParser, Tree, Node, Query, QueryCursor
 export Point, Edit, QueryMatch, QueryCapture
 export TreeSitterError
@@ -425,7 +425,7 @@ use std.parser.treesitter (Tree, Node, TreeSitterParser)
 The entire tree-sitter module is **100% Pure Simple**:
 
 ```
-src/std/src/parser/treesitter.spl  ← Wrapper
+src/lib/src/parser/treesitter.spl  ← Wrapper
   ↓ uses
 lib.pure.parser                    ← Pure Simple parser
 lib.pure.ast                       ← Pure Simple AST
@@ -473,7 +473,7 @@ lib.pure.ast       lib.pure.lexer
    - Identified root cause: module parse errors
 
 2. **Located broken module**:
-   - `src/std/src/parser/treesitter.spl`
+   - `src/lib/src/parser/treesitter.spl`
 
 3. **Identified issues**:
    - Wrong import syntax (braces instead of parentheses)
@@ -519,7 +519,7 @@ date: 2026-02-05
 
 feat: Fix tree-sitter module and enable 320+ skipped tests
 
-- Fix import syntax in src/std/src/parser/treesitter.spl (braces -> parentheses)
+- Fix import syntax in src/lib/src/parser/treesitter.spl (braces -> parentheses)
 - Add Lexer, Token, TokenKind exports and wrapper class
 - Enable all 401 tree-sitter tests (remove skip tags)
 - Fix import statements in 16 test files
@@ -536,7 +536,7 @@ See: doc/report/treesitter_module_fix_2026-02-05.md
 ### Files Changed
 
 ```
-src/std/src/parser/treesitter.spl              (modified: +24 lines)
+src/lib/src/parser/treesitter.spl              (modified: +24 lines)
 
 test/lib/std/unit/parser/
   treesitter_lexer_real_spec.spl               (modified: -40 skip tags, +1 import)

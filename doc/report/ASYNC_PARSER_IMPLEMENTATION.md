@@ -118,7 +118,7 @@ fn test_spawn():
 
 ## Additional Fixes
 
-Fixed blocking build error in `src/std/src/dl/config_loader.spl`:
+Fixed blocking build error in `src/lib/src/dl/config_loader.spl`:
 - Removed module-level variable `_config_state` (runtime limitation)
 - Changed `Result<DLConfig, text>` → `DLConfig?` (no generics at runtime)
 - Disabled user config caching to work around module closure bug
@@ -130,7 +130,7 @@ The parser and basic interpreter integration are complete. To fully enable async
 1. ✅ **Interpreter Integration** - Basic stubs added to prevent crashes
    - Added `eval_await_expr()`, `eval_yield_expr()`, `eval_spawn_expr()`
    - Currently evaluate synchronously (no state machine support)
-   - Note: Full async runtime (`src/std/async/`) exists but uses generics (runtime limitation)
+   - Note: Full async runtime (`src/lib/async/`) exists but uses generics (runtime limitation)
 
 2. ⏳ **Desugar Pipeline Integration** - Connect two AST systems
    - Core parser uses `core.ast` (arena-based, what I modified)
@@ -151,7 +151,7 @@ The parser and basic interpreter integration are complete. To fully enable async
 
 - `src/compiler_core/ast.spl` - Added async support to declarations and expressions
 - `src/compiler_core/parser.spl` - Added async parsing logic
-- `src/std/src/dl/config_loader.spl` - Fixed module-level variable issues
+- `src/lib/src/dl/config_loader.spl` - Fixed module-level variable issues
 
 ## Files Created
 

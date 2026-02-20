@@ -39,7 +39,7 @@ Cleaned up outdated files and updated bug database to reflect 100% Pure Simple a
 **Locations**:
 ```
 src/compiler/dependency/import_resolver.spl.bak
-src/std/src/testing/mock.spl.bak
+src/lib/src/testing/mock.spl.bak
 src/app/info/main.spl.bak
 src/app/env/main.spl.bak
 src/app/gen_lean/main.spl.bak
@@ -217,7 +217,7 @@ src/
 
 When filing new bugs, ensure they:
 1. ✅ Reference files that **exist** in the current codebase
-2. ✅ Use current file paths (`src/app/`, `src/lib/`, `src/std/`)
+2. ✅ Use current file paths (`src/app/`, `src/lib/`, `src/lib/`)
 3. ✅ Include reproducible test cases
 4. ✅ Link to test files that demonstrate the bug
 

@@ -13,13 +13,13 @@
 
 **Example:**
 ```simple
-# src/std/string/__init__.spl
+# src/lib/string/__init__.spl
 export trim, split, join, to_upper, to_lower
 export StringHelper
 export NL, CR, CRLF  # Constants group
 
 # Public API = 8 items (5 functions, 1 class, 3 constants)
-# Private = all other items in src/std/string/*.spl
+# Private = all other items in src/lib/string/*.spl
 ```
 
 ### 2. Group-Based SDoctest Rule
@@ -154,10 +154,10 @@ struct ItemCoverage:
 **Example:**
 ```bash
 # Check public API coverage with group awareness
-bin/simple doc-coverage --public-api-only src/std/string/
+bin/simple doc-coverage --public-api-only src/lib/string/
 
 # Output:
-# Public API Coverage (src/std/string/)
+# Public API Coverage (src/lib/string/)
 #   Groups: 2/2 (100%)
 #     - String constants (NL, CR, CRLF) ✅ sdoctest at doc/guide/string.md:45
 #     - Case conversion (to_upper, to_lower) ✅ sdoctest at doc/guide/string.md:78
@@ -204,7 +204,7 @@ Public API Coverage:
 
 **File Structure:**
 ```
-src/std/string/
+src/lib/string/
 ├── __init__.spl           # Public API definition
 ├── core.spl               # Core string functions
 ├── transform.spl          # Transformations
@@ -336,7 +336,7 @@ bin/simple doc-coverage --public-api-only --strict src/
 
 **Test 1: Simple Module**
 ```
-src/std/math/__init__.spl:
+src/lib/math/__init__.spl:
   export abs, sqrt, pow
 
 Expected:
@@ -346,7 +346,7 @@ Expected:
 
 **Test 2: Grouped Constants**
 ```
-src/std/http/__init__.spl:
+src/lib/http/__init__.spl:
   export GET, POST, PUT, DELETE, PATCH
 
 Expected:
@@ -356,7 +356,7 @@ Expected:
 
 **Test 3: Mixed**
 ```
-src/std/json/__init__.spl:
+src/lib/json/__init__.spl:
   export parse, stringify
   export JsonValue, JsonError
 

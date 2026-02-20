@@ -370,6 +370,6 @@ Expected CUDA:1, got CUDA:0
 
 **Files created:**
 - `/home/ormastes/dev/pub/simple/dl.config.sdn` - Example config
-- `/home/ormastes/dev/pub/simple/src/std/src/dl/config_loader.spl` - Config loader
+- `/home/ormastes/dev/pub/simple/src/lib/src/dl/config_loader.spl` - Config loader
 - `/home/ormastes/dev/pub/simple/test_gpu_config.spl` - Test script
 - `/home/ormastes/dev/pub/simple/doc/guide/gpu_configuration.md` - This guide

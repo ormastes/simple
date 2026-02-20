@@ -114,7 +114,7 @@ Root (branching: 32)
 
 **Approach:**
 ```simple
-# src/std/persistent/dict.spl
+# src/lib/persistent/dict.spl
 extern fn rt_persistent_dict_empty() -> i64
 extern fn rt_persistent_dict_insert(handle: i64, key: text, value: RuntimeValue) -> i64
 extern fn rt_persistent_dict_get(handle: i64, key: text) -> RuntimeValue?

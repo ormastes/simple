@@ -277,7 +277,7 @@ bin/simple test test/std/graph_utils_spec.spl
 
 The original 2,068-line file is backed up at:
 ```
-src/std/graph_utils.spl.backup
+src/lib/common/graph/graph_utils.spl.backup
 ```
 
 ## Refactoring History

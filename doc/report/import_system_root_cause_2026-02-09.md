@@ -293,7 +293,7 @@ Possible explanations:
 Copy functions from Phase 2 modules into test files:
 ```simple
 fn string_trim(s: text) -> text:
-    # Copy implementation from src/std/helpers.spl
+    # Copy implementation from src/lib/helpers.spl
     ...
 
 describe "My Tests":
@@ -331,7 +331,7 @@ bin/simple compile test.spl -o test
 
 ### Immediate (No Rebuild)
 
-1. ✅ Use inline helpers from `src/std/helpers.spl`
+1. ✅ Use inline helpers from `src/lib/helpers.spl`
 2. ✅ Document limitation in all Phase 2 reports
 3. ✅ Create migration guide for when imports work
 4. ☐ Test if imports work in compiled binaries
@@ -374,8 +374,8 @@ bin/simple compile test.spl -o test
 
 - **Bug location:** `src/app/interpreter/module/evaluator.spl:225-228`
 - **Import handler:** `src/app/interpreter/module/evaluator.spl:336-370`
-- **Phase 2 implementations:** `src/std/{string,array}.spl`, `src/ffi/system.spl`
-- **Inline workarounds:** `src/std/helpers.spl`
+- **Phase 2 implementations:** `src/lib/{string,array}.spl`, `src/ffi/system.spl`
+- **Inline workarounds:** `src/lib/helpers.spl`
 - **Runtime binary:** `bin/bootstrap/simple` (needs rebuild)
 
 ---

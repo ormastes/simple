@@ -36,7 +36,7 @@ This directory contains comprehensive duplication analysis for the Simple langua
 - [`phase2_std_duplicates.md`](phase2_std_duplicates.md) - Full analysis (583 lines)
 - [`DUPLICATION_QUICK_REFERENCE.md`](DUPLICATION_QUICK_REFERENCE.md) - Quick lookup table (214 lines)
 
-**Scope:** src/std/ directory (899 files, 184,679 lines)
+**Scope:** src/lib/ directory (899 files, 184,679 lines)
 
 **Key Findings:**
 - **10 semantic duplications** across core utility modules
@@ -220,7 +220,7 @@ This directory contains comprehensive duplication analysis for the Simple langua
 
 This analysis used a **sampled duplication detection approach**:
 
-1. **File analysis:** Identified 100 largest files in src/std/
+1. **File analysis:** Identified 100 largest files in src/lib/
 2. **Function extraction:** Parsed all function definitions
 3. **Duplication detection:** Compared function signatures and implementations
 4. **Impact assessment:** Evaluated each duplication for risk/benefit

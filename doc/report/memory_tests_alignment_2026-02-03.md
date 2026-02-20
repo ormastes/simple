@@ -43,14 +43,14 @@ expect (total > 0) to_equal true
 - Fixed 20 incorrect method calls: `.stats()` → `.stats` (field access)
 - GcConfig construction syntax verified correct
 
-**Blocker:** Parse error in `src/std/gc.spl:629`
+**Blocker:** Parse error in `src/lib/gc.spl:629`
 ```simple
 extern fn type_id_of<T>() -> i32  # ← Generic extern function not supported
 ```
 
 **Error Message:**
 ```
-Failed to parse module path="./src/std/gc.spl"
+Failed to parse module path="./src/lib/gc.spl"
 error=Unexpected token: expected identifier, found Lt
 ```
 
@@ -102,7 +102,7 @@ arc_box_dec_strong, arc_box_inc_weak, arc_box_dec_weak
 semantic: unknown extern function: rc_box_size
 ```
 
-**Root Cause:** The `src/std/rc.spl` module declares 20 extern functions for RC/Arc box management, but the Simple interpreter's Rust FFI layer doesn't have implementations for these functions. Unlike allocator tests (where FFI mocks were added to the source), `extern fn` declarations cannot be overridden by Simple function definitions.
+**Root Cause:** The `src/lib/rc.spl` module declares 20 extern functions for RC/Arc box management, but the Simple interpreter's Rust FFI layer doesn't have implementations for these functions. Unlike allocator tests (where FFI mocks were added to the source), `extern fn` declarations cannot be overridden by Simple function definitions.
 
 **Workarounds Attempted:**
 - ❌ Added Simple function mocks (ignored by compiler - extern takes precedence)
@@ -179,7 +179,7 @@ SSpec doesn't support these matchers:
 - `test/lib/std/unit/gc_spec.spl` (34 fixes, blocked by parser)
 - `test/lib/std/unit/runtime_value_spec.spl` (3 fixes, blocked by GC)
 - `test/lib/std/unit/rc_spec.spl` (complete rewrite, blocked by FFI)
-- `src/std/rc.spl` (added 130 lines of mock attempts - non-functional)
+- `src/lib/rc.spl` (added 130 lines of mock attempts - non-functional)
 
 ### Backup Files Created
 - `test/lib/std/unit/rc_spec.spl.broken` (original broken version)

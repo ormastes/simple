@@ -23,14 +23,14 @@
 | Fix | File | Issue | Solution | Status |
 |-----|------|-------|----------|--------|
 | 1 | `src/lib/database/core.spl` | Race conditions | Atomic locking | ✅ |
-| 2 | `src/std/spec.spl` | `assert` keyword conflict | Renamed to `check` | ✅ |
+| 2 | `src/lib/spec.spl` | `assert` keyword conflict | Renamed to `check` | ✅ |
 | 3 | `src/compiler/mir_data.spl` | Enum param parser bug | Simplified types | ✅ |
 | 4 | `src/compiler/treesitter/heuristic.spl` | Multi-line if | Extract to variable | ✅ |
 | 5 | `src/lib/database/feature.spl` | Field assignment | Commented out | ✅ |
 | 6 | `src/compiler/type_infer.spl` | Dotted mod paths | Commented out | ✅ |
 | 7 | `src/app/lsp/utils.spl` | `Match` type undefined | Use `any` | ✅ |
 | 8 | `src/compiler/query_api.spl` | Already working | No fix needed | ✅ |
-| 9 | `src/std/platform.spl` | Module structure | Moved to .spl file | ✅ |
+| 9 | `src/lib/platform.spl` | Module structure | Moved to .spl file | ✅ |
 | 10 | `src/app/io/mod.spl` | Platform dependencies | Inlined functions | ✅ |
 
 ### Build System Modifications
@@ -56,7 +56,7 @@ val result = BuildResult(success: true, ...)
 
 ## Platform Abstraction Fixes
 
-### Created: `src/std/platform.spl`
+### Created: `src/lib/platform.spl`
 
 **Features:**
 - Platform detection (is_windows, is_unix, is_macos, is_linux)
@@ -191,7 +191,7 @@ SSpec Framework
 │   Simple Source (Pure .spl files)   │
 │   src/app/cli/main.spl              │
 │   src/app/build/*.spl               │
-│   src/std/*.spl                     │
+│   src/lib/*.spl                     │
 │   - 100% self-hosting               │
 │   - Zero Rust dependencies          │
 └─────────────────────────────────────┘

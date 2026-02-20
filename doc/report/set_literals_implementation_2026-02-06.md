@@ -52,7 +52,7 @@ Source: s{1, 2, 3}
 
 | File | Changes | Purpose |
 |------|---------|---------|
-| `src/std/src/config.spl` | +90 lines | LiteralsConfig, LiteralDefinition |
+| `src/lib/src/config.spl` | +90 lines | LiteralsConfig, LiteralDefinition |
 | `src/compiler/lexer_types.spl` | +3 lines | SetLitStart, LiteralStart tokens |
 | `src/compiler/lexer.spl` | +65 lines | try_scan_literal_start() method |
 | `src/compiler/parser_types.spl` | +1 line | SetLit AST node |

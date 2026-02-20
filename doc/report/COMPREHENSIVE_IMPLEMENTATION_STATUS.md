@@ -117,7 +117,7 @@ simple doc-coverage --sdoctest-report --tag-file=missing_tags.txt
 **CLI Usage:**
 ```bash
 simple doc-coverage                    # Shows coverage summary
-simple doc-coverage src/std/           # Analyze specific directory
+simple doc-coverage src/lib/           # Analyze specific directory
 ```
 
 **Key Functions:**
@@ -386,10 +386,10 @@ if (a and
 Integration into compiler pipeline to emit warnings during `simple build`:
 
 ```bash
-simple build src/std/text.spl
+simple build src/lib/text.spl
 # Should emit:
-# warning: src/std/text.spl:42 - function 'split' missing inline comment
-# warning: src/std/text.spl:56 - function 'join' missing docstring
+# warning: src/lib/text.spl:42 - function 'split' missing inline comment
+# warning: src/lib/text.spl:56 - function 'join' missing docstring
 ```
 
 **Implementation Plan:**
@@ -505,7 +505,7 @@ simple stats
 **Tag Format:** `category:name`
 
 **Valid Categories:**
-- `stdlib` - Standard library modules (src/std/)
+- `stdlib` - Standard library modules (src/lib/)
 - `core` - Core compiler modules (src/compiler_core/)
 - `compiler` - Compiler subsystems (src/compiler/)
 - `feature` - Application features (src/app/)
@@ -514,7 +514,7 @@ simple stats
 
 **Auto-Generated Tags:**
 ```simple
-suggest_missing_tags("src/std/text.spl")
+suggest_missing_tags("src/lib/text.spl")
 # → ["stdlib:string"]
 
 suggest_missing_tags("src/compiler_core/parser.spl")

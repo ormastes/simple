@@ -184,12 +184,12 @@ All tests passed!
    - Safe shell integration (heredoc pattern)
 
 5. **Effect System** - ✅ CREATED
-   - Implementation: src/std/effects.spl (73 lines)
+   - Implementation: src/lib/effects.spl (73 lines)
    - Ready for integration
    - @pure, @io, @net, @fs, @unsafe, @async
 
 6. **Parser Error Recovery** - ✅ CREATED
-   - Implementation: src/std/parser.spl (179 lines)
+   - Implementation: src/lib/parser.spl (179 lines)
    - 15 common mistake detection
    - Multi-language support
 

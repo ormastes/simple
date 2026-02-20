@@ -119,7 +119,7 @@ use doc_coverage.analysis.init_parser.{parse_init_file}
 use app.doc_coverage.analysis.sdoctest_coverage.{load_sdoctest_blocks}
 
 # Parse public API from __init__.spl
-val result = parse_init_file("src/std/spec/__init__.spl")
+val result = parse_init_file("src/lib/spec/__init__.spl")
 val groups = result.0
 val items = result.1
 

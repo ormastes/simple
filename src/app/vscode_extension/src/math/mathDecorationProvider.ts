@@ -10,10 +10,10 @@
  *
  * Rendering infrastructure:
  * - Local preview: Uses mathConverter.ts simpleToUnicode() for quick inline decoration.
- *   This mirrors src/std/math_repr.spl to_pretty() in TypeScript for local rendering.
+ *   This mirrors src/lib/math_repr.spl to_pretty() in TypeScript for local rendering.
  * - Full rendering: The LSP hover handler (src/app/lsp/handlers/hover.spl) provides
  *   complete math rendering via render_latex_raw() and to_pretty() from the Simple
- *   runtime. See also src/std/mathjax.spl for MathJax SVG/HTML rendering.
+ *   runtime. See also src/lib/mathjax.spl for MathJax SVG/HTML rendering.
  */
 
 import * as vscode from 'vscode';
@@ -290,7 +290,7 @@ export class MathDecorationProvider implements vscode.Disposable {
      * Render a math block content string to Unicode pretty text.
      *
      * Uses the local TypeScript converter (mathConverter.ts) for quick inline
-     * preview. This mirrors what to_pretty() does in src/std/math_repr.spl
+     * preview. This mirrors what to_pretty() does in src/lib/math_repr.spl
      * but runs locally in TypeScript without requiring the LSP server.
      *
      * For full rendering, the LSP hover handler (src/app/lsp/handlers/hover.spl)

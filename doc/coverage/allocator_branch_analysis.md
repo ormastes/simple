@@ -1,6 +1,6 @@
 # Allocator Branch Coverage Analysis
 
-**Module:** `src/std/allocator.spl` (601 LOC)
+**Module:** `src/lib/allocator.spl` (601 LOC)
 **Test File:** `test/lib/std/unit/allocator_spec.spl` (455 lines, 55 existing tests)
 **Date:** 2026-02-03
 
@@ -10,7 +10,7 @@
 
 ### ArenaAllocator (Primary Focus - Week 1)
 
-**File:** `src/std/allocator.spl` lines 150-276
+**File:** `src/lib/allocator.spl` lines 150-276
 
 #### Critical Branches in `allocate()` (lines 230-254)
 
@@ -47,7 +47,7 @@
 
 ### PoolAllocator Branches
 
-**File:** `src/std/allocator.spl` lines 278-400 (estimated)
+**File:** `src/lib/allocator.spl` lines 278-400 (estimated)
 
 Key Branches:
 1. Size match check (`size == self.object_size`)
@@ -60,7 +60,7 @@ Existing Coverage: Lines 149-241 (good coverage, but needs verification)
 
 ### SlabAllocator Branches
 
-**File:** `src/std/allocator.spl` lines 400-500 (estimated)
+**File:** `src/lib/allocator.spl` lines 400-500 (estimated)
 
 Key Branches:
 1. Size class selection (8 classes)
@@ -72,7 +72,7 @@ Existing Coverage: Lines 246-294 (good coverage)
 
 ### SystemAllocator Branches
 
-**File:** `src/std/allocator.spl` lines 97-145
+**File:** `src/lib/allocator.spl` lines 97-145
 
 Key Branches:
 1. **Line 125:** `if ptr_is_null(ptr)` in allocate
@@ -286,6 +286,6 @@ diff doc/coverage/allocator_baseline.sdn doc/coverage/allocator_iter1.sdn
 ---
 
 **References:**
-- Source: `src/std/allocator.spl`
+- Source: `src/lib/allocator.spl`
 - Tests: `test/lib/std/unit/allocator_spec.spl`
 - Coverage: `doc/coverage/COVERAGE_PLAN_STATUS.md`

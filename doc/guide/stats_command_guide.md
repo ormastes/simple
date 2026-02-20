@@ -196,7 +196,7 @@ diff baseline.json current.json
 - **Total**: Count of all .spl files in `src/`
 - **app**: Application code in `src/app/`
 - **lib**: Library code in `src/lib/`
-- **std**: Standard library in `src/std/`
+- **std**: Standard library in `src/lib/`
 - **Tests**: Test files in `test/`
 
 ### Lines of Code

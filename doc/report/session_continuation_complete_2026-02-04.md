@@ -90,7 +90,7 @@ Fixed **11 files** with **~180+ tests** now passing or ready for enablement thro
 
 ## Part 3: Source File Fixes
 
-### Fixed: src/std/db_atomic.spl
+### Fixed: src/lib/db_atomic.spl
 
 **Issues Found & Fixed:**
 

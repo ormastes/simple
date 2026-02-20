@@ -43,7 +43,7 @@ These files have large impl blocks that cannot be split in Simple:
 
 **Refactoring:**
 ```
-src/std/numerical_methods/
+src/lib/numerical_methods/
 ├── mod.spl (80 lines) - Re-exports
 ├── root_finding.spl (~250 lines)
 │   - bisection, newton_raphson, secant, brent
@@ -75,7 +75,7 @@ src/std/numerical_methods/
 
 **Refactoring:**
 ```
-src/std/json/
+src/lib/json/
 ├── mod.spl (80 lines) - Re-exports
 ├── types.spl (~120 lines)
 │   - Constructors: json_null, json_boolean, json_number, json_string
@@ -101,7 +101,7 @@ src/std/json/
 
 **Refactoring:**
 ```
-src/std/graph/
+src/lib/graph/
 ├── mod.spl (70 lines)
 ├── types.spl (~150 lines) - Graph, Node, Edge representations
 ├── traversal.spl (~280 lines) - BFS, DFS, topological_sort
@@ -120,7 +120,7 @@ src/std/graph/
 
 **Refactoring:**
 ```
-src/std/compression/gzip/
+src/lib/compression/gzip/
 ├── mod.spl (60 lines)
 ├── types.spl (~120 lines) - Header, block types
 ├── deflate.spl (~400 lines) - DEFLATE compression

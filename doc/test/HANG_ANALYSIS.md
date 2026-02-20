@@ -12,7 +12,7 @@ Out of ~180 @skip/@pending tests, only **8 tests timeout** (120s). Root causes i
 ### 1. `test/unit/std/env_spec.spl` - TIMEOUT
 
 **Import:** `use shell.env`
-**Module:** `/home/ormastes/dev/pub/simple/src/std/shell/env.spl`
+**Module:** `/home/ormastes/dev/pub/simple/src/lib/shell/env.spl`
 
 **Root Cause:** FFI hang in module initialization
 
@@ -35,7 +35,7 @@ fn cwd() -> text:
 ### 2. `test/unit/std/log_spec.spl` - TIMEOUT
 
 **Import:** `import std_lib.src.log as log` (old syntax)
-**Module:** `/home/ormastes/dev/pub/simple/src/std/log.spl` (different path!)
+**Module:** `/home/ormastes/dev/pub/simple/src/lib/log.spl` (different path!)
 
 **Root Cause:** Module-level FFI call during initialization
 

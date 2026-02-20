@@ -489,7 +489,7 @@ Before proceeding, consider:
 ## Files to Review
 
 **Implementation:**
-- `src/std/gpu/*.spl` - Core GPU interface
+- `src/lib/gpu/*.spl` - Core GPU interface
 - `src/lib/torch/*.spl` - PyTorch FFI backend
 
 **Examples:**

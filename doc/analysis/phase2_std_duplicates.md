@@ -1,7 +1,7 @@
 # Phase 2: Standard Library Duplication Analysis
 
 **Date:** 2026-02-14
-**Scope:** src/std/ directory (899 .spl files, 184,679 lines)
+**Scope:** src/lib/ directory (899 .spl files, 184,679 lines)
 **Analysis Method:** Sampled duplication detection on largest 100 files
 **Total Files Analyzed:** 50+ key modules
 **Finding:** 10 semantic duplications across core utility modules
@@ -10,7 +10,7 @@
 
 ## Executive Summary
 
-The src/std/ directory contains significant **semantic duplication** of fundamental algorithms across multiple utility modules. While the small "duplication" measurements appear modest (51 estimated lines), this masks a deeper architectural issue: **core algorithms are replicated across 5-7 utility modules, creating maintenance burden and inconsistent implementations**.
+The src/lib/ directory contains significant **semantic duplication** of fundamental algorithms across multiple utility modules. While the small "duplication" measurements appear modest (51 estimated lines), this masks a deeper architectural issue: **core algorithms are replicated across 5-7 utility modules, creating maintenance burden and inconsistent implementations**.
 
 ### Key Metrics
 
@@ -531,15 +531,15 @@ fn median_sorted(arr):    # Assumes pre-sorted, integer division
 ## Files Affected by Consolidation
 
 ### Primary (Duplicates to remove)
-- `src/std/search_utils.spl` - remove: linear_search, binary_search, find_min, find_max, count_occurrences
-- `src/std/list_utils.spl` - remove: is_sorted, reverse_list, take, drop
-- `src/std/comparator_utils.spl` - remove: is_sorted, median
-- `src/std/collection_utils.spl` - remove: remove_duplicates, median
+- `src/lib/search_utils.spl` - remove: linear_search, binary_search, find_min, find_max, count_occurrences
+- `src/lib/list_utils.spl` - remove: is_sorted, reverse_list, take, drop
+- `src/lib/comparator_utils.spl` - remove: is_sorted, median
+- `src/lib/collection_utils.spl` - remove: remove_duplicates, median
 
 ### Secondary (Add re-exports)
-- `src/std/algorithm_utils.spl` - consolidate canonical versions
-- `src/std/search_utils.spl` - add re-exports for backward compatibility
-- `src/std/list_utils.spl` - add re-exports for backward compatibility
+- `src/lib/algorithm_utils.spl` - consolidate canonical versions
+- `src/lib/search_utils.spl` - add re-exports for backward compatibility
+- `src/lib/list_utils.spl` - add re-exports for backward compatibility
 
 ### Tests Affected
 - `test/unit/std/algorithm_utils_spec.spl` - add cases for re-exported functions

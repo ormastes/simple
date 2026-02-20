@@ -11,7 +11,7 @@ Created **3 more advanced utility modules** with **150+ functions** totaling **1
 
 ## Modules Created (Part 3)
 
-### 11. `src/std/range_utils.spl` (600 lines, 50+ functions)
+### 11. `src/lib/range_utils.spl` (600 lines, 50+ functions)
 **Range and interval operations**
 
 #### Range Construction
@@ -42,7 +42,7 @@ Created **3 more advanced utility modules** with **150+ functions** totaling **1
 - `normalize_range`, `range_complement` - Utilities
 - `range_equals`, `range_before`, `range_after` - Comparison
 
-### 12. `src/std/comparator_utils.spl` (550 lines, 50+ functions)
+### 12. `src/lib/comparator_utils.spl` (550 lines, 50+ functions)
 **Comparison and ordering operations**
 
 #### Comparison Results
@@ -82,7 +82,7 @@ Created **3 more advanced utility modules** with **150+ functions** totaling **1
 #### Lexicographic
 - `compare_arrays` - Array comparison
 
-### 13. `src/std/predicate_utils.spl` (480 lines, 50+ functions)
+### 13. `src/lib/predicate_utils.spl` (480 lines, 50+ functions)
 **Predicate combinators and logical operations**
 
 #### Basic Combinators

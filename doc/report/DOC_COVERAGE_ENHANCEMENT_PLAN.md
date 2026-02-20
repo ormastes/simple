@@ -61,7 +61,7 @@ doc:complete                  # Has all required documentation
 doc:incomplete                # Partial documentation
 
 # Scope Tags (auto-generated from file path)
-scope:stdlib      # src/std/
+scope:stdlib      # src/lib/
 scope:core        # src/compiler_core/
 scope:lib         # src/lib/
 scope:app         # src/app/
@@ -139,7 +139,7 @@ doc_coverage {
     default_threshold 70
 
     thresholds {
-        "src/std/" 90
+        "src/lib/" 90
         "src/compiler_core/" 75
         "src/lib/" 80
         "src/app/" 50
@@ -178,7 +178,7 @@ simple stats                              # Include doc coverage in output
 simple stats --doc-coverage-only          # Show only doc coverage
 simple stats --format=json                # JSON export
 simple stats --format=csv                 # CSV export
-simple stats --scope=src/std/             # Filter by scope
+simple stats --scope=src/lib/             # Filter by scope
 
 # Documentation coverage standalone
 simple doc-coverage                       # Full report
@@ -381,7 +381,7 @@ simple build --warn-docs-fail-on-error    # Exit 1 on warnings
 
 ## Success Metrics
 
-1. **Coverage:** `simple stats` shows ≥90% doc coverage for `src/std/`
+1. **Coverage:** `simple stats` shows ≥90% doc coverage for `src/lib/`
 2. **Warnings:** `simple build --warn-docs` shows all undocumented public functions
 3. **Reporting:** `simple stats --format=json` exports complete coverage data
 4. **Thresholds:** Threshold system catches below-threshold modules

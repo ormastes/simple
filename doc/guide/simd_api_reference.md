@@ -2,7 +2,7 @@
 
 **Status:** ⚠️ API DESIGN ONLY - No code generation implemented
 
-**Location:** `src/std/simd.spl` (390 lines)
+**Location:** `src/lib/simd.spl` (390 lines)
 
 **Implemented:** API surface, platform detection stubs
 **Not Implemented:** AVX2 codegen, NEON codegen, auto-vectorization, actual intrinsics
@@ -402,7 +402,7 @@ See `COMPREHENSIVE_IMPLEMENTATION_PLAN_2026-02-14.md` Section 2 for complete pla
 
 ## See Also
 
-- `src/std/simd.spl` - API surface definition
+- `src/lib/simd.spl` - API surface definition
 - `src/compiler/mir_opt/auto_vectorize.spl` - Auto-vectorization stub
 - `src/compiler/mir_opt/simd_lowering.spl` - SIMD lowering pass
 - `COMPREHENSIVE_IMPLEMENTATION_PLAN_2026-02-14.md` - Implementation plan

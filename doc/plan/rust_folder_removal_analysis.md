@@ -28,10 +28,10 @@ These components have been completely replaced by Simple implementations:
 | **type** | 6,605 | Type system in Simple | `src/compiler/type_infer.spl` |
 | **hir-core** | 1,390 | HIR in Simple | `src/compiler/hir*.spl` |
 | **loader** | 11,156 | Module loading in Simple | `src/compiler/loader/` |
-| **dependency_tracker** | 2,161 | Already in Simple | `src/std/dependency_tracker/` |
-| **sdn** | 3,779 | SDN parser in Simple | `src/std/sdn/` |
+| **dependency_tracker** | 2,161 | Already in Simple | `src/lib/dependency_tracker/` |
+| **sdn** | 3,779 | SDN parser in Simple | `src/lib/sdn/` |
 | **lib** | 33 | Minimal utilities | Not needed |
-| **log** | 942 | Logging in Simple | `src/std/log.spl` |
+| **log** | 942 | Logging in Simple | `src/lib/log.spl` |
 
 **Total to delete:** 242,530 lines
 
@@ -150,7 +150,7 @@ extern class CraneliftContext:
 
 | Crate | Lines | Decision | Action |
 |-------|-------|----------|--------|
-| **common** | 5,325 | Migrate | Move to Simple (`src/std/common/`) - already exists! |
+| **common** | 5,325 | Migrate | Move to Simple (`src/lib/common/`) - already exists! |
 | **native_loader** | 1,263 | FFI | Symbol loading via FFI |
 | **wasm-runtime** | 1,803 | Keep | Future WASM support |
 | **simd** | 2,241 | FFI | SIMD operations via FFI |
@@ -271,8 +271,8 @@ cd ..
    sudo apt-get install libgc-dev
 
    # Create FFI wrapper
-   vi src/std/gc_bdwgc.spl
-   simple ffi-gen src/std/gc_bdwgc.spl
+   vi src/lib/gc_bdwgc.spl
+   simple ffi-gen src/lib/gc_bdwgc.spl
 
    # Update runtime to use bdwgc
    # ... code changes ...

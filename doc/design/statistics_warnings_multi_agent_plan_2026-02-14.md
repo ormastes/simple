@@ -338,8 +338,8 @@ Enable `<>` generic syntax in runtime parser and interpreter. Currently blocked 
 
 3. **Integration tests**
    - Use generics in real code (not just unit tests)
-   - `src/std/collections/vec.spl` - generic vector
-   - `src/std/option.spl` - generic option type
+   - `src/lib/collections/vec.spl` - generic vector
+   - `src/lib/option.spl` - generic option type
 
 ##### 2.7: Compiler Tests
 1. **Update `test/unit/compiler/generic_template_spec.spl`**
@@ -487,8 +487,8 @@ If any task fails:
 - [ ] `src/compiler_core/types.spl` - Generic type representation
 - [ ] `src/compiler_core/interpreter/eval.spl` - Generic evaluation
 - [ ] `test/unit/compiler_core/generic_types_spec.spl` - Comprehensive tests
-- [ ] `src/std/collections/vec.spl` - Generic vector example
-- [ ] `src/std/option.spl` - Generic option type
+- [ ] `src/lib/collections/vec.spl` - Generic vector example
+- [ ] `src/lib/option.spl` - Generic option type
 - [ ] `doc/guide/generic_types.md` - User guide
 
 ---

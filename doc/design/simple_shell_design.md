@@ -332,5 +332,5 @@ task coverage:
 - `rust/compiler/src/lexer/` - new operators (`!?`, `>+`, `!>`, `@()`)
 - `rust/compiler/src/parser/` - task syntax, command execution
 - `rust/runtime/src/shell/` - shell execution engine (new)
-- `src/std/src/shell.spl` - standard library module (new)
+- `src/lib/src/shell.spl` - standard library module (new)
 - `src/app/cli/main.spl` - CLI integration for `.ssh` files

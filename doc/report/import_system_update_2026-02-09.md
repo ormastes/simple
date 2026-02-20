@@ -36,7 +36,7 @@ fn main():
 
 **Test WITH Export Statement:**
 ```simple
-# File: src/std/text.spl (existing stdlib module)
+# File: src/lib/text.spl (existing stdlib module)
 fn char_code(c: text) -> i64:
     # ... implementation ...
 
@@ -63,7 +63,7 @@ The testing reveals **two distinct import systems:**
 | Type | Location | Behavior | Status |
 |------|----------|----------|--------|
 | **Local Modules** | Current directory, /tmp | Auto-exposes all functions | ✅ Working |
-| **Stdlib Modules** | src/std/, src/app/ | Requires export processing | ❌ Broken |
+| **Stdlib Modules** | src/lib/, src/app/ | Requires export processing | ❌ Broken |
 
 ---
 
@@ -96,7 +96,7 @@ use my_module.{func}  # Works even without export statement
 
 ❌ **Stdlib module imports (even with exports):**
 ```simple
-# Modules in src/std/ or src/app/
+# Modules in src/lib/ or src/app/
 use std.text.{string_trim}  # Fails: "function not found"
 use app.io.{env_get}  # Fails: "function not found"
 ```
@@ -149,7 +149,7 @@ The confusion arose because:
 |-----------|----------------|-------------|---------|
 | Local module with exports | /tmp | Yes | ✅ Works |
 | Local module without exports | /tmp | No | ✅ Works |
-| Stdlib module with exports | src/std | Yes | ❌ Fails |
+| Stdlib module with exports | src/lib | Yes | ❌ Fails |
 | App module with exports | src/app | Yes | ❌ Fails |
 
 ---
@@ -167,7 +167,7 @@ The confusion arose because:
 **Approach:** Copy stdlib functions to local modules in project directory
 ```bash
 # Copy Phase 2 helpers to project
-cp src/std/helpers.spl my_project/helpers.spl
+cp src/lib/helpers.spl my_project/helpers.spl
 
 # Import from local copy
 use helpers.{string_trim, array_append_all}  # ✅ Works!
@@ -193,7 +193,7 @@ use helpers.{string_trim, array_append_all}  # ✅ Works!
 
 ### Immediate (Phase 2 Workaround)
 
-1. ✅ Use `src/std/helpers.spl` inline implementations
+1. ✅ Use `src/lib/helpers.spl` inline implementations
 2. ✅ Copy functions into test files as needed
 3. ✅ Document that stdlib imports are broken
 
@@ -253,7 +253,7 @@ use helpers.{string_trim, array_append_all}  # ✅ Works!
 - Deployment: **Blocked by stdlib import system**
 
 **Workaround Available:**
-Use inline helpers from `src/std/helpers.spl` until stdlib imports fixed
+Use inline helpers from `src/lib/helpers.spl` until stdlib imports fixed
 
 ---
 

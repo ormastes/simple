@@ -5,7 +5,7 @@
 
 ## Executive Summary
 
-Added **13 new skip functions** to `src/std/spec.spl` that **ACTUALLY skip tests** based on platform and runtime conditions. Not just comments - these are real, functional skip mechanisms with platform detection.
+Added **13 new skip functions** to `src/lib/spec.spl` that **ACTUALLY skip tests** based on platform and runtime conditions. Not just comments - these are real, functional skip mechanisms with platform detection.
 
 ## What Was Implemented
 
@@ -120,7 +120,7 @@ describe "Advanced Features":
 ## Files Modified
 
 **1 file changed:**
-- `src/std/spec.spl` (+90 lines)
+- `src/lib/spec.spl` (+90 lines)
   - Added 13 new skip functions
   - Added 4 platform detection functions
   - Updated exports

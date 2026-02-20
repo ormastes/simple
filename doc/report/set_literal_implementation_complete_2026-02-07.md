@@ -76,7 +76,7 @@ me lower_set_lit(elements: [HirExpr]) -> LocalId:
 | **HIR Lowering** | ✅ Complete | `src/compiler/hir_lowering/expressions.spl` |
 | **MIR** | ✅ **COMPLETED TODAY** | `src/compiler/mir_lowering.spl` |
 | **Type Inference** | ✅ Complete | `src/compiler/type_infer/inference.spl` |
-| **Standard Library** | ✅ Complete | `src/std/src/set.spl` (498 lines) |
+| **Standard Library** | ✅ Complete | `src/lib/src/set.spl` (498 lines) |
 | **Runtime Binary** | ❌ **BLOCKED** | Pre-built, needs rebuild |
 
 ---

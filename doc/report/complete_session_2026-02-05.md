@@ -32,7 +32,7 @@ When ready, remove tags: ["skip"] and uncomment the import.
 
 ### Root Cause
 
-Three issues in `src/std/src/parser/treesitter.spl`:
+Three issues in `src/lib/src/parser/treesitter.spl`:
 
 1. **Wrong import syntax** (braces `{}` instead of parentheses `()`)
 2. **Missing exports** (`Lexer`, `Token`, `TokenKind`)
@@ -96,7 +96,7 @@ class Lexer:
 
 **Examples**:
 - `src/compiler/dependency/import_resolver.spl.bak`
-- `src/std/src/testing/mock.spl.bak`
+- `src/lib/src/testing/mock.spl.bak`
 - `src/app/info/main.spl.bak`
 - And 17 more...
 
@@ -377,7 +377,7 @@ The module is functional but has placeholder implementations:
 **New bugs should**:
 - Reference files in current Pure Simple codebase
 - Include reproducible test cases
-- Use current paths (`src/app/`, `src/lib/`, `src/std/`)
+- Use current paths (`src/app/`, `src/lib/`, `src/lib/`)
 
 **Example good bug report**:
 ```sdn

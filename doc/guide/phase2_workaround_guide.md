@@ -9,8 +9,8 @@
 ## Background
 
 Phase 2 implemented 415 lines of SFFI wrappers (65+ functions) across three domains:
-- **String Methods** (`src/std/text.spl`) - 8 functions
-- **Array Methods** (`src/std/array.spl`) - 7 functions
+- **String Methods** (`src/lib/text.spl`) - 8 functions
+- **Array Methods** (`src/lib/array.spl`) - 7 functions
 - **System/Process** (`src/lib/ffi/system.spl`) - 50+ functions
 
 All implementations are correct and tested, but the runtime import system prevents using them:
@@ -63,7 +63,7 @@ describe "My Feature":
 
 ## Inline Helper Module
 
-**File:** `src/std/helpers.spl`
+**File:** `src/lib/helpers.spl`
 
 This module provides copy-pasteable inline implementations of the most useful Phase 2 functions:
 
@@ -89,7 +89,7 @@ This module provides copy-pasteable inline implementations of the most useful Ph
 
 ### Step 1: Copy Function Definition
 
-Open `src/std/helpers.spl` and copy the function you need:
+Open `src/lib/helpers.spl` and copy the function you need:
 
 ```simple
 fn string_trim_inline(s: text) -> text:
@@ -118,7 +118,7 @@ Add the function definition at the **module level** (not inside describe blocks)
 ```simple
 # my_feature_spec.spl
 
-# Inline helpers (copy from src/std/helpers.spl)
+# Inline helpers (copy from src/lib/helpers.spl)
 fn string_trim_inline(s: text) -> text:
     # ... paste implementation ...
     result
@@ -333,12 +333,12 @@ Once the runtime import system is fixed, all Phase 2 functions will be immediate
 ## References
 
 - **Phase 2 Implementations:**
-  - `src/std/text.spl` - String SFFI (+70 lines)
-  - `src/std/array.spl` - Array SFFI (+85 lines)
+  - `src/lib/text.spl` - String SFFI (+70 lines)
+  - `src/lib/array.spl` - Array SFFI (+85 lines)
   - `src/lib/ffi/system.spl` - System/Process SFFI (260 lines)
 
 - **Inline Helpers:**
-  - `src/std/helpers.spl` - Copy-paste inline implementations
+  - `src/lib/helpers.spl` - Copy-paste inline implementations
 
 - **Documentation:**
   - `doc/report/phase2_sffi_wrappers_complete_2026-02-09.md` - Full Phase 2 report

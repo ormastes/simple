@@ -273,7 +273,7 @@ val module = parser.parse_full()
 
 ## Specialized Parsers (Not Duplicates)
 
-### SDN Parser (`src/std/sdn/parser.spl`)
+### SDN Parser (`src/lib/sdn/parser.spl`)
 
 **Purpose:** Parse SDN data format (Simple's config/data language)
 **Language:** SDN (not Simple)

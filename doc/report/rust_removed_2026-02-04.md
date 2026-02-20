@@ -43,7 +43,7 @@ Simple v0.1.0
 **All functionality in Simple:**
 - Compiler: `src/compiler/` (241 files, 3.3 MB)
 - Applications: `src/app/` (340 files, 76K lines)
-- Standard library: `src/std/` (many files)
+- Standard library: `src/lib/` (many files)
 - Tests: `test/` (extensive test suite)
 
 **Statistics:**

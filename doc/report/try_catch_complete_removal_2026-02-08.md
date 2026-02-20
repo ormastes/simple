@@ -175,7 +175,7 @@ if error != "":
   - May be used when/if exceptions are implemented in the future
 
 ### Documentation Comments (kept)
-- `src/std/spec.spl:17` - "NOTE: No static fn, no try/catch/throw"
+- `src/lib/spec.spl:17` - "NOTE: No static fn, no try/catch/throw"
 - `src/app/desugar/rewriter.spl:21` - "NOTE: No try/catch/throw - Simple does not support exceptions"
 - These explain the limitation (as requested)
 
@@ -239,7 +239,7 @@ val result = risky_operation_safe() ?? fallback_value
 
 To fully implement Result-based error handling:
 
-1. **Define Result enum** in `src/std/result.spl`:
+1. **Define Result enum** in `src/lib/result.spl`:
    ```simple
    enum Result<T, E>:
        Ok(value: T)

@@ -6,7 +6,7 @@
 
 ## Objective
 
-Replace all hardcoded `"\n"` string literals with the `NL` constant from `src/std/text.spl` for better maintainability and cross-platform compatibility.
+Replace all hardcoded `"\n"` string literals with the `NL` constant from `src/lib/text.spl` for better maintainability and cross-platform compatibility.
 
 ## Strategy
 
@@ -28,7 +28,7 @@ Replace all hardcoded `"\n"` string literals with the `NL` constant from `src/st
 
 ## Exceptions (Do NOT change)
 
-1. **src/std/text.spl** - NL constant definition itself (lines 113-114, 122-126, 410, 410)
+1. **src/lib/text.spl** - NL constant definition itself (lines 113-114, 122-126, 410, 410)
 2. **test files** - Newline constant tests (test_newline_*.spl, newline_constants_spec.spl)
 3. **Raw strings** - `r"regex\n"` patterns
 4. **Comments** - `# Example: "hello\n"`
@@ -50,7 +50,7 @@ Replace all hardcoded `"\n"` string literals with the `NL` constant from `src/st
 - Focus: cli/, mcp/, io/, test_runner_new/
 - Files: ~200 occurrences
 
-### Agent 4: src/std/ (200 files)
+### Agent 4: src/lib/ (200 files)
 - Focus: All stdlib modules (EXCEPT text.spl)
 - Files: ~250 occurrences
 

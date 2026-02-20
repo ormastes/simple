@@ -11,7 +11,7 @@ Created shared error handling infrastructure (`std.error_core` and `std.error_fo
 
 ### 1. New Modules Created
 
-#### `src/std/error_core.spl` (249 lines)
+#### `src/lib/error_core.spl` (249 lines)
 Base error handling primitives:
 - **ErrorBase struct** - Consistent error structure with message, location, kind, and cause
 - **Creation functions** - `error_new`, `error_with_file`, `error_with_kind`, `error_with_cause`, `error_simple`
@@ -19,7 +19,7 @@ Base error handling primitives:
 - **Option pattern** - Uses nil/ErrorBase (NO try/catch/throw)
 - **Zero allocation** - No overhead when no errors occur
 
-#### `src/std/error_format.spl` (256 lines)
+#### `src/lib/error_format.spl` (256 lines)
 Consistent error formatting utilities:
 - **Standard format** - `error[KIND]: file:line:col: message`
 - **Message formatting** - `format_error_message`, `format_error_compact`, `format_error_with_context`
@@ -48,8 +48,8 @@ Tests for error_format utilities:
 
 #### Symlinks Created
 ```bash
-test/lib/std/error_core.spl -> ../../../src/std/error_core.spl
-test/lib/std/error_format.spl -> ../../../src/std/error_format.spl
+test/lib/std/error_core.spl -> ../../../src/lib/error_core.spl
+test/lib/std/error_format.spl -> ../../../src/lib/error_format.spl
 ```
 
 ## Architecture
@@ -92,7 +92,7 @@ error[parse]: main.spl:42:15: unexpected token
 ### Current Duplication Patterns
 
 **Found 12 `format_error` implementations across:**
-- `src/std/error.spl` - Full trait-based error system (565 lines)
+- `src/lib/error.spl` - Full trait-based error system (565 lines)
 - `src/compiler_core/error.spl` - Core parser errors (166 lines)
 - `src/compiler/backend/codegen_errors.spl` - Codegen errors (247 lines)
 - `src/compiler/error_formatter.spl` - Type inference errors
@@ -122,8 +122,8 @@ error[parse]: main.spl:42:15: unexpected token
 ## Migration Strategy
 
 ### Phase 1: Core Infrastructure ✅ COMPLETE
-- [x] Create `src/std/error_core.spl`
-- [x] Create `src/std/error_format.spl`
+- [x] Create `src/lib/error_core.spl`
+- [x] Create `src/lib/error_format.spl`
 - [x] Create test files
 - [x] Create symlinks
 
@@ -141,7 +141,7 @@ error[parse]: main.spl:42:15: unexpected token
    - `src/compiler/resolve.spl` (error handling)
 
 3. **High complexity (defer):**
-   - `src/std/error.spl` (trait-based system)
+   - `src/lib/error.spl` (trait-based system)
    - `src/compiler_core/error.spl` (easyfix suggestions)
 
 **Migration pattern for each module:**
@@ -182,8 +182,8 @@ For each migrated module:
 
 ### Build Verification ✅
 ```bash
-bin/simple build src/std/error_core.spl      # SUCCESS
-bin/simple build src/std/error_format.spl    # SUCCESS
+bin/simple build src/lib/error_core.spl      # SUCCESS
+bin/simple build src/lib/error_format.spl    # SUCCESS
 bin/simple build                              # SUCCESS
 ```
 
@@ -264,8 +264,8 @@ bin/simple build                              # SUCCESS
 ---
 
 **Files Created:**
-- `src/std/error_core.spl` (249 lines)
-- `src/std/error_format.spl` (256 lines)
+- `src/lib/error_core.spl` (249 lines)
+- `src/lib/error_format.spl` (256 lines)
 - `test/unit/std/error_core_spec.spl` (79 lines)
 - `test/unit/std/error_format_spec.spl` (96 lines)
 - `test/lib/std/error_core.spl` (symlink)

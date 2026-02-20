@@ -1,7 +1,7 @@
 # GZIP Compression Module
 
 **Refactored:** 2026-02-12
-**Original:** `src/std/gzip_utils.spl` (1,891 lines)
+**Original:** `src/lib/nogc_sync_mut/compression/gzip/` (1,891 lines)
 **New Structure:** 8 focused modules (~150-400 lines each)
 
 ---

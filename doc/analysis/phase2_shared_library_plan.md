@@ -101,7 +101,7 @@ src/compiler/backend/backend_extensions.spl  # NEW (optional helper functions)
 ### Target Architecture
 
 ```
-src/std/config_parser.spl           # NEW (200-250 lines)
+src/lib/config_parser.spl           # NEW (200-250 lines)
   - parse_sdn_config()
   - strip_quotes()
   - get_config_field/int/bool/float()
@@ -117,7 +117,7 @@ src/app/build/config.spl            # REFACTOR (100 → 45 lines)
 
 **Phase 1: Create Base Parser (2-3 hours)**
 
-File: `src/std/config_parser.spl`
+File: `src/lib/config_parser.spl`
 
 ```simple
 # Core types
@@ -380,9 +380,9 @@ Apply same pattern to:
 ### Target Architecture
 
 ```
-src/std/string_core.spl             # NEW (150-200 lines, canonical implementations)
-src/std/text.spl                  # KEEP (existing, imports from string_core)
-src/std/template/utilities.spl     # REFACTOR (remove duplicates)
+src/lib/string_core.spl             # NEW (150-200 lines, canonical implementations)
+src/lib/text.spl                  # KEEP (existing, imports from string_core)
+src/lib/template/utilities.spl     # REFACTOR (remove duplicates)
 src/compiler_core/types.spl                  # REFACTOR (delegate to string_core)
 ```
 
@@ -390,7 +390,7 @@ src/compiler_core/types.spl                  # REFACTOR (delegate to string_core
 
 **Phase 1: Create String Core (2 hours)**
 
-File: `src/std/string_core.spl`
+File: `src/lib/string_core.spl`
 
 ```simple
 # ============================================================================
@@ -570,7 +570,7 @@ export str_concat, str_len, str_eq, str_slice, str_char_at, str_contains, str_st
 
 **Phase 3: Cleanup Template Utilities (30 min)**
 
-File: `src/std/template/utilities.spl`
+File: `src/lib/template/utilities.spl`
 
 Remove functions now in string_core:
 - Lines 40-180 (str_* functions)
@@ -600,10 +600,10 @@ Keep template-specific utilities:
 ### Target Architecture
 
 ```
-src/std/error_core.spl              # NEW (base trait, formatting)
-src/std/error_format.spl            # NEW (formatting utilities)
+src/lib/error_core.spl              # NEW (base trait, formatting)
+src/lib/error_format.spl            # NEW (formatting utilities)
 src/compiler_core/error.spl                  # REFACTOR (uses error_core)
-src/std/error.spl                   # REFACTOR (implements error_core)
+src/lib/error.spl                   # REFACTOR (implements error_core)
 src/compiler/backend/codegen_errors.spl  # REFACTOR (implements error_core)
 ```
 
@@ -711,7 +711,7 @@ jj restore @-  # Return to previous state
 wc -l src/compiler_core/backend_types.spl  # 158
 wc -l src/compiler/backend/backend_types.spl  # 400+
 wc -l src/app/*/config.spl  # ~600
-wc -l src/std/text.spl src/std/template/utilities.spl  # 500+
+wc -l src/lib/text.spl src/lib/template/utilities.spl  # 500+
 
 # Test coverage
 bin/simple test --coverage

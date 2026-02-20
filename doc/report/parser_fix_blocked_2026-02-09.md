@@ -16,11 +16,11 @@ Successfully removed all `GPU` enum variants from source files, but parser error
 
 **Original Error:**
 ```
-Failed to parse module path="src/std/src/dl/config.spl"
+Failed to parse module path="src/lib/src/dl/config.spl"
 error=Unexpected token: expected identifier, found Gpu
 ```
 
-**Location:** Runtime parser fails when loading `src/std/src/dl/config.spl`
+**Location:** Runtime parser fails when loading `src/lib/src/dl/config.spl`
 
 **Impact:** All PyTorch examples fail to load because they import `std.src.dl.config.{Device}`
 
@@ -30,7 +30,7 @@ error=Unexpected token: expected identifier, found Gpu
 
 ### Files Successfully Updated (4 files)
 
-#### 1. src/std/src/dl/config.spl
+#### 1. src/lib/src/dl/config.spl
 ```simple
 # BEFORE:
 enum Device:
@@ -52,7 +52,7 @@ enum Device:
 - Updated `gpu()` helper: `Device.GPU` → `Device.CUDA(0)`
 - Moved docstring outside enum body (removed "GPU" text from inside enum)
 
-#### 2. src/std/src/dl/config_loader.spl
+#### 2. src/lib/src/dl/config_loader.spl
 ```simple
 # BEFORE:
 fn parse_device(s: text) -> Device:
@@ -212,7 +212,7 @@ Wait for project maintainers to release new pre-built runtime binary with update
 
 ### Option 3: Use Old Source Files
 
-Revert `src/std/src/dl/config.spl` changes to keep `GPU` variant:
+Revert `src/lib/src/dl/config.spl` changes to keep `GPU` variant:
 ```simple
 enum Device:
     CPU
@@ -254,8 +254,8 @@ Remove `std.src.dl.config` imports from examples, hardcode device selection.
 ### ✅ Completed
 
 **Source Code Fixes (4 files):**
-- src/std/src/dl/config.spl
-- src/std/src/dl/config_loader.spl
+- src/lib/src/dl/config.spl
+- src/lib/src/dl/config_loader.spl
 - src/compiler/parser_types.spl
 - src/compiler/hir_types.spl
 
@@ -293,12 +293,12 @@ Remove `std.src.dl.config` imports from examples, hardcode device selection.
 
 ### Source Files (4 files)
 
-1. `src/std/src/dl/config.spl`
+1. `src/lib/src/dl/config.spl`
    - Removed GPU from Device enum
    - Updated is_gpu(), cuda_id(), to_string()
    - Updated gpu() helper function
 
-2. `src/std/src/dl/config_loader.spl`
+2. `src/lib/src/dl/config_loader.spl`
    - Updated parse_device(): "gpu" → CUDA(0)
 
 3. `src/compiler/parser_types.spl`

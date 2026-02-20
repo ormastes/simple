@@ -269,7 +269,7 @@ fn char_to_ascii(ch: text) -> i64:
 ```
 
 **Extraction Opportunity:**
-Create `src/std/ascii.spl` or `src/compiler/backend/native/ascii_utils.spl`:
+Create `src/lib/ascii.spl` or `src/compiler/backend/native/ascii_utils.spl`:
 
 ```simple
 fn char_to_ascii(ch: text) -> i64:

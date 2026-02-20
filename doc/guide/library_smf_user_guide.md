@@ -151,7 +151,7 @@ Build the complete standard library:
 
 ```bash
 # Compile stdlib
-simple scripts/compile_with_objects.spl --input-dir=src/std
+simple scripts/compile_with_objects.spl --input-dir=src/lib
 
 # Build library
 simple scripts/build_libstd.spl --verbose
@@ -449,7 +449,7 @@ sudo cp build/lib/libstd.lsm /usr/lib/simple/
 # .github/workflows/build.yml
 - name: Build Standard Library
   run: |
-    simple scripts/compile_with_objects.spl --input-dir=src/std
+    simple scripts/compile_with_objects.spl --input-dir=src/lib
     simple scripts/build_libstd.spl
     simple scripts/lib_tool.spl verify build/lib/libstd.lsm
 
@@ -504,7 +504,7 @@ Error: Object file not found for module 'std/io/mod'
 
 2. Use helper script:
    ```bash
-   simple scripts/compile_with_objects.spl --input-dir=src/std
+   simple scripts/compile_with_objects.spl --input-dir=src/lib
    ```
 
 3. Check object location:

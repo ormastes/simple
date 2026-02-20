@@ -48,7 +48,7 @@ Phase 2 focuses on platform detection, data validation, and utility functions th
 
 ### Phase 2.3: Utility Functions (3 TODOs)
 
-**Files:** `src/runtime/hooks.spl`, `src/std/spec.spl`, `src/compiler/monomorphize_integration.spl`
+**Files:** `src/runtime/hooks.spl`, `src/lib/spec.spl`, `src/compiler/monomorphize_integration.spl`
 
 **Tasks:**
 1. **TODO #198:** Template variable replacement

@@ -12,7 +12,7 @@ Successfully implemented complete RC/ARC reference counting system with:
 - ✅ 3 allocator functions (sys_malloc, sys_free, sys_realloc)
 - ✅ 23 dispatcher registrations
 - ✅ 23 prelude registrations
-- ✅ Complete Simple API (src/std/rc.spl)
+- ✅ Complete Simple API (src/lib/rc.spl)
 - ✅ Low-level FFI verification (all functions work)
 - ⚠️ Module system issue prevents high-level tests
 
@@ -89,7 +89,7 @@ Strong count after drop: 0
 4. **rust/compiler/src/interpreter_eval.rs** (+23 lines) ✅
    - Added 23 functions to PRELUDE_EXTERN_FUNCTIONS
 
-5. **src/std/rc.spl** (360 lines) ✅
+5. **src/lib/rc.spl** (360 lines) ✅
    - Complete Rc class
    - Complete Arc class
    - Complete Weak class

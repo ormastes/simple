@@ -199,7 +199,7 @@ M rust/compiler/src/mir/lower/lowering_expr.rs
 
 ```bash
 R src/compiler/dependency/graph.spl
-R src/std/src/set.spl
+R src/lib/src/set.spl
   - Changes reverted - won't work until interpreter supports features
 ```
 

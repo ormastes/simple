@@ -19,7 +19,7 @@ Successfully implemented async/await parser support and discovered that the Simp
   - src/compiler_core/ast.spl
   - src/compiler_core/parser.spl  
   - src/compiler_core/interpreter/eval.spl
-  - src/std/src/dl/config_loader.spl
+  - src/lib/src/dl/config_loader.spl
 - **Lines added:** ~200
 - **Build status:** ✅ Passing
 

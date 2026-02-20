@@ -1,7 +1,7 @@
 # Phase 2: Cross-Module Duplication Analysis
 
 **Analysis Date:** 2026-02-14
-**Scope:** Cross-directory patterns spanning src/core, src/compiler, src/std, src/lib, src/app
+**Scope:** Cross-directory patterns spanning src/core, src/compiler, src/lib, src/lib, src/app
 **Threshold:** High precision (0.90+ cosine similarity)
 **Method:** Manual code inspection across representative files
 
@@ -12,8 +12,8 @@ Cross-module duplication analysis reveals **7 major architectural patterns** req
 ### Key Findings
 
 1. **Backend Type Definitions:** Duplicated across `src/compiler_core/backend_types.spl` (158 lines) and `src/compiler/backend/backend_types.spl` (~400 lines)
-2. **String Utilities:** 3-way duplication across `src/compiler_core/types.spl`, `src/std/text.spl`, `src/std/template/utilities.spl`
-3. **Error Handling:** 3 separate hierarchies in `src/compiler_core/error.spl`, `src/std/error.spl`, `src/compiler/backend/codegen_errors.spl`
+2. **String Utilities:** 3-way duplication across `src/compiler_core/types.spl`, `src/lib/text.spl`, `src/lib/template/utilities.spl`
+3. **Error Handling:** 3 separate hierarchies in `src/compiler_core/error.spl`, `src/lib/error.spl`, `src/compiler/backend/codegen_errors.spl`
 4. **Loop Patterns:** 955 occurrences of `while i < arr.len()` manual iteration across 244 files
 5. **Integer-to-String Conversion:** Repeated 70+ line implementation in multiple locations
 6. **Configuration Parsing:** 20+ implementations of line-based config parsers with similar structure
@@ -94,8 +94,8 @@ enum BackendKind:
 ### Locations
 
 1. **Core Simple:** `src/compiler_core/types.spl` (lines 14-48)
-2. **Standard Library:** `src/std/text.spl` (char_code lookup, 387+)
-3. **Template Engine:** `src/std/template/utilities.spl` (lines 40-180)
+2. **Standard Library:** `src/lib/text.spl` (char_code lookup, 387+)
+3. **Template Engine:** `src/lib/template/utilities.spl` (lines 40-180)
 4. **Legacy Concatenated:** `doc/analysis/stdlib_utils_concatenated.spl` (11,917+)
 
 ### Duplicated Functions (High Confidence)
@@ -127,7 +127,7 @@ fn str_starts_with(s: text, prefix: text) -> bool:
 fn str_ends_with(s: text, suffix: text) -> bool:
     s.ends_with(suffix)
 
-# src/std/template/utilities.spl (lines 62-73)
+# src/lib/template/utilities.spl (lines 62-73)
 fn str_starts_with(s: text, prefix: text) -> bool:
     if prefix.len() > s.len():
         return false
@@ -150,7 +150,7 @@ fn str_ends_with(s: text, suffix: text) -> bool:
 
 ### Solution
 
-**Unified String Library: `src/std/string_core.spl`**
+**Unified String Library: `src/lib/string_core.spl`**
 
 ```simple
 # Canonical string utilities - delegates to runtime built-ins when available
@@ -167,7 +167,7 @@ fn str_to_lower(s: text) -> text:
 ```
 
 **Migration:**
-1. Create `src/std/string_core.spl` with canonical implementations
+1. Create `src/lib/string_core.spl` with canonical implementations
 2. Update imports: `use std.text_core.{str_starts_with, ...}`
 3. Delete duplicates from template/utilities.spl
 4. Core types delegates to string_core
@@ -182,7 +182,7 @@ fn str_to_lower(s: text) -> text:
 ### Locations
 
 1. **Core Errors:** `src/compiler_core/error.spl` (easyfix suggestions, 158 lines)
-2. **Standard Errors:** `src/std/error.spl` (trait hierarchy, backtrace, 100+ lines)
+2. **Standard Errors:** `src/lib/error.spl` (trait hierarchy, backtrace, 100+ lines)
 3. **Codegen Errors:** `src/compiler/backend/codegen_errors.spl` (CodegenErrorKind enum, 100+ lines)
 
 ### Architectural Differences
@@ -201,7 +201,7 @@ fn str_to_lower(s: text) -> text:
 fn core_error(line: i64, col: i64, message: text):
     print "error[E:core]: line " + int_to_str(line) + ":" + int_to_str(col) + ": " + message
 
-# src/std/error.spl
+# src/lib/error.spl
 trait Error:
     fn message() -> text
     fn source() -> Error?
@@ -227,7 +227,7 @@ struct CodegenError:
 **Layered Error Architecture**
 
 ```simple
-# src/std/error_core.spl - Base definitions
+# src/lib/error_core.spl - Base definitions
 trait ErrorBase:
     fn message() -> text
     fn location() -> (i64, i64)?  # line, col
@@ -237,7 +237,7 @@ enum ErrorSeverity:
     Warning
     Error
 
-# src/std/error_format.spl - Formatting utilities
+# src/lib/error_format.spl - Formatting utilities
 fn format_error(severity: ErrorSeverity, code: text, loc: (i64, i64), msg: text) -> text:
     val (line, col) = loc
     "{severity_str}[{code}]: line {line}:{col}: {msg}"
@@ -294,7 +294,7 @@ while i < arr.len():
 
 ### Examples
 
-**String processing (src/std/text.spl:136-140)**
+**String processing (src/lib/text.spl:136-140)**
 ```simple
 fn text_hash(s: text) -> i64:
     var hash = 2166136261
@@ -306,7 +306,7 @@ fn text_hash(s: text) -> i64:
     hash
 ```
 
-**Array processing (src/std/array.spl:38-43)**
+**Array processing (src/lib/array.spl:38-43)**
 ```simple
 fn array_position(arr, predicate):
     var i = 0
@@ -332,7 +332,7 @@ fn array_position(arr, predicate):
 
 **Option B: Iterator Helpers**
 ```simple
-# src/std/iterator.spl
+# src/lib/iterator.spl
 fn iter_with_index(arr, handler):
     """Iterate with index - handler receives (index, item)"""
     var i = 0
@@ -441,8 +441,8 @@ Found **20 occurrences** of `parse_config` / `load_config` functions across modu
 | build | `src/app/build/config.spl` | ~100 |
 | test | `src/app/test/cpu_aware_test.spl` | ~40 |
 | mcp | `src/app/mcp/fileio_protection.spl` | ~80 |
-| stdlib | `src/std/sdn/parser.spl` | ~150 |
-| dl | `src/std/src/dl/config_loader.spl` | ~70 |
+| stdlib | `src/lib/sdn/parser.spl` | ~150 |
+| dl | `src/lib/src/dl/config_loader.spl` | ~70 |
 
 ### Common Pattern
 
@@ -498,7 +498,7 @@ fn parse_config_file(content: text) -> XyzConfig:
 
 ### Solution
 
-**Unified Config Parser: `src/std/config_parser.spl`**
+**Unified Config Parser: `src/lib/config_parser.spl`**
 
 ```simple
 struct ConfigSection:
@@ -632,7 +632,7 @@ Enable suffixed literal grammar: `42_actor_id` → `ActorId(value: 42)`
 
 ### Solution
 
-**Centralized Type Registry: `src/std/semantic_types.spl`**
+**Centralized Type Registry: `src/lib/semantic_types.spl`**
 
 ```simple
 # ============================================================================
@@ -698,19 +698,19 @@ class Nanos:
    - Timeline: 1-2 hours
 
 2. **Configuration Parser Consolidation** → 1,200-1,500 lines saved
-   - Action: Create `src/std/config_parser.spl`
+   - Action: Create `src/lib/config_parser.spl`
    - Migrate: 7 highest-impact parsers first
    - Timeline: 1-2 days
 
 3. **String Utilities Unification** → 250-300 lines saved
-   - Action: Create `src/std/string_core.spl`
+   - Action: Create `src/lib/string_core.spl`
    - Delete: Template utility duplicates
    - Timeline: 4-6 hours
 
 ### Priority 2 - Medium Impact (Near Term)
 
 4. **Error Handling Consolidation** → 150-200 lines saved
-   - Action: Create `src/std/error_core.spl` base layer
+   - Action: Create `src/lib/error_core.spl` base layer
    - Refactor: Core, std, codegen to use shared base
    - Timeline: 1 day
 
@@ -728,7 +728,7 @@ class Nanos:
    - Timeline: 1 hour
 
 7. **Semantic Types Registry**
-   - Action: Move `src/lib/types.spl` → `src/std/semantic_types.spl`
+   - Action: Move `src/lib/types.spl` → `src/lib/semantic_types.spl`
    - Document: Category organization
    - Timeline: 1 hour
 

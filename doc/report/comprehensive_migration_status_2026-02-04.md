@@ -69,7 +69,7 @@ User correctly identified that migration must cover **BOTH** interpreter AND com
    - value_async.rs (419 lines) - Async values
    - value_pointers.rs (418 lines) - Pointer values
    - value_bridge.rs (750 lines) - Rust ↔ Simple conversion
-   - **Status:** May exist in src/std/runtime_value.spl
+   - **Status:** May exist in src/lib/runtime_value.spl
    - **Need:** Verify and sync
    - **Effort:** 1 day verification, 2 days if missing
 
@@ -250,7 +250,7 @@ FFI dispatch and type conversion layer.
 
 1. **Focus on compiler critical path** - Interpreter is nearly done
 2. **Prioritize error.spl** - Foundational for everything else
-3. **Verify value types exist** - May already be in src/std/
+3. **Verify value types exist** - May already be in src/lib/
 4. **Implement FFI bridge early** - Needed for testing other components
 5. **Defer optional features** - web_compiler, mcp, etc. can wait
 

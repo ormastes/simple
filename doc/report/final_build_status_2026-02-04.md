@@ -169,7 +169,7 @@ rust/ffi_syscalls/src/lib.rs (23 functions)
 rust/runtime/src/syscalls_ffi.rs
 
 # Simple language wrappers
-src/std/common/file_reader.spl
+src/lib/common/file_reader.spl
 
 # Tests
 test/system/ffi/syscalls_test.spl

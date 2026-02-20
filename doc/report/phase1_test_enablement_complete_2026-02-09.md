@@ -18,7 +18,7 @@ Phase 1 successfully enabled 79 previously-skipped tests by implementing missing
 **Impact:** 26 tests enabled
 **Time:** ~3 hours
 **Files Created:**
-- `src/std/table.spl` (415 lines)
+- `src/lib/table.spl` (415 lines)
 - Updated `test/lib/std/features/table_spec.spl`
 
 **Implementation:**
@@ -55,7 +55,7 @@ val grouped = table_group_by(table, "category", "value", "sum")
 **Impact:** 22 tests enabled (15 conceptual + 7 compiler-feature stubs)
 **Time:** ~4 hours
 **Files Created:**
-- `src/std/core/resource.spl` (184 lines)
+- `src/lib/core/resource.spl` (184 lines)
 - Updated `test/lib/std/features/resource_cleanup_spec.spl`
 
 **Implementation:**
@@ -142,8 +142,8 @@ slow_it "boots minimal x86 kernel", fn():
 - QEMU boot tests: 31 tests
 
 ### Code Added: ~600 lines
-- `src/std/table.spl`: 415 lines
-- `src/std/core/resource.spl`: 184 lines
+- `src/lib/table.spl`: 415 lines
+- `src/lib/core/resource.spl`: 184 lines
 - `src/lib/qemu/boot_runner.spl`: +20 lines
 
 ### Files Modified: 5
@@ -210,7 +210,7 @@ fn registry_register(state: RegistryState, name: text) -> RegistryState:
 **Approach:**
 - Two-tier SFFI pattern: `extern fn rt_*` → wrapper function
 - Each wrapper gets 3+ unit tests
-- Follow `src/std/array.spl` and `src/app/io/mod.spl` patterns
+- Follow `src/lib/array.spl` and `src/app/io/mod.spl` patterns
 
 ---
 
@@ -227,8 +227,8 @@ fn registry_register(state: RegistryState, name: text) -> RegistryState:
 ## Files Reference
 
 **New Modules:**
-- `src/std/table.spl` - DataFrame operations
-- `src/std/core/resource.spl` - Resource cleanup framework
+- `src/lib/table.spl` - DataFrame operations
+- `src/lib/core/resource.spl` - Resource cleanup framework
 
 **Updated Tests:**
 - `test/lib/std/features/table_spec.spl` - 26 table tests

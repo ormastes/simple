@@ -134,7 +134,7 @@ describe "Cross-platform math":
         expect(0x300).to_equal(0x300)
 ```
 
-Available helpers (from `src/std/spec.spl`):
+Available helpers (from `src/lib/spec.spl`):
 
 | Helper | Behavior |
 |--------|----------|

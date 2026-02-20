@@ -157,7 +157,7 @@ describe "Feature":
 
 - Simple: `*_spec.spl` or `*_test.spl`
 - Tests directory: `test/`
-- Feature specs: `src/std/test/features/`
+- Feature specs: `src/lib/test/features/`
 
 ## Test Types
 

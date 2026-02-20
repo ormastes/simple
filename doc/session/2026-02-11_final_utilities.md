@@ -6,7 +6,7 @@
 ## Accomplishments
 
 ### 1. Validation Utilities Module ✅
-**File:** `src/std/validation.spl` (320 lines)
+**File:** `src/lib/validation.spl` (320 lines)
 
 Comprehensive validation functions for input checking:
 
@@ -44,7 +44,7 @@ Comprehensive validation functions for input checking:
 - `require_all` - Collect all validation errors
 
 ### 2. Numeric Utilities Module ✅
-**File:** `src/std/numeric.spl` (380 lines)
+**File:** `src/lib/numeric.spl` (380 lines)
 
 Extensive numeric helper functions:
 
@@ -80,7 +80,7 @@ Extensive numeric helper functions:
 - `from_binary_string` - Parse binary string
 
 ### 3. String Extra Utilities ✅
-**File:** `src/std/string_extra.spl` (328 lines, from previous)
+**File:** `src/lib/string_extra.spl` (328 lines, from previous)
 
 Already documented with 20+ string functions.
 

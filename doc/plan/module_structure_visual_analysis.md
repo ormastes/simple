@@ -9,7 +9,7 @@
 ### Stdlib Structure (Fragmented)
 
 ```
-src/std/
+src/lib/
 ├── allocator.spl                    ✅ Discoverable
 ├── async.spl                        ✅ Discoverable
 ├── atomic.spl                       ✅ Discoverable
@@ -76,7 +76,7 @@ use testing.mocking_core         # Works but not exported!
 ### Stdlib Structure (Organized)
 
 ```
-src/std/
+src/lib/
 ├── ✅ __init__.spl                  🎯 NEW: Entry point for entire stdlib
 ├── dependency_injection.spl         🎯 NEW: Alias for di.spl
 ├── allocator.spl
@@ -288,7 +288,7 @@ testing      | benchmark       | Performance tests
 
 $ simple show-module di
 Module: di
-Location: src/std/src/di.spl
+Location: src/lib/src/di.spl
 Category: core
 Description:
   Dependency Injection with profiles, containers, and service locator
@@ -364,8 +364,8 @@ use dependency_injection as di  # Now possible!
 4. `doc/guide/module_discovery_guide.md`
 
 **Code:**
-5. `src/std/__init__.spl` (stdlib root)
-6. `src/std/dependency_injection.spl` (alias)
+5. `src/lib/__init__.spl` (stdlib root)
+6. `src/lib/dependency_injection.spl` (alias)
 7. `src/app/build/__init__.spl`
 8. `src/app/test/__init__.spl`
 9. `src/app/lint/__init__.spl`
@@ -375,7 +375,7 @@ use dependency_injection as di  # Now possible!
 
 ### Modified Files (1)
 
-1. `src/std/src/testing/__init__.spl` (enable mocking exports)
+1. `src/lib/src/testing/__init__.spl` (enable mocking exports)
 
 ### Total Impact
 
@@ -435,9 +435,9 @@ use dependency_injection as di  # Now possible!
 - [ ] `doc/guide/module_discovery_guide.md` created
 
 ### Structure
-- [ ] `src/std/__init__.spl` created
-- [ ] `src/std/dependency_injection.spl` (alias) created
-- [ ] `src/std/src/testing/__init__.spl` exports mocking
+- [ ] `src/lib/__init__.spl` created
+- [ ] `src/lib/dependency_injection.spl` (alias) created
+- [ ] `src/lib/src/testing/__init__.spl` exports mocking
 - [ ] App modules have init files
 
 ### Tooling

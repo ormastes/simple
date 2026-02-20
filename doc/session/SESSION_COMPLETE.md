@@ -47,14 +47,14 @@
 
 #### Part 1 (Initial Session)
 
-#### `src/std/string_extra.spl` (328 lines, 20+ functions)
+#### `src/lib/string_extra.spl` (328 lines, 20+ functions)
 - String predicates (empty, whitespace, ASCII)
 - Counting (char, substring)
 - Manipulation (repeat, pad, truncate)
 - Capitalization and case conversion
 - Splitting and comparison
 
-#### `src/std/validation.spl` (320 lines, 27 functions)
+#### `src/lib/validation.spl` (320 lines, 27 functions)
 - String pattern validation
 - Numeric validation (range, positive)
 - Length validation
@@ -62,7 +62,7 @@
 - Format validation (version, path, email)
 - Validation helpers (require, require_all)
 
-#### `src/std/numeric.spl` (380 lines, 28 functions)
+#### `src/lib/numeric.spl` (380 lines, 28 functions)
 - Parity checks (even, odd)
 - Power of 2 operations
 - Digit operations (count, sum, reverse, palindrome)
@@ -72,20 +72,20 @@
 - Integer square root
 - Binary conversion
 
-#### `src/std/collection_utils.spl` (450 lines, 30+ functions)
+#### `src/lib/collection_utils.spl` (450 lines, 30+ functions)
 - Partitioning, grouping, windowing
 - Transpose, cartesian product
 - Frequencies, mode, median
 - Set operations (union, intersect, difference)
 - Array comparison and search
 
-#### `src/std/functional.spl` (420 lines, 40+ functions)
+#### `src/lib/functional.spl` (420 lines, 40+ functions)
 - Function composition, iteration
 - Fold, scan, zip operations
 - Predicates (all, any, none)
 - Array generation and transformation
 
-#### `src/std/option_helpers.spl` (380 lines, 35+ functions)
+#### `src/lib/option_helpers.spl` (380 lines, 35+ functions)
 - Option unwrapping, mapping
 - Chaining and combination
 - Collection operations (sequence, zip)
@@ -95,23 +95,23 @@
 
 #### Part 2 (Continuation Session)
 
-#### `src/std/result_helpers.spl` (490 lines, 35+ functions)
+#### `src/lib/result_helpers.spl` (490 lines, 35+ functions)
 - Result construction and unwrapping
 - Mapping and chaining
 - Collection operations
 - Error handling patterns
 
-#### `src/std/tuple_utils.spl` (470 lines, 55+ functions)
+#### `src/lib/tuple_utils.spl` (470 lines, 55+ functions)
 - Pair, triple, quad, quint operations
 - Accessors and mappers
 - Array conversion utilities
 
-#### `src/std/bitwise_utils.spl` (450 lines, 45+ functions)
+#### `src/lib/bitwise_utils.spl` (450 lines, 45+ functions)
 - Bit testing and manipulation
 - Bit counting and masks
 - Rotation and byte operations
 
-#### `src/std/format_utils.spl` (470 lines, 35+ functions)
+#### `src/lib/format_utils.spl` (470 lines, 35+ functions)
 - Number formatting (int, hex, binary, size)
 - Text alignment and wrapping
 - Tables, lists, progress bars
@@ -265,9 +265,9 @@
 3. **Session logs** - Complete work history
 
 ### New Utilities
-1. **`src/std/string_extra.spl`** - String manipulation
-2. **`src/std/validation.spl`** - Input validation
-3. **`src/std/numeric.spl`** - Numeric operations
+1. **`src/lib/string_extra.spl`** - String manipulation
+2. **`src/lib/validation.spl`** - Input validation
+3. **`src/lib/numeric.spl`** - Numeric operations
 
 ### Test Examples
 1. **`test/unit/compiler/uncovered_branches_spec.spl`** - Coverage example
@@ -337,7 +337,7 @@ Successfully transformed an overwhelming backlog of 695 pending items into a str
 
 **What's left?** → `doc/REMAINING_WORK.md`
 **What's prioritized?** → `doc/TODO_ACTIONABLE.md`
-**New utilities?** → `src/std/{string_extra,validation,numeric,collection_utils,functional,option_helpers,result_helpers,tuple_utils,bitwise_utils,format_utils}.spl`
+**New utilities?** → `src/lib/{string_extra,validation,numeric,collection_utils,functional,option_helpers,result_helpers,tuple_utils,bitwise_utils,format_utils}.spl`
 **Test examples?** → `test/unit/compiler/uncovered_branches_spec.spl`
 **Session details?** → `doc/session/2026-02-11_*.md`
 

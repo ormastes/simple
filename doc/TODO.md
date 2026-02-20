@@ -135,26 +135,26 @@
 | 111 | TODO | general | P3 | Remove this file once interpreter supports: | `src/lib/pure/tensor_factory.spl` | 6 |
 | 112 | TODO | general | P3 | Remove these once interpreter supports static methods on generic types | `src/lib/pure/tensor.spl` | 96 |
 | 113 | TODO | general | P3 | Integration point - When debugger FFI is available: | `src/runtime/hooks.spl` | 493 |
-| 114 | TODO | general | P3 | Invoke method on actor_instance | `src/std/actors/actor.spl` | 190 |
-| 115 | TODO | general | P3 | Add compile-time runtime selection when conditional compilation is implemented | `src/std/async_unified.spl` | 16 |
-| 116 | TODO | general | P3 | Return error or dummy stream | `src/std/gpu/context.spl` | 174 |
-| 117 | TODO | general | P3 | Use proper sizeof[T]() when available | `src/std/gpu/memory.spl` | 34 |
-| 118 | TODO | general | P3 | Implement upload via tensor operations | `src/std/gpu/memory.spl` | 49 |
-| 119 | TODO | general | P3 | Implement download via tensor operations | `src/std/gpu/memory.spl` | 63 |
-| 120 | TODO | general | P3 | Implement via tensor copy | `src/std/gpu/memory.spl` | 82 |
-| 121 | TODO | general | P3 | Create tensor on GPU device | `src/std/gpu/memory.spl` | 114 |
-| 122 | FIXME | general | P3 | Should return Some(Arc(self.ptr)) but can't construct Arc/Rc | `src/std/rc.spl` | 260 |
-| 123 | TODO | general | P3 | Re-enable generic version after bootstrap generics support | `src/std/src/di.spl` | 174 |
-| 124 | TODO | general | P3 | Execute HIR via instruction module | `src/std/src/di.spl` | 344 |
-| 125 | TODO | general | P3 | Implement via FFI to Rust codegen | `src/std/src/di.spl` | 363 |
-| 126 | TODO | general | P3 | Implement via FFI | `src/std/src/di.spl` | 465 |
-| 127 | TODO | general | P3 | Implement via FFI | `src/std/src/di.spl` | 481 |
-| 128 | TODO | general | P3 | Re-enable generic version after bootstrap generics support | `src/std/src/di.spl` | 647 |
-| 129 | TODO | general | P3 | Use proper FFI when available | `src/std/src/exp/config.spl` | 438 |
-| 130 | TODO | general | P3 | Wire to Rust FFI check | `src/std/src/math/backend.spl` | 115 |
-| 131 | TODO | general | P3 | Wire to Rust FFI check | `src/std/src/math/backend.spl` | 120 |
-| 132 | TODO | general | P3 | Native backend implementation | `src/std/src/tensor/factory.spl` | 236 |
-| 133 | TODO | general | P3 | Return actual dtype from handle | `src/std/src/tensor.spl` | 111 |
+| 114 | TODO | general | P3 | Invoke method on actor_instance | `src/lib/actors/actor.spl` | 190 |
+| 115 | TODO | general | P3 | Add compile-time runtime selection when conditional compilation is implemented | `src/lib/async_unified.spl` | 16 |
+| 116 | TODO | general | P3 | Return error or dummy stream | `src/lib/gpu/context.spl` | 174 |
+| 117 | TODO | general | P3 | Use proper sizeof[T]() when available | `src/lib/gpu/memory.spl` | 34 |
+| 118 | TODO | general | P3 | Implement upload via tensor operations | `src/lib/gpu/memory.spl` | 49 |
+| 119 | TODO | general | P3 | Implement download via tensor operations | `src/lib/gpu/memory.spl` | 63 |
+| 120 | TODO | general | P3 | Implement via tensor copy | `src/lib/gpu/memory.spl` | 82 |
+| 121 | TODO | general | P3 | Create tensor on GPU device | `src/lib/gpu/memory.spl` | 114 |
+| 122 | FIXME | general | P3 | Should return Some(Arc(self.ptr)) but can't construct Arc/Rc | `src/lib/rc.spl` | 260 |
+| 123 | TODO | general | P3 | Re-enable generic version after bootstrap generics support | `src/lib/src/di.spl` | 174 |
+| 124 | TODO | general | P3 | Execute HIR via instruction module | `src/lib/src/di.spl` | 344 |
+| 125 | TODO | general | P3 | Implement via FFI to Rust codegen | `src/lib/src/di.spl` | 363 |
+| 126 | TODO | general | P3 | Implement via FFI | `src/lib/src/di.spl` | 465 |
+| 127 | TODO | general | P3 | Implement via FFI | `src/lib/src/di.spl` | 481 |
+| 128 | TODO | general | P3 | Re-enable generic version after bootstrap generics support | `src/lib/src/di.spl` | 647 |
+| 129 | TODO | general | P3 | Use proper FFI when available | `src/lib/src/exp/config.spl` | 438 |
+| 130 | TODO | general | P3 | Wire to Rust FFI check | `src/lib/src/math/backend.spl` | 115 |
+| 131 | TODO | general | P3 | Wire to Rust FFI check | `src/lib/src/math/backend.spl` | 120 |
+| 132 | TODO | general | P3 | Native backend implementation | `src/lib/src/tensor/factory.spl` | 236 |
+| 133 | TODO | general | P3 | Return actual dtype from handle | `src/lib/src/tensor.spl` | 111 |
 | 134 | TODO | general | P3 | This assumes we have file write via fs or similar | `test/app/package/ffi_spec.spl` | 17 |
 | 135 | TODO | general | P3 | Test interrupt enable | `test/baremetal/arm32_boot_spec.spl` | 81 |
 | 136 | TODO | general | P3 | Test priority levels | `test/baremetal/arm32_boot_spec.spl` | 87 |

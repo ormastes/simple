@@ -34,7 +34,7 @@ This session successfully completed **Phase 1 and Phase 2** of the test enableme
 
 ### Phase 1.1: Table/DataFrame Module (26 tests)
 **Status:** ✅ Production Ready
-**File:** `src/std/table.spl` (415 lines)
+**File:** `src/lib/table.spl` (415 lines)
 
 ```simple
 # Column-based table with statistical operations
@@ -55,7 +55,7 @@ val joined = table_inner_join(table1, table2, "id")
 
 ### Phase 1.2: Resource Cleanup Framework (22 tests)
 **Status:** ✅ Production Ready
-**File:** `src/std/core/resource.spl` (184 lines)
+**File:** `src/lib/core/resource.spl` (184 lines)
 
 ```simple
 # Explicit state passing pattern (workaround for module closure limitation)
@@ -93,7 +93,7 @@ fn is_gdb_available() -> bool:
 
 ### Phase 2.1: String Methods (8 functions)
 **Status:** ✅ Implementation Complete, ⚠️ Import Blocked
-**File:** `src/std/text.spl` (+70 lines)
+**File:** `src/lib/text.spl` (+70 lines)
 
 ```simple
 # Convenience aliases
@@ -107,13 +107,13 @@ string_trim(s: text) -> text
 string_split(s: text, delim: text) -> [text]
 ```
 
-**Workaround:** Inline implementations available in `src/std/helpers.spl`
+**Workaround:** Inline implementations available in `src/lib/helpers.spl`
 
 ---
 
 ### Phase 2.2: Array Methods (7 functions)
 **Status:** ✅ Implementation Complete, ⚠️ Import Blocked
-**File:** `src/std/array.spl` (+85 lines)
+**File:** `src/lib/array.spl` (+85 lines)
 
 ```simple
 array_append_all(arr1, arr2)
@@ -125,7 +125,7 @@ array_compact(arr)
 array_reverse(arr)
 ```
 
-**Workaround:** Inline implementations available in `src/std/helpers.spl`
+**Workaround:** Inline implementations available in `src/lib/helpers.spl`
 
 ---
 
@@ -166,7 +166,7 @@ string_trim("  test  ")        # ❌ "function not found"
 **Inline implementations** - copy functions directly into test files:
 
 ```simple
-# Copy from src/std/helpers.spl
+# Copy from src/lib/helpers.spl
 fn string_trim_inline(s: text) -> text:
     var result = s
     # ... implementation ...
@@ -180,7 +180,7 @@ describe "My Feature":
 
 ### Workaround Files Created
 
-1. **`src/std/helpers.spl`** (240 lines)
+1. **`src/lib/helpers.spl`** (240 lines)
    - Copy-pasteable inline implementations
    - String helpers (8 functions)
    - Array helpers (7 functions)
@@ -309,9 +309,9 @@ getpid()                           # "function not found"
 
 ### Code Artifacts (4 modules)
 
-1. **`src/std/table.spl`** - Production-ready table module (415 lines)
-2. **`src/std/core/resource.spl`** - Resource cleanup framework (184 lines)
-3. **`src/std/helpers.spl`** - Inline helper implementations (240 lines)
+1. **`src/lib/table.spl`** - Production-ready table module (415 lines)
+2. **`src/lib/core/resource.spl`** - Resource cleanup framework (184 lines)
+3. **`src/lib/helpers.spl`** - Inline helper implementations (240 lines)
 4. **Enhanced modules:** text.spl (+70), array.spl (+85), boot_runner.spl (+20)
 
 ---

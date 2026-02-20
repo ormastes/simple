@@ -672,7 +672,7 @@ fn monitor_test_execution(pid: i64) -> ProcessMetrics:
 ```
 
 **Files to Modify:**
-- `src/std/process_monitor.spl`
+- `src/lib/process_monitor.spl`
 - `src/app/test_runner_new/test_runner_resources.spl`
 
 **Estimated Effort:** 2 hours
@@ -795,7 +795,7 @@ test_config {
 5. `src/app/test_runner_new/sequential_container.spl` (container ID tracking)
 6. `src/app/test_runner_new/test_runner_files.spl` (add metadata parsing)
 7. `src/app/test_runner_new/test_runner_types.spl` (add TestMetadata struct)
-8. `src/std/process_monitor.spl` (continuous monitoring)
+8. `src/lib/process_monitor.spl` (continuous monitoring)
 
 ### Files to Modify (Phase 4 - SFFI):
 1. `src/compiler_seed/runtime.c` (signal handler SFFI)

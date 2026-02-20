@@ -24,14 +24,14 @@ Successfully implemented Phase 3 (Resource Enforcement & Monitoring) from the Ro
 
 ### Files Created
 
-1. **`src/std/process_monitor.spl`** (~400 lines)
+1. **`src/lib/process_monitor.spl`** (~400 lines)
    - ProcessMetrics struct for resource snapshots
    - Platform detection (Linux, macOS, Windows)
    - Linux /proc filesystem reading
    - Real-time process sampling
    - Resource limit violation detection
 
-2. **`src/std/resource_tracker.spl`** (~480 lines)
+2. **`src/lib/resource_tracker.spl`** (~480 lines)
    - ResourceUsageRecord struct for database storage
    - Statistics calculation (max, avg, duration)
    - SDN database integration

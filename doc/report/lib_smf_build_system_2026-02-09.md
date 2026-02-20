@@ -14,7 +14,7 @@ Implemented **build system integration** for Library SMF - created scripts to ge
 **File:** `scripts/build_libstd.spl` (200 lines)
 
 **Features:**
-- Scans `src/std/` for all `.smf` files
+- Scans `src/lib/` for all `.smf` files
 - Automatically derives module names from file paths
 - Creates `build/lib/libstd.lsm` archive
 - Verbose output mode
@@ -35,7 +35,7 @@ simple scripts/build_libstd.spl --output=custom/path.lsm --verbose
       → mkdir -p build/lib
 
 [2/5] Scanning for standard library modules
-      → find src/std -name '*.smf'
+      → find src/lib -name '*.smf'
       → Found N modules
 
 [3/5] Creating library builder
@@ -129,7 +129,7 @@ simple scripts/lib_tool.spl create mylib.lsm mod1.smf mod2.smf mod3.smf
 
 **Algorithm:**
 ```simple
-# Input: src/std/io/file.smf
+# Input: src/lib/io/file.smf
 # Step 1: Remove 'src/' prefix → std/io/file.smf
 # Step 2: Remove '.smf' extension → std/io/file
 # Result: "std/io/file"
@@ -137,9 +137,9 @@ simple scripts/lib_tool.spl create mylib.lsm mod1.smf mod2.smf mod3.smf
 
 **Examples:**
 ```
-src/std/io/mod.smf          → std/io/mod
-src/std/collections/list.smf → std/collections/list
-src/std/math.smf            → std/math
+src/lib/io/mod.smf          → std/io/mod
+src/lib/collections/list.smf → std/collections/list
+src/lib/math.smf            → std/math
 ```
 
 ## Integration Points
@@ -269,7 +269,7 @@ bin/simple examples/lib_smf/load_from_library.spl
 ### Build Time
 | Operation | Modules | Time | Notes |
 |-----------|---------|------|-------|
-| Scan src/std | ~50 | ~50ms | find command |
+| Scan src/lib | ~50 | ~50ms | find command |
 | Add modules | ~50 | ~200ms | ~4ms per module |
 | Write library | 1 | ~100ms | File I/O |
 | **Total** | - | **~350ms** | Fast build |
@@ -288,7 +288,7 @@ bin/simple examples/lib_smf/load_from_library.spl
 
 ```bash
 # 1. Make changes to stdlib
-vim src/std/io/file.spl
+vim src/lib/io/file.spl
 
 # 2. Rebuild compiler
 bin/simple build
@@ -297,7 +297,7 @@ bin/simple build
 simple scripts/build_libstd.spl
 
 # 4. Test changes
-bin/simple test src/std/io/test/file_spec.spl
+bin/simple test src/lib/io/test/file_spec.spl
 ```
 
 ### Release Build Workflow

@@ -31,7 +31,7 @@
 ✅ **FixedBlockAllocator** - O(1) pool allocator
 ✅ **MultiPoolAllocator** - 8 size classes (16B to 2KB)
 
-File: `src/std/baremetal/allocator.spl` (800 lines)
+File: `src/lib/baremetal/allocator.spl` (800 lines)
 
 ### Phase 3: Syscall Wrappers
 ✅ **Semihosting** - Debug I/O via BKPT/SVC/EBREAK
@@ -39,7 +39,7 @@ File: `src/std/baremetal/allocator.spl` (800 lines)
 ✅ **Timers** - Counter read, ms/us delays
 ✅ **MMIO Helpers** - Volatile access, bit manipulation
 
-File: `src/std/baremetal/syscall.spl` (400 lines)
+File: `src/lib/baremetal/syscall.spl` (400 lines)
 
 ### Phase 4: Interrupt Handlers
 ✅ **ARM NVIC** - 240 interrupts, priority, pending, active
@@ -48,7 +48,7 @@ File: `src/std/baremetal/syscall.spl` (400 lines)
 ✅ **Generic Control** - Enable/disable, critical sections
 ✅ **Handler Registration** - Dynamic dispatch
 
-File: `src/std/baremetal/interrupt.spl` (600 lines)
+File: `src/lib/baremetal/interrupt.spl` (600 lines)
 
 ### Phase 5: Tests
 ✅ **Startup Tests** (`test/baremetal/startup_spec.spl` - 30 tests)
@@ -72,9 +72,9 @@ File: `src/std/baremetal/interrupt.spl` (600 lines)
 | `src/compiler/baremetal/arm/crt0.s` | 300 | ARM Cortex-M startup |
 | `src/compiler/baremetal/x86_64/crt0.s` | 350 | x86_64 startup + paging |
 | `src/compiler/baremetal/riscv/crt0.s` | 250 | RISC-V startup + SMP |
-| `src/std/baremetal/allocator.spl` | 800 | 4 memory allocators |
-| `src/std/baremetal/syscall.spl` | 400 | Semihosting, UART, timers |
-| `src/std/baremetal/interrupt.spl` | 600 | NVIC, PLIC, APIC |
+| `src/lib/baremetal/allocator.spl` | 800 | 4 memory allocators |
+| `src/lib/baremetal/syscall.spl` | 400 | Semihosting, UART, timers |
+| `src/lib/baremetal/interrupt.spl` | 600 | NVIC, PLIC, APIC |
 | `test/baremetal/startup_spec.spl` | 120 | Startup tests (30) |
 | `test/baremetal/allocator_spec.spl` | 360 | Allocator tests (60) |
 | `test/baremetal/syscall_spec.spl` | 120 | Syscall tests (40) |

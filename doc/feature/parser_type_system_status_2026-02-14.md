@@ -8,7 +8,7 @@
 ## Summary
 
 ### ✅ Implemented
-1. **Effect System Module** (`src/std/effects.spl`)
+1. **Effect System Module** (`src/lib/effects.spl`)
    - Effect enum with 6 variants (Pure, Io, Net, Fs, Unsafe, Async)
    - Conversion functions between decorator names and Effect values
    - Extension methods for Effect type
@@ -54,7 +54,7 @@
 
 ### Effect Annotations (@pending → ready)
 - **Test:** `test/feature/effect_annotations_spec.spl`
-- **Module:** `src/std/effects.spl` ✅ Created
+- **Module:** `src/lib/effects.spl` ✅ Created
 - **Status:** Ready for testing (if test runner issues resolved)
 - **Features:**
   - `@pure` - No side effects
@@ -156,7 +156,7 @@
 ## Files Modified/Created
 
 ### Created
-- `src/std/effects.spl` (75 lines) - Effect system for type annotations
+- `src/lib/effects.spl` (75 lines) - Effect system for type annotations
 
 ### Referenced
 - `doc/bug/parser_generic_field_access_bug.md` - Critical parser bug

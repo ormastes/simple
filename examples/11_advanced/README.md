@@ -17,4 +17,4 @@ Middle Intermediate Representation:
 ## See Also
 
 - Compiler source: `src/compiler/`
-- Core IR types: `src/core/mir_types.spl`, `src/core/hir_types.spl`
+- Core IR types: `src/compiler/50.mir/`, `src/compiler/20.hir/`

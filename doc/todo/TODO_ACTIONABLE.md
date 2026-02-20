@@ -22,7 +22,7 @@
 
 **Examples of blocked items:**
 - `src/lib/pure/tensor_f64.spl:4` - Generic PureTensor<T>
-- `src/std/src/di.spl:174` - Generic DI container
+- `src/lib/src/di.spl:174` - Generic DI container
 - All `test/unit/std/async_*.spl` tests - async syntax
 - Macro-related tests - macro keyword not supported
 
@@ -53,7 +53,7 @@ Based on doc/test/uncovered_branches_analysis.md:
 ## Priority 2: Simple Implementations (2-8 hours)
 
 ### 2.1 String Parsing Functions
-**File:** `src/std/text.spl` or similar
+**File:** `src/lib/text.spl` or similar
 
 Implement these if missing:
 - [ ] `ends_with` edge cases (see uncovered_branches_analysis line 121)

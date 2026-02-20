@@ -92,7 +92,7 @@ Modern CPUs execute SIMD instructions that process multiple data elements simult
 
 #### Phase 1: SIMD Intrinsics API
 
-**`src/std/simd.spl`** (New, ~600 lines)
+**`src/lib/simd.spl`** (New, ~600 lines)
 - Vector types: `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4`, `i32x8`
 - Load/store: `simd_load_f32x8`, `simd_store_f32x8`
 - Arithmetic: `add_*`, `sub_*`, `mul_*`, `div_*`, `fma_*`
@@ -727,7 +727,7 @@ fn array_add_simd(a: [f32], b: [f32]) -> [f32]:
 ### Related Files
 
 **Core Implementation:**
-- `src/std/simd.spl` - SIMD intrinsics API
+- `src/lib/simd.spl` - SIMD intrinsics API
 - `src/compiler_core/mir_types.spl` - MIR SIMD opcodes
 - `src/compiler/backend/x86_64_simd.spl` - x86_64 codegen
 - `src/compiler/backend/arm_neon.spl` - ARM codegen

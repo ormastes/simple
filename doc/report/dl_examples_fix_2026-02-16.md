@@ -193,7 +193,7 @@ PHASE 0 COMPLETE
 3. **Backend Infrastructure**:
    - CUDA backend: `src/compiler_core_legacy/backend/cuda_backend.spl`
    - CUDA FFI: `src/lib/cuda/` (10+ functions)
-   - Device management: `src/std/gpu/` (context, memory, streams)
+   - Device management: `src/lib/gpu/` (context, memory, streams)
 
 4. **FFI Functions Available** (27 in libsimple_torch_ffi.so):
    - `rt_torch_cuda_available()` - Check CUDA

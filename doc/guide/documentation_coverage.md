@@ -64,7 +64,7 @@ bin/simple stats | grep "Documented:"
 # Scanning 247 source files...
 #
 # Warning: Missing documentation
-# File: src/std/array.spl:42
+# File: src/lib/array.spl:42
 # Function: chunk_by
 # Severity: warn
 #
@@ -354,8 +354,8 @@ By Module:
   app:       74% (60/81)
 
 Missing Documentation (37 items):
-  src/std/array.spl:chunk_by
-  src/std/text.spl:levenshtein
+  src/lib/array.spl:chunk_by
+  src/lib/text.spl:levenshtein
   src/compiler_core/parser.spl:parse_match_arm
   ...
 ```
@@ -377,7 +377,7 @@ Missing Documentation (37 items):
     "stdlib": {"total": 128, "documented": 120, "percent": 94}
   },
   "missing": [
-    {"file": "src/std/array.spl", "name": "chunk_by", "kind": "function"}
+    {"file": "src/lib/array.spl", "name": "chunk_by", "kind": "function"}
   ]
 }
 ```
@@ -400,8 +400,8 @@ Missing Documentation (37 items):
 
 ## Missing Documentation
 
-- `src/std/array.spl:chunk_by` (function)
-- `src/std/text.spl:levenshtein` (function)
+- `src/lib/array.spl:chunk_by` (function)
+- `src/lib/text.spl:levenshtein` (function)
 ```
 
 ### CSV Format
@@ -410,9 +410,9 @@ Missing Documentation (37 items):
 
 ```csv
 file,name,kind,is_documented,has_sdoctest
-src/std/array.spl,map,function,true,true
-src/std/array.spl,filter,function,true,true
-src/std/array.spl,chunk_by,function,false,false
+src/lib/array.spl,map,function,true,true
+src/lib/array.spl,filter,function,true,true
+src/lib/array.spl,chunk_by,function,false,false
 ```
 
 ---
@@ -636,7 +636,7 @@ struct Config:
 pwd  # Should show /home/user/project
 
 # Verify source files exist
-ls src/std/*.spl
+ls src/lib/*.spl
 
 # Run from correct directory
 cd /path/to/project

@@ -198,7 +198,7 @@ Created **10 comprehensive utility modules** with **350+ functions**:
 
 ### New Utility Modules
 ```
-src/std/
+src/lib/
 ├── string_extra.spl      # String manipulation
 ├── validation.spl        # Input validation
 ├── numeric.spl           # Numeric operations
@@ -279,7 +279,7 @@ From a starting point of 695 unorganized pending items with no clear path forwar
 | **Complete summary** | `doc/SESSION_COMPLETE.md` |
 | **Prioritized work** | `doc/TODO_ACTIONABLE.md` |
 | **Current status** | `doc/REMAINING_WORK.md` |
-| **All utilities** | `src/std/{string_extra,validation,numeric,collection_utils,functional,option_helpers,result_helpers,tuple_utils,bitwise_utils,format_utils}.spl` |
+| **All utilities** | `src/lib/{string_extra,validation,numeric,collection_utils,functional,option_helpers,result_helpers,tuple_utils,bitwise_utils,format_utils}.spl` |
 | **Test examples** | `test/unit/compiler/uncovered_branches_spec.spl` |
 | **Session history** | `doc/session/2026-02-11_*.md` |
 

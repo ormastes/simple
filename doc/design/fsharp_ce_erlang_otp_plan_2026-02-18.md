@@ -36,15 +36,15 @@ Both clusters build on a solid existing foundation and require careful but bound
 
 **Next available token slot:** 204+ (TOK_KW_MIXIN = 203 is current highest).
 
-### Standard Library (verified in `src/std/`)
+### Standard Library (verified in `src/lib/`)
 
 | Library | File | Status |
 |---------|------|--------|
-| Supervision trees | `src/std/supervisor.spl` | Done — SupervisorConfig, ChildSpec, STRATEGY_*, RESTART_*, Supervisor class |
-| Result chaining | `src/std/result.spl` | Done — result_map, result_and_then, result_or_else, result_unwrap_or |
-| Trait system stubs | `src/std/traits.spl` | Stubs — field_names, has_field (return placeholders pending @traits built-in) |
-| Option type | `src/std/option.spl` | Done |
-| Phantom types | `src/std/phantom.spl` | Done |
+| Supervision trees | `src/lib/supervisor.spl` | Done — SupervisorConfig, ChildSpec, STRATEGY_*, RESTART_*, Supervisor class |
+| Result chaining | `src/lib/result.spl` | Done — result_map, result_and_then, result_or_else, result_unwrap_or |
+| Trait system stubs | `src/lib/traits.spl` | Stubs — field_names, has_field (return placeholders pending @traits built-in) |
+| Option type | `src/lib/option.spl` | Done |
+| Phantom types | `src/lib/phantom.spl` | Done |
 
 ---
 
@@ -120,7 +120,7 @@ The `ce` keyword is similarly clean: `ce` followed by an `IDENT` then `:` unique
 ### What Is Already Done
 
 - `spawn` keyword and AST — actors can be spawned
-- `src/std/supervisor.spl` — full supervision tree library: `one_for_one`, `one_for_all`, `rest_for_one`, `simple_one_for_one` strategies; `ChildSpec`; restart policies (permanent, temporary, transient); `Supervisor` class with `add_child`, `remove_child`, `record_restart`, `within_limits`
+- `src/lib/supervisor.spl` — full supervision tree library: `one_for_one`, `one_for_all`, `rest_for_one`, `simple_one_for_one` strategies; `ChildSpec`; restart policies (permanent, temporary, transient); `Supervisor` class with `add_child`, `remove_child`, `record_restart`, `within_limits`
 
 ### What Is Not Done
 
@@ -264,12 +264,12 @@ parse_ce_block():
 **Priority:** HIGH — core concurrency primitive
 
 **Files to create:**
-- `src/std/mailbox.spl` — Mailbox struct, `mailbox_new(capacity)`, `mailbox_send()`, `mailbox_receive()`, `mailbox_try_receive()`
-- `src/std/monitor.spl` — `monitor()`, `link()`, DownEvent struct, LinkExitEvent struct
+- `src/lib/mailbox.spl` — Mailbox struct, `mailbox_new(capacity)`, `mailbox_send()`, `mailbox_receive()`, `mailbox_try_receive()`
+- `src/lib/monitor.spl` — `monitor()`, `link()`, DownEvent struct, LinkExitEvent struct
 
 **Mailbox API sketch:**
 ```simple
-# src/std/mailbox.spl
+# src/lib/mailbox.spl
 struct Mailbox:
     capacity: i64
     messages: [text]   # serialized messages (capacity-bounded)
@@ -295,7 +295,7 @@ fn mailbox_receive(mb: Mailbox) -> text:
 
 **Monitor API sketch:**
 ```simple
-# src/std/monitor.spl
+# src/lib/monitor.spl
 struct DownEvent:
     pid: i64
     reason: text
@@ -312,8 +312,8 @@ fn link(pid: i64):
 ```
 
 **Test symlinks to create** in `test/lib/std/`:
-- `mailbox.spl` → `../../../src/std/mailbox.spl`
-- `monitor.spl` → `../../../src/std/monitor.spl`
+- `mailbox.spl` → `../../../src/lib/mailbox.spl`
+- `monitor.spl` → `../../../src/lib/monitor.spl`
 
 **Tests to create:**
 - `test/unit/std/mailbox_spec.spl` — send/receive, capacity bounds, empty receive
@@ -324,13 +324,13 @@ fn link(pid: i64):
 **Priority:** MEDIUM — structured process patterns
 
 **Files to create:**
-- `src/std/gen_server.spl` — GenServer trait with default `handle_info`, `terminate`
-- `src/std/gen_statem.spl` — GenStatem trait (`callback_mode`, `handle_event`, `init`, `terminate`)
-- `src/std/gen_event.spl` — GenEvent trait (`add_handler`, `handle_event`, `notify`)
+- `src/lib/gen_server.spl` — GenServer trait with default `handle_info`, `terminate`
+- `src/lib/gen_statem.spl` — GenStatem trait (`callback_mode`, `handle_event`, `init`, `terminate`)
+- `src/lib/gen_event.spl` — GenEvent trait (`add_handler`, `handle_event`, `notify`)
 
 **GenServer trait sketch:**
 ```simple
-# src/std/gen_server.spl
+# src/lib/gen_server.spl
 trait GenServer:
     fn init(args: text) -> text       # required — return initial state
 
@@ -363,8 +363,8 @@ class MyServer:
 ```
 
 **Test symlinks to create** in `test/lib/std/`:
-- `gen_server.spl` → `../../../src/std/gen_server.spl`
-- `gen_statem.spl` → `../../../src/std/gen_statem.spl`
+- `gen_server.spl` → `../../../src/lib/gen_server.spl`
+- `gen_statem.spl` → `../../../src/lib/gen_statem.spl`
 
 **Tests to create:**
 - `test/unit/std/gen_server_spec.spl` — trait method dispatch, default handle_info, terminate
@@ -375,14 +375,14 @@ class MyServer:
 **Priority:** MEDIUM — ergonomic Result/Option chaining
 
 **Files to create:**
-- `src/std/computation.spl` — CE builder trait: `bind()`, `return_ce()`, `yield_ce()`, `zero()`
-- `src/std/result_ce.spl` — ResultCE: short-circuit on nil (error)
-- `src/std/option_ce.spl` — OptionCE: short-circuit on nil (None)
-- `src/std/seq_ce.spl` — SeqCE: sequence/generator computation expression
+- `src/lib/computation.spl` — CE builder trait: `bind()`, `return_ce()`, `yield_ce()`, `zero()`
+- `src/lib/result_ce.spl` — ResultCE: short-circuit on nil (error)
+- `src/lib/option_ce.spl` — OptionCE: short-circuit on nil (None)
+- `src/lib/seq_ce.spl` — SeqCE: sequence/generator computation expression
 
 **CE builder protocol:**
 ```simple
-# src/std/computation.spl
+# src/lib/computation.spl
 trait CeBuilder:
     fn bind(value, continuation: fn())   # monadic bind
     fn return_ce(value)                  # wrap value in context
@@ -392,7 +392,7 @@ trait CeBuilder:
 
 **ResultCE builder:**
 ```simple
-# src/std/result_ce.spl
+# src/lib/result_ce.spl
 fn result_ce_bind(value, continuation: fn()):
     if value == nil:
         return nil   # short-circuit on error
@@ -596,15 +596,15 @@ All new features respect the JSF AV C++ / NASA Power of Ten constraints from `do
 
 | File | Phase | Purpose |
 |------|-------|---------|
-| `src/std/mailbox.spl` | 2 | Bounded typed message queue |
-| `src/std/monitor.spl` | 2 | monitor(), link(), DownEvent, LinkExitEvent |
-| `src/std/gen_server.spl` | 3 | GenServer OTP behaviour trait |
-| `src/std/gen_statem.spl` | 3 | GenStatem OTP behaviour trait |
-| `src/std/gen_event.spl` | 3 | GenEvent OTP behaviour trait |
-| `src/std/computation.spl` | 4 | CE builder trait |
-| `src/std/result_ce.spl` | 4 | ResultCE builder (Result monad) |
-| `src/std/option_ce.spl` | 4 | OptionCE builder (Option monad) |
-| `src/std/seq_ce.spl` | 4 | SeqCE builder (sequence/generator) |
+| `src/lib/mailbox.spl` | 2 | Bounded typed message queue |
+| `src/lib/monitor.spl` | 2 | monitor(), link(), DownEvent, LinkExitEvent |
+| `src/lib/gen_server.spl` | 3 | GenServer OTP behaviour trait |
+| `src/lib/gen_statem.spl` | 3 | GenStatem OTP behaviour trait |
+| `src/lib/gen_event.spl` | 3 | GenEvent OTP behaviour trait |
+| `src/lib/computation.spl` | 4 | CE builder trait |
+| `src/lib/result_ce.spl` | 4 | ResultCE builder (Result monad) |
+| `src/lib/option_ce.spl` | 4 | OptionCE builder (Option monad) |
+| `src/lib/seq_ce.spl` | 4 | SeqCE builder (sequence/generator) |
 | `test/unit/compiler_core/receive_spec.spl` | 1 | receive: parser tests |
 | `test/unit/compiler_core/bind_stmt_spec.spl` | 1 | bind statement parser tests |
 | `test/unit/compiler_core/ce_block_spec.spl` | 1 | ce NAME: parser tests |
@@ -632,7 +632,7 @@ All new features respect the JSF AV C++ / NASA Power of Ten constraints from `do
 
 This plan directly implements:
 - `doc/research/missing_language_features_2026-02-17.md` **section 15** (Process Supervision Trees) — extended with `receive:` block (the missing core Erlang primitive)
-- **Section 13** (Result/Option ergonomics) — CEs provide the structured monadic layer above the chaining methods already in `src/std/result.spl`
+- **Section 13** (Result/Option ergonomics) — CEs provide the structured monadic layer above the chaining methods already in `src/lib/result.spl`
 
 The safety profile notes are consistent with the baseline constraints in the research doc's safety profile section.
 
@@ -645,9 +645,9 @@ The safety profile notes are consistent with the baseline constraints in the res
 - [x] Phase 1: Add STMT_RECEIVE, STMT_BIND, DECL_CE to `src/compiler_core/ast.spl`
 - [x] Phase 1: Add parser productions for `receive:`, `bind`, `ce NAME:`
 - [x] Phase 1: Write tests — receive_spec, bind_stmt_spec, ce_block_spec
-- [x] Phase 2: Implement `src/std/mailbox.spl` + tests
-- [x] Phase 2: Implement `src/std/monitor.spl` + tests
-- [x] Phase 3: Implement `src/std/gen_server.spl`, `gen_statem.spl`, `gen_event.spl` + tests
+- [x] Phase 2: Implement `src/lib/mailbox.spl` + tests
+- [x] Phase 2: Implement `src/lib/monitor.spl` + tests
+- [x] Phase 3: Implement `src/lib/gen_server.spl`, `gen_statem.spl`, `gen_event.spl` + tests
 - [x] Phase 4: Implement CE builder protocol + result_ce, option_ce, seq_ce
 - [x] Phase 5: Add eval handlers in `src/compiler_core/interpreter/eval.spl`
 - [x] Phase 5: Sync `src/compiler_core/entity/token/kinds.spl`

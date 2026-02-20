@@ -2,7 +2,7 @@
 -- Math block detection, concealment, and extmark rendering for m{ ... } syntax
 --
 -- NOTE: The LSP hover handler (src/app/lsp/handlers/hover.spl) already provides
--- full math rendering in hover popups via src/std/math_repr.spl, including:
+-- full math rendering in hover popups via src/lib/math_repr.spl, including:
 --   - LaTeX ($$...$$ display math)
 --   - Unicode pretty text (to_pretty)
 --
@@ -189,8 +189,8 @@ function M.find_math_blocks(bufnr)
 end
 
 --- Local Unicode rendering for inline preview of math expressions.
---- This mirrors what to_pretty() does in src/std/math_repr.spl, which delegates
---- to src/std/unicode_math.spl for Greek letters, superscripts, subscripts,
+--- This mirrors what to_pretty() does in src/lib/math_repr.spl, which delegates
+--- to src/lib/unicode_math.spl for Greek letters, superscripts, subscripts,
 --- and math symbols. This is a lightweight Lua subset for virtual text display.
 ---
 --- Supported conversions:
@@ -204,7 +204,7 @@ end
 local function to_pretty_lua(content)
   local s = content
 
-  -- Superscript map (matches src/std/unicode_math.spl superscript_char)
+  -- Superscript map (matches src/lib/unicode_math.spl superscript_char)
   local sup = {
     ["0"] = "⁰", ["1"] = "¹", ["2"] = "²", ["3"] = "³", ["4"] = "⁴",
     ["5"] = "⁵", ["6"] = "⁶", ["7"] = "⁷", ["8"] = "⁸", ["9"] = "⁹",
@@ -218,7 +218,7 @@ local function to_pretty_lua(content)
   end)
   s = s:gsub("%^([%w%+%-])", function(ch) return sup[ch] or ("^" .. ch) end)
 
-  -- Greek letters (matches src/std/unicode_math.spl greek/greek_upper)
+  -- Greek letters (matches src/lib/unicode_math.spl greek/greek_upper)
   local greeks = {
     alpha = "α", beta = "β", gamma = "γ", delta = "δ", epsilon = "ε",
     zeta = "ζ", eta = "η", theta = "θ", iota = "ι", kappa = "κ",
@@ -232,7 +232,7 @@ local function to_pretty_lua(content)
     s = s:gsub("%f[%a]" .. name .. "%f[^%a]", sym)
   end
 
-  -- Math symbols (matches src/std/unicode_math.spl math_sym)
+  -- Math symbols (matches src/lib/unicode_math.spl math_sym)
   local syms = {
     sqrt = "√", sum = "∑", product = "∏", integral = "∫",
     infinity = "∞", forall = "∀", exists = "∃",
@@ -242,7 +242,7 @@ local function to_pretty_lua(content)
     s = s:gsub("%f[%a]" .. name .. "%f[^%a]", sym)
   end
 
-  -- Operator symbols (matches src/std/unicode_math.spl math_op)
+  -- Operator symbols (matches src/lib/unicode_math.spl math_op)
   local ops = {
     times = "×", cdot = "·", pm = "±",
     leq = "≤", geq = "≥", neq = "≠", approx = "≈", equiv = "≡",
@@ -304,7 +304,7 @@ function M.apply_conceal(bufnr, blocks)
       -- Show inline Unicode preview as virtual text at end of line.
       -- This is a quick visual hint; full rendering (LaTeX + pretty) is
       -- provided by the LSP hover handler (src/app/lsp/handlers/hover.spl)
-      -- which calls to_pretty() and render_latex_raw() from src/std/math_repr.spl.
+      -- which calls to_pretty() and render_latex_raw() from src/lib/math_repr.spl.
       local pretty = to_pretty_lua(block.content)
       if pretty ~= block.content then
         pcall(vim.api.nvim_buf_set_extmark, bufnr, M._ns, block.start_row, 0, {

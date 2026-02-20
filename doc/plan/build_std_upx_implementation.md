@@ -84,10 +84,10 @@ pub extern "C" fn upx_is_compressed(file: *const c_char) -> i32
 
 ### 2.3 Simple API Wrapper
 
-**Location:** `src/std/compress/upx.spl`
+**Location:** `src/lib/compress/upx.spl`
 
 ```simple
-# src/std/compress/upx.spl
+# src/lib/compress/upx.spl
 
 ## Compress a binary file using UPX
 ##
@@ -138,7 +138,7 @@ rust/runtime/src/compress/
 ├── mod.rs           # Module exports
 └── upx.rs           # UPX implementation + FFI
 
-src/std/compress/
+src/lib/compress/
 ├── mod.spl          # Module exports
 └── upx.spl          # Simple API wrapper
 ```
@@ -307,7 +307,7 @@ describe "upx module":
 - [ ] Create `rust/runtime/src/compress/` module
 - [ ] Implement `upx.rs` with Rust API
 - [ ] Add FFI bindings for Simple
-- [ ] Create `src/std/compress/upx.spl`
+- [ ] Create `src/lib/compress/upx.spl`
 - [ ] Add module exports
 - [ ] Test UPX library functionality
 

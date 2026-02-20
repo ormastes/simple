@@ -84,7 +84,7 @@
 - **Result:** ✅ PASS (6ms) - 20,000x speedup
 
 **2. env_spec.spl** - Lazy Initialization
-- **Fix:** Added lazy init + caching to `src/std/shell/env.spl` for `cwd()`
+- **Fix:** Added lazy init + caching to `src/lib/shell/env.spl` for `cwd()`
 - **Code:**
   ```simple
   var _cwd_cache: text? = nil
@@ -127,7 +127,7 @@
 **Status:** Implementation complete, ready for integration
 
 **What Was Created:**
-- ✅ `src/std/effects.spl` (73 lines)
+- ✅ `src/lib/effects.spl` (73 lines)
 - ✅ Effect enum (@pure, @io, @net, @fs, @unsafe, @async)
 - ✅ Effect composition functions
 - ✅ Decorator name conversion
@@ -167,7 +167,7 @@ fn read_file(path: text) -> text:
 **Status:** Implementation complete, ready for integration
 
 **What Was Created:**
-- ✅ `src/std/parser.spl` (179 lines)
+- ✅ `src/lib/parser.spl` (179 lines)
 - ✅ CommonMistake enum (15 variants)
 - ✅ Parser class with error recovery
 - ✅ Detection functions for Python, Rust, TypeScript, JavaScript syntax
@@ -302,15 +302,15 @@ fn suggest_fix(mistake: CommonMistake) -> text
 2. **test/unit/app/diagram/call_flow_profiling_spec.spl** - Lines 12-19
    - Added: 7 extern function declarations
 
-3. **src/std/shell/env.spl** - Lines 33-53
+3. **src/lib/shell/env.spl** - Lines 33-53
    - Added: Lazy initialization with caching for `cwd()`
 
 ### Session 2 (New Features)
 
-4. **src/std/effects.spl** - NEW FILE (73 lines)
+4. **src/lib/effects.spl** - NEW FILE (73 lines)
    - Effect system implementation
 
-5. **src/std/parser.spl** - NEW FILE (179 lines)
+5. **src/lib/parser.spl** - NEW FILE (179 lines)
    - Parser error recovery
 
 6. **bin/simple** - REBUILT

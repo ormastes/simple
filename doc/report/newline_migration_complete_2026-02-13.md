@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` constant from `src/std/text.spl` across the entire Simple language codebase.
+Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` constant from `src/lib/text.spl` across the entire Simple language codebase.
 
 ### Final Metrics
 
@@ -39,7 +39,7 @@ Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` 
 - **Key files:** All CLI tools, MCP servers, build tools, test runners
 - **Success rate:** 100%
 
-### Agent 4: src/std/ ✅
+### Agent 4: src/lib/ ✅
 - **Files:** 33 files
 - **Occurrences:** ~90 replacements
 - **Key files:** ascii_art/, diff/, fsm/, yaml/, xml/, regex_engine/
@@ -121,7 +121,7 @@ if ch == NL
 The remaining 335 `"\n"` literals are **correct and should not be changed**:
 
 ### 1. Constant Definitions (5 files)
-- **src/std/text.spl** - Defines `val NL = "\n"` and related constants
+- **src/lib/text.spl** - Defines `val NL = "\n"` and related constants
 - Lines 113-114, 122-126, 410, 410
 
 ### 2. Test Files (15 files)
@@ -217,7 +217,7 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 - **src/compiler/** - 21 files
 - **src/compiler_core_legacy/** - 46 files
 - **src/app/** - 244 files (100% coverage)
-- **src/std/** - 33 files
+- **src/lib/** - 33 files
 - **src/compiler_core_legacy/** - 3 files
 - **src/diagnostics/** - 3 files
 
@@ -263,6 +263,6 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 
 ## Conclusion
 
-The newline migration is **complete and successful**. All 7,167 replaceable `"\n"` literals have been converted to use the `NL` constant from `src/std/text.spl`, with 335 occurrences correctly preserved for escape sequences, protocol specs, and constant definitions.
+The newline migration is **complete and successful**. All 7,167 replaceable `"\n"` literals have been converted to use the `NL` constant from `src/lib/text.spl`, with 335 occurrences correctly preserved for escape sequences, protocol specs, and constant definitions.
 
 The codebase is now more maintainable, cross-platform compatible, and consistent in its newline handling.

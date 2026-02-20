@@ -87,7 +87,7 @@ class DiContainer:
 - No circular dependency detection
 - No auto-wiring
 
-### 2.2 `src/std/src/di.spl` (~200 lines)
+### 2.2 `src/lib/src/di.spl` (~200 lines)
 
 Separate stdlib DI with profile factories (`for_test()`, `for_dev()`, etc.).
 Similar pattern to compiler DI, different implementation.

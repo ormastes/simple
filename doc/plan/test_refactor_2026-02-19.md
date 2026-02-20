@@ -192,7 +192,7 @@ If any imports found, update `use shared_compiler.interpreter.` → `use compile
 
 ### Phase T3 — Parallel to src Phase 6: `std` → `lib` rename
 
-After `src/std/` is renamed to `src/lib/`:
+After `src/lib/` is renamed to `src/lib/`:
 
 #### 3a. Check for parser/ name conflicts
 

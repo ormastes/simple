@@ -23,7 +23,7 @@ Implemented critical Phase 1 optimizations for Simple language standard library 
 ## Files Created
 
 ### 1. Hash Trait Implementation
-**File:** `src/std/src/hash.spl` (350 lines)
+**File:** `src/lib/src/hash.spl` (350 lines)
 
 **Features:**
 ```simple
@@ -59,7 +59,7 @@ trait Hash:
 ```
 
 ### 2. Map Hash Fix
-**File:** `src/std/src/map.spl` (modifications)
+**File:** `src/lib/src/map.spl` (modifications)
 
 **Changes:**
 ```simple
@@ -85,7 +85,7 @@ fn hash_key(key: K) -> i64:
 - **100x+ speedup** on large maps
 
 ### 3. ArrayBuilder Utility
-**File:** `src/std/src/array_builder.spl` (280 lines)
+**File:** `src/lib/src/array_builder.spl` (280 lines)
 
 **API:**
 ```simple
@@ -288,7 +288,7 @@ app.interpreter.collections.persistent_vec (uses ArrayBuilder)
 
 ### Export Updates Needed
 
-Add to `src/std/mod.spl`:
+Add to `src/lib/mod.spl`:
 ```simple
 pub use std.hash
 pub use std.array_builder
@@ -359,9 +359,9 @@ Type inference optimization:
 
 | File | Lines | Status |
 |------|-------|--------|
-| `src/std/src/hash.spl` | 350 | ✅ Complete |
-| `src/std/src/array_builder.spl` | 280 | ✅ Complete |
-| `src/std/src/map.spl` | 475 (modified) | ✅ Complete |
+| `src/lib/src/hash.spl` | 350 | ✅ Complete |
+| `src/lib/src/array_builder.spl` | 280 | ✅ Complete |
+| `src/lib/src/map.spl` | 475 (modified) | ✅ Complete |
 | `src/app/interpreter/collections/persistent_dict.spl` | 627 (modified) | ✅ Complete |
 | `src/app/interpreter/collections/persistent_vec.spl` | 465 (modified) | ✅ Complete |
 | **Test files** | ~2000 | ✅ Complete |

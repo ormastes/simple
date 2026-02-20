@@ -47,15 +47,17 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `debug` | Debugging, tracing, fault detection |
 | `stdlib` | Stdlib module development |
 | `todo` | TODO/FIXME comment format |
-| `doc` | Documentation writing workflow |
+| `doc` | Documentation writing workflow — all 10 doc types, relationship model |
 | `deeplearning` | ML pipeline operators, dimension checking |
-| `sffi` | FFI wrapper patterns (two/three-tier) |
+| `sffi` | FFI wrapper patterns |
 | `database` | BugDB, TestDB, FeatureDB, query builder |
 | `mcp` | MCP server implementation |
 | `release` | Release process and versioning |
+| `rule` | Engineering rules, doc folder map, ADR process |
 
 **Full Syntax Reference:** `doc/guide/syntax_quick_reference.md`
 **SSpec Template:** `.claude/templates/sspec_template.spl`
+**Doc Model:** `doc/FILE.md` — PLAN → REQ → FEATURE → TESTS relationship
 
 ---
 
@@ -204,26 +206,14 @@ See `doc/guide/syntax_quick_reference.md` for complete reference.
 ```
 src/
   app/              # Applications (cli, build, mcp, mcp_jj, io, test_runner_new, desugar)
-  lib/              # Standard library + all ecosystem libs — use std.X imports resolve here
-    ffi/            # FFI declarations (io, system, codegen, cli, runtime, ast, debug, etc.)
-    mcp/            # MCP server library (core, protocol, schema, handler_registry, helpers)
-    mcp_sdk/        # MCP SDK (jsonrpc, server builder, transport)
-    database/       # BugDB, TestDB, FeatureDB, query builder
-    pure/           # ML tensor library (autograd, nn, training, data, optim — 60+ files)
-    cuda/           # CUDA integration
-    torch/          # PyTorch FFI bindings
-    baremetal/      # Bare-metal support (arm, arm64, riscv, riscv32, x86, x86_64, common)
-    collections/    # Advanced collections (lazy_seq, persistent_dict, persistent_vec)
-    execution/      # Execution engine (semihost capture, string table)
-    hooks/          # Event hooks (build, feature, task, todo detectors)
-    memory/         # Memory management (refc_binary)
-    diagnostics/    # Diagnostic formatters (json, simple, text)
-    qemu/           # QEMU boot/debug runner
-    ...             # + full stdlib: text, math, json, crypto, net, async, date, regex, etc.
-  std -> lib        # Symlink: `use std.X` resolves to src/lib/X (both namespaces work)
-  compiler_cpp/     # Generated C++20 output (CMakeLists.txt + *.cpp — bootstrap via CMake+Ninja)
-  compiler_core/    # Bootstrap build infra (CMakeLists.txt, legacy)
-  compiler_seed/    # C runtime (runtime.c/runtime.h — linked by generated C++)
+  lib/              # Standard library — `use std.X` resolves here (resolver searches lib/*/ subdirs)
+    common/         # Pure functions, no mutation (text, math, json, crypto, encoding, etc.)
+    nogc_sync_mut/  # Sync mutable, no GC (ffi, fs, net, http, database, mcp, spec, etc.)
+    nogc_async_mut/ # Async mutable, no GC (actors, async, threads, generators, etc.)
+    gc_async_mut/   # GC + async (gpu, cuda, torch, pure ML library)
+    nogc_async_mut_noalloc/  # Baremetal, execution, memory, qemu
+  compiler_cpp/     # Generated C++20 output only (CMakeLists.txt + *.cpp — bootstrap via CMake+Ninja)
+  runtime/          # C runtime (runtime.c/runtime.h — linked by generated C++)
   compiler/         # Unified compiler — numbered layers (NN.name/ prefix stripped for imports)
     00.common/      # Error types, config, effects, visibility, diagnostics, registry
     10.frontend/    # Lexer, parser, AST, treesitter, desugar, parser types
@@ -251,7 +241,7 @@ scripts/            # Bootstrap bash scripts (3 only)
 .claude/            # Agents, skills, templates
 ```
 
-**Import namespace:** `use std.X` and `use lib.X` both resolve from `src/lib/` (via `src/std -> lib` symlink). Prefer `use std.X` in new code.
+**Import namespace:** `use std.X` and `use lib.X` both resolve from `src/lib/`. The module resolver rewrites `std` → `lib` internally. Prefer `use std.X` in new code.
 
 **Detailed Structure:** See [`doc/architecture/file_class_structure.md`](doc/architecture/file_class_structure.md) for comprehensive codebase inventory (2,649 files, 623K lines, duplication analysis, refactoring recommendations).
 
@@ -274,8 +264,8 @@ Updated automatically:
 
 ## SFFI (Simple FFI)
 
-**Two-Tier** (Runtime): `extern fn rt_*` -> `fn wrapper()`
-**Three-Tier** (External): C++/Rust FFI -> `extern fn` -> Simple API
+**Runtime pattern**: `extern fn rt_*` -> `fn wrapper()`
+**External library pattern**: C++/Rust FFI -> `extern fn` -> Simple API
 
 ```simple
 extern fn rt_file_read_text(path: text) -> text

@@ -19,11 +19,11 @@
 ### Current State: Infrastructure Complete ✅
 
 **Existing Modules**:
-- `src/std/async/task.spl` - Task scheduling
-- `src/std/async/future.spl` - Future type
-- `src/std/async/poll.spl` - Poll enum
-- `src/std/async_host/` - Host runtime
-- `src/std/async_unified.spl` - Unified interface
+- `src/lib/async/task.spl` - Task scheduling
+- `src/lib/async/future.spl` - Future type
+- `src/lib/async/poll.spl` - Poll enum
+- `src/lib/async_host/` - Host runtime
+- `src/lib/async_unified.spl` - Unified interface
 
 **Type Definitions**:
 ```simple
@@ -237,7 +237,7 @@ struct Container<T>:
 ### Phase 6.3: Enable Async Modules (200 lines, 1 day)
 
 **Files to Modify**:
-- `src/std/async/*.spl` - Verify they load
+- `src/lib/async/*.spl` - Verify they load
 - Test async usage patterns
 
 **Deliverables**:
@@ -249,7 +249,7 @@ struct Container<T>:
 ### Phase 6.4: Enable Generic Collections (400 lines, 1 day)
 
 **Files to Modify**:
-- `src/std/collections/*.spl` - Load generic types
+- `src/lib/collections/*.spl` - Load generic types
 - Enable Set<T>, Map<K,V> usage
 
 **Deliverables**:

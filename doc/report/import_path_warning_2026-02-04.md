@@ -86,7 +86,7 @@ me convert_import(outline: ImportOutline) -> Import:
 3. **Absolute Paths** (from project root):
    ```simple
    use src/compiler/parser.*
-   use src/std/collections.*
+   use src/lib/collections.*
    ```
 
 ### Incorrect Syntax

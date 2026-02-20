@@ -25,7 +25,7 @@ Completed comprehensive duplicate removal across the codebase. Discovered that a
 **Solution:** Removed 2-param version from `repr.spl`, imported 3-param from `text.spl`
 
 **Changed:**
-- `src/std/repr.spl` (-11 lines)
+- `src/lib/repr.spl` (-11 lines)
 
 ---
 
@@ -38,8 +38,8 @@ Completed comprehensive duplicate removal across the codebase. Discovered that a
 **Solution:** Import from canonical `std.platform` module
 
 **Changed:**
-- `src/std/process_monitor.spl` (-14 lines, imported from platform)
-- `src/std/spec.spl` (-31 lines including `_get_host_os` helper)
+- `src/lib/process_monitor.spl` (-14 lines, imported from platform)
+- `src/lib/spec.spl` (-31 lines including `_get_host_os` helper)
 
 ---
 
@@ -52,8 +52,8 @@ Completed comprehensive duplicate removal across the codebase. Discovered that a
 **Solution:** Import from canonical `std.platform`, create `join_paths` alias for compatibility
 
 **Changed:**
-- `src/std/ftp_utils.spl` (-27 lines, kept `join_paths` wrapper)
-- `src/std/http_server/utilities.spl` (-40 lines, kept `join_paths` wrapper)
+- `src/lib/ftp_utils.spl` (-27 lines, kept `join_paths` wrapper)
+- `src/lib/http_server/utilities.spl` (-40 lines, kept `join_paths` wrapper)
 
 **Note:** URI modules (`uri/build.spl`, `uri/parse.spl`) have DIFFERENT signatures (array-based), not duplicates.
 
@@ -80,7 +80,7 @@ Completed comprehensive duplicate removal across the codebase. Discovered that a
 
 ## Detailed Changes
 
-### 1. src/std/repr.spl
+### 1. src/lib/repr.spl
 ```simple
 # BEFORE: Local implementation (11 lines)
 fn text_pad_right(s: text, width: i64) -> text:
@@ -95,7 +95,7 @@ use std.text.{text_pad_right}
 text_pad_right(cell, width, " ")  # Added third param
 ```
 
-### 2. src/std/process_monitor.spl
+### 2. src/lib/process_monitor.spl
 ```simple
 # BEFORE: Local implementation (14 lines)
 fn is_linux() -> bool: file_exists("/proc/self/stat")
@@ -106,7 +106,7 @@ fn is_windows() -> bool: ...
 use std.platform.{is_windows, is_linux, is_macos}
 ```
 
-### 3. src/std/spec.spl
+### 3. src/lib/spec.spl
 ```simple
 # BEFORE: Local implementation (31 lines including _get_host_os)
 fn _get_host_os() -> text: ...
@@ -119,7 +119,7 @@ fn is_unix() -> bool: ...
 use std.platform.{is_windows, is_linux, is_macos, is_unix}
 ```
 
-### 4. src/std/ftp_utils.spl
+### 4. src/lib/ftp_utils.spl
 ```simple
 # BEFORE: Local implementation (27 lines)
 fn normalize_path(path: text) -> text: ...
@@ -134,7 +134,7 @@ fn join_paths(base: text, relative: text) -> text:
     join_path(base, relative)
 ```
 
-### 5. src/std/http_server/utilities.spl
+### 5. src/lib/http_server/utilities.spl
 ```simple
 # BEFORE: Local implementation (40 lines)
 fn normalize_path(path: text) -> text: ...
@@ -250,11 +250,11 @@ bin/simple build --release
 
 ## Files Modified
 
-1. `src/std/repr.spl` - Import text_pad_right from text.spl
-2. `src/std/process_monitor.spl` - Import platform detection from platform.spl
-3. `src/std/spec.spl` - Import platform detection from platform.spl
-4. `src/std/ftp_utils.spl` - Import path utilities from platform.spl
-5. `src/std/http_server/utilities.spl` - Import path utilities from platform.spl
+1. `src/lib/repr.spl` - Import text_pad_right from text.spl
+2. `src/lib/process_monitor.spl` - Import platform detection from platform.spl
+3. `src/lib/spec.spl` - Import platform detection from platform.spl
+4. `src/lib/ftp_utils.spl` - Import path utilities from platform.spl
+5. `src/lib/http_server/utilities.spl` - Import path utilities from platform.spl
 
 ---
 

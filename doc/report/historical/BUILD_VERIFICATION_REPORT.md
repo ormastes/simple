@@ -207,7 +207,7 @@ simple compile src/compiler/backend.spl
 
 ```bash
 # Set environment variable for module search
-export SIMPLE_MODULE_PATH=src/compiler_core_legacy:src/std
+export SIMPLE_MODULE_PATH=src/compiler_core_legacy:src/lib
 
 # Or use compiler flag
 simple compile --module-path src/compiler_core_legacy src/compiler_core_legacy/backend.spl

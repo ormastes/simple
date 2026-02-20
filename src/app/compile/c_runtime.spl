@@ -3,7 +3,7 @@
 # C runtime generation and struct/result parsing:
 #   - generate_c_runtime: Produces C runtime helper code (from file or fallback)
 #   - parse_struct_fields: Parses Simple struct fields into C typedef
-#   - split_result: Extracts code and type entries from "code|||entries" format
+#   - split_result: Extracts code and type entries from "code<|TYPE|>entries" format
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -20,7 +20,7 @@ fn generate_c_runtime() -> text:
         val content = raw ?? ""
         return "\n" + content + "\n"
     # Fallback: minimal runtime
-    warn("compile", "C runtime not found at {runtime_path}")
+    warn("compile", r"C runtime not found at " + runtime_path)
     warn("compile", "Using minimal embedded runtime.")
     var rt = "\n// === Minimal Simple Runtime ===\n"
     rt = rt + "static long simple_strlen(const char* s) \{ return s ? (long)strlen(s) : 0; }" + "\n"
@@ -56,20 +56,26 @@ fn parse_struct_fields(lines_arr: [text], start_idx: i64) -> [text]:
             val field_name = clean_field.substring(0, field_colon).trim()
             val field_type = clean_field.substring(field_colon + 1).trim()
             val c_type = simple_type_to_c(field_type)
-            fields.push("    {c_type} {field_name};")
+            fields.push(r"    " + c_type + r" " + field_name + r";")
         idx = i + 1
 
     var typedef_body = fields.join("\n")
-    ["{idx}", typedef_body]
+    [r"" + idx, typedef_body]
 
-# Helper to extract code and type entries from a "code|||entries" result
+# Helper to extract code and type entries from a "code<|TYPE|>entries" result
 # Returns [code, type_entries] where type_entries may be ""
 fn split_result(raw: text) -> [text]:
-    val sep_pos = raw.index_of("|||") ?? -1
+    val sep_pos = raw.last_index_of("<|TYPE|>") ?? -1
     if sep_pos >= 0:
         val code = raw.substring(0, sep_pos)
-        val entries = raw.substring(sep_pos + 3)
-        return [code, entries]
-    [raw, ""]
+        val entries = raw.substring(sep_pos + 8)
+        var sr_result: [text] = []
+        sr_result.push(code)
+        sr_result.push(entries)
+        return sr_result
+    var sr_default: [text] = []
+    sr_default.push(raw)
+    sr_default.push("")
+    sr_default
 
 export generate_c_runtime, parse_struct_fields, split_result

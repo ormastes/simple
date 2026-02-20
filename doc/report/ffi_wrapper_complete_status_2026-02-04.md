@@ -134,7 +134,7 @@ fn exp(x: f64) -> f64
 ```
 
 **Location to add:**
-- Extern declarations: `src/app/io/mod.spl` (or new `src/std/math/mod.spl`)
+- Extern declarations: `src/app/io/mod.spl` (or new `src/lib/math/mod.spl`)
 - Wrappers: Same file, following two-tier pattern
 
 **Note:** Some math wrappers exist in `rust/lib/std/src/math/` (vec2, vec3, mat3, etc.) but basic functions (sin, cos, sqrt) are missing.
@@ -158,7 +158,7 @@ fn string_substring(s: text, start: i64, end: i64) -> text
 ```
 
 **Location to add:**
-- Extend: `src/std/text/mod.spl`
+- Extend: `src/lib/text/mod.spl`
 
 ### 3. Array Functions ❌ (HIGH Priority)
 
@@ -180,7 +180,7 @@ fn array_sort<T>(arr: [T]) -> [T]
 ```
 
 **Location to add:**
-- Create: `src/std/array/mod.spl`
+- Create: `src/lib/array/mod.spl`
 
 ### 4. Dictionary Functions ❌ (MEDIUM Priority)
 
@@ -200,7 +200,7 @@ fn dict_clear<K, V>(d: {K: V}) -> {K: V}
 ```
 
 **Location to add:**
-- Create: `src/std/dict/mod.spl`
+- Create: `src/lib/dict/mod.spl`
 
 ## Architecture Verification
 
@@ -259,28 +259,28 @@ These are internal APIs that apps should never call directly.
 **Estimated:** 95 wrappers to add
 
 1. **Math functions (36 wrappers)**
-   - Location: `src/std/math/mod.spl`
+   - Location: `src/lib/math/mod.spl`
    - Trigonometry: sin, cos, tan, asin, acos, atan
    - Exponentials: sqrt, pow, log, exp
    - Rounding: ceil, floor, round, trunc
    - Absolute: abs, min, max
 
 2. **String functions (15 wrappers)**
-   - Location: `src/std/text/mod.spl` (extend existing)
+   - Location: `src/lib/text/mod.spl` (extend existing)
    - Splitting: split, join
    - Manipulation: replace, trim, substring
    - Case: upper, lower, capitalize
    - Search: contains, starts_with, ends_with
 
 3. **Array functions (36 wrappers)**
-   - Location: `src/std/array/mod.spl` (create new)
+   - Location: `src/lib/array/mod.spl` (create new)
    - Access: first, last, slice, at
    - Transform: map, filter, reduce
    - Search: contains, find, index_of
    - Manipulation: reverse, sort, unique
 
 4. **Dictionary functions (8 wrappers)**
-   - Location: `src/std/dict/mod.spl` (create new)
+   - Location: `src/lib/dict/mod.spl` (create new)
    - Basic: get, set, keys, values
    - Operations: contains, remove, clear
 
@@ -289,16 +289,16 @@ These are internal APIs that apps should never call directly.
 **Estimated:** 27 wrappers to add
 
 5. **Random functions (5 wrappers)**
-   - Location: `src/std/random/mod.spl` (extend existing)
+   - Location: `src/lib/random/mod.spl` (extend existing)
 
 6. **SDN functions (3 wrappers)**
-   - Location: `src/std/sdn/mod.spl`
+   - Location: `src/lib/sdn/mod.spl`
 
 7. **Timestamp extended (4 wrappers)**
-   - Location: `src/std/time/mod.spl` (extend existing)
+   - Location: `src/lib/time/mod.spl` (extend existing)
 
 8. **Concurrency essentials (15 wrappers)**
-   - Location: `src/std/concurrent/mod.spl`
+   - Location: `src/lib/concurrent/mod.spl`
    - Select from 80 available: atomic ops, channels, mutexes
 
 ### Phase 3: Optional Graphics Extensions (LOW Priority)

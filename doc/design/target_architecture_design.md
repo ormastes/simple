@@ -2,7 +2,7 @@
 
 **Date**: 2026-02-05
 **Status**: Draft
-**Related**: `src/std/common/target.spl`, `src/compiler/type_layout.spl`
+**Related**: `src/lib/common/target.spl`, `src/compiler/type_layout.spl`
 
 ---
 
@@ -449,7 +449,7 @@ For `struct { a: u8, b: u32 }`:
 
 | File | Purpose |
 |------|---------|
-| `src/std/common/target.spl` | TargetArch enum and properties |
+| `src/lib/common/target.spl` | TargetArch enum and properties |
 | `src/compiler/type_layout.spl` | Architecture-aware type sizing |
 | `src/compiler/calling_convention.spl` | ABI definitions |
 | `src/compiler/cfg.spl` | Conditional compilation |

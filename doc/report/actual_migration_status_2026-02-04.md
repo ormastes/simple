@@ -109,7 +109,7 @@ interpreter/
 
 1. **value.rs** (674 lines)
    - RuntimeValue enum
-   - → Already have `src/std/runtime_value.spl`
+   - → Already have `src/lib/runtime_value.spl`
    - May need sync
 
 2. **value_bridge.rs** (750 lines)
@@ -170,7 +170,7 @@ Based on this analysis, the FIRST things to do:
 
 **Focus:** Ensure RuntimeValue is complete
 
-**Check:** Compare `src/std/runtime_value.spl` with `rust/compiler/src/value.rs`
+**Check:** Compare `src/lib/runtime_value.spl` with `rust/compiler/src/value.rs`
 
 **Why Third:**
 - Foundational type

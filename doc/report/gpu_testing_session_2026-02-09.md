@@ -32,7 +32,7 @@ error: parse error: Unexpected token: expected identifier, found Gpu
 
 **Analysis:**
 - Runtime parser doesn't support `struct` with `impl` blocks
-- The `Gpu` struct in `src/std/gpu/device.spl` line 21 causes parse error
+- The `Gpu` struct in `src/lib/gpu/device.spl` line 21 causes parse error
 - Runtime parser is more limited than full compiler parser
 
 ---
@@ -92,7 +92,7 @@ The pre-built runtime (`bin/bootstrap/simple`) uses a simpler parser that doesn'
 error: parse error: Unexpected token: expected identifier, found Gpu
 ```
 
-**Location:** `src/std/gpu/device.spl:21`
+**Location:** `src/lib/gpu/device.spl:21`
 
 ```simple
 struct Gpu:
@@ -232,7 +232,7 @@ $ ls -la .build/rust/ffi_torch/target/release/
 
 ### 2. Simple Syntax Valid ✅
 
-All Simple source files (`src/std/gpu/*.spl`, `src/lib/torch/*.spl`) have valid syntax for the **full Simple compiler**.
+All Simple source files (`src/lib/gpu/*.spl`, `src/lib/torch/*.spl`) have valid syntax for the **full Simple compiler**.
 
 **Note:** Runtime parser is a subset - it's normal that full syntax doesn't work in runtime
 
@@ -278,7 +278,7 @@ Since runtime testing is blocked, here are alternative verification methods:
 grep -r "use std.gpu" examples/gpu/
 
 # Check function signatures match
-grep -A 5 "fn alloc" src/std/gpu/context.spl
+grep -A 5 "fn alloc" src/lib/gpu/context.spl
 ```
 
 **Result:** ✅ All imports and types are correct
@@ -423,10 +423,10 @@ bin/simple compile examples/gpu/async_pipeline.spl -o test_async
 
 | File | Status | Evidence |
 |------|--------|----------|
-| `src/std/gpu/device.spl` | ✅ Correct | Valid syntax, sound logic |
-| `src/std/gpu/memory.spl` | ✅ Correct | RAII pattern implemented |
-| `src/std/gpu/context.spl` | ✅ Correct | Clean API, config integration |
-| `src/std/gpu/mod.spl` | ✅ Correct | Proper exports |
+| `src/lib/gpu/device.spl` | ✅ Correct | Valid syntax, sound logic |
+| `src/lib/gpu/memory.spl` | ✅ Correct | RAII pattern implemented |
+| `src/lib/gpu/context.spl` | ✅ Correct | Clean API, config integration |
+| `src/lib/gpu/mod.spl` | ✅ Correct | Proper exports |
 | `src/lib/torch/mod.spl` | ✅ Correct | SFFI Tier 3 wrapper |
 | `src/lib/torch/ffi.spl` | ✅ Correct | SFFI Tier 2 bindings |
 | `.build/rust/ffi_torch/` | ✅ Built | 408KB + 451KB libraries |

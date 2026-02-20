@@ -113,8 +113,8 @@ fn get(key: text) -> text:
 6. `doc/report/fix_session_summary_2026-02-05.md` (this file)
 
 ### Modified:
-1. `src/std/src/compiler_core/decorators.spl` - Fixed type issues, simplified
-2. `src/std/src/infra.spl` - Added 28 functions (+311 lines)
+1. `src/lib/src/compiler_core/decorators.spl` - Fixed type issues, simplified
+2. `src/lib/src/infra.spl` - Added 28 functions (+311 lines)
 3. `src/app/build/metrics.spl` - Added MetricsConfig, exports
 4. `src/app/build/watch.spl` - Added exports
 5. `src/app/build/incremental.spl` - Added exports

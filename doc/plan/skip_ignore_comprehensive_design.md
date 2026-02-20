@@ -197,10 +197,10 @@ ignore_fat32("chmod test", fn():
 
 | Module | Purpose | Lines | Status |
 |--------|---------|-------|--------|
-| `src/std/spec/env_detect.spl` | Environment detection (all 12 types) | ~400 | ⏳ TODO |
-| `src/std/spec/condition.spl` | `SkipCondition` struct + evaluator | ~150 | ⏳ TODO |
-| `src/std/spec/decorators.spl` | `skip()`, `ignore()`, `only_on()`, `skip_if()` | ~200 | ⏳ TODO |
-| `src/std/spec/builder.spl` | Fluent `TestBuilder` API | ~120 | ⏳ TODO |
+| `src/lib/spec/env_detect.spl` | Environment detection (all 12 types) | ~400 | ⏳ TODO |
+| `src/lib/spec/condition.spl` | `SkipCondition` struct + evaluator | ~150 | ⏳ TODO |
+| `src/lib/spec/decorators.spl` | `skip()`, `ignore()`, `only_on()`, `skip_if()` | ~200 | ⏳ TODO |
+| `src/lib/spec/builder.spl` | Fluent `TestBuilder` API | ~120 | ⏳ TODO |
 | `test/lib/std/spec/skip_spec.spl` | Unit tests | ~500 | ⏳ TODO |
 
 ## Detection Functions

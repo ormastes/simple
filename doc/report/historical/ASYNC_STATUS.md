@@ -53,7 +53,7 @@ Async/await syntax is now fully parseable and has basic interpreter support. The
 
 ### 5. Runtime Async Support
 **Current Situation:**
-- Async runtime exists at `src/std/async/` (Promise, Future, Task, Executor)
+- Async runtime exists at `src/lib/async/` (Promise, Future, Task, Executor)
 - Runtime uses generics heavily (Promise<T>, Future<T>)
 - **Runtime Limitation:** Generics don't work in interpreter
 - Async functions return raw Promise objects
@@ -96,7 +96,7 @@ Async/await syntax is now fully parseable and has basic interpreter support. The
 
 3. **Runtime Layer** (⚠️ PARTIAL)
    - Executes async code
-   - Located: `src/std/async/`, `src/compiler_core/interpreter/eval.spl`
+   - Located: `src/lib/async/`, `src/compiler_core/interpreter/eval.spl`
    - Issue: Uses generics (interpreter limitation)
 
 ### Why Await Fails
@@ -172,12 +172,12 @@ val result = await get_value()  # Fails here
 - `src/compiler/desugar/poll_generator.spl`
 
 **Async Runtime:**
-- `src/std/async/__init__.spl`
-- `src/std/async/promise.spl`
-- `src/std/async/future.spl`
-- `src/std/async/task.spl`
-- `src/std/async/executor.spl`
-- `src/std/async/runtime.spl`
+- `src/lib/async/__init__.spl`
+- `src/lib/async/promise.spl`
+- `src/lib/async/future.spl`
+- `src/lib/async/task.spl`
+- `src/lib/async/executor.spl`
+- `src/lib/async/runtime.spl`
 
 **Documentation:**
 - `ASYNC_PARSER_IMPLEMENTATION.md` - Parser implementation details

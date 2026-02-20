@@ -176,7 +176,7 @@ fn assert_positive(x: i64):
 **Implementation files:**
 - `src/compiler_core/parser.spl` — recognize `@file`/`@line`/`@function` in expression position
 - `src/compiler_core/interpreter/eval.spl` — resolve to constants during eval
-- `src/std/intrinsics.spl` — NEW: document the intrinsic set
+- `src/lib/intrinsics.spl` — NEW: document the intrinsic set
 
 **Tests:** `test/unit/compiler_core/source_location_spec.spl`
 
@@ -198,7 +198,7 @@ fn assert_positive(x: i64):
 **Implementation files:**
 - `src/compiler_core/interpreter/eval.spl` — constant expression evaluator
 - `src/compiler_core/compiler/driver.spl` — emit compile error from static assert failure
-- `src/std/intrinsics.spl` — export `@static_assert` behavior docs
+- `src/lib/intrinsics.spl` — export `@static_assert` behavior docs
 
 **Tests:** `test/unit/compiler_core/static_assert_spec.spl`
 
@@ -283,7 +283,7 @@ var _current_error_trace: ErrorTrace = ErrorTrace(sites: [], depth: 0)
 - **Works in release mode:** compile-time constants need no DWARF
 
 **Implementation files:**
-- `src/std/error_trace.spl` — NEW: `ErrorSite`, `ErrorTrace`, trace management
+- `src/lib/error_trace.spl` — NEW: `ErrorSite`, `ErrorTrace`, trace management
 - `src/compiler_core/parser.spl` — `?` operator desugaring to include trace append
 - `src/compiler_core/interpreter/eval.spl` — `?` eval path calls `error_trace_push()`
 
@@ -318,7 +318,7 @@ val n = parse_int("42")  # OK
 **Implementation files:**
 - `src/compiler_core/parser.spl` — store `@must_use` in fn declaration AST node
 - `src/compiler_core/interpreter/eval.spl` — check annotation in `eval_function_call()`
-- `src/std/intrinsics.spl` — document `@must_use`
+- `src/lib/intrinsics.spl` — document `@must_use`
 
 **Tests:** `test/unit/compiler_core/must_use_spec.spl`
 
@@ -369,7 +369,7 @@ struct Socket<State: SocketState>:
 **Implementation files:**
 - `src/compiler_core/parser.spl` — recognize `@phantom` on struct declarations
 - `src/compiler_core/generic_runtime.spl` — skip field construction for `@phantom` structs
-- `src/std/phantom.spl` — NEW: common phantom marker types (`Owned`, `Borrowed`, `ReadOnly`, etc.)
+- `src/lib/phantom.spl` — NEW: common phantom marker types (`Owned`, `Borrowed`, `ReadOnly`, etc.)
 
 **Tests:** `test/unit/compiler_core/phantom_types_spec.spl`
 
@@ -433,13 +433,13 @@ type Omit<T, Keys in keyof T> = struct { for K in (keyof T - Keys): K: T[K] }  #
 - Requires `keyof` (Phase 4.1)
 - Type expression syntax: `struct { for K in keyof T: K: T[K] }` in type position
 - Type checker: Expand `for K in keyof T` at compile time into concrete field list
-- Standard library: `src/std/types/mapped.spl` — common mapped type definitions
+- Standard library: `src/lib/types/mapped.spl` — common mapped type definitions
 - No runtime cost: all expansion happens at compile time
 
 **Implementation files:**
 - `src/compiler_core/parser.spl` — type expression parser handles `{ for K in keyof T: K: T[K]? }`
 - `src/compiler_core/interpreter/eval.spl` — expand mapped types at type-check time
-- `src/std/types/mapped.spl` — NEW: `Partial<T>`, `Readonly<T>`, `Stringify<T>`, `Pick`, `Omit`
+- `src/lib/types/mapped.spl` — NEW: `Partial<T>`, `Readonly<T>`, `Stringify<T>`, `Pick`, `Omit`
 
 **Tests:** `test/unit/compiler_core/mapped_types_spec.spl`
 
@@ -457,7 +457,7 @@ type Omit<T, Keys in keyof T> = struct { for K in (keyof T - Keys): K: T[K] }  #
 - On panic: runtime calls `rt_capture_dwarf_trace()` (SFFI to libunwind/libbacktrace)
 - Zero runtime cost during normal execution
 
-**Missing piece:** `rt_capture_stack_trace()` extern fn is declared in `src/std/report/runtime/panic.spl` but not yet implemented in the runtime binary.
+**Missing piece:** `rt_capture_stack_trace()` extern fn is declared in `src/lib/report/runtime/panic.spl` but not yet implemented in the runtime binary.
 
 **Implementation:**
 - Add SFFI: `extern fn rt_capture_stack_trace() -> [text]` in runtime binary
@@ -519,10 +519,10 @@ Features implemented as annotations (`@file`, `@line`, `@function`, `@static_ass
 ### New files to create (in implementation order):
 
 ```
-src/std/intrinsics.spl          # @file, @line, @function, @static_assert, @must_use docs + impls
-src/std/error_trace.spl         # ErrorSite, ErrorTrace, error_trace_begin/end/push
-src/std/phantom.spl             # Common @phantom markers: Owned, Borrowed, ReadOnly, WriteOnly
-src/std/types/mapped.spl        # Partial<T>, Readonly<T>, Stringify<T>, Pick<T,K>, Omit<T,K>
+src/lib/intrinsics.spl          # @file, @line, @function, @static_assert, @must_use docs + impls
+src/lib/error_trace.spl         # ErrorSite, ErrorTrace, error_trace_begin/end/push
+src/lib/phantom.spl             # Common @phantom markers: Owned, Borrowed, ReadOnly, WriteOnly
+src/lib/types/mapped.spl        # Partial<T>, Readonly<T>, Stringify<T>, Pick<T,K>, Omit<T,K>
 ```
 
 ### Existing files to modify (in implementation order):

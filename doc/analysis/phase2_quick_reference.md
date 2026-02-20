@@ -2,7 +2,7 @@
 
 **Generated:** 2026-02-14
 **Analysis:** Manual inspection of ~30 representative files
-**Scope:** src/core, src/compiler, src/std, src/lib, src/app
+**Scope:** src/core, src/compiler, src/lib, src/lib, src/app
 
 ---
 
@@ -39,7 +39,7 @@
 
 **2. Config Parser Creation** (6-7 hours)
 ```bash
-# Create: src/std/config_parser.spl (base parser)
+# Create: src/lib/config_parser.spl (base parser)
 # Migrate: 7 config files to use new parser
 # Test: Ensure existing configs load unchanged
 ```
@@ -49,16 +49,16 @@
 
 **3. String Utilities** (3-4 hours)
 ```bash
-# Create: src/std/string_core.spl (canonical implementations)
+# Create: src/lib/string_core.spl (canonical implementations)
 # Update: src/compiler_core/types.spl to re-export
-# Cleanup: src/std/template/utilities.spl duplicates
+# Cleanup: src/lib/template/utilities.spl duplicates
 ```
 **Saves:** 250-300 lines
 
 **4. Error Handling** (3-4 hours)
 ```bash
-# Create: src/std/error_core.spl (base trait)
-# Create: src/std/error_format.spl (formatters)
+# Create: src/lib/error_core.spl (base trait)
+# Create: src/lib/error_format.spl (formatters)
 # Migrate: 3 error modules to use shared base
 ```
 **Saves:** 150-200 lines
@@ -71,7 +71,7 @@
 - Add to style guide
 
 **6. Semantic Types**
-- Move `src/lib/types.spl` → `src/std/semantic_types.spl`
+- Move `src/lib/types.spl` → `src/lib/semantic_types.spl`
 - Organize by category (IDs, Sizes, Time, etc.)
 - Update imports
 
@@ -85,8 +85,8 @@
 
 ### Duplicated String Functions
 - `src/compiler_core/types.spl` (lines 14-48)
-- `src/std/text.spl` (char_code lookup)
-- `src/std/template/utilities.spl` (lines 40-180)
+- `src/lib/text.spl` (char_code lookup)
+- `src/lib/template/utilities.spl` (lines 40-180)
 - `doc/analysis/stdlib_utils_concatenated.spl` (11,917+)
 
 ### Duplicated Config Parsers
@@ -95,12 +95,12 @@
 3. `src/app/build/config.spl` (~100 lines)
 4. `src/app/test/cpu_aware_test.spl` (~40 lines)
 5. `src/app/mcp/fileio_protection.spl` (~80 lines)
-6. `src/std/sdn/parser.spl` (~150 lines)
-7. `src/std/src/dl/config_loader.spl` (~70 lines)
+6. `src/lib/sdn/parser.spl` (~150 lines)
+7. `src/lib/src/dl/config_loader.spl` (~70 lines)
 
 ### Duplicated Error Handlers
 - `src/compiler_core/error.spl` (easyfix suggestions, 158 lines)
-- `src/std/error.spl` (trait hierarchy, 100+ lines)
+- `src/lib/error.spl` (trait hierarchy, 100+ lines)
 - `src/compiler/backend/codegen_errors.spl` (enum + struct, 100+ lines)
 
 ---

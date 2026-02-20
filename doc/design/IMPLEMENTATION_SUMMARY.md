@@ -144,7 +144,7 @@ TODO: [area][priority] description [#issue] [blocked:#issue,#issue]
 ```sdn
 todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|
     1, TODO, runtime, P0, "Implement monoio TCP write", src/runtime/tcp.rs, 123, 234, "", open, true
-    2, FIXME, stdlib, P0, "Fix memory leak", src/stdlib/mem.rs, 456, 567, "123", open, true
+    2, FIXME, stdlib, P0, "Fix memory leak", src/liblib/mem.rs, 456, 567, "123", open, true
 ```
 
 ### ✅ CLI Commands

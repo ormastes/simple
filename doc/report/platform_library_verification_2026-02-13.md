@@ -52,7 +52,7 @@ The lexer correctly handles newlines after migrating from `NL` to `_NL`.
 
 | File | Change | Lines | Status |
 |------|--------|-------|--------|
-| `src/std/text.spl` | Distinguished `_NL` vs `NL` | 5 | ✅ Working |
+| `src/lib/text.spl` | Distinguished `_NL` vs `NL` | 5 | ✅ Working |
 | `src/compiler_core/lexer_struct.spl` | `NL` → `_NL` (9 occurrences) | 9 | ✅ Working |
 | `src/compiler_core/lexer.spl` | `NL` → `_NL` (9 occurrences) | 9 | ✅ Working |
 
@@ -62,12 +62,12 @@ The lexer correctly handles newlines after migrating from `NL` to `_NL`.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/std/platform/config.spl` | 72 | Platform configuration |
-| `src/std/platform/convert.spl` | 157 | Conversion functions |
-| `src/std/platform/newline.spl` | 31 | Newline translation |
-| `src/std/platform/wire.spl` | 101 | Wire format |
-| `src/std/platform/text_io.spl` | 29 | File I/O |
-| `src/std/platform/mod.spl` | 24 | Public API |
+| `src/lib/platform/config.spl` | 72 | Platform configuration |
+| `src/lib/platform/convert.spl` | 157 | Conversion functions |
+| `src/lib/platform/newline.spl` | 31 | Newline translation |
+| `src/lib/platform/wire.spl` | 101 | Wire format |
+| `src/lib/platform/text_io.spl` | 29 | File I/O |
+| `src/lib/platform/mod.spl` | 24 | Public API |
 | **Subtotal** | **414** | **6 modules** |
 
 | File | Lines | Purpose |

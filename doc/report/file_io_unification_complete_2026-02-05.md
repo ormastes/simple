@@ -1,7 +1,7 @@
 # File I/O Unification - Complete - 2026-02-05
 
 **Status:** ✅ Complete
-**Module:** `src/std/src/infra.spl` (712 lines)
+**Module:** `src/lib/src/infra.spl` (712 lines)
 **Pattern:** Unified public API with Result-based error handling
 
 ---
@@ -9,7 +9,7 @@
 ## What Was Accomplished
 
 ### 1. Decorator Fix
-✅ Simplified `src/std/src/compiler_core/decorators.spl` to work within Pure Simple limitations
+✅ Simplified `src/lib/src/compiler_core/decorators.spl` to work within Pure Simple limitations
 - Removed variadic function syntax (`*args`) which isn't supported
 - Simplified to name-based tracking instead of function wrapping
 - Still compiles and provides basic decorator patterns
@@ -244,7 +244,7 @@ fn backup_and_verify():
 └─────────────────┬────────────────────────────┘
                   │
 ┌─────────────────▼────────────────────────────┐
-│  src/std/src/infra.spl (Public API)          │
+│  src/lib/src/infra.spl (Public API)          │
 │  - Result<T, IoError> for error handling     │
 │  - High-level, user-friendly functions       │
 │  - 44 functions                              │
@@ -296,7 +296,7 @@ fn backup_and_verify():
 3. `doc/report/pure_simple_file_io_adv_2026-02-05.md` - Advanced I/O implementation
 
 **Next:**
-- Update `src/std/README.md` with infra module documentation
+- Update `src/lib/README.md` with infra module documentation
 - Add examples to module docstring
 - Create migration guide for `app.io` users
 
@@ -337,6 +337,6 @@ Successfully unified file I/O features into a single public API (`std.infra`) th
 ---
 
 **Report generated:** 2026-02-05
-**Module:** `src/std/src/infra.spl`
+**Module:** `src/lib/src/infra.spl`
 **Lines:** 712 (was 401)
 **Functions:** 44 (was 16)

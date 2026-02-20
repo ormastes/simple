@@ -143,7 +143,7 @@ The "Other" category (589 functions) is too large. Many are:
 
 **1. Wrap Essential Math Functions (36 functions)**
 
-Create `src/std/math/mod.spl`:
+Create `src/lib/math/mod.spl`:
 ```simple
 extern fn rt_math_sin(x: f64) -> f64
 fn sin(x: f64) -> f64:
@@ -158,7 +158,7 @@ fn sqrt(x: f64) -> f64:
 
 **2. Wrap Essential String Functions (15 functions)**
 
-Extend `src/std/text/mod.spl`:
+Extend `src/lib/text/mod.spl`:
 ```simple
 extern fn rt_string_split(s: text, delim: text) -> [text]
 fn split(s: text, delimiter: text) -> [text]:
@@ -169,7 +169,7 @@ fn split(s: text, delimiter: text) -> [text]:
 
 **3. Wrap Essential Array Functions (36 functions)**
 
-Create `src/std/array/mod.spl`:
+Create `src/lib/array/mod.spl`:
 ```simple
 extern fn rt_array_first<T>(arr: [T]) -> T?
 fn first<T>(arr: [T]) -> T?:
@@ -180,7 +180,7 @@ fn first<T>(arr: [T]) -> T?:
 
 **4. Wrap Dictionary Functions (8 functions)**
 
-Create `src/std/dict/mod.spl`:
+Create `src/lib/dict/mod.spl`:
 ```simple
 extern fn rt_dict_new() -> {K: V}
 fn new<K, V>() -> {K: V}:
@@ -256,11 +256,11 @@ Currently 80 concurrency functions. Review and wrap only:
 
 ## Files to Create/Update
 
-1. **Create:** `src/std/math/mod.spl` (36 wrappers)
-2. **Create:** `src/std/array/mod.spl` (36 wrappers)
-3. **Create:** `src/std/dict/mod.spl` (8 wrappers)
-4. **Update:** `src/std/text/mod.spl` (add 15 wrappers)
-5. **Update:** `src/std/random/mod.spl` (add 5 wrappers)
+1. **Create:** `src/lib/math/mod.spl` (36 wrappers)
+2. **Create:** `src/lib/array/mod.spl` (36 wrappers)
+3. **Create:** `src/lib/dict/mod.spl` (8 wrappers)
+4. **Update:** `src/lib/text/mod.spl` (add 15 wrappers)
+5. **Update:** `src/lib/random/mod.spl` (add 5 wrappers)
 6. **Update:** `doc/guide/ffi_guidelines.md` (document three-tier architecture)
 
 ## Conclusion

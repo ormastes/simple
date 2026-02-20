@@ -1,362 +1,200 @@
-# PyTorch Integration Tests
-# Self-contained tensor library tests (module import limitation workaround)
+# PyTorch SFFI Integration Tests
+#
+# Tests the real libtorch FFI bridge via libspl_torch.so.
+#
+# Run with GPU support:
+#   LD_PRELOAD=lib/libspl_torch.so bin/simple test test/unit/lib/torch_spec.spl
+#
+# Build the shared library first:
+#   bash scripts/build/build-torch-ffi.sh
 
-# ============================================================================
-# Inline Tensor Infrastructure
-# ============================================================================
+use std.gc_async_mut.torch.mod.{
+    Tensor,
+    Linear,
+    Conv2d,
+    MaxPool2d,
+    BatchNorm2d,
+    Dropout,
+    MSELoss,
+    torch_available,
+    cuda_available,
+    torch_version
+}
 
-class PureTensor:
-    data: [f64]
-    shape: [i64]
-    strides: [i64]
-
-    fn numel() -> i64:
-        var total = 1
-        for dim in self.shape:
-            total = total * dim
-        total
-
-fn compute_strides(shape: [i64]) -> [i64]:
-    var strides: [i64] = []
-    var stride = 1
-    var i = shape.len() - 1
-    while i >= 0:
-        strides.insert(0, stride)
-        stride = stride * shape[i]
-        i = i - 1
-    strides
-
-fn tensor_from_data(data: [f64], shape: [i64]) -> PureTensor:
-    PureTensor(data: data, shape: shape, strides: compute_strides(shape))
-
-fn tensor_zeros(shape: [i64]) -> PureTensor:
-    var numel = 1
-    for dim in shape:
-        numel = numel * dim
-    var data: [f64] = []
-    var i = 0
-    while i < numel:
-        data.push(0.0)
-        i = i + 1
-    PureTensor(data: data, shape: shape, strides: compute_strides(shape))
-
-fn tensor_ones(shape: [i64]) -> PureTensor:
-    var numel = 1
-    for dim in shape:
-        numel = numel * dim
-    var data: [f64] = []
-    var i = 0
-    while i < numel:
-        data.push(1.0)
-        i = i + 1
-    PureTensor(data: data, shape: shape, strides: compute_strides(shape))
-
-fn exp_approx(x: f64) -> f64:
-    var result = 1.0
-    var term = 1.0
-    var i = 1
-    while i < 20:
-        term = term * x / i
-        result = result + term
-        i = i + 1
-    result
-
-# ============================================================================
-# Tensor Class
-# ============================================================================
-
-class Tensor:
-    pure_tensor: PureTensor
-
-    fn ndim() -> i64:
-        self.pure_tensor.shape.len()
-
-    fn numel() -> i64:
-        self.pure_tensor.numel()
-
-    fn shape() -> [i64]:
-        self.pure_tensor.shape
-
-    fn add(other: Tensor) -> Tensor:
-        var result_data: [f64] = []
-        var i = 0
-        while i < self.pure_tensor.data.len():
-            result_data.push(self.pure_tensor.data[i] + other.pure_tensor.data[i])
-            i = i + 1
-        val pt = tensor_from_data(result_data, self.pure_tensor.shape)
-        Tensor(pure_tensor: pt)
-
-    fn mul(other: Tensor) -> Tensor:
-        var result_data: [f64] = []
-        var i = 0
-        while i < self.pure_tensor.data.len():
-            result_data.push(self.pure_tensor.data[i] * other.pure_tensor.data[i])
-            i = i + 1
-        val pt = tensor_from_data(result_data, self.pure_tensor.shape)
-        Tensor(pure_tensor: pt)
-
-    fn matmul(other: Tensor) -> Tensor:
-        val M = self.pure_tensor.shape[0]
-        val K = self.pure_tensor.shape[1]
-        val N = other.pure_tensor.shape[1]
-        var result_data: [f64] = []
-        var i = 0
-        while i < M:
-            var j = 0
-            while j < N:
-                var sum = 0.0
-                var k = 0
-                while k < K:
-                    val a_idx = i * K + k
-                    val b_idx = k * N + j
-                    sum = sum + self.pure_tensor.data[a_idx] * other.pure_tensor.data[b_idx]
-                    k = k + 1
-                result_data.push(sum)
-                j = j + 1
-            i = i + 1
-        val pt = tensor_from_data(result_data, [M, N])
-        Tensor(pure_tensor: pt)
-
-    fn relu() -> Tensor:
-        var result_data: [f64] = []
-        for v in self.pure_tensor.data:
-            result_data.push(if v > 0.0: v else: 0.0)
-        val pt = tensor_from_data(result_data, self.pure_tensor.shape)
-        Tensor(pure_tensor: pt)
-
-    fn sigmoid() -> Tensor:
-        var result_data: [f64] = []
-        for v in self.pure_tensor.data:
-            val exp_neg = exp_approx(-v)
-            val sig = 1.0 / (1.0 + exp_neg)
-            result_data.push(sig)
-        val pt = tensor_from_data(result_data, self.pure_tensor.shape)
-        Tensor(pure_tensor: pt)
-
-    fn tanh_act() -> Tensor:
-        var result_data: [f64] = []
-        for v in self.pure_tensor.data:
-            val ep = exp_approx(v)
-            val en = exp_approx(-v)
-            val t = (ep - en) / (ep + en)
-            result_data.push(t)
-        val pt = tensor_from_data(result_data, self.pure_tensor.shape)
-        Tensor(pure_tensor: pt)
-
-    fn cpu() -> Tensor:
-        self
-
-    fn cuda() -> Tensor:
-        self
-
-# ============================================================================
-# Factory Functions
-# ============================================================================
-
-fn torch_zeros(shape: [i64]) -> Tensor:
-    val pt = tensor_zeros(shape)
-    Tensor(pure_tensor: pt)
-
-fn torch_ones(shape: [i64]) -> Tensor:
-    val pt = tensor_ones(shape)
-    Tensor(pure_tensor: pt)
-
-fn torch_from_array(data: [f64], shape: [i64]) -> Tensor:
-    val pt = tensor_from_data(data, shape)
-    Tensor(pure_tensor: pt)
-
-# Note: Operator overloading (fn +, fn *, fn @) requires module-level support
-# Testing via .add(), .mul(), .matmul() methods directly
-
-# ============================================================================
-# Utility Functions
-# ============================================================================
-
-fn compute_mse(pred_data: [f64], target_data: [f64]) -> f64:
-    var diff_sq_sum = 0.0
-    var i = 0
-    while i < pred_data.len():
-        val diff = pred_data[i] - target_data[i]
-        diff_sq_sum = diff_sq_sum + diff * diff
-        i = i + 1
-    diff_sq_sum / (pred_data.len() * 1.0)
-
-fn get_backend() -> text:
-    "pure"
-
-fn torch_available() -> bool:
-    true
-
-fn torch_version() -> text:
-    "Pure Simple DL v1.0 (100% Simple, zero dependencies)"
-
-fn cuda_available() -> bool:
-    false
-
-# ============================================================================
-# Tests
-# ============================================================================
-
-describe "PyTorch Library":
+describe "PyTorch SFFI":
     describe "Backend Detection":
-        it "detects available backend":
-            val backend = get_backend()
-            expect(backend).to_equal("pure")
+        it "torch is available":
+            expect(torch_available()).to_equal(true)
 
-        it "reports torch availability":
-            val available = torch_available()
-            expect(available).to_equal(true)
+        it "CUDA is available":
+            expect(cuda_available()).to_equal(true)
 
         it "has version string":
-            val version = torch_version()
-            expect(version.len() > 0).to_equal(true)
-
-        it "reports CUDA availability":
-            val cuda = cuda_available()
-            expect(cuda).to_equal(false)
+            val v = torch_version()
+            expect(v.len() > 0).to_equal(true)
 
     describe "Tensor Creation":
-        it "creates zero tensors":
-            val t = torch_zeros([2, 3])
+        it "creates zero tensor":
+            val t = Tensor.zeros([2, 3])
             expect(t.ndim()).to_equal(2)
             expect(t.numel()).to_equal(6)
 
-        it "creates ones tensors":
-            val t = torch_ones([3, 2])
+        it "creates ones tensor":
+            val t = Tensor.ones([3, 2])
             expect(t.ndim()).to_equal(2)
             expect(t.numel()).to_equal(6)
 
-        it "creates tensors with shape":
-            val t = torch_zeros([4, 5, 6])
+        it "creates randn tensor":
+            val t = Tensor.randn([4, 4])
+            expect(t.ndim()).to_equal(2)
+            expect(t.numel()).to_equal(16)
+
+        it "creates 3D tensor":
+            val t = Tensor.zeros([4, 5, 6])
             expect(t.ndim()).to_equal(3)
             expect(t.numel()).to_equal(120)
 
-        it "creates from array":
-            val data = [1.0, 2.0, 3.0, 4.0]
-            val t = torch_from_array(data, [2, 2])
-            expect(t.ndim()).to_equal(2)
-            expect(t.numel()).to_equal(4)
-
     describe "Tensor Operations":
         it "performs element-wise addition":
-            val a = torch_ones([2, 2])
-            val b = torch_ones([2, 2])
+            val a = Tensor.ones([2, 2])
+            val b = Tensor.ones([2, 2])
             val c = a.add(b)
             expect(c.numel()).to_equal(4)
 
         it "performs element-wise multiplication":
-            val a = torch_ones([2, 2])
-            val b = torch_ones([2, 2])
+            val a = Tensor.ones([2, 2])
+            val b = Tensor.ones([2, 2])
             val c = a.mul(b)
             expect(c.numel()).to_equal(4)
 
         it "performs matrix multiplication":
-            val a = torch_ones([2, 3])
-            val b = torch_ones([3, 2])
+            val a = Tensor.ones([2, 3])
+            val b = Tensor.ones([3, 2])
             val c = a.matmul(b)
             expect(c.ndim()).to_equal(2)
-
-        it "supports addition via method":
-            val a = torch_ones([2, 2])
-            val b = torch_ones([2, 2])
-            val c = a.add(b)
             expect(c.numel()).to_equal(4)
-
-        it "supports multiplication via method":
-            val a = torch_ones([2, 2])
-            val b = torch_ones([2, 2])
-            val c = a.mul(b)
-            expect(c.numel()).to_equal(4)
-
-        it "supports matmul via method":
-            val a = torch_ones([2, 3])
-            val b = torch_ones([3, 2])
-            val c = a.matmul(b)
-            expect(c.ndim()).to_equal(2)
 
     describe "Activations":
         it "applies ReLU":
-            val x = torch_ones([2, 2])
+            val x = Tensor.ones([2, 2])
             val y = x.relu()
             expect(y.numel()).to_equal(4)
 
         it "applies sigmoid":
-            val x = torch_zeros([2, 2])
+            val x = Tensor.zeros([2, 2])
             val y = x.sigmoid()
             expect(y.numel()).to_equal(4)
 
         it "applies tanh":
-            val x = torch_zeros([2, 2])
-            val y = x.tanh_act()
+            val x = Tensor.zeros([2, 2])
+            val y = x.tanh()
             expect(y.numel()).to_equal(4)
 
-    describe "Device Management":
-        it "moves to CPU":
-            val t = torch_ones([2, 2])
-            val t_cpu = t.cpu()
-            expect(t_cpu.numel()).to_equal(4)
+        it "applies softmax":
+            val x = Tensor.randn([4, 10])
+            val y = x.softmax(1)
+            expect(y.numel()).to_equal(40)
 
-        it "attempts to move to CUDA":
-            val t = torch_ones([2, 2])
-            val t_cuda = t.cuda()
-            expect(t_cuda.numel()).to_equal(4)
-
-    describe "Memory Management":
-        it "handles tensor lifecycle":
-            var t = torch_zeros([10, 10])
-            expect(t.numel()).to_equal(100)
-            t = torch_ones([5, 5])
-            expect(t.numel()).to_equal(25)
-
-        it "creates and destroys many tensors":
-            var i = 0
-            while i < 100:
-                val t = torch_zeros([5, 5])
-                i = i + 1
-
-    describe "Shape Properties":
-        it "reports correct dimensions":
-            val t = torch_zeros([2, 3, 4])
+    describe "Shape Operations":
+        it "reports correct ndim":
+            val t = Tensor.zeros([2, 3, 4])
             expect(t.ndim()).to_equal(3)
 
-        it "reports correct element count":
-            val t = torch_zeros([2, 3, 4])
+        it "reports correct numel":
+            val t = Tensor.zeros([2, 3, 4])
             expect(t.numel()).to_equal(24)
 
-        it "handles 1D tensors":
-            val t = torch_zeros([10])
-            expect(t.ndim()).to_equal(1)
-            expect(t.numel()).to_equal(10)
+        it "reports correct shape":
+            val t = Tensor.zeros([2, 3])
+            val s = t.shape()
+            expect(s[0]).to_equal(2)
+            expect(s[1]).to_equal(3)
 
-        it "handles scalar tensors":
-            val t = torch_zeros([1])
-            expect(t.ndim()).to_equal(1)
-            expect(t.numel()).to_equal(1)
+        it "reshapes tensor":
+            val t = Tensor.zeros([2, 6])
+            val r = t.reshape([3, 4])
+            expect(r.ndim()).to_equal(2)
+            expect(r.numel()).to_equal(12)
 
-    describe "Complex Operations":
-        it "chains multiple operations":
-            val a = torch_ones([2, 2])
-            val b = torch_ones([2, 2])
-            val ab = a.add(b)
-            val ab_relu = ab.relu()
-            val c = ab_relu.sigmoid()
-            expect(c.numel()).to_equal(4)
+        it "transposes tensor":
+            val t = Tensor.zeros([2, 3])
+            val r = t.transpose(0, 1)
+            val s = r.shape()
+            expect(s[0]).to_equal(3)
+            expect(s[1]).to_equal(2)
 
-        it "combines add and relu":
-            val a = torch_ones([2, 2])
-            val b = torch_ones([2, 2])
-            val s = a.add(b)
-            val c = s.relu()
-            expect(c.numel()).to_equal(4)
+        it "unsqueezes tensor":
+            val t = Tensor.zeros([4])
+            val r = t.unsqueeze(0)
+            expect(r.ndim()).to_equal(2)
+
+    describe "GPU Operations":
+        it "creates tensor on GPU":
+            val t = Tensor.zeros([100, 100])
+            val t_gpu = t.cuda(0)
+            expect(t_gpu.is_cuda()).to_equal(true)
+            expect(t_gpu.numel()).to_equal(10000)
+
+        it "moves GPU tensor back to CPU":
+            val t = Tensor.ones([10, 10])
+            val t_gpu = t.cuda(0)
+            val t_cpu = t_gpu.cpu()
+            expect(t_cpu.is_cuda()).to_equal(false)
+            expect(t_cpu.numel()).to_equal(100)
+
+        it "GPU matmul":
+            val a = Tensor.randn([64, 128])
+            val b = Tensor.randn([128, 64])
+            val a_gpu = a.cuda(0)
+            val b_gpu = b.cuda(0)
+            val c_gpu = a_gpu.matmul(b_gpu)
+            expect(c_gpu.is_cuda()).to_equal(true)
+            expect(c_gpu.numel()).to_equal(4096)
+
+        it "GPU relu":
+            val x = Tensor.randn([32, 32])
+            val x_gpu = x.cuda(0)
+            val y_gpu = x_gpu.relu()
+            expect(y_gpu.is_cuda()).to_equal(true)
+            expect(y_gpu.numel()).to_equal(1024)
+
+        it "GPU tensor is not on CPU":
+            val t = Tensor.zeros([5, 5])
+            val t_gpu = t.cuda(0)
+            expect(t_gpu.is_cuda()).to_equal(true)
+
+    describe "Neural Network Layers":
+        it "linear layer forward pass":
+            val layer = Linear.create(128, 64)
+            val x = Tensor.randn([32, 128])
+            val y = layer.forward(x)
+            expect(y.numel()).to_equal(2048)
+
+        it "linear layer shape":
+            val layer = Linear.create(10, 5)
+            val x = Tensor.randn([4, 10])
+            val y = layer.forward(x)
+            val s = y.shape()
+            expect(s[0]).to_equal(4)
+            expect(s[1]).to_equal(5)
+
+    describe "Memory Management":
+        it "tensor lifecycle":
+            var t = Tensor.zeros([10, 10])
+            expect(t.numel()).to_equal(100)
+            t = Tensor.ones([5, 5])
+            expect(t.numel()).to_equal(25)
+
+        it "creates many tensors":
+            var i = 0
+            while i < 50:
+                val t = Tensor.zeros([4, 4])
+                i = i + 1
 
     describe "Loss Functions":
-        it "computes MSE loss":
-            val mse = compute_mse([1.0, 2.0, 3.0], [1.5, 2.5, 3.5])
-            expect(mse).to_equal(0.25)
-
-        it "verifies tensor data values":
-            val t = torch_from_array([1.0, 2.0, 3.0, 4.0], [2, 2])
-            expect(t.pure_tensor.data[0]).to_equal(1.0)
-            expect(t.pure_tensor.data[1]).to_equal(2.0)
-            expect(t.pure_tensor.data[2]).to_equal(3.0)
-            expect(t.pure_tensor.data[3]).to_equal(4.0)
+        it "MSE loss forward":
+            val criterion = MSELoss.create()
+            val pred = Tensor.randn([8, 4])
+            val target = Tensor.randn([8, 4])
+            val loss = criterion.forward(pred, target)
+            expect(loss.numel() > 0).to_equal(true)

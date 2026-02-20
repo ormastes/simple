@@ -1161,7 +1161,7 @@ fn compile_minimal_executable() -> text:
 describe "Phase 2 Complete - End-to-End":
     it "compiles stdlib math module":
         # Test complex real-world code
-        val source = file_read("src/std/math.spl")
+        val source = file_read("src/lib/math.spl")
         val obj = compile_source_to_object(source, "math")
 
         expect(file_exists(obj)).to_equal(true)

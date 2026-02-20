@@ -20,7 +20,7 @@ Successfully implemented Features 1-2 of Phase 2.3 TreeSitter Integration:
 
 ### 1. Implementation Files
 
-#### src/std/parser/treesitter_node.spl (337 lines)
+#### src/lib/parser/treesitter_node.spl (337 lines)
 
 **Position Tracking Methods:**
 - `Node.start_byte() -> i64`
@@ -106,7 +106,7 @@ Complete API guide with:
 
 ### 4. Module Updates
 
-#### src/std/parser/__init__.spl
+#### src/lib/parser/__init__.spl
 
 Updated module exports to include:
 ```simple
@@ -303,14 +303,14 @@ Features 1-2 of Phase 2.3 TreeSitter Integration are **complete and tested**. Th
 ### A. File Manifest
 
 **Created:**
-- `src/std/parser/treesitter_node.spl` (337 lines)
+- `src/lib/parser/treesitter_node.spl` (337 lines)
 - `test/unit/std/parser/treesitter_node_spec.spl` (289 lines)
 - `doc/feature/treesitter_implementation.md` (600 lines)
 - `doc/guide/treesitter_node_api.md` (700 lines)
 - `doc/feature/treesitter_phase2_3_summary.md` (this file)
 
 **Modified:**
-- `src/std/parser/__init__.spl` (updated exports)
+- `src/lib/parser/__init__.spl` (updated exports)
 
 **Total:** 1 modified, 5 created, ~2200 lines
 

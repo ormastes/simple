@@ -170,7 +170,7 @@ src/app/io/
 ├── process_ops.spl                    (existing) ✅
 └── process_limit_enforcer.spl         (existing) ✅
 
-src/std/
+src/lib/
 ├── process_monitor.spl                (existing) ✅
 ├── process_limits.spl                 (existing) ✅
 └── resource_tracker.spl               (existing) ✅

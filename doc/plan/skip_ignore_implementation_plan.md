@@ -255,7 +255,7 @@ tags: ["slow", "quick", "integration", "unit"]
 - [x] Caching layer - Basic caching in place
 
 **Files Modified:**
-- ✅ `src/std/spec.spl` (+40 lines for platform detection)
+- ✅ `src/lib/spec.spl` (+40 lines for platform detection)
 
 #### Task 1.2: Comprehensive Environment Detection ⏳ TODO
 
@@ -309,7 +309,7 @@ tags: ["slow", "quick", "integration", "unit"]
 - [ ] Semver comparison
 
 **Files to Create:**
-- `src/std/spec/env_detect.spl` (NEW - ~400 lines for all detection)
+- `src/lib/spec/env_detect.spl` (NEW - ~400 lines for all detection)
   - Platform detection (existing)
   - Runtime detection
   - Architecture detection
@@ -398,7 +398,7 @@ struct SkipCondition:
 ```
 
 **Files to Modify:**
-- `src/std/spec.spl` (+60 lines)
+- `src/lib/spec.spl` (+60 lines)
 
 **Tests:**
 ```simple
@@ -452,7 +452,7 @@ fn matches_runtime(name: text, patterns: [text]) -> bool:
 ```
 
 **Files to Modify:**
-- `src/std/spec.spl` (+80 lines)
+- `src/lib/spec.spl` (+80 lines)
 
 **Tests:**
 ```simple
@@ -554,7 +554,7 @@ fn skip_test(name: text, reason: text):
 ```
 
 **Files to Modify:**
-- `src/std/spec.spl` (+30 lines)
+- `src/lib/spec.spl` (+30 lines)
 
 #### Task 3.2: Ignore Decorator
 
@@ -618,7 +618,7 @@ fn ignore(
 ```
 
 **Files to Modify:**
-- `src/std/spec.spl` (+20 lines)
+- `src/lib/spec.spl` (+20 lines)
 
 #### Task 3.3: only_on Decorator
 
@@ -649,7 +649,7 @@ fn should_run_test(platforms: [text], runtimes: [text]) -> bool:
 ```
 
 **Files to Modify:**
-- `src/std/spec.spl` (+25 lines)
+- `src/lib/spec.spl` (+25 lines)
 
 #### Task 3.4: skip_if Conditional Decorator
 
@@ -674,7 +674,7 @@ fn skip_if(condition: fn() -> bool, reason: text = "") -> fn(text, fn()):
 ```
 
 **Files to Modify:**
-- `src/std/spec.spl` (+15 lines)
+- `src/lib/spec.spl` (+15 lines)
 
 #### Task 3.5: Export New Functions
 
@@ -778,7 +778,7 @@ test("my test")
 ```
 
 **Files to Create:**
-- `src/std/spec/builder.spl` (NEW - ~120 lines)
+- `src/lib/spec/builder.spl` (NEW - ~120 lines)
 
 **Deliverables:**
 - `TestBuilder` struct with fluent API

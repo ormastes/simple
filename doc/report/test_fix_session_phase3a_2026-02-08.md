@@ -8,7 +8,7 @@
 
 ## Module Already Existed
 
-The `src/std/parser/treesitter.spl` module already existed with basic implementation, but needed API updates to match test expectations.
+The `src/lib/parser/treesitter.spl` module already existed with basic implementation, but needed API updates to match test expectations.
 
 ## Changes Made
 
@@ -16,8 +16,8 @@ The `src/std/parser/treesitter.spl` module already existed with basic implementa
 
 **Problem:** Duplicate treesitter module in wrong location
 ```
-src/std/parser/treesitter.spl       (correct location)
-src/std/src/parser/treesitter.spl   (duplicate, wrong location)
+src/lib/parser/treesitter.spl       (correct location)
+src/lib/src/parser/treesitter.spl   (duplicate, wrong location)
 ```
 
 **Fix:** Renamed duplicate to `.backup` to prevent module loader confusion
@@ -137,9 +137,9 @@ Total: 183 tests requiring full TreeSitter API implementation (multiple days of 
 
 ## Files Modified
 
-- `src/std/parser/treesitter.spl` - Updated API, added position tracking
+- `src/lib/parser/treesitter.spl` - Updated API, added position tracking
 - `test/system/features/treesitter/treesitter_lexer_spec.spl` - Fixed imports, converted skip_it
-- `src/std/src/parser/treesitter_full.spl.backup` - Renamed duplicate module
+- `src/lib/src/parser/treesitter_full.spl.backup` - Renamed duplicate module
 
 ## Key Learnings
 

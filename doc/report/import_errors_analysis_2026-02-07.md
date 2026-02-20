@@ -89,7 +89,7 @@ use lib.database.{something}
 **Module Search Paths:**
 - Current directory: `.`
 - Library directory: `./lib`
-- Standard library: `./src/std/src`
+- Standard library: `./src/lib/src`
 - Application directory: `./src/app`
 
 ### 2. Function Not Found After Import

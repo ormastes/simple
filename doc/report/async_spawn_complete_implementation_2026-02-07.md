@@ -27,10 +27,10 @@ Successfully implemented foundation and parser integration for three major langu
 
 | Component | Location | Lines | Status |
 |-----------|----------|-------|--------|
-| Test Attributes | `src/std/testing/attributes.spl` | 180 | ✅ Complete |
-| Async Runtime | `src/std/async/runtime.spl` | 240 | ✅ Complete |
-| Future Type | `src/std/async/future.spl` | 190 | ✅ Complete |
-| Actor Model | `src/std/actors/actor.spl` | 280 | ✅ Complete |
+| Test Attributes | `src/lib/testing/attributes.spl` | 180 | ✅ Complete |
+| Async Runtime | `src/lib/async/runtime.spl` | 240 | ✅ Complete |
+| Future Type | `src/lib/async/future.spl` | 190 | ✅ Complete |
+| Actor Model | `src/lib/actors/actor.spl` | 280 | ✅ Complete |
 | Examples | `examples/` (3 files) | 460 | ✅ Complete |
 | **Total** | **7 files** | **1,350** | **✅ Complete** |
 
@@ -458,10 +458,10 @@ Bootstrap runtime will be updated in next release after tree-sitter grammar upda
 
 | File | Type | Lines | Description |
 |------|------|-------|-------------|
-| `src/std/testing/attributes.spl` | NEW | 180 | Test attribute decorators |
-| `src/std/async/runtime.spl` | NEW | 240 | Event loop and task scheduler |
-| `src/std/async/future.spl` | NEW | 190 | Future type and combinators |
-| `src/std/actors/actor.spl` | NEW | 280 | Actor model runtime |
+| `src/lib/testing/attributes.spl` | NEW | 180 | Test attribute decorators |
+| `src/lib/async/runtime.spl` | NEW | 240 | Event loop and task scheduler |
+| `src/lib/async/future.spl` | NEW | 190 | Future type and combinators |
+| `src/lib/actors/actor.spl` | NEW | 280 | Actor model runtime |
 | `examples/testing/test_attributes_example.spl` | NEW | 90 | Test attribute examples |
 | `examples/async/async_basics.spl` | NEW | 160 | Async/await examples |
 | `examples/actors/actor_basics.spl` | NEW | 210 | Actor model examples |

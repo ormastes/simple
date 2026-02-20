@@ -12,5 +12,5 @@ Async/await, actors, and parallel execution patterns.
 
 ## See Also
 
-- Actor implementation: `src/std/actor.spl`
-- Async runtime: `src/std/async.spl`
+- Actor implementation: `src/lib/actor.spl`
+- Async runtime: `src/lib/async.spl`

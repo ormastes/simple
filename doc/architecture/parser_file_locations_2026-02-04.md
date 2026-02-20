@@ -294,7 +294,7 @@ class OutlineParser:
 
 ---
 
-### 6. `src/std/sdn/parser.spl` (683 lines)
+### 6. `src/lib/sdn/parser.spl` (683 lines)
 
 **Purpose:** Parse SDN data format
 
@@ -320,7 +320,7 @@ fn parse_file(path: text) -> Result<SdnValue, SdnError>
 
 ---
 
-### 7. `src/std/sdn/lexer.spl` (411 lines)
+### 7. `src/lib/sdn/lexer.spl` (411 lines)
 
 **Purpose:** Tokenize SDN format
 

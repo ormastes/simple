@@ -6,7 +6,7 @@
 
 ## Summary
 
-Implemented a comprehensive platform abstraction library (`src/std/platform/`) that provides host/remote platform configuration with a send/receive pattern for converting values between platforms. This replaces ad-hoc platform-specific code with a unified, type-safe approach.
+Implemented a comprehensive platform abstraction library (`src/lib/platform/`) that provides host/remote platform configuration with a send/receive pattern for converting values between platforms. This replaces ad-hoc platform-specific code with a unified, type-safe approach.
 
 ## Implementation
 
@@ -29,7 +29,7 @@ The library uses a **PlatformConfig** struct to describe any platform (host, rem
 
 ### Files Created
 
-#### Source Files (src/std/platform/)
+#### Source Files (src/lib/platform/)
 
 1. **config.spl** (72 lines)
    - `PlatformConfig` struct with arch, os, endian, pointer_bytes, newline
@@ -75,7 +75,7 @@ The library uses a **PlatformConfig** struct to describe any platform (host, rem
 
 ### String Module Changes
 
-Modified `src/std/text.spl` to clearly distinguish:
+Modified `src/lib/text.spl` to clearly distinguish:
 - **`_NL`** - explicit LF (`"\n"`) for byte-level comparisons
 - **`NL`** - default newline (LF for consistency)
 - **`platform_newline()`** - function returning OS-specific newline

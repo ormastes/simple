@@ -281,7 +281,7 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
 **Full Compiler:**
 - `src/app/cli/` - CLI entry point
 - `src/compiler/` - Full compiler (409 files, 127,284 lines)
-- `src/std/` - Standard library
+- `src/lib/` - Standard library
 
 **Build Artifacts:**
 - `build/bootstrap/` - Temporary build directory
@@ -455,7 +455,7 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
 **Full Layer:**
 - `src/app/` - Applications (cli, build, test_runner_new, etc.)
 - `src/lib/` - Libraries (database)
-- `src/std/` - Standard library (spec, string, math, path, array, platform)
+- `src/lib/` - Standard library (spec, string, math, path, array, platform)
 - `build/bootstrap/full1/` - Full1 binary directory
   - `simple_full1` - Complete compiler first build
 - `build/bootstrap/full2/` - Full2 binary directory (reproducibility)

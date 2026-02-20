@@ -11,7 +11,7 @@
 **Problem:** Simple has world-class infrastructure (DI, comprehensive mocking, advanced testing) but it's **nearly impossible to discover**. Users don't know what exists or where to find it.
 
 **Root Causes:**
-1. ❌ No `/src/std/__init__.spl` - Stdlib has no entry point
+1. ❌ No `/src/lib/__init__.spl` - Stdlib has no entry point
 2. ❌ Mocking marked "disabled" in testing module despite working perfectly
 3. ❌ DI system (21KB) exists but undocumented and hard to find
 4. ❌ No module discovery guide or stdlib reference
@@ -27,15 +27,15 @@
 
 | Feature | Location | Size | Status | Discoverability |
 |---------|----------|------|--------|-----------------|
-| **DI System** | `src/std/src/di.spl` | 21KB | ✅ Works | 🔴 Hidden (2/10) |
-| **Mocking Framework** | `src/std/src/testing/mocking*.spl` | 70KB | ✅ Works | 🔴 Hidden (3/10) |
-| **Testing Helpers** | `src/std/src/testing/helpers.spl` | Exported | ✅ Works | 🟡 Partial (6/10) |
+| **DI System** | `src/lib/src/di.spl` | 21KB | ✅ Works | 🔴 Hidden (2/10) |
+| **Mocking Framework** | `src/lib/src/testing/mocking*.spl` | 70KB | ✅ Works | 🔴 Hidden (3/10) |
+| **Testing Helpers** | `src/lib/src/testing/helpers.spl` | Exported | ✅ Works | 🟡 Partial (6/10) |
 | **Module System** | `doc/guide/module_system.md` | 640 lines | ✅ Documented | 🟢 Clear (8/10) |
 
 ### Current Structure Issues
 
 ```
-src/std/
+src/lib/
 ├── ❌ NO __init__.spl           # Critical: No stdlib entry point
 ├── allocator.spl                # Discoverable
 ├── async.spl                    # Discoverable
@@ -129,7 +129,7 @@ use std.*  # Future: All stdlib modules
 ## Overview
 Simple includes a full-featured DI system supporting profiles, singleton/transient lifetimes, and service locator patterns.
 
-**Location:** `src/std/src/di.spl` (21KB)
+**Location:** `src/lib/src/di.spl` (21KB)
 
 ## Basic Usage
 
@@ -212,7 +212,7 @@ val service2 = container.resolve<UserService>()  # Injects db automatically
 ## Overview
 Simple has a comprehensive mocking framework with call tracking, expectations, async support, and advanced scheduling features.
 
-**Location:** `src/std/src/testing/mocking*.spl` (70KB across 4 files)
+**Location:** `src/lib/src/testing/mocking*.spl` (70KB across 4 files)
 
 ## Quick Start
 
@@ -349,10 +349,10 @@ Start here: `doc/guide/stdlib_quick_reference.md`
 ### 2. Browse Source Directories
 ```bash
 # Standard library
-ls src/std/                  # Top-level modules
-ls src/std/src/testing/      # Testing framework
-ls src/std/src/tooling/      # Build/dev tools
-ls src/std/common/           # Shared utilities
+ls src/lib/                  # Top-level modules
+ls src/lib/src/testing/      # Testing framework
+ls src/lib/src/tooling/      # Build/dev tools
+ls src/lib/common/           # Shared utilities
 
 # Applications
 ls src/app/                  # CLI commands
@@ -361,7 +361,7 @@ ls src/app/                  # CLI commands
 ### 3. Use grep for Keywords
 ```bash
 # Find modules related to testing
-grep -r "class.*Test" src/std/
+grep -r "class.*Test" src/lib/
 
 # Find DI usage
 grep -r "Injectable" src/
@@ -373,26 +373,26 @@ grep -r "create_mock" test/
 ### 4. Check Module Init Files
 ```bash
 # See what's exported
-cat src/std/src/testing/__init__.spl
-cat src/std/common/__init__.spl
+cat src/lib/src/testing/__init__.spl
+cat src/lib/common/__init__.spl
 ```
 
 ## Common "Where Is...?" Questions
 
 **Q: Where is dependency injection?**
-A: `src/std/src/di.spl` - See `doc/guide/dependency_injection_guide.md`
+A: `src/lib/src/di.spl` - See `doc/guide/dependency_injection_guide.md`
 
 **Q: Where is the mocking framework?**
-A: `src/std/src/testing/mocking*.spl` - See `doc/guide/mocking_guide.md`
+A: `src/lib/src/testing/mocking*.spl` - See `doc/guide/mocking_guide.md`
 
 **Q: Where are assertion helpers?**
-A: `src/std/src/testing/helpers.spl` - Import with `use testing.helpers`
+A: `src/lib/src/testing/helpers.spl` - Import with `use testing.helpers`
 
 **Q: Where is JSON parsing?**
-A: `src/std/json.spl` - Import with `use json`
+A: `src/lib/json.spl` - Import with `use json`
 
 **Q: Where is async/await?**
-A: `src/std/async.spl` - Import with `use async`
+A: `src/lib/async.spl` - Import with `use async`
 
 **Q: Where is the module system spec?**
 A: `doc/guide/module_system.md` - Complete specification
@@ -442,7 +442,7 @@ use testing.helpers.*
 
 ### Task 2.1: Create Stdlib Root Init (2 hours)
 
-**File:** `/src/std/__init__.spl`
+**File:** `/src/lib/__init__.spl`
 
 **Content:**
 ```simple
@@ -515,7 +515,7 @@ export type.type_utils
 
 ### Task 2.2: Fix Testing Module Exports (1 hour)
 
-**File:** `/src/std/src/testing/__init__.spl`
+**File:** `/src/lib/src/testing/__init__.spl`
 
 **Current (broken):**
 ```simple
@@ -663,7 +663,7 @@ export TypeMapper
 **Solution:** Add alias or better documentation
 
 **Option A: Alias (recommended)**
-Create `/src/std/dependency_injection.spl`:
+Create `/src/lib/dependency_injection.spl`:
 ```simple
 # Dependency Injection System (Alias)
 # Main implementation: src/di.spl
@@ -675,7 +675,7 @@ export *
 
 **Option B: Move file (more disruptive)**
 ```bash
-mv src/std/src/di.spl src/std/dependency_injection.spl
+mv src/lib/src/di.spl src/lib/dependency_injection.spl
 # Update all imports
 ```
 
@@ -709,7 +709,7 @@ class ListModulesCommand:
         print_module_table(modules)
 
     fn scan_stdlib_modules() -> [Module]:
-        # Scan src/std/ for .spl files
+        # Scan src/lib/ for .spl files
         # Parse __init__.spl exports
         # Return structured list
 
@@ -826,7 +826,7 @@ simple show-module async
 - ✅ `doc/guide/stdlib_quick_reference.md` - One-stop shop
 - ✅ DI guide with examples
 - ✅ Mocking guide with examples
-- ✅ `src/std/__init__.spl` - Clear entry point
+- ✅ `src/lib/__init__.spl` - Clear entry point
 - ✅ Testing module exports mocking
 - ✅ `simple list-modules` command
 - ✅ `simple show-module` command
@@ -880,15 +880,15 @@ use di.{Container, Profile}
 - `doc/guide/module_discovery_guide.md`
 
 **Code (Phase 2):**
-- `src/std/__init__.spl`
-- `src/std/dependency_injection.spl` (alias)
+- `src/lib/__init__.spl`
+- `src/lib/dependency_injection.spl` (alias)
 - `src/app/build/__init__.spl`
 - `src/app/test/__init__.spl`
 - `src/app/lint/__init__.spl`
 - `src/app/ffi_gen/__init__.spl`
 
 **Modified (Phase 2):**
-- `src/std/src/testing/__init__.spl` (fix exports)
+- `src/lib/src/testing/__init__.spl` (fix exports)
 
 **Code (Phase 3):**
 - `src/app/cli/list_modules.spl`

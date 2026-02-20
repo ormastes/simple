@@ -17,7 +17,7 @@
 #
 # Type tracking: Functions receive a `types` text parameter containing a registry string.
 # Format: ";text:name;arr:name;fn_text:funcname;" (semicolon-delimited entries)
-# Functions that add type entries return "code|||new_entries" separated by |||.
+# Functions that add type entries return "code<|TYPE|>new_entries" separated by <|TYPE|>.
 # The caller (generate_c_code) maintains and threads the registry through the main loop.
 #
 # Module structure:
@@ -51,7 +51,7 @@ fn generate_c_code(source_text: text) -> text:
             pending_line = pending_line + " " + rline.trim()
         else:
             pending_line = rline
-        # Count parens outside string literals, handling escaped quotes
+        # Count parens outside string literals and comments
         val has_paren = rline.contains("(") or rline.contains(")")
         if has_paren:
             var pp_in_str = false
@@ -68,6 +68,10 @@ fn generate_c_code(source_text: text) -> text:
                     if pp_ch == "\"":
                         pp_in_str = false
                     pp_i = pp_i + 1
+                    continue
+                # Stop at comment (# outside of string = rest is comment)
+                if pp_ch == "#":
+                    pp_i = pp_len
                     continue
                 if pp_ch == "\"":
                     pp_in_str = true
@@ -183,6 +187,15 @@ fn generate_c_code(source_text: text) -> text:
                     pe_vname = petrim.substring(0, pe_paren).trim()
                 types = types + "enum_variant:" + pe_name + "." + pe_vname + ";"
 
+    # Pre-pass 2: collect all function return types (resolves forward references)
+    for fp_i in range(0, lines_arr.len()):
+        val fp_line = lines_arr[fp_i].trim()
+        if fp_line.starts_with("fn ") and fp_line.ends_with(":"):
+            val fp_paren = fp_line.index_of("(") ?? -1
+            if fp_paren >= 0:
+                val fp_name = fp_line.substring(3, fp_paren).trim()
+                types = types + cg_track_fn_types(fp_line, fp_name)
+
     for line_idx in range(0, lines_arr.len()):
         val line = lines_arr[line_idx]
         var trimmed = line.trim()
@@ -216,9 +229,9 @@ fn generate_c_code(source_text: text) -> text:
             val comment_text = trimmed.substring(1).trim()
             val comment_indented = line.starts_with("    ") or line.starts_with("\t")
             if in_main and comment_indented:
-                main_body.push("    // {comment_text}")
+                main_body.push(r"    // " + comment_text)
             elif in_func and comment_indented:
-                current_fn_lines.push("    // {comment_text}")
+                current_fn_lines.push(r"    // " + comment_text)
             elif in_func and not comment_indented:
                 # Top-level comment while in_func - end the function
                 val fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines)
@@ -334,9 +347,9 @@ fn generate_c_code(source_text: text) -> text:
                                         sm_rest = sm_after.substring(sm_close + 1)
                                     val sm_before = code.substring(0, sm_pos)
                                     if sm_args != "":
-                                        code = "{sm_before}{current_impl_class}__{sm_name}(&self, {sm_args}){sm_rest}"
+                                        code = sm_before + current_impl_class + r"__" + sm_name + r"(&self, " + sm_args + r")" + sm_rest
                                     else:
-                                        code = "{sm_before}{current_impl_class}__{sm_name}(&self){sm_rest}"
+                                        code = sm_before + current_impl_class + r"__" + sm_name + r"(&self)" + sm_rest
                     # Replace self.field access/assignment inside method bodies
                     if code.contains("self."):
                         code = code.replace("self.", "self->")
@@ -344,7 +357,7 @@ fn generate_c_code(source_text: text) -> text:
                         var padding = ""
                         for pi in range(0, impl_indent - 1):
                             padding = padding + "    "
-                        impl_method_lines.push("{padding}{code}")
+                        impl_method_lines.push(padding + code)
                     continue
                 else:
                     continue
@@ -377,9 +390,9 @@ fn generate_c_code(source_text: text) -> text:
                             # Determine type from types registry
                             val is_text_glob = types.contains(";text:" + use_name + ";")
                             if is_text_glob:
-                                global_defs.push("static const char* {use_name} = \"\";")
+                                global_defs.push(r"static const char* " + use_name + r" = " + "\"\"" + r";")
                             else:
-                                global_defs.push("static long long {use_name} = 0;")
+                                global_defs.push(r"static long long " + use_name + r" = 0;")
             continue
         if trimmed.starts_with("import "):
             continue
@@ -419,7 +432,7 @@ fn generate_c_code(source_text: text) -> text:
                     var ec_params = "void"
                     if eparams_str.len() > 0:
                         ec_params = translate_params(eparams_str)
-                    forward_decls.push("{eret_type} {extern_name}({ec_params});")
+                    forward_decls.push(eret_type + r" " + extern_name + r"(" + ec_params + r");")
                     # Track extern fn return types for type inference
                     if eret_type == "const char*":
                         types = types + "fn_text:" + extern_name + ";"
@@ -467,7 +480,7 @@ fn generate_c_code(source_text: text) -> text:
         # Enum definition - detect data variants vs simple enums
         if trimmed.starts_with("enum ") and trimmed.ends_with(":"):
             val enum_result = cg_process_enum(lines_arr, line_idx, trimmed)
-            val enum_parts = enum_result.split("|||")
+            val enum_parts = enum_result.split("<|TYPE|>")
             enum_defs.push(enum_parts[0])
             types = types + enum_parts[1]
             skip_until_unindent = true
@@ -545,7 +558,7 @@ fn generate_c_code(source_text: text) -> text:
                 var padding = ""
                 for pi in range(0, indent):
                     padding = padding + "    "
-                main_body.push("{padding}{code}")
+                main_body.push(padding + code)
             continue
 
         if in_func and is_indented:
@@ -560,7 +573,7 @@ fn generate_c_code(source_text: text) -> text:
                 var padding = ""
                 for pi in range(0, indent):
                     padding = padding + "    "
-                current_fn_lines.push("{padding}{code}")
+                current_fn_lines.push(padding + code)
             continue
 
         if in_main:
@@ -596,13 +609,13 @@ fn generate_c_code(source_text: text) -> text:
                         val str_has_call = str_init.contains("(")
                         if str_has_call:
                             val str_decl = global_code.substring(0, str_eq)
-                            global_defs.push("static {str_decl} = NULL;")
+                            global_defs.push(r"static " + str_decl + r" = NULL;")
                             val str_name = str_decl.substring(12).trim()
                             val str_semi = str_init.index_of(";") ?? -1
                             var str_val = str_init
                             if str_semi >= 0:
                                 str_val = str_init.substring(0, str_semi).trim()
-                            main_body.push("    {str_name} = {str_val};")
+                            main_body.push(r"    " + str_name + r" = " + str_val + r";")
                             continue
                     global_code = "static " + global_code
                 elif global_code.starts_with("int "):
@@ -613,14 +626,14 @@ fn generate_c_code(source_text: text) -> text:
                     val arr_eq = global_code.index_of(" = ") ?? -1
                     if arr_eq >= 0:
                         val arr_decl = global_code.substring(0, arr_eq)
-                        global_defs.push("static {arr_decl};")
+                        global_defs.push(r"static " + arr_decl + r";")
                         # Add init to main_body
                         val arr_name = arr_decl.substring(18).trim()
                         val arr_semi = arr_name.index_of(";") ?? -1
                         var clean_name = arr_name
                         if arr_semi >= 0:
                             clean_name = arr_name.substring(0, arr_semi).trim()
-                        main_body.push("    {clean_name} = simple_new_string_array();")
+                        main_body.push(r"    " + clean_name + r" = simple_new_string_array();")
                         continue
                     global_code = "static " + global_code
                 elif global_code.starts_with("SimpleIntArray "):
@@ -628,39 +641,39 @@ fn generate_c_code(source_text: text) -> text:
                     val arr_eq = global_code.index_of(" = ") ?? -1
                     if arr_eq >= 0:
                         val arr_decl = global_code.substring(0, arr_eq)
-                        global_defs.push("static {arr_decl};")
+                        global_defs.push(r"static " + arr_decl + r";")
                         val arr_name = arr_decl.substring(15).trim()
                         val arr_semi = arr_name.index_of(";") ?? -1
                         var clean_name = arr_name
                         if arr_semi >= 0:
                             clean_name = arr_name.substring(0, arr_semi).trim()
-                        main_body.push("    {clean_name} = simple_new_int_array();")
+                        main_body.push(r"    " + clean_name + r" = simple_new_int_array();")
                         continue
                     global_code = "static " + global_code
                 elif global_code.starts_with("SimpleStringArrayArray "):
                     val arr_eq = global_code.index_of(" = ") ?? -1
                     if arr_eq >= 0:
                         val arr_decl = global_code.substring(0, arr_eq)
-                        global_defs.push("static {arr_decl};")
+                        global_defs.push(r"static " + arr_decl + r";")
                         val arr_name = arr_decl.substring(23).trim()
                         val arr_semi = arr_name.index_of(";") ?? -1
                         var clean_name = arr_name
                         if arr_semi >= 0:
                             clean_name = arr_name.substring(0, arr_semi).trim()
-                        main_body.push("    {clean_name} = simple_new_string_array_array();")
+                        main_body.push(r"    " + clean_name + r" = simple_new_string_array_array();")
                         continue
                     global_code = "static " + global_code
                 elif global_code.starts_with("SimpleIntArrayArray "):
                     val arr_eq = global_code.index_of(" = ") ?? -1
                     if arr_eq >= 0:
                         val arr_decl = global_code.substring(0, arr_eq)
-                        global_defs.push("static {arr_decl};")
+                        global_defs.push(r"static " + arr_decl + r";")
                         val arr_name = arr_decl.substring(20).trim()
                         val arr_semi = arr_name.index_of(";") ?? -1
                         var clean_name = arr_name
                         if arr_semi >= 0:
                             clean_name = arr_name.substring(0, arr_semi).trim()
-                        main_body.push("    {clean_name} = simple_new_int_array_array();")
+                        main_body.push(r"    " + clean_name + r" = simple_new_int_array_array();")
                         continue
                     global_code = "static " + global_code
                 elif global_code.starts_with("SimpleStructArray "):
@@ -668,24 +681,24 @@ fn generate_c_code(source_text: text) -> text:
                     val sarr_eq = global_code.index_of(" = ") ?? -1
                     if sarr_eq >= 0:
                         val sarr_decl = global_code.substring(0, sarr_eq)
-                        global_defs.push("static {sarr_decl};")
+                        global_defs.push(r"static " + sarr_decl + r";")
                         val sarr_name = sarr_decl.substring(18).trim()
                         val sarr_semi = sarr_name.index_of(";") ?? -1
                         var clean_sarr = sarr_name
                         if sarr_semi >= 0:
                             clean_sarr = sarr_name.substring(0, sarr_semi).trim()
-                        main_body.push("    {clean_sarr} = simple_new_struct_array();")
+                        main_body.push(r"    " + clean_sarr + r" = simple_new_struct_array();")
                         continue
                     global_code = "static " + global_code
                 elif global_code.starts_with("SimpleDict* "):
                     val dict_eq = global_code.index_of(" = ") ?? -1
                     if dict_eq >= 0:
                         val dict_decl = global_code.substring(0, dict_eq)
-                        global_defs.push("static {dict_decl} = NULL;")
+                        global_defs.push(r"static " + dict_decl + r" = NULL;")
                         val dict_name_start = dict_decl.index_of("* ") ?? -1
                         if dict_name_start >= 0:
                             val dict_name = dict_decl.substring(dict_name_start + 2).trim()
-                            main_body.push("    {dict_name} = simple_dict_new();")
+                            main_body.push(r"    " + dict_name + r" = simple_dict_new();")
                         continue
                     global_code = "static " + global_code
                 else:
@@ -703,7 +716,7 @@ fn generate_c_code(source_text: text) -> text:
                 var mod_padding = "    "
                 for mpi in range(0, mod_indent):
                     mod_padding = mod_padding + "    "
-                main_body.push("{mod_padding}{code}")
+                main_body.push(mod_padding + code)
 
     # Flush pending impl method
     if in_impl and in_impl_method:

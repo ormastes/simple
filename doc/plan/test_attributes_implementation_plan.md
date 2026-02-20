@@ -236,7 +236,7 @@ simple test --list --filter='tag:slow'
 ## Standard Library Support
 
 ```simple
-# src/std/testing/attributes.spl
+# src/lib/testing/attributes.spl
 
 # Attribute validation
 fn validate_timeout(value: i64) -> bool:

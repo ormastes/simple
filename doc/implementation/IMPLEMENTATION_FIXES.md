@@ -20,7 +20,7 @@ Implemented fixes for the root causes identified in HANG_ANALYSIS.md:
 
 ### 1. log.spl - FFI Lazy Initialization ✅
 
-**File:** `src/std/log.spl`
+**File:** `src/lib/log.spl`
 **Issue:** Module-level call to `_parse_log_level()` caused FFI hang
 **Root Cause:** `var GLOBAL_LOG_LEVEL = _parse_log_level()` at line 65 calls `rt_env_get()` during module initialization
 
@@ -167,7 +167,7 @@ fn get_prompt(name: text, arguments: Dict<text, text>) -> Result<PromptResult, t
 
 | File | Lines Changed | Type of Fix |
 |------|---------------|-------------|
-| src/std/log.spl | ~10 | FFI lazy init |
+| src/lib/log.spl | ~10 | FFI lazy init |
 | src/app/package/semver.spl | ~300 | Generic → tuple |
 | src/app/package/types.spl | ~5 | Enum syntax |
 | src/app/mcp/prompts.spl | ~8 | Type names |
@@ -191,7 +191,7 @@ fn get_prompt(name: text, arguments: Dict<text, text>) -> Result<PromptResult, t
 ## Tests NOT Fixed (Correctly Skipped)
 
 ### 1. env_spec.spl - Already Correct
-**File:** `src/std/shell/env.spl`
+**File:** `src/lib/shell/env.spl`
 **Status:** No changes needed - all FFI calls already inside functions
 **Issue:** Test runner bug, not code issue
 
@@ -226,7 +226,7 @@ fn get_prompt(name: text, arguments: Dict<text, text>) -> Result<PromptResult, t
 cd /home/ormastes/dev/pub/simple
 
 # Check log.spl
-bin/simple check src/std/log.spl
+bin/simple check src/lib/log.spl
 
 # Check semver.spl
 bin/simple check src/app/package/semver.spl

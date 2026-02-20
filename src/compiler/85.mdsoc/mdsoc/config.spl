@@ -34,7 +34,8 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
     """Parse MDSOC manifest from SDN text content.
 
     Returns nil if source is empty.
-    Handles sections: capsule, roots, dimension, rules.
+    Handles sections: capsule, roots, dimension, dimension_construct, rules.
+    Multiple dimensions are accumulated (not overwritten).
     """
     if source == "":
         return nil
@@ -53,7 +54,7 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
     var cur_root_caret = ""
     var cur_root_path = ""
 
-    # Dimension fields
+    # Dimension fields (shared for both dimension and dimension_construct sections)
     var dim_name = ""
     var dim_key_template = ""
     var dim_surface = "__init__.spl"
@@ -61,6 +62,7 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
     var dim_intra_access = "via_surface_only"
     var dim_symbol_merge = "forbid_implicit"
     var dim_dep_cycles = "reject"
+    var dim_kind = "horizontal"
 
     # Dimension mappings
     var dim_mappings: [CaretMapping] = []
@@ -72,6 +74,9 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
     var layer_direction = "upper_to_lower"
     var layer_allow_same = true
     var layer_adjacent_only = false
+
+    # Accumulated dimensions list
+    var dimensions: [DimensionDef] = []
 
     # Rules
     var rule_enforce_layering = true
@@ -110,9 +115,36 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
                 cur_map_caret = ""
                 cur_map_match = ""
 
+            # Flush previous dimension section if switching to a new top-level section
+            val prev_sec = section
             val sec_str = trimmed[0:trimmed.len() - 1]
             section = sdn_trim(sec_str)
             subsection = ""
+
+            # When leaving a dimension section, flush accumulated dimension
+            if (prev_sec == "dimension" or prev_sec == "dimension_construct") and dim_name != "":
+                val flushed = _build_dimension(
+                    dim_name, dim_key_template, dim_surface,
+                    dim_participation, dim_intra_access, dim_symbol_merge,
+                    dim_dep_cycles, dim_kind, dim_mappings,
+                    layer_order, layer_direction, layer_allow_same, layer_adjacent_only
+                )
+                dimensions.push(flushed)
+                # Reset dimension fields for next section
+                dim_name = ""
+                dim_key_template = ""
+                dim_surface = "__init__.spl"
+                dim_participation = "explicit_bind_only"
+                dim_intra_access = "via_surface_only"
+                dim_symbol_merge = "forbid_implicit"
+                dim_dep_cycles = "reject"
+                dim_kind = "horizontal"
+                dim_mappings = []
+                layer_order = []
+                layer_direction = "upper_to_lower"
+                layer_allow_same = true
+                layer_adjacent_only = false
+
             i = i + 1
             continue
 
@@ -158,24 +190,21 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
                 elif kv.0 == "path":
                     cur_root_path = kv.1
 
-        # ---- dimension section ----
+        # ---- dimension section (horizontal, first axis) ----
         elif section == "dimension":
-            # Detect subsections
+            # Handle subsection transitions at indent 2
             if indent == 2 and trimmed.ends_with(":"):
-                # Flush pending mapping before switching subsection
                 if subsection == "map" and cur_map_caret != "":
                     val target = derive_target_key(dim_key_template, cur_map_match)
                     dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
                     cur_map_caret = ""
                     cur_map_match = ""
-
                 val sub_str = trimmed[0:trimmed.len() - 1]
                 subsection = sdn_trim(sub_str)
                 i = i + 1
                 continue
 
             if subsection == "":
-                # Top-level dimension fields
                 val kv = parse_kv(trimmed)
                 if kv.0 == "name":
                     dim_name = kv.1
@@ -191,11 +220,11 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
                     dim_symbol_merge = kv.1
                 elif kv.0 == "dependency_cycles":
                     dim_dep_cycles = kv.1
+                elif kv.0 == "dimension_kind":
+                    dim_kind = kv.1
 
             elif subsection == "map":
-                # Map entries are list items
                 if trimmed.starts_with("- "):
-                    # Flush previous mapping (inline due to BUG-15)
                     if cur_map_caret != "":
                         val target = derive_target_key(dim_key_template, cur_map_match)
                         dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
@@ -215,6 +244,63 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
                         cur_map_caret = kv.1
                     elif kv.0 == "match":
                         cur_map_match = kv.1
+
+            elif subsection == "layering":
+                val kv = parse_kv(trimmed)
+                if kv.0 == "order":
+                    layer_order = parse_inline_array(kv.1)
+                elif kv.0 == "direction":
+                    layer_direction = kv.1
+                elif kv.0 == "allow_same_layer":
+                    layer_allow_same = parse_bool(kv.1)
+                elif kv.0 == "allow_adjacent_only":
+                    layer_adjacent_only = parse_bool(kv.1)
+
+        # ---- dimension_construct section (vertical, second axis) ----
+        elif section == "dimension_construct":
+            # Handle subsection transitions at indent 2
+            if indent == 2 and trimmed.ends_with(":"):
+                if subsection == "map" and cur_map_caret != "":
+                    val target = derive_target_key(dim_key_template, cur_map_match)
+                    dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
+                    cur_map_caret = ""
+                    cur_map_match = ""
+                val sub_str = trimmed[0:trimmed.len() - 1]
+                subsection = sdn_trim(sub_str)
+                i = i + 1
+                continue
+
+            if subsection == "":
+                val kv = parse_kv(trimmed)
+                if kv.0 == "name":
+                    dim_name = kv.1
+                elif kv.0 == "key_template":
+                    dim_key_template = kv.1
+                elif kv.0 == "surface":
+                    dim_surface = kv.1
+                elif kv.0 == "participation":
+                    dim_participation = kv.1
+                elif kv.0 == "intra_capsule_access":
+                    dim_intra_access = kv.1
+                elif kv.0 == "symbol_merge":
+                    dim_symbol_merge = kv.1
+                elif kv.0 == "dependency_cycles":
+                    dim_dep_cycles = kv.1
+                elif kv.0 == "dimension_kind":
+                    dim_kind = kv.1
+
+            elif subsection == "tiers":
+                # tiers subsection: order: [core, flow, decl, advanced, meta]
+                # direction: lower_to_upper
+                val kv = parse_kv(trimmed)
+                if kv.0 == "order":
+                    layer_order = parse_inline_array(kv.1)
+                elif kv.0 == "direction":
+                    layer_direction = kv.1
+                elif kv.0 == "allow_same_layer":
+                    layer_allow_same = parse_bool(kv.1)
+                elif kv.0 == "allow_adjacent_only":
+                    layer_adjacent_only = parse_bool(kv.1)
 
             elif subsection == "layering":
                 val kv = parse_kv(trimmed)
@@ -252,27 +338,15 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
         val target = derive_target_key(dim_key_template, cur_map_match)
         dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
 
-    # ---- Build LayerDef ----
-    var layer_dir = LayerDirection.UpperToLower
-    if layer_direction == "lower_to_upper":
-        layer_dir = LayerDirection.LowerToUpper
-
-    var layer_def = LayerDef.new(layer_order, layer_dir)
-    layer_def.allow_same_layer = layer_allow_same
-    layer_def.allow_adjacent_only = layer_adjacent_only
-
-    # ---- Build DimensionDef ----
-    var dimensions: [DimensionDef] = []
+    # Flush last dimension section
     if dim_name != "":
-        var dim = DimensionDef.new(dim_name, dim_key_template)
-        dim.surface_file = dim_surface
-        dim.participation = dim_participation
-        dim.intra_access = dim_intra_access
-        dim.symbol_merge = dim_symbol_merge
-        dim.dep_cycles = dim_dep_cycles
-        dim.mappings = dim_mappings
-        dim.layer = layer_def
-        dimensions.push(dim)
+        val last_dim = _build_dimension(
+            dim_name, dim_key_template, dim_surface,
+            dim_participation, dim_intra_access, dim_symbol_merge,
+            dim_dep_cycles, dim_kind, dim_mappings,
+            layer_order, layer_direction, layer_allow_same, layer_adjacent_only
+        )
+        dimensions.push(last_dim)
 
     # ---- Build CapsuleRules ----
     val rules = CapsuleRules.new(rule_enforce_layering, rule_reject_cycles, rule_forbid_implicit_merge, rule_require_explicit_bind)
@@ -285,6 +359,33 @@ fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
     manifest.rules = rules
 
     manifest
+
+# Helper: build a DimensionDef from accumulated fields
+fn _build_dimension(
+    name: text, key_template: text, surface: text,
+    participation: text, intra_access: text, symbol_merge: text,
+    dep_cycles: text, kind: text, mappings: [CaretMapping],
+    layer_order: [text], layer_direction: text,
+    layer_allow_same: bool, layer_adjacent_only: bool
+) -> DimensionDef:
+    var layer_dir = LayerDirection.UpperToLower
+    if layer_direction == "lower_to_upper":
+        layer_dir = LayerDirection.LowerToUpper
+
+    var layer_def = LayerDef.new(layer_order, layer_dir)
+    layer_def.allow_same_layer = layer_allow_same
+    layer_def.allow_adjacent_only = layer_adjacent_only
+
+    var dim = DimensionDef.new(name, key_template)
+    dim.surface_file = surface
+    dim.participation = participation
+    dim.intra_access = intra_access
+    dim.symbol_merge = symbol_merge
+    dim.dep_cycles = dep_cycles
+    dim.dimension_kind = kind
+    dim.mappings = mappings
+    dim.layer = layer_def
+    dim
 
 # =========================================================================
 # Parsing Helpers

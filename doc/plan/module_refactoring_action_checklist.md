@@ -55,7 +55,7 @@ cat doc/guide/stdlib_quick_reference.md | head -20
 touch doc/guide/dependency_injection_guide.md
 
 # Reference implementation:
-cat src/std/src/di.spl  # 21KB source
+cat src/lib/src/di.spl  # 21KB source
 
 # Reference usage:
 grep -r "Injectable" src/compiler/  # Real examples
@@ -87,10 +87,10 @@ simple test doc/guide/dependency_injection_guide.md  # If examples are code
 touch doc/guide/mocking_guide.md
 
 # Reference implementation:
-cat src/std/src/testing/mocking_core.spl      # 25KB
-cat src/std/src/testing/mocking_async.spl     # 14KB
-cat src/std/src/testing/mocking_advanced.spl  # 20KB
-cat src/std/src/testing/mocking.spl           # Aggregator
+cat src/lib/src/testing/mocking_core.spl      # 25KB
+cat src/lib/src/testing/mocking_async.spl     # 14KB
+cat src/lib/src/testing/mocking_advanced.spl  # 20KB
+cat src/lib/src/testing/mocking.spl           # Aggregator
 
 # Reference usage:
 grep -r "create_mock" test/  # Real test examples
@@ -176,11 +176,11 @@ jj git push --bookmark main
 
 ### ✅ Task 2.1: Create Stdlib Root Init (2 hours)
 
-**File:** `src/std/__init__.spl`
+**File:** `src/lib/__init__.spl`
 
 ```bash
 # Create the file
-touch src/std/__init__.spl
+touch src/lib/__init__.spl
 ```
 
 **Checklist:**
@@ -221,11 +221,11 @@ echo "use std.{di, async, json}" | simple --eval
 
 ### ✅ Task 2.2: Fix Testing Module Exports (1 hour)
 
-**File:** `src/std/src/testing/__init__.spl`
+**File:** `src/lib/src/testing/__init__.spl`
 
 ```bash
 # Backup original
-cp src/std/src/testing/__init__.spl src/std/src/testing/__init__.spl.bak
+cp src/lib/src/testing/__init__.spl src/lib/src/testing/__init__.spl.bak
 
 # Edit file
 # Replace "export helpers.*" with explicit exports
@@ -284,11 +284,11 @@ echo "use app.ffi_gen.{FfiGenCommand}" | simple --eval
 
 ### ✅ Task 2.4: Create DI Alias (1 hour)
 
-**File:** `src/std/dependency_injection.spl`
+**File:** `src/lib/dependency_injection.spl`
 
 ```bash
 # Create alias file
-touch src/std/dependency_injection.spl
+touch src/lib/dependency_injection.spl
 ```
 
 **Content:**
@@ -329,8 +329,8 @@ echo "use dependency_injection" | simple --eval
 ```bash
 jj describe -m "refactor: Add module init files for discoverability
 
-- Add src/std/__init__.spl (stdlib entry point)
-- Fix src/std/src/testing/__init__.spl (export mocking)
+- Add src/lib/__init__.spl (stdlib entry point)
+- Fix src/lib/src/testing/__init__.spl (export mocking)
 - Add app module init files (build, test, lint, ffi_gen)
 - Add dependency_injection.spl alias for di.spl
 
@@ -355,7 +355,7 @@ touch src/app/cli/list_modules.spl
 ```
 
 **Implementation checklist:**
-- [ ] Scan `src/std/` for .spl files
+- [ ] Scan `src/lib/` for .spl files
 - [ ] Parse `__init__.spl` files for exports
 - [ ] Categorize modules (core, testing, utilities)
 - [ ] Format as table
@@ -444,10 +444,10 @@ ls doc/guide/mocking_guide.md
 ls doc/guide/module_discovery_guide.md
 
 # 2. Stdlib init exists
-ls src/std/__init__.spl
+ls src/lib/__init__.spl
 
 # 3. Testing exports mocking
-grep "export.*create_mock" src/std/src/testing/__init__.spl
+grep "export.*create_mock" src/lib/src/testing/__init__.spl
 
 # 4. App inits exist
 ls src/app/build/__init__.spl
@@ -456,7 +456,7 @@ ls src/app/lint/__init__.spl
 ls src/app/ffi_gen/__init__.spl
 
 # 5. DI alias exists
-ls src/std/dependency_injection.spl
+ls src/lib/dependency_injection.spl
 
 # 6. CLI commands work
 simple list-modules
@@ -484,7 +484,7 @@ core         | dependency_injection    | Dependency Injection (alias)
 # Step 2: User inspects module
 $ simple show-module di
 Module: di
-Location: src/std/src/di.spl
+Location: src/lib/src/di.spl
 Category: core
 Description: Dependency Injection with profiles, containers, bindings
 ...
@@ -556,8 +556,8 @@ DI works!
 4. `doc/guide/module_discovery_guide.md`
 
 **Code:**
-5. `src/std/__init__.spl`
-6. `src/std/dependency_injection.spl`
+5. `src/lib/__init__.spl`
+6. `src/lib/dependency_injection.spl`
 7. `src/app/build/__init__.spl`
 8. `src/app/test/__init__.spl`
 9. `src/app/lint/__init__.spl`
@@ -567,7 +567,7 @@ DI works!
 
 ### Files to Modify (1)
 
-1. `src/std/src/testing/__init__.spl` - Enable mocking exports
+1. `src/lib/src/testing/__init__.spl` - Enable mocking exports
 
 ---
 
@@ -582,13 +582,13 @@ rm src/app/cli/list_modules.spl
 rm src/app/cli/show_module.spl
 
 # Rollback Phase 2 (refactoring)
-rm src/std/__init__.spl
-rm src/std/dependency_injection.spl
+rm src/lib/__init__.spl
+rm src/lib/dependency_injection.spl
 rm src/app/build/__init__.spl
 rm src/app/test/__init__.spl
 rm src/app/lint/__init__.spl
 rm src/app/ffi_gen/__init__.spl
-mv src/std/src/testing/__init__.spl.bak src/std/src/testing/__init__.spl
+mv src/lib/src/testing/__init__.spl.bak src/lib/src/testing/__init__.spl
 
 # Phase 1 (documentation) is risk-free - no rollback needed
 ```

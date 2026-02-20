@@ -80,7 +80,7 @@ Implemented comprehensive Library SMF (.lsm) format for bundling Simple modules 
 **Features:**
 
 **Standard Library Builder:**
-- Automatic scanning of `src/std/` for .smf files
+- Automatic scanning of `src/lib/` for .smf files
 - Module name derivation from file paths
 - Progress reporting (5 steps)
 - Verbose mode with detailed logging
@@ -234,7 +234,7 @@ val resolved = resolve_symbols_from_libraries(undefined, libraries, verbose)?
 
 | Operation | Time | Notes |
 |-----------|------|-------|
-| Scan src/std/ | ~50ms | find command |
+| Scan src/lib/ | ~50ms | find command |
 | Build libstd.lsm | ~350ms | 50 modules |
 | List library modules | ~10ms | CLI overhead |
 | Verify library | ~2s | Full hash check |

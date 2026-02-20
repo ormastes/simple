@@ -24,7 +24,7 @@ During implementation, I discovered that:
 3. **Already Integrated:**
    - Compiler driver calls `desugar_module()` in Phase 2d
    - Calls `process_async_mir()` to generate state machines
-   - Complete async runtime at `src/std/async/`
+   - Complete async runtime at `src/lib/async/`
 
 ## What I Implemented
 
@@ -188,7 +188,7 @@ bin/simple test/feature/async_features_spec.spl
 - `src/compiler_core/ast.spl` - Async declaration and expression support
 - `src/compiler_core/parser.spl` - Async parsing logic
 - `src/compiler_core/interpreter/eval.spl` - Basic async expression evaluators
-- `src/std/src/dl/config_loader.spl` - Fixed module-level variable (blocking build)
+- `src/lib/src/dl/config_loader.spl` - Fixed module-level variable (blocking build)
 
 ### Created Files
 - `ASYNC_PARSER_IMPLEMENTATION.md` - Parser implementation details
@@ -202,11 +202,11 @@ bin/simple test/feature/async_features_spec.spl
 - `src/compiler/desugar/state_enum.spl` - State machine enum generation
 - `src/compiler/desugar/poll_generator.spl` - Poll function generation
 - `src/compiler/async_integration.spl` - MIR-level async processing
-- `src/std/async/*.spl` - Complete async runtime (12 modules)
+- `src/lib/async/*.spl` - Complete async runtime (12 modules)
 
 ## Async Runtime Modules
 
-Complete async runtime exists at `src/std/async/`:
+Complete async runtime exists at `src/lib/async/`:
 
 ```
 __init__.spl      - Module initialization

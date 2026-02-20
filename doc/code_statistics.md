@@ -55,7 +55,7 @@ Simple has transitioned from a **Rust-based compiler** to a **100% self-hosting 
 |--------------|-------|---------|
 | **src/compiler/** | 83,250 | Compiler infrastructure (lexer, parser, HIR, MIR, codegen) |
 | **src/app/** | 82,292 | Applications (CLI, build, MCP, LSP, formatter, linter) |
-| **src/std/** | 30,581 | Standard library |
+| **src/lib/** | 30,581 | Standard library |
 | **src/lib/** | 5,614 | Libraries (database, pure DL) |
 | **Other** | 6,987 | Test modules, utilities |
 
@@ -69,7 +69,7 @@ Simple has transitioned from a **Rust-based compiler** to a **100% self-hosting 
 | **src/app/** | 6,067 | ~180 | App tests |
 | **src/lib/** | 2,274 | ~40 | Library tests |
 | **src/compiler/** | 1,907 | ~30 | Compiler tests |
-| **src/std/** | 153 | ~5 | Stdlib tests |
+| **src/lib/** | 153 | ~5 | Stdlib tests |
 | **Other** | 197,420 | ~629 | Other test locations |
 
 ### Test Statistics

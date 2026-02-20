@@ -33,7 +33,7 @@ Phase 2.3 requires 4 features to unblock 6 pending TreeSitter tests:
 **Date Completed:** 2026-02-14
 
 **Implementation:**
-- File: `src/std/parser/treesitter_node.spl`
+- File: `src/lib/parser/treesitter_node.spl`
 - Test: `test/unit/std/parser/treesitter_node_spec.spl`
 
 **Methods Implemented:**
@@ -76,7 +76,7 @@ struct Point:
 **Date Completed:** 2026-02-14
 
 **Implementation:**
-- File: `src/std/parser/treesitter_node.spl` (same file as Feature 1)
+- File: `src/lib/parser/treesitter_node.spl` (same file as Feature 1)
 - Test: `test/unit/std/parser/treesitter_node_spec.spl` (same file)
 
 **Methods Implemented:**
@@ -176,7 +176,7 @@ These tests are currently marked `@pending` or `@skip`:
 ### File Structure
 
 ```
-src/std/parser/
+src/lib/parser/
 ├── treesitter.spl            # Existing (simple lexer, not real TreeSitter)
 ├── treesitter_node.spl       # NEW - Node API wrapper (Features 1-2)
 └── __init__.spl              # Module initialization
@@ -324,7 +324,7 @@ Features 1-2 are self-contained and don't block on other work.
 - TreeSitter C API: https://tree-sitter.github.io/tree-sitter/using-parsers
 
 ### Source Files
-- Node API: `src/std/parser/treesitter_node.spl`
+- Node API: `src/lib/parser/treesitter_node.spl`
 - Node Tests: `test/unit/std/parser/treesitter_node_spec.spl`
 - Pending Tests: `test/unit/compiler/parser/treesitter_*_spec.spl`
 

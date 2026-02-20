@@ -116,8 +116,8 @@ Successfully refactored the entire Simple Language codebase, transforming 10 mon
 - registry.spl (53) - Rule orchestration
 
 **Locations:**
-- `src/std/net/`
-- `src/std/src/testing/mock/`
+- `src/lib/net/`
+- `src/lib/src/testing/mock/`
 - `src/app/fix/rules/`
 
 ---
@@ -288,8 +288,8 @@ All original files preserved with `.backup` extension:
 | treesitter.spl.backup | 77 KB | src/compiler/ |
 | backend.spl.backup | 51 KB | src/compiler/ |
 | hir_lowering.spl.backup | 51 KB | src/compiler/ |
-| net.spl.backup | 46 KB | src/std/ |
-| mocking_core.spl.backup | 34 KB | src/std/src/testing/ |
+| net.spl.backup | 46 KB | src/lib/ |
+| mocking_core.spl.backup | 34 KB | src/lib/src/testing/ |
 | rules.spl.backup | 35 KB | src/app/fix/ |
 
 **Total backup size:** 617 KB

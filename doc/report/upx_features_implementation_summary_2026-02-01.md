@@ -19,7 +19,7 @@ Successfully implemented Phase 1 (UPX Auto-Download) with full testing and verif
 - `rust/runtime/src/compress/upx_download.rs` (408 lines) - ✅ EXISTS
 - `rust/runtime/src/compress/upx.rs` (modified) - ✅ EXISTS
 - `rust/runtime/src/compress/mod.rs` (exports upx modules) - ✅ EXISTS
-- `src/std/compress/upx.spl` (Simple API with auto-download) - ✅ EXISTS
+- `src/lib/compress/upx.spl` (Simple API with auto-download) - ✅ EXISTS
 
 **Test Results:**
 ```
@@ -274,7 +274,7 @@ Multiple instances of file modifications noted in system reminders:
 ```
 Note: /home/ormastes/dev/pub/simple/rust/runtime/src/compress/mod.rs was modified
 Note: /home/ormastes/dev/pub/simple/rust/runtime/Cargo.toml was modified
-Note: /home/ormastes/dev/pub/simple/src/std/compress/upx.spl was modified
+Note: /home/ormastes/dev/pub/simple/src/lib/compress/upx.spl was modified
 ```
 
 Files confirmed missing:

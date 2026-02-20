@@ -147,7 +147,7 @@ test/
   lib/           # Library tests
   compiler/      # Compiler tests
   app/           # Application tests
-src/std/test/
+src/lib/test/
   unit/          # Fast, isolated (branch/condition coverage)
   integration/   # Public function touch (100%)
   system/        # Public type touch (100%)
@@ -247,6 +247,10 @@ SSpec uses triple-quoted strings (`"""`) as **full markdown docstrings** that ge
 **Category:** Language                 <- REQUIRED: Choose one category
 **Difficulty:** 3/5                    <- OPTIONAL: 1-5 rating
 **Status:** Implemented                <- REQUIRED: Current status
+**Requirements:** doc/requirement/auth.md   <- RECOMMENDED: requirement link
+**Plan:** doc/plan/auth.md             <- RECOMMENDED: plan link
+**Design:** doc/design/auth.md         <- RECOMMENDED: design/arch link
+**Research:** doc/research/auth.md     <- RECOMMENDED: research link
 
 ## Overview                            <- REQUIRED: What & Why
 
@@ -280,6 +284,19 @@ result = use_feature()
 | Category | Yes | `Infrastructure`, `Language`, `Syntax`, `Stdlib`, `Runtime`, `Testing`, `Tooling` | Index organization |
 | Difficulty | No | `1-5/5` | Complexity indicator |
 | Status | Yes | `Draft`, `In Progress`, `Implemented`, `Complete` | Development stage |
+| Requirements | Recommended | `doc/requirement/xxx.md` | Link to requirement document |
+| Plan | Recommended | `doc/plan/xxx.md` | Link to plan document |
+| Design | Recommended | `doc/design/xxx.md` | Link to design/architecture document |
+| Research | Recommended | `doc/research/xxx.md` | Link to research document |
+
+**Doc-link validation:** `sspec-docgen` performs two checks for each link field:
+1. **Missing** — field absent → warning with recommended path
+2. **Not found** — field set but file doesn't exist → warning with exact path
+
+Use `N/A` to suppress a warning when the link is genuinely not applicable:
+```
+**Requirements:** N/A
+```
 
 ### Test Group Docstrings (RECOMMENDED)
 
@@ -475,4 +492,8 @@ bin/simple gen-lean write --force     # Regenerate Lean files
 - `doc/guide/sspec_writing.md` - Writing guide
 - `doc/spec/sspec_manual.md` - User manual
 - `doc/test.md` - Test policy
+- `doc/FILE.md` - Document relationship model (PLAN → REQ → FEATURE → TESTS)
+- `doc/requirement/README.md` - Requirement doc format
+- `doc/feature/README.md` - Feature specification format
+- `/rule` skill - Engineering rules and doc folder map
 - `/architecture` skill - Lean codegen, dependency analysis

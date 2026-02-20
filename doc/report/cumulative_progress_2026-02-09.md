@@ -131,11 +131,11 @@ skip_if_missing_module(name, module)  # Module detection
 16. `src/compiler/baremetal/table_codegen.spl` - Import cleanup
 
 ### Phase 2 (6 files)
-1. `src/std/platform.spl` - Architecture detection
+1. `src/lib/platform.spl` - Architecture detection
 2. `src/compiler/smf_writer.spl` - Platform integration
 3. `src/compiler/blocks/utils.spl` - Validation (also in Phase 1B)
 4. `src/runtime/hooks.spl` - Template interpolation
-5. `src/std/spec.spl` - Module detection
+5. `src/lib/spec.spl` - Module detection
 6. `src/compiler/monomorphize_integration.spl` - Symbol resolution
 
 **Unique Files:** 22 (one file modified in both phases)

@@ -48,7 +48,7 @@ These are **not test runner bugs** - they're module initialization or implementa
 ### Category 1: FFI Calls During Module Init (3 tests)
 
 #### 1. `test/unit/std/env_spec.spl` - TIMEOUT
-**Module:** `src/std/shell/env.spl`
+**Module:** `src/lib/shell/env.spl`
 **Issue:** `cwd()` function calls `rt_process_run()` during module initialization
 **Root Cause:** FFI hangs when called at module-level `val` initialization
 
@@ -67,7 +67,7 @@ fn get_current_dir() -> text:
 ---
 
 #### 2. `test/unit/std/log_spec.spl` - TIMEOUT
-**Module:** `src/std/log.spl`
+**Module:** `src/lib/log.spl`
 **Issue:** `_parse_log_level()` calls `rt_env_get()` during module init
 **Root Cause:** FFI call at module-level variable initialization
 
@@ -197,7 +197,7 @@ extern fn generate_sequence_ffi() -> text
 **Status:** ✅ Applied
 
 ### 3. Lazy Initialization for env.spl ✅
-**File:** `src/std/shell/env.spl`
+**File:** `src/lib/shell/env.spl`
 **Change:** Made `cwd()` use lazy initialization with caching
 ```simple
 var _cwd_cache: text? = nil
@@ -209,7 +209,7 @@ fn cwd() -> text:
 **Status:** ✅ Applied
 
 ### 4. Lazy Initialization for log.spl ✅
-**File:** `src/std/log.spl`
+**File:** `src/lib/log.spl`
 **Status:** ✅ Already fixed (discovered during session)
 **Note:** Uses `var GLOBAL_LOG_LEVEL: i64 = -1` with lazy initialization
 

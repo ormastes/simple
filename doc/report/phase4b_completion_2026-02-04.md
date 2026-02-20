@@ -26,7 +26,7 @@ We now have **two separate mmap implementations** serving different purposes:
 - `rt_file_mmap_read_text()` - 56 lines
 - `rt_file_mmap_read_bytes()` - 54 lines
 
-**Used By:** Simple language code in `src/std/common/file_reader.spl`
+**Used By:** Simple language code in `src/lib/common/file_reader.spl`
 
 **Benefits:**
 - ✅ Zero external dependencies (only libc)

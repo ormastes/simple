@@ -121,7 +121,7 @@ Successfully implemented Library SMF format and created integration layer for th
 **Files Created:**
 1. `scripts/build_libstd.spl` (200 lines)
    - Automated libstd.lsm generation
-   - Scans src/std/ for SMF files
+   - Scans src/lib/ for SMF files
    - Module name derivation
    - Progress reporting
 

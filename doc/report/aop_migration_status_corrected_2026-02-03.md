@@ -35,7 +35,7 @@
 
 **Scope:** Compiler-level dependency injection for build-time configuration and compile-time resolution.
 
-#### Simple Implementation (`src/std/src/di.spl` - 669 lines)
+#### Simple Implementation (`src/lib/src/di.spl` - 669 lines)
 
 **Features:**
 - ✅ `Container` with profile support (test/dev/prod/sdn)
@@ -81,7 +81,7 @@
 
 **Scope:** Compiler-level mocking infrastructure for test framework integration.
 
-#### Simple Implementation (`src/std/src/testing/mocking*.spl`)
+#### Simple Implementation (`src/lib/src/testing/mocking*.spl`)
 
 **Files:**
 1. `mocking.spl` - Re-export module (49 lines)
@@ -162,13 +162,13 @@
 
 ### ❌ Previous Claim: "DI System Missing in Simple"
 **Status:** ✅ **FALSE - Already Implemented**
-- Location: `src/std/src/di.spl` (669 lines)
+- Location: `src/lib/src/di.spl` (669 lines)
 - Features: Container, profiles, backends, instruction modules
 - Scope: Runtime dependency injection (different from Rust compile-time DI)
 
 ### ❌ Previous Claim: "Mock System Missing in Simple"
 **Status:** ✅ **FALSE - Already Implemented**
-- Location: `src/std/src/testing/mocking*.spl` (3 modules)
+- Location: `src/lib/src/testing/mocking*.spl` (3 modules)
 - Features: Core mocking, async mocking, advanced scheduling
 - Scope: Test library API (different from Rust mock infrastructure)
 

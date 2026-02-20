@@ -84,12 +84,12 @@ bin/simple stats --json
 
 ```
 warning: public API group 'File operations' missing SDoctest coverage
-  --> src/std/io/__init__.spl:15
+  --> src/lib/io/__init__.spl:15
   = note: group contains 5 items, needs at least 1 SDoctest example
   = help: add usage example in README.md or doc/guide/*.md
 
 warning: public API item 'describe' missing SDoctest coverage
-  --> src/std/spec/__init__.spl:12
+  --> src/lib/spec/__init__.spl:12
   = note: individual items require their own SDoctest example
   = help: add usage example in README.md or doc/guide/*.md
 ```
@@ -204,7 +204,7 @@ Result: PUBLIC API COVERAGE BELOW THRESHOLD ⚠️
 use doc_coverage.analysis.init_parser.{parse_init_file}
 use doc_coverage.tagging.tag_generator.{generate_public_api_tags, format_tag_suggestions}
 
-val result = parse_init_file("src/std/spec/__init__.spl")
+val result = parse_init_file("src/lib/spec/__init__.spl")
 val groups = result.0
 val items = result.1
 
@@ -220,14 +220,14 @@ print formatted
 # ================================================
 
 Item: file_read
-Location: src/std/io/__init__.spl:15
+Location: src/lib/io/__init__.spl:15
 Suggested tags:
   @tag:api:public
   @tag:api:grouped
   @tag:group:File operations
 
 Item: describe
-Location: src/std/spec/__init__.spl:12
+Location: src/lib/spec/__init__.spl:12
 Suggested tags:
   @tag:api:public
   @tag:api:individual
@@ -310,7 +310,7 @@ bin/simple doc-coverage --check-public-api
 # Checking public API SDoctest coverage...
 #
 # ❌ Group 'File operations' missing SDoctest
-#    File: src/std/io/__init__.spl:15
+#    File: src/lib/io/__init__.spl:15
 #    Items: 5 functions
 #
 # Public API SDoctest Coverage Summary
@@ -379,7 +379,7 @@ use app.io.mod.{file_write}
 
 fn main():
     # Parse all __init__.spl files and collect groups/items
-    val result = parse_init_file("src/std/spec/__init__.spl")
+    val result = parse_init_file("src/lib/spec/__init__.spl")
     val groups = result.0
     val items = result.1
 

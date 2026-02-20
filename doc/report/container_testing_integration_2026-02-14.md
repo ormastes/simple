@@ -445,7 +445,7 @@ bin/simple test --only-slow
 **Scenario:** Developer editing Simple source code
 
 **Steps:**
-1. Edit source: `vim src/std/text.spl`
+1. Edit source: `vim src/lib/text.spl`
 2. Quick test (native): `bin/simple test test/unit/std/string_spec.spl`
 3. Verify isolated: `scripts/local-container-test.sh quick test/unit/std/string_spec.spl`
 4. Commit: `jj commit -m "fix: String.trim edge case"`

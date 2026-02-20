@@ -133,7 +133,7 @@ $ cd rust && cargo build --profile release-opt
 
 ### Step 1: Wire FFI to Simple (1-2 hours)
 
-Create `src/std/package_ffi.spl`:
+Create `src/lib/package_ffi.spl`:
 
 ```simple
 # Package FFI Bindings
@@ -228,7 +228,7 @@ Update `.github/workflows/release.yml`:
 ## Test Execution Plan
 
 ### Priority 1: FFI Bindings (Do First)
-- Create `src/std/package_ffi.spl`
+- Create `src/lib/package_ffi.spl`
 - Expose all 13 FFI functions
 - Test basic functionality
 

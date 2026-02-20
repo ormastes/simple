@@ -187,10 +187,10 @@
 ### Check Status
 ```bash
 # Find refactored modules
-for dir in src/std/*/; do
+for dir in src/lib/*/; do
   name=$(basename "$dir")
-  if [ -f "src/std/${name}_utils.spl" ]; then
-    lines=$(wc -l < "src/std/${name}_utils.spl")
+  if [ -f "src/lib/${name}_utils.spl" ]; then
+    lines=$(wc -l < "src/lib/${name}_utils.spl")
     mods=$(ls -1 "$dir"*.spl 2>/dev/null | wc -l)
     if [ $lines -lt 200 ] && [ $mods -gt 0 ]; then
       echo "✅ $name: facade ($lines) → $mods modules"
@@ -199,11 +199,11 @@ for dir in src/std/*/; do
 done
 
 # Find remaining (>800 lines)
-find src/std -maxdepth 1 -name "*_utils.spl" -exec sh -c '
+find src/lib -maxdepth 1 -name "*_utils.spl" -exec sh -c '
   lines=$(wc -l < "$1")
   if [ $lines -gt 800 ]; then
     name=$(basename "$1" _utils.spl)
-    if [ ! -d "src/std/$name" ] || [ $(ls -1 "src/std/$name/"*.spl 2>/dev/null | wc -l) -eq 0 ]; then
+    if [ ! -d "src/lib/$name" ] || [ $(ls -1 "src/lib/$name/"*.spl 2>/dev/null | wc -l) -eq 0 ]; then
       echo "🔄 $name ($lines lines)"
     fi
   fi
@@ -214,9 +214,9 @@ find src/std -maxdepth 1 -name "*_utils.spl" -exec sh -c '
 ```bash
 # Check if module is complete
 MODULE=json
-if [ -d "src/std/$MODULE" ] && [ $(wc -l < "src/std/${MODULE}_utils.spl") -lt 200 ]; then
+if [ -d "src/lib/$MODULE" ] && [ $(wc -l < "src/lib/${MODULE}_utils.spl") -lt 200 ]; then
   echo "✅ $MODULE complete"
-  ls -1 "src/std/$MODULE/"*.spl
+  ls -1 "src/lib/$MODULE/"*.spl
 else
   echo "❌ $MODULE needs work"
 fi
@@ -228,9 +228,9 @@ fi
 
 - **Plan:** `doc/plan/REFACTOR_PHASES.md`
 - **This report:** `doc/report/refactor_progress_2026-02-13.md`
-- **Modules:** `src/std/<module>/*.spl`
-- **Facades:** `src/std/<module>_utils.spl`
-- **Backups:** `src/std/<module>_utils.spl.backup*`
+- **Modules:** `src/lib/<module>/*.spl`
+- **Facades:** `src/lib/<module>_utils.spl`
+- **Backups:** `src/lib/<module>_utils.spl.backup*`
 
 ---
 

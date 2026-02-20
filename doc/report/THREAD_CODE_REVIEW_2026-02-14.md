@@ -27,7 +27,7 @@ The thread pool and thread SFFI implementations are well-designed and have compr
 ## 1. File-by-File Analysis
 
 ### 1.1 thread_sffi.spl (286 lines)
-**Location:** `/home/ormastes/dev/pub/simple/src/std/thread_sffi.spl`
+**Location:** `/home/ormastes/dev/pub/simple/src/lib/thread_sffi.spl`
 **Status:** ✅ CLEAN - No runtime parser issues detected
 
 **Strengths:**
@@ -53,7 +53,7 @@ The thread pool and thread SFFI implementations are well-designed and have compr
 ---
 
 ### 1.2 thread_pool.spl (207 lines)
-**Location:** `/home/ormastes/dev/pub/simple/src/std/thread_pool.spl`
+**Location:** `/home/ormastes/dev/pub/simple/src/lib/thread_pool.spl`
 **Status:** ⚠️ PARTIAL - Design issues, but no parser blockers
 
 **Strengths:**
@@ -102,7 +102,7 @@ class ThreadPool:
 ---
 
 ### 1.3 thread_safe_queue.spl (146 lines)
-**Location:** `/home/ormastes/dev/pub/simple/src/std/async_host/thread_safe_queue.spl`
+**Location:** `/home/ormastes/dev/pub/simple/src/lib/async_host/thread_safe_queue.spl`
 **Status:** ❌ BLOCKED - Runtime parser incompatible
 
 **CRITICAL ISSUE #3: Generic Syntax**
@@ -342,7 +342,7 @@ fn try_pop_checked() -> (bool, usize):
 **Note:** Assumes task IDs are never 0. Alternative: use -1 or add separate `has_value()` check.
 
 **Files to modify:**
-- `src/std/async_host/thread_safe_queue.spl` (2 functions)
+- `src/lib/async_host/thread_safe_queue.spl` (2 functions)
 
 ---
 
@@ -410,7 +410,7 @@ fn execute_task(task_id: usize):
 5. Join workers in `shutdown()`
 
 **Files to modify:**
-- `src/std/thread_pool.spl` (~100 lines added)
+- `src/lib/thread_pool.spl` (~100 lines added)
 
 ---
 

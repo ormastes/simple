@@ -74,10 +74,10 @@ val add = \x, y: x + y
 - Functions: `is_future_type()`, `extract_future_inner()`, `make_future_type()`
 
 **Runtime Libraries** (✅ Complete):
-- `src/std/async_core.spl` - Shared Poll<T>, TaskState, Priority
-- `src/std/async_embedded.spl` - Fixed-capacity runtime
-- `src/std/async_host.spl` - Dynamic runtime
-- `src/std/async_unified.spl` - Unified API
+- `src/lib/async_core.spl` - Shared Poll<T>, TaskState, Priority
+- `src/lib/async_embedded.spl` - Fixed-capacity runtime
+- `src/lib/async_host.spl` - Dynamic runtime
+- `src/lib/async_unified.spl` - Unified API
 
 **Core Type System** (❌ WAS MISSING → ✅ NOW FIXED):
 - No TYPE_FUTURE, TYPE_POLL, TYPE_TASK constants

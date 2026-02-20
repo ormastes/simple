@@ -54,7 +54,7 @@ fn file_read(path: text) -> text:                 # Tier 2: Simple wrapper
 
 - I/O: `src/app/io/mod.spl`
 - CLI: `src/app/cli/main.spl`
-- Stdlib + libs: `src/lib/` (use `std.X` imports — `src/std` is a symlink to `src/lib`)
+- Stdlib + libs: `src/lib/` (use `std.X` imports — resolver maps `std` to `lib`)
 - Apps: `src/app/`
 
 ## See Also

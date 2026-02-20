@@ -11,8 +11,8 @@
 **MISTAKE IN ORIGINAL REPORT:** TCP socket SFFI is NOT missing!
 
 **What Simple Already Has:**
-- ✅ `src/std/net/tcp.spl` - Full TCP client/server implementation
-- ✅ `src/std/net/ffi.spl` - Complete FFI bindings
+- ✅ `src/lib/net/tcp.spl` - Full TCP client/server implementation
+- ✅ `src/lib/net/ffi.spl` - Complete FFI bindings
 - ✅ `TcpStream.connect(addr)` - TCP client
 - ✅ `TcpListener.bind(addr)` - TCP server
 - ✅ `UdpSocket` - UDP support
@@ -287,7 +287,7 @@ print "Result: {result}"
 
 **Evidence:**
 - `src/remote/protocol/gdb_mi.spl` created Feb 2024
-- `src/std/net/tcp.spl` existed before that
+- `src/lib/net/tcp.spl` existed before that
 - No cross-reference between modules
 
 **Lesson:** Always search for existing stdlib modules before creating FFI wrappers.

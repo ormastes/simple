@@ -337,7 +337,7 @@ training:
 **Backend Infrastructure:**
 - `src/compiler_core_legacy/backend/cuda_backend.spl`
 - `src/lib/cuda/` (10+ functions)
-- `src/std/gpu/` (context, memory, streams)
+- `src/lib/gpu/` (context, memory, streams)
 
 ---
 

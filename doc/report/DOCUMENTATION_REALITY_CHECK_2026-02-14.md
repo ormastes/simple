@@ -40,7 +40,7 @@ The COMPREHENSIVE_IMPLEMENTATION_PLAN_2026-02-14.md Section 6 requests documenta
 ### 2. SIMD Optimization (Planned: ~2700 lines, Reality: ~390 lines stub)
 
 **What EXISTS:**
-- `src/std/simd.spl`: API skeleton (390 lines)
+- `src/lib/simd.spl`: API skeleton (390 lines)
   - Platform detection stubs: `has_sse()`, `has_avx()`, `has_avx2()`, `has_neon()`
   - Type definitions planned (Vec4f, Vec8f, etc.)
   - Function signatures documented
@@ -76,9 +76,9 @@ The COMPREHENSIVE_IMPLEMENTATION_PLAN_2026-02-14.md Section 6 requests documenta
 
 **What DOES NOT EXIST:**
 - ❌ Startup code (crt0.s for ARM, x86_64, RISC-V - planned 900 lines)
-- ❌ Memory allocator (`src/std/baremetal/allocator.spl` - planned 800 lines)
-- ❌ Syscall wrappers (`src/std/baremetal/syscall.spl` - planned 400 lines)
-- ❌ Interrupt handlers (`src/std/baremetal/interrupt.spl` - planned 600 lines)
+- ❌ Memory allocator (`src/lib/baremetal/allocator.spl` - planned 800 lines)
+- ❌ Syscall wrappers (`src/lib/baremetal/syscall.spl` - planned 400 lines)
+- ❌ Interrupt handlers (`src/lib/baremetal/interrupt.spl` - planned 600 lines)
 - ❌ Linker scripts and build system integration
 
 **Implementation Status: ~15%** (semihosting constants only, no runtime)
@@ -95,14 +95,14 @@ The COMPREHENSIVE_IMPLEMENTATION_PLAN_2026-02-14.md Section 6 requests documenta
 ### 4. Thread Pool & SFFI (Planned: verification only, Reality: broken)
 
 **What EXISTS:**
-- `src/std/thread_pool.spl`: Implementation (206 lines)
+- `src/lib/thread_pool.spl`: Implementation (206 lines)
   - ThreadPool class with worker management
   - Task submission API
   - Shutdown logic
-- `src/std/thread_sffi.spl`: SFFI primitives (285 lines)
+- `src/lib/thread_sffi.spl`: SFFI primitives (285 lines)
   - Low-level thread operations
   - Mutex, condvar, atomics (based on imports)
-- `src/std/async_host/thread_safe_queue.spl`: Queue implementation
+- `src/lib/async_host/thread_safe_queue.spl`: Queue implementation
 - `test/unit/std/thread_pool_spec.spl`: Tests exist (80+ tests)
 - `test/unit/std/thread_sffi_spec.spl`: Tests exist (60+ tests)
 

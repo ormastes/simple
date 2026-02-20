@@ -28,7 +28,7 @@ Successfully completed **Phase 1 (Quick Wins)** enabling 79 tests through new st
 
 ### Phase 1.1: Table/DataFrame Module (26 tests)
 **Status:** ✅ Complete
-**File:** `src/std/table.spl` (415 lines)
+**File:** `src/lib/table.spl` (415 lines)
 
 **Implementation:**
 - Column-based table structure with statistical operations
@@ -47,7 +47,7 @@ Successfully completed **Phase 1 (Quick Wins)** enabling 79 tests through new st
 
 ### Phase 1.2: Resource Cleanup Framework (22 tests)
 **Status:** ✅ Complete
-**File:** `src/std/core/resource.spl` (184 lines)
+**File:** `src/lib/core/resource.spl` (184 lines)
 
 **Implementation:**
 - Resource trait pattern (create, close, is_open, name)
@@ -100,7 +100,7 @@ val id = result.1  # Resource ID
 
 ### Phase 2.1: String Methods
 **Status:** ✅ Implementation Complete (+70 lines), ❌ Import Blocked
-**File:** `src/std/text.spl` (enhanced with +70 lines)
+**File:** `src/lib/text.spl` (enhanced with +70 lines)
 
 **Functions Added:**
 ```simple
@@ -126,7 +126,7 @@ string_split(s: text, delim: text) -> [text]  # General split function
 
 ### Phase 2.2: Array Methods
 **Status:** ✅ Implementation Complete (+85 lines), ❌ Import Blocked
-**File:** `src/std/array.spl` (enhanced with +85 lines)
+**File:** `src/lib/array.spl` (enhanced with +85 lines)
 
 **Functions Added:**
 ```simple
@@ -223,14 +223,14 @@ This affects:
 ## Code Statistics
 
 ### New Code Written (Phase 1)
-- `src/std/table.spl`: 415 lines (new)
-- `src/std/core/resource.spl`: 184 lines (new)
+- `src/lib/table.spl`: 415 lines (new)
+- `src/lib/core/resource.spl`: 184 lines (new)
 - `src/lib/qemu/boot_runner.spl`: +20 lines (enhanced)
 - **Phase 1 Total: 619 lines**
 
 ### Enhanced Code (Phase 2)
-- `src/std/text.spl`: +70 lines (Phase 2.1)
-- `src/std/array.spl`: +85 lines (Phase 2.2)
+- `src/lib/text.spl`: +70 lines (Phase 2.1)
+- `src/lib/array.spl`: +85 lines (Phase 2.2)
 - `src/ffi/system.spl`: 260 lines existing (Phase 2.3 - discovered)
 - **Phase 2 Total: 415 lines (155 new + 260 existing)**
 
@@ -375,14 +375,14 @@ Phase 3 (Runtime Core Fixes) requires:
 ## Files Modified
 
 ### Created
-- `src/std/table.spl` (415 lines)
-- `src/std/core/resource.spl` (184 lines)
+- `src/lib/table.spl` (415 lines)
+- `src/lib/core/resource.spl` (184 lines)
 - `doc/report/phase1_test_enablement_complete_2026-02-09.md`
 - `doc/report/test_enablement_session_summary_2026-02-09.md`
 
 ### Enhanced
-- `src/std/text.spl` (+70 lines) - Phase 2.1
-- `src/std/array.spl` (+85 lines) - Phase 2.2
+- `src/lib/text.spl` (+70 lines) - Phase 2.1
+- `src/lib/array.spl` (+85 lines) - Phase 2.2
 - `src/lib/qemu/boot_runner.spl` (+20 lines) - Phase 1.3
 
 ### Verified Existing

@@ -97,7 +97,7 @@ val result = match future.poll(current_waker()):
 **Future Type:**
 
 ```simple
-# src/std/async/future.spl
+# src/lib/async/future.spl
 struct Future<T>:
     poll_fn: fn(Waker) -> PollResult<T>
 
@@ -122,7 +122,7 @@ struct Future<T>:
 **Event Loop:**
 
 ```simple
-# src/std/async/runtime.spl
+# src/lib/async/runtime.spl
 struct Runtime:
     task_queue: Queue<Task>
     wakers: Map<TaskId, Waker>
@@ -261,7 +261,7 @@ loop:
 **Async I/O:**
 
 ```simple
-# src/std/async/io.spl
+# src/lib/async/io.spl
 async fn read_file(path: text) -> text:
     val fd = await open_async(path)
     val content = await read_async(fd)
@@ -277,7 +277,7 @@ async fn write_file(path: text, content: text):
 **Async HTTP:**
 
 ```simple
-# src/std/async/http.spl
+# src/lib/async/http.spl
 async fn get(url: text) -> Response:
     val req = Request(method: "GET", url: url)
     await send_request(req)
@@ -290,7 +290,7 @@ async fn post(url: text, body: text) -> Response:
 **Combinators:**
 
 ```simple
-# src/std/async/combinators.spl
+# src/lib/async/combinators.spl
 async fn gather<T>(futures: [Future<T>]) -> [T]:
     # Wait for all futures
     var results = []

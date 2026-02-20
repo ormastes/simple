@@ -26,7 +26,7 @@ Successfully implemented **Rust-free distribution** with **multi-platform packag
 
 ### Files Created (7 files, ~1,300 lines)
 
-1. **`src/std/platform/mod.spl`** (280 lines)
+1. **`src/lib/platform/mod.spl`** (280 lines)
    - Platform detection (Windows/Linux/macOS/FreeBSD)
    - Path normalization (handle Windows backslashes, UNC paths)
    - Platform naming (`linux-x86_64`, `darwin-arm64`, etc.)
@@ -142,7 +142,7 @@ simple-full-0.5.0-linux-x86_64.tar.gz
 
 ## Platform Abstraction Layer
 
-### API: `src/std/platform/mod.spl`
+### API: `src/lib/platform/mod.spl`
 
 **Platform Detection:**
 ```simple
@@ -494,7 +494,7 @@ xattr -d com.apple.quarantine bin/simple
 1. **simple.sdn** - Distribution configuration
 2. **script/package-dist.spl** - CLI packaging script
 3. **.github/workflows/release.yml** - CI/CD configuration
-4. **src/std/platform/mod.spl** - Platform API reference
+4. **src/lib/platform/mod.spl** - Platform API reference
 
 ---
 

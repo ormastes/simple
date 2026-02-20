@@ -41,8 +41,8 @@ Successfully migrated all import paths in the codebase to use the new syntax. Al
 - test/specs/traits_spec.spl
 
 **Other:**
-- src/std/net.spl
-- src/std/rc.spl
+- src/lib/net.spl
+- src/lib/rc.spl
 - src/ffi/mod.spl
 - src/app/build/watch.spl
 - src/app/ffi_gen/main.spl

@@ -82,9 +82,9 @@ fn translate_params(params_str: text) -> text:
             val pname = p.substring(0, colon_idx).trim()
             val ptype = p.substring(colon_idx + 1).trim()
             val ctype = simple_type_to_c(ptype)
-            c_parts.push("{ctype} {pname}")
+            c_parts.push(ctype + r" " + pname)
         else:
-            c_parts.push("long long {p}")
+            c_parts.push(r"long long " + p)
     c_parts.join(", ")
 
 # Parse a Simple function signature into [name, c_signature_body, forward_decl]
@@ -96,7 +96,11 @@ fn parse_fn_signature(trimmed: text) -> [text]:
     # Find function name (up to first paren)
     val paren_idx = sig.index_of("(") ?? -1
     if paren_idx < 0:
-        return [sig, "long long {sig}(void)", "long long {sig}(void);"]
+        var fallback: [text] = []
+        fallback.push(sig)
+        fallback.push(r"long long " + sig + r"(void)")
+        fallback.push(r"long long " + sig + r"(void);")
+        return fallback
 
     val name = sig.substring(0, paren_idx).trim()
 
@@ -117,8 +121,12 @@ fn parse_fn_signature(trimmed: text) -> [text]:
     if params_str.len() > 0:
         c_params = translate_params(params_str)
 
-    val c_sig = "{ret_type} {name}({c_params})"
-    [name, c_sig, "{c_sig};"]
+    val c_sig = ret_type + r" " + name + r"(" + c_params + r")"
+    var result: [text] = []
+    result.push(name)
+    result.push(c_sig)
+    result.push(c_sig + r";")
+    result
 
 # Find matching close paren starting from open_pos (exclusive)
 fn find_close_paren(expr: text, open_pos: i64) -> i64:
@@ -147,6 +155,68 @@ fn find_close_paren(expr: text, open_pos: i64) -> i64:
         elif ch == ")":
             depth = depth - 1
             if depth == 0:
+                return i
+        i = i + 1
+    return -1
+
+# Find top-level " + " operator position, skipping strings and parens
+fn find_top_level_plus(expr: text) -> i64:
+    var in_str = false
+    var depth = 0
+    var i = 0
+    val elen = expr.len()
+    while i < elen:
+        val ch = expr.substring(i, i + 1)
+        if in_str:
+            if ch == "\\" and i + 1 < elen:
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_str = false
+            i = i + 1
+            continue
+        if ch == "\"":
+            in_str = true
+            i = i + 1
+            continue
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+        elif ch == "+" and depth == 0:
+            # Check for " + " pattern (space before and after)
+            if i >= 1 and i + 1 < elen:
+                val before = expr.substring(i - 1, i)
+                val after = expr.substring(i + 1, i + 2)
+                if before == " " and after == " ":
+                    return i - 1
+        i = i + 1
+    return -1
+
+# Find a keyword/substring only outside of string literals
+# Returns position or -1 if not found (or only inside strings)
+fn find_outside_strings(expr: text, needle: text) -> i64:
+    var in_str = false
+    var i = 0
+    val elen = expr.len()
+    val nlen = needle.len()
+    while i < elen:
+        val ch = expr.substring(i, i + 1)
+        if in_str:
+            if ch == "\\" and i + 1 < elen:
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_str = false
+            i = i + 1
+            continue
+        if ch == "\"":
+            in_str = true
+            i = i + 1
+            continue
+        if i + nlen <= elen:
+            val candidate = expr.substring(i, i + nlen)
+            if candidate == needle:
                 return i
         i = i + 1
     return -1
@@ -312,7 +382,11 @@ fn parse_method_signature(trimmed: text, class_name: text, is_me: bool) -> [text
     val paren_idx = sig.index_of("(") ?? -1
     if paren_idx < 0:
         val mangled = class_name + "__" + sig
-        return [sig, "long long {mangled}(void)", "long long {mangled}(void);"]
+        var mfallback: [text] = []
+        mfallback.push(sig)
+        mfallback.push(r"long long " + mangled + r"(void)")
+        mfallback.push(r"long long " + mangled + r"(void);")
+        return mfallback
 
     val method_name = sig.substring(0, paren_idx).trim()
     val mangled = class_name + "__" + method_name
@@ -331,17 +405,21 @@ fn parse_method_signature(trimmed: text, class_name: text, is_me: bool) -> [text
         params_str = sig.substring(paren_idx + 1, close_paren_idx).trim()
 
     # Build self parameter + user params
-    var self_param = "const {class_name}* self"
+    var self_param = r"const " + class_name + r"* self"
     if is_me:
-        self_param = "{class_name}* self"
+        self_param = class_name + r"* self"
 
     var c_params = self_param
     if params_str.len() > 0:
         val user_params = translate_params(params_str)
         c_params = self_param + ", " + user_params
 
-    val c_sig = "{ret_type} {mangled}({c_params})"
-    [method_name, c_sig, "{c_sig};"]
+    val c_sig = ret_type + r" " + mangled + r"(" + c_params + r")"
+    var mresult: [text] = []
+    mresult.push(method_name)
+    mresult.push(c_sig)
+    mresult.push(c_sig + r";")
+    mresult
 
 # Parse generic type annotation like Dict<text, i64> -> ["Dict", "text", "i64"]
 # or Option<T> -> ["Option", "T"]
@@ -349,14 +427,19 @@ fn parse_method_signature(trimmed: text, class_name: text, is_me: bool) -> [text
 fn parse_generic_type(type_str: text) -> [text]:
     val lt_pos = type_str.index_of("<") ?? -1
     if lt_pos < 0:
-        return [type_str]
+        var gt_single: [text] = []
+        gt_single.push(type_str)
+        return gt_single
     val base = type_str.substring(0, lt_pos).trim()
     val gt_pos = type_str.index_of(">") ?? -1
     if gt_pos < 0:
-        return [base]
+        var gt_base: [text] = []
+        gt_base.push(base)
+        return gt_base
     val inner = type_str.substring(lt_pos + 1, gt_pos).trim()
     val parts = inner.split(",")
-    var result: [text] = [base]
+    var result: [text] = []
+    result.push(base)
     for part in parts:
         result.push(part.trim())
     result
@@ -413,7 +496,7 @@ fn is_fn_returning_str_arr(name: text, types: text) -> bool:
 
 
 export get_indent_level, get_c_indent, simple_type_to_c, translate_params
-export parse_fn_signature, find_close_paren
+export parse_fn_signature, find_close_paren, find_top_level_plus, find_outside_strings
 export is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array
 export is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn
 export is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant

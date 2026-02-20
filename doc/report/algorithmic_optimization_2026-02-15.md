@@ -22,7 +22,7 @@ Deployed 5 specialized analysis agents across codebase areas:
 | Agent | Area | Files Scanned | Issues Found |
 |-------|------|---------------|--------------|
 | A1 | `src/compiler_core/` | 40 files | 12 issues |
-| A2 | `src/std/` | 100+ files | 13 issues |
+| A2 | `src/lib/` | 100+ files | 13 issues |
 | A3 | `src/lib/` | 30+ files | 10 issues |
 | A4 | `src/compiler/` | 400+ files | 12 issues |
 | A5 | `src/app/` | 586 files | 10 issues |
@@ -55,7 +55,7 @@ Deployed 7 fix agents targeting specific complexity classes:
 
 ### 1. Exponential → Polynomial: `wildcard_match` O(2^n) → O(n·m)
 
-**File:** `src/std/search_utils.spl`
+**File:** `src/lib/search_utils.spl`
 **Problem:** Recursive wildcard matching with `*` branched exponentially without memoization.
 
 **Before:**
@@ -191,7 +191,7 @@ fn generic_cache_lookup(decl_id: i64, type_tags: [i64]) -> i64:
 
 ### 5. Pascal's Triangle: O(n³) → O(n²)
 
-**File:** `src/std/combinatorics_utils.spl`
+**File:** `src/lib/combinatorics_utils.spl`
 **Problem:** Calling `binomial_coefficient(n, k)` (O(k)) inside O(n²) nested loops.
 
 **Before:**

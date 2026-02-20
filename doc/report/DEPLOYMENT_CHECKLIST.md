@@ -108,7 +108,7 @@
 
 - [ ] **Evening:** Verify compilation checks work
   ```bash
-  bin/simple check src/std/log.spl
+  bin/simple check src/lib/log.spl
   bin/simple check src/app/package/semver.spl
   bin/simple check src/app/mcp/prompts.spl
   # Should compile without errors

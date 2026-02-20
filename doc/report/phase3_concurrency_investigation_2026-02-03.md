@@ -24,7 +24,7 @@ Fixed **atomic.spl parse error** (keyword conflict) but discovered all Phase 3 t
 ## ✅ Fixed: Atomic Parse Error
 
 ### Issue
-**Error:** `Failed to parse module path="./src/std/atomic.spl" error=Unexpected token: expected identifier, found Val`
+**Error:** `Failed to parse module path="./src/lib/atomic.spl" error=Unexpected token: expected identifier, found Val`
 **Location:** Multiple extern function declarations
 **Root Cause:** `val` is a keyword in Simple, cannot be used as parameter name
 
@@ -134,7 +134,7 @@ timeout 10 ./bin/simple test test/lib/std/unit/concurrent_spec.spl
 ### Source Code
 | File | Lines Changed | Changes |
 |------|---------------|---------|
-| `src/std/atomic.spl` | ~60 | Renamed 11 `val:` → `value:`, commented 23 externs |
+| `src/lib/atomic.spl` | ~60 | Renamed 11 `val:` → `value:`, commented 23 externs |
 
 ### Documentation
 | File | Purpose |

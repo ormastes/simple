@@ -41,7 +41,7 @@ Run: `bin/simple test test/investigation/string_ffi_test.spl`
 grep -r "ffi\.file_" src test | grep -v TODO | head -20
 
 # Check for string conversion utilities
-grep -r "string.*ptr\|str.*data" src/std src/app | grep "fn "
+grep -r "string.*ptr\|str.*data" src/lib src/app | grep "fn "
 ```
 
 ### 3. Check ffi_minimal Wrappers

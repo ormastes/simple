@@ -255,8 +255,8 @@ src/app/parser/
 - `src/compiler/hir_lowering.spl` (1,205 lines) → 4 modules
 
 **Phase 3: Libraries & Tools**
-- `src/std/net.spl` (1,106 lines) → 4 modules
-- `src/std/src/testing/mocking_core.spl` (826 lines) → 3 modules
+- `src/lib/net.spl` (1,106 lines) → 4 modules
+- `src/lib/src/testing/mocking_core.spl` (826 lines) → 3 modules
 - `src/app/fix/rules.spl` (853 lines) → 3 modules
 
 ### Lessons Learned

@@ -42,5 +42,5 @@ theorem actor_message_safe (msg : iso T) (actor : Actor) :
 ## Related
 
 - `doc/design/memory.md` - Memory model design
-- `src/std/type/lean_types.spl` - Lean type generation
+- `src/lib/type/lean_types.spl` - Lean type generation
 - `test/lib/std/unit/verification/memory_capabilities_spec.spl` - Test specs

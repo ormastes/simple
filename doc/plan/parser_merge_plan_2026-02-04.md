@@ -567,8 +567,8 @@ ls doc/architecture/file_tree.md
 ## Specialized Parsers (Other Languages/Formats)
 
 ### SDN Format
-- src/std/sdn/parser.spl (683 lines) - SDN parser
-- src/std/sdn/lexer.spl (411 lines) - SDN lexer
+- src/lib/sdn/parser.spl (683 lines) - SDN parser
+- src/lib/sdn/lexer.spl (411 lines) - SDN lexer
 
 ### IR DSL
 - src/compiler/irdsl/parser.spl (147 lines) - IR DSL parser

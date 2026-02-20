@@ -7,7 +7,7 @@
 
 ## Overview
 
-This report documents the investigation and fix for the broken SIMPLE_LIB import system. The original issue prevented modules from importing functions from `src/std/` and `src/app/` via the `SIMPLE_LIB` environment variable, forcing developers to use local symlinks as a workaround.
+This report documents the investigation and fix for the broken SIMPLE_LIB import system. The original issue prevented modules from importing functions from `src/lib/` and `src/app/` via the `SIMPLE_LIB` environment variable, forcing developers to use local symlinks as a workaround.
 
 ### Problem Statement
 
@@ -26,7 +26,7 @@ The module loader resolved the module file path correctly via `SIMPLE_LIB`, but 
 
 - ✅ **Local imports work:** `use module.{func}` (same directory or symlink)
 - ❌ **SIMPLE_LIB imports broken:** `use std.module.{func}` (via env var)
-- **Workaround:** Create symlinks in `test/lib/std/` pointing to `src/std/`
+- **Workaround:** Create symlinks in `test/lib/std/` pointing to `src/lib/`
 - **Affected files:** 330+ test files required symlinks
 
 ## Architecture
@@ -43,7 +43,7 @@ The module loader resolved the module file path correctly via `SIMPLE_LIB`, but 
 │ 2. Path Resolution:                                 │
 │    - Try local: ./std/text.spl                    │
 │    - Try SIMPLE_LIB: $SIMPLE_LIB/std/text.spl     │
-│    Result: /path/to/src/std/text.spl              │
+│    Result: /path/to/src/lib/text.spl              │
 └──────────────────────┬──────────────────────────────┘
                        │
                        v
@@ -251,7 +251,7 @@ fn cached_exports(abs_path: text) -> [text]
 # Resolve module path (local → SIMPLE_LIB)
 fn resolve_module_path(import_path: text) -> text
 
-# Example: "std.text" → "/path/to/src/std/text.spl"
+# Example: "std.text" → "/path/to/src/lib/text.spl"
 val abs = resolve_module_path("std/string")
 ```
 
@@ -386,8 +386,8 @@ use std.text.{upper}
 ```bash
 # Create symlinks in test directory
 cd test/unit/std
-ln -s ../../../src/std/text.spl text.spl
-ln -s ../../../src/std/array.spl array.spl
+ln -s ../../../src/lib/text.spl text.spl
+ln -s ../../../src/lib/array.spl array.spl
 ```
 
 ```simple

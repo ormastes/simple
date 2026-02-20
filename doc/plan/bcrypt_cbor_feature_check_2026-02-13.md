@@ -26,11 +26,11 @@
 
 ### Implementation Status: ✅ COMPLETE
 
-**Location:** `src/std/bcrypt/`
+**Location:** `src/lib/bcrypt/`
 
 **Files:**
 ```
-src/std/bcrypt/
+src/lib/bcrypt/
 ├── core.spl            (1,335 lines) - Complete implementation
 ├── types.spl           (45 lines)    - Constants and types
 ├── hash.spl            (stub)        - Delegates to core
@@ -143,11 +143,11 @@ src/std/bcrypt/
 
 ### Implementation Status: ✅ COMPLETE
 
-**Location:** `src/std/cbor/`
+**Location:** `src/lib/cbor/`
 
 **Files:**
 ```
-src/std/cbor/
+src/lib/cbor/
 ├── core.spl         (1,321 lines) - Complete implementation
 ├── types.spl        (28 lines)    - Type functions (delegate to core)
 ├── encode.spl       (stub)        - Delegates to core

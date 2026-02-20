@@ -52,7 +52,7 @@
 
 ### 1.2 Existing Tensor API (PyTorch FFI)
 
-**Location:** `src/std/src/tensor.spl`
+**Location:** `src/lib/src/tensor.spl`
 
 ```simple
 struct Tensor<T, const N: i64>:
@@ -73,7 +73,7 @@ struct Tensor<T, const N: i64>:
 
 ### 1.3 DL Configuration System
 
-**Location:** `src/std/src/dl/config.spl`
+**Location:** `src/lib/src/dl/config.spl`
 
 ```simple
 enum Backend:
@@ -821,8 +821,8 @@ else:
 - `doc/report/pure_dl_complete_2026-02-05.md` - Implementation status
 - Plan file: `~/.claude/plans/synchronous-floating-scott.md` - Original plan
 - `/sffi` skill - SFFI patterns and conventions
-- `src/std/src/tensor.spl` - Existing PyTorch FFI tensor
-- `src/std/src/dl/config.spl` - DL configuration system
+- `src/lib/src/tensor.spl` - Existing PyTorch FFI tensor
+- `src/lib/src/dl/config.spl` - DL configuration system
 
 **SFFI Resources:**
 - `src/app/ffi_gen/` - SFFI generator implementation

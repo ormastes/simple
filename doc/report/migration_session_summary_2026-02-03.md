@@ -76,7 +76,7 @@ Completed three major phases of the Rust to Simple migration plan in a single pr
 ### Phase 3: Path Utilities Migration (30 minutes)
 **Goal:** Eliminate path-related FFI with pure Simple implementation
 
-**New Module Created:** `src/std/path.spl` (217 lines, 10 functions)
+**New Module Created:** `src/lib/path.spl` (217 lines, 10 functions)
 - `basename()` - Extract filename from path
 - `dirname()` - Extract directory name
 - `extension()` - Get file extension
@@ -134,7 +134,7 @@ Completed three major phases of the Rust to Simple migration plan in a single pr
 8. `migration_session_summary_2026-02-03.md` - This document (800 lines)
 
 ### Code (3 files, ~600 lines)
-1. `src/std/path.spl` - Path utilities module (217 lines, 10 functions)
+1. `src/lib/path.spl` - Path utilities module (217 lines, 10 functions)
 2. `test/std/path_spec.spl` - Test suite (350 lines, 85+ tests)
 3. `Makefile` - Deprecation warnings added (7 targets updated)
 
@@ -419,7 +419,7 @@ When migrating FFI to Simple, implement complete functionality:
 - `doc/report/migration_session_summary_2026-02-03.md` (this)
 
 ### Code Created This Session
-- `src/std/path.spl`
+- `src/lib/path.spl`
 - `test/std/path_spec.spl`
 - `Makefile` (updated with deprecation warnings)
 

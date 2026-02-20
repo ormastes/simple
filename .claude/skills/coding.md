@@ -374,4 +374,4 @@ bin/simple fix file.spl --fix-interactive
 - `doc/spec/functions.md` - Functions, pattern matching
 - `doc/research/api_design_index.md` - API guidelines
 - **`src/app/fix/rules.spl`** - Shared EasyFix rule definitions (Simple)
-- **`src/std/test/features/easy_fix_rules_spec.spl`** - EasyFix rules SSpec tests
+- **`src/lib/test/features/easy_fix_rules_spec.spl`** - EasyFix rules SSpec tests

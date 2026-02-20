@@ -15,7 +15,7 @@
 ## 1. GC Tests (102 skipped) - ✅ FIXABLE
 
 ### Current Status
-- **Implementation:** ✅ Complete at `src/std/gc.spl` (350+ lines, pure Simple)
+- **Implementation:** ✅ Complete at `src/lib/gc.spl` (350+ lines, pure Simple)
 - **Test File:** `test/lib/std/unit/gc_spec.spl`
 - **Skip Reason:** Runtime limitations, not missing functionality
 
@@ -88,7 +88,7 @@ fn gc_collect() -> i64:
 ## 2. Failsafe Tests (51 skipped) - ✅ FIXABLE
 
 ### Current Status
-- **Implementation:** ✅ Complete at `src/std/failsafe/` (8 modules, 3,000+ lines)
+- **Implementation:** ✅ Complete at `src/lib/failsafe/` (8 modules, 3,000+ lines)
   - `core.spl`: Error types, metrics, logging
   - `panic.spl`: Panic recovery, safe operations
   - `ratelimit.spl`: Token bucket, rate limiting
@@ -175,7 +175,7 @@ use std.failsafe.core.{FailSafeError, ErrorCategory}
 
 **Option A: Pure Simple Rewrite (Recommended)**
 ```simple
-# src/std/debug.spl - Pure Simple version
+# src/lib/debug.spl - Pure Simple version
 enum DebugLevel:
     Off, Error, Warn, Info, Debug, Trace
 

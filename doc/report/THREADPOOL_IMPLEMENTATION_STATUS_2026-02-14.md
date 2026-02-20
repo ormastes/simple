@@ -19,7 +19,7 @@ ThreadPool worker infrastructure is now complete. All necessary code is in place
 ## What Was Implemented
 
 ### 1. Worker Thread Fields ✅
-**File:** `src/std/thread_pool.spl`
+**File:** `src/lib/thread_pool.spl`
 
 Added to ThreadPool struct:
 ```simple
@@ -32,7 +32,7 @@ class ThreadPool:
 ```
 
 ### 2. Global Pool Registry ✅
-**File:** `src/std/thread_pool.spl`
+**File:** `src/lib/thread_pool.spl`
 
 Module-level registry for workers to access their pools:
 ```simple
@@ -44,7 +44,7 @@ fn get_pool(pool_id: i64) -> ThreadPool
 ```
 
 ### 3. Worker Loop Implementation ✅
-**File:** `src/std/thread_pool.spl`
+**File:** `src/lib/thread_pool.spl`
 
 Complete worker entry point:
 ```simple
@@ -64,7 +64,7 @@ fn worker_loop_entry(pool_id: i64):
 - Task completion tracking
 
 ### 4. Graceful Shutdown ✅
-**File:** `src/std/thread_pool.spl`
+**File:** `src/lib/thread_pool.spl`
 
 Updated shutdown methods:
 ```simple
@@ -94,7 +94,7 @@ me destroy():
 - Cleans up resources
 
 ### 5. Thread Spawning Logic (INCOMPLETE) ⚠️
-**File:** `src/std/thread_pool.spl`
+**File:** `src/lib/thread_pool.spl`
 
 ```simple
 static fn new(num_workers: usize) -> ThreadPool:
@@ -245,7 +245,7 @@ bin/simple build --release  # Requires 8GB+ RAM
 
 ## Files Modified
 
-1. `src/std/thread_pool.spl` - Added fields, registry, worker loop, shutdown
+1. `src/lib/thread_pool.spl` - Added fields, registry, worker loop, shutdown
 2. `test_thread_extern.spl` - Test file (can be deleted)
 
 **Lines Added:** ~80 lines of implementation

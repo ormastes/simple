@@ -85,13 +85,13 @@ $ strings bin/simple | grep -E "^(describe|it|expect)$"
 
 ### Why `skip_it` Fails with SIMPLE_LIB Import
 
-`skip_it` is NOT a built-in - it's exported from `src/std/spec.spl`:
+`skip_it` is NOT a built-in - it's exported from `src/lib/spec.spl`:
 ```simple
 # This FAILS
 use std.spec.{skip_it}  # ERROR: function `skip_it` not found
 
 # This WORKS
-# (with symlink: ln -s src/std/spec.spl spec.spl)
+# (with symlink: ln -s src/lib/spec.spl spec.spl)
 use spec.{skip_it}  # Success!
 ```
 
@@ -146,7 +146,7 @@ increment()
 ### spec.spl Comments to Update
 
 **Files with misleading comments:**
-- `src/std/spec.spl` lines 41, 108, 131, 135, 156
+- `src/lib/spec.spl` lines 41, 108, 131, 135, 156
 
 **Current:** "Can't access module vars from imported functions"
 **Should be:** "Works with local imports, fails with std.spec.{} due to SIMPLE_LIB path bug"
@@ -155,9 +155,9 @@ increment()
 
 ## Workaround (Already Implemented)
 
-The `test/lib/std/` directory contains symlinks to `src/std/` modules:
+The `test/lib/std/` directory contains symlinks to `src/lib/` modules:
 ```bash
-test/lib/std/spec.spl -> ../../../src/std/spec.spl
+test/lib/std/spec.spl -> ../../../src/lib/spec.spl
 ```
 
 This allows tests to import via local path:
@@ -196,7 +196,7 @@ use std.spec.{skip_it}  # Uses symlink, works!
 3. ✅ Document findings (completed)
 
 ### Short Term
-1. Update `src/std/spec.spl` comments (lines 41, 108, 131, 135, 156)
+1. Update `src/lib/spec.spl` comments (lines 41, 108, 131, 135, 156)
 2. Document runtime built-in functions in user guide
 3. Add note to import guide about SIMPLE_LIB vs local paths
 

@@ -22,5 +22,5 @@ Demonstrations of stdlib features and utilities.
 
 ## See Also
 
-- Stdlib source: `src/std/`
-- Platform library: `src/std/platform/`
+- Stdlib source: `src/lib/`
+- Platform library: `src/lib/platform/`

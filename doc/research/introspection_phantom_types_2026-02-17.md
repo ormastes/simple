@@ -26,11 +26,11 @@ comprehensive framework for **modern type-level safety and observability**. The 
 | Generic monomorphization (runtime) | ✅ Complete | `src/compiler_core/generic_runtime.spl` |
 | Closure capture warnings | ✅ Complete | `src/compiler_core/closure_analysis.spl` |
 | Ignored return value warnings | ✅ Complete | `src/compiler_core/interpreter/eval.spl` |
-| Effect system (async/sync inference) | ✅ Complete | `src/std/type/effects.spl` |
-| ConstKeySet dict validation | ✅ Complete | `src/std/type/types.spl` |
-| Debug support (StackFrame, DebugLevel) | ✅ Design | `src/std/debug.spl` |
-| Panic report with StackTrace | ✅ Design | `src/std/report/runtime/panic.spl` |
-| Error trait with backtrace() | ✅ Design | `src/std/error.spl` |
+| Effect system (async/sync inference) | ✅ Complete | `src/lib/type/effects.spl` |
+| ConstKeySet dict validation | ✅ Complete | `src/lib/type/types.spl` |
+| Debug support (StackFrame, DebugLevel) | ✅ Design | `src/lib/debug.spl` |
+| Panic report with StackTrace | ✅ Design | `src/lib/report/runtime/panic.spl` |
+| Error trait with backtrace() | ✅ Design | `src/lib/error.spl` |
 | Structural type checking (duck typing) | ✅ Runtime | `src/compiler_core/interpreter/eval.spl` |
 | **Phantom types** | ❌ Missing | — |
 | **Compile-time @comptime reflection** | ❌ Missing | — |
@@ -47,7 +47,7 @@ comprehensive framework for **modern type-level safety and observability**. The 
 
 Simple already has several compile-time and near-compile-time checks:
 
-#### 1.1a ConstKeySet — Dict Key Validation (`src/std/type/types.spl`)
+#### 1.1a ConstKeySet — Dict Key Validation (`src/lib/type/types.spl`)
 
 The `Type` enum includes `ConstKeySet(keys: [text])` and `DependentKeys(source: text)`, plus
 `ConstKeyValidation` and `validate_dict_keys_against_const_set()`. This enforces that dict
@@ -77,7 +77,7 @@ Produces `WARN:` messages, 22 tests passing.
 
 Detects and warns when a non-void function's return value is silently discarded.
 
-#### 1.1d Effect System (`src/std/type/effects.spl`)
+#### 1.1d Effect System (`src/lib/type/effects.spl`)
 
 Tracks `@pure`, `@io`, `@net`, `@fs`, `@unsafe`, `@async` effect annotations. Validates
 that declared effects match inferred effects. Uses Tarjan SCC for mutual recursion.
@@ -687,7 +687,7 @@ fn close(c: Connection<Connected>) -> Connection<Disconnected>: ...
 
 #### Const State Dictionaries (Extend ConstKeySet)
 
-The existing `ConstKeySet` in `src/std/type/types.spl` can be extended to support
+The existing `ConstKeySet` in `src/lib/type/types.spl` can be extended to support
 **phantom state keys** — a compile-time checked set of valid states:
 
 ```simple
@@ -924,7 +924,7 @@ fn_addr  file_id  start_line  end_line
 
 #### Mode C: Full Runtime Stack (Debug Only, ~5-10%)
 
-Already designed in `src/std/debug.spl` (StackFrame, Debugger.call_stack).
+Already designed in `src/lib/debug.spl` (StackFrame, Debugger.call_stack).
 The missing piece is the **automatic push/pop instrumentation**:
 
 ```simple
@@ -1409,7 +1409,7 @@ The `@state_description` annotation provides the "help" text:
 
 ## Appendix: Connection to Existing Code
 
-### A1. Extending ConstKeySet (existing `src/std/type/types.spl`)
+### A1. Extending ConstKeySet (existing `src/lib/type/types.spl`)
 
 The current `ConstKeySet(keys: [text])` type can be extended to support phantom state
 validation:
@@ -1426,7 +1426,7 @@ fn validate_phantom_state(type_param: text, valid_states: [text]) -> ConstKeyVal
     ...
 ```
 
-### A2. Stack Trace Infrastructure (existing `src/std/debug.spl`, `src/std/report/runtime/panic.spl`)
+### A2. Stack Trace Infrastructure (existing `src/lib/debug.spl`, `src/lib/report/runtime/panic.spl`)
 
 Both files have the data structures but lack the capture implementation:
 - `debug.spl`: `StackFrame` struct (fn_name, file, line, locals)
@@ -1451,7 +1451,7 @@ extern fn rt_capture_stack_trace_frames(max_depth: i64) -> [[text]]
 # Returns array of [fn_name, file, line_str] tuples via DWARF lookup
 ```
 
-### A3. Effect System (existing `src/std/type/effects.spl`)
+### A3. Effect System (existing `src/lib/type/effects.spl`)
 
 The effect system already enforces `@io`, `@pure`, etc. Phantom types integrate naturally:
 functions that transition socket state should be `@io`. The effect checker can validate
@@ -1469,7 +1469,7 @@ The path forward for Simple's type safety and observability:
 3. Implement **Mode D (Zig-style error return traces)** for `?` desugaring — highest value, lowest cost
    - `rt_error_trace_push/get/clear/init` SFFI functions in the runtime
    - `--error-tracing` flag; implied by `--debug`
-   - Reuse `StackTrace`/`StackFrame` from `src/std/report/runtime/panic.spl`
+   - Reuse `StackTrace`/`StackFrame` from `src/lib/report/runtime/panic.spl`
 4. Add `@static_assert` for compile-time condition checking
 
 ### Short-Term (Next Quarter)

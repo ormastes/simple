@@ -46,7 +46,7 @@ me try_pop() -> usize:
 ```
 
 **Files Modified:**
-- `src/std/async_host/thread_safe_queue.spl` - 2 functions fixed
+- `src/lib/async_host/thread_safe_queue.spl` - 2 functions fixed
 
 **Impact:** ThreadSafeQueue now runtime-compatible ✅
 
@@ -80,9 +80,9 @@ target_link_libraries(spl_runtime PUBLIC pthread)
 
 **Solution:** Created symlinks
 ```bash
-test/lib/std/thread_sffi.spl -> ../../../src/std/thread_sffi.spl
-test/lib/std/thread_pool.spl -> ../../../src/std/thread_pool.spl
-test/lib/std/async_host/thread_safe_queue.spl -> ../../../../src/std/async_host/thread_safe_queue.spl
+test/lib/std/thread_sffi.spl -> ../../../src/lib/thread_sffi.spl
+test/lib/std/thread_pool.spl -> ../../../src/lib/thread_pool.spl
+test/lib/std/async_host/thread_safe_queue.spl -> ../../../../src/lib/async_host/thread_safe_queue.spl
 ```
 
 **Impact:** Imports now resolve correctly ✅
@@ -154,7 +154,7 @@ static fn new(num_workers: usize) -> ThreadPool:
 ```
 
 **Files to Modify:**
-- `src/std/thread_pool.spl` (~150 lines added)
+- `src/lib/thread_pool.spl` (~150 lines added)
 - `test/unit/std/thread_pool_spec.spl` (~30 lines for execution verification)
 
 **Estimated Time:** 4-6 hours
@@ -328,7 +328,7 @@ error: semantic: unknown extern function: spl_thread_cpu_count
 - `test_thread_minimal.spl` (verification script)
 
 ### Modified (2 files)
-- `src/std/async_host/thread_safe_queue.spl` (generic syntax removed)
+- `src/lib/async_host/thread_safe_queue.spl` (generic syntax removed)
 - `seed/CMakeLists.txt` (runtime_thread.c added)
 
 ### Symlinks Created (3 paths)

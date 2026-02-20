@@ -9,13 +9,13 @@
  * The full conversion is done server-side by the LSP.
  *
  * Simple-side equivalents:
- *   simpleToLatex()   -> src/std/math_repr.spl render_latex_raw()
- *   simpleToUnicode() -> src/std/math_repr.spl to_pretty()
+ *   simpleToLatex()   -> src/lib/math_repr.spl render_latex_raw()
+ *   simpleToUnicode() -> src/lib/math_repr.spl to_pretty()
  *
  * Supporting modules in the Simple codebase:
- *   src/std/repr.spl         - Pretty/LaTeX builders (fraction, power, sqrt, sum, integral)
- *   src/std/unicode_math.spl - Unicode character tables (greek, superscript, subscript, math_sym)
- *   src/std/mathjax.spl      - MathJax SFFI wrapper (SVG/HTML rendering via Node.js bridge)
+ *   src/lib/repr.spl         - Pretty/LaTeX builders (fraction, power, sqrt, sum, integral)
+ *   src/lib/unicode_math.spl - Unicode character tables (greek, superscript, subscript, math_sym)
+ *   src/lib/mathjax.spl      - MathJax SFFI wrapper (SVG/HTML rendering via Node.js bridge)
  *   src/app/lsp/handlers/hover.spl - LSP hover handler using render_latex_raw() + to_pretty()
  */
 

@@ -283,7 +283,7 @@ The Simple runtime will:
 
 ### GPU Configuration Integration
 
-The DL config system (`src/std/src/dl/config.spl`) can use:
+The DL config system (`src/lib/src/dl/config.spl`) can use:
 
 ```simple
 use lib.torch.{torch_cuda_available, torch_zeros}

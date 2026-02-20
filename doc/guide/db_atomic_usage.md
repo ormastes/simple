@@ -370,6 +370,6 @@ fn test_atomic_operations():
 
 ## See Also
 
-- **Implementation**: `src/std/db_atomic.spl`
+- **Implementation**: `src/lib/db_atomic.spl`
 - **Tests**: `test/std/db_atomic_spec.spl` (TODO)
 - **Examples**: `example/db_atomic_example.spl` (TODO)

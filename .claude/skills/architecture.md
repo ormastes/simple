@@ -2,13 +2,13 @@
 
 ## Compilation Pipeline
 
-Two frontends exist. Both share `compiler_core/lexer.spl` for tokenization.
+Unified compiler with numbered layers in `src/compiler/`. The layer prefix (NN.name/) is stripped for imports.
 
 ### Default Runtime (Core Interpreter)
 
-Used by `bin/simple file.spl`, `bin/simple test`. The Rust runtime (`bin/release/simple`) invokes this via FFI.
+Used by `bin/simple file.spl`, `bin/simple test`. The pre-built runtime (`bin/release/simple`) invokes this via FFI.
 
-Frontend: `compiler_core/frontend.spl` (no treesitter, no block resolution)
+Frontend: `compiler/10.frontend/core/` (no treesitter, no block resolution)
 
 ```
 Source (.spl)
@@ -22,19 +22,19 @@ Source (.spl)
     │
     ▼
 ┌──────────────────┐
-│ Lexer            │  compiler_core/lexer.spl
+│ Lexer            │  compiler/10.frontend/core/lexer.spl
 │                  │  → Token stream (INDENT/DEDENT, keywords, operators)
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ Parser           │  compiler_core/parser.spl — recursive descent + Pratt
+│ Parser           │  compiler/10.frontend/core/ — recursive descent + Pratt
 │                  │  → AST (arena: exprs, stmts, decls)
 └──────────────────┘
     │
     ▼
 ┌──────────────────────────────────────────────┐
-│ Core Interpreter  compiler_core/interpreter/ │
+│ Core Interpreter  compiler/95.interp/        │
 │                                              │
 │  resolve_module_locals() → eval_module()     │
 │       │                                      │
@@ -54,7 +54,7 @@ Source (.spl)
 
 Used by `bin/simple build`, `CompilerDriver.compile()`.
 
-Frontend: `compiler/frontend.spl` (with treesitter outline + block resolution)
+Frontend: `compiler/10.frontend/` (with treesitter outline + block resolution)
 
 ```
 Source (.spl)
@@ -73,13 +73,13 @@ Source (.spl)
     │
     ▼
 ┌──────────────────┐
-│ Lexer            │  compiler_core/lexer.spl
+│ Lexer            │  compiler/10.frontend/core/lexer.spl
 │                  │  → Token stream
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ TreeSitter       │  compiler_shared/treesitter.spl — Pure Simple outline parser
+│ TreeSitter       │  compiler/10.frontend/treesitter/ — Pure Simple outline parser
 │ (outline)        │  Walks tokens, extracts module structure, skips bodies,
 │                  │  captures DSL block payloads (m{}, sh{}, sql{})
 │                  │  → OutlineModule
@@ -87,56 +87,56 @@ Source (.spl)
     │
     ▼
 ┌──────────────────┐
-│ Block Resolver   │  compiler/blocks/ — resolves captured DSL blocks
+│ Block Resolver   │  compiler/15.blocks/ — resolves captured DSL blocks
 │                  │  Calls each block's parse_full() handler
-│                  │  3-tier: sub-lex → treesitter outline → full parse
+│                  │  3-phase: sub-lex → treesitter outline → full parse
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ Parser           │  compiler_core/parser.spl — full AST parse
+│ Parser           │  compiler/10.frontend/core/ — full AST parse
 │                  │  with pre-resolved blocks
 │                  │  → AST (arena: exprs, stmts, decls)
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ AST Desugar      │  compiler/desugar/ — async/generator/spawn transforms
+│ AST Desugar      │  compiler/ — async/generator/spawn transforms
 │ (async, gen)     │
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ Type Checking    │  compiler_shared/type_system/ — inference + checking
-│ + Inference      │  compiler/inference/ — unify, constraints, deferred
+│ Type Checking    │  compiler/30.types/ — inference + checking
+│ + Inference      │
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ Monomorphization │  compiler/monomorphize/ — generic specialization
+│ Monomorphization │  compiler/40.mono/ — generic specialization
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ HIR Lowering     │  compiler/hir_lowering/ — name resolution + type annotation
+│ HIR Lowering     │  compiler/20.hir/ — name resolution + type annotation
 │                  │  → HIR (structured control flow)
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ AOP Weaving      │  compiler_core/aop.spl — HIR join-point detection
-│ [STUBBED]        │  ⚠ Currently no-op — see TODO below
+│ AOP Weaving      │  compiler/90.tools/ — HIR join-point detection
+│ [STUBBED]        │  Currently no-op — see TODO below
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ MIR Lowering     │  compiler/mir/ — HIR → flat basic blocks
+│ MIR Lowering     │  compiler/50.mir/ — HIR → flat basic blocks
 │                  │  → MIR (50+ instructions, effect tags)
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ MIR Optimization │  compiler/mir_opt/ — copy propagation, etc.
+│ MIR Optimization │  compiler/60.mir_opt/ — copy propagation, etc.
 └──────────────────┘
     │
     ▼
@@ -146,60 +146,39 @@ Source (.spl)
 │  Debug ──→ Cranelift  (fast compile)               │
 │  Release → LLVM       (optimized)                  │
 │                                                     │
-│  Also: Native (x86/ARM/RISC-V), WASM, CUDA,       │
+│  Also: C, Native (x86/ARM/RISC-V), WASM, CUDA,   │
 │        Vulkan/SPIR-V, VHDL, Lean                   │
 └───────────────────────────────────────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ Linker           │  compiler/linker/ — SMF binary format
+│ Linker           │  compiler/70.backend/linker/ — SMF binary format
 │                  │  Backends: mold (Linux), MSVC (Windows)
 └──────────────────┘
     │
     ▼
 ┌──────────────────┐
-│ Loader           │  compiler/loader/ — mmap-based SMF loading
+│ Loader           │  compiler/99.loader/ — mmap-based SMF loading
 └──────────────────┘
     │
     ▼
   Execution
 ```
 
-### Two Frontends Compared
-
-| | Core Frontend | Full Frontend |
-|---|---|---|
-| **File** | `compiler_core/frontend.spl` | `compiler/frontend.spl` |
-| **Used by** | Core interpreter (default runtime) | `bin/simple build`, CompilerDriver |
-| **Preprocessor** | No | Yes (`@when`/`@cfg`) |
-| **TreeSitter** | No | Yes (outline + block capture) |
-| **Block resolution** | No | Yes (DSL blocks: m{}, sh{}, sql{}) |
-| **Seed-compilable** | Yes | No |
-
-### Deprecated: Interpreter-as-Backend
-
-`compiler/backend/interpreter.spl` wraps a HIR-level tree-walker as a `BackendPort`. File header marks it **DEPRECATED** — use `compiler_core.interpreter` instead. Only used in compiler driver tests.
-
 ### TODO: Wire AOP weaving at HIR level
 
-**Current state:** AOP is stubbed — `AopWeaver.weave()` is a no-op, call in `pipeline_fn.spl` is commented out. `detect_join_points()` operates on `MirBlockInfo`.
+**Current state:** AOP is stubbed — `AopWeaver.weave()` is a no-op. `detect_join_points()` operates on `MirBlockInfo`.
 
 **Planned change:** Move AOP weaving to HIR level (after HIR lowering, before MIR lowering).
-
-**Why:** HIR is the last common representation before backends diverge. Weaving at HIR means:
-- All compiled backends get AOP automatically
-- Core interpreter's JIT hot-path (AST→HIR→MIR→native) would get AOP if wired through the full frontend
-- Structured control flow makes join-point matching more natural than flat MIR blocks
 
 **Work needed:**
 - Rewrite `detect_join_points()` to work on HIR nodes instead of `MirBlockInfo`
 - Wire `AopWeaver.weave()` into full pipeline after HIR lowering
-- Update `pipeline_fn.spl` order to: `monomorphize → HIR → AOP weave → MIR → optimize → codegen`
-- Remove MIR-level weaving stubs
+- Update pipeline order to: `monomorphize → HIR → AOP weave → MIR → optimize → codegen`
 
 ## Full Pipeline — MDSOC Feature Stages
 
-Each stage is a `feature/` module with typed port contracts. Stage boundaries enforced by `transform/feature/` entity-view adapters.
+Each stage is a `feature/` module with typed port contracts. Stage boundaries enforced by entity-view adapters.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -280,11 +259,7 @@ Each stage is a `feature/` module with typed port contracts. Stage boundaries en
 ```
 cli (CLI entry) ──────────────────────────────┐
     │                                         │
-    ├── compiler (HIR, MIR, Codegen) ─────────┤
-    │       │                                 │
-    │       ├── compiler_shared ──────────────┤  (shared between core + full)
-    │       │       │                         │
-    │       │       └── compiler_core ────────┤  (Lexer, Parser, AST, AOP)
+    ├── compiler (numbered layers) ────────────┤
     │       │                                 │
     │       └── std (Standard library) ───────┤
     │                                         │
@@ -315,47 +290,35 @@ src/
 │   └── test_runner_new/ # Test runner + SDoctest
 ├── lib/              # Libraries
 │   └── database/     # Database library (SDN tables, atomic ops)
-├── std/              # Standard library
+├── std/              # Standard library (symlink to lib/)
 │   ├── spec.spl      # SSpec BDD framework
 │   ├── text.spl, array.spl, math.spl, path.spl
 │   └── platform/     # Cross-platform support
-├── compiler_core/    # Core (seed-compilable, no generics, no deps)
-│   ├── lexer.spl     # Stateful tokenizer (module globals)
-│   ├── parser.spl    # Recursive descent + Pratt
-│   ├── frontend.spl  # Shared parse entry points
-│   ├── ast.spl       # AST arena (parallel arrays)
-│   ├── tokens.spl    # Token kinds + keyword lookup
-│   ├── types.spl     # Type representations
-│   ├── aop.spl       # AOP weaving engine
-│   ├── hir_types.spl, mir_types.spl, backend_types.spl
-│   ├── interpreter/  # Tree-walking eval + adaptive JIT
-│   ├── compiler/     # C++ codegen (bootstrap)
-│   └── entity/       # Typed entities: ast/, hir/, mir/, token/, span/
-├── compiler_shared/  # Shared between core + full compiler
-│   ├── treesitter/   # TreeSitter integration (IDE, outline)
-│   ├── blocks/       # Block definition trait, registry, modes
-│   ├── aop.spl       # Shared AOP (richer features)
-│   ├── hir.spl, mir.spl, mir_opt/
-│   ├── backend/      # Backend API, selector, helpers
-│   ├── pipeline/     # CompilerCompilationContext
-│   └── type_system/  # Type checking + inference
-└── compiler/         # Full self-hosting compiler
-    ├── backend/      # All backends (Cranelift, LLVM, Native, WASM, CUDA, Vulkan, VHDL, Lean)
-    ├── blocks/       # Custom block parsers (math, shell, data, SQL)
-    ├── hir_lowering/ # AST → HIR
-    ├── mir/          # HIR → MIR
-    ├── mir_opt/      # MIR optimization
-    ├── monomorphize/ # Generic specialization
-    ├── inference/    # Type inference (unify, constraints)
-    ├── linker/       # SMF format, mold/MSVC linker wrappers
-    ├── loader/       # mmap-based SMF loading, JIT context
-    ├── dependency/   # Module resolution, visibility
-    ├── semantics/    # Binary ops, casts, coercion
-    ├── feature/      # MDSOC pipeline stages (ports)
-    ├── transform/    # MDSOC stage boundary adapters (entity views)
-    ├── mdsoc/        # Virtual capsule types, config, layer checker
-    ├── adapters/     # Hexagonal: in/ (lang server) out/ (file/mem storage)
-    └── desugar/      # AST-level desugar (async/generator/spawn)
+├── compiler_cpp/     # Generated C code + runtime (bootstrap via CMake+Ninja)
+│   ├── CMakeLists.txt
+│   ├── *.cpp, *.c    # Generated C code
+│   └── runtime/      # C runtime (runtime.c/runtime.h)
+└── compiler/         # Unified compiler — numbered layers
+    ├── 00.common/    # Error types, config, effects, visibility, diagnostics, registry
+    ├── 10.frontend/  # Lexer, parser, AST, treesitter, desugar, parser types
+    │   └── core/     # Core frontend (lexer.spl, parser.spl, ast.spl, tokens.spl)
+    ├── 15.blocks/    # Block definition system (22 files)
+    ├── 20.hir/       # HIR types, definitions, lowering, inference
+    ├── 25.traits/    # Trait def, impl, solver, coherence, validation
+    ├── 30.types/     # Type inference, type system, dimension constraints
+    ├── 35.semantics/ # Semantic analysis, lint, macro check, resolve, const eval
+    ├── 40.mono/      # Monomorphization (18 files), instantiation
+    ├── 50.mir/       # MIR types, data, instructions, lowering, serialization
+    ├── 55.borrow/    # Borrow checking, GC analysis
+    ├── 60.mir_opt/   # MIR optimization passes (17 files)
+    ├── 70.backend/   # Backends (C, LLVM, Cranelift, WASM, CUDA, Vulkan, Native, Lean)
+    │   ├── backend/  # Backend implementations
+    │   └── linker/   # SMF format, mold/MSVC linker wrappers
+    ├── 80.driver/    # Driver, pipeline, project, build mode, incremental
+    ├── 85.mdsoc/     # MDSOC (virtual capsules, feature, transform, weaving)
+    ├── 90.tools/     # API surface, coverage, query, symbol analyzer, AOP
+    ├── 95.interp/    # Interpreter, MIR interpreter, execution
+    └── 99.loader/    # Module resolver, loader
 ```
 
 ## Source-Level Desugaring Passes
@@ -374,10 +337,10 @@ Runs **before** lexing, rewrites source text (`app/desugar/mod.spl`):
 
 ## Block Parser System
 
-Custom DSL blocks use a **3-tier parsing** architecture (`compiler/blocks/`):
+Custom DSL blocks use a **3-phase parsing** architecture (`compiler/15.blocks/`):
 
-| Tier | Method | Purpose |
-|------|--------|---------|
+| Phase | Method | Purpose |
+|-------|--------|---------|
 | 1 | `lex(payload, pre_lex, ctx)` | Fast sub-lexer (brace tracking) |
 | 2 | `treesitter_outline(payload, pre_lex)` | IDE structural extraction |
 | 3 | `parse_full(payload, pre_lex, ctx)` | Full block parse → AST nodes |
@@ -388,7 +351,7 @@ Block registry: `register_block(name, definition)`, `is_block(name)`, `with_bloc
 
 ## AOP (Aspect-Oriented Programming)
 
-MIR-level weaving at `compiler_core/aop.spl`:
+MIR-level weaving at `compiler/90.tools/`:
 
 - **Pointcuts**: `NamePattern` (glob), `Annotation` (`@tag`), `Module` (path), `All`
 - **Advice**: `Before`, `AfterSuccess`, `AfterError`, `Around`
@@ -400,9 +363,10 @@ MIR-level weaving at `compiler_core/aop.spl`:
 
 | Backend | Mode | File(s) |
 |---------|------|---------|
+| **C** | Bootstrap | `c_backend.spl`, `c_ir_builder.spl`, `c_type_mapper.spl` |
 | **Cranelift** | Debug/JIT | `compiler.spl`, `cranelift_type_mapper.spl` |
 | **LLVM** | Release | `llvm_backend.spl`, `llvm_ir_builder.spl`, `llvm_target.spl` |
-| **Native** | Bootstrap | `native/isel_x86_64.spl`, `isel_aarch64.spl`, `isel_riscv{32,64}.spl`, `regalloc.spl`, `elf_writer.spl`, `macho_writer.spl` |
+| **Native** | Bare-metal | `native/isel_x86_64.spl`, `isel_aarch64.spl`, `isel_riscv{32,64}.spl`, `regalloc.spl`, `elf_writer.spl`, `macho_writer.spl` |
 | **WASM** | Web | `wasm_backend.spl`, `wasm/wat_codegen.spl` |
 | **CUDA** | GPU | `cuda_backend.spl`, `cuda/ptx_builder.spl` |
 | **Vulkan** | GPU | `vulkan_backend.spl`, `vulkan/spirv_builder.spl` |
@@ -433,14 +397,20 @@ Selection: `select_backend_with_mode(target, mode, nil)` in `backend_selector.sp
 
 Each instruction has an effect tag: `Compute`, `Io`, `Wait`, `GcAlloc`.
 
-## Bootstrap Chain
+## Bootstrap Chain (C Backend)
 
 ```
 Phase 0: C/C++ compiler (clang/gcc/MSVC)
-Phase 1: src/compiler_seed/seed.cpp  →  seed binary (C++ transpiler)
-Phase 2: seed transpiles compiler_core/*.spl  →  C++ code
-Phase 3: C++ code + runtime.c  →  core_compiler binary
-Phase 4: core_compiler compiles compiler/*.spl  →  Full Simple compiler
+Phase 1: bin/simple compile --backend=c  →  generates C code into src/compiler_cpp/
+Phase 2: cmake + ninja  →  builds C code + runtime.c  →  bootstrap binary
+```
+
+Commands:
+```bash
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
 ```
 
 ## Stdlib Variant System
@@ -449,55 +419,41 @@ Phase 4: core_compiler compiles compiler/*.spl  →  Full Simple compiler
 
 | Directory | GC | Mutable |
 |-----------|-----|---------|
-| `core/` | Yes | Yes |
-| `core_immut/` | Yes | No |
-| `core_nogc/` | No | Yes |
-| `core_nogc_immut/` | No | No |
-
-### Host Variants (Default: `async_nogc_mut`)
-```
-host/
-├── async_gc_mut/
-├── async_gc_immut/
-├── async_nogc_mut/   # DEFAULT
-├── sync_nogc_mut/
-└── common/
-```
+| `gc_sync_mut/` | Yes | Yes |
+| `gc_sync_immut/` | Yes | No |
+| `nogc_sync_mut/` | No | Yes |
+| `nogc_sync_immut/` | No | No |
+| `gc_async_mut/` | Yes | Yes + Async |
+| `nogc_async_mut/` | No | Yes + Async |
 
 ## Adding New Features
 
-1. **Lexer/Parser**: `src/compiler_core/lexer.spl`, `parser.spl`
+1. **Lexer/Parser**: `src/compiler/10.frontend/core/lexer.spl`, `parser.spl`
 2. **Source desugar**: `src/app/desugar/` (if new syntax sugar)
-3. **Block parsers**: `src/compiler/blocks/` (if new DSL block)
-4. **Type system**: `src/compiler_core/types.spl`, `src/compiler/inference/`
-5. **HIR lowering**: `src/compiler/hir_lowering/`
-6. **AOP rules**: `src/compiler_core/aop.spl` (if new join-point kind)
-7. **MIR lowering**: `src/compiler/mir/`, `src/compiler_core/mir.spl`
-8. **Backend**: `src/compiler/backend/` (if new instruction)
-9. **Standard library**: `src/std/`
+3. **Block parsers**: `src/compiler/15.blocks/` (if new DSL block)
+4. **Type system**: `src/compiler/30.types/`
+5. **HIR lowering**: `src/compiler/20.hir/`
+6. **AOP rules**: `src/compiler/90.tools/` (if new join-point kind)
+7. **MIR lowering**: `src/compiler/50.mir/`
+8. **Backend**: `src/compiler/70.backend/` (if new instruction)
+9. **Standard library**: `src/lib/`
 10. **Tests**: `test/`
 
 ## Architecture Rules
 
-- `src/compiler_core/` has no dependencies on other Simple modules
-- `src/compiler_shared/` depends only on `compiler_core`
-- `src/std/` depends only on `src/compiler_core/`
-- `src/compiler/` depends on `compiler_core`, `compiler_shared`, `std`
-- `src/lib/` depends on `src/std/` and `src/compiler_core/`
+- `src/compiler/` uses numbered layers — lower numbers cannot depend on higher numbers
+- `src/lib/` is the standard library (imports use `std.X` which resolves to `lib`)
 - `src/app/cli/` is the only CLI entry point
 - No circular dependencies between modules
-- MDSOC `arch {}` blocks enforce stage isolation in `feature/__init__.spl`
+- MDSOC `arch {}` blocks enforce stage isolation
 
 ### Module Dependency Rules
 
 | Layer | May Access | May Not Access |
 |-------|------------|----------------|
 | `src/app/cli/` | all | - |
-| `src/compiler/` | compiler_core, compiler_shared, std | app |
-| `src/compiler_shared/` | compiler_core | compiler, app |
-| `src/compiler_core/` | (no deps) | compiler, compiler_shared, app |
-| `src/std/` | compiler_core | compiler, app |
-| `src/lib/` | std, compiler_core | compiler |
+| `src/compiler/` | lib, std | app |
+| `src/lib/` | (no deps on compiler) | compiler, app |
 
 ---
 
@@ -531,7 +487,7 @@ simple gen-lean write --force               # Regenerate all
 
 ### When Modifying Type Inference
 
-1. Update `src/compiler_core/types.spl`
+1. Update `src/compiler/30.types/`
 2. Update Lean theorems in `verification/type_inference_compile/`
 3. Run `lake build` in verification project
 4. Run `simple gen-lean compare` to verify alignment
@@ -543,7 +499,7 @@ simple gen-lean write --force               # Regenerate all
 ### Before Implementing
 
 - [ ] Read relevant feature spec (`doc/feature/`)
-- [ ] Identify affected pipeline stages (feature/ + transform/)
+- [ ] Identify affected pipeline stages
 - [ ] Draw dependency impact diagram
 
 ### After Implementing
@@ -556,7 +512,7 @@ simple gen-lean write --force               # Regenerate all
 
 - **`doc/guide/architecture_writing.md`** - Architecture writing guide
 - `doc/architecture/README.md` - Full architecture docs
-- `doc/architecture/file_class_structure.md` - Codebase inventory (2,649 files, 623K lines)
+- `doc/architecture/file_class_structure.md` - Codebase inventory
 - `doc/codegen_technical.md` - Codegen details
 - `doc/codegen/status.md` - MIR coverage
 - `doc/formal_verification.md` - Lean verification docs

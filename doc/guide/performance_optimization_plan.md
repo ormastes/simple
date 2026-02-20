@@ -35,7 +35,7 @@
 ## Executive Summary
 
 This plan focuses on optimizing **Simple language code** in:
-- `src/std/src/` - Standard library (Map, Set, collections)
+- `src/lib/src/` - Standard library (Map, Set, collections)
 - `src/compiler/` - Compiler (lexer, parser, type inference)
 - `src/app/interpreter/` - Interpreter (persistent collections, execution)
 
@@ -45,7 +45,7 @@ This plan focuses on optimizing **Simple language code** in:
 
 ## 1. Hash Map Implementation (CRITICAL)
 
-### File: `src/std/src/map.spl` (475 lines)
+### File: `src/lib/src/map.spl` (475 lines)
 
 ### Current Issue: Broken Hashing
 
@@ -63,7 +63,7 @@ fn hash_key(key: K) -> i64:
 
 **Step 1: Add Hash trait (1 day)**
 
-Create `src/std/src/hash.spl`:
+Create `src/lib/src/hash.spl`:
 
 ```simple
 # Hash trait for hashable types
@@ -136,7 +136,7 @@ export Hash, FNV_OFFSET, FNV_PRIME
 
 **Step 2: Update Map to use Hash trait (1 day)**
 
-Update `src/std/src/map.spl`:
+Update `src/lib/src/map.spl`:
 
 ```simple
 use std.hash.Hash
@@ -219,7 +219,7 @@ fn array_insert<T>(arr: [T], index: i64, value: T) -> [T]:
 
 **Step 1: Add efficient array builders (1 day)**
 
-Create `src/std/src/array_builder.spl`:
+Create `src/lib/src/array_builder.spl`:
 
 ```simple
 # Efficient array building with pre-allocation

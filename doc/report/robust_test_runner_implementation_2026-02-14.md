@@ -362,8 +362,8 @@ describe 'Slow test':
 ### Summary of Completed Work
 
 **Modules (3 files, ~1,080 lines):**
-1. `src/std/process_monitor.spl` - Process metrics via /proc (~400 lines)
-2. `src/std/resource_tracker.spl` - Database tracking (~480 lines)
+1. `src/lib/process_monitor.spl` - Process metrics via /proc (~400 lines)
+2. `src/lib/resource_tracker.spl` - Database tracking (~480 lines)
 3. `src/app/test_runner_new/test_runner_resources.spl` - Integration (~200 lines)
 
 **Test Coverage (27 tests, 100% passing):**
@@ -835,7 +835,7 @@ describe "sequential_container":
 
 **Objective:** Add dedicated profile for tests with high resource needs (QEMU, compilation).
 
-**File:** `src/std/process_limits.spl`
+**File:** `src/lib/process_limits.spl`
 
 **Add Profile:**
 
@@ -863,7 +863,7 @@ fn profile_from_name(name: text) -> ResourceProfile:
 
 **Test Marker:**
 
-Add to `src/std/spec.spl`:
+Add to `src/lib/spec.spl`:
 
 ```simple
 fn critical_it(name: text, test_body: fn()):
@@ -903,8 +903,8 @@ test_config {
 - [ ] Test runner applies critical profile
 
 **Files to Modify:**
-- `src/std/process_limits.spl` - Add profile (~20 lines)
-- `src/std/spec.spl` - Add critical_it (~10 lines)
+- `src/lib/process_limits.spl` - Add profile (~20 lines)
+- `src/lib/spec.spl` - Add critical_it (~10 lines)
 - `simple.test.sdn` - Add critical config (~15 lines)
 
 **Complexity:** Low

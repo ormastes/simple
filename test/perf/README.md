@@ -170,8 +170,8 @@ bin/simple test/benchmarks/run_duplicate_check.spl src/ --compare baseline.txt
 ## Related Tools
 
 - **Performance Analysis:** `src/app/perf/` - CLI tools for profiling, optimization analysis
-- **Benchmarking Library:** `src/std/src/testing/benchmark.spl` - Stdlib benchmark utilities
-- **Example Code:** `src/std/examples/testing/benchmark_example.spl`
+- **Benchmarking Library:** `src/lib/src/testing/benchmark.spl` - Stdlib benchmark utilities
+- **Example Code:** `src/lib/examples/testing/benchmark_example.spl`
 
 ## See Also
 

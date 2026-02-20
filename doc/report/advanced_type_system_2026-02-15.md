@@ -496,8 +496,8 @@ fn process(obj: any, obj_type: i64):
 
 ### Related Features
 
-- **Platform Library** (`src/std/platform/`) - Platform-aware type conversions
-- **Effect System** (`src/std/effects.spl`) - Effect tracking in type system
+- **Platform Library** (`src/lib/platform/`) - Platform-aware type conversions
+- **Effect System** (`src/lib/effects.spl`) - Effect tracking in type system
 - **SFFI System** (`src/app/io/mod.spl`) - Foreign function types
 - **Parser** (`src/compiler_core/parser.spl`) - Type syntax parsing
 

@@ -1,7 +1,7 @@
 # 100% Branch Coverage Implementation - Status Report
 
 **Generated:** 2026-02-03
-**Goal:** Achieve 100% branch coverage on Simple standard library (`src/std/`)
+**Goal:** Achieve 100% branch coverage on Simple standard library (`src/lib/`)
 **Methodology:** Proven formatter approach (78 tests → 85% coverage)
 
 ---
@@ -36,7 +36,7 @@
 **Tasks:**
 - [x] Understand coverage infrastructure (SIMPLE_COVERAGE env var)
 - [x] Identify test files: `test/lib/std/unit/allocator_spec.spl` (455 lines, 55 tests)
-- [x] Identify source: `src/std/allocator.spl` (601 LOC)
+- [x] Identify source: `src/lib/allocator.spl` (601 LOC)
 - [ ] Run targeted coverage analysis on allocator
 - [ ] Map existing 55 tests to source branches
 - [ ] Identify coverage gaps
@@ -134,7 +134,7 @@ simple spl-coverage dump > .coverage/allocator_iteration_1.sdn
 
 ```simple
 # Feature: Memory Allocation
-# Test coverage for src/std/allocator.spl
+# Test coverage for src/lib/allocator.spl
 
 use std.allocator.*
 use std.test.sspec.*
@@ -187,7 +187,7 @@ describe "ComponentName":
 | File | Purpose |
 |------|---------|
 | `test/lib/std/unit/allocator_spec.spl` | Existing allocator tests (455 lines, 55 tests) |
-| `src/std/allocator.spl` | Allocator implementations (601 LOC, ~80 branches) |
+| `src/lib/allocator.spl` | Allocator implementations (601 LOC, ~80 branches) |
 | `.coverage/coverage.sdn` | Coverage data in SDN format |
 | `rust/runtime/src/coverage.rs` | Coverage collection runtime |
 | `rust/lib/std/src/tooling/coverage.spl` | Coverage API |

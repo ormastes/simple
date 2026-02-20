@@ -229,9 +229,9 @@ test("test name")
 - Add: Caching layer for runtime info
 
 **Files to modify:**
-- `src/std/spec.spl` - Add detection functions
-- New file: `src/std/spec/platform.spl` - Platform detection
-- New file: `src/std/spec/runtime.spl` - Runtime detection
+- `src/lib/spec.spl` - Add detection functions
+- New file: `src/lib/spec/platform.spl` - Platform detection
+- New file: `src/lib/spec/runtime.spl` - Runtime detection
 
 ### Phase 2: Core Skip/Ignore Logic (Week 2)
 
@@ -268,7 +268,7 @@ fn should_skip_test(platforms: [text], runtimes: [text]) -> bool:
 ```
 
 **Files to modify:**
-- `src/std/spec.spl` - Add condition evaluation
+- `src/lib/spec.spl` - Add condition evaluation
 
 ### Phase 3: Decorator Implementation (Week 3)
 
@@ -315,7 +315,7 @@ fn skip_if(condition: fn() -> bool, reason: text = "") -> fn(text, fn()):
 ```
 
 **Files to modify:**
-- `src/std/spec.spl` - Add decorator functions
+- `src/lib/spec.spl` - Add decorator functions
 
 ### Phase 4: Syntax Sugar (Week 4)
 
@@ -369,7 +369,7 @@ test("my test")
 ```
 
 **Files to create:**
-- `src/std/spec/builder.spl` - Test builder pattern
+- `src/lib/spec/builder.spl` - Test builder pattern
 
 ### Phase 5: Attribute Syntax (Future - Parser Enhancement)
 

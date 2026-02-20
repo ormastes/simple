@@ -317,7 +317,7 @@ If full implementation is deferred, document workaround:
 **Workaround: Source-Level Linking**
 ```bash
 # Instead of linking against libraries, recompile from source
-simple compile src/std/io/mod.spl -o std_io.o
+simple compile src/lib/io/mod.spl -o std_io.o
 simple compile src/my_app.spl -o my_app.o
 ld std_io.o my_app.o -o my_app
 ```

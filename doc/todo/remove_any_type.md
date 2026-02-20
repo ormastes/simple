@@ -19,17 +19,17 @@ The `Any` type is currently used throughout the compiler and standard library as
 Found **85 files** using `Any` type across the codebase:
 
 ### Type Alias (1 file)
-- `src/std/actors/actor.spl:273`: `type Any = text` (temporary workaround)
+- `src/lib/actors/actor.spl:273`: `type Any = text` (temporary workaround)
 
 ### Concurrency/Runtime FFI (15 files)
 **High Priority - Core Runtime:**
-- `src/std/concurrent.spl` - Channel, HashMap FFI (5 uses)
-- `src/std/concurrent/actor.spl` - Actor spawn/send (4 uses)
-- `src/std/concurrent/channel.spl` - Channel send (2 uses)
-- `src/std/concurrent/mutex.spl` - Mutex operations (7 uses)
-- `src/std/concurrent/rwlock.spl` - RwLock operations (9 uses)
-- `src/std/concurrent/thread.spl` - Thread spawn (4 uses)
-- `src/std/concurrent/collections.spl` - HashMap/BTreeMap insert (4 uses)
+- `src/lib/concurrent.spl` - Channel, HashMap FFI (5 uses)
+- `src/lib/concurrent/actor.spl` - Actor spawn/send (4 uses)
+- `src/lib/concurrent/channel.spl` - Channel send (2 uses)
+- `src/lib/concurrent/mutex.spl` - Mutex operations (7 uses)
+- `src/lib/concurrent/rwlock.spl` - RwLock operations (9 uses)
+- `src/lib/concurrent/thread.spl` - Thread spawn (4 uses)
+- `src/lib/concurrent/collections.spl` - HashMap/BTreeMap insert (4 uses)
 
 ### Compiler Internals (12 files)
 **Medium Priority - Type System:**
@@ -45,7 +45,7 @@ Found **85 files** using `Any` type across the codebase:
 - `src/compiler/driver.spl` - Compilation results (1 use)
 
 ### Documentation (1 file)
-- `src/std/actors/actor.spl` - Comment: "would be [Any]" (1 use)
+- `src/lib/actors/actor.spl` - Comment: "would be [Any]" (1 use)
 
 ### Test Files (2 files)
 - `test/lib/std/unit/dap/dap_spec.spl` - Cast to `List<Dict<text, Any>>` (2 uses)
@@ -87,13 +87,13 @@ extern fn rt_channel_send(channel_id: i64, value: ChannelValue)
 ```
 
 **Files to Update (Priority Order):**
-1. ✅ `src/std/concurrent/channel.spl` - Channel send (2 uses)
-2. ✅ `src/std/concurrent/actor.spl` - Actor spawn/send (4 uses)
-3. ✅ `src/std/concurrent/mutex.spl` - Mutex lock/unlock (7 uses)
-4. ✅ `src/std/concurrent/rwlock.spl` - RwLock read/write (9 uses)
-5. ✅ `src/std/concurrent/thread.spl` - Thread spawn (4 uses)
-6. ✅ `src/std/concurrent/collections.spl` - HashMap/BTreeMap (4 uses)
-7. ✅ `src/std/concurrent.spl` - Main concurrency module (5 uses)
+1. ✅ `src/lib/concurrent/channel.spl` - Channel send (2 uses)
+2. ✅ `src/lib/concurrent/actor.spl` - Actor spawn/send (4 uses)
+3. ✅ `src/lib/concurrent/mutex.spl` - Mutex lock/unlock (7 uses)
+4. ✅ `src/lib/concurrent/rwlock.spl` - RwLock read/write (9 uses)
+5. ✅ `src/lib/concurrent/thread.spl` - Thread spawn (4 uses)
+6. ✅ `src/lib/concurrent/collections.spl` - HashMap/BTreeMap (4 uses)
+7. ✅ `src/lib/concurrent.spl` - Main concurrency module (5 uses)
 
 **Estimated Effort:** 4 weeks (1 week per group)
 
@@ -192,7 +192,7 @@ expect(bps_text.contains("\"id\":\"1\""))
 
 Remove the temporary type alias:
 
-**src/std/actors/actor.spl:**
+**src/lib/actors/actor.spl:**
 ```simple
 # Before
 type Any = text  # Temporary workaround
@@ -341,7 +341,7 @@ container.singletons["foo"] = RuntimeValue.from(some_value)  # Typed
 ## Success Metrics
 
 - [ ] Zero uses of `Any` type in src/compiler/ (except deprecated)
-- [ ] Zero uses of `Any` type in src/std/concurrent/ (except deprecated)
+- [ ] Zero uses of `Any` type in src/lib/concurrent/ (except deprecated)
 - [ ] All tests passing (current: 262/273 debug/DAP)
 - [ ] No performance regression (<5% slowdown)
 - [ ] Documentation updated
@@ -357,7 +357,7 @@ container.singletons["foo"] = RuntimeValue.from(some_value)  # Typed
 ## References
 
 - **Type Safety:** `doc/design/type_system_design.md`
-- **Runtime FFI:** `src/std/runtime/value.spl`
+- **Runtime FFI:** `src/lib/runtime/value.spl`
 - **Generic System:** `doc/guide/generics_guide.md`
 - **This Report:** `doc/report/debug_dap_complete_session_2026-02-08.md` (DAP `Any` limitation)
 

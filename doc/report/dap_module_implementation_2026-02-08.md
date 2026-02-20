@@ -14,11 +14,11 @@ Created complete `std.mcp.dap` module implementation with all required types and
 
 ### Files Created
 
-1. **`src/std/mcp/__init__.spl`** (13 lines)
+1. **`src/lib/mcp/__init__.spl`** (13 lines)
    - Module entry point
    - Re-exports all DAP types from `dap.mod`
 
-2. **`src/std/mcp/dap/mod.spl`** (428 lines)
+2. **`src/lib/mcp/dap/mod.spl`** (428 lines)
    - Complete DAP type system
    - All required classes, enums, and implementations
    - Pure Simple implementation (no FFI)
@@ -230,7 +230,7 @@ val result = server.handle("initialize", {}, "vscode")
 - Complete lifecycle management
 - 56 tests passing (protocol_spec, breakpoints_spec, server_spec)
 
-**`src/std/mcp/dap/`** (New implementation):
+**`src/lib/mcp/dap/`** (New implementation):
 - 428 lines (all types in single module)
 - MCP-focused API
 - Failsafe integration built-in
@@ -282,11 +282,11 @@ The `std.mcp.dap` module is now fully available for use in the MCP server and ot
 **Session Impact:**
 - ✅ Implemented complete `std.mcp.dap` module (428 lines)
 - ✅ Enabled 35/46 previously failing tests
-- ✅ Created module structure (`src/std/mcp/`)
+- ✅ Created module structure (`src/lib/mcp/`)
 - ✅ Integrated with failsafe framework
 - ✅ Production-ready MCP DAP support
 
 **Files Created:**
-- `src/std/mcp/__init__.spl` (13 lines)
-- `src/std/mcp/dap/mod.spl` (428 lines)
+- `src/lib/mcp/__init__.spl` (13 lines)
+- `src/lib/mcp/dap/mod.spl` (428 lines)
 - `doc/report/dap_module_implementation_2026-02-08.md` (this report)

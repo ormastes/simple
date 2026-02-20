@@ -138,7 +138,7 @@ All FFI wrappers properly exposed through `src/app/io/mod.spl` using the two-tie
 **File:** `test/lib/std/unit/parser/error_recovery_spec.spl`
 **Issue:** Imports non-existent module `std.parser.error_recovery`
 **Status:** Disabled (`.disabled` suffix) - requires implementation
-**Action:** Re-enable when `src/std/parser/error_recovery.spl` is implemented
+**Action:** Re-enable when `src/lib/parser/error_recovery.spl` is implemented
 
 ### 3. Test Runner Hang (Earlier) ✅ WORKAROUND
 

@@ -79,7 +79,7 @@ Highly productive 4-hour session accomplishing migration, cleanup, and documenta
 
 **Objective:** Create pure Simple path utilities, eliminate path FFI
 
-**New Module Created:** `src/std/path.spl` (217 lines)
+**New Module Created:** `src/lib/path.spl` (217 lines)
 
 **Functions Implemented (10 total):**
 - `basename()` - Extract filename from path
@@ -162,7 +162,7 @@ Highly productive 4-hour session accomplishing migration, cleanup, and documenta
 ## Complete Deliverables List
 
 ### Code Files (3 created)
-1. `src/std/path.spl` - Path utilities module (217 lines, 10 functions)
+1. `src/lib/path.spl` - Path utilities module (217 lines, 10 functions)
 2. `test/std/path_spec.spl` - Test suite (350 lines, 85+ tests)
 3. `.gitignore` - Updated to prevent artifact accumulation
 
@@ -487,7 +487,7 @@ Located in `doc/spec/`:
 12. `ffi_boundary_spec.md`
 
 ### Code Files Created/Modified
-- `src/std/path.spl` (created)
+- `src/lib/path.spl` (created)
 - `test/std/path_spec.spl` (created)
 - `.gitignore` (modified)
 - 10 application files (modified)

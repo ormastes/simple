@@ -11,7 +11,7 @@ Created **2 comprehensive mathematical utility modules** with **100+ functions**
 
 ## Modules Created (Part 4)
 
-### 14. `src/std/stats_utils.spl` (550 lines, 60+ functions)
+### 14. `src/lib/stats_utils.spl` (550 lines, 60+ functions)
 **Statistical operations and data analysis**
 
 #### Basic Aggregation
@@ -59,7 +59,7 @@ Created **2 comprehensive mathematical utility modules** with **100+ functions**
 #### Summary
 - `summary_statistics` - Complete statistical summary
 
-### 15. `src/std/combinatorics_utils.spl` (650 lines, 40+ functions)
+### 15. `src/lib/combinatorics_utils.spl` (650 lines, 40+ functions)
 **Combinatorial mathematics operations**
 
 #### Factorials

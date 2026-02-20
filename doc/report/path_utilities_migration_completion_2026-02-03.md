@@ -15,7 +15,7 @@ Completed **Phase 3: Migrate Path Utilities to Pure Simple** of the Rust to Simp
 
 ### 1. Created std.path Module
 
-**File:** `src/std/path.spl` (217 lines)
+**File:** `src/lib/path.spl` (217 lines)
 
 **Functions Implemented:**
 
@@ -151,7 +151,7 @@ val name = path.basename(cwd)
 ## Migration Statistics
 
 ### Code Changes
-- **New file:** `src/std/path.spl` (217 lines, 10 functions)
+- **New file:** `src/lib/path.spl` (217 lines, 10 functions)
 - **Modified:** 2 application files (4 lines total)
 - **Removed:** 2 extern declarations, 2 FFI calls
 
@@ -370,7 +370,7 @@ After path migration, remaining application FFI:
 
 ## References
 
-- std.path implementation: `src/std/path.spl`
+- std.path implementation: `src/lib/path.spl`
 - FFI boundary spec: `doc/spec/ffi_boundary_spec.md`
 - Migration plan: `doc/report/rust_to_simple_migration_2026-02-03.md`
 - Legacy FFI removal: `doc/report/legacy_ffi_removal_completion_2026-02-03.md`

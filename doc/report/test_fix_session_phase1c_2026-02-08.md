@@ -10,7 +10,7 @@
 
 ### 1. Module Parse Error - Reserved Keyword
 
-**File:** `src/std/concurrent.spl`
+**File:** `src/lib/concurrent.spl`
 **Issue:** Variable `gen` is a reserved keyword in Simple
 **Line:** 234 in `Barrier.wait()` method
 
@@ -107,7 +107,7 @@ once.call_once(fn(): ())
 
 ## Files Modified
 
-- `src/std/concurrent.spl` - Fixed reserved keyword
+- `src/lib/concurrent.spl` - Fixed reserved keyword
 - `test/lib/std/unit/concurrent_spec.spl` - Fixed lambda syntax (2 tests)
 
 ## Next Steps

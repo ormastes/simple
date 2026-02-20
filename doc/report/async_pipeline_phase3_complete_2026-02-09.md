@@ -516,7 +516,7 @@ The Context API from Phase 2 already provides all necessary methods:
 - ✅ `stream.sync()` - Per-stream sync
 - ✅ `stream.query()` - Non-blocking check
 
-**No changes to `src/std/gpu/context.spl` required!**
+**No changes to `src/lib/gpu/context.spl` required!**
 
 ### Example Integration
 

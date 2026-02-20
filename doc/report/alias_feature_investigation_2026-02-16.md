@@ -53,7 +53,7 @@ it "parses function alias":
 
 **Attempted build error:**
 ```
-error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/std/text.spl":
+error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/lib/text.spl":
 Unexpected token: expected LParen, found Assign
 ```
 
@@ -173,4 +173,4 @@ Modified files to reflect current status:
 - Parser impl: `src/app/parser/def/function.spl:310-328`
 - AST types: `src/app/parser/ast.spl:495`
 - Tests (stubs): `test/feature/alias_deprecated_spec.spl`
-- Use case: `src/std/functions.spl` (delegation pattern)
+- Use case: `src/lib/functions.spl` (delegation pattern)

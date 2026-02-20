@@ -405,7 +405,7 @@ fn cleanup_all_containers():
 
 ### 3. Resource Monitoring Integration
 
-**Extend existing `src/std/process_monitor.spl`:**
+**Extend existing `src/lib/process_monitor.spl`:**
 
 #### 3.1 System-Wide Monitoring
 

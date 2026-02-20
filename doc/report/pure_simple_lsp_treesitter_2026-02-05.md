@@ -26,7 +26,7 @@ This requirement meant:
 
 ## Files Created/Modified
 
-### 1. **src/std/src/parser/treesitter.spl** (✅ COMPLETE - Pure Simple)
+### 1. **src/lib/src/parser/treesitter.spl** (✅ COMPLETE - Pure Simple)
 
 **Lines:** ~600
 
