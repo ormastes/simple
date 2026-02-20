@@ -308,7 +308,7 @@ docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation
 
 ### Daily Development
 
-1. **Edit code:** `vim src/std/text.spl`
+1. **Edit code:** `vim src/lib/text.spl`
 2. **Quick test:** `bin/simple test test/unit/std/string_spec.spl`
 3. **Verify isolated:** `scripts/local-container-test.sh quick test/unit/std/string_spec.spl`
 4. **Commit:** `jj commit -m "fix: String.trim edge case"`

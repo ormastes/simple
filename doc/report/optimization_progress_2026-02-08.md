@@ -41,7 +41,7 @@ Speedup: 9.4x
 
 **Files Modified:**
 - `src/compiler/backend_types.spl` (+90 lines)
-- `src/std/timing.spl` (+180 lines, new)
+- `src/lib/timing.spl` (+180 lines, new)
 - `test/compiler/backend/common/literal_converter_spec.spl`
 
 #### 2. allocator_spec ✅
@@ -211,7 +211,7 @@ Savings: 30 seconds (79% reduction)
 **Impact:** Unblocked 30+ tests in literal_converter_spec
 
 ### 2. Timing Module ✅
-**Location:** `src/std/timing.spl`
+**Location:** `src/lib/timing.spl`
 **Functions:**
 - `time_now()`, `time_elapsed()` - Basic timing
 - `profile()` - Detailed profiling

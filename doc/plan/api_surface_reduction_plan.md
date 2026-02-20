@@ -145,7 +145,7 @@ pub use .pure.*  # Pure functions are all public
 pub use .collections.{LazySeq, PersistentDict, PersistentVec}
 ```
 
-#### 1.3 Create `src/std/__init__.spl`
+#### 1.3 Create `src/lib/__init__.spl`
 **Purpose:** Standard library modules
 
 **Exports to determine:**
@@ -446,13 +446,13 @@ mod cycle_detector
 **Estimated Files:** 10
 **Estimated Time:** 2-3 sessions
 
-#### 4.1 `src/std/async/__init__.spl` (10 files)
-#### 4.2 `src/std/async_host/__init__.spl` (9 files)
-#### 4.3 `src/std/concurrent/__init__.spl` (7 files)
-#### 4.4 `src/std/spec/__init__.spl` (5 files)
-#### 4.5 `src/std/compute/__init__.spl` (5 files)
-#### 4.6 `src/std/net/__init__.spl` (4 files)
-#### 4.7 `src/std/gpu/__init__.spl` (4 files)
+#### 4.1 `src/lib/async/__init__.spl` (10 files)
+#### 4.2 `src/lib/async_host/__init__.spl` (9 files)
+#### 4.3 `src/lib/concurrent/__init__.spl` (7 files)
+#### 4.4 `src/lib/spec/__init__.spl` (5 files)
+#### 4.5 `src/lib/compute/__init__.spl` (5 files)
+#### 4.6 `src/lib/net/__init__.spl` (4 files)
+#### 4.7 `src/lib/gpu/__init__.spl` (4 files)
 #### 4.8-4.10 Smaller std modules
 
 ---
@@ -610,7 +610,7 @@ bin/simple test
   - [ ] Design export list
   - [ ] Write __init__.spl
   - [ ] Test compilation
-- [ ] Create `src/std/__init__.spl`
+- [ ] Create `src/lib/__init__.spl`
   - [ ] Analyze external imports
   - [ ] Design export list
   - [ ] Write __init__.spl

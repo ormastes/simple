@@ -18,7 +18,7 @@ Both Phase 1 (UPX Auto-Download) and Phase 2 (Self-Extracting Executables) are n
 ### Files
 - ✅ `rust/runtime/src/compress/upx_download.rs` (408 lines)
 - ✅ `rust/runtime/src/compress/upx.rs` (enhanced with auto-download)
-- ✅ `src/std/compress/upx.spl` (Simple API)
+- ✅ `src/lib/compress/upx.spl` (Simple API)
 - ✅ `rust/runtime/tests/upx_integration_test.rs`
 - ✅ `rust/runtime/tests/upx_compress_test.rs`
 
@@ -53,7 +53,7 @@ Both Phase 1 (UPX Auto-Download) and Phase 2 (Self-Extracting Executables) are n
 - ✅ `rust/runtime/src/compress/lzma_stub.rs` (330 lines)
 - ✅ `rust/runtime/src/compress/self_extract.rs` (380 lines)
 - ✅ `rust/runtime/src/compress/mod.rs` (updated with exports)
-- ✅ `src/std/compress/upx.spl` (Simple API additions)
+- ✅ `src/lib/compress/upx.spl` (Simple API additions)
 
 ### Features
 - Pure Rust LZMA compression (no UPX dependency)

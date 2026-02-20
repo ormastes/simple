@@ -18,7 +18,7 @@ error: parse error: Unexpected token: expected identifier, found Gpu
 ```
 
 **Solution**: Renamed the entire module directory and updated all imports
-- `src/std/gpu/` → `src/std/compute/`
+- `src/lib/gpu/` → `src/lib/compute/`
 - `use std.gpu.*` → `use std.compute.*`
 - `use gpu.device.*` → `use compute.device.*`
 
@@ -105,14 +105,14 @@ gpu_event_wait(self, -1)
 
 ### Core Library Files (11 files)
 ```
-src/std/compute/device.spl        ✅ Parses OK
-src/std/compute/memory.spl        ✅ Parses OK
-src/std/compute/kernels.spl       ✅ Parses OK
-src/std/compute/sync.spl          ✅ Parses OK
-src/std/compute/mod.spl           ✅ Parses OK
+src/lib/compute/device.spl        ✅ Parses OK
+src/lib/compute/memory.spl        ✅ Parses OK
+src/lib/compute/kernels.spl       ✅ Parses OK
+src/lib/compute/sync.spl          ✅ Parses OK
+src/lib/compute/mod.spl           ✅ Parses OK
 src/app/io/cuda_ffi.spl           ✅ Parses OK
 src/app/io/vulkan_ffi.spl         ✅ Parses OK
-src/std/src/testing/gpu_helpers.spl
+src/lib/src/testing/gpu_helpers.spl
 test/system/features/gpu/gpu_basic_spec.spl
 test/system/features/gpu/cuda_spec.spl
 test/system/features/gpu/vulkan_spec.spl
@@ -136,7 +136,7 @@ test/system/features/gpu/vulkan_spec.spl
 ### Parse Testing (0.4.0-beta bootstrap runtime)
 ```bash
 # All core library files
-$ for file in src/std/compute/*.spl; do
+$ for file in src/lib/compute/*.spl; do
     simple_runtime "$file" --parse-only
 done
 ✅ device.spl: OK
@@ -222,14 +222,14 @@ To verify the fixes:
 
 ```bash
 # 1. Test individual file parsing
-simple_runtime src/std/compute/device.spl --parse-only
+simple_runtime src/lib/compute/device.spl --parse-only
 
 # 2. Test FFI files
 simple_runtime src/app/io/cuda_ffi.spl --parse-only
 simple_runtime src/app/io/vulkan_ffi.spl --parse-only
 
 # 3. Test all compute module files
-for f in src/std/compute/*.spl; do
+for f in src/lib/compute/*.spl; do
     echo "Testing $f..."
     simple_runtime "$f" --parse-only || echo "FAILED: $f"
 done

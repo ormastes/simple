@@ -190,10 +190,10 @@ Total: ~2M
 
 **Files to migrate:**
 ```
-rust/runtime/src/value/core.rs → src/std/runtime_value.spl
-rust/runtime/src/value/collections.rs → src/std/collections.spl
-rust/runtime/src/value/dict.rs → src/std/dict.spl
-rust/runtime/src/value/heap.rs → src/std/heap.spl
+rust/runtime/src/value/core.rs → src/lib/runtime_value.spl
+rust/runtime/src/value/collections.rs → src/lib/collections.spl
+rust/runtime/src/value/dict.rs → src/lib/dict.spl
+rust/runtime/src/value/heap.rs → src/lib/heap.spl
 ```
 
 **Approach:**
@@ -232,8 +232,8 @@ rust/compiler/src/hir/type_check.rs → src/compiler/type_check/
 
 **Files to migrate:**
 ```
-rust/runtime/src/bytecode/vm.rs → src/std/runtime/vm.spl
-rust/runtime/src/bytecode/opcodes.rs → src/std/runtime/opcodes.spl
+rust/runtime/src/bytecode/vm.rs → src/lib/runtime/vm.spl
+rust/runtime/src/bytecode/opcodes.rs → src/lib/runtime/opcodes.spl
 ```
 
 **Benefits:**
@@ -275,7 +275,7 @@ pub enum RuntimeValue {
 
 ### Proposed Simple Implementation
 
-**RuntimeValue (src/std/runtime_value.spl):**
+**RuntimeValue (src/lib/runtime_value.spl):**
 ```simple
 struct RuntimeValue:
     """Runtime value type.
@@ -394,9 +394,9 @@ impl RuntimeValue:
 5. ✅ Self-hosting benefit
 
 **Start with:**
-- `value/core.rs` (1,640 lines) → `src/std/runtime_value.spl`
-- `value/collections.rs` (1,640 lines) → `src/std/collections.spl`
-- `value/dict.rs` (800 lines) → `src/std/dict.spl`
+- `value/core.rs` (1,640 lines) → `src/lib/runtime_value.spl`
+- `value/collections.rs` (1,640 lines) → `src/lib/collections.spl`
+- `value/dict.rs` (800 lines) → `src/lib/dict.spl`
 
 **Total:** ~5,080 lines for core runtime
 

@@ -38,10 +38,10 @@ Current test suite status shows **773 failing tests** across 460 test files. Ana
 
 **Goal:** Fix string methods and type conversion issues
 **Estimated Effort:** 4-6 hours
-**Files Modified:** `src/std/text.spl` (new), `src/std/convert.spl` (new), `src/app/io/mod.spl`
+**Files Modified:** `src/lib/text.spl` (new), `src/lib/convert.spl` (new), `src/app/io/mod.spl`
 
 #### 1.1 String Methods (Pure Simple)
-**Location:** `src/std/text.spl` (create new file)
+**Location:** `src/lib/text.spl` (create new file)
 
 ```simple
 # String extension methods
@@ -83,7 +83,7 @@ fn text_index_of_char(s: text, ch: text) -> i64:
 **Success metric:** +45 passing tests
 
 #### 1.2 Type Conversions (Pure Simple + SFFI)
-**Location:** `src/std/convert.spl` (create new file)
+**Location:** `src/lib/convert.spl` (create new file)
 
 ```simple
 # Unsigned integer parsing
@@ -136,10 +136,10 @@ fn text_hash_native(s: text) -> i64:
 
 **Goal:** Add missing array/collection methods
 **Estimated Effort:** 3-4 hours
-**Files Modified:** `src/std/array.spl` (new)
+**Files Modified:** `src/lib/array.spl` (new)
 
 #### 2.1 Array Extensions (Pure Simple)
-**Location:** `src/std/array.spl` (create new file)
+**Location:** `src/lib/array.spl` (create new file)
 
 ```simple
 # Array utility methods
@@ -202,7 +202,7 @@ fn array_sort_by<T>(arr: [T], comparator: fn(T, T) -> i64) -> [T]:
 
 **Goal:** Complete math stdlib with all trig, log, and rounding functions
 **Estimated Effort:** 2-3 hours
-**Files Modified:** `src/std/math.spl` (new), `src/app/io/mod.spl`
+**Files Modified:** `src/lib/math.spl` (new), `src/app/io/mod.spl`
 
 #### 3.1 SFFI Math Functions
 **Location:** `src/app/io/mod.spl` (add to existing SFFI section, around line 1000)
@@ -270,7 +270,7 @@ fn math_round(x: f64) -> f64:
 ```
 
 #### 3.2 Pure Simple Math Utilities
-**Location:** `src/std/math.spl` (create new file)
+**Location:** `src/lib/math.spl` (create new file)
 
 ```simple
 # Math utilities that don't need SFFI
@@ -445,10 +445,10 @@ fn atomic_i64_fetch_add(atomic_ref: i64, value: i64) -> i64:
 
 **Goal:** Add path manipulation utilities
 **Estimated Effort:** 2-3 hours
-**Files Modified:** `src/std/path.spl` (new)
+**Files Modified:** `src/lib/path.spl` (new)
 
 #### 5.1 Path Utilities (Pure Simple)
-**Location:** `src/std/path.spl` (create new file)
+**Location:** `src/lib/path.spl` (create new file)
 
 ```simple
 # Path manipulation utilities
@@ -706,11 +706,11 @@ fn main():
 ### Phase-Specific Scripts (in `scripts/impl/`)
 
 Each phase gets its own implementation script:
-- `scripts/impl/phase1_string_convert.spl` - Create `src/std/text.spl`, `src/std/convert.spl`
-- `scripts/impl/phase2_collections.spl` - Create `src/std/array.spl`
-- `scripts/impl/phase3_math.spl` - Create `src/std/math.spl`, update `src/app/io/mod.spl`
+- `scripts/impl/phase1_string_convert.spl` - Create `src/lib/text.spl`, `src/lib/convert.spl`
+- `scripts/impl/phase2_collections.spl` - Create `src/lib/array.spl`
+- `scripts/impl/phase3_math.spl` - Create `src/lib/math.spl`, update `src/app/io/mod.spl`
 - `scripts/impl/phase4_system_sffi.spl` - Update `src/app/io/mod.spl` stubs
-- `scripts/impl/phase5_path.spl` - Create `src/std/path.spl`
+- `scripts/impl/phase5_path.spl` - Create `src/lib/path.spl`
 
 ---
 
@@ -784,11 +784,11 @@ Each phase gets its own implementation script:
 ## Appendix: File Locations Summary
 
 **New files to create:**
-- `src/std/text.spl` - String extension methods
-- `src/std/convert.spl` - Type conversions
-- `src/std/array.spl` - Collection methods
-- `src/std/math.spl` - Pure math utilities
-- `src/std/path.spl` - Path manipulation
+- `src/lib/text.spl` - String extension methods
+- `src/lib/convert.spl` - Type conversions
+- `src/lib/array.spl` - Collection methods
+- `src/lib/math.spl` - Pure math utilities
+- `src/lib/path.spl` - Path manipulation
 - `scripts/impl_stdlib_sffi.spl` - Main orchestrator
 - `scripts/impl/phase*.spl` - Phase-specific scripts (5 files)
 - `scripts/fix_reserved_words.spl` - Workaround script

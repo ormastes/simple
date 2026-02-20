@@ -1475,7 +1475,7 @@ fn temp_manager_get_path(manager: TempFileManager, filename: text) -> text:
 
 **Test Helper Integration:**
 
-Add to `src/std/spec.spl`:
+Add to `src/lib/spec.spl`:
 ```simple
 fn temp_file(filename: text) -> text:
     # Get temp file path (uses SIMPLE_TEST_TEMP_DIR if set)

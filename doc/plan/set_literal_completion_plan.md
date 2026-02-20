@@ -25,7 +25,7 @@
    - `HirExprKind.SetLit(elements: [HirExpr], elem_type: HirType?)`
    - Type inference support
 
-4. **Standard Library** (`src/std/src/set.spl`)
+4. **Standard Library** (`src/lib/src/set.spl`)
    - Full `Set<T>` implementation with all methods
    - `Set.new()`, `insert()`, `has()`, `union()`, `intersect()`, etc.
    - 498 lines, production-ready

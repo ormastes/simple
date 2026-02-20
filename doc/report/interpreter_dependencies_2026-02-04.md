@@ -215,7 +215,7 @@ pub fn evaluate_expr(expr: &Expr, env: &Env) -> Result<Value, Error> {
 **Duration**: 1-2 weeks
 **Goal**: Move atomic operations to runtime FFI
 
-1. Create `src/std/concurrent/atomic.spl`
+1. Create `src/lib/concurrent/atomic.spl`
 2. Implement atomic operations in Simple with Rust FFI
 3. Update concurrent_providers to use new API
 4. Remove interpreter_extern/atomic dependency

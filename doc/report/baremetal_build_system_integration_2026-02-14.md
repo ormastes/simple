@@ -231,7 +231,7 @@ Total: 20/20 tests passing (100%)
    - Return object file path
 
 ### Short-Term (Runtime Team)
-1. **Bare-metal runtime library** (`src/std/baremetal/`):
+1. **Bare-metal runtime library** (`src/lib/baremetal/`):
    - `allocator.spl` - Simple bump allocator
    - `uart.spl` - Serial I/O for all platforms
    - `gpio.spl` - GPIO control (ARM)

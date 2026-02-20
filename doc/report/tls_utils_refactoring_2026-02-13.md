@@ -2,8 +2,8 @@
 
 **Date:** 2026-02-13
 **Pattern:** Facade Pattern
-**Original File:** `/home/ormastes/dev/pub/simple/src/std/tls_utils.spl` (1,505 lines)
-**Refactored Module:** `/home/ormastes/dev/pub/simple/src/std/tls/`
+**Original File:** `/home/ormastes/dev/pub/simple/src/lib/tls_utils.spl` (1,505 lines)
+**Refactored Module:** `/home/ormastes/dev/pub/simple/src/lib/tls/`
 
 ## Summary
 
@@ -220,7 +220,7 @@ from std.tls.handshake import build_client_hello, parse_server_hello
 ## File Organization
 
 ```
-src/std/
+src/lib/
 ├── tls_utils.spl              # Main facade (1,505 lines)
 └── tls/
     ├── types.spl              # Constants (76 lines)

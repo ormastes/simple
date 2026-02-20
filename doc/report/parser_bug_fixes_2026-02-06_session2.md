@@ -175,7 +175,7 @@ From all fixes across both sessions, the bootstrap parser has these limitations:
 - **Errors eliminated:** ~148 → 0 (100% reduction)
 - **Files fixed:**
   - `src/lib/database/core.spl` (atomic locking)
-  - `src/std/spec.spl` (assert → check)
+  - `src/lib/spec.spl` (assert → check)
   - `src/compiler/mir_data.spl` (enum workaround)
   - `src/compiler/treesitter/heuristic.spl` (multi-line if)
   - `src/lib/database/feature.spl` (field assignment)

@@ -322,7 +322,7 @@ fn eval_with_stmt(stmt: WithStmt, env: Env) -> Value:
 ### File Context Manager
 
 ```simple
-# src/std/io/file.spl
+# src/lib/io/file.spl
 class File:
     path: text
     handle: i64
@@ -361,7 +361,7 @@ with open("data.txt") as f:
 ### Lock Context Manager
 
 ```simple
-# src/std/concurrency/lock.spl
+# src/lib/concurrency/lock.spl
 class Lock:
     id: i64
     is_locked: bool
@@ -387,7 +387,7 @@ with mutex:
 ### Database Transaction
 
 ```simple
-# src/std/database/transaction.spl
+# src/lib/database/transaction.spl
 class Transaction:
     db: Database
     is_active: bool

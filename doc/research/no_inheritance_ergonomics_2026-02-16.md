@@ -275,12 +275,12 @@ Constraints: reflection/serialization, engine-owned lifecycle, hot path forwardi
 
 | Trait | Location | Required Methods |
 |-------|----------|-----------------|
-| `Error` | `src/std/error.spl` | `message() -> text`, `source() -> Error?`, `backtrace() -> Backtrace?` |
-| `FutureCore<T>` | `src/std/async_core.spl` | `poll() -> Poll<T>`, `is_ready() -> bool` |
-| `TaskHandleCore<T>` | `src/std/async_core.spl` | `id() -> usize`, `is_finished() -> bool`, `try_join() -> Option<T>`, `state() -> TaskState` |
-| `JoinSetCore<T>` | `src/std/async_core.spl` | `len() -> usize`, `is_empty() -> bool`, `try_join_next()` |
-| `SchedulerCore` | `src/std/async_core.spl` | `has_runnable() -> bool`, `run_one() -> bool`, `is_idle() -> bool` |
-| `ToJson` | `src/std/json.spl` | `to_json() -> text` |
+| `Error` | `src/lib/error.spl` | `message() -> text`, `source() -> Error?`, `backtrace() -> Backtrace?` |
+| `FutureCore<T>` | `src/lib/async_core.spl` | `poll() -> Poll<T>`, `is_ready() -> bool` |
+| `TaskHandleCore<T>` | `src/lib/async_core.spl` | `id() -> usize`, `is_finished() -> bool`, `try_join() -> Option<T>`, `state() -> TaskState` |
+| `JoinSetCore<T>` | `src/lib/async_core.spl` | `len() -> usize`, `is_empty() -> bool`, `try_join_next()` |
+| `SchedulerCore` | `src/lib/async_core.spl` | `has_runnable() -> bool`, `run_one() -> bool`, `is_idle() -> bool` |
+| `ToJson` | `src/lib/json.spl` | `to_json() -> text` |
 | `Displayable` | various | `to_string() -> text` |
 | `Comparable` | various | `compare_to(other) -> i64` |
 | `Serializable` | various | `serialize() -> text`, `deserialize(text)` |

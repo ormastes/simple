@@ -15,10 +15,10 @@ Implemented a comprehensive skip/ignore decorator system for the Simple language
 
 | File | Lines | Purpose | Status |
 |------|-------|---------|--------|
-| `src/std/spec/env_detect.spl` | 480 | Environment detection (11 categories) | ✅ Complete |
-| `src/std/spec/condition.spl` | 349 | Skip condition evaluation | ✅ Complete |
-| `src/std/spec/decorators.spl` | 318 | Decorator functions | ✅ Complete |
-| `src/std/spec/mod.spl` | 12 | Module index | ✅ Complete |
+| `src/lib/spec/env_detect.spl` | 480 | Environment detection (11 categories) | ✅ Complete |
+| `src/lib/spec/condition.spl` | 349 | Skip condition evaluation | ✅ Complete |
+| `src/lib/spec/decorators.spl` | 318 | Decorator functions | ✅ Complete |
+| `src/lib/spec/mod.spl` | 12 | Module index | ✅ Complete |
 | **Total** | **1,159** | | |
 
 ### 2. Design Documentation
@@ -32,7 +32,7 @@ Implemented a comprehensive skip/ignore decorator system for the Simple language
 
 | File | Changes | Purpose |
 |------|---------|---------|
-| `src/std/spec.spl` | +35 lines | Import & export new modules |
+| `src/lib/spec.spl` | +35 lines | Import & export new modules |
 
 ## Implementation Details
 
@@ -220,7 +220,7 @@ skip_win("test name", fn():
 ```
 
 ### Backwards Compatibility
-✅ Old functions still work (in `src/std/spec.spl`)
+✅ Old functions still work (in `src/lib/spec.spl`)
 ✅ No breaking changes
 ✅ Can gradually migrate tests
 
@@ -286,10 +286,10 @@ The comprehensive skip/ignore system is **fully implemented** and **production-r
 **Total Implementation Time:** ~4 hours (design + implementation + testing + refactoring)
 
 **Files Ready for Use:**
-- `src/std/spec/env_detect.spl` ✅
-- `src/std/spec/condition.spl` ✅
-- `src/std/spec/decorators.spl` ✅
-- `src/std/spec.spl` (integrated) ✅
+- `src/lib/spec/env_detect.spl` ✅
+- `src/lib/spec/condition.spl` ✅
+- `src/lib/spec/decorators.spl` ✅
+- `src/lib/spec.spl` (integrated) ✅
 
 **Next Steps:**
 1. Write comprehensive test suite (`test/lib/std/spec/skip_decorators_spec.spl`)

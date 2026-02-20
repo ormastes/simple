@@ -68,7 +68,7 @@ This document catalogs all remaining work items across the Simple language compi
 | `src/compiler/` | ~420 | 20% |
 | `src/ffi/` | ~280 | 13% |
 | `src/app/` | ~210 | 10% |
-| `src/std/` | ~140 | 7% |
+| `src/lib/` | ~140 | 7% |
 | `src/lib/` | ~85 | 4% |
 | `test/` | ~142 | 6% |
 
@@ -246,7 +246,7 @@ All 269 TODO items are P3 - general maintenance / future features:
 | Module | Implementation % | Notes |
 |--------|-----------------|-------|
 | `src/compiler_core_legacy/` | 95% | Core interpreter/parser complete |
-| `src/std/` | 90% | Platform lib, spec framework done |
+| `src/lib/` | 90% | Platform lib, spec framework done |
 | `src/lib/database/` | 85% | Core functionality production-ready |
 | `src/app/io/` | 92% | File/process/FFI working |
 | `src/app/cli/` | 88% | Main commands functional |

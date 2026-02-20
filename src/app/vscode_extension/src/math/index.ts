@@ -5,8 +5,8 @@
  * for Simple language `m{ ... }` math blocks.
  *
  * The existing Simple rendering infrastructure:
- *   src/std/math_repr.spl    - Math expression parser with to_pretty(), render_latex_raw(), to_md()
- *   src/std/mathjax.spl      - MathJax SFFI wrapper for SVG/HTML rendering
+ *   src/lib/math_repr.spl    - Math expression parser with to_pretty(), render_latex_raw(), to_md()
+ *   src/lib/mathjax.spl      - MathJax SFFI wrapper for SVG/HTML rendering
  *   src/app/lsp/handlers/hover.spl - LSP hover handler that renders math blocks server-side
  *   src/app/lsp/             - Full LSP server with hover, completion, diagnostics, etc.
  *

@@ -13,11 +13,11 @@
 - `use std.path.{basename}` fails with "function not found"
 
 **Files Ready:**
-- ✅ `src/std/path.spl` (217 lines, 10 functions, ready to use)
+- ✅ `src/lib/path.spl` (217 lines, 10 functions, ready to use)
 - ✅ `test/std/path_spec.spl` (350 lines, 85+ tests, ready to run)
 
 **Requirements:**
-1. Module resolution: Recognize `use std.path` → `src/std/path.spl`
+1. Module resolution: Recognize `use std.path` → `src/lib/path.spl`
 2. Namespace support: Allow `path.basename()` on imported namespace
 3. Selective imports: Support `use std.path.{basename, dirname}`
 
@@ -97,7 +97,7 @@ simple test test/app/formatter_comprehensive_spec.spl
 
 **Reference:**
 - Rust tests: `rust/runtime/tests/upx_integration_test.rs`
-- Simple lib: `src/std/compress/upx.spl` (if exists)
+- Simple lib: `src/lib/compress/upx.spl` (if exists)
 
 **Estimated Effort:** 2-3 hours
 
@@ -215,7 +215,7 @@ target-name:
 ---
 
 ### 10. Create std.text Module 📦 New stdlib
-**File:** `src/std/text.spl`
+**File:** `src/lib/text.spl`
 
 **Functions:**
 - `trim()`, `trim_start()`, `trim_end()`
@@ -290,7 +290,7 @@ jj status  # If using jujutsu
 - Quick reference: `doc/guide/migration_quick_reference.md`
 
 **Created This Session:**
-- `src/std/path.spl` - Path utilities (ready to use)
+- `src/lib/path.spl` - Path utilities (ready to use)
 - `test/std/path_spec.spl` - 85+ tests (ready to run)
 - 12 comprehensive reports (~5,400 lines)
 

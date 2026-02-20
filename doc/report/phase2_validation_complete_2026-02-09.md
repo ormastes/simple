@@ -113,7 +113,7 @@ System/Process functions in `src/ffi/system.spl` require `extern fn` runtime cal
 Since imports don't work, functions were copied inline into test file:
 
 ```simple
-# Copy function definition from src/std/text.spl or src/std/array.spl
+# Copy function definition from src/lib/text.spl or src/lib/array.spl
 fn string_trim(s: text) -> text:
     var result = s
     # ... exact implementation from Phase 2 ...
@@ -241,7 +241,7 @@ When the import system is fixed:
 
 ### Inline Helpers Module ✅
 
-**File:** `src/std/helpers.spl` (240 lines)
+**File:** `src/lib/helpers.spl` (240 lines)
 
 Provides copy-pasteable implementations of all validated Phase 2 functions:
 - String helpers: 8 functions
@@ -252,7 +252,7 @@ Provides copy-pasteable implementations of all validated Phase 2 functions:
 ### Adoption Path
 
 Teams needing Phase 2 functionality can:
-1. Copy functions from `src/std/helpers.spl` into test files
+1. Copy functions from `src/lib/helpers.spl` into test files
 2. Use inline implementations (proven to work)
 3. Migrate to imports when runtime fixed (simple search-and-replace)
 
@@ -311,7 +311,7 @@ Compilation: SMF format (219 bytes)
 ### Immediate Use ✅
 
 **Phase 2 is production-ready for inline usage:**
-1. Copy functions from `src/std/helpers.spl`
+1. Copy functions from `src/lib/helpers.spl`
 2. Use in tests with inline implementations
 3. All logic validated and working
 

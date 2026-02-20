@@ -240,7 +240,7 @@
 
 ### All Utility Modules
 ```
-src/std/{
+src/lib/{
   string_extra, validation, numeric,
   collection_utils, functional, option_helpers,
   result_helpers, tuple_utils, bitwise_utils,
@@ -314,7 +314,7 @@ Starting from a simple request to "check skip/pending/TODO items," this session 
 
 | What | Where |
 |------|-------|
-| **All utilities** | `src/std/*.spl` (17 modules) |
+| **All utilities** | `src/lib/*.spl` (17 modules) |
 | **Complete docs** | `doc/session/2026-02-11_*.md` |
 | **Roadmap** | `doc/TODO_ACTIONABLE.md` |
 | **Status** | `doc/REMAINING_WORK.md` |

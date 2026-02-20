@@ -136,7 +136,7 @@ Auto-generated from file path to indicate which part of the codebase the item be
 
 | Tag | Path Pattern | Description |
 |-----|--------------|-------------|
-| `scope:stdlib` | `src/std/**` | Standard library (highest priority for docs) |
+| `scope:stdlib` | `src/lib/**` | Standard library (highest priority for docs) |
 | `scope:core` | `src/compiler_core/**` | Core compiler library (high priority) |
 | `scope:lib` | `src/lib/**` | Internal libraries (medium priority) |
 | `scope:app` | `src/app/**` | Applications/tools (lower priority) |
@@ -147,7 +147,7 @@ Auto-generated from file path to indicate which part of the codebase the item be
 **Generation logic:**
 ```simple
 fn generate_scope_tag(file_path: text) -> text:
-    if file_path.starts_with("src/std/"):
+    if file_path.starts_with("src/lib/"):
         return "scope:stdlib"
     elif file_path.starts_with("src/compiler_core/"):
         return "scope:core"
@@ -324,7 +324,7 @@ impl DocItem:
 {
   "name": "square",
   "kind": "function",
-  "file": "src/std/math.spl",
+  "file": "src/lib/math.spl",
   "line": 42,
   "tags": [
     "kind:function",
@@ -344,8 +344,8 @@ impl DocItem:
 
 ```csv
 name,kind,file,line,tags,coverage_percent
-square,function,src/std/math.spl,42,"kind:function,scope:stdlib,api:public,doc:complete",100.0
-helper,function,src/std/math.spl,98,"kind:function,scope:stdlib,api:internal,doc:missing_inline_comment",0.0
+square,function,src/lib/math.spl,42,"kind:function,scope:stdlib,api:public,doc:complete",100.0
+helper,function,src/lib/math.spl,98,"kind:function,scope:stdlib,api:internal,doc:missing_inline_comment",0.0
 ```
 
 ---
@@ -382,7 +382,7 @@ fn generate_kind_tag(item: DocItem) -> text:
 ```simple
 fn generate_scope_tag(file_path: text) -> text:
     # See "Scope Tags" section above
-    if file_path.starts_with("src/std/"):
+    if file_path.starts_with("src/lib/"):
         return "scope:stdlib"
     # ... etc.
 ```
@@ -526,13 +526,13 @@ simple doc-coverage --tag=priority:critical --tag=doc:missing_sdoctest
 
 **Output:**
 ```
-Missing SDoctest in Critical APIs (src/std/)
+Missing SDoctest in Critical APIs (src/lib/)
 ============================================
 
-src/std/text.spl:42 - fn split(delimiter: text) -> [text]
+src/lib/text.spl:42 - fn split(delimiter: text) -> [text]
   Tags: kind:function, scope:stdlib, api:public, doc:missing_sdoctest, priority:critical
 
-src/std/array.spl:89 - fn filter(predicate: fn(T) -> bool) -> [T]
+src/lib/array.spl:89 - fn filter(predicate: fn(T) -> bool) -> [T]
   Tags: kind:function, scope:stdlib, api:public, doc:missing_sdoctest, priority:critical
 
 Total: 2 items need documentation
@@ -581,7 +581,7 @@ simple build --warn-docs --warn-docs-priority=critical
 **Output:**
 ```
 warning: missing sdoctest for public stdlib function
-  --> src/std/text.spl:42:1
+  --> src/lib/text.spl:42:1
    |
 42 | fn split(delimiter: text) -> [text]:
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -604,7 +604,7 @@ simple stats --format=json --doc-coverage-only | jq '.items[] | select(.tags[] |
 {
   "name": "split",
   "kind": "function",
-  "file": "src/std/text.spl",
+  "file": "src/lib/text.spl",
   "line": 42,
   "signature": "fn split(delimiter: text) -> [text]",
   "tags": [

@@ -11,7 +11,7 @@ Created **6 comprehensive utility modules** with **150+ functions** totaling **2
 
 ## Modules Created
 
-### 1. `src/std/string_extra.spl` (328 lines, 20+ functions)
+### 1. `src/lib/string_extra.spl` (328 lines, 20+ functions)
 **String manipulation beyond text.spl**
 
 - Predicates: empty, whitespace, ASCII checks
@@ -21,7 +21,7 @@ Created **6 comprehensive utility modules** with **150+ functions** totaling **2
 - Splitting: split_once, lines
 - Comparison: case-insensitive comparison
 
-### 2. `src/std/validation.spl` (320 lines, 27 functions)
+### 2. `src/lib/validation.spl` (320 lines, 27 functions)
 **Input validation and data checking**
 
 - String patterns: identifier, numeric, hex, email
@@ -31,7 +31,7 @@ Created **6 comprehensive utility modules** with **150+ functions** totaling **2
 - Format validation: version, path component
 - Validation helpers: require, require_all
 
-### 3. `src/std/numeric.spl` (380 lines, 28 functions)
+### 3. `src/lib/numeric.spl` (380 lines, 28 functions)
 **Numeric operations and number theory**
 
 - Parity: even/odd checks
@@ -43,7 +43,7 @@ Created **6 comprehensive utility modules** with **150+ functions** totaling **2
 - Range: sum/product of ranges
 - Conversion: binary string to/from integer
 
-### 4. `src/std/collection_utils.spl` (450 lines, 30+ functions)
+### 4. `src/lib/collection_utils.spl` (450 lines, 30+ functions)
 **Advanced collection operations**
 
 - Partitioning: partition, group_consecutive
@@ -54,7 +54,7 @@ Created **6 comprehensive utility modules** with **150+ functions** totaling **2
 - Comparison: array_equals, subarray operations
 - Search: index_of_subarray, contains_subarray
 
-### 5. `src/std/functional.spl` (420 lines, 40+ functions)
+### 5. `src/lib/functional.spl` (420 lines, 40+ functions)
 **Functional programming patterns**
 
 - Primitives: identity, constant, apply
@@ -67,7 +67,7 @@ Created **6 comprehensive utility modules** with **150+ functions** totaling **2
 - Array operations: take_while, drop_while, find_first/last
 - Generation: generate, range_step
 
-### 6. `src/std/option_helpers.spl` (380 lines, 35+ functions)
+### 6. `src/lib/option_helpers.spl` (380 lines, 35+ functions)
 **Option/Result type helpers**
 
 - Unwrapping: unwrap_or, unwrap_or_else

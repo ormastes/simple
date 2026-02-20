@@ -16,7 +16,7 @@ Phase 2 (SFFI Wrappers) is **100% complete in terms of implementation** - all St
 ## Phase 2.1: String Methods ✅
 
 **Status:** Implementation Complete (+70 lines)
-**File:** `src/std/text.spl`
+**File:** `src/lib/text.spl`
 **Blocker:** Runtime import system
 
 ### Functions Added
@@ -48,7 +48,7 @@ string_split(s: text, delim: text) -> [text]  # General split function
 ## Phase 2.2: Array Methods ✅
 
 **Status:** Implementation Complete (+85 lines)
-**File:** `src/std/array.spl`
+**File:** `src/lib/array.spl`
 **Blocker:** Runtime import system
 
 ### Functions Added
@@ -313,8 +313,8 @@ Phase 3 (Runtime Core Fixes) requires:
 ## Files Modified
 
 ### Enhanced
-- `src/std/text.spl` (+70 lines) - String method wrappers
-- `src/std/array.spl` (+85 lines) - Array method wrappers
+- `src/lib/text.spl` (+70 lines) - String method wrappers
+- `src/lib/array.spl` (+85 lines) - Array method wrappers
 
 ### Verified Existing
 - `src/ffi/system.spl` (260 lines) - System/Process SFFI (already existed)

@@ -19,7 +19,7 @@ Phase 3 focuses on parser enhancements, type system improvements, SDN integratio
 
 ### Phase 3.1: SDN Integration (5 TODOs)
 
-**Files:** `src/std/db_atomic.spl`, `src/std/src/dl/config_loader.spl`, `src/std/src/exp/artifact.spl`, `src/std/src/exp/config.spl`
+**Files:** `src/lib/db_atomic.spl`, `src/lib/src/dl/config_loader.spl`, `src/lib/src/exp/artifact.spl`, `src/lib/src/exp/config.spl`
 **Dependency:** `std.sdn` (already exists)
 
 **Tasks:**

@@ -55,12 +55,12 @@ db.save()
 
 | Module | Location | Functions |
 |--------|----------|-----------|
-| String | `src/std/text.spl` | String utilities |
-| Math | `src/std/math.spl` | Math functions |
-| Path | `src/std/path.spl` | Path utilities (13 functions) |
-| Array | `src/std/array.spl` | Collection methods |
-| Platform | `src/std/platform/mod.spl` | Cross-platform support |
-| Spec | `src/std/spec.spl` | SSpec test framework |
+| String | `src/lib/text.spl` | String utilities |
+| Math | `src/lib/math.spl` | Math functions |
+| Path | `src/lib/path.spl` | Path utilities (13 functions) |
+| Array | `src/lib/array.spl` | Collection methods |
+| Platform | `src/lib/platform/mod.spl` | Cross-platform support |
+| Spec | `src/lib/spec.spl` | SSpec test framework |
 
 ## SFFI Patterns
 

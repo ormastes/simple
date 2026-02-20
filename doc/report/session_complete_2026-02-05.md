@@ -72,7 +72,7 @@ Successfully completed comprehensive test infrastructure improvement across 3 ma
 ### Phase 2: Missing Function Implementation (Previous)
 - **Issue:** ~150 test failures due to missing functions
 - **Solutions:**
-  - Created `src/std/src/text_utils.spl` (268 lines, 14 functions)
+  - Created `src/lib/src/text_utils.spl` (268 lines, 14 functions)
   - Added `bug_to_row()` to `src/lib/database/bug.spl`
   - Verified FFI exports
 - **Result:** ~150 failures fixed (73% of all failures)

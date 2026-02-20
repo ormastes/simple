@@ -46,7 +46,7 @@
 - `src/app/cli/arch_check.spl` — architecture validation CLI
 - `src/compiler/backend_port.spl` — BackendPort typed contract
 - `src/compiler/compiler_services.spl` — CompilerServices port container
-- `src/std/error_suggest.spl` — error suggestion system
+- `src/lib/error_suggest.spl` — error suggestion system
 - `src/compiler_shared/` — 28 shared compiler files extracted
 
 ### Phase 1: Entity Dimension

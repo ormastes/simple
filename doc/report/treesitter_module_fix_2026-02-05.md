@@ -56,7 +56,7 @@ Tests expected a `Lexer` class with `tokenize()` method, but module didn't provi
 
 ### 1. Fixed Import Syntax
 
-**File**: `src/std/src/parser/treesitter.spl`
+**File**: `src/lib/src/parser/treesitter.spl`
 
 Changed:
 ```simple
@@ -199,7 +199,7 @@ $ grep -r 'tags: \["skip"\]' test/ | grep -c treesitter
 ### Files Modified
 
 **Core Module**:
-- `src/std/src/parser/treesitter.spl` (24 lines added/changed)
+- `src/lib/src/parser/treesitter.spl` (24 lines added/changed)
 
 **Test Files Enabled**:
 - `test/lib/std/unit/parser/treesitter_lexer_real_spec.spl`

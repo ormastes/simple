@@ -33,7 +33,7 @@ vim.bo.fileformat = "unix"
 
 -- Suffix for :find and gf
 vim.opt_local.suffixesadd:append(".spl")
-vim.opt_local.path:append("src/std,src/app,src/core,src/lib")
+vim.opt_local.path:append("src/app,src/core,src/lib")
 
 -- Match pairs for % navigation
 vim.opt_local.matchpairs:append("<:>")

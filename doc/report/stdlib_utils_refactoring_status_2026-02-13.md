@@ -10,7 +10,7 @@
 
 **Structure:**
 ```
-src/std/geometry/
+src/lib/geometry/
 ├── types.spl          (12 lines) - Constants and types
 ├── point.spl          (388 lines) - 2D/3D point and vector operations  
 ├── line.spl           (140 lines) - Line operations and intersections
@@ -19,7 +19,7 @@ src/std/geometry/
 └── utilities.spl      (292 lines) - Transformations, bounding boxes, collisions
 ```
 
-**Facade:** `src/std/geometry_utils.spl` (239 lines)
+**Facade:** `src/lib/geometry_utils.spl` (239 lines)
 
 **Categories:**
 - ✅ types - Constants (EPSILON)
@@ -35,7 +35,7 @@ src/std/geometry/
 
 **Planned Structure:**
 ```
-src/std/bcrypt/
+src/lib/bcrypt/
 ├── types.spl          - Constants, S-boxes, magic values
 ├── hash.spl           - Core bcrypt hashing functions
 ├── verify.spl         - Password verification and comparison
@@ -44,7 +44,7 @@ src/std/bcrypt/
 └── utilities.spl      - Helper functions, encoding, parsing
 ```
 
-**Facade:** `src/std/bcrypt_utils.spl`
+**Facade:** `src/lib/bcrypt_utils.spl`
 
 **Expected Categories:**
 - 🚧 types - Constants, Blowfish P-array and S-boxes
@@ -66,7 +66,7 @@ src/std/bcrypt/
 
 **Planned Structure:**
 ```
-src/std/cbor/
+src/lib/cbor/
 ├── types.spl          - Major types, constants, type detection
 ├── encode.spl         - CBOR encoding functions
 ├── decode.spl         - CBOR decoding functions
@@ -74,7 +74,7 @@ src/std/cbor/
 └── utilities.spl      - Utilities, diagnostics, hexdump
 ```
 
-**Facade:** `src/std/cbor_utils.spl`
+**Facade:** `src/lib/cbor_utils.spl`
 
 **Expected Categories:**
 - 🚧 types - Major type constants, initial byte encoding

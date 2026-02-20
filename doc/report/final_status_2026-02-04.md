@@ -46,7 +46,7 @@ Successfully implemented a minimal, syscall-based FFI system for Simple language
 
 ### Phase 3: Wrapper Migration ✅ 100%
 
-**Updated:** Simple language wrappers in `src/std/common/file_reader.spl`
+**Updated:** Simple language wrappers in `src/lib/common/file_reader.spl`
 
 **Features:**
 - FileReader with automatic mmap for large files (≥32KB threshold)
@@ -268,7 +268,7 @@ extern fn rt_file_read_text(path: text) -> text
 |------|---------|-------|
 | `rust/ffi_syscalls/src/lib.rs` | 23 syscall implementations | ~700 |
 | `rust/runtime/src/syscalls_ffi.rs` | FFI declarations | ~120 |
-| `src/std/common/file_reader.spl` | Simple wrappers | ~200 |
+| `src/lib/common/file_reader.spl` | Simple wrappers | ~200 |
 | `test/system/ffi/syscalls_manual_verify.spl` | Manual tests | ~100 |
 | `test/system/ffi/syscalls_test.spl` | Full test suite | ~250 |
 

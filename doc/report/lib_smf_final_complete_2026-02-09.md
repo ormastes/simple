@@ -189,7 +189,7 @@ Generate candidates:
   - std/io/mod.o       (full path)
   - std_io_mod.o       (underscored)
   - mod.o              (last component)
-  - src/std/io/mod.o   (with prefix)
+  - src/lib/io/mod.o   (with prefix)
 
 Search paths:
   - build/obj/
@@ -364,7 +364,7 @@ Error: Object file not found for module 'std/io/mod'
 
 ```bash
 # Build
-simple scripts/compile_with_objects.spl --input-dir=src/std
+simple scripts/compile_with_objects.spl --input-dir=src/lib
 simple scripts/build_libstd.spl
 
 # Verify

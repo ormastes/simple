@@ -71,7 +71,7 @@ Files: `*_spec.spl` or `*_test.spl`
 
 ## Import System for Tests
 
-1. Ensure symlink exists: `test/lib/std/module.spl -> ../../../src/std/module.spl`
+1. Ensure symlink exists: `test/lib/std/module.spl -> ../../../src/lib/module.spl`
 2. Use curly brace syntax: `use std.module.{func1, func2}`
 3. Functions accessible directly: `func1()`, `func2()`
 

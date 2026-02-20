@@ -69,7 +69,7 @@ export class MathHoverProvider implements vscode.HoverProvider {
      * Create a hover display for a math block (fallback mode).
      *
      * Uses local TypeScript converters from mathConverter.ts which mirror
-     * the Simple-side rendering in src/std/math_repr.spl.
+     * the Simple-side rendering in src/lib/math_repr.spl.
      */
     private createHover(content: string, range: vscode.Range): vscode.Hover {
         const markdown = new vscode.MarkdownString();
@@ -87,7 +87,7 @@ export class MathHoverProvider implements vscode.HoverProvider {
         // Separator
         markdown.appendMarkdown('---\n\n');
 
-        // Unicode pretty text (mirrors to_pretty() from src/std/math_repr.spl)
+        // Unicode pretty text (mirrors to_pretty() from src/lib/math_repr.spl)
         const pretty = simpleToUnicode(content);
         markdown.appendMarkdown(`**Pretty:** ${pretty}\n\n`);
 

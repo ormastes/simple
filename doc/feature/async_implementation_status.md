@@ -169,7 +169,7 @@ Provides:
 
 ### Runtime Libraries (✅ Complete)
 
-Located in `src/std/`:
+Located in `src/lib/`:
 - `async_core.spl` - Shared Poll<T>, TaskState, Priority types
 - `async_embedded.spl` - Fixed-capacity, no-heap runtime
 - `async_host.spl` - Dynamic, heap-allocated runtime
@@ -389,7 +389,7 @@ Type constants (✅) → Runtime C types (⏳) → Type checking (⏳) → Execu
 - `doc/plan/async_await_implementation_plan.md` - Full async roadmap
 - `doc/design/async_validation_status.md` - Async validation design
 - `doc/guide/async_runtime_guide.md` - Runtime usage guide
-- `src/std/async_core.spl` - Core async types
+- `src/lib/async_core.spl` - Core async types
 - `src/compiler/hir_lowering/async.spl` - HIR async integration
 
 ---

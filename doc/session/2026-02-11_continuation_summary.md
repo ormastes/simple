@@ -6,7 +6,7 @@
 ## Accomplishments
 
 ### 1. New Utility Module Created ✅
-**File:** `src/std/string_extra.spl`
+**File:** `src/lib/string_extra.spl`
 
 Comprehensive string utility module with 20+ functions:
 
@@ -65,7 +65,7 @@ Attempted to enable additional pending tests:
 
 ## Files Created
 
-1. `src/std/string_extra.spl` - New utility module (328 lines)
+1. `src/lib/string_extra.spl` - New utility module (328 lines)
    - 20+ string manipulation functions
    - Fully documented with examples
    - Pure Simple, no external dependencies

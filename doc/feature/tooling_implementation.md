@@ -13,10 +13,10 @@ Implementing missing tooling utilities that are timing out in tests. Priority ba
 |-----------|--------|----------|------------------------|
 | `arg_parsing_spec.spl` | All tests skipped (bootstrap limitation) | HIGH | Blocked - static method unsupported |
 | `json_utils_spec.spl` | PASSING (31 tests) | HIGH | Inline in test file |
-| `regex_utils_spec.spl` | PASSING (23 tests) | MEDIUM | `src/std/src/tooling/regex_utils.spl` |
+| `regex_utils_spec.spl` | PASSING (23 tests) | MEDIUM | `src/lib/src/tooling/regex_utils.spl` |
 | `html_utils_spec.spl` | PASSING (44 tests) | MEDIUM | Inline in test file |
-| `brief_view_spec.spl` | Needs module | LOW | `src/std/src/tooling/brief_view.spl` |
-| `context_pack_spec.spl` | Needs module | LOW | `src/std/src/tooling/context_pack.spl` |
+| `brief_view_spec.spl` | Needs module | LOW | `src/lib/src/tooling/brief_view.spl` |
+| `context_pack_spec.spl` | Needs module | LOW | `src/lib/src/tooling/context_pack.spl` |
 | `retry_utils_spec.spl` | PASSING (32 tests) | LOW | Inline in test file |
 
 ## Implementation Plan

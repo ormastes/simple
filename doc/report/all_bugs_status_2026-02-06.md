@@ -24,13 +24,13 @@
 - **Status**: ✅ FIXED
 - **Impact**: TreeSitter module parse errors
 - **Fix**: Renamed `QueryMatch` → `QueryResult`, `QueryCapture` → `CapturedNode`
-- **Files**: `src/std/src/parser/treesitter.spl`
+- **Files**: `src/lib/src/parser/treesitter.spl`
 
 ### Bug #3: Variable Name Keyword Conflict
 - **Status**: ✅ FIXED
 - **Impact**: TreeSitter cursor parse error
 - **Fix**: Renamed variable `match` → `result`
-- **Files**: `src/std/src/parser/treesitter.spl:695`
+- **Files**: `src/lib/src/parser/treesitter.spl:695`
 
 ### Bug #4: LexerMode Import Path
 - **Status**: ✅ FIXED

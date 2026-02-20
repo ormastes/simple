@@ -279,14 +279,14 @@ Simple searches for modules in these directories:
 
 1. Current directory: `.`
 2. Library directory: `./lib`
-3. Standard library: `./src/std/src`
+3. Standard library: `./src/lib/src`
 4. Application directory: `./src/app`
 
 Example:
 ```simple
 use lib.database.core     # Looks for: ./src/lib/database/core.spl
 use app.io                # Looks for: ./src/app/io/mod.spl
-use std.spec              # Looks for: ./src/std/src/spec.spl
+use std.spec              # Looks for: ./src/lib/src/spec.spl
 ```
 
 ## Import Resolution

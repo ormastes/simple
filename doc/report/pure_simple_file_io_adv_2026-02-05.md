@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-05
 **Status:** ✅ Complete (Pure Simple, No FFI)
-**Module:** `src/std/src/infra.spl` (11,439 bytes)
+**Module:** `src/lib/src/infra.spl` (11,439 bytes)
 **Pattern:** 100% Pure Simple using shell commands
 
 ---
@@ -362,7 +362,7 @@ All fallible operations return `Result<T, IoError>`.
 ## File Structure
 
 ```
-src/std/src/infra.spl  (11,439 bytes)
+src/lib/src/infra.spl  (11,439 bytes)
 ├── Exports (19 functions)
 ├── Result Types
 │   └── IoError struct

@@ -242,7 +242,7 @@ fn write_bytes_to_file(path: text, data: [u8]) -> bool:
 
 ```bash
 # Compile standard library to object files
-bin/simple build src/std --emit-obj -o build/obj/
+bin/simple build src/lib --emit-obj -o build/obj/
 
 # Build library with object files
 bin/simple scripts/build_libstd.spl --with-objects --obj-dir=build/obj
@@ -296,7 +296,7 @@ val obj_data = reader.get_object("std/io/mod")?
 2. **Build stdlib with objects:**
    ```bash
    # First compile stdlib
-   bin/simple build src/std --emit-obj -o build/obj/
+   bin/simple build src/lib --emit-obj -o build/obj/
 
    # Then create library
    bin/simple scripts/build_libstd.spl --with-objects --verbose

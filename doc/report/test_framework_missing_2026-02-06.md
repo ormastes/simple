@@ -59,7 +59,7 @@ The runtime provides `rt_cli_run_tests()` but no spec framework in Simple source
 
 ### Option 1: Implement Minimal sspec (RECOMMENDED)
 
-Create `src/std/spec.spl`:
+Create `src/lib/spec.spl`:
 ```simple
 # Minimal SSpec implementation
 fn describe(name: text, block: fn()):

@@ -24,7 +24,7 @@ Successfully implemented **cross-platform runtime support** for Windows, Linux, 
    - Auto-detection: lld-link → link.exe → lld
    - Library name conversion (Unix → Windows: .a → .lib)
 
-2. **`src/std/fs/path.spl`** (380 lines)
+2. **`src/lib/fs/path.spl`** (380 lines)
    - Cross-platform Path class
    - File/directory operations
    - Path joining with platform separators
@@ -52,7 +52,7 @@ Successfully implemented **cross-platform runtime support** for Windows, Linux, 
 
 ### Files Enhanced (2 files from Phase 1)
 
-5. **`src/std/platform/mod.spl`** (already created in Phase 1, 280 lines)
+5. **`src/lib/platform/mod.spl`** (already created in Phase 1, 280 lines)
    - Platform detection (is_windows, is_linux, is_macos)
    - Path separators (dir_sep, path_sep)
    - File extensions (exe_ext, lib_ext)
@@ -482,8 +482,8 @@ mklink /J link_name target_dir
    - Cross-compilation
 
 2. **API Documentation** (inline)
-   - `src/std/platform/mod.spl` - Platform detection
-   - `src/std/fs/path.spl` - Path handling
+   - `src/lib/platform/mod.spl` - Platform detection
+   - `src/lib/fs/path.spl` - Path handling
    - `src/compiler/linker/msvc.spl` - MSVC linker
 
 ### Developer-Facing

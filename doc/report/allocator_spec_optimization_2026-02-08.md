@@ -186,7 +186,7 @@ These tests don't rely on allocator API:
 
 ### Priority 1: Fix Allocator API
 ```simple
-# src/std/allocator.spl
+# src/lib/allocator.spl
 
 struct Pointer:
     address: i64

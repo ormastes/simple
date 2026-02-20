@@ -138,7 +138,7 @@ run_tests_parallel_mode():
    - `get_system_memory_percent()` - System-wide memory usage
    - `system_exceeds_threshold()` - Check if limits exceeded
 
-2. **`src/std/process_monitor.spl`** (existing)
+2. **`src/lib/process_monitor.spl`** (existing)
    - `sample_process(pid)` - Per-process metrics
    - `exceeds_limits()` - Check process limits
 

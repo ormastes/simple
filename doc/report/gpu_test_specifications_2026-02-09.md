@@ -299,8 +299,8 @@ These test specs complement existing GPU tests:
 ### Test Dependencies
 
 Tests depend on:
-- **Runtime:** `src/std/gpu_runtime/mod.spl`
-- **Full API:** `src/std/gpu/` (context, device, memory, mod)
+- **Runtime:** `src/lib/gpu_runtime/mod.spl`
+- **Full API:** `src/lib/gpu/` (context, device, memory, mod)
 - **Examples:** `examples/gpu/*.spl` demonstrate tested patterns
 
 ---

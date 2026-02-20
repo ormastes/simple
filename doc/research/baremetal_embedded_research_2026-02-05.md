@@ -131,7 +131,7 @@ extern fn rt_volatile_write_u32(addr: u64, value: u32)
 - ❌ No CPU-specific barrier instructions
 - ❌ No inline assembly
 
-**Available in `src/std/atomic.spl`:**
+**Available in `src/lib/atomic.spl`:**
 ```simple
 enum MemoryOrdering:
     Relaxed   # No ordering constraints
@@ -1059,5 +1059,5 @@ With the recommended Phase 1-2 implementations (~80 hours), Simple would be capa
 3. `doc/design/embedded_immutable_defaults.md` - Embedded target configuration
 4. `doc/spec/layout.sdn` - Layout configuration format
 5. `doc/format/smf_specification.md` - Binary format with bare-metal support
-6. `src/std/atomic.spl` - Atomic operations and memory ordering
+6. `src/lib/atomic.spl` - Atomic operations and memory ordering
 7. `src/app/io/mod.spl` - SFFI wrapper module

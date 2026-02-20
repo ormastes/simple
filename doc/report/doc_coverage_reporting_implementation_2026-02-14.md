@@ -105,7 +105,7 @@ fn generate_coverage_markdown(coverage: CoverageReport) -> text
 
 **Report Sections:**
 1. **Summary:** Overall statistics with status emoji
-2. **Coverage by Scope:** Table grouped by src/std/, src/compiler_core/, etc.
+2. **Coverage by Scope:** Table grouped by src/lib/, src/compiler_core/, etc.
 3. **Top 10 Files Needing Documentation:** Sorted by missing_docs count
 4. **Missing SDoctest Examples:** Up to 50 functions without sdoctests
 
@@ -146,7 +146,7 @@ Coverage by Scope:
 ┌────────────────┬─────────┬─────────┬────────────┬─────────────┐
 │ Scope          │ Files   │ Items   │ Documented │ Coverage    │
 ├────────────────┼─────────┼─────────┼────────────┼─────────────┤
-│ src/std        │      45 │     567 │        520 │      91% ✅ │
+│ src/lib        │      45 │     567 │        520 │      91% ✅ │
 │ src/core       │      32 │     389 │        310 │      79% ⚠️  │
 │ src/app        │      89 │     278 │        270 │      97% ✅ │
 └────────────────┴─────────┴─────────┴────────────┴─────────────┘
@@ -328,7 +328,7 @@ All modules follow MEMORY.md constraints:
 ### Grouping and Sorting
 
 **Scope Extraction (`_extract_scope`):**
-- `src/std/` → "src/std"
+- `src/lib/` → "src/lib"
 - `src/compiler_core/` → "src/core"
 - `src/lib/` → "src/lib"
 - `src/app/` → "src/app"
@@ -417,7 +417,7 @@ use app.doc_coverage.reporting.mod (
 
 3. **Markdown Generator Tests** (`test/unit/app/doc_coverage/markdown_generator_spec.spl`)
    - Test status emoji selection (≥90%, 60-89%, <60%)
-   - Test scope grouping (src/std, src/core, etc.)
+   - Test scope grouping (src/lib, src/core, etc.)
    - Test sorting by missing_docs
    - Test table formatting
 
@@ -525,7 +525,7 @@ simple stats --doc-coverage-only
 - ✅ **Runtime Safe:** All MEMORY.md constraints followed
 
 ### Target Metrics (Full Project)
-- 📊 Coverage ≥90% for `src/std/` modules
+- 📊 Coverage ≥90% for `src/lib/` modules
 - ⚠️  Build warnings for undocumented public functions
 - 📈 JSON export working in CI/CD pipelines
 - 📋 Threshold enforcement catches regressions

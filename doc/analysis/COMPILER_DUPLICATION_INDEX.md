@@ -120,7 +120,7 @@
    - Time/savings/risk table
    - Key files to refactor
 
-### Previous Phase 1 Analysis (src/app/ and src/std/)
+### Previous Phase 1 Analysis (src/app/ and src/lib/)
 - `phase1_summary.md` - Executive summary of Phase 1 findings
 - `phase1_app_duplicates.md` - App directory analysis
 - `phase1_stdlib_utils_duplicates.md` - Standard library utilities

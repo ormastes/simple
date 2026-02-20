@@ -25,7 +25,7 @@ Successfully implemented 20 FFI wrapper functions for Rc/Arc reference counting 
 2. **Updated Files:**
    - `rust/compiler/src/interpreter_extern/mod.rs`: Added rc module + 20 dispatcher entries
    - `rust/compiler/src/interpreter_extern/memory.rs`: Added sys_malloc, sys_free, sys_realloc (3 functions)
-   - `src/std/rc.spl`: Changed pointer type from `[u8]?` to `i64?` (pointer addresses)
+   - `src/lib/rc.spl`: Changed pointer type from `[u8]?` to `i64?` (pointer addresses)
 
 ### FFI Functions Implemented
 
@@ -296,7 +296,7 @@ The RC/ARC FFI layer is fully implemented and tested at the low level. All 23 fu
 
 **Class System: Needs Implementation** ⚠️
 
-The high-level Simple API in `src/std/rc.spl` is well-designed but cannot be used yet because:
+The high-level Simple API in `src/lib/rc.spl` is well-designed but cannot be used yet because:
 - Class constructors create dicts instead of instances
 - Methods cannot be called on class instances
 - Static methods don't work
@@ -313,7 +313,7 @@ The high-level Simple API in `src/std/rc.spl` is well-designed but cannot be use
 **Modified:**
 - `rust/compiler/src/interpreter_extern/mod.rs` (+24 lines)
 - `rust/compiler/src/interpreter_extern/memory.rs` (+120 lines)
-- `src/std/rc.spl` (pointer type changes)
+- `src/lib/rc.spl` (pointer type changes)
 
 **Test Files:**
 - `/tmp/test_rc_nocheck.spl` (low-level FFI test - passes)
@@ -338,7 +338,7 @@ The high-level Simple API in `src/std/rc.spl` is well-designed but cannot be use
 ## References
 
 - **Plan:** Plan specified in user prompt
-- **Simple API:** `src/std/rc.spl` (477 lines, well-designed)
+- **Simple API:** `src/lib/rc.spl` (477 lines, well-designed)
 - **Test Suite:** `test/lib/std/unit/rc_spec.spl` (478 lines, 55+ tests)
 - **FFI Implementation:** `rust/compiler/src/interpreter_extern/rc.rs`
 - **Memory Safety:** Rust's `AtomicUsize` with proper ordering guarantees thread safety

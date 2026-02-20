@@ -71,7 +71,7 @@ Source (.spl) -> Lexer -> Tokens -> Parser -> AST -> HIR -> MIR -> Codegen/Inter
 | Test runner | `src/app/test_runner_new/` |
 | MCP server | `src/app/mcp/main.spl` |
 | JJ MCP server | `src/app/mcp_jj/main.spl` |
-| SSpec framework | `src/std/spec.spl` |
+| SSpec framework | `src/lib/spec.spl` |
 | I/O module | `src/app/io/mod.spl` |
 | Database | `src/lib/database/` |
 | Build system | `src/app/build/` |

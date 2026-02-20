@@ -19,7 +19,7 @@ All three features have working runtime libraries. Full integration requires par
 
 ## 1. Test Attributes - FOUNDATION COMPLETE ✅
 
-**Implementation:** `src/std/testing/attributes.spl` (180 lines)
+**Implementation:** `src/lib/testing/attributes.spl` (180 lines)
 
 ### What's Implemented
 
@@ -56,7 +56,7 @@ tag(["slow", "integration"]):
 ### What's Left
 
 **Phase 2: Test Framework Integration (1 week)**
-- Integrate with src/std/spec.spl
+- Integrate with src/lib/spec.spl
 - Enforce timeouts in test runner
 - Implement actual retry logic
 - Process skip_reason
@@ -83,8 +83,8 @@ tag(["slow", "integration"]):
 ## 2. Async/Await - FOUNDATION COMPLETE ✅
 
 **Implementation:**
-- `src/std/async/future.spl` (190 lines)
-- `src/std/async/runtime.spl` (240 lines)
+- `src/lib/async/future.spl` (190 lines)
+- `src/lib/async/runtime.spl` (240 lines)
 
 ### What's Implemented
 
@@ -164,7 +164,7 @@ print result  # 94
 
 ## 3. Spawn Keyword (Actor Model) - FOUNDATION COMPLETE ✅
 
-**Implementation:** `src/std/actors/actor.spl` (280 lines)
+**Implementation:** `src/lib/actors/actor.spl` (280 lines)
 
 ### What's Implemented
 
@@ -256,10 +256,10 @@ get_actor_runtime().run()
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/std/testing/attributes.spl` | 180 | Test attribute runtime |
-| `src/std/async/future.spl` | 190 | Future type & combinators |
-| `src/std/async/runtime.spl` | 240 | Async runtime & scheduler |
-| `src/std/actors/actor.spl` | 280 | Actor model runtime |
+| `src/lib/testing/attributes.spl` | 180 | Test attribute runtime |
+| `src/lib/async/future.spl` | 190 | Future type & combinators |
+| `src/lib/async/runtime.spl` | 240 | Async runtime & scheduler |
+| `src/lib/actors/actor.spl` | 280 | Actor model runtime |
 | `examples/testing/test_attributes_example.spl` | 90 | Test attributes demo |
 | `examples/async/async_basics.spl` | 160 | Async/await demo |
 | `examples/actors/actor_basics.spl` | 210 | Actor model demo |

@@ -70,10 +70,10 @@ No P0, P1, or P2 TODOs remain - all critical work is complete!
 
 #### Phase 3.1: SDN Integration (5 TODOs)
 **Files Modified**:
-- `src/std/db_atomic.spl` - Table parsing
-- `src/std/src/dl/config_loader.spl` - DL config extraction
-- `src/std/src/exp/artifact.spl` - Artifact loading
-- `src/std/src/exp/config.spl` - Config parser
+- `src/lib/db_atomic.spl` - Table parsing
+- `src/lib/src/dl/config_loader.spl` - DL config extraction
+- `src/lib/src/exp/artifact.spl` - Artifact loading
+- `src/lib/src/exp/config.spl` - Config parser
 
 **Pattern Established**:
 ```simple

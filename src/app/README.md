@@ -46,7 +46,6 @@ Registered in the dispatch table. Each maps to `src/app/<module>/main.spl`.
 | `check-capsule` | `cli/` | Capsule visibility checks |
 | `check-dbs` | `cli/` | Validate databases |
 | `fix-dbs` | `cli/` | Repair databases |
-| `check-tier` | `cli/` | Tier compliance checks |
 | `duplicate-check` | `duplicate_check/` | Detect code duplication |
 | `verify` | `verify/` | Code verification |
 | `qualify-ignore` | `qualify_ignore/` | Qualification ignore rules |

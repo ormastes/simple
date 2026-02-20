@@ -287,7 +287,7 @@ rt_file_write_text(path, content)  # Success if no exception
 - Session summary: `doc/report/complete_session_summary_2026-02-03.md`
 
 ### Examples
-- std.path module: `src/std/path.spl` (pure Simple path utilities)
+- std.path module: `src/lib/path.spl` (pure Simple path utilities)
 - Path tests: `test/std/path_spec.spl` (85+ SSpec tests)
 - Updated apps: `src/app/formatter/main.spl`, `src/app/lint/main.spl`
 

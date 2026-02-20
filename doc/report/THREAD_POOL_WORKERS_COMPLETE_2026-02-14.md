@@ -15,7 +15,7 @@ Successfully implemented the missing C helper function for thread pool worker sp
 
 The Simple language doesn't have a way to get function pointers, which prevented thread pool from spawning worker threads. The worker_loop_entry function exists in Simple, but there was no way to pass its address to `spl_thread_create()`.
 
-**Blocker:** Line 79-84 in `src/std/thread_pool.spl`:
+**Blocker:** Line 79-84 in `src/lib/thread_pool.spl`:
 ```simple
 # TODO: Pass function pointer to worker_loop_entry
 # Current blocker: No way to get function address in Simple
@@ -134,7 +134,7 @@ spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
 
 ---
 
-### 3. Thread Pool Simple Code (`src/std/thread_pool.spl`)
+### 3. Thread Pool Simple Code (`src/lib/thread_pool.spl`)
 
 **Added:** Extern declaration for C helper
 ```simple
@@ -437,7 +437,7 @@ fn get_pool(pool_id: i64) -> ThreadPool:
 
 ### Thread-Safe Queue
 
-**Implementation:** `src/std/async_host/thread_safe_queue.spl` (146 lines)
+**Implementation:** `src/lib/async_host/thread_safe_queue.spl` (146 lines)
 
 **Features:**
 - Lock-free MPMC (multi-producer, multi-consumer)
@@ -462,7 +462,7 @@ fn destroy()                           # Clean up
 |------|--------------|---------|
 | `src/compiler_seed/runtime_thread.h` | +18 | Add spl_thread_pool_spawn_worker() declaration |
 | `src/compiler_seed/runtime_thread.c` | +76 | Implement worker spawn + weak symbol wrapper |
-| `src/std/thread_pool.spl` | +12 | Add extern declaration + use helper function |
+| `src/lib/thread_pool.spl` | +12 | Add extern declaration + use helper function |
 
 **Total:** 106 lines added, 9 lines removed (was TODO comments)
 

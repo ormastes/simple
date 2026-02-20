@@ -241,8 +241,8 @@ All 242 files in `src/app/` have been successfully migrated from hardcoded `"\n"
 **Next Steps (per migration plan):**
 - src/compiler/ directory (200 files, ~150 occurrences)
 - src/compiler_core_legacy/ directory (250 files, ~300 occurrences)
-- src/std/ directory (200 files, ~250 occurrences)
+- src/lib/ directory (200 files, ~250 occurrences)
 - test/ directories (325 files, ~250 occurrences)
 
 **Total Project Progress:** 4,495 replacements in src/app/ complete
-**Remaining Work:** src/compiler/, src/compiler_core_legacy/, src/std/, test/ directories
+**Remaining Work:** src/compiler/, src/compiler_core_legacy/, src/lib/, test/ directories

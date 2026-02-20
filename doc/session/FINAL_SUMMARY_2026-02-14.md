@@ -98,11 +98,11 @@ Status:  ✅ Production Ready
 11. `doc/session/complete_session_summary_2026-02-14.md` (summary)
 
 ### New Features (2 files)
-1. `src/std/effects.spl` (73 lines) - Effect system
-2. `src/std/parser.spl` (179 lines) - Parser error recovery
+1. `src/lib/effects.spl` (73 lines) - Effect system
+2. `src/lib/parser.spl` (179 lines) - Parser error recovery
 
 ### Modified Core Files (3 files)
-1. `src/std/shell/env.spl` - Lazy initialization
+1. `src/lib/shell/env.spl` - Lazy initialization
 2. `test/unit/app/mcp/prompts_spec.spl` - Import syntax
 3. `test/unit/app/diagram/call_flow_profiling_spec.spl` - Extern declarations
 

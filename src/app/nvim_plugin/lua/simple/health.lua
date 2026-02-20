@@ -228,7 +228,7 @@ function M._check_project()
   end
 
   -- Check for source directories
-  local dirs = { "src/std", "src/app", "src/core", "src/lib" }
+  local dirs = { "src/app", "src/core", "src/lib" }
   for _, dir in ipairs(dirs) do
     local path = cwd .. "/" .. dir
     if vim.fn.isdirectory(path) == 1 then

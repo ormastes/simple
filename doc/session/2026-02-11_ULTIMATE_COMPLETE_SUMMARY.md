@@ -271,7 +271,7 @@
 
 ### All Modules
 ```
-src/std/{
+src/lib/{
   string_extra, validation, numeric,
   collection_utils, functional, option_helpers,
   result_helpers, tuple_utils, bitwise_utils,
@@ -353,7 +353,7 @@ Starting from "check skip/pending/TODO items," this session delivered:
 
 | What | Where |
 |------|-------|
-| **All utilities** | `src/std/*.spl` (20 modules) |
+| **All utilities** | `src/lib/*.spl` (20 modules) |
 | **Algorithms** | `sorting_utils`, `search_utils`, `graph_utils`, `matrix_utils` |
 | **Mathematics** | `stats_utils`, `combinatorics_utils`, `numeric` |
 | **Data structures** | `collection_utils`, `tuple_utils`, `range_utils` |

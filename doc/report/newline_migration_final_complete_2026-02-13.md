@@ -32,7 +32,7 @@ Successfully completed **comprehensive** newline migration converting ALL conver
 - src/lib/hooks/detectors/build.spl (7)
 - src/compiler/gc_analysis/mod.spl (3)
 - src/compiler/dim_constraints_types.spl (1)
-- src/std/src/testing/deployment.spl (1)
+- src/lib/src/testing/deployment.spl (1)
 - src/lib/hooks/detectors/feature.spl (1)
 
 ### Agent 2: Multi-Line Responses (10 files, 30 conversions)
@@ -70,9 +70,9 @@ Successfully completed **comprehensive** newline migration converting ALL conver
 
 ### Agent 5: Stdlib User Strings (17 files, 100+ conversions)
 **Files:**
-- src/std/report/*.spl (14 files, 80+ conversions)
-- src/std/cli/help.spl (18 conversions)
-- src/std/spec/feature_doc.spl (20 conversions)
+- src/lib/report/*.spl (14 files, 80+ conversions)
+- src/lib/cli/help.spl (18 conversions)
+- src/lib/spec/feature_doc.spl (20 conversions)
 - src/shared/errors.spl (1 conversion)
 
 ## Total Cleanup: 71 Additional Files
@@ -177,7 +177,7 @@ rust_code = "fn main() {\n    println!(\"hello\");\n}"
 - **src/app/** - 244 files (100%)
 - **src/compiler/** - 89 files
 - **src/compiler_core_legacy/** - 96 files
-- **src/std/** - 50 files
+- **src/lib/** - 50 files
 - **src/compiler_core_legacy/** - 3 files
 - **src/diagnostics/** - 3 files
 - **src/lib/** - 4 files
@@ -206,7 +206,7 @@ All convertible `"\n"` literals have been migrated to the `NL` constant. The rem
 - Cross-platform ready
 - Fully tested and verified
 
-The Simple language codebase now has **consistent, maintainable, cross-platform newline handling** through the `NL` constant from `src/std/text.spl`.
+The Simple language codebase now has **consistent, maintainable, cross-platform newline handling** through the `NL` constant from `src/lib/text.spl`.
 
 ---
 

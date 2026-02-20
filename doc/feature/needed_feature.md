@@ -33,12 +33,12 @@ Status:  100% PASS RATE
    - All import tests passing
 
 3. **Effect System** - Created (was not started)
-   - Implementation: src/std/effects.spl (73 lines)
+   - Implementation: src/lib/effects.spl (73 lines)
    - Features: @pure, @io, @net, @fs, @unsafe, @async
    - Ready for integration
 
 4. **Parser Error Recovery** - Created (was not started)
-   - Implementation: src/std/parser.spl (179 lines)
+   - Implementation: src/lib/parser.spl (179 lines)
    - Detects 15 common syntax mistakes
    - Multi-language support
 
@@ -426,8 +426,8 @@ fn get_level(): rt_env_get("LOG")  # Lazy evaluation
 
 ### New Achievements (2026-02-14):
 1. ✅ Bootstrap rebuild completed (activated transitive imports)
-2. ✅ Effect system created (src/std/effects.spl)
-3. ✅ Parser error recovery created (src/std/parser.spl)
+2. ✅ Effect system created (src/lib/effects.spl)
+3. ✅ Parser error recovery created (src/lib/parser.spl)
 4. ✅ All 4,067 tests passing (100%)
 5. ✅ Comprehensive documentation (2,500+ lines)
 

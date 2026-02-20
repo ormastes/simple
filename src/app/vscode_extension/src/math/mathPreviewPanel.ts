@@ -5,10 +5,10 @@
  * Uses KaTeX (loaded from CDN) for rendering inside the webview.
  * Updates automatically when the cursor moves to a different math block.
  *
- * LaTeX conversion mirrors src/std/math_repr.spl render_latex_raw() for local
+ * LaTeX conversion mirrors src/lib/math_repr.spl render_latex_raw() for local
  * preview. The full Simple rendering pipeline is:
- *   src/std/math_repr.spl  - Parser + renderers (to_pretty, render_latex_raw, to_md)
- *   src/std/mathjax.spl    - MathJax SFFI wrapper (SVG/HTML rendering via Node.js)
+ *   src/lib/math_repr.spl  - Parser + renderers (to_pretty, render_latex_raw, to_md)
+ *   src/lib/mathjax.spl    - MathJax SFFI wrapper (SVG/HTML rendering via Node.js)
  *   src/app/lsp/handlers/hover.spl - LSP hover uses both for server-side rendering
  */
 
@@ -159,7 +159,7 @@ export class MathPreviewPanel implements vscode.Disposable {
     /**
      * Convert math block content to LaTeX string.
      *
-     * Mirrors src/std/math_repr.spl render_latex_raw() for local preview.
+     * Mirrors src/lib/math_repr.spl render_latex_raw() for local preview.
      * Handles: ^N -> ^{N}, Greek names -> \alpha, sqrt(x) -> \sqrt{x},
      * frac(a,b) -> \frac{a}{b}, known functions -> \sin/\cos/etc.
      * See mathConverter.ts simpleToLatex() for the full conversion logic.

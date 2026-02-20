@@ -34,7 +34,7 @@ Successfully implemented automatic UPX binary download and caching system. Users
 **`rust/runtime/src/compress/mod.rs` (+3 lines)**
 - Re-export auto-download functions
 
-**`src/std/compress/upx.spl` (+42 lines)**
+**`src/lib/compress/upx.spl` (+42 lines)**
 - New Simple API: `ensure_upx()`, `get_upx_path()`
 - Updated documentation (auto-download instead of manual install)
 
@@ -262,7 +262,7 @@ Tasks remaining:
 | `rust/runtime/src/compress/upx_download.rs` | NEW | 408 | ✅ |
 | `rust/runtime/src/compress/upx.rs` | MODIFIED | +45 | ✅ |
 | `rust/runtime/src/compress/mod.rs` | MODIFIED | +3 | ✅ |
-| `src/std/compress/upx.spl` | MODIFIED | +42 | ✅ |
+| `src/lib/compress/upx.spl` | MODIFIED | +42 | ✅ |
 | `rust/runtime/Cargo.toml` | MODIFIED | +3 deps | ✅ |
 | `rust/runtime/tests/upx_integration_test.rs` | NEW | 60 | ✅ |
 | `rust/runtime/tests/upx_compress_test.rs` | NEW | 80 | ✅ |

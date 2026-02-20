@@ -14,7 +14,7 @@ After the successful migration of 7,180 occurrences to the `NL` constant, **~312
 - ✅ Lambda parameters (`\name`, `\n:`) - Variable names, not newlines
 - ✅ Comments (`# example \n`) - Documentation text
 - ✅ Char literals (`'\n'`) - Character type comparisons
-- ✅ `src/std/text.spl` - Defines the NL constant itself
+- ✅ `src/lib/text.spl` - Defines the NL constant itself
 - ✅ Test files - `test_newline*.spl`, `newline_constants_spec.spl`
 
 **Focus:** Only actual string literals `"text\nmore"` that contain newline escape sequences.

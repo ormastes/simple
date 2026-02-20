@@ -67,8 +67,8 @@ ls src/compiler/hir_lowering/*.spl   # 4 files
 ls src/compiler/backend/*.spl        # 4 new files (+ 15 existing)
 
 # Library modules (10 files)
-ls src/std/net/*.spl                 # 4 files
-ls src/std/src/testing/mock/*.spl    # 3 files
+ls src/lib/net/*.spl                 # 4 files
+ls src/lib/src/testing/mock/*.spl    # 3 files
 ls src/app/fix/rules/*.spl           # 3 files
 ```
 
@@ -100,8 +100,8 @@ All original files preserved:
 ```bash
 ls -lh src/app/parser/*.backup
 ls -lh src/compiler/*.backup
-ls -lh src/std/*.backup
-ls -lh src/std/src/testing/*.backup
+ls -lh src/lib/*.backup
+ls -lh src/lib/src/testing/*.backup
 ls -lh src/app/fix/*.backup
 ```
 
@@ -114,7 +114,7 @@ Checked facade files for valid syntax:
 ```bash
 head -20 src/app/parser/expressions.spl
 head -20 src/compiler/type_infer.spl
-head -20 src/std/net.spl
+head -20 src/lib/net.spl
 ```
 
 **Result**: All facade files have correct:

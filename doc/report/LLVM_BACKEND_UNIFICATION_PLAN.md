@@ -82,7 +82,7 @@ compiler_core_legacy/backend/llvm_backend.spl
 
 ### 1. **Shared Core, Divergent Wrappers**
 
-Create `src/llvm_core/` (or `src/std/llvm/`) with shared LLVM primitives:
+Create `src/llvm_core/` (or `src/lib/llvm/`) with shared LLVM primitives:
 - Target configuration (triples, CPUs, features)
 - LLVM tool invocations (llc, opt, clang)
 - Type mapping (Simple types → LLVM types)
@@ -681,7 +681,7 @@ Create new tests:
 
 ## Questions for Review
 
-1. Should `shared/llvm/` be under `src/` or `src/std/`?
+1. Should `shared/llvm/` be under `src/` or `src/lib/`?
 2. Should we expose `--backend=llvm-core` CLI flag, or keep it internal?
 3. Should we extract IR building primitives, or keep them compiler-specific?
 4. What's the minimum LLVM version we want to support (15, 16, 17)?

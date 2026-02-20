@@ -18,7 +18,7 @@ Total Source Files: 1305
 ├── src/compiler/     413 files (32%)  - Compilation pipeline
 ├── src/app/          557 files (43%)  - Application tools
 ├── src/lib/           92 files (7%)   - Libraries
-└── src/std/          217 files (17%)  - Standard library
+└── src/lib/          217 files (17%)  - Standard library
 ```
 
 ## Test Coverage Created

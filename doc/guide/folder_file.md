@@ -90,8 +90,8 @@ src/
 │   ├── mir_opt/                         # MIR optimizations
 │   └── type_system/                     # Type checking & inference
 │
-├── compiler_core_legacy/  # Core compiler subset (97,057 lines)
-│   └── (Simplified version for bootstrapping)
+├── compiler/         # Unified compiler — numbered layers (see below)
+│   └── 10.frontend/core/  # Core frontend (lexer, parser, AST, interpreter)
 │
 ├── lib/            # Core libraries (30,993 lines)
 │   ├── database/                        # BugDB, TestDB, FeatureDB
@@ -105,9 +105,9 @@ src/
 ```
 
 **Go here when:**
-- Writing new features → `src/std/` or `src/app/`
-- Fixing compiler bugs → `src/compiler/` or `src/compiler_core_legacy/`
-- Adding ML features → `src/std/ml/` or `src/lib/pure/`
+- Writing new features → `src/lib/` or `src/app/`
+- Fixing compiler bugs → `src/compiler/`
+- Adding ML features → `src/lib/ml/` or `src/lib/pure/`
 - Building tools → `src/app/`
 
 ---
@@ -348,10 +348,10 @@ Example programs and tutorials.
 → `doc/guide/` for user guides, `doc/design/` for technical docs
 
 **...add a standard library feature**
-→ `src/std/`, create tests in `test/unit/std/`
+→ `src/lib/`, create tests in `test/unit/std/`
 
 **...fix a compiler bug**
-→ `src/compiler/` or `src/compiler_core_legacy/`, tests in `test/unit/compiler/`
+→ `src/compiler/`, tests in `test/unit/compiler/`
 
 **...understand the architecture**
 → `doc/architecture/overview.md`, `doc/architecture/file_class_structure.md`
@@ -387,7 +387,7 @@ Example programs and tutorials.
 
 ### Adding a New Feature
 
-1. **Write the code** → `src/std/` or `src/app/`
+1. **Write the code** → `src/lib/` or `src/app/`
 2. **Write tests** → `test/unit/`
 3. **Update docs** → `doc/guide/` or docstrings
 4. **Test it** → `bin/simple test`
@@ -442,7 +442,7 @@ bin/simple test --sdoctest
 |---------|---------|---------|
 | `*_spec.spl` | Test file (SSpec) | `array_spec.spl` |
 | `*_utils.spl` | Utility functions | `string_utils.spl` |
-| `mod.spl` | Module entry point | `src/std/mod.spl` |
+| `mod.spl` | Module entry point | `src/lib/mod.spl` |
 | `main.spl` | Application entry | `src/app/cli/main.spl` |
 
 ### Configuration Files

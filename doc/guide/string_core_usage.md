@@ -1,6 +1,6 @@
 # String Core Module - Usage Guide
 
-**Module:** `src/std/string_core.spl`
+**Module:** `src/lib/string_core.spl`
 **Purpose:** Canonical string utility implementations
 **Status:** Production Ready
 
@@ -261,7 +261,7 @@ use core.types.{str_concat, str_len, str_trim}
 
 ## See Also
 
-- **Full implementation:** `src/std/string_core.spl`
+- **Full implementation:** `src/lib/string_core.spl`
 - **Tests:** `test/unit/std/string_core_spec.spl`
 - **Migration report:** `doc/report/string_utilities_consolidation_2026-02-14.md`
-- **Related modules:** `src/std/text.spl`, `src/std/template/utilities.spl`
+- **Related modules:** `src/lib/text.spl`, `src/lib/template/utilities.spl`

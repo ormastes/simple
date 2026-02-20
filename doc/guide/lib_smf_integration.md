@@ -250,7 +250,7 @@ fn main():
 
 ```makefile
 # Build individual SMF files
-build/smf/std/io/mod.smf: src/std/io/mod.spl
+build/smf/std/io/mod.smf: src/lib/io/mod.spl
     simple compile $< -o $@
 
 # Build library archive

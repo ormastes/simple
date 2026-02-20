@@ -112,7 +112,7 @@ This directory contains the refactored B-tree implementation, split from the ori
 
 ## Facade Pattern
 
-The main file `src/std/b_tree_utils.spl` acts as a facade:
+The main file `src/lib/common/b_tree/` acts as a facade:
 - Imports all submodules
 - Re-exports all functions with `export *`
 - Maintains backward compatibility
@@ -199,5 +199,5 @@ February 12, 2026
 
 ## References
 
-- Original file: `src/std/b_tree_utils.spl`
+- Original file: `src/lib/common/b_tree/`
 - Facade pattern follows: `numerical_methods_utils.spl`, `json_parser_utils.spl`, `graph_utils.spl`, `gzip_utils.spl`

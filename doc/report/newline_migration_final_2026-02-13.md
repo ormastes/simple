@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Successfully completed migration of hardcoded `"\n"` string literals to the `NL` constant from `src/std/text.spl` across the entire Simple language codebase using 10 parallel agents.
+Successfully completed migration of hardcoded `"\n"` string literals to the `NL` constant from `src/lib/text.spl` across the entire Simple language codebase using 10 parallel agents.
 
 ### Final Metrics
 
@@ -27,7 +27,7 @@ Successfully completed migration of hardcoded `"\n"` string literals to the `NL`
 1. **Agent 1** (src/compiler/backend/) - 16 files, ~155 occurrences ✅
 2. **Agent 2** (src/compiler_core_legacy/) - 46 files, ~140 occurrences ✅
 3. **Agent 3** (src/app/) - 244 files, 4,495 occurrences ✅ **100% coverage**
-4. **Agent 4** (src/std/) - 33 files, ~90 occurrences ✅
+4. **Agent 4** (src/lib/) - 33 files, ~90 occurrences ✅
 5. **Agent 5** (test/compiler/ + test/unit/) - 110 files, ~350 occurrences ✅
 6. **Agent 6** (test/feature/ + test/integration/ + test/lib/) - 52 files, 367 occurrences ✅
 7. **Agent 7** (src/compiler_core_legacy/ + src/diagnostics/) - 6 files, 27 occurrences ✅
@@ -38,7 +38,7 @@ Successfully completed migration of hardcoded `"\n"` string literals to the `NL`
 
 ## Critical Fix: text.spl Restoration
 
-**Issue:** Agent 4 accidentally modified `src/std/text.spl` despite skip instructions, creating circular references where NL constant definitions used `{NL}` instead of `"\n"`.
+**Issue:** Agent 4 accidentally modified `src/lib/text.spl` despite skip instructions, creating circular references where NL constant definitions used `{NL}` instead of `"\n"`.
 
 **Impact:** Build failure - `Unexpected token: expected expression, found Indent`
 
@@ -98,7 +98,7 @@ if ch == NL
 ### Categories of Legitimate `"\n"` Usage
 
 #### 1. **Constant Definitions** (7 occurrences)
-**File:** `src/std/text.spl`
+**File:** `src/lib/text.spl`
 - Lines 113, 122, 124, 125, 126: `val NL = "\n"` and related constants
 - Lines 324, 389, 397, 410, 584: Core string utility functions
 
@@ -135,7 +135,7 @@ Network protocols requiring literal CRLF:
 val cmd = "USER anon\r\n"
 ```
 
-**Files:** `src/std/ftp_utils.spl`, `src/std/net.spl`, SMTP modules
+**Files:** `src/lib/ftp_utils.spl`, `src/lib/net.spl`, SMTP modules
 
 **Reason:** Protocol compliance requires exact byte sequences
 
@@ -146,7 +146,7 @@ Parameter names that happen to be `\n`:
 \n: if n <= 1: n else: fib(n-1) + fib(n-2)
 ```
 
-**Files:** `src/std/functional.spl`, `src/std/predicate_utils.spl`
+**Files:** `src/lib/functional.spl`, `src/lib/predicate_utils.spl`
 
 **Reason:** Not a newline literal - it's a variable name
 
@@ -204,7 +204,7 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 - `src/app/` - 244 files (**100% coverage**)
 - `src/compiler/` - 21 files
 - `src/compiler_core_legacy/` - 46 files
-- `src/std/` - 33 files (excluding text.spl)
+- `src/lib/` - 33 files (excluding text.spl)
 - `src/compiler_core_legacy/` - 3 files
 - `src/diagnostics/` - 3 files
 
@@ -233,7 +233,7 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 - Easy adaptation for Windows (CRLF), Unix (LF), old Mac (CR)
 
 ### 2. **Maintainability**
-- Centralized newline constant in `src/std/text.spl`
+- Centralized newline constant in `src/lib/text.spl`
 - Clear semantic intent: `{NL}` is more readable than `\n`
 - Easier to find all newline-related code
 - Reduced risk of copy-paste errors with wrong escape sequences
@@ -303,7 +303,7 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 
 ## Conclusion
 
-The newline migration is **complete, verified, and successful**. All 7,180 replaceable `"\n"` literals have been converted to use the `NL` constant from `src/std/text.spl`, with 322 occurrences correctly preserved for escape sequences, protocol specs, and constant definitions.
+The newline migration is **complete, verified, and successful**. All 7,180 replaceable `"\n"` literals have been converted to use the `NL` constant from `src/lib/text.spl`, with 322 occurrences correctly preserved for escape sequences, protocol specs, and constant definitions.
 
 **Key Achievement:** Consistent newline handling across 2,391 files in the Simple language codebase, providing a foundation for cross-platform compatibility and improved maintainability.
 

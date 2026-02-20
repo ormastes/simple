@@ -43,30 +43,41 @@ class MirToC:
         )
 
     me translate_module(module: MirModule) -> text:
-        """Translate entire MIR module to C++20 source."""
-        self.builder.emit_file_header()
+        """Translate entire MIR module to C++20 source (implementation file)."""
+        # Emit header preamble
+        self.builder.emit_header_file_header()
 
-        # Forward declarations
-        self.builder.emit_raw("// Forward declarations")
+        # Emit impl preamble
+        self.builder.emit_impl_file_header()
+
+        # Forward declarations go to BOTH header and impl
+        self.builder.emit_header_raw(r"// Forward declarations")
+        self.builder.emit_raw(r"// Forward declarations")
         for name, body in module.functions:
             self.emit_forward_declaration(name, body)
+        self.builder.emit_header_raw("")
         self.builder.emit_blank()
 
-        # Function definitions
+        # Function definitions go to impl only
         for name, body in module.functions:
             self.translate_function(name, body)
 
         self.builder.build()
 
+    me build_header() -> text:
+        """Build the header file content."""
+        self.builder.build_header()
+
     me emit_forward_declaration(name: text, body: MirBody):
-        """Emit forward declaration for a function."""
+        """Emit forward declaration for a function to both header and impl."""
         val ret_ty = self.type_mapper.map_return_type(body.return_ty)
         var params: [text] = []
         for i in 0..body.arg_count:
             val param_ty = self.get_local_type_from_body(body, i)
-            params = params.push("{param_ty} _l{i}")
+            params = params.push(param_ty + r" _l" + i)
         val params_str = if params.len() == 0: "void" else: params.join(", ")
         self.builder.emit_forward_decl(ret_ty, name, params_str)
+        self.builder.emit_header_raw(ret_ty + r" " + name + r"(" + params_str + r");")
 
     me translate_function(name: text, body: MirBody):
         """Translate a MIR function to C++."""
@@ -80,7 +91,7 @@ class MirToC:
         var params: [text] = []
         for i in 0..body.arg_count:
             val param_ty = self.get_local_type(i)
-            params = params.push("{param_ty} _l{i}")
+            params = params.push(param_ty + r" _l" + i)
         val params_str = if params.len() == 0: "void" else: params.join(", ")
 
         val ret_ty = self.type_mapper.map_return_type(body.return_ty)
@@ -93,7 +104,7 @@ class MirToC:
                 case _:
                     val ty = self.type_mapper.map_type(local.type_)
                     if ty != "void":
-                        self.builder.emit_local_init(ty, "_l{local.id.id}", self.zero_value(ty))
+                        self.builder.emit_local_init(ty, r"_l" + local.id.id, self.zero_value(ty))
 
         self.builder.emit_blank()
 
@@ -105,7 +116,7 @@ class MirToC:
 
     me translate_block(block: MirBlock):
         """Translate a MIR basic block to C labeled block."""
-        self.builder.emit_label("bb{block.id.id}")
+        self.builder.emit_label(r"bb" + block.id.id)
 
         for inst in block.instructions:
             self.translate_instruction(inst)
@@ -146,19 +157,19 @@ class MirToC:
                 val dest_name = self.get_local(dest.id)
                 val ty = self.type_mapper.map_type(type_)
                 val size = self.type_mapper.size_of(type_)
-                self.builder.emit_assign(dest_name, "(void*)spl_malloc({size})")
+                self.builder.emit_assign(dest_name, r"(void*)spl_malloc(" + size + r")")
 
             case Load(dest, ptr):
                 val dest_name = self.get_local(dest.id)
                 val ptr_val = self.translate_operand(ptr)
                 val ty = self.get_local_type(dest.id)
-                self.builder.emit("{ty} {dest_name} = *({ty}*){ptr_val}; // load")
+                self.builder.emit(ty + r" " + dest_name + r" = *(" + ty + r"*)" + ptr_val + r"; // load")
 
             case Store(ptr, value):
                 val ptr_val = self.translate_operand(ptr)
                 val value_val = self.translate_operand(value)
                 val ty = self.get_operand_type(value)
-                self.builder.emit("*({ty}*){ptr_val} = {value_val};")
+                self.builder.emit(r"*(" + ty + r"*)" + ptr_val + r" = " + value_val + r";")
 
             case GetElementPtr(dest, base, indices):
                 val dest_name = self.get_local(dest.id)
@@ -166,24 +177,28 @@ class MirToC:
                 # Simple single-index GEP -> pointer arithmetic
                 if indices.len() == 1:
                     val idx_val = self.translate_operand(indices[0])
-                    self.builder.emit_assign(dest_name, "(void*)((char*){base_val} + {idx_val} * 8)")
+                    self.builder.emit_assign(dest_name, r"(void*)((char*)" + base_val + r" + " + idx_val + r" * 8)")
                 else:
-                    self.builder.emit_assign(dest_name, "(void*){base_val}")
-                    self.builder.emit_comment("GEP with {indices.len()} indices")
+                    self.builder.emit_assign(dest_name, r"(void*)" + base_val)
+                    self.builder.emit_comment(r"GEP with " + indices.len() + r" indices")
 
             # === Function Calls ===
             case Call(dest, func, args):
                 val func_val = self.translate_operand(func)
-                var arg_vals: [text] = []
-                for arg in args:
-                    arg_vals = arg_vals.push(self.translate_operand(arg))
-                val args_str = arg_vals.join(", ")
-                if dest.?:
-                    val dest_name = self.get_local(dest.unwrap().id)
-                    val ret_ty = self.get_local_type(dest.unwrap().id)
-                    self.builder.emit_assign(dest_name, "{func_val}({args_str})")
+                # Try container call interception first
+                if self.translate_container_call(func_val, dest, args):
+                    pass_dn
                 else:
-                    self.builder.emit("{func_val}({args_str});")
+                    var arg_vals: [text] = []
+                    for arg in args:
+                        arg_vals = arg_vals.push(self.translate_operand(arg))
+                    val args_str = arg_vals.join(", ")
+                    if dest.?:
+                        val dest_name = self.get_local(dest.unwrap().id)
+                        val ret_ty = self.get_local_type(dest.unwrap().id)
+                        self.builder.emit_assign(dest_name, func_val + r"(" + args_str + r")")
+                    else:
+                        self.builder.emit(func_val + r"(" + args_str + r");")
 
             case CallIndirect(dest, ptr, args, sig):
                 val ptr_val = self.translate_operand(ptr)
@@ -194,38 +209,38 @@ class MirToC:
                 val ret_ty = self.type_mapper.map_type(sig.return_type)
                 if dest.?:
                     val dest_name = self.get_local(dest.unwrap().id)
-                    self.builder.emit_assign(dest_name, "(({ret_ty}(*)(...)){ptr_val})({args_str})")
+                    self.builder.emit_assign(dest_name, r"((" + ret_ty + r"(*)(...))(" + ptr_val + r"))(" + args_str + r")")
                 else:
-                    self.builder.emit("(({ret_ty}(*)(...)){ptr_val})({args_str});")
+                    self.builder.emit(r"((" + ret_ty + r"(*)(...))(" + ptr_val + r"))(" + args_str + r");")
 
             # === Casts ===
             case Cast(dest, operand, target):
                 val dest_name = self.get_local(dest.id)
                 val operand_val = self.translate_operand(operand)
                 val target_ty = self.type_mapper.map_type(target)
-                self.builder.emit_assign(dest_name, "({target_ty}){operand_val}")
+                self.builder.emit_assign(dest_name, r"(" + target_ty + r")" + operand_val)
 
             case Bitcast(dest, operand, target):
                 val dest_name = self.get_local(dest.id)
                 val operand_val = self.translate_operand(operand)
                 val target_ty = self.type_mapper.map_type(target)
-                self.builder.emit_assign(dest_name, "({target_ty}){operand_val}")
+                self.builder.emit_assign(dest_name, r"(" + target_ty + r")" + operand_val)
 
             # === Aggregates ===
             case Aggregate(dest, kind, operands):
                 val dest_name = self.get_local(dest.id)
-                self.builder.emit_comment("aggregate construction ({operands.len()} elements)")
+                self.builder.emit_comment(r"aggregate construction (" + operands.len() + r" elements)")
                 self.builder.emit_assign(dest_name, "0")
 
             case GetField(dest, base, field):
                 val dest_name = self.get_local(dest.id)
                 val base_val = self.translate_operand(base)
-                self.builder.emit_assign(dest_name, "((int64_t*){base_val})[{field}]")
+                self.builder.emit_assign(dest_name, r"((int64_t*)" + base_val + r")[" + field + r"]")
 
             case SetField(base, field, value):
                 val base_val = self.translate_operand(base)
                 val value_val = self.translate_operand(value)
-                self.builder.emit("((int64_t*){base_val})[{field}] = {value_val};")
+                self.builder.emit(r"((int64_t*)" + base_val + r")[" + field + r"] = " + value_val + r";")
 
             # === Intrinsics ===
             case Intrinsic(dest, name, args):
@@ -236,9 +251,9 @@ class MirToC:
                 if dest.?:
                     val dest_name = self.get_local(dest.unwrap().id)
                     val ret_ty = self.get_local_type(dest.unwrap().id)
-                    self.builder.emit_assign(dest_name, "__simple_intrinsic_{name}({args_str})")
+                    self.builder.emit_assign(dest_name, r"__simple_intrinsic_" + name + r"(" + args_str + r")")
                 else:
-                    self.builder.emit("__simple_intrinsic_{name}({args_str});")
+                    self.builder.emit(r"__simple_intrinsic_" + name + r"(" + args_str + r");")
 
             case CheckedBinOp(dest, op, left, right):
                 self.translate_binop(dest, op, left, right)
@@ -249,7 +264,7 @@ class MirToC:
                 val value_val = self.translate_operand(value)
                 val func_val = self.translate_operand(func)
                 val ret_ty = self.get_local_type(dest.id)
-                self.builder.emit_assign(dest_name, "(({ret_ty}(*)(int64_t)){func_val})({value_val})")
+                self.builder.emit_assign(dest_name, r"((" + ret_ty + r"(*)(int64_t))(" + func_val + r"))(" + value_val + r")")
 
             case Compose(dest, f, g, forward):
                 val dest_name = self.get_local(dest.id)
@@ -261,7 +276,7 @@ class MirToC:
             case Parallel(dest, funcs):
                 val dest_name = self.get_local(dest.id)
                 self.builder.emit_assign(dest_name, "(void*)0")
-                self.builder.emit_comment("parallel ({funcs.len()} functions)")
+                self.builder.emit_comment(r"parallel (" + funcs.len() + r" functions)")
 
             case LayerConnect(dest, layer1, layer2):
                 val dest_name = self.get_local(dest.id)
@@ -273,9 +288,9 @@ class MirToC:
             # === Inline Assembly ===
             case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
                 val volatile_str = if is_volatile: "volatile" else: ""
-                self.builder.emit("#if !(defined(_MSC_VER) && !defined(__clang__))")
-                self.builder.emit("asm {volatile_str} (\"{asm_template}\");")
-                self.builder.emit("#endif")
+                self.builder.emit(r"#if !(defined(_MSC_VER) && !defined(__clang__))")
+                self.builder.emit(r"asm " + volatile_str + r" (" + "\"" + asm_template + "\"" + r");")
+                self.builder.emit(r"#endif")
 
             # === Debug/Nop ===
             case DebugValue(local, name):
@@ -320,7 +335,7 @@ class MirToC:
 
             # === GPU instructions (stubs) ===
             case GpuKernelDef(name):
-                self.builder.emit_comment("GpuKernelDef: {name} (requires GPU backend)")
+                self.builder.emit_comment(r"GpuKernelDef: " + name + r" (requires GPU backend)")
             case GpuLaunch(args):
                 self.builder.emit_comment("GpuLaunch (requires GPU backend)")
             case GpuGlobalId(dest, dim):
@@ -344,7 +359,7 @@ class MirToC:
                 self.builder.emit_comment("GpuMemFence (requires GPU backend)")
             case GpuSharedAlloc(dest, type_, size):
                 val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, "(void*)spl_malloc({size})")
+                self.builder.emit_assign(dest_name, r"(void*)spl_malloc(" + size + r")")
             case GpuAtomicOp(dest, op, ptr, value):
                 val dest_name = self.get_local(dest.id)
                 self.builder.emit_assign(dest_name, "0")
@@ -358,7 +373,7 @@ class MirToC:
             case VhdlVarAssign(target, value):
                 self.builder.emit_comment("VhdlVarAssign (requires VHDL backend)")
             case VhdlPortMap(entity, instance, connections):
-                self.builder.emit_comment("VhdlPortMap: {entity}/{instance} (requires VHDL backend)")
+                self.builder.emit_comment(r"VhdlPortMap: " + entity + r"/" + instance + r" (requires VHDL backend)")
             case VhdlResize(dest, operand, new_width, signed):
                 val dest_name = self.get_local(dest.id)
                 self.builder.emit_assign(dest_name, "0")
@@ -434,7 +449,82 @@ class MirToC:
     me emit_simd_stub(dest: LocalId, a: MirOperand, b: MirOperand, op: text):
         val dest_name = self.get_local(dest.id)
         self.builder.emit_assign(dest_name, "0")
-        self.builder.emit_comment("SIMD {op} (scalar fallback stub)")
+        self.builder.emit_comment(r"SIMD " + op + r" (scalar fallback stub)")
+
+    me translate_container_call(func_name: text, dest: LocalId?, args: [MirOperand]) -> bool:
+        """Intercept spl_array_*/spl_dict_* runtime calls and emit C++ method calls.
+        Returns true if the call was handled, false otherwise."""
+        var arg_vals: [text] = []
+        for arg in args:
+            arg_vals = arg_vals.push(self.translate_operand(arg))
+
+        # Array operations
+        if func_name == "spl_array_new":
+            if dest.?:
+                val dest_name = self.get_local(dest.unwrap().id)
+                val ty = self.get_local_type(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, ty + r"()")
+            return true
+        elif func_name == "spl_array_push":
+            if arg_vals.len() >= 2:
+                self.builder.emit(arg_vals[0] + r".push(" + arg_vals[1] + r");")
+            return true
+        elif func_name == "spl_array_get":
+            if dest.? and arg_vals.len() >= 2:
+                val dest_name = self.get_local(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, arg_vals[0] + r".get(" + arg_vals[1] + r")")
+            return true
+        elif func_name == "spl_array_len":
+            if dest.? and arg_vals.len() >= 1:
+                val dest_name = self.get_local(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, arg_vals[0] + r".len()")
+            return true
+        elif func_name == "spl_array_pop":
+            if dest.? and arg_vals.len() >= 1:
+                val dest_name = self.get_local(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, arg_vals[0] + r".pop()")
+            return true
+        elif func_name == "spl_array_set":
+            if arg_vals.len() >= 3:
+                self.builder.emit(arg_vals[0] + r".set(" + arg_vals[1] + r", " + arg_vals[2] + r");")
+            return true
+        # Dict operations
+        elif func_name == "spl_dict_new":
+            if dest.?:
+                val dest_name = self.get_local(dest.unwrap().id)
+                val ty = self.get_local_type(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, ty + r"()")
+            return true
+        elif func_name == "spl_dict_set":
+            if arg_vals.len() >= 3:
+                self.builder.emit(arg_vals[0] + r".set(" + arg_vals[1] + r", " + arg_vals[2] + r");")
+            return true
+        elif func_name == "spl_dict_get":
+            if dest.? and arg_vals.len() >= 2:
+                val dest_name = self.get_local(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, arg_vals[0] + r".get(" + arg_vals[1] + r")")
+            return true
+        elif func_name == "spl_dict_contains":
+            if dest.? and arg_vals.len() >= 2:
+                val dest_name = self.get_local(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, arg_vals[0] + r".contains(" + arg_vals[1] + r")")
+            return true
+        elif func_name == "spl_dict_keys":
+            if dest.? and arg_vals.len() >= 1:
+                val dest_name = self.get_local(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, arg_vals[0] + r".keys()")
+            return true
+        elif func_name == "spl_dict_len":
+            if dest.? and arg_vals.len() >= 1:
+                val dest_name = self.get_local(dest.unwrap().id)
+                self.builder.emit_assign(dest_name, arg_vals[0] + r".len()")
+            return true
+        elif func_name == "spl_dict_remove":
+            if arg_vals.len() >= 2:
+                self.builder.emit(arg_vals[0] + r".remove(" + arg_vals[1] + r");")
+            return true
+
+        false
 
     # === Binary Operations ===
 
@@ -457,7 +547,7 @@ class MirToC:
                 self.builder.emit_binop(dest_name, ty, "%", left_val, right_val)
             case Pow:
                 self.builder.emit_comment("pow")
-                self.builder.emit_assign(dest_name, "({ty})__simple_pow({left_val}, {right_val})")
+                self.builder.emit_assign(dest_name, r"(" + ty + r")__simple_pow(" + left_val + r", " + right_val + r")")
 
             case BitAnd:
                 self.builder.emit_binop(dest_name, ty, "&", left_val, right_val)
@@ -484,20 +574,20 @@ class MirToC:
                 self.builder.emit_cmp(dest_name, ty, ">=", left_val, right_val)
 
             case MatMul:
-                self.builder.emit_assign(dest_name, "(void*)__simple_runtime_matmul((void*){left_val}, (void*){right_val})")
+                self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_matmul((void*)" + left_val + r", (void*)" + right_val + r")")
             case BroadcastAdd:
-                self.builder.emit_assign(dest_name, "(void*)__simple_runtime_broadcast_add((void*){left_val}, (void*){right_val})")
+                self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_broadcast_add((void*)" + left_val + r", (void*)" + right_val + r")")
             case BroadcastSub:
-                self.builder.emit_assign(dest_name, "(void*)__simple_runtime_broadcast_sub((void*){left_val}, (void*){right_val})")
+                self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_broadcast_sub((void*)" + left_val + r", (void*)" + right_val + r")")
             case BroadcastMul:
-                self.builder.emit_assign(dest_name, "(void*)__simple_runtime_broadcast_mul((void*){left_val}, (void*){right_val})")
+                self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_broadcast_mul((void*)" + left_val + r", (void*)" + right_val + r")")
             case BroadcastDiv:
-                self.builder.emit_assign(dest_name, "(void*)__simple_runtime_broadcast_div((void*){left_val}, (void*){right_val})")
+                self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_broadcast_div((void*)" + left_val + r", (void*)" + right_val + r")")
             case BroadcastPow:
-                self.builder.emit_assign(dest_name, "(void*)__simple_runtime_broadcast_pow((void*){left_val}, (void*){right_val})")
+                self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_broadcast_pow((void*)" + left_val + r", (void*)" + right_val + r")")
 
             case Offset:
-                self.builder.emit_assign(dest_name, "(int64_t)((char*)(intptr_t){left_val} + {right_val})")
+                self.builder.emit_assign(dest_name, r"(int64_t)((char*)(intptr_t)" + left_val + r" + " + right_val + r")")
 
     # === Unary Operations ===
 
@@ -514,7 +604,7 @@ class MirToC:
             case BitNot:
                 self.builder.emit_unaryop(dest_name, ty, "~", operand_val)
             case Transpose:
-                self.builder.emit_assign(dest_name, "(void*)__simple_runtime_transpose((void*){operand_val})")
+                self.builder.emit_assign(dest_name, r"(void*)__simple_runtime_transpose((void*)" + operand_val + r")")
 
     # === Terminators ===
 
@@ -528,25 +618,25 @@ class MirToC:
                     self.builder.emit_return(nil)
 
             case Goto(target):
-                self.builder.emit_goto("bb{target.id}")
+                self.builder.emit_goto(r"bb" + target.id)
 
             case If(cond, then_, else_):
                 val cond_val = self.translate_operand(cond)
-                self.builder.emit_if("{cond_val} != 0", "bb{then_.id}", "bb{else_.id}")
+                self.builder.emit_if(cond_val + r" != 0", r"bb" + then_.id, r"bb" + else_.id)
 
             case Switch(value, targets, default):
                 val discr_val = self.translate_operand(value)
                 self.builder.emit_switch_start(discr_val)
                 for switch_case in targets:
-                    self.builder.emit_switch_case("{switch_case.value}", "bb{switch_case.target.id}")
-                self.builder.emit_switch_default("bb{default.id}")
+                    self.builder.emit_switch_case(r"" + switch_case.value, r"bb" + switch_case.target.id)
+                self.builder.emit_switch_default(r"bb" + default.id)
                 self.builder.emit_switch_end()
 
             case Unreachable:
-                self.builder.emit("SPL_UNREACHABLE();")
+                self.builder.emit(r"SPL_UNREACHABLE();")
 
             case Abort(message):
-                self.builder.emit("spl_panic(\"{message}\");")
+                self.builder.emit(r"spl_panic(" + "\"" + message + "\"" + r");")
 
             case CallTerminator(dest, func, args, normal, unwind):
                 val func_val = self.translate_operand(func)
@@ -556,10 +646,10 @@ class MirToC:
                 val args_str = arg_vals.join(", ")
                 if dest.?:
                     val dest_name = self.get_local(dest.unwrap().id)
-                    self.builder.emit_assign(dest_name, "{func_val}({args_str})")
+                    self.builder.emit_assign(dest_name, func_val + r"(" + args_str + r")")
                 else:
-                    self.builder.emit("{func_val}({args_str});")
-                self.builder.emit_goto("bb{normal.id}")
+                    self.builder.emit(func_val + r"(" + args_str + r");")
+                self.builder.emit_goto(r"bb" + normal.id)
 
     # === Helpers ===
 
@@ -574,19 +664,19 @@ class MirToC:
 
     me translate_const_value(value: MirConstValue) -> text:
         match value:
-            case Int(val): "{val}"
-            case Float(val): "{val}"
+            case Int(val): r"" + val
+            case Float(val): r"" + val
             case Bool(val): if val: "1" else: "0"
             case Str(val):
                 val var_name = self.builder.add_string_literal(val)
-                "(const char*){var_name}"
+                r"(const char*)" + var_name
             case Zero: "0"
             case Array(elements): "(int64_t)0 /* array */"
             case Tuple(elements): "(int64_t)0 /* tuple */"
             case Struct(fields): "(int64_t)0 /* struct */"
 
     fn get_local(id: i64) -> text:
-        "_l{id}"
+        r"_l" + id
 
     fn get_local_type(id: i64) -> text:
         match self.local_types.get(id):
@@ -634,10 +724,13 @@ class CCodegenBackend:
     fn compile(module: MirModule) -> CompiledModule:
         var translator = MirToC__create(module.name)
         val c_source = translator.translate_module(module)
+        val h_source = translator.build_header()
         CompiledModule(
             name: module.name,
             object_code: nil,
             assembly: c_source,
+            has_llvm_ir: true,
+            llvm_ir: h_source,
             symbols: [],
             compile_time_ms: 0
         )

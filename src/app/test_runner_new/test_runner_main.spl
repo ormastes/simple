@@ -2,12 +2,10 @@
 #
 # Main test runner entry point and orchestration logic.
 # Supports DB writes, parallel execution, feature DB, and doc generation.
-# Parsing, categorization, warnings, and DB updates are in test_runner_helpers.spl
 
 use app.io.mod (env_set, env_get, time_now_unix_micros, dir_create_all, file_write, file_read, file_exists, cli_get_args)
 
 use test_runner_types.*
-use test_runner_helpers.{*}
 use test_runner_args.parse_test_args
 use test_config.{TestConfig, TestConfig__load}
 use test_runner_files.{discover_test_files, print_discovery_summary, strip_ansi, file_has_di_test_tag}
@@ -524,6 +522,163 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
             run_test_file_composite(file_path, effective_options, spec)
 
 # =========================================================================
+# C4: Individual test result parsing from output
+# =========================================================================
+
+fn parse_individual_results(output: text, file_path: text) -> [IndividualTestResult]:
+    var results: [IndividualTestResult] = []
+    val lines = output.split("\n")
+    var current_group = ""
+
+    for line in lines:
+        val clean = strip_ansi(line.trim())
+        if clean == "":
+            continue
+
+        # Detect group headers (indented describe/context blocks)
+        # Format: "GroupName" followed by indented tests
+        if clean.ends_with(":") and not clean.starts_with(" ") and not clean.contains(" "):
+            current_group = clean[:-1]
+            continue
+
+        # Parse individual test lines: checkmark/cross + name
+        if clean.len() > 2:
+            val prefix = clean[0:2]
+            if prefix == "  ":
+                # Indented line might be a test result
+                val inner = clean.trim()
+                if inner.len() > 2:
+                    val marker = inner[0:3]
+                    if marker.contains("✓") or marker.contains("✔") or inner.starts_with("PASS"):
+                        val name = extract_test_name(inner)
+                        results.push(IndividualTestResult(
+                            name: name,
+                            group: current_group,
+                            status: TestStatus.Passed,
+                            error_message: ""
+                        ))
+                    elif marker.contains("✗") or marker.contains("✘") or inner.starts_with("FAIL"):
+                        val name = extract_test_name(inner)
+                        results.push(IndividualTestResult(
+                            name: name,
+                            group: current_group,
+                            status: TestStatus.Failed,
+                            error_message: ""
+                        ))
+                    elif marker.contains("○") or marker.contains("◯") or inner.starts_with("SKIP"):
+                        val name = extract_test_name(inner)
+                        results.push(IndividualTestResult(
+                            name: name,
+                            group: current_group,
+                            status: TestStatus.Skipped,
+                            error_message: ""
+                        ))
+                    elif inner.starts_with("PEND") or inner.contains("... pending"):
+                        val name = extract_pending_test_name(inner)
+                        results.push(IndividualTestResult(
+                            name: name,
+                            group: current_group,
+                            status: TestStatus.Pending,
+                            error_message: ""
+                        ))
+
+    results
+
+fn extract_pending_test_name(line: text) -> text:
+    # Parse "it {name} ... pending (waiting on: ...)" or "PEND {name}"
+    var rest = line.trim()
+    if rest.starts_with("it "):
+        rest = rest[3:]
+    elif rest.starts_with("PEND "):
+        rest = rest[5:]
+    # Strip " ... pending (...)" suffix
+    val pending_idx = rest.index_of(" ... pending") ?? -1
+    if pending_idx > 0:
+        return rest[0:pending_idx]
+    return rest
+
+fn extract_test_name(line: text) -> text:
+    # Strip leading marker characters and whitespace
+    var i = 0
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if ch != " " and ch != "✓" and ch != "✔" and ch != "✗" and ch != "✘" and ch != "○" and ch != "◯":
+            break
+        i = i + 1
+    # Also skip "PASS ", "FAIL ", "SKIP ", "PEND " prefixes
+    val rest = line[i:].trim()
+    if rest.starts_with("PASS ") or rest.starts_with("FAIL ") or rest.starts_with("SKIP ") or rest.starts_with("PEND "):
+        return rest[5:].trim()
+    rest
+
+# =========================================================================
+# M1: Derive test category from file path
+# =========================================================================
+
+fn categorize_test_file(file_path: text) -> text:
+    if file_path.contains("test/unit/"):
+        return "Unit"
+    if file_path.contains("test/feature/"):
+        return "Feature"
+    if file_path.contains("test/integration/"):
+        return "Integration"
+    if file_path.contains("test/system/"):
+        return "System"
+    if file_path.contains("test/benchmark/"):
+        return "Benchmark"
+    "Unknown"
+
+# =========================================================================
+# Closure Warnings Display
+# =========================================================================
+
+fn display_closure_warnings():
+    """Display closure variable capture warnings if any were detected."""
+    if not closure_warnings_has():
+        return
+
+    print ""
+    print "=========================================="
+    print "CLOSURE CAPTURE WARNINGS"
+    print "=========================================="
+    print ""
+
+    val warnings = closure_warnings_get()
+    var i = 0
+    while i < warnings.len():
+        print "[CLOSURE WARNING] {warnings[i]}"
+        i = i + 1
+
+    print ""
+    print "For more information, see MEMORY.md"
+    print "=========================================="
+
+# =========================================================================
+# Call Graph Warnings Display
+# =========================================================================
+
+fn display_call_graph_warnings():
+    """Display call graph recursion warnings if any were detected."""
+    if not call_graph_warnings_has():
+        return
+
+    print ""
+    print "=========================================="
+    print "CALL GRAPH WARNINGS"
+    print "=========================================="
+    print ""
+
+    val warnings = call_graph_warnings_get()
+    var i = 0
+    for w in warnings:
+        print "[CALL GRAPH] {w}"
+        i = i + 1
+
+    print ""
+    print "Recursion is banned in @safe context"
+    print "=========================================="
+
+# =========================================================================
 # Main Entry Point
 # =========================================================================
 
@@ -678,6 +833,53 @@ fn get_flag_value(args: [text], flag: text) -> text?:
             return Some(args[i][flag.len() + 1:])
         i = i + 1
     nil
+
+# =========================================================================
+# Test Database Update (C5: per-test granularity, M1: categorization)
+# =========================================================================
+
+fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
+    # FIXME: Database loading causes semantic error in runtime
+    # Error: "semantic: method `split` not found on type `enum`"
+    # Location: lib.database.test_extended loading chain via SdnDatabase.load()
+    # The error appears when loading test_db.sdn during database initialization.
+    #
+    # To reproduce: uncomment the load_test_db_compat() call below
+    # To fix: Investigate SdnDatabase.load() and ensure all Option values
+    # are unwrapped before calling string methods like .split()
+    #
+    # Impact: Test database and documentation are not updated after test runs
+    # Workaround: Tests still execute correctly, just no persistence
+    #
+    # TODO: Fix the underlying issue in database library
+    pass
+
+# =========================================================================
+# M3/H6: Update feature status from test results
+# =========================================================================
+
+fn update_features_from_tests(fdb: FeatureDatabase, result: TestRunResult):
+    # Build set of failed file paths
+    var failed_files: Dict<text, bool> = {}
+    for file_result in result.files:
+        if file_result.failed > 0 or file_result.timed_out:
+            failed_files[file_result.path] = true
+
+    # Get all features and update status based on test results
+    val all_features = fdb.all_features()
+    for feature in all_features:
+        val spec = feature.spec_file
+        if spec != "" and spec.ends_with(".spl"):
+            if failed_files.contains_key(spec):
+                # Test failed - mark feature as failed
+                fdb.update_feature_status(feature.id, FeatureStatus.Failed)
+            else:
+                # Check if spec was in test results and passed
+                for file_result in result.files:
+                    if file_result.path == spec and file_result.failed == 0 and not file_result.timed_out:
+                        # Test passed - mark feature as done if not already
+                        if feature.pure_status != FeatureStatus.Done:
+                            fdb.update_feature_status(feature.id, FeatureStatus.Done)
 
 # =========================================================================
 # Exports

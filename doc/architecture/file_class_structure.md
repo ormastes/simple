@@ -22,7 +22,7 @@
 
 | Directory | Files | Lines | % of Core | Purpose |
 |-----------|-------|-------|-----------|---------|
-| `src/std/` | 909 | 192,427 | 173.3% | Standard library (utilities, data structures, protocols) |
+| `src/lib/` | 909 | 192,427 | 173.3% | Standard library (utilities, data structures, protocols) |
 | `src/compiler/` | 436 | 140,341 | 126.4% | Full compiler (Full Simple) |
 | `src/app/` | 594 | 129,154 | 116.3% | Applications & tools (CLI, MCP, LSP, test runner) |
 | `src/compiler_core_legacy/` | 441 | 97,057 | 87.4% | Core compiler (Core Simple) |
@@ -96,7 +96,7 @@
 
 ---
 
-### 1.2 Standard Library (`src/std/` - 909 files, 192,427 lines)
+### 1.2 Standard Library (`src/lib/` - 909 files, 192,427 lines)
 
 **Purpose:** Comprehensive standard library covering all common needs.
 
@@ -150,7 +150,7 @@
 | **I/O** | ~30 | ~10,000 | File, binary, async I/O, streams |
 | **Concurrency** | ~25 | ~8,000 | Threads, actors, channels, locks |
 
-#### Platform Library (`src/std/platform/` - 6 files, 414 lines)
+#### Platform Library (`src/lib/platform/` - 6 files, 414 lines)
 
 **Purpose:** Cross-platform abstraction (endianness, newlines, paths).
 
@@ -407,10 +407,10 @@
 #### 1. String/Text Processing (3-way overlap)
 
 **Files involved:**
-- `src/std/text.spl` (627 lines)
-- `src/std/text_utils.spl` (767 lines)
-- `src/std/string_core.spl` (400+ lines)
-- `src/std/helpers.spl` (string functions, ~200 lines)
+- `src/lib/text.spl` (627 lines)
+- `src/lib/text_utils.spl` (767 lines)
+- `src/lib/string_core.spl` (400+ lines)
+- `src/lib/helpers.spl` (string functions, ~200 lines)
 
 **Total:** ~2,000 lines
 **Estimated duplication:** ~500-700 lines (25-35%)
@@ -435,10 +435,10 @@
 #### 2. Array Operations (3-way overlap)
 
 **Files involved:**
-- `src/std/array.spl` (350 lines)
-- `src/std/list_utils.spl` (250+ lines)
-- `src/std/collection_utils.spl` (estimated ~300 lines)
-- `src/std/json/array_ops.spl` (559 lines - JSON-specific)
+- `src/lib/array.spl` (350 lines)
+- `src/lib/list_utils.spl` (250+ lines)
+- `src/lib/collection_utils.spl` (estimated ~300 lines)
+- `src/lib/json/array_ops.spl` (559 lines - JSON-specific)
 
 **Total:** ~1,450 lines
 **Estimated duplication:** ~300-400 lines (20-25%)
@@ -605,10 +605,10 @@ fn select_inst(mir: MirInst) -> MachInst:
 #### 7. Testing Framework (scattered)
 
 **Files involved:**
-- `src/std/spec.spl` (694 lines) - SSpec BDD framework
+- `src/lib/spec.spl` (694 lines) - SSpec BDD framework
 - `src/app/test_runner_new/test_runner_main.spl` (704 lines)
 - `src/app/test_runner_new/test_runner_execute.spl` (624 lines)
-- `src/std/src/testing/mocking_advanced.spl` (724 lines)
+- `src/lib/src/testing/mocking_advanced.spl` (724 lines)
 - Various test utilities across stdlib
 
 **Total:** ~3,000+ lines
@@ -649,9 +649,9 @@ fn select_inst(mir: MirInst) -> MachInst:
 #### 9. Validation Predicates (scattered)
 
 **Files involved:**
-- `src/std/math.spl` - `is_finite()`, `is_nan()`, `is_infinite()`
-- `src/std/validation_utils.spl` - `is_email()`, `is_url()`, `is_path()`
-- `src/std/text.spl` - `is_alpha()`, `is_digit()`, `is_alnum()`
+- `src/lib/math.spl` - `is_finite()`, `is_nan()`, `is_infinite()`
+- `src/lib/validation_utils.spl` - `is_email()`, `is_url()`, `is_path()`
+- `src/lib/text.spl` - `is_alpha()`, `is_digit()`, `is_alnum()`
 
 **Total:** ~400-500 lines scattered
 **Estimated duplication:** ~100-150 lines (similar validation patterns)
@@ -665,8 +665,8 @@ fn select_inst(mir: MirInst) -> MachInst:
 #### 10. Option/Result Helpers (2 locations)
 
 **Files involved:**
-- `src/std/option_helpers.spl` (~200 lines)
-- `src/std/functional.spl` (Option/Result monadic operations, ~150 lines)
+- `src/lib/option_helpers.spl` (~200 lines)
+- `src/lib/functional.spl` (Option/Result monadic operations, ~150 lines)
 
 **Overlap:** ~50-80 lines (map, flatMap, filter, getOrElse)
 
@@ -698,12 +698,12 @@ fn select_inst(mir: MirInst) -> MachInst:
 
 **Priority:** P1 High
 **Files to merge:**
-- `src/std/text.spl` (627 lines)
-- `src/std/text_utils.spl` (767 lines)
-- `src/std/string_core.spl` (~400 lines)
-- `src/std/helpers.spl` (string functions only, ~200 lines)
+- `src/lib/text.spl` (627 lines)
+- `src/lib/text_utils.spl` (767 lines)
+- `src/lib/string_core.spl` (~400 lines)
+- `src/lib/helpers.spl` (string functions only, ~200 lines)
 
-**Target:** `src/std/text.spl` (expanded to ~1,200 lines)
+**Target:** `src/lib/text.spl` (expanded to ~1,200 lines)
 
 **Expected reduction:** ~800 lines (from 2,000 to ~1,200 net)
 
@@ -755,13 +755,13 @@ fn select_inst(mir: MirInst) -> MachInst:
 
 **Priority:** P1 High
 **Files to merge:**
-- `src/std/array.spl` (350 lines)
-- `src/std/list_utils.spl` (~250 lines)
-- `src/std/collection_utils.spl` (~300 lines estimated)
+- `src/lib/array.spl` (350 lines)
+- `src/lib/list_utils.spl` (~250 lines)
+- `src/lib/collection_utils.spl` (~300 lines estimated)
 
-**Leave separate:** `src/std/json/array_ops.spl` (JSON-specific)
+**Leave separate:** `src/lib/json/array_ops.spl` (JSON-specific)
 
-**Target:** `src/std/array.spl` (expanded to ~600 lines)
+**Target:** `src/lib/array.spl` (expanded to ~600 lines)
 
 **Expected reduction:** ~300 lines (from 900 to ~600 net)
 
@@ -822,18 +822,18 @@ fn select_inst(mir: MirInst) -> MachInst:
 
 **Priority:** P2 Medium
 **Files to consolidate:**
-- `src/std/math.spl` (numeric validation)
-- `src/std/validation_utils.spl` (string validation)
-- `src/std/text.spl` (character validation)
+- `src/lib/math.spl` (numeric validation)
+- `src/lib/validation_utils.spl` (string validation)
+- `src/lib/text.spl` (character validation)
 
-**Target:** New `src/std/validation.spl` (~300 lines)
+**Target:** New `src/lib/validation.spl` (~300 lines)
 
 **Expected reduction:** ~100-150 lines
 
 **Risk:** Low (pure functions, no side effects)
 
 **Action plan:**
-1. **Week 1:** Create `src/std/validation.spl`
+1. **Week 1:** Create `src/lib/validation.spl`
    - Move all `is_*()` predicates
    - Organize by category (numeric, string, character, format)
 
@@ -970,7 +970,7 @@ class X86_64ISA:
 #### 2. Deprecated Helper Functions
 
 **Candidates:**
-- String functions in `src/std/helpers.spl` (after string consolidation)
+- String functions in `src/lib/helpers.spl` (after string consolidation)
 - Old validation predicates (after validation module)
 
 **Savings:** ~200-300 lines
@@ -1008,12 +1008,12 @@ class X86_64ISA:
 
 ### Module Hierarchy
 
-**Current issue:** Flat structure in `src/std/` (909 files)
+**Current issue:** Flat structure in `src/lib/` (909 files)
 
 **Proposal:** Organize into subdirectories by category
 
 ```
-src/std/
+src/lib/
   core/           # String, array, option, result (core data types)
   collections/    # Advanced data structures (skiplist, graph, tree)
   algorithms/     # Sorting, searching, graph algorithms
@@ -1443,7 +1443,7 @@ src/std/
 ### Next Quarter (Phase 1 + Phase 2 Start)
 
 6. **Month 2: Extract Validation Module**
-   - Create `src/std/validation.spl`
+   - Create `src/lib/validation.spl`
    - Update ~60 import statements
 
 7. **Month 3: Consolidate Phase Files**
@@ -1498,12 +1498,12 @@ find src/compiler/backend/native -name "isel_*.spl" -o -name "encode_*.spl"
 
 **Core Implementation:**
 - `src/compiler_core_legacy/parser.spl` (2,135 lines) - Bootstrap parser
-- `src/std/spec.spl` (694 lines) - SSpec testing framework
+- `src/lib/spec.spl` (694 lines) - SSpec testing framework
 - `src/app/cli/main.spl` (756 lines) - CLI entry point
 - `src/compiler/driver.spl` (856 lines) - Compiler driver
 
 **Duplication Hotspots:**
-- `src/std/text.spl`, `src/std/text_utils.spl` - String processing
+- `src/lib/text.spl`, `src/lib/text_utils.spl` - String processing
 - `src/compiler/backend/*_type_mapper.spl` - Backend type mappers
 - `src/compiler/backend/native/isel_*.spl` - ISA instruction selection
 

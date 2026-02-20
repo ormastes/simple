@@ -71,7 +71,7 @@ impl Value:
 
 **Impact:** Fixed 30 test failures
 
-### 2. Timing Module (src/std/timing.spl)
+### 2. Timing Module (src/lib/timing.spl)
 
 Created comprehensive profiling infrastructure (+180 lines):
 
@@ -172,7 +172,7 @@ Speedup: 4.5x faster (77% reduction)
 ### Reusability
 
 **Infrastructure Created:**
-1. `src/std/timing.spl` - Used by ANY test needing timing
+1. `src/lib/timing.spl` - Used by ANY test needing timing
 2. Value enum methods - Used by ALL backend tests
 3. Optimization patterns - Applicable to 29 other slow tests
 
@@ -239,7 +239,7 @@ Speedup: 4.5x faster (77% reduction)
    - Added Value enum type checking methods
    - Added Value enum accessor methods
 
-2. **src/std/timing.spl** (+180 lines, new file)
+2. **src/lib/timing.spl** (+180 lines, new file)
    - Timing and profiling infrastructure
    - Benchmark utilities
 

@@ -162,7 +162,7 @@ fn is_dict_extern(args: [Value]) -> Result<Value, InterpreterError>
 
 ## 4. RuntimeValue Tagged Pointer
 
-**Location:** `src/std/runtime_value.spl`
+**Location:** `src/lib/runtime_value.spl`
 
 Efficient value representation using tag bits (no allocation for primitives).
 
@@ -438,7 +438,7 @@ No need to create new serialization format.
 
 - **AST conversion:** `src/app/interpreter/ast_convert*.spl`
 - **Type mapping:** `src/app/ffi_gen/type_mapping.spl`
-- **Runtime values:** `src/std/runtime_value.spl`
+- **Runtime values:** `src/lib/runtime_value.spl`
 - **Conversion specs:** `src/app/ffi_gen.specs/conversion.spl`
 - **FFI generation:** `src/app/ffi_gen/rust_codegen.spl`
 

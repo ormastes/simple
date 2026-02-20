@@ -18,7 +18,7 @@
 
 2. **Mapped Test Landscape**
    - **Test file:** `test/lib/std/unit/allocator_spec.spl` (455 lines)
-   - **Source file:** `src/std/allocator.spl` (601 LOC)
+   - **Source file:** `src/lib/allocator.spl` (601 LOC)
    - **Existing tests:** 55 tests across 4 allocators (System, Arena, Pool, Slab)
 
 3. **Analyzed Branch Inventory**

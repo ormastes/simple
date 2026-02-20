@@ -7,10 +7,10 @@
 ## Complete Deliverables
 
 ### 1. Core Implementation (1,159 lines)
-- ✅ `src/std/spec/env_detect.spl` (480 lines) - 46 detection functions
-- ✅ `src/std/spec/condition.spl` (349 lines) - Condition matching
-- ✅ `src/std/spec/decorators.spl` (318 lines) - 8 decorator functions
-- ✅ `src/std/spec/mod.spl` (12 lines) - Module index
+- ✅ `src/lib/spec/env_detect.spl` (480 lines) - 46 detection functions
+- ✅ `src/lib/spec/condition.spl` (349 lines) - Condition matching
+- ✅ `src/lib/spec/decorators.spl` (318 lines) - 8 decorator functions
+- ✅ `src/lib/spec/mod.spl` (12 lines) - Module index
 
 ### 2. Test Suite (1,090 lines)
 - ✅ `test/lib/std/spec/env_detect_spec.spl` (240 lines) - 57 tests
@@ -183,7 +183,7 @@ val ignore_win = ignore_on_windows("Unix-only API")
 
 ### Core Modules (3 files, 1,159 lines)
 ```
-src/std/spec/
+src/lib/spec/
 ├── env_detect.spl      480 lines  46 functions
 ├── condition.spl       349 lines  12 matchers + 1 struct
 ├── decorators.spl      318 lines  8 decorators

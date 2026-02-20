@@ -255,14 +255,14 @@ Semantic difference justifies separate implementations. Attempting to unify woul
 **A. File Discovery (~200 lines)**
 - `find_spl_files()` duplicated in 10+ tools
 - Pattern: recursively find `.spl` files in directory
-- **Consolidation:** Extract to `src/std/file_discovery.spl`
+- **Consolidation:** Extract to `src/lib/file_discovery.spl`
 - **Risk:** LOW
 - **Benefit:** 180 lines saved
 
 **B. Duration Formatting (~200 lines)**
 - `format_duration_ms()` duplicated in 9 files
 - Pattern: convert milliseconds to "1.23s" or "450ms"
-- **Consolidation:** Extract to `src/std/format_utils.spl`
+- **Consolidation:** Extract to `src/lib/format_utils.spl`
 - **Risk:** LOW
 - **Benefit:** 180 lines saved
 

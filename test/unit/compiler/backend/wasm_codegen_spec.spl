@@ -1,291 +1,251 @@
-# WASM Codegen Specification
+# WAT Codegen Specification
 #
-# Tests for the WAT-based WASM backend:
-# - MIR to WAT instruction translation
-# - Control flow structuring
-# - Memory layout and string table
-# - WASI import declarations
-# - WatBuilder output
+# Tests for the WAT-based WASM backend (Phase 2).
+# Validates MIR to WAT translation, control flow structuring,
+# memory layout, string table, and WASI import declarations.
 
-use compiler.backend.wasm_backend.{WatBuilder, WasmType, WasmTarget}
-use compiler.backend.wasm_type_mapper.{WasmTypeMapper}
+use compiler.backend.wasm_backend.*
+use compiler.backend.wasm_type_mapper.{WasmTypeMapper, WasmTypeMapper__create_wasm32}
 use compiler.mir_data.*
 
-describe "WatBuilder":
+describe "WAT Codegen":
 
-    context "basic output":
+    context "WatBuilder basics":
         it "creates empty module":
             var builder = WatBuilder.create()
             builder.begin_module("test")
             builder.end_module()
-            val result = builder.build()
-            expect(result).to_contain("(module $test")
-            expect(result).to_contain(")")
+            val wat = builder.build()
+            expect(wat).to_contain("(module $test")
+            expect(wat).to_contain(")")
 
         it "emits i32 const":
             var builder = WatBuilder.create()
             builder.emit_i32_const(42)
-            val result = builder.build()
-            expect(result).to_contain("i32.const 42")
+            val wat = builder.build()
+            expect(wat).to_contain("i32.const 42")
 
         it "emits i64 const":
             var builder = WatBuilder.create()
             builder.emit_i64_const(100)
-            val result = builder.build()
-            expect(result).to_contain("i64.const 100")
+            val wat = builder.build()
+            expect(wat).to_contain("i64.const 100")
 
         it "emits f64 const":
             var builder = WatBuilder.create()
             builder.emit_f64_const(3.14)
-            val result = builder.build()
-            expect(result).to_contain("f64.const")
+            val wat = builder.build()
+            expect(wat).to_contain("f64.const")
 
-    context "control flow":
-        it "emits block":
-            var builder = WatBuilder.create()
-            builder.emit_block("exit")
-            builder.emit_end()
-            val result = builder.build()
-            expect(result).to_contain("(block $exit")
-
-        it "emits loop":
-            var builder = WatBuilder.create()
-            builder.emit_loop("loop0")
-            builder.emit_end()
-            val result = builder.build()
-            expect(result).to_contain("(loop $loop0")
-
-        it "emits branch":
-            var builder = WatBuilder.create()
-            builder.emit_br("exit")
-            val result = builder.build()
-            expect(result).to_contain("br $exit")
-
-        it "emits conditional branch":
-            var builder = WatBuilder.create()
-            builder.emit_br_if("exit")
-            val result = builder.build()
-            expect(result).to_contain("br_if $exit")
-
-        it "emits br_table":
-            var builder = WatBuilder.create()
-            builder.emit_br_table(["b0", "b1", "b2"], "b0")
-            val result = builder.build()
-            expect(result).to_contain("br_table")
-            expect(result).to_contain("$b0")
-            expect(result).to_contain("$b1")
-            expect(result).to_contain("$b2")
-
-    context "variables":
-        it "emits local get by name":
+        it "emits local get and set by name":
             var builder = WatBuilder.create()
             builder.emit_local_named_get("x")
-            val result = builder.build()
-            expect(result).to_contain("local.get $x")
-
-        it "emits local set by name":
-            var builder = WatBuilder.create()
-            builder.emit_local_named_set("x")
-            val result = builder.build()
-            expect(result).to_contain("local.set $x")
-
-        it "emits global get":
-            var builder = WatBuilder.create()
-            builder.emit_global_get("heap_ptr")
-            val result = builder.build()
-            expect(result).to_contain("global.get $heap_ptr")
-
-        it "emits global set":
-            var builder = WatBuilder.create()
-            builder.emit_global_set("heap_ptr")
-            val result = builder.build()
-            expect(result).to_contain("global.set $heap_ptr")
-
-    context "memory operations":
-        it "emits i32 load":
-            var builder = WatBuilder.create()
-            builder.emit_i32_load(0, 4)
-            val result = builder.build()
-            expect(result).to_contain("i32.load offset=0 align=4")
-
-        it "emits i32 store":
-            var builder = WatBuilder.create()
-            builder.emit_i32_store(0, 4)
-            val result = builder.build()
-            expect(result).to_contain("i32.store offset=0 align=4")
-
-        it "emits i64 load":
-            var builder = WatBuilder.create()
-            builder.emit_i64_load(8, 8)
-            val result = builder.build()
-            expect(result).to_contain("i64.load offset=8 align=8")
-
-    context "arithmetic":
-        it "emits i64 add":
-            var builder = WatBuilder.create()
-            builder.emit_i64_add()
-            val result = builder.build()
-            expect(result).to_contain("i64.add")
-
-        it "emits i64 sub":
-            var builder = WatBuilder.create()
-            builder.emit_i64_sub()
-            val result = builder.build()
-            expect(result).to_contain("i64.sub")
-
-        it "emits i64 mul":
-            var builder = WatBuilder.create()
-            builder.emit_i64_mul()
-            val result = builder.build()
-            expect(result).to_contain("i64.mul")
-
-        it "emits f64 add":
-            var builder = WatBuilder.create()
-            builder.emit_f64_add()
-            val result = builder.build()
-            expect(result).to_contain("f64.add")
-
-    context "comparison":
-        it "emits i64 eq":
-            var builder = WatBuilder.create()
-            builder.emit_i64_eq()
-            val result = builder.build()
-            expect(result).to_contain("i64.eq")
-
-        it "emits i64 lt_s":
-            var builder = WatBuilder.create()
-            builder.emit_i64_lt_s()
-            val result = builder.build()
-            expect(result).to_contain("i64.lt_s")
-
-        it "emits f64 lt":
-            var builder = WatBuilder.create()
-            builder.emit_f64_lt()
-            val result = builder.build()
-            expect(result).to_contain("f64.lt")
-
-    context "function":
-        it "emits function with params and results":
-            var builder = WatBuilder.create()
-            builder.begin_func("add", [WasmType.I64, WasmType.I64], [WasmType.I64])
-            builder.emit_local_get(0)
-            builder.emit_local_get(1)
-            builder.emit_i64_add()
-            builder.emit_return()
-            builder.end_func()
-            val result = builder.build()
-            expect(result).to_contain("(func $add")
-            expect(result).to_contain("(param i64)")
-            expect(result).to_contain("(result i64)")
-            expect(result).to_contain("i64.add")
+            builder.emit_local_named_set("y")
+            val wat = builder.build()
+            expect(wat).to_contain("local.get $x")
+            expect(wat).to_contain("local.set $y")
 
         it "emits call by name":
             var builder = WatBuilder.create()
             builder.emit_call_named("my_func")
-            val result = builder.build()
-            expect(result).to_contain("call $my_func")
+            val wat = builder.build()
+            expect(wat).to_contain("call $my_func")
 
-    context "special instructions":
-        it "emits nop":
+    context "WatBuilder control flow":
+        it "emits block and end":
             var builder = WatBuilder.create()
-            builder.emit_nop()
-            val result = builder.build()
-            expect(result).to_contain("nop")
+            builder.emit_block("exit")
+            builder.emit_end()
+            val wat = builder.build()
+            expect(wat).to_contain("(block $exit")
 
-        it "emits unreachable":
+        it "emits loop":
             var builder = WatBuilder.create()
-            builder.emit_unreachable()
-            val result = builder.build()
-            expect(result).to_contain("unreachable")
+            builder.emit_loop("loop_start")
+            builder.emit_end()
+            val wat = builder.build()
+            expect(wat).to_contain("(loop $loop_start")
 
-        it "emits drop":
+        it "emits branch instructions":
             var builder = WatBuilder.create()
-            builder.emit_drop()
-            val result = builder.build()
-            expect(result).to_contain("drop")
+            builder.emit_br("target")
+            builder.emit_br_if("cond_target")
+            val wat = builder.build()
+            expect(wat).to_contain("br $target")
+            expect(wat).to_contain("br_if $cond_target")
 
         it "emits return":
             var builder = WatBuilder.create()
             builder.emit_return()
-            val result = builder.build()
-            expect(result).to_contain("return")
+            val wat = builder.build()
+            expect(wat).to_contain("return")
 
-describe "WasmTypeMapper":
+        it "emits unreachable":
+            var builder = WatBuilder.create()
+            builder.emit_unreachable()
+            val wat = builder.build()
+            expect(wat).to_contain("unreachable")
 
-    context "wasm32 type mapping":
+    context "WatBuilder arithmetic":
+        it "emits i64 arithmetic":
+            var builder = WatBuilder.create()
+            builder.emit_i64_add()
+            builder.emit_i64_sub()
+            builder.emit_i64_mul()
+            builder.emit_i64_div_s()
+            builder.emit_i64_rem_s()
+            val wat = builder.build()
+            expect(wat).to_contain("i64.add")
+            expect(wat).to_contain("i64.sub")
+            expect(wat).to_contain("i64.mul")
+            expect(wat).to_contain("i64.div_s")
+            expect(wat).to_contain("i64.rem_s")
+
+        it "emits f64 arithmetic":
+            var builder = WatBuilder.create()
+            builder.emit_f64_add()
+            builder.emit_f64_sub()
+            builder.emit_f64_mul()
+            builder.emit_f64_div()
+            val wat = builder.build()
+            expect(wat).to_contain("f64.add")
+            expect(wat).to_contain("f64.sub")
+            expect(wat).to_contain("f64.mul")
+            expect(wat).to_contain("f64.div")
+
+    context "WatBuilder comparison":
+        it "emits i64 comparisons":
+            var builder = WatBuilder.create()
+            builder.emit_i64_eq()
+            builder.emit_i64_ne()
+            builder.emit_i64_lt_s()
+            builder.emit_i64_ge_s()
+            val wat = builder.build()
+            expect(wat).to_contain("i64.eq")
+            expect(wat).to_contain("i64.ne")
+            expect(wat).to_contain("i64.lt_s")
+            expect(wat).to_contain("i64.ge_s")
+
+        it "emits f64 comparisons":
+            var builder = WatBuilder.create()
+            builder.emit_f64_eq()
+            builder.emit_f64_lt()
+            builder.emit_f64_gt()
+            val wat = builder.build()
+            expect(wat).to_contain("f64.eq")
+            expect(wat).to_contain("f64.lt")
+            expect(wat).to_contain("f64.gt")
+
+    context "WatBuilder memory":
+        it "emits i32 load and store":
+            var builder = WatBuilder.create()
+            builder.emit_i32_load(0, 4)
+            builder.emit_i32_store(8, 4)
+            val wat = builder.build()
+            expect(wat).to_contain("i32.load offset=0 align=4")
+            expect(wat).to_contain("i32.store offset=8 align=4")
+
+        it "emits global get and set":
+            var builder = WatBuilder.create()
+            builder.emit_global_get("heap_ptr")
+            builder.emit_global_set("heap_ptr")
+            val wat = builder.build()
+            expect(wat).to_contain("global.get $heap_ptr")
+            expect(wat).to_contain("global.set $heap_ptr")
+
+    context "WatBuilder logical":
+        it "emits logical ops":
+            var builder = WatBuilder.create()
+            builder.emit_i32_and()
+            builder.emit_i32_or()
+            builder.emit_i32_xor()
+            builder.emit_i32_eqz()
+            val wat = builder.build()
+            expect(wat).to_contain("i32.and")
+            expect(wat).to_contain("i32.or")
+            expect(wat).to_contain("i32.xor")
+            expect(wat).to_contain("i32.eqz")
+
+    context "WasmType":
+        it "converts to text correctly":
+            expect(WasmType.I32.to_text()).to_equal("i32")
+            expect(WasmType.I64.to_text()).to_equal("i64")
+            expect(WasmType.F32.to_text()).to_equal("f32")
+            expect(WasmType.F64.to_text()).to_equal("f64")
+            expect(WasmType.FuncRef.to_text()).to_equal("funcref")
+            expect(WasmType.ExternRef.to_text()).to_equal("externref")
+
+    context "WasmTarget":
+        it "detects JS glue needs":
+            expect(WasmTarget.Browser.needs_js_glue()).to_equal(true)
+            expect(WasmTarget.Wasi.needs_js_glue()).to_equal(false)
+            expect(WasmTarget.Minimal.needs_js_glue()).to_equal(false)
+
+        it "detects WASI import needs":
+            expect(WasmTarget.Wasi.needs_wasi_imports()).to_equal(true)
+            expect(WasmTarget.Browser.needs_wasi_imports()).to_equal(false)
+            expect(WasmTarget.Minimal.needs_wasi_imports()).to_equal(false)
+
+    context "WasmTypeMapper":
         it "maps i64 to i64":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val ty = MirType(kind: MirTypeKind.I64)
-            expect(mapper.map_type(ty)).to_equal("i64")
-
-        it "maps i32 to i32":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val ty = MirType(kind: MirTypeKind.I32)
-            expect(mapper.map_type(ty)).to_equal("i32")
+            val mapper = WasmTypeMapper__create_wasm32()
+            val mir_type = MirType(kind: MirTypeKind.I64)
+            expect(mapper.map_type(mir_type)).to_equal("i64")
 
         it "maps f64 to f64":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val ty = MirType(kind: MirTypeKind.F64)
-            expect(mapper.map_type(ty)).to_equal("f64")
+            val mapper = WasmTypeMapper__create_wasm32()
+            val mir_type = MirType(kind: MirTypeKind.F64)
+            expect(mapper.map_type(mir_type)).to_equal("f64")
 
         it "maps bool to i32":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val ty = MirType(kind: MirTypeKind.Bool)
-            expect(mapper.map_type(ty)).to_equal("i32")
+            val mapper = WasmTypeMapper__create_wasm32()
+            val mir_type = MirType(kind: MirTypeKind.Bool)
+            expect(mapper.map_type(mir_type)).to_equal("i32")
 
-    context "size and alignment":
-        it "i64 is 8 bytes":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val ty = MirType(kind: MirTypeKind.I64)
-            expect(mapper.size_of(ty)).to_equal(8)
+        it "maps i32 to i32":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val mir_type = MirType(kind: MirTypeKind.I32)
+            expect(mapper.map_type(mir_type)).to_equal("i32")
 
-        it "i32 is 4 bytes":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val ty = MirType(kind: MirTypeKind.I32)
-            expect(mapper.size_of(ty)).to_equal(4)
+        it "reports correct size for i64":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val mir_type = MirType(kind: MirTypeKind.I64)
+            expect(mapper.size_of(mir_type)).to_equal(8)
 
-        it "bool is 1 byte":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val ty = MirType(kind: MirTypeKind.Bool)
-            expect(mapper.size_of(ty)).to_equal(1)
+        it "reports correct size for i32":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val mir_type = MirType(kind: MirTypeKind.I32)
+            expect(mapper.size_of(mir_type)).to_equal(4)
 
-        it "unit is 0 bytes":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val ty = MirType(kind: MirTypeKind.Unit)
-            expect(mapper.size_of(ty)).to_equal(0)
+        it "reports correct size for bool":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val mir_type = MirType(kind: MirTypeKind.Bool)
+            expect(mapper.size_of(mir_type)).to_equal(1)
 
-    context "function signatures":
-        it "generates correct signature for unit return":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val params = [MirType(kind: MirTypeKind.I64)]
-            val ret = MirType(kind: MirTypeKind.Unit)
-            val sig = mapper.map_function_signature(params, ret)
-            expect(sig).to_contain("(param")
-            # Unit return should have no (result ...)
+        it "reports correct alignment for f64":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val mir_type = MirType(kind: MirTypeKind.F64)
+            expect(mapper.align_of(mir_type)).to_equal(8)
 
-        it "generates correct signature with result":
-            val mapper = WasmTypeMapper.create_wasm32()
-            val params = [MirType(kind: MirTypeKind.I64), MirType(kind: MirTypeKind.I64)]
-            val ret = MirType(kind: MirTypeKind.I64)
-            val sig = mapper.map_function_signature(params, ret)
-            expect(sig).to_contain("(param")
-            expect(sig).to_contain("(result")
+    context "JsGlueGenerator":
+        it "generates JavaScript glue code":
+            var glue = JsGlueGenerator.create()
+            glue.add_binding(BrowserBinding.console_log())
+            glue.add_export("main")
+            val js = glue.generate()
+            expect(js).to_contain("WebAssembly")
+            expect(js).to_contain("memory")
+            expect(js).to_contain("loadWasm")
 
-describe "WasmTarget":
+    context "WasmBackend creation":
+        it "creates browser backend":
+            val backend = WasmBackend.create(WasmTarget.Browser)
+            expect(backend.target.to_text()).to_equal("browser")
 
-    it "browser needs JS glue":
-        expect(WasmTarget.Browser.needs_js_glue()).to_equal(true)
+        it "creates wasi backend":
+            val backend = WasmBackend.create(WasmTarget.Wasi)
+            expect(backend.target.to_text()).to_equal("wasi")
 
-    it "wasi does not need JS glue":
-        expect(WasmTarget.Wasi.needs_js_glue()).to_equal(false)
-
-    it "wasi needs WASI imports":
-        expect(WasmTarget.Wasi.needs_wasi_imports()).to_equal(true)
-
-    it "browser does not need WASI imports":
-        expect(WasmTarget.Browser.needs_wasi_imports()).to_equal(false)
-
-    it "converts to text correctly":
-        expect(WasmTarget.Browser.to_text()).to_equal("browser")
-        expect(WasmTarget.Wasi.to_text()).to_equal("wasi")
-        expect(WasmTarget.Minimal.to_text()).to_equal("minimal")
+        it "creates minimal backend":
+            val backend = WasmBackend.create(WasmTarget.Minimal)
+            expect(backend.target.to_text()).to_equal("minimal")

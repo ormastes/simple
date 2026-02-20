@@ -37,7 +37,7 @@
 
 ---
 
-### Module 2: `src/std/src/infra.spl` (High-level, Result-based)
+### Module 2: `src/lib/src/infra.spl` (High-level, Result-based)
 
 **Purpose:** Standard library file I/O with proper error handling
 **Pattern:** Shell commands, Pure Simple
@@ -152,7 +152,7 @@
 
 ```
 ┌─────────────────────────────────────────┐
-│  src/std/src/infra.spl                  │  ← Public API (Result-based)
+│  src/lib/src/infra.spl                  │  ← Public API (Result-based)
 │  (High-level, error handling)           │
 └─────────────────┬───────────────────────┘
                   │ uses

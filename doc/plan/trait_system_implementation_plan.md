@@ -416,7 +416,7 @@ trait FromStr:
     fn from_str(s: text) -> Self?
 ```
 
-**Implementation:** `src/std/traits/mod.spl` (200 lines)
+**Implementation:** `src/lib/traits/mod.spl` (200 lines)
 
 ---
 
@@ -430,7 +430,7 @@ src/compiler/
 ├── trait_objects.spl       (200 lines)  - Optional: dyn Trait
 └── trait_validation.spl    (150 lines)  - Coherence, orphan rule
 
-src/std/traits/
+src/lib/traits/
 └── mod.spl                 (200 lines)  - Built-in trait definitions
 
 Total: ~1,400 lines of implementation

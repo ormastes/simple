@@ -239,6 +239,6 @@ if not valid:
 
 ## See Also
 
-- Parent: `src/std/json_parser_utils.spl` (facade)
+- Parent: `src/lib/common/json/` (facade)
 - Tests: `test/std/json_parser_utils_spec.spl`
 - Plan: `doc/report/stdlib_utils_refactoring_plan_2026-02-12.md`

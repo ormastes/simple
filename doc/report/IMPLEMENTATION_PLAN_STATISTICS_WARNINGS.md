@@ -108,9 +108,9 @@ fn generate_coverage_report(results: [InlineCommentResult]) -> text:
 
 **Example Warnings:**
 ```
-warning: function 'compute_result' at src/std/math.spl:42 has no inline comment
+warning: function 'compute_result' at src/lib/math.spl:42 has no inline comment
 info: class 'Parser' at src/compiler_core/parser.spl:89 has sdoctest but no inline comment
-error: public function 'api_call' at src/std/http.spl:156 has no documentation
+error: public function 'api_call' at src/lib/http.spl:156 has no documentation
 ```
 
 ---

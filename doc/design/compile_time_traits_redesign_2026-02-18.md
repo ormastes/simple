@@ -319,7 +319,7 @@ static_if is_struct(T) and @traits(has_member, T, "id"):
 Ergonomic wrappers built on `@traits`, like D's `std.traits`:
 
 ```simple
-# src/std/traits.spl
+# src/lib/traits.spl
 use core.traits.*
 
 fn field_names<T>() -> [text]:
@@ -375,8 +375,8 @@ fn fields_with_annotation<T>(annotation: text) -> [text]:
 - Exhaustiveness checking (uses `@traits(enum_members, T)` internally)
 
 ### Phase 2 (unchanged — already partially implemented)
-- `src/std/error_trace.spl`
-- `src/std/phantom.spl`
+- `src/lib/error_trace.spl`
+- `src/lib/phantom.spl`
 
 ### Phase 3 — Core `@traits` System (NEW, replaces old Phase 4)
 

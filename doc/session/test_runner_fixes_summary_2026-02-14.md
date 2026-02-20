@@ -79,7 +79,7 @@ fn cwd() -> text:
 - Cached for subsequent calls (fast)
 - Safe for module initialization (no hang)
 
-**File:** `src/std/shell/env.spl`
+**File:** `src/lib/shell/env.spl`
 
 ---
 
@@ -97,7 +97,7 @@ var GLOBAL_LOG_LEVEL: i64 = -1  # -1 means not initialized
 
 **Status:** No action needed
 
-**File:** `src/std/log.spl`
+**File:** `src/lib/log.spl`
 
 ---
 
@@ -249,7 +249,7 @@ bin/simple test test/unit/std/log_spec.spl
 
 1. `test/unit/app/mcp/prompts_spec.spl` - Import syntax
 2. `test/unit/app/diagram/call_flow_profiling_spec.spl` - Extern declarations
-3. `src/std/shell/env.spl` - Lazy cwd() initialization
+3. `src/lib/shell/env.spl` - Lazy cwd() initialization
 4. `doc/session/test_runner_bug_fixes_2026-02-14.md` - Full analysis (264 lines)
 5. `doc/session/test_runner_fixes_summary_2026-02-14.md` - This summary
 

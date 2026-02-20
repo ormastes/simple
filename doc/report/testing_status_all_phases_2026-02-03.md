@@ -54,13 +54,13 @@ Tested **26 unit test files** across all phases. **Only 2 modules work** (alloca
 
 **json_spec.spl:**
 ```
-Failed to parse module path="./src/std/json.spl"
+Failed to parse module path="./src/lib/json.spl"
 error=Unexpected token: expected Fn, found Question
 ```
 
 **gc_spec.spl:**
 ```
-Failed to parse module path="./src/std/gc.spl"
+Failed to parse module path="./src/lib/gc.spl"
 error=Unexpected token: expected identifier, found Lt
 # Cause: extern fn type_id_of<T>() -> i32
 ```

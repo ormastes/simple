@@ -30,11 +30,11 @@ system for capability-based handler selection.
 - Trace32 native uses t32rem CLI for unique features (flash, trace, coverage)
 """
 
-use remote.types.{Architecture, Endianness, DebugConfig, DebugError}
+use remote.types.{Architecture, Endianness, DebugConfig, DebugError, HaltReason}
 use remote.target.riscv32.RiscV32Target
 use remote.feature.features.{FeatureId, FeatureRank}
 use remote.feature.registry.{FeatureHandler, FeatureRegistry}
-use remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord}
+use remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable}
 use remote.test.qemu_runner.{QemuRunner, build_rv32_test, is_rv32_qemu_available, is_rv32_gdb_available, is_rv32_gcc_available}
 use remote.backend.RemoteRiscV32Backend
 
@@ -624,3 +624,293 @@ describe "QEMU Integration":
                     pass
         else:
             skip("required tools not available")
+
+
+# ============================================================================
+# Test Group 8: DebugConfig Class Methods
+# ============================================================================
+
+describe "DebugConfig class methods":
+    """
+    ## DebugConfig Static Constructors
+
+    Validates static factory methods on DebugConfig produce
+    correctly initialised instances.
+    """
+
+    context "default_gdb constructor":
+        it "sets localhost and port 1234":
+            val cfg = DebugConfig__default_gdb("firmware.elf")
+            expect(cfg.host).to_equal("localhost")
+            expect(cfg.port).to_equal(1234)
+
+        it "stores the program path":
+            val cfg = DebugConfig__default_gdb("my_app.elf")
+            expect(cfg.program).to_equal("my_app.elf")
+
+        it "defaults to RiscV32 architecture":
+            val cfg = DebugConfig__default_gdb("fw.elf")
+            val arch = cfg.target
+            expect(arch.to_string()).to_equal("riscv32")
+
+    context "for_trace32 constructor":
+        it "stores the given host and port":
+            val cfg = DebugConfig__for_trace32("10.0.0.5", 20001)
+            expect(cfg.host).to_equal("10.0.0.5")
+            expect(cfg.port).to_equal(20001)
+
+        it "sets backend option to trace32":
+            val cfg = DebugConfig__for_trace32("10.0.0.5", 20001)
+            val backend = cfg.options.get("backend") ?? ""
+            expect(backend).to_equal("trace32")
+
+    context "for_trace32_gdb constructor":
+        it "sets backend option to trace32-gdb":
+            val cfg = DebugConfig__for_trace32_gdb("192.168.1.1", 3333)
+            val backend = cfg.options.get("backend") ?? ""
+            expect(backend).to_equal("trace32-gdb")
+
+        it "stores host and port correctly":
+            val cfg = DebugConfig__for_trace32_gdb("192.168.1.1", 3333)
+            expect(cfg.host).to_equal("192.168.1.1")
+            expect(cfg.port).to_equal(3333)
+
+
+# ============================================================================
+# Test Group 9: HaltReason and DebugError enum methods
+# ============================================================================
+
+describe "HaltReason enum methods":
+    """
+    ## HaltReason to_string
+
+    Validates every HaltReason variant formats correctly.
+    """
+
+    it "formats Breakpoint with address":
+        val r = HaltReason.Breakpoint(addr: 0x80000010)
+        expect(r.to_string()).to_equal("breakpoint at 0x80000010")
+
+    it "formats Watchpoint with address":
+        val r = HaltReason.Watchpoint(addr: 0x20001000)
+        expect(r.to_string()).to_equal("watchpoint at 0x20001000")
+
+    it "formats SingleStep":
+        val r = HaltReason.SingleStep
+        expect(r.to_string()).to_equal("single step")
+
+    it "formats Halt":
+        val r = HaltReason.Halt
+        expect(r.to_string()).to_equal("halt")
+
+    it "formats Exception with code":
+        val r = HaltReason.Exception(code: 3)
+        expect(r.to_string()).to_equal("exception 3")
+
+
+describe "DebugError additional variants":
+    """
+    ## DebugError enum methods
+
+    Validates remaining DebugError variants not covered in group 1.
+    """
+
+    it "formats TargetNotHalted":
+        val e = DebugError.TargetNotHalted
+        expect(e.to_string()).to_equal("target not halted")
+
+    it "formats InvalidAddress":
+        val e = DebugError.InvalidAddress(addr: 0xDEAD)
+        expect(e.to_string()).to_equal("invalid address: 0xDEAD")
+
+    it "formats InvalidRegister":
+        val e = DebugError.InvalidRegister(index: 99)
+        expect(e.to_string()).to_equal("invalid register: 99")
+
+    it "formats ProtocolError":
+        val e = DebugError.ProtocolError(msg: "unexpected EOF")
+        expect(e.to_string()).to_equal("protocol error: unexpected EOF")
+
+    it "formats NotSupported":
+        val e = DebugError.NotSupported(msg: "flash write")
+        expect(e.to_string()).to_equal("not supported: flash write")
+
+
+# ============================================================================
+# Test Group 10: GdbVariable class methods
+# ============================================================================
+
+describe "GdbVariable class methods":
+    """
+    ## GdbVariable Static Constructor and Fields
+
+    Validates the GdbVariable.of static factory and field values.
+    """
+
+    context "of constructor":
+        it "stores name value and type":
+            val v = GdbVariable__of("count", "42", "int")
+            expect(v.name).to_equal("count")
+            expect(v.value).to_equal("42")
+            expect(v.type_name).to_equal("int")
+
+        it "defaults num_children to 0":
+            val v = GdbVariable__of("x", "1", "i32")
+            expect(v.num_children).to_equal(0)
+
+        it "defaults has_more to false":
+            val v = GdbVariable__of("y", "0", "bool")
+            expect(v.has_more).to_equal(false)
+
+        it "handles pointer type name":
+            val v = GdbVariable__of("ptr", "0x80001000", "uint32_t *")
+            expect(v.type_name).to_equal("uint32_t *")
+
+
+# ============================================================================
+# Test Group 11: FeatureHandler class methods
+# ============================================================================
+
+describe "FeatureHandler class methods":
+    """
+    ## FeatureHandler.of Static Constructor
+
+    Validates that FeatureHandler.of stores all fields correctly
+    and that handler_fn is callable.
+    """
+
+    context "of constructor":
+        it "stores feat rank and backend_name":
+            val h = FeatureHandler__of(
+                FeatureId.Reset, 2, "secondary",
+                \args: Ok("reset_ok"),
+                "Secondary reset"
+            )
+            expect(h.rank).to_equal(2)
+            expect(h.backend_name).to_equal("secondary")
+
+        it "stores description":
+            val h = FeatureHandler__of(
+                FeatureId.Halt, 0, "gdb",
+                \args: Ok("halted"),
+                "GDB halt command"
+            )
+            expect(h.description).to_equal("GDB halt command")
+
+        it "handler_fn returns expected result":
+            val h = FeatureHandler__of(
+                FeatureId.Resume, 0, "gdb",
+                \args: Ok("resumed"),
+                "GDB continue"
+            )
+            val callback = h.handler_fn
+            val result = callback([])
+            expect(result.unwrap()).to_equal("resumed")
+
+        it "handler_fn can receive args":
+            val h = FeatureHandler__of(
+                FeatureId.ReadMemory, 0, "gdb",
+                \args: Ok(args[0]),
+                "GDB read mem"
+            )
+            val callback = h.handler_fn
+            val result = callback(["0x80000000"])
+            expect(result.unwrap()).to_equal("0x80000000")
+
+
+# ============================================================================
+# Test Group 12: FeatureRegistry impl methods
+# ============================================================================
+
+describe "FeatureRegistry impl methods":
+    """
+    ## FeatureRegistry Method Coverage
+
+    Exercises the impl methods on FeatureRegistry beyond what
+    group 3 already covers.
+    """
+
+    context "all_handlers on empty registry":
+        it "returns empty list for unknown feature":
+            val registry = FeatureRegistry__empty()
+            val handlers = registry.all_handlers(FeatureId.TraceCapture)
+            expect(handlers.len()).to_equal(0)
+
+    context "is_supported after registration":
+        it "returns true after registering the feature":
+            var registry = FeatureRegistry__empty()
+            registry.register(FeatureHandler__of(
+                FeatureId.SingleStep, 0, "gdb",
+                \args: Ok("stepped"),
+                "GDB single step"
+            ))
+            expect(registry.is_supported(FeatureId.SingleStep)).to_equal(true)
+
+        it "returns false for an unregistered feature":
+            var registry = FeatureRegistry__empty()
+            registry.register(FeatureHandler__of(
+                FeatureId.Halt, 0, "gdb",
+                \args: Ok("halted"),
+                "GDB halt"
+            ))
+            expect(registry.is_supported(FeatureId.SingleStep)).to_equal(false)
+
+    context "execute propagates handler result":
+        it "returns Ok value from handler":
+            var registry = FeatureRegistry__empty()
+            registry.register(FeatureHandler__of(
+                FeatureId.Reset, 0, "gdb",
+                \args: Ok("reset_done"),
+                "GDB reset"
+            ))
+            val result = registry.execute(FeatureId.Reset, [])
+            expect(result.unwrap()).to_equal("reset_done")
+
+        it "returns Err when no handler registered":
+            val registry = FeatureRegistry__empty()
+            val result = registry.execute(FeatureId.FlashProgram, [])
+            expect(result.err.?).to_equal(true)
+
+    context "handler_count across multiple features":
+        it "counts handlers across different features":
+            var registry = FeatureRegistry__empty()
+            registry.register(FeatureHandler__of(
+                FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
+            ))
+            registry.register(FeatureHandler__of(
+                FeatureId.Resume, 0, "gdb", \args: Ok("ok"), "resume"
+            ))
+            registry.register(FeatureHandler__of(
+                FeatureId.Reset, 0, "gdb", \args: Ok("ok"), "reset"
+            ))
+            expect(registry.handler_count()).to_equal(3)
+
+    context "capabilities_report content":
+        it "includes all registered feature names":
+            var registry = FeatureRegistry__empty()
+            registry.register(FeatureHandler__of(
+                FeatureId.ReadMemory, 0, "gdb", \args: Ok("ok"), "Read mem"
+            ))
+            registry.register(FeatureHandler__of(
+                FeatureId.WriteMemory, 0, "gdb", \args: Ok("ok"), "Write mem"
+            ))
+            val report = registry.capabilities_report()
+            expect(report.contains("ReadMemory")).to_equal(true)
+            expect(report.contains("WriteMemory")).to_equal(true)
+
+        it "labels native rank handlers as native":
+            var registry = FeatureRegistry__empty()
+            registry.register(FeatureHandler__of(
+                FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "GDB halt"
+            ))
+            val report = registry.capabilities_report()
+            expect(report.contains("native")).to_equal(true)
+
+        it "labels emulated rank handlers as emulated":
+            var registry = FeatureRegistry__empty()
+            registry.register(FeatureHandler__of(
+                FeatureId.TraceCapture, 4, "emulation",
+                \args: Ok("ok"), "Emulated trace"
+            ))
+            val report = registry.capabilities_report()
+            expect(report.contains("emulated")).to_equal(true)

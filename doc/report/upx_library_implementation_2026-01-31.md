@@ -39,7 +39,7 @@ pub fn is_upx_available() -> bool
 
 ### 2. Simple API Wrapper ✅
 
-**Location:** `src/std/compress/upx.spl`
+**Location:** `src/lib/compress/upx.spl`
 
 **Usage Examples:**
 
@@ -116,7 +116,7 @@ rust/runtime/src/compress/
 ├── mod.rs           # Module exports
 └── upx.rs           # UPX implementation + FFI (360 lines)
 
-src/std/compress/
+src/lib/compress/
 ├── mod.spl          # Module exports
 └── upx.spl          # Simple API wrapper (160 lines)
 

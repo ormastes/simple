@@ -1,4 +1,53 @@
-# Refactoring & TODO Implementation Plans
+# Plan Documentation
+
+Project plans defining why, scope, milestones, and risks.
+
+Plan answers: **What and when?**
+
+Plans are living documents — update as work progresses, delete when 100% complete (git history preserves past plans).
+
+---
+
+## Plan Document Template
+
+```markdown
+# Project Plan – [Feature Name]
+
+## 1. Objective
+Deliver [capability] for [milestone].
+
+## 2. Scope
+IN:
+- Capability A
+- Capability B
+
+OUT:
+- Deferred item X
+- Future enhancement Y
+
+## 3. Milestones
+- Week 1: Requirements finalized
+- Week 2: Design complete
+- Week 3–4: Implementation
+- Week 5: Testing and hardening
+
+## 4. Risks
+- Risk A: mitigation
+- Risk B: mitigation
+
+## 5. Success Metrics
+- Metric 1: target value
+- Metric 2: target value
+
+## Cross-References
+- **Requirements:** [doc/requirement/xxx.md](../requirement/xxx.md)
+- **Design:** [doc/design/xxx.md](../design/xxx.md)
+- **Research:** [doc/research/xxx.md](../research/xxx.md)
+```
+
+---
+
+## Active Plans
 
 **Status:** Active Planning Phase
 **Created:** 2026-02-13
@@ -26,7 +75,7 @@ Two major cleanup initiatives:
 
 **Quick Start:**
 ```bash
-cd src/std
+cd src/lib
 # Work on current phase
 cat ../../doc/plan/REFACTOR_PHASES.md
 ```

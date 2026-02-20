@@ -52,7 +52,7 @@ WARNING: Public API group 'File operations' missing SDoctest coverage
   Suggestion: Add example in README.md or doc/guide/io.md
 
 WARNING: Public API 'describe' missing SDoctest
-  File: src/std/spec/__init__.spl:15
+  File: src/lib/spec/__init__.spl:15
   Suggestion: Add usage example
 ```
 

@@ -16,7 +16,7 @@
 
 - ✅ **1 test suite enabled** - `test/system/runner_spec.spl` (was pending, now working)
 - ✅ **50+ test cases added** - `test/unit/compiler/uncovered_branches_spec.spl`
-- ✅ **20+ utility functions added** - `src/std/string_extra.spl`
+- ✅ **20+ utility functions added** - `src/lib/string_extra.spl`
 - ✅ **Feature #700 verified** - Passing, not failed
 - ✅ **110+ items documented as blocked** - Waiting on runtime features
 
@@ -37,7 +37,7 @@
 **Examples:**
 ```
 src/lib/pure/tensor_f64.spl:4 - Generic PureTensor<T>
-src/std/src/di.spl:174 - Generic DI container
+src/lib/src/di.spl:174 - Generic DI container
 test/unit/std/async_*.spl - All async tests
 test/system/macro_*.spl - All macro tests
 ```
@@ -84,20 +84,20 @@ From `doc/test/uncovered_branches_analysis.md`:
 ### 📝 Priority 2: Simple Implementations (2-8 hours each)
 
 #### 2.1 String Utilities (2 hours)
-**File:** `src/std/text.spl`
+**File:** `src/lib/text.spl`
 - [ ] `ends_with` edge case handling
 - [ ] String interpolation with nested braces
 - [ ] Escaped brace handling (`{{` for literal `{`)
 
 #### 2.2 Math Utilities (1 hour)
-**File:** `src/std/math.spl`
+**File:** `src/lib/math.spl`
 Already mostly complete, but could add:
 - [ ] `math_floor` / `math_ceil` (if not in FFI)
 - [ ] `math_round` variants
 - [ ] Additional trig approximations (Taylor series)
 
 #### 2.3 Array/List Utilities (2 hours)
-**Files:** `src/std/array.spl`, `src/std/list_utils.spl`
+**Files:** `src/lib/array.spl`, `src/lib/list_utils.spl`
 Already comprehensive, but could add:
 - [ ] `array_partition` - Split by predicate
 - [ ] `array_group_consecutive` - Group consecutive equal elements
@@ -278,5 +278,5 @@ src/app/test_runner_new/test_runner_parallel.spl:51 - Parallel execution
 - `doc/TODO_ACTIONABLE.md` - Detailed priority breakdown
 - `doc/test/uncovered_branches_analysis.md` - Test coverage targets
 - `doc/session/2026-02-11_*.md` - Session work summaries
-- `src/std/string_extra.spl` - New utilities example
+- `src/lib/string_extra.spl` - New utilities example
 - `test/unit/compiler/uncovered_branches_spec.spl` - Test coverage example

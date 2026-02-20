@@ -346,7 +346,7 @@ print "Hit rate: {stats.cache_hits}/{stats.cache_hits + stats.cache_misses}"
 ### Related Codebase
 
 - SMF format: `doc/design/smf_note_sdn_implementation.md`
-- SDN parser: `src/std/sdn/parser.spl`
+- SDN parser: `src/lib/sdn/parser.spl`
 - Note.sdn: `src/compiler/monomorphize/note_sdn.spl`
 
 ---

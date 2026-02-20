@@ -126,11 +126,11 @@ val gradient = m{ d/dx (x^2) }
 Math rendering works at two levels:
 
 1. **LSP hover** (primary): The LSP server at `src/app/lsp/handlers/hover.spl` detects
-   `m{ }` blocks and renders them using `src/std/math_repr.spl`:
+   `m{ }` blocks and renders them using `src/lib/math_repr.spl`:
    - `render_latex_raw()` -- raw LaTeX output (`$$x^{2} + y^{2}$$`)
    - `to_pretty()` -- Unicode pretty text (`x² + y²`)
    - `to_md()` -- LaTeX markdown (`$x^{2} + y^{2}$`)
-   - MathJax SVG rendering via `src/std/mathjax.spl` (requires Node.js)
+   - MathJax SVG rendering via `src/lib/mathjax.spl` (requires Node.js)
 
 2. **Inline conceal** (supplementary): With `math.conceal = true`, the `m{` and `}`
    delimiters are concealed, the interior is highlighted with `SimpleMathBlock`, and

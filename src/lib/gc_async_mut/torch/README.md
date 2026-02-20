@@ -1,14 +1,14 @@
-# PyTorch Simple API - Tier 3
+# PyTorch Simple API
 
 This library provides a comprehensive PyTorch-like API for neural network development in Simple. It wraps the low-level FFI bindings with a high-level, idiomatic Simple interface designed to feel familiar to PyTorch users.
 
 ## Architecture
 
-The library follows a three-tier architecture:
+The library follows a layered architecture:
 
-1. **Tier 1 (C++)**: PyTorch C++ (libtorch) bindings in `.build/rust/ffi_torch/simple-torch/`
-2. **Tier 2 (SFFI)**: Rust FFI layer in `.build/rust/ffi_torch/src/lib.rs` and Simple bindings in `ffi.spl`
-3. **Tier 3 (Simple API)**: High-level PyTorch-like API in `mod.spl` (this library)
+1. **Native (C++)**: PyTorch C++ (libtorch) bindings in `.build/rust/ffi_torch/simple-torch/`
+2. **SFFI**: Rust FFI layer in `.build/rust/ffi_torch/src/lib.rs` and Simple bindings in `ffi.spl`
+3. **Simple API**: High-level PyTorch-like API in `mod.spl` (this library)
 
 ## Features
 

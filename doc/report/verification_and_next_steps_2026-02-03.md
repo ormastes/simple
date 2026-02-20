@@ -15,7 +15,7 @@ Completed migration work verification reveals that while all code changes are co
    - No syntax errors in updated files
 
 2. **std.path Module Created** - VERIFIED
-   - Module file created: `src/std/path.spl` (217 lines, 10 functions)
+   - Module file created: `src/lib/path.spl` (217 lines, 10 functions)
    - All functions properly documented
    - Pure Simple implementation (no FFI dependencies)
 
@@ -121,7 +121,7 @@ val name = basename_local(cwd)
 **Task:** Enhance Simple module system to support custom std modules
 
 **Requirements:**
-1. **Module resolution:** Recognize `use std.path` as file path `src/std/path.spl`
+1. **Module resolution:** Recognize `use std.path` as file path `src/lib/path.spl`
 2. **Namespace imports:** Support `use std.path as path`
 3. **Function exports:** Allow calling `path.basename()` on imported namespace
 4. **Selective imports:** Support `use std.path.{basename, dirname}`
@@ -161,7 +161,7 @@ val name = basename_local(cwd)
 ## Files Status
 
 ### Created & Ready
-- ✅ `src/std/path.spl` - Complete, tested (manually), ready for use
+- ✅ `src/lib/path.spl` - Complete, tested (manually), ready for use
 - ✅ `test/std/path_spec.spl` - Complete, 85+ tests ready
 - ✅ Documentation (8 reports, ~3,000 lines)
 
@@ -304,7 +304,7 @@ The discovery that the module system needs enhancement is valuable - it identifi
 ---
 
 **Files Ready for Use:**
-- `src/std/path.spl` (217 lines, 10 functions)
+- `src/lib/path.spl` (217 lines, 10 functions)
 - `test/std/path_spec.spl` (350 lines, 85+ tests)
 - All updated application files (working correctly)
 

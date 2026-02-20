@@ -11,9 +11,9 @@
 **Status:** ✅ **42/42 tests passing (100%)**
 
 ### Module Status
-- Module already existed at `src/std/parser/treesitter.spl`
+- Module already existed at `src/lib/parser/treesitter.spl`
 - Required API updates to match test expectations
-- Resolved conflict with duplicate module in `src/std/src/parser/`
+- Resolved conflict with duplicate module in `src/lib/src/parser/`
 
 ### Key Changes
 1. Updated `Span` struct with position fields (`start_byte`, `start_line`, `start_column`)
@@ -40,9 +40,9 @@ Remaining treesitter specs require full TreeSitter API:
 **Total:** 183 additional tests requiring extensive TreeSitter implementation (multiple days)
 
 ### Files Modified
-- `src/std/parser/treesitter.spl` - API updates, position tracking
+- `src/lib/parser/treesitter.spl` - API updates, position tracking
 - `test/system/features/treesitter/treesitter_lexer_spec.spl` - Fixed imports, converted skip_it
-- `src/std/src/parser/treesitter_full.spl.backup` - Renamed duplicate to avoid conflict
+- `src/lib/src/parser/treesitter_full.spl.backup` - Renamed duplicate to avoid conflict
 
 ---
 
@@ -51,7 +51,7 @@ Remaining treesitter specs require full TreeSitter API:
 **Status:** ✅ **32/44 tests passing (73%)**
 
 ### Module Status
-- Modules already complete at `src/std/failsafe/`
+- Modules already complete at `src/lib/failsafe/`
 - Submodules: core, panic, ratelimit, circuit, timeout, resource_monitor, mod
 - All core functionality working
 
@@ -105,7 +105,7 @@ Tests cover:
 **Status:** ⚠️ **1/26 tests passing (4%)**
 
 ### Module Status
-- Module exists at `src/std/src/table.spl`
+- Module exists at `src/lib/src/table.spl`
 - Module is functional but tests require compiled mode
 
 ### Test Results

@@ -172,7 +172,7 @@ process_is_running, process_kill
 **Agent Report:**
 
 **Implementation:**
-- Location: `src/std/src/infra.spl`, `src/app/io/file_ops.spl`, `src/std/file_system/`
+- Location: `src/lib/src/infra.spl`, `src/app/io/file_ops.spl`, `src/lib/file_system/`
 - Lines: 6 modules, comprehensive file system operations
 - Method: 100% Pure Simple (shell-based, no FFI needed)
 
@@ -354,7 +354,7 @@ process_is_running, process_kill
 
 **Implementation Files Verified:**
 - `src/app/io/process_ops.spl` - Process management
-- `src/std/src/infra.spl` - File I/O
+- `src/lib/src/infra.spl` - File I/O
 - `src/app/package/*.spl` - Package management (20 files)
 - `src/compiler_core/parser.spl` - Parser (bug identified)
 

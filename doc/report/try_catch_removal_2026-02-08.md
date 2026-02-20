@@ -48,7 +48,7 @@ else:
 - `test/lib/std/unit/testing/mock_spec.spl` - Line 508-512 already commented
 
 ### Documentation (kept - explains limitation)
-- `src/std/spec.spl:17` - "NOTE: No static fn, no try/catch/throw"
+- `src/lib/spec.spl:17` - "NOTE: No static fn, no try/catch/throw"
 - `src/app/desugar/rewriter.spl:21` - "NOTE: No try/catch/throw - Simple does not support exceptions"
 
 ### Bug Comments (kept - explains workaround)
@@ -58,7 +58,7 @@ else:
 - `src/compiler/hir_types.spl:562` - `Throws(type_: HirType)` enum variant (effect system design)
 
 ### Other Comments (kept - documentation)
-- `src/std/src/testing/gpu_helpers.spl:58` - Comment about SkipException
+- `src/lib/src/testing/gpu_helpers.spl:58` - Comment about SkipException
 - `src/app/interpreter/extern/file_io.spl:358` - Result type documentation
 - `src/compiler/backend/cuda/ptx_builder.spl:61` - String interpolation, not exception
 

@@ -38,7 +38,7 @@ Successfully initiated the 100% branch coverage plan for the Simple standard lib
 
 2. **Branch Analysis Documentation**
    - **File:** `doc/coverage/allocator_branch_analysis.md` (300+ lines)
-   - Identified ~80 branches in `src/std/allocator.spl`
+   - Identified ~80 branches in `src/lib/allocator.spl`
    - Mapped 55 existing tests to source branches
    - Identified high-priority coverage gaps
    - Created prioritized test plan
@@ -123,7 +123,7 @@ The proven formatter approach (78 tests → 85% coverage) was successfully appli
 ### Pattern Applied ✅
 
 1. **Identify branches** ✅
-   - Analyzed `src/std/allocator.spl` line by line
+   - Analyzed `src/lib/allocator.spl` line by line
    - Found if/elif/else statements
    - Identified optional chaining (`?`) branches
    - Mapped match arms
@@ -475,7 +475,7 @@ test/lib/std/unit/
 ### Key Source Files
 
 ```
-src/std/
+src/lib/
 ├── allocator.spl         # 601 LOC, ~80 branches
 ├── gc.spl                # 648 LOC, ~120 branches (Week 2)
 ├── runtime_value.spl     # 575 LOC, ~90 branches (Week 3)

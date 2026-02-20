@@ -36,7 +36,7 @@ Successfully implemented LZMA-based self-extracting executable infrastructure. T
 **`rust/runtime/src/compress/mod.rs` (+4 lines)**
 - Re-export self-extracting functions
 
-**`src/std/compress/upx.spl` (+65 lines)**
+**`src/lib/compress/upx.spl` (+65 lines)**
 - New Simple API:  `create_self_extracting()`, `is_self_extracting()`, `get_self_extract_ratio()`
 
 **`rust/runtime/Cargo.toml`**
@@ -298,7 +298,7 @@ Similar to UPX auto-download, fetch pre-built stub from GitHub releases.
 | `rust/runtime/src/compress/lzma_stub.rs` | NEW | 330 | ✅ |
 | `rust/runtime/src/compress/self_extract.rs` | NEW | 380 | ✅ |
 | `rust/runtime/src/compress/mod.rs` | MODIFIED | +4 | ✅ |
-| `src/std/compress/upx.spl` | MODIFIED | +65 | ✅ |
+| `src/lib/compress/upx.spl` | MODIFIED | +65 | ✅ |
 | `rust/runtime/Cargo.toml` | MODIFIED | (no new deps) | ✅ |
 
 **Total:** ~710 new lines, ~70 modified lines

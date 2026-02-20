@@ -389,7 +389,7 @@ Will automatically:
 8. **Deep Learning Library Integration**
    - Connect to `src/lib/pure/nn.spl`
    - Connect to `src/lib/pure/training.spl`
-   - Connect to `src/std/src/dl/config.spl`
+   - Connect to `src/lib/src/dl/config.spl`
    - Test full training pipeline on GPU
 
 ---

@@ -6,13 +6,13 @@
 
 ## Summary
 
-Created a shared SDN format parser module (`src/std/config_parser.spl`) to eliminate duplication across 7+ configuration parsing implementations in the codebase. Successfully migrated 2 config files as proof of concept, with 29 comprehensive tests passing.
+Created a shared SDN format parser module (`src/lib/config_parser.spl`) to eliminate duplication across 7+ configuration parsing implementations in the codebase. Successfully migrated 2 config files as proof of concept, with 29 comprehensive tests passing.
 
 ## Implementation
 
 ### 1. Base Parser Module
 
-**File:** `src/std/config_parser.spl` (174 lines)
+**File:** `src/lib/config_parser.spl` (174 lines)
 
 **Features:**
 - Section-based SDN format parsing
@@ -231,7 +231,7 @@ ls -la test/lib/std/config_parser.spl
 ## Files Created/Modified
 
 **New Files:**
-- `src/std/config_parser.spl` (174 lines)
+- `src/lib/config_parser.spl` (174 lines)
 - `test/unit/std/config_parser_test.spl` (159 lines)
 - `test/lib/std/config_parser.spl` (symlink)
 - `test/unit/std/cp_test1.spl` (12 lines, simple verification)

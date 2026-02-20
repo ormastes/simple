@@ -20,8 +20,8 @@ Successfully implemented **5 phases** of stdlib/SFFI features in a hybrid parall
 **Agent:** string-impl
 **Duration:** ~8 minutes
 **Files Created:**
-- `src/std/text.spl` (214 lines) - String extension methods
-- `src/std/convert.spl` (126 lines) - Type conversion functions
+- `src/lib/text.spl` (214 lines) - String extension methods
+- `src/lib/convert.spl` (126 lines) - Type conversion functions
 
 **Functions Implemented:**
 - **String methods (14 functions):**
@@ -55,7 +55,7 @@ Successfully implemented **5 phases** of stdlib/SFFI features in a hybrid parall
 **Agent:** string-impl
 **Duration:** ~10 minutes
 **Files Created:**
-- `src/std/array.spl` (251 lines) - Array utility methods
+- `src/lib/array.spl` (251 lines) - Array utility methods
 
 **Functions Implemented (18 total):**
 - **Search/Find:**
@@ -97,7 +97,7 @@ Many methods already built-in: `.sort()`, `.reverse()`, `.first()`, `.last()`, `
 **Agent:** string-impl
 **Duration:** ~8 minutes
 **Files Created:**
-- `src/std/math.spl` (205 lines) - Pure Simple math utilities
+- `src/lib/math.spl` (205 lines) - Pure Simple math utilities
 
 **Files Modified:**
 - `src/app/io/mod.spl` - Added 12 SFFI math wrappers
@@ -167,7 +167,7 @@ Many methods already built-in: `.sort()`, `.reverse()`, `.first()`, `.last()`, `
 **Agent:** path-impl
 **Duration:** ~9 minutes
 **Files Created:**
-- `src/std/path.spl` (157 lines) - Path manipulation utilities
+- `src/lib/path.spl` (157 lines) - Path manipulation utilities
 
 **Functions Implemented (13 functions):**
 - **Path components:**
@@ -265,11 +265,11 @@ Many methods already built-in: `.sort()`, `.reverse()`, `.first()`, `.last()`, `
 
 | File | Lines | Functions | Purpose |
 |------|-------|-----------|---------|
-| `src/std/text.spl` | 214 | 14 | String extensions & hashing |
-| `src/std/convert.spl` | 126 | 11 | Type conversions (unsigned, bool, etc.) |
-| `src/std/array.spl` | 251 | 18 | Collection utilities |
-| `src/std/math.spl` | 205 | 15 | Pure math utilities |
-| `src/std/path.spl` | 157 | 13 | Path manipulation |
+| `src/lib/text.spl` | 214 | 14 | String extensions & hashing |
+| `src/lib/convert.spl` | 126 | 11 | Type conversions (unsigned, bool, etc.) |
+| `src/lib/array.spl` | 251 | 18 | Collection utilities |
+| `src/lib/math.spl` | 205 | 15 | Pure math utilities |
+| `src/lib/path.spl` | 157 | 13 | Path manipulation |
 | **Total** | **953** | **71** | - |
 
 ### Modified Files

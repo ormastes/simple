@@ -67,7 +67,7 @@ slow_it "benchmark operation":
     expect elapsed < 100  # Should complete in <100ms
 ```
 
-**Location:** `src/std/timing.spl`
+**Location:** `src/lib/timing.spl`
 
 ### 4. Deprecated API Usage 📚
 **Symptom:** Tests fail with "method not found"
@@ -253,7 +253,7 @@ impl Value:
 
 **2. Created Timing Module (+180 lines)**
 ```simple
-# src/std/timing.spl
+# src/lib/timing.spl
 fn time_now() -> Instant
 fn time_elapsed(start: Instant) -> i64
 fn profile<T>(name: text, block: fn() -> T) -> (T, ProfileResult)

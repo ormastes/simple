@@ -3,7 +3,7 @@
 ## Directory Structure
 
 ```
-src/std/
+src/lib/
 ├── src/                    # Source modules
 │   ├── __init__.spl        # Root manifest
 │   ├── core/               # GC + mutable (default)
@@ -152,7 +152,7 @@ simple build rust test -p simple-driver simple_stdlib_unit
 simple build rust test -p simple-driver simple_stdlib_unit_mymodule
 
 # Direct run
-./rust/target/debug/simple src/std/test/unit/mymodule/mytype_spec.spl
+./rust/target/debug/simple src/lib/test/unit/mymodule/mytype_spec.spl
 ```
 
 ## Contracts
@@ -242,7 +242,7 @@ File in `simple/improve_request.md`:
 
 ## See Also
 
-- `src/std/README.md` - Full stdlib docs
+- `src/lib/README.md` - Full stdlib docs
 - `doc/spec/stdlib.md` - Stdlib specification
 - `doc/spec/testing/testing_bdd_framework.md` - BDD framework
 - `.claude/skills/test.md` - Test writing skill

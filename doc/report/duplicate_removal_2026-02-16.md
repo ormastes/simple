@@ -12,8 +12,8 @@
 ### ✅ Task 1: Fix text_pad_right API Conflict
 
 **Problem:** Two incompatible versions of `text_pad_right()`
-- `src/std/repr.spl`: 2-param version (hardcoded space padding)
-- `src/std/text.spl`: 3-param version (configurable pad_char)
+- `src/lib/repr.spl`: 2-param version (hardcoded space padding)
+- `src/lib/text.spl`: 3-param version (configurable pad_char)
 
 **Solution:**
 - Removed duplicate from `repr.spl`
@@ -21,7 +21,7 @@
 - Updated caller to add third parameter: `text_pad_right(cell, width, " ")`
 
 **Files Changed:**
-- `src/std/repr.spl` (-11 lines)
+- `src/lib/repr.spl` (-11 lines)
 
 **Lines Saved:** 11 lines
 
@@ -30,9 +30,9 @@
 ### ✅ Task 2: Consolidate Platform Detection Functions
 
 **Problem:** Platform detection functions duplicated in 3 modules:
-- `src/std/platform.spl` (canonical)
-- `src/std/process_monitor.spl` (Linux /proc-based)
-- `src/std/spec.spl` (uname-based)
+- `src/lib/platform.spl` (canonical)
+- `src/lib/process_monitor.spl` (Linux /proc-based)
+- `src/lib/spec.spl` (uname-based)
 
 **Functions Affected:**
 - `is_windows()`
@@ -46,8 +46,8 @@
 - Also removed `_get_host_os()` helper from spec.spl
 
 **Files Changed:**
-- `src/std/process_monitor.spl` (-14 lines)
-- `src/std/spec.spl` (-31 lines, including _get_host_os)
+- `src/lib/process_monitor.spl` (-14 lines)
+- `src/lib/spec.spl` (-31 lines, including _get_host_os)
 
 **Lines Saved:** 45 lines
 
@@ -75,13 +75,13 @@ Functions to consolidate:
 - `join_path()`
 
 Affected files:
-- `src/std/ftp_utils.spl`
-- `src/std/http_server/utilities.spl`
-- `src/std/uri/build.spl`
-- `src/std/uri/parse.spl`
-- `src/std/path.spl`
+- `src/lib/ftp_utils.spl`
+- `src/lib/http_server/utilities.spl`
+- `src/lib/uri/build.spl`
+- `src/lib/uri/parse.spl`
+- `src/lib/path.spl`
 
-**Canonical source:** `src/std/platform.spl` (already exports these)
+**Canonical source:** `src/lib/platform.spl` (already exports these)
 
 **Estimated effort:** 1-2 hours
 **Estimated lines saved:** 60-80 lines
@@ -163,8 +163,8 @@ bin/simple test test/unit/std/spec_framework_spec.spl
 
 ## Files Modified
 
-1. `src/std/repr.spl` - Removed text_pad_right, import from text.spl
-2. `src/std/process_monitor.spl` - Import platform detection from platform.spl
-3. `src/std/spec.spl` - Import platform detection from platform.spl
+1. `src/lib/repr.spl` - Removed text_pad_right, import from text.spl
+2. `src/lib/process_monitor.spl` - Import platform detection from platform.spl
+3. `src/lib/spec.spl` - Import platform detection from platform.spl
 
 **All changes are backward compatible** - function signatures unchanged.

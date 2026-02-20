@@ -151,7 +151,7 @@ These modules were refactored (likely in previous sessions):
 
 ### 1.1 numerical_methods_utils.spl (2,434 lines) ✅
 **Status:** COMPLETE - Facade exists (35 lines)
-**Target:** `src/std/numerical_methods/`
+**Target:** `src/lib/numerical_methods/`
 
 **Verification needed:**
 - [ ] Check if `numerical_methods/` directory exists with 11 modules
@@ -169,7 +169,7 @@ numerical_methods_utils.spl (35 lines facade)
 
 ### 1.2 json_parser_utils.spl (2,240 lines) ✅
 **Status:** COMPLETE - Done in Phase 0
-**Target:** `src/std/json/`
+**Target:** `src/lib/json/`
 
 - ✅ 8 modules exist
 - ✅ Facade (40 lines) verified
@@ -179,7 +179,7 @@ numerical_methods_utils.spl (35 lines facade)
 
 ### 1.3 graph_utils.spl (2,068 lines) ✅
 **Status:** COMPLETE - Done in Phase 0
-**Target:** `src/std/graph/`
+**Target:** `src/lib/graph/`
 
 - ✅ 9 modules exist
 - ✅ Facade (31 lines) verified
@@ -189,7 +189,7 @@ numerical_methods_utils.spl (35 lines facade)
 
 ### 1.4 gzip_utils.spl (1,891 lines) ✅
 **Status:** COMPLETE - Done in Phase 0
-**Target:** `src/std/compression/gzip/`
+**Target:** `src/lib/compression/gzip/`
 
 - ✅ 9 modules exist (2,050 lines total)
 - ✅ Facade (48 lines) verified
@@ -310,8 +310,8 @@ grep -r "use std.${MODULE}_utils" src/ test/ && {
 }
 
 # 3. Delete original file
-echo "Deleting src/std/${MODULE}_utils.spl..."
-rm "src/std/${MODULE}_utils.spl"
+echo "Deleting src/lib/${MODULE}_utils.spl..."
+rm "src/lib/${MODULE}_utils.spl"
 
 # 4. Commit
 jj describe -m "refactor: Split ${MODULE}_utils into modules"
@@ -348,14 +348,14 @@ Before marking phase complete:
 # Template for creating new module
 MODULE=numerical_methods
 
-mkdir -p "src/std/$MODULE"
-touch "src/std/$MODULE/mod.spl"
+mkdir -p "src/lib/$MODULE"
+touch "src/lib/$MODULE/mod.spl"
 # ... create other files based on categories
 ```
 
 ### Facade Pattern
 ```simple
-# src/std/numerical_methods/mod.spl
+# src/lib/numerical_methods/mod.spl
 
 """
 Numerical Methods module.

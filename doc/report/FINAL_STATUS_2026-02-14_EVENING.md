@@ -91,9 +91,9 @@ VEX: C4 (3-byte) E1 (RXB+map) 74 (W+vvvv+L+pp) 58 (opcode) C2 (ModR/M)
   - ARM Cortex-M: 256-entry vector table, FPU enable, fault handler
   - x86_64: Multiboot2, 32→64-bit transition, 4-level page tables
   - RISC-V: RV32/RV64, SMP support, trap vectors
-- ✅ `src/std/baremetal/allocator.spl` (800 lines) - 4 allocators
-- ✅ `src/std/baremetal/syscall.spl` (400 lines) - Semihosting, UART, timers
-- ✅ `src/std/baremetal/interrupt.spl` (600 lines) - NVIC, PLIC, APIC
+- ✅ `src/lib/baremetal/allocator.spl` (800 lines) - 4 allocators
+- ✅ `src/lib/baremetal/syscall.spl` (400 lines) - Semihosting, UART, timers
+- ✅ `src/lib/baremetal/interrupt.spl` (600 lines) - NVIC, PLIC, APIC
 - ✅ 180 tests written
 
 **Features:**

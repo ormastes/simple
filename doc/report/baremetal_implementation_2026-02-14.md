@@ -42,9 +42,9 @@ Implemented comprehensive bare-metal support for Simple language across ARM Cort
 | **Startup (ARM)** | `src/compiler/baremetal/arm/crt0.s` | 300 | ✅ Complete |
 | **Startup (x86_64)** | `src/compiler/baremetal/x86_64/crt0.s` | 350 | ✅ Complete |
 | **Startup (RISC-V)** | `src/compiler/baremetal/riscv/crt0.s` | 250 | ✅ Complete |
-| **Allocator** | `src/std/baremetal/allocator.spl` | 800 | ✅ Complete |
-| **Syscalls** | `src/std/baremetal/syscall.spl` | 400 | ✅ Complete |
-| **Interrupts** | `src/std/baremetal/interrupt.spl` | 600 | ✅ Complete |
+| **Allocator** | `src/lib/baremetal/allocator.spl` | 800 | ✅ Complete |
+| **Syscalls** | `src/lib/baremetal/syscall.spl` | 400 | ✅ Complete |
+| **Interrupts** | `src/lib/baremetal/interrupt.spl` | 600 | ✅ Complete |
 | **Tests (Startup)** | `test/baremetal/startup_spec.spl` | 120 | ✅ Complete |
 | **Tests (Allocator)** | `test/baremetal/allocator_spec.spl` | 360 | ✅ Complete |
 | **Tests (Syscall)** | `test/baremetal/syscall_spec.spl` | 120 | ✅ Complete |
@@ -166,7 +166,7 @@ Implemented 4 allocators optimized for different use cases:
 | **FixedBlockAllocator** | Free list | O(1) alloc/dealloc | None | Uniform objects (pools) |
 | **MultiPoolAllocator** | Size classes | O(1) alloc/dealloc | Low | Mixed workloads |
 
-### BumpAllocator (src/std/baremetal/allocator.spl)
+### BumpAllocator (src/lib/baremetal/allocator.spl)
 
 **Features:**
 - Extremely fast O(1) allocation
@@ -280,7 +280,7 @@ fn find_pool(size: u32) -> u32
 
 ## 4. Phase 3: Syscall Wrappers
 
-### Semihosting Support (src/std/baremetal/syscall.spl)
+### Semihosting Support (src/lib/baremetal/syscall.spl)
 
 Semihosting allows bare-metal programs to interact with the debugger/emulator host for I/O and debugging.
 
@@ -369,7 +369,7 @@ fn mem_modify_bits(addr: u32, clear_mask: u32, set_mask: u32)
 
 ## 5. Phase 4: Interrupt Handlers
 
-### ARM Cortex-M NVIC (src/std/baremetal/interrupt.spl)
+### ARM Cortex-M NVIC (src/lib/baremetal/interrupt.spl)
 
 **Features:**
 - Up to 240 external interrupts (16 core exceptions + 224 device-specific)

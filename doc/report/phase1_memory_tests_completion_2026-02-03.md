@@ -49,7 +49,7 @@ SystemAllocator: 12 tests (large allocations, realloc)
 ## ❌ Blocker: GC Module (Parser Limitation)
 
 ### Issue
-**Location:** `src/std/gc.spl:629`
+**Location:** `src/lib/gc.spl:629`
 **Error:** `Unexpected token: expected identifier, found Lt`
 **Cause:** Generic extern function not supported by parser
 
@@ -138,7 +138,7 @@ eprintln!("rc_box_init ptr={:x}", ptr);
 
 **Why:** Allows runtime to resolve functions dynamically without semantic analysis checks.
 
-**Applied to:** RC module (src/std/rc.spl) - commented all 22 extern declarations
+**Applied to:** RC module (src/lib/rc.spl) - commented all 22 extern declarations
 
 ### 2. SSpec Matcher Limitations
 
@@ -167,7 +167,7 @@ SSpec framework doesn't support these matchers:
 ### Source Files
 | File | Changes | Purpose |
 |------|---------|---------|
-| `src/std/rc.spl` | Commented 22 extern declarations | Enable runtime resolution |
+| `src/lib/rc.spl` | Commented 22 extern declarations | Enable runtime resolution |
 
 ### Backup Files
 - `test/lib/std/unit/rc_spec.spl.broken` - Original version with non-existent types

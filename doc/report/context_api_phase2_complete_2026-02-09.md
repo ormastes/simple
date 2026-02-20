@@ -483,10 +483,10 @@ fn main():
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/std/gpu/device.spl` | ~150 | Backend detection, device management |
-| `src/std/gpu/memory.spl` | ~150 | GPU arrays, memory allocation |
-| `src/std/gpu/context.spl` | ~200 | Unified context API |
-| `src/std/gpu/mod.spl` | ~30 | Module re-exports |
+| `src/lib/gpu/device.spl` | ~150 | Backend detection, device management |
+| `src/lib/gpu/memory.spl` | ~150 | GPU arrays, memory allocation |
+| `src/lib/gpu/context.spl` | ~200 | Unified context API |
+| `src/lib/gpu/mod.spl` | ~30 | Module re-exports |
 | `examples/gpu/context_basic.spl` | ~150 | Complete example |
 | **Total** | **~680 lines** | Phase 2 complete |
 

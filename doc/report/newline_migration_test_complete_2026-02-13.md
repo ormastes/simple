@@ -291,7 +291,7 @@ A Python script (`migrate_nl_complete.py`) was created to automate the migration
 As per the migration plan (doc/report/newline_migration_plan_2026-02-13.md):
 1. ✅ **COMPLETE:** test/compiler/ and test/unit/ (this report)
 2. **Remaining:** test/feature/ and test/integration/
-3. **Remaining:** src/compiler/, src/compiler_core_legacy/, src/app/, src/std/
+3. **Remaining:** src/compiler/, src/compiler_core_legacy/, src/app/, src/lib/
 
 ## Conclusion
 

@@ -9,7 +9,7 @@
 
 ### 1. Standard Library Modules Implemented
 
-#### `src/std/effects.spl` (73 lines)
+#### `src/lib/effects.spl` (73 lines)
 Effect system for type annotations on functions.
 
 **Features:**
@@ -26,7 +26,7 @@ Effect system for type annotations on functions.
 
 **Enables:** `test/feature/effect_annotations_spec.spl` (30+ test cases)
 
-#### `src/std/parser.spl` (179 lines)
+#### `src/lib/parser.spl` (179 lines)
 Parser error recovery utilities for detecting common syntax mistakes.
 
 **Features:**
@@ -129,8 +129,8 @@ All tests hung during this session:
 ## 📝 Files Created/Modified
 
 ### Created (5 files, 815 lines)
-1. `src/std/effects.spl` (73 lines) - Effect system module
-2. `src/std/parser.spl` (179 lines) - Parser error recovery module
+1. `src/lib/effects.spl` (73 lines) - Effect system module
+2. `src/lib/parser.spl` (179 lines) - Parser error recovery module
 3. `doc/feature/parser_type_system_status_2026-02-14.md` (283 lines) - Status report
 4. `doc/session/parser_type_system_session_2026-02-14.md` (this file)
 5. Test file created and removed (debugging)

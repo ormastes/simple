@@ -121,7 +121,7 @@ simple sffi-gen --gen-intern src/app/ffi_gen/specs/im_rs_spec.spl
 
 #### 1.2: Integrate with std.collections (4-6h)
 
-**File:** `src/std/collections/persistent_dict.spl`
+**File:** `src/lib/collections/persistent_dict.spl`
 
 ```simple
 use im_rs.{HashMap}
@@ -230,7 +230,7 @@ fn bounded<T>(capacity: i64) -> (Sender<T>, Receiver<T>)
 
 #### 2.2: Enhance Mailbox Implementation (8-12h)
 
-**File:** `src/std/actor/mailbox.spl`
+**File:** `src/lib/actor/mailbox.spl`
 
 ```simple
 use crossbeam.{Sender, Receiver, bounded, unbounded}
@@ -396,7 +396,7 @@ pub extern "C" fn compiler_destroy_context(ctx: *mut CompilerContext) {
 
 **Simple Side:**
 
-**File:** `src/std/compiler/context.spl`
+**File:** `src/lib/compiler/context.spl`
 
 ```simple
 extern fn compiler_create_context() -> i64
@@ -426,7 +426,7 @@ impl CompilerContext:
 
 #### 3.2: SMF File I/O (12-20h)
 
-**File:** `src/std/smf/reader.spl`
+**File:** `src/lib/smf/reader.spl`
 
 ```simple
 # SMF (Simple Module Format) structure:
@@ -654,7 +654,7 @@ Enhance implicit multiplication detection in math blocks.
 - Feature 700.1: Export users table to SDN
 - Feature 700.2: Import users table from SDN
 
-**File:** `src/std/db/sdn_export.spl`
+**File:** `src/lib/db/sdn_export.spl`
 
 ```simple
 fn export_table_to_sdn(table: Table, path: text) -> Result<(), text>:
@@ -676,7 +676,7 @@ fn import_table_from_sdn(path: text) -> Result<Table, text>:
 - converts git sources to lockfile format
 - parses git dependency with tag/branch/commit
 
-**File:** `src/std/package/git_deps.spl`
+**File:** `src/lib/package/git_deps.spl`
 
 Simple parsing logic for git dependency syntax.
 

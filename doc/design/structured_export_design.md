@@ -63,7 +63,7 @@ structured_export:
 **All paths in `structured_export` are relative to the current `__init__.spl`'s module.** They reference direct child modules, not the project root or package name.
 
 ```simple
-# src/std/src/testing/__init__.spl
+# src/lib/src/testing/__init__.spl
 # 'mocking_core' and 'assertions' are direct child modules of 'testing'
 structured_export:
     mocking_core:
@@ -88,7 +88,7 @@ export use assertions.assert_eq
 Deeper nesting only applies when a **parent** `__init__.spl` re-exports from a child package:
 
 ```simple
-# src/std/src/__init__.spl (parent of testing)
+# src/lib/src/__init__.spl (parent of testing)
 # Here 'testing' IS a child module, so it appears in the tree
 structured_export:
     testing:

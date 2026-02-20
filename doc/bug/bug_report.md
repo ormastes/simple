@@ -2418,7 +2418,7 @@ When processing `import std.spec`, the fix:
 
 Additional fix implemented (2026-01-06):
 - **File:** `src/compiler/src/interpreter_module.rs` (lines 741-778)
-- **Issue:** `import std.spec` was trying to resolve to `std_lib/src/std/spec/__init__.spl` instead of `std_lib/src/spec/__init__.spl`
+- **Issue:** `import std.spec` was trying to resolve to `std_lib/src/lib/spec/__init__.spl` instead of `std_lib/src/spec/__init__.spl`
 - **Fix:** Strip "std" prefix when resolving stdlib modules, since "std" represents the stdlib root itself, not a subdirectory
 - **Result:** Module now loads successfully
 

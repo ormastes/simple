@@ -13,7 +13,7 @@ Use this skill when working with deep learning tasks in Simple:
 
 ### 1. Configuration System (`config`)
 
-**Location**: `src/std/src/config/__init__.spl`
+**Location**: `src/lib/src/config/__init__.spl`
 
 **Usage**:
 ```simple
@@ -50,7 +50,7 @@ training:
 
 ### 2. Experiment Tracking (`ml.tracking`)
 
-**Location**: `src/std/src/ml/tracking/__init__.spl`
+**Location**: `src/lib/src/ml/tracking/__init__.spl`
 
 **Usage**:
 ```simple
@@ -89,7 +89,7 @@ run.finish()
 
 ### 3. Training Engine (`ml.engine`)
 
-**Location**: `src/std/src/ml/engine/__init__.spl`
+**Location**: `src/lib/src/ml/engine/__init__.spl`
 
 **Usage**:
 ```simple
@@ -489,10 +489,10 @@ fn update_lr(engine: Engine):
 
 - **Deep Learning Guide**: `simple/doc/guide/deeplearning.md`
 - **Example Project**: `simple/example/medgemma_korean/`
-- **Config System**: `src/std/src/config/`
-- **Tracking System**: `src/std/src/ml/tracking/`
-- **Engine System**: `src/std/src/ml/engine/`
-- **BDD Specs**: `src/std/test/features/ml/`
+- **Config System**: `src/lib/src/config/`
+- **Tracking System**: `src/lib/src/ml/tracking/`
+- **Engine System**: `src/lib/src/ml/engine/`
+- **BDD Specs**: `src/lib/test/features/ml/`
 
 ---
 

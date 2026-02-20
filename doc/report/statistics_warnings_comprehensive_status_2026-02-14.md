@@ -273,7 +273,7 @@ bin/simple build --warn-all            # All warnings
 ## Known Issues and Limitations
 
 ### 1. **SIMPLE_LIB Import Path**
-- Imports from `src/std/` via `SIMPLE_LIB` fail for non-built-in functions
+- Imports from `src/lib/` via `SIMPLE_LIB` fail for non-built-in functions
 - Workaround: Symlinks in test directories
 - See: `doc/report/import_system_update_2026-02-09.md`
 

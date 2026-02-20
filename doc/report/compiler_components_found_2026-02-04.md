@@ -102,7 +102,7 @@ me monomorphize_impl() -> bool:
 
 **Additional Files:**
 - `src/compiler/dependency/macro_import.spl` - Macro imports
-- `src/std/dependency_tracker/macro_import.spl` - Dependency tracking
+- `src/lib/dependency_tracker/macro_import.spl` - Dependency tracking
 
 **Status in Code:**
 ```simple

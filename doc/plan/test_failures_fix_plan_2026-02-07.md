@@ -184,14 +184,14 @@ test/lib/std/unit/compiler/generic_template_spec.spl - variable `partition_gener
 
 ```
 test/lib/std/features/table_spec.spl
-Error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/std/src/table.spl":
+Error: compile failed: parse: in "/home/ormastes/dev/pub/simple/src/lib/src/table.spl":
   Unexpected token: expected expression, found Val
 ```
 
-**Root Cause:** Bug in `src/std/src/table.spl` source file
+**Root Cause:** Bug in `src/lib/src/table.spl` source file
 
 **Fix:**
-1. Open `/home/ormastes/dev/pub/simple/src/std/src/table.spl`
+1. Open `/home/ormastes/dev/pub/simple/src/lib/src/table.spl`
 2. Find line with `Val` token issue
 3. Fix syntax (likely misplaced `val` keyword)
 

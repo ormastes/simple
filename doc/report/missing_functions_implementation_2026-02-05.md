@@ -38,7 +38,7 @@ fn bug_to_row(bug: Bug) -> mod.SdnRow:
 
 ---
 
-### 2. String Utilities Module (`src/std/src/text_utils.spl`) - NEW FILE
+### 2. String Utilities Module (`src/lib/src/text_utils.spl`) - NEW FILE
 
 **Problem:** 46 test failures - `semantic: function 'str_replace' not found`
 **Problem:** String search failures - `semantic: function 'str_find' not found`
@@ -171,7 +171,7 @@ fn str_is_empty(s: text) -> bool
 | File | Status | Lines Changed |
 |------|--------|---------------|
 | `src/lib/database/bug.spl` | ✅ Modified | +29 lines |
-| `src/std/src/text_utils.spl` | ✅ New File | +268 lines |
+| `src/lib/src/text_utils.spl` | ✅ New File | +268 lines |
 | `src/app/io/mod.spl` | ✅ Modified | ~10 fixes |
 | `src/lib/database/atomic.spl` | ✅ Verified | No change |
 | `src/lib/database/feature.spl` | ✅ Verified | No change |

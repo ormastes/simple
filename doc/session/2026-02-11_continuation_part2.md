@@ -11,7 +11,7 @@ Created **4 more comprehensive utility modules** with **170+ functions** totalin
 
 ## Modules Created (Part 2)
 
-### 7. `src/std/result_helpers.spl` (490 lines, 35+ functions)
+### 7. `src/lib/result_helpers.spl` (490 lines, 35+ functions)
 **Result type operations and error handling**
 
 #### Result Construction
@@ -49,7 +49,7 @@ Created **4 more comprehensive utility modules** with **170+ functions** totalin
 - `result_from_option` - Convert Option to Result
 - `result_from_predicate` - Create Result from predicate
 
-### 8. `src/std/tuple_utils.spl` (470 lines, 55+ functions)
+### 8. `src/lib/tuple_utils.spl` (470 lines, 55+ functions)
 **Tuple manipulation and operations**
 
 #### Pair (2-Tuple) Operations
@@ -81,7 +81,7 @@ Created **4 more comprehensive utility modules** with **170+ functions** totalin
 - `both`, `either` - Predicate checking
 - `merge` - Combine tuple elements with function
 
-### 9. `src/std/bitwise_utils.spl` (450 lines, 45+ functions)
+### 9. `src/lib/bitwise_utils.spl` (450 lines, 45+ functions)
 **Bitwise operations and bit manipulation**
 
 #### Bit Testing
@@ -122,7 +122,7 @@ Created **4 more comprehensive utility modules** with **170+ functions** totalin
 - `swap_bytes` - Endianness conversion
 - `to_bit_string` - Binary string representation
 
-### 10. `src/std/format_utils.spl` (470 lines, 35+ functions)
+### 10. `src/lib/format_utils.spl` (470 lines, 35+ functions)
 **Advanced string formatting and presentation**
 
 #### Number Formatting

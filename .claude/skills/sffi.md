@@ -4,8 +4,8 @@
 
 **SFFI (Simple FFI)** is the Simple language's approach to FFI wrappers. SFFI provides **two patterns**:
 
-1. **Two-Tier Pattern**: For runtime built-ins (file I/O, process, etc.)
-2. **Three-Tier Pattern**: For external libraries (C++ libs, Rust crates, etc.)
+1. **Runtime Pattern**: For runtime built-ins (file I/O, process, etc.)
+2. **External Library Pattern**: For external libraries (C++ libs, Rust crates, etc.)
 
 **Terminology:**
 - **SFFI**: Simple FFI - FFI wrappers written in Simple
@@ -17,71 +17,71 @@
 
 ```
 ✅ Write SFFI wrappers in Simple (.spl) using extern fn + wrapper pattern
-✅ Use `simple wrapper-gen` to generate Tier 1 native code from specs
-✅ For C++ libraries, use three-tier pattern with `lang: cpp`
-✅ For Rust crates, use three-tier pattern with `lang: rust`
+✅ Use `simple wrapper-gen` to generate native code from specs
+✅ For C++ libraries, use external library pattern with `lang: cpp`
+✅ For Rust crates, use external library pattern with `lang: rust`
 ```
 
-## Two-Tier Pattern (Runtime Built-ins)
+## Runtime Pattern (Built-ins)
 
 Use this for functionality **built into** the Simple runtime:
 
 ```simple
-# Tier 1: Extern declaration (raw FFI binding)
+# Extern declaration (raw FFI binding)
 extern fn rt_file_read_text(path: text) -> text
 
-# Tier 2: Simple-friendly wrapper (idiomatic API)
+# Simple-friendly wrapper (idiomatic API)
 fn file_read(path: text) -> text:
     rt_file_read_text(path)
 ```
 
-**Why two tiers?**
+**Structure:**
 1. `extern fn` - Raw binding to runtime, prefixed with `rt_`
 2. Wrapper `fn` - Clean API for Simple users, handles type conversions
 
 **Location**: `src/lib/ffi/` (extern declarations), `src/app/io/mod.spl` (I/O wrappers)
 
-## Three-Tier Pattern (External Libraries)
+## External Library Pattern
 
-Use this for **external** libraries NOT in the runtime. Supports two Tier 1 backends:
+Use this for **external** libraries NOT in the runtime. Supports two native backends:
 
-| Backend | `lang` field | Use case | Tier 1 output |
+| Backend | `lang` field | Use case | Native output |
 |---------|-------------|----------|---------------|
 | **C++** | `lang: cpp` (default) | C/C++ libraries (PyTorch, OpenCV, SQLite) | cxx bridge + C++ (`bridge.h`, `bridge.cpp`, `lib.rs`) |
 | **Rust** | `lang: rust` | Rust crates (regex, reqwest, gilrs) | Handle table + Rust FFI (`lib.rs` only) |
 
 ```
 ┌──────────────────────────────────┐
-│ Tier 3: Simple API (mod.spl)    │  <- User code
+│ Simple API (mod.spl)            │  <- User code
 │   class Tensor:                  │
 │     fn zeros(shape) -> Tensor    │
 └─────────────┬────────────────────┘
               │ calls
 ┌─────────────▼────────────────────┐
-│ Tier 2: SFFI Bindings (ffi.spl) │  <- extern fn
+│ SFFI Bindings (ffi.spl)         │  <- extern fn
 │   extern fn rt_torch_zeros()     │
 └─────────────┬────────────────────┘
               │ links to
 ┌─────────────▼────────────────────┐
-│ Tier 1: Native Wrapper (lib.rs) │  <- Memory safety
+│ Native Wrapper (lib.rs)         │  <- Memory safety
 │   lang: cpp  -> cxx bridge + C++ │
 │   lang: rust -> Handle table     │
 │   #[no_mangle] extern "C"        │
 └─────────────┬────────────────────┘
               │ links to
 ┌─────────────▼────────────────────┐
-│ Tier 0: External Library          │
+│ External Library                  │
 │   C++: libtorch.so               │
 │   Rust: regex crate              │
 └──────────────────────────────────┘
 ```
 
 **Key Principles**:
-1. **Tier 1 is THIN**: Only memory safety, no business logic
-2. **Tier 2 is MINIMAL**: Just `extern fn` declarations
-3. **Tier 3 is RICH**: Full idiomatic Simple API with RAII
+1. **Native wrapper is THIN**: Only memory safety, no business logic
+2. **SFFI bindings are MINIMAL**: Just `extern fn` declarations
+3. **Simple API is RICH**: Full idiomatic Simple API with RAII
 4. **All logic in Simple**: Don't put business logic in native wrapper
-5. **Backend is transparent**: Tiers 2 and 3 are identical regardless of `lang`
+5. **Backend is transparent**: SFFI bindings and API are identical regardless of `lang`
 
 ## Wrapper Spec Format (`.wrapper_spec`)
 
@@ -123,12 +123,9 @@ methods:
 ## Wrapper Generator (`wrapper-gen`)
 
 ```bash
-# Generate all tiers (backend auto-detected from lang field)
+# Generate all output (backend auto-detected from lang field)
 simple wrapper-gen torch.wrapper_spec           # lang: cpp
 simple wrapper-gen regex.wrapper_spec           # lang: rust
-
-# Generate specific tier
-simple wrapper-gen regex.wrapper_spec --tier=1  # Only Tier 1
 
 # Preview without writing files
 simple wrapper-gen regex.wrapper_spec --dry-run --verbose
@@ -139,14 +136,14 @@ simple wrapper-gen regex.wrapper_spec --verify
 
 **Output by backend:**
 
-| Backend | Tier 1 output location | Files |
+| Backend | Native output location | Files |
 |---------|----------------------|-------|
 | `lang: cpp` | `.build/rust/ffi_<lib>/` | `Cargo.toml`, `build.rs`, `src/lib.rs`, `bridge.h`, `bridge.cpp` |
 | `lang: rust` | `.build/rust/ffi_<lib>/` | `Cargo.toml`, `src/lib.rs` |
 
 ### Rust Backend: Handle Table Pattern
 
-For `lang: rust`, Tier 1 uses a handle table pattern:
+For `lang: rust`, the native wrapper uses a handle table pattern:
 - `HashMap<i64, RustObject>` stores live objects
 - `AtomicI64` counter for unique handle IDs
 - All functions take/return `i64` handles (not raw pointers)
@@ -169,7 +166,7 @@ pub extern "C" fn rt_regex_new(pattern: *const c_char) -> i64 {
 
 ### C++ Backend: cxx Bridge Pattern
 
-For `lang: cpp`, Tier 1 uses the cxx bridge pattern:
+For `lang: cpp`, the native wrapper uses the cxx bridge pattern:
 - `bridge.h` / `bridge.cpp` for C++ side
 - `lib.rs` with `#[cxx::bridge]` for Rust side
 - Links to system C++ libraries
@@ -351,14 +348,14 @@ methods:
       return: text
 ```
 
-### Step 2: Generate Tiers
+### Step 2: Generate Wrappers
 
 ```bash
 simple wrapper-gen examples/mylib.wrapper_spec --dry-run   # Preview
 simple wrapper-gen examples/mylib.wrapper_spec              # Generate
 ```
 
-### Step 3: Build Tier 1
+### Step 3: Build Native Wrapper
 
 ```bash
 cd .build/rust/ffi_mylib && cargo build --release
@@ -406,8 +403,8 @@ describe "MyLib":
 
 ### DO
 
-- Use the two-tier pattern consistently for runtime built-ins
-- Use three-tier pattern with `lang` field for external libraries
+- Use the runtime pattern consistently for runtime built-ins
+- Use the external library pattern with `lang` field for external libraries
 - Group related functions with section comments
 - Use descriptive wrapper names (remove `rt_` prefix)
 - Return tuples for multiple values
@@ -425,18 +422,13 @@ describe "MyLib":
 
 | File | Purpose |
 |------|---------|
-| `src/lib/ffi/` | Centralized FFI extern declarations (two-tier) |
+| `src/lib/ffi/` | Centralized FFI extern declarations |
 | `src/app/io/mod.spl` | I/O SFFI wrapper module |
 | `src/app/io/*_ffi.spl` | Per-library SFFI modules (regex, http, gamepad, etc.) |
 | `src/app/wrapper_gen/mod.spl` | Wrapper generator main entry point |
 | `src/app/wrapper_gen/spec_parser.spl` | `.wrapper_spec` parser |
-| `src/app/wrapper_gen/tier1_gen.spl` | Tier 1 generator (C++ backend: cxx bridge) |
-| `src/app/wrapper_gen/tier1_rust_gen.spl` | Tier 1 generator (Rust backend: handle tables) |
-| `src/app/wrapper_gen/tier2_gen.spl` | Tier 2 generator (Simple `extern fn` declarations) |
-| `src/app/wrapper_gen/tier3_gen.spl` | Tier 3 generator (Simple API scaffold) |
 | `examples/torch.wrapper_spec` | Example: C++ library (PyTorch) |
 | `examples/regex.wrapper_spec` | Example: Rust crate (regex) |
-| `doc/design/sffi_external_library_pattern.md` | Design document |
 | `doc/guide/sffi_gen_guide.md` | SFFI generation guide |
 
 ## SFFI vs Raw FFI
@@ -444,7 +436,7 @@ describe "MyLib":
 | Aspect | SFFI (Simple FFI) | Raw FFI |
 |--------|-------------------|---------|
 | **Where** | Simple code (.spl) | Rust code (.rs) |
-| **Pattern** | Two-tier or three-tier | Direct FFI |
+| **Pattern** | Runtime or external library | Direct FFI |
 | **Prefix** | `rt_` for extern, clean name for wrapper | `rt_` exposed directly |
 | **Generation** | `simple wrapper-gen` from specs | Manual code |
 | **Example** | `fn file_read()` calls `extern fn rt_file_read()` | Direct `pub extern "C" fn rt_file_read()` |
@@ -458,4 +450,3 @@ describe "MyLib":
 - `src/app/io/mod.spl` - I/O SFFI wrapper implementations
 - `/coding` skill - Simple language coding standards
 - `doc/guide/sffi_gen_guide.md` - SFFI generation guide
-- `doc/design/sffi_external_library_pattern.md` - Three-tier design

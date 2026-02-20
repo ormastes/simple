@@ -53,7 +53,7 @@ Successfully initiated the ambitious 100% branch coverage plan for the Simple st
 
 **Deliverable:** Complete branch inventory for allocator.spl
 
-**File Analyzed:** `src/std/allocator.spl` (601 LOC)
+**File Analyzed:** `src/lib/allocator.spl` (601 LOC)
 
 **Branches Identified:**
 - SystemAllocator: ~20 branches
@@ -142,7 +142,7 @@ Successfully initiated the ambitious 100% branch coverage plan for the Simple st
 
 **Solution Implemented:** Created production-quality mocks
 
-**Mocks Created** in `src/std/allocator.spl`:
+**Mocks Created** in `src/lib/allocator.spl`:
 
 1. **sys_malloc(size, align) -> [u8]**
    ```simple
@@ -266,8 +266,8 @@ simple spl-coverage dump > doc/coverage/baseline_2026-02-03.sdn
 
 | File | Change | Lines | Impact |
 |------|--------|-------|--------|
-| `src/std/allocator.spl` | Added FFI mocks | +80 | Enables interpreter testing |
-| `src/std/allocator.spl` | Commented extern | ~10 | Use mocks instead |
+| `src/lib/allocator.spl` | Added FFI mocks | +80 | Enables interpreter testing |
+| `src/lib/allocator.spl` | Commented extern | ~10 | Use mocks instead |
 | `test/lib/std/unit/allocator_spec.spl` | 10 new tests | +100 | +18% test coverage |
 | `test/lib/std/unit/allocator_spec.spl` | Fixed matchers | ~60 | 60 lines changed |
 | `test/lib/std/unit/allocator_spec.spl` | Fixed inline if | ~6 | Syntax corrections |
@@ -648,7 +648,7 @@ simple spl-coverage clear
 ### Files to Review
 
 - `doc/coverage/baseline_2026-02-03.sdn` - Coverage data
-- `src/std/allocator.spl` - Source with mocks
+- `src/lib/allocator.spl` - Source with mocks
 - `test/lib/std/unit/allocator_spec.spl` - Test suite
 - `doc/coverage/allocator_branch_analysis.md` - Branch inventory
 

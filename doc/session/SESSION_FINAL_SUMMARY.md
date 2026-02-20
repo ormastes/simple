@@ -40,7 +40,7 @@
 ### 1. FFI Lazy Initialization Pattern ✅
 
 **Files Modified:**
-- `src/std/log.spl` - Implemented lazy initialization
+- `src/lib/log.spl` - Implemented lazy initialization
 
 **Pattern Established:**
 ```simple
@@ -133,10 +133,10 @@ struct Data:
 ## Code Implemented
 
 ### New/Modified Modules
-1. ✅ **src/std/parser/treesitter_node.spl** (337 lines) - NEW
-2. ✅ **src/std/shell/env.spl** - NEW
-3. ✅ **src/std/log.spl** - ENHANCED (14 new functions)
-4. ✅ **src/std/src/tooling/regex_utils.spl** - NEW
+1. ✅ **src/lib/parser/treesitter_node.spl** (337 lines) - NEW
+2. ✅ **src/lib/shell/env.spl** - NEW
+3. ✅ **src/lib/log.spl** - ENHANCED (14 new functions)
+4. ✅ **src/lib/src/tooling/regex_utils.spl** - NEW
 5. ✅ **src/app/package/semver.spl** - FIXED (removed generics)
 6. ✅ **src/app/package/types.spl** - FIXED (enum syntax)
 7. ✅ **src/app/mcp/prompts.spl** - FIXED (type names)

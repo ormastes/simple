@@ -251,7 +251,7 @@ $ simple test --tags coverage -v
 Running tests with tags: [coverage]
 Excluding tags: []
 
-[coverage] src/std/test/coverage_spec.spl
+[coverage] src/lib/test/coverage_spec.spl
   Coverage API Availability
     it blocks check_coverage without @coverage tag ... ok
     it allows check_coverage with @coverage tag ... ok
@@ -260,7 +260,7 @@ Excluding tags: []
     it supports branch coverage type ... ok
     ...
 
-[coverage,longrun] src/std/test/grammar_coverage_spec.spl
+[coverage,longrun] src/lib/test/grammar_coverage_spec.spl
   (skipped - tag 'longrun' excluded)
 
 Tests: 45 passed, 2 skipped, 0 failed

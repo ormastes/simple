@@ -5,7 +5,7 @@
 -- and is started via `simple lsp` or `bin/simple lsp`.
 --
 -- Server capabilities (handled by src/app/lsp/handlers/):
---   hover.spl          - Hover with math block detection (LaTeX + Unicode pretty text via src/std/math_repr.spl)
+--   hover.spl          - Hover with math block detection (LaTeX + Unicode pretty text via src/lib/math_repr.spl)
 --   completion.spl     - Code completion
 --   definition.spl     - Go to definition
 --   references.spl     - Find references

@@ -184,7 +184,7 @@ rust/target/release/libffi_syscalls.so    # 13 KB (syscall library)
 ```
 rust/ffi_syscalls/src/lib.rs              # 23 syscall functions
 rust/runtime/src/syscalls_ffi.rs          # Runtime integration
-src/std/common/file_reader.spl            # Simple language wrappers
+src/lib/common/file_reader.spl            # Simple language wrappers
 test/system/ffi/syscalls_test.spl         # Integration tests
 ```
 

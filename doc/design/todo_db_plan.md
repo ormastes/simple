@@ -121,7 +121,7 @@ src/driver/src/cli/migrate_sspec.rs: 1
 ```sdn
 todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|
     1, TODO, runtime, P0, "Implement monoio TCP write", src/runtime/tcp.rs, 123, 234, "", open, true
-    2, FIXME, stdlib, critical, "Fix memory leak", src/stdlib/mem.rs, 456, 567, "123", open, true
+    2, FIXME, stdlib, critical, "Fix memory leak", src/liblib/mem.rs, 456, 567, "123", open, true
     3, TODO, gpu, P1, "Create Vector3 variant", src/gpu/vector.rs, 789, 789, "100", blocked, true
     4, TODO, parser, P2, "Handle edge case", src/parser/expr.rs, 234, "", "", open, true
 ```
@@ -303,7 +303,7 @@ make check-full:
 ### stdlib
 
 - **#15** [stdlib][P0] Fix memory corruption [#567]
-  - File: `src/stdlib/mem.rs:789`
+  - File: `src/liblib/mem.rs:789`
   - Status: open
 
 ## P1 High Priority TODOs

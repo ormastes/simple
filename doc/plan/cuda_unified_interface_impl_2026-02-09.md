@@ -495,7 +495,7 @@ export GpuBackend, Gpu, detect_backends, gpu_cuda
 
 #### Integration with Config System
 
-**Update src/std/src/dl/config.spl:**
+**Update src/lib/src/dl/config.spl:**
 
 ```simple
 use std.gpu.{Context, GpuBackend}
@@ -679,7 +679,7 @@ extern fn rt_cuda_stream_sync(stream: i64) -> bool
 export rt_cuda_*
 ```
 
-**3. High-Level CUDA API** (src/std/gpu/cuda.spl)
+**3. High-Level CUDA API** (src/lib/gpu/cuda.spl)
 
 ```simple
 use app.io.cuda_ffi.*
@@ -809,7 +809,7 @@ fn main():
 
 - `src/compiler/codegen/cuda/` - CUDA PTX code generator
 - `src/compiler/mir_data.spl` - Add GPU MIR instructions
-- `src/std/gpu/kernels.spl` - Kernel compilation and launch
+- `src/lib/gpu/kernels.spl` - Kernel compilation and launch
 
 **Estimated Time:** 7-10 hours (complex, involves compiler changes)
 

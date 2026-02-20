@@ -160,7 +160,7 @@ skip(features: ["generics"], reason: "Generic code path test")
 
 ## Changes Made
 
-### File: `src/std/spec/condition.spl`
+### File: `src/lib/spec/condition.spl`
 
 | Function | Change | Lines |
 |----------|--------|-------|

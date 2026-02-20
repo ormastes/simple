@@ -216,7 +216,7 @@ module std.path:
 - File I/O for reading source files
 - Process management for invoking tools
 
-### Standard Library (src/std/)
+### Standard Library (src/lib/)
 
 **High FFI usage:**
 - `std.fs` - All file system operations

@@ -127,7 +127,7 @@ Phase 5: Mode-specific processing
 
 ## Runtime Integration
 
-The async integration bridges to the existing async runtime in `src/std/async.spl`:
+The async integration bridges to the existing async runtime in `src/lib/async.spl`:
 
 | MIR Concept | Runtime Implementation |
 |-------------|----------------------|

@@ -203,7 +203,7 @@ These CAN be fixed with Simple code changes:
 
 ### Source Code (3 files + 1 new)
 - `src/lib/database/bug.spl` (+29 lines) - Added bug_to_row
-- `src/std/src/text_utils.spl` (+268 lines) - NEW comprehensive string utilities
+- `src/lib/src/text_utils.spl` (+268 lines) - NEW comprehensive string utilities
 - `src/app/io/mod.spl` (~10 fixes) - Fixed escape sequences
 
 ### Test Files (67 files)

@@ -57,7 +57,7 @@ Successfully implemented comprehensive GPU support for Simple language:
 
 **Components:**
 
-1. **Device Management** (`src/std/gpu/device.spl` - 150 lines)
+1. **Device Management** (`src/lib/gpu/device.spl` - 150 lines)
    ```simple
    enum GpuBackend: Cuda | Vulkan | None
    struct Gpu: backend, device_id, is_initialized
@@ -65,7 +65,7 @@ Successfully implemented comprehensive GPU support for Simple language:
    fn preferred_backend() -> GpuBackend
    ```
 
-2. **Memory Management** (`src/std/gpu/memory.spl` - 150 lines)
+2. **Memory Management** (`src/lib/gpu/memory.spl` - 150 lines)
    ```simple
    class GpuArray[T]:
        backend: GpuBackend
@@ -78,7 +78,7 @@ Successfully implemented comprehensive GPU support for Simple language:
        fn drop()  # RAII auto-cleanup
    ```
 
-3. **Context API** (`src/std/gpu/context.spl` - 200 lines)
+3. **Context API** (`src/lib/gpu/context.spl` - 200 lines)
    ```simple
    class Context:
        backend: GpuBackend
@@ -98,7 +98,7 @@ Successfully implemented comprehensive GPU support for Simple language:
    fn create_context_from_config() -> Context
    ```
 
-4. **Module Exports** (`src/std/gpu/mod.spl` - 30 lines)
+4. **Module Exports** (`src/lib/gpu/mod.spl` - 30 lines)
    - Re-exports device, memory, context APIs
 
 **Benefits:**
@@ -209,7 +209,7 @@ Successfully implemented comprehensive GPU support for Simple language:
 
 **Solution:** Simplified function-based API using handles
 
-**File:** `src/std/gpu_runtime/mod.spl` (~200 lines)
+**File:** `src/lib/gpu_runtime/mod.spl` (~200 lines)
 
 **API Design:**
 ```simple
@@ -321,13 +321,13 @@ fn gpu_async_upload_batch(rows: i64, cols: i64, device_id: i32, stream_handle: i
 3. `src/lib/torch/mod.spl` (Simple API)
 
 **Phase 2 - Context API:**
-4. `src/std/gpu/device.spl` (150 lines)
-5. `src/std/gpu/memory.spl` (150 lines)
-6. `src/std/gpu/context.spl` (200 lines)
-7. `src/std/gpu/mod.spl` (30 lines)
+4. `src/lib/gpu/device.spl` (150 lines)
+5. `src/lib/gpu/memory.spl` (150 lines)
+6. `src/lib/gpu/context.spl` (200 lines)
+7. `src/lib/gpu/mod.spl` (30 lines)
 
 **Runtime Solution:**
-8. `src/std/gpu_runtime/mod.spl` (200 lines)
+8. `src/lib/gpu_runtime/mod.spl` (200 lines)
 
 **Phase 3 - Examples:**
 9. `examples/gpu/async_pipeline.spl` (380 lines)

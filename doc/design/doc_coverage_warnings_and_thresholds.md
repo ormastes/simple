@@ -40,7 +40,7 @@ fn is_public_function(func_name: text, file_path: text) -> bool:
 ```
 
 **Examples:**
-- `src/std/text.spl` function `str_len()` → Check `src/std/__init__.spl` exports
+- `src/lib/text.spl` function `str_len()` → Check `src/lib/__init__.spl` exports
 - If exported → public, requires sdoctest
 - If not exported → internal, lower threshold
 
@@ -81,7 +81,7 @@ fn is_public_function(func_name: text, file_path: text) -> bool:
                 │
                 ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  Diagnostics: src/std/common/diagnostic.spl                   │
+│  Diagnostics: src/lib/common/diagnostic.spl                   │
 │  - Emit warnings with file:line info                          │
 │  - Severity: INFO/WARN/ERROR                                  │
 │  - Format: "Missing sdoctest for public function `func_name`" │
@@ -111,7 +111,7 @@ fn is_public_function(func_name: text, file_path: text) -> bool:
 
 ```
 warning[missing_sdoctest]: Missing sdoctest for public function `str_len`
-  --> src/std/text.spl:42:1
+  --> src/lib/text.spl:42:1
    |
 42 | fn str_len(s: text) -> i64:
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ function lacks documentation example
@@ -201,7 +201,7 @@ doc_coverage {
 
     # Per-scope thresholds
     thresholds {
-        "src/std/" 90     # Stdlib: high standard
+        "src/lib/" 90     # Stdlib: high standard
         "src/compiler_core/" 75    # Core: medium-high
         "src/lib/" 80     # Libraries: high
         "src/app/" 50     # Applications: lower
@@ -237,7 +237,7 @@ doc_coverage {
 
 ```simple
 struct ThresholdResult:
-    scope: text           # "src/std/", "src/compiler_core/", etc.
+    scope: text           # "src/lib/", "src/compiler_core/", etc.
     threshold: i64        # Required percentage (0-100)
     actual: i64           # Actual coverage percentage
     passed: bool          # actual >= threshold
@@ -248,7 +248,7 @@ struct ThresholdResult:
 fn calculate_coverage(files: [text], config: ThresholdConfig) -> [ThresholdResult]:
     var results = []
 
-    # Group files by scope (src/std/, src/compiler_core/, etc.)
+    # Group files by scope (src/lib/, src/compiler_core/, etc.)
     val groups = group_by_scope(files)
 
     for scope in groups.keys():
@@ -310,7 +310,7 @@ Generated: 2026-02-14 10:30:00
 
 ## Threshold Results
 
-### ✅ src/std/ (PASSED)
+### ✅ src/lib/ (PASSED)
 - **Threshold:** 90%
 - **Actual:** 92% (147/160 functions)
 - **Status:** PASS
@@ -411,7 +411,7 @@ simple doc-coverage --thresholds --tag-file=coverage_tags.txt
     "inline_comment_coverage_percent": 82
   },
   "by_scope": {
-    "src/std/": {
+    "src/lib/": {
       "threshold": 90,
       "actual": 92,
       "passed": true,
@@ -425,7 +425,7 @@ simple doc-coverage --thresholds --tag-file=coverage_tags.txt
   "functions": [
     {
       "name": "str_len",
-      "file": "src/std/text.spl",
+      "file": "src/lib/text.spl",
       "line": 42,
       "is_public": true,
       "has_sdoctest": true,
@@ -442,8 +442,8 @@ simple doc-coverage --thresholds --tag-file=coverage_tags.txt
 
 ```csv
 name,file,line,is_public,has_sdoctest,has_inline,has_docstring,tags
-str_len,src/std/text.spl,42,true,true,true,true,"coverage:excellent;sdoctest:present"
-str_reverse,src/std/text.spl,67,true,false,true,false,"coverage:poor;sdoctest:missing"
+str_len,src/lib/text.spl,42,true,true,true,true,"coverage:excellent;sdoctest:present"
+str_reverse,src/lib/text.spl,67,true,false,true,false,"coverage:poor;sdoctest:missing"
 ...
 ```
 
@@ -552,7 +552,7 @@ simple build --warn-docs
 
 # Output:
 # warning[missing_sdoctest]: Missing sdoctest for public function `new_feature`
-#   --> src/std/feature.spl:42:1
+#   --> src/lib/feature.spl:42:1
 #
 # Build succeeded with 1 warning
 
@@ -560,7 +560,7 @@ simple build --warn-docs
 simple doc-coverage --thresholds
 
 # Output:
-# ✅ src/std/ (92% >= 90%)
+# ✅ src/lib/ (92% >= 90%)
 # ❌ src/lib/ (68% < 80%)
 #
 # Threshold check: 4/5 passed (80%)
@@ -599,4 +599,4 @@ simple doc-coverage --thresholds --list-missing
 - **Phase 4:** JSON/CSV export used in CI pipelines
 - **Phase 5:** 100% test coverage for new modules
 
-**End Goal:** 90%+ public function sdoctest coverage across `src/std/` and `src/compiler_core/`
+**End Goal:** 90%+ public function sdoctest coverage across `src/lib/` and `src/compiler_core/`

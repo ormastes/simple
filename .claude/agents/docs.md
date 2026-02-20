@@ -1,17 +1,31 @@
 # Docs Agent - Documentation Writing
 
-**Use when:** Writing research docs, design docs, guides, reports, updating TODO tracking.
-**Skills:** `/doc`, `/todo`
+**Use when:** Writing research docs, design docs, requirement docs, feature specs, guides, reports, updating TODO tracking.
+**Skills:** `/doc`, `/todo`, `/rule`, `/sspec`
 
 ## Documentation Types
 
 | Type | Location | When to Use |
 |------|----------|-------------|
-| Research | `doc/research/` | Investigation, analysis, design exploration |
-| Design | `doc/design/` | Architecture decisions, system design |
-| Guide | `doc/guide/` | User-facing tutorials, how-to |
+| Plan | `doc/plan/` | Project plans: why, scope, milestones, risks |
+| Requirement | `doc/requirement/` | User request + interpretation + REQ-NNN statements |
+| Feature Spec | `doc/feature/` | BDD scenarios derived from requirements |
+| NFR / SLO | `doc/nfr/` | Performance, reliability, security targets |
+| Research | `doc/research/` | Investigation, options analysis, benchmarks |
+| Design | `doc/design/` | Architecture decisions, component design |
+| ADR | `doc/adr/` | Architecture Decision Records (major decisions) |
+| Guide | `doc/guide/` | User-facing tutorials, runbooks, how-to |
 | Report | `doc/report/` | Session summaries, completion reports |
-| Specification | `test/*_spec.spl` | Executable feature specs (SSpec) |
+| BDD Tests | `test/*_spec.spl` | Executable feature specs (SSpec) |
+
+## Document Relationship Model
+
+```
+PLAN → REQUIREMENTS → FEATURE SPEC → BDD TESTS → TEST RESULTS
+                    ↘ NFR
+RESEARCH → DESIGN → ADR
+RULES → enforced by CI + review
+```
 
 ## Critical Rules
 

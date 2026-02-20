@@ -86,7 +86,7 @@
 **Deliverables:**
 
 **Implementation:**
-- `src/std/parser/treesitter_node.spl` (337 lines)
+- `src/lib/parser/treesitter_node.spl` (337 lines)
   - 15 methods, complete FFI wrapper
   - Position tracking: `start_byte()`, `end_byte()`, `start_point()`, `end_point()`
   - Navigation: `parent()`, `next_sibling()`, `prev_sibling()`
@@ -128,7 +128,7 @@
 **Key Fixes:**
 - Static method syntax: `TypeName__method()` → `TypeName.method()`
 - Reserved keyword: `Match` → `RegexMatch`
-- Created stub module: `src/std/src/tooling/regex_utils.spl`
+- Created stub module: `src/lib/src/tooling/regex_utils.spl`
 
 **Deliverable:** `doc/feature/tooling_implementation.md`
 
@@ -246,19 +246,19 @@ fn get_level(): rt_env_get("LOG")
 ## Code Implementation
 
 ### New Modules
-1. **src/std/parser/treesitter_node.spl** (337 lines)
+1. **src/lib/parser/treesitter_node.spl** (337 lines)
    - Complete TreeSitter node API wrapper
    - 15 methods, 3 utilities, 2 data structures
 
-2. **src/std/shell/env.spl** (NEW)
+2. **src/lib/shell/env.spl** (NEW)
    - Environment variable operations
    - Functions: `get()`, `set()`, `cwd()`
 
-3. **src/std/log.spl** (ENHANCED)
+3. **src/lib/log.spl** (ENHANCED)
    - Added 14 new logging functions
    - Level management, scope management
 
-4. **src/std/src/tooling/regex_utils.spl** (NEW)
+4. **src/lib/src/tooling/regex_utils.spl** (NEW)
    - Regex pattern matching utilities
 
 ### Test Files

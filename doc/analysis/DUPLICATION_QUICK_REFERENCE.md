@@ -1,7 +1,7 @@
 # Stdlib Duplication Quick Reference
 
 **Last Updated:** 2026-02-14
-**Scope:** src/std/ core utility modules
+**Scope:** src/lib/ core utility modules
 **Duplications Found:** 10 semantic duplications
 
 ---

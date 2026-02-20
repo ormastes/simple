@@ -42,14 +42,14 @@ Fixed critical parser errors and module import issues, improving test pass rate 
 - **Cause**: Type names contain `Match` keyword
 - **Solution**: Renamed to avoid keyword conflicts
 - **Files affected**:
-  - `src/std/src/parser/treesitter.spl`
+  - `src/lib/src/parser/treesitter.spl`
   - `test/system/features/treesitter/treesitter_query_spec.spl`
 
 **Fix 3: Variable name conflict**
 - **Error**: `Unexpected token: expected pattern, found Match`
 - **Cause**: `val match = ...` uses reserved keyword as variable name
 - **Solution**: Renamed variable to `result`
-- **File**: `src/std/src/parser/treesitter.spl:695`
+- **File**: `src/lib/src/parser/treesitter.spl:695`
 
 ### 2. Module Import Path Fix
 
@@ -126,7 +126,7 @@ val config = HeapConfig.default()  # Error: unsupported path call
 ## Files Modified
 
 1. `src/lib/pure/ast.spl` - Renamed `MatchExpr` → `MatchCase`
-2. `src/std/src/parser/treesitter.spl` - Renamed types & variable
+2. `src/lib/src/parser/treesitter.spl` - Renamed types & variable
 3. `src/compiler/blocks.spl` - Fixed export paths
 4. `src/app/io/mod.spl` - Added debug function stubs
 5. **15 compiler files** - Updated `MatchExpr` → `MatchCase` usage

@@ -139,14 +139,14 @@ $ find src -name "*.spl" | xargs basename -a | sort | uniq -c | sort -rn | head 
 - `src/compiler/backend/native/mod.spl` - Shared native backend dispatcher
 
 **Standard Library:**
-- `src/std/**/*.spl` - All stdlib shared across platforms
-- Platform detection via `src/std/platform.spl` (runtime detection, not compile-time duplication)
+- `src/lib/**/*.spl` - All stdlib shared across platforms
+- Platform detection via `src/lib/platform.spl` (runtime detection, not compile-time duplication)
 
 ### Platform-Specific Code (Conditional, Not Duplicated)
 
 **Runtime Detection Pattern:**
 ```simple
-# src/std/platform.spl
+# src/lib/platform.spl
 fn get_host_os() -> text:
     if is_windows_env():
         "windows"

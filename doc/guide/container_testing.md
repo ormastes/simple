@@ -74,7 +74,7 @@ Make changes to Simple source files or test specs:
 
 ```bash
 # Edit source
-vim src/std/text.spl
+vim src/lib/text.spl
 
 # Edit test
 vim test/unit/std/string_spec.spl

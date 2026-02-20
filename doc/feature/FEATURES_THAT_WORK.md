@@ -419,7 +419,7 @@ val id = capsule.capsule_id()  # "feature/auth"
 ```simple
 use app.doc.public_check.export_parser.{find_module_exports}
 
-val exports = find_module_exports("src/std/array")
+val exports = find_module_exports("src/lib/array")
 # Returns list of ExportInfo for all exported types
 ```
 

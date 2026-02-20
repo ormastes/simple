@@ -69,7 +69,7 @@ var result = if condition: value1 else: value2
 
 ### Examples from stdlib
 
-**From `src/std/path.spl` (path-impl discovery):**
+**From `src/lib/path.spl` (path-impl discovery):**
 ```simple
 # ORIGINAL ATTEMPT (failed):
 var min_len = if norm_path.len() < norm_base.len():
@@ -135,7 +135,7 @@ val result = compute(result_input)
 
 ### Examples from stdlib
 
-**From `src/std/path.spl`:**
+**From `src/lib/path.spl`:**
 ```simple
 # ORIGINAL ATTEMPT (unreliable):
 fn is_absolute(path: text) -> bool:
@@ -149,7 +149,7 @@ fn is_absolute(path: text) -> bool:
         return false
 ```
 
-**From `src/std/convert.spl` (string-impl):**
+**From `src/lib/convert.spl` (string-impl):**
 ```simple
 # ORIGINAL ATTEMPT (unreliable):
 fn digit_value(ch: text) -> i64:
@@ -209,7 +209,7 @@ var processed = parts.map(\x: parse_int(x))
 
 ### Examples from stdlib
 
-**From `src/std/array.spl`:**
+**From `src/lib/array.spl`:**
 ```simple
 # ORIGINAL ATTEMPT (unreliable):
 var sorted = arr.map(\x: x).merge(insertion_sort_recurse(x))
@@ -266,7 +266,7 @@ fn test(x: i64) -> text:
 
 ### Examples from stdlib
 
-**From `src/std/path.spl`:**
+**From `src/lib/path.spl`:**
 ```simple
 # ORIGINAL ATTEMPT (unreliable):
 fn has_extension(path: text, ext: text) -> bool:

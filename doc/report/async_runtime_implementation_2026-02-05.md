@@ -513,11 +513,11 @@ fn main():
 
 | File | Lines | Purpose | Status |
 |------|-------|---------|--------|
-| `src/std/async_core.spl` | 271 | Shared types/traits | ✅ Complete |
-| `src/std/async_embedded.spl` | 480 | Embedded runtime | ✅ Complete |
-| `src/std/async_host.spl` | 801 | Host runtime | ✅ Complete |
-| `src/std/async_unified.spl` | 144 | Unified interface | ✅ Complete |
-| `src/std/async_sffi.spl` | 111 | Pure Simple FFI | ✅ Complete |
+| `src/lib/async_core.spl` | 271 | Shared types/traits | ✅ Complete |
+| `src/lib/async_embedded.spl` | 480 | Embedded runtime | ✅ Complete |
+| `src/lib/async_host.spl` | 801 | Host runtime | ✅ Complete |
+| `src/lib/async_unified.spl` | 144 | Unified interface | ✅ Complete |
+| `src/lib/async_sffi.spl` | 111 | Pure Simple FFI | ✅ Complete |
 | `examples/async_structure_demo.spl` | 115 | Structure demo | ✅ Working |
 | `test/std/async_core_spec.spl` | ~300 | Core tests | ⏳ Ready |
 | `test/std/async_embedded_spec.spl` | ~400 | Embedded tests | ⏳ Ready |

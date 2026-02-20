@@ -19,7 +19,7 @@
 
 ### 1. Core Modules - FIXED ✅
 
-#### Decorators (`src/std/src/compiler_core/decorators.spl`)
+#### Decorators (`src/lib/src/compiler_core/decorators.spl`)
 - **Status:** ✅ Complete (Pure Simple, no FFI)
 - **Fixed:** Mutability errors (`fn` → `me` for methods that modify self)
 - **Tests:** 7 tests (ready to run)
@@ -31,7 +31,7 @@
 
 **No FFI used** - 100% Pure Simple ✅
 
-#### Context Manager (`src/std/src/compiler_core/context_manager.spl`)
+#### Context Manager (`src/lib/src/compiler_core/context_manager.spl`)
 - **Status:** ✅ Complete (Pure Simple, no FFI)
 - **Fixed:**
   - Removed `extern fn rt_time_now_seconds()`
@@ -49,7 +49,7 @@
 
 All collections use **SFFI wrapper pattern** (Simple wrapper + FFI):
 
-#### HashMap (`src/std/src/collections/hashmap.spl`)
+#### HashMap (`src/lib/src/collections/hashmap.spl`)
 - **Status:** ✅ Simple wrapper complete
 - **Pattern:** Two-tier SFFI
 - **Lines:** 130
@@ -80,7 +80,7 @@ class HashMap:
 
 **Needs:** Rust implementations of `rt_hashmap_*` functions
 
-#### HashSet (`src/std/src/collections/hashset.spl`)
+#### HashSet (`src/lib/src/collections/hashset.spl`)
 - **Status:** ✅ Simple wrapper complete
 - **Pattern:** Two-tier SFFI
 - **Lines:** 110
@@ -99,7 +99,7 @@ extern fn rt_hashset_free(handle: i64)
 
 **Needs:** Rust implementations of `rt_hashset_*` functions
 
-#### BTreeMap (`src/std/src/collections/btree.spl`)
+#### BTreeMap (`src/lib/src/collections/btree.spl`)
 - **Status:** ✅ Simple wrapper complete
 - **Pattern:** Two-tier SFFI
 - **Lines:** 140
@@ -124,7 +124,7 @@ extern fn rt_btree_free(handle: i64)
 
 ### 3. LSP & Treesitter - Pure Simple ✅
 
-#### Treesitter (`src/std/src/parser/treesitter.spl`)
+#### Treesitter (`src/lib/src/parser/treesitter.spl`)
 - **Status:** ✅ Complete (Pure Simple, no FFI)
 - **Pattern:** Wraps `lib.pure.parser`
 - **Lines:** 600
@@ -226,10 +226,10 @@ No compilation errors. All extern declarations accepted.
 ## Files Created/Modified
 
 ### New Files (8 files)
-1. `src/std/src/collections/hashmap.spl` - HashMap SFFI wrapper
-2. `src/std/src/collections/hashset.spl` - HashSet SFFI wrapper
-3. `src/std/src/collections/btree.spl` - BTreeMap SFFI wrapper
-4. `src/std/src/collections/mod.spl` - Collections module
+1. `src/lib/src/collections/hashmap.spl` - HashMap SFFI wrapper
+2. `src/lib/src/collections/hashset.spl` - HashSet SFFI wrapper
+3. `src/lib/src/collections/btree.spl` - BTreeMap SFFI wrapper
+4. `src/lib/src/collections/mod.spl` - Collections module
 5. `src/app/lsp/handlers/hover.spl` - LSP hover (stub)
 6. `src/app/lsp/handlers/definition.spl` - LSP definition (stub)
 7. `src/app/lsp/handlers/references.spl` - LSP references (stub)
@@ -240,10 +240,10 @@ No compilation errors. All extern declarations accepted.
 12. `doc/report/pure_simple_lsp_treesitter_2026-02-05.md` - LSP summary
 
 ### Modified Files (4 files)
-1. `src/std/src/compiler_core/decorators.spl` - Fixed mutability
-2. `src/std/src/compiler_core/context_manager.spl` - Removed FFI, added .new()
+1. `src/lib/src/compiler_core/decorators.spl` - Fixed mutability
+2. `src/lib/src/compiler_core/context_manager.spl` - Removed FFI, added .new()
 3. `src/app/io/mod.spl` - Added 30 collection exports
-4. `src/std/src/parser/treesitter.spl` - Pure Simple implementation
+4. `src/lib/src/parser/treesitter.spl` - Pure Simple implementation
 5. `src/app/lsp/server.spl` - Updated API
 
 ---

@@ -11,7 +11,7 @@ Successfully implemented memory-mapped file I/O functions in the ffi_syscalls cr
 
 ## Context
 
-The Simple language code in `src/std/common/file_reader.spl` was calling `rt_file_mmap_read_text()` and `rt_file_mmap_read_bytes()` FFI functions that didn't exist in the runtime. These functions are critical for:
+The Simple language code in `src/lib/common/file_reader.spl` was calling `rt_file_mmap_read_text()` and `rt_file_mmap_read_bytes()` FFI functions that didn't exist in the runtime. These functions are critical for:
 
 1. **Performance** - Zero-copy reading for large files
 2. **FileReader Strategy** - Auto mode uses mmap for files ≥32KB
@@ -129,7 +129,7 @@ extern "C" {
 
 #### Simple Language Usage
 
-The functions are used in `src/std/common/file_reader.spl`:
+The functions are used in `src/lib/common/file_reader.spl`:
 
 ```simple
 # Auto strategy - use mmap for files >= 32KB

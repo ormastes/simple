@@ -21,7 +21,7 @@ This directory contains 11 focused modules refactored from the original 2,434-li
 
 ## Facade Pattern
 
-The main file `src/std/numerical_methods_utils.spl` (35 lines) acts as a facade that:
+The main file `src/lib/common/numerical_methods/` (35 lines) acts as a facade that:
 - Imports all 11 submodules
 - Re-exports all functions for 100% backward compatibility
 - Maintains the original API surface

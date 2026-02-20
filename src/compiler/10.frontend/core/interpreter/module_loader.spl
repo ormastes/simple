@@ -4,7 +4,7 @@
 # Mirrors compile-time module loading but operates within interpreter context.
 #
 # Key responsibilities:
-# 1. Resolve module paths (std.string → src/std/text.spl)
+# 1. Resolve module paths (std.string → src/lib/text.spl)
 # 2. Load and parse module source files
 # 3. Extract exported functions from module AST
 # 4. Register functions in interpreter's function table
@@ -12,7 +12,7 @@
 # Module Path Resolution (in order):
 # 1. Local directory (relative to current file)
 # 2. SIMPLE_LIB environment variable path
-# 3. Fallback to src/std/ (standard library)
+# 3. Fallback to src/lib/ (standard library)
 
 use compiler.core.frontend.{core_frontend_parse_isolated}
 
@@ -180,6 +180,10 @@ fn resolve_module_path(module_name: text, current_file: text) -> text:
 
     relative_path = relative_path + ".spl"
 
+    # Rewrite std/ → lib/ (std is a package alias, real code is in lib/)
+    if relative_path.starts_with("std/"):
+        relative_path = "lib" + relative_path.substring(3)
+
     # Try resolution strategies:
 
     # 1. Local directory (relative to current file)
@@ -203,7 +207,29 @@ fn resolve_module_path(module_name: text, current_file: text) -> text:
     if rt_file_exists(src_path) == 1:
         return src_path
 
-    # 4. Try numbered directory resolution (NN.name pattern)
+    # 4. Try lib subdirectory search (lib/*/X for use std.X / use lib.X)
+    #    Default app mode is nogc_async_mut. Search order:
+    #    nogc_async_mut (default) > nogc_sync_mut (sync fallback) > common > gc_async_mut > nogc_async_mut_noalloc
+    if relative_path.starts_with("lib/"):
+        val lib_subpath = relative_path.substring(4)
+        val lib_dir = rt_path_join("src", "lib")
+        val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
+        if rt_file_exists(nam) == 1:
+            return nam
+        val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
+        if rt_file_exists(nsm) == 1:
+            return nsm
+        val cm = rt_path_join(lib_dir, rt_path_join("common", lib_subpath))
+        if rt_file_exists(cm) == 1:
+            return cm
+        val gam = rt_path_join(lib_dir, rt_path_join("gc_async_mut", lib_subpath))
+        if rt_file_exists(gam) == 1:
+            return gam
+        val nanm = rt_path_join(lib_dir, rt_path_join("nogc_async_mut_noalloc", lib_subpath))
+        if rt_file_exists(nanm) == 1:
+            return nanm
+
+    # 5. Try numbered directory resolution (NN.name pattern)
     val numbered_path = resolve_with_numbered_dirs("src", path_parts)
     if numbered_path != "":
         if rt_file_exists(numbered_path) == 1:

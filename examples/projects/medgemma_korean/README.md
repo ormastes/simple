@@ -1,30 +1,58 @@
 # MedGemma Korean - Progressive LoRA Training in Simple
 
-Deep learning example demonstrating progressive LoRA training to prevent catastrophic forgetting, implemented in the Simple language.
+Real GPU training example demonstrating progressive LoRA training to prevent catastrophic forgetting, implemented in the Simple language using libtorch FFI on CUDA.
 
 ## Overview
 
-This example shows how to train a medical language model for Korean using **progressive LoRA stacking**, where each training phase adds a new LoRA adapter while freezing previous knowledge.
-
-
-### Update tokenizer
-
-
+This example trains a neural network model for Korean medical applications using **progressive LoRA stacking** on CUDA GPU. Each training phase adds a new LoRA adapter while freezing previous knowledge.
 
 ### Training Phases
 
 ```
 Phase 0: Plain Text (Korean fluency)
-    Base (frozen) + LoRA_0 (trainable)
+    Base (frozen) + LoRA_0 (trainable)  →  merge LoRA_0 into base
     ↓
 Phase 1: Medical Dictionary (terminology)
-    [Base + LoRA_0] (frozen) + LoRA_1 (trainable)
+    [Base + LoRA_0] (frozen) + LoRA_1 (trainable)  →  merge LoRA_1
     ↓
 Phase 2: MCQ (medical reasoning)
-    [Base + LoRA_0 + LoRA_1] (frozen) + LoRA_2 (trainable)
+    [Base + LoRA_0 + LoRA_1] (frozen) + LoRA_2 (trainable)  →  merge LoRA_2
 ```
 
-**Key Concept**: Each phase merges previous LoRAs into the base model, then adds a new trainable LoRA. This prevents catastrophic forgetting.
+**Key Concept**: Each phase merges previous LoRAs into the base model (W = W + B @ A * scale), then adds a new trainable LoRA. This prevents catastrophic forgetting.
+
+---
+
+## Prerequisites
+
+1. **CUDA GPU** with PyTorch/libtorch installed
+2. **Build the torch FFI bridge**:
+```bash
+bash scripts/build/build-torch-ffi.sh
+```
+
+This compiles `src/runtime/torch_ffi.cpp` into `build/libspl_torch.so`.
+
+---
+
+## Quick Start
+
+### Run All Phases
+```bash
+LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/run_all.spl
+```
+
+### Run Individual Phase
+```bash
+# Phase 0 only
+LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase0.spl
+
+# Phase 0 + 1
+LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase1.spl
+
+# Phase 0 + 1 + 2
+LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase2.spl
+```
 
 ---
 
@@ -33,421 +61,114 @@ Phase 2: MCQ (medical reasoning)
 ```
 medgemma_korean/
 ├── README.md                    # This file
+├── run_all.spl                  # Complete pipeline (all 3 phases)
 ├── config/
 │   ├── base.sdn                # Base configuration
-│   ├── phase0.sdn              # Phase 0 config (plain text)
-│   ├── phase1.sdn              # Phase 1 config (medical dict)
-│   └── phase2.sdn              # Phase 2 config (MCQ)
+│   ├── phase0.sdn              # Phase 0 config
+│   ├── phase1.sdn              # Phase 1 config
+│   └── phase2.sdn              # Phase 2 config
 ├── src/
-│   ├── lora_utils.spl          # LoRA merge/add utilities
+│   ├── model.spl               # TextModel (3-layer feed-forward on CUDA)
+│   ├── lora_utils.spl          # Real LoRA: A/B matrices, merge, freeze
 │   ├── train_phase0.spl        # Phase 0: Plain text training
 │   ├── train_phase1.spl        # Phase 1: Medical dict training
 │   ├── train_phase2.spl        # Phase 2: MCQ training
-│   └── validation.spl          # Validation utilities
-├── data/
-│   ├── plain_text/             # Korean text data
-│   ├── medical_dict/           # Medical dictionary
-│   └── mcq/                    # Multiple choice questions
-└── models/
-    ├── phase0/                 # Phase 0 outputs
-    ├── phase1/                 # Phase 1 outputs
-    └── phase2/                 # Phase 2 outputs (final)
+│   └── validation.spl          # Real inference validation
+├── data/ -> symlink             # Training data
+├── old_py/ -> symlink           # Original Python implementation
+└── models/                     # Output directory
 ```
 
 ---
 
-## Features Demonstrated
+## Architecture
 
-### 1. Simple ML Infrastructure
+### TextModel (src/model.spl)
 
-- **Config System**: Hierarchical configuration with SDN format
-- **Tracking System**: Experiment tracking (offline mode)
-- **Engine System**: Event-driven training loops (PyTorch Ignite style)
-- **Metrics**: Custom metrics (Loss, Accuracy, etc.)
+Real 3-layer feed-forward network on CUDA:
 
-### 2. Progressive LoRA Training
-
-- **Merge previous LoRAs**: Freeze previous knowledge
-- **Add new LoRA**: Only train new adapter
-- **Prevent catastrophic forgetting**: Retain all previous phases
-
-### 3. Korean Language Model Training
-
-- **Phase 0**: Learn Korean language fluency
-- **Phase 1**: Learn medical terminology
-- **Phase 2**: Learn medical reasoning (MCQ)
-
----
-
-## Quick Start
-
-### Run All Phases
-
-```bash
-# Navigate to Simple root
-cd simple
-
-# Phase 0: Plain text training
-./target/release/simple example/medgemma_korean/src/train_phase0.spl
-
-# Phase 1: Medical dictionary training
-./target/release/simple example/medgemma_korean/src/train_phase1.spl
-
-# Phase 2: MCQ training
-./target/release/simple example/medgemma_korean/src/train_phase2.spl
+```
+Input [batch=16, dim=64]
+  → Linear(64, 128) → GELU
+  → Linear(128, 128) → GELU
+  → Linear(128, 32)
+  → Output [batch=16, dim=32]
 ```
 
-### Run Individual Phase
+All tensor operations run on CUDA GPU via libtorch FFI (`rt_torch_*` functions).
 
-```bash
-# With custom config
-./target/release/simple example/medgemma_korean/src/train_phase1.spl \
-    --config example/medgemma_korean/config/phase1.sdn \
-    --epochs 5
-```
+### LoRA (src/lora_utils.spl)
 
----
-
-## Configuration
-
-Configurations use Simple Data Notation (SDN) format.
-
-### Base Config (`config/base.sdn`)
-
-```sdn
-project: "medgemma-korean"
-seed: 42
-
-model:
-  name: "google/medgemma-4b-it"
-  lora_r: 64
-  lora_alpha: 128
-  lora_dropout: 0.05
-
-training:
-  batch_size: 4
-  grad_accum: 4
-  learning_rate: 0.0002
-  max_length: 512
-  device: "cuda:0"
-
-tracking:
-  mode: "offline"
-  dir: ".simple/runs"
-```
-
-### Phase-specific configs extend base config.
-
----
-
-## Training Process
-
-### Phase 0: Plain Text
-
-**Goal**: Learn Korean language fluency
+Real Low-Rank Adaptation:
 
 ```simple
-import config
-import ml.tracking as Track
-import ml.engine.{Engine, Events, Loss}
+# LoRA adds trainable A, B to frozen weight W:
+# output = x @ W^T + (x @ A^T) @ B^T * (alpha / rank)
 
-# Load config
-let cfg = config.from_file("config/phase0.sdn")
+# A: [rank, in_features] - small random init
+# B: [out_features, rank] - zero init (starts as identity)
 
-# Create run
-let run = Track.run(
-    project=cfg.get("project"),
-    name="phase0-plain-text",
-    config=cfg,
-    tags=["phase0", "korean"]
-)
-
-# Define training step
-fn train_step(engine: Engine, batch: any):
-    # Forward pass
-    output = model.forward(batch)
-    loss = loss_fn(output)
-
-    # Backward pass
-    loss.backward()
-    optimizer.step()
-
-    return {"loss": loss.item()}
-
-# Create engine
-let trainer = Engine(train_step)
-
-# Attach handlers
-@trainer.on(Events.EPOCH_COMPLETED)
-fn log_epoch(engine: Engine):
-    run.log({
-        "loss": engine.state.metrics["loss"],
-        "epoch": engine.state.epoch
-    }, step=engine.state.epoch)
-
-# Run training
-trainer.run(data_loader, max_epochs=cfg.get("training.epochs"))
-
-# Save LoRA_0
-save_lora(model, "models/phase0/lora_0")
-run.finish()
+# Merge: W_new = W + B @ A * scale
 ```
 
-### Phase 1: Medical Dictionary
+- **Rank**: 8 (configurable)
+- **Alpha**: 16.0
+- Applied to layers 1 and 2
 
-**Goal**: Learn medical terminology (while preserving Korean fluency)
+### Training Loop
 
-```simple
-import lora_utils
-
-# Load base model
-model = load_base_model(cfg.get("model.name"))
-
-# Merge LoRA_0 (freeze Phase 0 knowledge)
-model = lora_utils.merge_lora(model, "models/phase0/lora_0")
-
-# Add NEW LoRA_1 (trainable)
-model = lora_utils.add_lora(model, cfg.get("model"))
-
-# Train (only LoRA_1 updates)
-trainer.run(dict_data_loader, max_epochs=cfg.get("training.epochs"))
-
-# Save LoRA_1
-save_lora(model, "models/phase1/lora_1")
-```
-
-### Phase 2: MCQ
-
-**Goal**: Learn medical reasoning (while preserving Phase 0 + 1 knowledge)
-
-```simple
-# Merge LoRA_0 + LoRA_1 (freeze all previous knowledge)
-model = load_base_model(cfg.get("model.name"))
-model = lora_utils.merge_lora(model, "models/phase0/lora_0")
-model = lora_utils.merge_lora(model, "models/phase1/lora_1")
-
-# Add NEW LoRA_2 (trainable)
-model = lora_utils.add_lora(model, cfg.get("model"))
-
-# Train (only LoRA_2 updates)
-trainer.run(mcq_data_loader, max_epochs=cfg.get("training.epochs"))
-
-# Save LoRA_2
-save_lora(model, "models/phase2/lora_2")
-```
+Real GPU training per step:
+1. Generate batch on CUDA (`rt_torch_tensor_randn` → `rt_torch_torchtensor_cuda`)
+2. Forward pass through model + LoRA (matmul, GELU activations)
+3. MSE loss as differentiable tensor (for autograd backward)
+4. `rt_torch_autograd_backward` computes gradients
+5. Manual SGD: `param = param - lr * grad`
+6. Zero gradients for next step
 
 ---
 
-## Validation
+## What's Real
 
-After each phase, validate that previous knowledge is retained:
+Everything uses actual CUDA GPU computation:
 
-```simple
-import validation
-
-# After Phase 1, test both Phase 0 and Phase 1
-validation.test_plain_text(model)  # Phase 0 knowledge
-validation.test_medical_dict(model)  # Phase 1 knowledge
-
-# After Phase 2, test all three
-validation.test_plain_text(model)  # Phase 0 knowledge
-validation.test_medical_dict(model)  # Phase 1 knowledge
-validation.test_mcq(model)  # Phase 2 knowledge
-```
-
----
-
-## Event-Driven Training
-
-Uses Simple's Engine (PyTorch Ignite style):
-
-```simple
-# Create engine
-let trainer = Engine(train_step)
-
-# Event: Log every 100 iterations
-@trainer.on(Events.ITERATION_COMPLETED_EVERY(100))
-fn log_iteration(engine: Engine):
-    print(f"Step {engine.state.iteration}: loss={engine.state.output.loss}")
-
-# Event: Validate every epoch
-@trainer.on(Events.EPOCH_COMPLETED)
-fn validate(engine: Engine):
-    let val_loss = run_validation(model, val_loader)
-    run.log({"val_loss": val_loss}, step=engine.state.epoch)
-
-# Event: Save checkpoints
-@trainer.on(Events.EPOCH_COMPLETED_EVERY(5))
-fn save_checkpoint(engine: Engine):
-    save_model(model, f"checkpoint_epoch_{engine.state.epoch}.pt")
-
-# Event: Early stopping
-@trainer.on(Events.EPOCH_COMPLETED)
-fn early_stop(engine: Engine):
-    if engine.state.metrics["loss"] < 0.01:
-        engine.terminate()
-```
-
----
-
-## Metrics
-
-Custom metrics track training progress:
-
-```simple
-import ml.engine.{Metric, Loss, Accuracy}
-
-# Define custom metric
-class MedicalAccuracy(Metric):
-    correct: i64
-    total: i64
-
-    fn __init__(self):
-        self.correct = 0
-        self.total = 0
-
-    fn reset(self):
-        self.correct = 0
-        self.total = 0
-
-    fn update(self, output: any):
-        # Check if predicted answer matches expected
-        if output.predicted == output.expected:
-            self.correct += 1
-        self.total += 1
-
-    fn compute(self) -> f64:
-        return self.correct.to_f64() / self.total.to_f64()
-
-# Add to engine
-trainer.add_metric(MedicalAccuracy(), "med_acc")
-```
-
----
-
-## Experiment Tracking
-
-All runs are tracked locally:
-
-```
-.simple/runs/
-└── medgemma-korean/
-    ├── run-phase0-001/
-    │   ├── metadata.sdn        # Config, tags, timestamps
-    │   ├── metrics.jsonl       # Training metrics
-    │   └── artifacts/          # Saved models
-    ├── run-phase1-001/
-    └── run-phase2-001/
-```
-
-View run history:
-
-```simple
-import ml.tracking as Track
-
-# List all runs
-let runs = Track.list_runs(project="medgemma-korean")
-
-for run in runs:
-    print(f"Run {run.id}: {run.name} (accuracy: {run.summary.accuracy})")
-```
-
----
-
-## Advanced Features
-
-### 1. Multi-GPU Training
-
-```sdn
-# config/multi_gpu.sdn
-training:
-  device: "cuda"  # Auto-distribute across all GPUs
-  distributed: true
-```
-
-### 2. Custom Callbacks
-
-```simple
-class ProgressCallback(TrainerCallback):
-    fn on_epoch_end(self, engine: Engine):
-        print(f"Epoch {engine.state.epoch} complete!")
-        print(f"Loss: {engine.state.metrics.loss:.4f}")
-
-trainer.add_callback(ProgressCallback())
-```
-
-### 3. Hyperparameter Search
-
-```simple
-# Sweep over learning rates
-for lr in [0.0001, 0.0002, 0.0005]:
-    cfg.set("training.learning_rate", lr)
-
-    let run = Track.run(
-        project="medgemma-korean",
-        name=f"lr_sweep_{lr}",
-        config=cfg
-    )
-
-    train_and_evaluate(run, cfg)
-    run.finish()
-```
-
----
-
-## Benefits of Simple Implementation
-
-1. **Concise**: No boilerplate, clean syntax
-2. **Type-safe**: Compile-time type checking
-3. **Event-driven**: PyTorch Ignite style patterns
-4. **Config management**: Built-in hierarchical configs
-5. **Tracking**: Local-first experiment tracking
-6. **No Python**: Pure Simple language (`.spl`)
+- **Tensors**: Created via `rt_torch_tensor_randn`, moved to GPU via `rt_torch_torchtensor_cuda`
+- **Forward pass**: Real matrix multiplications (`rt_torch_torchtensor_matmul`), real activations (`rt_torch_torchtensor_gelu`)
+- **Loss**: Real MSE computed as differentiable tensor operations
+- **Backward**: Real autograd via `rt_torch_autograd_backward`
+- **Gradients**: Real gradient tensors via `rt_torch_autograd_grad`
+- **SGD update**: Real parameter updates (`param = param - lr * grad`)
+- **LoRA merge**: Real matrix multiply (`W = W + B @ A * scale`)
+- **Memory tracking**: Real GPU memory via `rt_torch_cuda_memory_allocated`
 
 ---
 
 ## Comparison: Python vs Simple
 
-### Python (before)
+### Python (old_py/)
 ```python
-# 50+ lines of imports
-# Complex PEFT/transformers setup
-# Manual event handling
-# External config libraries (Hydra)
-# External tracking (W&B)
+# 20+ imports (transformers, peft, trl, torch, ...)
+# HuggingFace model loading (AutoModelForCausalLM)
+# BitsAndBytes 8-bit quantization
+# PEFT LoRA adapter management
+# SFTTrainer with callbacks
+# ~600 lines per training script
 ```
 
-### Simple (this example)
+### Simple (this implementation)
 ```simple
-# 5 imports
-import config
-import ml.tracking as Track
-import ml.engine.{Engine, Events}
-import lora_utils
-
-# Clean, integrated ML stack
-# Built-in config/tracking/engine
+# Direct libtorch FFI (rt_torch_* functions)
+# Real CUDA tensor operations
+# Manual LoRA implementation (A, B matrices)
+# Manual SGD optimizer
+# ~150 lines per training script
 ```
 
 ---
 
 ## References
 
-- **Simple Language Docs**: `simple/README.md`
-- **ML Infrastructure Guide**: `simple/doc/guide/deeplearning.md`
-- **Config System**: `simple/std_lib/src/config/`
-- **Tracking System**: `simple/std_lib/src/ml/tracking/`
-- **Engine System**: `simple/std_lib/src/ml/engine/`
-- **Progressive LoRA Plan**: `medgemma_korean/PROGRESSIVE_LORA_PLAN.md`
-
----
-
-## Next Steps
-
-1. Run the example: `./target/release/simple example/medgemma_korean/src/train_phase0.spl`
-2. Read the code: Explore `src/*.spl` files
-3. Modify configs: Edit `config/*.sdn` files
-4. Add custom metrics: Extend `validation.spl`
-5. Experiment: Try different hyperparameters
-
-This example demonstrates production-ready deep learning in Simple!
+- **Torch FFI**: `src/lib/gc_async_mut/torch/` (Tensor, Linear, FFI bindings)
+- **C++ Bridge**: `src/runtime/torch_ffi.cpp` (90+ libtorch wrappers)
+- **Build Script**: `scripts/build/build-torch-ffi.sh`
+- **Tests**: `test/unit/lib/torch_spec.spl`
+- **Original Python**: `old_py/` (HuggingFace/PEFT implementation)

@@ -99,7 +99,7 @@ print output
 **Warning Format:**
 ```
 warning: public API group 'File operations' missing SDoctest coverage
-  --> src/std/io/__init__.spl:15
+  --> src/lib/io/__init__.spl:15
   = note: group contains 5 items, needs at least 1 SDoctest example
   = help: add usage example in README.md or doc/guide/*.md
 ```
@@ -156,7 +156,7 @@ print report
 **Output:**
 ```
 Item: file_read
-Location: src/std/io/__init__.spl:15
+Location: src/lib/io/__init__.spl:15
 Suggested tags:
   @tag:api:public
   @tag:api:grouped
@@ -165,7 +165,7 @@ Suggested tags:
 
 **Usage:**
 ```simple
-val result = parse_init_file("src/std/spec/__init__.spl")
+val result = parse_init_file("src/lib/spec/__init__.spl")
 val groups = result.0
 val items = result.1
 val suggestions = generate_public_api_tags(groups, items)
@@ -334,7 +334,7 @@ print report
 # 4. Generate tags
 use doc_coverage.analysis.init_parser.{parse_init_file}
 use doc_coverage.tagging.tag_generator.{generate_public_api_tags}
-val result = parse_init_file("src/std/spec/__init__.spl")
+val result = parse_init_file("src/lib/spec/__init__.spl")
 val tags = generate_public_api_tags(result.0, result.1)
 ```
 

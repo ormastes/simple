@@ -38,12 +38,12 @@ class Debugger:
 
 ## Implementation
 
-### 1. Created New Debug Module (`src/std/debug.spl`)
+### 1. Created New Debug Module (`src/lib/debug.spl`)
 
 **Why new location?**
 - Original at `src/app/interpreter.helpers/debug.spl` uses Rust syntax
 - Dots in directory names (`interpreter.helpers`) break module loader
-- Moved to `src/std/debug.spl` which works correctly
+- Moved to `src/lib/debug.spl` which works correctly
 
 **Module structure:**
 - **Enums:** `DebugLevel` (Off/Error/Warn/Info/Debug/Trace), `StepMode` (Continue/StepOver/StepInto/StepOut)
@@ -123,7 +123,7 @@ class Debugger:
 
 ## Files Modified
 
-- **Created:** `src/std/debug.spl` (298 lines) - Complete debug module in Simple
+- **Created:** `src/lib/debug.spl` (298 lines) - Complete debug module in Simple
 - **Created:** `test/std/debug_spec.spl` (1,585 lines) - 98 comprehensive tests
 - **Original (Rust-style):** `src/app/interpreter.helpers/debug.spl` - kept for reference, not used by tests
 

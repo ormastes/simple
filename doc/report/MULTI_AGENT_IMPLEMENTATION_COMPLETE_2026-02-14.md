@@ -94,9 +94,9 @@ C4 E1 74 58 C2
 - ✅ `src/compiler/baremetal/arm/crt0.s` (300 lines) - ARM Cortex-M startup
 - ✅ `src/compiler/baremetal/x86_64/crt0.s` (300 lines) - x86_64 multiboot2 + long mode
 - ✅ `src/compiler/baremetal/riscv/crt0.s` (300 lines) - RISC-V with SMP support
-- ✅ `src/std/baremetal/allocator.spl` (800 lines) - 4 allocators (bump, freelist, fixed, multipool)
-- ✅ `src/std/baremetal/syscall.spl` (400 lines) - Semihosting, UART, timers, MMIO
-- ✅ `src/std/baremetal/interrupt.spl` (600 lines) - NVIC, PLIC, APIC support
+- ✅ `src/lib/baremetal/allocator.spl` (800 lines) - 4 allocators (bump, freelist, fixed, multipool)
+- ✅ `src/lib/baremetal/syscall.spl` (400 lines) - Semihosting, UART, timers, MMIO
+- ✅ `src/lib/baremetal/interrupt.spl` (600 lines) - NVIC, PLIC, APIC support
 - ✅ Test suite: 180 tests across 4 files
 
 **Key Achievements:**
@@ -130,7 +130,7 @@ C4 E1 74 58 C2
 - ✅ `THREAD_CODE_REVIEW_2026-02-14.md` (13 pages) - Complete analysis
 - ✅ `THREAD_IMPLEMENTATION_SUMMARY_2026-02-14.md` - Executive summary
 - ✅ `test/unit/std/thread_safe_queue_spec.spl` (40 tests)
-- ✅ Fixed `src/std/async_host/thread_safe_queue.spl` (removed generic syntax)
+- ✅ Fixed `src/lib/async_host/thread_safe_queue.spl` (removed generic syntax)
 - ✅ Updated `seed/CMakeLists.txt` (added runtime_thread.c)
 - ✅ Rebuilt `build/seed/libspl_runtime.a` with threading support
 - ✅ Created test symlinks for imports

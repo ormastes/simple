@@ -66,8 +66,8 @@ Passed: 99
 ### DAP Module (test/lib/std/unit/dap/dap_spec.spl) - ✅ 35/46 PASSING (76%)
 
 **Status:** Module implemented and functional
-**Implementation:** `src/std/mcp/dap/mod.spl` (428 lines) + `src/std/mcp/__init__.spl` (13 lines)
-**Location:** `src/std/mcp/dap/`
+**Implementation:** `src/lib/mcp/dap/mod.spl` (428 lines) + `src/lib/mcp/__init__.spl` (13 lines)
+**Location:** `src/lib/mcp/dap/`
 
 **Test Categories:**
 | Type | Tests | Status |
@@ -170,8 +170,8 @@ semantic: type mismatch: unsupported cast target type:
 **Workaround:** These tests will pass when JIT compiler is implemented (compiled-only limitation).
 
 **What Was Implemented:**
-- `src/std/mcp/__init__.spl` - Module entry point (13 lines)
-- `src/std/mcp/dap/mod.spl` - Complete DAP types and handlers (428 lines)
+- `src/lib/mcp/__init__.spl` - Module entry point (13 lines)
+- `src/lib/mcp/dap/mod.spl` - Complete DAP types and handlers (428 lines)
   - 13 types: BreakpointLocation, Breakpoint, StackFrame, VariableScope, Variable, Scope, Thread, EvaluateResult, StepType, DapSessionState, DapHandler, DapFailSafeContext, FailSafeDapServer
   - All required methods and implementations
   - Pure Simple (no FFI/Rust dependencies)
@@ -239,7 +239,7 @@ DAP tests require implementing the `std.mcp.dap` module. This would involve:
 - Comprehensive test coverage
 
 **DAP Tests: ✅ MOSTLY COMPLETE (35/46 passing - 76%)**
-- Module implemented: `src/std/mcp/dap/mod.spl` (428 lines)
+- Module implemented: `src/lib/mcp/dap/mod.spl` (428 lines)
 - 35/46 tests passing (76% pass rate)
 - 2 tests blocked by runtime limitations (`Any` type, complex generic casts)
 - Production-ready for MCP server integration
@@ -256,9 +256,9 @@ DAP tests require implementing the `std.mcp.dap` module. This would involve:
 **Files Created/Analyzed:**
 - `test/std/debug_spec.spl` (99 tests, 100% passing)
 - `test/lib/std/unit/dap/dap_spec.spl` (35/46 tests passing, 76%)
-- `src/std/debug` (implementation, working)
-- `src/std/mcp/__init__.spl` (created, 13 lines)
-- `src/std/mcp/dap/mod.spl` (created, 428 lines)
+- `src/lib/debug` (implementation, working)
+- `src/lib/mcp/__init__.spl` (created, 13 lines)
+- `src/lib/mcp/dap/mod.spl` (created, 428 lines)
 - `src/app/dap/` (existing implementation, 1,017 lines, 56 tests passing)
 - `doc/report/dap_module_implementation_2026-02-08.md` (completion report)
 

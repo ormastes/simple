@@ -270,18 +270,18 @@
     - Estimated 2-3 hours
 
 12. **Create iteration module** (200 lines saved)
-    - `src/std/iteration.spl` (150 lines new)
+    - `src/lib/iteration.spl` (150 lines new)
     - Add map/filter/reduce/fold
     - Update 31 utils files
     - Estimated 4-6 hours
 
 13. **Create string transform helpers** (100 lines saved)
-    - Add to `src/std/text.spl`
+    - Add to `src/lib/text.spl`
     - Migrate 7 string processing loops
     - Estimated 2-3 hours
 
 14. **Create matrix builder** (150 lines saved)
-    - Add to `src/std/matrix_utils.spl`
+    - Add to `src/lib/matrix_utils.spl`
     - Migrate 6 matrix construction patterns
     - Estimated 2-3 hours
 

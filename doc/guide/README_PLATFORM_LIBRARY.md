@@ -1,6 +1,6 @@
 # Platform Abstraction Library
 
-**Location:** `src/std/platform/`
+**Location:** `src/lib/platform/`
 **Status:** Production Ready
 **Tests:** 5/5 files passing (80 individual tests)
 
@@ -245,9 +245,9 @@ See `test/unit/std/platform/*_spec.spl` for comprehensive usage examples.
 
 ## Related Modules
 
-- `src/std/common/target.spl` - TargetArch, TargetOS, Endian types
-- `src/std/platform.spl` - OS detection (is_windows, is_unix, etc.)
-- `src/std/text.spl` - Newline constants (LF, CRLF, _NL, NL)
+- `src/lib/common/target.spl` - TargetArch, TargetOS, Endian types
+- `src/lib/platform.spl` - OS detection (is_windows, is_unix, etc.)
+- `src/lib/text.spl` - Newline constants (LF, CRLF, _NL, NL)
 - `app/io/mod.spl` - File I/O primitives
 
 ## Migration Guide

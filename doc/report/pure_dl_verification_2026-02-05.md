@@ -163,7 +163,7 @@ The generic parameter `<T>` in `PureTensor<T>` might be causing issues when comb
 
 **Evidence:**
 - Error occurs in files with generic classes
-- Other generic classes in codebase (e.g., `src/std/error.spl`) use multi-line docstrings without issues
+- Other generic classes in codebase (e.g., `src/lib/error.spl`) use multi-line docstrings without issues
 
 **Next Step:** Compare PureTensor<T> definition with working generic classes in std library.
 

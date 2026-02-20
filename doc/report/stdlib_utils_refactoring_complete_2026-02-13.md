@@ -19,7 +19,7 @@ Successfully refactored three large standard library utility files into modular 
 
 **Structure:**
 ```
-src/std/geometry/
+src/lib/geometry/
 ├── types.spl          (12 lines)   - Constants (EPSILON)
 ├── point.spl          (388 lines)  - 2D/3D point and vector operations
 ├── line.spl           (140 lines)  - Line and segment operations
@@ -28,7 +28,7 @@ src/std/geometry/
 └── utilities.spl      (292 lines)  - Transformations, bounding boxes, collisions
 ```
 
-**Facade:** `src/std/geometry_utils.spl` (239 lines of re-exports)
+**Facade:** `src/lib/geometry_utils.spl` (239 lines of re-exports)
 
 **Key Achievements:**
 - Clean separation of concerns
@@ -43,7 +43,7 @@ src/std/geometry/
 
 **Structure:**
 ```
-src/std/bcrypt/
+src/lib/bcrypt/
 ├── core.spl            (1,335 lines) - Complete bcrypt implementation
 ├── types.spl           (stub)       - Delegates to core
 ├── hash.spl            (stub)       - Delegates to core
@@ -53,7 +53,7 @@ src/std/bcrypt/
 └── utilities.spl       (stub)       - Delegates to core
 ```
 
-**Facade:** `src/std/bcrypt_utils.spl` (facade with categorized imports)
+**Facade:** `src/lib/bcrypt_utils.spl` (facade with categorized imports)
 
 **Rationale for Core Module Approach:**
 - **Deep interdependencies:** Blowfish cipher ↔ Eksblowfish key schedule ↔ bcrypt hashing
@@ -75,7 +75,7 @@ src/std/bcrypt/
 
 **Structure:**
 ```
-src/std/cbor/
+src/lib/cbor/
 ├── core.spl         (1,321 lines) - Complete CBOR implementation
 ├── types.spl        (stub)        - Delegates to core
 ├── encode.spl       (stub)        - Delegates to core
@@ -84,7 +84,7 @@ src/std/cbor/
 └── utilities.spl    (stub)        - Delegates to core
 ```
 
-**Facade:** `src/std/cbor_utils.spl` (facade with categorized imports)
+**Facade:** `src/lib/cbor_utils.spl` (facade with categorized imports)
 
 **Rationale for Core Module Approach:**
 - **Recursive dependencies:** Encoding/decoding calls itself for nested structures
@@ -103,10 +103,10 @@ src/std/cbor/
 ## Backup Files Created
 
 All original files have been safely backed up:
-- `/home/ormastes/dev/pub/simple/src/std/geometry_utils.spl.old`
-- `/home/ormastes/dev/pub/simple/src/std/bcrypt_utils.spl.old`
-- `/home/ormastes/dev/pub/simple/src/std/bcrypt_utils.spl.original`
-- `/home/ormastes/dev/pub/simple/src/std/cbor_utils.spl.original`
+- `/home/ormastes/dev/pub/simple/src/lib/geometry_utils.spl.old`
+- `/home/ormastes/dev/pub/simple/src/lib/bcrypt_utils.spl.old`
+- `/home/ormastes/dev/pub/simple/src/lib/bcrypt_utils.spl.original`
+- `/home/ormastes/dev/pub/simple/src/lib/cbor_utils.spl.original`
 
 ## Benefits Achieved
 
@@ -174,20 +174,20 @@ The `geometry_utils` module demonstrates the end goal with full modularization, 
 ## Files Modified
 
 ### Created
-- `src/std/geometry/` (6 files)
-- `src/std/bcrypt/` (7 files)
-- `src/std/cbor/` (6 files)
+- `src/lib/geometry/` (6 files)
+- `src/lib/bcrypt/` (7 files)
+- `src/lib/cbor/` (6 files)
 
 ### Modified
-- `src/std/geometry_utils.spl` (facade)
-- `src/std/bcrypt_utils.spl` (facade)
-- `src/std/cbor_utils.spl` (facade)
+- `src/lib/geometry_utils.spl` (facade)
+- `src/lib/bcrypt_utils.spl` (facade)
+- `src/lib/cbor_utils.spl` (facade)
 
 ### Backed Up
-- `src/std/geometry_utils.spl.old`
-- `src/std/bcrypt_utils.spl.old`
-- `src/std/bcrypt_utils.spl.original`
-- `src/std/cbor_utils.spl.original`
+- `src/lib/geometry_utils.spl.old`
+- `src/lib/bcrypt_utils.spl.old`
+- `src/lib/bcrypt_utils.spl.original`
+- `src/lib/cbor_utils.spl.original`
 
 ## Metrics
 

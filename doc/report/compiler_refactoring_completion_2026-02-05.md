@@ -276,8 +276,8 @@ src/compiler/
 - **Total:** 4 files (6,468 lines) → 15 modules
 
 ### Phase 3: Libraries & Tools ⏳ READY
-- `src/std/net.spl` (1,106 lines) → 4 modules
-- `src/std/src/testing/mocking_core.spl` (826 lines) → 3 modules
+- `src/lib/net.spl` (1,106 lines) → 4 modules
+- `src/lib/src/testing/mocking_core.spl` (826 lines) → 3 modules
 - `src/app/fix/rules.spl` (853 lines) → 3 modules
 - **Total:** 3 files (2,785 lines) → 10 modules (planned)
 

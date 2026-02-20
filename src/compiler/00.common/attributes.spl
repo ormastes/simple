@@ -46,23 +46,8 @@ struct VolatileAttr:
 # Volatile Attribute Parsing
 # ============================================================================
 
-@when(tier=core):
 fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
-    """Core-tier parser: ignore detailed volatile attributes."""
-    VolatileAttr(mode: VolatileMode.None_, address: nil, barriers: false)
-
-@else:
-fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
-    """Extract volatile attributes from a list of attributes.
-
-    Handles:
-    - @volatile -> VolatileMode.Full
-    - @volatile_read -> VolatileMode.ReadOnly
-    - @volatile_write -> VolatileMode.WriteOnly
-    - @nonvolatile -> VolatileMode.Explicit
-
-    Returns default VolatileAttr if no volatile attributes found.
-    """
+    """Extract volatile attributes from a list of attributes."""
     var mode = VolatileMode.None_
     var address: i64? = nil
     var barriers = false
@@ -89,13 +74,12 @@ fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
         address: address,
         barriers: barriers
     )
-@end
 
 fn is_volatile(attr: VolatileAttr) -> bool:
     """Check if volatile access is required."""
-    attr.mode == VolatileMode.Full or
+    (attr.mode == VolatileMode.Full or
     attr.mode == VolatileMode.ReadOnly or
-    attr.mode == VolatileMode.WriteOnly
+    attr.mode == VolatileMode.WriteOnly)
 
 fn is_read_volatile(attr: VolatileAttr) -> bool:
     """Check if volatile reads are required."""
@@ -118,22 +102,8 @@ struct FunctionAttr:
     is_interrupt: bool      # @interrupt - interrupt handler
     is_boot: bool           # @boot - init-phase function (runs before scheduler)
 
-@when(tier=core):
 fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
-    """Core-tier parser: keep default function attributes."""
-    FunctionAttr__default()
-
-@else:
-fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
-    """Extract function attributes from a list of attributes.
-
-    Handles:
-    - @entry -> is_entry=true
-    - @naked -> is_naked=true
-    - @noreturn -> is_noreturn=true
-    - @section("name") -> section=name
-    - @interrupt -> is_interrupt=true
-    """
+    """Extract function attributes from a list of attributes."""
     var is_entry = false
     var is_naked = false
     var is_noreturn = false
@@ -166,7 +136,6 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         is_interrupt: is_interrupt,
         is_boot: is_boot
     )
-@end
 
 fn FunctionAttr__default() -> FunctionAttr:
     """Default function attributes (no special attributes)."""
@@ -200,26 +169,8 @@ struct TaskAttr:
     frame: i64?
     wait_nodes: i64
 
-@when(tier=core):
 fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
-    """Core-tier parser: detect @task and apply defaults (no named arg parsing)."""
-    for attr in attrs:
-        if attr.name == "task":
-            return Some(TaskAttr(instances: 1, group: nil, frame: nil, wait_nodes: 0))
-    nil
-
-@else:
-fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
-    """Extract @task attributes from a list of attributes.
-
-    Handles:
-    - @task(instances=N) -> instances=N
-    - @task(group="name") -> group="name"
-    - @task(frame=N) -> frame=N
-    - @task(wait_nodes=N) -> wait_nodes=N
-
-    Returns nil if no @task attribute found.
-    """
+    """Extract @task attributes from a list of attributes."""
     var found = false
     var instances = 1
     var group: text? = nil
@@ -263,38 +214,19 @@ fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
         frame: frame,
         wait_nodes: wait_nodes
     )
-@end
 
 # ============================================================================
 # Layout Attribute Parsing
 # ============================================================================
 
-# Parse layout attributes from a list of attributes
-@when(tier=core):
 fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
-    """Core-tier parser: keep default layout attributes."""
-    LayoutAttr(layout_kind: LayoutKind.Simple, explicit_align: nil, is_packed: false)
-
-@else:
-fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
-    """Extract layout attributes from a list of attributes.
-
-    Handles:
-    - @repr("C") -> LayoutKind.C
-    - @repr("packed") -> LayoutKind.Packed, is_packed=true
-    - @repr("transparent") -> LayoutKind.Transparent
-    - @packed -> LayoutKind.Packed, is_packed=true
-    - @align(N) -> explicit_align=N
-
-    Returns default LayoutAttr if no layout attributes found.
-    """
+    """Extract layout attributes from a list of attributes."""
     var layout_kind = LayoutKind.Simple
     var explicit_align: i64? = nil
     var is_packed = false
 
     for attr in attrs:
         if attr.name == "repr":
-            # @repr("C"), @repr("packed"), @repr("transparent")
             if attr.args.len() > 0:
                 val repr_kind = extract_string_arg(attr.args[0])
                 if repr_kind == "C":
@@ -305,11 +237,9 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
                 elif repr_kind == "transparent":
                     layout_kind = LayoutKind.Transparent
         elif attr.name == "packed":
-            # @packed shorthand
             layout_kind = LayoutKind.Packed
             is_packed = true
         elif attr.name == "align":
-            # @align(N) - alignment must be power of 2
             if attr.args.len() > 0:
                 val align_val = extract_int_arg(attr.args[0])
                 if align_val.? and is_power_of_two(align_val.unwrap()):
@@ -320,7 +250,6 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
         explicit_align: explicit_align,
         is_packed: is_packed
     )
-@end
 
 # Extract string value from an expression (for @repr("C"))
 fn extract_string_arg(expr: Expr) -> text:
@@ -332,12 +261,6 @@ fn extract_string_arg(expr: Expr) -> text:
 
 # Extract barriers option from attribute args
 # Handles: @volatile(true), @volatile(barriers: true)
-@when(tier=core):
-fn extract_barriers_arg(args: [Expr]) -> bool:
-    """Core-tier parser: ignore named attribute args."""
-    false
-
-@else:
 fn extract_barriers_arg(args: [Expr]) -> bool:
     for arg in args:
         # Check for bare true literal: @volatile(true)
@@ -356,7 +279,6 @@ fn extract_barriers_arg(args: [Expr]) -> bool:
                     case _: ()
             case _: ()
     false
-@end
 
 # Extract integer value from an expression (for @align(16))
 fn extract_int_arg(expr: Expr) -> i64?:

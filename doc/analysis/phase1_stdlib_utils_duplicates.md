@@ -1,7 +1,7 @@
 # Standard Library Utils Duplication Analysis - Phase 1
 
 **Analysis Date:** 2026-02-14
-**Scope:** All `*_utils.spl` files in `src/std/`
+**Scope:** All `*_utils.spl` files in `src/lib/`
 **Method:** Token-based similarity analysis with 5-line sliding windows
 
 ---
@@ -20,37 +20,37 @@
 
 ## Files Analyzed
 
-1. `src/std/algorithm_utils.spl`
-2. `src/std/amqp_utils.spl`
-3. `src/std/bitwise_utils.spl`
-4. `src/std/collection_utils.spl`
-5. `src/std/combinatorics_utils.spl`
-6. `src/std/comparator_utils.spl`
-7. `src/std/ds_utils.spl`
-8. `src/std/encoding_utils.spl`
-9. `src/std/format_utils.spl`
-10. `src/std/ftp_utils.spl`
-11. `src/std/gzip_utils.spl`
-12. `src/std/hash_utils.spl`
-13. `src/std/html_parser_utils.spl`
-14. `src/std/json_parser_utils.spl`
-15. `src/std/list_utils.spl`
-16. `src/std/matrix_utils.spl`
-17. `src/std/predicate_utils.spl`
-18. `src/std/probability_utils.spl`
-19. `src/std/random_utils.spl`
-20. `src/std/range_utils.spl`
-21. `src/std/regex_engine/char_utils.spl`
-22. `src/std/search_utils.spl`
-23. `src/std/set_utils.spl`
-24. `src/std/skiplist_utils.spl`
-25. `src/std/src/text_utils.spl`
-26. `src/std/src/tooling/regex_utils.spl`
-27. `src/std/stats_utils.spl`
-28. `src/std/text_utils.spl`
-29. `src/std/tuple_utils.spl`
-30. `src/std/udp_utils.spl`
-31. `src/std/validation_utils.spl`
+1. `src/lib/algorithm_utils.spl`
+2. `src/lib/amqp_utils.spl`
+3. `src/lib/bitwise_utils.spl`
+4. `src/lib/collection_utils.spl`
+5. `src/lib/combinatorics_utils.spl`
+6. `src/lib/comparator_utils.spl`
+7. `src/lib/ds_utils.spl`
+8. `src/lib/encoding_utils.spl`
+9. `src/lib/format_utils.spl`
+10. `src/lib/ftp_utils.spl`
+11. `src/lib/gzip_utils.spl`
+12. `src/lib/hash_utils.spl`
+13. `src/lib/html_parser_utils.spl`
+14. `src/lib/json_parser_utils.spl`
+15. `src/lib/list_utils.spl`
+16. `src/lib/matrix_utils.spl`
+17. `src/lib/predicate_utils.spl`
+18. `src/lib/probability_utils.spl`
+19. `src/lib/random_utils.spl`
+20. `src/lib/range_utils.spl`
+21. `src/lib/regex_engine/char_utils.spl`
+22. `src/lib/search_utils.spl`
+23. `src/lib/set_utils.spl`
+24. `src/lib/skiplist_utils.spl`
+25. `src/lib/src/text_utils.spl`
+26. `src/lib/src/tooling/regex_utils.spl`
+27. `src/lib/stats_utils.spl`
+28. `src/lib/text_utils.spl`
+29. `src/lib/tuple_utils.spl`
+30. `src/lib/udp_utils.spl`
+31. `src/lib/validation_utils.spl`
 
 ---
 
@@ -227,12 +227,12 @@ fn get_N(tuple):
 
 ### High Priority (30-50 lines savings each)
 
-1. **Iteration Module** (`src/std/iteration.spl`)
+1. **Iteration Module** (`src/lib/iteration.spl`)
    - `each`, `map`, `filter`, `reduce`, `fold`
    - **Savings:** ~200 lines across all utils
    - **Complexity:** Low
 
-2. **String Transform Helpers** (add to `src/std/text.spl`)
+2. **String Transform Helpers** (add to `src/lib/text.spl`)
    - `string_map(s, fn)` - Character-by-character transformation
    - `string_filter(s, predicate)` - Filter characters
    - **Savings:** ~100 lines
@@ -288,27 +288,27 @@ fn get_N(tuple):
 
 ## Next Steps
 
-1. **Create Iteration Module** (`src/std/iteration.spl`)
+1. **Create Iteration Module** (`src/lib/iteration.spl`)
    - Priority: HIGH
    - Effort: 2-3 hours
    - Impact: 200+ lines saved
 
-2. **Add String Transform Helpers** to `src/std/text.spl`
+2. **Add String Transform Helpers** to `src/lib/text.spl`
    - Priority: HIGH
    - Effort: 1-2 hours
    - Impact: 100+ lines saved
 
-3. **Consolidate Binary Search** in `src/std/search_utils.spl`
+3. **Consolidate Binary Search** in `src/lib/search_utils.spl`
    - Priority: HIGH
    - Effort: 1 hour
    - Impact: 120+ lines saved
 
-4. **Add Matrix Builder** to `src/std/matrix_utils.spl`
+4. **Add Matrix Builder** to `src/lib/matrix_utils.spl`
    - Priority: MEDIUM
    - Effort: 2 hours
    - Impact: 150+ lines saved
 
-5. **Add Array Comparison** to `src/std/collection_utils.spl`
+5. **Add Array Comparison** to `src/lib/collection_utils.spl`
    - Priority: MEDIUM
    - Effort: 30 minutes
    - Impact: 60+ lines saved

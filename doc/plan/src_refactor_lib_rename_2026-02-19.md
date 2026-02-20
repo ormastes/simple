@@ -7,7 +7,7 @@
 
 ## Core Design Decision
 
-**`src/std/` → renamed to `src/lib/`** — the folder name changes, but the `std.*` import namespace stays.
+**`src/lib/` → renamed to `src/lib/`** — the folder name changes, but the `std.*` import namespace stays.
 `src/lib/` becomes the single home for everything that was `std.*` AND `lib.*`.
 
 The build config (`simple.sdn`) maps `std.*` to `src/lib/`, eliminating the `lib.*` namespace entirely.
@@ -35,7 +35,7 @@ src/
 ## Target `src/lib/` Structure
 
 ```
-src/lib/                            # (was src/std/ + src/lib/ merged)
+src/lib/                            # (was src/lib/ + src/lib/ merged)
   simple.sdn                        # updated project config
 
   # ── Core language features (all from old std/) ────────────────
@@ -120,19 +120,19 @@ src/lib/                            # (was src/std/ + src/lib/ merged)
 ### Phase 0 — Configuration (`simple.sdn`)
 
 Update root `simple.sdn`:
-- Remove `src/std` entry from `projects:`
+- Remove `src/lib` entry from `projects:`
 - Keep `src/lib` but configure it as the `std.*` namespace root
-- Update all dependency references: `src/lib` replaces `src/std` everywhere
+- Update all dependency references: `src/lib` replaces `src/lib` everywhere
 
 ```diff
   projects:
--   - path: src/std
-    - path: src/lib      # std.* namespace, was src/std/
+-   - path: src/lib
+    - path: src/lib      # std.* namespace, was src/lib/
   dependencies:
--   src/compiler: [rust, src/std]
--   src/lib: [rust, src/std]
--   src/app: [rust, src/compiler, src/std, src/lib]
--   test: [rust, src/compiler, src/app, src/std, src/lib]
+-   src/compiler: [rust, src/lib]
+-   src/lib: [rust, src/lib]
+-   src/app: [rust, src/compiler, src/lib, src/lib]
+-   test: [rust, src/compiler, src/app, src/lib, src/lib]
 +   src/compiler: [rust, src/lib]
 +   src/app: [rust, src/compiler, src/lib]
 +   test: [rust, src/compiler, src/app, src/lib]
@@ -173,17 +173,17 @@ Delete `src/shared_compiler/` after updating imports.
 
 ---
 
-### Phase 3 — Move `src/ffi/` → `src/std/ffi/` (11 import sites)
+### Phase 3 — Move `src/ffi/` → `src/lib/ffi/` (11 import sites)
 
 ```bash
-mv src/ffi/ src/std/ffi/
+mv src/ffi/ src/lib/ffi/
 ```
 
 Update 11 files (`use ffi.X` → `use std.ffi.X`):
 - `src/compiler/build_log.spl`
 - `src/compiler/project.spl`
 - `src/compiler/codegen.spl`
-- `src/std/async_host/future.spl`
+- `src/lib/async_host/future.spl`
 - `src/app/debug/remote/ptrace.spl`
 - `src/app/debug/remote/dwarf.spl`
 - `src/compiler_shared/backend/native_bridge.spl` (3 lines)
@@ -191,10 +191,10 @@ Update 11 files (`use ffi.X` → `use std.ffi.X`):
 
 ---
 
-### Phase 4 — Move `src/mcp_lib/` → `src/std/mcp/` (13 import sites)
+### Phase 4 — Move `src/mcp_lib/` → `src/lib/mcp/` (13 import sites)
 
 ```bash
-cp src/mcp_lib/*.spl src/std/mcp/
+cp src/mcp_lib/*.spl src/lib/mcp/
 rm -rf src/mcp_lib/
 ```
 
@@ -214,16 +214,16 @@ Update 13 files (`use mcp_lib.X` → `use std.mcp.X`):
 
 ---
 
-### Phase 5 — Merge `src/baremetal/` → `src/std/baremetal/` (8 internal files)
+### Phase 5 — Merge `src/baremetal/` → `src/lib/baremetal/` (8 internal files)
 
 ```bash
 cp -r src/baremetal/arm src/baremetal/arm64 src/baremetal/riscv \
       src/baremetal/riscv32 src/baremetal/x86 src/baremetal/x86_64 \
-      src/baremetal/common src/std/baremetal/
+      src/baremetal/common src/lib/baremetal/
 cp src/baremetal/mod.spl src/baremetal/qemu_runner.spl \
    src/baremetal/string_intern.spl src/baremetal/system_api.spl \
    src/baremetal/test_integration.spl src/baremetal/test_semihost_output.spl \
-   src/baremetal/test_system_api_standalone.spl src/std/baremetal/
+   src/baremetal/test_system_api_standalone.spl src/lib/baremetal/
 rm -rf src/baremetal/
 ```
 
@@ -240,46 +240,46 @@ Also check `src/app/verify/baremetal.spl` for external references.
 
 ---
 
-### Phase 6 — Merge old `src/lib/` → `src/std/` then rename `src/std/` → `src/lib/`
+### Phase 6 — Merge old `src/lib/` → `src/lib/` then rename `src/lib/` → `src/lib/`
 
-#### 6a. Move non-conflicting lib/ subdirs into src/std/
+#### 6a. Move non-conflicting lib/ subdirs into src/lib/
 
 ```bash
-mv src/lib/database    src/std/database
-mv src/lib/mcp_sdk     src/std/mcp_sdk
-mv src/lib/pure        src/std/pure
-mv src/lib/collections src/std/collections
-mv src/lib/cuda        src/std/cuda
-mv src/lib/torch       src/std/torch
-mv src/lib/qemu        src/std/qemu
-mv src/lib/execution   src/std/execution
-mv src/lib/hooks       src/std/hooks
-mv src/lib/memory      src/std/memory
-mv src/lib/diagnostics src/std/diagnostics
+mv src/lib/database    src/lib/database
+mv src/lib/mcp_sdk     src/lib/mcp_sdk
+mv src/lib/pure        src/lib/pure
+mv src/lib/collections src/lib/collections
+mv src/lib/cuda        src/lib/cuda
+mv src/lib/torch       src/lib/torch
+mv src/lib/qemu        src/lib/qemu
+mv src/lib/execution   src/lib/execution
+mv src/lib/hooks       src/lib/hooks
+mv src/lib/memory      src/lib/memory
+mv src/lib/diagnostics src/lib/diagnostics
 ```
 
-#### 6b. Move root lib/ files into src/std/
+#### 6b. Move root lib/ files into src/lib/
 
 ```bash
-mv src/lib/actor_scheduler.spl  src/std/
-mv src/lib/lazy_val.spl         src/std/
-mv src/lib/mailbox.spl          src/std/
-mv src/lib/message_transfer.spl src/std/
-mv src/lib/symbol.spl           src/std/
-mv src/lib/types.spl            src/std/
-mv src/lib/perf.spl             src/std/
+mv src/lib/actor_scheduler.spl  src/lib/
+mv src/lib/lazy_val.spl         src/lib/
+mv src/lib/mailbox.spl          src/lib/
+mv src/lib/message_transfer.spl src/lib/
+mv src/lib/symbol.spl           src/lib/
+mv src/lib/types.spl            src/lib/
+mv src/lib/perf.spl             src/lib/
 ```
 
 #### 6c. Conflict merges
 
-- `src/lib/json/builder.spl` → copy into `src/std/json/builder.spl` (new file, no conflict)
-- `src/lib/cli/*.spl` → merge into `src/std/cli/` (check for name conflicts first)
-- `src/lib/parser/*.spl` → merge into `src/std/parser/` (check for name conflicts first)
+- `src/lib/json/builder.spl` → copy into `src/lib/json/builder.spl` (new file, no conflict)
+- `src/lib/cli/*.spl` → merge into `src/lib/cli/` (check for name conflicts first)
+- `src/lib/parser/*.spl` → merge into `src/lib/parser/` (check for name conflicts first)
 
-#### 6d. Rename src/std/ → src/lib/
+#### 6d. Rename src/lib/ → src/lib/
 
 ```bash
-mv src/std src/lib_new
+mv src/lib src/lib_new
 # delete old empty src/lib/
 rm -rf src/lib
 mv src/lib_new src/lib

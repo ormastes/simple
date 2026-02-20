@@ -149,7 +149,7 @@ fn get_value() -> T:
     result
 ```
 
-**Usage:** `src/std/shell/env.spl` - `cwd()` function
+**Usage:** `src/lib/shell/env.spl` - `cwd()` function
 **Impact:** Prevents module init hang, 20,000x speedup
 
 ### 2. Extern Declaration Pattern ✅ WORKS
@@ -183,10 +183,10 @@ import app.mcp.prompts
 2. **test/unit/app/diagram/call_flow_profiling_spec.spl** - Lines 12-19
    - Added: 7 extern function declarations
 
-3. **src/std/shell/env.spl** - Lines 33-53
+3. **src/lib/shell/env.spl** - Lines 33-53
    - Added: Lazy initialization with caching for `cwd()`
 
-4. **src/std/log.spl** - Lines 65-66 (already fixed)
+4. **src/lib/log.spl** - Lines 65-66 (already fixed)
    - Uses: Lazy initialization pattern (no changes needed)
 
 ---

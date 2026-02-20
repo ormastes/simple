@@ -2,22 +2,42 @@
 
 Documentation in Simple follows a "specification as code" philosophy - executable tests generate documentation, and research documents inform implementation.
 
+## Document Relationship Model
+
+```
+PLAN → REQUIREMENTS → FEATURE SPEC → BDD TESTS → TEST RESULTS
+
+Parallel:
+REQUIREMENTS → NFR
+RESEARCH → DESIGN → ADR
+REQUIREMENTS → ARCHITECTURE
+GUIDES + RUNBOOKS ← OPERATIONS
+RULES → enforced by CI + review
+```
+
 ## Documentation Types & Locations
 
-| Type | Location | Format | Purpose |
+| Type | Location | Format | Answers |
 |------|----------|--------|---------|
-| Research | `doc/research/` | Markdown | Investigation, analysis, design exploration |
-| Design | `doc/design/` | Markdown | Architecture decisions, system design |
-| Guides | `doc/guide/` | Markdown | User-facing tutorials, how-to guides |
-| Specifications | `src/std/test/features/` | SSpec (`.spl`) | Executable feature specs that generate docs |
-| API Docs | Generated | Markdown | Auto-generated from SSpec tests |
-| Reports | `doc/report/` | Markdown | Session summaries, completion reports |
+| **Plan** | `doc/plan/` | Markdown | What and when |
+| **Requirement** | `doc/requirement/` | Markdown | What must the system do |
+| **Feature Spec** | `doc/feature/` | Markdown | How user experiences the requirement |
+| **NFR / SLO** | `doc/nfr/` | Markdown | How well must it work |
+| **Research** | `doc/research/` | Markdown | What should we choose and why |
+| **Design** | `doc/design/` | Markdown | How it is built |
+| **Architecture** | `doc/architecture/` | Markdown | Overall system structure |
+| **ADR** | `doc/adr/` | Markdown | Why this architectural decision |
+| **BDD Tests** | `test/*_spec.spl` | SSpec `.spl` | Executable scenarios (generate docs) |
+| **Guide / Runbook** | `doc/guide/` | Markdown | How to use or operate |
+| **Rule** | `doc/rule/` | Markdown | How engineers must work |
+| **Report** | `doc/report/` | Markdown | Session summaries, completion reports |
+| **API Docs** | `doc/spec/generated/` | Markdown | Auto-generated from SSpec tests |
 
 ## Critical Rules
 
 ### Specifications MUST be SSpec
 - ❌ **NEVER write spec.md files** - write `*_spec.spl` instead
-- ✅ Specifications are executable tests in `src/std/test/features/`
+- ✅ Specifications are executable tests in `src/lib/test/features/`
 - ✅ Use SSpec framework to generate documentation from tests
 - ✅ See `/sspec` skill for test writing guidelines
 
@@ -30,28 +50,30 @@ Documentation in Simple follows a "specification as code" philosophy - executabl
 ### Documentation Hierarchy
 ```
 doc/
-├── research/          # Investigation, analysis
-│   ├── torch_improvements.md
-│   ├── async_ui_architecture.md
-│   └── ...
-├── design/            # Architecture decisions
-│   ├── tensor_dimensions_design.md
-│   └── ...
-├── guide/             # User-facing guides
-│   ├── tensor_dimensions_guide.md
-│   └── ...
-├── report/            # Session reports
+├── plan/              # Plans: why, scope, milestones, risks
+├── requirement/       # Functional requirements (user request + REQ-NNN)
+│   └── README.md      # Template and format
+├── feature/           # Feature specs (BDD scenarios from REQ)
+│   └── README.md      # Template and format
+├── nfr/               # Non-functional requirements / SLOs
+│   └── README.md      # Template and format
+├── research/          # Investigation, analysis, options
+├── design/            # Architecture decisions, component design
+│   └── README.md      # Template and format
+├── architecture/      # System-level architecture
+├── adr/               # Architecture Decision Records
+│   └── README.md      # ADR format and lifecycle
+├── rule/              # Engineering rules (mandatory standards)
+│   └── README.md      # Full rules document
+├── guide/             # User-facing guides + runbooks
+├── report/            # Session reports, completion reports
 └── spec/              # NON-executable specs only
-    └── tooling/       # Tooling-specific (not feature specs)
+    └── generated/     # Auto-generated from SSpec tests
 
-src/std/test/features/  # EXECUTABLE feature specs
-├── ml/
-│   ├── config_system_spec.spl
-│   ├── experiment_tracking_spec.spl
-│   └── ...
-├── data_structures/
-│   ├── tensor_dimensions_spec.spl
-│   └── ...
+test/                  # EXECUTABLE BDD specs (SSpec)
+├── unit/compiler/
+├── unit/lib/
+└── *_spec.spl
 ```
 
 ## SSpec Feature Specification Format
@@ -492,35 +514,26 @@ users |id, name, role|
 
 ## Documentation Workflow
 
-### 1. Research Phase
-Write research document exploring the problem and solutions.
+### For New Features (full lifecycle)
 
-Location: `doc/research/`
+1. **Plan** → `doc/plan/<feature>.md` — why, scope, milestones, risks
+2. **Requirements** → `doc/requirement/<feature>.md` — user request + REQ-NNN statements
+3. **Feature spec** → `doc/feature/<feature>.md` — BDD scenarios from requirements
+4. **NFR** → `doc/nfr/<feature>.md` — performance, reliability, security targets
+5. **Research** → `doc/research/<feature>.md` — options analysis (if non-obvious)
+6. **Design** → `doc/design/<feature>.md` — components, decisions, failure handling
+7. **ADR** → `doc/adr/ADR-NNN-title.md` — for major architectural decisions in design
+8. **BDD Tests** → `test/*_spec.spl` — link `**Requirements:**` + `**Design:**` in docstring
+9. **Guide** → `doc/guide/<feature>_guide.md` — user-facing guide (if applicable)
+10. **Report** → `doc/report/<feature>_complete_YYYY-MM-DD.md` — on completion
 
-### 2. Design Phase
-Create design document with architectural decisions.
-
-Location: `doc/design/`
-
-### 3. Specification Phase
-Write executable SSpec feature specification.
-
-Location: `src/std/test/features/*/`
-
-### 4. Implementation Phase
-Implement code with inline documentation.
-
-### 5. Guide Phase
-Write user guide once feature is stable.
-
-Location: `doc/guide/`
-
-### 6. Generation Phase
-Run doc generator to create API docs from SSpec.
+### Generate API Docs from SSpec
 
 ```bash
 # Generate documentation from specs
-bin/simple src/std/test/features/generate_docs.spl
+bin/simple doc-gen
+
+# Output: doc/spec/generated/
 ```
 
 ## Common Pitfalls
@@ -554,7 +567,7 @@ Include setup, usage, and cleanup in examples.
 ### Doc Generation
 ```bash
 # Generate docs from SSpec tests
-bin/simple src/std/test/features/generate_docs.spl
+bin/simple src/lib/test/features/generate_docs.spl
 
 # Outputs to: doc/spec/generated/
 ```
@@ -562,7 +575,7 @@ bin/simple src/std/test/features/generate_docs.spl
 ## Examples from Codebase
 
 ### Good: Executable Specification
-`src/std/test/features/data_structures/tensor_dimensions_spec.spl`
+`src/lib/test/features/data_structures/tensor_dimensions_spec.spl`
 - Executable test with metadata
 - Generates documentation
 - Includes code examples
@@ -591,7 +604,13 @@ bin/simple src/std/test/features/generate_docs.spl
 
 ## See Also
 
-- `/sspec` - SSpec test writing
+- `/sspec` - SSpec test writing (BDD tests + doc-link validation)
 - `/test` - Test writing guidelines
 - `/research` - Codebase exploration
-- Feature DB: `doc/feature/feature_db.sdn`
+- `/rule` - Engineering rules + doc folder map
+- `doc/FILE.md` - Complete document relationship model
+- `doc/requirement/README.md` - Requirement doc template
+- `doc/feature/README.md` - Feature spec template
+- `doc/nfr/README.md` - NFR/SLO template
+- `doc/design/README.md` - Design doc template
+- `doc/adr/README.md` - ADR format and lifecycle

@@ -66,7 +66,7 @@ arc_box_dec_strong, arc_box_inc_weak, arc_box_dec_weak
 ### GC Tests ⚠️ (Syntax Fixed, Parser Blocked)
 - Fixed 14 invalid comparison patterns
 - Fixed 20 field access issues (.stats() → .stats)
-- Blocked by: `src/std/gc.spl:629` - `extern fn type_id_of<T>()`
+- Blocked by: `src/lib/gc.spl:629` - `extern fn type_id_of<T>()`
 
 ### RuntimeValue Tests ⚠️ (Syntax Fixed, GC Blocked)
 - Fixed 3 invalid matchers
@@ -134,7 +134,7 @@ extern fn type_id_of<T>() -> i32  // Should parse correctly
 - ⚠️ `test/lib/std/unit/rc_spec.spl` - complete rewrite, runtime blocked
 
 ### Source Files
-- ⚠️ `src/std/rc.spl` - commented extern declarations (following allocator pattern)
+- ⚠️ `src/lib/rc.spl` - commented extern declarations (following allocator pattern)
 
 ### Backup Files
 - `test/lib/std/unit/rc_spec.spl.broken` - original broken version

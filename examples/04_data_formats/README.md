@@ -22,5 +22,5 @@ languages:
 
 ## See Also
 
-- SDN implementation: `src/std/sdn.spl`
-- CBOR implementation: `src/std/cbor.spl`
+- SDN implementation: `src/lib/sdn.spl`
+- CBOR implementation: `src/lib/cbor.spl`

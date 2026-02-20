@@ -91,10 +91,10 @@ Tags:
 ### Run Single Test
 ```bash
 # Run with verbose output
-bin/simple --verbose src/std/test/unit/core/test_spec.spl
+bin/simple --verbose src/lib/test/unit/core/test_spec.spl
 
 # Step through (if DAP available)
-bin/simple --debug src/std/test/unit/core/test_spec.spl
+bin/simple --debug src/lib/test/unit/core/test_spec.spl
 ```
 
 ## Fault Detection

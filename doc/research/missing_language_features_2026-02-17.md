@@ -1419,7 +1419,7 @@ fn pick<T, K in keyof T>(obj: T, key: K) -> ...
 > **Pitfall:** `keyof` must resolve at compile time; cannot be used with runtime-determined types.
 
 **Connection to existing code:** Extends `ConstKeySet`/`ConstKeyValidation` in
-`src/std/type/types.spl`. `keyof T` generates a `ConstKeySet` from struct field names.
+`src/lib/type/types.spl`. `keyof T` generates a `ConstKeySet` from struct field names.
 
 **Impact:** MEDIUM-HIGH. Enables entire classes of generic type-safe utilities (serialization,
 ORMs, form builders) that currently require unchecked string keys.
@@ -1615,7 +1615,7 @@ match status:
 
 `pack` is not a language keyword. What exists:
 - `src/compiler_core/context_pack.spl` — compiler tool for extracting minimal LLM context
-- `src/std/msgpack/pack.spl` — MessagePack binary serialization library
+- `src/lib/msgpack/pack.spl` — MessagePack binary serialization library
 - `*args`/`**kwargs` variadic packing — ✅ already implemented as a language feature
 
 If "pack" means **variadic argument packing** (`*args` spread/gather), that is already
@@ -1777,7 +1777,7 @@ These features have been deferred for later consideration.
 - Use cases: API state machines, type-safe IDs, builder patterns, physical units, capability markers
 - Key pitfalls: state explosion, cryptic error messages, data-dependent state limitations
 - Design: `@phantom struct`, `struct Foo<State>` with state set constraints
-- Integration with existing `ConstKeySet` dict validation in `src/std/type/types.spl`
+- Integration with existing `ConstKeySet` dict validation in `src/lib/type/types.spl`
 - Error message design using `@state_description` annotations
 
 **Proposed syntax (from research):**

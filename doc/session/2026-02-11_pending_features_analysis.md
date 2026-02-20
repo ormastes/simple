@@ -80,7 +80,7 @@ Cannot implement until runtime supports:
 
 **Examples:**
 - `src/lib/pure/tensor_f64.spl` - Generic PureTensor<T>
-- `src/std/src/di.spl` - Generic DI container
+- `src/lib/src/di.spl` - Generic DI container
 - All async test files
 - Macro-related tests
 

@@ -104,7 +104,7 @@ Reallocation edge cases (NEW TESTS):
 
 ## Mock Implementations Created
 
-**Location:** `src/std/allocator.spl` (lines ~540-600)
+**Location:** `src/lib/allocator.spl` (lines ~540-600)
 
 ### 9 Mock Functions Implemented:
 
@@ -193,7 +193,7 @@ cat doc/coverage/allocator_with_mocks.sdn
 
 ## Code Added
 
-**File:** `src/std/allocator.spl`
+**File:** `src/lib/allocator.spl`
 **Lines Added:** ~80 lines of mock implementations
 **Comment Status:** Well-documented mocks
 

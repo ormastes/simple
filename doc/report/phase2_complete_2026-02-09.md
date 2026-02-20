@@ -13,7 +13,7 @@ Successfully completed Phase 2 by implementing platform detection, data validati
 
 ### Phase 2.1: Platform Detection (1 TODO) ✅
 
-**Files:** `src/std/platform.spl`, `src/compiler/smf_writer.spl`
+**Files:** `src/lib/platform.spl`, `src/compiler/smf_writer.spl`
 
 **Implemented:**
 - **get_host_arch()** - CPU architecture detection
@@ -52,7 +52,7 @@ Successfully completed Phase 2 by implementing platform detection, data validati
 
 ### Phase 2.3: Utility Functions (2 TODOs) ✅
 
-**Files:** `src/runtime/hooks.spl`, `src/std/spec.spl`, `src/compiler/monomorphize_integration.spl`
+**Files:** `src/runtime/hooks.spl`, `src/lib/spec.spl`, `src/compiler/monomorphize_integration.spl`
 
 **Implemented:**
 1. **interpolate_log_message()** - Template variable replacement
@@ -107,11 +107,11 @@ Successfully completed Phase 2 by implementing platform detection, data validati
 
 | File | Changes |
 |------|---------|
-| `src/std/platform.spl` | Added get_host_arch() with uname/env detection |
+| `src/lib/platform.spl` | Added get_host_arch() with uname/env detection |
 | `src/compiler/smf_writer.spl` | Updated Target.host() to use platform detection |
 | `src/compiler/blocks/utils.spl` | Added JSON & SQL validation + helpers |
 | `src/runtime/hooks.spl` | Added template interpolation infrastructure |
-| `src/std/spec.spl` | Added module detection with dual-strategy approach |
+| `src/lib/spec.spl` | Added module detection with dual-strategy approach |
 | `src/compiler/monomorphize_integration.spl` | Added symbol resolution helper |
 | **Total** | **6 files** |
 

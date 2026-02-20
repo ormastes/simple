@@ -12,13 +12,13 @@ Successfully implemented a comprehensive two-tier async runtime system for Simpl
 
 ### Core Modules (3 files, 1,552 lines)
 
-1. **`src/std/async_core.spl`** (271 lines) ✅
+1. **`src/lib/async_core.spl`** (271 lines) ✅
    - Shared types: `Poll<T>`, `TaskState`, `Priority`, `AsyncError`
    - Shared traits: `FutureCore<T>`, `TaskHandleCore<T>`, `JoinSetCore<T>`
    - Duck typing support (no explicit implementations)
    - Parses successfully
 
-2. **`src/std/async_embedded.spl`** (480 lines) ✅
+2. **`src/lib/async_embedded.spl`** (480 lines) ✅
    - Fixed-capacity runtime (MAX_TASKS=16, MAX_FUTURES=32)
    - No heap allocation (stack + static only)
    - Polling-based scheduling (no wakers)
@@ -26,7 +26,7 @@ Successfully implemented a comprehensive two-tier async runtime system for Simpl
    - Components: `EmbeddedFuture`, `EmbeddedJoinSet`, `EmbeddedFuturesUnordered`, `EmbeddedScheduler`
    - Parses successfully
 
-3. **`src/std/async_host.spl`** (801 lines) ✅
+3. **`src/lib/async_host.spl`** (801 lines) ✅
    - Dynamic heap-allocated runtime
    - Waker-based notification system
    - Work-stealing multi-worker scheduler
@@ -36,7 +36,7 @@ Successfully implemented a comprehensive two-tier async runtime system for Simpl
 
 ### Supporting Files
 
-4. **`src/std/async_unified.spl`** (156 lines) ✅
+4. **`src/lib/async_unified.spl`** (156 lines) ✅
    - Unified facade (currently re-exports host runtime)
    - Usage examples
    - Migration guide
@@ -242,7 +242,7 @@ while val Some((id, data)) = await set.join_next():
 
 ### Embedded Capacity (Compile-Time)
 
-Edit `src/std/async_embedded.spl`:
+Edit `src/lib/async_embedded.spl`:
 ```simple
 val MAX_TASKS: usize = 16      # Max concurrent tasks
 val MAX_FUTURES: usize = 32    # Max futures in collections
@@ -411,7 +411,7 @@ Enable SSpec tests to execute:
 ### 2. ~~Add FFI Bindings~~ ✅ DONE - Pure Simple SFFI!
 
 **Update:** FFI is NOT needed! All functions implemented as Pure Simple SFFI wrappers:
-- `src/std/async_sffi.spl` - Pure Simple implementations
+- `src/lib/async_sffi.spl` - Pure Simple implementations
 - `task_alloc_id()` - Simple counter (global var)
 - `waker_signal()` - Simple registry (bool array)
 - No external FFI required!
@@ -452,10 +452,10 @@ Optimize hot paths:
 ## Files Modified/Created
 
 ### Created
-- `src/std/async_core.spl`
-- `src/std/async_embedded.spl`
-- `src/std/async_host.spl`
-- `src/std/async_unified.spl`
+- `src/lib/async_core.spl`
+- `src/lib/async_embedded.spl`
+- `src/lib/async_host.spl`
+- `src/lib/async_unified.spl`
 - `examples/async_demo.spl`
 - `test/std/async_embedded_spec.spl`
 - `test/std/async_host_spec.spl`
@@ -463,7 +463,7 @@ Optimize hot paths:
 - `doc/report/async_two_tier_implementation_2026-02-05.md` (this file)
 
 ### Modified
-- `src/std/async.spl` - Added two-tier documentation (lines 652-692)
+- `src/lib/async.spl` - Added two-tier documentation (lines 652-692)
 
 ### No Git Changes Yet
 

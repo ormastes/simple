@@ -20,7 +20,7 @@ bin/simple compile --backend=llvm program.spl
 bin/simple compile --backend=c -o program.cpp program.spl
 
 # Then build with a C++ compiler:
-clang++ -std=c++20 -O2 program.cpp src/compiler_seed/runtime.c -I src/compiler_seed -o program
+clang++ -std=c++20 -O2 program.cpp src/runtime/runtime.c -I src/runtime -o program
 
 # Or generate to directory and build with CMake + Ninja:
 bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
@@ -135,7 +135,7 @@ When `backend = "auto"` (default), selection is based on build mode:
 ```bash
 # Single-file output:
 bin/simple compile --backend=c -o output.cpp source.spl
-clang++ -std=c++20 -O2 output.cpp src/compiler_seed/runtime.c -I src/compiler_seed -o output
+clang++ -std=c++20 -O2 output.cpp src/runtime/runtime.c -I src/runtime -o output
 
 # Multi-file output (bootstrap):
 bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl

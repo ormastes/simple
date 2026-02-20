@@ -219,7 +219,7 @@ Found 1 duplicate group (fuzzy match: 92% similar)
 
 The codebase already has similar functionality:
 - ✅ Levenshtein distance in `src/compiler/const_keys.spl`
-- ✅ Math utilities in `src/std/math.spl`
+- ✅ Math utilities in `src/lib/math.spl`
 - ✅ Tensor ops in `src/lib/pure/tensor_ops.spl`
 - ✅ Token normalization in `src/app/duplicate_check/tokenizer.spl`
 

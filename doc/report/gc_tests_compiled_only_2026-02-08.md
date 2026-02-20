@@ -15,7 +15,7 @@ Attempted to convert 102 stubbed GC tests from `skip_it` placeholders to real te
 When attempting to import `std.gc` in test file:
 
 ```
-ERROR: Failed to parse module path="./src/std/gc.spl"
+ERROR: Failed to parse module path="./src/lib/gc.spl"
 error=Unexpected token: expected identifier, found Lt
 ```
 
@@ -23,7 +23,7 @@ error=Unexpected token: expected identifier, found Lt
 
 ### Why GC Module is Compiled-Only
 
-The `src/std/gc.spl` module uses multiple features not available in the interpreter:
+The `src/lib/gc.spl` module uses multiple features not available in the interpreter:
 
 1. **Generics**: `class GcPtr<T>:` - runtime parser doesn't support `<>` syntax
 2. **Allocator types**: `ArenaAllocator`, `SlabAllocator` - from `std.allocator`
@@ -103,7 +103,7 @@ Total: 102 tests (all compiled-only)
 
 ## Files Examined
 
-- `src/std/gc.spl` (649 lines) - GC implementation
+- `src/lib/gc.spl` (649 lines) - GC implementation
 - `test/lib/std/unit/gc_spec.spl` (426 lines) - Test suite
 
 ## Next Steps

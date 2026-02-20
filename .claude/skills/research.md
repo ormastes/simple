@@ -108,7 +108,7 @@ cat src/app/cli/main.spl
 |---------|----------|
 | Simple source | `src/**/*.spl` |
 | Simple tests | `test/**/*_spec.spl` |
-| Feature specs | `src/std/test/features/**/*_spec.spl` |
+| Feature specs | `src/lib/test/features/**/*_spec.spl` |
 | Specs | `doc/spec/*.md` |
 | Status | `doc/status/*.md` |
 

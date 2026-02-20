@@ -557,6 +557,6 @@ chmod +x bin/simple
 
 - **CI/CD:** `.github/workflows/release.yml`
 - **Package Script:** `scripts/package-dist.spl`
-- **Platform API:** `src/std/platform/mod.spl`
+- **Platform API:** `src/lib/platform/mod.spl`
 - **Distribution Config:** `simple.sdn`
 - **Installation Guide:** `README.md`

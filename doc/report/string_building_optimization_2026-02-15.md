@@ -80,7 +80,7 @@ val fname = fname_chars.join("")
 
 ## High Priority: Lexer String Building
 
-### File: `src/std/sdn/lexer.spl`
+### File: `src/lib/sdn/lexer.spl`
 
 **Functions optimized:** 3
 
@@ -369,7 +369,7 @@ val str = chars.join("")  # Single allocation and copy - O(n)
 | File | Functions | Pattern | Lines Changed |
 |------|-----------|---------|---------------|
 | `src/compiler_core/interpreter/eval.spl` | `must_use_scan_source` | O(n⁴) → O(n) | 309-399 |
-| `src/std/sdn/lexer.spl` | `scan_string`, `scan_number`, `scan_identifier` | O(n²) → O(n) | 309-408 |
+| `src/lib/sdn/lexer.spl` | `scan_string`, `scan_number`, `scan_identifier` | O(n²) → O(n) | 309-408 |
 | `src/compiler/predicate_parser.spl` | Selector + arg parsing | O(n²) → O(n) | 57-100 |
 | `src/compiler/const_keys_phase8a.spl` | `extract_keys` | O(n²) → O(n) | 26-57 |
 | `src/compiler/const_keys_phase8b.spl` | `extract_keys` | O(n²) → O(n) | 256-278 |
@@ -455,7 +455,7 @@ This work builds on previous algorithmic optimization sessions:
 1. **Remaining opportunities:**
    - Audit `src/compiler_core/closure_analysis.spl:47-58` scope reconstruction
    - Check `src/app/perf/optimizer.spl` analysis loops (low priority - not production code)
-   - Verify `src/std/compression/lz4.spl` count string building
+   - Verify `src/lib/compression/lz4.spl` count string building
 
 2. **Advanced optimizations:**
    - Consider StringBuilder class for repeated operations

@@ -322,15 +322,15 @@ All examples consistently:
 
 ## Discovered Blockers
 
-### BLOCKER 1: Runtime Parser Fails on `src/std/src/dl/config.spl`
+### BLOCKER 1: Runtime Parser Fails on `src/lib/src/dl/config.spl`
 
 **Error:**
 ```
-Failed to parse module path="src/std/src/dl/config.spl"
+Failed to parse module path="src/lib/src/dl/config.spl"
 error=Unexpected token: expected identifier, found Gpu
 ```
 
-**Location:** Line 65 of `src/std/src/dl/config.spl`
+**Location:** Line 65 of `src/lib/src/dl/config.spl`
 ```simple
 enum Device:
     CPU
@@ -387,7 +387,7 @@ error: semantic: function `torch_available` not found
 
 **Option A: Rename GPU variant (Quick Fix - 5 minutes)**
 
-1. Edit `src/std/src/dl/config.spl` line 65:
+1. Edit `src/lib/src/dl/config.spl` line 65:
    ```simple
    # Before:
    GPU             # Default GPU (typically CUDA:0)
@@ -397,8 +397,8 @@ error: semantic: function `torch_available` not found
    ```
 
 2. Update all references to `Device.GPU`:
-   - `src/std/src/dl/config.spl` (2 locations in impl Device)
-   - `src/std/src/dl/config_loader.spl` (parsing logic)
+   - `src/lib/src/dl/config.spl` (2 locations in impl Device)
+   - `src/lib/src/dl/config_loader.spl` (parsing logic)
 
 3. Update documentation:
    - `doc/guide/gpu_configuration.md`
@@ -417,7 +417,7 @@ error: semantic: function `torch_available` not found
 
 ### Phase 2: Test Examples with Fixed Parser (15 minutes)
 
-1. Fix `src/std/src/dl/config.spl` parser issue (Phase 1)
+1. Fix `src/lib/src/dl/config.spl` parser issue (Phase 1)
 
 2. Run each example to verify import works:
    ```bash
@@ -557,8 +557,8 @@ Modify Simple runtime to accept unknown extern functions.
 
 ### Existing Files (Not Modified):
 - `dl.config.sdn` (already configured with cuda:1)
-- `src/std/src/dl/config.spl` (has parser issue - fix needed)
-- `src/std/src/dl/config_loader.spl`
+- `src/lib/src/dl/config.spl` (has parser issue - fix needed)
+- `src/lib/src/dl/config_loader.spl`
 - `src/lib/torch/mod.spl` (generated)
 - `src/lib/torch/ffi.spl` (generated)
 - `src/lib/pure/nn.spl`

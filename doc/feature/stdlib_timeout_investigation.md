@@ -36,7 +36,7 @@ $ timeout 30 bin/simple test test/unit/compiler_core/interpreter/factorial_spec.
 
 #### 1. shell.env Module (Created)
 
-**Location:** `/home/ormastes/dev/pub/simple/src/std/shell/env.spl`
+**Location:** `/home/ormastes/dev/pub/simple/src/lib/shell/env.spl`
 
 **Functions implemented:**
 ```simple
@@ -87,7 +87,7 @@ val path = get("PATH")  # Direct function call
 
 #### 3. log.spl Status
 
-**Current implementation:** `/home/ormastes/dev/pub/simple/src/std/log.spl`
+**Current implementation:** `/home/ormastes/dev/pub/simple/src/lib/log.spl`
 
 **Has:**
 - LOG_OFF, LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE constants
@@ -156,14 +156,14 @@ Action: Try running via full suite to see actual status.
 
 ## Files Created
 
-1. `/home/ormastes/dev/pub/simple/src/std/shell/env.spl` - Environment functions
-2. `/home/ormastes/dev/pub/simple/src/std/shell/mod.spl` - Shell module index
+1. `/home/ormastes/dev/pub/simple/src/lib/shell/env.spl` - Environment functions
+2. `/home/ormastes/dev/pub/simple/src/lib/shell/mod.spl` - Shell module index
 
 ## Implementation Results
 
 ### 1. shell.env Module - COMPLETE ✓
 
-**Created:** `/home/ormastes/dev/pub/simple/src/std/shell/env.spl`
+**Created:** `/home/ormastes/dev/pub/simple/src/lib/shell/env.spl`
 
 **Functions:**
 - `get(key: text) -> text` - Get env variable (returns "" if nil)
@@ -176,7 +176,7 @@ Action: Try running via full suite to see actual status.
 
 ### 2. Extended log.spl - COMPLETE ✓
 
-**Extended:** `/home/ormastes/dev/pub/simple/src/std/log.spl`
+**Extended:** `/home/ormastes/dev/pub/simple/src/lib/log.spl`
 
 **Added Constants:**
 - `LOG_FATAL = 1`

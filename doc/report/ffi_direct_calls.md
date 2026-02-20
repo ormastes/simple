@@ -9547,7 +9547,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   ```
 - **Line 36**: `rt_dir_create()`
   ```simple
-  rt_dir_create(pkg_dir + "/src/std", true)
+  rt_dir_create(pkg_dir + "/src/lib", true)
   ```
 - **Line 37**: `rt_dir_create()`
   ```simple
@@ -10651,7 +10651,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   rt_type_registry_has(name)
   ```
 
-#### `src/std/common/config_env.spl`
+#### `src/lib/common/config_env.spl`
 
 - **Line 53**: `rt_env_vars()`
   ```simple
@@ -10662,7 +10662,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   val vars = rt_env_vars()
   ```
 
-#### `src/std/common/file_reader.spl`
+#### `src/lib/common/file_reader.spl`
 
 - **Line 108**: `rt_file_size()`
   ```simple
@@ -10697,7 +10697,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   val content = rt_file_read_text(path)
   ```
 
-#### `src/std/common/fix_applicator.spl`
+#### `src/lib/common/fix_applicator.spl`
 
 - **Line 107**: `rt_file_write_text()`
   ```simple
@@ -10708,7 +10708,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   var sorted = replacements.sort_by(a, b: b.1.span.start - a.1.span.start)
   ```
 
-#### `src/std/common/target.spl`
+#### `src/lib/common/target.spl`
 
 - **Line 107**: `rt_host_os()`
   ```simple
@@ -10719,7 +10719,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   val arch = rt_host_arch()
   ```
 
-#### `src/std/dependency_tracker/resolution.spl`
+#### `src/lib/dependency_tracker/resolution.spl`
 
 - **Line 116**: `rt_file_exists()`
   ```simple
@@ -10734,7 +10734,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   val dir_exists = rt_file_exists(dir_path)
   ```
 
-#### `src/std/examples/testing/benchmark_example.spl`
+#### `src/lib/examples/testing/benchmark_example.spl`
 
 - **Line 30**: `rt_impl()`
   ```simple
@@ -10745,14 +10745,14 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   fn bubblesort_impl()
   ```
 
-#### `src/std/failsafe/mod.spl`
+#### `src/lib/failsafe/mod.spl`
 
 - **Line 66**: `rt_timeout()`
   ```simple
   val token = self.timeout_manager.start_timeout(operation_name)
   ```
 
-#### `src/std/failsafe/timeout.spl`
+#### `src/lib/failsafe/timeout.spl`
 
 - **Line 110**: `rt_operation()`
   ```simple
@@ -10771,7 +10771,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   pub me start_timeout_ms(operation_name: text, timeout_ms: i64) -> TimeoutToken:
   ```
 
-#### `src/std/package_ffi.spl`
+#### `src/lib/package_ffi.spl`
 
 - **Line 103**: `rt_package_create_symlink()`
   ```simple
@@ -10814,7 +10814,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   rt_package_remove_dir_all(dir_path) == 0
   ```
 
-#### `src/std/sdn/document.spl`
+#### `src/lib/sdn/document.spl`
 
 - **Line 123**: `rt_file_write_text()`
   ```simple
@@ -10825,14 +10825,14 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   val source = rt_file_read_text(path)
   ```
 
-#### `src/std/sdn/parser.spl`
+#### `src/lib/sdn/parser.spl`
 
 - **Line 580**: `rt_file_read_text()`
   ```simple
   val source = rt_file_read_text(path)
   ```
 
-#### `src/std/src/db.spl`
+#### `src/lib/src/db.spl`
 
 - **Line 158**: `rt_file_write()`
   ```simple
@@ -10843,7 +10843,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   val content = rt_file_read(path)
   ```
 
-#### `src/std/src/exp/artifact.spl`
+#### `src/lib/src/exp/artifact.spl`
 
 - **Line 106**: `rt_time_now_unix_micros()`
   ```simple
@@ -10866,7 +10866,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   timestamp: "{rt_time_now_unix_micros()}"
   ```
 
-#### `src/std/src/exp/config.spl`
+#### `src/lib/src/exp/config.spl`
 
 - **Line 404**: `rt_file_exists()`
   ```simple
@@ -10881,7 +10881,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   val result = rt_env_get(key)
   ```
 
-#### `src/std/src/exp/run.spl`
+#### `src/lib/src/exp/run.spl`
 
 - **Line 123**: `rt_time_now_unix_micros()`
   ```simple
@@ -10936,7 +10936,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   timestamp: "{rt_time_now_unix_micros()}"
   ```
 
-#### `src/std/src/exp/storage.spl`
+#### `src/lib/src/exp/storage.spl`
 
 - **Line 257**: `rt_dir_create()`
   ```simple
@@ -10975,7 +10975,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   rt_file_delete(tmp_path)
   ```
 
-#### `src/std/src/exp/sweep.spl`
+#### `src/lib/src/exp/sweep.spl`
 
 - **Line 221**: `rt_time_now_unix_micros()`
   ```simple
@@ -11002,7 +11002,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   val idx = rt_random_randint(0, choices.len() - 1)
   ```
 
-#### `src/std/src/log.spl`
+#### `src/lib/src/log.spl`
 
 - **Line 43**: `rt_log_set_global_level()`
   ```simple
@@ -11033,7 +11033,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   rt_log_emit(level, scope.ptr(), scope.len(), msg.ptr(), msg.len())
   ```
 
-#### `src/std/src/map.spl`
+#### `src/lib/src/map.spl`
 
 - **Line 319**: `rt_if_absent()`
   ```simple
@@ -11044,21 +11044,21 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   if map.insert_if_absent("key", "value")
   ```
 
-#### `src/std/src/set.spl`
+#### `src/lib/src/set.spl`
 
 - **Line 74**: `rt_if_absent()`
   ```simple
   self.map.insert_if_absent(value, true)
   ```
 
-#### `src/std/src/table.spl`
+#### `src/lib/src/table.spl`
 
 - **Line 392**: `rt_by()`
   ```simple
   fn sort_by(column: text, ascending: bool = true) -> Table:
   ```
 
-#### `src/std/src/testing/helpers.spl`
+#### `src/lib/src/testing/helpers.spl`
 
 - **Line 107**: `rt_ok()`
   ```simple
@@ -11145,7 +11145,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   assert_none(find_user("invalid"), "User should not exist")
   ```
 
-#### `src/std/src/testing/mocking_advanced.spl`
+#### `src/lib/src/testing/mocking_advanced.spl`
 
 - **Line 403**: `rt_order()`
   ```simple
@@ -11160,14 +11160,14 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   me try_start_waiting()
   ```
 
-#### `src/std/src/testing/mocking_core.spl`
+#### `src/lib/src/testing/mocking_core.spl`
 
 - **Line 541**: `rt_chain()`
   ```simple
   me start_chain(parent_id: i32, call: CallRecord) -> i32:
   ```
 
-#### `src/std/src/time.spl`
+#### `src/lib/src/time.spl`
 
 - **Line 114**: `rt_thread_sleep()`
   ```simple
@@ -11202,7 +11202,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
   rt_thread_sleep(milliseconds)
   ```
 
-#### `src/std/src/tooling/easy_fix/rules.spl`
+#### `src/lib/src/tooling/easy_fix/rules.spl`
 
 - **Line 81**: `rt_offset()`
   ```simple

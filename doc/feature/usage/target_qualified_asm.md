@@ -11,8 +11,8 @@ the current build target. **This feature only works with `asm match` or `compile
 standalone `asm[spec]{}` is not supported.
 
 Relies on existing types:
-- `TargetArch` — `src/std/common/target.spl`
-- `TargetOS` — `src/std/common/target.spl`
+- `TargetArch` — `src/lib/common/target.spl`
+- `TargetOS` — `src/lib/common/target.spl`
 - `TargetPreset.abi` — `src/compiler/target_presets.spl`
 - `BackendKind` — `src/compiler_core/backend_types.spl`
 - `CallingConvention` — `src/compiler_shared/calling_convention.spl`
@@ -349,7 +349,7 @@ sets the default for plain `asm` blocks. `asm match` overrides this per-case.
 ## References
 
 - Inline assembly design: `doc/design/inline_assembly_design.md`
-- Target types: `src/std/common/target.spl` (TargetArch, TargetOS, Target)
+- Target types: `src/lib/common/target.spl` (TargetArch, TargetOS, Target)
 - Target presets: `src/compiler/target_presets.spl` (TargetPreset with abi field)
 - Backend types: `src/compiler_core/backend_types.spl` (BackendKind, CodegenTarget)
 - Calling conventions: `src/compiler_shared/calling_convention.spl`

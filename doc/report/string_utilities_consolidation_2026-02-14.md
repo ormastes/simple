@@ -11,7 +11,7 @@ Successfully consolidated duplicate string utility functions into a canonical `s
 
 ## Changes Made
 
-### 1. Created New Module: `src/std/string_core.spl` (433 lines)
+### 1. Created New Module: `src/lib/string_core.spl` (433 lines)
 
 **Purpose:** Canonical implementations of core string operations
 
@@ -31,7 +31,7 @@ Successfully consolidated duplicate string utility functions into a canonical `s
 - **Case Conversion:** str_to_lower, str_to_upper, str_capitalize
 - **Manipulation:** str_reverse, str_repeat, str_truncate, str_pad_left, str_pad_right, str_center
 
-### 2. Refactored: `src/std/template/utilities.spl`
+### 2. Refactored: `src/lib/template/utilities.spl`
 
 **Before:** 337 lines
 **After:** 162 lines
@@ -77,8 +77,8 @@ Successfully consolidated duplicate string utility functions into a canonical `s
 
 | File | Before | After | Change |
 |------|--------|-------|--------|
-| `src/std/string_core.spl` | 0 | 433 | +433 (new) |
-| `src/std/template/utilities.spl` | 337 | 162 | -175 |
+| `src/lib/string_core.spl` | 0 | 433 | +433 (new) |
+| `src/lib/template/utilities.spl` | 337 | 162 | -175 |
 | `test/unit/std/string_core_spec.spl` | 0 | 170 | +170 (new) |
 | **Net Change** | **337** | **765** | **+428** |
 
@@ -155,8 +155,8 @@ $ timeout 30 bin/release/simple run test_minimal.spl
 
 ## Files Modified
 
-- **Created:** `src/std/string_core.spl` (433 lines)
-- **Modified:** `src/std/template/utilities.spl` (337→162 lines, -175)
+- **Created:** `src/lib/string_core.spl` (433 lines)
+- **Modified:** `src/lib/template/utilities.spl` (337→162 lines, -175)
 - **Created:** `test/unit/std/string_core_spec.spl` (170 lines)
 - **Created:** `doc/report/string_utilities_consolidation_2026-02-14.md` (this file)
 
@@ -164,10 +164,10 @@ $ timeout 30 bin/release/simple run test_minimal.spl
 
 ```bash
 # Syntax validation
-bin/simple build --check-syntax src/std/string_core.spl
+bin/simple build --check-syntax src/lib/string_core.spl
 # ✅ Build succeeded in 0ms
 
-bin/simple build --check-syntax src/std/template/utilities.spl
+bin/simple build --check-syntax src/lib/template/utilities.spl
 # ✅ Build succeeded in 0ms
 
 # Test validation (blocked by runtime timeout)

@@ -31,6 +31,6 @@ Result: Promise(callbacks: [], state: PromiseState::Resolved(42))
 ### Files Discovered
 - src/compiler/desugar_async.spl - 420 lines (complete)
 - src/compiler/desugar/* - State machine generation
-- src/std/async/* - 12 modules, full runtime
+- src/lib/async/* - 12 modules, full runtime
 
 ## Result: Production Ready ✅

@@ -34,7 +34,7 @@
    - Result: 120s timeout → 6ms (20,000x speedup)
 
 2. **env_spec.spl** - Lazy initialization
-   - Added lazy init + caching to `src/std/shell/env.spl` for `cwd()`
+   - Added lazy init + caching to `src/lib/shell/env.spl` for `cwd()`
    - Result: 120s timeout → 6ms (20,000x speedup)
 
 3. **call_flow_profiling_spec.spl** - Extern declarations
@@ -93,12 +93,12 @@
    - Expected impact: +300-400 tests unlocked
 
 3. ✅ **Effect System** - Created from scratch
-   - File: `src/std/effects.spl` (73 lines)
+   - File: `src/lib/effects.spl` (73 lines)
    - Features: @pure, @io, @net, @fs, @unsafe, @async
    - Ready for integration
 
 4. ✅ **Parser Error Recovery** - Created from scratch
-   - File: `src/std/parser.spl` (179 lines)
+   - File: `src/lib/parser.spl` (179 lines)
    - Detects 15 common syntax mistakes from other languages
    - Ready for integration
 
@@ -257,12 +257,12 @@ Time:    17.1 seconds (17116ms)
    - Status: Working
 
 3. ✅ **Effect System** - Created
-   - Implementation: `src/std/effects.spl` (73 lines)
+   - Implementation: `src/lib/effects.spl` (73 lines)
    - Features: 6 effect types, composition, checking
    - Status: Ready for integration
 
 4. ✅ **Parser Error Recovery** - Created
-   - Implementation: `src/std/parser.spl` (179 lines)
+   - Implementation: `src/lib/parser.spl` (179 lines)
    - Features: 15 mistake detections, multi-language support
    - Status: Ready for integration
 
@@ -372,9 +372,9 @@ import app.mcp.prompts
 ## Files Changed Summary
 
 ### Source Code (5 files)
-1. `src/std/shell/env.spl` - Lazy initialization for `cwd()`
-2. `src/std/effects.spl` - NEW: Effect system (73 lines)
-3. `src/std/parser.spl` - NEW: Parser error recovery (179 lines)
+1. `src/lib/shell/env.spl` - Lazy initialization for `cwd()`
+2. `src/lib/effects.spl` - NEW: Effect system (73 lines)
+3. `src/lib/parser.spl` - NEW: Parser error recovery (179 lines)
 4. `test/unit/app/mcp/prompts_spec.spl` - Import syntax fix
 5. `test/unit/app/diagram/call_flow_profiling_spec.spl` - Extern declarations
 

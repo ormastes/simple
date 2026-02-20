@@ -18,7 +18,7 @@
 
 ### Adding New Types
 
-1. Add variant to the type system in `src/compiler_core/types.spl`
+1. Add variant to the type system in `src/compiler/30.types/`
 2. Create separate module for complex types
 3. Update type substitution for new variants
 4. Update `contains_var()` if type can contain variables
@@ -26,12 +26,12 @@
 
 Example:
 ```simple
-# src/compiler_core/types.spl
+# src/compiler/30.types/
 enum Type:
     # ... existing variants
     NewType(name: text)   # Add new variant
 
-# src/compiler_core/new_type.spl
+# src/compiler/30.types/new_type.spl
 class NewType:
     name: text
     fields: [Field]
@@ -179,11 +179,11 @@ use app.doc.public_check.export_parser.{find_module_exports}
 use app.doc.public_check.docstring_checker.{check_module_docstrings}
 
 # Find all exported types
-val exports = find_module_exports("src/std/array")
+val exports = find_module_exports("src/lib/array")
 
 # Check which have docstrings
 val export_names = exports.map(\e: e.name)
-val docs = check_module_docstrings("src/std/array", export_names)
+val docs = check_module_docstrings("src/lib/array", export_names)
 
 # Report missing
 for info in docs:

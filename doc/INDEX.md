@@ -208,38 +208,58 @@
 ```
 doc/
 ├── INDEX.md                          ← You are here
+├── FILE.md                           ← Complete folder guide (doc model, all folders)
 ├── EXECUTIVE_SUMMARY.md              ← Start here
 ├── PRODUCTION_READINESS.md           ← Deployment decision
 ├── needed_feature.md                 ← Feature status (UPDATED)
 ├── FEATURES_THAT_WORK.md            ← Working features
 ├── IMPLEMENTATION_FIXES.md           ← Recent fixes
-├── MULTI_AGENT_SESSION_SUMMARY.md    ← Session overview
-├── SESSION_FINAL_SUMMARY.md          ← Final summary
 │
+├── plan/                             ← Plans: why, scope, milestones, risks
+├── requirement/                      ← Functional requirements (user request + REQ-NNN)
+│   └── README.md                     ← Template and format
+├── feature/                          ← Feature specifications (BDD scenarios from REQ)
+│   └── README.md                     ← Template and format
+├── nfr/                              ← Non-functional requirements / SLOs
+│   └── README.md                     ← Template and format
+│
+├── design/                           ← Design documents
+│   └── README.md                     ← Template and format
 ├── architecture/                     ← Architecture documentation
 │   ├── overview.md                   ← High-level architecture
-│   ├── file_class_structure.md       ← **Comprehensive codebase inventory** (2,649 files, 623K lines)
-│   ├── architecture.md               ← Structure, dependencies
-│   ├── architecture_modules.md       ← Module details
-│   └── architecture_flows.md         ← Data flows, execution
+│   └── file_class_structure.md       ← Codebase inventory (2,649 files, 623K lines)
+├── adr/                              ← Architecture Decision Records
+│   └── README.md                     ← ADR format and lifecycle
 │
-├── guide/                            ← User guides (4,700 lines)
+├── research/                         ← Research and options analysis
+├── rule/                             ← Engineering rules (mandatory standards)
+│   └── README.md                     ← Full rules document
+│
+├── guide/                            ← User guides, runbooks (4,700 lines)
 │   ├── async_guide.md
-│   ├── lsp_integration.md
-│   ├── backend_capabilities.md
 │   ├── syntax_quick_reference.md
 │   └── README.md
 │
-├── test/                             ← Test documentation
-│   ├── TEST_STATUS_AUDIT.md
-│   ├── HANG_ANALYSIS.md
+├── test/                             ← Test documentation (auto-generated)
 │   └── test_result.md
-│
-├── feature/                          ← Feature specs
-├── design/                           ← Design docs
-├── research/                         ← Research notes
-└── bug/                              ← Bug reports
+├── bug/                              ← Bug reports (auto-generated)
+└── build/                            ← Build status (auto-generated)
 ```
+
+## 🗺️ Document Relationship Model
+
+```
+PLAN → REQUIREMENTS → FEATURE (BDD) → TESTS → TEST RESULTS
+
+Parallel:
+REQUIREMENTS → NFR
+RESEARCH → DESIGN → ADR
+REQUIREMENTS → ARCHITECTURE
+GUIDES ← OPERATIONS + RUNBOOKS
+RULES → enforced by CI + review
+```
+
+See [FILE.md](FILE.md) for the complete relationship table and per-folder templates.
 
 ---
 

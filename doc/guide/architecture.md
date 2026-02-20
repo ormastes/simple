@@ -14,7 +14,7 @@ Simple uses a two-layer design that separates runtime execution from language im
 ┌─────────────────────────────────────────────────────────┐
 │  Layer 2: Simple Compiler & Tools (100% Simple)        │
 │  ├─ Compiler (src/compiler/)                           │
-│  ├─ Standard Library (src/std/)                        │
+│  ├─ Standard Library (src/lib/)                        │
 │  ├─ Build System (src/app/build/)                      │
 │  ├─ MCP Server (src/app/mcp/)                          │
 │  ├─ LSP Server (src/app/lsp/)                          │
@@ -123,10 +123,10 @@ Native Code (via Layer 1)
 - Borrow checker (reference capabilities)
 - Optimization passes
 
-**2. Standard Library (src/std/)**
+**2. Standard Library (src/lib/)**
 
 ```
-src/std/
+src/lib/
 ├── collections/        # List, Dict, Set, Tree
 ├── io/                 # File, network, process
 ├── async/              # Async/await runtime
@@ -170,7 +170,7 @@ Self-hosting build system with 8 phases:
 **In the distribution package:**
 - ✅ Pre-compiled runtime binary (10 MB)
 - ✅ Complete Simple compiler source (src/compiler/)
-- ✅ Standard library source (src/std/)
+- ✅ Standard library source (src/lib/)
 - ✅ Build system source (src/app/build/)
 - ✅ All tools source (src/app/)
 - ✅ Examples and documentation
@@ -317,7 +317,7 @@ simple build bootstrap-rebuild
 ### Adding Standard Library Features
 
 ```simple
-# src/std/my_module.spl
+# src/lib/my_module.spl
 export fn my_function(x: i64) -> i64:
     x * 2
 

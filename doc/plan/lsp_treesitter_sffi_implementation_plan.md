@@ -133,7 +133,7 @@ extern fn rt_ts_node_child_count(node_handle: i64) -> i64
 extern fn rt_ts_node_child(node_handle: i64, index: i64) -> i64
 ```
 
-**Tier 2: Simple Wrappers** (in `src/std/src/parser/treesitter.spl`)
+**Tier 2: Simple Wrappers** (in `src/lib/src/parser/treesitter.spl`)
 ```simple
 class TreeSitterParser:
     _handle: i64
@@ -158,7 +158,7 @@ class TreeSitterParser:
 
 ### 3.1 Treesitter SFFI Module
 
-**Location:** `src/std/src/parser/treesitter.spl`
+**Location:** `src/lib/src/parser/treesitter.spl`
 
 **Exports:**
 ```simple
@@ -614,7 +614,7 @@ pub extern "C" fn rt_ts_parser_parse(handle: i64, source: *const c_char) -> i64 
 **Tasks:**
 1. ✅ Create SFFI spec: `src/app/ffi_gen/specs/treesitter.spl`
 2. ✅ Generate Rust FFI: `simple sffi-gen --gen-intern treesitter.spl`
-3. ✅ Implement Simple wrappers: `src/std/src/parser/treesitter.spl`
+3. ✅ Implement Simple wrappers: `src/lib/src/parser/treesitter.spl`
 4. ✅ Add extern declarations: `src/app/io/mod.spl`
 5. ✅ Test basic parsing: 5 core tests passing
 
@@ -720,7 +720,7 @@ pub extern "C" fn rt_ts_parser_parse(handle: i64, source: *const c_char) -> i64 
   - [ ] Query functions
   - [ ] Cursor functions
 
-- [ ] Simple Wrappers (`src/std/src/parser/treesitter.spl`)
+- [ ] Simple Wrappers (`src/lib/src/parser/treesitter.spl`)
   - [ ] `TreeSitterParser` class
   - [ ] `Tree` class
   - [ ] `Node` class

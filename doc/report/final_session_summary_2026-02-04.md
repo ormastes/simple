@@ -81,7 +81,7 @@ Through systematic testing and fixing, verified **552+ tests passing** across th
 
 ### Source Files (1 file)
 
-12. **src/std/db_atomic.spl**
+12. **src/lib/db_atomic.spl**
     - Fixed import syntax: `(...)` → `{...}`
     - Fixed lambda syntax: Multi-line → single-line
     - Fixed type syntax: `List<T>` → `[T]`

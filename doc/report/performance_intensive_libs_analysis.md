@@ -18,7 +18,7 @@ This report analyzes the performance-intensive implementations in the Simple lan
 
 ---
 
-## 1. Hash Map Implementation (`src/std/src/map.spl`)
+## 1. Hash Map Implementation (`src/lib/src/map.spl`)
 
 ### Current Implementation Analysis
 

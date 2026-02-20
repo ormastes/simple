@@ -113,7 +113,7 @@ We'll spawn 6 specialized agents working in parallel:
 **Goal:** Production-ready SIMD with explicit intrinsics and auto-vectorization
 
 **Current State:**
-- ✅ API design complete (src/std/simd.spl ~600 lines)
+- ✅ API design complete (src/lib/simd.spl ~600 lines)
 - ✅ MIR opcodes defined (MIR_SIMD_LOAD, MIR_SIMD_ADD, etc.)
 - ✅ Auto-vectorization skeleton (src/compiler/mir_opt/auto_vectorize.spl)
 - ✅ SIMD lowering skeleton (src/compiler/mir_opt/simd_lowering.spl)
@@ -190,21 +190,21 @@ We'll spawn 6 specialized agents working in parallel:
    - Free list allocator (general purpose)
    - Arena allocator (bulk allocation)
    - Tests: test/baremetal/allocator_spec.spl (60 tests)
-   - File: src/std/baremetal/allocator.spl (~800 lines)
+   - File: src/lib/baremetal/allocator.spl (~800 lines)
 
 3. **Syscall Wrappers** (2 days)
    - Semihosting (ARM, RISC-V) for debugging
    - UART I/O (serial console)
    - Timer access
    - Tests: test/baremetal/syscall_spec.spl (40 tests)
-   - File: src/std/baremetal/syscall.spl (~400 lines)
+   - File: src/lib/baremetal/syscall.spl (~400 lines)
 
 4. **Interrupt Handlers** (3 days)
    - Vector table setup
    - Exception handlers
    - Interrupt registration API
    - Tests: test/baremetal/interrupt_spec.spl (50 tests)
-   - File: src/std/baremetal/interrupt.spl (~600 lines)
+   - File: src/lib/baremetal/interrupt.spl (~600 lines)
 
 5. **Integration** (2 days)
    - Build system integration (simple build --target=baremetal-arm)
@@ -214,9 +214,9 @@ We'll spawn 6 specialized agents working in parallel:
 
 **Deliverables:**
 - src/compiler/baremetal/{arm,x86_64,riscv}/crt0.s (900 lines total)
-- src/std/baremetal/allocator.spl (~800 lines)
-- src/std/baremetal/syscall.spl (~400 lines)
-- src/std/baremetal/interrupt.spl (~600 lines)
+- src/lib/baremetal/allocator.spl (~800 lines)
+- src/lib/baremetal/syscall.spl (~400 lines)
+- src/lib/baremetal/interrupt.spl (~600 lines)
 - test/baremetal/ (200 tests)
 - doc/guide/baremetal_programming.md
 

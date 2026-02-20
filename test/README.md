@@ -28,7 +28,7 @@ test/
   specs/                   # Additional specification tests
 
   lib/                     # Import symlinks (DO NOT MODIFY)
-    std/                   # -> src/std/ (symlinks for module imports)
+    std/                   # -> src/lib/ (symlinks for module imports)
     app/                   # -> src/app/
     lib/                   # -> src/lib/
     compiler/              # -> src/compiler/
@@ -97,7 +97,7 @@ describe "std.my_module":
 Test files import source modules via symlinks in `test/lib/`:
 
 ```simple
-# Import from src/std/math.spl
+# Import from src/lib/math.spl
 use std.math.{sqrt, abs, pow}
 
 # Import from src/app/build/types.spl
@@ -110,7 +110,7 @@ use lib.database.stats.{calculate_mean, calculate_std_dev}
 If a module isn't importable, check that the symlink exists:
 ```bash
 ls -la test/lib/std/module_name.spl
-# Should point to ../../../src/std/module_name.spl
+# Should point to ../../../src/lib/module_name.spl
 ```
 
 ## Coverage

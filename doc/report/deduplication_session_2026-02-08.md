@@ -51,7 +51,7 @@ use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 
 ### ✅ Priority 2: String Parsing Utilities (MEDIUM Impact - ~25 lines)
 
-**Updated:** `src/std/text.spl`
+**Updated:** `src/lib/text.spl`
 
 Added functions:
 - `parse_i64_safe(s)` - Parse i64 from string with safe fallback
@@ -66,7 +66,7 @@ Added functions:
 
 ### ✅ Priority 3: Path Utilities (MEDIUM Impact - ~10 lines)
 
-**Created:** `src/std/glob.spl` (30 lines)
+**Created:** `src/lib/glob.spl` (30 lines)
 
 Added glob pattern matching:
 - `glob_match(path, pattern)` - Simple glob matching (* wildcards)
@@ -161,13 +161,13 @@ bin/simple test test/lib/std/unit/tooling/path_utils_spec.spl
 
 ### New Files (2)
 - `src/app/io/file_shell.spl` - Common shell operations
-- `src/std/glob.spl` - Glob pattern matching
+- `src/lib/glob.spl` - Glob pattern matching
 
 ### Modified Files (7)
 1. `src/app/compile/native.spl` - Uses file_shell module
 2. `src/app/compile/llvm_direct.spl` - Uses file_shell module
 3. `src/app/cli/bootstrap_check.spl` - Uses file_shell module
-4. `src/std/text.spl` - Added parse_i64_safe, char_to_digit
+4. `src/lib/text.spl` - Added parse_i64_safe, char_to_digit
 5. `src/app/mcp/fileio_temp.spl` - Uses std.text and std.path
 6. `src/app/mcp/fileio_protection.spl` - Uses std.path and std.glob
 
