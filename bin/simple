@@ -78,17 +78,40 @@ find_bootstrap() {
 # Each fast-path command has a lightweight entry point that only
 # imports what it needs, saving ~160ms of module loading overhead.
 detect_fast_path() {
+    # Find the first non-flag positional argument (the command)
+    local first_cmd=""
     for arg in "$@"; do
-        case "$arg" in
-            --*) continue ;;  # Skip flags
-            test) echo "../test_runner_new/test_runner_main.spl"; return 0 ;;
-            compile) echo "compile_entry.spl"; return 0 ;;
-            bootstrap-check) echo "bootstrap_check.spl"; return 0 ;;
-            lint|fmt|fix) echo "lint_entry.spl"; return 0 ;;
-            *) return 1 ;;    # First non-flag arg is not a fast-path command
-        esac
+        [[ "$arg" == --* ]] && continue
+        first_cmd="$arg"
+        break
     done
-    return 1
+
+    case "$first_cmd" in
+        test)
+            # Single .spl file with no heavy flags → lightweight entry (saves ~54s startup)
+            local spl_arg="" past_test=false has_heavy=false
+            for arg in "$@"; do
+                if [ "$arg" = "test" ]; then past_test=true; continue; fi
+                [ "$past_test" = "false" ] && continue
+                case "$arg" in
+                    --coverage|--sdoctest*|--container*|--chaos|--fuzz|--deploy|--security|--resume|--parallel)
+                        has_heavy=true; break ;;
+                    --*) continue ;;
+                    *) [ -z "$spl_arg" ] && spl_arg="$arg" ;;
+                esac
+            done
+            if [[ "$spl_arg" == *.spl ]] && [ "$has_heavy" = "false" ]; then
+                echo "../test_runner_new/test_runner_single.spl"
+            else
+                echo "../test_runner_new/test_runner_main.spl"
+            fi
+            return 0
+            ;;
+        compile) echo "compile_entry.spl"; return 0 ;;
+        bootstrap-check) echo "bootstrap_check.spl"; return 0 ;;
+        lint|fmt|fix) echo "lint_entry.spl"; return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Run command with noisy stderr lines filtered out.
