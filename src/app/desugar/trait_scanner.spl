@@ -45,6 +45,7 @@ struct TraitMethod:
 struct ScannedTrait:
     name: text
     methods: [TraitMethod]
+    is_interface: bool
 
 # ================================================================
 # Main API
@@ -70,9 +71,16 @@ fn scan_traits(source: text) -> [ScannedTrait]:
         val line = lines[i]
         val trimmed = line.trim()
 
-        # Check if this line starts a trait definition
+        # Check if this line starts a trait or interface definition
         val trait_name = parse_trait_header(trimmed)
-        if trait_name != "":
+        val iface_name = parse_interface_header(trimmed)
+        var detected_name = trait_name
+        var is_iface = false
+        if detected_name == "" and iface_name != "":
+            detected_name = iface_name
+            is_iface = true
+
+        if detected_name != "":
             val trait_indent = get_indent(line)
             val body_indent = trait_indent + 4
 
@@ -96,7 +104,16 @@ fn scan_traits(source: text) -> [ScannedTrait]:
 
             # Parse methods from the collected body lines
             val methods = parse_trait_body(body_lines, body_indent)
-            traits.push(ScannedTrait(name: trait_name, methods: methods))
+
+            # Validate: interface methods cannot have default implementations
+            if is_iface:
+                var mi = 0
+                while mi < methods.len():
+                    if methods[mi].has_default:
+                        print "error: interface methods cannot have default implementations"
+                    mi = mi + 1
+
+            traits.push(ScannedTrait(name: detected_name, methods: methods, is_interface: is_iface))
             i = j
         else:
             i = i + 1
@@ -123,7 +140,7 @@ fn find_trait(name: text, traits: [ScannedTrait]) -> ScannedTrait:
             return t
         idx = idx + 1
     # Not found - return empty trait
-    ScannedTrait(name: name, methods: [])
+    ScannedTrait(name: name, methods: [], is_interface: false)
 
 # ================================================================
 # Trait Header Parsing
@@ -140,6 +157,28 @@ fn parse_trait_header(trimmed: text) -> text:
     # Extract name between "trait " and ":"
     val tlen = trimmed.len()
     val name_part = trimmed[6:tlen - 1]
+    val name = name_part.trim()
+
+    # Validate: name must be non-empty and start with uppercase
+    if name == "":
+        return ""
+    val first_ch = name[0:1]
+    if not is_upper_char(first_ch):
+        return ""
+
+    name
+
+# Parse a trimmed line as an interface header. Returns the interface name if the
+# line matches "interface NAME:", or empty text if it does not.
+fn parse_interface_header(trimmed: text) -> text:
+    if not trimmed.starts_with("interface "):
+        return ""
+    if not trimmed.ends_with(":"):
+        return ""
+
+    # Extract name between "interface " (10 chars) and ":"
+    val tlen = trimmed.len()
+    val name_part = trimmed[10:tlen - 1]
     val name = name_part.trim()
 
     # Validate: name must be non-empty and start with uppercase
