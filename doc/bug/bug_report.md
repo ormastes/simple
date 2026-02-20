@@ -50,8 +50,9 @@
 | MCP dependencies_spec.spl parse error | ✅ CLOSED | Low |
 | **`export...as` syntax breaks runtime parser** | ✅ FIXED | Medium |
 | `bin/simple bug-add` fails: LOG_ERROR not found + build help shown | ✅ FIXED | Medium |
+| MCP jj_commit/describe/new/squash shell quoting bug | ✅ FIXED | Medium |
 
-**Summary:** 41 fixed, 3 open, 1 investigating, 1 workaround, 2 invalid (Updated 2026-02-19)
+**Summary:** 42 fixed, 2 open, 1 investigating, 1 workaround, 2 invalid (Updated 2026-02-20)
 
 ---
 
