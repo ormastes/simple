@@ -1,0 +1,327 @@
+# Compiler Initialization
+#
+# Sets up the complete compilation environment:
+# 1. Load configuration (file -> env -> args)
+# 2. Initialize DI container with profile bindings
+# 3. Initialize AOP with logging aspects
+# 4. Register compiler-specific services
+
+use std_lib.config.AppConfig, std_lib.config.load_full_config, std_lib.config.quick_config
+use std_lib.di.Container, std_lib.di.init_container, std_lib.di.get_container
+use std_lib.di.Backend, std_lib.di.InterpreterBackend, std_lib.di.CompilerBackend, std_lib.di.SdnBackend
+use std_lib.aop.init_aop, std_lib.aop.get_registry, std_lib.aop.Aspect
+
+# ============================================================================
+# Compiler Context
+# ============================================================================
+
+struct CompilerContext:
+    """Complete compiler context with all services."""
+    config: AppConfig
+    container: Container
+    mode: CompilerMode
+
+"""Compiler execution mode."""
+enum CompilerMode:
+    Interpret           # Tree-walking interpreter
+    Jit                 # JIT compilation
+    Aot                 # Ahead-of-time compilation
+    Sdn                 # SDN parsing (data only)
+    Check               # Type check only
+
+impl CompilerMode:
+    static fn from_text(mode: text) -> CompilerMode:
+        match mode:
+            case "interpret": CompilerMode.Interpret
+            case "jit": CompilerMode.Jit
+            case "aot": CompilerMode.Aot
+            case "sdn": CompilerMode.Sdn
+            case "check": CompilerMode.Check
+            case _: CompilerMode.Interpret
+
+    fn to_profile() -> text:
+        """Map mode to DI profile."""
+        match self:
+            case Interpret: "dev"
+            case Jit: "dev"
+            case Aot: "prod"
+            case Sdn: "sdn"
+            case Check: "dev"
+
+# ============================================================================
+# Initialization Functions
+# ============================================================================
+
+var global_context: CompilerContext? = nil
+
+pub fn init_compiler() -> Result<CompilerContext, text>:
+    """Initialize compiler with default configuration."""
+    init_compiler_with_config(quick_config())
+
+pub fn init_compiler_with_file(config_path: text) -> Result<CompilerContext, text>:
+    """Initialize compiler with configuration from file."""
+    val config = load_full_config(config_path)?
+    init_compiler_with_config(config)
+
+pub fn init_compiler_with_config(config: AppConfig) -> Result<CompilerContext, text>:
+    """Initialize compiler with provided configuration."""
+
+    # Step 1: Determine mode
+    val mode = CompilerMode.from_text(config.execution.mode)
+
+    # Step 2: Initialize DI container with profile
+    val profile = mode.to_profile()
+    init_container(profile)
+    val container = get_container()
+
+    # Step 3: Initialize AOP
+    init_aop(config.aop)
+
+    # Step 4: Register compiler-specific services
+    register_compiler_services(container, mode)
+
+    # Step 5: Create context
+    val ctx = CompilerContext(
+        config: config,
+        container: container,
+        mode: mode
+    )
+
+    global_context = Some(ctx)
+    Ok(ctx)
+
+fn register_compiler_services(container: Container, mode: CompilerMode):
+    """Register compiler-specific services based on mode."""
+    match mode:
+        case Interpret:
+            # Interpreter mode: use interpreter backend
+            container.bind("ExecutionEngine", \: InterpreterExecutionEngine(), true)
+        case Jit:
+            # JIT mode: use interpreter with JIT caching
+            container.bind("ExecutionEngine", \: JitExecutionEngine(), true)
+        case Aot:
+            # AOT mode: use compiler backend
+            container.bind("ExecutionEngine", \: AotExecutionEngine(), true)
+        case Sdn:
+            # SDN mode: no execution engine
+            container.bind("ExecutionEngine", \: NoOpExecutionEngine(), true)
+        case Check:
+            # Check mode: no execution, just type checking
+            container.bind("ExecutionEngine", \: NoOpExecutionEngine(), true)
+
+# ============================================================================
+# Execution Engines (Mode-specific)
+# ============================================================================
+
+trait ExecutionEngine:
+    """Interface for code execution."""
+    fn execute(source: text) -> Result<ExecutionResult, text>
+    fn execute_file(path: text) -> Result<ExecutionResult, text>
+    fn compile(source: text) -> Result<CompiledUnit, text>
+    fn name() -> text
+
+"""Result of execution."""
+enum ExecutionResult:
+    Value(Any)
+    ExitCode(i64)
+    None_
+
+struct CompiledUnit:
+    """Result of compilation."""
+    bytes: [u8]
+    symbols: Dict<text, i64>
+    entry_point: text?
+
+struct InterpreterExecutionEngine:
+    """Interpreter-based execution engine."""
+
+impl ExecutionEngine for InterpreterExecutionEngine:
+    fn execute(source: text) -> Result<ExecutionResult, text>:
+        # Parse source and evaluate via interpreter
+        val ast = parse_source(source)?
+        val result = interpret_ast(ast)?
+        Ok(result)
+
+    fn execute_file(path: text) -> Result<ExecutionResult, text>:
+        # Read file, parse, and interpret
+        val source = file_read(path)
+        if source == "":
+            return Err("Failed to read file: {path}")
+        self.execute(source)
+
+    fn compile(source: text) -> Result<CompiledUnit, text>:
+        Err("Interpreter mode does not support compilation")
+
+    fn name() -> text:
+        "InterpreterExecutionEngine"
+
+struct JitExecutionEngine:
+    """JIT compilation engine."""
+    cache: Dict<text, CompiledUnit>
+
+impl ExecutionEngine for JitExecutionEngine:
+    fn execute(source: text) -> Result<ExecutionResult, text>:
+        # JIT compile and execute
+        val compiled = self.compile(source)?
+        if compiled.entry_point.?:
+            val entry = compiled.entry_point.unwrap()
+            Ok(execute_compiled(compiled, entry))
+        else:
+            Err("No entry point found in compiled unit")
+
+    fn execute_file(path: text) -> Result<ExecutionResult, text>:
+        # Read file, JIT compile, and execute
+        val source = file_read(path)
+        if source == "":
+            return Err("Failed to read file: {path}")
+        # Check cache
+        if self.cache.contains_key(path):
+            val cached = self.cache[path]
+            if cached.entry_point.?:
+                return Ok(execute_compiled(cached, cached.entry_point.unwrap()))
+        val result = self.execute(source)
+        result
+
+    fn compile(source: text) -> Result<CompiledUnit, text>:
+        # Parse, lower to MIR, optimize, and compile to native code
+        val ast = parse_source(source)?
+        val mir = lower_to_mir(ast)?
+        val optimized = optimize_mir(mir)?
+        val code = codegen(optimized)?
+        Ok(code)
+
+    fn name() -> text:
+        "JitExecutionEngine"
+
+struct AotExecutionEngine:
+    """Ahead-of-time compilation engine."""
+
+impl ExecutionEngine for AotExecutionEngine:
+    fn execute(source: text) -> Result<ExecutionResult, text>:
+        Err("AOT mode requires compilation first")
+
+    fn execute_file(path: text) -> Result<ExecutionResult, text>:
+        Err("AOT mode requires compilation first")
+
+    fn compile(source: text) -> Result<CompiledUnit, text>:
+        # Parse, lower to MIR, optimize, and compile to object file
+        val ast = parse_source(source)?
+        val mir = lower_to_mir(ast)?
+        val optimized = optimize_mir(mir)?
+        val code = codegen_to_object(optimized)?
+        Ok(code)
+
+    fn name() -> text:
+        "AotExecutionEngine"
+
+struct NoOpExecutionEngine:
+    """No-operation execution engine for SDN and check modes."""
+
+impl ExecutionEngine for NoOpExecutionEngine:
+    fn execute(source: text) -> Result<ExecutionResult, text>:
+        Err("Execution not available in this mode")
+
+    fn execute_file(path: text) -> Result<ExecutionResult, text>:
+        Err("Execution not available in this mode")
+
+    fn compile(source: text) -> Result<CompiledUnit, text>:
+        Err("Compilation not available in this mode")
+
+    fn name() -> text:
+        "NoOpExecutionEngine"
+
+# ============================================================================
+# Global Context Access
+# ============================================================================
+
+pub fn get_context() -> Result<CompilerContext, text>:
+    """Get the global compiler context."""
+    if global_context.is_none():
+        return Err("Compiler not initialized. Call init_compiler() first.")
+    Ok(global_context.unwrap())
+
+pub fn get_engine() -> Result<ExecutionEngine, text>:
+    """Get the execution engine from global context."""
+    val ctx = get_context()?
+    # Resolve as Any and cast (avoid generic method call for bootstrap)
+    val resolved = ctx.container.resolve_any("ExecutionEngine")
+    if resolved.is_err():
+        return Err(resolved.unwrap_err())
+    Ok(resolved.unwrap() as ExecutionEngine)
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+pub fn run(source: text) -> Result<ExecutionResult, text>:
+    """Run Simple code with current context."""
+    val engine = get_engine()?
+    engine.execute(source)
+
+pub fn run_file(path: text) -> Result<ExecutionResult, text>:
+    """Run Simple file with current context."""
+    val engine = get_engine()?
+    engine.execute_file(path)
+
+pub fn compile(source: text) -> Result<CompiledUnit, text>:
+    """Compile Simple code with current context."""
+    val engine = get_engine()?
+    engine.compile(source)
+
+# ============================================================================
+# SDN-Safe Parsing
+# ============================================================================
+
+pub fn parse_sdn_safe(source: text) -> Result<SdnValue, text>:
+    """Parse SDN with guaranteed no code execution.
+
+    Uses SdnBackend which blocks all execution instructions.
+    Safe for untrusted input.
+    """
+    # Create SDN-mode container
+    val container = Container.for_sdn()
+    # Resolve as Any and cast (avoid generic method call for bootstrap)
+    val backend_result = container.resolve_any("Backend")
+    if backend_result.is_err():
+        return Err(backend_result.unwrap_err())
+    val backend = backend_result.unwrap() as Backend
+
+    # Parse SDN key=value pairs from source
+    var data: Dict<text, Any> = {}
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # Skip empty lines and comments
+        if trimmed.len() == 0 or trimmed.starts_with("#"):
+            pass
+        elif trimmed.contains("="):
+            val parts = trimmed.split("=")
+            if parts.len() >= 2:
+                val key = parts[0].trim()
+                val value = parts[1..].join("=").trim()
+                data = data.set(key, value)
+        elif trimmed.ends_with(":"):
+            # Section header (key:) - store as nested marker
+            val key = trimmed[0..trimmed.len()-1].trim()
+            data = data.set(key, {})
+
+    Ok(SdnValue(data: data))
+
+# Placeholder type
+struct SdnValue:
+    data: Dict<text, Any>
+
+impl SdnValue:
+    static fn empty() -> SdnValue:
+        SdnValue(data: {})
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CompilerContext, CompilerMode
+export init_compiler, init_compiler_with_file, init_compiler_with_config
+export get_context, get_engine
+export run, run_file, compile, parse_sdn_safe
+export ExecutionEngine, ExecutionResult, CompiledUnit
+export InterpreterExecutionEngine, JitExecutionEngine, AotExecutionEngine, NoOpExecutionEngine

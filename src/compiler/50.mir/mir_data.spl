@@ -1,0 +1,402 @@
+# MIR - Mid-level Intermediate Representation (Data Structures)
+#
+# Lower-level IR between HIR and native code generation.
+# Features:
+# - Explicit control flow (basic blocks, terminators)
+# - Explicit memory operations (load, store, alloc)
+# - SSA form (each value defined once)
+# - Type-annotated values
+# - Ready for optimization and codegen
+#
+# Split into:
+# - mir_types.spl: Type system and leaf data structures (~210 lines)
+# - mir_instructions.spl: Blocks, instructions, terminators, operands (~460 lines)
+# - mir_data.spl: MirBuilder API + re-exports (this file)
+
+use hir.SymbolId
+use lexer.Span
+use compiler.mir_types.{*}
+use compiler.mir_instructions.{*}
+
+# ============================================================================
+# MIR Builder
+# ============================================================================
+
+struct MirBuilder:
+    """Builder for constructing MIR."""
+    module: MirModule
+    current_function: MirFunction?
+    current_block: BlockId
+    next_local_id: i64
+    next_block_id: i64
+    locals: [MirLocal]
+    blocks: [MirBlock]
+    instructions: [MirInst]
+
+impl MirBuilder:
+    static fn new() -> MirBuilder:
+        MirBuilder(
+            module: MirModule(
+                name: "",
+                functions: {},
+                statics: {},
+                constants: {},
+                types: {}
+            ),
+            current_function: nil,
+            current_block: BlockId.entry(),
+            next_local_id: 0,
+            next_block_id: 1,
+            locals: [],
+            blocks: [],
+            instructions: []
+        )
+
+    # ========================================================================
+    # Function Building
+    # ========================================================================
+
+    me begin_function(symbol: SymbolId, name: text, signature: MirSignature, span: Span):
+        """Begin building a new function."""
+        self.current_function = Some(MirFunction(
+            symbol: symbol,
+            name: name,
+            signature: signature,
+            locals: [],
+            blocks: [],
+            entry_block: BlockId.entry(),
+            span: span,
+            generic_params: [],
+            is_generic_template: false,
+            specialization_of: nil,
+            type_bindings: {}
+        ))
+        self.next_local_id = 0
+        self.next_block_id = 1
+        self.locals = []
+        self.blocks = []
+        self.instructions = []
+        self.current_block = BlockId.entry()
+
+        # Create entry block
+        self.blocks = self.blocks.push(MirBlock(
+            id: BlockId.entry(),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Unreachable  # Placeholder
+        ))
+
+        # Create return local
+        if signature.return_type.kind != MirTypeKind.Unit:
+            self.new_local(Some("_return"), signature.return_type, LocalKind.Return)
+
+        # Create parameter locals
+        for i in 0..signature.params.len():
+            self.new_local(nil, signature.params[i], LocalKind.Arg(i))
+
+    me end_function() -> MirFunction:
+        """Finish building current function and return it."""
+        # Finalize current block
+        self.finalize_block()
+
+        var fn_ = self.current_function.unwrap()
+        fn_.locals = self.locals
+        fn_.blocks = self.blocks
+        self.current_function = nil
+        fn_
+
+    me add_function(fn_: MirFunction):
+        """Add a completed function to the module."""
+        var functions = self.module.functions
+        functions[fn_.symbol] = fn_
+        self.module.functions = functions
+
+    # ========================================================================
+    # Local Variables
+    # ========================================================================
+
+    me new_local(name: text?, type_: MirType, kind: LocalKind) -> LocalId:
+        """Create a new local variable."""
+        val id = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+
+        self.locals = self.locals.push(MirLocal(
+            id: id,
+            name: name,
+            type_: type_,
+            kind: kind
+        ))
+
+        id
+
+    me new_temp(type_: MirType) -> LocalId:
+        """Create a new temporary."""
+        self.new_local(nil, type_, LocalKind.Temp)
+
+    # ========================================================================
+    # Basic Blocks
+    # ========================================================================
+
+    me new_block(label: text?) -> BlockId:
+        """Create a new basic block."""
+        val id = BlockId.new(self.next_block_id)
+        self.next_block_id = self.next_block_id + 1
+
+        self.blocks = self.blocks.push(MirBlock(
+            id: id,
+            label: label,
+            instructions: [],
+            terminator: MirTerminator.Unreachable  # Placeholder
+        ))
+
+        id
+
+    me switch_to_block(block: BlockId):
+        """Switch to building a different block."""
+        self.finalize_block()
+        self.current_block = block
+        self.instructions = []
+
+    me finalize_block():
+        """Finalize current block with accumulated instructions."""
+        if self.instructions.is_empty():
+            return
+
+        # Find and update current block
+        for i in 0..self.blocks.len():
+            if self.blocks[i].id.id == self.current_block.id:
+                var block = self.blocks[i]
+                block.instructions = self.instructions
+                self.blocks[i] = block
+                break
+
+        self.instructions = []
+
+    # ========================================================================
+    # Instructions
+    # ========================================================================
+
+    me emit(inst: MirInst):
+        """Emit an instruction to current block."""
+        self.instructions = self.instructions + [inst]
+
+    me emit_const(dest: LocalId, value: MirConstValue, type_: MirType):
+        """Emit a constant load."""
+        self.emit(MirInst(
+            kind: MirInstKind.Const(dest, value, type_),
+            span: nil
+        ))
+
+    me emit_const_int(value: i64) -> LocalId:
+        """Emit an integer constant and return its local."""
+        val dest = self.new_temp(MirType.i64())
+        self.emit_const(dest, MirConstValue.Int(value), MirType.i64())
+        dest
+
+    me emit_const_float(value: f64) -> LocalId:
+        """Emit a float constant and return its local."""
+        val dest = self.new_temp(MirType.f64())
+        self.emit_const(dest, MirConstValue.Float(value), MirType.f64())
+        dest
+
+    me emit_const_bool(value: bool) -> LocalId:
+        """Emit a boolean constant and return its local."""
+        val dest = self.new_temp(MirType.bool())
+        self.emit_const(dest, MirConstValue.Bool(value), MirType.bool())
+        dest
+
+    me emit_copy(dest: LocalId, src: LocalId):
+        """Emit a copy instruction."""
+        self.emit(MirInst(
+            kind: MirInstKind.Copy(dest, src),
+            span: nil
+        ))
+
+    me emit_move(dest: LocalId, src: LocalId):
+        """Emit a move instruction."""
+        self.emit(MirInst(
+            kind: MirInstKind.Move(dest, src),
+            span: nil
+        ))
+
+    me emit_binop(op: MirBinOp, left: MirOperand, right: MirOperand, type_: MirType) -> LocalId:
+        """Emit a binary operation and return result local."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.BinOp(dest, op, left, right),
+            span: nil
+        ))
+        dest
+
+    me emit_unary(op: MirUnaryOp, operand: MirOperand, type_: MirType) -> LocalId:
+        """Emit a unary operation and return result local."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.UnaryOp(dest, op, operand),
+            span: nil
+        ))
+        dest
+
+    me emit_load(ptr: MirOperand, type_: MirType) -> LocalId:
+        """Emit a load instruction."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.Load(dest, ptr),
+            span: nil
+        ))
+        dest
+
+    me emit_store(ptr: MirOperand, value: MirOperand):
+        """Emit a store instruction."""
+        self.emit(MirInst(
+            kind: MirInstKind.Store(ptr, value),
+            span: nil
+        ))
+
+    me emit_alloc(type_: MirType) -> LocalId:
+        """Emit an allocation."""
+        val dest = self.new_temp(MirType.ptr(type_, true))
+        self.emit(MirInst(
+            kind: MirInstKind.Alloc(dest, type_),
+            span: nil
+        ))
+        dest
+
+    me emit_call(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId?:
+        """Emit a function call."""
+        var dest: LocalId? = nil
+        if return_type.kind != MirTypeKind.Unit:
+            dest = Some(self.new_temp(return_type))
+
+        self.emit(MirInst(
+            kind: MirInstKind.Call(dest, func, args),
+            span: nil
+        ))
+
+        dest
+
+    me emit_call_indirect(ptr: MirOperand, args: [MirOperand], sig: MirSignature, return_type: MirType) -> LocalId?:
+        """Emit an indirect function call (through closure or function pointer)."""
+        var dest: LocalId? = nil
+        if return_type.kind != MirTypeKind.Unit:
+            dest = Some(self.new_temp(return_type))
+
+        self.emit(MirInst(
+            kind: MirInstKind.CallIndirect(dest, ptr, args, sig),
+            span: nil
+        ))
+
+        dest
+
+    me emit_cast(operand: MirOperand, target: MirType) -> LocalId:
+        """Emit a type cast."""
+        val dest = self.new_temp(target)
+        self.emit(MirInst(
+            kind: MirInstKind.Cast(dest, operand, target),
+            span: nil
+        ))
+        dest
+
+    me emit_aggregate(kind: AggregateKind, operands: [MirOperand], type_: MirType) -> LocalId:
+        """Emit aggregate construction."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.Aggregate(dest, kind, operands),
+            span: nil
+        ))
+        dest
+
+    me emit_get_field(base: MirOperand, field: i64, type_: MirType) -> LocalId:
+        """Emit field access."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.GetField(dest, base, field),
+            span: nil
+        ))
+        dest
+
+    me emit_set_field(base: MirOperand, field: i64, value: MirOperand):
+        """Emit field assignment."""
+        self.emit(MirInst(
+            kind: MirInstKind.SetField(base, field, value),
+            span: nil
+        ))
+
+    me emit_gep(base: MirOperand, indices: [MirOperand], type_: MirType) -> LocalId:
+        """Emit GetElementPtr instruction."""
+        val dest = self.new_temp(type_)
+        self.emit(MirInst(
+            kind: MirInstKind.GetElementPtr(dest, base, indices),
+            span: nil
+        ))
+        dest
+
+    # ========================================================================
+    # Terminators
+    # ========================================================================
+
+    me terminate_goto(target: BlockId):
+        """Terminate current block with unconditional jump."""
+        self.set_terminator(MirTerminator.Goto(target))
+
+    me terminate_return(value: MirOperand?):
+        """Terminate current block with return."""
+        self.set_terminator(MirTerminator.Return(value))
+
+    me terminate_if(cond: MirOperand, then_: BlockId, else_: BlockId):
+        """Terminate current block with conditional branch."""
+        self.set_terminator(MirTerminator.If(cond, then_, else_))
+
+    me terminate_switch(value: MirOperand, targets: [(i64, BlockId)], default: BlockId):
+        """Terminate current block with switch."""
+        self.set_terminator(MirTerminator.Switch(value, targets, default))
+
+    me terminate_unreachable():
+        """Terminate current block as unreachable."""
+        self.set_terminator(MirTerminator.Unreachable)
+
+    me set_terminator(term: MirTerminator):
+        """Set terminator for current block."""
+        self.finalize_block()
+
+        for i in 0..self.blocks.len():
+            if self.blocks[i].id.id == self.current_block.id:
+                var block = self.blocks[i]
+                block.terminator = term
+                self.blocks[i] = block
+                break
+
+# ============================================================================
+# Exports (re-export all from split modules + MirBuilder)
+# ============================================================================
+
+# From mir_types
+export LayoutPhase
+export MirSignature, MirLocal, LocalId, LocalKind
+export MirStatic, MirConstant, MirConstValue
+export MirTypeDef, MirTypeDefKind, MirFieldDef, MirVariantDef
+export MirType, MirTypeKind
+
+# From mir_instructions
+export BlockId, MirBlock
+export MirModule, MirFunction
+export MirInst, MirInstKind, MirBinOp, MirUnaryOp, AggregateKind
+export MirOperand, MirOperandKind
+export mir_operand_copy, mir_operand_move, mir_operand_const_int, mir_operand_const_float, mir_operand_const_bool
+export SwitchCase, MirAsmOperand
+export MirTerminator
+export MirBody
+export copy_mir_function_with_blocks
+
+# Borrow checking support types
+export MirBorrowKind, MirPlace, MirProjection
+
+# GPU support types
+export GpuBarrierScope, GpuMemoryScope, GpuAtomicOpKind
+
+# VHDL support types
+export VhdlProcessKind, VhdlClockDomain, VhdlClockEdge
+export VhdlSignalKind, VhdlPortDirection, VhdlSignalResolution, VhdlNumericKind
+
+# MirBuilder (defined in this file)
+export MirBuilder

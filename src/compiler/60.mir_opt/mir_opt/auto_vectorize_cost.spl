@@ -1,0 +1,237 @@
+# Auto-Vectorization Pass - Phase 3: Cost Model and Decision
+#
+# Estimates scalar vs vector execution costs to determine
+# whether vectorization is profitable for a given loop.
+
+use compiler.mir_data.{MirBlock, MirInst, MirInstKind, MirBinOp, LocalId}
+use compiler.mir_opt.auto_vectorize_types.{LoopInfo}
+use compiler.mir_opt.auto_vectorize_validate.{estimate_trip_count}
+
+# ============================================================================
+# Cost Estimate
+# ============================================================================
+
+struct CostEstimate:
+    """Cost estimate for loop execution."""
+    scalar_cost: i64      # Estimated scalar execution time
+    vector_cost: i64      # Estimated vector execution time
+    speedup: f64          # Estimated speedup (scalar/vector)
+    profitable: bool      # True if vectorization is profitable
+
+# ============================================================================
+# Cost Estimation
+# ============================================================================
+
+fn estimate_vectorization_cost(
+    loop: LoopInfo,
+    body_blocks: [MirBlock],
+    vector_width: i64,
+    element_type: text
+) -> CostEstimate:
+    """
+    Estimate cost of scalar vs vector execution.
+    Returns speedup estimate and profitability decision.
+    """
+    # Estimate scalar cost
+    val scalar_cost = estimate_scalar_cost(loop, body_blocks)
+
+    # Estimate vector cost
+    val vector_cost = estimate_vector_cost(loop, body_blocks, vector_width, element_type)
+
+    # Calculate speedup
+    var speedup = 0.0
+    if vector_cost > 0:
+        speedup = int_to_float(scalar_cost) / int_to_float(vector_cost)
+
+    # Profitable if speedup > 1.5x (threshold to overcome overhead)
+    val profitable = speedup > 1.5
+
+    CostEstimate(
+        scalar_cost: scalar_cost,
+        vector_cost: vector_cost,
+        speedup: speedup,
+        profitable: profitable
+    )
+
+fn estimate_scalar_cost(loop: LoopInfo, body_blocks: [MirBlock]) -> i64:
+    """
+    Estimate scalar execution cost in arbitrary time units.
+    Based on instruction counts and operation types.
+    """
+    var cost = 0
+    val trip_count = estimate_trip_count(loop)
+
+    for block in body_blocks:
+        for inst in block.instructions:
+            val inst_cost = get_scalar_instruction_cost(inst)
+            cost = cost + inst_cost
+
+    # Multiply by trip count
+    cost * trip_count
+
+fn estimate_vector_cost(loop: LoopInfo, body_blocks: [MirBlock], vector_width: i64, element_type: text) -> i64:
+    """
+    Estimate vector execution cost including overhead.
+    Accounts for: vector ops, alignment checks, remainder loop.
+    """
+    var cost = 0
+    val trip_count = estimate_trip_count(loop)
+
+    # Vector loop iterations
+    val vector_iters = trip_count / vector_width
+
+    # Remainder loop iterations
+    val remainder_iters = trip_count % vector_width
+
+    # Cost of vector loop
+    for block in body_blocks:
+        for inst in block.instructions:
+            val inst_cost = get_vector_instruction_cost(inst, element_type)
+            cost = cost + inst_cost
+
+    cost = cost * vector_iters
+
+    # Cost of remainder loop (scalar)
+    var remainder_cost = 0
+    for block in body_blocks:
+        for inst in block.instructions:
+            remainder_cost = remainder_cost + (get_scalar_instruction_cost(inst))
+
+    cost = cost + (remainder_cost * remainder_iters)
+
+    # Add overhead costs
+    cost = cost + (estimate_vectorization_overhead(body_blocks, element_type))
+
+    cost
+
+# ============================================================================
+# Instruction Cost Tables
+# ============================================================================
+
+fn get_scalar_instruction_cost(inst: MirInst) -> i64:
+    """
+    Get cost of executing an instruction in scalar mode.
+    Costs are relative (e.g., multiply is more expensive than add).
+    """
+    match inst.kind:
+        case BinOp(_, op, _, _):
+            match op:
+                case Add | Sub: 1
+                case Mul: 3
+                case Div: 10
+                case _: 2
+        case Load(_, _): 4   # Memory access is expensive
+        case Store(_, _): 4
+        case GetElementPtr(_, _, _): 2
+        case _: 1
+
+fn get_vector_instruction_cost(inst: MirInst, element_type: text) -> i64:
+    """
+    Get cost of executing an instruction in vector mode.
+    Generally cheaper per element than scalar.
+    """
+    match inst.kind:
+        case BinOp(_, op, _, _):
+            match op:
+                case Add | Sub: 2     # Vector add/sub ~2 cycles
+                case Mul: 5           # Vector mul ~5 cycles
+                case Div: 15          # Vector div still expensive
+                case _: 3
+        case Load(_, _): 8            # Vector load (wider)
+        case Store(_, _): 8           # Vector store
+        case GetElementPtr(_, _, _): 2
+        case _: 1
+
+fn estimate_vectorization_overhead(body_blocks: [MirBlock], element_type: text) -> i64:
+    """
+    Estimate overhead of vectorization.
+    Includes: alignment checks, loop peeling, epilogue code.
+    """
+    var overhead = 0
+
+    # Alignment check overhead
+    overhead = overhead + 10
+
+    # Loop setup overhead (prologue)
+    overhead = overhead + 5
+
+    # Epilogue overhead (remainder loop setup)
+    overhead = overhead + 5
+
+    # Memory access alignment penalties
+    var loads = 0
+    var stores = 0
+    for block in body_blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Load(_, _): loads = loads + 1
+                case Store(_, _): stores = stores + 1
+                case _: pass_do_nothing
+
+    # Unaligned access penalty (assume 50% chance of misalignment)
+    overhead = overhead + ((loads + stores) * 3)
+
+    overhead
+
+# ============================================================================
+# Utility
+# ============================================================================
+
+fn int_to_float(x: i64) -> f64:
+    """Convert integer to float for division."""
+    # This would use actual conversion in real implementation
+    # Simplified: treat as approximate conversion
+    var result = 0.0
+    if x > 0:
+        result = 1.0
+        var i = 1
+        while i < x:
+            result = result + 1.0
+            i = i + 1
+    result
+
+# ============================================================================
+# Vectorization Decision
+# ============================================================================
+
+fn should_vectorize_loop(loop: LoopInfo, body: [MirBlock]) -> bool:
+    """
+    Decide if loop should be vectorized based on cost model.
+
+    Factors:
+    - Loop trip count (must be >= 4 to benefit)
+    - Operation types (floating point benefits more)
+    - Memory access patterns (stride-1 is best)
+    - Complexity (simple loops only)
+    """
+    val trip_count = loop.end_value - loop.start_value
+
+    # Need at least 4 iterations to benefit from SSE
+    if trip_count < 4:
+        return false
+
+    # Check if operations are SIMD-friendly
+    var has_vectorizable_ops = false
+    for block in body:
+        for inst in block.instructions:
+            match inst.kind:
+                case BinOp(_, op, _, _):
+                    match op:
+                        case Add | Sub | Mul:
+                            has_vectorizable_ops = true
+                        case _:
+                            pass_do_nothing
+                case _:
+                    pass_do_nothing
+
+    has_vectorizable_ops
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CostEstimate
+export estimate_vectorization_cost, estimate_scalar_cost, estimate_vector_cost
+export get_scalar_instruction_cost, get_vector_instruction_cost
+export estimate_vectorization_overhead, int_to_float
+export should_vectorize_loop

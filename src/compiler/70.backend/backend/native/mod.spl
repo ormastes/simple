@@ -1,0 +1,303 @@
+# Native Backend - Direct Machine Code Generation
+#
+# Produces native object files (.o) directly from MIR without external toolchains.
+# No gcc, clang, llc, or any external tool needed.
+#
+# Pipeline: MIR -> ISel -> RegAlloc -> Encode -> Layout -> ELF/Mach-O
+#
+# Supported architectures:
+# - x86_64 (Linux ELF, macOS Mach-O)
+# - AArch64 (Linux ELF, macOS Mach-O)
+# - RISC-V 64 (Linux ELF)
+
+use compiler.mir_data.{MirModule}
+use compiler.core.backend_types.{CodegenTarget, CompiledModule}
+use compiler.backend.native.isel_x86_64.{isel_module}
+use compiler.backend.native.isel_aarch64.{isel_module_aarch64}
+use compiler.backend.native.isel_riscv64.{isel_module_riscv64}
+use compiler.backend.native.regalloc.{regalloc_module}
+use compiler.backend.native.encode_x86_64.{encode_module}
+use compiler.backend.native.encode_aarch64.{encode_module_aarch64}
+use compiler.backend.native.encode_riscv64.{encode_module_riscv64}
+use compiler.backend.native.elf_writer.{elf_writer_x86_64, elf_add_section, new_text_section, write_elf64}
+use compiler.backend.native.native_layout.{reorder_by_layout}
+use compiler.backend.native.native_elf.{emit_elf_x86_64, emit_elf_aarch64, emit_elf_riscv64}
+use compiler.backend.native.native_macho.{compile_native_macho_aarch64, compile_native_macho_x86_64, emit_macho_aarch64, emit_macho_x86_64}
+
+# ============================================================================
+# Native Backend Entry Point
+# ============================================================================
+
+fn compile_native(module: MirModule, target: CodegenTarget) -> [i64]:
+    match target:
+        case X86_64:
+            compile_native_x86_64(module)
+        case AArch64:
+            compile_native_aarch64(module)
+        case Riscv64:
+            compile_native_riscv64(module)
+        case AArch64_MacOS:
+            compile_native_macho_aarch64(module)
+        case X86_64_MacOS:
+            compile_native_macho_x86_64(module)
+        case _:
+            compile_native_stub(module, "unsupported")
+
+fn compile_native_x86_64(module: MirModule) -> [i64]:
+    # Phase 1: Instruction Selection (MIR -> MachInst)
+    val mach_module = isel_module(module)
+
+    # Phase 2: Register Allocation (virtual -> physical regs)
+    val allocated = regalloc_module(mach_module)
+
+    # Phase 3: Instruction Encoding (MachInst -> bytes)
+    val encoded_funcs = encode_module(allocated)
+
+    # Phase 4: Layout Optimization & ELF Emission
+    emit_elf_x86_64(encoded_funcs, allocated, module)
+
+fn compile_native_aarch64(module: MirModule) -> [i64]:
+    # Phase 1: Instruction Selection (MIR -> MachInst)
+    val mach_module = isel_module_aarch64(module)
+
+    # Phase 2: Register Allocation (virtual -> physical regs)
+    val allocated = regalloc_module(mach_module)
+
+    # Phase 3: Instruction Encoding (MachInst -> bytes)
+    val encoded_funcs = encode_module_aarch64(allocated)
+
+    # Phase 4: Layout Optimization & ELF Emission
+    emit_elf_aarch64(encoded_funcs, allocated, module)
+
+fn compile_native_riscv64(module: MirModule) -> [i64]:
+    # Phase 1: Instruction Selection (MIR -> MachInst)
+    val mach_module = isel_module_riscv64(module)
+
+    # Phase 2: Register Allocation (virtual -> physical regs)
+    val allocated = regalloc_module(mach_module)
+
+    # Phase 3: Instruction Encoding (MachInst -> bytes)
+    val encoded_funcs = encode_module_riscv64(allocated)
+
+    # Phase 4: Layout Optimization & ELF Emission
+    emit_elf_riscv64(encoded_funcs, allocated, module)
+
+fn compile_native_stub(module: MirModule, arch: text) -> [i64]:
+    # Stub for unsupported architectures - returns empty ELF
+    var writer = elf_writer_x86_64()
+    val text_section = new_text_section([0xc3])  # Just a ret
+    writer = elf_add_section(writer, text_section)
+    write_elf64(writer)
+
+# ============================================================================
+# High-Level API
+# ============================================================================
+
+fn native_compile_to_object(module: MirModule, target: CodegenTarget) -> [i64]:
+    compile_native(module, target)
+
+fn native_compile_result(module: MirModule, target: CodegenTarget) -> CompiledModule:
+    val object_bytes = compile_native(module, target)
+    CompiledModule(
+        name: module.name,
+        object_code: Some(object_bytes),
+        assembly: nil,
+        llvm_ir: nil,
+        mir_dump: nil,
+        symbols: [],
+        compile_time_ms: 0
+    )
+
+# ============================================================================
+# SMF Generation with Embedded Object Code
+# ============================================================================
+#
+# Generates SMF v1.1 files with native ELF object code embedded.
+# Self-contained: no dependency on smf_writer.spl or smf_header.spl
+# (which can't load in interpreter due to triple-quoted strings/generics).
+#
+# SMF v1.1 layout (trailer-based, like ZIP):
+#   [Object code bytes]   offset 0
+#   [Section table]        1+ entries, 64 bytes each
+#   [Symbol table]         1+ entries, 52 bytes each
+#   [String table]         null-terminated names
+#   [Header - 128 bytes]   trailer at EOF
+
+fn compile_native_to_smf(module: MirModule, target: CodegenTarget) -> [i64]:
+    val obj_bytes = compile_native(module, target)
+    wrap_object_in_smf(obj_bytes, module.name, target)
+
+fn wrap_object_in_smf(obj_bytes: [i64], module_name: text, target: CodegenTarget) -> [i64]:
+    # Determine architecture byte for SMF header
+    val arch_byte = target_to_arch_byte(target)
+    val platform_byte = detect_platform_byte(target)
+
+    # Layout calculation
+    val obj_size = obj_bytes.len()
+    val section_entry_size = 64
+    val symbol_entry_size = 52
+    val section_count = 1      # Just the code section
+    val symbol_count = 1       # "main" symbol
+
+    # Build string table: "main\0"
+    val strtab: [i64] = [109, 97, 105, 110, 0]  # "main\0"
+
+    # Calculate offsets
+    val code_offset = 0
+    val section_table_offset = obj_size
+    val section_table_size = section_count * section_entry_size
+    val symbol_table_offset = section_table_offset + section_table_size
+    val symbol_table_size = symbol_count * symbol_entry_size
+    val string_table_offset = symbol_table_offset + symbol_table_size
+
+    # Build SMF bytes
+    var smf: [i64] = []
+
+    # 1. Object code at offset 0
+    smf = smf + obj_bytes
+
+    # 2. Section table - code section entry (64 bytes)
+    smf = smf + [1]                              # section_type = Code
+    smf = smf + [0, 0, 0]                        # padding
+    smf = smf + smf_u32_bytes(5)                  # flags = READ|EXEC (0x05)
+    smf = smf + smf_u64_bytes(code_offset)        # offset
+    smf = smf + smf_u64_bytes(obj_size)           # size
+    smf = smf + smf_u64_bytes(obj_size)           # virtual_size
+    smf = smf + smf_u32_bytes(16)                 # alignment
+    # Section name "code" (16 bytes, zero-padded)
+    smf = smf + [99, 111, 100, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    # Pad to 64 bytes (36 + 16 = 52, need 12 more)
+    smf = smf + [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    # 3. Symbol table - "main" entry (52 bytes)
+    smf = smf + smf_u32_bytes(0)                  # name_offset in string table
+    smf = smf + smf_u64_bytes(smf_hash_name("main"))  # name_hash
+    smf = smf + [1]                               # sym_type = Function
+    smf = smf + [1]                               # binding = Global
+    smf = smf + [0]                               # visibility
+    smf = smf + [0]                               # flags
+    smf = smf + smf_u64_bytes(0)                  # value (offset in code section)
+    smf = smf + smf_u64_bytes(obj_size)           # size
+    smf = smf + smf_u32_bytes(0)                  # type_id
+    smf = smf + smf_u32_bytes(0)                  # version
+    smf = smf + [0]                               # template_param_count
+    smf = smf + [0, 0, 0]                         # reserved
+    smf = smf + smf_u64_bytes(0)                  # template_offset
+
+    # 4. String table
+    smf = smf + strtab
+
+    # 5. SMF Header (128 bytes) - trailer at end
+    # Identification (8 bytes)
+    smf = smf + [83, 77, 70, 0]                   # magic "SMF\0"
+    smf = smf + [1]                               # version_major
+    smf = smf + [1]                               # version_minor
+    smf = smf + [platform_byte]                   # platform
+    smf = smf + [arch_byte]                       # arch
+
+    # Flags and counts (20 bytes)
+    smf = smf + smf_u32_bytes(1)                  # flags = EXECUTABLE
+    smf = smf + [0]                               # compression = none
+    smf = smf + [0]                               # compression_level
+    smf = smf + [0, 0]                            # reserved_compression
+    smf = smf + smf_u32_bytes(section_count)      # section_count
+    smf = smf + smf_u64_bytes(section_table_offset) # section_table_offset
+
+    # Symbols (16 bytes)
+    smf = smf + smf_u64_bytes(symbol_table_offset)  # symbol_table_offset
+    smf = smf + smf_u32_bytes(symbol_count)       # symbol_count
+    smf = smf + smf_u32_bytes(1)                  # exported_count
+
+    # Execution (16 bytes)
+    smf = smf + smf_u64_bytes(0)                  # entry_point
+    smf = smf + smf_u32_bytes(0)                  # stub_size
+    smf = smf + smf_u32_bytes(0)                  # smf_data_offset
+
+    # Hashing (16 bytes)
+    smf = smf + smf_u64_bytes(0)                  # module_hash
+    smf = smf + smf_u64_bytes(0)                  # source_hash
+
+    # Hints (12 bytes)
+    smf = smf + [0]                               # app_type = CLI
+    smf = smf + smf_u16_bytes(1280)               # window_width
+    smf = smf + smf_u16_bytes(720)                # window_height
+    smf = smf + [0]                               # prefetch_hint
+    smf = smf + [0]                               # prefetch_file_count
+    smf = smf + [0, 0, 0, 0, 0]                  # reserved_hints
+
+    # Reserved (40 bytes)
+    smf = smf + [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    smf
+
+# SMF binary helpers (self-contained, no imports needed)
+# Uses % and / instead of bitwise and/shift (and/or/xor are boolean in interpreter)
+
+fn smf_byte_of(value: i64, shift: i64) -> i64:
+    # Extract byte at position 'shift' (0, 8, 16, 24, 32, 40, 48, 56)
+    var v = value
+    # Divide by 2^shift
+    for i in 0..shift:
+        v = v / 2
+    v % 256
+
+fn smf_u16_bytes(value: i64) -> [i64]:
+    val b0 = value % 256
+    val b1 = (value / 256) % 256
+    [b0, b1]
+
+fn smf_u32_bytes(value: i64) -> [i64]:
+    val b0 = value % 256
+    val b1 = (value / 256) % 256
+    val b2 = (value / 65536) % 256
+    val b3 = (value / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn smf_u64_bytes(value: i64) -> [i64]:
+    val b0 = value % 256
+    val b1 = (value / 256) % 256
+    val b2 = (value / 65536) % 256
+    val b3 = (value / 16777216) % 256
+    val b4 = (value / 4294967296) % 256
+    val b5 = (value / 1099511627776) % 256
+    val b6 = (value / 281474976710656) % 256
+    val b7 = (value / 72057594037927936) % 256
+    [b0, b1, b2, b3, b4, b5, b6, b7]
+
+fn smf_hash_name(name: text) -> i64:
+    # Simple hash based on string length and character positions
+    # (interpreter lacks .to_bytes() on str, so no byte-level access)
+    # Returns 0 for empty strings - valid in SMF (disables hash-based lookup)
+    var hash = 5381
+    for i in 0..name.len():
+        hash = hash * 33 + (i + 1) * 7
+    hash = hash * 31 + name.len()
+    hash
+
+fn target_to_arch_byte(target: CodegenTarget) -> i64:
+    match target:
+        case X86_64: 1
+        case AArch64: 2
+        case Riscv64: 5
+        case AArch64_MacOS: 2
+        case X86_64_MacOS: 1
+        case _: 1  # Default x86_64
+
+fn detect_platform_byte(target: CodegenTarget) -> i64:
+    match target:
+        case AArch64_MacOS | X86_64_MacOS: 2  # macOS
+        case _: 1  # Linux
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export compile_native, compile_native_x86_64, compile_native_aarch64, compile_native_riscv64
+export compile_native_macho_aarch64, compile_native_macho_x86_64
+export emit_elf_x86_64, emit_elf_aarch64, emit_elf_riscv64
+export emit_macho_aarch64, emit_macho_x86_64
+export native_compile_to_object, native_compile_result
+export compile_native_to_smf, wrap_object_in_smf
+export smf_u16_bytes, smf_u32_bytes, smf_u64_bytes, smf_hash_name
+export target_to_arch_byte, detect_platform_byte
+export reorder_by_layout

@@ -128,6 +128,12 @@ bin/simple todo-scan                # Update TODO tracking
 bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
 
+# C Backend Bootstrap (CMake + Ninja)
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+
 # LLM Integration Testing (requires claude CLI + auth, ~$1-2 per run)
 CLAUDECODE= bin/simple test test/system/llm_caret_live_comprehensive_spec.spl
 ```
@@ -215,16 +221,27 @@ src/
     qemu/           # QEMU boot/debug runner
     ...             # + full stdlib: text, math, json, crypto, net, async, date, regex, etc.
   std -> lib        # Symlink: `use std.X` resolves to src/lib/X (both namespaces work)
-  compiler_core/    # Bootstrap build infra (CMakeLists.txt, generated C++ output)
+  compiler_cpp/     # Generated C++20 output (CMakeLists.txt + *.cpp — bootstrap via CMake+Ninja)
+  compiler_core/    # Bootstrap build infra (CMakeLists.txt, legacy)
   compiler_seed/    # C runtime (runtime.c/runtime.h — linked by generated C++)
-  compiler/         # Unified compiler (all backends, all stages)
-    core/           # Core types (lexer, parser, AST, AOP, interpreter, tokens, types)
-    backend/        # Backends (LLVM, Cranelift, Native, C/C++, Wasm, CUDA, Vulkan)
-    blocks/         # Block definition system
-    interpreter/    # Shared interpreter code (contracts, operators, pattern, llvm)
-    mdsoc/          # Multi-Dimensional Separation of Concerns (virtual capsules, 3-tier visibility)
-    feature/        # MDSOC pipeline stages (typed port contracts)
-    transform/      # MDSOC stage boundary adapters (entity views)
+  compiler/         # Unified compiler — numbered layers (NN.name/ prefix stripped for imports)
+    00.common/      # Error types, config, effects, visibility, diagnostics, registry
+    10.frontend/    # Lexer, parser, AST, treesitter, desugar, parser types
+    15.blocks/      # Block definition system (22 files)
+    20.hir/         # HIR types, definitions, lowering, inference
+    25.traits/      # Trait def, impl, solver, coherence, validation
+    30.types/       # Type inference, type system, dimension constraints, phase files
+    35.semantics/   # Semantic analysis, lint, macro check, resolve, const eval
+    40.mono/        # Monomorphization (18 files), instantiation
+    50.mir/         # MIR types, data, instructions, lowering, serialization
+    55.borrow/      # Borrow checking, GC analysis
+    60.mir_opt/     # MIR optimization passes (17 files)
+    70.backend/     # Backends (LLVM, C, Cranelift, WASM, CUDA, Vulkan, Native), linker
+    80.driver/      # Driver, pipeline, project, build mode, incremental
+    85.mdsoc/       # MDSOC (virtual capsules, feature, transform, weaving, adapters)
+    90.tools/       # API surface, coverage, query, symbol analyzer, AOP
+    95.interp/      # Interpreter, MIR interpreter, execution
+    99.loader/      # Module resolver, loader
   i18n/             # Internationalization
 test/               # Test files (lib, app, compiler, benchmarks)
 doc/                # Documentation (report, design, guide, research, feature, test, bug)

@@ -1,0 +1,504 @@
+# MIR Lowering - HIR to MIR Transformation
+#
+# This module handles lowering from HIR (High-level IR) to MIR (Mid-level IR).
+# It converts:
+# - Nested expressions to SSA form
+# - Control flow to basic blocks
+# - Memory operations to explicit loads/stores
+# - Type system from HIR to MIR representation
+#
+# Split into:
+# - mir_lowering_types.spl: Struct definitions (MirLowering, MirError)
+# - mir_lowering.spl: Core coordinator, module/function/type lowering, asm/target (this file)
+# - mir_lowering_expr.spl: Expression lowering, operators, calls, literals
+# - mir_lowering_stmts.spl: Statement lowering, control flow (if/loop/for)
+# - mir_lowering_ml.spl: ML blocks, async/await, custom blocks
+
+use mir_data.*
+use hir.*
+use lexer.Span
+use compiler.blocks.value.BlockValue
+
+# Import struct definitions from types module
+use compiler.mir_lowering_types.{MirLowering, MirError}
+
+# Import split modules so their impl blocks are linked
+use compiler.mir_lowering_expr.*
+use compiler.mir_lowering_stmts.*
+use compiler.mir_lowering_ml.*
+
+impl MirLowering:
+    static fn new(symbols: SymbolTable) -> MirLowering:
+        MirLowering(
+            builder: MirBuilder.new(),
+            symbols: symbols,
+            local_map: {},
+            loop_stack: [],
+            errors: [],
+            field_map: {}
+        )
+
+    me lower_module(module: HirModule) -> MirModule:
+        """Lower HIR module to MIR."""
+        # Copy-modify-reassign: nested field mutations don't propagate in interpreter
+        var builder = self.builder
+        var builder_module = builder.module
+        builder_module.name = module.name
+        builder.module = builder_module
+        self.builder = builder
+
+        # Build field map from struct and class definitions
+        for (sym_id, struct_def) in module.structs:
+            var field_names: [text] = []
+            for field in struct_def.fields:
+                field_names.push(field.name)
+            self.field_map[sym_id.id] = field_names
+
+        for (sym_id, class_def) in module.classes:
+            var field_names: [text] = []
+            for field in class_def.fields:
+                field_names.push(field.name)
+            self.field_map[sym_id.id] = field_names
+
+        # Lower functions (skip extern declarations - they have no body)
+        for fn_ in module.functions.values():
+            var fn_is_extern = false
+            if fn_.is_extern.?:
+                fn_is_extern = fn_.is_extern
+            if fn_is_extern:
+                continue
+            val mir_fn = self.lower_function(fn_)
+            # Copy-modify-reassign: self.builder.add_function() won't propagate
+            var bldr = self.builder
+            bldr.add_function(mir_fn)
+            self.builder = bldr
+
+        # Lower constants
+        for const_ in module.constants.values():
+            self.lower_const(const_)
+
+        self.builder.module
+
+    me lower_function(fn_: HirFunction) -> MirFunction:
+        """Lower HIR function to MIR."""
+        self.local_map = {}
+
+        # Build signature
+        var params: [MirType] = []
+        for p in fn_.params:
+            params = params.push(self.lower_type(p.type_))
+
+        val return_type = self.lower_type(fn_.return_type)
+        val signature = MirSignature(
+            params: params,
+            return_type: return_type,
+            is_variadic: false
+        )
+
+        # Begin function (copy-modify-reassign for interpreter)
+        var bldr = self.builder
+        bldr.begin_function(fn_.symbol, fn_.name, signature, fn_.span)
+        self.builder = bldr
+
+        # Map parameters to locals
+        for i in 0..fn_.params.len():
+            val param = fn_.params[i]
+            val local = LocalId(id: i + 1)  # +1 for return slot
+            self.local_map[param.symbol] = local
+
+        # Lower body
+        val result = self.lower_block(fn_.body)
+
+        # Return result (copy-modify-reassign for interpreter)
+        var bldr2 = self.builder
+        if result.?:
+            bldr2.terminate_return(Some(mir_operand_copy(result.unwrap())))
+        else:
+            bldr2.terminate_return(nil)
+        self.builder = bldr2
+
+        var bldr3 = self.builder
+        val fn_result = bldr3.end_function()
+        self.builder = bldr3
+        fn_result
+
+    me lower_const(const_: HirConst):
+        """Lower HIR constant to MIR static."""
+        val value = self.lower_const_expr(const_.value)
+        if value.?:
+            # Copy-modify-reassign: self.builder.module nested access
+            var bldr = self.builder
+            var module = bldr.module
+            var constants = module.constants
+            constants[const_.symbol] = MirConstant(
+                symbol: const_.symbol,
+                name: const_.name,
+                type_: self.lower_type(const_.type_),
+                value: value.unwrap()
+            )
+            module.constants = constants
+            bldr.module = module
+            self.builder = bldr
+
+    me lower_type(type_: HirType) -> MirType:
+        """Lower HIR type to MIR type."""
+        match type_.kind:
+            case Int(bits, signed):
+                if signed:
+                    match bits:
+                        case 8: MirType(kind: MirTypeKind.I8)
+                        case 16: MirType(kind: MirTypeKind.I16)
+                        case 32: MirType(kind: MirTypeKind.I32)
+                        case _: MirType(kind: MirTypeKind.I64)
+                else:
+                    match bits:
+                        case 8: MirType(kind: MirTypeKind.U8)
+                        case 16: MirType(kind: MirTypeKind.U16)
+                        case 32: MirType(kind: MirTypeKind.U32)
+                        case _: MirType(kind: MirTypeKind.U64)
+            case Float(bits):
+                match bits:
+                    case 32: MirType(kind: MirTypeKind.F32)
+                    case _: MirType(kind: MirTypeKind.F64)
+            case Bool:
+                MirType(kind: MirTypeKind.Bool)
+            case Char:
+                MirType(kind: MirTypeKind.Char)
+            case Str:
+                # String is a fat pointer (ptr, len)
+                MirType(kind: MirTypeKind.Tuple([
+                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+                    MirType(kind: MirTypeKind.U64)
+                ]))
+            case Unit:
+                MirType(kind: MirTypeKind.Unit)
+            case Tuple(elements):
+                var mir_elements: [MirType] = []
+                for e in elements:
+                    mir_elements = mir_elements.push(self.lower_type(e))
+                MirType(kind: MirTypeKind.Tuple(mir_elements))
+            case Array(element, size):
+                MirType(kind: MirTypeKind.Array(self.lower_type(element), size ?? 0))
+            case Ref(inner, mutable):
+                MirType(kind: MirTypeKind.Ref(self.lower_type(inner), mutable))
+            case Optional(inner):
+                # Optional is enum { nil, Some(T) }
+                MirType(kind: MirTypeKind.Tuple([
+                    MirType(kind: MirTypeKind.Bool),  # has_value
+                    self.lower_type(inner)
+                ]))
+            case Named(symbol, _):
+                MirType(kind: MirTypeKind.Struct(symbol))
+            case Never:
+                MirType(kind: MirTypeKind.Never)
+            case _:
+                self.error("unsupported MIR type kind: {type_.kind}", nil)
+                MirType(kind: MirTypeKind.I64)
+
+    me lower_block(block: HirBlock) -> LocalId?:
+        """Lower HIR block to MIR, return result local if any."""
+        for stmt in block.stmts:
+            self.lower_stmt(stmt)
+
+        if block.value.?:
+            val local = self.lower_expr(block.value.unwrap())
+            Some(local)
+        else:
+            nil
+
+# ============================================================================
+# Range Lowering
+# ============================================================================
+
+    me lower_range(start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?) -> LocalId:
+        """Lower range expression to runtime call.
+
+        Generates call to rt_range(start, end) or rt_range_inclusive(start, end).
+        When a step parameter is provided, generates rt_range_step(start, end, step)
+        or rt_range_inclusive_step(start, end, step) instead.
+        """
+        # Lower start and end to locals
+        val start_local = if start.?: self.lower_expr(start.unwrap()) else: self.builder.emit_const_int(0)
+        val end_local = if end.?: self.lower_expr(end.unwrap()) else: self.builder.emit_const_int(0)
+
+        # Create function operand for the appropriate runtime call
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(0),  # Function symbol (will be resolved in codegen)
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+
+        if step.?:
+            # Step parameter provided: rt_range_step(start, end, step)
+            # or rt_range_inclusive_step(start, end, step)
+            val step_local = self.lower_expr(step.unwrap())
+
+            val result = self.builder.emit_call(func_operand, [
+                mir_operand_copy(start_local),
+                mir_operand_copy(end_local),
+                mir_operand_copy(step_local)
+            ], MirType.i64())
+
+            result ?? self.builder.new_temp(MirType.i64())
+        else:
+            # No step: rt_range(start, end) or rt_range_inclusive(start, end)
+            val result = self.builder.emit_call(func_operand, [
+                mir_operand_copy(start_local),
+                mir_operand_copy(end_local)
+            ], MirType.i64())
+
+            result ?? self.builder.new_temp(MirType.i64())
+
+# ============================================================================
+# Inline Assembly Lowering
+# ============================================================================
+
+    me lower_inline_asm(asm: HirAsm) -> LocalId:
+        """Lower inline assembly from HIR to MIR.
+
+        Converts HIR inline assembly constraints to MIR operands.
+        """
+        # Lower all constraint value expressions to MIR operands
+        var inputs: [MirAsmOperand] = []
+        var outputs: [MirAsmOperand] = []
+
+        for constraint in asm.constraints:
+            # Lower the HIR expression to a local
+            val value_local = self.lower_expr(constraint.value)
+            val mir_operand = mir_operand_copy(value_local)
+
+            val asm_operand = MirAsmOperand(
+                name: constraint.name,
+                kind: constraint.kind,
+                location: constraint.location,
+                operand: mir_operand
+            )
+
+            # Categorize as input or output
+            match constraint.kind:
+                case In:
+                    inputs.push(asm_operand)
+                case Out | LateOut:
+                    outputs.push(asm_operand)
+                case InOut:
+                    # InOut constraints appear in both lists
+                    inputs.push(asm_operand)
+                    outputs.push(asm_operand)
+
+        # Emit inline assembly instruction
+        self.builder.emit(MirInst(
+            kind: MirInstKind.InlineAsm(
+                asm_template: asm.asm_template,
+                is_volatile: asm.is_volatile,
+                inputs: inputs,
+                outputs: outputs,
+                clobbers: asm.clobbers
+            ),
+            span: Some(asm.span)
+        ))
+
+        # Return a unit value (inline asm doesn't produce a value directly)
+        self.builder.new_temp(MirType.unit())
+
+# ============================================================================
+# Field Resolution
+# ============================================================================
+
+    me resolve_field_index(base: HirExpr, field_name: text, resolved: SymbolId?) -> i64:
+        """Resolve field index within a struct/class type.
+
+        Uses the base expression's type to look up field ordering.
+        Falls back to 0 if type cannot be determined.
+        """
+        # Try to get the type symbol from the base expression's type
+        val type_sym = self.expr_type_symbol(base)
+        if type_sym.?:
+            val sym_id = type_sym.unwrap().id
+            if self.field_map.contains_key(sym_id):
+                val fields = self.field_map[sym_id]
+                val n = fields.len()
+                var idx = 0
+                while idx < n:
+                    if fields[idx] == field_name:
+                        return idx
+                    idx = idx + 1
+
+        0  # Default fallback when type is unknown
+
+    fn expr_type_symbol(expr: HirExpr) -> SymbolId?:
+        """Determine the type symbol of an expression from its HIR type annotation."""
+        if expr.type_.?:
+            val ty = expr.type_.unwrap()
+            match ty.kind:
+                case Named(symbol, _):
+                    Some(symbol)
+                case _:
+                    nil
+        else:
+            nil
+
+# ============================================================================
+# Target-Qualified Assembly
+# ============================================================================
+
+    me lower_inline_asm_match(arms: [HirAsmMatchArm]) -> LocalId?:
+        """Lower target-qualified asm match by resolving against current target.
+
+        Evaluates each arm's target spec against the build target.
+        The first matching arm is compiled; all others are discarded.
+        """
+        use std.common.target_spec.{match_target_spec, check_exhaustiveness, all_target_archs, MatchResult}
+
+        # Get current target info from compilation context
+        val target_arch = self.get_target_arch()
+        val target_os = self.get_target_os()
+        val target_abi = self.get_target_abi()
+        val target_backend = self.get_target_backend()
+        val target_backend_version = self.get_target_backend_version()
+
+        # Collect arm specs for exhaustiveness checking
+        var arms_archs: [[text]] = []
+        var arms_is_wildcard: [bool] = []
+        for arm in arms:
+            arms_is_wildcard.push(arm.is_wildcard)
+            if arm.has_spec:
+                arms_archs.push(arm.spec.archs)
+            else:
+                arms_archs.push([])
+
+        # Check exhaustiveness - warn if no wildcard
+        var has_wildcard = false
+        for arm in arms:
+            if arm.is_wildcard:
+                has_wildcard = true
+                break
+        if not has_wildcard:
+            val missing = check_exhaustiveness(arms_archs, arms_is_wildcard, all_target_archs())
+            if missing.len() > 0:
+                val missing_str = missing.join(", ")
+                self.error("asm match is non-exhaustive, missing: {missing_str}. Add 'case _: compile_error(\"...\")' for exhaustive matching", nil)
+
+        # Find matching arm
+        for arm in arms:
+            if arm.is_wildcard:
+                # Wildcard matches everything
+                if arm.is_compile_error:
+                    self.error(arm.error_message, Some(arm.span))
+                    return nil
+                if arm.has_asm_body:
+                    return self.lower_inline_asm(arm.asm_body)
+                return nil
+
+            if arm.has_spec:
+                val spec = arm.spec
+                val ver_ops: [text] = []
+                val ver_vals: [i64] = []
+                for vc in spec.version_constraints:
+                    ver_ops.push(vc.op)
+                    ver_vals.push(vc.version)
+
+                val result = match_target_spec(
+                    spec.archs, spec.has_os, spec.os,
+                    spec.has_abi, spec.abi, spec.has_backend, spec.backend,
+                    ver_ops, ver_vals,
+                    target_arch, target_os, target_abi, target_backend,
+                    target_backend_version
+                )
+
+                match result:
+                    case MatchResult.Matched:
+                        if arm.is_compile_error:
+                            self.error(arm.error_message, Some(arm.span))
+                            return nil
+                        if arm.has_asm_body:
+                            return self.lower_inline_asm(arm.asm_body)
+                        return nil
+                    case MatchResult.MatchedWithNote(note):
+                        # Still matches, but emit a note
+                        self.error("note: {note}", Some(arm.span))
+                        if arm.is_compile_error:
+                            self.error(arm.error_message, Some(arm.span))
+                            return nil
+                        if arm.has_asm_body:
+                            return self.lower_inline_asm(arm.asm_body)
+                        return nil
+                    case MatchResult.NotMatched:
+                        pass_dn  # Continue to next arm
+
+        # No arm matched
+        self.error("no asm match case for target {target_arch}-{target_os}", nil)
+        nil
+
+    me lower_asm_assert(spec: AsmTargetSpec, span: Span?):
+        """Lower asm assert by checking spec against current target.
+
+        Emits a compile error if the target doesn't match.
+        """
+        use std.common.target_spec.{match_target_spec, MatchResult}
+
+        val target_arch = self.get_target_arch()
+        val target_os = self.get_target_os()
+        val target_abi = self.get_target_abi()
+        val target_backend = self.get_target_backend()
+        val target_backend_version = self.get_target_backend_version()
+
+        val ver_ops: [text] = []
+        val ver_vals: [i64] = []
+        for vc in spec.version_constraints:
+            ver_ops.push(vc.op)
+            ver_vals.push(vc.version)
+
+        val result = match_target_spec(
+            spec.archs, spec.has_os, spec.os,
+            spec.has_abi, spec.abi, spec.has_backend, spec.backend,
+            ver_ops, ver_vals,
+            target_arch, target_os, target_abi, target_backend,
+            target_backend_version
+        )
+
+        match result:
+            case MatchResult.NotMatched:
+                val spec_str = spec.archs.join("|")
+                self.error("asm assert failed: target {target_arch}-{target_os} does not match [{spec_str}]", span)
+            case MatchResult.MatchedWithNote(note):
+                self.error("note: {note}", span)
+            case MatchResult.Matched:
+                pass_dn  # OK, no action needed
+
+# ============================================================================
+# Target Query
+# ============================================================================
+
+    me get_target_arch() -> text:
+        """Get current target architecture from compilation context."""
+        # Default to host arch - actual implementation reads from compiler context
+        "x86_64"
+
+    me get_target_os() -> text:
+        """Get current target OS from compilation context."""
+        "linux"
+
+    me get_target_abi() -> text:
+        """Get current target ABI from compilation context."""
+        "gnu"
+
+    me get_target_backend() -> text:
+        """Get current backend from compilation context."""
+        "llvm"
+
+    me get_target_backend_version() -> i64:
+        """Get current backend version from compilation context."""
+        15
+
+# ============================================================================
+# Error Handling
+# ============================================================================
+
+    me error(message: text, span: Span?):
+        """Record a lowering error."""
+        self.errors = self.errors.push(MirError(message: message, span: span))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MirLowering, MirError

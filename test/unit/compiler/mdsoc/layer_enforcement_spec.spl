@@ -1,0 +1,109 @@
+"""
+# Layer Enforcement Specification
+
+**Feature IDs:** #LAYER-002
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests that the numbered layer dependency rule is enforced:
+layer N can only import from layers with number <= N.
+
+## Behavior
+
+- Layer 70 (backend) can import layer 50 (mir): allowed
+- Layer 10 (frontend) cannot import layer 50 (mir): violation
+- Layer 00 (common) can only import itself: layer 0
+- Non-numbered directories have no constraint
+"""
+
+import std.spec
+
+# ============================================================================
+# Test Group 1: Layer Number Extraction
+# ============================================================================
+
+describe "Layer Number Extraction":
+    """
+    ## Extract Layer Numbers
+
+    Tests extract_layer_number() from numbered directory names.
+    """
+
+    it "extracts 0 from 00.common":
+        val num = extract_layer_number("00.common")
+        expect(num).to_equal(0)
+
+    it "extracts 10 from 10.frontend":
+        val num = extract_layer_number("10.frontend")
+        expect(num).to_equal(10)
+
+    it "extracts 50 from 50.mir":
+        val num = extract_layer_number("50.mir")
+        expect(num).to_equal(50)
+
+    it "extracts 99 from 99.loader":
+        val num = extract_layer_number("99.loader")
+        expect(num).to_equal(99)
+
+    it "returns -1 for non-numbered directory":
+        val num = extract_layer_number("backend")
+        expect(num).to_equal(-1)
+
+    it "returns -1 for invalid prefix":
+        val num = extract_layer_number("abc.frontend")
+        expect(num).to_equal(-1)
+
+
+# ============================================================================
+# Test Group 2: Layer Dependency Checking
+# ============================================================================
+
+describe "Numbered Layer Dependency Checking":
+    """
+    ## check_numbered_layer_dep
+
+    Tests the layer dependency rule: layer N can import layers <= N.
+    """
+
+    it "allows same-layer imports":
+        # Layer 50 -> Layer 50: allowed
+        val violation = check_numbered_layer_dep("50.mir", "50.mir")
+        expect(violation.?).to_equal(false)
+
+    it "allows lower-layer imports":
+        # Layer 70 -> Layer 50: allowed (70 >= 50)
+        val violation = check_numbered_layer_dep("70.backend", "50.mir")
+        expect(violation.?).to_equal(false)
+
+    it "allows importing layer 0 from any layer":
+        # Layer 10 -> Layer 0: allowed
+        val violation = check_numbered_layer_dep("10.frontend", "00.common")
+        expect(violation.?).to_equal(false)
+
+    it "rejects higher-layer imports":
+        # Layer 10 -> Layer 50: VIOLATION (10 < 50)
+        val violation = check_numbered_layer_dep("10.frontend", "50.mir")
+        expect(violation.?).to_equal(true)
+
+    it "rejects lower importing higher":
+        # Layer 00 -> Layer 99: VIOLATION
+        val violation = check_numbered_layer_dep("00.common", "99.loader")
+        expect(violation.?).to_equal(true)
+
+    it "no constraint for non-numbered directories":
+        val violation = check_numbered_layer_dep("backend", "50.mir")
+        expect(violation.?).to_equal(false)
+
+    it "no constraint when both non-numbered":
+        val violation = check_numbered_layer_dep("old_dir", "another_dir")
+        expect(violation.?).to_equal(false)
+
+    it "violation message includes layer numbers":
+        val violation = check_numbered_layer_dep("10.frontend", "50.mir")
+        if violation.?:
+            val v = violation ?? LayerViolation.new("", "", "", "", "", "")
+            expect(v.message).to_contain("layer 10")
+            expect(v.message).to_contain("layer 50")

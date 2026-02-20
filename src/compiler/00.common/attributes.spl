@@ -1,0 +1,388 @@
+# Attribute Parsing - Parse and Validate Attributes
+#
+# Handles parsing of layout-related attributes:
+# - @repr("C")         - C ABI compatible layout
+# - @repr("packed")    - No padding between fields
+# - @repr("transparent") - Single-field wrapper layout
+# - @packed            - Shorthand for @repr("packed")
+# - @align(N)          - Minimum alignment (must be power of 2)
+#
+# Handles parsing of volatile attributes:
+# - @volatile          - Full volatile (reads and writes)
+# - @volatile_read     - Read-only volatile
+# - @volatile_write    - Write-only volatile
+# - @nonvolatile       - Explicitly non-volatile (override)
+#
+# Returns a LayoutAttr for use in type layout computation.
+
+use parser_types.{Attribute, Expr, ExprKind}
+use type_layout.{LayoutAttr, LayoutKind}
+use lexer.Span
+
+export parse_layout_attrs, validate_alignment, is_power_of_two
+export parse_volatile_attrs, VolatileMode, VolatileAttr
+export parse_function_attrs, FunctionAttr, FunctionAttr__default
+export TaskAttr, parse_task_attr
+
+# ============================================================================
+# Volatile Attribute Types
+# ============================================================================
+
+"""Volatile access mode for memory-mapped I/O."""
+enum VolatileMode:
+    None_            # Normal (not volatile)
+    Full            # Full volatile (reads and writes)
+    ReadOnly        # Volatile reads, normal writes
+    WriteOnly       # Volatile writes, normal reads
+    Explicit        # Explicitly non-volatile (override)
+
+struct VolatileAttr:
+    """Volatile attribute configuration."""
+    mode: VolatileMode
+    address: i64?          # Fixed address for memory-mapped variable (@ addr)
+    barriers: bool         # Insert memory barriers around access
+
+# ============================================================================
+# Volatile Attribute Parsing
+# ============================================================================
+
+@when(tier=core):
+fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
+    """Core-tier parser: ignore detailed volatile attributes."""
+    VolatileAttr(mode: VolatileMode.None_, address: nil, barriers: false)
+
+@else:
+fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
+    """Extract volatile attributes from a list of attributes.
+
+    Handles:
+    - @volatile -> VolatileMode.Full
+    - @volatile_read -> VolatileMode.ReadOnly
+    - @volatile_write -> VolatileMode.WriteOnly
+    - @nonvolatile -> VolatileMode.Explicit
+
+    Returns default VolatileAttr if no volatile attributes found.
+    """
+    var mode = VolatileMode.None_
+    var address: i64? = nil
+    var barriers = false
+
+    for attr in attrs:
+        if attr.name == "volatile":
+            mode = VolatileMode.Full
+            # Check for @volatile(barriers: true)
+            if attr.args.len() > 0:
+                barriers = extract_barriers_arg(attr.args)
+        elif attr.name == "volatile_read":
+            mode = VolatileMode.ReadOnly
+        elif attr.name == "volatile_write":
+            mode = VolatileMode.WriteOnly
+        elif attr.name == "nonvolatile":
+            mode = VolatileMode.Explicit
+        elif attr.name == "address" or attr.name == "addr":
+            # @address(0x40020000) - fixed memory address
+            if attr.args.len() > 0:
+                address = extract_int_arg(attr.args[0])
+
+    VolatileAttr(
+        mode: mode,
+        address: address,
+        barriers: barriers
+    )
+@end
+
+fn is_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile access is required."""
+    attr.mode == VolatileMode.Full or
+    attr.mode == VolatileMode.ReadOnly or
+    attr.mode == VolatileMode.WriteOnly
+
+fn is_read_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile reads are required."""
+    attr.mode == VolatileMode.Full or attr.mode == VolatileMode.ReadOnly
+
+fn is_write_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile writes are required."""
+    attr.mode == VolatileMode.Full or attr.mode == VolatileMode.WriteOnly
+
+# ============================================================================
+# Function Attribute Types
+# ============================================================================
+
+struct FunctionAttr:
+    """Function-level attributes for code generation."""
+    is_entry: bool          # @entry - bare-metal entry point
+    is_naked: bool          # @naked - no prologue/epilogue
+    is_noreturn: bool       # @noreturn - function never returns
+    section: text?          # @section("X") - ELF section placement
+    is_interrupt: bool      # @interrupt - interrupt handler
+    is_boot: bool           # @boot - init-phase function (runs before scheduler)
+
+@when(tier=core):
+fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
+    """Core-tier parser: keep default function attributes."""
+    FunctionAttr__default()
+
+@else:
+fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
+    """Extract function attributes from a list of attributes.
+
+    Handles:
+    - @entry -> is_entry=true
+    - @naked -> is_naked=true
+    - @noreturn -> is_noreturn=true
+    - @section("name") -> section=name
+    - @interrupt -> is_interrupt=true
+    """
+    var is_entry = false
+    var is_naked = false
+    var is_noreturn = false
+    var section: text? = nil
+    var is_interrupt = false
+    var is_boot = false
+
+    for attr in attrs:
+        if attr.name == "entry":
+            is_entry = true
+        elif attr.name == "naked":
+            is_naked = true
+        elif attr.name == "noreturn":
+            is_noreturn = true
+        elif attr.name == "section":
+            if attr.args.len() > 0:
+                val section_name = extract_string_arg(attr.args[0])
+                if section_name.len() > 0:
+                    section = section_name
+        elif attr.name == "interrupt":
+            is_interrupt = true
+        elif attr.name == "boot":
+            is_boot = true
+
+    FunctionAttr(
+        is_entry: is_entry,
+        is_naked: is_naked,
+        is_noreturn: is_noreturn,
+        section: section,
+        is_interrupt: is_interrupt,
+        is_boot: is_boot
+    )
+@end
+
+fn FunctionAttr__default() -> FunctionAttr:
+    """Default function attributes (no special attributes)."""
+    FunctionAttr(
+        is_entry: false,
+        is_naked: false,
+        is_noreturn: false,
+        section: nil,
+        is_interrupt: false,
+        is_boot: false
+    )
+
+# ============================================================================
+# Task Attribute Types
+# ============================================================================
+
+struct TaskAttr:
+    """Task-level attributes from @task annotation.
+
+    Used by spawn boundedness analysis (Pass B) to verify that task pools
+    are correctly sized for baremetal strict mode.
+
+    Fields:
+        instances: Maximum number of concurrent instances (from @task(instances=N))
+        group: Optional task group name (from @task(group="name"))
+        frame: Optional declared frame size in bytes (from @task(frame=N))
+        wait_nodes: Number of wait-queue nodes (from @task(wait_nodes=N), default 0)
+    """
+    instances: i64
+    group: text?
+    frame: i64?
+    wait_nodes: i64
+
+@when(tier=core):
+fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
+    """Core-tier parser: detect @task and apply defaults (no named arg parsing)."""
+    for attr in attrs:
+        if attr.name == "task":
+            return Some(TaskAttr(instances: 1, group: nil, frame: nil, wait_nodes: 0))
+    nil
+
+@else:
+fn parse_task_attr(attrs: [Attribute]) -> TaskAttr?:
+    """Extract @task attributes from a list of attributes.
+
+    Handles:
+    - @task(instances=N) -> instances=N
+    - @task(group="name") -> group="name"
+    - @task(frame=N) -> frame=N
+    - @task(wait_nodes=N) -> wait_nodes=N
+
+    Returns nil if no @task attribute found.
+    """
+    var found = false
+    var instances = 1
+    var group: text? = nil
+    var frame: i64? = nil
+    var wait_nodes = 0
+
+    for attr in attrs:
+        if attr.name == "task":
+            found = true
+            for arg in attr.args:
+                match arg.kind:
+                    case Assign(left, op, right):
+                        match left.kind:
+                            case Ident(name):
+                                if name == "instances":
+                                    val v = extract_int_arg(right)
+                                    if v != nil:
+                                        instances = v ?? 1
+                                elif name == "group":
+                                    val g = extract_string_arg(right)
+                                    if g.len() > 0:
+                                        group = g
+                                elif name == "frame":
+                                    frame = extract_int_arg(right)
+                                elif name == "wait_nodes":
+                                    val w = extract_int_arg(right)
+                                    if w != nil:
+                                        wait_nodes = w ?? 0
+                            case _: ()
+                    case IntLit(value):
+                        # Bare integer: @task(4) means instances=4
+                        instances = value
+                    case _: ()
+
+    if not found:
+        return nil
+
+    TaskAttr(
+        instances: instances,
+        group: group,
+        frame: frame,
+        wait_nodes: wait_nodes
+    )
+@end
+
+# ============================================================================
+# Layout Attribute Parsing
+# ============================================================================
+
+# Parse layout attributes from a list of attributes
+@when(tier=core):
+fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
+    """Core-tier parser: keep default layout attributes."""
+    LayoutAttr(layout_kind: LayoutKind.Simple, explicit_align: nil, is_packed: false)
+
+@else:
+fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
+    """Extract layout attributes from a list of attributes.
+
+    Handles:
+    - @repr("C") -> LayoutKind.C
+    - @repr("packed") -> LayoutKind.Packed, is_packed=true
+    - @repr("transparent") -> LayoutKind.Transparent
+    - @packed -> LayoutKind.Packed, is_packed=true
+    - @align(N) -> explicit_align=N
+
+    Returns default LayoutAttr if no layout attributes found.
+    """
+    var layout_kind = LayoutKind.Simple
+    var explicit_align: i64? = nil
+    var is_packed = false
+
+    for attr in attrs:
+        if attr.name == "repr":
+            # @repr("C"), @repr("packed"), @repr("transparent")
+            if attr.args.len() > 0:
+                val repr_kind = extract_string_arg(attr.args[0])
+                if repr_kind == "C":
+                    layout_kind = LayoutKind.C
+                elif repr_kind == "packed":
+                    layout_kind = LayoutKind.Packed
+                    is_packed = true
+                elif repr_kind == "transparent":
+                    layout_kind = LayoutKind.Transparent
+        elif attr.name == "packed":
+            # @packed shorthand
+            layout_kind = LayoutKind.Packed
+            is_packed = true
+        elif attr.name == "align":
+            # @align(N) - alignment must be power of 2
+            if attr.args.len() > 0:
+                val align_val = extract_int_arg(attr.args[0])
+                if align_val.? and is_power_of_two(align_val.unwrap()):
+                    explicit_align = align_val
+
+    LayoutAttr(
+        layout_kind: layout_kind,
+        explicit_align: explicit_align,
+        is_packed: is_packed
+    )
+@end
+
+# Extract string value from an expression (for @repr("C"))
+fn extract_string_arg(expr: Expr) -> text:
+    match expr.kind:
+        case StringLit(value, _):
+            value
+        case _:
+            ""
+
+# Extract barriers option from attribute args
+# Handles: @volatile(true), @volatile(barriers: true)
+@when(tier=core):
+fn extract_barriers_arg(args: [Expr]) -> bool:
+    """Core-tier parser: ignore named attribute args."""
+    false
+
+@else:
+fn extract_barriers_arg(args: [Expr]) -> bool:
+    for arg in args:
+        # Check for bare true literal: @volatile(true)
+        match arg.kind:
+            case BoolLit(v):
+                return v
+            case Assign(left, op, right):
+                # Check for named arg: barriers = true
+                match left.kind:
+                    case Ident(name):
+                        if name == "barriers":
+                            match right.kind:
+                                case BoolLit(v):
+                                    return v
+                                case _: ()
+                    case _: ()
+            case _: ()
+    false
+@end
+
+# Extract integer value from an expression (for @align(16))
+fn extract_int_arg(expr: Expr) -> i64?:
+    match expr.kind:
+        case IntLit(value):
+            Some(value)
+        case _:
+            nil
+
+# Check if a number is a power of 2
+fn is_power_of_two(n: i64) -> bool:
+    """Check if n is a power of 2.
+
+    Uses bitwise trick: n & (n-1) == 0 for powers of 2.
+    """
+    n > 0 and (n & (n - 1)) == 0
+
+# Validate alignment value
+fn validate_alignment(align: i64, span: Span) -> Result<i64, text>:
+    """Validate that alignment is a positive power of 2.
+
+    Returns the alignment if valid, or an error message.
+    """
+    if align <= 0:
+        Err("alignment must be positive, got {align}")
+    elif not is_power_of_two(align):
+        Err("alignment must be a power of 2, got {align}")
+    else:
+        Ok(align)

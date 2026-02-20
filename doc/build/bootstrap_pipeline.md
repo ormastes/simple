@@ -14,7 +14,21 @@ seed (C++)  -->  core (Simple)  -->  full (Simple)
 | **core** | Core Simple | `src/compiler_core/` (20,053 lines, 31 files) | Native compiler binary | Compile Full Simple |
 | **full** | Full Simple | `src/compiler/` (127,284 lines, 409 files) | Self-hosting compiler | The production compiler |
 
-### Bootstrap Chain
+### C Backend Bootstrap (Recommended)
+
+The C backend generates C++20 directly from the full compiler, bypassing the seed/core layers:
+
+```
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+bin/bootstrap/cpp/simple build   # Self-host verification
+```
+
+Output: `bin/bootstrap/cpp/simple` — a bootstrap binary built from generated C++20.
+
+### Bootstrap Chain (Seed/Core/Full)
 
 ```
 Step 1 (bootstrap):  clang++ seed.cpp --> seed binary (Mach-O/ELF)

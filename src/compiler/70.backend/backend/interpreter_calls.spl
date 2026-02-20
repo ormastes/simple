@@ -1,0 +1,316 @@
+# Interpreter Backend - Function Calls and Builtins
+#
+# Extracted from interpreter.spl. Contains InterpreterBackendImpl methods for:
+# - call_function, call_hir_function, call_function_by_id, call_closure
+# - apply_assign_op
+# - try_call_builtin (FFI dispatch)
+# - value_to_runtime_ptr, runtime_ptr_to_value, value_to_string
+
+use compiler.hir.*
+use compiler.core.lexer.Span
+use backend_types.*
+use backend.env.{EvalContext, Environment}
+use compiler.ffi_minimal as ffi
+use compiler.70.backend.backend.interpreter.{InterpreterBackendImpl}
+
+impl InterpreterBackendImpl:
+    fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        match fn_value:
+            case Function(f):
+                # Check for builtin functions first
+                val builtin_result = self.try_call_builtin(f.name, args)
+                if builtin_result.?:
+                    return builtin_result.unwrap()
+
+                # Look up function in module
+                if not ctx.module.functions.contains_key(f.symbol):
+                    return Err(BackendError.runtime_error("function '{f.name}' not found", Some(span)))
+
+                val fn_ = ctx.module.functions[f.symbol]
+                self.call_hir_function(fn_, args, ctx)
+
+            case Closure(c):
+                self.call_closure(c, args, ctx)
+
+            case _:
+                Err(BackendError.type_error("value is not callable", Some(span)))
+
+    fn call_hir_function(fn_: HirFunction, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
+        ctx.env.push_scope()
+
+        # Bind parameters
+        for i in 0..fn_.params.len():
+            val param = fn_.params[i]
+            val value = if i < args.len():
+                args[i]
+            elif param.default.?:
+                self.eval_expr(param.default.unwrap(), ctx)?
+            else:
+                return Err(BackendError.runtime_error("missing argument for parameter {param.name}", Some(fn_.span)))
+
+            ctx.env.define(param.symbol, value)
+
+        # Execute body
+        val result = self.eval_block(fn_.body, ctx)?
+
+        ctx.env.pop_scope()
+        Ok(result)
+
+    fn call_function_by_id(method_id: SymbolId, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
+        """Look up function by symbol ID and call it."""
+        # Look up function definition in module
+        if not ctx.module.functions.contains_key(method_id):
+            return Err(BackendError.runtime_error("function not found by symbol ID", Some(span)))
+
+        val fn_ = ctx.module.functions[method_id]
+        self.call_hir_function(fn_, args, ctx)
+
+    fn call_closure(closure: ClosureValue, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
+        ctx.env.push_scope()
+
+        # Bind captured variables
+        for symbol in closure.captures.keys():
+            val value = closure.captures[symbol]
+            ctx.env.define(symbol, value)
+
+        # Bind parameters
+        for i in 0..closure.params.len():
+            val param = closure.params[i]
+            val value = if i < args.len():
+                args[i]
+            else:
+                return Err(BackendError.runtime_error("missing argument for parameter", nil))
+
+            ctx.env.define(param.symbol, value)
+
+        # Evaluate body
+        val result = self.eval_expr(closure.body, ctx)?
+
+        ctx.env.pop_scope()
+        Ok(result)
+
+    fn apply_assign_op(op: HirAssignOp, left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+        match op:
+            case Add: self.eval_binop(HirBinOp.Add, left, right, span)
+            case Sub: self.eval_binop(HirBinOp.Sub, left, right, span)
+            case Mul: self.eval_binop(HirBinOp.Mul, left, right, span)
+            case Div: self.eval_binop(HirBinOp.Div, left, right, span)
+            case Mod: self.eval_binop(HirBinOp.Mod, left, right, span)
+            case _: Err(BackendError.not_implemented("assignment operator not implemented"))
+
+    fn try_call_builtin(name: text, args: [Value]) -> Option<Result<Value, BackendError>>:
+        """Try to call a builtin function. Returns None if not a builtin."""
+        match name:
+            case "print":
+                if args.len() > 0:
+                    val arg = args[0]
+                    match arg:
+                        case RuntimeValue(ptr):
+                            ffi.value_print(ptr)
+                        case Int(_), Float(_), Bool(_), Nil:
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            ffi.value_print(ptr)
+                        case _:
+                            val msg = self.value_to_string(arg)
+                            print msg
+                else:
+                    print ""
+                Some(Ok(Value.Unit))
+            case "println":
+                if args.len() > 0:
+                    val arg = args[0]
+                    match arg:
+                        case RuntimeValue(ptr):
+                            ffi.value_println(ptr)
+                        case Int(_), Float(_), Bool(_), Nil:
+                            val ptr = self.value_to_runtime_ptr(arg)
+                            ffi.value_println(ptr)
+                        case _:
+                            val msg = self.value_to_string(arg)
+                            print msg
+                else:
+                    print ""
+                Some(Ok(Value.Unit))
+            case "to_string":
+                if args.len() > 0:
+                    Some(Ok(Value.string(self.value_to_string(args[0]))))
+                else:
+                    Some(Ok(Value.string("")))
+
+            case "type_of":
+                if args.len() > 0:
+                    val arg = args[0]
+                    match arg:
+                        case RuntimeValue(ptr):
+                            val type_tag = ffi.value_type(ptr)
+                            val type_name = match type_tag:
+                                case ValueType.Nil: "nil"
+                                case ValueType.Bool: "bool"
+                                case ValueType.Int: "int"
+                                case ValueType.Float: "float"
+                                case ValueType.String: "string"
+                                case ValueType.Array: "array"
+                                case ValueType.Dict: "dict"
+                                case ValueType.Object: "object"
+                                case ValueType.Function: "function"
+                                case _: "unknown"
+                            Some(Ok(Value.string(type_name)))
+                        case _:
+                            Some(Ok(Value.string(arg.type_name())))
+                else:
+                    Some(Err(BackendError.runtime_error("type_of requires value argument", nil)))
+
+            case "clone":
+                if args.len() > 0:
+                    val arg = args[0]
+                    match arg:
+                        case RuntimeValue(ptr):
+                            val cloned_ptr = ffi.value_clone(ptr)
+                            Some(Ok(Value.RuntimeValue(cloned_ptr)))
+                        case _:
+                            Some(Ok(arg))
+                else:
+                    Some(Err(BackendError.runtime_error("clone requires value argument", nil)))
+
+            # File I/O operations
+            case "file_exists":
+                if args.len() > 0:
+                    match args[0]:
+                        case String(path):
+                            val result = ffi.file_exists_ptr(path.ptr(), path.len())
+                            Some(Ok(Value.bool(result)))
+                        case _:
+                            Some(Err(BackendError.type_error("file_exists requires string path", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("file_exists requires path argument", nil)))
+
+            case "file_read":
+                if args.len() > 0:
+                    match args[0]:
+                        case String(path):
+                            val ptr = ffi.file_read_text_ptr(path.ptr(), path.len())
+                            if ptr == 0:
+                                Some(Ok(Value.string("")))
+                            else:
+                                val result = self.runtime_ptr_to_value(ptr)
+                                Some(Ok(result))
+                        case _:
+                            Some(Err(BackendError.type_error("file_read requires string path", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("file_read requires path argument", nil)))
+
+            case "file_write":
+                if args.len() >= 2:
+                    match args[0]:
+                        case String(path):
+                            match args[1]:
+                                case String(content):
+                                    val result = ffi.file_write_text_ptr(path.ptr(), path.len(), content.ptr(), content.len())
+                                    Some(Ok(Value.bool(result)))
+                                case _:
+                                    Some(Err(BackendError.type_error("file_write requires string path and content", nil)))
+                        case _:
+                            Some(Err(BackendError.type_error("file_write requires string path and content", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("file_write requires path and content arguments", nil)))
+
+            case "file_delete":
+                if args.len() > 0:
+                    match args[0]:
+                        case String(path):
+                            val result = ffi.file_delete_ptr(path.ptr(), path.len())
+                            Some(Ok(Value.bool(result)))
+                        case _:
+                            Some(Err(BackendError.type_error("file_delete requires string path", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("file_delete requires path argument", nil)))
+
+            # Environment variable operations
+            case "env_get":
+                if args.len() > 0:
+                    match args[0]:
+                        case String(name):
+                            val ptr = ffi.env_get_ptr(name.ptr(), name.len())
+                            if ptr == 0:
+                                Some(Ok(Value.string("")))
+                            else:
+                                val result = self.runtime_ptr_to_value(ptr)
+                                Some(Ok(result))
+                        case _:
+                            Some(Err(BackendError.type_error("env_get requires string name", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("env_get requires name argument", nil)))
+
+            case "env_set":
+                if args.len() >= 2:
+                    match args[0]:
+                        case String(name):
+                            match args[1]:
+                                case String(value):
+                                    val result = ffi.env_set_ptr(name.ptr(), name.len(), value.ptr(), value.len())
+                                    Some(Ok(Value.bool(result)))
+                                case _:
+                                    Some(Err(BackendError.type_error("env_set requires string name and value", nil)))
+                        case _:
+                            Some(Err(BackendError.type_error("env_set requires string name and value", nil)))
+                else:
+                    Some(Err(BackendError.runtime_error("env_set requires name and value arguments", nil)))
+
+            case _:
+                nil
+
+    # ========================================================================
+    # FFI RuntimeValue Conversion Helpers
+    # ========================================================================
+
+    fn value_to_runtime_ptr(value: Value) -> i64:
+        """Convert Simple Value to RuntimeValue pointer for FFI operations."""
+        match value:
+            case Int(i): ffi.value_int(i)
+            case Float(f): ffi.value_float(f)
+            case Bool(b): ffi.value_bool(b)
+            case Nil: ffi.value_nil()
+            case RuntimeValue(ptr): ptr  # Already a pointer
+            case String(s):
+                ffi.value_string(s.ptr(), s.len())
+            case _:
+                ffi.value_nil()
+
+    fn runtime_ptr_to_value(ptr: i64) -> Value:
+        """Convert RuntimeValue pointer to Simple Value."""
+        if ffi.value_is_int(ptr):
+            val i = ffi.value_as_int(ptr)
+            Value.int(i)
+        elif ffi.value_is_float(ptr):
+            val f = ffi.value_as_float(ptr)
+            Value.float(f)
+        elif ffi.value_is_bool(ptr):
+            val b = ffi.value_as_bool(ptr)
+            Value.bool(b)
+        elif ffi.value_is_nil(ptr):
+            Value.Nil
+        else:
+            Value.RuntimeValue(ptr)
+
+    fn value_to_string(value: Value) -> text:
+        """Convert a Value to its string representation."""
+        match value:
+            case Nil: "nil"
+            case Unit: "()"
+            case Bool(b): if b: "true" else: "false"
+            case Int(i): "{i}"
+            case Float(f): "{f}"
+            case Char(c): "{c}"
+            case String(s): s
+            case Array(elements):
+                var parts: [text] = []
+                for elem in elements:
+                    parts = parts.push(self.value_to_string(elem))
+                "[{parts.join(\", \")}]"
+            case RuntimeValue(_): "<runtime_value>"
+            case _: "<{value.type_name()}>"
+
+
+export call_function, call_hir_function, call_function_by_id, call_closure
+export apply_assign_op, try_call_builtin
+export value_to_runtime_ptr, runtime_ptr_to_value, value_to_string

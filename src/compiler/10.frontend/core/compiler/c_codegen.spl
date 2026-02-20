@@ -1,0 +1,746 @@
+# Core Simple — AST-to-C++ Code Generator
+#
+# Walks the Core AST (struct pools) and emits C++ code compatible
+# with the spl_runtime library (src/compiler_seed/runtime.h).
+#
+# Two-pass design:
+#   Pass 1: Register all structs, enums, function signatures
+#   Pass 2: Emit C++ (preamble, types, forward decls, functions, module init, main)
+#
+# Compiled by seed (Core Simple subset): no generics, no closures, no lambdas.
+#
+# Usage: called by driver.spl via codegen_program()
+#
+# Split into three files:
+#   cg_helpers.spl — output buffer, type tracking, inference, string helpers, asm codegen
+#   cg_expr.spl   — expression codegen + statement codegen (mutually recursive)
+#   c_codegen.spl  — (this file) declaration codegen, preamble, main entry
+
+use compiler.core.ast.{expr_get, expr_get_tag, expr_get_int, expr_get_str}
+use compiler.core.ast.{expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_stmts}
+use compiler.core.ast.{stmt_get_tag, stmt_get_expr}
+use compiler.core.ast.{decl_get, decl_get_tag, decl_get_name, decl_get_param_names, decl_get_param_types}
+use compiler.core.ast.{decl_get_ret_type, decl_get_body, decl_get_fields, decl_get_field_types}
+use compiler.core.ast.{decl_get_imports, decl_count, decl_get_is_async}
+use compiler.core.ast.{module_get_decls}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_IF, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK}
+use compiler.core.ast.{EXPR_RETURN, EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_STRUCT_LIT, EXPR_CALL}
+use compiler.core.ast.{STMT_EXPR, STMT_RETURN, STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH}
+use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_VAL, DECL_VAR}
+use compiler.core.ast.{DECL_USE, DECL_EXPORT, DECL_ENUM, DECL_IMPL, DECL_CLASS}
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT}
+use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY}
+use compiler.core.types.{TYPE_STRUCT, TYPE_NAMED_BASE}
+use compiler.core.types.{type_tag_to_c}
+use compiler.core.types.{named_type_register, named_type_update, named_type_find, named_type_name, named_type_fields, named_type_field_type_tags}
+use compiler.core.types.{fn_sig_register, fn_sig_find, fn_sig_ret_type}
+use compiler.core.types.{fn_sig_param_count, fn_sig_get_param_names, fn_sig_get_param_types}
+use compiler.core.types.{int_to_str}
+use compiler.core.compiler.cg_helpers.{cg_emit, cg_emit_line, cg_emit_blank, cg_indent_inc, cg_indent_dec}
+use compiler.core.compiler.cg_helpers.{cg_output_get, cg_reset}
+use compiler.core.compiler.cg_helpers.{vt_reset, vt_push_scope, vt_pop_scope, vt_add, vt_find}
+use compiler.core.compiler.cg_helpers.{st_reset, st_add, st_find}
+use compiler.core.compiler.cg_helpers.{sa_reset}
+use compiler.core.compiler.cg_helpers.{cg_infer_expr_type}
+use compiler.core.compiler.cg_expr.{cg_expr, cg_stmt}
+use compiler.core.compiler.cg_expr.{cg_emit_if_as_stmt, cg_emit_for_as_stmt, cg_emit_while_as_stmt}
+
+# ===== Declaration Codegen =====
+
+fn cg_register_pass():
+    val decls = module_get_decls()
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+
+        if tag == DECL_STRUCT:
+            val name = decl_get_name(decl_idx)
+            val fields = decl_get_fields(decl_idx)
+            val ftypes = decl_get_field_types(decl_idx)
+            val existing_id = named_type_find(name)
+            if existing_id >= 0:
+                named_type_update(existing_id, fields, ftypes)
+            else:
+                named_type_register(name, fields, ftypes)
+
+        if tag == DECL_FN:
+            val name = decl_get_name(decl_idx)
+            val ptypes = decl_get_param_types(decl_idx)
+            val ret = decl_get_ret_type(decl_idx)
+            fn_sig_register(name, decl_get_param_names(decl_idx), ptypes, ret, 0)
+
+        if tag == DECL_EXTERN_FN:
+            val name = decl_get_name(decl_idx)
+            val ptypes = decl_get_param_types(decl_idx)
+            val ret = decl_get_ret_type(decl_idx)
+            fn_sig_register(name, decl_get_param_names(decl_idx), ptypes, ret, 1)
+
+        if tag == DECL_IMPL:
+            # Register impl method signatures
+            val impl_name = decl_get_name(decl_idx)
+            val impl_methods = decl_get_body(decl_idx)
+            for mi in range(0, impl_methods.len()):
+                val m_idx = impl_methods[mi]
+                val m_name = decl_get_name(m_idx)
+                val m_ptypes = decl_get_param_types(m_idx)
+                val m_ret = decl_get_ret_type(m_idx)
+                fn_sig_register(m_name, decl_get_param_names(m_idx), m_ptypes, m_ret, 0)
+
+fn cg_emit_preamble():
+    val lb = "{"
+    val rb = "}"
+    cg_emit_line("#include <cstdio>")
+    cg_emit_line("#include <cstdlib>")
+    cg_emit_line("#include <cstring>")
+    cg_emit_line("#include <cstdint>")
+    cg_emit_line("#include <cmath>")
+    cg_emit_line("#include <vector>")
+    cg_emit_blank()
+    cg_emit_line("#define asm asm_spl")
+    cg_emit_line("#define assert spl_assert")
+    cg_emit_line("#define template template_spl")
+    cg_emit_line("#define register register_spl")
+    cg_emit_blank()
+    cg_emit_line("extern \"C\" " + lb)
+    cg_emit_line("#include \"runtime.h\"")
+    cg_emit_line(rb)
+    cg_emit_blank()
+    cg_emit_line("static int has_field = 0;")
+    cg_emit_line("static int64_t _ = 0;")
+    cg_emit_blank()
+    # Type aliases
+    cg_emit_line("typedef float f32;")
+    cg_emit_line("typedef double f64;")
+    cg_emit_line("typedef int8_t i8;")
+    cg_emit_line("typedef int16_t i16;")
+    cg_emit_line("typedef int32_t i32;")
+    cg_emit_line("typedef uint8_t u8;")
+    cg_emit_line("typedef uint16_t u16;")
+    cg_emit_line("typedef uint32_t u32;")
+    cg_emit_line("typedef uint64_t u64;")
+    cg_emit_blank()
+    # spl_to_str overloads
+    cg_emit_line("inline const char* spl_to_str(int64_t n) " + lb + " return spl_i64_to_str(n); " + rb)
+    cg_emit_line("inline const char* spl_to_str(const char* s) " + lb + " return s; " + rb)
+    cg_emit_line("inline const char* spl_to_str(double d) " + lb + " return spl_f64_to_str(d); " + rb)
+    cg_emit_blank()
+    # SplOption / SplResult
+    cg_emit_line("struct SplOption " + lb)
+    cg_emit_line("    int has_value;")
+    cg_emit_line("    SplValue value;")
+    cg_emit_line(rb + ";")
+    cg_emit_blank()
+    cg_emit_line("struct SplResult " + lb)
+    cg_emit_line("    int is_ok;")
+    cg_emit_line("    SplValue value;")
+    cg_emit_line("    const char* error;")
+    cg_emit_line(rb + ";")
+    cg_emit_blank()
+    # Assert
+    cg_emit_line("inline void spl_assert(int cond) " + lb + " if (!cond) " + lb + " fprintf(stderr, \"Assertion failed\\n\"); exit(1); " + rb + " " + rb)
+    cg_emit_blank()
+    # Ok/Err helpers
+    cg_emit_line("inline SplResult* Ok(SplValue v) " + lb + " auto* r = new SplResult; r->is_ok = 1; r->value = v; r->error = \"\"; return r; " + rb)
+    cg_emit_line("inline SplResult* Ok() " + lb + " return Ok(spl_int(0)); " + rb)
+    cg_emit_line("inline SplResult* Ok(int64_t v) " + lb + " return Ok(spl_int(v)); " + rb)
+    cg_emit_line("inline SplResult* Ok(const char* v) " + lb + " return Ok(spl_str(v)); " + rb)
+    cg_emit_line("inline SplResult* Ok(double v) " + lb + " return Ok(spl_float(v)); " + rb)
+    cg_emit_line("inline SplResult* Err(const char* msg) " + lb + " auto* r = new SplResult; r->is_ok = 0; r->value = " + lb + rb + "; r->error = msg; return r; " + rb)
+    cg_emit_line("inline SplValue spl_result_unwrap(SplResult* r) " + lb + " if (r && r->is_ok) return r->value; fprintf(stderr, \"unwrap failed\\n\"); exit(1); " + rb)
+    cg_emit_blank()
+    # SplSome / SplNone helpers
+    cg_emit_line("inline SplOption* SplSome(SplValue v) " + lb + " auto* o = new SplOption; o->has_value = 1; o->value = v; return o; " + rb)
+    cg_emit_line("inline SplOption* SplNone() " + lb + " auto* o = new SplOption; o->has_value = 0; o->value = " + lb + rb + "; return o; " + rb)
+    cg_emit_line("inline SplValue spl_option_unwrap(SplOption* o) " + lb + " if (o && o->has_value) return o->value; fprintf(stderr, \"unwrap failed\\n\"); exit(1); " + rb)
+    cg_emit_blank()
+    # C++ overloads for int64_t-based dispatch
+    cg_emit_line("inline int64_t spl_array_len(int64_t a) " + lb + " return spl_array_len((SplArray*)(intptr_t)a); " + rb)
+    cg_emit_line("inline SplValue spl_array_get(int64_t a, int64_t i) " + lb + " return spl_array_get((SplArray*)(intptr_t)a, i); " + rb)
+    cg_emit_line("inline void spl_array_set(int64_t a, int64_t i, SplValue v) " + lb + " spl_array_set((SplArray*)(intptr_t)a, i, v); " + rb)
+    cg_emit_line("inline void spl_array_push(int64_t a, SplValue v) " + lb + " spl_array_push((SplArray*)(intptr_t)a, v); " + rb)
+    cg_emit_line("inline int spl_str_contains(int64_t s, const char* n) " + lb + " return spl_str_contains((const char*)(intptr_t)s, n); " + rb)
+    cg_emit_line("inline void spl_dict_set(int64_t d, const char* k, SplValue v) " + lb + " spl_dict_set((SplDict*)(intptr_t)d, k, v); " + rb)
+    cg_emit_line("inline void spl_dict_set(int64_t d, int64_t k, SplValue v) " + lb + " spl_dict_set((SplDict*)(intptr_t)d, (const char*)(intptr_t)k, v); " + rb)
+    cg_emit_line("inline SplValue spl_dict_get(int64_t d, const char* k) " + lb + " return spl_dict_get((SplDict*)(intptr_t)d, k); " + rb)
+    cg_emit_line("inline int spl_str_eq(int64_t a, const char* b) " + lb + " return spl_str_eq((const char*)(intptr_t)a, b); " + rb)
+    cg_emit_line("inline int spl_str_eq(const char* a, int64_t b) " + lb + " return spl_str_eq(a, (const char*)(intptr_t)b); " + rb)
+    cg_emit_line("inline int spl_str_eq(int64_t a, int64_t b) " + lb + " return spl_str_eq((const char*)(intptr_t)a, (const char*)(intptr_t)b); " + rb)
+    cg_emit_line("inline const char* spl_str_concat(int64_t a, const char* b) " + lb + " return spl_str_concat((const char*)(intptr_t)a, b); " + rb)
+    cg_emit_line("inline const char* spl_str_concat(const char* a, int64_t b) " + lb + " return spl_str_concat(a, (const char*)(intptr_t)b); " + rb)
+    cg_emit_line("inline const char* spl_str_concat(int64_t a, int64_t b) " + lb + " return spl_str_concat((const char*)(intptr_t)a, (const char*)(intptr_t)b); " + rb)
+    cg_emit_line("inline int spl_str_starts_with(int64_t s, const char* p) " + lb + " return spl_str_starts_with((const char*)(intptr_t)s, p); " + rb)
+    cg_emit_line("inline int spl_str_starts_with(int64_t s, int64_t p) " + lb + " return spl_str_starts_with((const char*)(intptr_t)s, (const char*)(intptr_t)p); " + rb)
+    cg_emit_line("inline int spl_str_ends_with(int64_t s, const char* p) " + lb + " return spl_str_ends_with((const char*)(intptr_t)s, p); " + rb)
+    cg_emit_line("inline int spl_str_ends_with(int64_t s, int64_t p) " + lb + " return spl_str_ends_with((const char*)(intptr_t)s, (const char*)(intptr_t)p); " + rb)
+    cg_emit_line("inline SplArray* spl_str_split(int64_t s, const char* d) " + lb + " return spl_str_split((const char*)(intptr_t)s, d); " + rb)
+    cg_emit_line("inline SplArray* spl_str_split(int64_t s, int64_t d) " + lb + " return spl_str_split((const char*)(intptr_t)s, (const char*)(intptr_t)d); " + rb)
+    cg_emit_line("inline char* spl_str_join(int64_t a, const char* d) " + lb + " return spl_str_join((SplArray*)(intptr_t)a, d); " + rb)
+    cg_emit_line("inline char* spl_str_join(int64_t a, int64_t d) " + lb + " return spl_str_join((SplArray*)(intptr_t)a, (const char*)(intptr_t)d); " + rb)
+    cg_emit_line("inline char* spl_str_join(SplArray* a, int64_t d) " + lb + " return spl_str_join(a, (const char*)(intptr_t)d); " + rb)
+    cg_emit_line("inline char* spl_str_slice(int64_t s, int64_t start, int64_t end) " + lb + " return spl_str_slice((const char*)(intptr_t)s, start, end); " + rb)
+    cg_emit_line("inline char* spl_str_replace(int64_t s, const char* o, const char* n) " + lb + " return spl_str_replace((const char*)(intptr_t)s, o, n); " + rb)
+    cg_emit_line("inline char* spl_str_replace(int64_t s, int64_t o, int64_t n) " + lb + " return spl_str_replace((const char*)(intptr_t)s, (const char*)(intptr_t)o, (const char*)(intptr_t)n); " + rb)
+    cg_emit_line("inline char* spl_str_trim(int64_t s) " + lb + " return spl_str_trim((const char*)(intptr_t)s); " + rb)
+    cg_emit_line("inline int64_t spl_str_index_of(int64_t s, const char* n) " + lb + " return spl_str_index_of((const char*)(intptr_t)s, n); " + rb)
+    cg_emit_line("inline int64_t spl_str_index_of(int64_t s, int64_t n) " + lb + " return spl_str_index_of((const char*)(intptr_t)s, (const char*)(intptr_t)n); " + rb)
+    cg_emit_line("inline int64_t spl_str_len(int64_t s) " + lb + " return spl_str_len((const char*)(intptr_t)s); " + rb)
+    cg_emit_line("inline char* spl_str_to_upper(int64_t s) " + lb + " return spl_str_to_upper((const char*)(intptr_t)s); " + rb)
+    cg_emit_line("inline char* spl_str_to_lower(int64_t s) " + lb + " return spl_str_to_lower((const char*)(intptr_t)s); " + rb)
+    cg_emit_line("inline int spl_str_contains(int64_t s, int64_t n) " + lb + " return spl_str_contains((const char*)(intptr_t)s, (const char*)(intptr_t)n); " + rb)
+    cg_emit_line("inline int64_t spl_str_last_index_of(int64_t s, const char* n) " + lb + " return spl_str_last_index_of((const char*)(intptr_t)s, n); " + rb)
+    cg_emit_line("inline char* spl_str_index_char(int64_t s, int64_t i) " + lb + " return spl_str_index_char((const char*)(intptr_t)s, i); " + rb)
+    cg_emit_line("inline const char* spl_to_str(int n) " + lb + " return spl_i64_to_str((int64_t)n); " + rb)
+    cg_emit_line("inline const char* spl_to_str(bool b) " + lb + " return b ? \"true\" : \"false\"; " + rb)
+    cg_emit_line("inline const char* spl_to_str(SplValue v) " + lb + " return spl_i64_to_str(v.as_int); " + rb)
+    cg_emit_line("inline SplResult* Ok(int v) " + lb + " return Ok((int64_t)v); " + rb)
+    cg_emit_line("inline SplResult* Ok(bool v) " + lb + " return Ok(spl_int(v ? 1 : 0)); " + rb)
+    cg_emit_line("inline void spl_array_set(int64_t a, const char* k, SplValue v) " + lb + " spl_dict_set((SplDict*)(intptr_t)a, k, v); " + rb)
+    cg_emit_line("inline void spl_array_set(SplArray* a, const char* k, SplValue v) " + lb + " spl_dict_set((SplDict*)a, k, v); " + rb)
+    cg_emit_line("inline SplArray* spl_array_slice(int64_t a, int64_t s, int64_t e) " + lb + " return spl_array_slice((SplArray*)(intptr_t)a, s, e); " + rb)
+    cg_emit_line("inline SplArray* spl_array_concat(int64_t a, int64_t b) " + lb + " return spl_array_concat((SplArray*)(intptr_t)a, (SplArray*)(intptr_t)b); " + rb)
+    cg_emit_line("inline SplValue spl_array_pop(int64_t a) " + lb + " return spl_array_pop((SplArray*)(intptr_t)a); " + rb)
+    cg_emit_line("inline int spl_array_contains_str(int64_t a, const char* s) " + lb + " return spl_array_contains_str((SplArray*)(intptr_t)a, s); " + rb)
+    cg_emit_line("inline SplValue spl_dict_get(int64_t d, int64_t k) " + lb + " return spl_dict_get((SplDict*)(intptr_t)d, (const char*)(intptr_t)k); " + rb)
+    cg_emit_line("inline int spl_dict_contains(int64_t d, const char* k) " + lb + " return spl_dict_contains((SplDict*)(intptr_t)d, k); " + rb)
+    cg_emit_line("inline int spl_dict_contains(int64_t d, int64_t k) " + lb + " return spl_dict_contains((SplDict*)(intptr_t)d, (const char*)(intptr_t)k); " + rb)
+    cg_emit_line("inline SplArray* spl_dict_keys(int64_t d) " + lb + " return spl_dict_keys((SplDict*)(intptr_t)d); " + rb)
+    cg_emit_line("inline SplArray* spl_dict_values(int64_t d) " + lb + " return spl_dict_values((SplDict*)(intptr_t)d); " + rb)
+    cg_emit_line("inline int64_t spl_dict_len(int64_t d) " + lb + " return spl_dict_len((SplDict*)(intptr_t)d); " + rb)
+    cg_emit_line("inline void spl_dict_remove(int64_t d, const char* k) " + lb + " spl_dict_remove((SplDict*)(intptr_t)d, k); " + rb)
+    # Native pointer overloads
+    cg_emit_line("inline void spl_dict_set(SplDict* d, const char* k, SplValue v) " + lb + " spl_dict_set(d, k, v); " + rb)
+    cg_emit_line("inline void spl_dict_set(SplDict* d, int64_t k, SplValue v) " + lb + " spl_dict_set(d, (const char*)(intptr_t)k, v); " + rb)
+    cg_emit_line("inline SplValue spl_dict_get(SplDict* d, const char* k) " + lb + " return spl_dict_get(d, k); " + rb)
+    cg_emit_line("inline SplValue spl_dict_get(SplDict* d, int64_t k) " + lb + " return spl_dict_get(d, (const char*)(intptr_t)k); " + rb)
+    cg_emit_line("inline int spl_dict_contains(SplDict* d, const char* k) " + lb + " return spl_dict_contains(d, k); " + rb)
+    cg_emit_line("inline int spl_dict_contains(SplDict* d, int64_t k) " + lb + " return spl_dict_contains(d, (const char*)(intptr_t)k); " + rb)
+    cg_emit_line("inline SplArray* spl_dict_keys(SplDict* d) " + lb + " return spl_dict_keys(d); " + rb)
+    cg_emit_line("inline SplArray* spl_dict_values(SplDict* d) " + lb + " return spl_dict_values(d); " + rb)
+    cg_emit_line("inline int64_t spl_dict_len(SplDict* d) " + lb + " return spl_dict_len(d); " + rb)
+    cg_emit_line("inline void spl_dict_remove(SplDict* d, const char* k) " + lb + " spl_dict_remove(d, k); " + rb)
+    cg_emit_line("inline void spl_array_set(SplArray* a, int64_t i, SplValue v) " + lb + " spl_array_set(a, i, v); " + rb)
+    cg_emit_line("inline void spl_array_push(SplArray* a, SplValue v) " + lb + " spl_array_push(a, v); " + rb)
+    cg_emit_line("inline int64_t spl_array_len(SplArray* a) " + lb + " return spl_array_len(a); " + rb)
+    cg_emit_line("inline SplValue spl_array_get(SplArray* a, int64_t i) " + lb + " return spl_array_get(a, i); " + rb)
+    cg_emit_line("inline SplValue spl_array_pop(SplArray* a) " + lb + " return spl_array_pop(a); " + rb)
+    cg_emit_line("inline SplArray* spl_array_slice(SplArray* a, int64_t s, int64_t e) " + lb + " return spl_array_slice(a, s, e); " + rb)
+    cg_emit_line("inline SplArray* spl_array_concat(SplArray* a, SplArray* b) " + lb + " return spl_array_concat(a, b); " + rb)
+    cg_emit_line("inline int spl_array_contains_str(SplArray* a, const char* s) " + lb + " return spl_array_contains_str(a, s); " + rb)
+    cg_emit_blank()
+
+fn cg_emit_structs():
+    val decls = module_get_decls()
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+        if tag == DECL_STRUCT:
+            val name = decl_get_name(decl_idx)
+            val fields = decl_get_fields(decl_idx)
+            val ftypes = decl_get_field_types(decl_idx)
+            cg_emit_line("struct " + name + " {")
+            cg_indent_inc()
+            for j in range(0, fields.len()):
+                val c_type = type_tag_to_c(ftypes[j])
+                val f_name: text = fields[j]
+                var field_line: text = c_type + " "
+                field_line = field_line + f_name
+                field_line = field_line + ";"
+                cg_emit_line(field_line)
+            cg_indent_dec()
+            cg_emit_line("};")
+            cg_emit_blank()
+
+fn cg_emit_enums():
+    val decls = module_get_decls()
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+        if tag == DECL_ENUM:
+            val name = decl_get_name(decl_idx)
+            val variants = decl_get_fields(decl_idx)
+            cg_emit_line("/* enum " + name + " */")
+            for j in range(0, variants.len()):
+                val v_name: text = variants[j]
+                var enum_line: text = "static const int64_t " + name + "_"
+                enum_line = enum_line + v_name
+                enum_line = enum_line + " = "
+                enum_line = enum_line + int_to_str(j)
+                enum_line = enum_line + ";"
+                cg_emit_line(enum_line)
+            cg_emit_blank()
+
+fn cg_emit_forward_decls():
+    val decls = module_get_decls()
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+
+        if tag == DECL_EXTERN_FN:
+            val name = decl_get_name(decl_idx)
+            val pnames = decl_get_param_names(decl_idx)
+            val ptypes = decl_get_param_types(decl_idx)
+            val ret = decl_get_ret_type(decl_idx)
+            val ret_c = type_tag_to_c(ret)
+            var params_c: text = ""
+            for j in range(0, pnames.len()):
+                if j > 0:
+                    params_c = params_c + ", "
+                val p_type_c: text = type_tag_to_c(ptypes[j])
+                val p_name: text = pnames[j]
+                params_c = params_c + p_type_c
+                params_c = params_c + " "
+                params_c = params_c + p_name
+            var ext_line: text = "extern \"C\" " + ret_c
+            ext_line = ext_line + " "
+            ext_line = ext_line + name
+            ext_line = ext_line + "("
+            ext_line = ext_line + params_c
+            ext_line = ext_line + ");"
+            cg_emit_line(ext_line)
+
+        if tag == DECL_USE:
+            # Emit forward declarations for imported functions
+            # In whole-program compilation, imported functions are in the same C++ file
+            # but may be defined later, so we need forward declarations
+            val imports = decl_get_imports(decl_idx)
+            for j in range(0, imports.len()):
+                val import_name = imports[j]
+                val sig_id = fn_sig_find(import_name)
+                if sig_id >= 0:
+                    # Function signature is registered, emit proper forward declaration
+                    val ret_type = fn_sig_ret_type(sig_id)
+                    val ret_c = type_tag_to_c(ret_type)
+                    val pnames = fn_sig_get_param_names(sig_id)
+                    val ptypes = fn_sig_get_param_types(sig_id)
+                    var params_c: text = ""
+                    for k in range(0, pnames.len()):
+                        if k > 0:
+                            params_c = params_c + ", "
+                        val p_type_c: text = type_tag_to_c(ptypes[k])
+                        val p_name: text = pnames[k]
+                        params_c = params_c + p_type_c
+                        params_c = params_c + " "
+                        params_c = params_c + p_name
+                    var use_line: text = ret_c + " "
+                    use_line = use_line + import_name
+                    use_line = use_line + "("
+                    use_line = use_line + params_c
+                    use_line = use_line + ");"
+                    cg_emit_line(use_line)
+
+        if tag == DECL_FN:
+            val name = decl_get_name(decl_idx)
+            val pnames = decl_get_param_names(decl_idx)
+            val ptypes = decl_get_param_types(decl_idx)
+            val ret = decl_get_ret_type(decl_idx)
+            val ret_c = type_tag_to_c(ret)
+            var params_c: text = ""
+            for j in range(0, pnames.len()):
+                if j > 0:
+                    params_c = params_c + ", "
+                val p_type_c: text = type_tag_to_c(ptypes[j])
+                val p_name: text = pnames[j]
+                params_c = params_c + p_type_c
+                params_c = params_c + " "
+                params_c = params_c + p_name
+            var emit_name: text = name
+            if name == "main":
+                emit_name = "spl_main"
+            var fn_line: text = ret_c + " "
+            fn_line = fn_line + emit_name
+            fn_line = fn_line + "("
+            fn_line = fn_line + params_c
+            fn_line = fn_line + ");"
+            cg_emit_line(fn_line)
+
+        if tag == DECL_IMPL:
+            # Forward declare impl methods
+            val impl_methods = decl_get_body(decl_idx)
+            val impl_target = decl_get_name(decl_idx)
+            for mi in range(0, impl_methods.len()):
+                val m_idx = impl_methods[mi]
+                val m_name = decl_get_name(m_idx)
+                val m_pnames = decl_get_param_names(m_idx)
+                val m_ptypes = decl_get_param_types(m_idx)
+                val m_ret = decl_get_ret_type(m_idx)
+                val m_mflag = decl_get_is_async(m_idx)
+                val m_ret_c = type_tag_to_c(m_ret)
+                var m_params_c: text = ""
+                # Add self parameter for non-static methods
+                if m_mflag != 1:
+                    if m_mflag == 2:
+                        m_params_c = impl_target + "* self"
+                    else:
+                        m_params_c = "const " + impl_target + "* self"
+                for mj in range(0, m_pnames.len()):
+                    if m_params_c != "":
+                        m_params_c = m_params_c + ", "
+                    val mp_type: text = type_tag_to_c(m_ptypes[mj])
+                    val mp_name: text = m_pnames[mj]
+                    m_params_c = m_params_c + mp_type + " " + mp_name
+                cg_emit_line(m_ret_c + " " + m_name + "(" + m_params_c + ");")
+    cg_emit_blank()
+
+fn cg_emit_functions():
+    val decls = module_get_decls()
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+        if tag == DECL_FN:
+            cg_emit_function(decl_idx)
+
+fn cg_emit_impl_methods():
+    val decls = module_get_decls()
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+        if tag == DECL_IMPL:
+            val impl_target = decl_get_name(decl_idx)
+            val impl_methods = decl_get_body(decl_idx)
+            for mi in range(0, impl_methods.len()):
+                val m_idx = impl_methods[mi]
+                val m_name = decl_get_name(m_idx)
+                val m_pnames = decl_get_param_names(m_idx)
+                val m_ptypes = decl_get_param_types(m_idx)
+                val m_ret = decl_get_ret_type(m_idx)
+                val m_body = decl_get_body(m_idx)
+                val m_mflag = decl_get_is_async(m_idx)
+                val m_ret_c = type_tag_to_c(m_ret)
+                # Build params with self
+                var m_params_c: text = ""
+                if m_mflag != 1:
+                    if m_mflag == 2:
+                        m_params_c = impl_target + "* self"
+                    else:
+                        m_params_c = "const " + impl_target + "* self"
+                for mj in range(0, m_pnames.len()):
+                    if m_params_c != "":
+                        m_params_c = m_params_c + ", "
+                    val mp_type: text = type_tag_to_c(m_ptypes[mj])
+                    val mp_name: text = m_pnames[mj]
+                    m_params_c = m_params_c + mp_type + " " + mp_name
+                cg_emit_line(m_ret_c + " " + m_name + "(" + m_params_c + ") " + "{")
+                cg_indent_inc()
+                # Track self as struct type
+                vt_push_scope()
+                if m_mflag != 1:
+                    st_add("self", impl_target)
+                    # Track self's fields as accessible types
+                    val self_nid = named_type_find(impl_target)
+                    if self_nid >= 0:
+                        val self_fields = named_type_fields(self_nid)
+                        val self_ftypes = named_type_field_type_tags(self_nid)
+                        for sf in range(0, self_fields.len()):
+                            vt_add("self_" + self_fields[sf], self_ftypes[sf])
+                # Track params
+                for mj in range(0, m_pnames.len()):
+                    val pn: text = m_pnames[mj]
+                    vt_add(pn, m_ptypes[mj])
+                # Emit body
+                for si in range(0, m_body.len()):
+                    val is_last = si == m_body.len() - 1
+                    if is_last:
+                        if m_ret != TYPE_VOID:
+                            val s_tag = stmt_get_tag(m_body[si])
+                            if s_tag == STMT_EXPR:
+                                val inner = stmt_get_expr(m_body[si])
+                                if inner >= 0:
+                                    val inner_tag = expr_get_tag(inner)
+                                    val is_ret = inner_tag == EXPR_RETURN
+                                    val is_assign = inner_tag == EXPR_ASSIGN
+                                    val is_comp = inner_tag == EXPR_COMPOUND_ASSIGN
+                                    if not is_ret:
+                                        if not is_assign:
+                                            if not is_comp:
+                                                cg_emit_line("return " + cg_expr(inner) + ";")
+                                                vt_pop_scope()
+                                                cg_indent_dec()
+                                                cg_emit_line("}")
+                                                cg_emit_blank()
+                                                return
+                    cg_stmt(m_body[si])
+                vt_pop_scope()
+                cg_indent_dec()
+                cg_emit_line("}")
+                cg_emit_blank()
+
+fn cg_emit_function(decl_idx: i64):
+    val name = decl_get_name(decl_idx)
+    val pnames = decl_get_param_names(decl_idx)
+    val ptypes = decl_get_param_types(decl_idx)
+    val ret = decl_get_ret_type(decl_idx)
+    val body_stmts = decl_get_body(decl_idx)
+    val ret_c = type_tag_to_c(ret)
+
+    var params_c: text = ""
+    for j in range(0, pnames.len()):
+        if j > 0:
+            params_c = params_c + ", "
+        val p_type_c: text = type_tag_to_c(ptypes[j])
+        val p_name: text = pnames[j]
+        params_c = params_c + p_type_c
+        params_c = params_c + " "
+        params_c = params_c + p_name
+
+    var emit_name: text = name
+    if name == "main":
+        emit_name = "spl_main"
+    var fn_header: text = ret_c + " "
+    fn_header = fn_header + emit_name
+    fn_header = fn_header + "("
+    fn_header = fn_header + params_c
+    fn_header = fn_header + ") {"
+    cg_emit_line(fn_header)
+    cg_indent_inc()
+
+    # Track parameter types
+    vt_push_scope()
+    for j in range(0, pnames.len()):
+        val pn: text = pnames[j]
+        vt_add(pn, ptypes[j])
+
+    # Emit body statements
+    for i in range(0, body_stmts.len()):
+        val is_last = i == body_stmts.len() - 1
+
+        # Auto-return for last statement in non-void functions
+        if is_last:
+            val needs_return = ret != TYPE_VOID
+            if needs_return:
+                val s_tag = stmt_get_tag(body_stmts[i])
+                val is_expr_stmt = s_tag == STMT_EXPR
+                val is_return = s_tag == STMT_RETURN
+                val is_control = s_tag == STMT_IF
+                val is_loop = s_tag == STMT_FOR
+                val is_loop2 = s_tag == STMT_WHILE
+                val is_match = s_tag == STMT_MATCH
+                if is_expr_stmt:
+                    # Check if already has return/assign/print
+                    val inner_expr = stmt_get_expr(body_stmts[i])
+                    if inner_expr >= 0:
+                        val inner_tag = expr_get_tag(inner_expr)
+                        val is_ret = inner_tag == EXPR_RETURN
+                        val is_assign = inner_tag == EXPR_ASSIGN
+                        val is_comp = inner_tag == EXPR_COMPOUND_ASSIGN
+                        val needs_wrap = not is_ret
+                        val skip_for_assign = is_assign or is_comp
+                        if needs_wrap:
+                            if not skip_for_assign:
+                                cg_emit_line("return " + cg_expr(inner_expr) + ";")
+                                vt_pop_scope()
+                                cg_indent_dec()
+                                cg_emit_line("}")
+                                cg_emit_blank()
+                                return
+                if is_return:
+                    cg_stmt(body_stmts[i])
+                    vt_pop_scope()
+                    cg_indent_dec()
+                    cg_emit_line("}")
+                    cg_emit_blank()
+                    return
+                if is_control:
+                    cg_stmt(body_stmts[i])
+                    vt_pop_scope()
+                    cg_indent_dec()
+                    cg_emit_line("}")
+                    cg_emit_blank()
+                    return
+                if is_loop:
+                    cg_stmt(body_stmts[i])
+                    vt_pop_scope()
+                    cg_indent_dec()
+                    cg_emit_line("}")
+                    cg_emit_blank()
+                    return
+                if is_loop2:
+                    cg_stmt(body_stmts[i])
+                    vt_pop_scope()
+                    cg_indent_dec()
+                    cg_emit_line("}")
+                    cg_emit_blank()
+                    return
+                if is_match:
+                    cg_stmt(body_stmts[i])
+                    vt_pop_scope()
+                    cg_indent_dec()
+                    cg_emit_line("}")
+                    cg_emit_blank()
+                    return
+
+        cg_stmt(body_stmts[i])
+
+    vt_pop_scope()
+    cg_indent_dec()
+    cg_emit_line("}")
+    cg_emit_blank()
+
+fn cg_resolve_type(type_tag: i64, init_expr: i64) -> text:
+    # If type is annotated, use it
+    if type_tag != TYPE_VOID:
+        return type_tag_to_c(type_tag)
+    # Infer type from init expression
+    if init_expr >= 0:
+        val etag = expr_get_tag(init_expr)
+        if etag == EXPR_INT_LIT: return "int64_t"
+        if etag == EXPR_FLOAT_LIT: return "double"
+        if etag == EXPR_STRING_LIT: return "const char*"
+        if etag == EXPR_BOOL_LIT: return "int"
+        if etag == EXPR_NIL_LIT: return "int64_t"
+        if etag == EXPR_ARRAY_LIT: return "SplArray*"
+        if etag == EXPR_BINARY: return "int64_t"
+        if etag == EXPR_INTERPOLATED_STRING: return "const char*"
+        if etag == EXPR_CALL:
+            val callee_idx = expr_get_left(init_expr)
+            if expr_get_tag(callee_idx) == EXPR_IDENT:
+                val cname = expr_get_str(callee_idx)
+                val sig = fn_sig_find(cname)
+                if sig >= 0:
+                    return type_tag_to_c(fn_sig_ret_type(sig))
+            return "int64_t"
+    # Default
+    "int64_t"
+
+fn cg_emit_globals():
+    # Emit global variable declarations for all module-level val/var
+    val decls = module_get_decls()
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+        if tag == DECL_VAL:
+            val name = decl_get_name(decl_idx)
+            var eff_type = decl_get_ret_type(decl_idx)
+            val body = decl_get_body(decl_idx)
+            var init_expr: i64 = -1
+            if body.len() > 0:
+                init_expr = body[0]
+            # Skip synthetic module-level statements (type_tag == -1)
+            if eff_type != -1:
+                # Infer effective type for vt tracking
+                if eff_type == TYPE_VOID:
+                    if init_expr >= 0:
+                        eff_type = cg_infer_expr_type(init_expr)
+                    if eff_type == TYPE_VOID:
+                        eff_type = TYPE_I64
+                val c_type = cg_resolve_type(eff_type, init_expr)
+                vt_add(name, eff_type)
+                cg_emit_line("static " + c_type + " " + name + ";")
+        if tag == DECL_VAR:
+            val name = decl_get_name(decl_idx)
+            var eff_type = decl_get_ret_type(decl_idx)
+            val body = decl_get_body(decl_idx)
+            var init_expr: i64 = -1
+            if body.len() > 0:
+                init_expr = body[0]
+            # Infer effective type for vt tracking
+            if eff_type == TYPE_VOID:
+                if init_expr >= 0:
+                    eff_type = cg_infer_expr_type(init_expr)
+                if eff_type == TYPE_VOID:
+                    eff_type = TYPE_I64
+            val c_type = cg_resolve_type(eff_type, init_expr)
+            vt_add(name, eff_type)
+            cg_emit_line("static " + c_type + " " + name + ";")
+    cg_emit_blank()
+
+fn cg_emit_module_init():
+    cg_emit_line("static void __module_init(void) {")
+    cg_indent_inc()
+
+    val decls = module_get_decls()
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+
+        # Module-level val/var bindings — assign (already declared as globals)
+        if tag == DECL_VAL:
+            val name = decl_get_name(decl_idx)
+            val ret_type = decl_get_ret_type(decl_idx)
+            val body = decl_get_body(decl_idx)
+            if body.len() > 0:
+                val init_expr = body[0]
+                if ret_type == -1:
+                    # Synthetic module-level statement
+                    val init_tag = expr_get_tag(init_expr)
+                    if init_tag == EXPR_IF:
+                        cg_emit_if_as_stmt(init_expr)
+                    elif init_tag == EXPR_FOR:
+                        cg_emit_for_as_stmt(init_expr)
+                    elif init_tag == EXPR_WHILE:
+                        cg_emit_while_as_stmt(init_expr)
+                    else:
+                        val init_c = cg_expr(init_expr)
+                        cg_emit_line(init_c + ";")
+                else:
+                    val init_c = cg_expr(init_expr)
+                    cg_emit_line(name + " = " + init_c + ";")
+
+        if tag == DECL_VAR:
+            val name = decl_get_name(decl_idx)
+            val body = decl_get_body(decl_idx)
+            if body.len() > 0:
+                val init_expr = body[0]
+                val init_c = cg_expr(init_expr)
+                cg_emit_line(name + " = " + init_c + ";")
+
+    cg_indent_dec()
+    cg_emit_line("}")
+    cg_emit_blank()
+
+fn cg_emit_main():
+    cg_emit_line("int main(int argc, char** argv) {")
+    cg_indent_inc()
+    cg_emit_line("spl_init_args(argc, argv);")
+    cg_emit_line("__module_init();")
+
+    # Call user entry point if it exists
+    val decls = module_get_decls()
+    var found_entry: bool = false
+    for i in range(0, decls.len()):
+        val decl_idx = decls[i]
+        val tag = decl_get_tag(decl_idx)
+        if tag == DECL_FN:
+            val name = decl_get_name(decl_idx)
+            if name == "main" or name == "spl_main":
+                val ret = decl_get_ret_type(decl_idx)
+                if ret == TYPE_VOID:
+                    cg_emit_line("spl_main();")
+                else:
+                    cg_emit_line("return (int)spl_main();")
+                found_entry = true
+            elif name == "main_test":
+                cg_emit_line("main_test();")
+                found_entry = true
+            elif name == "main_entry":
+                cg_emit_line("main_entry();")
+                found_entry = true
+
+    cg_emit_line("return 0;")
+    cg_indent_dec()
+    cg_emit_line("}")
+
+# ===== Main Entry Point =====
+
+fn codegen_program() -> text:
+    cg_reset()
+    vt_reset()
+    st_reset()
+    sa_reset()
+
+    # Pass 1: Register structs and function signatures
+    cg_register_pass()
+
+    # Pass 2: Emit C++ code
+    cg_emit_preamble()
+    cg_emit_structs()
+    cg_emit_enums()
+    cg_emit_forward_decls()
+    cg_emit_globals()
+    cg_emit_functions()
+    cg_emit_impl_methods()
+    cg_emit_module_init()
+    cg_emit_main()
+
+    cg_output_get()
+
+export codegen_program

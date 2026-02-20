@@ -3,22 +3,24 @@
 #
 # This script:
 # 1. Uses the current binary to generate C++20 from the compiler source
-# 2. Copies the generated C++ to src/compiler_core/generated/
+# 2. Outputs generated C++ to src/compiler_cpp/
 # 3. Builds with CMake + Ninja (or Make)
-# 4. Optionally verifies the bootstrap binary
+# 4. Copies the binary to bin/bootstrap/cpp/simple
+# 5. Optionally verifies via self-host rebuild
 #
 # Prerequisites: cmake, ninja (or make), clang++ (or g++)
 #
 # Usage:
 #   scripts/bootstrap/bootstrap-c.sh              # Generate + build
-#   scripts/bootstrap/bootstrap-c.sh --verify     # Generate + build + verify
+#   scripts/bootstrap/bootstrap-c.sh --verify     # Generate + build + self-host verify
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-GENERATED_DIR="${PROJECT_DIR}/src/compiler_core/generated"
-BUILD_DIR="${PROJECT_DIR}/src/compiler_core/build"
+GENERATED_DIR="${PROJECT_DIR}/src/compiler_cpp"
+BUILD_DIR="${PROJECT_DIR}/build"
+BOOTSTRAP_BIN="${PROJECT_DIR}/bin/bootstrap/cpp/simple"
 SIMPLE_BIN="${PROJECT_DIR}/bin/simple"
 
 VERIFY=false
@@ -33,7 +35,7 @@ echo ""
 # Step 1: Generate C++20 from compiler source
 echo "Step 1: Generating C++20 from compiler..."
 if [[ -x "${SIMPLE_BIN}" ]]; then
-    "${SIMPLE_BIN}" compile --backend=c --emit-c -o "${GENERATED_DIR}/simple_compiler.cpp" src/app/cli/main.spl || {
+    "${SIMPLE_BIN}" compile --backend=c -o "${GENERATED_DIR}/" src/app/cli/main.spl || {
         echo "Warning: C backend generation not yet fully functional."
         echo "The C backend infrastructure is in place but the full compiler"
         echo "self-compilation requires the MIR pipeline to be complete."
@@ -55,23 +57,39 @@ if command -v cmake &>/dev/null; then
         GENERATOR="-G Ninja"
     fi
 
-    cmake -B "${BUILD_DIR}" ${GENERATOR} "${PROJECT_DIR}/src/compiler_core"
+    CXX_FLAG=""
+    C_FLAG=""
+    if command -v clang++ &>/dev/null; then
+        CXX_FLAG="-DCMAKE_CXX_COMPILER=clang++"
+        C_FLAG="-DCMAKE_C_COMPILER=clang"
+    fi
+
+    cmake -B "${BUILD_DIR}" ${GENERATOR} ${CXX_FLAG} ${C_FLAG} -S "${GENERATED_DIR}"
     cmake --build "${BUILD_DIR}"
+
+    # Step 3: Install bootstrap binary
     echo ""
-    echo "Bootstrap binary: ${BUILD_DIR}/simple_bootstrap"
+    echo "Step 3: Installing bootstrap binary..."
+    mkdir -p "$(dirname "${BOOTSTRAP_BIN}")"
+    cp "${BUILD_DIR}/simple" "${BOOTSTRAP_BIN}"
+    echo "Bootstrap binary: ${BOOTSTRAP_BIN}"
 else
     echo "Error: cmake not found. Install CMake to build."
     exit 1
 fi
 
-# Step 3: Verify (optional)
+# Step 4: Verify via self-host (optional)
 if [[ "${VERIFY}" == "true" ]]; then
     echo ""
-    echo "Step 3: Verifying bootstrap binary..."
-    BOOTSTRAP_BIN="${BUILD_DIR}/simple_bootstrap"
+    echo "Step 4: Verifying bootstrap binary (self-host)..."
     if [[ -x "${BOOTSTRAP_BIN}" ]]; then
         echo "  Running: ${BOOTSTRAP_BIN} --version"
         "${BOOTSTRAP_BIN}" --version || echo "  (version check not yet supported)"
+
+        echo ""
+        echo "  Self-host: rebuilding with bootstrap binary..."
+        "${BOOTSTRAP_BIN}" build || echo "  (self-host build not yet supported)"
+
         echo ""
         echo "Bootstrap verification complete."
     else

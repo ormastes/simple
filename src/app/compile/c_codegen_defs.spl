@@ -1,0 +1,206 @@
+# C Codegen — Definition Handlers
+#
+# Extracted from c_codegen.spl. Contains:
+# - cg_process_enum: Parse enum definition, return enum_def|||type_entries
+# - cg_track_field_types: Track struct/class field types, return type_entries
+# - cg_track_fn_types: Track function return/param types, return type_entries
+
+use app.compile.c_helpers.{simple_type_to_c}
+
+# Process an enum definition, returning "enum_def|||type_entries"
+# where enum_def is the C typedef and type_entries are new type registry entries.
+fn cg_process_enum(lines_arr: [text], line_idx: i64, trimmed: text) -> text:
+    val enum_name = trimmed.substring(5, trimmed.len() - 1).trim()
+    var type_entries = "struct:" + enum_name + ";"
+    var variants: [text] = []
+    var has_data_variant = false
+    var data_variants: [text] = []
+    var simple_variants: [text] = []
+    for vi in range(line_idx + 1, lines_arr.len()):
+        val vline = lines_arr[vi]
+        val vtrimmed = vline.trim()
+        if vtrimmed == "":
+            continue
+        val v_indented = vline.starts_with("    ")
+        if not v_indented:
+            break
+        if vtrimmed.starts_with("#"):
+            continue
+        if vtrimmed.starts_with("fn ") or vtrimmed.starts_with("me ") or vtrimmed.starts_with("static fn "):
+            continue
+        val vparen = vtrimmed.index_of("(") ?? -1
+        if vparen >= 0:
+            has_data_variant = true
+            data_variants.push(vtrimmed)
+        else:
+            simple_variants.push(vtrimmed)
+
+    var enum_def = ""
+    if has_data_variant:
+        var tag_idx = 0
+        var union_fields = ""
+        var constructors = ""
+        var tag_defines = ""
+        for dv in data_variants:
+            val dv_paren = dv.index_of("(") ?? -1
+            val dv_name = dv.substring(0, dv_paren).trim()
+            val dv_close = dv.index_of(")") ?? -1
+            var dv_fields_str = ""
+            if dv_close > dv_paren + 1:
+                dv_fields_str = dv.substring(dv_paren + 1, dv_close).trim()
+            tag_defines = tag_defines + "#define {enum_name}_TAG_{dv_name} {tag_idx}\n"
+            type_entries = type_entries + "enum_variant:" + enum_name + "." + dv_name + ";"
+            var struct_fields = ""
+            var ctor_params = ""
+            var ctor_assigns = ""
+            if dv_fields_str.len() > 0:
+                val dv_parts = dv_fields_str.split(",")
+                var fi = 0
+                for dvp in dv_parts:
+                    val dvf = dvp.trim()
+                    val dvf_colon = dvf.index_of(":") ?? -1
+                    if dvf_colon >= 0:
+                        val fname = dvf.substring(0, dvf_colon).trim()
+                        val ftype = dvf.substring(dvf_colon + 1).trim()
+                        val ctype = simple_type_to_c(ftype)
+                        struct_fields = struct_fields + "            {ctype} {fname};\n"
+                        if fi > 0:
+                            ctor_params = ctor_params + ", "
+                        ctor_params = ctor_params + "{ctype} {fname}"
+                        ctor_assigns = ctor_assigns + "    r.data.{dv_name}.{fname} = {fname};\n"
+                    else:
+                        val ctype = simple_type_to_c(dvf)
+                        val pname = "_{fi}"
+                        struct_fields = struct_fields + "            {ctype} {pname};\n"
+                        if fi > 0:
+                            ctor_params = ctor_params + ", "
+                        ctor_params = ctor_params + "{ctype} {pname}"
+                        ctor_assigns = ctor_assigns + "    r.data.{dv_name}.{pname} = {pname};\n"
+                    fi = fi + 1
+            union_fields = union_fields + "        struct \{" + "\n" + struct_fields + "        } " + dv_name + ";\n"
+            constructors = constructors + "static " + enum_name + " " + enum_name + "__" + dv_name + "(" + ctor_params + ") \{" + "\n"
+            constructors = constructors + "    {enum_name} r;\n    r.tag = {enum_name}_TAG_{dv_name};\n"
+            constructors = constructors + ctor_assigns
+            constructors = constructors + "    return r;" + "\n" + "}" + "\n"
+            tag_idx = tag_idx + 1
+        for sv in simple_variants:
+            tag_defines = tag_defines + "#define {enum_name}_TAG_{sv} {tag_idx}\n"
+            constructors = constructors + "static " + enum_name + " " + enum_name + "__" + sv + "(void) \{" + "\n"
+            constructors = constructors + "    {enum_name} r;\n    r.tag = {enum_name}_TAG_{sv};\n"
+            constructors = constructors + "    return r;" + "\n" + "}" + "\n"
+            tag_idx = tag_idx + 1
+        enum_def = tag_defines + "\n"
+        enum_def = enum_def + "typedef struct \{" + "\n" + "    int tag;" + "\n" + "    union \{" + "\n"
+        enum_def = enum_def + union_fields
+        enum_def = enum_def + "    } data;" + "\n" + "} " + enum_name + ";\n\n"
+        enum_def = enum_def + constructors
+    else:
+        var variant_names: [text] = []
+        for sv in simple_variants:
+            variant_names.push("{enum_name}_{sv}")
+            type_entries = type_entries + "enum_variant:" + enum_name + "." + sv + ";"
+        val variant_list = variant_names.join(", ")
+        enum_def = "typedef enum \{ " + variant_list + " } " + enum_name + ";"
+
+    return enum_def + "|||" + type_entries
+
+# Track struct/class field types, returning new type registry entries
+fn cg_track_field_types(lines_arr: [text], start_idx: i64, type_name: text) -> text:
+    var type_entries = ""
+    for fi in range(start_idx + 1, lines_arr.len()):
+        val fline = lines_arr[fi]
+        val ftrimmed = fline.trim()
+        if ftrimmed == "":
+            continue
+        val f_indented = fline.starts_with("    ")
+        if not f_indented:
+            break
+        if ftrimmed.starts_with("fn ") or ftrimmed.starts_with("me ") or ftrimmed.starts_with("static fn "):
+            break
+        var fclean = ftrimmed
+        val fhash = ftrimmed.index_of(" #") ?? -1
+        if fhash >= 0:
+            fclean = ftrimmed.substring(0, fhash).trim()
+        val fcolon = fclean.index_of(":") ?? -1
+        if fcolon >= 0:
+            val fname = fclean.substring(0, fcolon).trim()
+            val ftype = fclean.substring(fcolon + 1).trim()
+            if ftype == "text" or ftype == "str":
+                type_entries = type_entries + "field_text:" + type_name + "." + fname + ";"
+            if ftype == "[text]" or ftype == "[str]":
+                type_entries = type_entries + "field_arr:" + type_name + "." + fname + ";"
+            if ftype == "[i64]" or ftype == "[int]" or ftype == "[bool]":
+                type_entries = type_entries + "field_int_arr:" + type_name + "." + fname + ";"
+            if ftype.starts_with("[") and ftype.ends_with("]"):
+                val sf_elem = ftype.substring(1, ftype.len() - 1).trim()
+                if sf_elem.len() > 0:
+                    val sf_ef = sf_elem[0]
+                    if sf_ef >= "A" and sf_ef <= "Z":
+                        type_entries = type_entries + "field_struct_arr:" + type_name + "." + fname + "=" + sf_elem + ";"
+    return type_entries
+
+# Track function return type and parameter types, returning new type registry entries
+fn cg_track_fn_types(trimmed: text, fn_name: text) -> text:
+    var type_entries = ""
+    # Track return type
+    val arrow_idx = trimmed.index_of("->") ?? -1
+    if arrow_idx >= 0:
+        val ret_str = trimmed.substring(arrow_idx + 2)
+        val colon_pos = ret_str.index_of(":") ?? -1
+        var ret_type = ret_str.trim()
+        if colon_pos >= 0:
+            ret_type = ret_str.substring(0, colon_pos).trim()
+        val is_text_ret = ret_type == "text" or ret_type == "str"
+        if is_text_ret:
+            type_entries = type_entries + "fn_text:" + fn_name + ";"
+        if ret_type.len() > 0:
+            val ret_first = ret_type[0]
+            val ret_is_upper = ret_first >= "A" and ret_first <= "Z"
+            if ret_is_upper:
+                type_entries = type_entries + "fn_struct:" + fn_name + "=" + ret_type + ";"
+        if ret_type.starts_with("[") and ret_type.ends_with("]"):
+            val ret_sa_elem = ret_type.substring(1, ret_type.len() - 1).trim()
+            if ret_sa_elem == "i64" or ret_sa_elem == "int":
+                type_entries = type_entries + "fn_int_arr:" + fn_name + ";"
+            elif ret_sa_elem == "text" or ret_sa_elem == "str":
+                type_entries = type_entries + "fn_str_arr:" + fn_name + ";"
+            elif ret_sa_elem.len() > 0:
+                val ret_sa_f = ret_sa_elem[0]
+                if ret_sa_f >= "A" and ret_sa_f <= "Z":
+                    type_entries = type_entries + "fn_struct_arr:" + fn_name + "=" + ret_sa_elem + ";"
+    # Track parameter types
+    val fn_paren_idx = trimmed.index_of("(") ?? -1
+    val fn_close_idx = trimmed.index_of(")") ?? -1
+    if fn_paren_idx >= 0 and fn_close_idx > fn_paren_idx + 1:
+        val fn_params_str = trimmed.substring(fn_paren_idx + 1, fn_close_idx)
+        val fn_params = fn_params_str.split(",")
+        for fn_param in fn_params:
+            val fp = fn_param.trim()
+            val fp_colon = fp.index_of(":") ?? -1
+            if fp_colon >= 0:
+                val fp_name = fp.substring(0, fp_colon).trim()
+                val fp_type = fp.substring(fp_colon + 1).trim()
+                if fp_type == "text" or fp_type == "str":
+                    type_entries = type_entries + "text:" + fp_name + ";"
+                if fp_type == "[text]" or fp_type == "[str]":
+                    type_entries = type_entries + "arr:" + fp_name + ";"
+                if fp_type == "[i64]" or fp_type == "[int]" or fp_type == "[bool]":
+                    type_entries = type_entries + "int_arr:" + fp_name + ";"
+                if fp_type == "[[text]]" or fp_type == "[[str]]":
+                    type_entries = type_entries + "str_arr_arr:" + fp_name + ";"
+                if fp_type == "[[i64]]" or fp_type == "[[int]]":
+                    type_entries = type_entries + "int_arr_arr:" + fp_name + ";"
+                if fp_type.starts_with("[") and fp_type.ends_with("]"):
+                    val fp_elem = fp_type.substring(1, fp_type.len() - 1).trim()
+                    if fp_elem.len() > 0:
+                        val fp_ef = fp_elem[0]
+                        if fp_ef >= "A" and fp_ef <= "Z":
+                            type_entries = type_entries + "struct_arr_var:" + fp_name + "=" + fp_elem + ";"
+                if fp_type.len() > 0:
+                    val fp_first = fp_type[0]
+                    val fp_upper = fp_first >= "A" and fp_first <= "Z"
+                    if fp_upper:
+                        type_entries = type_entries + "struct_var:" + fp_name + "=" + fp_type + ";"
+    return type_entries
+
+export cg_process_enum, cg_track_field_types, cg_track_fn_types

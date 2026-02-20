@@ -1,0 +1,257 @@
+# Expression Type Inference - Operator Inference
+#
+# Binary and unary operator type inference.
+# Split from expr_infer.spl for maintainability.
+
+use inference.types.{Type, TypeVarId, UnifyError, InferError}
+use inference.infer.{InferenceEngine}
+use ast.{Expr, BinOp, UnaryOp}
+use compiler.type_system.checker.{TypeError}
+
+# ============================================================================
+# Binary Operators
+# ============================================================================
+
+fn infer_binary(engine: InferenceEngine, op: BinOp, left: Expr, right: Expr,
+                env: Dict<text, Type>) -> text:
+    """Infer type of binary operation."""
+    # Forward declaration: infer_expr is imported at call site via the main module
+    use compiler.type_system.expr_infer.{infer_expr}
+
+    val left_ty = infer_expr(engine, left, env)?
+    val right_ty = infer_expr(engine, right, env)?
+
+    match op:
+        # Arithmetic operators: unify operands, return numeric type
+        case Add:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Sub:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Mul:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Div:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Mod:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Pow:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case MatMul:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        # Comparison operators: unify operands, return bool
+        case Eq:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case NotEq:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case Lt:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case Gt:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case LtEq:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case GtEq:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        # Logical operators: both operands bool, return bool
+        case And:
+            engine_unify(engine, left_ty, Type.Bool)?
+            engine_unify(engine, right_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        case Or:
+            engine_unify(engine, left_ty, Type.Bool)?
+            engine_unify(engine, right_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        case AndSuspend:
+            engine_unify(engine, left_ty, Type.Bool)?
+            engine_unify(engine, right_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        case OrSuspend:
+            engine_unify(engine, left_ty, Type.Bool)?
+            engine_unify(engine, right_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        # Bitwise operators: both operands int, return int
+        case BitAnd:
+            val unify_left1 = engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))
+            if unify_left1.is_err():
+                return unify_left1
+            val unify_right1 = engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))
+            if unify_right1.is_err():
+                return unify_right1
+            Ok(type_Int(bits: 64, signed: true))
+
+        case BitOr:
+            val unify_left2 = engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))
+            if unify_left2.is_err():
+                return unify_left2
+            val unify_right2 = engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))
+            if unify_right2.is_err():
+                return unify_right2
+            Ok(type_Int(bits: 64, signed: true))
+
+        case BitXor:
+            val unify_left3 = engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))
+            if unify_left3.is_err():
+                return unify_left3
+            val unify_right3 = engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))
+            if unify_right3.is_err():
+                return unify_right3
+            Ok(type_Int(bits: 64, signed: true))
+
+        case ShiftLeft:
+            val unify_left4 = engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))
+            if unify_left4.is_err():
+                return unify_left4
+            val unify_right4 = engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))
+            if unify_right4.is_err():
+                return unify_right4
+            Ok(type_Int(bits: 64, signed: true))
+
+        case ShiftRight:
+            val unify_left5 = engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))
+            if unify_left5.is_err():
+                return unify_left5
+            val unify_right5 = engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))
+            if unify_right5.is_err():
+                return unify_right5
+            Ok(type_Int(bits: 64, signed: true))
+
+        # Is and In operators: return bool
+        case Is:
+            Ok(Type.Bool)
+
+        case In:
+            Ok(Type.Bool)
+
+        case NotIn:
+            Ok(Type.Bool)
+
+        # Pipe forward: x |> f - return function result type
+        case PipeForward:
+            match engine_resolve(engine, right_ty):
+                case Function(params, ret):
+                    Ok(ret)
+                case _:
+                    # Not a function - return fresh var
+                    Ok(engine_fresh_var(engine))
+
+        # Parallel operator: returns tuple of both results
+        case Parallel:
+            Ok(type_Tuple(elements: [left_ty, right_ty]))
+
+        case _:
+            # Unknown operator - return fresh var
+            Ok(engine_fresh_var(engine))
+
+# ============================================================================
+# Unary Operators
+# ============================================================================
+
+fn infer_unary(engine: InferenceEngine, op: UnaryOp, operand: Expr,
+               env: Dict<text, Type>) -> text:
+    """Infer type of unary operation."""
+    use compiler.type_system.expr_infer.{infer_expr}
+
+    val operand_ty = infer_expr(engine, operand, env)?
+
+    match op:
+        case Neg:
+            # Negation: operand must be numeric
+            val unify_neg = engine_unify(engine, operand_ty, Type.Int(bits: 64, signed: true))
+            if unify_neg.is_err():
+                return unify_neg
+            Ok(type_Int(bits: 64, signed: true))
+
+        case Not:
+            # Logical not: returns bool
+            Ok(Type.Bool)
+
+        case BitNot:
+            # Bitwise not: operand must be int
+            val unify_bitnot = engine_unify(engine, operand_ty, Type.Int(bits: 64, signed: true))
+            if unify_bitnot.is_err():
+                return unify_bitnot
+            Ok(type_Int(bits: 64, signed: true))
+
+        case Ref:
+            # Borrow: &T
+            Ok(type_Borrow(inner: operand_ty))
+
+        case RefMut:
+            # Mutable borrow: &mut T
+            Ok(type_BorrowMut(inner: operand_ty))
+
+        case Deref:
+            # Dereference: *T -> T
+            match engine_resolve(engine, operand_ty):
+                case Borrow(inner):
+                    Ok(inner)
+                case BorrowMut(inner):
+                    Ok(inner)
+                case _:
+                    # Not a reference - pass through
+                    Ok(operand_ty)
+
+        case ChannelRecv:
+            # Channel receive: <-chan extracts T from Channel<T>
+            match engine_resolve(engine, operand_ty):
+                case Generic(base, args):
+                    if base == "Channel":
+                        if has_args:
+                            Ok(args[0])
+                    else:
+                        Ok(engine_fresh_var(engine))
+                case Named(name):
+                    if name == "Channel":
+                        Ok(engine_fresh_var(engine))
+                    else:
+                        Ok(engine_fresh_var(engine))
+                case Var(_):
+                    # Create constraint: must be Channel<T>
+                    val inner = engine_fresh_var(engine)
+                    val channel_ty = Type.Generic(base: "Channel", args: [inner])
+                    engine_unify(engine, operand_ty, channel_ty)?
+                    Ok(inner)
+                case _:
+                    Ok(engine_fresh_var(engine))
+
+        case Move:
+            # Move is a semantic marker - type unchanged
+            Ok(operand_ty)
+
+        case _:
+            # Unknown operator
+            Ok(engine_fresh_var(engine))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export infer_binary, infer_unary

@@ -1,10 +1,571 @@
-# Hash Utilities - Backward Compatibility Stub
+# Hash Functions & Utilities
 #
-# This module has been consolidated into src/std/encoding.spl
-# This stub maintains backward compatibility - DO NOT DELETE
+# String hashing (DJB2, SDBM, FNV), integer hashing, collection hashing,
+# checksums (additive, XOR, Luhn, CRC), hash table utilities,
+# and advanced hashing (rolling hash, consistent hashing).
 #
-# All hash functions are re-exported from the unified encoding module.
+# Split from encoding.spl for modularity.
+#
+# Note: Hash functions are NOT cryptographically secure - for hash tables, checksums only.
 
-use std.encoding.{*}
+
+# ============================================================================
+# Section 4: Hash Functions (String Hashing)
+# ============================================================================
+
+fn hash_string_djb2(s: text) -> i64:
+    """DJB2 hash algorithm for strings.
+
+    Simple and fast hash function.
+    Good distribution for hash tables.
+
+    Example:
+        hash_string_djb2("hello")  # 210714636441
+    """
+    var hash = 5381
+
+    var i = 0
+    while i < s.len():
+        # hash * 33 + c
+        hash = ((hash << 5) + hash) + s[i].ord()
+        i = i + 1
+
+    hash
+
+fn hash_string_sdbm(s: text) -> i64:
+    """SDBM hash algorithm for strings.
+
+    Alternative to DJB2.
+
+    Example:
+        hash_string_sdbm("hello")  # Different from DJB2
+    """
+    var hash = 0
+
+    var i = 0
+    while i < s.len():
+        # hash = hash * 65599 + c
+        hash = s[i].ord() + (hash << 6) + (hash << 16) - hash
+        i = i + 1
+
+    hash
+
+fn hash_string_fnv(s: text) -> i64:
+    """FNV-1a hash algorithm for strings.
+
+    Good distribution, widely used.
+
+    Example:
+        hash_string_fnv("hello")
+    """
+    var hash = 2166136261  # FNV offset basis (32-bit)
+
+    var i = 0
+    while i < s.len():
+        hash = hash ^ s[i].ord()
+        hash = hash * 16777619  # FNV prime
+        i = i + 1
+
+    hash
+
+fn hash_string_simple(s: text) -> i64:
+    """Simple polynomial rolling hash.
+
+    Example:
+        hash_string_simple("test")
+    """
+    var hash = 0
+    val prime = 31
+
+    var i = 0
+    while i < s.len():
+        hash = hash * prime + s[i].ord()
+        i = i + 1
+
+    hash
+
+# ============================================================================
+# Section 5: Integer Hashing
+# ============================================================================
+
+fn hash_int(n: i64) -> i64:
+    """Hash an integer.
+
+    Uses integer mixing.
+
+    Example:
+        hash_int(12345)
+    """
+    var hash = n
+
+    # Integer mixing
+    hash = hash ^ (hash >> 16)
+    hash = hash * 0x85ebca6b
+    hash = hash ^ (hash >> 13)
+    hash = hash * 0xc2b2ae35
+    hash = hash ^ (hash >> 16)
+
+    hash
+
+fn hash_combine(hash1: i64, hash2: i64) -> i64:
+    """Combine two hash values.
+
+    Useful for hashing composite objects.
+
+    Example:
+        hash_combine(hash_int(1), hash_int(2))
+    """
+    # Based on boost::hash_combine
+    hash1 ^ (hash2 + 0x9e3779b9 + (hash1 << 6) + (hash1 >> 2))
+
+fn hash_combine_all(hashes):
+    """Combine multiple hash values.
+
+    Example:
+        hash_combine_all([hash1, hash2, hash3])
+    """
+    if hashes.len() == 0:
+        return 0
+
+    var result = hashes[0]
+    var i = 1
+
+    while i < hashes.len():
+        result = hash_combine(result, hashes[i])
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Section 6: Collection Hashing
+# ============================================================================
+
+fn hash_array(arr):
+    """Hash an array of integers.
+
+    Example:
+        hash_array([1, 2, 3, 4, 5])
+    """
+    var hash = 0
+
+    for elem in arr:
+        hash = hash_combine(hash, hash_int(elem))
+
+    hash
+
+fn hash_string_array(arr):
+    """Hash an array of strings.
+
+    Example:
+        hash_string_array(["hello", "world"])
+    """
+    var hash = 0
+
+    for s in arr:
+        hash = hash_combine(hash, hash_string_djb2(s))
+
+    hash
+
+fn hash_tuple2(pair):
+    """Hash a 2-tuple.
+
+    Example:
+        hash_tuple2((1, 2))
+    """
+    val (a, b) = pair
+    hash_combine(hash_int(a), hash_int(b))
+
+fn hash_tuple3(triple):
+    """Hash a 3-tuple.
+
+    Example:
+        hash_tuple3((1, 2, 3))
+    """
+    val (a, b, c) = triple
+    hash_combine_all([hash_int(a), hash_int(b), hash_int(c)])
+
+# ============================================================================
+# Section 7: Checksums
+# ============================================================================
+
+fn checksum_add(arr) -> i64:
+    """Simple additive checksum.
+
+    Example:
+        checksum_add([1, 2, 3, 4])  # 10
+    """
+    var sum = 0
+    for x in arr:
+        sum = sum + x
+    sum
+
+fn checksum_xor(arr) -> i64:
+    """XOR checksum.
+
+    Example:
+        checksum_xor([1, 2, 3, 4])  # 1^2^3^4 = 4
+    """
+    var result = 0
+    for x in arr:
+        result = result ^ x
+    result
+
+fn checksum_string_add(s: text) -> i64:
+    """Additive checksum of string.
+
+    Example:
+        checksum_string_add("hello")
+    """
+    var sum = 0
+    var i = 0
+
+    while i < s.len():
+        sum = sum + s[i].ord()
+        i = i + 1
+
+    sum
+
+fn checksum_string_xor(s: text) -> i64:
+    """XOR checksum of string.
+
+    Example:
+        checksum_string_xor("hello")
+    """
+    var result = 0
+    var i = 0
+
+    while i < s.len():
+        result = result ^ s[i].ord()
+        i = i + 1
+
+    result
+
+fn luhn_checksum(digits):
+    """Calculate Luhn checksum.
+
+    Used for credit card validation.
+
+    Example:
+        luhn_checksum([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    """
+    var sum = 0
+    var alternate = false
+
+    var i = digits.len() - 1
+    while i >= 0:
+        var digit = digits[i]
+
+        if alternate:
+            digit = digit * 2
+            if digit > 9:
+                digit = digit - 9
+
+        sum = sum + digit
+        alternate = not alternate
+        i = i - 1
+
+    sum % 10
+
+fn luhn_is_valid(digits):
+    """Check if digits pass Luhn check.
+
+    Example:
+        luhn_is_valid([4, 5, 3, 9, 1, 4, 0, 8, 0, 0, 0, 0, 0, 0, 0, 3])  # Visa
+    """
+    luhn_checksum(digits) == 0
+
+fn luhn_generate_check_digit(digits):
+    """Generate Luhn check digit.
+
+    Returns digit that makes sequence valid.
+
+    Example:
+        luhn_generate_check_digit([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    """
+    var with_zero = digits
+    with_zero.push(0)
+
+    val sum_mod = luhn_checksum(with_zero)
+    if sum_mod == 0:
+        return 0
+
+    10 - sum_mod
+
+fn crc8_simple(data):
+    """Simple 8-bit CRC.
+
+    Not standard CRC-8, but simple implementation.
+
+    Example:
+        crc8_simple([1, 2, 3, 4, 5])
+    """
+    var crc = 0
+
+    for byte in data:
+        crc = crc ^ byte
+
+        var i = 0
+        while i < 8:
+            if (crc & 0x80) != 0:
+                crc = (crc << 1) ^ 0x07  # Polynomial
+            else:
+                crc = crc << 1
+
+            crc = crc & 0xFF  # Keep 8 bits
+            i = i + 1
+
+    crc
+
+fn crc16_simple(data):
+    """Simple 16-bit CRC.
+
+    Example:
+        crc16_simple([1, 2, 3, 4, 5])
+    """
+    var crc = 0xFFFF
+
+    for byte in data:
+        crc = crc ^ byte
+
+        var i = 0
+        while i < 8:
+            if (crc & 0x0001) != 0:
+                crc = (crc >> 1) ^ 0xA001  # Polynomial
+            else:
+                crc = crc >> 1
+            i = i + 1
+
+    crc
+
+fn crc_string(s: text) -> i64:
+    """CRC of string bytes.
+
+    Example:
+        crc_string("hello")
+    """
+    var bytes = []
+    var i = 0
+
+    while i < s.len():
+        bytes.push(s[i].ord())
+        i = i + 1
+
+    crc16_simple(bytes)
+
+fn verify_checksum(data, expected_checksum: i64):
+    """Verify checksum matches data.
+
+    Example:
+        verify_checksum([1, 2, 3], 6)  # true for additive
+    """
+    checksum_add(data) == expected_checksum
+
+# ============================================================================
+# Section 8: Hash Table Utilities
+# ============================================================================
+
+fn hash_bucket(hash_value: i64, num_buckets: i64) -> i64:
+    """Map hash value to bucket index.
+
+    Example:
+        hash_bucket(12345, 100)  # 0-99
+    """
+    val abs_hash = if hash_value < 0: -hash_value else: hash_value
+    abs_hash % num_buckets
+
+fn hash_with_capacity(value, capacity: i64) -> i64:
+    """Hash value for hash table with given capacity.
+
+    For integer values.
+
+    Example:
+        hash_with_capacity(42, 1000)
+    """
+    hash_bucket(hash_int(value), capacity)
+
+fn hash_string_with_capacity(s: text, capacity: i64) -> i64:
+    """Hash string for hash table.
+
+    Example:
+        hash_string_with_capacity("key", 1000)
+    """
+    hash_bucket(hash_string_djb2(s), capacity)
+
+fn find_next_prime(n: i64) -> i64:
+    """Find next prime >= n (for hash table sizing).
+
+    Simple trial division.
+
+    Example:
+        find_next_prime(100)  # 101
+    """
+    if n <= 2:
+        return 2
+
+    var candidate = if n % 2 == 0: n + 1 else: n
+
+    while true:
+        var is_prime = true
+        var i = 3
+
+        while i * i <= candidate:
+            if candidate % i == 0:
+                is_prime = false
+                break
+            i = i + 2
+
+        if is_prime:
+            return candidate
+
+        candidate = candidate + 2
+
+fn good_hash_capacity(expected_size: i64) -> i64:
+    """Recommend good hash table capacity.
+
+    Returns prime number ~1.5x expected size.
+
+    Example:
+        good_hash_capacity(100)  # ~150, prime
+    """
+    val target = expected_size + expected_size / 2
+    find_next_prime(target)
+
+fn count_collisions(hash_values, capacity: i64) -> i64:
+    """Count hash collisions for given capacity.
+
+    Example:
+        count_collisions([hash1, hash2, hash3, ...], 100)
+    """
+    var buckets = []
+    var i = 0
+    while i < capacity:
+        buckets.push(0)
+        i = i + 1
+
+    # Count items per bucket
+    for hash_val in hash_values:
+        val bucket = hash_bucket(hash_val, capacity)
+        buckets[bucket] = buckets[bucket] + 1
+
+    # Count collisions
+    var collisions = 0
+    for count in buckets:
+        if count > 1:
+            collisions = collisions + (count - 1)
+
+    collisions
+
+fn hash_distribution_score(hash_values, capacity: i64) -> i64:
+    """Score hash distribution quality (lower is better).
+
+    Returns sum of squared bucket sizes.
+
+    Example:
+        hash_distribution_score(hashes, 100)
+    """
+    var buckets = []
+    var i = 0
+    while i < capacity:
+        buckets.push(0)
+        i = i + 1
+
+    for hash_val in hash_values:
+        val bucket = hash_bucket(hash_val, capacity)
+        buckets[bucket] = buckets[bucket] + 1
+
+    var score = 0
+    for count in buckets:
+        score = score + count * count
+
+    score
+
+# ============================================================================
+# Section 9: Advanced Hashing (Rolling, Consistent Hashing)
+# ============================================================================
+
+fn rolling_hash_init(s: text, window_size: i64):
+    """Initialize rolling hash.
+
+    Returns (hash, base, first_char_code).
+
+    Example:
+        val (hash, base, first) = rolling_hash_init("hello", 3)
+    """
+    val base = 31
+    var hash = 0
+    var power = 1
+
+    var i = 0
+    while i < window_size and i < s.len():
+        hash = hash * base + s[i].ord()
+        if i < window_size - 1:
+            power = power * base
+        i = i + 1
+
+    (hash, power, if s.len() > 0: s[0].ord() else: 0)
+
+fn rolling_hash_slide(current_hash: i64, power: i64, old_char: i64, new_char: i64) -> i64:
+    """Slide rolling hash window.
+
+    Example:
+        val new_hash = rolling_hash_slide(hash, power, 'h', 'o')
+    """
+    val base = 31
+    (current_hash - old_char * power) * base + new_char
+
+fn consistent_hash(key: i64, num_servers: i64) -> i64:
+    """Simple consistent hashing.
+
+    Maps key to server with minimal disruption on server changes.
+
+    Example:
+        consistent_hash(12345, 10)  # Server 0-9
+    """
+    var h = hash_int(key)
+    h = h % (num_servers * 100)  # Create more hash points
+
+    h / 100  # Map to server
+
+fn jump_consistent_hash(key: i64, num_buckets: i64) -> i64:
+    """Jump consistent hash algorithm.
+
+    Better than simple consistent hashing.
+
+    Example:
+        jump_consistent_hash(12345, 10)
+    """
+    var k = key
+    var b = -1
+    var j = 0
+
+    while j < num_buckets:
+        b = j
+        k = k * 2862933555777941757 + 1
+        j = ((b + 1) * (4294967296 / ((k >> 33) + 1)))
+
+    b
+
+fn hash_equals(h1: i64, h2: i64):
+    """Check if two hash values are equal.
+
+    Example:
+        hash_equals(hash1, hash2)
+    """
+    h1 == h2
+
+fn hash_compare(h1: i64, h2: i64) -> i64:
+    """Compare two hash values.
+
+    Returns: -1 if h1 < h2, 0 if equal, 1 if h1 > h2.
+
+    Example:
+        hash_compare(hash1, hash2)
+    """
+    if h1 < h2:
+        return -1
+    elif h1 > h2:
+        return 1
+    else:
+        return 0
 
 export *

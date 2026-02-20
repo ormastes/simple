@@ -21,6 +21,19 @@ This ensures:
 2. End users get all features including Cranelift JIT when it works properly
 3. Hang bug is isolated to bootstrap, not general product usage
 
+## C Backend Bootstrap (Alternative)
+
+For a simpler bootstrap path, the C backend can generate C++20 directly:
+
+```bash
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+```
+
+Output: `bin/bootstrap/cpp/simple`. See `scripts/bootstrap/bootstrap-c.sh`.
+
 ## Architecture
 
 ### 5-Phase Pipeline

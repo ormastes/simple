@@ -6,6 +6,7 @@ This guide is the quick bootstrap reference for the current repository layout.
 
 - Core sources: `src/compiler_core/`
 - Full compiler sources: `src/compiler/`
+- Generated C++20 output: `src/compiler_cpp/`
 - Bootstrap scripts: `scripts/bootstrap/`
 
 `src/compiler_core_legacy/` is retired. Bootstrap and docs should use `src/compiler/`.
@@ -19,6 +20,32 @@ This guide is the quick bootstrap reference for the current repository layout.
 5. `full2` recompiles for reproducibility check.
 
 See detailed pipeline: `doc/build/bootstrap_pipeline.md`.
+
+## C Backend Bootstrap
+
+The C backend generates C++20 from Simple source, which is then built with CMake + Ninja + Clang:
+
+```bash
+# 1. Generate C++20 from compiler source
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+
+# 2. Build with CMake + Ninja
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+
+# 3. Install bootstrap binary
+mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+
+# 4. Self-host verification
+bin/bootstrap/cpp/simple build
+```
+
+Or use the bootstrap script:
+
+```bash
+scripts/bootstrap/bootstrap-c.sh              # Generate + build
+scripts/bootstrap/bootstrap-c.sh --verify     # Generate + build + self-host verify
+```
 
 ## Shared Frontend Contract
 
@@ -85,8 +112,17 @@ QEMU FreeBSD bootstrap wrapper:
 ./scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --step=full2 --deploy
 ```
 
+## Quick Commands
+
+```bash
+# C backend bootstrap (CMake + Ninja)
+scripts/bootstrap/bootstrap-c.sh
+scripts/bootstrap/bootstrap-c.sh --verify
+```
+
 ## Script Map
 
+- `scripts/bootstrap/bootstrap-c.sh`: C backend bootstrap (CMake + Ninja)
 - `scripts/bootstrap/bootstrap-from-scratch.sh`: end-to-end bootstrap
 - `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`: FreeBSD target flow
 - `scripts/bootstrap/bootstrap-from-scratch.bat`: Windows flow
@@ -95,6 +131,7 @@ QEMU FreeBSD bootstrap wrapper:
 ## Expected Output
 
 - Final binary: `bin/release/simple`
+- C backend bootstrap binary: `bin/bootstrap/cpp/simple`
 - Intermediate artifacts: `build/bootstrap/`
 
 ## Related Docs

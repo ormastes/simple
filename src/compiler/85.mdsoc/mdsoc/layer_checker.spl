@@ -1,0 +1,739 @@
+# MDSOC Layer Dependency Checker
+#
+# Validates that module and capsule dependencies respect layer ordering.
+# Detects violations, cycles, and audits bypass usage.
+#
+# Layer rules are defined in LayerDef (types.spl). This module enforces
+# those rules across a project's dependency graph and produces audit
+# reports for any bypass grants/usages.
+#
+# Public documentation validation extracted to layer_doc_checker.spl.
+
+# External dependencies for documentation checking
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+# Re-export doc validation (extracted to layer_doc_checker.spl)
+use compiler.mdsoc.layer_doc_checker.{*}
+
+export LayerChecker
+export LayerViolation
+export DocViolation
+export BypassAudit
+export BypassReport
+export check_layer_dep
+export detect_layer_cycles
+export generate_bypass_report
+export check_public_documentation
+
+# ============================================================================
+# Violations
+# ============================================================================
+
+struct LayerViolation:
+    """A detected layer dependency violation.
+
+    Created when a module attempts to import from a module in a layer
+    that the ordering rules forbid.
+    """
+    from_module: text
+    to_module: text
+    from_layer: text
+    to_layer: text
+    message: text
+    location: text
+
+struct DocViolation:
+    """Missing documentation on CapsuleVisibility.Public export.
+
+    Created when a type marked as Public in a virtual capsule surface
+    does not have an associated docstring.
+    """
+    type_name: text
+    type_kind: text
+    module_path: text
+    source_file: text
+    line_number: i64
+    message: text
+
+impl DocViolation:
+    static fn new(name: text, kind: text, path: text, file: text, line: i64, msg: text) -> DocViolation:
+        DocViolation(
+            type_name: name,
+            type_kind: kind,
+            module_path: path,
+            source_file: file,
+            line_number: line,
+            message: msg
+        )
+
+    fn to_text() -> text:
+        "DocViolation: {self.type_name} ({self.type_kind}) missing documentation at {self.source_file}:{self.line_number}"
+
+    fn to_detail() -> text:
+        var result = "DOCUMENTATION REQUIRED: {self.message}\n"
+        result = result + "  type:   {self.type_name} ({self.type_kind})\n"
+        result = result + "  module: {self.module_path}\n"
+        result = result + "  at:     {self.source_file}:{self.line_number}"
+        result
+
+impl LayerViolation:
+    static fn new(from_mod: text, to_mod: text, from_layer: text, to_layer: text, msg: text, loc: text) -> LayerViolation:
+        LayerViolation(
+            from_module: from_mod,
+            to_module: to_mod,
+            from_layer: from_layer,
+            to_layer: to_layer,
+            message: msg,
+            location: loc
+        )
+
+    fn to_text() -> text:
+        "LayerViolation: {self.from_module} ({self.from_layer}) -> {self.to_module} ({self.to_layer}): {self.message}"
+
+    fn to_detail() -> text:
+        var result = "VIOLATION: {self.message}\n"
+        result = result + "  from: {self.from_module} (layer: {self.from_layer})\n"
+        result = result + "  to:   {self.to_module} (layer: {self.to_layer})\n"
+        result = result + "  at:   {self.location}"
+        result
+
+# ============================================================================
+# Bypass Audit
+# ============================================================================
+
+struct BypassAudit:
+    """Audit report for bypass grant/usage matching.
+
+    Tracks which grants have corresponding usages and vice versa.
+    Unmatched usages are errors (using a bypass without a grant).
+    Unmatched grants are warnings (granted but never used).
+    """
+    grants: [BypassGrant]
+    usages: [BypassUsage]
+    unmatched_grants: [BypassGrant]
+    unmatched_usages: [BypassUsage]
+
+impl BypassAudit:
+    static fn empty() -> BypassAudit:
+        BypassAudit(
+            grants: [],
+            usages: [],
+            unmatched_grants: [],
+            unmatched_usages: []
+        )
+
+    fn has_errors() -> bool:
+        self.unmatched_usages.len() > 0
+
+    fn has_warnings() -> bool:
+        self.unmatched_grants.len() > 0
+
+    fn error_count() -> i64:
+        self.unmatched_usages.len()
+
+    fn warning_count() -> i64:
+        self.unmatched_grants.len()
+
+# ============================================================================
+# Layer Checker
+# ============================================================================
+
+struct BypassReport:
+    """Summary report of bypass grants and usages."""
+    grant_count: i64
+    usage_count: i64
+    unmatched_grant_count: i64
+    unmatched_usage_count: i64
+    report_text: text
+
+impl BypassReport:
+    fn to_text() -> text:
+        self.report_text
+
+    fn has_errors() -> bool:
+        self.unmatched_usage_count > 0
+
+    fn has_warnings() -> bool:
+        self.unmatched_grant_count > 0
+
+struct LayerChecker:
+    """Enforces layer dependency rules for MDSOC.
+
+    Maintains a registry of module-to-layer assignments, checks dependencies
+    against the layer definition, and tracks bypass grants/usages for audit.
+    Also validates that CapsuleVisibility.Public exports have documentation.
+    """
+    layer_def: LayerDef
+    module_layers: [text]
+    module_layer_names: [text]
+    violations: [LayerViolation]
+    doc_violations: [DocViolation]
+    bypass_grant_keys: [text]
+    bypass_grant_items: [BypassGrant]
+    bypass_usages: [BypassUsage]
+    dep_froms: [text]
+    dep_tos: [text]
+
+impl LayerChecker:
+    static fn new(layer_def: LayerDef) -> LayerChecker:
+        LayerChecker(
+            layer_def: layer_def,
+            module_layers: [],
+            module_layer_names: [],
+            violations: [],
+            doc_violations: [],
+            bypass_grant_keys: [],
+            bypass_grant_items: [],
+            bypass_usages: [],
+            dep_froms: [],
+            dep_tos: []
+        )
+
+    # -- Module registration -------------------------------------------------
+
+    me assign_module_layer(module: text, layer: text):
+        """Register which layer a module belongs to."""
+        # Check if already assigned; update if so
+        var i: i64 = 0
+        for mod_path in self.module_layers:
+            if mod_path == module:
+                self.module_layer_names[i] = layer
+                return
+            i = i + 1
+        self.module_layers.push(module)
+        self.module_layer_names.push(layer)
+
+    fn get_module_layer(module: text) -> text?:
+        """Look up the layer for a module. Returns nil if unregistered."""
+        var i: i64 = 0
+        for mod_path in self.module_layers:
+            if mod_path == module:
+                return Some(self.module_layer_names[i])
+            i = i + 1
+        nil
+
+    # -- Dependency checking -------------------------------------------------
+
+    fn check_dependency(from_mod: text, to_mod: text) -> LayerViolation?:
+        """Check a single dependency between two modules.
+
+        Returns a violation if the dependency is disallowed, nil otherwise.
+        Modules not assigned to a layer are unconstrained.
+        """
+        val from_layer_opt = self.get_module_layer(from_mod)
+        val to_layer_opt = self.get_module_layer(to_mod)
+
+        # If either module has no assigned layer, no constraint
+        if from_layer_opt.? == false:
+            return nil
+        if to_layer_opt.? == false:
+            return nil
+
+        val from_layer = from_layer_opt ?? ""
+        val to_layer = to_layer_opt ?? ""
+
+        # Check if this is a bypassed dependency
+        if self._has_bypass_for(from_mod, to_mod, from_layer, to_layer):
+            return nil
+
+        # Delegate to layer_def
+        val allowed = self.layer_def.can_depend(from_layer, to_layer)
+        if allowed:
+            return nil
+
+        val msg = self.layer_def.describe_violation(from_layer, to_layer)
+        LayerViolation.new(from_mod, to_mod, from_layer, to_layer, msg, "")
+
+    me check_all_deps(dep_froms: [text], dep_tos: [text]):
+        """Check a batch of dependencies, collecting violations.
+
+        Takes parallel arrays of from-module and to-module paths.
+        """
+        var i: i64 = 0
+        for from_mod in dep_froms:
+            val to_mod = dep_tos[i]
+            val violation = self.check_dependency(from_mod, to_mod)
+            if violation.?:
+                val v = violation ?? LayerViolation.new("", "", "", "", "", "")
+                self.violations.push(v)
+            i = i + 1
+
+    # -- Bypass management ---------------------------------------------------
+
+    me register_bypass_grant(grant: BypassGrant):
+        """Record an export-side bypass grant."""
+        val key = grant.grant_key()
+        self.bypass_grant_keys.push(key)
+        self.bypass_grant_items.push(grant)
+
+    fn _find_bypass_grant(symbol: text) -> BypassGrant?:
+        """Find a grant by symbol name."""
+        var i: i64 = 0
+        for item in self.bypass_grant_items:
+            if item.granted_symbol == symbol:
+                return Some(item)
+            i = i + 1
+        nil
+
+    fn _has_bypass_for(from_mod: text, to_mod: text, from_layer: text, to_layer: text) -> bool:
+        """Check if there is a valid bypass for this dependency edge."""
+        val edge = "{from_layer}->{to_layer}"
+        for grant in self.bypass_grant_items:
+            if grant.granting_module == to_mod and grant.layer_edge == edge:
+                # Check if there is a matching usage
+                for usage in self.bypass_usages:
+                    if (usage.using_module == from_mod and
+                        usage.target_symbol == grant.granted_symbol and
+                        usage.layer_edge == edge):
+                        return true
+        false
+
+    fn validate_bypass_use(using_mod: text, target: text, edge: text, reason: text, location: text) -> text?:
+        """Validate a use-site bypass annotation.
+
+        Returns an error message if no matching grant exists, nil if valid.
+        Records the usage for audit purposes.
+        """
+        val grant_opt = self._find_bypass_grant(target)
+        if grant_opt.? == false:
+            return Some("no bypass grant found for symbol '{target}'")
+
+        val grant = grant_opt ?? BypassGrant.new("", "", "", "", "")
+
+        # Verify the edge matches
+        if grant.layer_edge != edge:
+            return Some("bypass edge mismatch: grant is '{grant.layer_edge}', usage is '{edge}'")
+
+        nil
+
+    me record_bypass_use(using_mod: text, target: text, edge: text, reason: text, location: text):
+        """Record a bypass usage (call after validate_bypass_use succeeds)."""
+        val grant_opt = self._find_bypass_grant(target)
+        val grant_loc = if grant_opt.?:
+            val g = grant_opt ?? BypassGrant.new("", "", "", "", "")
+            g.location
+        else:
+            ""
+
+        val usage = BypassUsage.new(using_mod, target, edge, reason, location, grant_loc)
+        self.bypass_usages.push(usage)
+
+    # -- Dependency tracking (for cycle detection) ----------------------------
+
+    me add_dependency(from_mod: text, to_mod: text):
+        """Record a dependency edge for cycle detection."""
+        self.dep_froms.push(from_mod)
+        self.dep_tos.push(to_mod)
+
+    fn detect_layer_cycles() -> [text]:
+        """Detect cycles in the recorded dependencies.
+
+        Delegates to the standalone detect_layer_cycles function.
+        """
+        detect_layer_cycles(self.dep_froms, self.dep_tos)
+
+    # -- Convenience methods -------------------------------------------------
+
+    fn has_bypass_grant(module: text, symbol: text) -> bool:
+        """Check if a bypass grant exists for a given module and symbol."""
+        for grant in self.bypass_grant_items:
+            if grant.granting_module == module and grant.granted_symbol == symbol:
+                return true
+        false
+
+    fn validate_bypass_usage(usage: BypassUsage) -> bool:
+        """Validate a bypass usage against registered grants.
+
+        Returns true if valid (matching grant exists), false otherwise.
+        """
+        val err = self.validate_bypass_use(
+            usage.using_module,
+            usage.target_symbol,
+            usage.layer_edge,
+            usage.reason,
+            usage.use_location
+        )
+        if err.?:
+            return false
+        true
+
+    me generate_bypass_report() -> BypassReport:
+        """Generate a summary bypass report."""
+        val audit = self.build_audit()
+        val report_text = generate_bypass_report(self)
+        BypassReport(
+            grant_count: audit.grants.len(),
+            usage_count: audit.usages.len(),
+            unmatched_grant_count: audit.unmatched_grants.len(),
+            unmatched_usage_count: audit.unmatched_usages.len(),
+            report_text: report_text
+        )
+
+    # -- Results access ------------------------------------------------------
+
+    fn get_violations() -> [LayerViolation]:
+        """Return all detected violations."""
+        self.violations
+
+    fn has_violations() -> bool:
+        """Check if any violations were detected."""
+        self.violations.len() > 0
+
+    fn violation_count() -> i64:
+        self.violations.len()
+
+    fn get_doc_violations() -> [DocViolation]:
+        """Return all detected documentation violations."""
+        self.doc_violations
+
+    fn has_doc_violations() -> bool:
+        """Check if any documentation violations were detected."""
+        self.doc_violations.len() > 0
+
+    fn doc_violation_count() -> i64:
+        self.doc_violations.len()
+
+    me add_doc_violation(violation: DocViolation):
+        """Record a documentation violation."""
+        self.doc_violations = self.doc_violations + [violation]
+
+    # -- Audit ---------------------------------------------------------------
+
+    fn build_audit() -> BypassAudit:
+        """Build a bypass audit report.
+
+        Matches grants to usages, identifies unmatched on both sides.
+        """
+        var matched_grant_indices: [i64] = []
+        var matched_usage_indices: [i64] = []
+
+        # Match each usage to a grant
+        var ui: i64 = 0
+        for usage in self.bypass_usages:
+            var gi: i64 = 0
+            for grant in self.bypass_grant_items:
+                if (grant.granted_symbol == usage.target_symbol and
+                    grant.layer_edge == usage.layer_edge):
+                    # Check if this grant index is already in matched list
+                    var already_matched = false
+                    for idx in matched_grant_indices:
+                        if idx == gi:
+                            already_matched = true
+                    if already_matched == false:
+                        matched_grant_indices.push(gi)
+                    matched_usage_indices.push(ui)
+                gi = gi + 1
+            ui = ui + 1
+
+        # Collect unmatched grants
+        var unmatched_g: [BypassGrant] = []
+        var gi2: i64 = 0
+        for grant in self.bypass_grant_items:
+            var found = false
+            for idx in matched_grant_indices:
+                if idx == gi2:
+                    found = true
+            if found == false:
+                unmatched_g.push(grant)
+            gi2 = gi2 + 1
+
+        # Collect unmatched usages
+        var unmatched_u: [BypassUsage] = []
+        var ui2: i64 = 0
+        for usage in self.bypass_usages:
+            var found = false
+            for idx in matched_usage_indices:
+                if idx == ui2:
+                    found = true
+            if found == false:
+                unmatched_u.push(usage)
+            ui2 = ui2 + 1
+
+        BypassAudit(
+            grants: self.bypass_grant_items,
+            usages: self.bypass_usages,
+            unmatched_grants: unmatched_g,
+            unmatched_usages: unmatched_u
+        )
+
+# ============================================================================
+# Standalone Functions
+# ============================================================================
+
+fn check_layer_dep(layer_def: LayerDef, from_layer: text, to_layer: text) -> bool:
+    """Simple layer dependency check.
+
+    Returns true if the dependency is allowed, false if disallowed.
+    Convenience function when you don't need the full LayerChecker.
+    """
+    layer_def.can_depend(from_layer, to_layer)
+
+fn detect_layer_cycles(dep_froms: [text], dep_tos: [text]) -> [text]:
+    """Detect cycles in a capsule/module dependency graph.
+
+    Takes parallel arrays representing directed edges: dep_froms[i] -> dep_tos[i].
+    Returns a list of cycle descriptions (empty if no cycles).
+
+    Uses iterative DFS with an explicit recursion stack to avoid
+    nested closure mutation issues.
+    """
+    var cycles: [text] = []
+
+    # Build adjacency list using parallel arrays
+    var node_names: [text] = []
+    var adj_from_indices: [i64] = []
+    var adj_to_indices: [i64] = []
+
+    # Collect unique node names
+    var i: i64 = 0
+    for from_node in dep_froms:
+        var found = false
+        for existing in node_names:
+            if existing == from_node:
+                found = true
+        if found == false:
+            node_names.push(from_node)
+        i = i + 1
+
+    i = 0
+    for to_node in dep_tos:
+        var found = false
+        for existing in node_names:
+            if existing == to_node:
+                found = true
+        if found == false:
+            node_names.push(to_node)
+        i = i + 1
+
+    # Build edge index pairs (indices into node_names)
+    i = 0
+    for from_node in dep_froms:
+        val to_node = dep_tos[i]
+        val from_idx = _index_of(node_names, from_node)
+        val to_idx = _index_of(node_names, to_node)
+        adj_from_indices.push(from_idx)
+        adj_to_indices.push(to_idx)
+        i = i + 1
+
+    val node_count = node_names.len()
+
+    # DFS state arrays: 0 = unvisited, 1 = in progress, 2 = done
+    var state: [i64] = []
+    var ni: i64 = 0
+    for n in node_names:
+        state.push(0)
+        ni = ni + 1
+
+    # Iterative DFS for each unvisited node
+    var start: i64 = 0
+    for node_name in node_names:
+        if state[start] == 0:
+            # DFS stack: each entry is a node index
+            var dfs_stack: [i64] = []
+            var path_stack: [i64] = []
+            dfs_stack.push(start)
+
+            for step in 0..node_count * node_count + node_count:
+                if dfs_stack.len() > 0:
+                    val current = dfs_stack[dfs_stack.len() - 1]
+                    var dummy = dfs_stack.pop()
+
+                    if state[current] == 1:
+                        # Backtracking: mark done, pop path
+                        state[current] = 2
+                        if path_stack.len() > 0:
+                            var dummy2 = path_stack.pop()
+                    else:
+                        if state[current] == 0:
+                            state[current] = 1
+                            path_stack.push(current)
+                            # Push a backtrack marker (re-push current to handle completion)
+                            dfs_stack.push(current)
+
+                            # Push neighbors
+                            var ei: i64 = 0
+                            for from_idx in adj_from_indices:
+                                if from_idx == current:
+                                    val neighbor = adj_to_indices[ei]
+                                    if state[neighbor] == 0:
+                                        dfs_stack.push(neighbor)
+                                    else:
+                                        if state[neighbor] == 1:
+                                            # Cycle found! Build cycle description
+                                            val cycle_desc = _build_cycle_desc(node_names, path_stack, neighbor)
+                                            cycles.push(cycle_desc)
+                                ei = ei + 1
+        start = start + 1
+
+    cycles
+
+fn _index_of(names: [text], target: text) -> i64:
+    """Find the index of a name in a list. Returns -1 if not found."""
+    var i: i64 = 0
+    for name in names:
+        if name == target:
+            return i
+        i = i + 1
+    -1
+
+fn _build_cycle_desc(node_names: [text], path_stack: [i64], back_to: i64) -> text:
+    """Build a human-readable cycle description from the DFS path."""
+    var parts: [text] = []
+    var found_start = false
+
+    for idx in path_stack:
+        if idx == back_to:
+            found_start = true
+        if found_start:
+            parts.push(node_names[idx])
+
+    # Close the cycle
+    parts.push(node_names[back_to])
+
+    var result = "cycle: "
+    var first = true
+    for part in parts:
+        if first:
+            result = result + part
+            first = false
+        else:
+            result = result + " -> " + part
+    result
+
+# ============================================================================
+# Bypass Report Generation
+# ============================================================================
+
+fn generate_bypass_report(checker: LayerChecker) -> text:
+    """Generate a markdown audit report for bypass grants and usages.
+
+    The report includes:
+    - Summary counts
+    - All grants with details
+    - All usages with matched grant info
+    - Errors for unmatched usages
+    """
+    val audit = checker.build_audit()
+    var lines: [text] = []
+
+    # Header
+    lines.push("# MDSOC Bypass Audit Report")
+    lines.push("")
+
+    # Summary
+    lines.push("## Summary")
+    lines.push("- Total grants: {audit.grants.len()}")
+    lines.push("- Total usages: {audit.usages.len()}")
+    lines.push("- Unmatched grants: {audit.unmatched_grants.len()}")
+    lines.push("- Unmatched usages (ERRORS): {audit.unmatched_usages.len()}")
+    lines.push("")
+
+    # Grants section
+    lines.push("## Grants")
+    if audit.grants.len() == 0:
+        lines.push("No bypass grants registered.")
+        lines.push("")
+    else:
+        for grant in audit.grants:
+            lines.push("### {grant.granted_symbol}")
+            lines.push("- Module: {grant.granting_module}")
+            lines.push("- Edge: {grant.layer_edge}")
+            lines.push("- Reason: {grant.reason}")
+            lines.push("- Location: {grant.location}")
+            lines.push("")
+
+    # Usages section
+    lines.push("## Usages")
+    if audit.usages.len() == 0:
+        lines.push("No bypass usages recorded.")
+        lines.push("")
+    else:
+        for usage in audit.usages:
+            lines.push("### {usage.target_symbol}")
+            lines.push("- Using module: {usage.using_module}")
+            lines.push("- Edge: {usage.layer_edge}")
+            lines.push("- Reason: {usage.reason}")
+            lines.push("- Use site: {usage.use_location}")
+            lines.push("- Grant site: {usage.grant_location}")
+            lines.push("")
+
+    # Errors section
+    if audit.unmatched_usages.len() > 0:
+        lines.push("## Errors")
+        for usage in audit.unmatched_usages:
+            lines.push("### Missing grant for: {usage.target_symbol}")
+            lines.push("- Requested by: {usage.use_location}")
+            lines.push("- Edge: {usage.layer_edge}")
+            lines.push("")
+
+    # Warnings section
+    if audit.unmatched_grants.len() > 0:
+        lines.push("## Warnings")
+        for grant in audit.unmatched_grants:
+            lines.push("### Unused grant: {grant.granted_symbol}")
+            lines.push("- Module: {grant.granting_module}")
+            lines.push("- Edge: {grant.layer_edge}")
+            lines.push("- Location: {grant.location}")
+            lines.push("")
+
+    # Violations section (if any on the checker)
+    val violations = checker.get_violations()
+    if violations.len() > 0:
+        lines.push("## Layer Violations")
+        for v in violations:
+            lines.push("### {v.from_module} -> {v.to_module}")
+            lines.push("- From layer: {v.from_layer}")
+            lines.push("- To layer: {v.to_layer}")
+            lines.push("- Message: {v.message}")
+            if v.location != "":
+                lines.push("- Location: {v.location}")
+            lines.push("")
+
+    var report = ""
+    var first_line = true
+    for line in lines:
+        if first_line:
+            report = line
+            first_line = false
+        else:
+            report = report + "\n" + line
+    report
+
+# ============================================================================
+# Numbered Layer Enforcement
+# ============================================================================
+
+fn check_numbered_layer_dep(from_dir: text, to_dir: text) -> LayerViolation?:
+    """Check if a dependency between numbered directories is allowed.
+
+    Extracts NN from directory names (e.g., "10.frontend", "50.mir") and
+    verifies that to_num <= from_num (a layer can only depend on equal or
+    lower-numbered layers).
+
+    Returns nil if the dependency is allowed, a LayerViolation otherwise.
+    """
+    use compiler.common.dependency.visibility.{extract_layer_number}
+
+    val from_num = extract_layer_number(from_dir)
+    val to_num = extract_layer_number(to_dir)
+
+    # If either is not a numbered directory, no constraint
+    if from_num < 0 or to_num < 0:
+        return nil
+
+    # Layer N can import layers <= N
+    if to_num <= from_num:
+        return nil
+
+    # Violation: importing from a higher-numbered layer
+    val from_name = from_dir
+    val to_name = to_dir
+    LayerViolation.new(
+        from_dir, to_dir,
+        "layer {from_num}", "layer {to_num}",
+        "layer {from_num} ({from_dir}) cannot import from layer {to_num} ({to_dir}): higher layers depend on lower layers, not vice versa",
+        ""
+    )
+
+export check_numbered_layer_dep

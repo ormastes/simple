@@ -1,0 +1,544 @@
+# Expression Type Inference
+#
+# Implements expression-level type inference using Hindley-Milner algorithm.
+# Port of rust/type/src/checker_infer.rs::infer_expr()
+#
+# This module extends TypeChecker with expression inference capabilities.
+#
+# Split into:
+#   expr_infer.spl       - main dispatch, literals, identifiers
+#   expr_infer_ops.spl   - binary + unary operators
+#   expr_infer_calls.spl - calls, lambdas, control flow, collections, field/index, macros
+
+use compiler.type_system.stmt_check.{bind_pattern, extract_element_type}
+use inference.types.{Type, TypeVarId, UnifyError, InferError}
+use inference.infer.{InferenceEngine}
+use ast.{Expr, BinOp, UnaryOp, FStringPart, MacroArg}
+use compiler.type_system.checker.{TypeError}
+use compiler.type_system.module_check.{ast_type_to_inference_type_engine}
+
+# Import from split modules
+use compiler.type_system.expr_infer_ops.{infer_binary, infer_unary}
+use compiler.type_system.expr_infer_calls.{
+    infer_call, infer_method_call,
+    infer_lambda, infer_if, infer_match,
+    infer_array, infer_tuple, infer_dict,
+    infer_field_access, infer_index_access, infer_macro
+}
+
+# ============================================================================
+# Expression Inference (Extension to TypeChecker)
+# ============================================================================
+
+# NOTE: These methods should be added to the TypeChecker class in checker.spl
+# For now, we define them as standalone functions that can be integrated.
+
+fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> text:
+    """Infer type of an expression using Hindley-Milner algorithm.
+
+    Port of rust/type/src/checker_infer.rs::infer_expr()
+    """
+    match expr:
+        # ====================================================================
+        # Literals
+        # ====================================================================
+        case Integer(_):
+            Ok(type_Int(bits: 64, signed: true))
+
+        case Float(_):
+            Ok(type_Float(bits: 64))
+
+        case TypedInteger(_, suffix):
+            # Decode numeric suffix to exact integer type
+            match suffix:
+                case I8: Ok(type_Int(bits: 8, signed: true))
+                case I16: Ok(type_Int(bits: 16, signed: true))
+                case I32: Ok(type_Int(bits: 32, signed: true))
+                case I64: Ok(type_Int(bits: 64, signed: true))
+                case U8: Ok(type_Int(bits: 8, signed: false))
+                case U16: Ok(type_Int(bits: 16, signed: false))
+                case U32: Ok(type_Int(bits: 32, signed: false))
+                case U64: Ok(type_Int(bits: 64, signed: false))
+                case _: Ok(type_Int(bits: 64, signed: true))
+
+        case TypedFloat(_, suffix):
+            # Decode numeric suffix to exact float type
+            match suffix:
+                case F32: Ok(type_Float(bits: 32))
+                case F64: Ok(type_Float(bits: 64))
+                case _: Ok(type_Float(bits: 64))
+
+        case String(_):
+            Ok(Type.Str)
+
+        case TypedString(_, _):
+            Ok(Type.Str)
+
+        case Bool(_):
+            Ok(Type.Bool)
+
+        case Nil:
+            Ok(Type.Nil)
+
+        case Symbol(_):
+            # Symbol literals have a fresh type
+            Ok(engine_fresh_var(engine))
+
+        # ====================================================================
+        # FString (interpolated strings)
+        # ====================================================================
+        case FString(parts):
+            # Infer each interpolated expression
+            # Allow undefined identifiers in placeholders (for template.with pattern)
+            for part in parts:
+                match part:
+                    case ExprPart(e):
+                        val result = infer_expr(engine, e, env)
+                        match result:
+                            case Ok(_):
+                                pass  # Continue checking
+                            case Err(typeerror_Undefined(_)):
+                                # Ignore undefined in FString placeholders
+                                # They'll be provided via .with method
+                                pass
+                            case Err(other_err):
+                                return Err(other_err)
+                    case Literal(_):
+                        pass  # No type checking needed for literals
+
+            Ok(Type.Str)
+
+        # ====================================================================
+        # Identifiers
+        # ====================================================================
+        case Identifier(name):
+            # Handle FFI calls: @rt_function_name - strip @ prefix for lookup
+            val lookup_name = if name.starts_with("@"):
+                name[1:]
+            else:
+                name
+
+            if env_contains(env, lookup_name):
+                Ok(env[lookup_name])
+            else:
+                Err(TypeError.Undefined("undefined identifier: {name}"))
+
+        case Path(segments):
+            # Multi-segment path (e.g., module::Type)
+            # For now, return fresh var - full resolution needs module system
+            Ok(engine_fresh_var(engine))
+
+        # ====================================================================
+        # Binary Operators
+        # ====================================================================
+        case Binary(op, left, right):
+            infer_binary(engine, op, left, right, env)
+
+        # ====================================================================
+        # Unary Operators
+        # ====================================================================
+        case Unary(op, operand):
+            infer_unary(engine, op, operand, env)
+
+        # ====================================================================
+        # Function Calls
+        # ====================================================================
+        case Call(callee, args):
+            infer_call(engine, callee, args, env)
+
+        case MethodCall(receiver, method, args):
+            infer_method_call(engine, receiver, method, args, env)
+
+        # ====================================================================
+        # Lambdas
+        # ====================================================================
+        case Lambda(params, body, move_mode, capture_all):
+            infer_lambda(engine, params, body, env)
+
+        # ====================================================================
+        # Control Flow
+        # ====================================================================
+        case IfExpr(let_pattern, condition, then_branch, else_branch):
+            infer_if(engine, condition, then_branch, else_branch, env)
+
+        case MatchCase(subject, arms):
+            infer_match(engine, subject, arms, env)
+
+        # ====================================================================
+        # Collections
+        # ====================================================================
+        case Array(elements):
+            infer_array(engine, elements, env)
+
+        case ArrayRepeat(value, count):
+            val value_ty = infer_expr(engine, value, env)?
+            val count_ty = infer_expr(engine, count, env)?
+            engine_unify(engine, count_ty, Type.Int(bits: 64, signed: true))?
+            Ok(type_Array(elem: value_ty, size: nil))
+
+        case VecLiteral(elements):
+            # Same as array for type inference purposes
+            infer_array(engine, elements, env)
+
+        case Tuple(elements):
+            infer_tuple(engine, elements, env)
+
+        case Dict(pairs):
+            infer_dict(engine, pairs, env)
+
+        # ====================================================================
+        # Field and Index Access
+        # ====================================================================
+        case FieldAccess(receiver, field):
+            infer_field_access(engine, receiver, field, env)
+
+        case Index(receiver, index):
+            infer_index_access(engine, receiver, index, env)
+
+        case TupleIndex(receiver, index):
+            # Tuple indexing with literal index
+            val recv_ty = infer_expr(engine, receiver, env)?
+            match engine_resolve(engine, recv_ty):
+                case Tuple(elems):
+                    if index >= 0:
+                        if index < elems_len(elems):
+                            Ok(elems[index])
+                    else:
+                        Err(TypeError.Other("tuple index out of bounds"))
+                case _:
+                    # Not a tuple - return fresh var
+                    Ok(engine_fresh_var(engine))
+
+        case Slice(receiver, start, end, step):
+            # Slicing returns same type as receiver (for arrays/strings)
+            val recv_ty = infer_expr(engine, receiver, env)?
+
+            # Check slice indices are integers
+            if has_start:
+                val start_ty = infer_expr(engine, start_value, env)?
+                engine_unify(engine, start_ty, Type.Int(bits: 64, signed: true))?
+            if has_end:
+                val end_ty = infer_expr(engine, end_value, env)?
+                engine_unify(engine, end_ty, Type.Int(bits: 64, signed: true))?
+            if has_step:
+                val step_ty = infer_expr(engine, step_value, env)?
+                engine_unify(engine, step_ty, Type.Int(bits: 64, signed: true))?
+
+            Ok(recv_ty)
+
+        # ====================================================================
+        # Ranges
+        # ====================================================================
+        case Range(start, end, bound):
+            # Infer range bounds
+            if has_start:
+                val _unused_1 = infer_expr(engine, start_value, env)?
+            if has_end:
+                val _unused_2 = infer_expr(engine, end_value, env)?
+
+            # Range type is a fresh variable for now
+            # Full implementation needs Range<T> type
+            Ok(engine_fresh_var(engine))
+
+        # ====================================================================
+        # List/Dict Comprehensions
+        # ====================================================================
+        case ListComprehension(expr, pattern, iterable, condition):
+            # Infer iterable type
+            val iterable_ty = infer_expr(engine, iterable, env)?
+
+            # Bind pattern variables (Phase 3[2] - TODO #171)
+            val elem_ty_iter = extract_element_type(engine, iterable_ty)?
+            val comp_env = bind_pattern(pattern, elem_ty_iter, env)
+
+            # Infer condition with extended environment
+            if has_condition:
+                val cond_ty = infer_expr(engine, condition_value, comp_env)?
+                engine_unify(engine, cond_ty, Type.Bool)?
+
+            # Infer element expression with extended environment
+            val elem_ty = infer_expr(engine, expr, comp_env)?
+
+            Ok(type_Array(elem: elem_ty, size: nil))
+
+        case DictComprehension(key, value, pattern, iterable, condition):
+            # Similar to list comprehension but returns dict
+            val _unused_3 = infer_expr(engine, iterable, env)?
+
+            if has_condition:
+                val cond_ty = infer_expr(engine, condition_value, env)?
+                engine_unify(engine, cond_ty, Type.Bool)?
+
+            val key_ty = infer_expr(engine, key, env)?
+            val value_ty = infer_expr(engine, value, env)?
+
+            Ok(type_Dict(key: key_ty, value: value_ty))
+
+        # ====================================================================
+        # Struct Initialization
+        # ====================================================================
+        case StructInit(name, fields):
+            # Infer each field expression
+            for _item_0 in fields:
+                val field_name = _item_0[0]
+                val field_expr = _item_0[1]
+                val _unused_4 = infer_expr(engine, field_expr, env)?
+
+            # Return named type - full resolution needs struct definition
+            Ok(type_Named(name))
+
+        # ====================================================================
+        # Concurrency
+        # ====================================================================
+        case Spawn(expr):
+            # Spawn returns a future/thread handle
+            val expr_ty = infer_expr(engine, expr, env)?
+            # Return Future<T> or similar
+            Ok(Type.Generic(base: "Future", args: [expr_ty]))
+
+        case Go(args, params, body):
+            # Go block returns fresh var for now
+            Ok(engine_fresh_var(engine))
+
+        case Await(expr):
+            # Await unwraps Future<T> to T
+            val expr_ty = infer_expr(engine, expr, env)?
+            match engine_resolve(engine, expr_ty):
+                case Generic(base, args):
+                    if base == "Future":
+                        if has_args:
+                            Ok(args[0])
+                    else:
+                        Ok(engine_fresh_var(engine))
+                case _:
+                    Ok(engine_fresh_var(engine))
+
+        case Yield(value):
+            if has_value:
+                infer_expr(engine, value_value, env)
+            else:
+                Ok(Type.Unit)
+
+        # ====================================================================
+        # Memory Operations
+        # ====================================================================
+        case New(kind, expr):
+            val expr_ty = infer_expr(engine, expr, env)?
+            # New creates a pointer to the type
+            match kind:
+                case Borrow:
+                    Ok(type_Borrow(inner: expr_ty))
+                case BorrowMut:
+                    Ok(type_BorrowMut(inner: expr_ty))
+                case _:
+                    # Other pointer kinds - return generic pointer for now
+                    Ok(engine_fresh_var(engine))
+
+        # ====================================================================
+        # Type Casts
+        # ====================================================================
+        case Cast(expr, target_type):
+            # Type annotation - just return the target type
+            val _unused_5 = infer_expr(engine, expr, env)?
+            Ok(ast_type_to_inference_type_engine(target_type, engine))
+
+        # ====================================================================
+        # Optional/Result Operations
+        # ====================================================================
+        case Try(expr):
+            # Try operator (?) unwraps Result<T, E> to T
+            val expr_ty = infer_expr(engine, expr, env)?
+            match engine_resolve(engine, expr_ty):
+                case Result(ok, err):
+                    Ok(ok)
+                case Optional(inner):
+                    Ok(inner)
+                case _:
+                    # Not a Result/Optional - return fresh var
+                    Ok(engine_fresh_var(engine))
+
+        case ExistsCheck(expr):
+            # .? operator always returns bool
+            val _unused_6 = infer_expr(engine, expr, env)?
+            Ok(Type.Bool)
+
+        case UnwrapOr(expr, default):
+            # expr ?? default - returns T from Option<T> or default
+            val expr_ty = infer_expr(engine, expr, env)?
+            val default_ty = infer_expr(engine, default, env)?
+
+            # Unify with default type
+            engine_unify(engine, expr_ty, default_ty)?
+
+            Ok(engine_resolve(engine, expr_ty))
+
+        case UnwrapElse(expr, fallback_fn):
+            # Similar to UnwrapOr but with function
+            val expr_ty = infer_expr(engine, expr, env)?
+            val _unused_7 = infer_expr(engine, fallback_fn, env)?
+
+            match engine_resolve(engine, expr_ty):
+                case Optional(inner):
+                    Ok(inner)
+                case _:
+                    Ok(engine_fresh_var(engine))
+
+        case UnwrapOrReturn(expr):
+            # Unwrap or early return
+            val expr_ty = infer_expr(engine, expr, env)?
+            match engine_resolve(engine, expr_ty):
+                case Optional(inner):
+                    Ok(inner)
+                case Result(ok, _):
+                    Ok(ok)
+                case _:
+                    Ok(engine_fresh_var(engine))
+
+        case Coalesce(expr, default):
+            # Same as UnwrapOr
+            val expr_ty = infer_expr(engine, expr, env)?
+            val default_ty = infer_expr(engine, default, env)?
+            engine_unify(engine, expr_ty, default_ty)?
+            Ok(engine_resolve(engine, expr_ty))
+
+        case OptionalChain(expr, field):
+            # expr?.field returns Option<FieldType>
+            val _unused_8 = infer_expr(engine, expr, env)?
+            # Field type lookup needs struct definitions
+            val field_ty = engine_fresh_var(engine)
+            Ok(type_Optional(inner: field_ty))
+
+        case OptionalMethodCall(receiver, method, args):
+            # receiver?.method() returns Option<ReturnType>
+            val _unused_9 = infer_expr(engine, receiver, env)?
+            for arg in args:
+                val _unused_10 = infer_expr(engine, arg.value, env)?
+
+            val ret_ty = engine_fresh_var(engine)
+            Ok(type_Optional(inner: ret_ty))
+
+        # ====================================================================
+        # Cast Operations
+        # ====================================================================
+        case CastOr(expr, target_type, default):
+            # Cast with default value
+            val _unused_11 = infer_expr(engine, expr, env)?
+            val _unused_12 = infer_expr(engine, default, env)?
+            Ok(ast_type_to_inference_type_engine(target_type, engine))
+
+        case CastElse(expr, target_type, fallback_fn):
+            val _unused_13 = infer_expr(engine, expr, env)?
+            val _unused_14 = infer_expr(engine, fallback_fn, env)?
+            Ok(engine_fresh_var(engine))
+
+        case CastOrReturn(expr, target_type):
+            val _unused_15 = infer_expr(engine, expr, env)?
+            Ok(engine_fresh_var(engine))
+
+        # ====================================================================
+        # Macros
+        # ====================================================================
+        case MacroInvocation(name, args):
+            infer_macro(engine, name, args, env)
+
+        # ====================================================================
+        # Spread Operators
+        # ====================================================================
+        case Spread(expr):
+            # Spread preserves the array type
+            infer_expr(engine, expr, env)
+
+        case DictSpread(expr):
+            # Dict spread preserves the dict type
+            infer_expr(engine, expr, env)
+
+        # ====================================================================
+        # Functional Update
+        # ====================================================================
+        case FunctionalUpdate(target, method, args):
+            # Returns same type as target
+            val target_ty = infer_expr(engine, target, env)?
+            for arg in args:
+                val _unused_16 = infer_expr(engine, arg.value, env)?
+            Ok(target_ty)
+
+        # ====================================================================
+        # Contract/Verification Expressions
+        # ====================================================================
+        case ContractResult:
+            # Result placeholder in contracts
+            Ok(engine_fresh_var(engine))
+
+        case ContractOld(expr):
+            # Old value in postconditions - same type as expr
+            infer_expr(engine, expr, env)
+
+        case Forall(pattern, range, predicate):
+            val _unused_17 = infer_expr(engine, range, env)?
+            val pred_ty = infer_expr(engine, predicate, env)?
+            engine_unify(engine, pred_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        case Exists(pattern, range, predicate):
+            val _unused_18 = infer_expr(engine, range, env)?
+            val pred_ty = infer_expr(engine, predicate, env)?
+            engine_unify(engine, pred_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        # ====================================================================
+        # Block Expressions
+        # ====================================================================
+        case DoBlock(stmts):
+            # Do block returns type of last statement
+            # For now, return fresh var (needs statement inference)
+            Ok(engine_fresh_var(engine))
+
+        # ====================================================================
+        # Math/ML Extensions
+        # ====================================================================
+        case GridLiteral(rows, device):
+            # Grid literal is a 2D array/tensor
+            # Infer element type from first element
+            if rows.?:
+                if rows[0].?:
+                    val first_elem_ty = infer_expr(engine, rows[0][0], env)?
+                    Ok(type_Array(elem: Type.Array(elem: first_elem_ty, size: nil), size: nil))
+            else:
+                Ok(engine_fresh_var(engine))
+
+        case TensorLiteral(dtype, dims, mode, device):
+            # Tensor type - use dtype and dimensions
+            # For now, return generic Tensor type
+            Ok(Type.Named("Tensor"))
+
+        case BlockExpr(kind, payload):
+            # Math blocks and other special blocks
+            Ok(engine_fresh_var(engine))
+
+        # ====================================================================
+        # I18n
+        # ====================================================================
+        case I18nString(_, _):
+            Ok(Type.Str)
+
+        case I18nTemplate(_, _, _):
+            Ok(Type.Str)
+
+        case I18nRef(_):
+            Ok(Type.Str)
+
+        # ====================================================================
+        # Fallback
+        # ====================================================================
+        case _:
+            # Unsupported expression type - return fresh variable
+            Ok(engine_fresh_var(engine))
+
+# ============================================================================
+# Exports - re-export everything for backward compatibility
+# ============================================================================
+
+export infer_expr, infer_binary, infer_unary, infer_call, infer_method_call
+export infer_lambda, infer_if, infer_match
+export infer_array, infer_tuple, infer_dict
+export infer_field_access, infer_index_access, infer_macro
