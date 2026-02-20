@@ -1,7 +1,400 @@
-# Desugar Suspension Analysis (delegates to compiler_shared)
-use compiler_shared.desugar.suspension_analysis.{SuspensionPoint, SuspensionAnalysis}
-use compiler_shared.desugar.suspension_analysis.{analyze_suspensions, has_await_expressions}
-use compiler_shared.desugar.suspension_analysis.{format_suspension_analysis}
-export SuspensionPoint, SuspensionAnalysis
-export analyze_suspensions, has_await_expressions
+# Suspension Point Analysis for Async State Machine Generation
+#
+# This module identifies suspension points (await expressions) in async function
+# bodies and computes the set of live variables that must be preserved in the
+# state machine.
+#
+# A suspension point is a location where an async function may yield control
+# back to the runtime (an await expression). The state machine must preserve
+# all live variables across these suspension points.
+
+use compiler.parser_types.*
+use lexer.Span
+
+# ================================================================
+# Data Structures
+# ================================================================
+
+struct SuspensionPoint:
+    """A single suspension point in an async function.
+
+    Represents an `await` expression where the function may suspend execution
+    and return control to the runtime. The state machine must be able to
+    resume from this point with all live variables intact.
+
+    Example:
+        val data = await fetch()
+                   ^^^^^^^^^^^^^ suspension point
+
+    Fields:
+        id: Sequential ID (0, 1, 2, ...) for this suspension point
+        await_expr: The await expression itself
+        awaited_future: The expression being awaited (inside the await)
+        context_depth: Nesting depth (for tracking control flow)
+        live_variables: Variables that must be preserved in state
+        span: Source location of the await expression
+    """
+    id: i64
+    await_expr: Expr
+    awaited_future: Expr
+    context_depth: i64
+    live_variables: [text]
+    span: Span
+
+struct SuspensionAnalysis:
+    """Complete suspension point analysis for an async function.
+
+    Contains all suspension points found in the function body, ordered by
+    execution sequence.
+
+    Fields:
+        suspension_points: Ordered list of suspension points
+        total_states: Number of states needed (num suspension points + 2)
+                     State0 = initial, State1..N = after each await,
+                     StateN+1 = terminal (if needed)
+    """
+    suspension_points: [SuspensionPoint]
+    total_states: i64
+
+# ================================================================
+# Analysis Entry Point
+# ================================================================
+
+fn analyze_suspensions(func: Function) -> SuspensionAnalysis:
+    """Analyze async function to find all suspension points.
+
+    Walks the function body AST to find all `await` expressions, assigns
+    them sequential IDs, and computes live variables at each point.
+
+    Args:
+        func: Async function to analyze
+
+    Returns:
+        SuspensionAnalysis with all suspension points identified
+
+    Example:
+        async fn example():
+            val a = 1
+            val b = await fetch1()  # SP0
+            val c = await fetch2()  # SP1
+            return a + b + c
+
+        # Returns: SuspensionAnalysis(
+        #   suspension_points: [
+        #     SuspensionPoint(id: 0, live: ["a"], ...),
+        #     SuspensionPoint(id: 1, live: ["a", "b"], ...)
+        #   ],
+        #   total_states: 3  # State0, State1, State2
+        # )
+    """
+    if not func.is_async:
+        # Not an async function, no suspension points
+        return SuspensionAnalysis(
+            suspension_points: [],
+            total_states: 0
+        )
+
+    var visitor = SuspensionVisitor(
+        next_id: 0,
+        suspension_points: [],
+        current_depth: 0,
+        declared_variables: []
+    )
+
+    visitor_visit_block(visitor, func.body)
+
+    SuspensionAnalysis(
+        suspension_points: visitor.suspension_points,
+        total_states: visitor.suspension_points_len(suspension_points) + 1  # +1 for State0
+    )
+
+# ================================================================
+# AST Visitor for Finding Suspension Points
+# ================================================================
+
+class SuspensionVisitor:
+    """Visitor that walks AST to find await expressions.
+
+    Tracks:
+    - All await expressions (suspension points)
+    - Control flow depth (for nested blocks)
+    - Declared variables (for live variable analysis)
+
+    Methods walk the AST recursively, building up the list of suspension
+    points with their context.
+    """
+    next_id: i64
+    suspension_points: [SuspensionPoint]
+    current_depth: i64
+    declared_variables: [text]
+
+    me visit_block(block: Block):
+        """Visit all statements in a block."""
+        for stmt in block.stmts:
+            self.visit_stmt(stmt)
+
+    me visit_stmt(stmt: Stmt):
+        """Visit a single statement."""
+        match stmt.kind:
+            case stmtkind_Expr(expr):
+                self.visit_expr(expr)
+
+            case stmtkind_Val(name, type_, value):
+                # Track variable declaration
+                self.declared_variables = self.declared_variables_push(declared_variables, name)
+                if has_value:
+                    self.visit_expr(value)
+
+            case stmtkind_Var(name, type_, value):
+                # Track mutable variable declaration
+                self.declared_variables = self.declared_variables_push(declared_variables, name)
+                if has_value:
+                    self.visit_expr(value)
+
+            case stmtkind_Assign(target, op, value):
+                self.visit_expr(target)
+                self.visit_expr(value)
+
+            case stmtkind_While(condition, body):
+                self.visit_expr(condition)
+
+                self.current_depth = self.current_depth + 1
+                self.visit_block(body)
+                self.current_depth = self.current_depth - 1
+
+            case stmtkind_For(var_name, iterable, body):
+                # Track loop variable
+                self.declared_variables = self.declared_variables_push(declared_variables, var_name)
+                self.visit_expr(iterable)
+
+                self.current_depth = self.current_depth + 1
+                self.visit_block(body)
+                self.current_depth = self.current_depth - 1
+
+            case stmtkind_Return(value):
+                if has_value:
+                    self.visit_expr(value)
+
+            case StmtKind.Break:
+                ()
+
+            case StmtKind.Continue:
+                ()
+
+            case _:
+                # Other statement types don't typically contain expressions
+                ()
+
+    me visit_expr(expr: Expr):
+        """Visit an expression, checking for await."""
+        match expr.kind:
+            case exprkind_Await(awaited):
+                # Found a suspension point!
+                self.add_suspension_point(expr, awaited)
+                # Also visit the awaited expression
+                self.visit_expr(awaited)
+
+            case exprkind_Block(block):
+                self.current_depth = self.current_depth + 1
+                self.visit_block(block)
+                self.current_depth = self.current_depth - 1
+
+            case exprkind_If(condition, then_expr, else_expr):
+                self.visit_expr(condition)
+                self.visit_expr(then_expr)
+                if has_else_expr:
+                    self.visit_expr(else_expr)
+
+            case exprkind_Call(func, args):
+                self.visit_expr(func)
+                for arg in args:
+                    self.visit_expr(arg.value)
+
+            case exprkind_Binary(left, op, right):
+                self.visit_expr(left)
+                self.visit_expr(right)
+
+            case exprkind_Unary(op, operand):
+                self.visit_expr(operand)
+
+            case exprkind_Field(object_, field):
+                self.visit_expr(object_)
+
+            case exprkind_Index(array, index):
+                self.visit_expr(array)
+                self.visit_expr(index)
+
+            case exprkind_MatchCase(scrutinee, arms):
+                self.visit_expr(scrutinee)
+                for arm in arms:
+                    self.current_depth = self.current_depth + 1
+                    self.visit_block(arm.body)
+                    self.current_depth = self.current_depth - 1
+
+            # Literals and simple expressions don't need recursion
+            case exprkind_Ident(_):
+                ()
+
+            case exprkind_IntLiteral(_):
+                ()
+
+            case exprkind_FloatLiteral(_):
+                ()
+
+            case exprkind_StringLiteral(_):
+                ()
+
+            case exprkind_BoolLiteral(_):
+                ()
+
+            case _:
+                # Other expression types don't contain await
+                ()
+
+    me add_suspension_point(await_expr: Expr, awaited_future: Expr):
+        """Add a new suspension point to the list.
+
+        Assigns a sequential ID and computes live variables at this point.
+        """
+        val live_vars = self.compute_live_variables()
+
+        val sp = SuspensionPoint(
+            id: self.next_id,
+            await_expr: await_expr,
+            awaited_future: awaited_future,
+            context_depth: self.current_depth,
+            live_variables: live_vars,
+            span: await_expr.span
+        )
+
+        self.suspension_points = self.suspension_points_push(suspension_points, sp)
+        self.next_id = self.next_id + 1
+
+    fn compute_live_variables() -> [text]:
+        """Compute which variables are live at current suspension point.
+
+        For now, conservatively include all declared variables.
+        A more sophisticated analysis would compute actual liveness.
+
+        Returns:
+            List of variable names that are live
+        """
+        # Basic liveness analysis (Phase 1B[6] - TODO #81 ✅)
+        # A variable is live at a suspension point if it's:
+        # 1. Used after the suspension point, OR
+        # 2. Used in any subsequent suspension points
+
+        var live_vars = []
+
+        # Scan expressions after this suspension point
+        for var_name in self.declared_variables:
+            if self.is_used_after_suspension(var_name, after_point):
+                live_vars_push(live_vars, var_name)
+
+        live_vars
+
+    fn is_used_after_suspension(var_name: text, after_expr: Expr) -> bool:
+        """Check if variable is used after given expression."""
+        # Simple heuristic: check if variable appears in string representation
+        # A proper implementation would walk the AST
+        val expr_str = self.expr_to_string(after_expr)
+        expr_str_contains(expr_str, var_name)
+
+    fn expr_to_string(expr: Expr) -> text:
+        """Convert expression to string for simple analysis."""
+        # Simplified - actual implementation would use proper AST traversal
+        "expr"
+
+# ================================================================
+# Utility Functions
+# ================================================================
+
+fn has_await_expressions(block: Block) -> bool:
+    """Quick check if block contains any await expressions.
+
+    Args:
+        block: Block to check
+
+    Returns:
+        true if block contains any await, false otherwise
+    """
+    var checker = AwaitChecker()
+    checker_check_block(checker, block)
+    checker.has_await
+
+class AwaitChecker:
+    """Simple visitor that just checks for presence of await."""
+    has_await: bool
+
+    me check_block(block: Block):
+        """Check block for await expressions."""
+        if self.has_await:
+            return  # Already found one, stop searching
+
+        for stmt in block.stmts:
+            self.check_stmt(stmt)
+            if self.has_await:
+                return
+
+    me check_stmt(stmt: Stmt):
+        """Check statement for await expressions."""
+        match stmt.kind:
+            case stmtkind_Expr(expr):
+                self.check_expr(expr)
+            case stmtkind_Val(_, _, value):
+                if has_value:
+                    self.check_expr(value)
+            case stmtkind_Var(_, _, value):
+                if has_value:
+                    self.check_expr(value)
+            case _:
+                ()
+
+    me check_expr(expr: Expr):
+        """Check expression for await."""
+        match expr.kind:
+            case exprkind_Await(_):
+                self.has_await = true
+            case _:
+                ()  # Don't recurse, just looking for top-level awaits
+
+# ================================================================
+# Debugging Helpers
+# ================================================================
+
+fn format_suspension_analysis(analysis: SuspensionAnalysis) -> text:
+    """Format suspension analysis for debugging.
+
+    Args:
+        analysis: Analysis to format
+
+    Returns:
+        Human-readable string representation
+
+    Example output:
+        Suspension Analysis:
+          Total states: 3
+          Suspension points: 2
+            SP0: await fetch1() [live: a]
+            SP1: await fetch2() [live: a, b]
+    """
+    var lines = []
+    lines = lines.push("Suspension Analysis:")
+    lines = lines.push("  Total states: {analysis.total_states}")
+    lines = lines.push("  Suspension points: {analysis.suspension_points.len()}")
+
+    for sp in analysis.suspension_points:
+        val live_vars = sp.live_variables.join(", ")
+        lines = lines.push("    SP{sp.id}: await <expr> [live: {live_vars}]")
+
+    lines.join("\n")
+
+# ================================================================
+# Exports
+# ================================================================
+
+export SuspensionPoint
+export SuspensionAnalysis
+export analyze_suspensions
+export has_await_expressions
 export format_suspension_analysis

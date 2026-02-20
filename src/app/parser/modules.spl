@@ -4,7 +4,6 @@
 # requires capabilities, structured_export.
 # Port of rust/parser/src/stmt_parsing/module_system.rs
 
-use std.text.{NL}
 
 from token import {Span, Token, TokenKind}
 from ast import {Node, ModulePath, ImportTarget, ModDecl, UseStmt, MultiUse,
@@ -160,6 +159,13 @@ fn parse_use(self) -> Result<Node, ParseError>:
     val start_span = self.current.span
     self.expect(TokenKind.Use)
 
+    # Check for lazy modifier: use lazy module.Item
+    val is_lazy = if self.current.kind.is_identifier_named("lazy"):
+        self.advance()
+        true
+    else:
+        false
+
     # Check for type-only import: use type module.Item
     val is_type_only = if self.check(TokenKind.Type):
         self.advance()
@@ -167,7 +173,7 @@ fn parse_use(self) -> Result<Node, ParseError>:
     else:
         false
 
-    self.parse_use_or_import_body(start_span, is_type_only)
+    self.parse_use_or_import_body(start_span, is_type_only, is_lazy)
 
 # ============================================================================
 # Import Statement (deprecated, alias for use)
@@ -189,7 +195,7 @@ fn parse_import(self) -> Result<Node, ParseError>:
     else:
         false
 
-    self.parse_use_or_import_body(start_span, is_type_only)
+    self.parse_use_or_import_body(start_span, is_type_only, false)
 
 # ============================================================================
 # From-Import (deprecated Python-style)
@@ -240,10 +246,11 @@ fn parse_from_import(self) -> Result<Node, ParseError>:
         path: path,
         target: target,
         is_type_only: false,
+        is_lazy: false,
     )))
 
 # Common body for use/import statements
-fn parse_use_or_import_body(self, start_span: Span, is_type_only: Bool) -> Result<Node, ParseError>:
+fn parse_use_or_import_body(self, start_span: Span, is_type_only: Bool, is_lazy: bool) -> Result<Node, ParseError>:
     val (path, target) = self.parse_use_path_and_target()
 
     # Comma-separated imports: use a.B, c.D
@@ -257,6 +264,7 @@ fn parse_use_or_import_body(self, start_span: Span, is_type_only: Bool) -> Resul
             span: Span(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             imports: imports,
             is_type_only: is_type_only,
+            is_lazy: is_lazy,
         )))
     else:
         Ok(Node.UseStmt(UseStmt(
@@ -264,6 +272,7 @@ fn parse_use_or_import_body(self, start_span: Span, is_type_only: Bool) -> Resul
             path: path,
             target: target,
             is_type_only: is_type_only,
+            is_lazy: is_lazy,
         )))
 
 # ============================================================================
@@ -370,7 +379,7 @@ fn parse_export_use(self) -> Result<Node, ParseError>:
         self.expect(TokenKind.From)
         val module_path = self.parse_module_path()
 
-        val targets = items.map({NL}ame: ImportTarget.Single(name))
+        val targets = items.map(\name: ImportTarget.Single(name))
         return Ok(Node.ExportUseStmt(ExportUseStmt(
             span: Span(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             path: module_path,
@@ -442,7 +451,7 @@ fn parse_export_use(self) -> Result<Node, ParseError>:
         # export X, Y from module
         self.advance()
         val module_path = self.parse_module_path()
-        val targets = items.map({NL}ame: ImportTarget.Single(name))
+        val targets = items.map(\name: ImportTarget.Single(name))
         Ok(Node.ExportUseStmt(ExportUseStmt(
             span: Span(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             path: module_path,
@@ -450,7 +459,7 @@ fn parse_export_use(self) -> Result<Node, ParseError>:
         )))
     else:
         # Bare export: export X, Y, Z
-        val targets = items.map({NL}ame: ImportTarget.Single(name))
+        val targets = items.map(\name: ImportTarget.Single(name))
         Ok(Node.ExportUseStmt(ExportUseStmt(
             span: Span(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             path: ModulePath.new([]),

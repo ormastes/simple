@@ -2,7 +2,6 @@
 # Extracted from mod.spl for modularity
 
 # Extern fn declarations (runtime resolves at file level)
-use std.text.{NL}
 
 extern fn rt_cli_get_args() -> [str]
 extern fn rt_exit(code: i64)
@@ -49,7 +48,7 @@ fn _cli_file_read_impl(path: text) -> text:
         ""
 
 fn _cli_file_write_impl(path: text, content: text) -> bool:
-    val result = _cli_shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'{NL}{content}{NL}SIMPLE_WRITE_EOF")
+    val result = _cli_shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
     result.exit_code == 0
 
 fn _cli_file_copy_impl(src: text, dst: text) -> bool:
@@ -380,6 +379,7 @@ fn cli_compile(args: [str]) -> i64:
     var pgo_generate: bool = false
     var pgo_use_path: text = ""
     var release_optimized: bool = false
+    var emit_c: bool = false
 
     var i = 0
     if args.len() > 0 and args[0] == "compile":
@@ -398,7 +398,8 @@ fn cli_compile(args: [str]) -> i64:
             print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
             print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
             print "  --native              Compile to native binary via C codegen + gcc"
-            print "  --backend=<backend>   Backend: auto, cranelift, llvm, vhdl (default: auto)"
+            print "  --backend=<backend>   Backend: auto, cranelift, llvm, vhdl, c (default: auto)"
+            print "  --emit-c              Emit C++20 source code (C backend)"
             print "  --coverage            Enable coverage instrumentation"
             print "  --coverage-output=<p> Coverage output file path"
             print "  --release             Release build (optimized, prefers LLVM)"
@@ -455,6 +456,9 @@ fn cli_compile(args: [str]) -> i64:
         elif arg.starts_with("--coverage-output="):
             # Pass-through (handled by compiler)
             pass
+        elif arg == "--emit-c":
+            emit_c = true
+            backend = "c"
         elif arg == "--native":
             emit = "native"
         elif arg == "-o":
@@ -489,6 +493,9 @@ fn cli_compile(args: [str]) -> i64:
 
     if backend == "vhdl":
         return compile_vhdl(source_file, output_file, verbose)
+
+    if backend == "c" or backend == "cpp" or backend == "ccodegen" or emit_c:
+        return compile_c_backend(source_file, output_file, verbose)
 
     if emit == "native":
         var out = output_file
@@ -688,6 +695,33 @@ fn cli_info(args: [str]) -> i64:
 # ============================================================================
 # Advanced Features
 # ============================================================================
+
+fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64:
+    """Compile a Simple source file to C++20 source code."""
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".cpp")
+
+    if verbose:
+        print "Compiling {source_file} to C++20"
+        print "  Output: {out}"
+
+    # The C backend produces .cpp text files from MIR.
+    # Pipeline: source -> parse -> HIR -> MIR -> MirToC -> .cpp
+    var c_cmd = "bin/release/simple src/app/compile/native.spl '{source_file}' '{out}' --backend=c"
+    if verbose:
+        c_cmd = c_cmd + " --verbose"
+    val result = _cli_shell(c_cmd)
+    if result.stdout != "":
+        print result.stdout
+    if result.stderr != "" and result.exit_code != 0:
+        _cli_eprint(result.stderr)
+        return result.exit_code
+
+    if result.exit_code == 0:
+        print "Output: {out}"
+        print "Build with: clang++ -std=c++20 -O2 {out} runtime.c -o {source_file.replace('.spl', '')}"
+    return result.exit_code
 
 fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
     """Compile a Simple source file to VHDL output."""

@@ -1,7 +1,251 @@
-# Block Validators (delegates to compiler_shared)
-use compiler_shared.blocks.validators.{validate_json, validate_regex, validate_sql}
-use compiler_shared.blocks.validators.{validate_json_structure, validate_sql_dialect}
-use compiler_shared.blocks.validators.{json_depth, json_type_name}
+# Block Utilities - Pre-built Validators
+#
+# Pre-built validators for common formats:
+# - JSON structure validation
+# - Regex pattern validation
+# - SQL dialect validation
+
+use compiler.blocks.value.{BlockValue, JsonValue, JsonKind}
+
+# ============================================================================
+# Pre-built Validators
+# ============================================================================
+
+fn validate_json(value: BlockValue) -> [text]:
+    """Validate that value is valid JSON.
+
+    Args:
+        value: BlockValue to validate
+
+    Returns:
+        List of error messages (empty if valid)
+    """
+    match value:
+        case Json(json_val):
+            # Additional JSON-specific validation
+            validate_json_structure(json_val)
+        case _:
+            ["Expected JSON value, got {value.type_name()}"]
+
+fn validate_regex(value: BlockValue) -> [text]:
+    """Validate that value is a valid regex pattern.
+
+    Args:
+        value: BlockValue to validate
+
+    Returns:
+        List of error messages (empty if valid)
+    """
+    match value:
+        case Regex(pattern):
+            # Check if pattern is valid
+            if pattern.has_raw:
+                []
+            else:
+                ["Empty regex pattern"]
+        case _:
+            ["Expected Regex value, got {value.type_name()}"]
+
+fn validate_sql(value: BlockValue, dialect: text) -> [text]:
+    """Validate SQL query for specific dialect.
+
+    Args:
+        value: BlockValue to validate
+        dialect: SQL dialect (ansi, postgres, mysql, sqlite)
+
+    Returns:
+        List of error messages (empty if valid)
+
+    Example:
+    ```simple
+    val sql = BlockBuilder("sql").raw_text()
+        .simple_parser(parse_sql_helper).simple_validator(\v: validate_sql(v, "postgres"))
+        .build()
+    ```
+    """
+    match value:
+        case Sql(query):
+            validate_sql_dialect(query, dialect)
+        case _:
+            ["Expected SQL query, got {value.type_name()}"]
+
+# ============================================================================
+# Internal Helper Functions
+# ============================================================================
+
+fn validate_json_structure(value: JsonValue) -> [text]:
+    """Validate JSON structure for common issues (Phase 2[2] - TODO #64 ✅).
+
+    Checks:
+    - Object keys are not empty
+    - No excessive nesting depth (max 100 levels)
+    - Arrays have consistent element types (warning only)
+    - No circular references (structural only)
+
+    Returns:
+        List of error messages (empty if valid)
+    """
+    var errors = []
+
+    # Check nesting depth
+    val depth = json_depth(value, 0)
+    if depth > 100:
+        errors.push("JSON nesting depth {depth} exceeds maximum 100")
+
+    # Check object keys
+    match value.kind:
+        case Object(fields):
+            for field in fields:
+                val key = field[0]
+                if key_len(key) == 0:
+                    errors.push("JSON object has empty key")
+            # Recursively validate nested objects
+            for field in fields:
+                val nested_errors = validate_json_structure(field[1])
+                errors = errors + nested_errors
+
+        case Array(elements):
+            # Check array homogeneity (warning for mixed types)
+            if elements_len(elements) > 0:
+                val first_type = json_type_name(elements[0])
+                var mixed = false
+                for elem in elements:
+                    if json_type_name(elem) != first_type:
+                        mixed = true
+                if mixed:
+                    errors.push("Warning: JSON array has mixed types")
+            # Recursively validate array elements
+            for elem in elements:
+                val nested_errors = validate_json_structure(elem)
+                errors = errors + nested_errors
+
+        case _:
+            ()  # Primitives are always valid
+
+    errors
+
+fn validate_sql_dialect(query: SqlQuery, dialect: text) -> [text]:
+    """Validate SQL for specific dialect (Phase 2[2] - TODO #65 ✅).
+
+    Args:
+        query: Parsed SQL query
+        dialect: SQL dialect ("ansi", "postgres", "mysql", "sqlite")
+
+    Checks:
+    - Dialect-specific keywords and syntax
+    - Common SQL anti-patterns
+    - Reserved word usage
+
+    Returns:
+        List of error/warning messages (empty if valid)
+    """
+    var errors = []
+    val raw = query.raw_lower(raw)
+
+    # Check for common SQL injection patterns
+    if raw.contains("';") or raw.contains("--") or raw.contains("/*"):
+        errors.push("Warning: SQL contains potential injection patterns")
+
+    # Dialect-specific validation
+    match dialect:
+        case "postgres":
+            # PostgreSQL-specific checks
+            if raw.contains("limit"):
+                if not raw.contains("offset"):
+                    ()  # LIMIT without OFFSET is ok
+            if raw.contains("returning"):
+                if query.kind != SqlKind.Insert and query.kind != SqlKind.Update and query.kind != SqlKind.Delete:
+                    errors.push("RETURNING clause only valid for INSERT/UPDATE/DELETE in PostgreSQL")
+            # Check for PostgreSQL-specific types
+            if raw.contains("serial") or raw.contains("bigserial"):
+                ()  # Valid PostgreSQL types
+            if raw.contains("auto_increment"):
+                errors.push("auto_increment is MySQL syntax; use SERIAL in PostgreSQL")
+
+        case "mysql":
+            # MySQL-specific checks
+            if raw.contains("serial"):
+                errors.push("SERIAL is PostgreSQL syntax; use AUTO_INCREMENT in MySQL")
+            if raw.contains("returning"):
+                errors.push("RETURNING clause not supported in MySQL")
+            if raw.contains("limit"):
+                if raw.contains(","):
+                    ()  # MySQL uses LIMIT offset, count syntax
+
+        case "sqlite":
+            # SQLite-specific checks
+            if raw.contains("serial"):
+                errors.push("Use INTEGER PRIMARY KEY AUTOINCREMENT in SQLite")
+            if raw.contains("returning"):
+                errors.push("RETURNING clause not supported in SQLite (requires version 3[35]+)")
+            # Check for unsupported ALTER TABLE operations
+            if raw.contains("alter table"):
+                if (raw.contains("add constraint") or raw.contains("drop column")):
+                    errors.push("Warning: SQLite has limited ALTER TABLE support")
+
+        case "ansi":
+            # ANSI SQL standard checks
+            if raw.contains("serial") or raw.contains("auto_increment"):
+                errors.push("SERIAL/AUTO_INCREMENT are vendor extensions; use IDENTITY in ANSI SQL")
+            if raw.contains("limit"):
+                errors.push("LIMIT is vendor extension; use FETCH FIRST in ANSI SQL")
+
+        case _:
+            errors.push("Unknown SQL dialect: {dialect}")
+
+    # Check for basic syntax issues
+    if query.kind == SqlKind.Select:
+        if not raw.contains("from"):
+            if not raw.contains("select"):
+                errors.push("SELECT query should have FROM clause or be SELECT without table")
+
+    if query.kind == SqlKind.Insert:
+        if not raw.contains("values"):
+            if not raw.contains("select"):
+                errors.push("INSERT should have VALUES or SELECT clause")
+
+    errors
+
+# ============================================================================
+# JSON Helper Functions (for validation)
+# ============================================================================
+
+fn json_depth(value: JsonValue, current: i64) -> i64:
+    """Calculate maximum nesting depth of JSON value."""
+    match value.kind:
+        case Object(fields):
+            var max_depth = current
+            for field in fields:
+                val nested_depth = json_depth(field[1], current + 1)
+                if nested_depth > max_depth:
+                    max_depth = nested_depth
+            max_depth
+
+        case Array(elements):
+            var max_depth = current
+            for elem in elements:
+                val nested_depth = json_depth(elem, current + 1)
+                if nested_depth > max_depth:
+                    max_depth = nested_depth
+            max_depth
+
+        case _:
+            current
+
+fn json_type_name(value: JsonValue) -> text:
+    """Get type name of JSON value."""
+    match value.kind:
+        case Null: "null"
+        case Bool(_): "boolean"
+        case Number(_): "number"
+        case String(_): "string"
+        case Array(_): "array"
+        case Object(_): "object"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
 export validate_json, validate_regex, validate_sql
 export validate_json_structure, validate_sql_dialect
 export json_depth, json_type_name

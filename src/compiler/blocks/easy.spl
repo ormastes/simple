@@ -1,5 +1,313 @@
-# Blocks Easy API (delegates to compiler_shared)
-use compiler_shared.blocks.easy.{block, block_with_validation, const_block}
+# Easy Block API - Minimal Boilerplate
+#
+# Simplified API for creating custom blocks with 3 lines of code.
+# Wraps the BlockDefinition trait with smart defaults.
+
+use compiler.blocks.definition.{BlockDefinition, ConstValue, BlockExample}
+use compiler.blocks.value.{BlockValue}
+use compiler.blocks.context.{BlockContext, BlockError}
+use compiler.blocks.modes.{LexerMode, SyntaxFeatures}
+
+# ============================================================================
+# Tier 1: Minimal API
+# ============================================================================
+
+fn define_block(
+    kind: text,
+    mode: LexerMode,
+    parser: fn(text) -> text
+):
+    """Define a new custom block type with minimal configuration.
+
+    This is the simplest way to define a custom block. Just provide:
+    - A keyword (e.g., "heredoc", "color", "port")
+    - A lexer mode (usually LexerMode.Raw)
+    - A parser function that returns Result<BlockValue, text>
+
+    All optional methods use smart defaults.
+
+    Example:
+    ```simple
+    val heredoc = define_block("heredoc", LexerMode.Raw, \text:
+        Ok(blockvalue_Raw(text.trim()))
+    )
+    register_block(heredoc)
+
+    val content = heredoc{
+        Line 1
+        Line 2
+    }
+    ```
+
+    Args:
+        kind: Block keyword (e.g., "heredoc")
+        mode: Lexer mode (Raw, Math, or Normal)
+        parser: Function to parse payload text
+
+    Returns:
+        BlockDefinition ready to register
+    """
+    SimpleBlockDef(_kind: kind, _mode: mode, _parser: parser)
+
+fn validated_block(
+    kind: text,
+    mode: LexerMode,
+    parser: fn(text) -> text,
+    validator: fn(BlockValue) -> [text]
+):
+    """Define a block with validation after parsing.
+
+    Like block(), but adds post-parse validation that can return
+    multiple error messages.
+
+    Example:
+    ```simple
+    val port = validated_block("port", LexerMode.Raw,
+        \text:
+            val num = text_trim(text).parse_int()?
+            Ok(BlockValue.Custom("Port", num))
+        ,
+        \value:
+            match value:
+                case Custom("Port", num):
+                    if num < 1 or num > 65535:
+                        ["Port must be between 1 and 65535"]
+                    else:
+                        []
+                case _:
+                    ["Invalid port value"]
+    )
+    ```
+
+    Args:
+        kind: Block keyword
+        mode: Lexer mode
+        parser: Function to parse payload
+        validator: Function to validate parsed value, returns error strings
+
+    Returns:
+        BlockDefinition with validation
+    """
+    ValidatedBlockDef(
+        _kind: kind,
+        _mode: mode,
+        _parser: parser,
+        _validator: validator
+    )
+
+fn define_const_block(
+    kind: text,
+    mode: LexerMode,
+    parser: fn(text) -> text,
+    eval: fn(BlockValue) -> ConstValue
+):
+    """Define a block with compile-time evaluation.
+
+    Like block(), but the block can be evaluated at compile time
+    if it contains only constant values. This enables optimizations.
+
+    Example:
+    ```simple
+    val re = define_const_block("re", LexerMode.Raw,
+        \pattern:
+            val compiled = compile_regex(pattern_trim(pattern))?
+            Ok(blockvalue_Regex(compiled))
+        ,
+        \value:
+            match value:
+                case Regex(pattern): constvalue_String(pattern.raw)
+                # case# DESUGARED: _: nil
+    )
+
+    # Pattern compiled at compile time:
+    val email = re{ ^[a-z]+@[a-z]+\.[a-z]+$ }
+    ```
+
+    Args:
+        kind: Block keyword
+        mode: Lexer mode
+        parser: Function to parse payload
+        eval: Function to evaluate at compile time (returns nil for runtime-only)
+
+    Returns:
+        BlockDefinition with compile-time evaluation
+    """
+    ConstBlockDef(
+        _kind: kind,
+        _mode: mode,
+        _parser: parser,
+        _eval: eval
+    )
+
+# Backward-compatible aliases used by public docs/tests.
+fn block(kind: text, mode: LexerMode, parser: fn(text) -> text):
+    define_block(kind, mode, parser)
+
+fn block_with_validation(
+    kind: text,
+    mode: LexerMode,
+    parser: fn(text) -> text,
+    validator: fn(BlockValue) -> [text]
+):
+    validated_block(kind, mode, parser, validator)
+
+fn const_block(
+    kind: text,
+    mode: LexerMode,
+    parser: fn(text) -> text,
+    eval: fn(BlockValue) -> ConstValue
+):
+    define_const_block(kind, mode, parser, eval)
+
+# ============================================================================
+# Implementation: Simple Block
+# ============================================================================
+
+struct SimpleBlockDef(BlockDefinition):
+    """Simple block definition with minimal boilerplate.
+
+    Wraps user-provided parser with smart defaults for all optional methods.
+    """
+
+    _kind: text
+    _mode: LexerMode
+    _parser: fn(text) -> text
+
+    # --- Required Methods ---
+
+    fn kind() -> text:
+        self._kind
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> text:
+        # Call user's simple parser
+        match (self._parser)(payload):
+            case Ok(value):
+                Ok(value)
+            case Err(message):
+                # Convert string error to BlockError
+                Err(blockerror_parse(message))
+
+    # --- Optional Methods with Smart Defaults ---
+
+    fn lexer_mode() -> LexerMode:
+        self._mode
+
+    fn syntax_features() -> SyntaxFeatures:
+        # Default: no special features
+        syntaxfeatures_default()
+
+    fn validate(value: BlockValue, ctx: BlockContext) -> [BlockError]:
+        # Default: no validation
+        []
+
+    fn eval_const(value: BlockValue) -> has_ConstValue:
+        # Default: no compile-time evaluation
+        nil
+
+    fn description() -> text:
+        # Default: simple description
+        "Custom block: {self._kind}"
+
+    fn examples() -> [BlockExample]:
+        # Default: no examples
+        []
+
+# ============================================================================
+# Implementation: Validated Block
+# ============================================================================
+
+struct ValidatedBlockDef(BlockDefinition):
+    """Block definition with post-parse validation."""
+
+    _kind: text
+    _mode: LexerMode
+    _parser: fn(text) -> text
+    _validator: fn(BlockValue) -> [text]
+
+    fn kind() -> text:
+        self._kind
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> text:
+        match (self._parser)(payload):
+            case Ok(value):
+                Ok(value)
+            case Err(message):
+                Err(blockerror_parse(message))
+
+    fn lexer_mode() -> LexerMode:
+        self._mode
+
+    fn syntax_features() -> SyntaxFeatures:
+        syntaxfeatures_default()
+
+    fn validate(value: BlockValue, ctx: BlockContext) -> [BlockError]:
+        # Call user's validator and convert strings to BlockErrors
+        val messages = (self._validator)(value)
+        messages_map(messages, \msg: BlockError.validation(msg))
+
+    fn eval_const(value: BlockValue) -> has_ConstValue:
+        nil
+
+    fn description() -> text:
+        "Custom block with validation: {self._kind}"
+
+    fn examples() -> [BlockExample]:
+        []
+
+# ============================================================================
+# Implementation: Const Block
+# ============================================================================
+
+struct ConstBlockDef(BlockDefinition):
+    """Block definition with compile-time evaluation."""
+
+    _kind: text
+    _mode: LexerMode
+    _parser: fn(text) -> text
+    _eval: fn(BlockValue) -> ConstValue
+
+    fn kind() -> text:
+        self._kind
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> text:
+        match (self._parser)(payload):
+            case Ok(value):
+                Ok(value)
+            case Err(message):
+                Err(blockerror_parse(message))
+
+    fn lexer_mode() -> LexerMode:
+        self._mode
+
+    fn syntax_features() -> SyntaxFeatures:
+        syntaxfeatures_default()
+
+    fn validate(value: BlockValue, ctx: BlockContext) -> [BlockError]:
+        []
+
+    fn eval_const(value: BlockValue) -> has_ConstValue:
+        # Call user's eval function
+        (self._eval)(value)
+
+    fn description() -> text:
+        "Custom block with compile-time evaluation: {self._kind}"
+
+    fn examples() -> [BlockExample]:
+        []
+
+# ============================================================================
+# Placeholder Import for BlockExample
+# ============================================================================
+
+# BlockExample imported from blocks.definition
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export define_block
+export validated_block
+export define_const_block
 export block
 export block_with_validation
 export const_block

@@ -1,0 +1,691 @@
+# Core Simple — Struct-Based Lexer
+#
+# Struct-based lexer for the seed compiler (src/compiler_seed/seed.cpp).
+# Converts source text into a stream of tokens using a CoreLexer struct
+# with methods, instead of module-level mutable state.
+#
+# Handles indentation tracking, literals, identifiers, keywords,
+# operators, delimiters, and comments.
+#
+# Design: All state in CoreLexer struct fields. Methods modify self.
+# Compatible with seed compiler: no generics, no closures, no lambdas.
+
+use std.text.{_NL}
+use compiler.core.tokens.{keyword_lookup}
+use compiler.core.tokens.{TOK_INT_LIT, TOK_FLOAT_LIT, TOK_STRING_LIT}
+use compiler.core.tokens.{TOK_BOOL_LIT, TOK_NIL_LIT, TOK_IDENT}
+use compiler.core.tokens.{TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR}
+use compiler.core.tokens.{TOK_KW_TRUE, TOK_KW_FALSE, TOK_KW_NIL}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
+use compiler.core.tokens.{TOK_EQ, TOK_NEQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ}
+use compiler.core.tokens.{TOK_ASSIGN, TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN}
+use compiler.core.tokens.{TOK_STAR_ASSIGN, TOK_SLASH_ASSIGN}
+use compiler.core.tokens.{TOK_AND, TOK_OR, TOK_NOT}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
+use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
+use compiler.core.tokens.{TOK_ARROW, TOK_FAT_ARROW, TOK_PIPE}
+use compiler.core.tokens.{TOK_QUESTION, TOK_QUESTION_DOT, TOK_DOUBLE_QUESTION}
+use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
+use compiler.core.tokens.{TOK_HASH_LBRACKET, TOK_DOTDOTDOT, TOK_DOTDOT_EQ}
+use compiler.core.tokens.{TOK_SEMICOLON, TOK_AT, TOK_UNDERSCORE}
+use compiler.core.tokens.{TOK_PIPE_FORWARD, TOK_DOUBLE_STAR}
+use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
+
+# ===== CoreLexer Struct =====
+
+struct CoreLexer:
+    source: text
+    pos: i64
+    line: i64
+    col: i64
+    indent_stack: [i64]
+    pending_dedents: i64
+    at_line_start: bool
+    paren_depth: i64
+    cur_kind: i64
+    cur_text: text
+    cur_line: i64
+    cur_col: i64
+
+# ===== Constructor (free function) =====
+
+fn make_core_lexer(source: text) -> CoreLexer:
+    var lex: CoreLexer = CoreLexer(source: source, pos: 0, line: 1, col: 1, indent_stack: [], pending_dedents: 0, at_line_start: true, paren_depth: 0, cur_kind: 0, cur_text: "", cur_line: 0, cur_col: 0)
+    lex.indent_stack.push(0)
+    lex
+
+# ===== CoreLexer Methods =====
+
+impl CoreLexer:
+
+    # ----- Read-only accessors -----
+
+    fn at_end() -> bool:
+        self.pos >= self.source.len()
+
+    fn peek() -> text:
+        if self.pos >= self.source.len():
+            return ""
+        self.source[self.pos:self.pos + 1]
+
+    fn peek_next() -> text:
+        val next_pos: i64 = self.pos + 1
+        if next_pos >= self.source.len():
+            return ""
+        self.source[next_pos:next_pos + 1]
+
+    fn peek_at(offset: i64) -> text:
+        val target: i64 = self.pos + offset
+        if target >= self.source.len():
+            return ""
+        self.source[target:target + 1]
+
+    fn token_kind() -> i64:
+        self.cur_kind
+
+    fn token_text() -> text:
+        self.cur_text
+
+    fn token_line() -> i64:
+        self.cur_line
+
+    fn token_col() -> i64:
+        self.cur_col
+
+    # ----- Mutating methods -----
+
+    me advance() -> text:
+        if self.pos >= self.source.len():
+            return ""
+        val c: text = self.source[self.pos:self.pos + 1]
+        self.pos = self.pos + 1
+        if c == _NL:
+            self.line = self.line + 1
+            self.col = 1
+            self.at_line_start = true
+        else:
+            self.col = self.col + 1
+        c
+
+    me match_char(expected: text) -> bool:
+        if self.pos >= self.source.len():
+            return false
+        if self.source[self.pos:self.pos + 1] != expected:
+            return false
+        self.pos = self.pos + 1
+        self.col = self.col + 1
+        true
+
+    # ----- Token Construction -----
+
+    me make_token(kind: i64, token_text: text, start_line: i64, start_col: i64):
+        self.cur_kind = kind
+        self.cur_text = token_text
+        self.cur_line = start_line
+        self.cur_col = start_col
+
+    me make_simple(kind: i64, token_text: text):
+        val sl: i64 = self.line
+        val sc: i64 = self.col
+        self.make_token(kind, token_text, sl, sc)
+
+    # ----- Skip Whitespace (not newlines) -----
+
+    me skip_spaces():
+        for i in 0..100000:
+            val c: text = self.peek()
+            if c == " ":
+                self.advance()
+            elif c == "\t":
+                self.advance()
+            else:
+                break
+
+    # ----- Number Scanning -----
+
+    me scan_number():
+        val start: i64 = self.pos
+        val start_line: i64 = self.line
+        val start_col: i64 = self.col
+        var is_float: bool = false
+
+        # Check for hex, binary, octal prefix
+        val first: text = self.peek()
+        if first == "0":
+            val second: text = self.peek_next()
+            if second == "x":
+                # Hex literal
+                self.advance()
+                self.advance()
+                var hex_start: i64 = self.pos
+                for i in 0..64:
+                    val hc: text = self.peek()
+                    if hc == "_":
+                        self.advance()
+                    elif is_hex_digit(hc):
+                        self.advance()
+                    else:
+                        break
+                val num_text: text = self.source[start:self.pos]
+                self.make_token(TOK_INT_LIT, num_text, start_line, start_col)
+                return
+            if second == "b":
+                # Binary literal
+                self.advance()
+                self.advance()
+                for i in 0..64:
+                    val bc: text = self.peek()
+                    val is_bin: bool = bc == "0"
+                    val is_bin1: bool = bc == "1"
+                    val is_under: bool = bc == "_"
+                    val is_bin_char: bool = is_bin or is_bin1
+                    val valid: bool = is_bin_char or is_under
+                    if valid:
+                        self.advance()
+                    else:
+                        break
+                val num_text: text = self.source[start:self.pos]
+                self.make_token(TOK_INT_LIT, num_text, start_line, start_col)
+                return
+            if second == "o":
+                # Octal literal
+                self.advance()
+                self.advance()
+                for i in 0..64:
+                    val oc: text = self.peek()
+                    val is_oct: bool = is_digit(oc)
+                    val is_under: bool = oc == "_"
+                    val valid: bool = is_oct or is_under
+                    if valid:
+                        self.advance()
+                    else:
+                        break
+                val num_text: text = self.source[start:self.pos]
+                self.make_token(TOK_INT_LIT, num_text, start_line, start_col)
+                return
+
+        # Decimal number
+        for i in 0..100:
+            val dc: text = self.peek()
+            val is_d: bool = is_digit(dc)
+            val is_u: bool = dc == "_"
+            val valid: bool = is_d or is_u
+            if valid:
+                self.advance()
+            else:
+                break
+
+        # Check for float
+        val maybe_dot: text = self.peek()
+        val after_dot: text = self.peek_next()
+        val dot_then_digit: bool = maybe_dot == "."
+        if dot_then_digit:
+            val is_next_dig: bool = is_digit(after_dot)
+            if is_next_dig:
+                is_float = true
+                self.advance()
+                for i in 0..100:
+                    val fc: text = self.peek()
+                    val is_fd: bool = is_digit(fc)
+                    val is_fu: bool = fc == "_"
+                    val fvalid: bool = is_fd or is_fu
+                    if fvalid:
+                        self.advance()
+                    else:
+                        break
+
+        # Check for exponent
+        val exp_c: text = self.peek()
+        val is_exp_e: bool = exp_c == "e"
+        val is_exp_E: bool = exp_c == "E"
+        val has_exp: bool = is_exp_e or is_exp_E
+        if has_exp:
+            is_float = true
+            self.advance()
+            val sign: text = self.peek()
+            val is_plus: bool = sign == "+"
+            val is_minus: bool = sign == "-"
+            val has_sign: bool = is_plus or is_minus
+            if has_sign:
+                self.advance()
+            for i in 0..100:
+                val ec: text = self.peek()
+                if is_digit(ec):
+                    self.advance()
+                else:
+                    break
+
+        val num_text: text = self.source[start:self.pos]
+        if is_float:
+            self.make_token(TOK_FLOAT_LIT, num_text, start_line, start_col)
+        else:
+            self.make_token(TOK_INT_LIT, num_text, start_line, start_col)
+
+    # ----- String Scanning -----
+
+    me scan_string():
+        val start_line: i64 = self.line
+        val start_col: i64 = self.col
+        val quote: text = self.advance()
+        var result: text = ""
+        var done: bool = false
+
+        for i in 0..100000:
+            if done:
+                break
+            if self.at_end():
+                self.make_token(TOK_ERROR, "unterminated string", start_line, start_col)
+                return
+            val c: text = self.peek()
+            if c == _NL:
+                self.make_token(TOK_ERROR, "unterminated string", start_line, start_col)
+                return
+            if c == quote:
+                self.advance()
+                done = true
+            elif c == "\\":
+                self.advance()
+                val esc: text = self.advance()
+                if esc == "n":
+                    result = result + "\n"
+                elif esc == "t":
+                    result = result + "\t"
+                elif esc == "r":
+                    result = result + "\r"
+                elif esc == "\\":
+                    result = result + "\\"
+                elif esc == "\"":
+                    result = result + "\""
+                elif esc == "'":
+                    result = result + "'"
+                elif esc == "0":
+                    result = result + "\0"
+                else:
+                    result = result + "\\"
+                    result = result + esc
+            else:
+                result = result + self.advance()
+
+        self.make_token(TOK_STRING_LIT, result, start_line, start_col)
+
+    # ----- Identifier/Keyword Scanning -----
+
+    me scan_ident():
+        val start: i64 = self.pos
+        val start_line: i64 = self.line
+        val start_col: i64 = self.col
+
+        for i in 0..1000:
+            val c: text = self.peek()
+            if is_ident_char(c):
+                self.advance()
+            else:
+                break
+
+        val ident_text: text = self.source[start:self.pos]
+
+        # Check for keyword
+        val kw_kind: i64 = keyword_lookup(ident_text)
+        if kw_kind != TOK_IDENT:
+            # Special: true/false -> bool literal, nil -> nil literal
+            if kw_kind == TOK_KW_TRUE:
+                self.make_token(TOK_BOOL_LIT, "true", start_line, start_col)
+            elif kw_kind == TOK_KW_FALSE:
+                self.make_token(TOK_BOOL_LIT, "false", start_line, start_col)
+            elif kw_kind == TOK_KW_NIL:
+                self.make_token(TOK_NIL_LIT, "nil", start_line, start_col)
+            else:
+                self.make_token(kw_kind, ident_text, start_line, start_col)
+        else:
+            # Check for underscore-only as special token
+            if ident_text == "_":
+                self.make_token(TOK_UNDERSCORE, "_", start_line, start_col)
+            else:
+                self.make_token(TOK_IDENT, ident_text, start_line, start_col)
+
+    # ----- Indentation Handling -----
+
+    me handle_indentation():
+        # Count leading whitespace
+        var indent_level: i64 = 0
+        for i in 0..10000:
+            val c: text = self.peek()
+            if c == " ":
+                indent_level = indent_level + 1
+                self.advance()
+            elif c == "\t":
+                indent_level = indent_level + 4
+                self.advance()
+            else:
+                break
+
+        # Skip blank lines and comment-only lines
+        val next_c: text = self.peek()
+        val is_blank: bool = next_c == _NL
+        val is_end: bool = next_c == ""
+        val is_comment: bool = next_c == "#"
+        if is_blank:
+            self.advance()
+            self.at_line_start = true
+            self.scan_token()
+            return
+        if is_end:
+            return
+        if is_comment:
+            # Skip comment, then the newline
+            for i in 0..100000:
+                val cc: text = self.peek()
+                val is_nl: bool = cc == _NL
+                val is_eof: bool = cc == ""
+                val done: bool = is_nl or is_eof
+                if done:
+                    break
+                self.advance()
+            val peek_nl: text = self.peek()
+            if peek_nl == _NL:
+                self.advance()
+            self.at_line_start = true
+            self.scan_token()
+            return
+
+        self.at_line_start = false
+
+        # Compare with current indent level
+        val stack_len: i64 = self.indent_stack.len()
+        val current_indent: i64 = self.indent_stack[stack_len - 1]
+
+        if indent_level > current_indent:
+            self.indent_stack.push(indent_level)
+            val tl: i64 = self.line
+            self.make_token(TOK_INDENT, "", tl, 1)
+        elif indent_level < current_indent:
+            # Pop indent stack and count dedents
+            var dedent_count: i64 = 0
+            for i in 0..100:
+                val slen: i64 = self.indent_stack.len()
+                if slen <= 1:
+                    break
+                val top: i64 = self.indent_stack[slen - 1]
+                if top <= indent_level:
+                    break
+                self.indent_stack.pop()
+                dedent_count = dedent_count + 1
+
+            # First dedent is returned immediately, rest are pending
+            if dedent_count > 0:
+                self.pending_dedents = dedent_count - 1
+                val tl: i64 = self.line
+                self.make_token(TOK_DEDENT, "", tl, 1)
+            else:
+                # Indent level doesn't match any in stack - error
+                val tl: i64 = self.line
+                self.make_token(TOK_ERROR, "inconsistent indentation", tl, 1)
+        else:
+            # Same indentation - no token needed, continue scanning
+            self.scan_token()
+
+    # ----- Main Token Scanner -----
+
+    me scan_token():
+        # Skip spaces (not newlines) - but NOT at line start (indentation needs them)
+        if not self.at_line_start:
+            self.skip_spaces()
+
+        if self.at_end():
+            # Emit pending dedents for remaining indentation
+            val slen: i64 = self.indent_stack.len()
+            if slen > 1:
+                self.indent_stack.pop()
+                self.pending_dedents = slen - 2
+                val tl: i64 = self.line
+                val tc: i64 = self.col
+                self.make_token(TOK_DEDENT, "", tl, tc)
+                return
+            val tl: i64 = self.line
+            val tc: i64 = self.col
+            self.make_token(TOK_EOF, "", tl, tc)
+            return
+
+        val start_line: i64 = self.line
+        val start_col: i64 = self.col
+        val c: text = self.peek()
+
+        # Newline
+        if c == _NL:
+            self.advance()
+            self.at_line_start = true
+            if self.paren_depth > 0:
+                # Inside parens: suppress newline, scan next token
+                self.scan_token()
+                return
+            self.make_token(TOK_NEWLINE, _NL, start_line, start_col)
+            return
+
+        # Handle indentation at line start
+        if self.at_line_start:
+            self.handle_indentation()
+            return
+
+        # Comment
+        if c == "#":
+            val next: text = self.peek_next()
+            if next == "[":
+                # Attribute: #[
+                self.advance()
+                self.advance()
+                self.make_token(TOK_HASH_LBRACKET, "#[", start_line, start_col)
+                return
+            # Skip comment to end of line
+            for i in 0..100000:
+                val cc: text = self.peek()
+                val is_nl: bool = cc == _NL
+                val is_eof: bool = cc == ""
+                val done: bool = is_nl or is_eof
+                if done:
+                    break
+                self.advance()
+            # Recurse to get next real token
+            self.scan_token()
+            return
+
+        # String literal
+        val is_dquote: bool = c == "\""
+        val is_squote: bool = c == "'"
+        if is_dquote:
+            self.scan_string()
+            return
+        if is_squote:
+            self.scan_string()
+            return
+
+        # Number literal
+        if is_digit(c):
+            self.scan_number()
+            return
+
+        # Identifier or keyword
+        val is_al: bool = is_alpha(c)
+        val is_un: bool = c == "_"
+        val starts_ident: bool = is_al or is_un
+        if starts_ident:
+            self.scan_ident()
+            return
+
+        # Operators and delimiters (single char consumed via advance)
+        self.advance()
+
+        # Two+ character operators
+        if c == "=":
+            if self.match_char("="):
+                self.make_token(TOK_EQ, "==", start_line, start_col)
+            elif self.match_char(">"):
+                self.make_token(TOK_FAT_ARROW, "=>", start_line, start_col)
+            else:
+                self.make_token(TOK_ASSIGN, "=", start_line, start_col)
+            return
+
+        if c == "!":
+            if self.match_char("="):
+                self.make_token(TOK_NEQ, "!=", start_line, start_col)
+            else:
+                self.make_token(TOK_NOT, "!", start_line, start_col)
+            return
+
+        if c == "<":
+            if self.match_char("="):
+                self.make_token(TOK_LEQ, "<=", start_line, start_col)
+            else:
+                self.make_token(TOK_LT, "<", start_line, start_col)
+            return
+
+        if c == ">":
+            if self.match_char("="):
+                self.make_token(TOK_GEQ, ">=", start_line, start_col)
+            else:
+                self.make_token(TOK_GT, ">", start_line, start_col)
+            return
+
+        if c == "+":
+            if self.match_char("="):
+                self.make_token(TOK_PLUS_ASSIGN, "+=", start_line, start_col)
+            else:
+                self.make_token(TOK_PLUS, "+", start_line, start_col)
+            return
+
+        if c == "-":
+            if self.match_char(">"):
+                self.make_token(TOK_ARROW, "->", start_line, start_col)
+            elif self.match_char("="):
+                self.make_token(TOK_MINUS_ASSIGN, "-=", start_line, start_col)
+            else:
+                self.make_token(TOK_MINUS, "-", start_line, start_col)
+            return
+
+        if c == "*":
+            if self.match_char("*"):
+                self.make_token(TOK_DOUBLE_STAR, "**", start_line, start_col)
+            elif self.match_char("="):
+                self.make_token(TOK_STAR_ASSIGN, "*=", start_line, start_col)
+            else:
+                self.make_token(TOK_STAR, "*", start_line, start_col)
+            return
+
+        if c == "/":
+            if self.match_char("="):
+                self.make_token(TOK_SLASH_ASSIGN, "/=", start_line, start_col)
+            else:
+                self.make_token(TOK_SLASH, "/", start_line, start_col)
+            return
+
+        if c == "%":
+            self.make_token(TOK_PERCENT, "%", start_line, start_col)
+            return
+
+        if c == ".":
+            val d1: text = self.peek()
+            if d1 == ".":
+                self.advance()
+                val d2: text = self.peek()
+                if d2 == ".":
+                    self.advance()
+                    self.make_token(TOK_DOTDOTDOT, "...", start_line, start_col)
+                elif d2 == "=":
+                    self.advance()
+                    self.make_token(TOK_DOTDOT_EQ, "..=", start_line, start_col)
+                else:
+                    self.make_token(TOK_DOTDOT, "..", start_line, start_col)
+            elif d1 == "?":
+                self.advance()
+                self.make_token(TOK_QUESTION_DOT, ".?", start_line, start_col)
+            else:
+                self.make_token(TOK_DOT, ".", start_line, start_col)
+            return
+
+        if c == "?":
+            val q1: text = self.peek()
+            if q1 == "?":
+                self.advance()
+                self.make_token(TOK_DOUBLE_QUESTION, "??", start_line, start_col)
+            elif q1 == ".":
+                self.advance()
+                self.make_token(TOK_QUESTION_DOT, "?.", start_line, start_col)
+            else:
+                self.make_token(TOK_QUESTION, "?", start_line, start_col)
+            return
+
+        if c == "|":
+            if self.match_char(">"):
+                self.make_token(TOK_PIPE_FORWARD, "|>", start_line, start_col)
+            else:
+                self.make_token(TOK_PIPE, "|", start_line, start_col)
+            return
+
+        if c == "@":
+            self.make_token(TOK_AT, "@", start_line, start_col)
+            return
+
+        if c == ";":
+            self.make_token(TOK_SEMICOLON, ";", start_line, start_col)
+            return
+
+        # Delimiters (track paren depth)
+        if c == "(":
+            self.paren_depth = self.paren_depth + 1
+            self.make_token(TOK_LPAREN, "(", start_line, start_col)
+            return
+
+        if c == ")":
+            if self.paren_depth > 0:
+                self.paren_depth = self.paren_depth - 1
+            self.make_token(TOK_RPAREN, ")", start_line, start_col)
+            return
+
+        if c == "[":
+            self.paren_depth = self.paren_depth + 1
+            self.make_token(TOK_LBRACKET, "[", start_line, start_col)
+            return
+
+        if c == "]":
+            if self.paren_depth > 0:
+                self.paren_depth = self.paren_depth - 1
+            self.make_token(TOK_RBRACKET, "]", start_line, start_col)
+            return
+
+        if c == "{":
+            self.paren_depth = self.paren_depth + 1
+            self.make_token(TOK_LBRACE, "{", start_line, start_col)
+            return
+
+        if c == "}":
+            if self.paren_depth > 0:
+                self.paren_depth = self.paren_depth - 1
+            self.make_token(TOK_RBRACE, "}", start_line, start_col)
+            return
+
+        if c == ":":
+            self.make_token(TOK_COLON, ":", start_line, start_col)
+            return
+
+        if c == ",":
+            self.make_token(TOK_COMMA, ",", start_line, start_col)
+            return
+
+        # Unknown character
+        val err_msg: text = "unexpected character: {c}"
+        self.make_token(TOK_ERROR, err_msg, start_line, start_col)
+
+    # ----- Public API -----
+
+    me next_token() -> i64:
+        # Check for pending dedents
+        if self.pending_dedents > 0:
+            self.pending_dedents = self.pending_dedents - 1
+            self.cur_kind = TOK_DEDENT
+            self.cur_text = ""
+            return TOK_DEDENT
+
+        self.scan_token()
+        return self.cur_kind
+
+export make_core_lexer, is_digit, is_hex_digit, is_alpha, is_ident_char, is_space

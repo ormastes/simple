@@ -1,3 +1,394 @@
-# CUDA PTX Builder (delegates to compiler_shared)
-use compiler_shared.backend.cuda.ptx_builder.{PtxBuilder}
+# PTX Builder - CUDA PTX Assembly Code Generation
+#
+# Generates PTX (Parallel Thread Execution) assembly code from MIR.
+# PTX is NVIDIA's virtual GPU instruction set.
+
+use compiler.mir_data.*
+use compiler.backend.cuda_type_mapper.CudaTypeMapper
+use compiler.hir_types.MemorySpace
+
+# ============================================================================
+# PTX Builder
+# ============================================================================
+
+class PtxBuilder:
+    """
+    Generates PTX assembly code for CUDA.
+
+    PTX is an intermediate representation that NVIDIA's driver
+    compiles to native GPU machine code (SASS) at load time.
+
+    Features:
+    - Virtual registers (unlimited)
+    - Typed operations
+    - Memory space qualifiers
+    - Predicated execution
+    - Synchronization barriers
+    """
+
+    type_mapper: CudaTypeMapper
+    val _tv_0 = [i64, i64]
+    compute_capability: _tv_0
+    output: [text]
+    next_reg: i64
+    next_label: i64
+    indent_level: i64
+
+    val _tv_1 = [i64, i64]
+    static fn create(compute_cap: _tv_1) -> PtxBuilder:
+        """Create PTX builder for specific compute capability."""
+        PtxBuilder(
+            type_mapper: cudatypemapper_create_sm(compute_cap[0], compute_cap[1]),
+            compute_capability: compute_cap,
+            output: [],
+            next_reg: 0,
+            next_label: 0,
+            indent_level: 0
+        )
+
+    # === Module Structure ===
+
+    me emit_module_header(name: text):
+        """Emit PTX module header."""
+        val _destruct_0 = self.compute_capability
+        val major = _destruct_0[0]
+        val minor = _destruct_0[1]
+        self.emit_line(".version 7[8]")
+        self.emit_line(".target sm_{major}{minor}")
+        self.emit_line(".address_size 64")
+        self.emit_line("")
+        self.emit_line("// Module: {name}")
+        self.emit_line("")
+
+    me emit_kernel_entry(name: text, params: [MirLocal]):
+        """Emit kernel entry point declaration."""
+        self.emit_line(".visible .entry {name}(")
+        self.indent_level = self.indent_level + 1
+
+        for _for_item_0 in params_enumerate(params):
+            val i = _for_item_0[0]
+            val param = _for_item_0[1]
+            val ty = self.type_mapper_ptx_type(type_mapper, param.type_.kind)
+            val comma = if i < params.length - 1: "," else: ""
+            self.emit_line(".param {ty} param_{i}{comma}")
+
+        self.indent_level = self.indent_level - 1
+        self.emit_line(")")
+        self.emit_line("{")
+        self.indent_level = self.indent_level + 1
+
+    me emit_kernel_end():
+        """Emit kernel end."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("}")
+        self.emit_line("")
+
+    me emit_device_function(name: text, params: [MirLocal], ret_type: MirType):
+        """Emit device function declaration."""
+        val ret = self.type_mapper_ptx_type(type_mapper, ret_type.kind)
+        self.emit_line(".visible .func ({ret} retval) {name}(")
+        self.indent_level = self.indent_level + 1
+
+        for _for_item_1 in params_enumerate(params):
+            val i = _for_item_1[0]
+            val param = _for_item_1[1]
+            val ty = self.type_mapper_ptx_type(type_mapper, param.type_.kind)
+            val comma = if i < params.length - 1: "," else: ""
+            self.emit_line(".param {ty} param_{i}{comma}")
+
+        self.indent_level = self.indent_level - 1
+        self.emit_line(")")
+        self.emit_line("{")
+        self.indent_level = self.indent_level + 1
+
+    # === Register Allocation ===
+
+    me alloc_reg(ty: PrimitiveType) -> text:
+        """Allocate a virtual register."""
+        val reg_num = self.next_reg
+        self.next_reg = self.next_reg + 1
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        "%r{reg_num}"
+
+    me alloc_pred_reg() -> text:
+        """Allocate a predicate register."""
+        val reg_num = self.next_reg
+        self.next_reg = self.next_reg + 1
+        "%p{reg_num}"
+
+    me emit_reg_decl(reg: text, ty: PrimitiveType):
+        """Emit register declaration."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        self.emit_line(".reg {ptx_ty} {reg};")
+
+    me emit_pred_decl(reg: text):
+        """Emit predicate register declaration."""
+        self.emit_line(".reg .pred {reg};")
+
+    # === Special Registers (Thread/Block IDs) ===
+
+    me emit_get_thread_id(dest: text, dim: i64):
+        """Emit instruction to get thread ID within block."""
+        val dim_name = match dim:
+            case 0: "x"
+            case 1: "y"
+            case 2: "z"
+            case _: error("Invalid dimension: {dim}")
+        self.emit_line("mov.u32 {dest}, %tid.{dim_name};")
+
+    me emit_get_block_id(dest: text, dim: i64):
+        """Emit instruction to get block ID."""
+        val dim_name = match dim:
+            case 0: "x"
+            case 1: "y"
+            case 2: "z"
+            case _: error("Invalid dimension: {dim}")
+        self.emit_line("mov.u32 {dest}, %ctaid.{dim_name};")
+
+    me emit_get_block_dim(dest: text, dim: i64):
+        """Emit instruction to get block dimensions."""
+        val dim_name = match dim:
+            case 0: "x"
+            case 1: "y"
+            case 2: "z"
+            case _: error("Invalid dimension: {dim}")
+        self.emit_line("mov.u32 {dest}, %ntid.{dim_name};")
+
+    me emit_get_grid_dim(dest: text, dim: i64):
+        """Emit instruction to get grid dimensions."""
+        val dim_name = match dim:
+            case 0: "x"
+            case 1: "y"
+            case 2: "z"
+            case _: error("Invalid dimension: {dim}")
+        self.emit_line("mov.u32 {dest}, %nctaid.{dim_name};")
+
+    me emit_compute_global_id(dest: text, dim: i64):
+        """Emit instructions to compute global thread ID."""
+        val tid = self.alloc_reg(PrimitiveType.U32)
+        val bid = self.alloc_reg(PrimitiveType.U32)
+        val bdim = self.alloc_reg(PrimitiveType.U32)
+        val tmp = self.alloc_reg(PrimitiveType.U32)
+
+        self.emit_reg_decl(tid, PrimitiveType.U32)
+        self.emit_reg_decl(bid, PrimitiveType.U32)
+        self.emit_reg_decl(bdim, PrimitiveType.U32)
+        self.emit_reg_decl(tmp, PrimitiveType.U32)
+
+        self.emit_get_thread_id(tid, dim)
+        self.emit_get_block_id(bid, dim)
+        self.emit_get_block_dim(bdim, dim)
+        self.emit_line("mul.lo.u32 {tmp}, {bid}, {bdim};")
+        self.emit_line("add.u32 {dest}, {tmp}, {tid};")
+
+    # === Arithmetic Operations ===
+
+    me emit_add(dest: text, ty: PrimitiveType, a: text, b: text):
+        """Emit add instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        match ty:
+            case F32:
+                self.emit_line("add{ptx_ty} {dest}, {a}, {b};")
+            case F64:
+                self.emit_line("add{ptx_ty} {dest}, {a}, {b};")
+            case _:
+                self.emit_line("add{ptx_ty} {dest}, {a}, {b};")
+
+    me emit_sub(dest: text, ty: PrimitiveType, a: text, b: text):
+        """Emit subtract instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        self.emit_line("sub{ptx_ty} {dest}, {a}, {b};")
+
+    me emit_mul(dest: text, ty: PrimitiveType, a: text, b: text):
+        """Emit multiply instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        match ty:
+            case F32:
+                self.emit_line("mul{ptx_ty} {dest}, {a}, {b};")
+            case F64:
+                self.emit_line("mul{ptx_ty} {dest}, {a}, {b};")
+            case _:
+                self.emit_line("mul.lo{ptx_ty} {dest}, {a}, {b};")
+
+    me emit_div(dest: text, ty: PrimitiveType, a: text, b: text):
+        """Emit divide instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        match ty:
+            case F32:
+                self.emit_line("div.approx{ptx_ty} {dest}, {a}, {b};")
+            case F64:
+                self.emit_line("div.rn{ptx_ty} {dest}, {a}, {b};")
+            case _:
+                self.emit_line("div{ptx_ty} {dest}, {a}, {b};")
+
+    me emit_neg(dest: text, ty: PrimitiveType, src: text):
+        """Emit negate instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        self.emit_line("neg{ptx_ty} {dest}, {src};")
+
+    # === Memory Operations ===
+
+    me emit_load(dest: text, ty: PrimitiveType, addr: text, space: MemorySpace):
+        """Emit load instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        self.emit_line("ld{space_str}{ptx_ty} {dest}, [{addr}];")
+
+    me emit_store(ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
+        """Emit store instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        self.emit_line("st{space_str}{ptx_ty} [{addr}], {value};")
+
+    me emit_shared_memory(name: text, ty: PrimitiveType, count: i64):
+        """Emit shared memory allocation."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        self.emit_line(".shared {ptx_ty} {name}[{count}];")
+
+    # === Comparison and Branching ===
+
+    me emit_compare(dest: text, op: text, ty: PrimitiveType, a: text, b: text):
+        """Emit comparison instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        self.emit_line("setp.{op}{ptx_ty} {dest}, {a}, {b};")
+
+    me emit_branch(label: text):
+        """Emit unconditional branch."""
+        self.emit_line("bra {label};")
+
+    me emit_branch_if(pred: text, label: text):
+        """Emit conditional branch."""
+        self.emit_line("@{pred} bra {label};")
+
+    me emit_branch_if_not(pred: text, label: text):
+        """Emit conditional branch (negated)."""
+        self.emit_line("@!{pred} bra {label};")
+
+    me emit_label(label: text):
+        """Emit label."""
+        self.output = self.output.push("{label}:")
+
+    me alloc_label() -> text:
+        """Allocate a new label."""
+        val label_num = self.next_label
+        self.next_label = self.next_label + 1
+        "L{label_num}"
+
+    # === Synchronization ===
+
+    me emit_barrier():
+        """Emit thread barrier (block-level)."""
+        self.emit_line("bar.sync 0;")
+
+    me emit_membar_cta():
+        """Emit memory barrier (CTA/block level)."""
+        self.emit_line("membar.cta;")
+
+    me emit_membar_gl():
+        """Emit memory barrier (global level)."""
+        self.emit_line("membar.gl;")
+
+    me emit_membar_sys():
+        """Emit memory barrier (system level)."""
+        self.emit_line("membar.sys;")
+
+    # === Atomic Operations ===
+
+    me emit_atomic_add(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
+        """Emit atomic add instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        self.emit_line("atom{space_str}.add{ptx_ty} {dest}, [{addr}], {value};")
+
+    me emit_atomic_min(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
+        """Emit atomic min instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        self.emit_line("atom{space_str}.min{ptx_ty} {dest}, [{addr}], {value};")
+
+    me emit_atomic_max(dest: text, ty: PrimitiveType, addr: text, value: text, space: MemorySpace):
+        """Emit atomic max instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        self.emit_line("atom{space_str}.max{ptx_ty} {dest}, [{addr}], {value};")
+
+    me emit_atomic_cas(dest: text, ty: PrimitiveType, addr: text, compare: text, value: text, space: MemorySpace):
+        """Emit atomic compare-and-swap instruction."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        val space_str = self.type_mapper_ptx_state_space(type_mapper, space)
+        self.emit_line("atom{space_str}.cas{ptx_ty} {dest}, [{addr}], {compare}, {value};")
+
+    # === Conversion ===
+
+    me emit_convert(dest: text, dest_ty: PrimitiveType, src: text, src_ty: PrimitiveType):
+        """Emit type conversion instruction."""
+        val dest_ptx = self.type_mapper_ptx_type(type_mapper, dest_ty)
+        val src_ptx = self.type_mapper_ptx_type(type_mapper, src_ty)
+
+        # Float to float
+        if ((dest_ty == PrimitiveType.F32 or dest_ty == PrimitiveType.F64) and
+           (src_ty == PrimitiveType.F32 or src_ty == PrimitiveType.F64)):
+            self.emit_line("cvt.rn{dest_ptx}{src_ptx} {dest}, {src};")
+        # Int to float
+        elif dest_ty == PrimitiveType.F32 or dest_ty == PrimitiveType.F64:
+            self.emit_line("cvt.rn{dest_ptx}{src_ptx} {dest}, {src};")
+        # Float to int
+        elif src_ty == PrimitiveType.F32 or src_ty == PrimitiveType.F64:
+            self.emit_line("cvt.rzi{dest_ptx}{src_ptx} {dest}, {src};")
+        # Int to int
+        else:
+            self.emit_line("cvt{dest_ptx}{src_ptx} {dest}, {src};")
+
+    # === Constants ===
+
+    me emit_const_int(dest: text, ty: PrimitiveType, value: i64):
+        """Emit integer constant load."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        self.emit_line("mov{ptx_ty} {dest}, {value};")
+
+    me emit_const_float(dest: text, ty: PrimitiveType, value: f64):
+        """Emit float constant load."""
+        val ptx_ty = self.type_mapper_ptx_type(type_mapper, ty)
+        # PTX uses 0F/0D prefix for float/double literals
+        match ty:
+            case F32:
+                self.emit_line("mov{ptx_ty} {dest}, 0F{value.to_hex()};")
+            case F64:
+                self.emit_line("mov{ptx_ty} {dest}, 0D{value.to_hex()};")
+            case _:
+                error("Invalid float type: {ty}")
+
+    # === Return ===
+
+    me emit_ret():
+        """Emit return instruction."""
+        self.emit_line("ret;")
+
+    me emit_exit():
+        """Emit kernel exit instruction."""
+        self.emit_line("exit;")
+
+    # === Output ===
+
+    me emit_line(line: text):
+        """Emit a line of PTX code with proper indentation."""
+        val indent = "    ".repeat(self.indent_level)
+        self.output = self.output.push("{indent}{line}")
+
+    me emit_comment(comment: text):
+        """Emit a comment."""
+        self.emit_line("// {comment}")
+
+    fn build() -> text:
+        """Build final PTX code."""
+        self.output.join("\n")
+
+    fn get_output() -> [text]:
+        """Get output lines."""
+        self.output
+
+# ============================================================================
+# Export
+# ============================================================================
+
 export PtxBuilder

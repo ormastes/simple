@@ -1,0 +1,835 @@
+# Core Simple — Lexer (Tokenizer)
+#
+# Shared core library: converts source text into a stream of tokens.
+# Handles indentation tracking, literals, identifiers, keywords,
+# operators, delimiters, and comments.
+#
+# Design: All state in module-level vars. Functions modify state.
+# Works when compiled to C; NOT in the interpreter (closure bug).
+
+use std.text.{_NL}
+use compiler.core.tokens.{keyword_lookup}
+use compiler.core.tokens.{TOK_INT_LIT, TOK_FLOAT_LIT, TOK_STRING_LIT}
+use compiler.core.tokens.{TOK_BOOL_LIT, TOK_NIL_LIT, TOK_IDENT}
+use compiler.core.tokens.{TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR}
+use compiler.core.tokens.{TOK_KW_TRUE, TOK_KW_FALSE, TOK_KW_NIL}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
+use compiler.core.tokens.{TOK_EQ, TOK_NEQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ}
+use compiler.core.tokens.{TOK_SHL, TOK_SHR}
+use compiler.core.tokens.{TOK_ASSIGN, TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN, TOK_WALRUS}
+use compiler.core.tokens.{TOK_STAR_ASSIGN, TOK_SLASH_ASSIGN}
+use compiler.core.tokens.{TOK_AND, TOK_OR, TOK_NOT}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
+use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
+use compiler.core.tokens.{TOK_ARROW, TOK_FAT_ARROW, TOK_PIPE}
+use compiler.core.tokens.{TOK_QUESTION, TOK_QUESTION_DOT, TOK_DOUBLE_QUESTION}
+use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
+use compiler.core.tokens.{TOK_HASH_LBRACKET, TOK_DOTDOTDOT, TOK_DOTDOT_EQ}
+use compiler.core.tokens.{TOK_SEMICOLON, TOK_AT, TOK_UNDERSCORE}
+use compiler.core.tokens.{TOK_PIPE_FORWARD, TOK_DOUBLE_STAR}
+use compiler.core.tokens.{TOK_SUFFIXED_INT, TOK_SUFFIXED_FLOAT}
+use compiler.core.tokens.{TOK_LABEL, TOK_BACKTICK_IDENT}
+use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
+
+# ===== Lexer State =====
+
+var lex_source: text = ""
+var lex_pos: i64 = 0
+var lex_line: i64 = 1
+var lex_col: i64 = 1
+var lex_indent_stack: [i64] = [0]
+var lex_pending_dedents: i64 = 0
+var lex_at_line_start: bool = true
+var lex_paren_depth: i64 = 0
+var lex_round_paren_depth: i64 = 0
+
+# Current token properties
+var lex_cur_kind: i64 = 0
+var lex_cur_text: text = ""
+var lex_cur_line: i64 = 0
+var lex_cur_col: i64 = 0
+var lex_cur_suffix: text = ""
+
+# ===== Lexer Init/State Access =====
+
+fn lex_init(source: text):
+    lex_source = source
+    lex_pos = 0
+    lex_line = 1
+    lex_col = 1
+    lex_indent_stack = []
+    lex_indent_stack.push(0)
+    lex_pending_dedents = 0
+    lex_at_line_start = true
+    lex_paren_depth = 0
+    lex_round_paren_depth = 0
+    lex_cur_kind = 0
+    lex_cur_text = ""
+    lex_cur_line = 0
+    lex_cur_col = 0
+    lex_cur_suffix = ""
+
+fn lex_at_end() -> bool:
+    lex_pos >= lex_source.len()
+
+fn lex_peek() -> text:
+    if lex_pos >= lex_source.len():
+        return ""
+    lex_source[lex_pos:lex_pos + 1]
+
+fn lex_peek_next() -> text:
+    val next_pos: i64 = lex_pos + 1
+    if next_pos >= lex_source.len():
+        return ""
+    lex_source[next_pos:next_pos + 1]
+
+fn lex_peek_at(offset: i64) -> text:
+    val target: i64 = lex_pos + offset
+    if target >= lex_source.len():
+        return ""
+    lex_source[target:target + 1]
+
+fn lex_advance() -> text:
+    if lex_pos >= lex_source.len():
+        return ""
+    val c: text = lex_source[lex_pos:lex_pos + 1]
+    lex_pos = lex_pos + 1
+    if c == _NL:
+        lex_line = lex_line + 1
+        lex_col = 1
+        lex_at_line_start = true
+    else:
+        lex_col = lex_col + 1
+    c
+
+fn lex_match_char(expected: text) -> bool:
+    if lex_pos >= lex_source.len():
+        return false
+    if lex_source[lex_pos:lex_pos + 1] != expected:
+        return false
+    lex_pos = lex_pos + 1
+    lex_col = lex_col + 1
+    true
+
+# ===== Token Construction =====
+
+fn lex_make_token(kind: i64, token_text: text, start_line: i64, start_col: i64):
+    lex_cur_kind = kind
+    lex_cur_text = token_text
+    lex_cur_line = start_line
+    lex_cur_col = start_col
+
+fn lex_make_simple(kind: i64, token_text: text):
+    lex_make_token(kind, token_text, lex_line, lex_col)
+
+# ===== Number Scanning =====
+
+fn lex_scan_number():
+    val start: i64 = lex_pos
+    val start_line: i64 = lex_line
+    val start_col: i64 = lex_col
+    var is_float: bool = false
+
+    # Check for hex, binary, octal prefix
+    val first: text = lex_peek()
+    if first == "0":
+        val second: text = lex_peek_next()
+        if second == "x":
+            # Hex literal
+            lex_advance()
+            lex_advance()
+            var hex_start: i64 = lex_pos
+            for i in 0..64:
+                val hc: text = lex_peek()
+                if hc == "_":
+                    lex_advance()
+                elif is_hex_digit(hc):
+                    lex_advance()
+                else:
+                    break
+            val num_text: text = lex_source[start:lex_pos]
+            lex_make_token(TOK_INT_LIT, num_text, start_line, start_col)
+            return
+        if second == "b":
+            # Binary literal
+            lex_advance()
+            lex_advance()
+            for i in 0..64:
+                val bc: text = lex_peek()
+                val is_bin: bool = bc == "0"
+                val is_bin1: bool = bc == "1"
+                val is_under: bool = bc == "_"
+                val is_bin_char: bool = is_bin or is_bin1
+                val valid: bool = is_bin_char or is_under
+                if valid:
+                    lex_advance()
+                else:
+                    break
+            val num_text: text = lex_source[start:lex_pos]
+            lex_make_token(TOK_INT_LIT, num_text, start_line, start_col)
+            return
+        if second == "o":
+            # Octal literal
+            lex_advance()
+            lex_advance()
+            for i in 0..64:
+                val oc: text = lex_peek()
+                val is_oct: bool = is_digit(oc)
+                val is_under: bool = oc == "_"
+                val valid: bool = is_oct or is_under
+                if valid:
+                    lex_advance()
+                else:
+                    break
+            val num_text: text = lex_source[start:lex_pos]
+            lex_make_token(TOK_INT_LIT, num_text, start_line, start_col)
+            return
+
+    # Decimal number
+    for i in 0..100:
+        val dc: text = lex_peek()
+        val is_d: bool = is_digit(dc)
+        val is_u: bool = dc == "_"
+        val valid: bool = is_d or is_u
+        if valid:
+            lex_advance()
+        else:
+            break
+
+    # Check for float
+    val maybe_dot: text = lex_peek()
+    val after_dot: text = lex_peek_next()
+    val dot_then_digit: bool = maybe_dot == "."
+    if dot_then_digit:
+        val is_next_dig: bool = is_digit(after_dot)
+        if is_next_dig:
+            is_float = true
+            lex_advance()
+            for i in 0..100:
+                val fc: text = lex_peek()
+                val is_fd: bool = is_digit(fc)
+                val is_fu: bool = fc == "_"
+                val fvalid: bool = is_fd or is_fu
+                if fvalid:
+                    lex_advance()
+                else:
+                    break
+
+    # Check for exponent
+    val exp_c: text = lex_peek()
+    val is_exp_e: bool = exp_c == "e"
+    val is_exp_E: bool = exp_c == "E"
+    val has_exp: bool = is_exp_e or is_exp_E
+    if has_exp:
+        is_float = true
+        lex_advance()
+        val sign: text = lex_peek()
+        val is_plus: bool = sign == "+"
+        val is_minus: bool = sign == "-"
+        val has_sign: bool = is_plus or is_minus
+        if has_sign:
+            lex_advance()
+        for i in 0..100:
+            val ec: text = lex_peek()
+            if is_digit(ec):
+                lex_advance()
+            else:
+                break
+
+    val num_text_raw: text = lex_source[start:lex_pos]
+
+    # Suffix detection: if number text ends with _ and next char is alpha
+    val raw_len: i64 = num_text_raw.len()
+    var ends_underscore: bool = false
+    if raw_len > 0:
+        val last_ch: text = num_text_raw[raw_len - 1:raw_len]
+        ends_underscore = last_ch == "_"
+    val after_num: text = lex_peek()
+    val next_is_alpha: bool = is_alpha(after_num)
+    if ends_underscore and next_is_alpha:
+        # Suffix detected: strip trailing _, scan suffix identifier
+        val num_text: text = num_text_raw[0:raw_len - 1]
+        var suffix_start: i64 = lex_pos
+        for i in 0..1000:
+            val sc: text = lex_peek()
+            if is_ident_char(sc):
+                lex_advance()
+            else:
+                break
+        val suffix: text = lex_source[suffix_start:lex_pos]
+        lex_cur_suffix = suffix
+        if is_float:
+            lex_make_token(TOK_SUFFIXED_FLOAT, num_text, start_line, start_col)
+        else:
+            lex_make_token(TOK_SUFFIXED_INT, num_text, start_line, start_col)
+        return
+
+    # Normal number token (no suffix)
+    lex_cur_suffix = ""
+    if is_float:
+        lex_make_token(TOK_FLOAT_LIT, num_text_raw, start_line, start_col)
+    else:
+        lex_make_token(TOK_INT_LIT, num_text_raw, start_line, start_col)
+
+# ===== String Scanning =====
+
+fn lex_scan_string():
+    val start_line: i64 = lex_line
+    val start_col: i64 = lex_col
+    val quote: text = lex_advance()
+    var result: text = ""
+
+    # Check for triple-quote string: """ or '''
+    val tq1: text = lex_peek()
+    val tq2: text = lex_peek_next()
+    val is_tq1: bool = tq1 == quote
+    val is_tq2: bool = tq2 == quote
+    val is_triple: bool = is_tq1 and is_tq2
+    if is_triple:
+        lex_advance()
+        lex_advance()
+        # Scan until closing triple-quote
+        for i in 0..1000000:
+            if lex_at_end():
+                lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+                return
+            val tc: text = lex_peek()
+            val tn1: text = lex_peek_next()
+            val tn2: text = lex_peek_at(2)
+            val close1: bool = tc == quote
+            val close2: bool = tn1 == quote
+            val close3: bool = tn2 == quote
+            val close12: bool = close1 and close2
+            val close_all: bool = close12 and close3
+            if close_all:
+                lex_advance()
+                lex_advance()
+                lex_advance()
+                lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+                return
+            result = result + lex_advance()
+        lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+        return
+
+    var done: bool = false
+
+    for i in 0..100000:
+        if done:
+            break
+        if lex_at_end():
+            lex_make_token(TOK_ERROR, "unterminated string", start_line, start_col)
+            return
+        val c: text = lex_peek()
+        if c == _NL:
+            lex_make_token(TOK_ERROR, "unterminated string", start_line, start_col)
+            return
+        if c == quote:
+            lex_advance()
+            done = true
+        elif c == "\\":
+            lex_advance()
+            val esc: text = lex_advance()
+            if esc == "n":
+                result = result + "\n"
+            elif esc == "t":
+                result = result + "\t"
+            elif esc == "r":
+                result = result + "\r"
+            elif esc == "\\":
+                result = result + "\\"
+            elif esc == "\"":
+                result = result + "\""
+            elif esc == "'":
+                result = result + "'"
+            elif esc == "0":
+                result = result + "\0"
+            else:
+                result = result + "\\"
+                result = result + esc
+        else:
+            result = result + lex_advance()
+
+    lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+
+# ===== Identifier/Keyword Scanning =====
+
+fn lex_scan_ident():
+    val start: i64 = lex_pos
+    val start_line: i64 = lex_line
+    val start_col: i64 = lex_col
+
+    for i in 0..1000:
+        val c: text = lex_peek()
+        if is_ident_char(c):
+            lex_advance()
+        else:
+            break
+
+    val ident_text: text = lex_source[start:lex_pos]
+
+    # Check for keyword
+    val kw_kind: i64 = keyword_lookup(ident_text)
+    if kw_kind != TOK_IDENT:
+        # Special: true/false → bool literal, nil → nil literal
+        if kw_kind == TOK_KW_TRUE:
+            lex_make_token(TOK_BOOL_LIT, "true", start_line, start_col)
+        elif kw_kind == TOK_KW_FALSE:
+            lex_make_token(TOK_BOOL_LIT, "false", start_line, start_col)
+        elif kw_kind == TOK_KW_NIL:
+            lex_make_token(TOK_NIL_LIT, "nil", start_line, start_col)
+        else:
+            lex_make_token(kw_kind, ident_text, start_line, start_col)
+    else:
+        # Check for underscore-only as special token
+        if ident_text == "_":
+            lex_make_token(TOK_UNDERSCORE, "_", start_line, start_col)
+        else:
+            lex_make_token(TOK_IDENT, ident_text, start_line, start_col)
+
+# ===== Skip Whitespace (not newlines) =====
+
+fn lex_skip_spaces():
+    for i in 0..100000:
+        val c: text = lex_peek()
+        if c == " ":
+            lex_advance()
+        elif c == "\t":
+            lex_advance()
+        else:
+            break
+
+# ===== Indentation Handling =====
+
+fn lex_handle_indentation():
+    # Count leading whitespace
+    var indent_level: i64 = 0
+    for i in 0..10000:
+        val c: text = lex_peek()
+        if c == " ":
+            indent_level = indent_level + 1
+            lex_advance()
+        elif c == "\t":
+            indent_level = indent_level + 4
+            lex_advance()
+        else:
+            break
+
+    # Skip blank lines and comment-only lines
+    val next_c: text = lex_peek()
+    val is_blank: bool = next_c == _NL
+    val is_end: bool = next_c == ""
+    val is_comment: bool = next_c == "#"
+    if is_blank:
+        lex_advance()
+        lex_at_line_start = true
+        return
+    if is_end:
+        return
+    if is_comment:
+        # Skip comment, then the newline
+        for i in 0..100000:
+            val cc: text = lex_peek()
+            val is_nl: bool = cc == _NL
+            val is_eof: bool = cc == ""
+            val done: bool = is_nl or is_eof
+            if done:
+                break
+            lex_advance()
+        if lex_peek() == _NL:
+            lex_advance()
+        lex_at_line_start = true
+        return
+
+    lex_at_line_start = false
+
+    # Compare with current indent level
+    val stack_len: i64 = lex_indent_stack.len()
+    val current_indent: i64 = lex_indent_stack[stack_len - 1]
+
+    if indent_level > current_indent:
+        lex_indent_stack.push(indent_level)
+        lex_make_token(TOK_INDENT, "", lex_line, 1)
+    elif indent_level < current_indent:
+        # Pop indent stack and count dedents
+        var dedent_count: i64 = 0
+        for i in 0..100:
+            val slen: i64 = lex_indent_stack.len()
+            if slen <= 1:
+                break
+            val top: i64 = lex_indent_stack[slen - 1]
+            if top <= indent_level:
+                break
+            lex_indent_stack.pop()
+            dedent_count = dedent_count + 1
+
+        # First dedent is returned immediately, rest are pending
+        if dedent_count > 0:
+            lex_pending_dedents = dedent_count - 1
+            lex_make_token(TOK_DEDENT, "", lex_line, 1)
+        else:
+            # Indent level doesn't match any in stack — error
+            lex_make_token(TOK_ERROR, "inconsistent indentation", lex_line, 1)
+
+# ===== Main Token Scanner =====
+
+fn lex_scan_token():
+    # Check EOF first (before indentation or anything else)
+    if lex_at_end():
+        val slen: i64 = lex_indent_stack.len()
+        if slen > 1:
+            lex_indent_stack.pop()
+            lex_pending_dedents = slen - 2
+            lex_make_token(TOK_DEDENT, "", lex_line, lex_col)
+            return
+        lex_make_token(TOK_EOF, "", lex_line, lex_col)
+        return
+
+    # Handle indentation at line start BEFORE skipping spaces
+    # (handle_indentation counts and consumes leading spaces itself)
+    if lex_at_line_start:
+        if lex_round_paren_depth > 0:
+            # Inside round parens: suppress indentation tokens
+            lex_at_line_start = false
+            lex_skip_spaces()
+            lex_scan_token()
+            return
+        lex_cur_kind = 0
+        lex_handle_indentation()
+        if lex_cur_kind != 0:
+            return
+        # Same indent or blank/comment line consumed
+        lex_scan_token()
+        return
+
+    # Skip spaces (not newlines) — only for mid-line tokens
+    lex_skip_spaces()
+
+    if lex_at_end():
+        # Emit pending dedents for remaining indentation
+        val slen: i64 = lex_indent_stack.len()
+        if slen > 1:
+            lex_indent_stack.pop()
+            lex_pending_dedents = slen - 2
+            lex_make_token(TOK_DEDENT, "", lex_line, lex_col)
+            return
+        lex_make_token(TOK_EOF, "", lex_line, lex_col)
+        return
+
+    val start_line: i64 = lex_line
+    val start_col: i64 = lex_col
+    val c: text = lex_peek()
+
+    # Newline
+    if c == _NL:
+        lex_advance()
+        lex_at_line_start = true
+        if lex_round_paren_depth > 0:
+            # Inside round parens: suppress newline, scan next token
+            lex_scan_token()
+            return
+        lex_make_token(TOK_NEWLINE, _NL, start_line, start_col)
+        return
+
+    # Comment
+    if c == "#":
+        val next: text = lex_peek_next()
+        if next == "[":
+            # Attribute: #[
+            lex_advance()
+            lex_advance()
+            lex_make_token(TOK_HASH_LBRACKET, "#[", start_line, start_col)
+            return
+        # Skip comment to end of line
+        for i in 0..100000:
+            val cc: text = lex_peek()
+            val is_nl: bool = cc == _NL
+            val is_eof: bool = cc == ""
+            val done: bool = is_nl or is_eof
+            if done:
+                break
+            lex_advance()
+        # Recurse to get next real token
+        lex_scan_token()
+        return
+
+    # String literal
+    val is_dquote: bool = c == "\""
+    val is_squote: bool = c == "'"
+    if is_dquote:
+        lex_scan_string()
+        return
+    if is_squote:
+        # Check if this is a label token: 'identifier
+        val after_quote: text = lex_peek_next()
+        val is_label_alpha: bool = is_alpha(after_quote)
+        val is_label_under: bool = after_quote == "_"
+        val is_label: bool = is_label_alpha or is_label_under
+        if is_label:
+            # Label token: 'name
+            lex_advance()  # consume '
+            val label_start: i64 = lex_pos
+            for li in 0..1000:
+                val lc: text = lex_peek()
+                if is_ident_char(lc):
+                    lex_advance()
+                else:
+                    break
+            val label_name: text = lex_source[label_start:lex_pos]
+            lex_make_token(TOK_LABEL, label_name, start_line, start_col)
+            return
+        lex_scan_string()
+        return
+
+    # Number literal
+    if is_digit(c):
+        lex_scan_number()
+        return
+
+    # Identifier or keyword
+    val is_al: bool = is_alpha(c)
+    val is_un: bool = c == "_"
+    val starts_ident: bool = is_al or is_un
+    if starts_ident:
+        lex_scan_ident()
+        return
+
+    # Operators and delimiters (single char consumed via advance)
+    lex_advance()
+
+    # Two+ character operators
+    if c == "=":
+        if lex_match_char("="):
+            lex_make_token(TOK_EQ, "==", start_line, start_col)
+        elif lex_match_char(">"):
+            lex_make_token(TOK_FAT_ARROW, "=>", start_line, start_col)
+        else:
+            lex_make_token(TOK_ASSIGN, "=", start_line, start_col)
+        return
+
+    if c == "!":
+        if lex_match_char("="):
+            lex_make_token(TOK_NEQ, "!=", start_line, start_col)
+        else:
+            lex_make_token(TOK_NOT, "!", start_line, start_col)
+        return
+
+    if c == "<":
+        if lex_match_char("<"):
+            lex_make_token(TOK_SHL, "<<", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(TOK_LEQ, "<=", start_line, start_col)
+        else:
+            lex_make_token(TOK_LT, "<", start_line, start_col)
+        return
+
+    if c == ">":
+        if lex_match_char(">"):
+            lex_make_token(TOK_SHR, ">>", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(TOK_GEQ, ">=", start_line, start_col)
+        else:
+            lex_make_token(TOK_GT, ">", start_line, start_col)
+        return
+
+    if c == "+":
+        if lex_match_char("="):
+            lex_make_token(TOK_PLUS_ASSIGN, "+=", start_line, start_col)
+        else:
+            lex_make_token(TOK_PLUS, "+", start_line, start_col)
+        return
+
+    if c == "-":
+        if lex_match_char(">"):
+            lex_make_token(TOK_ARROW, "->", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(TOK_MINUS_ASSIGN, "-=", start_line, start_col)
+        else:
+            lex_make_token(TOK_MINUS, "-", start_line, start_col)
+        return
+
+    if c == "*":
+        if lex_match_char("*"):
+            lex_make_token(TOK_DOUBLE_STAR, "**", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(TOK_STAR_ASSIGN, "*=", start_line, start_col)
+        else:
+            lex_make_token(TOK_STAR, "*", start_line, start_col)
+        return
+
+    if c == "/":
+        if lex_match_char("="):
+            lex_make_token(TOK_SLASH_ASSIGN, "/=", start_line, start_col)
+        else:
+            lex_make_token(TOK_SLASH, "/", start_line, start_col)
+        return
+
+    if c == "%":
+        lex_make_token(TOK_PERCENT, "%", start_line, start_col)
+        return
+
+    if c == ".":
+        val d1: text = lex_peek()
+        if d1 == ".":
+            lex_advance()
+            val d2: text = lex_peek()
+            if d2 == ".":
+                lex_advance()
+                lex_make_token(TOK_DOTDOTDOT, "...", start_line, start_col)
+            elif d2 == "=":
+                lex_advance()
+                lex_make_token(TOK_DOTDOT_EQ, "..=", start_line, start_col)
+            else:
+                lex_make_token(TOK_DOTDOT, "..", start_line, start_col)
+        elif d1 == "?":
+            lex_advance()
+            lex_make_token(TOK_QUESTION_DOT, ".?", start_line, start_col)
+        else:
+            lex_make_token(TOK_DOT, ".", start_line, start_col)
+        return
+
+    if c == "?":
+        val q1: text = lex_peek()
+        if q1 == "?":
+            lex_advance()
+            lex_make_token(TOK_DOUBLE_QUESTION, "??", start_line, start_col)
+        elif q1 == ".":
+            lex_advance()
+            lex_make_token(TOK_QUESTION_DOT, "?.", start_line, start_col)
+        else:
+            lex_make_token(TOK_QUESTION, "?", start_line, start_col)
+        return
+
+    if c == "|":
+        if lex_match_char(">"):
+            lex_make_token(TOK_PIPE_FORWARD, "|>", start_line, start_col)
+        else:
+            lex_make_token(TOK_PIPE, "|", start_line, start_col)
+        return
+
+    if c == "@":
+        lex_make_token(TOK_AT, "@", start_line, start_col)
+        return
+
+    # Backtick atom token: `identifier
+    if c == "`":
+        val atom_start: i64 = lex_pos
+        for ai in 0..1000:
+            val ac: text = lex_peek()
+            if is_ident_char(ac):
+                lex_advance()
+            elif ac == "`":
+                lex_advance()
+                break
+            else:
+                break
+        val atom_text: text = lex_source[atom_start:lex_pos]
+        lex_make_token(TOK_BACKTICK_IDENT, atom_text, start_line, start_col)
+        return
+
+    if c == ";":
+        lex_make_token(TOK_SEMICOLON, ";", start_line, start_col)
+        return
+
+    # Delimiters (track paren depth)
+    if c == "(":
+        lex_paren_depth = lex_paren_depth + 1
+        lex_round_paren_depth = lex_round_paren_depth + 1
+        lex_make_token(TOK_LPAREN, "(", start_line, start_col)
+        return
+
+    if c == ")":
+        if lex_paren_depth > 0:
+            lex_paren_depth = lex_paren_depth - 1
+        if lex_round_paren_depth > 0:
+            lex_round_paren_depth = lex_round_paren_depth - 1
+        lex_make_token(TOK_RPAREN, ")", start_line, start_col)
+        return
+
+    if c == "[":
+        lex_paren_depth = lex_paren_depth + 1
+        lex_make_token(TOK_LBRACKET, "[", start_line, start_col)
+        return
+
+    if c == "]":
+        if lex_paren_depth > 0:
+            lex_paren_depth = lex_paren_depth - 1
+        lex_make_token(TOK_RBRACKET, "]", start_line, start_col)
+        return
+
+    if c == "{":
+        lex_paren_depth = lex_paren_depth + 1
+        lex_make_token(TOK_LBRACE, "{", start_line, start_col)
+        return
+
+    if c == "}":
+        if lex_paren_depth > 0:
+            lex_paren_depth = lex_paren_depth - 1
+        lex_make_token(TOK_RBRACE, "}", start_line, start_col)
+        return
+
+    if c == ":":
+        if lex_match_char("="):
+            lex_make_token(TOK_WALRUS, ":=", start_line, start_col)
+        else:
+            lex_make_token(TOK_COLON, ":", start_line, start_col)
+        return
+
+    if c == ",":
+        lex_make_token(TOK_COMMA, ",", start_line, start_col)
+        return
+
+    # Unknown character
+    lex_make_token(TOK_ERROR, "unexpected character: " + c, start_line, start_col)
+
+# ===== Public API =====
+
+fn lex_next() -> i64:
+    # Check for pending dedents
+    if lex_pending_dedents > 0:
+        lex_pending_dedents = lex_pending_dedents - 1
+        lex_cur_kind = TOK_DEDENT
+        lex_cur_text = ""
+        return TOK_DEDENT
+
+    lex_scan_token()
+    return lex_cur_kind
+
+fn lex_token_kind() -> i64:
+    lex_cur_kind
+
+fn lex_token_text() -> text:
+    lex_cur_text
+
+fn lex_token_line() -> i64:
+    lex_cur_line
+
+fn lex_token_col() -> i64:
+    lex_cur_col
+
+# ===== Convenience: Tokenize All =====
+# Tokenizes entire source and returns arrays of token data.
+# Useful for testing and debugging.
+
+var lex_all_kinds: [i64] = []
+var lex_all_texts: [text] = []
+var lex_all_lines: [i64] = []
+var lex_all_cols: [i64] = []
+
+fn lex_tokenize_all(source: text) -> i64:
+    lex_init(source)
+    lex_all_kinds = []
+    lex_all_texts = []
+    lex_all_lines = []
+    lex_all_cols = []
+
+    for i in 0..1000000:
+        val kind: i64 = lex_next()
+        lex_all_kinds.push(kind)
+        lex_all_texts.push(lex_cur_text)
+        lex_all_lines.push(lex_cur_line)
+        lex_all_cols.push(lex_cur_col)
+        if kind == TOK_EOF:
+            break
+
+    lex_all_kinds.len()
