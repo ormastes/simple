@@ -56,7 +56,11 @@ init_di()
 start_server()
 
 fn init_di():
-    val config_content = rt_file_read_text("config/di.sdn") ?? ""
+    val lib_root = rt_env_get("SIMPLE_LIB") ?? ""
+    var config_path = "config/di.sdn"
+    if lib_root != "":
+        config_path = lib_root + "/../config/di.sdn"
+    val config_content = rt_file_read_text(config_path) ?? ""
     val profile = rt_env_get("SIMPLE_PROFILE") ?? ""
     di_setup_from_config(config_content, profile)
     # Override placeholders with real factories
@@ -128,12 +132,18 @@ fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
         return make_error_response(id, -32602, "Missing tool name")
     if tool_name.starts_with("debug_log_"):
         val handler = di_resolve("debug_log_handler")
+        if handler == nil:
+            return make_error_response(id, -32603, "Handler not available: debug_log_handler")
         return handler.handle_fn(tool_name, id, body)
     elif tool_name.starts_with("debug_"):
         val handler = di_resolve("debug_handler")
+        if handler == nil:
+            return make_error_response(id, -32603, "Handler not available: debug_handler")
         return handler.handle_fn(tool_name, id, body)
     elif tool_name.starts_with("simple_"):
         val handler = di_resolve("diag_handler")
+        if handler == nil:
+            return make_error_response(id, -32603, "Handler not available: diag_handler")
         return handler.handle_fn(tool_name, id, body)
     make_error_response(id, -32601, "Unknown tool: " + tool_name)
 
@@ -334,6 +344,8 @@ fn handle_resources_read(id: text, uri: text) -> text:
     # debuglog:///... (direct in-process call)
     if uri.starts_with("debuglog:///"):
         val log_content = dispatch_debuglog_resource(uri)
+        if log_content.starts_with("Unknown debuglog query:"):
+            return make_error_response(id, -32002, log_content)
         if log_content != "":
             var log_mime = "application/json"
             if uri.ends_with("/text"):
