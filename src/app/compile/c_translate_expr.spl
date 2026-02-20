@@ -1,0 +1,762 @@
+# Simple to C Code Generator - Expression Translation
+#
+# Helpers, condition, method call, and expression translation:
+#   - Type-check helpers (is_c_expr_string_result, extract_fn_names, etc.)
+#   - Condition translation (and/or/not, nil, string equality)
+#   - Method call translation (.contains, .starts_with, .len, etc.)
+#   - Full expression translation (literals, operators, structs, enums)
+
+use app.compile.c_helpers.{find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array, simple_type_to_c, translate_params, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr, is_fn_returning_int_arr, is_fn_returning_str_arr}
+
+# --- Translation Functions ---
+# Functions that only READ types receive `types: text` parameter.
+# Functions that ADD type entries return "code|||;entry1;entry2;" with ||| separator.
+
+# Check if a C expression returns a string result based on known function patterns
+fn is_c_expr_string_result(c_expr: text) -> bool:
+    val is1 = c_expr.starts_with("\"") or c_expr.contains("simple_substring")
+    val is2 = c_expr.contains("simple_trim") or c_expr.contains("simple_replace")
+    val is3 = c_expr.contains("simple_string_join") or c_expr.contains("simple_str_concat")
+    val is4 = c_expr.contains("simple_char_at") or c_expr.contains("simple_file_read")
+    val is5 = c_expr.contains("simple_dict_get") or c_expr.contains("simple_option_unwrap_str")
+    val is6 = c_expr.contains("!= NULL ?")
+    is1 or is2 or is3 or is4 or is5 or is6
+
+# Extract function names from raw rhs and translated c_rhs (before first paren)
+fn extract_fn_names(rhs: text, c_rhs: text) -> [text]:
+    var names: [text] = []
+    val p1 = rhs.index_of("(") ?? -1
+    if p1 >= 0:
+        names.push(rhs.substring(0, p1).trim())
+    val p2 = c_rhs.index_of("(") ?? -1
+    if p2 >= 0:
+        names.push(c_rhs.substring(0, p2).trim())
+    names
+
+# Translate a simple method call: obj.method(args) -> c_func(obj, args)
+fn translate_simple_method(expr: text, paren_pos: i64, obj: text, c_func: text, do_translate: bool, ref_obj: bool, types: text) -> text:
+    val arg_end = find_close_paren(expr, paren_pos)
+    if arg_end >= 0:
+        val arg = expr.substring(paren_pos + 1, arg_end)
+        var c_arg = arg
+        if do_translate:
+            c_arg = translate_expr(arg, types)
+        var c_obj = obj
+        if ref_obj:
+            c_obj = "&" + obj
+        return "{c_func}({c_obj}, {c_arg})"
+    ""
+
+# Check if a base expression is an items-indexed array (produces base.items[idx])
+fn is_items_indexed_array(base: text, types: text) -> bool:
+    if is_string_array_var(base, types):
+        return true
+    if is_int_array_var(base, types):
+        return true
+    if is_str_arr_arr_var(base, types):
+        return true
+    if is_int_arr_arr_var(base, types):
+        return true
+    if base.contains("."):
+        if is_struct_field_str_array(base, types) or is_struct_field_int_array(base, types):
+            return true
+    false
+
+# Resolve .len() for a base expression based on its type, returns "" if unresolved
+fn resolve_len(base: text, types: text) -> text:
+    if is_dict_var(base, types):
+        return "simple_dict_len({base})"
+    val base_is_text = is_text_var(base, types) or base.starts_with("\"")
+    if base_is_text:
+        return "simple_strlen({base})"
+    if is_struct_field_text(base, types):
+        return "simple_strlen({base})"
+    if is_string_array_var(base, types) or is_int_array_var(base, types):
+        return "{base}.len"
+    if is_str_arr_arr_var(base, types) or is_int_arr_arr_var(base, types):
+        return "{base}.len"
+    if is_struct_array_var(base, types) != "":
+        return "{base}.len"
+    if is_struct_field_str_array(base, types) or is_struct_field_int_array(base, types):
+        return "{base}.len"
+    if is_struct_field_struct_array(base, types) != "":
+        return "{base}.len"
+    ""
+
+# Generate a C for-loop over an array variable
+fn gen_array_for_loop(loop_var: text, iterable: text, elem_type: text, is_text_elem: bool) -> text:
+    var result = "for (long long _idx_" + loop_var + " = 0; _idx_" + loop_var + " < " + iterable + ".len; _idx_" + loop_var + "++) \{ " + elem_type + " " + loop_var + " = " + iterable + ".items[_idx_" + loop_var + "];"
+    if is_text_elem:
+        result = result + "|||;text:" + loop_var + ";"
+    result
+
+# Try to translate a compound assignment operator (-=, *=, /=), returns "" if not found
+fn try_translate_compound_assign(trimmed: text, op: text, types: text) -> text:
+    val pos = trimmed.index_of(op) ?? -1
+    if pos >= 0:
+        val lhs = trimmed.substring(0, pos).trim()
+        val rhs = trimmed.substring(pos + op.len()).trim()
+        return lhs + op + translate_expr(rhs, types) + ";"
+    ""
+
+# Try to translate a binary comparison operator, returns "" if not found
+fn try_translate_binary_cmp(result: text, op: text, types: text) -> text:
+    val pos = result.index_of(op) ?? -1
+    if pos >= 0:
+        val left = result.substring(0, pos).trim()
+        val right = result.substring(pos + op.len()).trim()
+        return translate_expr(left, types) + op + translate_expr(right, types)
+    ""
+
+# Translate a Simple condition to C
+fn translate_condition(cond: text, types: text) -> text:
+    var result = cond
+    # Handle "not" prefix
+    if result.starts_with("not "):
+        result = "!(" + translate_condition(result.substring(4), types) + ")"
+        return result
+    # Handle compound "or" (lower precedence - split first, translate each part recursively)
+    if result.contains(" or "):
+        val or_pos = result.index_of(" or ") ?? -1
+        if or_pos >= 0:
+            val or_left = result.substring(0, or_pos).trim()
+            val or_right = result.substring(or_pos + 4).trim()
+            return translate_condition(or_left, types) + " || " + translate_condition(or_right, types)
+    # Handle compound "and" (higher precedence - split and translate each part recursively)
+    if result.contains(" and "):
+        val and_pos = result.index_of(" and ") ?? -1
+        if and_pos >= 0:
+            val and_left = result.substring(0, and_pos).trim()
+            val and_right = result.substring(and_pos + 5).trim()
+            return translate_condition(and_left, types) + " && " + translate_condition(and_right, types)
+    # Handle "!= nil" and "== nil" - use NULL for text, < 0 for integers
+    if result.contains(" != nil"):
+        val nil_neq_pos = result.index_of(" != nil") ?? -1
+        if nil_neq_pos >= 0:
+            val nil_var = result.substring(0, nil_neq_pos).trim()
+            # Strip leading !( if present
+            var clean_nil_var = nil_var
+            if clean_nil_var.starts_with("!("):
+                clean_nil_var = clean_nil_var.substring(2)
+            if is_text_var(clean_nil_var, types):
+                result = result.replace(" != nil", " != NULL")
+            elif is_struct_type_var(clean_nil_var, types) != "":
+                result = "1"
+            elif is_string_array_var(clean_nil_var, types) or is_int_array_var(clean_nil_var, types):
+                result = "1"
+            elif is_struct_field_str_array(clean_nil_var, types) or is_struct_field_int_array(clean_nil_var, types):
+                result = "1"
+            else:
+                result = result.replace(" != nil", " >= 0")
+    if result.contains(" == nil"):
+        val nil_eq_pos = result.index_of(" == nil") ?? -1
+        if nil_eq_pos >= 0:
+            val nil_var = result.substring(0, nil_eq_pos).trim()
+            if is_text_var(nil_var, types):
+                result = result.replace(" == nil", " == NULL")
+            elif is_struct_type_var(nil_var, types) != "":
+                result = "0"
+            elif is_string_array_var(nil_var, types) or is_int_array_var(nil_var, types):
+                result = "0"
+            elif is_struct_field_str_array(nil_var, types) or is_struct_field_int_array(nil_var, types):
+                result = "0"
+            else:
+                result = result.replace(" == nil", " < 0")
+    # Handle string equality: a == "str" or a == b where both are text
+    # But NOT a == nil (which is a NULL check, handled above)
+    if result.contains(" == "):
+        val eq_pos = result.index_of(" == ") ?? -1
+        if eq_pos >= 0:
+            val eq_left = result.substring(0, eq_pos).trim()
+            val eq_right = result.substring(eq_pos + 4).trim()
+            # Skip nil/NULL/0 comparisons (also handles "NULL || ..." after or-replacement)
+            val skip_nil = eq_right == "NULL" or eq_right.starts_with("NULL ") or eq_right == "0" or eq_left == "NULL" or eq_left == "0"
+            if not skip_nil:
+                val left_is_text = is_text_var(eq_left, types)
+                val right_is_text = is_text_var(eq_right, types)
+                val left_is_str = eq_left.starts_with("\"")
+                val right_is_str = eq_right.starts_with("\"")
+                val left_is_arr_item = eq_left.contains(".items[")
+                val str_cmp = left_is_text or right_is_text or left_is_str or right_is_str or left_is_arr_item
+                if str_cmp:
+                    val c_left = translate_expr(eq_left, types)
+                    val c_right = translate_expr(eq_right, types)
+                    return "strcmp({c_left}, {c_right}) == 0"
+
+    # Handle string inequality: a != "str"
+    if result.contains(" != "):
+        val neq_pos = result.index_of(" != ") ?? -1
+        if neq_pos >= 0:
+            val neq_left = result.substring(0, neq_pos).trim()
+            val neq_right = result.substring(neq_pos + 4).trim()
+            # Skip NULL/nil/0 comparisons
+            val skip_null = neq_right == "NULL" or neq_right == "0" or neq_left == "NULL" or neq_left == "0"
+            if not skip_null:
+                val neq_l_text = is_text_var(neq_left, types)
+                val neq_r_text = is_text_var(neq_right, types)
+                val neq_l_str = neq_left.starts_with("\"")
+                val neq_r_str = neq_right.starts_with("\"")
+                val neq_l_item = neq_left.contains(".items[")
+                val str_neq = neq_l_text or neq_r_text or neq_l_str or neq_r_str or neq_l_item
+                if str_neq:
+                    val c_left = translate_expr(neq_left, types)
+                    val c_right = translate_expr(neq_right, types)
+                    return "strcmp({c_left}, {c_right}) != 0"
+
+    # Handle comparison operators by translating each side individually
+    # This ensures .len() and other method calls are properly translated
+    val cmp_ops: [text] = [" == ", " >= ", " <= ", " > ", " < "]
+    for op in cmp_ops:
+        val cmp_result = try_translate_binary_cmp(result, op, types)
+        if cmp_result != "":
+            return cmp_result
+
+    # Translate method calls in conditions
+    result = translate_expr(result, types)
+    result
+
+# Translate a method call expression to C
+# Returns the original expression if no method call is detected
+fn translate_method_expr(expr: text, types: text) -> text:
+    # Extract method name once with a single scan instead of 15+ serial index_of() calls.
+    # Find the last '.' before the first '(' to get: obj.method(args)
+    val paren_pos = expr.index_of("(") ?? -1
+    if paren_pos > 0:
+        # Find the last '.' before '(' by scanning backward
+        var method_dot = -1
+        var scan_i = paren_pos - 1
+        for scan_i in 0..paren_pos:
+            val ch = expr.substring(paren_pos - 1 - scan_i, paren_pos - scan_i)
+            if ch == ".":
+                method_dot = paren_pos - 1 - scan_i
+                # Found the last dot before paren - stop
+                scan_i = paren_pos
+        if method_dot >= 0:
+            val method_name = expr.substring(method_dot + 1, paren_pos)
+            val obj = expr.substring(0, method_dot)
+
+            # Dispatch on extracted method name (O(1) string comparisons on short names)
+            if method_name == "contains":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val arg = expr.substring(paren_pos + 1, arg_end)
+                    if is_dict_var(obj, types):
+                        return "simple_dict_contains({obj}, {translate_expr(arg, types)})"
+                    if is_string_array_var(obj, types):
+                        return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
+                    if is_struct_field_str_array(obj, types):
+                        return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
+                    return "simple_contains({obj}, {translate_expr(arg, types)})"
+
+            elif method_name == "starts_with":
+                val r = translate_simple_method(expr, paren_pos, obj, "simple_starts_with", true, false, types)
+                if r != "": return r
+
+            elif method_name == "ends_with":
+                val r = translate_simple_method(expr, paren_pos, obj, "simple_ends_with", true, false, types)
+                if r != "": return r
+
+            elif method_name == "substring":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val sub_arg = expr.substring(paren_pos + 1, arg_end)
+                    # Check if single-arg form (no comma) -> add strlen as end
+                    if sub_arg.contains(","):
+                        return "simple_substring({obj}, {sub_arg})"
+                    return "simple_substring({obj}, {sub_arg}, simple_strlen({obj}))"
+
+            elif method_name == "trim":
+                return "simple_trim({obj})"
+
+            elif method_name == "split":
+                val r = translate_simple_method(expr, paren_pos, obj, "simple_split", false, false, types)
+                if r != "": return r
+
+            elif method_name == "replace":
+                val r = translate_simple_method(expr, paren_pos, obj, "simple_replace", false, false, types)
+                if r != "": return r
+
+            elif method_name == "index_of":
+                val r = translate_simple_method(expr, paren_pos, obj, "simple_index_of", false, false, types)
+                if r != "": return r
+
+            elif method_name == "last_index_of":
+                val r = translate_simple_method(expr, paren_pos, obj, "simple_last_index_of", false, false, types)
+                if r != "": return r
+
+            elif method_name == "join":
+                val r = translate_simple_method(expr, paren_pos, obj, "simple_string_join", false, true, types)
+                if r != "": return r
+
+            elif method_name == "len":
+                val base = obj
+                val len_resolved = resolve_len(base, types)
+                if len_resolved != "":
+                    return len_resolved
+                # Check if base contains bracket indexing (e.g., arr[idx].len())
+                val base_bracket = base.index_of("[") ?? -1
+                if base_bracket >= 0:
+                    val c_base = translate_expr(base, types)
+                    return "{c_base}.len"
+                return "{base}.len"
+
+            elif method_name == "to_int":
+                return "atoll({obj})"
+
+            elif method_name == "pop":
+                val base = obj
+                if is_int_array_var(base, types):
+                    return "simple_int_pop(&{base})"
+                return "simple_string_pop(&{base})"
+
+            elif method_name == "keys":
+                if is_dict_var(obj, types):
+                    return "simple_dict_keys({obj})"
+
+            elif method_name == "remove":
+                if is_dict_var(obj, types):
+                    val arg_end = find_close_paren(expr, paren_pos)
+                    if arg_end >= 0:
+                        val arg = expr.substring(paren_pos + 1, arg_end)
+                        return "simple_dict_remove({obj}, {arg})"
+
+            else:
+                pass
+
+    # Struct method call: obj.method(args) where obj is a known struct variable
+    val dot_pos = expr.index_of(".") ?? -1
+    if dot_pos >= 0:
+        val obj = expr.substring(0, dot_pos).trim()
+        val after_dot = expr.substring(dot_pos + 1)
+        val m_paren = after_dot.index_of("(") ?? -1
+        if m_paren >= 0:
+            val method_name = after_dot.substring(0, m_paren).trim()
+            val class_name = is_struct_type_var(obj, types)
+            if class_name != "":
+                if is_known_method(class_name, method_name, types):
+                    val m_close = find_close_paren(after_dot, m_paren)
+                    var m_args = ""
+                    if m_close > m_paren + 1:
+                        m_args = after_dot.substring(m_paren + 1, m_close)
+                    if is_me_method(class_name, method_name, types):
+                        if m_args != "":
+                            return "{class_name}__{method_name}(&{obj}, {m_args})"
+                        return "{class_name}__{method_name}(&{obj})"
+                    else:
+                        if m_args != "":
+                            return "{class_name}__{method_name}(&{obj}, {m_args})"
+                        return "{class_name}__{method_name}(&{obj})"
+            # Check if obj is a class name (static method call)
+            if is_known_struct(obj, types):
+                if is_static_fn(obj, method_name, types):
+                    val m_close = find_close_paren(after_dot, m_paren)
+                    var m_args = ""
+                    if m_close > m_paren + 1:
+                        m_args = after_dot.substring(m_paren + 1, m_close)
+                    if m_args != "":
+                        return "{obj}__{method_name}({m_args})"
+                    return "{obj}__{method_name}()"
+        else:
+            # Field access: obj.field (no parens)
+            val class_name = is_struct_type_var(obj, types)
+            if class_name != "":
+                val field_name = after_dot.trim()
+                return "{obj}.{field_name}"
+
+    # No method call detected
+    expr
+
+# Translate a Simple expression to C
+fn translate_expr(expr: text, types: text) -> text:
+    # Handle nil
+    if expr == "nil":
+        return "NULL"
+    if expr == "true":
+        return "1"
+    if expr == "false":
+        return "0"
+    if expr == "()":
+        return "/* unit */"
+    # Handle 'not' prefix in expressions
+    if expr.starts_with("not "):
+        val not_inner = expr.substring(4).trim()
+        return "!({translate_expr(not_inner, types)})"
+    if expr == "None":
+        return "simple_none()"
+
+    # Handle numeric literals: octal 0o prefix -> 0, remove underscores
+    if expr.starts_with("0o"):
+        val oct_rest = expr.substring(2)
+        val oct_parts = oct_rest.split("_")
+        val oct_clean = oct_parts.join("")
+        return "0" + oct_clean
+    if expr.contains("_"):
+        val first_ch = expr.substring(0, 1)
+        val is_digit = first_ch >= "0" and first_ch <= "9"
+        if is_digit:
+            val num_parts = expr.split("_")
+            return num_parts.join("")
+
+    # Handle enum variant access: EnumName.Variant -> EnumName_Variant
+    val ev_dot = expr.index_of(".") ?? -1
+    if ev_dot >= 0:
+        val ev_name = expr.substring(0, ev_dot).trim()
+        val ev_after = expr.substring(ev_dot + 1).trim()
+        # No further dots or parens = simple variant access
+        val ev_has_paren = ev_after.contains("(")
+        val ev_has_dot = ev_after.contains(".")
+        if not ev_has_paren and not ev_has_dot:
+            if is_enum_variant(expr, types):
+                return "{ev_name}_{ev_after}"
+
+    # Handle inline ternary: if cond: expr1 else: expr2 -> cond ? expr1 : expr2
+    if expr.starts_with("if ") and expr.contains(" else: "):
+        val else_pos = expr.index_of(" else: ") ?? -1
+        if else_pos >= 0:
+            val if_part = expr.substring(3, else_pos).trim()
+            val else_expr = expr.substring(else_pos + 7).trim()
+            val colon_pos = if_part.index_of(":") ?? -1
+            if colon_pos >= 0:
+                val cond = if_part.substring(0, colon_pos).trim()
+                val then_expr = if_part.substring(colon_pos + 1).trim()
+                val c_cond = translate_condition(cond, types)
+                val c_then = translate_expr(then_expr, types)
+                val c_else = translate_expr(else_expr, types)
+                return "({c_cond} ? {c_then} : {c_else})"
+
+    # Handle Some(v)
+    if expr.starts_with("Some(") and expr.ends_with(")"):
+        val inner = expr.substring(5, expr.len() - 1).trim()
+        val c_inner = translate_expr(inner, types)
+        # Detect type for Some
+        val is_str = inner.starts_with("\"")
+        val is_text = is_text_var(inner, types)
+        if is_str or is_text:
+            return "simple_some_str({c_inner})"
+        return "simple_some_int({c_inner})"
+
+    # Handle int(x) builtin -> atoll(x)
+    if expr.starts_with("int(") and expr.ends_with(")"):
+        val int_inner = expr.substring(4, expr.len() - 1).trim()
+        val c_int_inner = translate_expr(int_inner, types)
+        return "atoll({c_int_inner})"
+
+    # Handle ?? (null coalescing)
+    val nq_pos = expr.index_of(" ?? ") ?? -1
+    if nq_pos >= 0:
+        val left = expr.substring(0, nq_pos).trim()
+        val right = expr.substring(nq_pos + 4).trim()
+        val c_left = translate_expr(left, types)
+        val c_right = translate_expr(right, types)
+        # For index_of ?? -1, index_of already returns -1 on not found
+        if c_right == "-1":
+            val has_iof = c_left.contains("simple_index_of")
+            if has_iof:
+                return c_left
+        # String coalescing: use NULL check
+        val left_is_text = is_text_var(left, types)
+        val right_is_str = right.starts_with("\"")
+        val right_is_text = is_text_var(right, types)
+        if left_is_text or right_is_str or right_is_text:
+            return "({c_left} != NULL ? {c_left} : {c_right})"
+        # General integer coalescing
+        return "({c_left} >= 0 ? {c_left} : {c_right})"
+
+    # Handle pipe operator: expr |> func
+    val pipe_pos = expr.index_of(" |> ") ?? -1
+    if pipe_pos >= 0:
+        val left = expr.substring(0, pipe_pos).trim()
+        val right = expr.substring(pipe_pos + 4).trim()
+        val c_left = translate_expr(left, types)
+        return "{right}({c_left})"
+
+    # Handle "key in dict" -> simple_dict_contains(dict, key)
+    val in_pos = expr.index_of(" in ") ?? -1
+    if in_pos >= 0:
+        val left = expr.substring(0, in_pos).trim()
+        val right = expr.substring(in_pos + 4).trim()
+        if is_dict_var(right, types):
+            return "simple_dict_contains({right}, {translate_expr(left, types)})"
+
+    # Handle complete string literals (starts and ends with quote, no unquoted +)
+    if expr.starts_with("\"") and expr.ends_with("\""):
+        val has_concat = expr.contains("\" + ") or expr.contains(" + \"")
+        if not has_concat:
+            return expr
+
+    # Handle empty dict literal
+    if expr == "{}":
+        return "simple_dict_new()"
+
+    # Handle string concatenation with +
+    val plus_pos = expr.index_of(" + ") ?? -1
+    if plus_pos >= 0:
+        val left = expr.substring(0, plus_pos).trim()
+        val right = expr.substring(plus_pos + 3).trim()
+        val left_is_str = left.starts_with("\"")
+        val right_is_str = right.starts_with("\"")
+        val left_is_text = is_text_var(left, types)
+        val right_is_text = is_text_var(right, types)
+        val left_is_method = left.contains("simple_")
+        val right_is_method = right.contains("simple_")
+        val either_str = left_is_str or right_is_str
+        val either_text = left_is_text or right_is_text
+        val either_method = left_is_method or right_is_method
+        val is_string_concat = either_str or either_text or either_method
+        if is_string_concat:
+            return "simple_str_concat({translate_expr(left, types)}, {translate_expr(right, types)})"
+        # Array concat: arr + [elem]
+        if right.starts_with("[") and right.ends_with("]"):
+            val arr_elem = right.substring(1, right.len() - 1).trim()
+            val c_left = translate_expr(left, types)
+            val c_arr_elem = translate_expr(arr_elem, types)
+            # Check struct array variable
+            val sa_elem_type = is_struct_array_var(left, types)
+            if sa_elem_type != "":
+                return "(\{ " + sa_elem_type + "* _cp = malloc(sizeof(" + sa_elem_type + ")); *_cp = " + c_arr_elem + "; simple_struct_array_copy_push(" + c_left + ", (void*)_cp); })"
+            # Check struct field that is a struct array
+            val sf_elem_type = is_struct_field_struct_array(left, types)
+            if sf_elem_type != "":
+                return "(\{ " + sf_elem_type + "* _cp = malloc(sizeof(" + sf_elem_type + ")); *_cp = " + c_arr_elem + "; simple_struct_array_copy_push(" + c_left + ", (void*)_cp); })"
+            # Check int array
+            if is_int_array_var(left, types):
+                return "simple_int_array_copy_push({c_left}, {c_arr_elem})"
+            # Check string array
+            if is_string_array_var(left, types):
+                return "simple_string_array_copy_push({c_left}, {c_arr_elem})"
+
+    # Pre-process: replace .len() within complex expressions
+    # This handles cases like arr.len() - 1 inside brackets
+    if expr.contains(".len()"):
+        var processed = expr
+        # Find and replace each .len() occurrence
+        var len_pos = processed.index_of(".len()") ?? -1
+        if len_pos >= 0:
+            val len_full_base = processed.substring(0, len_pos)
+            val len_rest = processed.substring(len_pos + 6)
+            # Extract just the variable/field part (after last comma, space, or paren)
+            var len_base = len_full_base
+            var len_prefix = ""
+            var lscan = len_full_base.len() - 1
+            var lfound = false
+            while lscan >= 0 and not lfound:
+                val lch = len_full_base[lscan]
+                val is_sep = lch == "," or lch == " " or lch == "("
+                if is_sep:
+                    len_prefix = len_full_base.substring(0, lscan + 1)
+                    len_base = len_full_base.substring(lscan + 1).trim()
+                    lfound = true
+                lscan = lscan - 1
+            # Directly resolve .len() based on type
+            var len_replacement = resolve_len(len_base, types)
+            if len_replacement == "":
+                # Fallback: try translate_method_expr
+                val len_result = translate_method_expr(len_base + ".len()", types)
+                val len_orig = len_base + ".len()"
+                if len_result != len_orig and not len_result.ends_with(".len"):
+                    len_replacement = len_result
+            if len_replacement != "":
+                processed = len_prefix + len_replacement + len_rest
+                return translate_expr(processed, types)
+
+    # Handle method calls
+    val method_result = translate_method_expr(expr, types)
+    if method_result != expr:
+        return method_result
+
+    # Handle dict indexing: d[key] where d is a known dict
+    val bracket_pos = expr.index_of("[") ?? -1
+    if bracket_pos >= 0:
+        val base = expr.substring(0, bracket_pos)
+        if is_dict_var(base, types):
+            val idx_end = expr.index_of("]") ?? -1
+            if idx_end >= 0:
+                val idx_expr = expr.substring(bracket_pos + 1, idx_end)
+                return "simple_dict_get({base}, {translate_expr(idx_expr, types)})"
+
+    # Handle string indexing and slicing: s[idx] or s[start:end]
+    if bracket_pos >= 0:
+        val base = expr.substring(0, bracket_pos)
+        val base_is_text_var = is_text_var(base, types)
+        val base_is_field_text = is_struct_field_text(base, types)
+        if base_is_text_var or base_is_field_text:
+            val idx_end = expr.index_of("]") ?? -1
+            if idx_end >= 0:
+                val idx_expr = expr.substring(bracket_pos + 1, idx_end)
+                # Check for slice syntax: s[start:end]
+                val colon_pos = idx_expr.index_of(":") ?? -1
+                if colon_pos >= 0:
+                    val start_expr = idx_expr.substring(0, colon_pos).trim()
+                    val end_expr = idx_expr.substring(colon_pos + 1).trim()
+                    # Handle open-ended slice: s[start:] -> s[start:len]
+                    if end_expr == "":
+                        return "simple_substring({base}, {translate_expr(start_expr, types)}, simple_strlen({base}))"
+                    return "simple_substring({base}, {translate_expr(start_expr, types)}, {translate_expr(end_expr, types)})"
+                return "simple_char_at({base}, {translate_expr(idx_expr, types)})"
+
+    # Handle items-indexed array indexing: arr[i] -> arr.items[i]
+    if bracket_pos >= 0:
+        val base = expr.substring(0, bracket_pos)
+        if is_items_indexed_array(base, types):
+            val idx_end = expr.index_of("]") ?? -1
+            if idx_end >= 0:
+                val idx_expr = expr.substring(bracket_pos + 1, idx_end)
+                return "{base}.items[{translate_expr(idx_expr, types)}]"
+
+    # Handle struct array indexing: arr[i] -> *(ElementType*)arr.items[i]
+    if bracket_pos >= 0:
+        val base = expr.substring(0, bracket_pos)
+        val sa_elem = is_struct_array_var(base, types)
+        if sa_elem != "":
+            val idx_end = expr.index_of("]") ?? -1
+            if idx_end >= 0:
+                val idx_expr = expr.substring(bracket_pos + 1, idx_end)
+                val c_idx = translate_expr(idx_expr, types)
+                val after_bracket = expr.substring(idx_end + 1)
+                if after_bracket.starts_with("."):
+                    # Chained field access: arr[i].field -> (*(Type*)arr.items[i]).field
+                    return "(*({sa_elem}*){base}.items[{c_idx}]){after_bracket}"
+                return "*({sa_elem}*){base}.items[{c_idx}]"
+
+    # Handle optional chaining: expr.? -> simple_option_has(expr)
+    if expr.ends_with(".?"):
+        val base = expr.substring(0, expr.len() - 2).trim()
+        return "simple_option_has({translate_expr(base, types)})"
+
+    # Handle optional chaining: obj?.field -> temp var pattern
+    val opt_chain_pos = expr.index_of("?.") ?? -1
+    if opt_chain_pos >= 0:
+        # Skip if ?. is inside a string literal
+        val before_opt = expr.substring(0, opt_chain_pos)
+        val quote_count_opt = before_opt.split("\"").len() - 1
+        val opt_in_str = quote_count_opt % 2 == 1
+        if not opt_in_str:
+            val left = expr.substring(0, opt_chain_pos).trim()
+            val right = expr.substring(opt_chain_pos + 2).trim()
+            val c_left = translate_expr(left, types)
+            return "({c_left} != NULL ? {c_left}->{right} : NULL)"
+
+    # Handle struct construction: ClassName(field: val, field2: val2)
+    val ctor_paren = expr.index_of("(") ?? -1
+    if ctor_paren >= 0 and expr.ends_with(")"):
+        val ctor_name = expr.substring(0, ctor_paren).trim()
+        if is_known_struct(ctor_name, types):
+            val ctor_args = expr.substring(ctor_paren + 1, expr.len() - 1).trim()
+            if ctor_args.contains(":"):
+                # Named construction: Point(x: 3, y: 4) -> (Point){.x = 3, .y = 4}
+                val cparts = ctor_args.split(",")
+                var designated: [text] = []
+                for cp in cparts:
+                    val cpt = cp.trim()
+                    val ccolon = cpt.index_of(":") ?? -1
+                    if ccolon >= 0:
+                        val fname = cpt.substring(0, ccolon).trim()
+                        val fval = cpt.substring(ccolon + 1).trim()
+                        # Handle [] in struct field init - use correct type based on field
+                        var c_fval = ""
+                        if fval == "[]":
+                            val field_arr_marker = ";field_arr:" + ctor_name + "." + fname + ";"
+                            val field_int_arr_marker = ";field_int_arr:" + ctor_name + "." + fname + ";"
+                            val field_struct_arr_prefix = ";field_struct_arr:" + ctor_name + "." + fname + "="
+                            if types.contains(field_arr_marker):
+                                c_fval = "simple_new_string_array()"
+                            elif types.contains(field_int_arr_marker):
+                                c_fval = "simple_new_int_array()"
+                            elif types.contains(field_struct_arr_prefix):
+                                c_fval = "simple_new_struct_array()"
+                            else:
+                                c_fval = "simple_new_int_array()"
+                        else:
+                            c_fval = translate_expr(fval, types)
+                        designated.push(".{fname} = {c_fval}")
+                val desig_str = designated.join(", ")
+                return "(" + ctor_name + ")\{" + desig_str + "}"
+            # Enum variant construction: EnumName.Variant(args) is handled in method_expr
+            # Positional construction fallback
+            val args_c = translate_expr(ctor_args, types)
+            return "{ctor_name}__{ctor_name}({args_c})"
+
+    # Handle enum variant: EnumName.Variant or EnumName.Variant(args)
+    val edot_pos = expr.index_of(".") ?? -1
+    if edot_pos >= 0:
+        val ename = expr.substring(0, edot_pos).trim()
+        val erest = expr.substring(edot_pos + 1).trim()
+        if is_known_struct(ename, types):
+            val ev_paren = erest.index_of("(") ?? -1
+            if ev_paren >= 0:
+                val ev_name = erest.substring(0, ev_paren).trim()
+                val ev_close = erest.index_of(")") ?? -1
+                if ev_close > ev_paren + 1:
+                    val ev_args = erest.substring(ev_paren + 1, ev_close).trim()
+                    return "{ename}__{ev_name}({translate_expr(ev_args, types)})"
+                return "{ename}__{ev_name}()"
+            else:
+                # Simple enum variant or field access
+                return "{ename}__{erest}"
+
+    # Handle general function calls: translate each argument individually
+    # This ensures string concat and other patterns inside arguments get translated
+    if ctor_paren >= 0 and expr.ends_with(")"):
+        val fc_name = expr.substring(0, ctor_paren).trim()
+        val fc_has_dot = fc_name.contains(".")
+        val fc_is_struct = is_known_struct(fc_name, types)
+        if not fc_has_dot and not fc_is_struct and fc_name.len() > 0:
+            val fc_close = find_close_paren(expr, ctor_paren)
+            if fc_close >= 0:
+                val fc_args_str = expr.substring(ctor_paren + 1, fc_close)
+                # Split args by top-level commas (using find_close_paren for nesting)
+                var fc_args: [text] = []
+                var fc_start = 0
+                var fc_i = 0
+                var fc_pdepth = 0
+                var fc_in_quotes = false
+                val fc_parts = fc_args_str.split("\"")
+                # Rebuild: replace top-level commas with separator
+                var fc_rebuilt = ""
+                for fc_si in range(0, fc_parts.len()):
+                    if fc_si % 2 == 0:
+                        val fc_seg = fc_parts[fc_si]
+                        # Outside strings: replace commas at depth 0
+                        # Count parens to track depth
+                        val sub_segs = fc_seg.split(",")
+                        for ss_i in range(0, sub_segs.len()):
+                            val ss = sub_segs[ss_i]
+                            val ss_open = ss.split("(").len() - 1
+                            val ss_close_p = ss.split(")").len() - 1
+                            fc_pdepth = fc_pdepth + ss_open - ss_close_p
+                            if ss_i > 0:
+                                if fc_pdepth == 0:
+                                    fc_rebuilt = fc_rebuilt + "|||ASEP|||"
+                                else:
+                                    fc_rebuilt = fc_rebuilt + ","
+                            fc_rebuilt = fc_rebuilt + ss
+                    else:
+                        fc_rebuilt = fc_rebuilt + "\"" + fc_parts[fc_si] + "\""
+                fc_args = fc_rebuilt.split("|||ASEP|||")
+                var fc_translated: [text] = []
+                for fc_a in fc_args:
+                    fc_translated.push(translate_expr(fc_a.trim(), types))
+                val fc_result = fc_translated.join(", ")
+                return "{fc_name}({fc_result})"
+
+    # Handle tuple construction: (a, b)
+    if expr.starts_with("(") and expr.ends_with(")"):
+        val inner = expr.substring(1, expr.len() - 1).trim()
+        if inner.contains(","):
+            val tparts = inner.split(",")
+            if tparts.len() == 2:
+                val t0 = translate_expr(tparts[0].trim(), types)
+                val t1 = translate_expr(tparts[1].trim(), types)
+                return "(SimpleTuple2)\{._0 = (void*)(long long)(" + t0 + "), ._1 = (void*)(long long)(" + t1 + ")}"
+            if tparts.len() == 3:
+                val t0 = translate_expr(tparts[0].trim(), types)
+                val t1 = translate_expr(tparts[1].trim(), types)
+                val t2 = translate_expr(tparts[2].trim(), types)
+                return "(SimpleTuple3)\{._0 = (void*)(long long)(" + t0 + "), ._1 = (void*)(long long)(" + t1 + "), ._2 = (void*)(long long)(" + t2 + ")}"
+
+    expr
+
+export is_c_expr_string_result, extract_fn_names
+export translate_simple_method, is_items_indexed_array, resolve_len
+export gen_array_for_loop, try_translate_compound_assign, try_translate_binary_cmp
+export translate_condition, translate_method_expr, translate_expr

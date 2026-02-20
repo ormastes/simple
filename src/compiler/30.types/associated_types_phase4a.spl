@@ -1,0 +1,400 @@
+"""
+Associated Types - Phase 4A: Associated Type Definitions
+
+Extends the trait system with associated types.
+
+Status: Phase 4A In Progress
+"""
+
+# tier: full
+
+type Symbol = text
+
+# ============================================================================
+# Type System (Simplified)
+# ============================================================================
+
+enum HirType:
+    Int
+    Str
+    Bool
+    Named(name: Symbol)
+    Generic(name: Symbol, args: [HirType])
+    Projection(base: HirType, assoc_name: Symbol)  # NEW: T.Item
+    Error  # NEW: For unresolved projections
+
+impl HirType:
+    fn to_string() -> text:
+        match self:
+            case Int: "i32"
+            case Str: "String"
+            case Bool: "bool"
+            case Named(name): name
+            case Generic(name, _): "{name}<...>"
+            case Projection(base, assoc_name):
+                "{base.to_string()}.{assoc_name}"
+            case Error: "<error>"
+
+    fn type_name() -> Symbol:
+        match self:
+            case Int: "i32"
+            case Str: "String"
+            case Bool: "bool"
+            case Named(name): name
+            case Generic(name, _): name
+            case Projection(base, _): base.type_name()
+            case Error: "<error>"
+
+# ============================================================================
+# Trait Reference (from Phase 2)
+# ============================================================================
+
+class TraitRef:
+    name: text
+
+impl TraitRef:
+    static fn new(name: Symbol) -> TraitRef:
+        TraitRef(name: name)
+
+    fn to_string() -> text:
+        self.name
+
+# ============================================================================
+# Associated Type Definition
+# ============================================================================
+
+class AssocTypeDef:
+    """
+    Associated type definition in a trait
+
+    Example:
+        trait Iterator:
+            type Item           # No bounds, no default
+            type Error: Display # With bound
+            type Index = i64    # With default
+    """
+    name: text
+    bounds: text       # Placeholder for [TraitRef]
+    default_type: text # Placeholder for Option<HirType>
+
+impl AssocTypeDef:
+    static fn new(name: Symbol) -> AssocTypeDef:
+        AssocTypeDef(
+            name: name,
+            bounds: "[]",
+            default_type: "None"
+        )
+
+    static fn with_bounds(name: Symbol, bounds: [TraitRef]) -> AssocTypeDef:
+        val assoc_type = AssocTypeDef.new(name)
+        val bounds_dict = {}
+        for bound in bounds:
+            bounds_dict[bound.name] = bound
+        val new_assoc = AssocTypeDef(
+            name: name,
+            bounds: bounds_dict,
+            default_type: "None"
+        )
+        new_assoc
+
+    static fn with_default(name: Symbol, default_type: HirType) -> AssocTypeDef:
+        val assoc_type = AssocTypeDef.new(name)
+        val new_assoc = AssocTypeDef(
+            name: name,
+            bounds: "[]",
+            default_type: default_type
+        )
+        new_assoc
+
+    fn has_bounds() -> bool:
+        self.bounds != "[]"
+
+    fn has_default() -> bool:
+        self.default_type != "None"
+
+    fn to_string() -> text:
+        var result = "type {self.name}"
+
+        if self.has_bounds():
+            result = "{result}: <bounds>"
+
+        if self.has_default():
+            result = "{result} = <default>"
+
+        result
+
+# ============================================================================
+# Extended Trait Definition
+# ============================================================================
+
+class TraitDefEx:
+    """
+    Extended trait definition with associated types
+
+    Example:
+        trait Iterator:
+            type Item           # Associated type
+            fn next() -> Item?  # Method using associated type
+    """
+    name: text
+    methods: text      # Placeholder for [MethodSig]
+    supertraits: text  # Placeholder for [Symbol]
+    assoc_types: text  # Dict<Symbol, AssocTypeDef>
+
+impl TraitDefEx:
+    static fn new(name: Symbol) -> TraitDefEx:
+        TraitDefEx(
+            name: name,
+            methods: "[]",
+            supertraits: "[]",
+            assoc_types: {}
+        )
+
+    me add_assoc_type(assoc_type: AssocTypeDef):
+        """Add an associated type to this trait"""
+        self.assoc_types[assoc_type.name] = assoc_type
+
+    fn has_assoc_type(name: Symbol) -> bool:
+        """Check if trait has this associated type"""
+        name in self.assoc_types
+
+    fn get_assoc_type(name: Symbol) -> AssocTypeDef:
+        """Get associated type by name (returns dummy if not found)"""
+        if name in self.assoc_types:
+            return self.assoc_types[name]
+
+        # Return dummy
+        AssocTypeDef.new("NotFound")
+
+    fn assoc_type_count() -> i64:
+        """Count associated types"""
+        self.assoc_types.len()
+
+    fn to_string() -> text:
+        var result = "trait {self.name}"
+
+        if self.assoc_type_count() > 0:
+            result = "{result} (with {self.assoc_type_count()} assoc types)"
+
+        result
+
+# ============================================================================
+# Extended Trait Registry
+# ============================================================================
+
+class TraitRegistryEx:
+    """
+    Extended trait registry supporting associated types
+    """
+    traits: text  # Dict<Symbol, TraitDefEx>
+
+impl TraitRegistryEx:
+    static fn new() -> TraitRegistryEx:
+        val registry_data = {
+            "traits": {}
+        }
+        TraitRegistryEx(traits: registry_data)
+
+    me register_trait(trait_def: TraitDefEx) -> bool:
+        """Register a trait definition"""
+        val traits = self.traits["traits"]
+
+        if trait_def.name in traits:
+            return false  # Already registered
+
+        traits[trait_def.name] = trait_def
+        true
+
+    fn get_trait(name: Symbol) -> TraitDefEx:
+        """Get trait by name"""
+        val traits = self.traits["traits"]
+
+        if name in traits:
+            return traits[name]
+
+        # Return dummy
+        TraitDefEx.new("NotFound")
+
+    fn has_trait(name: Symbol) -> bool:
+        """Check if trait exists"""
+        val traits = self.traits["traits"]
+        name in traits
+
+    fn count_traits() -> i64:
+        """Count registered traits"""
+        val traits = self.traits["traits"]
+        traits.len()
+
+    me define_builtin_traits():
+        """Define standard library traits with associated types"""
+
+        # Iterator trait (with Item associated type)
+        val iterator = TraitDefEx.new("Iterator")
+        val item_type = AssocTypeDef.new("Item")
+        iterator.add_assoc_type(item_type)
+        self.register_trait(iterator)
+
+        # Collection trait (with Item and Index)
+        val collection = TraitDefEx.new("Collection")
+        val coll_item = AssocTypeDef.new("Item")
+        val index_type = AssocTypeDef.with_default("Index", HirType.Int)
+        collection.add_assoc_type(coll_item)
+        collection.add_assoc_type(index_type)
+        self.register_trait(collection)
+
+        # Result trait (with Ok and Err types)
+        val result_trait = TraitDefEx.new("Result")
+        val ok_type = AssocTypeDef.new("Ok")
+        val err_type = AssocTypeDef.new("Err")
+        result_trait.add_assoc_type(ok_type)
+        result_trait.add_assoc_type(err_type)
+        self.register_trait(result_trait)
+
+        # Display trait (no associated types - for comparison)
+        val display = TraitDefEx.new("Display")
+        self.register_trait(display)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+fn test_assoc_type_basic():
+    """Test basic associated type definition"""
+    val item_type = AssocTypeDef.new("Item")
+
+    assert item_type.name == "Item", "Name is Item"
+    assert not item_type.has_bounds(), "No bounds"
+    assert not item_type.has_default(), "No default"
+    assert item_type.to_string() == "type Item", "String representation"
+
+    print "✅ Basic associated type"
+
+fn test_multiple_assoc_types():
+    """Test trait with multiple associated types"""
+    val trait_def = TraitDefEx.new("Collection")
+
+    val item_type = AssocTypeDef.new("Item")
+    val index_type = AssocTypeDef.new("Index")
+
+    trait_def.add_assoc_type(item_type)
+    trait_def.add_assoc_type(index_type)
+
+    assert trait_def.assoc_type_count() == 2, "Two associated types"
+    assert trait_def.has_assoc_type("Item"), "Has Item"
+    assert trait_def.has_assoc_type("Index"), "Has Index"
+    assert not trait_def.has_assoc_type("Unknown"), "No Unknown"
+
+    print "✅ Multiple associated types"
+
+fn test_assoc_type_with_bounds():
+    """Test associated type with trait bounds"""
+    val display_ref = TraitRef.new("Display")
+    val node_type = AssocTypeDef.with_bounds("Node", [display_ref])
+
+    assert node_type.name == "Node", "Name is Node"
+    assert node_type.has_bounds(), "Has bounds"
+    assert not node_type.has_default(), "No default"
+
+    print "✅ Associated type with bounds"
+
+fn test_default_assoc_type():
+    """Test associated type with default"""
+    val index_type = AssocTypeDef.with_default("Index", HirType.Int)
+
+    assert index_type.name == "Index", "Name is Index"
+    assert not index_type.has_bounds(), "No bounds"
+    assert index_type.has_default(), "Has default"
+
+    print "✅ Default associated type"
+
+fn test_builtin_iterator_trait():
+    """Test built-in Iterator trait"""
+    val registry = TraitRegistryEx.new()
+    registry.define_builtin_traits()
+
+    assert registry.has_trait("Iterator"), "Has Iterator trait"
+
+    val iterator = registry.get_trait("Iterator")
+    assert iterator.assoc_type_count() == 1, "Iterator has 1 assoc type"
+    assert iterator.has_assoc_type("Item"), "Iterator has Item"
+
+    val item = iterator.get_assoc_type("Item")
+    assert item.name == "Item", "Item assoc type"
+
+    print "✅ Built-in Iterator trait"
+
+fn test_trait_registry_ex():
+    """Test extended trait registry"""
+    val registry = TraitRegistryEx.new()
+
+    assert registry.count_traits() == 0, "Empty initially"
+
+    # Register Iterator trait
+    val iterator = TraitDefEx.new("Iterator")
+    val item = AssocTypeDef.new("Item")
+    iterator.add_assoc_type(item)
+
+    val registered = registry.register_trait(iterator)
+    assert registered, "Registered"
+    assert registry.count_traits() == 1, "One trait"
+
+    # Lookup
+    val found = registry.get_trait("Iterator")
+    assert found.name == "Iterator", "Found Iterator"
+    assert found.has_assoc_type("Item"), "Has Item"
+
+    print "✅ Extended trait registry"
+
+fn test_projection_type():
+    """Test projection type representation"""
+    val base = HirType.Named(name: "T")
+    val projection = HirType.Projection(base: base, assoc_name: "Item")
+
+    assert projection.to_string() == "T.Item", "Projection string"
+    assert projection.type_name() == "T", "Base type name"
+
+    print "✅ Projection type"
+
+fn test_builtin_collection():
+    """Test Collection trait with default Index"""
+    val registry = TraitRegistryEx.new()
+    registry.define_builtin_traits()
+
+    val collection = registry.get_trait("Collection")
+    assert collection.assoc_type_count() == 2, "Two assoc types"
+    assert collection.has_assoc_type("Item"), "Has Item"
+    assert collection.has_assoc_type("Index"), "Has Index"
+
+    val index = collection.get_assoc_type("Index")
+    assert index.has_default(), "Index has default"
+
+    print "✅ Collection with default Index"
+
+fn main():
+    print ""
+    print "Associated Types Phase 4A Tests"
+    print "================================"
+
+    test_assoc_type_basic()
+    test_multiple_assoc_types()
+    test_assoc_type_with_bounds()
+    test_default_assoc_type()
+    test_builtin_iterator_trait()
+    test_trait_registry_ex()
+    test_projection_type()
+    test_builtin_collection()
+
+    print ""
+    print "🎉 Phase 4A Complete!"
+    print ""
+    print "Implemented:"
+    print "  ✅ AssocTypeDef - associated type definitions"
+    print "  ✅ TraitDefEx - extended trait with associated types"
+    print "  ✅ TraitRegistryEx - registry with assoc type support"
+    print "  ✅ Built-in Iterator trait with Item"
+    print "  ✅ Built-in Collection trait with Item and Index"
+    print "  ✅ HirType.Projection for T.Item syntax"
+    print "  ✅ Associated type bounds and defaults"
+    print ""
+    print "Progress: 2/8 hours (25% of Phase 4)"
+    print "Next: Phase 4B - Associated Type Implementations (2h)"

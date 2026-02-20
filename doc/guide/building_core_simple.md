@@ -66,6 +66,10 @@ seed/
     └── baremetal/
         └── ...
 
+src/compiler_cpp/          # Generated C++20 output (CMake + Ninja build)
+├── CMakeLists.txt         # CMake build config for generated C++
+└── *.cpp                  # Generated C++20 source files
+
 src/app/compile/       # C codegen (all in Simple)
 ├── c_codegen.spl      # Main generator: type registry, pre-pass, struct/enum/fn handling
 ├── c_translate.spl    # Expression/statement/control flow translation

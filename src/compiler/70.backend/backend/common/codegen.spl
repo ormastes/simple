@@ -1,0 +1,145 @@
+# Codegen Trait - Universal Backend Interface
+#
+# All compiler backends implement this trait, providing a uniform
+# interface for the Backend dispatcher. Domain-specific access
+# (GPU, verification, hardware, native) is provided by separate
+# domain traits that backends implement independently.
+#
+# Usage:
+#   val codegen: Codegen = CodegenFactory.create(BackendKind.Llvm, options)
+#   val result = codegen.compile_module(module)
+
+use compiler.mir_data.{MirModule}
+use compiler.core.backend_types.{BackendKind, CodegenTarget, CompiledModule, CompiledSymbol, CompileError}
+
+# ============================================================================
+# Codegen Output Kind
+# ============================================================================
+
+enum CodegenOutputKind:
+    """Describes the kind of output a backend produces."""
+    ObjectCode          # Native: ELF/Mach-O bytes
+    TextSource          # LLVM/C/WASM/Lean/VHDL: text
+    GpuCode             # CUDA/Vulkan: GPU module
+    InterpretedResult   # Interpreter: no output
+
+# ============================================================================
+# Codegen Output
+# ============================================================================
+
+class CodegenOutput:
+    """Result of a codegen backend compiling a module."""
+    name: text
+    kind: CodegenOutputKind
+    text_output: text
+    has_text_output: bool
+    object_code: [i64]
+    has_object_code: bool
+    symbols: [CompiledSymbol]
+    compile_time_ms: i64
+
+    static fn text(name: text, source: text) -> CodegenOutput:
+        """Create text source output (LLVM IR, C++, WAT, Lean, VHDL)."""
+        CodegenOutput(
+            name: name,
+            kind: CodegenOutputKind.TextSource,
+            text_output: source,
+            has_text_output: true,
+            object_code: [],
+            has_object_code: false,
+            symbols: [],
+            compile_time_ms: 0
+        )
+
+    static fn object(name: text, bytes: [i64]) -> CodegenOutput:
+        """Create object code output (ELF/Mach-O)."""
+        CodegenOutput(
+            name: name,
+            kind: CodegenOutputKind.ObjectCode,
+            text_output: "",
+            has_text_output: false,
+            object_code: bytes,
+            has_object_code: true,
+            symbols: [],
+            compile_time_ms: 0
+        )
+
+    static fn gpu(name: text, source: text) -> CodegenOutput:
+        """Create GPU code output (PTX/SPIR-V)."""
+        CodegenOutput(
+            name: name,
+            kind: CodegenOutputKind.GpuCode,
+            text_output: source,
+            has_text_output: true,
+            object_code: [],
+            has_object_code: false,
+            symbols: [],
+            compile_time_ms: 0
+        )
+
+    static fn interpreted(name: text) -> CodegenOutput:
+        """Create empty output for interpreter backend."""
+        CodegenOutput(
+            name: name,
+            kind: CodegenOutputKind.InterpretedResult,
+            text_output: "",
+            has_text_output: false,
+            object_code: [],
+            has_object_code: false,
+            symbols: [],
+            compile_time_ms: 0
+        )
+
+    fn with_symbols(syms: [CompiledSymbol]) -> CodegenOutput:
+        """Return copy with symbols set."""
+        CodegenOutput(
+            name: self.name,
+            kind: self.kind,
+            text_output: self.text_output,
+            has_text_output: self.has_text_output,
+            object_code: self.object_code,
+            has_object_code: self.has_object_code,
+            symbols: syms,
+            compile_time_ms: self.compile_time_ms
+        )
+
+    fn with_compile_time(ms: i64) -> CodegenOutput:
+        """Return copy with compile time set."""
+        CodegenOutput(
+            name: self.name,
+            kind: self.kind,
+            text_output: self.text_output,
+            has_text_output: self.has_text_output,
+            object_code: self.object_code,
+            has_object_code: self.has_object_code,
+            symbols: self.symbols,
+            compile_time_ms: ms
+        )
+
+    fn to_compiled_module() -> CompiledModule:
+        """Convert to CompiledModule for backward compatibility."""
+        CompiledModule(
+            name: self.name,
+            object_code: if self.has_object_code: self.object_code else: nil,
+            assembly: if self.has_text_output: self.text_output else: nil,
+            symbols: self.symbols,
+            compile_time_ms: self.compile_time_ms
+        )
+
+# ============================================================================
+# Codegen Trait
+# ============================================================================
+
+trait Codegen:
+    """Universal codegen interface implemented by all backends."""
+    fn backend_kind() -> BackendKind
+    fn backend_name() -> text
+    fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>
+    fn supports_target(target: CodegenTarget) -> bool
+    fn output_kind() -> CodegenOutputKind
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Codegen, CodegenOutput, CodegenOutputKind

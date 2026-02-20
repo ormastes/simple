@@ -23,20 +23,31 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Runtime sources from compiler_seed/
 set(RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../compiler_seed")
 
-# Collect all generated C++ files
-file(GLOB GENERATED_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/generated/*.cpp")
-
 # Runtime C files
 set(RUNTIME_SOURCES
     ${RUNTIME_DIR}/runtime.c
     ${RUNTIME_DIR}/runtime_thread.c
 )
 
-# Build the bootstrap binary
-add_executable(simple_bootstrap
-    ${GENERATED_SOURCES}
-    ${RUNTIME_SOURCES}
-)
+# Support both single-file and multi-file generated code
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/generated_sources.cmake")
+    # Multi-file mode: per-module .cpp files with CMake structure
+    include(${CMAKE_CURRENT_SOURCE_DIR}/generated/generated_sources.cmake)
+    add_executable(simple_bootstrap
+        ${GENERATED_ROOT_SOURCES}
+        ${RUNTIME_SOURCES}
+    )
+    foreach(LIB ${GENERATED_OBJECT_LIBS})
+        target_link_libraries(simple_bootstrap PRIVATE ${LIB})
+    endforeach()
+else()
+    # Single-file mode (backward compatible)
+    file(GLOB GENERATED_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/generated/*.cpp")
+    add_executable(simple_bootstrap
+        ${GENERATED_SOURCES}
+        ${RUNTIME_SOURCES}
+    )
+endif()
 
 target_include_directories(simple_bootstrap PRIVATE
     ${RUNTIME_DIR}

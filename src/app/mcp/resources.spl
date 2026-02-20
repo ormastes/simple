@@ -211,6 +211,14 @@ class ResourceManager:
             mime_type: Some("text/plain")
         ))
 
+        # API search resource
+        resources.push(ResourceInfo(
+            uri: "api:///*",
+            name: "Module API",
+            description: Some("Search module API with visibility-aware filtering (use api:///{path}?from={location}&visibility={filter})"),
+            mime_type: Some("text/plain")
+        ))
+
         self.resources_cache = Some(resources)
         resources
 
@@ -269,6 +277,13 @@ class ResourceManager:
             name: "Debug Log",
             description: Some("AOP debug log views (tree, entries, status, text)"),
             mime_type: Some("application/json")
+        ))
+
+        templates.push(ResourceTemplate(
+            uri_template: r"api:///{path}",
+            name: "Module API",
+            description: Some("Module API with visibility filtering. Optional query params: ?from={location}&visibility={public|friend|package|all}"),
+            mime_type: Some("text/plain")
         ))
 
         self.templates_cache = Some(templates)
@@ -346,6 +361,15 @@ class ResourceManager:
             val query = uri.substring(9)  # Remove "testdb://"
             val result = self.provide_testdb_query(query)
             return self.result_to_resource_content(uri, result, Some("application/json"))
+
+        if uri.starts_with("api://"):
+            val path = uri.substring(6)  # Remove "api://"
+            # Strip leading slashes
+            var clean_path = path
+            if clean_path.starts_with("/"):
+                clean_path = clean_path.substring(1)
+            val result = self.provide_api_info(clean_path)
+            return self.result_to_resource_content(uri, result, Some("text/plain"))
 
         Err("Resource not found: " + uri)
 
@@ -604,6 +628,89 @@ class ResourceManager:
             return Ok(r)
         else:
             return Err("Unknown test database query: " + query + ". Valid queries: runs, recent, stats, flaky")
+
+    # Provide API info for a module path
+    fn provide_api_info(path: text) -> Result<text, text>:
+        """Return API symbols for a module path.
+
+        Parses the target file using line-by-line heuristic and returns
+        formatted symbol list with visibility markers.
+        """
+        # Parse query parameters if present
+        var module_path = path
+        var from_module = ""
+        var vis_filter = "all"
+
+        val q_idx = path.index_of("?")
+        if q_idx.?:
+            module_path = path.substring(0, q_idx ?? 0)
+            val query_str = path.substring((q_idx ?? 0) + 1)
+            # Simple query param parsing
+            val params = query_str.split("&")
+            for param in params:
+                if param.starts_with("from="):
+                    from_module = param.substring(5)
+                elif param.starts_with("visibility="):
+                    vis_filter = param.substring(11)
+
+        # Resolve module path to file
+        val file_path = self.resolve_module_to_file(module_path)
+        if file_path == "":
+            return Err("Cannot resolve module: " + module_path)
+
+        val source = file_read(file_path)
+        if source == "":
+            return Err("Cannot read file: " + file_path)
+
+        # Extract symbols using simple heuristic
+        var output = "# API: {module_path}\n"
+        output = output + "# File: {file_path}\n"
+        output = output + "# Filter: visibility={vis_filter}\n"
+        output = output + "#\n"
+
+        val lines = source.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("pub fn ") or trimmed.starts_with("pub me "):
+                output = output + "P  F> " + trimmed.substring(4) + "\n"
+            elif trimmed.starts_with("pub(friend) fn ") or trimmed.starts_with("pub(friend) me "):
+                if vis_filter != "public":
+                    output = output + "F  F> " + trimmed.substring(12) + "\n"
+            elif trimmed.starts_with("pub(package) fn ") or trimmed.starts_with("pub(package) me "):
+                if vis_filter == "all" or vis_filter == "package":
+                    output = output + "I  F> " + trimmed.substring(13) + "\n"
+            elif trimmed.starts_with("pub struct "):
+                output = output + "P  S> " + trimmed.substring(4) + "\n"
+            elif trimmed.starts_with("pub class "):
+                output = output + "P  C> " + trimmed.substring(4) + "\n"
+            elif trimmed.starts_with("pub enum "):
+                output = output + "P  E> " + trimmed.substring(4) + "\n"
+            elif trimmed.starts_with("pub trait "):
+                output = output + "P  T> " + trimmed.substring(4) + "\n"
+
+        Ok(output)
+
+    fn resolve_module_to_file(module_path: text) -> text:
+        """Resolve a dotted module path to a file path."""
+        # If it already looks like a file path
+        if module_path.contains("/") or module_path.ends_with(".spl"):
+            val full = self.project_root + "/" + module_path
+            if file_exists(full):
+                return full
+            if file_exists(module_path):
+                return module_path
+            return ""
+
+        # Dotted path
+        val parts = module_path.split(".")
+        val rel = parts.join("/")
+        val spl_path = self.project_root + "/src/" + rel + ".spl"
+        if file_exists(spl_path):
+            return spl_path
+        val init_path = self.project_root + "/src/" + rel + "/__init__.spl"
+        if file_exists(init_path):
+            return init_path
+        ""
 
 # --- Helper Functions ---
 

@@ -109,10 +109,18 @@ Only needed if you want to modify the runtime:
 ```bash
 git clone https://github.com/simple-lang/simple.git
 cd simple
-simple build bootstrap  # Rebuilds runtime from Rust source
+
+# C backend bootstrap (CMake + Ninja + Clang)
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+bin/bootstrap/cpp/simple build   # Self-host verification
 ```
 
-See [doc/guide/architecture.md](doc/guide/architecture.md) for details on the two-layer architecture.
+Or use the bootstrap script: `scripts/bootstrap/bootstrap-c.sh --verify`
+
+See [doc/guide/bootstrap.md](doc/guide/bootstrap.md) for the full bootstrap guide.
 
 ### Build with GPU Support
 

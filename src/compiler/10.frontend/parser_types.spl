@@ -1,0 +1,392 @@
+# Parser Types - AST Type Definitions
+#
+# This module contains all AST (Abstract Syntax Tree) type definitions.
+# Split into:
+# - parser_types.spl: Module structure (Module, Import, Export, Function, Class, etc.)
+# - parser_types_expr.spl: Expression-level types (Type, Expr, Pattern, Stmt, operators, ASM)
+# - parser_types_utils.spl: Float parsing utilities
+
+use lexer.Span
+use compiler.parser_types_expr.{*}
+use compiler.parser_types_utils.{*}
+
+struct Module:
+    """Complete parsed module."""
+    name: text
+    imports: [Import]
+    exports: [Export]
+    functions: Dict<text, Function>
+    classes: Dict<text, Class>
+    actors: Dict<text, ActorDef>
+    structs: Dict<text, Struct>
+    enums: Dict<text, Enum>
+    bitfields: Dict<text, Bitfield>
+    traits: Dict<text, Trait>
+    impls: [Impl]
+    type_aliases: Dict<text, TypeAlias>
+    constants: Dict<text, Const>
+    static_asserts: [StaticAssert]
+    aop_advices: [AopAdvice]
+    di_bindings: [DiBinding]
+    arch_rules: [ArchRule]
+    mock_decls: [MockDecl]
+
+struct Import:
+    """Import declaration."""
+    module: text
+    items: [ImportItem]
+    is_lazy: bool
+    span: Span
+
+struct ImportItem:
+    """Single imported item."""
+    name: text
+    # # DESUGARED: alias: text
+    has_alias: bool
+    alias: text
+
+struct Export:
+    """Export declaration."""
+    items: [text]
+    span: Span
+
+struct Function:
+    """Function definition."""
+    name: text
+    type_params: [TypeParam]
+    params: [Param]
+    # # DESUGARED: return_type: Type
+    has_return_type: bool
+    return_type: Type
+    body: Block
+    is_async: bool
+    is_static: bool
+    is_public: bool
+    is_method: bool
+    is_mutable: bool    # 'me' vs 'fn'
+    is_const: bool      # 'const fn' - can be evaluated at compile time
+    is_kernel: bool     # 'kernel fn' - GPU kernel function
+    is_extern: bool     # 'extern fn' - external function (no body)
+    attributes: [Attribute]  # Attribute annotations (Phase 3[3] - TODO ✅)
+    # # DESUGARED: doc_comment: text
+    has_doc_comment: bool
+    doc_comment: text
+    span: Span
+
+struct Param:
+    """Function parameter."""
+    name: text
+    # # DESUGARED: type_: Type
+    has_type_: bool
+    type_: Type
+    # # DESUGARED: default: Expr
+    has_default: bool
+    default: Expr
+    span: Span
+
+struct TypeParam:
+    """Generic type parameter."""
+    name: text
+    bounds: [Type]
+    # # DESUGARED: default: Type
+    has_default: bool
+    default: Type
+    span: Span
+
+struct TraitBound:
+    """Trait bound constraint: T: Trait
+
+    Used in:
+    - Function signatures: fn foo<T: Display>(x: T)
+    - Where clauses: where T: Clone
+    - Trait definitions: trait Ord: Eq
+    - Impl blocks: impl<T: Clone> Clone for Vec<T>
+    """
+    type_param: text            # Type parameter name being constrained
+    trait_: Type                # Trait that must be implemented
+    span: Span
+
+struct Attribute:
+    """Attribute annotation on a declaration.
+
+    Syntax:
+        @name                     # Simple attribute
+        @name(value)              # Attribute with single argument
+        @name(arg1, arg2, ...)    # Attribute with multiple arguments
+        @name("string_value")     # Attribute with string argument
+
+    Examples:
+        @repr("C")
+        @align(16)
+        @packed
+        @deprecated("Use X instead")
+    """
+    name: text              # Attribute name (e.g., "repr", "align", "packed")
+    args: [Expr]            # Attribute arguments (may be empty)
+    span: Span
+
+struct Class:
+    """Class definition."""
+    name: text
+    type_params: [TypeParam]
+    fields: [Field]
+    methods: Dict<text, Function>
+    is_public: bool
+    # # DESUGARED: doc_comment: text
+    has_doc_comment: bool
+    doc_comment: text
+    attributes: [Attribute]     # Attributes like @repr, @packed, @align
+    span: Span
+
+struct ActorDef:
+    """Actor definition - message-based concurrent entity."""
+    name: text
+    type_params: [TypeParam]
+    fields: [Field]
+    methods: Dict<text, Function>    # Message handlers
+    is_public: bool
+    # # DESUGARED: doc_comment: text
+    has_doc_comment: bool
+    doc_comment: text
+    attributes: [Attribute]
+    span: Span
+
+struct Struct:
+    """Struct definition."""
+    name: text
+    type_params: [TypeParam]
+    fields: [Field]
+    is_public: bool
+    # # DESUGARED: doc_comment: text
+    has_doc_comment: bool
+    doc_comment: text
+    attributes: [Attribute]     # Attributes like @repr, @packed, @align
+    span: Span
+
+struct Field:
+    """Struct/class field."""
+    name: text
+    type_: Type
+    # # DESUGARED: default: Expr
+    has_default: bool
+    default: Expr
+    is_public: bool
+    is_volatile: bool          # @volatile field
+    # # DESUGARED: fixed_address: i64
+    has_fixed_address: bool
+    fixed_address: i64
+    span: Span
+
+struct Enum:
+    """Enum definition."""
+    name: text
+    type_params: [TypeParam]
+    variants: [Variant]
+    is_public: bool
+    # # DESUGARED: doc_comment: text
+    has_doc_comment: bool
+    doc_comment: text
+    span: Span
+
+struct Variant:
+    """Enum variant."""
+    name: text
+    kind: VariantKind
+    span: Span
+
+"""Enum variant kind."""
+enum VariantKind:
+    Unit
+    Tuple([Type])
+    Struct([Field])
+
+struct Bitfield:
+    """Bitfield definition.
+
+    Example:
+        bitfield Flags(u32):
+            enabled: bool       # 1 bit
+            priority: u4        # 4 bits
+            _reserved: 27       # 27 reserved bits
+    """
+    name: text
+    backing_type: Type          # e.g., u32, u64
+    fields: [BitfieldField]
+    is_public: bool
+    # # DESUGARED: doc_comment: text
+    has_doc_comment: bool
+    doc_comment: text
+    attributes: [Attribute]
+    span: Span
+
+struct BitfieldField:
+    """Bitfield field."""
+    name: text
+    # # DESUGARED: type_: Type
+    has_type_: bool
+    type_: Type
+    # # DESUGARED: bits: i64
+    has_bits: bool
+    bits: i64
+    is_reserved: bool          # True if _reserved field
+    span: Span
+
+struct Trait:
+    """Trait definition.
+
+    Example:
+        trait Display:
+            fn to_string() -> text:
+                pass
+
+        trait Ord: Eq:  # Supertrait
+            fn cmp(Self) -> Ordering:
+            fn max(Self) -> Self:  # Default implementation
+                if self.cmp(other) == Greater: self else: other
+    """
+    name: text
+    type_params: [TypeParam]
+    super_traits: [Type]         # Trait: Supertrait bounds (e.g., trait Ord: Eq)
+    where_clause: [TraitBound]   # Where clauses on the trait
+    methods: [Function]          # Both abstract and default method implementations
+    is_public: bool
+    # # DESUGARED: doc_comment: text
+    has_doc_comment: bool
+    doc_comment: text
+    span: Span
+
+struct Impl:
+    """Impl block.
+
+    Examples:
+        # Inherent impl (no trait)
+        impl Point:
+            fn new(i64, i64) -> Point: ...
+
+        # Trait impl
+        # REMOVED: impl Display for Point:
+        # (Trait implementations not supported in Core Simple)
+            # fn to_string() -> text: ...
+
+        # Generic impl with where clause
+        impl<T> Display for Vec<T> where T: Display:
+            fn to_string() -> text: ...
+    """
+    type_: Type                 # Type being implemented for
+    # # DESUGARED: trait_: Type
+    has_trait_: bool
+    trait_: Type
+    type_params: [TypeParam]    # Generic parameters (impl<T>)
+    where_clause: [TraitBound]  # Where T: Trait constraints
+    methods: Dict<text, Function>
+    span: Span
+
+struct TypeAlias:
+    """Type alias."""
+    name: text
+    type_params: [TypeParam]
+    type_: Type
+    is_public: bool
+    span: Span
+
+struct Const:
+    """Module-level constant."""
+    name: text
+    # # DESUGARED: type_: Type
+    has_type_: bool
+    type_: Type
+    value: Expr
+    is_mutable: bool
+    is_public: bool
+    is_volatile: bool          # @volatile variable
+    # # DESUGARED: fixed_address: i64
+    has_fixed_address: bool
+    fixed_address: i64
+    span: Span
+
+struct StaticAssert:
+    """Static assertion - evaluated at compile time.
+
+    Example:
+        static assert size_of<u32>() == 4
+        static assert align_of<Point>() >= 4  # Point must be 4-byte aligned
+    """
+    condition: Expr             # Condition expression (must evaluate to bool at compile time)
+    # # DESUGARED: message: text
+    has_message: bool
+    message: text
+    span: Span
+
+struct AopAdvice:
+    """AOP advice declaration: on pc{...} use interceptor [form] [priority N]"""
+    pointcut: text       # raw pc{...} content
+    form: text           # "before" | "after_success" | "after_error" | "around"
+    handler: text        # interceptor function name (as text identifier)
+    priority: i64
+    span: Span
+
+struct DiBinding:
+    """DI binding: bind on pc{...} -> Impl"""
+    pointcut: text
+    implementation: text
+    span: Span
+
+struct ArchRule:
+    """Architecture rule: forbid/allow pc{...} "message" """
+    kind: text           # "forbid" | "allow"
+    pointcut: text
+    message: text
+    span: Span
+
+struct MockDecl:
+    """Mock declaration: mock Name implements Trait"""
+    name: text
+    trait_name: text
+    span: Span
+
+# ============================================================================
+# Parser
+# ============================================================================
+
+struct Parser:
+    """Full AST parser using TreeSitter outline."""
+    source: text
+    lexer: Lexer
+    current: Token
+    previous: Token
+    errors: [ParseError]
+    # # DESUGARED: outline: OutlineModule
+    has_outline: bool
+    outline: OutlineModule
+    # # DESUGARED: resolved_blocks: ResolvedModule
+    has_resolved_blocks: bool
+    resolved_blocks: ResolvedModule
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+# Module-level types (defined here)
+export Module, Import, ImportItem, Export
+export Function, Param, TypeParam, TraitBound, Class, Struct, Field, Attribute
+export Enum, Variant, VariantKind, Bitfield, BitfieldField
+export Trait, Impl, TypeAlias, Const, StaticAssert
+export AopAdvice, DiBinding, ArchRule, MockDecl
+export ActorDef
+export Parser
+
+# Re-exported from parser_types_expr
+export Type, TypeKind
+export Expr, ExprKind, Interpolation, CallArg, MatchArm, CatchClause
+export LambdaParam, ComprehensionClause, ComprehensionKind, EnumPayload
+export Pattern, PatternKind, EnumPatternPayload
+export Stmt, StmtKind, AssignOp, Block, WithItem
+export BinOp, UnaryOp
+export DType, Device, Backend, TensorSuffix
+export GpuIntrinsicKind
+export AsmExpr, AsmConstraint, AsmConstraintKind, AsmLocation
+export AsmTargetSpec, AsmVersionConstraint, AsmMatchArm
+
+# Re-exported from parser_types_utils
+export parse_float_literal, parse_float_int_part, parse_fractional
+export split_exponent, pow10

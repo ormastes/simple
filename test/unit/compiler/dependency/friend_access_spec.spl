@@ -1,0 +1,180 @@
+"""
+# Friend Access Control Specification
+
+**Feature IDs:** #FRIEND-001
+**Category:** Language
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests the friend access control system: Visibility enum extension,
+DirManifest friend declarations, and friend-aware access checking.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `friend <pkg>` | Grants a package access to internal symbols |
+| `pub(friend)` | Symbol visible to friends only |
+| `pub(package)` | Symbol visible within same package only |
+| `internal_export` | Package-level friend-visible symbol declaration |
+"""
+
+import std.spec
+
+# ============================================================================
+# Test Group 1: Visibility Enum
+# ============================================================================
+
+describe "Extended Visibility Enum":
+    """
+    ## 4-Level Visibility
+
+    Tests the Public > Internal > Package > Private ordering.
+    """
+
+    it "Public has rank 3":
+        val v = Visibility.Public
+        expect(v.rank()).to_equal(3)
+
+    it "Internal has rank 2":
+        val v = Visibility.Internal
+        expect(v.rank()).to_equal(2)
+
+    it "Package has rank 1":
+        val v = Visibility.Package
+        expect(v.rank()).to_equal(1)
+
+    it "Private has rank 0":
+        val v = Visibility.Private
+        expect(v.rank()).to_equal(0)
+
+    it "visibility_meet returns more restrictive":
+        # Public meet Internal = Internal
+        val r1 = visibility_meet(Visibility.Public, Visibility.Internal)
+        expect(r1.rank()).to_equal(2)
+
+        # Internal meet Private = Private
+        val r2 = visibility_meet(Visibility.Internal, Visibility.Private)
+        expect(r2.rank()).to_equal(0)
+
+        # Package meet Package = Package
+        val r3 = visibility_meet(Visibility.Package, Visibility.Package)
+        expect(r3.rank()).to_equal(1)
+
+    it "marker returns correct single character":
+        expect(Visibility.Public.marker()).to_equal("P")
+        expect(Visibility.Internal.marker()).to_equal("F")
+        expect(Visibility.Package.marker()).to_equal("I")
+        expect(Visibility.Private.marker()).to_equal("-")
+
+
+# ============================================================================
+# Test Group 2: DirManifest Friends
+# ============================================================================
+
+describe "DirManifest Friend Declarations":
+    """
+    ## Friend Management
+
+    Tests adding and checking friend packages in DirManifest.
+    """
+
+    it "new manifest has no friends":
+        val m = DirManifest.new("test_pkg")
+        expect(m.friends.len()).to_equal(0)
+
+    it "can add friend packages":
+        var m = DirManifest.new("hir")
+        m.add_friend("types")
+        m.add_friend("mir")
+        expect(m.friends.len()).to_equal(2)
+
+    it "is_friend returns true for declared friend":
+        var m = DirManifest.new("hir")
+        m.add_friend("types")
+        m.add_friend("mir")
+        expect(m.is_friend("types")).to_equal(true)
+        expect(m.is_friend("mir")).to_equal(true)
+
+    it "is_friend returns false for non-friend":
+        var m = DirManifest.new("hir")
+        m.add_friend("types")
+        expect(m.is_friend("backend")).to_equal(false)
+
+    it "can add internal exports":
+        var m = DirManifest.new("hir")
+        m.add_internal_export(SymbolId.new("HirLowering"))
+        m.add_internal_export(SymbolId.new("HirBuilder"))
+        expect(m.internal_exports.len()).to_equal(2)
+
+    it "is_internal_export checks correctly":
+        var m = DirManifest.new("hir")
+        m.add_internal_export(SymbolId.new("HirLowering"))
+        expect(m.is_internal_export(SymbolId.new("HirLowering"))).to_equal(true)
+        expect(m.is_internal_export(SymbolId.new("NotExported"))).to_equal(false)
+
+
+# ============================================================================
+# Test Group 3: Friend Access Checking
+# ============================================================================
+
+describe "Friend Access Checking":
+    """
+    ## Access Control
+
+    Tests check_friend_access with various visibility/friend combinations.
+    """
+
+    it "public symbols are always accessible":
+        var m = DirManifest.new("hir")
+        val sym = SymbolId.new("HirModule")
+        val result = check_friend_access("backend", m, sym, Visibility.Public)
+        expect(result).to_equal(true)
+
+    it "internal symbols accessible by friends":
+        var m = DirManifest.new("hir")
+        m.add_friend("mir")
+        m.add_internal_export(SymbolId.new("HirLowering"))
+        val sym = SymbolId.new("HirLowering")
+        val result = check_friend_access("mir", m, sym, Visibility.Internal)
+        expect(result).to_equal(true)
+
+    it "internal symbols not accessible by non-friends":
+        var m = DirManifest.new("hir")
+        m.add_friend("mir")
+        val sym = SymbolId.new("HirLowering")
+        val result = check_friend_access("backend", m, sym, Visibility.Internal)
+        expect(result).to_equal(false)
+
+    it "package symbols accessible within same package":
+        var m = DirManifest.new("hir")
+        val sym = SymbolId.new("InternalHelper")
+        val result = check_friend_access("hir", m, sym, Visibility.Package)
+        expect(result).to_equal(true)
+
+    it "package symbols not accessible from other packages":
+        var m = DirManifest.new("hir")
+        val sym = SymbolId.new("InternalHelper")
+        val result = check_friend_access("mir", m, sym, Visibility.Package)
+        expect(result).to_equal(false)
+
+    it "private symbols never accessible from outside":
+        var m = DirManifest.new("hir")
+        m.add_friend("mir")
+        val sym = SymbolId.new("PrivateImpl")
+        val result = check_friend_access("mir", m, sym, Visibility.Private)
+        expect(result).to_equal(false)
+
+    it "friend access is non-transitive":
+        # hir friends mir, mir friends backend
+        # backend should NOT have access to hir internals
+        var hir_manifest = DirManifest.new("hir")
+        hir_manifest.add_friend("mir")
+        hir_manifest.add_internal_export(SymbolId.new("HirLowering"))
+
+        val sym = SymbolId.new("HirLowering")
+        # backend is NOT a friend of hir
+        val result = check_friend_access("backend", hir_manifest, sym, Visibility.Internal)
+        expect(result).to_equal(false)

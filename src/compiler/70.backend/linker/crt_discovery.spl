@@ -1,0 +1,230 @@
+# Linker Wrapper — CRT File Discovery
+#
+# Extracted from linker_wrapper.spl. Contains:
+# - find_crt_files: Primary CRT file discovery
+# - find_crt_files_via_cc: Discovery via cc -print-file-name
+# - find_crt_files_fallback: Fallback to well-known paths
+# - find_gcc_lib_dirs: GCC library directory probing
+# - find_dynamic_linker: Dynamic linker path detection
+# - path_dirname: Path helper
+
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, host_os, host_arch}
+use compiler.linker.linker_wrapper.{CrtFiles}
+
+# ============================================================================
+# CRT File Discovery
+# ============================================================================
+
+fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
+    # Primary strategy: use cc -print-file-name=X
+    val cc_result = find_crt_files_via_cc(pie, verbose)
+    if cc_result.found:
+        return cc_result
+
+    # Fallback: probe well-known paths
+    val fallback_result = find_crt_files_fallback(pie, verbose)
+    if fallback_result.found:
+        return fallback_result
+
+    # Return empty (not found)
+    CrtFiles(
+        crt1: "", crti: "", crtn: "",
+        crtbegin: "", crtend: "",
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: [],
+        found: false
+    )
+
+fn find_crt_files_via_cc(pie: bool, verbose: bool) -> CrtFiles:
+    # Use cc -print-file-name to locate CRT files
+    var crt1_name = "crt1.o"
+    var crtbegin_name = "crtbegin.o"
+    var crtend_name = "crtend.o"
+    if pie:
+        crt1_name = "Scrt1.o"
+        crtbegin_name = "crtbeginS.o"
+        crtend_name = "crtendS.o"
+
+    val crt1 = cc_print_file(crt1_name)
+    val crti = cc_print_file("crti.o")
+    val crtn = cc_print_file("crtn.o")
+    val crtbegin = cc_print_file(crtbegin_name)
+    val crtend = cc_print_file(crtend_name)
+
+    # Validate: cc returns the bare filename if not found, absolute path if found
+    val all_found = crt1.contains("/") and crti.contains("/") and crtn.contains("/") and crtbegin.contains("/") and crtend.contains("/")
+
+    if verbose:
+        if all_found:
+        print "[linker-wrapper] CRT files found via cc:"
+        print "[linker-wrapper]   crt1={crt1} crti={crti} crtn={crtn}"
+        print "[linker-wrapper]   crtbegin={crtbegin} crtend={crtend}"
+
+    # Collect library directories from CRT paths
+    var lib_dirs: [text] = []
+    if crt1.contains("/"):
+        val dir = path_dirname(crt1)
+        if dir != "":
+            lib_dirs = lib_dirs_push(lib_dirs, dir)
+    if crtbegin.contains("/"):
+        val dir = path_dirname(crtbegin)
+        if dir != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs_push(lib_dirs, dir)
+
+    CrtFiles(
+        crt1: crt1,
+        crti: crti,
+        crtn: crtn,
+        crtbegin: crtbegin,
+        crtend: crtend,
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: lib_dirs,
+        found: all_found
+    )
+
+fn cc_print_file(name: text) -> text:
+    val result = shell_output("cc -print-file-name={name} 2>/dev/null")
+    val trimmed = result_trim(result)
+    if trimmed_len(trimmed) > 0:
+        trimmed
+    else:
+        name
+
+fn find_crt_files_fallback(pie: bool, verbose: bool) -> CrtFiles:
+    # Probe well-known system paths
+    val probe_dirs: [text] = [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib"
+    ]
+
+    var crt1_name = "crt1.o"
+    var crtbegin_name = "crtbegin.o"
+    var crtend_name = "crtend.o"
+    if pie:
+        crt1_name = "Scrt1.o"
+        crtbegin_name = "crtbeginS.o"
+        crtend_name = "crtendS.o"
+
+    var crt1 = ""
+    var crti = ""
+    var crtn = ""
+    var crtbegin = ""
+    var crtend = ""
+    var lib_dirs: [text] = []
+
+    # Find crt1, crti, crtn in system dirs
+    for dir in probe_dirs:
+        if crt1 == "":
+            if file_exists("{dir}/{crt1_name}"):
+            crt1 = "{dir}/{crt1_name}"
+        if crti == "":
+            if file_exists("{dir}/crti.o"):
+            crti = "{dir}/crti.o"
+        if crtn == "":
+            if file_exists("{dir}/crtn.o"):
+            crtn = "{dir}/crtn.o"
+        if crt1 != "" or crti != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs_push(lib_dirs, dir)
+
+    # Find crtbegin/crtend in GCC lib dirs
+    val gcc_dirs = find_gcc_lib_dirs()
+    for dir in gcc_dirs:
+        if crtbegin == "":
+            if file_exists("{dir}/{crtbegin_name}"):
+            crtbegin = "{dir}/{crtbegin_name}"
+        if crtend == "":
+            if file_exists("{dir}/{crtend_name}"):
+            crtend = "{dir}/{crtend_name}"
+        if crtbegin != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs_push(lib_dirs, dir)
+
+    val all_found = crt1 != "" and crti != "" and crtn != "" and crtbegin != "" and crtend != ""
+
+    if verbose:
+        if all_found:
+        print "[linker-wrapper] CRT files found via fallback:"
+        print "[linker-wrapper]   crt1={crt1} crti={crti} crtn={crtn}"
+        print "[linker-wrapper]   crtbegin={crtbegin} crtend={crtend}"
+
+    CrtFiles(
+        crt1: crt1, crti: crti, crtn: crtn,
+        crtbegin: crtbegin, crtend: crtend,
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: lib_dirs,
+        found: all_found
+    )
+
+fn find_gcc_lib_dirs() -> [text]:
+    # Find GCC library directories by probing common triplets and versions
+    var dirs: [text] = []
+    val triplets = ["x86_64-linux-gnu", "x86_64-redhat-linux", "x86_64-pc-linux-gnu", "aarch64-linux-gnu"]
+    val versions = ["14", "13", "12", "11", "10", "9"]
+
+    for triplet in triplets:
+        for ver in versions:
+            val dir = "/usr/lib/gcc/{triplet}/{ver}"
+            if file_exists("{dir}/crtbegin.o"):
+                dirs = dirs_push(dirs, dir)
+
+    # Also try cc -print-search-dirs for gcc lib path
+    val search_result = shell_output("cc -print-search-dirs 2>/dev/null")
+    if search_result_len(search_result) > 0:
+        val lines = search_result.split("\n")
+        for line in lines:
+            if line.starts_with("libraries: ="):
+                val paths_str = line[12:]
+                val paths = paths_str.split(":")
+                for p in paths:
+                    val trimmed = p_trim(p)
+                    if trimmed.len() > 0:
+                        if file_exists("{trimmed}/crtbegin.o"):
+                        dirs = dirs_push(dirs, trimmed)
+    dirs
+
+fn find_dynamic_linker() -> text:
+    val os = host_os()
+    val arch = host_arch()
+
+    if os == "linux":
+        if arch == "x86_64":
+            if file_exists("/lib64/ld-linux-x86-64.so[2]"):
+                return "/lib64/ld-linux-x86-64.so[2]"
+            if file_exists("/lib/x86_64-linux-gnu/ld-linux-x86-64.so[2]"):
+                return "/lib/x86_64-linux-gnu/ld-linux-x86-64.so[2]"
+        elif arch == "aarch64":
+            if file_exists("/lib/ld-linux-aarch64.so[1]"):
+                return "/lib/ld-linux-aarch64.so[1]"
+            if file_exists("/lib/aarch64-linux-gnu/ld-linux-aarch64.so[1]"):
+                return "/lib/aarch64-linux-gnu/ld-linux-aarch64.so[1]"
+    elif os == "freebsd":
+        return "/libexec/ld-elf.so[1]"
+
+    # macOS: dyld handles this, no dynamic linker needed
+    ""
+
+fn path_dirname(path: text) -> text:
+    # Return directory part of a file path
+    val last_slash = path.rfind("/")
+    if last_slash >= 0:
+        path[0:last_slash]
+    else:
+        ""
+
+export find_crt_files, find_crt_files_via_cc, find_crt_files_fallback
+export find_gcc_lib_dirs, find_dynamic_linker, path_dirname, cc_print_file

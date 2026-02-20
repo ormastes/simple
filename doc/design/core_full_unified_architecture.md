@@ -1,6 +1,6 @@
 # Unified Compiler Architecture — Design Document
 
-## Status: Unified (Phases 0-6 Complete)
+## Status: Unified (Phases 0-7 Complete)
 
 ## 1. Architecture Overview
 
@@ -10,8 +10,8 @@ replaced with a C/C++ backend for bootstrap.
 
 **New bootstrap approach** (like Go/Zig):
 ```
-compiler --backend=c → generates C++20 → committed to compiler_core/generated/
-                                          → CMake + Clang builds it
+compiler --backend=c → generates C++20 → committed to src/compiler_cpp/
+                                          → CMake + Ninja + Clang builds it
 ```
 
 Anyone can bootstrap from scratch with just CMake + Clang.
@@ -38,7 +38,8 @@ Anyone can bootstrap from scratch with just CMake + Clang.
 |  driver       (full pipeline orchestration)                        |
 +===================================================================+
 
-src/compiler_core/  → Build infra only (CMakeLists.txt + generated/ C++ output)
+src/compiler_cpp/   → Generated C++20 output (CMakeLists.txt + *.cpp files)
+src/compiler_core/  → Build infra only (CMakeLists.txt, legacy)
 src/compiler_seed/  → C runtime only (runtime.c, runtime.h, platform/)
 ```
 
@@ -48,12 +49,31 @@ The C backend (`src/compiler/backend/c_backend.spl`) translates MIR to C++20:
 - `CTypeMapper`: Maps MIR types → C++ types (int64_t, double, void*, etc.)
 - `CIRBuilder`: Builds C++ source strings with indentation
 - `MirToC`: Main translator handling all MIR instructions and terminators
+- `CCodegenBackend`: Backend interface used by `BackendFactory`
+
+The MIR-based C backend is fully wired into the compiler pipeline:
+- `CompilerDriver.aot_compile()` detects `--backend=c` and routes to `compile_to_c()`
+- `compile_to_c()` translates all MIR modules via `compile_module_with_backend("c", ...)`
+- Output is written directly to the specified file via `rt_file_write_text()`
 
 Bootstrap workflow:
-1. `bin/simple compile --backend=c --emit-c` → generates C++20
-2. Output committed to `src/compiler_core/generated/`
-3. `cmake -B build -G Ninja && ninja -C build` → `simple_bootstrap`
-4. Reproducibility: bootstrap binary generates identical C++
+1. `bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl` → generates C++20
+2. Output committed to `src/compiler_cpp/`
+3. `cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp`
+4. `ninja -C build` → `build/simple`
+5. `mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple`
+6. `bin/bootstrap/cpp/simple build` → self-host verification
+
+Build generated C++ (single-file):
+```bash
+clang++ -std=c++20 -O2 output.cpp src/compiler_seed/runtime.c -I src/compiler_seed -o output
+```
+
+Build generated C++ (multi-file via CMake):
+```bash
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+```
 
 ## 4. Import Paths
 
@@ -71,12 +91,13 @@ source.spl --> lexer --> parser --> AST --> c_codegen --> output.cpp
 ```
 Simple, fast. No optimizations. Good for bootstrapping.
 
-### Path B: HIR/MIR Pipeline (--emit-c-mir)
+### Path B: HIR/MIR Pipeline (--backend=c)
 ```
 source.spl --> lexer --> parser --> AST --> hir_lower --> HIR
-    --> mir_lower --> MIR --> mir_codegen --> output.cpp
+    --> monomorphize --> mir_lower --> MIR --> optimize --> MirToC --> output.cpp
 ```
-Enables future optimizations at MIR level.
+Full pipeline with MIR optimizations. Wired end-to-end via `CompilerDriver.compile_to_c()`.
+Usage: `bin/simple compile --backend=c -o output.cpp source.spl`
 
 ### Path C: Interpreter (--interpret)
 ```
@@ -113,7 +134,7 @@ Simple API: `wffi_load`, `wffi_get`, `wffi_call_i64`, `wffi_call_text`, `wffi_fr
 | 4 | Core MIR lowering (HIR -> MIR) | DONE |
 | 5 | Core MIR codegen (MIR -> C) | DONE |
 | 6 | Core WFFI (dlopen/dlsym) | DONE |
-| 7 | Core driver integration | DONE |
+| 7 | Core driver integration (compile_to_c, aot_compile routing, CCodegenBackend) | DONE |
 | 8 | Migrate full lexer/parser to use core | PLANNED |
 | 9 | Full WFFI extensions | PLANNED |
 | 10 | SFFI gen + shell library | PLANNED |
@@ -172,9 +193,12 @@ Move shared LLVM infra to `src/compiler_shared/llvm/`:
 
 ## 9. Key Files
 
-- `src/compiler_core/compiler/c_codegen.spl` — AST-direct C codegen (Phase 2)
-- `src/compiler_core/compiler/driver.spl` — Compiler driver
-- `src/compiler_core/hir/lowering.spl` — HIR lowering (Phase 3)
-- `src/compiler_core/mir/lowering.spl` — MIR lowering (Phase 4)
-- `src/compiler_core/compiler/mir_codegen.spl` — MIR-to-C codegen (Phase 5)
-- `src/compiler_core/wffi/mod.spl` — WFFI module (Phase 6)
+- `src/compiler/backend/c_backend.spl` — MIR-to-C++20 translator (MirToC, CCodegenBackend)
+- `src/compiler/backend/c_type_mapper.spl` — MIR type → C++ type mapping
+- `src/compiler/backend/c_ir_builder.spl` — C++ source string builder
+- `src/compiler/backend/backend_helpers.spl` — compile_module_with_backend() routing
+- `src/compiler/backend/backend_factory.spl` — BackendFactory (CCodegen case)
+- `src/compiler/driver.spl` — CompilerDriver (compile_to_c, aot_compile C routing)
+- `src/app/compile/c_mir_backend.spl` — CLI entry script for MIR C backend
+- `src/app/compile/c_codegen.spl` — AST-direct C codegen (Path A, legacy)
+- `src/compiler_seed/runtime.c` — C runtime (linked with generated C++)

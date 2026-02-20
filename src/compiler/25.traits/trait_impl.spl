@@ -1,0 +1,158 @@
+# Trait Impl Blocks
+#
+# Implementation blocks for traits and type matching.
+# Split from traits.spl for modularity.
+
+use compiler.hir.*
+use compiler.core.lexer.*
+use compiler.trait_def.{TraitBound}
+
+# ============================================================================
+# Impl Block
+# ============================================================================
+
+struct ImplBlock:
+    """Implementation of a trait for a specific type.
+
+    Example:
+        impl Display for Point:
+            fn to_string() -> text:
+                "Point({self.x}, {self.y})"
+    """
+    trait_name: Symbol              # Which trait is being implemented
+    for_type: HirType               # Which type is implementing the trait
+    type_params: [Symbol]           # Generic parameters (impl<T> Trait for Vec<T>)
+    where_clause: [TraitBound]      # Where T: Trait constraints
+    methods: [HirFunction]          # Method implementations
+    span: Span
+
+impl ImplBlock:
+    static fn create(trait_name: Symbol, for_type: HirType, span: Span) -> ImplBlock:
+        """Create a new impl block."""
+        ImplBlock(
+            trait_name: trait_name,
+            for_type: for_type,
+            type_params: [],
+            where_clause: [],
+            methods: [],
+            span: span
+        )
+
+    fn has_method(method_name: text) -> bool:
+        """Check if impl has a method with given name."""
+        for method in self.methods:
+            if method.name == method_name:
+                return true
+        false
+
+    fn get_method(method_name: text) -> HirFunction?:
+        """Get method implementation by name."""
+        for method in self.methods:
+            if method.name == method_name:
+                return Some(method)
+        nil
+
+    fn matches_type(ty: HirType) -> bool:
+        """Check if this impl matches the given type.
+
+        Handles generic matching:
+        - impl<T> Display for Vec<T> matches Vec<i64>
+        - impl Display for Point matches Point
+
+        Returns true if the impl can be instantiated to match ty.
+        """
+        match_types(self.for_type, ty)
+
+# ============================================================================
+# Generic Type Matching (Phase B.3.1)
+# ============================================================================
+
+fn match_types(pattern: HirType, concrete: HirType) -> bool:
+    """Check if a type pattern matches a concrete type.
+
+    Handles generic matching where pattern may contain type parameters.
+
+    Examples:
+    - match_types(Vec<T>, Vec<i64>) -> true (T can be i64)
+    - match_types(Point, Point) -> true
+    - match_types(Vec<T>, Point) -> false
+
+    Algorithm:
+    - If pattern is TypeParam, always matches (can be anything)
+    - If both are Named, check name matches and recursively check args
+    - Otherwise, check structural equality
+    """
+    match pattern.kind:
+        case TypeParam(_, _):
+            # Type parameter matches any concrete type
+            true
+
+        case Named(pattern_symbol, pattern_args):
+            match concrete.kind:
+                case Named(concrete_symbol, concrete_args):
+                    # Check if symbols match
+                    if pattern_symbol != concrete_symbol:
+                        return false
+
+                    # Check if argument counts match
+                    if pattern_args.len() != concrete_args.len():
+                        return false
+
+                    # Recursively check each type argument
+                    for i in 0..pattern_args.len():
+                        if not match_types(pattern_args[i], concrete_args[i]):
+                            return false
+
+                    true
+                case _:
+                    false
+
+        case Function(pattern_params, pattern_ret, _):
+            match concrete.kind:
+                case Function(concrete_params, concrete_ret, _):
+                    # Check parameter count
+                    if pattern_params.len() != concrete_params.len():
+                        return false
+
+                    # Check each parameter
+                    for i in 0..pattern_params.len():
+                        if not match_types(pattern_params[i], concrete_params[i]):
+                            return false
+
+                    # Check return type
+                    match_types(pattern_ret, concrete_ret)
+                case _:
+                    false
+
+        case Tuple(pattern_elems):
+            match concrete.kind:
+                case Tuple(concrete_elems):
+                    if pattern_elems.len() != concrete_elems.len():
+                        return false
+
+                    for i in 0..pattern_elems.len():
+                        if not match_types(pattern_elems[i], concrete_elems[i]):
+                            return false
+
+                    true
+                case _:
+                    false
+
+        case Array(pattern_elem, pattern_size):
+            match concrete.kind:
+                case Array(concrete_elem, concrete_size):
+                    # Check sizes match (if both specified)
+                    if pattern_size.? and concrete_size.?:
+                        if pattern_size.unwrap() != concrete_size.unwrap():
+                            return false
+
+                    # Check element types match
+                    match_types(pattern_elem, concrete_elem)
+                case _:
+                    false
+
+        case _:
+            # For other types, use structural equality
+            pattern.kind == concrete.kind
+
+export ImplBlock, match_types

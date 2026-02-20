@@ -1,0 +1,595 @@
+# Pipeline, Dimension, Control Flow, and Effect Inference
+#
+# Implements advanced operator inference and program-level type checking:
+# - Pipeline operators (|>, >>, <<, //)
+# - Deep learning operators (~>, @, broadcast)
+# - Dimension constraint solving and runtime check generation
+# - Block, statement, and pattern inference
+# - Function and module-level inference
+# - Effect inference and checking
+#
+# Part of the type_infer/inference split. See inference.spl for module overview.
+# Effect inference methods are in inference_effects.spl.
+
+use compiler.hir.*
+use compiler.core.lexer.*
+use compiler.dim_constraints.*
+use compiler.traits.*
+use type_infer_types.*
+use compiler.30.types.type_infer.inference_effects.{*}
+
+impl HmInferContext:
+    # =========================================================================
+    # Pipeline Operator Inference
+    # =========================================================================
+
+    me infer_pipe_forward(left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer type of x |> f (pipe forward).
+
+        x |> f is equivalent to f(x).
+        Left operand is the value, right operand must be a function.
+        """
+        val resolved_right = self.resolve(right)
+        match resolved_right.kind:
+            case Function(params, ret, _):
+                if params.len() == 0:
+                    return Err(TypeInferError.Other("pipe forward requires function with at least one parameter", span))
+                # Unify left with first parameter
+                match self.unify(left, params[0]):
+                    case Err(e): Err(e)
+                    case _: Ok(self.resolve(ret))
+            case Infer(_, _):
+                # Right side is unknown, create function type constraint
+                val ret_ty = self.fresh_var(span)
+                val fn_ty = HirType(
+                    kind: HirTypeKind.Function([left], ret_ty, []),
+                    span: span
+                )
+                match self.unify(right, fn_ty):
+                    case Err(e): Err(e)
+                    case _: Ok(self.resolve(ret_ty))
+            case _:
+                Err(TypeInferError.Mismatch(
+                    HirType(kind: HirTypeKind.Function([left], self.fresh_var(span), []), span: span),
+                    resolved_right,
+                    span
+                ))
+
+    me infer_compose(left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer type of f >> g (compose forward).
+
+        f >> g creates a function \x -> g(f(x)).
+        Both operands must be functions, and f's return type must match g's input.
+        """
+        val resolved_left = self.resolve(left)
+        val resolved_right = self.resolve(right)
+
+        match (resolved_left.kind, resolved_right.kind):
+            case (Function(params_f, ret_f, _), Function(params_g, ret_g, _)):
+                if params_g.len() == 0:
+                    return Err(TypeInferError.Other("composed function must accept at least one argument", span))
+                # f's output must match g's input
+                match self.unify(ret_f, params_g[0]):
+                    case Err(e): Err(e)
+                    case _:
+                        # Result is a function from f's params to g's return
+                        Ok(HirType(
+                            kind: HirTypeKind.Function(params_f, self.resolve(ret_g), []),
+                            span: span
+                        ))
+            case (Infer(_, _), _) | (_, Infer(_, _)):
+                # Create fresh function types and unify
+                val a = self.fresh_var(span)
+                val b = self.fresh_var(span)
+                val c = self.fresh_var(span)
+                val fn_f = HirType(kind: HirTypeKind.Function([a], b, []), span: span)
+                val fn_g = HirType(kind: HirTypeKind.Function([b], c, []), span: span)
+                match self.unify(left, fn_f):
+                    case Err(e): return Err(e)
+                    case _: pass
+                match self.unify(right, fn_g):
+                    case Err(e): return Err(e)
+                    case _: pass
+                # Workaround: use temporary variables for method calls in array literals
+                val resolved_a = self.resolve(a)
+                val resolved_c = self.resolve(c)
+                val empty_effects: [Effect] = []
+                Ok(HirType(
+                    kind: HirTypeKind.Function([resolved_a], resolved_c, empty_effects),
+                    span: span
+                ))
+            case _:
+                Err(TypeInferError.Other("composition requires function operands", span))
+
+    me infer_parallel(left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer type of a // b (parallel).
+
+        Parallel operator combines two branches.
+        For functions: (f // g)(x, y) = (f(x), g(y))
+        For layers: parallel layer branches
+        """
+        val resolved_left = self.resolve(left)
+        val resolved_right = self.resolve(right)
+
+        match (resolved_left.kind, resolved_right.kind):
+            # Two functions: create parallel function
+            case (Function(params_l, ret_l, _), Function(params_r, ret_r, _)):
+                var combined_params: [HirType] = []
+                for p in params_l:
+                    combined_params = combined_params.push(p)
+                for p in params_r:
+                    combined_params = combined_params.push(p)
+                val combined_ret = HirType(
+                    kind: HirTypeKind.Tuple([ret_l, ret_r]),
+                    span: span
+                )
+                Ok(HirType(
+                    kind: HirTypeKind.Function(combined_params, combined_ret, []),
+                    span: span
+                ))
+            # Two layers: create parallel layer
+            case (Layer(in_l, out_l), Layer(in_r, out_r)):
+                # Parallel layers have combined inputs and outputs
+                var combined_in: [DimExpr] = []
+                var combined_out: [DimExpr] = []
+                for d in in_l:
+                    combined_in = combined_in.push(d)
+                for d in in_r:
+                    combined_in = combined_in.push(d)
+                for d in out_l:
+                    combined_out = combined_out.push(d)
+                for d in out_r:
+                    combined_out = combined_out.push(d)
+                Ok(HirType(
+                    kind: HirTypeKind.Layer(combined_in, combined_out),
+                    span: span
+                ))
+            case _:
+                # Default: return tuple of both
+                Ok(HirType(
+                    kind: HirTypeKind.Tuple([resolved_left, resolved_right]),
+                    span: span
+                ))
+
+    me infer_layer_connect(left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer type of l1 ~> l2 (layer connect).
+
+        Layer connection composes neural network layers with dimension checking.
+        Left layer's output dimensions must match right layer's input dimensions.
+        """
+        val resolved_left = self.resolve(left)
+        val resolved_right = self.resolve(right)
+
+        match (resolved_left.kind, resolved_right.kind):
+            case (Layer(in_l, out_l), Layer(in_r, out_r)):
+                # Add dimension constraint: out_l must be compatible with in_r
+                self.dim_solver.add_layer_compatible(out_l, in_r, span)
+
+                # Result layer: input from left, output from right
+                Ok(HirType(
+                    kind: HirTypeKind.Layer(in_l, out_r),
+                    span: span
+                ))
+
+            # Allow connecting with inference variables
+            case (Layer(in_l, out_l), Infer(_, _)):
+                # Create fresh layer type for right side
+                val batch_dim = self.dim_solver.fresh_var(span)
+                var in_dims: [DimExpr] = [batch_dim]
+                var out_dims: [DimExpr] = [batch_dim]
+                # Copy dimensions from left output
+                for d in out_l:
+                    in_dims = in_dims.push(d)
+                val out_dim = self.dim_solver.fresh_var(span)
+                out_dims = out_dims.push(out_dim)
+                val layer_ty = HirType(
+                    kind: HirTypeKind.Layer(in_dims, out_dims),
+                    span: span
+                )
+                match self.unify(right, layer_ty):
+                    case Err(e): Err(e)
+                    case _:
+                        Ok(HirType(
+                            kind: HirTypeKind.Layer(in_l, out_dims),
+                            span: span
+                        ))
+
+            case (Infer(_, _), Layer(in_r, out_r)):
+                # Create fresh layer type for left side
+                val batch_dim = self.dim_solver.fresh_var(span)
+                var in_dims: [DimExpr] = [batch_dim]
+                val in_dim = self.dim_solver.fresh_var(span)
+                in_dims = in_dims.push(in_dim)
+                # Copy dimensions from right input
+                var out_dims: [DimExpr] = []
+                for d in in_r:
+                    out_dims = out_dims.push(d)
+                val layer_ty = HirType(
+                    kind: HirTypeKind.Layer(in_dims, out_dims),
+                    span: span
+                )
+                match self.unify(left, layer_ty):
+                    case Err(e): Err(e)
+                    case _:
+                        Ok(HirType(
+                            kind: HirTypeKind.Layer(in_dims, out_r),
+                            span: span
+                        ))
+
+            case (Infer(_, _), Infer(_, _)):
+                # Both unknown: create fresh layer types with shared middle dimension
+                val batch = self.dim_solver.fresh_var(span)
+                val dim_a = self.dim_solver.fresh_var(span)
+                val dim_b = self.dim_solver.fresh_var(span)
+                val dim_c = self.dim_solver.fresh_var(span)
+                val layer_l = HirType(
+                    kind: HirTypeKind.Layer([batch, dim_a], [batch, dim_b]),
+                    span: span
+                )
+                val layer_r = HirType(
+                    kind: HirTypeKind.Layer([batch, dim_b], [batch, dim_c]),
+                    span: span
+                )
+                match self.unify(left, layer_l):
+                    case Err(e): return Err(e)
+                    case _: pass
+                match self.unify(right, layer_r):
+                    case Err(e): return Err(e)
+                    case _: pass
+                Ok(HirType(
+                    kind: HirTypeKind.Layer([batch, dim_a], [batch, dim_c]),
+                    span: span
+                ))
+
+            case _:
+                Err(TypeInferError.Other("layer connect (~>) requires Layer types", span))
+
+    me infer_matmul(left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer type of A @ B (matrix multiplication).
+
+        Requires compatible dimensions: [M, K] @ [K, N] -> [M, N]
+        """
+        val resolved_left = self.resolve(left)
+        val resolved_right = self.resolve(right)
+
+        match (resolved_left.kind, resolved_right.kind):
+            case (Tensor(elem_l, dims_l, dev_l), Tensor(elem_r, dims_r, dev_r)):
+                # Unify element types
+                match self.unify(elem_l, elem_r):
+                    case Err(e): return Err(e)
+                    case _: pass
+
+                # Check dimensions for matmul compatibility
+                if dims_l.len() >= 2 and dims_r.len() >= 2:
+                    # Last dim of left must equal second-to-last of right
+                    val k_left = dims_l[dims_l.len() - 1]
+                    val k_right = dims_r[dims_r.len() - 2]
+                    self.dim_solver.add_equal(k_left, k_right, span)
+
+                    # Result shape: [..., M, N]
+                    var result_dims: [DimExpr] = []
+                    # Copy batch dimensions from left (all but last)
+                    for i in 0..(dims_l.len() - 1):
+                        result_dims = result_dims.push(dims_l[i])
+                    # Add last dim from right
+                    result_dims = result_dims.push(dims_r[dims_r.len() - 1])
+
+                    Ok(HirType(
+                        kind: HirTypeKind.Tensor(self.resolve(elem_l), result_dims, dev_l),
+                        span: span
+                    ))
+                else:
+                    Err(TypeInferError.Other("matrix multiplication requires at least 2D tensors", span))
+
+            case _:
+                Err(TypeInferError(message: "unsupported matmul types", span: span))
+
+    me infer_broadcast_op(left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer type of broadcast operations (.+, .-, .*, ./, .^).
+
+        Element-wise operations with broadcasting rules.
+        """
+        val resolved_left = self.resolve(left)
+        val resolved_right = self.resolve(right)
+
+        match (resolved_left.kind, resolved_right.kind):
+            case (Tensor(elem_l, dims_l, dev), Tensor(elem_r, dims_r, _)):
+                # Unify element types
+                match self.unify(elem_l, elem_r):
+                    case Err(e): return Err(e)
+                    case _: pass
+
+                # Compute broadcast result shape
+                val result_dims = self.broadcast_shapes(dims_l, dims_r, span)
+                Ok(HirType(
+                    kind: HirTypeKind.Tensor(self.resolve(elem_l), result_dims, dev),
+                    span: span
+                ))
+
+            case (Tensor(elem, dims, dev), _):
+                # Scalar broadcast
+                Ok(HirType(
+                    kind: HirTypeKind.Tensor(elem, dims, dev),
+                    span: span
+                ))
+
+            case (_, Tensor(elem, dims, dev)):
+                # Scalar broadcast
+                Ok(HirType(
+                    kind: HirTypeKind.Tensor(elem, dims, dev),
+                    span: span
+                ))
+
+            case _:
+                Err(TypeInferError(message: "unsupported broadcast op types", span: span))
+
+    fn broadcast_shapes(dims1: [DimExpr], dims2: [DimExpr], span: Span) -> [DimExpr]:
+        """Compute broadcast result shape.
+
+        Broadcasting rules (NumPy-style):
+        1. Align shapes from right
+        2. Each dimension must be either equal, or one of them is 1
+        3. Result dimension is the maximum
+        """
+        val len1 = dims1.len()
+        val len2 = dims2.len()
+        val max_len = if len1 > len2: len1 else: len2
+
+        var result: [DimExpr] = []
+        for i in 0..max_len:
+            val idx1 = len1 - max_len + i
+            val idx2 = len2 - max_len + i
+
+            if idx1 < 0:
+                result = result.push(dims2[idx2])
+            elif idx2 < 0:
+                result = result.push(dims1[idx1])
+            else:
+                val d1 = dims1[idx1]
+                val d2 = dims2[idx2]
+
+                # Check if dimensions are compatible for broadcasting
+                match (d1.kind, d2.kind):
+                    case (Literal(1), _):
+                        result = result.push(d2)
+                    case (_, Literal(1)):
+                        result = result.push(d1)
+                    case (Literal(v1), Literal(v2)):
+                        if v1 == v2:
+                            result = result.push(d1)
+                        else:
+                            # Add constraint that they must be equal
+                            self.dim_solver.add_equal(d1, d2, span)
+                            result = result.push(d1)
+                    case _:
+                        # Add constraint and use first
+                        self.dim_solver.add_equal(d1, d2, span)
+                        result = result.push(d1)
+
+        result
+
+    # =========================================================================
+    # Dimension Constraint Solving
+    # =========================================================================
+
+    me solve_dim_constraints() -> Result<(), [DimError]>:
+        """Solve all collected dimension constraints.
+
+        Should be called after type inference is complete.
+        Returns errors if dimension constraints cannot be satisfied.
+        """
+        self.dim_solver.solve()
+
+    me check_dim_constraints():
+        """Check dimension constraints and record any errors.
+
+        Two-phase checking:
+        1. Compile-time: Solve static constraints, report errors for mismatches
+        2. Runtime: Generate checks for dynamic constraints (before training)
+        """
+        # First, try to solve all constraints that can be verified statically
+        for c in self.dim_solver.constraints:
+            val timing = self.dim_solver.classify_constraint(c)
+            match timing:
+                case CompileTime | Both:
+                    # Try to solve at compile time
+                    match self.dim_solver.solve_constraint(c):
+                        case Err(err):
+                            self.errors = self.errors.push(TypeInferError.DimensionError(err))
+                        case _:
+                            pass
+
+                case Runtime:
+                    # Generate runtime check instead
+                    self.generate_runtime_check(c)
+
+    me generate_runtime_check(c: DimConstraint):
+        """Generate a runtime dimension check for dynamic constraints."""
+        match c:
+            case Equal(d1, d2, span):
+                val expr1 = d1.format()
+                val expr2 = d2.format()
+                self.runtime_checks.add_shape_check(expr1, expr2, span)
+
+            case GreaterEq(d, min, span):
+                val expr = d.format()
+                self.runtime_checks.add_dim_range_check(expr, min, 9223372036854775807, span)
+
+            case LessEq(d, max, span):
+                val expr = d.format()
+                self.runtime_checks.add_dim_range_check(expr, 0, max, span)
+
+            case InRange(d, lo, hi, span):
+                val expr = d.format()
+                self.runtime_checks.add_dim_range_check(expr, lo, hi, span)
+
+            case LayerCompatible(out, in_, span):
+                val out_str = format_shape(out)
+                val in_str = format_shape(in_)
+                self.runtime_checks.add_layer_compat_check(out_str, in_str, span)
+
+            case _:
+                pass
+
+    fn get_runtime_checks() -> [text]:
+        """Get generated runtime check code."""
+        self.runtime_checks.generate_all()
+
+    # =========================================================================
+    # Block, Statement, and Pattern Inference
+    # =========================================================================
+
+    me infer_block(block: HirBlock) -> Result<HirType, TypeInferError>:
+        """Infer type of a block."""
+        var result_ty = HirType(kind: HirTypeKind.Unit, span: block.span)
+
+        for stmt in block.statements:
+            match self.infer_stmt(stmt):
+                case Ok(ty):
+                    result_ty = ty
+                case Err(e):
+                    return Err(e)
+
+        Ok(result_ty)
+
+    me infer_stmt(stmt: HirStmt) -> Result<HirType, TypeInferError>:
+        """Infer type of a statement."""
+        match stmt.kind:
+            case Expr(expr):
+                self.infer_expr(expr)
+
+            case Let(symbol, type_, init):
+                self.enter_level()
+
+                # Use bidirectional checking: if there's a type annotation,
+                # use check mode to propagate types into lambdas
+                val has_annotation = type_.? and type_.unwrap().kind != HirTypeKind.Infer(0, 0)
+
+                val init_result = if has_annotation:
+                    val expected = type_.unwrap()
+                    # For lambdas, use check mode to propagate expected param types
+                    match init.kind:
+                        case Closure(_, _, _):
+                            match self.check_expr(init, expected):
+                                case Ok(_): Ok(expected)
+                                case Err(e): Err(e)
+                        case _:
+                            # For non-lambdas, synthesize then unify
+                            match self.infer_expr(init):
+                                case Ok(init_ty):
+                                    match self.unify(init_ty, expected):
+                                        case Ok(_): Ok(self.resolve(init_ty))
+                                        case Err(e): Err(e)
+                                case Err(e): Err(e)
+                else:
+                    # No type annotation, just synthesize
+                    self.infer_expr(init)
+
+                match init_result:
+                    case Ok(init_ty):
+                        self.exit_level()
+
+                        # Generalize the type for let-polymorphism
+                        val scheme = self.generalize(init_ty)
+                        val name = symbol.id.to_text()
+                        self.bind_poly(name, scheme)
+                        Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
+                    case Err(e):
+                        self.exit_level()
+                        Err(e)
+
+            case Assign(target, _, value):
+                match self.infer_expr(target):
+                    case Ok(target_ty):
+                        match self.infer_expr(value):
+                            case Ok(value_ty):
+                                match self.unify(target_ty, value_ty):
+                                    case Err(e): Err(e)
+                                    case _: Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
+                            case Err(e): Err(e)
+                    case Err(e): Err(e)
+
+            case Block(block):
+                self.infer_block(block)
+
+            case _:
+                Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
+
+    me infer_pattern(pattern: HirPattern, expected: HirType) -> Result<(), TypeInferError>:
+        """Infer types from pattern matching."""
+        match pattern.kind:
+            case Wildcard:
+                Ok(())
+            case Binding(symbol, _):
+                val name = symbol.id.to_text()
+                self.bind_mono(name, expected)
+                Ok(())
+            case Literal(expr):
+                match self.infer_expr(expr):
+                    case Ok(lit_ty):
+                        match self.unify(expected, lit_ty):
+                            case Err(e): Err(e)
+                            case _: Ok(())
+                    case Err(e): Err(e)
+            case Tuple(elements):
+                val resolved = self.resolve(expected)
+                match resolved.kind:
+                    case Tuple(elem_types) if elem_types.len() == elements.len():
+                        var i = 0
+                        while i < elements.len():
+                            match self.infer_pattern(elements[i], elem_types[i]):
+                                case Err(e): return Err(e)
+                                case _: pass
+                            i = i + 1
+                        Ok(())
+                    case _:
+                        Ok(())
+            case _:
+                Ok(())
+
+    # =========================================================================
+    # Module/Function Inference
+    # =========================================================================
+
+    me infer_function(fn_: HirFunction):
+        """Infer types for a function."""
+        self.enter_level()
+
+        # Bind parameters
+        for p in fn_.params:
+            self.bind_mono(p.name, p.type_)
+
+        # Infer body
+        match self.infer_block(fn_.body):
+            case Ok(body_ty):
+                # Check return type
+                if fn_.return_type.kind != HirTypeKind.Infer(0, 0):
+                    match self.unify(body_ty, fn_.return_type):
+                        case Err(e): self.error(e)
+                        case _: pass
+            case Err(e):
+                self.error(e)
+
+        self.exit_level()
+
+        # Generalize function type
+        var param_types: [HirType] = []
+        for p in fn_.params:
+            param_types = param_types.push(self.resolve(p.type_))
+        val fn_ty = HirType(
+            kind: HirTypeKind.Function(param_types, self.resolve(fn_.return_type), fn_.effects),
+            span: fn_.span
+        )
+        val scheme = self.generalize_all(fn_ty)
+        self.bind_poly(fn_.name, scheme)
+
+    me infer_module(module: HirModule):
+        """Infer types for all functions in a module."""
+        for fn_ in module.functions.values():
+            val symbol = module.symbols.get(fn_.symbol)
+            if symbol.?:
+                self.infer_function(fn_)
+
+        # After all type inference, solve dimension constraints
+        self.check_dim_constraints()
+

@@ -27,6 +27,7 @@ A comprehensive reference for Simple's syntax features. All features listed here
 - [Ranges](#ranges)
 - [Resource Cleanup](#resource-cleanup)
 - [Traits](#traits)
+- [Visibility & Friend Access](#visibility--friend-access)
 
 ---
 
@@ -1040,6 +1041,51 @@ trait Resource:
     fn is_open() -> bool
     fn resource_name() -> text
 ```
+
+---
+
+## Visibility & Friend Access
+
+Control symbol visibility across packages and layers.
+
+### Visibility Modifiers
+
+```simple
+# Public — visible everywhere (default for exported symbols)
+pub fn public_api() -> text: "hello"
+
+# Friend-visible — accessible by declared friend packages only
+pub(friend) fn internal_helper() -> text: "internal"
+
+# Package-visible — accessible within the same package only
+pub(package) fn package_util() -> text: "package"
+
+# Private — accessible within the same file only (default)
+fn private_impl() -> text: "private"
+```
+
+### Friend Declarations (in `__init__.spl`)
+
+```simple
+# Declare which packages can access internal symbols
+friend types
+friend traits
+friend mir
+
+# Export symbols publicly
+export HirModule, HirExpr, HirStmt
+
+# Export symbols to friends only
+internal_export HirLowering, HirBuilder
+```
+
+### Semantics
+
+- **Non-transitive:** A's friend seeing B's friend's internals is NOT allowed
+- **Unidirectional:** `friend X` means X can see our internals, not vice versa
+- **Non-inherited:** Friend status does not extend to subpackages
+
+See [Friend Access Control](../design/friend_access_control.md) and [Layered Compiler Architecture](../design/layered_compiler_architecture.md).
 
 ---
 

@@ -1,0 +1,128 @@
+# TreeSitter - Tree-sitter Integration for Simple
+#
+# Provides fast outline parsing using tree-sitter.
+# Used for:
+# - Quick module structure extraction (no full parsing)
+# - IDE features (outline view, quick navigation)
+# - Multi-phase compilation (outline -> detailed parse)
+#
+# Outline type definitions are in treesitter_types.spl
+#
+# ============================================================================
+# FACADE MODULE
+# ============================================================================
+#
+# This module has been refactored into focused submodules:
+#
+# - treesitter/outline.spl   - Tree-sitter outline generation (semantic parsing)
+# - treesitter/heuristic.spl - Fallback heuristic parsing (error-tolerant)
+#
+# This file now serves as a facade that re-exports all functionality.
+# The refactoring maintains clean separation between:
+#   1. Token-based tree-sitter parsing (outline.spl)
+#   2. Line-based heuristic fallback (heuristic.spl)
+#
+# ============================================================================
+
+use compiler.core.lexer.*
+use treesitter_types.*
+use compiler.blocks.modes.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo}
+use compiler.blocks.registry.{BlockRegistry, block_registry}
+
+# Import submodules from treesitter/ directory
+use compiler.treesitter.outline.{TreeSitter, TopLevelItem}
+use compiler.treesitter.heuristic.{HeuristicOutlineKind, HeuristicOutlineItem, HeuristicParseResult}
+
+# ============================================================================
+# Main Entry Point (TreeSitter extension)
+# ============================================================================
+
+
+# ============================================================================
+# TreeSitter Methods (was: impl TreeSitter:)
+# ============================================================================
+
+fn treesitter_parse_outline(self: TreeSitter) -> OutlineModule:
+        """Parse source into an outline module.
+
+        This is the main entry point that dispatches to either:
+        - Heuristic mode (line-based, error-tolerant)
+        - Token-based mode (tree-sitter, accurate)
+        """
+
+        # Branch based on mode
+        if self.heuristic_mode:
+            return self.parse_outline_heuristic()
+
+        # Token-based parsing (default)
+        var module = OutlineModule(
+            name: "",
+            imports: [],
+            exports: [],
+            functions: [],
+            classes: [],
+            structs: [],
+            enums: [],
+            bitfields: [],
+            traits: [],
+            impls: [],
+            type_aliases: [],
+            constants: [],
+            static_asserts: [],
+            inline_blocks: [],
+            errors: []
+        )
+
+        while not self.is_at_end():
+            self.skip_newlines()
+            if self.is_at_end():
+                break
+
+            val item = self.parse_top_level_item()
+            match item:
+                case toplevelitem_Import(i):
+                    module.imports = module.imports_push(imports, i)
+                case toplevelitem_Export(e):
+                    module.exports = module.exports_push(exports, e)
+                case toplevelitem_Function(f):
+                    module.functions = module.functions_push(functions, f)
+                case toplevelitem_Class(c):
+                    module.classes = module.classes_push(classes, c)
+                case toplevelitem_Struct(s):
+                    module.structs = module.structs_push(structs, s)
+                case toplevelitem_Enum(e):
+                    module.enums = module.enums_push(enums, e)
+                case toplevelitem_Bitfield(b):
+                    module.bitfields = module.bitfields_push(bitfields, b)
+                case toplevelitem_Trait(t):
+                    module.traits = module.traits_push(traits, t)
+                case toplevelitem_Impl(i):
+                    module.impls = module.impls_push(impls, i)
+                case toplevelitem_TypeAlias(t):
+                    module.type_aliases = module.type_aliases_push(type_aliases, t)
+                case toplevelitem_Const(c):
+                    module.constants = module.constants_push(constants, c)
+                case toplevelitem_StaticAssert(a):
+                    module.static_asserts = module.static_asserts_push(static_asserts, a)
+                case toplevelitem_Error(e):
+                    module.errors = module.errors_push(errors, e)
+                case _:
+                    pass
+        module.inline_blocks = self.inline_blocks
+        module.errors = self.errors
+        module
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export OutlineModule, ImportOutline, ExportOutline, BlockOutline
+export FunctionOutline, ParamOutline, ClassOutline, StructOutline, FieldOutline
+export EnumOutline, VariantOutline, VariantPayload
+export BitfieldOutline, BitfieldFieldOutline
+export TraitOutline, ImplOutline, TypeAliasOutline, ConstOutline, StaticAssertOutline
+export TypeParamOutline, TypeOutline, TypeOutlineKind
+export ParseError, ErrorSeverity
+export TreeSitter
+export HeuristicOutlineKind, HeuristicOutlineItem, HeuristicParseResult

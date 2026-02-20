@@ -44,6 +44,19 @@ Package verified working:
 - ✅ Version check passes
 - ✅ All source files included
 
+## C Backend Bootstrap
+
+For building from generated C++20 source (alternative to binary distribution):
+
+```bash
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+```
+
+See `doc/guide/bootstrap.md` for the full bootstrap guide.
+
 ## Notes
 
 - This is a **pure binary distribution** - no compilation needed

@@ -1,0 +1,422 @@
+# Dimension Constraints Types - Constraint and Error Definitions
+#
+# This module contains dimension constraint type definitions:
+# - DimConstraint: Dimension equality/inequality constraints
+# - DimError: Dimension checking error types with detailed diagnostics
+# - DimNote: Additional context for dimension errors
+#
+# The constraint solver implementation is in dim_constraints.spl
+
+use compiler.hir.{DimExpr, DimExprKind, HirType}
+use compiler.core.lexer.Span
+
+enum DimConstraint:
+    # Two dimensions must be equal
+    Equal(d1: DimExpr, d2: DimExpr, span: Span)
+
+    # Dimension must be >= a minimum value
+    GreaterEq(d: DimExpr, min: i64, span: Span)
+
+    # Dimension must be <= a maximum value
+    LessEq(d: DimExpr, max: i64, span: Span)
+
+    # Dimension must be in a range [lo, hi]
+    InRange(d: DimExpr, lo: i64, hi: i64, span: Span)
+
+    # Product of dimensions must equal a value
+    ProductEquals(dims: [DimExpr], value: i64, span: Span)
+
+    # Layer output must match next layer's input (for ~>)
+    LayerCompatible(out: [DimExpr], in_: [DimExpr], span: Span)
+
+    # VHDL-specific constraints
+    # Two signal widths must match for assignment/connection
+    WidthMatch(signal1: DimExpr, signal2: DimExpr, operation: text, span: Span)
+    # Arithmetic result width must be safe (no overflow)
+    WidthSafe(operands: [DimExpr], operator: text, result_width: DimExpr, span: Span)
+    # Loop must have a statically bounded iteration count
+    BoundedLoop(bound: DimExpr, max_allowed: i64, span: Span)
+    # Slice range hi >= lo (valid range)
+    ValidRange(hi: DimExpr, lo: DimExpr, span: Span)
+
+impl DimConstraint:
+    fn span() -> Span:
+        match self:
+            case Equal(_, _, s): s
+            case GreaterEq(_, _, s): s
+            case LessEq(_, _, s): s
+            case InRange(_, _, _, s): s
+            case ProductEquals(_, _, s): s
+            case LayerCompatible(_, _, s): s
+            case WidthMatch(_, _, _, s): s
+            case WidthSafe(_, _, _, s): s
+            case BoundedLoop(_, _, s): s
+            case ValidRange(_, _, s): s
+
+# ============================================================================
+# Dimension Errors
+# ============================================================================
+
+struct DimError:
+    """Error from dimension constraint solving.
+
+    Provides detailed, actionable error messages for dimension mismatches.
+    Includes context about what was expected, what was found, and how to fix it.
+    """
+    message: text
+    kind: DimErrorKind
+    span: Span
+    notes: [DimNote]
+    help: text?
+    error_code: text
+
+struct DimNote:
+    """Additional context for dimension errors."""
+    message: text
+    span: Span?
+    kind: DimNoteKind
+
+"""Kind of note."""
+enum DimNoteKind:
+    Info        # General information
+    Expected    # What was expected
+    Found       # What was actually found
+    Suggestion  # Suggested fix
+    Context     # Additional context
+
+"""Kind of dimension error."""
+enum DimErrorKind:
+    Mismatch             # Two dimensions don't match
+    OutOfRange           # Dimension is outside allowed range
+    Unsatisfiable        # Constraint cannot be satisfied
+    UnresolvedVariable   # Dimension variable couldn't be resolved
+    ShapeMismatch        # Shapes have different lengths
+    LayerIncompatible    # Layer dimensions don't connect
+    BroadcastIncompat    # Shapes cannot be broadcast together
+    MatMulIncompat       # Matrix dimensions incompatible for @
+    RankMismatch         # Tensor ranks don't match
+    BatchMismatch        # Batch dimensions don't align
+    ChannelMismatch      # Channel dimensions don't match (CNN)
+    SequenceMismatch     # Sequence length mismatch (RNN/Transformer)
+    # VHDL-specific error kinds
+    WidthMismatch        # Signal widths don't match for assignment
+    WidthOverflow        # Arithmetic result exceeds available width
+    UnboundedLoop        # Loop lacks static upper bound
+    InvalidRange         # Slice range hi < lo
+
+impl DimError:
+    static fn mismatch(d1: DimExpr, d2: DimExpr, span: Span) -> DimError:
+        val v1 = d1.format()
+        val v2 = d2.format()
+        DimError(
+            message: "dimension mismatch: expected {v1}, found {v2}",
+            kind: DimErrorKind.Mismatch,
+            span: span,
+            notes: [
+                DimNote(message: "expected dimension: {v1}", span: Some(span), kind: DimNoteKind.Expected),
+                DimNote(message: "found dimension: {v2}", span: nil, kind: DimNoteKind.Found)
+            ],
+            help: Some("ensure both dimensions have the same value"),
+            error_code: "E0501"
+        )
+
+    static fn layer_incompatible(out_shape: [DimExpr], in_shape: [DimExpr], span: Span) -> DimError:
+        val out_str = format_shape(out_shape)
+        val in_str = format_shape(in_shape)
+
+        # Find first mismatching dimension for detailed error
+        var mismatch_idx = -1
+        var mismatch_out = ""
+        var mismatch_in = ""
+        val min_len = if out_shape.len() < in_shape.len(): out_shape.len() else: in_shape.len()
+        for i in 0..min_len:
+            val o = out_shape[i].format()
+            val n = in_shape[i].format()
+            if o != n:
+                mismatch_idx = i
+                mismatch_out = o
+                mismatch_in = n
+                break
+
+        var notes: [DimNote] = [
+            DimNote(
+                message: "previous layer outputs shape: {out_str}",
+                span: nil,
+                kind: DimNoteKind.Found
+            ),
+            DimNote(
+                message: "next layer expects input shape: {in_str}",
+                span: nil,
+                kind: DimNoteKind.Expected
+            )
+        ]
+
+        if mismatch_idx >= 0:
+            notes = notes.push(DimNote(
+                message: "dimension {mismatch_idx} differs: {mismatch_out} vs {mismatch_in}",
+                span: nil,
+                kind: DimNoteKind.Info
+            ))
+
+        # Generate helpful suggestion
+        var help_msg = "add a layer to transform dimensions"
+        if out_shape.len() >= 2 and in_shape.len() >= 2:
+            val out_feat = out_shape[out_shape.len() - 1].format()
+            val in_feat = in_shape[in_shape.len() - 1].format()
+            help_msg = "insert Linear({out_feat}, {in_feat}) between these layers"
+
+        DimError(
+            message: "layer dimension mismatch in ~> pipeline",
+            kind: DimErrorKind.LayerIncompatible,
+            span: span,
+            notes: notes,
+            help: Some(help_msg),
+            error_code: "E0502"
+        )
+
+    static fn shape_rank_mismatch(rank1: i64, rank2: i64, span: Span) -> DimError:
+        DimError(
+            message: "tensor rank mismatch: {rank1}D vs {rank2}D",
+            kind: DimErrorKind.RankMismatch,
+            span: span,
+            notes: [
+                DimNote(message: "first tensor has {rank1} dimensions", span: nil, kind: DimNoteKind.Found),
+                DimNote(message: "second tensor has {rank2} dimensions", span: nil, kind: DimNoteKind.Found)
+            ],
+            help: Some("use reshape() or unsqueeze() to match tensor ranks"),
+            error_code: "E0503"
+        )
+
+    static fn matmul_incompatible(left_shape: [DimExpr], right_shape: [DimExpr], span: Span) -> DimError:
+        val left_str = format_shape(left_shape)
+        val right_str = format_shape(right_shape)
+
+        var k_left = "?"
+        var k_right = "?"
+        if left_shape.len() >= 1:
+            k_left = left_shape[left_shape.len() - 1].format()
+        if right_shape.len() >= 2:
+            k_right = right_shape[right_shape.len() - 2].format()
+
+        DimError(
+            message: "matrix multiplication dimension mismatch",
+            kind: DimErrorKind.MatMulIncompat,
+            span: span,
+            notes: [
+                DimNote(message: "left operand shape: {left_str}", span: nil, kind: DimNoteKind.Found),
+                DimNote(message: "right operand shape: {right_str}", span: nil, kind: DimNoteKind.Found),
+                DimNote(message: "for A @ B: A's last dim ({k_left}) must equal B's second-to-last dim ({k_right})", span: nil, kind: DimNoteKind.Info)
+            ],
+            help: Some("for [M, K] @ [K, N] -> [M, N], ensure K dimensions match"),
+            error_code: "E0504"
+        )
+
+    static fn broadcast_incompatible(shape1: [DimExpr], shape2: [DimExpr], dim_idx: i64, d1: DimExpr, d2: DimExpr, span: Span) -> DimError:
+        val s1 = format_shape(shape1)
+        val s2 = format_shape(shape2)
+        val v1 = d1.format()
+        val v2 = d2.format()
+
+        DimError(
+            message: "shapes cannot be broadcast together",
+            kind: DimErrorKind.BroadcastIncompat,
+            span: span,
+            notes: [
+                DimNote(message: "shape 1: {s1}", span: nil, kind: DimNoteKind.Found),
+                DimNote(message: "shape 2: {s2}", span: nil, kind: DimNoteKind.Found),
+                DimNote(message: "dimension {dim_idx} incompatible: {v1} vs {v2}", span: nil, kind: DimNoteKind.Info),
+                DimNote(message: "broadcasting requires dimensions to be equal or one of them to be 1", span: nil, kind: DimNoteKind.Info)
+            ],
+            help: Some("use expand() or unsqueeze() to make shapes broadcastable"),
+            error_code: "E0505"
+        )
+
+    static fn batch_mismatch(batch1: DimExpr, batch2: DimExpr, span: Span) -> DimError:
+        val b1 = batch1.format()
+        val b2 = batch2.format()
+
+        DimError(
+            message: "batch dimension mismatch: {b1} vs {b2}",
+            kind: DimErrorKind.BatchMismatch,
+            span: span,
+            notes: [
+                DimNote(message: "first tensor batch size: {b1}", span: nil, kind: DimNoteKind.Found),
+                DimNote(message: "second tensor batch size: {b2}", span: nil, kind: DimNoteKind.Found),
+                DimNote(message: "batch dimensions (dim 0) must match for element-wise operations", span: nil, kind: DimNoteKind.Info)
+            ],
+            help: Some("ensure all tensors in the operation have the same batch size"),
+            error_code: "E0506"
+        )
+
+    static fn channel_mismatch(expected: DimExpr, found: DimExpr, layer_name: text, span: Span) -> DimError:
+        val exp = expected.format()
+        val fnd = found.format()
+
+        DimError(
+            message: "channel dimension mismatch in {layer_name}",
+            kind: DimErrorKind.ChannelMismatch,
+            span: span,
+            notes: [
+                DimNote(message: "{layer_name} expects {exp} input channels", span: nil, kind: DimNoteKind.Expected),
+                DimNote(message: "input tensor has {fnd} channels", span: nil, kind: DimNoteKind.Found)
+            ],
+            help: Some("check in_channels parameter of {layer_name} matches previous layer's out_channels"),
+            error_code: "E0507"
+        )
+
+    static fn sequence_mismatch(seq1: DimExpr, seq2: DimExpr, span: Span) -> DimError:
+        val s1 = seq1.format()
+        val s2 = seq2.format()
+
+        DimError(
+            message: "sequence length mismatch: {s1} vs {s2}",
+            kind: DimErrorKind.SequenceMismatch,
+            span: span,
+            notes: [
+                DimNote(message: "expected sequence length: {s1}", span: nil, kind: DimNoteKind.Expected),
+                DimNote(message: "found sequence length: {s2}", span: nil, kind: DimNoteKind.Found)
+            ],
+            help: Some("use padding or truncation to match sequence lengths"),
+            error_code: "E0508"
+        )
+
+    static fn out_of_range(dim: DimExpr, value: i64, lo: i64, hi: i64, span: Span) -> DimError:
+        val d = dim.format()
+
+        DimError(
+            message: "dimension {d} = {value} is outside valid range [{lo}, {hi}]",
+            kind: DimErrorKind.OutOfRange,
+            span: span,
+            notes: [
+                DimNote(message: "dimension value: {value}", span: nil, kind: DimNoteKind.Found),
+                DimNote(message: "valid range: [{lo}, {hi}]", span: nil, kind: DimNoteKind.Expected)
+            ],
+            help: Some("ensure dimension is within the specified range"),
+            error_code: "E0509"
+        )
+
+    static fn unresolved_variable(var_id: i64, span: Span) -> DimError:
+        DimError(
+            message: "could not infer dimension ?{var_id}",
+            kind: DimErrorKind.UnresolvedVariable,
+            span: span,
+            notes: [
+                DimNote(message: "dimension variable ?{var_id} has no concrete value", span: nil, kind: DimNoteKind.Info)
+            ],
+            help: Some("add explicit type annotation to specify the dimension"),
+            error_code: "E0510"
+        )
+
+    fn with_note(note: text) -> DimError:
+        DimError(
+            message: self.message,
+            kind: self.kind,
+            span: self.span,
+            notes: self.notes.push(DimNote(message: note, span: nil, kind: DimNoteKind.Info)),
+            help: self.help,
+            error_code: self.error_code
+        )
+
+    fn with_context(ctx: text, ctx_span: Span) -> DimError:
+        DimError(
+            message: self.message,
+            kind: self.kind,
+            span: self.span,
+            notes: self.notes.push(DimNote(message: ctx, span: Some(ctx_span), kind: DimNoteKind.Context)),
+            help: self.help,
+            error_code: self.error_code
+        )
+
+    fn with_suggestion(suggestion: text) -> DimError:
+        DimError(
+            message: self.message,
+            kind: self.kind,
+            span: self.span,
+            notes: self.notes.push(DimNote(message: suggestion, span: nil, kind: DimNoteKind.Suggestion)),
+            help: self.help,
+            error_code: self.error_code
+        )
+
+    fn with_help(help_text: text) -> DimError:
+        DimError(
+            message: self.message,
+            kind: self.kind,
+            span: self.span,
+            notes: self.notes,
+            help: Some(help_text),
+            error_code: self.error_code
+        )
+
+    fn format() -> text:
+        """Format error for display with full context.
+
+        Example output:
+        ```
+        error[E0502]: layer dimension mismatch in ~> pipeline
+          --> model.spl:15:23
+           |
+           = found: previous layer outputs shape: [batch, 256]
+           = expected: next layer expects input shape: [batch, 128]
+           = note: dimension 1 differs: 256 vs 128
+           = help: insert Linear(256, 128) between these layers
+        ```
+        """
+        var output = "error[{self.error_code}]: {self.message}\n"
+        output = output + "  --> line {self.span.line}:{self.span.col}\n"
+        output = output + "   |\n"
+
+        for note in self.notes:
+            val prefix = match note.kind:
+                case Expected: "expected"
+                case Found: "found"
+                case Suggestion: "suggestion"
+                case Info: "note"
+                case Context: "context"
+
+            if note.span.?:
+                val note_span = note.span.unwrap()
+                output = output + "   = {prefix} (line {note_span.line}): {note.message}\n"
+            else:
+                output = output + "   = {prefix}: {note.message}\n"
+
+        if self.help.?:
+            output = output + "   = help: {self.help.unwrap()}\n"
+
+        output
+
+    fn format_short() -> text:
+        """Format error as single line for quick display."""
+        "error[{self.error_code}]: {self.message} (line {self.span.line})"
+
+    fn format_json() -> text:
+        """Format error as JSON for tooling integration."""
+        var notes_json = "["
+        var first = true
+        for note in self.notes:
+            if not first:
+                notes_json = notes_json + ", "
+            first = false
+            val kind_str = match note.kind:
+                case Expected: "expected"
+                case Found: "found"
+                case Suggestion: "suggestion"
+                case Info: "info"
+                case Context: "context"
+            notes_json = notes_json + "{\"kind\": \"{kind_str}\", \"message\": \"{note.message}\"}"
+        notes_json = notes_json + "]"
+
+        val help_json = if self.help.?: "\"{self.help.unwrap()}\"" else: "null"
+
+        "{\"error_code\": \"{self.error_code}\", \"message\": \"{self.message}\", \"line\": {self.span.line}, \"col\": {self.span.col}, \"notes\": {notes_json}, \"help\": {help_json}}"
+
+# ============================================================================
+# Dimension Solver
+# ============================================================================
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export DimConstraint
+export DimError, DimNote, DimNoteKind, DimErrorKind

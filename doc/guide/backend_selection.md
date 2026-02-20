@@ -1,6 +1,6 @@
 # Backend Selection Guide
 
-The Simple compiler supports multiple backends (Cranelift and LLVM) with flexible selection via configuration.
+The Simple compiler supports multiple backends (Cranelift, LLVM, C++20, Native, VHDL) with flexible selection via configuration.
 
 ## Quick Start
 
@@ -15,6 +15,17 @@ bin/simple compile --backend=cranelift program.spl
 
 # Force LLVM backend
 bin/simple compile --backend=llvm program.spl
+
+# Generate C++20 source via MIR backend (single file)
+bin/simple compile --backend=c -o program.cpp program.spl
+
+# Then build with a C++ compiler:
+clang++ -std=c++20 -O2 program.cpp src/compiler_seed/runtime.c -I src/compiler_seed -o program
+
+# Or generate to directory and build with CMake + Ninja:
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
 
 # Cranelift with release optimizations
 bin/simple compile --backend=cranelift --release program.spl
@@ -42,7 +53,9 @@ val options = CompileOptions(
 Supported values:
 - `"cranelift"` or `"clif"` → Cranelift JIT
 - `"llvm"` → LLVM backend
-- `"native"` or `"c"` → Native C backend
+- `"native"` → Direct machine code generation
+- `"c"`, `"cpp"`, or `"ccodegen"` → C++20 source generation (MIR-based)
+- `"vhdl"` → VHDL hardware description output
 - `"interpreter"` or `"i"` → Tree-walk interpreter
 - `"auto"` → Auto-select (see below)
 
@@ -96,6 +109,47 @@ When `backend = "auto"` (default), selection is based on build mode:
 - Performance-critical code
 - Benchmarking
 - Shipping to users
+
+### C++20 (MIR-based)
+
+**Pros:**
+- ✅ **Portable output** - C++20 compiles anywhere with clang++/g++
+- ✅ **Bootstrap** - no LLVM/Cranelift needed, just a C++ compiler
+- ✅ Readable output for debugging compiler internals
+- ✅ Cross-compilation via C++ toolchain
+
+**Cons:**
+- ❌ Two-step process (generate C++ then compile it)
+- ❌ No JIT support
+- ❌ Optimization depends on the C++ compiler
+
+**Best for:**
+- Bootstrapping the compiler from scratch
+- Cross-compilation to new targets
+- Inspecting generated code
+- Environments without LLVM/Cranelift
+
+**Pipeline:** `source.spl → parse → HIR → MIR → MirToC → output.cpp`
+
+**Usage:**
+```bash
+# Single-file output:
+bin/simple compile --backend=c -o output.cpp source.spl
+clang++ -std=c++20 -O2 output.cpp src/compiler_seed/runtime.c -I src/compiler_seed -o output
+
+# Multi-file output (bootstrap):
+bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+ninja -C build
+mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+```
+
+**Key files:**
+- `src/compiler/backend/c_backend.spl` — MirToC translator + CCodegenBackend
+- `src/compiler/backend/c_type_mapper.spl` — MIR type → C++ type mapping
+- `src/compiler/backend/c_ir_builder.spl` — C++ source builder
+- `src/compiler_cpp/CMakeLists.txt` — CMake build config for generated C++
+- `src/app/compile/c_mir_backend.spl` — CLI entry script
 
 ## Programmatic Usage
 
@@ -204,20 +258,29 @@ bin/simple compile --backend=llvm --release program.spl
 
 ## Implementation Details
 
-**File:** `src/compiler_core_legacy/backend/backend_factory.spl`
+**Backend Factory:** `src/compiler/backend/backend_factory.spl`
+**Backend Helpers:** `src/compiler/backend/backend_helpers.spl`
+**Driver:** `src/compiler/driver.spl`
+
+The driver's `aot_compile()` method checks the backend name before format dispatch:
+- If backend is `"c"`, `"cpp"`, or `"ccodegen"` → routes to `compile_to_c()` (writes C++ source)
+- Otherwise → routes to `compile_to_native()` (links object files to executable)
 
 ```simple
-# Backend selection logic
-fn create(target: CodegenTarget, options: CompileOptions) -> Backend:
-    # 1. Check explicit override
-    val backend_kind = backendkind_from_text(options.backend)
-    if backend_kind != nil:
-        return create_specific(backend_kind, target, options)
+# In CompilerDriver.aot_compile():
+val backend_name = self.ctx.options.backend
+if backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
+    return self.compile_to_c(output)
+# ... otherwise dispatch based on output format (native, smf, etc.)
+```
 
-    # 2. Auto-select based on build mode
-    val mode = if options.release: BuildMode.Release else: BuildMode.Debug
-    val auto_kind = auto_select(target, mode)
-    return create_specific(auto_kind, target, options)
+`compile_module_with_backend()` in `backend_helpers.spl` handles the actual MIR translation:
+
+```simple
+case BackendKind.CCodegen:
+    var c_translator = MirToC__create(module.name)
+    val c_source = c_translator.translate_module(module)
+    Ok(CompiledModule(name: module.name, object_code: nil, assembly: c_source, ...))
 ```
 
 ## Future Enhancements
@@ -232,5 +295,9 @@ fn create(target: CodegenTarget, options: CompileOptions) -> Backend:
 
 - `doc/guide/jit_compilation.md` - JIT compilation guide
 - `doc/guide/optimization_levels.md` - Optimization flags
-- `src/compiler_core_legacy/backend/backend_factory.spl` - Implementation
-- `src/compiler_core_legacy/backend_types.spl` - Backend types
+- `doc/design/core_full_unified_architecture.md` - Unified compiler architecture
+- `src/compiler/backend/backend_factory.spl` - Backend factory implementation
+- `src/compiler/backend/backend_types.spl` - Backend type definitions
+- `src/compiler/backend/backend_helpers.spl` - Backend selection and compilation helpers
+- `src/compiler/backend/c_backend.spl` - MIR-to-C++20 translator
+- `src/compiler/driver.spl` - Compiler driver (compile_to_c, aot_compile)

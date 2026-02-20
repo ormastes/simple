@@ -1,0 +1,171 @@
+# Unified Backend API
+#
+# Provides a unified interface to all compiler backends.
+# Uses the Codegen trait for dispatch - no more match self.kind.
+#
+# Refactored: Split into submodules for modularity:
+# - backend_types.spl: All enum/struct type definitions
+# - backend_helpers.spl: Helper functions (selection, listing)
+# - codegen_factory.spl: Creates Codegen implementations
+#
+# Supported backends:
+# - Cranelift: Default backend for 64-bit targets
+# - LLVM: 32-bit support, advanced optimizations
+# - Native: Direct machine code generation
+# - WASM: WebAssembly for browser deployment
+# - C: C++20 source generation
+# - Lean: Verification export for formal proofs
+# - CUDA/Vulkan: GPU compute
+# - VHDL: Hardware description
+# - Interpreter: Debug tree-walking
+#
+# Usage:
+#   val backend = Backend.for_target(CodegenTarget.X86_64)
+#   val result = backend.compile(mir_module)
+
+use compiler.mir_data.*
+use compiler.core.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, CompileOptions, CompiledModule, CompiledSymbol, CompiledSymbolKind, CompileError, compileoptions_default_options, compileerror_target_unsupported}
+use compiler.backend.backend_helpers.{format_mir_module, select_backend, select_backend_with_mode, available_backends, gpu_backends, backend_for_name, compile_module_with_backend, get_effective_backend_name}
+use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
+use compiler.backend.codegen_factory.{CodegenFactory}
+
+# ============================================================================
+# Backend Interface
+# ============================================================================
+
+class Backend:
+    """Unified backend interface.
+
+    Dispatches compilation to a Codegen trait object. The Backend class
+    is a thin wrapper that provides convenience constructors and backward
+    compatibility with the old API.
+    """
+    codegen: Codegen
+    options: CompileOptions
+
+    static fn for_target(target: CodegenTarget) -> Backend:
+        """
+        Create backend for target with automatic backend selection (legacy API).
+
+        For new code, prefer for_target_and_mode() which considers build mode.
+        This method assumes Debug mode for backwards compatibility.
+        """
+        val kind = select_backend(target, nil)
+        val opts = compileoptions_default_options().with_target(target)
+        Backend(
+            codegen: CodegenFactory.create(kind, opts),
+            options: opts
+        )
+
+    static fn for_target_and_mode(target: CodegenTarget, mode: BuildMode) -> Backend:
+        """
+        Create backend for target and build mode with automatic backend selection.
+
+        This is the recommended way to create backends, as it considers both
+        the target architecture and build mode for optimal backend selection.
+
+        Examples:
+            backend_for_target_and_mode(X86_64, Debug)     # -> Cranelift
+            backend_for_target_and_mode(X86_64, Release)   # -> LLVM
+            backend_for_target_and_mode(X86_64, Test)      # -> Interpreter
+            backend_for_target_and_mode(X86, Release)      # -> LLVM (32-bit)
+        """
+        val kind = select_backend_with_mode(target, mode, nil)
+        val opts = compileoptions_default_options().with_target(target).with_optimization(mode_default_optimization(mode))
+
+        Backend(
+            codegen: CodegenFactory.create(kind, opts),
+            options: opts
+        )
+
+    static fn for_target_mode_and_backend(
+        target: CodegenTarget,
+        mode: BuildMode,
+        backend: BackendKind
+    ):
+        """
+        Create backend with explicit backend selection.
+
+        Validates that the backend supports the target. Use this when the user
+        explicitly specifies a backend via --backend flag.
+        """
+        val opts = compileoptions_default_options().with_target(target).with_optimization(mode_default_optimization(mode))
+        val cg = CodegenFactory.create(backend, opts)
+        if not cg.supports_target(target):
+            return Err(compileerror_target_unsupported(backend, target))
+
+        Ok(Backend(codegen: cg, options: opts))
+
+    static fn create(kind: BackendKind, options: CompileOptions):
+        """Create backend with explicit backend kind."""
+        val cg = CodegenFactory.create(kind, options)
+        if not cg.supports_target(options.target):
+            return Err(compileerror_target_unsupported(kind, options.target))
+
+        Ok(Backend(codegen: cg, options: options))
+
+    static fn cranelift() -> Backend:
+        """Create Cranelift backend with default options."""
+        val opts = compileoptions_default_options()
+        Backend(codegen: CodegenFactory.create(BackendKind.Cranelift, opts), options: opts)
+
+    static fn llvm() -> Backend:
+        """Create LLVM backend with default options."""
+        val opts = compileoptions_default_options()
+        Backend(codegen: CodegenFactory.create(BackendKind.Llvm, opts), options: opts)
+
+    static fn wasm() -> Backend:
+        """Create WASM backend."""
+        val opts = compileoptions_default_options().with_target(CodegenTarget.Wasm32)
+        Backend(codegen: CodegenFactory.create(BackendKind.Wasm, opts), options: opts)
+
+    static fn native() -> Backend:
+        """Create Native backend (direct machine code, no external tools)."""
+        val opts = compileoptions_default_options()
+        Backend(codegen: CodegenFactory.create(BackendKind.Native, opts), options: opts)
+
+    static fn lean() -> Backend:
+        """Create Lean verification backend."""
+        val opts = compileoptions_default_options()
+        Backend(codegen: CodegenFactory.create(BackendKind.Lean, opts), options: opts)
+
+    static fn c() -> Backend:
+        """Create C/C++ code generation backend."""
+        val opts = compileoptions_default_options()
+        Backend(codegen: CodegenFactory.create(BackendKind.CCodegen, opts), options: opts)
+
+    fn kind() -> BackendKind:
+        """Get the backend kind (delegated to Codegen trait)."""
+        self.codegen.backend_kind()
+
+    fn compile(module: MirModule):
+        """Compile a MIR module using the Codegen trait."""
+        val result = self.codegen.compile_module(module)
+        match result:
+            case Ok(output):
+                Ok(output.to_compiled_module())
+            case Err(e):
+                Err(e)
+
+# ============================================================================
+# Exports - includes re-exports from submodules for backward compatibility
+# ============================================================================
+
+# Re-export from backend_types.spl
+export BackendKind, CodegenTarget, OptimizationLevel, BuildMode
+export CompileOptions, CompiledModule, CompiledSymbol, CompiledSymbolKind
+export CompileError
+
+# Re-export from backend_helpers.spl
+export format_mir_module, select_backend, select_backend_with_mode
+export available_backends, gpu_backends, backend_for_name
+export compile_module_with_backend, get_effective_backend_name
+
+# Re-export from codegen
+export Codegen, CodegenOutput, CodegenOutputKind
+
+# Re-export factory
+export CodegenFactory
+
+# This module's exports
+export Backend

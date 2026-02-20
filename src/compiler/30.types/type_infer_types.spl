@@ -1,0 +1,237 @@
+# Type Inference Types - Core Type System Definitions
+#
+# This module contains the core type system for Hindley-Milner type inference:
+# - TypeScheme: Polymorphic type schemes with quantified variables
+# - Substitution: Type variable substitutions for unification
+# - TypeInferError: Type inference error types
+#
+# The inference implementation is in type_infer.spl
+
+use compiler.hir.*
+use compiler.core.lexer.*
+
+use compiler.dim_constraints.*
+
+# ============================================================================
+# Typed Empty Dict Helpers (for bootstrap compiler inference)
+# ============================================================================
+
+fn empty_subst_map() -> Dict<i64, HirType>:
+    """Create empty substitution map."""
+    var result: Dict<i64, HirType> = {}
+    result
+
+fn empty_type_env() -> Dict<text, TypeScheme>:
+    """Create empty type environment."""
+    var result: Dict<text, TypeScheme> = {}
+    result
+
+# ============================================================================
+# Type Scheme (Polymorphic Types)
+# ============================================================================
+
+struct TypeScheme:
+    """Polymorphic type: forall vars. ty
+
+    A type scheme represents a polymorphic type with quantified variables.
+    For example, the identity function has scheme: forall a. a -> a
+    """
+    # Bound type variable IDs (quantified)
+    vars: [i64]
+    # The type body (may reference vars)
+    ty: HirType
+
+impl TypeScheme:
+    static fn mono(ty: HirType) -> TypeScheme:
+        """Create a monomorphic scheme (no quantified variables)."""
+        TypeScheme(vars: [], ty: ty)
+
+    static fn poly(vars: [i64], ty: HirType) -> TypeScheme:
+        """Create a polymorphic scheme with the given bound variables."""
+        TypeScheme(vars: vars, ty: ty)
+
+    fn is_mono() -> bool:
+        """Check if this is a monomorphic type (no quantified vars)."""
+        self.vars.is_empty()
+
+# ============================================================================
+# Substitution
+# ============================================================================
+
+struct Substitution:
+    """Mapping from type variable IDs to types."""
+    map: Dict<i64, HirType>
+
+impl Substitution:
+    static fn new() -> Substitution:
+        Substitution(map: empty_subst_map())
+
+    fn get(id: i64) -> HirType?:
+        """Look up a type variable."""
+        self.map[id]
+
+    me insert(id: i64, ty: HirType):
+        """Insert a substitution."""
+        self.map[id] = ty
+
+    fn apply(ty: HirType) -> HirType:
+        """Apply substitution to a type."""
+        match ty.kind:
+            case Infer(id, level):
+                if self.map[id].?:
+                    self.apply(self.map[id])
+                else:
+                    ty
+            case Function(params, ret, effects):
+                var new_params: [HirType] = []
+                for p in params:
+                    new_params = new_params.push(self.apply(p))
+                HirType(
+                    kind: HirTypeKind.Function(new_params, self.apply(ret), effects),
+                    span: ty.span
+                )
+            case Tuple(elements):
+                var new_elements: [HirType] = []
+                for e in elements:
+                    new_elements = new_elements.push(self.apply(e))
+                HirType(kind: HirTypeKind.Tuple(new_elements), span: ty.span)
+            case Array(element, size):
+                HirType(kind: HirTypeKind.Array(self.apply(element), size), span: ty.span)
+            case Slice(element):
+                HirType(kind: HirTypeKind.Slice(self.apply(element)), span: ty.span)
+            case Dict(key, value):
+                HirType(kind: HirTypeKind.Dict(self.apply(key), self.apply(value)), span: ty.span)
+            case Optional(inner):
+                HirType(kind: HirTypeKind.Optional(self.apply(inner)), span: ty.span)
+            case Result(ok, err):
+                HirType(kind: HirTypeKind.Result(self.apply(ok), self.apply(err)), span: ty.span)
+            case Ref(inner, mutable):
+                HirType(kind: HirTypeKind.Ref(self.apply(inner), mutable), span: ty.span)
+            case Ptr(inner, mutable):
+                HirType(kind: HirTypeKind.Ptr(self.apply(inner), mutable), span: ty.span)
+            case Named(symbol, args):
+                var new_args: [HirType] = []
+                for a in args:
+                    new_args = new_args.push(self.apply(a))
+                HirType(kind: HirTypeKind.Named(symbol, new_args), span: ty.span)
+            case Tensor(element, dims, device):
+                HirType(kind: HirTypeKind.Tensor(self.apply(element), dims, device), span: ty.span)
+            case Layer(input, output):
+                HirType(kind: HirTypeKind.Layer(input, output), span: ty.span)
+            case _:
+                ty
+
+# ============================================================================
+# Type Inference Errors
+# ============================================================================
+
+"""Type inference error."""
+enum TypeInferError:
+    Mismatch(expected: HirType, found: HirType, span: Span)
+    OccursCheck(var_id: i64, ty: HirType, span: Span)
+    Undefined(name: text, span: Span)
+    DimensionError(err: DimError)
+    TraitNotImplemented(ty: HirType, trait_name: text, span: Span)
+    Other(message: text, span: Span)
+
+impl TypeInferError:
+    fn message() -> text:
+        """Get error message."""
+        match self:
+            case Mismatch(expected, found, _):
+                "type mismatch: expected {expected.kind}, found {found.kind}"
+            case OccursCheck(var_id, ty, _):
+                "infinite type: T{var_id} occurs in {ty.kind}"
+            case Undefined(name, _):
+                "undefined: {name}"
+            case DimensionError(err):
+                err.message
+            case TraitNotImplemented(ty, trait_name, _):
+                "trait not implemented: {ty.kind} does not implement {trait_name}"
+            case Other(msg, _):
+                msg
+
+    fn span() -> Span:
+        """Get error span."""
+        match self:
+            case Mismatch(_, _, s): s
+            case OccursCheck(_, _, s): s
+            case Undefined(_, s): s
+            case DimensionError(err): err.span
+            case TraitNotImplemented(_, _, s): s
+            case Other(_, s): s
+
+# ============================================================================
+# HM Inference Context
+# ============================================================================
+
+struct HmInferContext:
+    """Hindley-Milner inference context with level-based generalization.
+
+    Levels enable efficient generalization control:
+    - Each scope (let-binding, lambda) increments the level
+    - Type variables are created at the current level
+    - Only variables at level > environment level are generalizable
+
+    Includes dimension constraint solver for tensor/layer type checking.
+    Dimension checking happens in two phases:
+    - Compile-time: Static dimension mismatches caught during type inference
+    - Runtime: Dynamic dimension checks generated for before training/inference
+    """
+    # Type environment: maps names to polymorphic type schemes
+    env: Dict<text, TypeScheme>
+    # Current generalization level (incremented on enter_level)
+    level: i64
+    # Counter for generating fresh type variable IDs
+    next_var: i64
+    # Substitution map from type variable IDs to types
+    subst: Substitution
+    # Accumulated errors
+    errors: [TypeInferError]
+    # Dimension constraint solver for tensor/layer operations
+    dim_solver: DimSolver
+    # Runtime dimension check generator
+    runtime_checks: DimCheckGenerator
+    # Dimension check mode (controls runtime check generation)
+    dim_check_mode: DimCheckMode
+
+
+# ============================================================================
+# Bidirectional Type Checking
+# ============================================================================
+
+enum InferMode:
+    """Mode for bidirectional type checking.
+
+    Synthesize: Infer type from expression structure (bottom-up)
+    Check:      Validate expression matches expected type (top-down)
+    """
+    Synthesize
+    Check(expected: HirType)
+
+impl InferMode:
+    fn is_check() -> bool:
+        """Check if this is check mode."""
+        match self:
+            case Check(_): true
+            case _: false
+
+    fn is_synthesize() -> bool:
+        """Check if this is synthesize mode."""
+        match self:
+            case Synthesize: true
+            case _: false
+
+    fn expected() -> HirType?:
+        """Get expected type if in check mode."""
+        match self:
+            case Check(ty): Some(ty)
+            case _: nil
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TypeScheme, Substitution, TypeInferError
+export InferMode
+export empty_subst_map, empty_type_env
