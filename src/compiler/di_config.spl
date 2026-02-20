@@ -12,11 +12,10 @@
 #   - src/compiler/di_runtime.spl - DI runtime engine
 #   - doc/design/di_auto_lazy_proxy.md - Design document
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_env_get(key: text) -> text
+use compiler.di_runtime.{di_register, di_reset}
 
 export DiServiceConfig, DiProfileConfig, DiConfig
-export load_di_config, should_be_lazy, di_setup_from_config, di_setup_from_config_with_profile
+export load_di_config, parse_di_config, should_be_lazy, di_setup_from_config, di_setup_from_config_with_profile
 
 # ============================================================================
 # Config Structs
@@ -42,20 +41,19 @@ struct DiConfig:
 # Config Loading
 # ============================================================================
 
-# Load DI config from an SDN file path.
+# Load DI config from file content text.
 #
 # Parses the SDN text manually (line-based) to extract profiles and services.
 # This avoids importing the full SDN parser to keep the DI bootstrap chain minimal.
 #
 # Parameters:
-#   path: Path to the SDN config file (e.g., "config/di.sdn")
+#   content: SDN text content (caller reads the file)
 #
 # Returns:
 #   DiConfig with parsed profiles and services
-fn load_di_config(path: text) -> DiConfig:
-    val content = rt_file_read_text(path) ?? ""
+fn load_di_config(content: text) -> DiConfig:
     if content == "":
-        print "DI CONFIG WARN: could not read {path}, using defaults"
+        print "DI CONFIG WARN: empty config content, using defaults"
         return default_config()
     parse_di_config(content)
 
@@ -137,7 +135,8 @@ fn parse_di_config(content: text) -> DiConfig:
 
             # Parse new item name (strip trailing ":")
             if trimmed.ends_with(":"):
-                current_name = trimmed.substring(0, trimmed.len() - 1).trim()
+                var name_raw = trimmed.substring(0, trimmed.len() - 1)
+                current_name = name_raw.trim()
             else:
                 current_name = trimmed.trim()
             # Reset service fields
@@ -215,21 +214,21 @@ fn find_profile(config: DiConfig, name: text) -> DiProfileConfig:
 # Setup API
 # ============================================================================
 
-# Load config from SDN and register all services with the DI runtime.
+# Load config from SDN content and register all services with the DI runtime.
 #
-# Uses SIMPLE_PROFILE env var if set, otherwise config's default_profile.
-fn di_setup_from_config(path: text):
-    val profile_env = rt_env_get("SIMPLE_PROFILE") ?? ""
-    val config = load_di_config(path)
+# Parameters:
+#   content: SDN config text (caller reads the file)
+#   profile_env: Value of SIMPLE_PROFILE env var (pass "" if not set)
+fn di_setup_from_config(content: text, profile_env: text):
+    val config = load_di_config(content)
     var profile_name = config.default_profile
     if profile_env != "":
         profile_name = profile_env
-    di_setup_from_config_with_profile(path, profile_name)
+    di_setup_from_config_with_profile(content, profile_name)
 
 # Load config and register services using an explicit profile name.
-fn di_setup_from_config_with_profile(path: text, profile_name: text):
-    use compiler.di_runtime.{di_register, di_reset}
-    val config = load_di_config(path)
+fn di_setup_from_config_with_profile(content: text, profile_name: text):
+    val config = load_di_config(content)
     val profile = find_profile(config, profile_name)
 
     var idx = 0
