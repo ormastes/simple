@@ -3,8 +3,8 @@
 # All 34 tools + resources + prompts + completions.
 # Protocol: JSON Lines (one JSON object per line).
 #
-# Tool modules are loaded on-demand via subprocess dispatch.
-# Only std.mcp.helpers is imported at startup for fast initialization.
+# Tool dispatch uses DI-resolved handler adapters (in-process).
+# SessionManager persists across calls for state retention.
 #
 # Tool groups:
 #   debug_*       (16) - Debug session/breakpoint/inspect tools
@@ -21,10 +21,14 @@ extern fn rt_env_get(name: text) -> text
 # JSON and response helpers (use std.mcp.helpers for fast load — no app.io.mod chain)
 use std.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_tool_result, make_result_response, make_error_response, min_int}
 
-# Tool handlers loaded on-demand via subprocess dispatch (see dispatch_tool_subprocess)
-val HANDLER_DEBUG = "src/app/mcp/handlers/debug_handler.spl"
-val HANDLER_DEBUG_LOG = "src/app/mcp/handlers/debug_log_handler.spl"
-val HANDLER_DIAG = "src/app/mcp/handlers/diag_handler.spl"
+# DI runtime
+use compiler.di_runtime.{di_register, di_resolve}
+use compiler.di_config.{di_setup_from_config}
+
+# Handler adapters (DI-resolved, in-process dispatch)
+use app.mcp.handler_adapters.debug_adapter.{create_debug_handler}
+use app.mcp.handler_adapters.debug_log_adapter.{create_debug_log_handler, dispatch_debuglog_resource}
+use app.mcp.handler_adapters.diag_adapter.{create_diag_handler}
 
 # ============================================================================
 # Constants
@@ -43,13 +47,22 @@ var TOOLS_CACHE = ""
 var INIT_CACHE = ""
 var RESOURCES_CACHE = ""
 var PROMPTS_CACHE = ""
-# Session state removed: tool handlers run as subprocesses
 
 # ============================================================================
 # Entry point
 # ============================================================================
 
+init_di()
 start_server()
+
+fn init_di():
+    val config_content = rt_file_read_text("config/di.sdn") ?? ""
+    val profile = rt_env_get("SIMPLE_PROFILE") ?? ""
+    di_setup_from_config(config_content, profile)
+    # Override placeholders with real factories
+    di_register("debug_handler", fn(): create_debug_handler(), true)
+    di_register("debug_log_handler", fn(): create_debug_log_handler(), true)
+    di_register("diag_handler", fn(): create_diag_handler(), true)
 
 # ============================================================================
 # Server loop
@@ -113,35 +126,16 @@ fn dispatch_method(method: text, id: text, body: text) -> text:
 fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
     if tool_name == "":
         return make_error_response(id, -32602, "Missing tool name")
-    # Route to handler script based on tool prefix
-    var handler_script = ""
     if tool_name.starts_with("debug_log_"):
-        handler_script = HANDLER_DEBUG_LOG
+        val handler = di_resolve("debug_log_handler")
+        return handler.handle_fn(tool_name, id, body)
     elif tool_name.starts_with("debug_"):
-        handler_script = HANDLER_DEBUG
+        val handler = di_resolve("debug_handler")
+        return handler.handle_fn(tool_name, id, body)
     elif tool_name.starts_with("simple_"):
-        handler_script = HANDLER_DIAG
-    else:
-        return make_error_response(id, -32601, "Unknown tool: " + tool_name)
-    dispatch_tool_subprocess(id, tool_name, body, handler_script)
-
-fn dispatch_tool_subprocess(id: text, tool_name: text, body: text, handler_script: text) -> text:
-    val runtime_path = get_runtime_path()
-    val result = rt_process_run(runtime_path, [handler_script, tool_name, id, body])
-    val stdout = result[0]
-    val stderr = result[1]
-    val exit_str = result[2]
-    if exit_str != "0" and exit_str != "":
-        return make_error_response(id, -32603, "Handler error: " + stderr)
-    if stdout == "":
-        return make_error_response(id, -32603, "Handler returned empty response")
-    stdout
-
-fn get_runtime_path() -> text:
-    val simple_lib = rt_env_get("SIMPLE_LIB") ?? ""
-    if simple_lib != "":
-        return simple_lib + "/../bin/release/simple"
-    "bin/release/simple"
+        val handler = di_resolve("diag_handler")
+        return handler.handle_fn(tool_name, id, body)
+    make_error_response(id, -32601, "Unknown tool: " + tool_name)
 
 # ============================================================================
 # Initialize
@@ -337,12 +331,14 @@ fn handle_resources_read(id: text, uri: text) -> text:
         val path = uri.substring(8)
         return handle_resource_file(id, uri, path)
 
-    # debuglog:///... (dispatched to handler subprocess)
+    # debuglog:///... (direct in-process call)
     if uri.starts_with("debuglog:///"):
-        val log_result = rt_process_run(get_runtime_path(), [HANDLER_DEBUG_LOG, "__resource__", id, uri])
-        val log_stdout = log_result[0]
-        if log_stdout != "":
-            return log_stdout
+        val log_content = dispatch_debuglog_resource(uri)
+        if log_content != "":
+            var log_mime = "application/json"
+            if uri.ends_with("/text"):
+                log_mime = "text/plain"
+            return make_resource_content_response(id, uri, log_content, log_mime)
         return make_resource_content_response(id, uri, "[]", "application/json")
 
     make_error_response(id, -32002, "Resource not found: " + uri)

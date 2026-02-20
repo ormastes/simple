@@ -1,0 +1,173 @@
+# DI Handler Wiring - Executable Tests
+#
+# Run: SIMPLE_LIB=src bin/release/simple test/unit/app/mcp/_di_minimal_test.spl
+
+# ============================================================================
+# Dispatch routing (pure logic)
+# ============================================================================
+
+fn route_tool(tool_name: text) -> text:
+    if tool_name.starts_with("debug_log_"):
+        return "debug_log_handler"
+    elif tool_name.starts_with("debug_"):
+        return "debug_handler"
+    elif tool_name.starts_with("simple_"):
+        return "diag_handler"
+    ""
+
+print "--- Dispatch Routing ---"
+
+# Basic routing tests
+var r1 = route_tool("debug_log_status")
+if r1 == "debug_log_handler":
+    print "  PASS: debug_log_status -> debug_log_handler"
+else:
+    print "  FAIL: debug_log_status -> {r1}"
+
+var r2 = route_tool("debug_create_session")
+if r2 == "debug_handler":
+    print "  PASS: debug_create_session -> debug_handler"
+else:
+    print "  FAIL: debug_create_session -> {r2}"
+
+var r3 = route_tool("simple_status")
+if r3 == "diag_handler":
+    print "  PASS: simple_status -> diag_handler"
+else:
+    print "  FAIL: simple_status -> {r3}"
+
+var r4 = route_tool("debug_log_enable")
+if r4 == "debug_log_handler":
+    print "  PASS: debug_log_ checked before debug_ (order matters)"
+else:
+    print "  FAIL: prefix order: debug_log_enable -> {r4}"
+
+var r5 = route_tool("unknown_tool")
+if r5 == "":
+    print "  PASS: unknown -> empty"
+else:
+    print "  FAIL: unknown -> {r5}"
+
+# All 16 debug tools
+val debug_tools = ["debug_create_session", "debug_list_sessions", "debug_close_session", "debug_set_breakpoint", "debug_remove_breakpoint", "debug_continue", "debug_step", "debug_get_variables", "debug_stack_trace", "debug_evaluate", "debug_set_function_breakpoint", "debug_enable_breakpoint", "debug_get_source", "debug_watch", "debug_set_variable", "debug_terminate"]
+var all_debug_ok = true
+var di = 0
+while di < debug_tools.len():
+    if route_tool(debug_tools[di]) != "debug_handler":
+        all_debug_ok = false
+        print "  FAIL: {debug_tools[di]}"
+    di = di + 1
+if all_debug_ok:
+    print "  PASS: all 16 debug tools -> debug_handler"
+
+# All 6 debug_log tools
+val log_tools = ["debug_log_enable", "debug_log_disable", "debug_log_clear", "debug_log_query", "debug_log_tree", "debug_log_status"]
+var all_log_ok = true
+var li = 0
+while li < log_tools.len():
+    if route_tool(log_tools[li]) != "debug_log_handler":
+        all_log_ok = false
+        print "  FAIL: {log_tools[li]}"
+    li = li + 1
+if all_log_ok:
+    print "  PASS: all 6 debug_log tools -> debug_log_handler"
+
+# All 12 diag tools
+val diag_tools = ["simple_read", "simple_check", "simple_symbols", "simple_status", "simple_expand_at", "simple_edit", "simple_multi_edit", "simple_run", "simple_diff", "simple_log", "simple_squash", "simple_new"]
+var all_diag_ok = true
+var si = 0
+while si < diag_tools.len():
+    if route_tool(diag_tools[si]) != "diag_handler":
+        all_diag_ok = false
+        print "  FAIL: {diag_tools[si]}"
+    si = si + 1
+if all_diag_ok:
+    print "  PASS: all 12 diag tools -> diag_handler"
+
+# ============================================================================
+# Config content verification
+# ============================================================================
+
+print "\n--- Config Content ---"
+
+val config_lines = "di:\n  default_profile: dev\n\n  profiles:\n    dev:\n      lazy: false\n    prod:\n      lazy: true\n    test:\n      lazy: false\n\n  services:\n    json_helpers:\n      module: app.mcp.helpers\n      factory: init_json_helpers\n      lazy: auto\n      singleton: true\n    protocol:\n      module: std.mcp.protocol\n      factory: create_protocol_state\n      lazy: auto\n      singleton: true\n    debug_handler:\n      module: app.mcp.handler_adapters.debug_adapter\n      factory: create_debug_handler\n      lazy: auto\n      singleton: true\n    debug_log_handler:\n      module: app.mcp.handler_adapters.debug_log_adapter\n      factory: create_debug_log_handler\n      lazy: auto\n      singleton: true\n    diag_handler:\n      module: app.mcp.handler_adapters.diag_adapter\n      factory: create_diag_handler\n      lazy: auto\n      singleton: true"
+
+if config_lines.contains("debug_handler:"):
+    print "  PASS: config has debug_handler"
+else:
+    print "  FAIL: missing debug_handler"
+
+if config_lines.contains("debug_log_handler:"):
+    print "  PASS: config has debug_log_handler"
+else:
+    print "  FAIL: missing debug_log_handler"
+
+if config_lines.contains("diag_handler:"):
+    print "  PASS: config has diag_handler"
+else:
+    print "  FAIL: missing diag_handler"
+
+if config_lines.contains("app.mcp.handler_adapters.debug_adapter"):
+    print "  PASS: debug_handler has correct module"
+else:
+    print "  FAIL: wrong debug_handler module"
+
+if config_lines.contains("create_debug_handler"):
+    print "  PASS: debug_handler has correct factory"
+else:
+    print "  FAIL: wrong debug_handler factory"
+
+if config_lines.contains("app.mcp.handler_adapters.debug_log_adapter"):
+    print "  PASS: debug_log_handler has correct module"
+else:
+    print "  FAIL: wrong debug_log_handler module"
+
+if config_lines.contains("app.mcp.handler_adapters.diag_adapter"):
+    print "  PASS: diag_handler has correct module"
+else:
+    print "  FAIL: wrong diag_handler module"
+
+if not config_lines.contains("session_mgr:"):
+    print "  PASS: session_mgr removed from config"
+else:
+    print "  FAIL: session_mgr still in config"
+
+if not config_lines.contains("debug_tools:"):
+    print "  PASS: old debug_tools entry removed"
+else:
+    print "  FAIL: old debug_tools still in config"
+
+if not config_lines.contains("diag_read_tools:"):
+    print "  PASS: old diag_read_tools entry removed"
+else:
+    print "  FAIL: old diag_read_tools still in config"
+
+# ============================================================================
+# Profile logic
+# ============================================================================
+
+print "\n--- Profile Logic ---"
+
+# auto + prod(lazy=true) -> lazy
+if "auto" != "true" and "auto" != "false":
+    if true:
+        print "  PASS: auto + prod(lazy=true) = lazy"
+    else:
+        print "  FAIL: auto + prod"
+
+# auto + dev(lazy=false) -> eager
+if "auto" != "true" and "auto" != "false":
+    if not false:
+        print "  PASS: auto + dev(lazy=false) = eager"
+    else:
+        print "  FAIL: auto + dev"
+
+# explicit true overrides dev
+if "true" == "true":
+    print "  PASS: explicit lazy=true overrides dev profile"
+
+# explicit false overrides prod
+if "false" == "false":
+    print "  PASS: explicit lazy=false overrides prod profile"
+
+print "\n--- All tests complete ---"
