@@ -215,11 +215,13 @@ src/
     qemu/           # QEMU boot/debug runner
     ...             # + full stdlib: text, math, json, crypto, net, async, date, regex, etc.
   std -> lib        # Symlink: `use std.X` resolves to src/lib/X (both namespaces work)
-  compiler_core/    # Core (seed-compilable: lexer, parser, AST, AOP, interpreter, C codegen)
-  compiler_shared/  # Shared infra (treesitter, backend API, type system, MIR opt)
-    blocks/         # Block definition system (real impl — no more src/blocks/ shim)
-    interpreter/    # Shared compiler/interpreter code (contracts, operators, pattern, llvm)
-  compiler/         # Full compiler (backends, HIR/MIR lowering, linker, loader, MDSOC)
+  compiler_core/    # Bootstrap build infra (CMakeLists.txt, generated C++ output)
+  compiler_seed/    # C runtime (runtime.c/runtime.h — linked by generated C++)
+  compiler/         # Unified compiler (all backends, all stages)
+    core/           # Core types (lexer, parser, AST, AOP, interpreter, tokens, types)
+    backend/        # Backends (LLVM, Cranelift, Native, C/C++, Wasm, CUDA, Vulkan)
+    blocks/         # Block definition system
+    interpreter/    # Shared interpreter code (contracts, operators, pattern, llvm)
     mdsoc/          # Multi-Dimensional Separation of Concerns (virtual capsules, 3-tier visibility)
     feature/        # MDSOC pipeline stages (typed port contracts)
     transform/      # MDSOC stage boundary adapters (entity views)

@@ -29,7 +29,7 @@
 | Module Import Hangs for core.json | ✅ FIXED | High |
 | "common" Keyword in Module Paths | ✅ FIXED | Medium |
 | Extern Functions in Imported Modules | ✅ FIXED | Medium |
-| Match arm `=>` with statements | 🔄 WORKAROUND | Low |
+| Match expression rejects `:` and `case` separators | ✅ FIXED | Low |
 | Struct init with `:` syntax | ✅ FIXED | Medium |
 | `@async` blocking `print` test | ✅ FIXED | Low |
 | Test harness module resolution | ✅ FIXED | Medium |
@@ -53,7 +53,7 @@
 | MCP jj_commit/describe/new/squash shell quoting bug | ✅ FIXED | Medium |
 | Test runner single-file 56s startup | ✅ FIXED | Low |
 
-**Summary:** 45 fixed, 0 open, 0 investigating, 1 workaround, 5 invalid (Updated 2026-02-20)
+**Summary:** 46 fixed, 0 open, 0 investigating, 0 workaround, 5 invalid (Updated 2026-02-20)
 
 ---
 
@@ -3308,3 +3308,76 @@ export sum
 ### Fix Priority
 
 Medium - not blocking (workaround exists), but affects code quality and refactoring ease.
+
+---
+
+## Match Expression Rejects `:` and `case` Separators ✅ FIXED
+
+**Type:** Bug - Parser
+**Priority:** Low
+**Discovered:** 2026-01-05
+**Resolved:** 2026-02-20
+**Component:** Expression-level match parser (`src/app/parser/expr/control.spl`)
+
+### Description
+
+The runtime has two match parsers:
+1. **Statement-level** (`src/compiler/core/parser.spl`): requires `case` keyword + `:` separator, executes for side effects only (no return value)
+2. **Expression-level** (`src/app/parser/expr/control.spl`): returns a value, but only accepted `=>` (FatArrow) as separator
+
+This meant `val y = match x: 42: "found"` and `val y = match x: case 42: "found"` both failed with parse errors, while `val y = match x: 42 => "found"` worked.
+
+### Reproduction
+
+```simple
+# FAILS: "expected FatArrow, found Colon"
+val y = match 42:
+    42: "found"
+    _: "other"
+
+# FAILS: "expected pattern, found Case"
+val y = match 42:
+    case 42: "found"
+    case _: "other"
+
+# WORKS (workaround):
+val y = match 42:
+    42 => "found"
+    _ => "other"
+```
+
+### Root Cause
+
+The expression-level match arm parser (`parse_match_arm_expr`) only accepted `=>` (FatArrow) as the arm separator token. It did not recognize the `case` keyword or `:` (Colon) as valid alternatives.
+
+### Fix
+
+Updated `src/app/parser/expr/control.spl` lines 78-94:
+1. Added optional `case` keyword support (lines 81-82)
+2. Added `:` (Colon) and `->` (Arrow) as valid separators alongside `=>` (line 94)
+
+```simple
+# Now accepts: case keyword (optional), and separators :, =>, ->
+val is_pipe_syntax = self.check(TokenKind.Pipe)
+if is_pipe_syntax:
+    self.advance()
+elif self.check(TokenKind.Case):
+    self.advance()
+
+# ...pattern and guard parsing...
+
+val valid_separator = if is_pipe_syntax:
+    self.check(TokenKind.Arrow)
+else:
+    self.check(TokenKind.Arrow) or self.check(TokenKind.FatArrow) or self.check(TokenKind.Colon)
+```
+
+### Status
+
+✅ **FIXED** (2026-02-20)
+
+Source fix applied. Awaiting binary rebuild.
+
+### Test
+
+`test/feature/usage/parser_match_expression_spec.spl` — 9 passing tests covering statement-level, expression-level, and consistency checks.

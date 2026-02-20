@@ -23,19 +23,19 @@
 | `import` | declarations | seed | Module import (deprecated, use use) |  |
 | `trait` | declarations | core | Trait definition | `trait Printable: fn print():` |
 | `pub` | declarations | core | Public visibility modifier |  |
-| `static` | declarations | core | Static method or binding |  |
-| `me` | declarations | core | Mutable self method |  |
+| `static` | declarations | seed | Static method or binding |  |
+| `me` | declarations | seed | Mutable self method |  |
 | `type` | declarations | core | Type alias |  |
-| `asm` | declarations | core | Inline assembly block |  |
 | `implements` | declarations | core | Trait implementation declaration |  |
+| `const` | declarations | core | Compile-time constant |  |
 | `mod` | declarations | full | Module definition |  |
-| `const` | declarations | full | Compile-time constant |  |
+| `asm` | declarations | seed | Inline assembly block |  |
+| `unit` | declarations | full | Unit type definition |  |
+| `unsafe` | declarations | full | Unsafe block |  |
+| `shared` | declarations | full | GPU shared memory |  |
 | `bitfield` | declarations | full | Packed bit struct |  |
 | `kernel` | declarations | full | GPU kernel function |  |
-| `shared` | declarations | full | GPU shared memory |  |
-| `unsafe` | declarations | full | Unsafe block |  |
 | `actor` | declarations | full | Actor definition (concurrency) |  |
-| `unit` | declarations | full | Unit type definition |  |
 | `if` | control_flow | seed | Conditional branch | `if x > 0: print "positive"` |
 | `elif` | control_flow | seed | Else-if branch |  |
 | `else` | control_flow | seed | Else branch |  |
@@ -48,15 +48,17 @@
 | `continue` | control_flow | seed | Skip to next iteration |  |
 | `in` | control_flow | seed | Membership / iteration operator |  |
 | `loop` | control_flow | core | Infinite loop |  |
-| `pass` | control_flow | core | No-op placeholder |  |
-| `pass_todo` | control_flow | core | Unimplemented placeholder (TODO) |  |
-| `pass_do_nothing` | control_flow | core | Intentional no-op |  |
-| `pass_dn` | control_flow | core | Alias for pass_do_nothing |  |
-| `and` | control_flow | core | Logical AND | `if a and b: ...` |
-| `or` | control_flow | core | Logical OR |  |
-| `not` | control_flow | core | Logical NOT |  |
-| `self` | control_flow | core | Current instance reference |  |
+| `pass` | control_flow | seed | No-op placeholder |  |
+| `pass_todo` | control_flow | seed | Unimplemented placeholder (TODO) |  |
+| `pass_do_nothing` | control_flow | seed | Intentional no-op |  |
+| `pass_dn` | control_flow | seed | Alias for pass_do_nothing |  |
+| `and` | control_flow | seed | Logical AND | `if a and b: ...` |
+| `or` | control_flow | seed | Logical OR |  |
+| `not` | control_flow | seed | Logical NOT |  |
+| `self` | control_flow | seed | Current instance reference |  |
 | `is` | control_flow | core | Type check operator |  |
+| `as` | control_flow | core | Type cast operator |  |
+| `from` | control_flow | core | Import source specifier |  |
 | `async` | control_flow | core | Async function modifier | `async fn fetch():` |
 | `await` | control_flow | core | Await async expression |  |
 | `yield` | control_flow | core | Yield from generator |  |
@@ -67,17 +69,15 @@
 | `with` | control_flow | full | Context manager block |  |
 | `finally` | control_flow | full | Finally block (always runs) |  |
 | `panic` | control_flow | full | Panic / unrecoverable error |  |
+| `xor` | control_flow | full | Bitwise XOR operator |  |
 | `true` | expressions | seed | Boolean true literal | `val done = true` |
 | `false` | expressions | seed | Boolean false literal |  |
 | `nil` | expressions | seed | Null/none value | `var result = nil` |
-| `as` | expressions | full | Type cast operator |  |
-| `xor` | expressions | full | Bitwise XOR operator |  |
-| `from` | expressions | full | Import source specifier |  |
-| `super` | expressions | full | Parent module reference |  |
-| `Some` | expressions | full | Option type wrapper |  |
-| `Ok` | expressions | full | Result success wrapper |  |
-| `Err` | expressions | full | Result error wrapper |  |
-| `None` | expressions | full | Option empty value |  |
+| `super` | expressions | seed | Parent module reference |  |
+| `Some` | expressions | seed | Option type wrapper |  |
+| `Ok` | expressions | seed | Result success wrapper |  |
+| `Err` | expressions | seed | Result error wrapper |  |
+| `None` | expressions | seed | Option empty value |  |
 | `loss` | expressions | full | Neural network loss block |  |
 | `nograd` | expressions | full | Disable gradient computation |  |
 
@@ -137,6 +137,8 @@
 | range_expr | seed |
 | array_literal | seed |
 | struct_constructor | seed |
+| when_block | seed |
+| cfg_attribute | seed |
 | lambda | core |
 | generic_syntax | core |
 | optional_chaining | core |
@@ -154,6 +156,39 @@
 | pointcut_expr | full |
 | suspension_ops | full |
 
+## Assembly Capabilities
+
+| Capability | Kind | Tier | Description |
+|------------|------|------|-------------|
+| asm_single_line | clang-depend | seed | Single-line asm statement (`asm "nop"`) |
+| asm_indented_block | clang-depend | seed | Indented asm block (`asm:\n    "nop"`) |
+| asm_braced_block | clang-depend | seed | Braced asm block (`asm nop`) |
+| asm_match | clang-depend | seed | Target-conditional asm (`asm match: case [x86_64]: ...`) |
+| asm_assert | clang-depend | seed | Target assertion (`asm assert [x86_64, linux]`) |
+| asm_operands | compiler-depend | full | Register operands (`in(reg) var, out(reg) var`) |
+| asm_clobbers | compiler-depend | full | Clobber lists (`clobbers: ["eax"]`) |
+| asm_options | compiler-depend | full | Asm options (`options: [volatile, noreturn]`) |
+| asm_register_alloc | compiler-depend | full | Compiler register allocation |
+| asm_target_validation | compiler-depend | full | Per-arch instruction validation |
+
+## Low-Level Features
+
+| Feature | Tier | Description |
+|---------|------|-------------|
+| bitfield | full | Packed bit-level struct declarations |
+| union_type_operator | core | Union type operator (`A | B | C`) |
+| volatile_asm | seed | Volatile asm via C passthrough |
+| volatile_attr | full | `@volatile` attribute for MMIO |
+
+### Not Yet Implemented
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| union_declaration | not implemented | C-style `union {}` declaration |
+| packed_attr | not implemented | `@packed` attribute for struct layout |
+| repr_attr | not implemented | `@repr(C)` representation attribute |
+| align_attr | not implemented | `@align(N)` alignment attribute |
+
 ---
 
-**Summary:** 70 keywords, 42 operators, 21 constructs
+**Summary:** 70 keywords, 42 operators, 23 constructs

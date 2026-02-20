@@ -12,10 +12,10 @@
 |---------|------|
 | `val` | seed |
 | `var` | seed |
-| `const` | full |
-| `static` | core |
+| `const` | core |
+| `static` | seed |
 | `fn` | seed |
-| `me` | core |
+| `me` | seed |
 | `class` | seed |
 | `struct` | seed |
 | `enum` | seed |
@@ -42,10 +42,10 @@
 | `continue` | seed |
 | `return` | seed |
 | `yield` | core |
-| `pass` | core |
-| `pass_todo` | core |
-| `pass_do_nothing` | core |
-| `pass_dn` | core |
+| `pass` | seed |
+| `pass_todo` | seed |
+| `pass_do_nothing` | seed |
+| `pass_dn` | seed |
 | `try` | full |
 | `catch` | full |
 | `finally` | full |
@@ -54,18 +54,18 @@
 | `async` | core |
 | `await` | core |
 | `spawn` | core |
-| `self` | core |
+| `self` | seed |
 | `shared` | full |
 | `kernel` | full |
-| `and` | core |
-| `or` | core |
-| `not` | core |
+| `and` | seed |
+| `or` | seed |
+| `not` | seed |
 | `xor` | full |
 | `true` | seed |
 | `false` | seed |
 | `nil` | seed |
-| `None` | full |
-| `Some` | full |
+| `None` | seed |
+| `Some` | seed |
 
 ## Aspirational (69 keywords)
 
@@ -146,16 +146,16 @@
 | Keyword | Tier |
 |---------|------|
 | `extern` | seed |
-| `asm` | core |
-| `bitfield` | full |
+| `asm` | seed |
 | `unsafe` | full |
+| `bitfield` | full |
 | `in` | seed |
 | `is` | core |
+| `as` | core |
+| `from` | core |
 | `with` | full |
-| `as` | full |
-| `from` | full |
-| `super` | full |
-| `Ok` | full |
-| `Err` | full |
+| `super` | seed |
+| `Ok` | seed |
+| `Err` | seed |
 | `loss` | full |
 | `nograd` | full |

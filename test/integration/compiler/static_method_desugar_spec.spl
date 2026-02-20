@@ -13,34 +13,33 @@ use std.spec
 use app.desugar.static_methods (desugar_static_methods)
 use app.desugar.rewriter (rewrite_static_calls)
 use app.desugar.mod (desugar_source)
-use std.text.{NL}
 
 describe "Static Method Desugaring":
 
     context "desugar_static_methods":
 
         it "hoists a simple static fn to module level":
-            val input = "struct Point:{NL}    x: i64{NL}    y: i64{NL}{NL}impl Point:{NL}    static fn origin() -> Point:{NL}        Point(x: 0, y: 0){NL}"
+            val input = "struct Point:\n    x: i64\n    y: i64\n\nimpl Point:\n    static fn origin() -> Point:\n        Point(x: 0, y: 0)\n"
             val output = desugar_static_methods(input)
             # Should contain the hoisted function
             expect(output).to_contain("fn Point__origin() -> Point:")
             expect(output).to_contain("Point(x: 0, y: 0)")
 
         it "preserves instance methods in impl block":
-            val input = "impl Point:{NL}    static fn origin() -> Point:{NL}        Point(x: 0, y: 0){NL}    fn distance() -> f64:{NL}        (self.x ** 2 + self.y ** 2).sqrt(){NL}"
+            val input = "impl Point:\n    static fn origin() -> Point:\n        Point(x: 0, y: 0)\n    fn distance() -> f64:\n        (self.x ** 2 + self.y ** 2).sqrt()\n"
             val output = desugar_static_methods(input)
             # Instance method should remain in impl block
             expect(output).to_contain("impl Point:")
             expect(output).to_contain("fn distance() -> f64:")
 
         it "handles multiple static methods":
-            val input = "impl Builder:{NL}    static fn create() -> Builder:{NL}        Builder(items: []){NL}    static fn from_list(items: [text]) -> Builder:{NL}        Builder(items: items){NL}"
+            val input = "impl Builder:\n    static fn create() -> Builder:\n        Builder(items: [])\n    static fn from_list(items: [text]) -> Builder:\n        Builder(items: items)\n"
             val output = desugar_static_methods(input)
             expect(output).to_contain("fn Builder__create() -> Builder:")
             expect(output).to_contain("fn Builder__from_list(items: [text]) -> Builder:")
 
         it "drops empty impl block when all methods are static":
-            val input = "impl Config:{NL}    static fn defaults() -> Config:{NL}        Config(value: 0){NL}"
+            val input = "impl Config:\n    static fn defaults() -> Config:\n        Config(value: 0)\n"
             val output = desugar_static_methods(input)
             expect(output).to_contain("fn Config__defaults() -> Config:")
             # The impl block should be dropped since it would be empty
@@ -48,35 +47,35 @@ describe "Static Method Desugaring":
     context "rewrite_static_calls":
 
         it "rewrites Type.method() to Type__method()":
-            val input = "val p = Point.origin(){NL}"
+            val input = "val p = Point.origin()\n"
             val output = rewrite_static_calls(input)
             expect(output).to_contain("Point__origin()")
 
         it "rewrites calls with arguments":
-            val input = "val p = Point.from_pair(1, 2){NL}"
+            val input = "val p = Point.from_pair(1, 2)\n"
             val output = rewrite_static_calls(input)
             expect(output).to_contain("Point__from_pair(1, 2)")
 
         it "does not rewrite instance method calls":
-            val input = "val d = point.distance(){NL}"
+            val input = "val d = point.distance()\n"
             val output = rewrite_static_calls(input)
             # lowercase receiver should not be rewritten
             expect(output).to_contain("point.distance()")
 
         it "does not rewrite field access":
-            val input = "val x = point.x{NL}"
+            val input = "val x = point.x\n"
             val output = rewrite_static_calls(input)
             expect(output).to_contain("point.x")
 
         it "handles nested static calls":
-            val input = "val r = Type.method(Other.factory()){NL}"
+            val input = "val r = Type.method(Other.factory())\n"
             val output = rewrite_static_calls(input)
             expect(output).to_contain("Type__method(Other__factory())")
 
     context "desugar_source (full pipeline)":
 
         it "transforms static method definition and call":
-            val input = "struct Point:{NL}    x: i64{NL}    y: i64{NL}{NL}impl Point:{NL}    static fn origin() -> Point:{NL}        Point(x: 0, y: 0){NL}{NL}val p = Point.origin(){NL}print p.x{NL}"
+            val input = "struct Point:\n    x: i64\n    y: i64\n\nimpl Point:\n    static fn origin() -> Point:\n        Point(x: 0, y: 0)\n\nval p = Point.origin()\nprint p.x\n"
             val output = desugar_source(input)
             # Hoisted function
             expect(output).to_contain("fn Point__origin() -> Point:")
@@ -86,13 +85,13 @@ describe "Static Method Desugaring":
             expect(output).to_contain("struct Point:")
 
         it "handles chained calls: Type.method().instance_method()":
-            val input = "val result = Builder.create().build(){NL}"
+            val input = "val result = Builder.create().build()\n"
             val output = desugar_source(input)
             # Only the static part should be rewritten
             expect(output).to_contain("Builder__create().build()")
 
         it "preserves comments and strings":
-            val input = "# Point.origin() in a comment{NL}val s = \"Point.origin()\"{NL}val p = Point.origin(){NL}"
+            val input = "# Point.origin() in a comment\nval s = \"Point.origin()\"\nval p = Point.origin()\n"
             val output = desugar_source(input)
             # Comment should be preserved
             expect(output).to_contain("# Point.origin() in a comment")

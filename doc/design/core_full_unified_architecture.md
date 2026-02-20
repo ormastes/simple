@@ -1,80 +1,67 @@
-# Core/Full Unified Architecture — Design Document
+# Unified Compiler Architecture — Design Document
 
-## Status: Implementation In Progress (Phase 7 Complete)
+## Status: Unified (Phases 0-6 Complete)
 
-## 1. Problem Statement
+## 1. Architecture Overview
 
-Currently, Core Simple (`src/compiler_core/`, ~8.8K lines) and Full Simple (`src/compiler/`, ~123K lines)
-are completely separate implementations with duplicated lexer, parser, AST, HIR types, and MIR types.
-Core has no codegen. Full cannot reuse core.
+The Simple compiler is now a **single unified compiler** in `src/compiler/`. The old 4-tier
+bootstrap (`compiler_seed/ → compiler_core/ → compiler_shared/ → compiler/`) has been
+replaced with a C/C++ backend for bootstrap.
 
-**Duplication map:**
-- Lexer: `src/compiler_core/lexer_struct.spl` (719 lines) vs `src/compiler/lexer.spl` (~2K lines)
-- Parser: `src/compiler_core/parser.spl` (1,188 lines) vs `src/compiler/parser.spl` (~1.8K lines)
-- AST: `src/compiler_core/ast.spl` + `ast_types.spl` (~940 lines) vs `src/compiler/ast.spl` (~1.5K lines)
-- Types: `src/compiler_core/types.spl` (367 lines) vs `src/compiler/types/` (~2K lines)
-
-## 2. Target Architecture
-
+**New bootstrap approach** (like Go/Zig):
 ```
- SEED (C++)                          core is deployable alone
-      | builds                       |
-      v                              v
-+===================================================================+
-|                    src/compiler_core/ (Seed-Compilable)                     |
-|                                                                   |
-|  tokens --> lexer --> parser --> ast (struct pools, int tags)      |
-|                                  |                                |
-|           +----------+-----------+-----------+----------+         |
-|           v          v           v           v          v         |
-|    interpreter   c_codegen   hir_lower   mir_lower    wffi       |
-|    (eval+JIT)    (AST->C)   (AST->HIR)  (HIR->MIR) (dlopen)     |
-|                                              |                    |
-|                                         mir_codegen               |
-|                                         (MIR->C)                  |
-|                                                                   |
-|  types  error  driver (orchestrates all)                          |
-+===================================================================+
-                         |
-               Full IMPORTS and EXTENDS
-                         |
-+===================================================================+
-|              src/compiler/ (Compiled-Only Extensions)              |
-|                                                                   |
-|  lexer_ext    (blocks, math mode, unified registry)               |
-|  parser_ext   (generics <>, traits, async, macros)                |
-|  hir_ext      (generic types, trait bounds, effects)              |
-|  type_infer   (bidirectional, constraints)                        |
-|  monomorphize (generic specialization)                            |
-|  borrow_check / traits / effects                                  |
-|  mir_ext + mir_opt (const_fold, dce, inline, cse...)              |
-|  wffi_ext     (header_parser, binding_gen, struct_layout,         |
-|                callback_bridge, lib_manager)                      |
-|  backend/     (cranelift, llvm, native ELF, wasm, cuda)           |
-|  driver       (full pipeline orchestration)                       |
-+===================================================================+
+compiler --backend=c → generates C++20 → committed to compiler_core/generated/
+                                          → CMake + Clang builds it
 ```
 
-## 3. Module Boundaries
+Anyone can bootstrap from scratch with just CMake + Clang.
 
-### Core (Seed-Compilable)
-Everything in `src/compiler_core/` must compile through `seed_cpp`. Constraints:
-- No generics (`<T>` syntax)
-- No closures/lambdas
-- No traits or impl blocks with dynamic dispatch
-- No exception handling (try/catch/throw)
-- No multi-line boolean expressions
-- All types are concrete: i64, f64, text, bool, [i64], [text], named structs
-- Integer tags for enums/variants (no enum payloads)
-- Struct pools instead of generic containers
-- `var`/`val` for all variables
+## 2. Current Architecture
 
-### Full (Compiled-Only)
-Everything in `src/compiler/` may use the full language. It:
-- Imports from core and extends it
-- Adds generics, traits, async, macros
-- Has multiple backends (cranelift, llvm, native, wasm, cuda)
-- Full type inference with bidirectional checking
+```
++===================================================================+
+|              src/compiler/ (Unified Compiler)                       |
+|                                                                    |
+|  core/        (lexer, parser, AST, tokens, types, AOP, interpreter)|
+|  backend/     (C/C++, LLVM, Cranelift, Native, Wasm, CUDA, Vulkan) |
+|  blocks/      (block definition system)                            |
+|  interpreter/ (shared interpreter code)                            |
+|  mir_data     (MIR types)                                          |
+|  hir          (HIR types + lowering)                               |
+|  type_infer   (bidirectional, constraints)                         |
+|  monomorphize (generic specialization)                             |
+|  borrow_check / traits / effects                                   |
+|  mir_opt      (const_fold, dce, inline, cse...)                    |
+|  linker/      (ELF, Mach-O, WASM linking)                         |
+|  loader/      (module loading, JIT)                                |
+|  mdsoc/       (Multi-Dimensional Separation of Concerns)           |
+|  driver       (full pipeline orchestration)                        |
++===================================================================+
+
+src/compiler_core/  → Build infra only (CMakeLists.txt + generated/ C++ output)
+src/compiler_seed/  → C runtime only (runtime.c, runtime.h, platform/)
+```
+
+## 3. C Backend Bootstrap
+
+The C backend (`src/compiler/backend/c_backend.spl`) translates MIR to C++20:
+- `CTypeMapper`: Maps MIR types → C++ types (int64_t, double, void*, etc.)
+- `CIRBuilder`: Builds C++ source strings with indentation
+- `MirToC`: Main translator handling all MIR instructions and terminators
+
+Bootstrap workflow:
+1. `bin/simple compile --backend=c --emit-c` → generates C++20
+2. Output committed to `src/compiler_core/generated/`
+3. `cmake -B build -G Ninja && ninja -C build` → `simple_bootstrap`
+4. Reproducibility: bootstrap binary generates identical C++
+
+## 4. Import Paths
+
+After unification:
+- `use compiler.X` — compiler modules (backends, HIR, MIR, linker, etc.)
+- `use compiler.core.X` — core types (tokens, lexer, parser, AST, types)
+- `use compiler_shared.X` — removed (merged into `compiler.X`)
+- `use compiler_core.X` — removed (merged into `compiler.core.X`)
 
 ## 4. Core Compilation Paths
 
@@ -132,14 +119,58 @@ Simple API: `wffi_load`, `wffi_get`, `wffi_call_i64`, `wffi_call_text`, `wffi_fr
 | 10 | SFFI gen + shell library | PLANNED |
 | 11 | Fix skipped FFI tests | PLANNED |
 
-## 7. Verification Strategy
+## 7. Phase 8 Migration Plan — Full Imports Core
+
+### Goal
+Eliminate duplication by having `src/compiler/` import and extend `src/compiler_core/` modules
+instead of maintaining parallel implementations.
+
+### File-by-File Migration
+
+| Core File | Full File | Migration Strategy |
+|-----------|-----------|-------------------|
+| `compiler_core/tokens.spl` | `compiler/tokens.spl` | Full imports core tokens, adds block/GPU/math tokens via extension constants |
+| `compiler_core/lexer_struct.spl` (719 lines) | `compiler/lexer.spl` (~2K lines) | Full lexer imports core lexer, extends with block tokens, math mode, unified registry |
+| `compiler_core/parser.spl` (1,188 lines) | `compiler/parser.spl` (~1.8K lines) | Full parser imports core parser, extends with generics `<>`, traits, async, macros |
+| `compiler_core/ast.spl` + `ast_types.spl` (~940 lines) | `compiler/ast.spl` (~1.5K lines) | Full AST extends core AST with generic types, trait bounds, effects, custom blocks |
+| `compiler_core/types.spl` (367 lines) | `compiler/types/` (~2K lines) | Full types import core type IDs, add inference engine + bidirectional checking |
+
+### LLVM Shared Infrastructure
+
+~1,300 lines of LLVM code duplicated between core and full (37% overlap per `LLVM_BACKEND_ARCHITECTURE.md`).
+Move shared LLVM infra to `src/compiler_shared/llvm/`:
+
+| Shared Module | Content |
+|--------------|---------|
+| `llvm/types.spl` | LLVM type mappings (i64->i64, f64->double, text->i8*) |
+| `llvm/builder.spl` | Basic block + instruction builder wrappers |
+| `llvm/module.spl` | Module creation, function declarations |
+| `llvm/codegen_helpers.spl` | Common patterns (alloca+store, GEP, casts) |
+
+### Migration Order
+
+1. **Tokens first** — lowest dependency, highest reuse
+2. **AST types** — core AST structs become base, full extends
+3. **Lexer** — full lexer wraps core lexer, adds state for blocks/math
+4. **Parser** — full parser calls core parser for base syntax, adds extension rules
+5. **Types** — full type system imports core type IDs
+6. **LLVM shared** — extract common LLVM patterns to compiler_shared
+
+### Constraints
+
+- Core must remain seed-compilable (no generics, no closures)
+- Full can freely use the full language
+- Import direction: full → core only (never core → full)
+- compiler_shared may depend on core but not on full
+
+## 8. Verification Strategy
 
 1. **Seed builds core:** All core files compile through seed_cpp
 2. **Core compiles itself:** core_compiler can compile core .spl files
 3. **Full test suite passes:** 604+ tests passing after each phase
 4. **WFFI works:** Load .so, call foreign function, get correct result
 
-## 8. Key Files
+## 9. Key Files
 
 - `src/compiler_core/compiler/c_codegen.spl` — AST-direct C codegen (Phase 2)
 - `src/compiler_core/compiler/driver.spl` — Compiler driver

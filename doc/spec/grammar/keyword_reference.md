@@ -23,19 +23,19 @@
 | `import` | declarations | seed | Module import (deprecated, use use) |
 | `trait` | declarations | core | Trait definition |
 | `pub` | declarations | core | Public visibility modifier |
-| `static` | declarations | core | Static method or binding |
-| `me` | declarations | core | Mutable self method |
+| `static` | declarations | seed | Static method or binding |
+| `me` | declarations | seed | Mutable self method |
 | `type` | declarations | core | Type alias |
-| `asm` | declarations | core | Inline assembly block |
 | `implements` | declarations | core | Trait implementation declaration |
+| `const` | declarations | core | Compile-time constant |
 | `mod` | declarations | full | Module definition |
-| `const` | declarations | full | Compile-time constant |
+| `asm` | declarations | seed | Inline assembly block |
+| `unit` | declarations | full | Unit type definition |
+| `unsafe` | declarations | full | Unsafe block |
+| `shared` | declarations | full | GPU shared memory |
 | `bitfield` | declarations | full | Packed bit struct |
 | `kernel` | declarations | full | GPU kernel function |
-| `shared` | declarations | full | GPU shared memory |
-| `unsafe` | declarations | full | Unsafe block |
 | `actor` | declarations | full | Actor definition (concurrency) |
-| `unit` | declarations | full | Unit type definition |
 | `if` | control_flow | seed | Conditional branch |
 | `elif` | control_flow | seed | Else-if branch |
 | `else` | control_flow | seed | Else branch |
@@ -48,15 +48,17 @@
 | `continue` | control_flow | seed | Skip to next iteration |
 | `in` | control_flow | seed | Membership / iteration operator |
 | `loop` | control_flow | core | Infinite loop |
-| `pass` | control_flow | core | No-op placeholder |
-| `pass_todo` | control_flow | core | Unimplemented placeholder (TODO) |
-| `pass_do_nothing` | control_flow | core | Intentional no-op |
-| `pass_dn` | control_flow | core | Alias for pass_do_nothing |
-| `and` | control_flow | core | Logical AND |
-| `or` | control_flow | core | Logical OR |
-| `not` | control_flow | core | Logical NOT |
-| `self` | control_flow | core | Current instance reference |
+| `pass` | control_flow | seed | No-op placeholder |
+| `pass_todo` | control_flow | seed | Unimplemented placeholder (TODO) |
+| `pass_do_nothing` | control_flow | seed | Intentional no-op |
+| `pass_dn` | control_flow | seed | Alias for pass_do_nothing |
+| `and` | control_flow | seed | Logical AND |
+| `or` | control_flow | seed | Logical OR |
+| `not` | control_flow | seed | Logical NOT |
+| `self` | control_flow | seed | Current instance reference |
 | `is` | control_flow | core | Type check operator |
+| `as` | control_flow | core | Type cast operator |
+| `from` | control_flow | core | Import source specifier |
 | `async` | control_flow | core | Async function modifier |
 | `await` | control_flow | core | Await async expression |
 | `yield` | control_flow | core | Yield from generator |
@@ -67,17 +69,15 @@
 | `with` | control_flow | full | Context manager block |
 | `finally` | control_flow | full | Finally block (always runs) |
 | `panic` | control_flow | full | Panic / unrecoverable error |
+| `xor` | control_flow | full | Bitwise XOR operator |
 | `true` | expressions | seed | Boolean true literal |
 | `false` | expressions | seed | Boolean false literal |
 | `nil` | expressions | seed | Null/none value |
-| `as` | expressions | full | Type cast operator |
-| `xor` | expressions | full | Bitwise XOR operator |
-| `from` | expressions | full | Import source specifier |
-| `super` | expressions | full | Parent module reference |
-| `Some` | expressions | full | Option type wrapper |
-| `Ok` | expressions | full | Result success wrapper |
-| `Err` | expressions | full | Result error wrapper |
-| `None` | expressions | full | Option empty value |
+| `super` | expressions | seed | Parent module reference |
+| `Some` | expressions | seed | Option type wrapper |
+| `Ok` | expressions | seed | Result success wrapper |
+| `Err` | expressions | seed | Result error wrapper |
+| `None` | expressions | seed | Option empty value |
 | `loss` | expressions | full | Neural network loss block |
 | `nograd` | expressions | full | Disable gradient computation |
 
@@ -137,6 +137,8 @@
 | range_expr | seed |
 | array_literal | seed |
 | struct_constructor | seed |
+| when_block | seed |
+| cfg_attribute | seed |
 | lambda | core |
 | generic_syntax | core |
 | optional_chaining | core |
@@ -160,7 +162,7 @@
 
 | Tier | Keywords | Description |
 |------|----------|-------------|
-| seed | 25 | C++ bootstrap compiler |
-| core | 21 | Simple-in-Simple compiler |
-| full | 24 | Complete runtime |
+| seed | 41 | C++ bootstrap compiler |
+| core | 13 | Simple-in-Simple compiler |
+| full | 16 | Complete runtime |
 | **Total** | **70** | |

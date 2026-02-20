@@ -1,4 +1,607 @@
-# Delegates to compiler_shared
-use compiler_shared.backend.vulkan.spirv_builder.{SpirvBuilder}
+# SPIR-V Builder - Vulkan SPIR-V Binary/Assembly Code Generation
+#
+# Generates SPIR-V binary or assembly code from MIR.
+# SPIR-V is the shader intermediate representation for Vulkan.
+
+use compiler.mir_data.*
+use compiler.backend.vulkan_type_mapper.*
+use compiler.hir_types.MemorySpace
+
+# ============================================================================
+# SPIR-V Builder
+# ============================================================================
+
+class SpirvBuilder:
+    """
+    Generates SPIR-V code for Vulkan compute shaders.
+
+    SPIR-V is a binary format, but we generate human-readable
+    assembly that can be assembled with spirv-as or used for debugging.
+
+    Structure:
+    1. Capabilities and extensions
+    2. Memory model
+    3. Entry point declaration
+    4. Decorations
+    5. Type declarations
+    6. Constants
+    7. Global variables
+    8. Functions
+
+    This builder generates SPIR-V assembly (text) that can be
+    assembled to binary using spirv-as from SPIRV-Tools.
+    """
+
+    type_mapper: VulkanTypeMapper
+    val _tv_0 = [i64, i64]
+    spirv_version: _tv_0
+    val _tv_1 = [i64, i64]
+    vulkan_version: _tv_1
+    output: [text]
+    next_id: i64
+    type_ids: Dict<text, i64>      # Type representation -> ID
+    const_ids: Dict<text, i64>     # Constant representation -> ID
+    capabilities: [text]
+    extensions: [text]
+
+    val _tv_2 = [i64, i64]
+    static fn create(vk_version: _tv_2) -> SpirvBuilder:
+        """Create SPIR-V builder for specific Vulkan version."""
+        val spirv_ver = match vk_version:
+            case [1, 0]: (1, 0)
+            case [1, 1]: (1, 3)
+            case [1, 2]: (1, 5)
+            case [1, 3]: (1, 6)
+            val _tup_0 = [1, 6]
+            case _: _tup_0
+
+        SpirvBuilder(
+            type_mapper: vulkantypemapper_create_version(vk_version[0], vk_version[1], spirv_ver[0], spirv_ver[1]),
+            spirv_version: spirv_ver,
+            vulkan_version: vk_version,
+            output: [],
+            next_id: 1,  # SPIR-V IDs start at 1
+            type_ids: {},
+            const_ids: {},
+            capabilities: ["Shader"],
+            extensions: []
+        )
+
+    # === ID Management ===
+
+    me alloc_id() -> i64:
+        """Allocate a new SPIR-V ID."""
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        id
+
+    fn id_str(id: i64) -> text:
+        """Format ID as SPIR-V string."""
+        "%{id}"
+
+    # === Module Structure ===
+
+    me emit_header():
+        """Emit SPIR-V module header."""
+        val _destruct_0 = self.spirv_version
+        val major = _destruct_0[0]
+        val minor = _destruct_0[1]
+        self.emit("; SPIR-V")
+        self.emit("; Version: {major}.{minor}")
+        self.emit("; Generator: Simple Compiler")
+        self.emit("; Bound: <bound>")  # Placeholder, replaced at end
+        self.emit("; Schema: 0")
+        self.emit("")
+
+    me emit_capabilities():
+        """Emit capability declarations."""
+        for cap in self.capabilities:
+            self.emit("OpCapability {cap}")
+        self.emit("")
+
+    me add_capability(cap: text):
+        """Add a capability."""
+        if not self.capabilities_contains(capabilities, cap):
+            self.capabilities = self.capabilities_push(capabilities, cap)
+
+    me emit_extensions():
+        """Emit extension declarations."""
+        for ext in self.extensions:
+            self.emit("OpExtension \"{ext}\"")
+        if self.extensions.length > 0:
+            self.emit("")
+
+    me add_extension(ext: text):
+        """Add an extension."""
+        if not self.extensions_contains(extensions, ext):
+            self.extensions = self.extensions_push(extensions, ext)
+
+    me emit_memory_model():
+        """Emit memory model declaration."""
+        # GLSL450 for compute, Logical for logical addressing
+        self.emit("OpMemoryModel Logical GLSL450")
+        self.emit("")
+
+    me emit_entry_point(name: text, id: i64, interface_ids: [i64]):
+        """Emit entry point declaration for compute shader."""
+        val interface_str = interface_ids.map(\i: self.id_str(i)).join(" ")
+        self.emit("OpEntryPoint GLCompute {self.id_str(id)} \"{name}\" {interface_str}")
+
+    val _tv_7 = [i64, i64, i64]
+    me emit_execution_mode(entry_id: i64, local_size: _tv_7):
+        """Emit execution mode (workgroup size)."""
+        val _destruct_1 = local_size
+        val x = _destruct_1[0]
+        val y = _destruct_1[1]
+        val z = _destruct_1[2]
+        self.emit("OpExecutionMode {self.id_str(entry_id)} LocalSize {x} {y} {z}")
+        self.emit("")
+
+    # === Decorations ===
+
+    me emit_decorate(id: i64, decoration: text):
+        """Emit decoration."""
+        self.emit("OpDecorate {self.id_str(id)} {decoration}")
+
+    me emit_decorate_builtin(id: i64, builtin: SpirvBuiltin):
+        """Emit builtin decoration."""
+        val builtin_name = self.type_mapper_spirv_builtin(type_mapper, builtin)
+        self.emit("OpDecorate {self.id_str(id)} BuiltIn {builtin_name}")
+
+    me emit_decorate_binding(id: i64, set: i64, binding: i64):
+        """Emit descriptor set and binding decorations."""
+        self.emit("OpDecorate {self.id_str(id)} DescriptorSet {set}")
+        self.emit("OpDecorate {self.id_str(id)} Binding {binding}")
+
+    me emit_decorate_array_stride(id: i64, stride: i64):
+        """Emit array stride decoration."""
+        self.emit("OpDecorate {self.id_str(id)} ArrayStride {stride}")
+
+    me emit_member_decorate(struct_id: i64, member: i64, decoration: text):
+        """Emit member decoration for struct."""
+        self.emit("OpMemberDecorate {self.id_str(struct_id)} {member} {decoration}")
+
+    # === Types ===
+
+    me get_or_create_type(type_repr: text, create_fn: fn() -> i64) -> i64:
+        """Get existing type ID or create new one."""
+        if self.type_ids_contains_key(type_ids, type_repr):
+            return self.type_ids_get(type_ids, type_repr).unwrap()
+
+        val id = create_fn()
+        self.type_ids = self.type_ids_insert(type_ids, type_repr, id)
+        id
+
+    me emit_type_void() -> i64:
+        """Emit void type."""
+        self.get_or_create_type("void", \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpTypeVoid")
+            id
+        )
+
+    me emit_type_bool() -> i64:
+        """Emit boolean type."""
+        self.get_or_create_type("bool", \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpTypeBool")
+            id
+        )
+
+    me emit_type_int(width: i64, signed: bool) -> i64:
+        """Emit integer type."""
+        val sign_val = if signed: 1 else: 0
+        val repr = "int_{width}_{sign_val}"
+        self.get_or_create_type(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpTypeInt {width} {sign_val}")
+            id
+        )
+
+    me emit_type_float(width: i64) -> i64:
+        """Emit float type."""
+        val repr = "float_{width}"
+        self.get_or_create_type(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpTypeFloat {width}")
+            id
+        )
+
+    me emit_type_vector(component_id: i64, count: i64) -> i64:
+        """Emit vector type."""
+        val repr = "vec_{component_id}_{count}"
+        self.get_or_create_type(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpTypeVector {self.id_str(component_id)} {count}")
+            id
+        )
+
+    me emit_type_array(element_id: i64, length_id: i64) -> i64:
+        """Emit array type (fixed size)."""
+        val repr = "arr_{element_id}_{length_id}"
+        self.get_or_create_type(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpTypeArray {self.id_str(element_id)} {self.id_str(length_id)}")
+            id
+        )
+
+    me emit_type_runtime_array(element_id: i64) -> i64:
+        """Emit runtime array type (unsized, for SSBOs)."""
+        val repr = "rarr_{element_id}"
+        self.get_or_create_type(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpTypeRuntimeArray {self.id_str(element_id)}")
+            id
+        )
+
+    me emit_type_struct(member_ids: [i64]) -> i64:
+        """Emit struct type."""
+        val repr = "struct_{member_ids.map(\i: "{i}").join("_")}"
+        self.get_or_create_type(repr, \:
+            val id = self.alloc_id()
+            val members = member_ids.map(\i: self.id_str(i)).join(" ")
+            self.emit("{self.id_str(id)} = OpTypeStruct {members}")
+            id
+        )
+
+    me emit_type_pointer(storage_class: text, pointee_id: i64) -> i64:
+        """Emit pointer type."""
+        val repr = "ptr_{storage_class}_{pointee_id}"
+        self.get_or_create_type(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpTypePointer {storage_class} {self.id_str(pointee_id)}")
+            id
+        )
+
+    me emit_type_function(return_id: i64, param_ids: [i64]) -> i64:
+        """Emit function type."""
+        val repr = "fn_{return_id}_{param_ids.map(\i: "{i}").join("_")}"
+        self.get_or_create_type(repr, \:
+            val id = self.alloc_id()
+            val params = param_ids.map(\i: self.id_str(i)).join(" ")
+            self.emit("{self.id_str(id)} = OpTypeFunction {self.id_str(return_id)} {params}")
+            id
+        )
+
+    # === Constants ===
+
+    me emit_const_true(bool_type_id: i64) -> i64:
+        """Emit true constant."""
+        val repr = "true_{bool_type_id}"
+        self.get_or_create_const(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpConstantTrue {self.id_str(bool_type_id)}")
+            id
+        )
+
+    me emit_const_false(bool_type_id: i64) -> i64:
+        """Emit false constant."""
+        val repr = "false_{bool_type_id}"
+        self.get_or_create_const(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpConstantFalse {self.id_str(bool_type_id)}")
+            id
+        )
+
+    me emit_const_int(type_id: i64, value: i64) -> i64:
+        """Emit integer constant."""
+        val repr = "int_{type_id}_{value}"
+        self.get_or_create_const(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpConstant {self.id_str(type_id)} {value}")
+            id
+        )
+
+    me emit_const_float(type_id: i64, value: f64) -> i64:
+        """Emit float constant."""
+        val repr = "float_{type_id}_{value}"
+        self.get_or_create_const(repr, \:
+            val id = self.alloc_id()
+            self.emit("{self.id_str(id)} = OpConstant {self.id_str(type_id)} {value}")
+            id
+        )
+
+    me get_or_create_const(const_repr: text, create_fn: fn() -> i64) -> i64:
+        """Get existing constant ID or create new one."""
+        if self.const_ids_contains_key(const_ids, const_repr):
+            return self.const_ids_get(const_ids, const_repr).unwrap()
+
+        val id = create_fn()
+        self.const_ids = self.const_ids_insert(const_ids, const_repr, id)
+        id
+
+    # === Variables ===
+
+    me emit_variable(ptr_type_id: i64, storage_class: text) -> i64:
+        """Emit variable declaration."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpVariable {self.id_str(ptr_type_id)} {storage_class}")
+        id
+
+    me emit_variable_with_init(ptr_type_id: i64, storage_class: text, init_id: i64) -> i64:
+        """Emit variable with initializer."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpVariable {self.id_str(ptr_type_id)} {storage_class} {self.id_str(init_id)}")
+        id
+
+    # === Functions ===
+
+    me emit_function(result_type_id: i64, func_type_id: i64, control: text) -> i64:
+        """Emit function definition start."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFunction {self.id_str(result_type_id)} {control} {self.id_str(func_type_id)}")
+        id
+
+    me emit_function_parameter(type_id: i64) -> i64:
+        """Emit function parameter."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFunctionParameter {self.id_str(type_id)}")
+        id
+
+    me emit_function_end():
+        """Emit function end."""
+        self.emit("OpFunctionEnd")
+        self.emit("")
+
+    # === Basic Blocks ===
+
+    me emit_label() -> i64:
+        """Emit label (basic block start)."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpLabel")
+        id
+
+    me emit_branch(target_id: i64):
+        """Emit unconditional branch."""
+        self.emit("OpBranch {self.id_str(target_id)}")
+
+    me emit_branch_conditional(cond_id: i64, true_id: i64, false_id: i64):
+        """Emit conditional branch."""
+        self.emit("OpBranchConditional {self.id_str(cond_id)} {self.id_str(true_id)} {self.id_str(false_id)}")
+
+    me emit_return():
+        """Emit void return."""
+        self.emit("OpReturn")
+
+    me emit_return_value(value_id: i64):
+        """Emit return with value."""
+        self.emit("OpReturnValue {self.id_str(value_id)}")
+
+    # === Memory Operations ===
+
+    me emit_load(result_type_id: i64, ptr_id: i64) -> i64:
+        """Emit load instruction."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpLoad {self.id_str(result_type_id)} {self.id_str(ptr_id)}")
+        id
+
+    me emit_store(ptr_id: i64, value_id: i64):
+        """Emit store instruction."""
+        self.emit("OpStore {self.id_str(ptr_id)} {self.id_str(value_id)}")
+
+    me emit_access_chain(result_type_id: i64, base_id: i64, indices: [i64]) -> i64:
+        """Emit access chain (pointer arithmetic)."""
+        val id = self.alloc_id()
+        val idx_str = indices.map(\i: self.id_str(i)).join(" ")
+        self.emit("{self.id_str(id)} = OpAccessChain {self.id_str(result_type_id)} {self.id_str(base_id)} {idx_str}")
+        id
+
+    # === Arithmetic Operations ===
+
+    me emit_iadd(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit integer add."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpIAdd {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_isub(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit integer subtract."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpISub {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_imul(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit integer multiply."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpIMul {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_sdiv(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit signed integer divide."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpSDiv {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_udiv(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit unsigned integer divide."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpUDiv {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_fadd(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit float add."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFAdd {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_fsub(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit float subtract."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFSub {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_fmul(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit float multiply."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFMul {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_fdiv(type_id: i64, a: i64, b: i64) -> i64:
+        """Emit float divide."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFDiv {self.id_str(type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_fneg(type_id: i64, a: i64) -> i64:
+        """Emit float negate."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFNegate {self.id_str(type_id)} {self.id_str(a)}")
+        id
+
+    me emit_sneg(type_id: i64, a: i64) -> i64:
+        """Emit signed integer negate."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpSNegate {self.id_str(type_id)} {self.id_str(a)}")
+        id
+
+    # === Comparison Operations ===
+
+    me emit_iequal(bool_type_id: i64, a: i64, b: i64) -> i64:
+        """Emit integer equal."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpIEqual {self.id_str(bool_type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_inotequal(bool_type_id: i64, a: i64, b: i64) -> i64:
+        """Emit integer not equal."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpINotEqual {self.id_str(bool_type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_sless_than(bool_type_id: i64, a: i64, b: i64) -> i64:
+        """Emit signed less than."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpSLessThan {self.id_str(bool_type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_sless_than_equal(bool_type_id: i64, a: i64, b: i64) -> i64:
+        """Emit signed less than or equal."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpSLessThanEqual {self.id_str(bool_type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_fequal(bool_type_id: i64, a: i64, b: i64) -> i64:
+        """Emit float equal."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFOrdEqual {self.id_str(bool_type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    me emit_fless_than(bool_type_id: i64, a: i64, b: i64) -> i64:
+        """Emit float less than."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpFOrdLessThan {self.id_str(bool_type_id)} {self.id_str(a)} {self.id_str(b)}")
+        id
+
+    # === Synchronization ===
+
+    me emit_control_barrier(execution: text, memory: text, semantics: text):
+        """Emit control barrier (workgroup sync)."""
+        # Scope constants need to be defined
+        self.emit("OpControlBarrier {execution} {memory} {semantics}")
+
+    me emit_memory_barrier(memory: text, semantics: text):
+        """Emit memory barrier."""
+        self.emit("OpMemoryBarrier {memory} {semantics}")
+
+    # === Atomic Operations ===
+
+    me emit_atomic_iadd(result_type_id: i64, ptr_id: i64, scope_id: i64, semantics_id: i64, value_id: i64) -> i64:
+        """Emit atomic integer add."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpAtomicIAdd {self.id_str(result_type_id)} {self.id_str(ptr_id)} {self.id_str(scope_id)} {self.id_str(semantics_id)} {self.id_str(value_id)}")
+        id
+
+    me emit_atomic_smin(result_type_id: i64, ptr_id: i64, scope_id: i64, semantics_id: i64, value_id: i64) -> i64:
+        """Emit atomic signed min."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpAtomicSMin {self.id_str(result_type_id)} {self.id_str(ptr_id)} {self.id_str(scope_id)} {self.id_str(semantics_id)} {self.id_str(value_id)}")
+        id
+
+    me emit_atomic_smax(result_type_id: i64, ptr_id: i64, scope_id: i64, semantics_id: i64, value_id: i64) -> i64:
+        """Emit atomic signed max."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpAtomicSMax {self.id_str(result_type_id)} {self.id_str(ptr_id)} {self.id_str(scope_id)} {self.id_str(semantics_id)} {self.id_str(value_id)}")
+        id
+
+    me emit_atomic_exchange(result_type_id: i64, ptr_id: i64, scope_id: i64, semantics_id: i64, value_id: i64) -> i64:
+        """Emit atomic exchange."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpAtomicExchange {self.id_str(result_type_id)} {self.id_str(ptr_id)} {self.id_str(scope_id)} {self.id_str(semantics_id)} {self.id_str(value_id)}")
+        id
+
+    me emit_atomic_compare_exchange(result_type_id: i64, ptr_id: i64, scope_id: i64, equal_semantics_id: i64, unequal_semantics_id: i64, value_id: i64, comparator_id: i64) -> i64:
+        """Emit atomic compare and exchange."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpAtomicCompareExchange {self.id_str(result_type_id)} {self.id_str(ptr_id)} {self.id_str(scope_id)} {self.id_str(equal_semantics_id)} {self.id_str(unequal_semantics_id)} {self.id_str(value_id)} {self.id_str(comparator_id)}")
+        id
+
+    # === Conversion ===
+
+    me emit_convert_stof(type_id: i64, value_id: i64) -> i64:
+        """Convert signed int to float."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpConvertSToF {self.id_str(type_id)} {self.id_str(value_id)}")
+        id
+
+    me emit_convert_ftos(type_id: i64, value_id: i64) -> i64:
+        """Convert float to signed int."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpConvertFToS {self.id_str(type_id)} {self.id_str(value_id)}")
+        id
+
+    me emit_bitcast(type_id: i64, value_id: i64) -> i64:
+        """Bitcast (reinterpret)."""
+        val id = self.alloc_id()
+        self.emit("{self.id_str(id)} = OpBitcast {self.id_str(type_id)} {self.id_str(value_id)}")
+        id
+
+    # === Composite Operations ===
+
+    me emit_composite_extract(type_id: i64, composite_id: i64, indices: [i64]) -> i64:
+        """Extract element from composite."""
+        val id = self.alloc_id()
+        val idx_str = indices.map(\i: "{i}").join(" ")
+        self.emit("{self.id_str(id)} = OpCompositeExtract {self.id_str(type_id)} {self.id_str(composite_id)} {idx_str}")
+        id
+
+    me emit_composite_construct(type_id: i64, constituent_ids: [i64]) -> i64:
+        """Construct composite from constituents."""
+        val id = self.alloc_id()
+        val constituents = constituent_ids.map(\i: self.id_str(i)).join(" ")
+        self.emit("{self.id_str(id)} = OpCompositeConstruct {self.id_str(type_id)} {constituents}")
+        id
+
+    # === Output ===
+
+    me emit(line: text):
+        """Emit a line of SPIR-V assembly."""
+        self.output = self.output_push(output, line)
+
+    me emit_comment(comment: text):
+        """Emit a comment."""
+        self.emit("; {comment}")
+
+    fn build() -> text:
+        """Build final SPIR-V assembly."""
+        # Replace bound placeholder with actual value
+        val bound_line = "; Bound: {self.next_id}"
+        self.output.map(\line:
+            if line == "; Bound: <bound>":
+                bound_line
+            else:
+                line
+        ).join("\n")
+
+    fn get_output() -> [text]:
+        """Get output lines."""
+        self.output
+
+    fn get_bound() -> i64:
+        """Get current ID bound."""
+        self.next_id
+
+# ============================================================================
+# Export
+# ============================================================================
 
 export SpirvBuilder

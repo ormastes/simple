@@ -163,6 +163,38 @@ fn get_keyword_example(name: text) -> text:
     if name == "spawn": return "`spawn worker()`"
     return ""
 
+fn get_asm_description(name: text) -> text:
+    if name == "asm_single_line": return "Single-line asm statement (`asm \"nop\"`)"
+    if name == "asm_indented_block": return "Indented asm block (`asm:\\n    \"nop\"`)"
+    if name == "asm_braced_block": return "Braced asm block (`asm { \"nop\" }`)"
+    if name == "asm_match": return "Target-conditional asm (`asm match: case [x86_64]: ...`)"
+    if name == "asm_assert": return "Target assertion (`asm assert [x86_64, linux]`)"
+    if name == "asm_operands": return "Register operands (`in(reg) var, out(reg) var`)"
+    if name == "asm_clobbers": return "Clobber lists (`clobbers: [\"eax\"]`)"
+    if name == "asm_options": return "Asm options (`options: [volatile, noreturn]`)"
+    if name == "asm_register_alloc": return "Compiler register allocation"
+    if name == "asm_target_validation": return "Per-arch instruction validation"
+    return name
+
+fn get_asm_kind(name: text) -> text:
+    if name == "asm_single_line": return "clang-depend"
+    if name == "asm_indented_block": return "clang-depend"
+    if name == "asm_braced_block": return "clang-depend"
+    if name == "asm_match": return "clang-depend"
+    if name == "asm_assert": return "clang-depend"
+    return "compiler-depend"
+
+fn get_llf_description(name: text) -> text:
+    if name == "bitfield": return "Packed bit-level struct declarations"
+    if name == "union_type_operator": return "Union type operator (`A | B | C`)"
+    if name == "union_declaration": return "C-style `union {}` declaration"
+    if name == "packed_attr": return "`@packed` attribute for struct layout"
+    if name == "repr_attr": return "`@repr(C)` representation attribute"
+    if name == "align_attr": return "`@align(N)` alignment attribute"
+    if name == "volatile_asm": return "Volatile asm via C passthrough"
+    if name == "volatile_attr": return "`@volatile` attribute for MMIO"
+    return name
+
 fn tier_allowed(target_tier: text, kw_tier: text) -> bool:
     if target_tier == "full": return true
     if target_tier == "core":
@@ -222,6 +254,10 @@ fn main() -> i64:
     var ct_names: [text] = []
     var ct_tiers: [text] = []
     var aspirational_keywords: [text] = []
+    var asm_names: [text] = []
+    var asm_tiers: [text] = []
+    var llf_names: [text] = []
+    var llf_tiers: [text] = []
 
     var current_section = ""
     var current_subsection = ""
@@ -257,6 +293,12 @@ fn main() -> i64:
                 elif current_section == "constructs":
                     ct_names.push(key)
                     ct_tiers.push(value_part)
+                elif current_section == "asm_capabilities":
+                    asm_names.push(key)
+                    asm_tiers.push(value_part)
+                elif current_section == "low_level_features":
+                    llf_names.push(key)
+                    llf_tiers.push(value_part)
                 elif current_section == "treesitter_aspirational":
                     if key == "keywords":
                         val kw_list = value_part.split(", ")
@@ -265,7 +307,7 @@ fn main() -> i64:
                             if cleaned != "":
                                 aspirational_keywords.push(cleaned)
 
-    print "Parsed {kw_names.len()} keywords, {op_names.len()} operators, {ct_names.len()} constructs"
+    print "Parsed {kw_names.len()} keywords, {op_names.len()} operators, {ct_names.len()} constructs, {asm_names.len()} asm capabilities, {llf_names.len()} low-level features"
 
     # JSON output mode
     if format == "json":
@@ -417,6 +459,68 @@ fn main() -> i64:
             if tier_allowed(tier, ct_tier):
                 out = out + "| {ct_name} | {ct_tier} |\n"
             ci = ci + 1
+        # Asm capabilities table
+        var has_asm = false
+        var ai = 0
+        for an in asm_names:
+            if tier_allowed(tier, asm_tiers[ai]):
+                has_asm = true
+                break
+            ai = ai + 1
+        if has_asm:
+            out = out + "\n## Assembly Capabilities\n\n"
+            out = out + "| Capability | Kind | Tier | Description |\n"
+            out = out + "|------------|------|------|-------------|\n"
+            var ai2 = 0
+            for an in asm_names:
+                val at = asm_tiers[ai2]
+                if tier_allowed(tier, at):
+                    val ad = get_asm_description(an)
+                    val ak = get_asm_kind(an)
+                    out = out + "| {an} | {ak} | {at} | {ad} |\n"
+                ai2 = ai2 + 1
+
+        # Low-level features table
+        var has_llf = false
+        var li = 0
+        for ln in llf_names:
+            val lt = llf_tiers[li]
+            if lt != "none" and tier_allowed(tier, lt):
+                has_llf = true
+                break
+            li = li + 1
+        if has_llf:
+            out = out + "\n## Low-Level Features\n\n"
+            out = out + "| Feature | Tier | Description |\n"
+            out = out + "|---------|------|-------------|\n"
+            var li2 = 0
+            for ln in llf_names:
+                val lt = llf_tiers[li2]
+                if lt != "none" and tier_allowed(tier, lt):
+                    val ld = get_llf_description(ln)
+                    out = out + "| {ln} | {lt} | {ld} |\n"
+                li2 = li2 + 1
+
+        # Also show "none" features as not-implemented markers in full tier
+        if tier == "full":
+            var has_none = false
+            var ni = 0
+            for ln in llf_names:
+                if llf_tiers[ni] == "none":
+                    has_none = true
+                    break
+                ni = ni + 1
+            if has_none:
+                out = out + "\n### Not Yet Implemented\n\n"
+                out = out + "| Feature | Status | Description |\n"
+                out = out + "|---------|--------|-------------|\n"
+                var ni2 = 0
+                for ln in llf_names:
+                    if llf_tiers[ni2] == "none":
+                        val ld = get_llf_description(ln)
+                        out = out + "| {ln} | not implemented | {ld} |\n"
+                    ni2 = ni2 + 1
+
         # Count
         var kw_count = 0
         var ki5 = 0
@@ -437,7 +541,17 @@ fn main() -> i64:
                 ct_count = ct_count + 1
             ci2 = ci2 + 1
         out = out + "\n---\n\n**Summary:** {kw_count} keywords, {op_count} operators, {ct_count} constructs\n"
+
+        # Preserve hand-maintained sections from existing file
         val tier_path = "{out_dir}/{tier}_grammar.md"
+        val existing = rt_file_read_text(tier_path) ?? ""
+        if existing != "":
+            val gap_marker = "## Conditional Compilation"
+            val gap_idx = existing.index_of(gap_marker) ?? -1
+            if gap_idx >= 0:
+                val preserved = existing.slice(gap_idx, existing.len())
+                out = out + "\n" + preserved
+
         rt_file_write_text(tier_path, out)
         print "Generated {tier_path}"
 
