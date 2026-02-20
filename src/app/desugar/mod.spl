@@ -120,6 +120,7 @@ use app.desugar.static_methods (desugar_static_methods)
 use app.desugar.enum_constructors (desugar_enum_constructors)
 use app.desugar.rewriter (rewrite_static_calls)
 use app.desugar.context_params (desugar_context_params)
+use app.desugar.trait_static_dispatch (desugar_trait_static_dispatch)
 use std.log.{error}
 
 export desugar_file, desugar_source
@@ -190,13 +191,23 @@ fn desugar_source(source: text) -> text:
     #       -> "var __ctx_logger: Logger = nil\n...\n__ctx_logger = x\nf()\n..."
     val pass_ctx = desugar_context_params(source)
 
+    # Pass -1.5: Rewrite trait-typed function parameters to generic params
+    #            for static dispatch. `fn f(x: Trait)` becomes
+    #            `fn f<__T0: Trait>(x: __T0)`. Interface-typed and
+    #            dyn-prefixed params are left as dynamic dispatch.
+    #            Must run BEFORE trait desugar converts traits to structs.
+    #
+    # Example: "fn process(x: Printable):"
+    #       -> "fn process<__T0: Printable>(x: __T0):"
+    val pass_static = desugar_trait_static_dispatch(pass_ctx)
+
     # Pass -1: Transform trait declarations into struct-with-fn-fields.
     #          Must run before forwarding so that `alias TraitName = field`
     #          in class bodies can still reference the generated struct.
     #
     # Example: "trait Repo:\n    fn find(id: text) -> Item"
     #       -> "struct Repo:\n    find_fn: fn(text) -> Item"
-    val pass_trait = desugar_traits(pass_ctx)
+    val pass_trait = desugar_traits(pass_static)
 
     # Pass -0.5: Generate lazy proxy delegation functions for traits
     #            annotated with # @lazy_proxy("service_name").

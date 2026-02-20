@@ -40,9 +40,11 @@ class TextFormatter:
 #   Phase 3 - impl generates factory: forwarding from alias TraitName = field
 #   Phase 4 - Forwarding: alias fn/me and blanket alias field
 #   Phase 5 - End-to-end: complete trait workflow define, implement, use
+#   Phase 6 - Static dispatch rewrite: trait params become generics
 
 use app.desugar.trait_scanner (scan_traits, find_trait, ScannedTrait, TraitMethod)
 use app.desugar.forwarding (desugar_forwarding)
+use app.desugar.trait_static_dispatch (desugar_trait_static_dispatch)
 
 # ============================================================================
 # Phase 1 - Trait Detection
@@ -450,3 +452,51 @@ describe "Trait Keyword: Phase 5 - End-to-end usage":
             expect(out).to_contain("self.impl.status()")
             expect(out).to_contain("fn name():")
             expect(out).to_contain("self.impl.name()")
+
+# ============================================================================
+# Phase 6 - Static Dispatch Rewrite
+# ============================================================================
+
+describe "Trait Keyword: Phase 6 - Static dispatch rewrite":
+
+    context "trait params become generic":
+        it "fn with trait param is rewritten to generic":
+            var src = "trait Printable:" + "\n"
+            src = src + "    fn print_text() -> text" + "\n"
+            src = src + "\n"
+            src = src + "fn show(x: Printable):" + "\n"
+            src = src + "    x.print_text()" + "\n"
+            val out = desugar_trait_static_dispatch(src)
+            expect(out).to_contain("fn show<__T0: Printable>(x: __T0):")
+
+        it "multiple trait params get separate type vars":
+            var src = "trait Readable:" + "\n"
+            src = src + "    fn read() -> text" + "\n"
+            src = src + "\n"
+            src = src + "trait Closeable:" + "\n"
+            src = src + "    me close()" + "\n"
+            src = src + "\n"
+            src = src + "fn use_both(r: Readable, c: Closeable):" + "\n"
+            src = src + "    pass_do_nothing" + "\n"
+            val out = desugar_trait_static_dispatch(src)
+            expect(out).to_contain("fn use_both<__T0: Readable, __T1: Closeable>(r: __T0, c: __T1):")
+
+    context "dyn prefix stays dynamic":
+        it "dyn Trait param is NOT rewritten":
+            var src = "trait Printable:" + "\n"
+            src = src + "    fn print_text() -> text" + "\n"
+            src = src + "\n"
+            src = src + "fn show(x: dyn Printable):" + "\n"
+            src = src + "    x.print_text()" + "\n"
+            val out = desugar_trait_static_dispatch(src)
+            expect(out).to_contain("fn show(x: dyn Printable):")
+
+    context "interface stays dynamic":
+        it "interface-typed param is NOT rewritten":
+            var src = "interface Drawable:" + "\n"
+            src = src + "    fn draw()" + "\n"
+            src = src + "\n"
+            src = src + "fn render(x: Drawable):" + "\n"
+            src = src + "    x.draw()" + "\n"
+            val out = desugar_trait_static_dispatch(src)
+            expect(out).to_contain("fn render(x: Drawable):")
