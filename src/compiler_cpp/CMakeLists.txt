@@ -9,17 +9,35 @@
 #
 # The generated code links against runtime.c/runtime.h from src/runtime/.
 #
-# Build:
-#   cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
-#   ninja -C build
+# Build (clang/clang-cl auto-detected; override with -DCMAKE_C_COMPILER=...):
+#   cmake -B build -G Ninja -S src/compiler_cpp
+#   ninja -C build -j7
 #
 # The bootstrap approach follows Go/Zig: generated C is committed to repo,
 # so anyone can bootstrap from scratch with just CMake + a C compiler.
 
 cmake_minimum_required(VERSION 3.20)
+
+# Default to clang/clang-cl if not explicitly set
+if(NOT DEFINED CMAKE_C_COMPILER)
+    if(WIN32)
+        find_program(_CLANG_CL clang-cl)
+        if(_CLANG_CL)
+            set(CMAKE_C_COMPILER "${_CLANG_CL}" CACHE FILEPATH "C compiler" FORCE)
+        endif()
+    else()
+        find_program(_CLANG clang)
+        if(_CLANG)
+            set(CMAKE_C_COMPILER "${_CLANG}" CACHE FILEPATH "C compiler" FORCE)
+        endif()
+    endif()
+endif()
+
 project(simple LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
+
+option(ENABLE_ASAN "Enable AddressSanitizer and LeakSanitizer" OFF)
 
 # Runtime sources from src/runtime/ (sibling directory)
 set(RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../runtime")
@@ -34,17 +52,15 @@ set(RUNTIME_SOURCES
 # Build other tools as separate targets.
 
 # Primary bootstrap binary (CLI entry point)
+# Links runtime for spl_init_args, rt_file_read_text, etc.
 add_executable(simple main.c ${RUNTIME_SOURCES})
 
 # Bootstrap codegen tool (text-based Simple→C compiler)
-add_executable(simple_codegen real_compiler.c ${RUNTIME_SOURCES})
-
-# Additional standalone tools
-add_executable(simple_gen_c gen_c_only.c ${RUNTIME_SOURCES})
-add_executable(simple_native native.c ${RUNTIME_SOURCES})
+# Self-contained: has its own rt_* implementations, does NOT link runtime.c
+add_executable(simple_codegen real_compiler.c)
 
 # Common settings for all targets
-set(ALL_TARGETS simple simple_codegen simple_gen_c simple_native)
+set(ALL_TARGETS simple simple_codegen)
 
 foreach(TGT ${ALL_TARGETS})
     target_include_directories(${TGT} PRIVATE
@@ -66,6 +82,10 @@ foreach(TGT ${ALL_TARGETS})
             $<$<CONFIG:Release>:-O2>
             $<$<CONFIG:Debug>:-g -O0>
         )
+        if(ENABLE_ASAN)
+            target_compile_options(${TGT} PRIVATE -fsanitize=address,leak -fno-omit-frame-pointer)
+            target_link_options(${TGT} PRIVATE -fsanitize=address,leak)
+        endif()
     endif()
     if(CMAKE_C_COMPILER_ID MATCHES "MSVC")
         target_compile_options(${TGT} PRIVATE

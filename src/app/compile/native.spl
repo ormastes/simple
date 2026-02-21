@@ -25,6 +25,7 @@
 
 # Direct extern declarations to avoid module closure limitations
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_cli_get_args() -> [str]
 
@@ -100,8 +101,8 @@ fn extract_use_modules(source: text) -> [text]:
         val trimmed = line.trim()
         if trimmed.starts_with("use "):
             val rest = trimmed.substring(4).trim()
-            # Skip stdlib/framework imports
-            if rest.starts_with("app.") or rest.starts_with("std.") or rest.starts_with("compiler."):
+            # Skip compiler internals (no local files to bundle)
+            if rest.starts_with("compiler."):
                 continue
             # Extract module path (before { or .)
             var module_path = rest
@@ -110,7 +111,10 @@ fn extract_use_modules(source: text) -> [text]:
                 module_path = rest.substring(0, brace_idx).trim()
                 if module_path.ends_with("."):
                     module_path = module_path.substring(0, module_path.len() - 1)
-            if module_path.ends_with("*"):
+            if module_path.ends_with(".*"):
+                # Wildcard import: strip .* and include the base module
+                module_path = module_path.substring(0, module_path.len() - 2)
+            elif module_path.ends_with("*"):
                 continue
             if module_path.len() > 0:
                 modules.push(module_path)
@@ -124,6 +128,26 @@ fn resolve_module_file(module_path: text, base_dir: text) -> text:
     val init_path = base_dir + "/" + rel_path + "/__init__.spl"
     if rt_file_exists(init_path):
         return init_path
+    # Handle app.X.Y imports - resolve to src/app/X/Y.spl from project root
+    if module_path.starts_with("app."):
+        val parts = module_path.substring(4)
+        val app_rel = parts.replace(".", "/")
+        val app_path = "src/app/" + app_rel + ".spl"
+        if rt_file_exists(app_path):
+            return app_path
+        val app_init = "src/app/" + app_rel + "/__init__.spl"
+        if rt_file_exists(app_init):
+            return app_init
+    # Handle std.X.Y imports - resolve to src/lib/X/Y.spl from project root
+    if module_path.starts_with("std."):
+        val parts = module_path.substring(4)
+        val lib_rel = parts.replace(".", "/")
+        val lib_path = "src/lib/" + lib_rel + ".spl"
+        if rt_file_exists(lib_path):
+            return lib_path
+        val lib_init = "src/lib/" + lib_rel + "/__init__.spl"
+        if rt_file_exists(lib_init):
+            return lib_init
     # Fallback: strip leading package prefix if it matches the base dir name
     # Handles intra-package imports like "use compiler.core.tokens" when base_dir is src/core
     val dot_pos = module_path.index_of(".") ?? -1
@@ -169,8 +193,8 @@ fn collect_all_sources(source_file: text, source: text, verbose: bool) -> text:
             if verbose:
                 warn("compile", "cannot read dependency: {dep_file}")
             continue
-        # Skip if combined source would exceed 80KB (runtime file_write limit)
-        if combined_size + dep_source.len() > 80000:
+        # Skip if combined source would exceed 500KB
+        if combined_size + dep_source.len() > 500000:
             if verbose:
                 debug("compile", "Skipping dependency (size limit): {dep_file}")
             continue
@@ -200,7 +224,7 @@ fn collect_all_sources(source_file: text, source: text, verbose: bool) -> text:
 # Compilation Pipeline
 # ============================================================================
 
-fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_override: text) -> i64:
+fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool) -> i64:
     if verbose:
         info("compile", "Compiling {source_file} to native binary...")
 
@@ -243,17 +267,21 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
     var gcc_cmd = ""
     var used_mold = false
 
+    var sanitize_flags = ""
+    if sanitize:
+        sanitize_flags = "-fsanitize=address,leak -fno-omit-frame-pointer -g "
+
     if mold_path != "":
         var mold_dir = "."
         val last_slash = mold_path.last_index_of("/") ?? -1
         if last_slash >= 0:
             mold_dir = mold_path.substring(0, last_slash)
-        gcc_cmd = "{cc} -fuse-ld=mold -B {mold_dir}/ -o '{output_file}' '{temp_c}'"
+        gcc_cmd = "{cc} {sanitize_flags}-fuse-ld=mold -B {mold_dir}/ -o '{output_file}' '{temp_c}'"
         used_mold = true
         if verbose:
             debug("compile", "Using mold linker at: {mold_path}")
     else:
-        gcc_cmd = "{cc} -o '{output_file}' '{temp_c}'"
+        gcc_cmd = "{cc} {sanitize_flags}-o '{output_file}' '{temp_c}'"
         if verbose:
             debug("compile", "No mold found, using system linker")
 
@@ -290,8 +318,11 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
 # Multi-File Linked Compilation (separate compile + link via mold/gcc)
 # ============================================================================
 
-fn compile_c_to_object(c_file: text, obj_file: text, verbose: bool, cc: text) -> bool:
-    val cmd = "{cc} -c -fPIE -o '{obj_file}' '{c_file}'"
+fn compile_c_to_object(c_file: text, obj_file: text, verbose: bool, cc: text, sanitize: bool) -> bool:
+    var san_flags = ""
+    if sanitize:
+        san_flags = "-fsanitize=address,leak -fno-omit-frame-pointer -g "
+    val cmd = "{cc} {san_flags}-c -fPIE -o '{obj_file}' '{c_file}'"
     if verbose:
         debug("compile", "{cc} -c: {c_file} -> {obj_file}")
     val (out, err, exit_code) = shell(cmd)
@@ -334,7 +365,7 @@ fn link_objects(obj_files: [text], output_file: text, verbose: bool, cc: text) -
         return false
     true
 
-fn compile_native_linked(source_file: text, output_file: text, verbose: bool, compiler_override: text) -> i64:
+fn compile_native_linked(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool) -> i64:
     if verbose:
         info("compile", "Compiling {source_file} to native binary (separate compile+link)...")
 
@@ -408,7 +439,7 @@ fn compile_native_linked(source_file: text, output_file: text, verbose: bool, co
         return 1
 
     val temp_o = temp_dir + "/combined.o"
-    if not compile_c_to_object(temp_c, temp_o, verbose, cc):
+    if not compile_c_to_object(temp_c, temp_o, verbose, cc, sanitize):
         shell("rm -rf '{temp_dir}'")
         return 1
 
@@ -451,7 +482,12 @@ fn compile_gen_c_only(source_file: text, output_file: text, verbose: bool) -> i6
     val source = collect_all_sources(source_file, source_single, verbose)
     val c_code = generate_c_code(source)
 
-    if not file_write(output_file, c_code):
+    # If output is "-", print to stdout for shell redirection
+    if output_file == "-":
+        print c_code
+        return 0
+
+    if not rt_file_write_text(output_file, c_code):
         error("compile", "Failed to write C file: {output_file}")
         return 1
 
@@ -476,6 +512,7 @@ fn main() -> i64:
     var use_linked = false
     var gen_c_only = false
     var compiler_override = ""
+    var sanitize = false
     for ai in range(4, args.len()):
         if args[ai] == "--verbose":
             verbose = true
@@ -483,14 +520,16 @@ fn main() -> i64:
             use_linked = true
         if args[ai] == "--gen-c-only":
             gen_c_only = true
+        if args[ai] == "--sanitize":
+            sanitize = true
         if args[ai].starts_with("--compiler="):
             compiler_override = args[ai].substring(11)
 
     if gen_c_only:
         return compile_gen_c_only(source_file, output_file, verbose)
     if use_linked:
-        return compile_native_linked(source_file, output_file, verbose, compiler_override)
-    compile_native(source_file, output_file, verbose, compiler_override)
+        return compile_native_linked(source_file, output_file, verbose, compiler_override, sanitize)
+    compile_native(source_file, output_file, verbose, compiler_override, sanitize)
 
 # export compile_native, compile_native_linked, compile_gen_c_only, generate_c_code
 # export find_c_compiler, detect_platform
