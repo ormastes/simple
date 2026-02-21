@@ -64,8 +64,11 @@ if command -v cmake &>/dev/null; then
         C_FLAG="-DCMAKE_C_COMPILER=clang"
     fi
 
+    # Limit parallel jobs to avoid OOM crashes on large generated C++ files
+    MAX_JOBS="${BOOTSTRAP_JOBS:-7}"
+
     cmake -B "${BUILD_DIR}" ${GENERATOR} ${CXX_FLAG} ${C_FLAG} -S "${GENERATED_DIR}"
-    cmake --build "${BUILD_DIR}"
+    cmake --build "${BUILD_DIR}" --parallel "${MAX_JOBS}"
 
     # Step 3: Install bootstrap binary
     echo ""

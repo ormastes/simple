@@ -21,7 +21,7 @@ The C backend generates C++20 directly from the full compiler, bypassing the see
 ```
 bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
 cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
-ninja -C build
+ninja -C build -j7
 mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
 bin/bootstrap/cpp/simple build   # Self-host verification
 ```
@@ -329,7 +329,7 @@ cd simple
 mkdir -p build/seed
 cd build/seed
 cmake -G Ninja -DCMAKE_CXX_COMPILER=clang++-20 ..
-ninja
+ninja -j7
 cd ../..
 
 # 2. Transpile Core Simple to C++
@@ -521,7 +521,7 @@ cmake -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_CXX_STANDARD=20 \
       ../..
-gmake -j$(sysctl -n hw.ncpu)
+gmake -j7
 cd ../..
 
 # 2. Transpile Core Simple to C++

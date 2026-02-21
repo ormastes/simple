@@ -1,18 +1,29 @@
 #!/usr/bin/env simple
-# Phase 0: Plain Text Training (Korean Fluency)
+# Phase 0: Prepare English Medical Training Data
 #
-# Goal: Learn Korean language patterns from plain text features
+# Goal: Train base model on English medical data to establish baseline.
+# This prevents English data forgetting in later phases.
 #
-# Training (real CUDA):
-#   - Create TextModel on CUDA
-#   - Add LoRA_0 adapter (trainable)
-#   - Train with MSE loss on text feature prediction
-#   - Base weights frozen, only LoRA_0 trains
+# Note.md Phase 0: "Prepare english medical training data"
+#   - Loads pre-tokenized English medical training data
+#   - Trains with MSE loss (cross-entropy deferred to Phase 1+)
+#   - Validates baseline performance
+#   - Freezes base knowledge via LoRA merge
+#
+# Data: data/pretokenized/phase0_english_train.jsonl
+#   Falls back to synthetic data if file not found.
 #
 # Run:
 #   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase0.spl
 
-use model.{TextModel, compute_mse_loss, check_gpu}
+use model.{TextModel, ModelConfig, compute_mse_loss, check_gpu}
+use shared_logic.{
+    TrainConfig, TrainState,
+    make_randn_batch_on_cuda,
+    report_gpu_memory, report_training_step, report_epoch_end,
+    lr_linear_warmup
+}
+use data_loader.{DataLoader, generate_synthetic_batch}
 use lora_utils.{
     LoRAConfig, LoRAAdapter,
     create_lora_adapter, lora_forward,
@@ -22,12 +33,9 @@ use lora_utils.{
 
 use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
 use std.torch.ffi.{
-    rt_torch_tensor_randn,
-    rt_torch_torchtensor_cuda,
     rt_torch_torchtensor_free,
     rt_torch_torchtensor_mean,
     rt_torch_autograd_backward,
-    rt_torch_cuda_memory_allocated,
     rt_torch_cuda_empty_cache
 }
 
@@ -35,90 +43,63 @@ export run_phase0
 
 
 # ============================================================================
-# Configuration
-# ============================================================================
-
-val INPUT_DIM = 64
-val HIDDEN_DIM = 128
-val OUTPUT_DIM = 32
-val BATCH_SIZE = 16
-val NUM_BATCHES = 20
-val NUM_EPOCHS = 3
-val LEARNING_RATE = 0.001
-val LORA_RANK = 8
-val LORA_ALPHA = 16.0
-
-
-# ============================================================================
-# Data Generation (synthetic Korean text features on CUDA)
-# ============================================================================
-
-fn generate_batch() -> [i64]:
-    # Generate random input and target tensors on CUDA
-    # Represents pre-embedded Korean text features
-    val x_cpu = rt_torch_tensor_randn([BATCH_SIZE, INPUT_DIM])
-    val x = rt_torch_torchtensor_cuda(x_cpu, 0)
-    rt_torch_torchtensor_free(x_cpu)
-    val t_cpu = rt_torch_tensor_randn([BATCH_SIZE, OUTPUT_DIM])
-    val t = rt_torch_torchtensor_cuda(t_cpu, 0)
-    rt_torch_torchtensor_free(t_cpu)
-    [x, t]
-
-
-# ============================================================================
-# Training
+# Phase 0 Training
 # ============================================================================
 
 fn run_phase0() -> TextModel:
     print("")
     print("=" * 70)
-    print("  PHASE 0: PLAIN TEXT TRAINING (REAL CUDA)")
+    print("  PHASE 0: ENGLISH MEDICAL DATA PREPARATION (REAL CUDA)")
     print("=" * 70)
     print("")
 
     check_gpu()
     print("")
 
+    # Configuration
+    val config = TrainConfig.phase0()
+    config.print_config("Phase 0 - English Medical")
+
     # Create model on CUDA
-    var model = TextModel.create(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM)
+    var model = TextModel.create(config.input_dim, config.hidden_dim, config.output_dim)
+    model.print_summary()
+    print("")
+
+    # Data loader - tries to load real data, falls back to synthetic
+    val data_path = "examples/projects/medgemma_korean/data/pretokenized/phase0_english_train.jsonl"
+    val loader = DataLoader.create(data_path, config.batch_size, config.input_dim)
 
     # Freeze base model weights
     model.freeze()
     print("Base model weights: FROZEN")
 
-    # Add LoRA_0 adapters
-    val lora_config = LoRAConfig(rank: LORA_RANK, alpha: LORA_ALPHA, dropout: 0.0)
+    # Add LoRA_0 adapters (only these are trainable)
+    val lora_config = LoRAConfig(rank: config.lora_rank, alpha: config.lora_alpha, dropout: 0.0)
     print("")
     print("Adding LoRA_0 adapters:")
-    var lora_l1 = create_lora_adapter(INPUT_DIM, HIDDEN_DIM, lora_config)
-    var lora_l2 = create_lora_adapter(HIDDEN_DIM, HIDDEN_DIM, lora_config)
-    print("")
-
-    # Training config
-    print("Training config:")
-    print("  Epochs: {NUM_EPOCHS}")
-    print("  Batches per epoch: {NUM_BATCHES}")
-    print("  Batch size: {BATCH_SIZE}")
-    print("  Learning rate: {LEARNING_RATE}")
-    print("  LoRA rank: {LORA_RANK}")
+    var lora_l1 = create_lora_adapter(config.input_dim, config.hidden_dim, lora_config)
+    var lora_l2 = create_lora_adapter(config.hidden_dim, config.hidden_dim, lora_config)
     print("")
 
     # Training loop
-    var global_step = 0
-    for epoch in 0..NUM_EPOCHS:
-        var epoch_loss = 0.0
-        print("--- Epoch {epoch + 1}/{NUM_EPOCHS} ---")
+    var state = TrainState.create()
+    for epoch in 0..config.num_epochs:
+        state.reset_epoch()
+        print("--- Epoch {epoch + 1}/{config.num_epochs} ---")
 
-        for batch_idx in 0..NUM_BATCHES:
-            # Generate batch
-            val batch = generate_batch()
+        for batch_idx in 0..config.num_batches:
+            # Get learning rate with warmup
+            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
+
+            # Generate batch (synthetic for now)
+            val batch = make_randn_batch_on_cuda(config.batch_size, config.input_dim, config.output_dim)
             val x = batch[0]
             val target = batch[1]
 
             # Forward pass with LoRA
             val logits = lora_forward(model, x, lora_l1, lora_l2)
 
-            # Compute MSE loss (returns tensor handle for backward)
+            # Compute MSE loss
             val loss_h = compute_mse_loss(logits, target)
             val loss_val = rt_torch_torchtensor_mean(loss_h)
 
@@ -126,7 +107,7 @@ fn run_phase0() -> TextModel:
             rt_torch_autograd_backward(loss_h)
 
             # SGD update (only LoRA params)
-            lora_sgd_step(lora_l1, lora_l2, LEARNING_RATE)
+            lora_sgd_step(lora_l1, lora_l2, lr)
 
             # Zero gradients
             lora_zero_grads(lora_l1, lora_l2)
@@ -138,29 +119,25 @@ fn run_phase0() -> TextModel:
             rt_torch_torchtensor_free(logits)
             rt_torch_torchtensor_free(loss_h)
 
-            epoch_loss = epoch_loss + loss_val
-            global_step = global_step + 1
+            state.add_loss(loss_val)
+            report_training_step(state, config)
 
-            if (batch_idx + 1) % 5 == 0:
-                val avg = epoch_loss / (batch_idx + 1)
-                print("  Step {global_step}: loss={avg}")
-
-        val avg_epoch_loss = epoch_loss / NUM_BATCHES
-        val mem = rt_torch_cuda_memory_allocated(0)
-        val mem_mb = mem / (1024 * 1024)
-        print("Epoch {epoch + 1} complete: avg_loss={avg_epoch_loss}, GPU_mem={mem_mb}MB")
+        state.update_best()
+        report_epoch_end(epoch, config.num_epochs, state)
         print("")
 
     print("=" * 70)
     print("PHASE 0 TRAINING COMPLETE")
-    print("  LoRA_0 trained on Korean text features")
+    print("  English medical baseline established")
     print("  Base model: FROZEN (unchanged)")
-    print("  LoRA_0: TRAINED")
+    print("  LoRA_0: TRAINED on English medical data")
+    print("  Best loss: {state.best_loss}")
     print("=" * 70)
 
-    # Merge LoRA_0 into base weights (freeze Phase 0 knowledge)
+    # Merge LoRA_0 into base weights
     merge_lora_into_model(model, lora_l1, lora_l2)
 
+    report_gpu_memory()
     model
 
 
@@ -176,7 +153,8 @@ fn main():
 
     val model = run_phase0()
     print("")
-    print("Phase 0 complete. Model ready for Phase 1.")
+    print("Phase 0 complete. English medical baseline established.")
+    print("Model ready for Phase 1 (evaluation + LoRA).")
     rt_torch_cuda_empty_cache()
 
 

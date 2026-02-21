@@ -1,7 +1,7 @@
 # TextModel - Real Neural Network for MedGemma Korean Training
 #
 # A feed-forward language model that runs on CUDA via libtorch FFI.
-# Used across all three progressive LoRA training phases.
+# Used across all progressive LoRA training phases.
 #
 # Architecture:
 #   Input [batch, input_dim]
@@ -61,7 +61,51 @@ use std.torch.ffi.{
     rt_torch_cuda_empty_cache
 }
 
-export TextModel, compute_mse_loss, sgd_update_tensor, check_gpu
+export ModelConfig, TextModel, compute_mse_loss, sgd_update_tensor, check_gpu
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+
+class ModelConfig:
+    input_dim: i64
+    hidden_dim: i64
+    output_dim: i64
+    init_scale: f64
+    num_layers: i64
+
+    static fn default_config() -> ModelConfig:
+        ModelConfig(
+            input_dim: 64,
+            hidden_dim: 128,
+            output_dim: 32,
+            init_scale: 0.1,
+            num_layers: 3
+        )
+
+    static fn from_dims(input_dim: i64, hidden_dim: i64, output_dim: i64) -> ModelConfig:
+        ModelConfig(
+            input_dim: input_dim,
+            hidden_dim: hidden_dim,
+            output_dim: output_dim,
+            init_scale: 0.1,
+            num_layers: 3
+        )
+
+    fn total_params() -> i64:
+        val l1 = self.input_dim * self.hidden_dim + self.hidden_dim
+        val l2 = self.hidden_dim * self.hidden_dim + self.hidden_dim
+        val l3 = self.hidden_dim * self.output_dim + self.output_dim
+        l1 + l2 + l3
+
+    fn print_config():
+        print("ModelConfig:")
+        print("  Input dim:  {self.input_dim}")
+        print("  Hidden dim: {self.hidden_dim}")
+        print("  Output dim: {self.output_dim}")
+        print("  Layers: {self.num_layers}")
+        print("  Total params: {self.total_params()}")
+
 
 # ============================================================================
 # GPU Check
@@ -88,14 +132,11 @@ fn check_gpu():
 fn to_cuda(h: i64) -> i64:
     rt_torch_torchtensor_cuda(h, 0)
 
-fn make_param(dims: [i64]) -> i64:
-    # Create random weight on CUDA with requires_grad
+fn make_param(dims: [i64], init_scale: f64) -> i64:
     val h = rt_torch_tensor_randn(dims)
     val h_gpu = to_cuda(h)
     rt_torch_torchtensor_free(h)
-    # Scale down for better initialization (Xavier-like)
-    val scale = 0.1
-    val h_scaled = rt_torch_torchtensor_mul_scalar(h_gpu, scale)
+    val h_scaled = rt_torch_torchtensor_mul_scalar(h_gpu, init_scale)
     rt_torch_torchtensor_free(h_gpu)
     rt_torch_autograd_set_requires_grad(h_scaled, true)
     h_scaled
@@ -121,26 +162,27 @@ class TextModel:
     # Output layer weights
     w3: i64
     b3: i64
-    # Dimensions
-    in_dim: i64
-    hid_dim: i64
-    out_dim: i64
+    # Configuration
+    config: ModelConfig
 
     static fn create(in_dim: i64, hid_dim: i64, out_dim: i64) -> TextModel:
-        print("Creating TextModel({in_dim} -> {hid_dim} -> {hid_dim} -> {out_dim}) on CUDA")
-        val w1 = make_param([hid_dim, in_dim])
-        val b1 = make_zeros_param([hid_dim])
-        val w2 = make_param([hid_dim, hid_dim])
-        val b2 = make_zeros_param([hid_dim])
-        val w3 = make_param([out_dim, hid_dim])
-        val b3 = make_zeros_param([out_dim])
-        val total_params = (in_dim * hid_dim + hid_dim) + (hid_dim * hid_dim + hid_dim) + (hid_dim * out_dim + out_dim)
-        print("  Total parameters: {total_params}")
+        val cfg = ModelConfig.from_dims(in_dim, hid_dim, out_dim)
+        TextModel.create_from_config(cfg)
+
+    static fn create_from_config(cfg: ModelConfig) -> TextModel:
+        print("Creating TextModel({cfg.input_dim} -> {cfg.hidden_dim} -> {cfg.hidden_dim} -> {cfg.output_dim}) on CUDA")
+        val w1 = make_param([cfg.hidden_dim, cfg.input_dim], cfg.init_scale)
+        val b1 = make_zeros_param([cfg.hidden_dim])
+        val w2 = make_param([cfg.hidden_dim, cfg.hidden_dim], cfg.init_scale)
+        val b2 = make_zeros_param([cfg.hidden_dim])
+        val w3 = make_param([cfg.output_dim, cfg.hidden_dim], cfg.init_scale)
+        val b3 = make_zeros_param([cfg.output_dim])
+        print("  Total parameters: {cfg.total_params()}")
         TextModel(
             w1: w1, b1: b1,
             w2: w2, b2: b2,
             w3: w3, b3: b3,
-            in_dim: in_dim, hid_dim: hid_dim, out_dim: out_dim
+            config: cfg
         )
 
     fn forward(x: i64) -> i64:
@@ -175,8 +217,10 @@ class TextModel:
     fn param_handles() -> [i64]:
         [self.w1, self.b1, self.w2, self.b2, self.w3, self.b3]
 
+    fn param_count() -> i64:
+        self.config.total_params()
+
     me sgd_step(lr: f64):
-        # Update all parameters with SGD
         rt_torch_autograd_no_grad_begin()
         self.w1 = sgd_update_tensor(self.w1, lr)
         self.b1 = sgd_update_tensor(self.b1, lr)
@@ -185,7 +229,6 @@ class TextModel:
         self.w3 = sgd_update_tensor(self.w3, lr)
         self.b3 = sgd_update_tensor(self.b3, lr)
         rt_torch_autograd_no_grad_end()
-        # Re-enable grad tracking
         rt_torch_autograd_set_requires_grad(self.w1, true)
         rt_torch_autograd_set_requires_grad(self.b1, true)
         rt_torch_autograd_set_requires_grad(self.w2, true)
@@ -202,7 +245,6 @@ class TextModel:
         rt_torch_autograd_zero_grad(self.b3)
 
     me freeze():
-        # Freeze all parameters (no gradient)
         rt_torch_autograd_set_requires_grad(self.w1, false)
         rt_torch_autograd_set_requires_grad(self.b1, false)
         rt_torch_autograd_set_requires_grad(self.w2, false)
@@ -218,21 +260,47 @@ class TextModel:
         rt_torch_autograd_set_requires_grad(self.w3, true)
         rt_torch_autograd_set_requires_grad(self.b3, true)
 
+    fn print_summary():
+        print("TextModel Summary:")
+        print("  Architecture: {self.config.input_dim} -> {self.config.hidden_dim} -> {self.config.hidden_dim} -> {self.config.output_dim}")
+        print("  Parameters: {self.config.total_params()}")
+        val on_gpu = rt_torch_torchtensor_is_cuda(self.w1)
+        if on_gpu:
+            print("  Device: CUDA")
+        else:
+            print("  Device: CPU")
+
+
+# ============================================================================
+# Checkpoint Stubs
+# ============================================================================
+
+# Save model checkpoint (stub - requires tensor serialization FFI).
+# For now, just logs the action.
+fn save_checkpoint(model: TextModel, path: text):
+    print("CHECKPOINT: Would save model to {path}")
+    print("  (Tensor serialization not yet available in FFI)")
+    print("  Model config: {model.config.input_dim}x{model.config.hidden_dim}x{model.config.output_dim}")
+    print("  Params: {model.config.total_params()}")
+
+# Load model checkpoint (stub - requires tensor deserialization FFI).
+fn load_checkpoint(path: text, config: ModelConfig) -> TextModel:
+    print("CHECKPOINT: Would load model from {path}")
+    print("  (Tensor deserialization not yet available in FFI)")
+    print("  Creating fresh model instead")
+    TextModel.create_from_config(config)
+
 
 # ============================================================================
 # Loss: Differentiable MSE (returns tensor handle for backward)
 # ============================================================================
 
 fn compute_mse_loss(pred: i64, target: i64) -> i64:
-    # MSE = mean((pred - target)^2)
-    # All ops create tensors in the computation graph
     val diff = rt_torch_torchtensor_sub(pred, target)
     val sq = rt_torch_torchtensor_mul(diff, diff)
     rt_torch_torchtensor_free(diff)
-    # Sum over feature dim -> [batch]
     val per_sample = rt_torch_torchtensor_sum_dim(sq, 1, false)
     rt_torch_torchtensor_free(sq)
-    # Mean over batch -> scalar tensor
     val loss = rt_torch_torchtensor_mean_dim(per_sample, 0, false)
     rt_torch_torchtensor_free(per_sample)
     loss
@@ -243,10 +311,8 @@ fn compute_mse_loss(pred: i64, target: i64) -> i64:
 # ============================================================================
 
 fn sgd_update_tensor(param_h: i64, lr: f64) -> i64:
-    # param = param - lr * grad
     val grad_h = rt_torch_autograd_grad(param_h)
     if grad_h == 0:
-        # No gradient, return unchanged (clone to get new handle)
         return rt_torch_torchtensor_clone(param_h)
     val scaled = rt_torch_torchtensor_mul_scalar(grad_h, lr)
     val updated = rt_torch_torchtensor_sub(param_h, scaled)
