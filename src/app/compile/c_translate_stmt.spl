@@ -158,7 +158,7 @@ fn translate_for_loop(trimmed: text, types: text) -> text:
     # for item in split result - detect .split( in iterable
     if iterable.contains(".split("):
         val c_split = translate_expr(iterable, types)
-        return "\{ SimpleStringArray _split_" + loop_var + " = " + c_split + "; for (long long _idx_" + loop_var + " = 0; _idx_" + loop_var + " < _split_" + loop_var + ".len; _idx_" + loop_var + "++) \{ const char* " + loop_var + " = _split_" + loop_var + ".items[_idx_" + loop_var + "];<|TYPE|>;text:" + loop_var + ";"
+        return "\{ SimpleStringArray _split_" + loop_var + " = " + c_split + "; /*__SPLITFREE:_split_" + loop_var + "*/ for (long long _idx_" + loop_var + " = 0; _idx_" + loop_var + " < _split_" + loop_var + ".len; _idx_" + loop_var + "++) \{ const char* " + loop_var + " = _split_" + loop_var + ".items[_idx_" + loop_var + "];<|TYPE|>;text:" + loop_var + ";"
 
     # Default: integer array iteration
     "for (long long _idx_" + loop_var + " = 0; _idx_" + loop_var + " < " + iterable + "_len; _idx_" + loop_var + "++) \{ long long " + loop_var + " = " + iterable + "[_idx_" + loop_var + "];"
@@ -240,6 +240,10 @@ fn translate_statement(trimmed: text, types: text) -> text:
         return translate_print(rest, types)
     if trimmed == "print":
         return "puts(\"\");"
+    # print(...) function call form
+    if trimmed.starts_with("print(") and trimmed.ends_with(")"):
+        val print_inner = trimmed.substring(6, trimmed.len() - 1).trim()
+        return translate_print(print_inner, types)
 
     # eprint -> fprintf(stderr, ...)
     if trimmed.starts_with("eprint "):
@@ -281,19 +285,19 @@ fn translate_statement(trimmed: text, types: text) -> text:
     if trimmed.starts_with("return "):
         val expr = trimmed.substring(7).trim()
         if expr == "()":
-            return "return;"
+            return "return;<|TYPE|>"
         if expr == "[]":
-            return "return simple_new_struct_array();"
+            return "return simple_new_struct_array();<|TYPE|>"
         # Use translate_condition for expressions with and/or/comparisons
         val has_and = expr.contains(" and ")
         val has_or = expr.contains(" or ")
         if has_and or has_or:
-            return r"return " + translate_condition(expr, types) + r";"
-        return r"return " + translate_expr(expr, types) + r";"
+            return r"return " + translate_condition(expr, types) + r";<|TYPE|>"
+        return r"return " + translate_expr(expr, types) + r";<|TYPE|>"
     if trimmed == "return":
-        return "return;"
+        return "return;<|TYPE|>"
     if trimmed == "return ()":
-        return "return;"
+        return "return;<|TYPE|>"
 
     # Control flow
     if trimmed.starts_with("if ") and trimmed.ends_with(":"):
@@ -415,9 +419,9 @@ fn translate_statement(trimmed: text, types: text) -> text:
     if plus_eq >= 0:
         val lhs = trimmed.substring(0, plus_eq).trim()
         val rhs = trimmed.substring(plus_eq + 4).trim()
-        # String concatenation assignment
+        # String concatenation assignment - free old value
         if is_text_var(lhs, types):
-            return lhs + r" = simple_str_concat(" + lhs + r", " + translate_expr(rhs, types) + r");"
+            return "\{ const char* _old = " + lhs + "; " + lhs + r" = simple_str_concat(_old, " + translate_expr(rhs, types) + r"); simple_str_free(_old); }"
         return lhs + r" += " + translate_expr(rhs, types) + r";"
     val compound_ops: [text] = [" -= ", " *= ", " /= "]
     for cop in compound_ops:
@@ -509,7 +513,14 @@ fn translate_statement(trimmed: text, types: text) -> text:
             val rhs_is_str = rhs.starts_with("\"")
             val rhs_is_text = c_rhs.contains("simple_")
             if rhs_is_str or rhs_is_text:
-                return lhs + r" = " + c_rhs + r";<|TYPE|>;text:" + lhs + r";"
+                # strdup plain string literals so all text vars are heap-owned
+                var final_rhs = c_rhs
+                if rhs_is_str and not rhs_is_text:
+                    final_rhs = "strdup(" + c_rhs + ")"
+                # Free old value if var was already a text var
+                if is_text_var(lhs, types):
+                    return "\{ const char* _old = " + lhs + "; " + lhs + r" = " + final_rhs + r"; simple_str_free(_old); }<|TYPE|>;text:" + lhs + r";"
+                return lhs + r" = " + final_rhs + r";<|TYPE|>;text:" + lhs + r";"
             return lhs + r" = " + c_rhs + r";"
 
     # While loop
@@ -533,22 +544,22 @@ fn translate_statement(trimmed: text, types: text) -> text:
     val has_cmp = trimmed.contains(" == ") or trimmed.contains(" != ") or trimmed.contains(" < ") or trimmed.contains(" > ") or trimmed.contains(" <= ") or trimmed.contains(" >= ")
     val has_logic = trimmed.contains(" and ") or trimmed.contains(" or ") or trimmed.starts_with("not ")
     if has_cmp or has_logic:
-        return r"return " + translate_condition(trimmed, types) + r";"
+        return r"return " + translate_condition(trimmed, types) + r";<|TYPE|>"
 
     val c_expr = translate_expr(trimmed, types)
     if c_expr != trimmed:
         # Expression was translated to something different - use as return
-        return r"return " + c_expr + r";"
+        return r"return " + c_expr + r";<|TYPE|>"
     # Simple variable reference or literal - implicit return
     val is_simple_var = not trimmed.contains(" ")
     val is_bracket = trimmed.contains("[")
     val is_dot = trimmed.contains(".")
     if is_simple_var or is_bracket or is_dot:
-        return r"return " + c_expr + r";"
+        return r"return " + c_expr + r";<|TYPE|>"
     # Arithmetic expressions with spaces (e.g., "a + b", "-1")
     val is_arith = trimmed.contains(" + ") or trimmed.contains(" - ") or trimmed.contains(" * ") or trimmed.contains(" / ") or trimmed.starts_with("-")
     if is_arith:
-        return r"return " + c_expr + r";"
+        return r"return " + c_expr + r";<|TYPE|>"
     r"/* unsupported: " + trimmed + r" */"
 
 export translate_interpolated_print, translate_print

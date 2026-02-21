@@ -51,8 +51,8 @@ fn generate_c_code(source_text: text) -> text:
             pending_line = pending_line + " " + rline.trim()
         else:
             pending_line = rline
-        # Count parens outside string literals and comments
-        val has_paren = rline.contains("(") or rline.contains(")")
+        # Count parens and braces outside string literals and comments
+        val has_paren = rline.contains("(") or rline.contains(")") or rline.contains("\{") or rline.contains("}")
         if has_paren:
             var pp_in_str = false
             var pp_opens = 0
@@ -77,9 +77,9 @@ fn generate_c_code(source_text: text) -> text:
                     pp_in_str = true
                     pp_i = pp_i + 1
                     continue
-                if pp_ch == "(":
+                if pp_ch == "(" or pp_ch == "\{":
                     pp_opens = pp_opens + 1
-                elif pp_ch == ")":
+                elif pp_ch == ")" or pp_ch == "}":
                     pp_closes = pp_closes + 1
                 pp_i = pp_i + 1
             paren_depth = paren_depth + pp_opens - pp_closes
@@ -216,7 +216,8 @@ fn generate_c_code(source_text: text) -> text:
             if inline_hash >= 0:
                 # Make sure it's not inside a string literal
                 val before_hash = trimmed.substring(0, inline_hash)
-                val quote_count = before_hash.split("\"").len() - 1
+                val quote_parts = before_hash.split("\"")
+                val quote_count = quote_parts.len() - 1
                 val is_inside_str = quote_count % 2 == 1
                 # Also check it's not a #[ decorator or #! shebang
                 val after_hash = trimmed.substring(inline_hash + 2).trim()
@@ -297,7 +298,9 @@ fn generate_c_code(source_text: text) -> text:
                         val static_method_name = parsed[0]
                         val mangled_name = current_impl_class + "__" + static_method_name
                         # Re-parse with mangled name
-                        val static_sig_trimmed = static_trimmed.replace(static_method_name + "(", mangled_name + "(")
+                        val static_search = static_method_name + "("
+                        val static_replace = mangled_name + "("
+                        val static_sig_trimmed = static_trimmed.replace(static_search, static_replace)
                         val parsed2 = parse_fn_signature(static_sig_trimmed)
                         impl_method_name = static_method_name
                         impl_method_sig = parsed2[1]
@@ -393,6 +396,9 @@ fn generate_c_code(source_text: text) -> text:
                                 global_defs.push(r"static const char* " + use_name + r" = " + "\"\"" + r";")
                             else:
                                 global_defs.push(r"static long long " + use_name + r" = 0;")
+            # Handle multi-line use: use module.{ \n items \n }
+            if use_brace >= 0 and use_brace_end < 0:
+                skip_until_close_brace = true
             continue
         if trimmed.starts_with("import "):
             continue
@@ -486,7 +492,7 @@ fn generate_c_code(source_text: text) -> text:
             skip_until_unindent = true
             continue
 
-        # Class definition - treat like struct
+        # Class definition - treat like struct + extract inline methods via impl handler
         if trimmed.starts_with("class ") and trimmed.ends_with(":"):
             val class_name = trimmed.substring(6, trimmed.len() - 1).trim()
             types = types + "struct:" + class_name + ";"
@@ -497,7 +503,10 @@ fn generate_c_code(source_text: text) -> text:
             cdef = cdef + "} " + class_name + ";"
             struct_defs.push(cdef)
             types = types + cg_track_field_types(lines_arr, line_idx, class_name)
-            skip_until_unindent = true
+            # Treat class body methods like an impl block
+            current_impl_class = class_name
+            in_impl = true
+            in_impl_method = false
             continue
 
         # Impl block - parse methods

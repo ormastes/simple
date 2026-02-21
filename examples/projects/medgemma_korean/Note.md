@@ -23,19 +23,20 @@
 * train medgemma in eglish with cross entrophy loss.
 * **Implementation:** Handled in `train_phase1.spl` — when accuracy < 97%, automatically adds LoRA_1 and trains. Cross-entropy loss available in `shared_logic.spl` (`compute_ce_loss`).
 
-## 2. create embedding. check old_py. 🔲 DEFERRED (Phase 2+)
+## 2. create embedding. ✅ IMPLEMENTED
 * but add two more embedding to it distinguish korean/english.
 * let original token to enable korean embedding, others english.
 * can only these two embedding trainable?
-* **Blocked by:** sin/cos FFI (for RoPE), integer tensor creation, safetensors loading
+* **Implementation:** `train_phase3.spl` + `embedding_utils.spl` — KorEngEmbedding with dual weight tables (kor_weight, eng_weight). Mask-based routing: Korean tokens → kor_embedding, English → eng_embedding. RoPE positional encoding via precomputed sin/cos cache. Mean pooling over sequence dimension. Config: `config/phase3.sdn`.
 
-## 3. train korean text while check english text. 🔲 DEFERRED (Phase 2+)
+## 3. train korean text while check english text. ✅ IMPLEMENTED
 * train korean text for additional 2 embed and lora1 in cross entrophy loss.
 * "each layer" original layer cross entrophy loss with (+ 2 embedded and lora1) in cross entrophy loss in english medical train data.
  - test english version of med kore exam validation it is over 97% if not do "each layer" train for english
+* **Implementation:** `train_phase4.spl` + `layer_utils.spl` — ExtendedModel wraps TextModel + embeddings + RoPE. LoRA_3 added to layers 1-2. Per-layer CE loss monitoring. English retention checked every epoch (>= 97%). Recovery sub-loop when retention drops. Config: `config/phase4.sdn`.
 
 
-## 4. train translation korean. 🔲 DEFERRED (Phase 3+)
+## 4. train translation korean. ✅ IMPLEMENTED
 * add front most layer and back most layer with duplication of front and end. and make these two layer total trainable.
 * train korean text(include med kor format knowledge) for additional 2 embed and lora1 in cross entrophy loss.
 * "each layer" original layer cross entrophy loss with (+ 2 embedded and lora1, front/back layer) in cross entrophy loss in english medical train data.
@@ -43,9 +44,10 @@
 * train korean translation for additional 2 embed and lora1 in cross entrophy loss, front/back layer.
 * "each layer" original layer cross entrophy loss with (+ 2 embedded and lora1, front/back layer) in cross entrophy loss in english medical train data.
  - test english version of med kore exam validation it is over 97% if not do "each layer" train for english
+* **Implementation:** `train_phase5.spl` — Front/back layers duplicated from L1/L3 via `duplicate_front_back_layers()`. Sub-phase A: Korean text (front→L1+LoRA→L2+LoRA→L3→back). Sub-phase B: Korean→English translation. LoRA_4 merged after training. Config: `config/phase5.sdn`.
 
 
-## 5. train reasoning. 🔲 DEFERRED (Phase 4+)
+## 5. train reasoning. ✅ IMPLEMENTED
 * train korean text(include med kor format knowledge) for additional 2 embed and lora1 in cross entrophy loss.
 * "each layer" original layer cross entrophy loss with (+ 2 embedded and lora1, front/back layer) in cross entrophy loss in english medical train data.
  - test english version of med kore exam validation it is over 97% if not do "each layer" train for english
@@ -57,6 +59,7 @@
  - test with med kor exam validation data.
 * "each layer" original layer cross entrophy loss with (+ 2 embedded and lora1) in cross entrophy loss in english medical train data.
  - test english version of med kore exam validation it is over 97% if not do "each layer" train for english.
+* **Implementation:** `train_phase6.spl` — 3 sub-phases: A (Korean text), B (translation), C (exam reasoning). Exam loss = CE*0.6 + format_penalty*0.2 + confidence*0.2. LoRA_5 merged after training. Final comprehensive validation. Config: `config/phase6.sdn`.
 
 ---
 
@@ -68,12 +71,18 @@
 - **dyn_ffi.spl** — Added 15 new DynLoader wrappers: sum_dim, mean_dim, argmax, argmin, max_dim, gather, slice, nn_linear, nn_embedding, no_grad_begin/end, CUDA memory ops
 
 ### Project Level (examples/projects/medgemma_korean/src/)
-- **shared_logic.spl** — TrainConfig, TrainState, batch creation, loss wrappers, GPU reporting, LR scheduling
+- **shared_logic.spl** — TrainConfig (phases 0-6), TrainState, batch creation, loss wrappers, GPU reporting, LR scheduling
 - **data_loader.spl** — JSONL pre-tokenized data loading with synthetic fallback
 - **model.spl** — Added ModelConfig, checkpoint stubs, print_summary
-- **validation.spl** — MCQ accuracy (argmax), 97% threshold, English retention check
+- **validation.spl** — MCQ accuracy (argmax), 97% threshold, English retention check, Korean/exam validation, extended model validation
 - **lora_utils.spl** — Added gradient clipping (lora_clip_and_step)
-- **train_phase0.spl** — Restructured: English medical baseline with shared_logic
-- **train_phase1.spl** — Restructured: evaluate → threshold check → conditional LoRA training
-- **train_phase2.spl** — Restructured: gradient clipping, English retention per epoch
-- **run_all.spl** — Phase order matches Note.md, retention checks after each phase
+- **embedding_utils.spl** — KorEngEmbedding (dual Korean/English), RoPECache (sin/cos), mask-based token routing, mean pooling
+- **layer_utils.spl** — ExtendedModel (base + embeddings + RoPE + front/back), per-layer CE loss, front/back layer duplication
+- **train_phase0.spl** — English medical baseline with shared_logic
+- **train_phase1.spl** — evaluate → threshold check → conditional LoRA training
+- **train_phase2.spl** — Gradient clipping, English retention per epoch
+- **train_phase3.spl** — Embedding training (Korean/English + RoPE, no LoRA)
+- **train_phase4.spl** — Korean text + LoRA_3 + per-layer CE + English recovery
+- **train_phase5.spl** — Korean translation + front/back layers + LoRA_4
+- **train_phase6.spl** — Korean medical exam reasoning + weighted loss + LoRA_5
+- **run_all.spl** — Full 7-phase pipeline with extended validation

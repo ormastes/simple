@@ -696,98 +696,98 @@ SimpleStringArray close_blocks(SimpleStringArray body_lines);
 const char* build_function(const char* name, const char* sig, SimpleStringArray body_lines);
 
 SimpleStringArray close_blocks(SimpleStringArray body_lines) {
-    SimpleIntArray result = simple_new_int_array();
+    SimpleStringArray result = simple_new_string_array();
     SimpleIntArray brace_indents = simple_new_int_array();
-    for (long long idx = 0; idx <  body_lines.len; idx++) {
+    for (long long idx = 0; idx < body_lines.len; idx++) {
         const char* line = body_lines.items[idx];
         const char* trimmed = simple_trim(line);
         long long current_indent = get_c_indent(line);
-    //  Don't let comments trigger block closing
+    // Don't let comments trigger block closing
         if (simple_starts_with(trimmed, "//") || simple_starts_with(trimmed, "/*")) {
-            /* result.push(line) */;
+            simple_string_push(&result, line);
             continue;
         }
         if (simple_starts_with(trimmed, "} else")) {
-    //  Close any nested blocks at higher indent before the else
+    // Close any nested blocks at higher indent before the else
             long long else_close = 0;
-            for (long long ebi = 0; ebi <  brace_indents.len; ebi++) {
-                long long esi = brace_indents.len;
+            for (long long ebi = 0; ebi < brace_indents.len; ebi++) {
+                long long esi = brace_indents.len - 1 - ebi;
                 if (esi < 0) {
                     break;
                 }
-                if (brace_indents[esi] > current_indent) {
+                if (brace_indents.items[esi] > current_indent) {
                     else_close = else_close + 1;
                 } else {
                     break;
                 }
             }
-            for (long long eci = 0; eci <  else_close; eci++) {
-                long long epi = brace_indents.len;
-                long long eclose_indent = brace_indents[epi];
-                simple_string_pop(&brace_indents);
+            for (long long eci = 0; eci < else_close; eci++) {
+                long long epi = brace_indents.len - 1;
+                long long eclose_indent = brace_indents.items[epi];
+                simple_int_pop(&brace_indents);
                 const char* epad = "";
-                for (long long epi2 = 0; epi2 <  eclose_indent; epi2++) {
+                for (long long epi2 = 0; epi2 < eclose_indent; epi2++) {
                     epad = simple_str_concat(epad, "    ");
-                /* result.push(epad + "}") */;
-            /* result.push(line) */;
                 }
+                simple_string_push(&result, simple_str_concat(epad, "}"));
             }
+            simple_string_push(&result, line);
             continue;
         }
         long long close_count = 0;
-        for (long long bi = 0; bi <  brace_indents.len; bi++) {
-            long long stack_idx = brace_indents.len;
+        for (long long bi = 0; bi < brace_indents.len; bi++) {
+            long long stack_idx = brace_indents.len - 1 - bi;
             if (stack_idx < 0) {
                 break;
             }
-            if (current_indent <= brace_indents[stack_idx]) {
+            if (current_indent <= brace_indents.items[stack_idx]) {
                 close_count = close_count + 1;
             } else {
                 break;
             }
         }
-        for (long long ci = 0; ci <  close_count; ci++) {
-            long long pop_idx = brace_indents.len;
-            long long close_indent = brace_indents[pop_idx];
-            simple_string_pop(&brace_indents);
+        for (long long ci = 0; ci < close_count; ci++) {
+            long long pop_idx = brace_indents.len - 1;
+            long long close_indent = brace_indents.items[pop_idx];
+            simple_int_pop(&brace_indents);
             const char* close_padding = "";
-            for (long long pi = 0; pi <  close_indent; pi++) {
+            for (long long pi = 0; pi < close_indent; pi++) {
                 close_padding = simple_str_concat(close_padding, "    ");
-            /* result.push(close_padding + "}") */;
-        /* result.push(line) */;
             }
+            simple_string_push(&result, simple_str_concat(close_padding, "}"));
         }
-        if (simple_ends_with(trimmed, "{")) {
-            /* brace_indents.push(current_indent) */;
-        } else if (simple_contains(trimmed, ") {") && !(simple_ends_with(trimmed, "}"))) {
-    //  Inline opening brace (e.g., for-loop with inline body start)
-            /* brace_indents.push(current_indent) */;
-        } else if (simple_starts_with(trimmed, "{") && !(simple_ends_with(trimmed, "}"))) {
-    //  Match block opening: { long long _match_val = ...;
-            /* brace_indents.push(current_indent) */;
+        simple_string_push(&result, line);
+        if (simple_ends_with(trimmed, "\{")) {
+            simple_int_push(&brace_indents, current_indent);
+        } else if (simple_contains(trimmed, ") \{") && !(simple_ends_with(trimmed, "}"))) {
+    // Inline opening brace (e.g., for-loop with inline body start)
+            simple_int_push(&brace_indents, current_indent);
+        } else if (simple_starts_with(trimmed, "\{") && !(simple_ends_with(trimmed, "}"))) {
+    // Match block opening: { long long _match_val = ...;
+            simple_int_push(&brace_indents, current_indent);
         }
     }
-    for (long long ci = 0; ci <  brace_indents.len; ci++) {
-        long long pop_idx = brace_indents.len;
-        long long close_indent = brace_indents[pop_idx];
+    for (long long ci = 0; ci < brace_indents.len; ci++) {
+        long long pop_idx = brace_indents.len - 1 - ci;
+        long long close_indent = brace_indents.items[pop_idx];
         const char* close_padding = "";
-        for (long long pi = 0; pi <  close_indent; pi++) {
+        for (long long pi = 0; pi < close_indent; pi++) {
             close_padding = simple_str_concat(close_padding, "    ");
-        /* result.push(close_padding + "}") */;
         }
+        simple_string_push(&result, simple_str_concat(close_padding, "}"));
     }
     return result;
 }
 
 const char* build_function(const char* name, const char* sig, SimpleStringArray body_lines) {
     SimpleStringArray closed_lines = close_blocks(body_lines);
-    //  Check if the function has a non-void return type
+    // Check if the function has a non-void return type
     long long is_void_fn = simple_starts_with(sig, "void ");
-    //  Find the last meaningful statement line (not a closing brace)
+    // Find the last meaningful statement line (not a closing brace)
     long long last_stmt_idx = -1;
     if (!(is_void_fn)) {
-        for (long long li = 0; li <  closed_lines.len; li++) {
-            long long check_idx = closed_lines.len;
+        for (long long li = 0; li < closed_lines.len; li++) {
+            long long check_idx = closed_lines.len - 1 - li;
             if (check_idx < 0) {
                 break;
             }
@@ -806,33 +806,33 @@ const char* build_function(const char* name, const char* sig, SimpleStringArray 
             }
             last_stmt_idx = check_idx;
             break;
-    //  Deduplicate variable declarations: if a name is declared multiple times
-    //  (e.g., in different branches), convert subsequent declarations to assignments
-    //  Scope-aware: track indent level of each declaration so that variables in
-    //  sibling scopes (e.g., two if-blocks at the same indent) are not deduped
+    // Deduplicate variable declarations: if a name is declared multiple times
+    // (e.g., in different branches), convert subsequent declarations to assignments
+    // Scope-aware: track indent level of each declaration so that variables in
+    // sibling scopes (e.g., two if-blocks at the same indent) are not deduped
         }
     }
-    SimpleIntArray declared_vars = simple_new_int_array();
+    SimpleStringArray declared_vars = simple_new_string_array();
     SimpleIntArray declared_indents = simple_new_int_array();
-    SimpleIntArray deduped_lines = simple_new_int_array();
+    SimpleStringArray deduped_lines = simple_new_string_array();
     SimpleStringArray c_types_arr = simple_new_string_array(); simple_string_push(&c_types_arr, "const char* "); simple_string_push(&c_types_arr, "long long "); simple_string_push(&c_types_arr, "int "); simple_string_push(&c_types_arr, "double "); simple_string_push(&c_types_arr, "SimpleStringArray "); simple_string_push(&c_types_arr, "SimpleIntArray "); simple_string_push(&c_types_arr, "SimpleStringArrayArray "); simple_string_push(&c_types_arr, "SimpleIntArrayArray "); simple_string_push(&c_types_arr, "SimpleStructArray "); simple_string_push(&c_types_arr, "SimpleDict* "); simple_string_push(&c_types_arr, "SimpleOption ");
-    for (long long dl_idx = 0; dl_idx <  closed_lines.len; dl_idx++) {
-        long long dl = closed_lines[dl_idx];
+    for (long long dl_idx = 0; dl_idx < closed_lines.len; dl_idx++) {
+        const char* dl = closed_lines.items[dl_idx];
         const char* dl_trim = simple_trim(dl);
         long long dl_c_indent = get_c_indent(dl);
-    //  Scope cleanup: remove vars declared at indent > current indent
-    //  (they went out of scope when their block's } was processed)
-        SimpleIntArray scope_new_vars = simple_new_int_array();
+    // Scope cleanup: remove vars declared at indent > current indent
+    // (they went out of scope when their block's } was processed)
+        SimpleStringArray scope_new_vars = simple_new_string_array();
         SimpleIntArray scope_new_indents = simple_new_int_array();
-        for (long long scope_vi = 0; scope_vi <  declared_vars.len; scope_vi++) {
-            if (declared_indents[scope_vi] <= dl_c_indent) {
-                /* scope_new_vars.push(declared_vars[scope_vi]) */;
-                /* scope_new_indents.push(declared_indents[scope_vi]) */;
+        for (long long scope_vi = 0; scope_vi < declared_vars.len; scope_vi++) {
+            if (declared_indents.items[scope_vi] <= dl_c_indent) {
+                simple_string_push(&scope_new_vars, declared_vars.items[scope_vi]);
+                simple_int_push(&scope_new_indents, declared_indents.items[scope_vi]);
             }
         }
         declared_vars = scope_new_vars;
         declared_indents = scope_new_indents;
-    //  Check if this line is a C variable declaration
+    // Check if this line is a C variable declaration
         const char* found_type = "";
         const char* found_name = "";
         for (long long _idx_ct = 0; _idx_ct < c_types_arr.len; _idx_ct++) { const char* ct = c_types_arr.items[_idx_ct];
@@ -843,7 +843,7 @@ const char* build_function(const char* name, const char* sig, SimpleStringArray 
                     found_type = ct;
                     found_name = simple_substring(after_type, 0, eq_pos);
                     break;
-    //  Also check struct declarations: StructName varname = ...
+    // Also check struct declarations: StructName varname = ...
                 }
             }
         }
@@ -864,45 +864,45 @@ const char* build_function(const char* name, const char* sig, SimpleStringArray 
             }
         }
         if (strcmp(found_name, "") != 0) {
-    //  Check if already declared (only vars still in scope)
+    // Check if already declared (only vars still in scope)
             int already = 0;
-            for (long long _idx_dv = 0; _idx_dv < declared_vars_len; _idx_dv++) { long long dv = declared_vars[_idx_dv];
+            for (long long _idx_dv = 0; _idx_dv < declared_vars.len; _idx_dv++) { const char* dv = declared_vars.items[_idx_dv];
                 if (strcmp(dv, found_name) == 0) {
                     already = 1;
                     break;
                 }
             }
             if (already) {
-    //  Replace declaration with assignment: strip the type prefix
-                const char* dl_indent = simple_substring(dl, 0, dl.len() - dl_trim.len());
+    // Replace declaration with assignment: strip the type prefix
+                const char* dl_indent = simple_substring(dl, 0, simple_strlen(dl) - simple_strlen(dl_trim));
                 const char* assignment = simple_substring(dl_trim, simple_strlen(found_type), simple_strlen(dl_trim));
-                /* deduped_lines.push("{dl_indent}{assignment}") */;
+                simple_string_push(&deduped_lines, "{dl_indent}{assignment}");
             } else {
-                /* declared_vars.push(found_name) */;
-                /* declared_indents.push(dl_c_indent) */;
-                /* deduped_lines.push(dl) */;
+                simple_string_push(&declared_vars, found_name);
+                simple_int_push(&declared_indents, dl_c_indent);
+                simple_string_push(&deduped_lines, dl);
             }
         } else {
-            /* deduped_lines.push(dl) */;
+            simple_string_push(&deduped_lines, dl);
         }
     }
-    const char* result = simple_str_concat(simple_str_concat(sig, " "), simple_str_concat("{", "\n"));
-    for (long long line_idx = 0; line_idx <  deduped_lines.len; line_idx++) {
-        long long body_line = deduped_lines[line_idx];
+    const char* result = simple_str_concat("{sig} ", simple_str_concat("\{", "\n"));
+    for (long long line_idx = 0; line_idx < deduped_lines.len; line_idx++) {
+        const char* body_line = deduped_lines.items[line_idx];
         if (line_idx == last_stmt_idx) {
             const char* bl_trimmed = simple_trim(body_line);
-    //  Add return if the last statement doesn't have one
+    // Add return if the last statement doesn't have one
             long long has_ret = simple_starts_with(bl_trimmed, "return ");
             int is_control = simple_starts_with(bl_trimmed, "if ") || simple_starts_with(bl_trimmed, "} else") || simple_starts_with(bl_trimmed, "for ") || simple_starts_with(bl_trimmed, "while ");
             int is_comment = simple_starts_with(bl_trimmed, "//") || simple_starts_with(bl_trimmed, "/*");
             if (!(has_ret && !(is_control && !(is_comment)))) {
-    //  Remove the trailing semicolon, wrap with return
+    // Remove the trailing semicolon, wrap with return
                 const char* stmt = bl_trimmed;
                 if (simple_ends_with(stmt, ";")) {
                     stmt = simple_substring(stmt, 0, simple_strlen(stmt) - 1);
                 }
-                const char* indent = simple_substring(body_line, 0, body_line.len() - bl_trimmed.len());
-                result = simple_str_concat(result, simple_str_concat(simple_str_concat(simple_str_concat(indent, "return "), stmt), ";\n"));
+                const char* indent = simple_substring(body_line, 0, simple_strlen(body_line) - simple_strlen(bl_trimmed));
+                result = simple_str_concat(result, "{indent}return {stmt};\n");
                 continue;
             }
         }
@@ -915,3 +915,4 @@ const char* build_function(const char* name, const char* sig, SimpleStringArray 
 int main(void) {
     return 0;
 }
+

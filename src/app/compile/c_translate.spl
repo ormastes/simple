@@ -14,6 +14,7 @@ use app.compile.c_translate_stmt.{translate_interpolated_print, translate_print,
 fn close_blocks(body_lines: [text]) -> [text]:
     var result: [text] = []
     var brace_indents: [i64] = []
+    var brace_cleanup: [text] = []
 
     for idx in range(0, body_lines.len()):
         val line = body_lines[idx]
@@ -40,9 +41,13 @@ fn close_blocks(body_lines: [text]) -> [text]:
                 val epi = brace_indents.len() - 1
                 val eclose_indent = brace_indents[epi]
                 brace_indents.pop()
+                val ecleanup = brace_cleanup[brace_cleanup.len() - 1]
+                brace_cleanup.pop()
                 var epad = ""
                 for epi2 in range(0, eclose_indent):
                     epad = epad + "    "
+                if ecleanup != "":
+                    result.push(epad + "    " + ecleanup)
                 result.push(epad + "}")
             result.push(line)
             continue
@@ -61,28 +66,49 @@ fn close_blocks(body_lines: [text]) -> [text]:
             val pop_idx = brace_indents.len() - 1
             val close_indent = brace_indents[pop_idx]
             brace_indents.pop()
+            val cleanup = brace_cleanup[brace_cleanup.len() - 1]
+            brace_cleanup.pop()
             var close_padding = ""
             for pi in range(0, close_indent):
                 close_padding = close_padding + "    "
+            if cleanup != "":
+                result.push(close_padding + "    " + cleanup)
             result.push(close_padding + "}")
 
         result.push(line)
 
         if trimmed.ends_with("\{"):
             brace_indents.push(current_indent)
+            brace_cleanup.push("")
         elif trimmed.contains(") \{") and not trimmed.ends_with("}"):
+            # Also handle outer { for split blocks (push outer first, inner second)
+            if trimmed.starts_with("\{"):
+                brace_indents.push(current_indent)
+                var split_cleanup = ""
+                if trimmed.contains("/*__SPLITFREE:"):
+                    val sfm_start = trimmed.index_of("/*__SPLITFREE:") ?? -1
+                    val sfm_end = trimmed.index_of("*/") ?? -1
+                    if sfm_start >= 0 and sfm_end > sfm_start:
+                        val split_var_name = trimmed.substring(sfm_start + 14, sfm_end)
+                        split_cleanup = "simple_string_array_free(&" + split_var_name + ");"
+                brace_cleanup.push(split_cleanup)
             # Inline opening brace (e.g., for-loop with inline body start)
             brace_indents.push(current_indent)
+            brace_cleanup.push("")
         elif trimmed.starts_with("\{") and not trimmed.ends_with("}"):
             # Match block opening: { long long _match_val = ...;
             brace_indents.push(current_indent)
+            brace_cleanup.push("")
 
     for ci in range(0, brace_indents.len()):
         val pop_idx = brace_indents.len() - 1 - ci
         val close_indent = brace_indents[pop_idx]
+        val end_cleanup = brace_cleanup[pop_idx]
         var close_padding = ""
         for pi in range(0, close_indent):
             close_padding = close_padding + "    "
+        if end_cleanup != "":
+            result.push(close_padding + "    " + end_cleanup)
         result.push(close_padding + "}")
 
     result

@@ -4,7 +4,7 @@
 # - translate_array_decl: Array declaration translation
 # - translate_var_decl: Variable declaration translation (val/var)
 
-use app.compile.c_helpers.{find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr, is_fn_returning_int_arr, is_fn_returning_str_arr}
+use app.compile.c_helpers.{find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_i64, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr, is_fn_returning_int_arr, is_fn_returning_str_arr}
 use app.compile.c_translate_expr.{translate_expr, translate_condition, is_c_expr_string_result, extract_fn_names, try_translate_compound_assign, gen_array_for_loop}
 
 # Translate array declaration
@@ -100,7 +100,7 @@ fn translate_var_decl(stmt: text, types: text) -> text:
     if rhs.starts_with("\"") and rhs.ends_with("\""):
         val has_str_concat = rhs.contains("\" + ") or rhs.contains(" + \"")
         if not has_str_concat:
-            return r"const char* " + name + r" = " + rhs + r";<|TYPE|>;text:" + name + r";"
+            return r"const char* " + name + r" = strdup(" + rhs + r");<|TYPE|>;text:" + name + r";"
 
     # Handle string concat starting with literal: "prefix" + expr
     if rhs.starts_with("\""):
@@ -112,13 +112,13 @@ fn translate_var_decl(stmt: text, types: text) -> text:
         var c_bval = "0"
         if rhs == "true":
             c_bval = "1"
-        return r"int " + name + r" = " + c_bval + r";"
+        return r"int " + name + r" = " + c_bval + r";<|TYPE|>"
 
     # Handle boolean/logical expressions: val x = a or b, val x = a and b
     val rhs_has_logic = rhs.contains(" and ") or rhs.contains(" or ") or rhs.starts_with("not ")
     if rhs_has_logic:
         val c_logic = translate_condition(rhs, types)
-        return r"int " + name + r" = " + c_logic + r";"
+        return r"int " + name + r" = " + c_logic + r";<|TYPE|>"
 
     # Handle array literal
     if rhs.starts_with("[") and rhs.ends_with("]"):
@@ -160,7 +160,7 @@ fn translate_var_decl(stmt: text, types: text) -> text:
         # Handle simple int array indexing: val x = int_arr[i] -> long long
         if is_int_array_var(rhs_base, types):
             val c_rhs_idx = translate_expr(rhs, types)
-            return r"long long " + name + r" = " + c_rhs_idx + r";"
+            return r"long long " + name + r" = " + c_rhs_idx + r";<|TYPE|>"
 
     # Handle Some/None -> SimpleOption
     if rhs.starts_with("Some(") or rhs == "None" or rhs == "nil":
@@ -175,6 +175,11 @@ fn translate_var_decl(stmt: text, types: text) -> text:
     # Handle method call results
     val c_rhs = translate_expr(rhs, types)
     val rhs_is_split = c_rhs.starts_with("simple_split(")
+    # Check i64-returning functions FIRST to avoid misclassification (e.g. find_top_level_plus(simple_substring(...)))
+    val fn_names_early = extract_fn_names(rhs, c_rhs)
+    for fn_n_e in fn_names_early:
+        if is_fn_returning_i64(fn_n_e, types):
+            return r"long long " + name + r" = " + c_rhs + r";<|TYPE|>"
     if is_c_expr_string_result(c_rhs):
         return r"const char* " + name + r" = " + c_rhs + r";<|TYPE|>;text:" + name + r";"
 
@@ -282,6 +287,6 @@ fn translate_var_decl(stmt: text, types: text) -> text:
         return r"SimpleIntArray " + name + r" = " + c_rhs + r";<|TYPE|>;int_arr:" + name + r";"
 
     # Default: long long
-    r"long long " + name + r" = " + c_rhs + r";"
+    r"long long " + name + r" = " + c_rhs + r";<|TYPE|>"
 
 export translate_array_decl, translate_var_decl

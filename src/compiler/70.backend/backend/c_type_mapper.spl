@@ -28,15 +28,16 @@ class CTypeMapper:
     """
 
     target_bits: i64
+    type_names: Dict  # i64 symbol id -> C type name (for named structs/enums)
 
     static fn create() -> CTypeMapper:
-        CTypeMapper(target_bits: 64)
+        CTypeMapper(target_bits: 64, type_names: {})
 
     static fn create_for_target(target: CodegenTarget) -> CTypeMapper:
         if target.is_32bit():
-            CTypeMapper(target_bits: 32)
+            CTypeMapper(target_bits: 32, type_names: {})
         else:
-            CTypeMapper(target_bits: 64)
+            CTypeMapper(target_bits: 64, type_names: {})
 
 impl TypeMapper for CTypeMapper:
     fn map_primitive(ty: PrimitiveType) -> text:
@@ -57,6 +58,10 @@ impl TypeMapper for CTypeMapper:
         "C"
 
 impl CTypeMapper:
+    me register_type(sym_id: i64, c_name: text):
+        """Register a C type name for a MIR struct/enum symbol id (for generic type name sanitization)."""
+        self.type_names[sym_id] = c_name
+
     fn map_type(ty: MirType) -> text:
         match ty.kind:
             case I64: "int64_t"
@@ -89,8 +94,14 @@ impl CTypeMapper:
                     for elem in elements:
                         types = types.push(self.map_type(elem))
                     "std::tuple<{types.join(", ")}>"
-            case Struct(_): "void*"
-            case Enum(_): "int64_t"
+            case Struct(symbol):
+                match self.type_names.get(symbol.id):
+                    case Some(n): n + "*"
+                    case nil: "void*"
+            case Enum(symbol):
+                match self.type_names.get(symbol.id):
+                    case Some(n): n
+                    case nil: "int64_t"
             case Never: "void"
             case Opaque(_): "void*"
             case Promise(_): "void*"
@@ -105,23 +116,23 @@ impl CTypeMapper:
 
     fn size_of(ty: MirType) -> i64:
         match ty.kind:
-            case I64, U64, F64: 8
-            case I32, U32, F32: 4
-            case I16, U16, Char: 2
-            case I8, U8, Bool: 1
+            case I64 | U64 | F64: 8
+            case I32 | U32 | F32: 4
+            case I16 | U16 | Char: 2
+            case I8 | U8 | Bool: 1
             case Unit: 0
-            case Ptr(_, _), Ref(_, _), FuncPtr(_):
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_):
                 self.target_bits / 8
             case Array(elem, size): self.size_of(elem) * size
             case _: 8
 
     fn align_of(ty: MirType) -> i64:
         match ty.kind:
-            case I64, U64, F64: 8
-            case I32, U32, F32: 4
-            case I16, U16, Char: 2
-            case I8, U8, Bool: 1
-            case Ptr(_, _), Ref(_, _), FuncPtr(_):
+            case I64 | U64 | F64: 8
+            case I32 | U32 | F32: 4
+            case I16 | U16 | Char: 2
+            case I8 | U8 | Bool: 1
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_):
                 self.target_bits / 8
             case _: 8
 

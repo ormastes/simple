@@ -54,9 +54,10 @@ fn translate_simple_method(expr: text, paren_pos: i64, obj: text, c_func: text, 
         var c_arg = arg
         if do_translate:
             c_arg = translate_expr(arg, types)
-        var c_obj = obj
+        val c_obj_base = translate_expr(obj, types)
+        var c_obj = c_obj_base
         if ref_obj:
-            c_obj = "&" + obj
+            c_obj = "&" + c_obj_base
         return c_func + r"(" + c_obj + r", " + c_arg + r")"
     ""
 
@@ -276,7 +277,7 @@ fn translate_method_expr(expr: text, types: text) -> text:
                     return r"simple_substring(" + obj + r", " + sub_arg + r", simple_strlen(" + obj + r"))"
 
             elif method_name == "trim":
-                return r"simple_trim(" + obj + r")"
+                return r"simple_trim(" + translate_expr(obj, types) + r")"
 
             elif method_name == "split":
                 val r = translate_simple_method(expr, paren_pos, obj, "simple_split", false, false, types)
@@ -458,8 +459,8 @@ fn translate_expr(expr: text, types: text) -> text:
         val c_int_inner = translate_expr(int_inner, types)
         return r"atoll(" + c_int_inner + r")"
 
-    # Handle ?? (null coalescing)
-    val nq_pos = expr.index_of(" ?? ") ?? -1
+    # Handle ?? (null coalescing) - use find_outside_strings to skip string literals
+    val nq_pos = find_outside_strings(expr, " ?? ")
     if nq_pos >= 0:
         val left = expr.substring(0, nq_pos).trim()
         val right = expr.substring(nq_pos + 4).trim()
@@ -467,7 +468,7 @@ fn translate_expr(expr: text, types: text) -> text:
         val c_right = translate_expr(right, types)
         # For index_of ?? -1, index_of already returns -1 on not found
         if c_right == "-1":
-            val has_iof = c_left.contains("simple_index_of")
+            val has_iof = c_left.contains("simple_index_of") or c_left.contains("simple_last_index_of")
             if has_iof:
                 return c_left
         # String coalescing: use NULL check
@@ -480,7 +481,7 @@ fn translate_expr(expr: text, types: text) -> text:
         return r"(" + c_left + r" >= 0 ? " + c_left + r" : " + c_right + r")"
 
     # Handle pipe operator: expr |> func
-    val pipe_pos = expr.index_of(" |> ") ?? -1
+    val pipe_pos = find_outside_strings(expr, " |> ")
     if pipe_pos >= 0:
         val left = expr.substring(0, pipe_pos).trim()
         val right = expr.substring(pipe_pos + 4).trim()
@@ -488,7 +489,7 @@ fn translate_expr(expr: text, types: text) -> text:
         return right + r"(" + c_left + r")"
 
     # Handle "key in dict" -> simple_dict_contains(dict, key)
-    val in_pos = expr.index_of(" in ") ?? -1
+    val in_pos = find_outside_strings(expr, " in ")
     if in_pos >= 0:
         val left = expr.substring(0, in_pos).trim()
         val right = expr.substring(in_pos + 4).trim()
@@ -527,7 +528,20 @@ fn translate_expr(expr: text, types: text) -> text:
         val either_method = left_is_method or right_is_method
         val is_string_concat = either_str or either_text or either_method
         if is_string_concat:
-            return r"simple_str_concat(" + translate_expr(left, types) + r", " + translate_expr(right, types) + r")"
+            val c_left = translate_expr(left, types)
+            val c_right = translate_expr(right, types)
+            # Auto-convert integer to string in string context
+            # If right is not a string/text/function-returning-string, wrap with simple_int_to_str
+            # Exclude function calls (contain "(") and array element accesses (.items[) to avoid wrapping text-returning expressions
+            val right_needs_int_conv = (left_is_str or left_is_text) and not right_is_str and not right_is_text and not right_is_method and not c_right.contains("simple_") and not c_right.contains(".items[") and not c_right.starts_with("\"") and not c_right.starts_with("(") and not right.contains("(")
+            val left_needs_int_conv = (right_is_str or right_is_text) and not left_is_str and not left_is_text and not left_is_method and not c_left.contains("simple_") and not c_left.contains(".items[") and not c_left.starts_with("\"") and not c_left.starts_with("(") and not left.contains("(")
+            var final_left = c_left
+            var final_right = c_right
+            if right_needs_int_conv:
+                final_right = r"simple_int_to_str(" + c_right + r")"
+            if left_needs_int_conv:
+                final_left = r"simple_int_to_str(" + c_left + r")"
+            return r"simple_str_concat(" + final_left + r", " + final_right + r")"
         # Array concat: arr + [elem]
         if right.starts_with("[") and right.ends_with("]"):
             val arr_elem = right.substring(1, right.len() - 1).trim()
@@ -550,10 +564,11 @@ fn translate_expr(expr: text, types: text) -> text:
 
     # Pre-process: replace .len() within complex expressions
     # This handles cases like arr.len() - 1 inside brackets
-    if expr.contains(".len()"):
+    # Use find_outside_strings to avoid matching .len() inside string literals
+    if find_outside_strings(expr, ".len()") >= 0:
         var processed = expr
-        # Find and replace each .len() occurrence
-        var len_pos = processed.index_of(".len()") ?? -1
+        # Find and replace each .len() occurrence (outside string literals)
+        var len_pos = find_outside_strings(processed, ".len()")
         if len_pos >= 0:
             val len_full_base = processed.substring(0, len_pos)
             val len_rest = processed.substring(len_pos + 6)
@@ -564,7 +579,7 @@ fn translate_expr(expr: text, types: text) -> text:
             var lfound = false
             while lscan >= 0 and not lfound:
                 val lch = len_full_base[lscan]
-                val is_sep = lch == "," or lch == " " or lch == "("
+                val is_sep = lch == "," or lch == " " or lch == "(" or lch == "["
                 if is_sep:
                     len_prefix = len_full_base.substring(0, lscan + 1)
                     len_base = len_full_base.substring(lscan + 1).trim()
@@ -651,7 +666,8 @@ fn translate_expr(expr: text, types: text) -> text:
     if opt_chain_pos >= 0:
         # Skip if ?. is inside a string literal
         val before_opt = expr.substring(0, opt_chain_pos)
-        val quote_count_opt = before_opt.split("\"").len() - 1
+        val quote_parts_opt = before_opt.split("\"")
+        val quote_count_opt = quote_parts_opt.len() - 1
         val opt_in_str = quote_count_opt % 2 == 1
         if not opt_in_str:
             val left = expr.substring(0, opt_chain_pos).trim()

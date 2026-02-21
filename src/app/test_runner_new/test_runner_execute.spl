@@ -10,7 +10,10 @@
 use test_runner_types.*
 use test_runner_files.{strip_ansi, read_file_content}
 use test_runner_coverage.{record_coverage_sdn}
-use app.io.mod (file_exists, env_get, time_now_unix_micros, process_run_timeout, process_run_with_limits, file_write, file_delete)
+use app.io.file_ops.{file_exists, file_write, file_delete}
+use app.io.env_ops.{env_get}
+use app.io.time_ops.{time_now_unix_micros}
+use app.io.process_ops.{process_run_timeout, process_run_with_limits}
 
 # =========================================================================
 # Binary Location Discovery
@@ -285,7 +288,28 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     val child_args = build_child_args(wrapped_path, options)
     val timeout_ms = options.timeout * 1000
     val start = time_now_unix_micros()
-    var (stdout, stderr, exit_code) = process_run_timeout(binary, child_args, timeout_ms)
+    var stdout = ""
+    var stderr = ""
+    var exit_code = 0
+    if options.max_mem_gb > 0 and not options.no_limits:
+        val memory_bytes = options.max_mem_gb * 1024 * 1024 * 1024
+        val result = process_run_with_limits(binary, child_args, timeout_ms, memory_bytes, 0, 0, 0)
+        stdout = result.stdout
+        stderr = result.stderr
+        exit_code = result.exit_code
+        if result.limit_exceeded:
+            val end2 = time_now_unix_micros()
+            val dur = (end2 - start) / 1000
+            if cleanup_path != "" and not options.keep_artifacts:
+                if file_exists(cleanup_path):
+                    file_delete(cleanup_path)
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: dur, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+    else:
+        val (out, err, code) = process_run_timeout(binary, child_args, timeout_ms)
+        stdout = out
+        stderr = err
+        exit_code = code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
     if options.coverage:
@@ -318,7 +342,25 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
             run_args.push("--gc-log")
         if options.gc_off:
             run_args.push("--gc=off")
-        var (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
+        var stdout = ""
+        var stderr = ""
+        var exit_code = 0
+        if options.max_mem_gb > 0 and not options.no_limits:
+            val memory_bytes = options.max_mem_gb * 1024 * 1024 * 1024
+            val result = process_run_with_limits(binary, run_args, timeout_ms, memory_bytes, 0, 0, 0)
+            stdout = result.stdout
+            stderr = result.stderr
+            exit_code = result.exit_code
+            if result.limit_exceeded:
+                val end2 = time_now_unix_micros()
+                val dur = (end2 - start) / 1000
+                return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                    duration_ms: dur, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+        else:
+            val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
+            stdout = out
+            stderr = err
+            exit_code = code
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         if options.coverage:
@@ -341,7 +383,25 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     if not file_exists(binary):
         print "ERROR: Binary not found: {binary}"
 
-    var (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
+    var stdout = ""
+    var stderr = ""
+    var exit_code = 0
+    if options.max_mem_gb > 0 and not options.no_limits:
+        val memory_bytes = options.max_mem_gb * 1024 * 1024 * 1024
+        val result = process_run_with_limits(binary, run_args, timeout_ms, memory_bytes, 0, 0, 0)
+        stdout = result.stdout
+        stderr = result.stderr
+        exit_code = result.exit_code
+        if result.limit_exceeded:
+            val end2 = time_now_unix_micros()
+            val dur = (end2 - start) / 1000
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: dur, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+    else:
+        val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
+        stdout = out
+        stderr = err
+        exit_code = code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
@@ -508,7 +568,30 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if options.gc_off:
         run_args.push("--gc=off")
 
-    var (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
+    var stdout = ""
+    var stderr = ""
+    var exit_code = 0
+    if options.max_mem_gb > 0 and not options.no_limits:
+        val memory_bytes = options.max_mem_gb * 1024 * 1024 * 1024
+        val result = process_run_with_limits(binary, run_args, timeout_ms, memory_bytes, 0, 0, 0)
+        stdout = result.stdout
+        stderr = result.stderr
+        exit_code = result.exit_code
+        if result.limit_exceeded:
+            val end2 = time_now_unix_micros()
+            val dur = (end2 - start) / 1000
+            if not options.keep_artifacts:
+                if file_exists(smf_path):
+                    file_delete(smf_path)
+                if cleanup_path != "" and file_exists(cleanup_path):
+                    file_delete(cleanup_path)
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: dur, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+    else:
+        val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
+        stdout = out
+        stderr = err
+        exit_code = code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
