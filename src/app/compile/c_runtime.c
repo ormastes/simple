@@ -129,6 +129,20 @@ static const char* simple_string_pop(SimpleStringArray* arr) {
     return arr->items[arr->len];
 }
 
+static void simple_string_array_free(SimpleStringArray* arr) {
+    for (long long i = 0; i < arr->len; i++) {
+        free((char*)arr->items[i]);
+    }
+    free(arr->items);
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
+}
+
+static void simple_str_free(const char* s) {
+    if (s) free((char*)s);
+}
+
 static int simple_str_array_contains(SimpleStringArray arr, const char* needle) {
     for (long long i = 0; i < arr.len; i++) {
         if (arr.items[i] && needle && strcmp(arr.items[i], needle) == 0) return 1;
@@ -211,6 +225,15 @@ static long long simple_int_pop(SimpleIntArray* arr) {
     if (arr->len == 0) return 0;
     arr->len--;
     return arr->items[arr->len];
+}
+
+static void simple_int_array_free(SimpleIntArray* arr) {
+    if (arr->items) {
+        free(arr->items);
+    }
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
 }
 
 // --- Array of String Arrays (for [[text]]) ---
@@ -298,6 +321,20 @@ static SimpleStructArray simple_struct_array_copy_push(SimpleStructArray src, vo
     dst.len = src.len;
     dst.items[dst.len++] = item;
     return dst;
+}
+
+static void simple_struct_array_free(SimpleStructArray* arr) {
+    if (arr->items) {
+        for (long long i = 0; i < arr->len; i++) {
+            if (arr->items[i]) {
+                free(arr->items[i]);
+            }
+        }
+        free(arr->items);
+    }
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
 }
 
 static SimpleIntArray simple_int_array_copy_push(SimpleIntArray src, long long item) {
@@ -559,6 +596,22 @@ static void simple_dict_remove(SimpleDict* d, const char* key) {
         d->entries[i] = d->entries[i + 1];
     }
     d->len--;
+}
+
+static void simple_dict_free(SimpleDict* d) {
+    if (!d) return;
+    for (long long i = 0; i < d->len; i++) {
+        if (d->entries[i].key) {
+            free((char*)d->entries[i].key);
+        }
+        if (d->entries[i].type_tag == SIMPLE_DICT_TYPE_STR && d->entries[i].value.str_val) {
+            free((char*)d->entries[i].value.str_val);
+        }
+    }
+    if (d->entries) {
+        free(d->entries);
+    }
+    free(d);
 }
 
 // --- Option Type ---

@@ -1,0 +1,57 @@
+# Leak Check - Internal Runner
+#
+# Runs the internal (interpreter-level) leak check by tracking
+# GC allocations during file execution.
+
+extern fn rt_file_exists(path: text) -> bool
+
+use app.io.mod (cli_run_file)
+use types
+use internal_tracker
+
+# Run an internal leak check on the given source file
+fn run_internal_check(cfg: LeakCheckConfig) -> LeakCheckResult:
+    var result = empty_leak_check_result()
+    result.mode = "internal"
+
+    if cfg.source_file == "":
+        print "Error: no source file specified"
+        result.exit_code = 1
+        return result
+
+    if not rt_file_exists(cfg.source_file):
+        print "Error: source file not found: {cfg.source_file}"
+        result.exit_code = 1
+        return result
+
+    if cfg.verbose:
+        print "Running internal leak check on: {cfg.source_file}"
+        print "GC leak window: {cfg.gc_leak_window}"
+
+    # Reset the allocation tracker
+    tracker_reset()
+
+    # Run the target file through the interpreter
+    val run_args: [text] = [cfg.source_file]
+    val run_exit = cli_run_file(cfg.source_file, run_args, false, false)
+
+    if cfg.verbose:
+        print "Program exited with code: {run_exit}"
+        print "Total allocations tracked: {tracker_get_alloc_count()}"
+        print "Total frees tracked: {tracker_get_free_count()}"
+
+    # Collect leaked allocations
+    val leaks = tracker_get_leaks()
+
+    if cfg.verbose:
+        print "Leaked allocations: {leaks.len()}"
+
+    result.internal_leaks = leaks
+    if leaks.len() > 0:
+        result.exit_code = 1
+    else:
+        result.exit_code = 0
+
+    result
+
+export run_internal_check

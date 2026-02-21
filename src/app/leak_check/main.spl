@@ -1,0 +1,77 @@
+# Leak Check - Main Entry Point
+#
+# Unified memory leak detection tool.
+#
+# Usage:
+#     simple leak-check [options] <source.spl>
+#
+# Supports:
+#   - Internal mode: GC-level allocation tracking
+#   - External mode: ASan or Valgrind via C backend
+#   - Both mode: Run both internal and external checks
+
+use types
+use config
+use internal_tracker
+use internal_runner
+use external_runner
+use reporter
+
+# Main entry point for leak-check command
+fn run_leak_check(args: [text]) -> i64:
+    val cfg = parse_leak_check_args(args)
+
+    # Handle help (source_file will be empty if --help was printed)
+    if cfg.source_file == "":
+        return 0
+
+    if cfg.verbose:
+        print "Leak check configuration:"
+        print "  Mode: {leak_check_mode_to_string(cfg.mode)}"
+        print "  Source: {cfg.source_file}"
+        if cfg.mode == LeakCheckMode.External or cfg.mode == LeakCheckMode.Both:
+            print "  External tool: {external_tool_to_string(cfg.external_tool)}"
+        print "  Report format: {report_format_to_string(cfg.report_format)}"
+        print ""
+
+    var result = empty_leak_check_result()
+
+    match cfg.mode:
+        case LeakCheckMode.Internal:
+            result = run_internal_check(cfg)
+        case LeakCheckMode.External:
+            result = run_external_check(cfg)
+        case LeakCheckMode.Both:
+            # Run internal check first
+            val internal_result = run_internal_check(cfg)
+            # Then external check
+            val external_result = run_external_check(cfg)
+            # Merge results
+            result.mode = "both"
+            result.internal_leaks = internal_result.internal_leaks
+            result.external_report = external_result.external_report
+            val has_internal = internal_result.internal_leaks.len() > 0
+            val has_external = (external_result.external_report.definitely_lost_bytes > 0 or external_result.external_report.indirectly_lost_bytes > 0 or external_result.external_report.possibly_lost_bytes > 0)
+            if has_internal or has_external:
+                result.exit_code = 1
+            else:
+                result.exit_code = 0
+
+    # Print histograms if verbose and internal mode
+    if (cfg.verbose and (cfg.mode == LeakCheckMode.Internal or cfg.mode == LeakCheckMode.Both)):
+        val size_hist = tracker_build_histogram_by_size()
+        if size_hist.len() > 0:
+            print format_histogram_console(size_hist, "Leaks by size class")
+            print ""
+
+        val loc_hist = tracker_build_histogram_by_location()
+        if loc_hist.len() > 0:
+            print format_histogram_console(loc_hist, "Leaks by source location")
+            print ""
+
+    # Write report
+    write_report(result, cfg)
+
+    result.exit_code
+
+export run_leak_check
