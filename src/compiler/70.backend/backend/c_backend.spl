@@ -50,6 +50,9 @@ class MirToC:
         # Emit impl preamble
         self.builder.emit_impl_file_header()
 
+        # Emit named type definitions (sanitizes generic names like Box<i64> -> Box_i64)
+        self.emit_type_definitions(module)
+
         # Forward declarations go to BOTH header and impl
         self.builder.emit_header_raw(r"// Forward declarations")
         self.builder.emit_raw(r"// Forward declarations")
@@ -67,6 +70,49 @@ class MirToC:
     me build_header() -> text:
         """Build the header file content."""
         self.builder.build_header()
+
+    me emit_type_definitions(module: MirModule):
+        """Register and emit C struct/enum definitions for all named types in the module.
+        Sanitizes generic type names (e.g. Box<i64> -> Box_i64) to valid C identifiers."""
+        # Pass 1: register all C names so cross-referencing field types resolve correctly
+        for (key, type_def) in module.types:
+            val c_name = sanitize_c_name(type_def.name)
+            self.type_mapper.register_type(type_def.symbol.id, c_name)
+
+        # Pass 2: forward declarations (typedef) to header
+        for (key, type_def) in module.types:
+            val c_name = sanitize_c_name(type_def.name)
+            match type_def.kind:
+                case Struct(_):
+                    self.builder.emit_header_raw("typedef struct " + c_name + "_s " + c_name + ";")
+                case Enum(_):
+                    self.builder.emit_header_raw("typedef struct " + c_name + "_s " + c_name + ";")
+                case _: pass_dn
+        self.builder.emit_header_raw("")
+
+        # Pass 3: full struct/enum definitions to header
+        for (key, type_def) in module.types:
+            val c_name = sanitize_c_name(type_def.name)
+            match type_def.kind:
+                case Struct(fields):
+                    self.builder.emit_header_raw("struct " + c_name + "_s {")
+                    for field in fields:
+                        val field_c_type = self.type_mapper.map_type(field.type_)
+                        self.builder.emit_header_raw("    " + field_c_type + " " + field.name + ";")
+                    self.builder.emit_header_raw("};")
+                    self.builder.emit_header_raw("")
+                case Enum(variants):
+                    self.builder.emit_header_raw("struct " + c_name + "_s {")
+                    self.builder.emit_header_raw("    int64_t tag;")
+                    self.builder.emit_header_raw("    union {")
+                    for variant in variants:
+                        if variant.payload.?:
+                            val payload_ty = self.type_mapper.map_type(variant.payload.unwrap())
+                            self.builder.emit_header_raw("        " + payload_ty + " " + variant.name + "_payload;")
+                    self.builder.emit_header_raw("    } data;")
+                    self.builder.emit_header_raw("};")
+                    self.builder.emit_header_raw("")
+                case _: pass_dn
 
     me emit_forward_declaration(name: text, body: MirBody):
         """Emit forward declaration for a function to both header and impl."""
@@ -733,6 +779,16 @@ class MirToC:
             "nullptr"
         else:
             "0"
+
+# Sanitize a SPL type name containing generics to a valid C identifier.
+# Examples: "Box<i64>" -> "Box_i64", "Dict<Text, i64>" -> "Dict_Text_i64"
+fn sanitize_c_name(name: text) -> text:
+    var s = name.split("<").join("_")
+    s = s.split(">").join("")
+    s = s.split(",").join("_")
+    s = s.split(" ").join("")
+    s = s.split("::").join("_")
+    s
 
 # ============================================================================
 # CCodegenBackend - Backend interface for BackendFactory

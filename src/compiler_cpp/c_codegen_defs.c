@@ -699,11 +699,11 @@ const char* cg_track_fn_types(const char* trimmed, const char* fn_name);
 const char* cg_process_enum(SimpleStringArray lines_arr, long long line_idx, const char* trimmed) {
     const char* enum_name = simple_substring(trimmed, 5, simple_strlen(trimmed) - 1);
     const char* type_entries = simple_str_concat("struct:", simple_str_concat(enum_name, ";"));
-    SimpleIntArray variants = simple_new_int_array();
+    SimpleStringArray variants = simple_new_string_array();
     int has_data_variant = 0;
-    SimpleIntArray data_variants = simple_new_int_array();
-    SimpleIntArray simple_variants = simple_new_int_array();
-    for (long long vi = line_idx + 1; vi <  lines_arr.len; vi++) {
+    SimpleStringArray data_variants = simple_new_string_array();
+    SimpleStringArray simple_variants = simple_new_string_array();
+    for (long long vi = line_idx + 1; vi < lines_arr.len; vi++) {
         const char* vline = lines_arr.items[vi];
         const char* vtrimmed = simple_trim(vline);
         if (strcmp(vtrimmed, "") == 0) {
@@ -722,9 +722,9 @@ const char* cg_process_enum(SimpleStringArray lines_arr, long long line_idx, con
         long long vparen = simple_index_of(vtrimmed, "(");
         if (vparen >= 0) {
             has_data_variant = 1;
-            /* data_variants.push(vtrimmed) */;
+            simple_string_push(&data_variants, vtrimmed);
         } else {
-            /* simple_variants.push(vtrimmed) */;
+            simple_string_push(&simple_variants, vtrimmed);
         }
     }
     const char* enum_def = "";
@@ -733,7 +733,7 @@ const char* cg_process_enum(SimpleStringArray lines_arr, long long line_idx, con
         const char* union_fields = "";
         const char* constructors = "";
         const char* tag_defines = "";
-        for (long long _idx_dv = 0; _idx_dv < data_variants_len; _idx_dv++) { long long dv = data_variants[_idx_dv];
+        for (long long _idx_dv = 0; _idx_dv < data_variants.len; _idx_dv++) { const char* dv = data_variants.items[_idx_dv];
             long long dv_paren = simple_index_of(dv, "(");
             const char* dv_name = simple_substring(dv, 0, dv_paren);
             long long dv_close = simple_index_of(dv, ")");
@@ -741,7 +741,7 @@ const char* cg_process_enum(SimpleStringArray lines_arr, long long line_idx, con
             if (dv_close > dv_paren + 1) {
                 dv_fields_str = simple_substring(dv, dv_paren + 1, dv_close);
             }
-            tag_defines = simple_str_concat(tag_defines, r"#define " + enum_name + r"_TAG_" + dv_name + r" " + tag_idx + "\n");
+            tag_defines = simple_str_concat(tag_defines, simple_str_concat("#define ", simple_str_concat(enum_name, simple_str_concat("_TAG_", simple_str_concat(dv_name, simple_str_concat(" ", simple_str_concat(tag_idx, "\n")))))));
             type_entries = simple_str_concat(type_entries, simple_str_concat("enum_variant:", simple_str_concat(enum_name, simple_str_concat(".", simple_str_concat(dv_name, ";")))));
             const char* struct_fields = "";
             const char* ctor_params = "";
@@ -749,68 +749,66 @@ const char* cg_process_enum(SimpleStringArray lines_arr, long long line_idx, con
             if (simple_strlen(dv_fields_str) > 0) {
                 SimpleStringArray dv_parts = simple_split(dv_fields_str, ",");
                 long long fi = 0;
-                for (long long _idx_dvp = 0; _idx_dvp < dv_parts_len; _idx_dvp++) { long long dvp = dv_parts[_idx_dvp];
+                for (long long _idx_dvp = 0; _idx_dvp < dv_parts.len; _idx_dvp++) { const char* dvp = dv_parts.items[_idx_dvp];
                     const char* dvf = simple_trim(dvp);
                     long long dvf_colon = simple_index_of(dvf, ":");
                     if (dvf_colon >= 0) {
                         const char* fname = simple_substring(dvf, 0, dvf_colon);
                         const char* ftype = simple_substring(dvf, dvf_colon + 1, simple_strlen(dvf));
                         long long ctype = simple_type_to_c(ftype);
-                        struct_fields = simple_str_concat(struct_fields, r"            " + ctype + r" " + fname + r";" + "\n");
+                        struct_fields = simple_str_concat(struct_fields, simple_str_concat("            ", simple_str_concat(ctype, simple_str_concat(" ", simple_str_concat(fname, simple_str_concat(";", "\n"))))));
                         if (fi > 0) {
                             ctor_params = simple_str_concat(ctor_params, ", ");
                         }
-                        ctor_params = simple_str_concat(ctor_params, ctype + r" " + fname);
-                        ctor_assigns = simple_str_concat(ctor_assigns, r"    r.data." + dv_name + r"." + fname + r" = " + fname + r";" + "\n");
+                        ctor_params = simple_str_concat(ctor_params, simple_str_concat(ctype, simple_str_concat(" ", fname)));
+                        ctor_assigns = simple_str_concat(ctor_assigns, simple_str_concat("    r.data.", simple_str_concat(dv_name, simple_str_concat(".", simple_str_concat(fname, simple_str_concat(" = ", simple_str_concat(fname, simple_str_concat(";", "\n"))))))));
                     } else {
                         long long ctype = simple_type_to_c(dvf);
-                        long long pname = r"_" + fi;
-                        struct_fields = simple_str_concat(struct_fields, r"            " + ctype + r" " + pname + r";" + "\n");
+                        const char* pname = simple_str_concat("_", fi);
+                        struct_fields = simple_str_concat(struct_fields, simple_str_concat("            ", simple_str_concat(ctype, simple_str_concat(" ", simple_str_concat(pname, simple_str_concat(";", "\n"))))));
                         if (fi > 0) {
                             ctor_params = simple_str_concat(ctor_params, ", ");
                         }
-                        ctor_params = simple_str_concat(ctor_params, ctype + r" " + pname);
-                        ctor_assigns = simple_str_concat(ctor_assigns, r"    r.data." + dv_name + r"." + pname + r" = " + pname + r";" + "\n");
+                        ctor_params = simple_str_concat(ctor_params, simple_str_concat(ctype, simple_str_concat(" ", pname)));
+                        ctor_assigns = simple_str_concat(ctor_assigns, simple_str_concat("    r.data.", simple_str_concat(dv_name, simple_str_concat(".", simple_str_concat(pname, simple_str_concat(" = ", simple_str_concat(pname, simple_str_concat(";", "\n"))))))));
                     }
                     fi = fi + 1;
                 }
             }
-            union_fields = simple_str_concat(union_fields, simple_str_concat("        struct {", simple_str_concat("\n", simple_str_concat(struct_fields, simple_str_concat("        } ", simple_str_concat(dv_name, ";\n"))))));
-            constructors = simple_str_concat(constructors, simple_str_concat("static ", simple_str_concat(enum_name, simple_str_concat(" ", simple_str_concat(enum_name, simple_str_concat("__", simple_str_concat(dv_name, simple_str_concat("(", simple_str_concat(ctor_params, simple_str_concat(") {", "\n"))))))))));
-            }
-            constructors = simple_str_concat(constructors, r"    " + enum_name + r" r;" + "\n" + r"    r.tag = " + enum_name + r"_TAG_" + dv_name + r";" + "\n");
+            union_fields = simple_str_concat(union_fields, simple_str_concat("        struct \{", simple_str_concat("\n", simple_str_concat(struct_fields, simple_str_concat("        } ", simple_str_concat(dv_name, ";\n"))))));
+            constructors = simple_str_concat(constructors, simple_str_concat("static ", simple_str_concat(enum_name, simple_str_concat(" ", simple_str_concat(enum_name, simple_str_concat("__", simple_str_concat(dv_name, simple_str_concat("(", simple_str_concat(ctor_params, simple_str_concat(") \{", "\n"))))))))));
+            constructors = simple_str_concat(constructors, simple_str_concat("    ", simple_str_concat(enum_name, simple_str_concat(" r;", simple_str_concat("\n", simple_str_concat("    r.tag = ", simple_str_concat(enum_name, simple_str_concat("_TAG_", simple_str_concat(dv_name, simple_str_concat(";", "\n"))))))))));
             constructors = simple_str_concat(constructors, ctor_assigns);
             constructors = simple_str_concat(constructors, simple_str_concat("    return r;", simple_str_concat("\n", simple_str_concat("}", "\n"))));
             tag_idx = tag_idx + 1;
         }
-        for (long long _idx_sv = 0; _idx_sv < simple_variants_len; _idx_sv++) { long long sv = simple_variants[_idx_sv];
-            tag_defines = simple_str_concat(tag_defines, r"#define " + enum_name + r"_TAG_" + sv + r" " + tag_idx + "\n");
-            constructors = simple_str_concat(constructors, simple_str_concat("static ", simple_str_concat(enum_name, simple_str_concat(" ", simple_str_concat(enum_name, simple_str_concat("__", simple_str_concat(sv, simple_str_concat("(void) {", "\n"))))))));
-            }
-            constructors = simple_str_concat(constructors, r"    " + enum_name + r" r;" + "\n" + r"    r.tag = " + enum_name + r"_TAG_" + sv + r";" + "\n");
+        for (long long _idx_sv = 0; _idx_sv < simple_variants.len; _idx_sv++) { const char* sv = simple_variants.items[_idx_sv];
+            tag_defines = simple_str_concat(tag_defines, simple_str_concat("#define ", simple_str_concat(enum_name, simple_str_concat("_TAG_", simple_str_concat(sv, simple_str_concat(" ", simple_str_concat(tag_idx, "\n")))))));
+            constructors = simple_str_concat(constructors, simple_str_concat("static ", simple_str_concat(enum_name, simple_str_concat(" ", simple_str_concat(enum_name, simple_str_concat("__", simple_str_concat(sv, simple_str_concat("(void) \{", "\n"))))))));
+            constructors = simple_str_concat(constructors, simple_str_concat("    ", simple_str_concat(enum_name, simple_str_concat(" r;", simple_str_concat("\n", simple_str_concat("    r.tag = ", simple_str_concat(enum_name, simple_str_concat("_TAG_", simple_str_concat(sv, simple_str_concat(";", "\n"))))))))));
             constructors = simple_str_concat(constructors, simple_str_concat("    return r;", simple_str_concat("\n", simple_str_concat("}", "\n"))));
             tag_idx = tag_idx + 1;
         }
         enum_def = simple_str_concat(tag_defines, "\n");
-        enum_def = simple_str_concat(enum_def, simple_str_concat("typedef struct {", simple_str_concat("\n", simple_str_concat("    int tag;", simple_str_concat("\n", simple_str_concat("    union {", "\n"))))));
+        enum_def = simple_str_concat(enum_def, simple_str_concat("typedef struct \{", simple_str_concat("\n", simple_str_concat("    int tag;", simple_str_concat("\n", simple_str_concat("    union \{", "\n"))))));
         enum_def = simple_str_concat(enum_def, union_fields);
         enum_def = simple_str_concat(enum_def, simple_str_concat("    } data;", simple_str_concat("\n", simple_str_concat("} ", simple_str_concat(enum_name, ";\n\n")))));
         enum_def = simple_str_concat(enum_def, constructors);
     } else {
-        SimpleIntArray variant_names = simple_new_int_array();
-        for (long long _idx_sv = 0; _idx_sv < simple_variants_len; _idx_sv++) { long long sv = simple_variants[_idx_sv];
-            /* variant_names.push(enum_name + r"_" + sv) */;
+        SimpleStringArray variant_names = simple_new_string_array();
+        for (long long _idx_sv = 0; _idx_sv < simple_variants.len; _idx_sv++) { const char* sv = simple_variants.items[_idx_sv];
+            simple_string_push(&variant_names, simple_str_concat(enum_name, simple_str_concat("_", sv)));
             type_entries = simple_str_concat(type_entries, simple_str_concat("enum_variant:", simple_str_concat(enum_name, simple_str_concat(".", simple_str_concat(sv, ";")))));
         }
         const char* variant_list = simple_string_join(&variant_names, ", ");
-        enum_def = simple_str_concat("typedef enum { ", simple_str_concat(variant_list, simple_str_concat(" } ", simple_str_concat(enum_name, ";"))));
+        enum_def = simple_str_concat("typedef enum \{ ", simple_str_concat(variant_list, simple_str_concat(" } ", simple_str_concat(enum_name, ";"))));
     }
     return simple_str_concat(enum_def, simple_str_concat("
 }
 
 const char* cg_track_field_types(SimpleStringArray lines_arr, long long start_idx, const char* type_name) {
     const char* type_entries = "";
-    for (long long fi = start_idx + 1; fi <  lines_arr.len; fi++) {
+    for (long long fi = start_idx + 1; fi < lines_arr.len; fi++) {
         const char* fline = lines_arr.items[fi];
         const char* ftrimmed = simple_trim(fline);
         if (strcmp(ftrimmed, "") == 0) {
@@ -857,7 +855,7 @@ const char* cg_track_field_types(SimpleStringArray lines_arr, long long start_id
 
 const char* cg_track_fn_types(const char* trimmed, const char* fn_name) {
     const char* type_entries = "";
-    //  Track return type
+    // Track return type
     long long arrow_idx = simple_index_of(trimmed, "->");
     if (arrow_idx >= 0) {
         const char* ret_str = simple_substring(trimmed, arrow_idx + 2, simple_strlen(trimmed));
@@ -887,7 +885,7 @@ const char* cg_track_fn_types(const char* trimmed, const char* fn_name) {
                 const char* ret_sa_f = simple_char_at(ret_sa_elem, 0);
                 if (ret_sa_f >= "A" && ret_sa_f <= "Z") {
                     type_entries = simple_str_concat(type_entries, simple_str_concat("fn_struct_arr:", simple_str_concat(fn_name, simple_str_concat("=", simple_str_concat(ret_sa_elem, ";")))));
-    //  Track parameter types
+    // Track parameter types
                 }
             }
         }
@@ -897,7 +895,7 @@ const char* cg_track_fn_types(const char* trimmed, const char* fn_name) {
     if (fn_paren_idx >= 0 && fn_close_idx > fn_paren_idx + 1) {
         const char* fn_params_str = simple_substring(trimmed, fn_paren_idx + 1, fn_close_idx);
         SimpleStringArray fn_params = simple_split(fn_params_str, ",");
-        for (long long _idx_fn_param = 0; _idx_fn_param < fn_params_len; _idx_fn_param++) { long long fn_param = fn_params[_idx_fn_param];
+        for (long long _idx_fn_param = 0; _idx_fn_param < fn_params.len; _idx_fn_param++) { const char* fn_param = fn_params.items[_idx_fn_param];
             const char* fp = simple_trim(fn_param);
             long long fp_colon = simple_index_of(fp, ":");
             if (fp_colon >= 0) {
@@ -943,3 +941,4 @@ const char* cg_track_fn_types(const char* trimmed, const char* fn_name) {
 int main(void) {
     return 0;
 }
+

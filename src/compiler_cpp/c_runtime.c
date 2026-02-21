@@ -699,59 +699,54 @@ SimpleStringArray parse_struct_fields(SimpleStringArray lines_arr, long long sta
 SimpleStringArray split_result(const char* raw);
 
 const char* generate_c_runtime(void) {
-    //  Try to read from file first
+    // Try to read from file first
     const char* runtime_path = "src/app/compile/c_runtime.c";
     if (rt_file_exists(runtime_path)) {
         const char* raw = rt_file_read_text(runtime_path);
         const char* content = (raw != NULL ? raw : "");
         return simple_str_concat("\n", simple_str_concat(content, "\n"));
-    //  Fallback: minimal runtime
+    // Fallback: minimal runtime
     }
-    warn("compile", simple_str_concat(r"C runtime not found at ", runtime_path));
+    warn("compile", simple_str_concat("C runtime not found at ", runtime_path));
     warn("compile", "Using minimal embedded runtime.");
     const char* rt = "\n// === Minimal Simple Runtime ===\n";
-    rt = simple_str_concat(rt, simple_str_concat("static long simple_strlen(const char* s) { return s ? (long)strlen(s) : 0; }", "\n"));
-    }
-    rt = simple_str_concat(rt, simple_str_concat("static int simple_contains(const char* s, const char* n) { return s && n && strstr(s, n) != NULL; }", "\n"));
-    }
-    rt = simple_str_concat(rt, simple_str_concat("static int simple_starts_with(const char* s, const char* p) { return s && p && strncmp(s, p, strlen(p)) == 0; }", "\n"));
-    }
-    rt = simple_str_concat(rt, simple_str_concat("static int simple_ends_with(const char* s, const char* x) { long sl = strlen(s), xl = strlen(x); return xl <= sl && strcmp(s+sl-xl, x) == 0; }", "\n"));
-    }
-    rt = simple_str_concat(rt, simple_str_concat("static long simple_index_of(const char* s, const char* n) { const char* f = strstr(s, n); return f ? (long)(f-s) : -1; }", "\n"));
-    }
+    rt = simple_str_concat(rt, simple_str_concat("static long simple_strlen(const char* s) \{ return s ? (long)strlen(s) : 0; }", "\n"));
+    rt = simple_str_concat(rt, simple_str_concat("static int simple_contains(const char* s, const char* n) \{ return s && n && strstr(s, n) != NULL; }", "\n"));
+    rt = simple_str_concat(rt, simple_str_concat("static int simple_starts_with(const char* s, const char* p) \{ return s && p && strncmp(s, p, strlen(p)) == 0; }", "\n"));
+    rt = simple_str_concat(rt, simple_str_concat("static int simple_ends_with(const char* s, const char* x) \{ long sl = strlen(s), xl = strlen(x); return xl <= sl && strcmp(s+sl-xl, x) == 0; }", "\n"));
+    rt = simple_str_concat(rt, simple_str_concat("static long simple_index_of(const char* s, const char* n) \{ const char* f = strstr(s, n); return f ? (long)(f-s) : -1; }", "\n"));
     return rt;
 }
 
 SimpleStringArray parse_struct_fields(SimpleStringArray lines_arr, long long start_idx) {
-    //  Returns [end_index, c_typedef]
-    SimpleIntArray fields = simple_new_int_array();
+    // Returns [end_index, c_typedef]
+    SimpleStringArray fields = simple_new_string_array();
     long long idx = start_idx + 1;
-    for (long long i = start_idx + 1; i <  lines_arr.len; i++) {
+    for (long long i = start_idx + 1; i < lines_arr.len; i++) {
         const char* line = lines_arr.items[i];
         const char* trimmed = simple_trim(line);
         if (strcmp(trimmed, "") == 0) {
             idx = i + 1;
             continue;
-    //  Check if still indented (part of struct body)
+    // Check if still indented (part of struct body)
         }
         long long is_indented = simple_starts_with(line, "    ");
         if (!(is_indented)) {
             break;
-    //  Strip inline comments: "field: type  # comment" -> "field: type"
+    // Strip inline comments: "field: type  # comment" -> "field: type"
         }
         const char* clean_field = trimmed;
         long long hash_pos = simple_index_of(trimmed, " #");
         if (hash_pos >= 0) {
             clean_field = simple_substring(trimmed, 0, hash_pos);
-    //  Parse field: name: type
+    // Parse field: name: type
         }
         long long field_colon = simple_index_of(clean_field, ":");
         if (field_colon >= 0) {
             const char* field_name = simple_substring(clean_field, 0, field_colon);
             const char* field_type = simple_substring(clean_field, field_colon + 1, simple_strlen(clean_field));
             long long c_type = simple_type_to_c(field_type);
-            /* fields.push(r"    " + c_type + r" " + field_name + r";") */;
+            simple_string_push(&fields, simple_str_concat("    ", simple_str_concat(c_type, simple_str_concat(" ", simple_str_concat(field_name, ";")))));
         }
         idx = i + 1;
     }
@@ -764,17 +759,18 @@ SimpleStringArray split_result(const char* raw) {
     if (sep_pos >= 0) {
         const char* code = simple_substring(raw, 0, sep_pos);
         const char* entries = simple_substring(raw, sep_pos + 8, simple_strlen(raw));
-        SimpleIntArray sr_result = simple_new_int_array();
-        /* sr_result.push(code) */;
-        /* sr_result.push(entries) */;
+        SimpleStringArray sr_result = simple_new_string_array();
+        simple_string_push(&sr_result, code);
+        simple_string_push(&sr_result, entries);
         return sr_result;
     }
-    SimpleIntArray sr_default = simple_new_int_array();
-    /* sr_default.push(raw) */;
-    /* sr_default.push("") */;
+    SimpleStringArray sr_default = simple_new_string_array();
+    simple_string_push(&sr_default, raw);
+    simple_string_push(&sr_default, "");
     return sr_default;
 }
 
 int main(void) {
     return 0;
 }
+

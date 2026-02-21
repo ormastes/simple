@@ -696,39 +696,39 @@ const char* translate_array_decl(const char* name, const char* rhs, const char* 
 const char* translate_var_decl(const char* stmt, const char* types);
 
 const char* translate_array_decl(const char* name, const char* rhs, const char* type_hint, const char* types) {
-    //  Check for nested array types first
+    // Check for nested array types first
     if (strcmp(type_hint, "[[text]]") == 0 || strcmp(type_hint, "[[str]]") == 0) {
         if (strcmp(rhs, "[]") == 0) {
-            return simple_str_concat(r"SimpleStringArrayArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_string_array_array();
+            return simple_str_concat("SimpleStringArrayArray ", simple_str_concat(name, simple_str_concat(" = simple_new_string_array_array();
         }
-        return simple_str_concat(r"SimpleStringArrayArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_string_array_array();
+        return simple_str_concat("SimpleStringArrayArray ", simple_str_concat(name, simple_str_concat(" = simple_new_string_array_array();
     }
     if (strcmp(type_hint, "[[i64]]") == 0 || strcmp(type_hint, "[[int]]") == 0) {
         if (strcmp(rhs, "[]") == 0) {
-            return simple_str_concat(r"SimpleIntArrayArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_int_array_array();
+            return simple_str_concat("SimpleIntArrayArray ", simple_str_concat(name, simple_str_concat(" = simple_new_int_array_array();
         }
-        return simple_str_concat(r"SimpleIntArrayArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_int_array_array();
-    //  Check for string array type
+        return simple_str_concat("SimpleIntArrayArray ", simple_str_concat(name, simple_str_concat(" = simple_new_int_array_array();
+    // Check for string array type
     }
     if (strcmp(type_hint, "[text]") == 0 || strcmp(type_hint, "[str]") == 0) {
         if (strcmp(rhs, "[]") == 0) {
-            return simple_str_concat(r"SimpleStringArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_string_array();
-    //  Non-empty string array init: ["a", "b", "c"]
+            return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = simple_new_string_array();
+    // Non-empty string array init: ["a", "b", "c"]
         }
         const char* inner = simple_substring(rhs, 1, simple_strlen(rhs) - 1);
         SimpleStringArray elements = simple_split(inner, ",");
-        const char* init_code = simple_str_concat(r"SimpleStringArray ", simple_str_concat(name, r" = simple_new_string_array();"));
-        for (long long _idx_elem = 0; _idx_elem < elements_len; _idx_elem++) { long long elem = elements[_idx_elem];
+        const char* init_code = simple_str_concat("SimpleStringArray ", simple_str_concat(name, " = simple_new_string_array();"));
+        for (long long _idx_elem = 0; _idx_elem < elements.len; _idx_elem++) { const char* elem = elements.items[_idx_elem];
             const char* trimmed_elem = simple_trim(elem);
-            init_code = simple_str_concat(init_code, simple_str_concat(r" simple_string_push(&", simple_str_concat(name, r", " + trimmed_elem + r");")));
+            init_code = simple_str_concat(init_code, simple_str_concat(" simple_string_push(&", simple_str_concat(name, simple_str_concat(", ", simple_str_concat(trimmed_elem, ");")))));
         }
-        return simple_str_concat(init_code, r"
-    //  Check for integer array type
+        return simple_str_concat(init_code, simple_str_concat("
+    // Check for integer array type
     }
     if (strcmp(type_hint, "[i64]") == 0 || strcmp(type_hint, "[int]") == 0 || strcmp(type_hint, "[bool]") == 0) {
         if (strcmp(rhs, "[]") == 0) {
-            return simple_str_concat(r"SimpleIntArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_int_array();
-    //  Check for struct array type hint: [StructName]
+            return simple_str_concat("SimpleIntArray ", simple_str_concat(name, simple_str_concat(" = simple_new_int_array();
+    // Check for struct array type hint: [StructName]
         }
     }
     if (simple_starts_with(type_hint, "[") && simple_ends_with(type_hint, "]")) {
@@ -737,52 +737,52 @@ const char* translate_array_decl(const char* name, const char* rhs, const char* 
             const char* sa_fc = simple_char_at(sa_elem, 0);
             if (sa_fc >= "A" && sa_fc <= "Z") {
                 if (strcmp(rhs, "[]") == 0) {
-                    return simple_str_concat(r"SimpleStructArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_struct_array();
-    //  Non-empty struct array: [StructExpr, ...]
+                    return simple_str_concat("SimpleStructArray ", simple_str_concat(name, simple_str_concat(" = simple_new_struct_array();
+    // Non-empty struct array: [StructExpr, ...]
                 }
                 const char* sa_inner = simple_substring(rhs, 1, simple_strlen(rhs) - 1);
                 SimpleStringArray sa_elements = simple_split(sa_inner, ",");
-                const char* sa_init = simple_str_concat(r"SimpleStructArray ", simple_str_concat(name, r" = simple_new_struct_array();"));
-                for (long long _idx_sa_e = 0; _idx_sa_e < sa_elements_len; _idx_sa_e++) { long long sa_e = sa_elements[_idx_sa_e];
+                const char* sa_init = simple_str_concat("SimpleStructArray ", simple_str_concat(name, " = simple_new_struct_array();"));
+                for (long long _idx_sa_e = 0; _idx_sa_e < sa_elements.len; _idx_sa_e++) { const char* sa_e = sa_elements.items[_idx_sa_e];
                     const char* sa_te = translate_expr(simple_trim(sa_e), types);
-                    sa_init = simple_str_concat(sa_init, simple_str_concat(simple_str_concat(" ", simple_int_to_str( )), simple_str_concat(sa_elem, simple_str_concat("* _e = malloc(sizeof(", simple_str_concat(sa_elem, simple_str_concat(")); *_e = ", simple_str_concat(sa_te, simple_str_concat("; simple_struct_push(&", simple_str_concat(name, ", (void*)_e); }")))))))));
+                    sa_init = simple_str_concat(sa_init, simple_str_concat(" { ", simple_str_concat(sa_elem, simple_str_concat("* _e = malloc(sizeof(", simple_str_concat(sa_elem, simple_str_concat(")); *_e = ", simple_str_concat(sa_te, simple_str_concat("; simple_struct_push(&", simple_str_concat(name, ", (void*)_e); }")))))))));
                 }
-                return simple_str_concat(sa_init, r"
-    //  Default: infer array type from first element
+                return simple_str_concat(sa_init, simple_str_concat("
+    // Default: infer array type from first element
             }
         }
     }
     const char* inner = simple_substring(rhs, 1, simple_strlen(rhs) - 1);
     if (strcmp(inner, "") == 0) {
-        return simple_str_concat(r"SimpleIntArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_int_array();
+        return simple_str_concat("SimpleIntArray ", simple_str_concat(name, simple_str_concat(" = simple_new_int_array();
     }
     SimpleStringArray elements = simple_split(inner, ",");
-    //  Check first element to infer type
+    // Check first element to infer type
     const char* first_elem = simple_trim(elements[0]);
     long long is_string_elem = simple_starts_with(first_elem, "\"");
     if (is_string_elem) {
-    //  String array
-        const char* str_init = simple_str_concat(r"SimpleStringArray ", simple_str_concat(name, r" = simple_new_string_array();"));
-        for (long long _idx_str_e = 0; _idx_str_e < elements_len; _idx_str_e++) { long long str_e = elements[_idx_str_e];
+    // String array
+        const char* str_init = simple_str_concat("SimpleStringArray ", simple_str_concat(name, " = simple_new_string_array();"));
+        for (long long _idx_str_e = 0; _idx_str_e < elements.len; _idx_str_e++) { const char* str_e = elements.items[_idx_str_e];
             const char* trimmed_str = simple_trim(str_e);
-            str_init = simple_str_concat(str_init, simple_str_concat(r" simple_string_push(&", simple_str_concat(name, r", " + trimmed_str + r");")));
+            str_init = simple_str_concat(str_init, simple_str_concat(" simple_string_push(&", simple_str_concat(name, simple_str_concat(", ", simple_str_concat(trimmed_str, ");")))));
         }
-        return simple_str_concat(str_init, r"
-    //  Integer array (default)
+        return simple_str_concat(str_init, simple_str_concat("
+    // Integer array (default)
     }
-    const char* init_code = simple_str_concat(r"SimpleIntArray ", simple_str_concat(name, r" = simple_new_int_array();"));
-    for (long long _idx_elem = 0; _idx_elem < elements_len; _idx_elem++) { long long elem = elements[_idx_elem];
+    const char* init_code = simple_str_concat("SimpleIntArray ", simple_str_concat(name, " = simple_new_int_array();"));
+    for (long long _idx_elem = 0; _idx_elem < elements.len; _idx_elem++) { const char* elem = elements.items[_idx_elem];
         const char* trimmed_elem = simple_trim(elem);
-        init_code = simple_str_concat(init_code, simple_str_concat(r" simple_int_push(&", simple_str_concat(name, r", " + translate_expr(trimmed_elem, types) + r");")));
+        init_code = simple_str_concat(init_code, simple_str_concat(" simple_int_push(&", simple_str_concat(name, simple_str_concat(", ", simple_str_concat(translate_expr(trimmed_elem, types), ");")))));
     }
-    return simple_str_concat(init_code, r"
+    return simple_str_concat(init_code, simple_str_concat("
 }
 
 const char* translate_var_decl(const char* stmt, const char* types) {
     long long is_val = simple_starts_with(stmt, "val ");
     long long eq_idx = simple_index_of(stmt, "=");
     if (eq_idx < 0) {
-        return r"/* unsupported decl: " + stmt + r" */";
+        return simple_str_concat("/* unsupported decl: ", simple_str_concat(stmt, " */"));
     }
     const char* lhs = simple_substring(stmt, 4, eq_idx);
     const char* rhs = simple_substring(stmt, eq_idx + 1, simple_strlen(stmt));
@@ -792,169 +792,169 @@ const char* translate_var_decl(const char* stmt, const char* types) {
     if (colon_idx >= 0) {
         name = simple_substring(lhs, 0, colon_idx);
         type_hint = simple_substring(lhs, colon_idx + 1, simple_strlen(lhs));
-    //  Handle nil
+    // Handle nil
     }
     if (strcmp(rhs, "nil") == 0) {
-        return r"const char* " + name + r" = NULL;
-    //  Handle complete string literal (not concat like "foo" + bar)
+        return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = NULL;
+    // Handle complete string literal (not concat like "foo" + bar)
     }
     if (simple_starts_with(rhs, "\"") && simple_ends_with(rhs, "\"")) {
         int has_str_concat = simple_contains(rhs, "\" + ") || simple_contains(rhs, " + \"");
         if (!(has_str_concat)) {
-            return r"const char* " + name + r" = " + rhs + r";
-    //  Handle string concat starting with literal: "prefix" + expr
+            return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(rhs, simple_str_concat(";
+    // Handle string concat starting with literal: "prefix" + expr
         }
     }
     if (simple_starts_with(rhs, "\"")) {
         long long c_rhs = translate_expr(rhs, types);
-        return r"const char* " + name + r" = " + c_rhs + r";
-    //  Handle boolean
+        return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Handle boolean
     }
     if (strcmp(rhs, "true") == 0 || strcmp(rhs, "false") == 0) {
         const char* c_bval = "0";
         if (strcmp(rhs, "true") == 0) {
             c_bval = "1";
         }
-        return r"int " + name + r" = " + c_bval + r";";
-    //  Handle boolean/logical expressions: val x = a or b, val x = a and b
+        return simple_str_concat("int ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_bval, ";"))));
+    // Handle boolean/logical expressions: val x = a or b, val x = a and b
     }
     int rhs_has_logic = simple_contains(rhs, " and ") || simple_contains(rhs, " or ") || simple_starts_with(rhs, "not ");
     if (rhs_has_logic) {
         long long c_logic = translate_condition(rhs, types);
-        return r"int " + name + r" = " + c_logic + r";";
-    //  Handle array literal
+        return simple_str_concat("int ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_logic, ";"))));
+    // Handle array literal
     }
     if (simple_starts_with(rhs, "[") && simple_ends_with(rhs, "]")) {
         return translate_array_decl(name, rhs, type_hint, types);
-    //  Handle empty array with type hint
+    // Handle empty array with type hint
     }
     if (strcmp(rhs, "[]") == 0) {
         if (strcmp(type_hint, "[[text]]") == 0 || strcmp(type_hint, "[[str]]") == 0) {
-            return simple_str_concat(r"SimpleStringArrayArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_string_array_array();
+            return simple_str_concat("SimpleStringArrayArray ", simple_str_concat(name, simple_str_concat(" = simple_new_string_array_array();
         }
         if (strcmp(type_hint, "[[i64]]") == 0 || strcmp(type_hint, "[[int]]") == 0) {
-            return simple_str_concat(r"SimpleIntArrayArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_int_array_array();
+            return simple_str_concat("SimpleIntArrayArray ", simple_str_concat(name, simple_str_concat(" = simple_new_int_array_array();
         }
         if (strcmp(type_hint, "[text]") == 0 || strcmp(type_hint, "[str]") == 0) {
-            return simple_str_concat(r"SimpleStringArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_string_array();
+            return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = simple_new_string_array();
         }
         if (strcmp(type_hint, "[i64]") == 0 || strcmp(type_hint, "[int]") == 0 || strcmp(type_hint, "[bool]") == 0) {
-            return simple_str_concat(r"SimpleIntArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_int_array();
-    //  Struct array type hint: [StructName]
+            return simple_str_concat("SimpleIntArray ", simple_str_concat(name, simple_str_concat(" = simple_new_int_array();
+    // Struct array type hint: [StructName]
         }
         if (simple_starts_with(type_hint, "[") && simple_ends_with(type_hint, "]")) {
             const char* sa_elem_type = simple_substring(type_hint, 1, simple_strlen(type_hint) - 1);
             if (simple_strlen(sa_elem_type) > 0) {
                 const char* sa_f = simple_char_at(sa_elem_type, 0);
                 if (sa_f >= "A" && sa_f <= "Z") {
-                    return simple_str_concat(r"SimpleStructArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_struct_array();
+                    return simple_str_concat("SimpleStructArray ", simple_str_concat(name, simple_str_concat(" = simple_new_struct_array();
                 }
             }
         }
-        return simple_str_concat(r"SimpleIntArray ", simple_str_concat(name, simple_str_concat(r" = simple_new_int_array();
-    //  Handle nested array indexing: val x = nested_arr[idx] -> inner array type
+        return simple_str_concat("SimpleIntArray ", simple_str_concat(name, simple_str_concat(" = simple_new_int_array();
+    // Handle nested array indexing: val x = nested_arr[idx] -> inner array type
     }
     long long rhs_bracket = simple_index_of(rhs, "[");
     if (rhs_bracket >= 0) {
         const char* rhs_base = simple_substring(rhs, 0, rhs_bracket);
         if (is_int_arr_arr_var(rhs_base, types)) {
             long long c_rhs_idx = translate_expr(rhs, types);
-            return r"SimpleIntArray " + name + r" = " + c_rhs_idx + r";
+            return simple_str_concat("SimpleIntArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs_idx, simple_str_concat(";
         }
         if (is_str_arr_arr_var(rhs_base, types)) {
             long long c_rhs_idx = translate_expr(rhs, types);
-            return r"SimpleStringArray " + name + r" = " + c_rhs_idx + r";
-    //  Handle simple string array indexing: val x = str_arr[i] -> const char*
+            return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs_idx, simple_str_concat(";
+    // Handle simple string array indexing: val x = str_arr[i] -> const char*
         }
         if (is_string_array_var(rhs_base, types)) {
             long long c_rhs_idx = translate_expr(rhs, types);
-            return r"const char* " + name + r" = " + c_rhs_idx + r";
-    //  Handle simple int array indexing: val x = int_arr[i] -> long long
+            return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs_idx, simple_str_concat(";
+    // Handle simple int array indexing: val x = int_arr[i] -> long long
         }
         if (is_int_array_var(rhs_base, types)) {
             long long c_rhs_idx = translate_expr(rhs, types);
-            return r"long long " + name + r" = " + c_rhs_idx + r";";
-    //  Handle Some/None -> SimpleOption
+            return simple_str_concat("long long ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs_idx, ";"))));
+    // Handle Some/None -> SimpleOption
         }
     }
     if (simple_starts_with(rhs, "Some(") || strcmp(rhs, "None") == 0 || strcmp(rhs, "nil") == 0) {
         long long c_rhs_opt = translate_expr(rhs, types);
         if (simple_contains(c_rhs_opt, "simple_some") || simple_contains(c_rhs_opt, "simple_none")) {
-            return r"SimpleOption " + name + r" = " + c_rhs_opt + r";
-    //  Handle empty dict literal
+            return simple_str_concat("SimpleOption ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs_opt, simple_str_concat(";
+    // Handle empty dict literal
         }
     }
-    if (strcmp(rhs, simple_int_to_str()) == 0) {
-        return simple_str_concat(r"SimpleDict* ", simple_str_concat(name, simple_str_concat(r" = simple_dict_new();
-    //  Handle method call results
+    if (strcmp(rhs, "{}") == 0) {
+        return simple_str_concat("SimpleDict* ", simple_str_concat(name, simple_str_concat(" = simple_dict_new();
+    // Handle method call results
     }
     long long c_rhs = translate_expr(rhs, types);
     long long rhs_is_split = simple_starts_with(c_rhs, "simple_split(");
     if (is_c_expr_string_result(c_rhs)) {
-        return r"const char* " + name + r" = " + c_rhs + r";
+        return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
     }
     if (rhs_is_split) {
-        return r"SimpleStringArray " + name + r" = " + c_rhs + r";
-    //  Handle text type hint
+        return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Handle text type hint
     }
     if (strcmp(type_hint, "text") == 0 || strcmp(type_hint, "str") == 0) {
-        return r"const char* " + name + r" = " + c_rhs + r";
-    //  Check function return types using both raw and mangled names
+        return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check function return types using both raw and mangled names
     }
     long long fn_names = extract_fn_names(rhs, c_rhs);
     for (long long _idx_fn_n = 0; _idx_fn_n < fn_names_len; _idx_fn_n++) { long long fn_n = fn_names[_idx_fn_n];
         if (is_fn_returning_text(fn_n, types)) {
-            return r"const char* " + name + r" = " + c_rhs + r";
+            return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
         }
     }
     for (long long _idx_fn_n = 0; _idx_fn_n < fn_names_len; _idx_fn_n++) { long long fn_n = fn_names[_idx_fn_n];
         long long struct_ret = is_fn_returning_struct(fn_n, types);
         if (strcmp(struct_ret, "") != 0) {
-            return struct_ret + r" " + name + r" = " + c_rhs + r";
+            return simple_str_concat(struct_ret, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
         }
     }
     for (long long _idx_fn_n = 0; _idx_fn_n < fn_names_len; _idx_fn_n++) { long long fn_n = fn_names[_idx_fn_n];
         long long sa_ret_elem = is_fn_returning_struct_arr(fn_n, types);
         if (strcmp(sa_ret_elem, "") != 0) {
-            return r"SimpleStructArray " + name + r" = " + c_rhs + r";
+            return simple_str_concat("SimpleStructArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
         }
     }
     for (long long _idx_fn_n = 0; _idx_fn_n < fn_names_len; _idx_fn_n++) { long long fn_n = fn_names[_idx_fn_n];
         if (is_fn_returning_int_arr(fn_n, types)) {
-            return r"SimpleIntArray " + name + r" = " + c_rhs + r";
+            return simple_str_concat("SimpleIntArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
         }
     }
     for (long long _idx_fn_n = 0; _idx_fn_n < fn_names_len; _idx_fn_n++) { long long fn_n = fn_names[_idx_fn_n];
         if (is_fn_returning_str_arr(fn_n, types)) {
-            return r"SimpleStringArray " + name + r" = " + c_rhs + r";
-    //  Handle Dict type hint
+            return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Handle Dict type hint
         }
     }
     long long gen_parts = parse_generic_type(type_hint);
     if (gen_parts.len > 0) {
         long long gen_base = gen_parts[0];
         if (strcmp(gen_base, "Dict") == 0) {
-            if (strcmp(rhs, simple_int_to_str()) == 0) {
-                return simple_str_concat(r"SimpleDict* ", simple_str_concat(name, simple_str_concat(r" = simple_dict_new();
+            if (strcmp(rhs, "{}") == 0) {
+                return simple_str_concat("SimpleDict* ", simple_str_concat(name, simple_str_concat(" = simple_dict_new();
             }
-            return r"SimpleDict* " + name + r" = " + c_rhs + r";
+            return simple_str_concat("SimpleDict* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
         }
         if (strcmp(gen_base, "Option") == 0) {
-            return r"SimpleOption " + name + r" = " + c_rhs + r";
-    //  Handle struct type hint - known struct
+            return simple_str_concat("SimpleOption ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Handle struct type hint - known struct
         }
     }
     if (is_known_struct(type_hint, types)) {
-        return simple_str_concat(type_hint, r" " + name + r" = " + c_rhs + r";
-    //  Handle struct construction on RHS: ClassName(field: val)
+        return simple_str_concat(type_hint, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Handle struct construction on RHS: ClassName(field: val)
     }
     long long rhs_paren = simple_index_of(rhs, "(");
     if (rhs_paren >= 0) {
         const char* rhs_ctor = simple_substring(rhs, 0, rhs_paren);
         if (is_known_struct(rhs_ctor, types)) {
-            return simple_str_concat(rhs_ctor, r" " + name + r" = " + c_rhs + r";
-    //  Check for enum variant construction: ClassName.Variant(args)
-    //  Only if it's NOT a known static fn (static fns return specific types, not the class itself)
+            return simple_str_concat(rhs_ctor, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check for enum variant construction: ClassName.Variant(args)
+    // Only if it's NOT a known static fn (static fns return specific types, not the class itself)
         }
         long long cdot = simple_index_of(rhs_ctor, ".");
         if (cdot >= 0) {
@@ -963,68 +963,69 @@ const char* translate_var_decl(const char* stmt, const char* types) {
             if (is_known_struct(enum_name, types)) {
                 long long is_static = is_static_fn(enum_name, variant_part, types);
                 if (!(is_static)) {
-                    return simple_str_concat(enum_name, r" " + name + r" = " + c_rhs + r";
-    //  Handle Option<T> nullable pattern (check for ? in type)
+                    return simple_str_concat(enum_name, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Handle Option<T> nullable pattern (check for ? in type)
                 }
             }
         }
     }
     if (simple_ends_with(type_hint, "?")) {
-        return r"SimpleOption " + name + r" = " + c_rhs + r";
-    //  Detect ternary expressions that return strings: (cond ? "str" : "str")
+        return simple_str_concat("SimpleOption ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Detect ternary expressions that return strings: (cond ? "str" : "str")
     }
     long long c_has_ternary_str = simple_contains(c_rhs, "? \"");
     if (c_has_ternary_str) {
-        return r"const char* " + name + r" = " + c_rhs + r";
-    //  Detect inline if expression returning string
+        return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Detect inline if expression returning string
     }
     if (simple_starts_with(rhs, "if ") && simple_contains(rhs, " else: ")) {
         long long ternary_check = simple_contains(rhs, "\"");
         if (ternary_check) {
-            return r"const char* " + name + r" = " + c_rhs + r";
-    //  Check if RHS is a known text variable
+            return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check if RHS is a known text variable
         }
     }
     if (is_text_var(rhs, types)) {
-        return r"const char* " + name + r" = " + c_rhs + r";
-    //  Check if RHS is a struct field that is text
+        return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check if RHS is a struct field that is text
     }
     if (is_struct_field_text(rhs, types)) {
-        return r"const char* " + name + r" = " + c_rhs + r";
-    //  Check if RHS is a known struct variable (propagate struct type)
+        return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check if RHS is a known struct variable (propagate struct type)
     }
     long long rhs_struct_type = is_struct_type_var(rhs, types);
     if (strcmp(rhs_struct_type, "") != 0) {
-        return rhs_struct_type + r" " + name + r" = " + c_rhs + r";
-    //  Check if RHS is a known string array (propagate array type)
+        return simple_str_concat(rhs_struct_type, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check if RHS is a known string array (propagate array type)
     }
     if (is_string_array_var(rhs, types)) {
-        return r"SimpleStringArray " + name + r" = " + c_rhs + r";
+        return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
     }
     if (is_int_array_var(rhs, types)) {
-        return r"SimpleIntArray " + name + r" = " + c_rhs + r";
+        return simple_str_concat("SimpleIntArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
     }
     long long rhs_sa_type = is_struct_array_var(rhs, types);
     if (strcmp(rhs_sa_type, "") != 0) {
-        return r"SimpleStructArray " + name + r" = " + c_rhs + r";
-    //  Check if RHS is a struct field that is a struct array
+        return simple_str_concat("SimpleStructArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check if RHS is a struct field that is a struct array
     }
     long long rhs_sf_sa = is_struct_field_struct_array(rhs, types);
     if (strcmp(rhs_sf_sa, "") != 0) {
-        return r"SimpleStructArray " + name + r" = " + c_rhs + r";
-    //  Check if RHS is a struct field that is a string array
+        return simple_str_concat("SimpleStructArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check if RHS is a struct field that is a string array
     }
     if (is_struct_field_str_array(rhs, types)) {
-        return r"SimpleStringArray " + name + r" = " + c_rhs + r";
-    //  Check if RHS is a struct field that is an int array
+        return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Check if RHS is a struct field that is an int array
     }
     if (is_struct_field_int_array(rhs, types)) {
-        return r"SimpleIntArray " + name + r" = " + c_rhs + r";
-    //  Default: long long
+        return simple_str_concat("SimpleIntArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, simple_str_concat(";
+    // Default: long long
     }
-    return r"long long " + name + r" = " + c_rhs + r";";
+    return simple_str_concat("long long ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_rhs, ";"))));
 }
 
 int main(void) {
     return 0;
 }
+

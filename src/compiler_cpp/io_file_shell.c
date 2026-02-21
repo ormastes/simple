@@ -709,16 +709,16 @@ const char* shell_output(const char* command) {
 }
 
 int file_write(const char* path, const char* content) {
-    SimpleTuple3 _tmp_tuple = shell(simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat("cat > '", path), "' << 'SIMPLE_WRITE_EOF'\n"), content), "\nSIMPLE_WRITE_EOF")); long long out = (long long)_tmp_tuple._0; long long err = (long long)_tmp_tuple._1; long long code = (long long)_tmp_tuple._2;
+    SimpleTuple3 _tmp_tuple = shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF"); long long out = (long long)_tmp_tuple._0; long long err = (long long)_tmp_tuple._1; long long code = (long long)_tmp_tuple._2;
     return code == 0;
 }
 
 void file_delete(const char* path) {
-    shell(simple_str_concat(simple_str_concat("rm -f '", path), "'"));
+    shell("rm -f '{path}'");
 }
 
 long long file_size(const char* path) {
-    SimpleTuple3 _tmp_tuple = shell(simple_str_concat(simple_str_concat("stat -c '%s' '", path), "' 2>/dev/null")); long long size_str = (long long)_tmp_tuple._0; long long err = (long long)_tmp_tuple._1; long long code = (long long)_tmp_tuple._2;
+    SimpleTuple3 _tmp_tuple = shell("stat -c '%s' '{path}' 2>/dev/null"); long long size_str = (long long)_tmp_tuple._0; long long err = (long long)_tmp_tuple._1; long long code = (long long)_tmp_tuple._2;
     if (code != 0) {
         return 0;
     }
@@ -732,3 +732,4 @@ long long file_size(const char* path) {
 int main(void) {
     return 0;
 }
+

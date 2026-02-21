@@ -696,18 +696,19 @@ const char* rt_file_read_text(const char* path);
 SimpleStringArray rt_cli_get_args(void);
 
 int main(void) {
-    SimpleStringArray args = ;
+    SimpleStringArray args = rt_cli_get_args();
     if (args.len < 4) {
         puts("Usage: gen_c_only.spl <source.spl> <output.c>");
         return;
     }
-    const char* source = (rt_file_read_text(args[2]) != NULL ? rt_file_read_text(args[2]) : "");
+    const char* source = (rt_file_read_text(args.items[2]) != NULL ? rt_file_read_text(args.items[2]) : "");
     if (strcmp(source, "") == 0) {
-        error("compile", simple_str_concat("cannot read source file: ", simple_int_to_str(args[2])));
+        error("compile", "cannot read source file: {args[2]}");
         return;
     }
     long long c_code = generate_c_code(source);
-    file_write(args[3], c_code);
-    info("compile", simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat("Generated C: ", simple_int_to_str(args[3])), " ("), simple_int_to_str(c_code.len)), " bytes)"));
+    file_write(args.items[3], c_code);
+    info("compile", "Generated C: {args[3]} ({c_code.len()} bytes)");
     return 0;
 }
+

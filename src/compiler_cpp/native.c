@@ -723,7 +723,7 @@ const char* detect_platform(void) {
         return "windows";
     }
     if (strcmp(uname, "") == 0) {
-    //  uname failed - likely Windows without MSYS
+    // uname failed - likely Windows without MSYS
         long long win_check = shell_output("cmd /c ver 2>NUL");
         if (simple_contains(win_check, "Windows")) {
             return "windows";
@@ -735,8 +735,8 @@ const char* detect_platform(void) {
 const char* find_c_compiler(void) {
     SimpleStringArray compilers = simple_new_string_array(); simple_string_push(&compilers, "clang"); simple_string_push(&compilers, "gcc"); simple_string_push(&compilers, "cc");
     for (long long _idx_compiler = 0; _idx_compiler < compilers.len; _idx_compiler++) { const char* compiler = compilers.items[_idx_compiler];
-        const char* check = shell_output(simple_str_concat(simple_str_concat("which ", compiler), " 2>/dev/null"));
-        if (simple_strlen(check) > 0) {
+        long long check = shell_output("which {compiler} 2>/dev/null");
+        if (check.len > 0) {
             return compiler;
         }
     }
@@ -744,8 +744,8 @@ const char* find_c_compiler(void) {
 }
 
 const char* find_mold_for_native(void) {
-    //  mold is Linux-only
-    const char* platform = ;
+    // mold is Linux-only
+    const char* platform = detect_platform();
     if (strcmp(platform, "linux") != 0) {
         return "";
     }
@@ -770,16 +770,16 @@ const char* get_dir_of_file(const char* path) {
 }
 
 SimpleStringArray extract_use_modules(const char* source) {
-    SimpleIntArray modules = simple_new_int_array();
+    SimpleStringArray modules = simple_new_string_array();
     SimpleStringArray lines = simple_split(source, "\n");
-    for (long long _idx_line = 0; _idx_line < lines_len; _idx_line++) { long long line = lines[_idx_line];
+    for (long long _idx_line = 0; _idx_line < lines.len; _idx_line++) { const char* line = lines.items[_idx_line];
         const char* trimmed = simple_trim(line);
         if (simple_starts_with(trimmed, "use ")) {
             const char* rest = simple_substring(trimmed, 4, simple_strlen(trimmed));
-    //  Skip stdlib/framework imports
+    // Skip stdlib/framework imports
             if (simple_starts_with(rest, "app.") || simple_starts_with(rest, "std.") || simple_starts_with(rest, "compiler.")) {
                 continue;
-    //  Extract module path (before { or .)
+    // Extract module path (before { or .)
             }
             const char* module_path = rest;
             long long brace_idx = simple_index_of(rest, "\{");
@@ -793,7 +793,7 @@ SimpleStringArray extract_use_modules(const char* source) {
                 continue;
             }
             if (simple_strlen(module_path) > 0) {
-                /* modules.push(module_path) */;
+                simple_string_push(&modules, module_path);
             }
         }
     }
@@ -809,8 +809,8 @@ const char* resolve_module_file(const char* module_path, const char* base_dir) {
     const char* init_path = simple_str_concat(base_dir, simple_str_concat("/", simple_str_concat(rel_path, "/__init__.spl")));
     if (rt_file_exists(init_path)) {
         return init_path;
-    //  Fallback: strip leading package prefix if it matches the base dir name
-    //  Handles intra-package imports like "use compiler.core.tokens" when base_dir is src/core
+    // Fallback: strip leading package prefix if it matches the base dir name
+    // Handles intra-package imports like "use compiler.core.tokens" when base_dir is src/core
     }
     long long dot_pos = simple_index_of(module_path, ".");
     if (dot_pos >= 0) {
@@ -838,51 +838,51 @@ const char* resolve_module_file(const char* module_path, const char* base_dir) {
 
 const char* collect_all_sources(const char* source_file, const char* source, int verbose) {
     const char* base_dir = get_dir_of_file(source_file);
-    SimpleIntArray visited = simple_new_int_array(); simple_int_push(&visited, source_file);
-    SimpleIntArray dep_sources = simple_new_int_array();
-    SimpleIntArray queue = simple_new_int_array();
-    //  Seed queue with main file's use imports
+    SimpleStringArray visited = simple_new_string_array(); simple_string_push(&visited, source_file);
+    SimpleStringArray dep_sources = simple_new_string_array();
+    SimpleStringArray queue = simple_new_string_array();
+    // Seed queue with main file's use imports
     SimpleStringArray main_modules = extract_use_modules(source);
-    for (long long _idx_mod_path = 0; _idx_mod_path < main_modules_len; _idx_mod_path++) { long long mod_path = main_modules[_idx_mod_path];
+    for (long long _idx_mod_path = 0; _idx_mod_path < main_modules.len; _idx_mod_path++) { const char* mod_path = main_modules.items[_idx_mod_path];
         const char* file_path = resolve_module_file(mod_path, base_dir);
-        if (strcmp(file_path, "") != 0 && !(simple_contains(visited, file_path))) {
-            /* visited.push(file_path) */;
-            /* queue.push(file_path) */;
-    //  BFS over dependency files
+        if (strcmp(file_path, "") != 0 && !(simple_str_array_contains(visited, file_path))) {
+            simple_string_push(&visited, file_path);
+            simple_string_push(&queue, file_path);
+    // BFS over dependency files
         }
     }
     long long qi = 0;
     long long combined_size = simple_strlen(source);
     while (qi < queue.len) {
-        long long dep_file = queue[qi];
+        const char* dep_file = queue.items[qi];
         qi = qi + 1;
         const char* dep_source = (rt_file_read_text(dep_file) != NULL ? rt_file_read_text(dep_file) : "");
         if (strcmp(dep_source, "") == 0) {
             if (verbose) {
-                warn("compile", simple_str_concat("cannot read dependency: ", simple_int_to_str(dep_file)));
+                warn("compile", "cannot read dependency: {dep_file}");
             }
             continue;
-    //  Skip if combined source would exceed 80KB (runtime file_write limit)
+    // Skip if combined source would exceed 80KB (runtime file_write limit)
         }
         if (simple_str_concat(combined_size, simple_strlen(dep_source)) > 80000) {
             if (verbose) {
-                debug("compile", simple_str_concat("Skipping dependency (size limit): ", simple_int_to_str(dep_file)));
+                debug("compile", "Skipping dependency (size limit): {dep_file}");
             }
             continue;
         }
         if (verbose) {
-            debug("compile", simple_str_concat("Including dependency: ", simple_int_to_str(dep_file)));
-        /* dep_sources.push(dep_source) */;
+            debug("compile", "Including dependency: {dep_file}");
         }
+        simple_string_push(&dep_sources, dep_source);
         combined_size = simple_str_concat(combined_size, simple_strlen(dep_source));
-    //  Discover transitive dependencies
+    // Discover transitive dependencies
         const char* dep_dir = get_dir_of_file(dep_file);
         SimpleStringArray sub_modules = extract_use_modules(dep_source);
-        for (long long _idx_sub_mod = 0; _idx_sub_mod < sub_modules_len; _idx_sub_mod++) { long long sub_mod = sub_modules[_idx_sub_mod];
+        for (long long _idx_sub_mod = 0; _idx_sub_mod < sub_modules.len; _idx_sub_mod++) { const char* sub_mod = sub_modules.items[_idx_sub_mod];
             const char* sub_file = resolve_module_file(sub_mod, dep_dir);
-            if (strcmp(sub_file, "") != 0 && !(simple_contains(visited, sub_file))) {
-                /* visited.push(sub_file) */;
-                /* queue.push(sub_file) */;
+            if (strcmp(sub_file, "") != 0 && !(simple_str_array_contains(visited, sub_file))) {
+                simple_string_push(&visited, sub_file);
+                simple_string_push(&queue, sub_file);
             }
         }
     }
@@ -890,7 +890,7 @@ const char* collect_all_sources(const char* source_file, const char* source, int
         return source;
     }
     const char* combined = "";
-    for (long long _idx_dep_src = 0; _idx_dep_src < dep_sources_len; _idx_dep_src++) { long long dep_src = dep_sources[_idx_dep_src];
+    for (long long _idx_dep_src = 0; _idx_dep_src < dep_sources.len; _idx_dep_src++) { const char* dep_src = dep_sources.items[_idx_dep_src];
         combined = simple_str_concat(combined, simple_str_concat(dep_src, "\n"));
     }
     return simple_str_concat(combined, source);
@@ -898,22 +898,22 @@ const char* collect_all_sources(const char* source_file, const char* source, int
 
 long long compile_native(const char* source_file, const char* output_file, int verbose, const char* compiler_override) {
     if (verbose) {
-        info("compile", simple_str_concat(simple_str_concat("Compiling ", source_file), " to native binary..."));
-    //  Step 1: Read source file
+        info("compile", "Compiling {source_file} to native binary...");
+    // Step 1: Read source file
     }
     const char* source_raw = rt_file_read_text(source_file);
     const char* source_single = (source_raw != NULL ? source_raw : "");
     if (strcmp(source_single, "") == 0) {
-        error("compile", simple_str_concat("Cannot read source file: ", source_file));
+        error("compile", "Cannot read source file: {source_file}");
         return 1;
-    //  Step 1b: Collect dependencies (multi-file support)
+    // Step 1b: Collect dependencies (multi-file support)
     }
     const char* source = collect_all_sources(source_file, source_single, verbose);
-    //  Step 2: Generate C code
+    // Step 2: Generate C code
     long long c_code = generate_c_code(source);
     if (verbose) {
-        debug("compile", simple_str_concat(simple_str_concat("Generated C code (", simple_int_to_str(c_code.len)), " bytes)"));
-    //  Step 3: Write to temp file
+        debug("compile", "Generated C code ({c_code.len()} bytes)");
+    // Step 3: Write to temp file
     }
     long long temp_c = shell_output("mktemp /tmp/simple_native_XXXXXX.c");
     if (strcmp(temp_c, "") == 0) {
@@ -921,20 +921,20 @@ long long compile_native(const char* source_file, const char* output_file, int v
         return 1;
     }
     if (!(file_write(temp_c, c_code))) {
-        error("compile", simple_str_concat("Failed to write temp C file: ", simple_int_to_str(temp_c)));
+        error("compile", "Failed to write temp C file: {temp_c}");
         return 1;
     }
     if (verbose) {
-        debug("compile", simple_str_concat("Wrote temp C file: ", simple_int_to_str(temp_c)));
-    //  Step 4: Find compiler and mold, then compile
+        debug("compile", "Wrote temp C file: {temp_c}");
+    // Step 4: Find compiler and mold, then compile
     }
-    const char* cc = (strcmp(compiler_override, "") != 0 ?  compiler_override : );
+    const char* cc = (strcmp(compiler_override, "") != 0 ? compiler_override : find_c_compiler());
     if (strcmp(cc, "") == 0) {
         error("compile", "No C compiler found (tried clang, gcc, cc)");
         file_delete(temp_c);
         return 1;
     }
-    const char* mold_path = ;
+    const char* mold_path = find_mold_for_native();
     const char* gcc_cmd = "";
     int used_mold = 0;
     if (strcmp(mold_path, "") != 0) {
@@ -943,26 +943,26 @@ long long compile_native(const char* source_file, const char* output_file, int v
         if (last_slash >= 0) {
             mold_dir = simple_substring(mold_path, 0, last_slash);
         }
-        gcc_cmd = simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat(cc, " -fuse-ld=mold -B "), mold_dir), "/ -o '"), output_file), "' '"), simple_int_to_str(temp_c)), "'");
+        gcc_cmd = "{cc} -fuse-ld=mold -B {mold_dir}/ -o '{output_file}' '{temp_c}'";
         used_mold = 1;
         if (verbose) {
-            debug("compile", simple_str_concat("Using mold linker at: ", mold_path));
+            debug("compile", "Using mold linker at: {mold_path}");
         }
     } else {
-        gcc_cmd = simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat(cc, " -o '"), output_file), "' '"), simple_int_to_str(temp_c)), "'");
+        gcc_cmd = "{cc} -o '{output_file}' '{temp_c}'";
         if (verbose) {
             debug("compile", "No mold found, using system linker");
         }
     }
     if (verbose) {
-        debug("compile", simple_str_concat("Running: ", gcc_cmd));
+        debug("compile", "Running: {gcc_cmd}");
     }
     SimpleTuple3 _tmp_tuple = shell(gcc_cmd); long long gcc_out = (long long)_tmp_tuple._0; long long gcc_err = (long long)_tmp_tuple._1; long long gcc_exit = (long long)_tmp_tuple._2;
-    //  Step 5: Cleanup temp file
+    // Step 5: Cleanup temp file
     file_delete(temp_c);
-    //  Step 6: Report results
+    // Step 6: Report results
     if (gcc_exit != 0) {
-        error("compile", simple_str_concat(simple_str_concat("Compilation failed (exit code ", simple_int_to_str(gcc_exit)), ")"));
+        error("compile", "Compilation failed (exit code {gcc_exit})");
         if (strcmp(gcc_err, "") != 0) {
             error("compile", gcc_err);
         }
@@ -970,16 +970,16 @@ long long compile_native(const char* source_file, const char* output_file, int v
     }
     if (rt_file_exists(output_file)) {
         long long size = file_size(output_file);
-        info("compile", simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat("Compiled: ", output_file), " ("), simple_int_to_str(size)), " bytes)"));
+        info("compile", "Compiled: {output_file} ({size} bytes)");
         if (verbose) {
             const char* linker_name = "system";
             if (used_mold) {
                 linker_name = "mold";
             }
-            debug("compile", simple_str_concat("Linker: ", linker_name));
+            debug("compile", "Linker: {linker_name}");
         }
     } else {
-        error("compile", simple_str_concat("Output file not created: ", output_file));
+        error("compile", "Output file not created: {output_file}");
         return 1;
     }
     return 0;
@@ -988,11 +988,11 @@ long long compile_native(const char* source_file, const char* output_file, int v
 int compile_c_to_object(const char* c_file, const char* obj_file, int verbose, const char* cc) {
     const char* cmd = "{cc} -c -fPIE -o '{obj_file}' '{c_file}'";
     if (verbose) {
-        debug("compile", simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat(cc, " -c: "), c_file), " -> "), obj_file));
+        debug("compile", "{cc} -c: {c_file} -> {obj_file}");
     }
     SimpleTuple3 _tmp_tuple = shell(cmd); long long out = (long long)_tmp_tuple._0; long long err = (long long)_tmp_tuple._1; long long exit_code = (long long)_tmp_tuple._2;
     if (exit_code != 0) {
-        error("compile", simple_str_concat("compile failed for ", c_file));
+        error("compile", "compile failed for {c_file}");
         if (strcmp(err, "") != 0) {
             error("compile", err);
         }
@@ -1002,8 +1002,8 @@ int compile_c_to_object(const char* c_file, const char* obj_file, int verbose, c
 }
 
 int link_objects(SimpleStringArray obj_files, const char* output_file, int verbose, const char* cc) {
-    //  Build link command: use mold if available, else system linker
-    const char* mold_path = ;
+    // Build link command: use mold if available, else system linker
+    const char* mold_path = find_mold_for_native();
     const char* link_cmd = cc;
     if (strcmp(mold_path, "") != 0) {
         const char* mold_dir = ".";
@@ -1011,26 +1011,26 @@ int link_objects(SimpleStringArray obj_files, const char* output_file, int verbo
         if (last_slash >= 0) {
             mold_dir = simple_substring(mold_path, 0, last_slash);
         }
-        link_cmd = simple_str_concat(simple_str_concat(simple_str_concat(cc, " -fuse-ld=mold -B "), mold_dir), "/");
+        link_cmd = "{cc} -fuse-ld=mold -B {mold_dir}/";
         if (verbose) {
-            debug("compile", simple_str_concat("Using mold linker at: ", mold_path));
+            debug("compile", "Using mold linker at: {mold_path}");
         }
     } else {
         if (verbose) {
-            debug("compile", simple_str_concat(simple_str_concat("Using system linker (", cc), ")"));
-    //  Add object files
+            debug("compile", "Using system linker ({cc})");
+    // Add object files
         }
     }
     for (long long _idx_obj = 0; _idx_obj < obj_files.len; _idx_obj++) { const char* obj = obj_files.items[_idx_obj];
-        link_cmd = simple_str_concat(link_cmd, simple_str_concat(simple_str_concat(" '", obj), "'"));
+        link_cmd = simple_str_concat(link_cmd, " '{obj}'");
     }
-    link_cmd = simple_str_concat(link_cmd, simple_str_concat(simple_str_concat(" -o '", output_file), "'"));
+    link_cmd = simple_str_concat(link_cmd, " -o '{output_file}'");
     if (verbose) {
-        debug("compile", simple_str_concat("Link: ", link_cmd));
+        debug("compile", "Link: {link_cmd}");
     }
     SimpleTuple3 _tmp_tuple = shell(link_cmd); long long out = (long long)_tmp_tuple._0; long long err = (long long)_tmp_tuple._1; long long exit_code = (long long)_tmp_tuple._2;
     if (exit_code != 0) {
-        error("compile", simple_str_concat(simple_str_concat("Linking failed (exit code ", simple_int_to_str(exit_code)), ")"));
+        error("compile", "Linking failed (exit code {exit_code})");
         if (strcmp(err, "") != 0) {
             error("compile", err);
         }
@@ -1041,63 +1041,63 @@ int link_objects(SimpleStringArray obj_files, const char* output_file, int verbo
 
 long long compile_native_linked(const char* source_file, const char* output_file, int verbose, const char* compiler_override) {
     if (verbose) {
-        info("compile", simple_str_concat(simple_str_concat("Compiling ", source_file), " to native binary (separate compile+link)..."));
-    //  Step 1: Read main source
+        info("compile", "Compiling {source_file} to native binary (separate compile+link)...");
+    // Step 1: Read main source
     }
     const char* source_raw = rt_file_read_text(source_file);
     const char* source_single = (source_raw != NULL ? source_raw : "");
     if (strcmp(source_single, "") == 0) {
-        error("compile", simple_str_concat("Cannot read source file: ", source_file));
+        error("compile", "Cannot read source file: {source_file}");
         return 1;
-    //  Step 2: Discover dependency files via BFS
+    // Step 2: Discover dependency files via BFS
     }
     const char* base_dir = get_dir_of_file(source_file);
-    SimpleIntArray dep_sources = simple_new_int_array();
-    SimpleIntArray visited = simple_new_int_array(); simple_int_push(&visited, source_file);
-    SimpleIntArray queue = simple_new_int_array();
+    SimpleStringArray dep_sources = simple_new_string_array();
+    SimpleStringArray visited = simple_new_string_array(); simple_string_push(&visited, source_file);
+    SimpleStringArray queue = simple_new_string_array();
     SimpleStringArray main_modules = extract_use_modules(source_single);
-    for (long long _idx_mod_path = 0; _idx_mod_path < main_modules_len; _idx_mod_path++) { long long mod_path = main_modules[_idx_mod_path];
+    for (long long _idx_mod_path = 0; _idx_mod_path < main_modules.len; _idx_mod_path++) { const char* mod_path = main_modules.items[_idx_mod_path];
         const char* file_path = resolve_module_file(mod_path, base_dir);
-        if (strcmp(file_path, "") != 0 && !(simple_contains(visited, file_path))) {
-            /* visited.push(file_path) */;
-            /* queue.push(file_path) */;
+        if (strcmp(file_path, "") != 0 && !(simple_str_array_contains(visited, file_path))) {
+            simple_string_push(&visited, file_path);
+            simple_string_push(&queue, file_path);
         }
     }
     long long qi = 0;
     while (qi < queue.len) {
-        long long dep_file = queue[qi];
+        const char* dep_file = queue.items[qi];
         qi = qi + 1;
         const char* dep_source = (rt_file_read_text(dep_file) != NULL ? rt_file_read_text(dep_file) : "");
         if (strcmp(dep_source, "") == 0) {
             if (verbose) {
-                warn("compile", simple_str_concat("cannot read dependency: ", simple_int_to_str(dep_file)));
+                warn("compile", "cannot read dependency: {dep_file}");
             }
             continue;
         }
         if (verbose) {
-            debug("compile", simple_str_concat("Found dependency: ", simple_int_to_str(dep_file)));
-        /* dep_sources.push(dep_source) */;
+            debug("compile", "Found dependency: {dep_file}");
         }
+        simple_string_push(&dep_sources, dep_source);
         const char* dep_dir = get_dir_of_file(dep_file);
         SimpleStringArray sub_modules = extract_use_modules(dep_source);
-        for (long long _idx_sub_mod = 0; _idx_sub_mod < sub_modules_len; _idx_sub_mod++) { long long sub_mod = sub_modules[_idx_sub_mod];
+        for (long long _idx_sub_mod = 0; _idx_sub_mod < sub_modules.len; _idx_sub_mod++) { const char* sub_mod = sub_modules.items[_idx_sub_mod];
             const char* sub_file = resolve_module_file(sub_mod, dep_dir);
-            if (strcmp(sub_file, "") != 0 && !(simple_contains(visited, sub_file))) {
-                /* visited.push(sub_file) */;
-                /* queue.push(sub_file) */;
-    //  Step 3: Combine sources and generate C code
+            if (strcmp(sub_file, "") != 0 && !(simple_str_array_contains(visited, sub_file))) {
+                simple_string_push(&visited, sub_file);
+                simple_string_push(&queue, sub_file);
+    // Step 3: Combine sources and generate C code
             }
         }
     }
     const char* combined = "";
-    for (long long _idx_dep_src = 0; _idx_dep_src < dep_sources_len; _idx_dep_src++) { long long dep_src = dep_sources[_idx_dep_src];
+    for (long long _idx_dep_src = 0; _idx_dep_src < dep_sources.len; _idx_dep_src++) { const char* dep_src = dep_sources.items[_idx_dep_src];
         combined = simple_str_concat(combined, simple_str_concat(dep_src, "\n"));
     }
     combined = simple_str_concat(combined, source_single);
     long long c_code = generate_c_code(combined);
     if (verbose) {
-        debug("compile", simple_str_concat(simple_str_concat("Generated C code (", simple_int_to_str(c_code.len)), " bytes)"));
-    //  Step 4: Write C, compile to .o, then link separately
+        debug("compile", "Generated C code ({c_code.len()} bytes)");
+    // Step 4: Write C, compile to .o, then link separately
     }
     long long temp_dir = shell_output("mktemp -d /tmp/simple_linked_XXXXXX");
     if (strcmp(temp_dir, "") == 0) {
@@ -1107,36 +1107,36 @@ long long compile_native_linked(const char* source_file, const char* output_file
     const char* temp_c = simple_str_concat(temp_dir, "/combined.c");
     if (!(file_write(temp_c, c_code))) {
         error("compile", "Failed to write temp C file");
-        shell(simple_str_concat(simple_str_concat("rm -rf '", simple_int_to_str(temp_dir)), "'"));
+        shell("rm -rf '{temp_dir}'");
         return 1;
     }
-    const char* cc = (strcmp(compiler_override, "") != 0 ?  compiler_override : );
+    const char* cc = (strcmp(compiler_override, "") != 0 ? compiler_override : find_c_compiler());
     if (strcmp(cc, "") == 0) {
         error("compile", "No C compiler found (tried clang, gcc, cc)");
-        shell(simple_str_concat(simple_str_concat("rm -rf '", simple_int_to_str(temp_dir)), "'"));
+        shell("rm -rf '{temp_dir}'");
         return 1;
     }
     const char* temp_o = simple_str_concat(temp_dir, "/combined.o");
     if (!(compile_c_to_object(temp_c, temp_o, verbose, cc))) {
-        shell(simple_str_concat(simple_str_concat("rm -rf '", simple_int_to_str(temp_dir)), "'"));
+        shell("rm -rf '{temp_dir}'");
         return 1;
-    //  Step 5: Link object file(s) to binary
+    // Step 5: Link object file(s) to binary
     }
-    SimpleIntArray obj_files = simple_new_int_array(); simple_int_push(&obj_files, temp_o);
+    SimpleStringArray obj_files = simple_new_string_array(); simple_string_push(&obj_files, temp_o);
     if (verbose) {
-        debug("compile", simple_str_concat(simple_str_concat("Linking ", simple_int_to_str(obj_files.len)), " object file(s)..."));
+        debug("compile", "Linking {obj_files.len()} object file(s)...");
     }
     long long link_ok = link_objects(obj_files, output_file, verbose, cc);
-    //  Step 6: Cleanup
-    shell(simple_str_concat(simple_str_concat("rm -rf '", simple_int_to_str(temp_dir)), "'"));
+    // Step 6: Cleanup
+    shell("rm -rf '{temp_dir}'");
     if (!(link_ok)) {
         return 1;
     }
     if (rt_file_exists(output_file)) {
         long long size = file_size(output_file);
-        info("compile", simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat("Compiled: ", output_file), " ("), simple_int_to_str(size)), " bytes) [linked]"));
+        info("compile", "Compiled: {output_file} ({size} bytes) [linked]");
     } else {
-        error("compile", simple_str_concat("Output file not created: ", output_file));
+        error("compile", "Output file not created: {output_file}");
         return 1;
     }
     return 0;
@@ -1144,46 +1144,46 @@ long long compile_native_linked(const char* source_file, const char* output_file
 
 long long compile_gen_c_only(const char* source_file, const char* output_file, int verbose) {
     if (verbose) {
-        info("compile", simple_str_concat(simple_str_concat("Generating C code only for ", source_file), "..."));
+        info("compile", "Generating C code only for {source_file}...");
     }
     const char* source_raw = rt_file_read_text(source_file);
     const char* source_single = (source_raw != NULL ? source_raw : "");
     if (strcmp(source_single, "") == 0) {
-        error("compile", simple_str_concat("Cannot read source file: ", source_file));
+        error("compile", "Cannot read source file: {source_file}");
         return 1;
     }
     const char* source = collect_all_sources(source_file, source_single, verbose);
     long long c_code = generate_c_code(source);
     if (!(file_write(output_file, c_code))) {
-        error("compile", simple_str_concat("Failed to write C file: ", output_file));
+        error("compile", "Failed to write C file: {output_file}");
         return 1;
     }
-    info("compile", simple_str_concat(simple_str_concat(simple_str_concat(simple_str_concat("Generated C: ", output_file), " ("), simple_int_to_str(c_code.len)), " bytes)"));
+    info("compile", "Generated C: {output_file} ({c_code.len()} bytes)");
     return 0;
 }
 
 int main(void) {
-    SimpleStringArray args = ;
-    //  args[0] = binary, args[1] = script path, args[2..] = user args
-    //  Usage: native.spl <source_file> <output_file> [--verbose] [--linked] [--gen-c-only] [--compiler=X]
+    SimpleStringArray args = rt_cli_get_args();
+    // args[0] = binary, args[1] = script path, args[2..] = user args
+    // Usage: native.spl <source_file> <output_file> [--verbose] [--linked] [--gen-c-only] [--compiler=X]
     if (args.len < 4) {
         puts("Usage: native.spl <source.spl> <output> [--verbose] [--linked] [--gen-c-only] [--compiler=X]");
         return 1;
     }
-    long long source_file = args[2];
-    long long output_file = args[3];
+    const char* source_file = args.items[2];
+    const char* output_file = args.items[3];
     int verbose = 0;
     int use_linked = 0;
     int gen_c_only = 0;
     const char* compiler_override = "";
-    for (long long ai = 4; ai <  args.len; ai++) {
-        if (strcmp(args[ai], "--verbose") == 0) {
+    for (long long ai = 4; ai < args.len; ai++) {
+        if (strcmp(args.items[ai], "--verbose") == 0) {
             verbose = 1;
         }
-        if (strcmp(args[ai], "--linked") == 0) {
+        if (strcmp(args.items[ai], "--linked") == 0) {
             use_linked = 1;
         }
-        if (strcmp(args[ai], "--gen-c-only") == 0) {
+        if (strcmp(args.items[ai], "--gen-c-only") == 0) {
             gen_c_only = 1;
         }
         if (simple_starts_with(args[ai], "--compiler=")) {
@@ -1199,3 +1199,4 @@ int main(void) {
     compile_native(source_file, output_file, verbose, compiler_override);
     return 0;
 }
+

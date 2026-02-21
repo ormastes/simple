@@ -1,0 +1,230 @@
+# NoGC Torch Training Components
+#
+# Same API as gc_async_mut/torch/torch_training.spl by convention.
+# Adjusted for unique ownership (no owns_handle on Stream).
+
+use std.nogc_sync_mut.torch.mod.{Tensor, Linear, Conv2d}
+use std.nogc_sync_mut.torch.ffi.{
+    rt_torch_stream_create,
+    rt_torch_torchstream_sync,
+    rt_torch_torchstream_query,
+    rt_torch_torchstream_free
+}
+
+# ============================================================================
+# Loss Functions
+# ============================================================================
+
+class MSELoss:
+    static fn create() -> MSELoss:
+        MSELoss()
+
+    fn forward(pred: Tensor, target: Tensor) -> Tensor:
+        val diff = pred.sub(target)
+        diff.mul(diff)
+
+
+class CrossEntropyLoss:
+    static fn create() -> CrossEntropyLoss:
+        CrossEntropyLoss()
+
+    fn forward(logits: Tensor, targets: Tensor) -> Tensor:
+        logits.clone()
+
+
+# ============================================================================
+# Optimizers
+# ============================================================================
+
+class SGD:
+    parameters: [Tensor]
+    lr: i64
+    momentum: i64
+    velocities: [Tensor]
+
+    static fn create(parameters: [Tensor], lr: i64, momentum: i64) -> SGD:
+        var velocities_list = []
+        var i = 0
+        while i < parameters.len():
+            val param = parameters[i]
+            val velocity = Tensor.zeros(param.shape())
+            velocities_list = velocities_list + [velocity]
+            i = i + 1
+        SGD(
+            parameters: parameters,
+            lr: lr,
+            momentum: momentum,
+            velocities: velocities_list
+        )
+
+    fn step():
+        0
+
+    fn zero_grad():
+        var i = 0
+        while i < self.parameters.len():
+            self.parameters[i].zero_grad()
+            i = i + 1
+
+
+class Adam:
+    parameters: [Tensor]
+    lr: i64
+    beta1: i64
+    beta2: i64
+    eps: i64
+    m: [Tensor]
+    v: [Tensor]
+    t: i64
+
+    static fn create(parameters: [Tensor], lr: i64, beta1: i64, beta2: i64) -> Adam:
+        var m_list = []
+        var v_list = []
+        var i = 0
+        while i < parameters.len():
+            val param = parameters[i]
+            val m_tensor = Tensor.zeros(param.shape())
+            val v_tensor = Tensor.zeros(param.shape())
+            m_list = m_list + [m_tensor]
+            v_list = v_list + [v_tensor]
+            i = i + 1
+        Adam(
+            parameters: parameters,
+            lr: lr,
+            beta1: beta1,
+            beta2: beta2,
+            eps: 0,
+            m: m_list,
+            v: v_list,
+            t: 0
+        )
+
+    me step():
+        self.t = self.t + 1
+
+    fn zero_grad():
+        var i = 0
+        while i < self.parameters.len():
+            self.parameters[i].zero_grad()
+            i = i + 1
+
+
+class RMSprop:
+    parameters: [Tensor]
+    lr: i64
+    alpha: i64
+    eps: i64
+    v: [Tensor]
+
+    static fn create(parameters: [Tensor], lr: i64, alpha: i64, eps: i64) -> RMSprop:
+        var v_list = []
+        var i = 0
+        while i < parameters.len():
+            val param = parameters[i]
+            val v_tensor = Tensor.zeros(param.shape())
+            v_list = v_list + [v_tensor]
+            i = i + 1
+        RMSprop(
+            parameters: parameters,
+            lr: lr,
+            alpha: alpha,
+            eps: eps,
+            v: v_list
+        )
+
+    fn step():
+        0
+
+    fn zero_grad():
+        var i = 0
+        while i < self.parameters.len():
+            self.parameters[i].zero_grad()
+            i = i + 1
+
+
+# ============================================================================
+# CUDA Stream Wrapper (Unique Ownership)
+# ============================================================================
+
+class Stream:
+    # No owns_handle — unique owner always owns
+    handle: i64
+    device_id: i64
+
+    static fn create(device_id: i64) -> Stream:
+        val device_i32 = 0
+        val handle = rt_torch_stream_create(device_i32)
+        Stream(handle: handle, device_id: device_id)
+
+    fn drop():
+        # Unconditional free — unique ownership
+        rt_torch_torchstream_free(self.handle)
+
+    fn synchronize():
+        rt_torch_torchstream_sync(self.handle)
+
+    fn query() -> bool:
+        rt_torch_torchstream_query(self.handle)
+
+
+# ============================================================================
+# Sequential Container
+# ============================================================================
+
+class Sequential:
+    layers_linear: [Linear]
+    layers_conv2d: [Conv2d]
+
+    static fn create() -> Sequential:
+        Sequential(layers_linear: [], layers_conv2d: [])
+
+    me add_layer_linear(layer: Linear):
+        self.layers_linear = self.layers_linear + [layer]
+
+    me add_layer_conv2d(layer: Conv2d):
+        self.layers_conv2d = self.layers_conv2d + [layer]
+
+    fn forward(x: Tensor) -> Tensor:
+        var output = x
+        var i = 0
+        while i < self.layers_linear.len():
+            output = self.layers_linear[i].forward(output)
+            i = i + 1
+        var j = 0
+        while j < self.layers_conv2d.len():
+            output = self.layers_conv2d[j].forward(output)
+            j = j + 1
+        output
+
+    fn parameters() -> [Tensor]:
+        var all_params = []
+        var i = 0
+        while i < self.layers_linear.len():
+            val layer_params = self.layers_linear[i].parameters()
+            all_params = all_params + layer_params
+            i = i + 1
+        var j = 0
+        while j < self.layers_conv2d.len():
+            val layer_params = self.layers_conv2d[j].parameters()
+            all_params = all_params + layer_params
+            j = j + 1
+        all_params
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn no_grad(f: fn()):
+    f()
+
+fn set_seed(seed: i64):
+    0
+
+fn manual_seed(seed: i64):
+    set_seed(seed)
+
+export MSELoss, CrossEntropyLoss
+export SGD, Adam, RMSprop
+export Stream, Sequential
+export no_grad, set_seed, manual_seed

@@ -731,7 +731,7 @@ int is_fn_returning_str_arr(const char* name, const char* types);
 
 long long get_indent_level(const char* line) {
     long long spaces = 0;
-    for (long long idx = 0; idx <  simple_strlen(line); idx++) {
+    for (long long idx = 0; idx < simple_strlen(line); idx++) {
         const char* ch = simple_char_at(line, idx);
         if (strcmp(ch, " ") == 0) {
             spaces = spaces + 1;
@@ -746,7 +746,7 @@ long long get_indent_level(const char* line) {
 
 long long get_c_indent(const char* line) {
     long long spaces = 0;
-    for (long long idx = 0; idx <  simple_strlen(line); idx++) {
+    for (long long idx = 0; idx < simple_strlen(line); idx++) {
         const char* ch = simple_char_at(line, idx);
         if (strcmp(ch, " ") == 0) {
             spaces = spaces + 1;
@@ -787,7 +787,7 @@ const char* simple_type_to_c(const char* stype) {
     }
     if (strcmp(stype, "[[i64]]") == 0 || strcmp(stype, "[[int]]") == 0) {
         return "SimpleIntArrayArray";
-    //  Struct array: [StructName] -> SimpleStructArray
+    // Struct array: [StructName] -> SimpleStructArray
     }
     if (simple_starts_with(stype, "[") && simple_ends_with(stype, "]")) {
         const char* sa_inner = simple_substring(stype, 1, simple_strlen(stype) - 1);
@@ -795,7 +795,7 @@ const char* simple_type_to_c(const char* stype) {
             const char* sa_first = simple_char_at(sa_inner, 0);
             if (sa_first >= "A" && sa_first <= "Z") {
                 return "SimpleStructArray";
-    //  If the type starts with uppercase, treat it as a struct type name
+    // If the type starts with uppercase, treat it as a struct type name
             }
         }
     }
@@ -811,17 +811,17 @@ const char* simple_type_to_c(const char* stype) {
 
 const char* translate_params(const char* params_str) {
     SimpleStringArray params = simple_split(params_str, ",");
-    SimpleIntArray c_parts = simple_new_int_array();
-    for (long long _idx_param = 0; _idx_param < params_len; _idx_param++) { long long param = params[_idx_param];
+    SimpleStringArray c_parts = simple_new_string_array();
+    for (long long _idx_param = 0; _idx_param < params.len; _idx_param++) { const char* param = params.items[_idx_param];
         const char* p = simple_trim(param);
         long long colon_idx = simple_index_of(p, ":");
         if (colon_idx >= 0) {
             const char* pname = simple_substring(p, 0, colon_idx);
             const char* ptype = simple_substring(p, colon_idx + 1, simple_strlen(p));
             const char* ctype = simple_type_to_c(ptype);
-            /* c_parts.push(ctype + r" " + pname) */;
+            simple_string_push(&c_parts, simple_str_concat(ctype, simple_str_concat(" ", pname)));
         } else {
-            /* c_parts.push(r"long long " + p) */;
+            simple_string_push(&c_parts, simple_str_concat("long long ", p));
         }
     }
     return simple_string_join(&c_parts, ", ");
@@ -831,23 +831,23 @@ SimpleStringArray parse_fn_signature(const char* trimmed) {
     const char* without_fn = simple_substring(trimmed, 3, simple_strlen(trimmed));
     long long colon_pos = simple_strlen(without_fn) - 1;
     const char* sig = simple_substring(without_fn, 0, colon_pos);
-    //  Find function name (up to first paren)
+    // Find function name (up to first paren)
     long long paren_idx = simple_index_of(sig, "(");
     if (paren_idx < 0) {
-        SimpleIntArray fallback = simple_new_int_array();
-        /* fallback.push(sig) */;
-        /* fallback.push(r"long long " + sig + r"(void)") */;
-        /* fallback.push(r"long long " + sig + r"(void);") */;
+        SimpleStringArray fallback = simple_new_string_array();
+        simple_string_push(&fallback, sig);
+        simple_string_push(&fallback, simple_str_concat("long long ", simple_str_concat(sig, "(void)")));
+        simple_string_push(&fallback, simple_str_concat("long long ", simple_str_concat(sig, "(void);")));
         return fallback;
     }
     const char* name = simple_substring(sig, 0, paren_idx);
-    //  Find return type - default to void if no -> annotation
+    // Find return type - default to void if no -> annotation
     long long arrow_idx = simple_index_of(sig, "->");
     const char* ret_type = "void";
     if (arrow_idx >= 0) {
         const char* ret_str = simple_substring(sig, arrow_idx + 2, simple_strlen(sig));
         ret_type = simple_type_to_c(ret_str);
-    //  Parse parameters
+    // Parse parameters
     }
     long long close_paren_idx = simple_index_of(sig, ")");
     const char* params_str = "";
@@ -858,16 +858,16 @@ SimpleStringArray parse_fn_signature(const char* trimmed) {
     if (simple_strlen(params_str) > 0) {
         c_params = translate_params(params_str);
     }
-    const char* c_sig = simple_str_concat(ret_type, r" " + name + r"(" + c_params + r")");
-    SimpleIntArray result = simple_new_int_array();
-    /* result.push(name) */;
-    /* result.push(c_sig) */;
-    /* result.push(c_sig + r";") */;
+    const char* c_sig = simple_str_concat(ret_type, simple_str_concat(" ", simple_str_concat(name, simple_str_concat("(", simple_str_concat(c_params, ")")))));
+    SimpleStringArray result = simple_new_string_array();
+    simple_string_push(&result, name);
+    simple_string_push(&result, c_sig);
+    simple_string_push(&result, simple_str_concat(c_sig, ";"));
     return result;
 }
 
 long long find_close_paren(const char* expr, long long open_pos) {
-    //  Find matching close paren, skipping string literals and escaped quotes
+    // Find matching close paren, skipping string literals and escaped quotes
     long long depth = 1;
     int in_str = 0;
     long long i = open_pos + 1;
@@ -876,7 +876,7 @@ long long find_close_paren(const char* expr, long long open_pos) {
         const char* ch = simple_substring(expr, i, i + 1);
         if (in_str) {
             if (strcmp(ch, "\\") == 0 && i + 1 < elen) {
-    //  Skip escaped character (handles \" inside strings)
+    // Skip escaped character (handles \" inside strings)
                 i = i + 2;
                 continue;
             }
@@ -932,7 +932,7 @@ long long find_top_level_plus(const char* expr) {
         } else if (strcmp(ch, ")") == 0) {
             depth = depth - 1;
         } else if (strcmp(ch, "+") == 0 && depth == 0) {
-    //  Check for " + " pattern (space before and after)
+    // Check for " + " pattern (space before and after)
             if (i >= 1 && i + 1 < elen) {
                 const char* before = simple_substring(expr, i - 1, i);
                 const char* after = simple_substring(expr, i + 1, i + 2);
@@ -1126,7 +1126,7 @@ const char* resolve_enum_variant(const char* short_name, const char* types) {
     long long pos = simple_index_of(types, search);
     if (pos < 0) {
         return "";
-    //  Walk backwards to find "enum_variant:"
+    // Walk backwards to find "enum_variant:"
     }
     const char* before = simple_substring(types, 0, pos);
     long long marker_pos = (simple_last_index_of(before, ";enum_variant:") >= 0 ? simple_last_index_of(before, ";enum_variant:") : -1);
@@ -1134,83 +1134,83 @@ const char* resolve_enum_variant(const char* short_name, const char* types) {
         return "";
     }
     const char* entry = simple_substring(before, marker_pos + 14, simple_strlen(before));
-    //  entry is like "PointcutKind"
+    // entry is like "PointcutKind"
     return simple_str_concat(entry, simple_str_concat("_", short_name));
 }
 
 SimpleStringArray parse_method_signature(const char* trimmed, const char* class_name, int is_me) {
-    //  trimmed is like "fn method_name(params) -> ret:" or "me method_name(params) -> ret:"
+    // trimmed is like "fn method_name(params) -> ret:" or "me method_name(params) -> ret:"
     const char* without_prefix = "";
     if (is_me) {
         without_prefix = simple_substring(trimmed, 3, simple_strlen(trimmed));
     } else {
         without_prefix = simple_substring(trimmed, 3, simple_strlen(trimmed));
-    //  Remove trailing colon
+    // Remove trailing colon
     }
     long long colon_pos = simple_strlen(without_prefix) - 1;
     const char* sig = simple_substring(without_prefix, 0, colon_pos);
     long long paren_idx = simple_index_of(sig, "(");
     if (paren_idx < 0) {
         const char* mangled = simple_str_concat(class_name, simple_str_concat("__", sig));
-        SimpleIntArray mfallback = simple_new_int_array();
-        /* mfallback.push(sig) */;
-        /* mfallback.push(r"long long " + mangled + r"(void)") */;
-        /* mfallback.push(r"long long " + mangled + r"(void);") */;
+        SimpleStringArray mfallback = simple_new_string_array();
+        simple_string_push(&mfallback, sig);
+        simple_string_push(&mfallback, simple_str_concat("long long ", simple_str_concat(mangled, "(void)")));
+        simple_string_push(&mfallback, simple_str_concat("long long ", simple_str_concat(mangled, "(void);")));
         return mfallback;
     }
     const char* method_name = simple_substring(sig, 0, paren_idx);
     const char* mangled = simple_str_concat(class_name, simple_str_concat("__", method_name));
-    //  Return type - default to void if no -> annotation
+    // Return type - default to void if no -> annotation
     long long arrow_idx = simple_index_of(sig, "->");
     const char* ret_type = "void";
     if (arrow_idx >= 0) {
         const char* ret_str = simple_substring(sig, arrow_idx + 2, simple_strlen(sig));
         ret_type = simple_type_to_c(ret_str);
-    //  Parameters
+    // Parameters
     }
     long long close_paren_idx = simple_index_of(sig, ")");
     const char* params_str = "";
     if (close_paren_idx > paren_idx + 1) {
         params_str = simple_substring(sig, paren_idx + 1, close_paren_idx);
-    //  Build self parameter + user params
+    // Build self parameter + user params
     }
-    long long self_param = r"const " + class_name + r"* self";
+    const char* self_param = simple_str_concat("const ", simple_str_concat(class_name, "* self"));
     if (is_me) {
-        self_param = simple_str_concat(class_name, r"* self");
+        self_param = simple_str_concat(class_name, "* self");
     }
-    long long c_params = self_param;
+    const char* c_params = self_param;
     if (simple_strlen(params_str) > 0) {
         const char* user_params = translate_params(params_str);
         c_params = simple_str_concat(self_param, simple_str_concat(", ", user_params));
     }
-    const char* c_sig = simple_str_concat(ret_type, r" " + mangled + r"(" + c_params + r")");
-    SimpleIntArray mresult = simple_new_int_array();
-    /* mresult.push(method_name) */;
-    /* mresult.push(c_sig) */;
-    /* mresult.push(c_sig + r";") */;
+    const char* c_sig = simple_str_concat(ret_type, simple_str_concat(" ", simple_str_concat(mangled, simple_str_concat("(", simple_str_concat(c_params, ")")))));
+    SimpleStringArray mresult = simple_new_string_array();
+    simple_string_push(&mresult, method_name);
+    simple_string_push(&mresult, c_sig);
+    simple_string_push(&mresult, simple_str_concat(c_sig, ";"));
     return mresult;
 }
 
 SimpleStringArray parse_generic_type(const char* type_str) {
     long long lt_pos = simple_index_of(type_str, "<");
     if (lt_pos < 0) {
-        SimpleIntArray gt_single = simple_new_int_array();
-        /* gt_single.push(type_str) */;
+        SimpleStringArray gt_single = simple_new_string_array();
+        simple_string_push(&gt_single, type_str);
         return gt_single;
     }
     const char* base = simple_substring(type_str, 0, lt_pos);
     long long gt_pos = simple_index_of(type_str, ">");
     if (gt_pos < 0) {
-        SimpleIntArray gt_base = simple_new_int_array();
-        /* gt_base.push(base) */;
+        SimpleStringArray gt_base = simple_new_string_array();
+        simple_string_push(&gt_base, base);
         return gt_base;
     }
     const char* inner = simple_substring(type_str, lt_pos + 1, gt_pos);
     SimpleStringArray parts = simple_split(inner, ",");
-    SimpleIntArray result = simple_new_int_array();
-    /* result.push(base) */;
-    for (long long _idx_part = 0; _idx_part < parts_len; _idx_part++) { long long part = parts[_idx_part];
-        /* result.push(part.trim()) */;
+    SimpleStringArray result = simple_new_string_array();
+    simple_string_push(&result, base);
+    for (long long _idx_part = 0; _idx_part < parts.len; _idx_part++) { const char* part = parts.items[_idx_part];
+        simple_string_push(&result, simple_trim(part));
     }
     return result;
 }
@@ -1278,3 +1278,4 @@ int is_fn_returning_str_arr(const char* name, const char* types) {
 int main(void) {
     return 0;
 }
+

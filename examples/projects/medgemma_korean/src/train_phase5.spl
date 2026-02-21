@@ -1,0 +1,266 @@
+#!/usr/bin/env simple
+# Phase 5: Korean Translation (Note.md Phase 4)
+#
+# Goal: Train Korean translation capability with front/back layers
+#
+# Progressive training:
+#   1. Duplicate front/back layers from L1 and L3
+#   2. Freeze base model
+#   3. Add LoRA_4 to layers 1 and 2
+#   4. Sub-phase A: Korean text training (front/back + embeddings + LoRA)
+#   5. Sub-phase B: Korean->English translation training
+#   6. English retention check per epoch
+#   7. Merge LoRA_4 into base
+#
+# Run:
+#   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase5.spl
+
+use model.{TextModel, compute_mse_loss, check_gpu}
+use shared_logic.{
+    TrainConfig, TrainState, EMBEDDING_SEQ_LEN,
+    make_randn_batch_on_cuda, compute_ce_loss,
+    report_gpu_memory, report_training_step, report_epoch_end,
+    lr_linear_warmup
+}
+use validation.{
+    validate_model, check_english_retention,
+    validate_extended_model, validate_per_layer_retention
+}
+use embedding_utils.{
+    KorEngEmbedding, RoPECache,
+    make_embedding_batch,
+    embedding_sgd_step, embedding_zero_grads
+}
+use layer_utils.{
+    ExtendedModel,
+    duplicate_front_back_layers,
+    extended_lora_forward,
+    extended_sgd_step, extended_zero_grads
+}
+use lora_utils.{
+    LoRAConfig, LoRAAdapter,
+    create_lora_adapter,
+    lora_sgd_step, lora_zero_grads, lora_clip_and_step,
+    merge_lora_into_model
+}
+use train_phase0.{run_phase0}
+use train_phase1.{run_phase1}
+use train_phase2.{run_phase2}
+use train_phase3.{run_phase3}
+use train_phase4.{run_phase4}
+
+use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
+use std.torch.ffi.{
+    rt_torch_torchtensor_free,
+    rt_torch_torchtensor_mean,
+    rt_torch_autograd_backward,
+    rt_torch_cuda_empty_cache
+}
+
+export run_phase5
+
+
+# ============================================================================
+# Phase 5 Configuration
+# ============================================================================
+
+val SUBPHASE_A_EPOCHS = 3
+val SUBPHASE_B_EPOCHS = 2
+
+
+# ============================================================================
+# Sub-Phase A: Korean Text Training (with front/back layers)
+# ============================================================================
+
+fn run_subphase_a(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig):
+    print("")
+    print("  --- Sub-Phase A: Korean Text (with front/back layers) ---")
+
+    var state = TrainState.create()
+    for epoch in 0..SUBPHASE_A_EPOCHS:
+        state.reset_epoch()
+        print("  Sub-A Epoch {epoch + 1}/{SUBPHASE_A_EPOCHS}")
+
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
+
+            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext.emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+
+            # Extended forward: front -> L1+LoRA -> L2+LoRA -> L3 -> back
+            val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask, lora_l1, lora_l2)
+
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+            rt_torch_autograd_backward(loss_h)
+            extended_sgd_step(ext, lora_l1, lora_l2, lr)
+            extended_zero_grads(ext, lora_l1, lora_l2)
+
+            rt_torch_torchtensor_free(kor_ids)
+            rt_torch_torchtensor_free(eng_ids)
+            rt_torch_torchtensor_free(mask)
+            rt_torch_torchtensor_free(target)
+            rt_torch_torchtensor_free(logits)
+            rt_torch_torchtensor_free(loss_h)
+
+            state.add_loss(loss_val)
+            report_training_step(state, config)
+
+        state.update_best()
+        report_epoch_end(epoch, SUBPHASE_A_EPOCHS, state)
+
+        val retained = validate_per_layer_retention(ext, config)
+        if not retained:
+            print("  WARNING: English retention dropping in Sub-A")
+        print("")
+
+    print("  Sub-Phase A complete. Best loss: {state.best_loss}")
+
+
+# ============================================================================
+# Sub-Phase B: Korean->English Translation Training
+# ============================================================================
+
+fn run_subphase_b(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig):
+    print("")
+    print("  --- Sub-Phase B: Korean->English Translation ---")
+
+    var state = TrainState.create()
+    for epoch in 0..SUBPHASE_B_EPOCHS:
+        state.reset_epoch()
+        print("  Sub-B Epoch {epoch + 1}/{SUBPHASE_B_EPOCHS}")
+
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
+
+            # Korean source tokens
+            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext.emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+
+            # Forward: Korean input -> model -> CE loss vs English target
+            val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask, lora_l1, lora_l2)
+
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+            rt_torch_autograd_backward(loss_h)
+            extended_sgd_step(ext, lora_l1, lora_l2, lr)
+            extended_zero_grads(ext, lora_l1, lora_l2)
+
+            rt_torch_torchtensor_free(kor_ids)
+            rt_torch_torchtensor_free(eng_ids)
+            rt_torch_torchtensor_free(mask)
+            rt_torch_torchtensor_free(target)
+            rt_torch_torchtensor_free(logits)
+            rt_torch_torchtensor_free(loss_h)
+
+            state.add_loss(loss_val)
+            report_training_step(state, config)
+
+        state.update_best()
+        report_epoch_end(epoch, SUBPHASE_B_EPOCHS, state)
+
+        val retained = validate_per_layer_retention(ext, config)
+        if not retained:
+            print("  WARNING: English retention dropping in Sub-B")
+        print("")
+
+    print("  Sub-Phase B complete. Best loss: {state.best_loss}")
+
+
+# ============================================================================
+# Training
+# ============================================================================
+
+fn run_phase5(ext_model: ExtendedModel) -> ExtendedModel:
+    print("")
+    print("=" * 70)
+    print("  PHASE 5: KOREAN TRANSLATION (Note.md Phase 4)")
+    print("=" * 70)
+    print("")
+
+    check_gpu()
+    print("")
+
+    val config = TrainConfig.phase5()
+    config.print_config("Phase 5 - Korean Translation")
+
+    # Duplicate front/back layers
+    duplicate_front_back_layers(ext_model)
+    print("")
+
+    # Freeze base model
+    ext_model.base.freeze()
+    print("Base model weights: FROZEN")
+    print("")
+
+    # Add LoRA_4
+    val lora_config = LoRAConfig(rank: config.lora_rank, alpha: config.lora_alpha, dropout: 0.0)
+    print("Adding LoRA_4 adapters (Progressive LoRA):")
+    var lora_l1 = create_lora_adapter(config.input_dim, config.hidden_dim, lora_config)
+    var lora_l2 = create_lora_adapter(config.hidden_dim, config.hidden_dim, lora_config)
+    print("")
+
+    # Sub-phase A: Korean text (with front/back + embeddings + LoRA)
+    run_subphase_a(ext_model, lora_l1, lora_l2, config)
+
+    # Sub-phase B: Korean->English translation
+    run_subphase_b(ext_model, lora_l1, lora_l2, config)
+
+    print("")
+    print("=" * 70)
+    print("PHASE 5 TRAINING COMPLETE")
+    print("  Front/back layers: TRAINED")
+    print("  LoRA_4: Korean translation (TRAINED)")
+    print("  Embeddings: Updated")
+    print("=" * 70)
+
+    # Merge LoRA_4 into base weights
+    merge_lora_into_model(ext_model.base, lora_l1, lora_l2)
+
+    report_gpu_memory()
+    ext_model
+
+
+# ============================================================================
+# Standalone entry point
+# ============================================================================
+
+fn main():
+    if not torch_available():
+        print("ERROR: libtorch not loaded. Run with:")
+        print("  LD_PRELOAD=build/libspl_torch.so bin/simple <this_file>")
+        return
+
+    # Run all prerequisite phases
+    print("Running Phase 0 (prerequisite)...")
+    var model = run_phase0()
+    print("")
+    print("Running Phase 1 (prerequisite)...")
+    model = run_phase1(model)
+    print("")
+    print("Running Phase 2 (prerequisite)...")
+    model = run_phase2(model)
+    print("")
+    print("Running Phase 3 (prerequisite)...")
+    var ext_model = run_phase3(model)
+    print("")
+    print("Running Phase 4 (prerequisite)...")
+    ext_model = run_phase4(ext_model)
+    print("")
+
+    ext_model = run_phase5(ext_model)
+    ext_model.print_summary()
+    print("")
+    print("Phase 5 complete. Korean translation capability added.")
+    rt_torch_cuda_empty_cache()
+
+
+main()

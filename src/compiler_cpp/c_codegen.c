@@ -695,24 +695,24 @@ typedef struct {
 const char* generate_c_code(const char* source_text);
 
 const char* generate_c_code(const char* source_text) {
-    //  Type registry - tracks variable types and function return types
-    //  Format: ";text:name;arr:name;fn_text:funcname;struct:StructName;"
+    // Type registry - tracks variable types and function return types
+    // Format: ";text:name;arr:name;fn_text:funcname;struct:StructName;"
     const char* types = ";";
-    //  Pre-seed well-known cross-module variables (used by parser, lexer, etc.)
+    // Pre-seed well-known cross-module variables (used by parser, lexer, etc.)
     types = simple_str_concat(types, "text:par_text;text:par_current;text:lex_cur_text;text:lex_cur_suffix;");
     types = simple_str_concat(types, "text:g_log_filter_pattern;");
     SimpleStringArray raw_lines = simple_split(source_text, "\n");
-    //  Pre-process: join multi-line expressions (unclosed parentheses)
-    SimpleIntArray lines_arr = simple_new_int_array();
+    // Pre-process: join multi-line expressions (unclosed parentheses)
+    SimpleStringArray lines_arr = simple_new_string_array();
     const char* pending_line = "";
     long long paren_depth = 0;
-    for (long long li = 0; li <  raw_lines.len; li++) {
-        long long rline = raw_lines[li];
+    for (long long li = 0; li < raw_lines.len; li++) {
+        const char* rline = raw_lines.items[li];
         if (strcmp(pending_line, "") != 0) {
             pending_line = simple_str_concat(pending_line, simple_str_concat(" ", simple_trim(rline)));
         } else {
             pending_line = rline;
-    //  Count parens outside string literals and comments
+    // Count parens outside string literals and comments
         }
         int has_paren = simple_contains(rline, "(") || simple_contains(rline, ")");
         if (has_paren) {
@@ -720,7 +720,7 @@ const char* generate_c_code(const char* source_text) {
             long long pp_opens = 0;
             long long pp_closes = 0;
             long long pp_i = 0;
-            long long pp_len = rline.len;
+            long long pp_len = simple_strlen(rline);
             while (pp_i < pp_len) {
                 const char* pp_ch = simple_substring(rline, pp_i, pp_i + 1);
                 if (pp_in_str) {
@@ -733,7 +733,7 @@ const char* generate_c_code(const char* source_text) {
                     }
                     pp_i = pp_i + 1;
                     continue;
-    //  Stop at comment (# outside of string = rest is comment)
+    // Stop at comment (# outside of string = rest is comment)
                 }
                 if (strcmp(pp_ch, "#") == 0) {
                     pp_i = pp_len;
@@ -754,22 +754,22 @@ const char* generate_c_code(const char* source_text) {
             paren_depth = paren_depth + pp_opens - pp_closes;
         }
         if (paren_depth <= 0) {
-            /* lines_arr.push(pending_line) */;
+            simple_string_push(&lines_arr, pending_line);
             pending_line = "";
             paren_depth = 0;
         }
     }
     if (strcmp(pending_line, "") != 0) {
-        /* lines_arr.push(pending_line) */;
+        simple_string_push(&lines_arr, pending_line);
     }
-    SimpleIntArray forward_decls = simple_new_int_array();
-    SimpleIntArray func_defs = simple_new_int_array();
-    SimpleIntArray struct_defs = simple_new_int_array();
-    SimpleIntArray enum_defs = simple_new_int_array();
-    SimpleIntArray global_defs = simple_new_int_array();
-    SimpleIntArray main_body = simple_new_int_array();
+    SimpleStringArray forward_decls = simple_new_string_array();
+    SimpleStringArray func_defs = simple_new_string_array();
+    SimpleStringArray struct_defs = simple_new_string_array();
+    SimpleStringArray enum_defs = simple_new_string_array();
+    SimpleStringArray global_defs = simple_new_string_array();
+    SimpleStringArray main_body = simple_new_string_array();
     const char* current_fn_name = "";
-    SimpleIntArray current_fn_lines = simple_new_int_array();
+    SimpleStringArray current_fn_lines = simple_new_string_array();
     const char* current_fn_sig = "";
     const char* types_before_fn = "";
     int in_main = 0;
@@ -782,15 +782,15 @@ const char* generate_c_code(const char* source_text) {
     int in_impl_method = 0;
     const char* impl_method_name = "";
     const char* impl_method_sig = "";
-    SimpleIntArray impl_method_lines = simple_new_int_array();
+    SimpleStringArray impl_method_lines = simple_new_string_array();
     int impl_method_is_me = 0;
     long long lambda_counter = 0;
     int skip_until_close_brace = 0;
-    //  Pre-pass: collect all struct/class/enum names and field types
-    //  This resolves forward references (e.g., impl using struct defined later)
+    // Pre-pass: collect all struct/class/enum names and field types
+    // This resolves forward references (e.g., impl using struct defined later)
     int pre_skip = 0;
-    for (long long pi = 0; pi <  lines_arr.len; pi++) {
-        long long pline = lines_arr[pi];
+    for (long long pi = 0; pi < lines_arr.len; pi++) {
+        const char* pline = lines_arr.items[pi];
         const char* ptrim = simple_trim(pline);
         if (strcmp(ptrim, "") == 0) {
             continue;
@@ -806,9 +806,9 @@ const char* generate_c_code(const char* source_text) {
                 p_name = simple_substring(ptrim, 6, simple_strlen(ptrim) - 1);
             }
             types = simple_str_concat(types, simple_str_concat("struct:", simple_str_concat(p_name, ";")));
-    //  Scan fields
-            for (long long pfi = pi + 1; pfi <  lines_arr.len; pfi++) {
-                long long pfline = lines_arr[pfi];
+    // Scan fields
+            for (long long pfi = pi + 1; pfi < lines_arr.len; pfi++) {
+                const char* pfline = lines_arr.items[pfi];
                 const char* pftrim = simple_trim(pfline);
                 if (strcmp(pftrim, "") == 0) {
                     continue;
@@ -822,7 +822,7 @@ const char* generate_c_code(const char* source_text) {
                 }
                 if (simple_starts_with(pftrim, "#")) {
                     continue;
-    //  Strip inline comments
+    // Strip inline comments
                 }
                 const char* pf_clean = pftrim;
                 long long pf_hash = simple_index_of(pftrim, " #");
@@ -841,7 +841,7 @@ const char* generate_c_code(const char* source_text) {
                     }
                     if (strcmp(pf_ftype, "[i64]") == 0 || strcmp(pf_ftype, "[int]") == 0 || strcmp(pf_ftype, "[bool]") == 0) {
                         types = simple_str_concat(types, simple_str_concat("field_int_arr:", simple_str_concat(p_name, simple_str_concat(".", simple_str_concat(pf_fname, ";")))));
-    //  Struct array field: [StructName]
+    // Struct array field: [StructName]
                     }
                     if (simple_starts_with(pf_ftype, "[") && simple_ends_with(pf_ftype, "]")) {
                         const char* pf_elem = simple_substring(pf_ftype, 1, simple_strlen(pf_ftype) - 1);
@@ -857,9 +857,9 @@ const char* generate_c_code(const char* source_text) {
         }
         if (p_is_enum) {
             const char* pe_name = simple_substring(ptrim, 5, simple_strlen(ptrim) - 1);
-    //  Scan variants
-            for (long long pei = pi + 1; pei <  lines_arr.len; pei++) {
-                long long peline = lines_arr[pei];
+    // Scan variants
+            for (long long pei = pi + 1; pei < lines_arr.len; pei++) {
+                const char* peline = lines_arr.items[pei];
                 const char* petrim = simple_trim(peline);
                 if (strcmp(petrim, "") == 0) {
                     continue;
@@ -877,11 +877,11 @@ const char* generate_c_code(const char* source_text) {
                     pe_vname = simple_substring(petrim, 0, pe_paren);
                 }
                 types = simple_str_concat(types, simple_str_concat("enum_variant:", simple_str_concat(pe_name, simple_str_concat(".", simple_str_concat(pe_vname, ";")))));
-    //  Pre-pass 2: collect all function return types (resolves forward references)
+    // Pre-pass 2: collect all function return types (resolves forward references)
             }
         }
     }
-    for (long long fp_i = 0; fp_i <  lines_arr.len; fp_i++) {
+    for (long long fp_i = 0; fp_i < lines_arr.len; fp_i++) {
         const char* fp_line = simple_trim(lines_arr[fp_i]);
         if (simple_starts_with(fp_line, "fn ") && simple_ends_with(fp_line, ":")) {
             long long fp_paren = simple_index_of(fp_line, "(");
@@ -891,29 +891,29 @@ const char* generate_c_code(const char* source_text) {
             }
         }
     }
-    for (long long line_idx = 0; line_idx <  lines_arr.len; line_idx++) {
-        long long line = lines_arr[line_idx];
+    for (long long line_idx = 0; line_idx < lines_arr.len; line_idx++) {
+        const char* line = lines_arr.items[line_idx];
         const char* trimmed = simple_trim(line);
         if (strcmp(trimmed, "") == 0) {
             continue;
-    //  Skip lines inside multi-line import blocks (pub use ... { ... })
+    // Skip lines inside multi-line import blocks (pub use ... { ... })
         }
         if (skip_until_close_brace) {
             if (strcmp(trimmed, "}") == 0 || simple_ends_with(trimmed, "}")) {
                 skip_until_close_brace = 0;
             }
             continue;
-    //  Strip inline comments: code # comment (but not inside strings)
-    //  Handle both "code  # comment" and "code # comment"
+    // Strip inline comments: code # comment (but not inside strings)
+    // Handle both "code  # comment" and "code # comment"
         }
         if (simple_contains(trimmed, " #") && !(simple_starts_with(trimmed, "#"))) {
             long long inline_hash = simple_index_of(trimmed, " #");
             if (inline_hash >= 0) {
-    //  Make sure it's not inside a string literal
+    // Make sure it's not inside a string literal
                 const char* before_hash = simple_substring(trimmed, 0, inline_hash);
                 SimpleStringArray quote_count = simple_split(before_hash, simple_strlen("\""));
                 long long is_inside_str = quote_count % 2 == 1;
-    //  Also check it's not a #[ decorator or #! shebang
+    // Also check it's not a #[ decorator or #! shebang
                 const char* after_hash = simple_substring(trimmed, inline_hash + 2, simple_strlen(trimmed));
                 long long is_decorator = simple_starts_with(after_hash, "[");
                 if (!(is_inside_str && !(is_decorator))) {
@@ -928,43 +928,43 @@ const char* generate_c_code(const char* source_text) {
             const char* comment_text = simple_substring(trimmed, 1, simple_strlen(trimmed));
             int comment_indented = simple_starts_with(line, "    ") || simple_starts_with(line, "\t");
             if (in_main && comment_indented) {
-                /* main_body.push(r"    // " + comment_text) */;
+                simple_string_push(&main_body, simple_str_concat("    // ", comment_text));
             } else if (in_func && comment_indented) {
-                /* current_fn_lines.push(r"    // " + comment_text) */;
+                simple_string_push(&current_fn_lines, simple_str_concat("    // ", comment_text));
             } else if (in_func && !(comment_indented)) {
-    //  Top-level comment while in_func - end the function
+    // Top-level comment while in_func - end the function
                 long long fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines);
-                /* func_defs.push(fn_code) */;
-                current_fn_lines = simple_new_int_array();
+                simple_string_push(&func_defs, fn_code);
+                current_fn_lines = simple_new_string_array();
                 in_func = 0;
                 types = types_before_fn;
             }
             continue;
-    //  Handle impl block methods - indented lines inside impl
+    // Handle impl block methods - indented lines inside impl
         }
         if (in_impl) {
             long long still_indented = simple_starts_with(line, "    ");
             long long is_tab = simple_starts_with(line, "\t");
             if (!(still_indented && !(is_tab))) {
-    //  End of impl block - flush any pending method
+    // End of impl block - flush any pending method
                 if (in_impl_method) {
                     const char* method_code = build_function(simple_str_concat(current_impl_class, simple_str_concat("__", impl_method_name)), impl_method_sig, impl_method_lines);
-                    /* func_defs.push(method_code) */;
-                    impl_method_lines = simple_new_int_array();
+                    simple_string_push(&func_defs, method_code);
+                    impl_method_lines = simple_new_string_array();
                     in_impl_method = 0;
                 }
                 in_impl = 0;
                 current_impl_class = "";
-    //  Fall through to process current line normally
+    // Fall through to process current line normally
             } else {
-    //  Inside impl block
+    // Inside impl block
                 long long impl_indent = get_indent_level(line);
                 if (impl_indent == 1) {
-    //  Top-level impl member (fn, me, static fn)
+    // Top-level impl member (fn, me, static fn)
                     if (in_impl_method) {
                         const char* method_code = build_function(simple_str_concat(current_impl_class, simple_str_concat("__", impl_method_name)), impl_method_sig, impl_method_lines);
-                        /* func_defs.push(method_code) */;
-                        impl_method_lines = simple_new_int_array();
+                        simple_string_push(&func_defs, method_code);
+                        impl_method_lines = simple_new_string_array();
                         in_impl_method = 0;
                     }
                     if (simple_starts_with(trimmed, "fn ") && simple_ends_with(trimmed, ":")) {
@@ -972,7 +972,7 @@ const char* generate_c_code(const char* source_text) {
                         impl_method_name = parsed[0];
                         impl_method_sig = parsed[1];
                         long long fwd = parsed[2];
-                        /* forward_decls.push(fwd) */;
+                        simple_string_push(&forward_decls, fwd);
                         in_impl_method = 1;
                         impl_method_is_me = 0;
                         types = simple_str_concat(types, simple_str_concat("method:", simple_str_concat(current_impl_class, simple_str_concat(".", simple_str_concat(impl_method_name, ";")))));
@@ -984,7 +984,7 @@ const char* generate_c_code(const char* source_text) {
                         impl_method_name = parsed[0];
                         impl_method_sig = parsed[1];
                         long long fwd = parsed[2];
-                        /* forward_decls.push(fwd) */;
+                        simple_string_push(&forward_decls, fwd);
                         in_impl_method = 1;
                         impl_method_is_me = 1;
                         types = simple_str_concat(types, simple_str_concat("me_method:", simple_str_concat(current_impl_class, simple_str_concat(".", simple_str_concat(impl_method_name, ";")))));
@@ -992,35 +992,35 @@ const char* generate_c_code(const char* source_text) {
                         types = simple_str_concat(types, cg_track_fn_types(trimmed, simple_str_concat(current_impl_class, simple_str_concat("__", impl_method_name))));
                         continue;
                     } else if (simple_starts_with(trimmed, "static fn ") && simple_ends_with(trimmed, ":")) {
-    //  Static method - no self parameter
+    // Static method - no self parameter
                         const char* static_trimmed = simple_str_concat("fn ", simple_substring(trimmed, 10, simple_strlen(trimmed)));
                         long long parsed = parse_fn_signature(static_trimmed);
                         long long static_method_name = parsed[0];
                         const char* mangled_name = simple_str_concat(current_impl_class, simple_str_concat("__", static_method_name));
-    //  Re-parse with mangled name
+    // Re-parse with mangled name
                         const char* static_sig_trimmed = simple_replace(static_trimmed, static_method_name + "(", mangled_name + "(");
                         long long parsed2 = parse_fn_signature(static_sig_trimmed);
                         impl_method_name = static_method_name;
                         impl_method_sig = parsed2[1];
-                        /* forward_decls.push(parsed2[2]) */;
+                        simple_string_push(&forward_decls, parsed2[2]);
                         in_impl_method = 1;
                         impl_method_is_me = 0;
                         types = simple_str_concat(types, simple_str_concat("static_fn:", simple_str_concat(current_impl_class, simple_str_concat(".", simple_str_concat(static_method_name, ";")))));
                         types = simple_str_concat(types, cg_track_fn_types(trimmed, mangled_name));
                         continue;
                     } else {
-    //  Skip other impl-level lines (comments etc)
+    // Skip other impl-level lines (comments etc)
                         continue;
                     }
                 } else if (impl_indent >= 2 && in_impl_method) {
-    //  Method body line - translate with self context
+    // Method body line - translate with self context
                     long long raw_result = translate_statement(trimmed, types);
                     long long parts = split_result(raw_result);
                     long long code = parts[0];
                     long long new_types = parts[1];
                     if (strcmp(new_types, "") != 0) {
                         types = simple_str_concat(types, new_types);
-    //  Replace self.method(args) calls before generic self. replacement
+    // Replace self.method(args) calls before generic self. replacement
                     }
                     if (simple_contains(code, "self.")) {
                         long long sm_pos = simple_index_of(code, "self.");
@@ -1030,7 +1030,7 @@ const char* generate_c_code(const char* source_text) {
                             long long sm_dot2 = simple_index_of(sm_after, ".");
                             long long sm_space = simple_index_of(sm_after, " ");
                             long long sm_eq = simple_index_of(sm_after, "=");
-    //  Is this a method call? (paren comes before dot/space/eq)
+    // Is this a method call? (paren comes before dot/space/eq)
                             long long sm_is_call = sm_paren >= 0;
                             if (sm_is_call && sm_dot2 >= 0 && sm_dot2 < sm_paren) {
                                 sm_is_call = 0;
@@ -1055,10 +1055,10 @@ const char* generate_c_code(const char* source_text) {
                                     }
                                     const char* sm_before = simple_substring(code, 0, sm_pos);
                                     if (strcmp(sm_args, "") != 0) {
-                                        code = simple_str_concat(sm_before, simple_str_concat(current_impl_class, r"__" + sm_name + r"(&self, " + sm_args + r")" + sm_rest));
+                                        code = simple_str_concat(sm_before, simple_str_concat(current_impl_class, simple_str_concat("__", simple_str_concat(sm_name, simple_str_concat("(&self, ", simple_str_concat(sm_args, simple_str_concat(")", sm_rest)))))));
                                     } else {
-                                        code = simple_str_concat(sm_before, simple_str_concat(current_impl_class, r"__" + sm_name + r"(&self)" + sm_rest));
-    //  Replace self.field access/assignment inside method bodies
+                                        code = simple_str_concat(sm_before, simple_str_concat(current_impl_class, simple_str_concat("__", simple_str_concat(sm_name, simple_str_concat("(&self)", sm_rest)))));
+    // Replace self.field access/assignment inside method bodies
                                     }
                                 }
                             }
@@ -1069,15 +1069,15 @@ const char* generate_c_code(const char* source_text) {
                     }
                     if (strcmp(code, "") != 0) {
                         const char* padding = "";
-                        for (long long pi = 0; pi <  impl_indent - 1; pi++) {
+                        for (long long pi = 0; pi < impl_indent - 1; pi++) {
                             padding = simple_str_concat(padding, "    ");
-                        /* impl_method_lines.push(padding + code) */;
                         }
+                        simple_string_push(&impl_method_lines, simple_str_concat(padding, code));
                     }
                     continue;
                 } else {
                     continue;
-    //  Skip indented lines after struct/enum/class (not impl - handled above)
+    // Skip indented lines after struct/enum/class (not impl - handled above)
                 }
             }
         }
@@ -1088,30 +1088,30 @@ const char* generate_c_code(const char* source_text) {
                 continue;
             }
             skip_until_unindent = 0;
-    //  Module directives - skip at top level
+    // Module directives - skip at top level
         }
         if (simple_starts_with(trimmed, "use ")) {
-    //  Extract cross-module variable names from use imports
-    //  Generate global declarations for known patterns (lex_cur_*, etc.)
+    // Extract cross-module variable names from use imports
+    // Generate global declarations for known patterns (lex_cur_*, etc.)
             long long use_brace = simple_index_of(trimmed, "\{");
             long long use_brace_end = (simple_last_index_of(trimmed, "}") >= 0 ? simple_last_index_of(trimmed, "}") : -1);
             if (use_brace >= 0 && use_brace_end > use_brace) {
                 const char* use_names_str = simple_substring(trimmed, use_brace + 1, use_brace_end);
                 SimpleStringArray use_names = simple_split(use_names_str, ",");
-                for (long long _idx_use_name_raw = 0; _idx_use_name_raw < use_names_len; _idx_use_name_raw++) { long long use_name_raw = use_names[_idx_use_name_raw];
+                for (long long _idx_use_name_raw = 0; _idx_use_name_raw < use_names.len; _idx_use_name_raw++) { const char* use_name_raw = use_names.items[_idx_use_name_raw];
                     const char* use_name = simple_trim(use_name_raw);
-    //  Detect external globals: lowercase names that start with known prefixes
+    // Detect external globals: lowercase names that start with known prefixes
                     if (simple_starts_with(use_name, "lex_cur_") || simple_starts_with(use_name, "par_")) {
-    //  Check if already declared (avoid duplicates)
+    // Check if already declared (avoid duplicates)
                         const char* use_decl_marker = simple_str_concat(";use_decl:", simple_str_concat(use_name, ";"));
                         if (!(simple_contains(types, use_decl_marker))) {
                             types = simple_str_concat(types, use_decl_marker);
-    //  Determine type from types registry
+    // Determine type from types registry
                             long long is_text_glob = simple_contains(types, simple_str_concat(";text:", simple_str_concat(use_name, ";")));
                             if (is_text_glob) {
-                                /* global_defs.push(r"static const char* " + use_name + r" = " + "\"\"" + r";") */;
+                                simple_string_push(&global_defs, simple_str_concat("static const char* ", simple_str_concat(use_name, simple_str_concat(" = ", simple_str_concat("\"\"", ";")))));
                             } else {
-                                /* global_defs.push(r"static long long " + use_name + r" = 0;") */;
+                                simple_string_push(&global_defs, simple_str_concat("static long long ", simple_str_concat(use_name, " = 0;")));
                             }
                         }
                     }
@@ -1138,18 +1138,18 @@ const char* generate_c_code(const char* source_text) {
             continue;
         }
         if (simple_starts_with(trimmed, "pub use ")) {
-            if (simple_ends_with(trimmed, "{")) {
+            if (simple_ends_with(trimmed, "\{")) {
                 skip_until_close_brace = 1;
             }
             continue;
         }
         if (simple_starts_with(trimmed, "common use ")) {
             continue;
-    //  Extern function - generate forward declaration instead of skipping
+    // Extern function - generate forward declaration instead of skipping
         }
         if (simple_starts_with(trimmed, "extern fn ")) {
             const char* extern_rest = simple_substring(trimmed, 10, simple_strlen(trimmed));
-    //  Parse: name(params) -> ret
+    // Parse: name(params) -> ret
             long long ep_idx = simple_index_of(extern_rest, "(");
             if (ep_idx >= 0) {
                 const char* extern_name = simple_substring(extern_rest, 0, ep_idx);
@@ -1167,12 +1167,12 @@ const char* generate_c_code(const char* source_text) {
                     const char* ec_params = "void";
                     if (simple_strlen(eparams_str) > 0) {
                         ec_params = translate_params(eparams_str);
-                    /* forward_decls.push(eret_type + r" " + extern_name + r"(" + ec_params + r");") */;
-    //  Track extern fn return types for type inference
                     }
+                    simple_string_push(&forward_decls, simple_str_concat(eret_type, simple_str_concat(" ", simple_str_concat(extern_name, simple_str_concat("(", simple_str_concat(ec_params, ");"))))));
+    // Track extern fn return types for type inference
                     if (strcmp(eret_type, "const char*") == 0) {
                         types = simple_str_concat(types, simple_str_concat("fn_text:", simple_str_concat(extern_name, ";")));
-    //  Track struct and array return types
+    // Track struct and array return types
                     }
                     if (earrow >= 0) {
                         const char* eret_raw = simple_substring(extern_rest, earrow + 2, simple_strlen(extern_rest));
@@ -1194,70 +1194,70 @@ const char* generate_c_code(const char* source_text) {
                 }
             }
             continue;
-    //  Type alias - skip
+    // Type alias - skip
         }
         if (simple_starts_with(trimmed, "type ") && simple_contains(trimmed, " = ")) {
             continue;
-    //  Docstrings - skip
+    // Docstrings - skip
         }
         if (simple_starts_with(trimmed, "\"\"\"")) {
             continue;
-    //  Decorator attributes - skip
+    // Decorator attributes - skip
         }
         if (simple_starts_with(trimmed, "#[")) {
             continue;
-    //  Struct definition
+    // Struct definition
         }
         if (simple_starts_with(trimmed, "struct ") && simple_ends_with(trimmed, ":")) {
             const char* struct_name = simple_substring(trimmed, 7, simple_strlen(trimmed) - 1);
             types = simple_str_concat(types, simple_str_concat("struct:", simple_str_concat(struct_name, ";")));
             long long field_result = parse_struct_fields(lines_arr, line_idx);
             long long field_body = field_result[1];
-            const char* sdef = simple_str_concat("typedef struct {", "\n");
+            const char* sdef = simple_str_concat("typedef struct \{", "\n");
             sdef = simple_str_concat(sdef, simple_str_concat(field_body, "\n"));
             sdef = simple_str_concat(sdef, simple_str_concat("} ", simple_str_concat(struct_name, ";")));
-            /* struct_defs.push(sdef) */;
+            simple_string_push(&struct_defs, sdef);
             types = simple_str_concat(types, cg_track_field_types(lines_arr, line_idx, struct_name));
             skip_until_unindent = 1;
             continue;
-    //  Enum definition - detect data variants vs simple enums
+    // Enum definition - detect data variants vs simple enums
         }
         if (simple_starts_with(trimmed, "enum ") && simple_ends_with(trimmed, ":")) {
             long long enum_result = cg_process_enum(lines_arr, line_idx, trimmed);
-            SimpleStringArray enum_parts = simple_split(enum_result, "
-            /* enum_defs.push(enum_parts[0]) */;
-            types = simple_str_concat(types, enum_parts[1]);
+            SimpleStringArray enum_parts = simple_split(enum_result, "<|TYPE|>");
+            simple_string_push(&enum_defs, enum_parts.items[0]);
+            types = simple_str_concat(types, enum_parts.items[1]);
             skip_until_unindent = 1;
             continue;
-    //  Class definition - treat like struct
+    // Class definition - treat like struct
         }
         if (simple_starts_with(trimmed, "class ") && simple_ends_with(trimmed, ":")) {
             const char* class_name = simple_substring(trimmed, 6, simple_strlen(trimmed) - 1);
             types = simple_str_concat(types, simple_str_concat("struct:", simple_str_concat(class_name, ";")));
             long long field_result = parse_struct_fields(lines_arr, line_idx);
             long long field_body = field_result[1];
-            const char* cdef = simple_str_concat("typedef struct {", "\n");
+            const char* cdef = simple_str_concat("typedef struct \{", "\n");
             cdef = simple_str_concat(cdef, simple_str_concat(field_body, "\n"));
             cdef = simple_str_concat(cdef, simple_str_concat("} ", simple_str_concat(class_name, ";")));
-            /* struct_defs.push(cdef) */;
+            simple_string_push(&struct_defs, cdef);
             types = simple_str_concat(types, cg_track_field_types(lines_arr, line_idx, class_name));
             skip_until_unindent = 1;
             continue;
-    //  Impl block - parse methods
+    // Impl block - parse methods
         }
         if (simple_starts_with(trimmed, "impl ") && simple_ends_with(trimmed, ":")) {
             current_impl_class = simple_substring(trimmed, 5, simple_strlen(trimmed) - 1);
             in_impl = 1;
             in_impl_method = 0;
             continue;
-    //  Function definition
+    // Function definition
         }
         if (simple_starts_with(trimmed, "fn ") && simple_ends_with(trimmed, ":")) {
             if (in_func) {
                 long long fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines);
-                /* func_defs.push(fn_code) */;
-                current_fn_lines = simple_new_int_array();
-    //  Restore types to before function (clear local var types)
+                simple_string_push(&func_defs, fn_code);
+                current_fn_lines = simple_new_string_array();
+    // Restore types to before function (clear local var types)
                 types = types_before_fn;
             }
             if (strcmp(trimmed, "fn main():") == 0 || simple_starts_with(trimmed, "fn main()")) {
@@ -1270,19 +1270,19 @@ const char* generate_c_code(const char* source_text) {
             current_fn_name = parsed[0];
             current_fn_sig = parsed[1];
             long long fwd = parsed[2];
-            /* forward_decls.push(fwd) */;
+            simple_string_push(&forward_decls, fwd);
             in_func = 1;
             in_main = 0;
-    //  Track function return type and parameter types
+    // Track function return type and parameter types
             types = simple_str_concat(types, cg_track_fn_types(trimmed, current_fn_name));
             types_before_fn = types;
             continue;
-    //  Static fn at top level - skip (only valid inside impl)
+    // Static fn at top level - skip (only valid inside impl)
         }
         if (simple_starts_with(trimmed, "static fn ") && simple_ends_with(trimmed, ":")) {
             skip_until_unindent = 1;
             continue;
-    //  Mutable method at top level - skip (only valid inside impl)
+    // Mutable method at top level - skip (only valid inside impl)
         }
         if (simple_starts_with(trimmed, "me ") && simple_ends_with(trimmed, ":")) {
             skip_until_unindent = 1;
@@ -1303,10 +1303,10 @@ const char* generate_c_code(const char* source_text) {
             }
             if (strcmp(code, "") != 0) {
                 const char* padding = "";
-                for (long long pi = 0; pi <  indent; pi++) {
+                for (long long pi = 0; pi < indent; pi++) {
                     padding = simple_str_concat(padding, "    ");
-                /* main_body.push(padding + code) */;
                 }
+                simple_string_push(&main_body, simple_str_concat(padding, code));
             }
             continue;
         }
@@ -1321,10 +1321,10 @@ const char* generate_c_code(const char* source_text) {
             }
             if (strcmp(code, "") != 0) {
                 const char* padding = "";
-                for (long long pi = 0; pi <  indent; pi++) {
+                for (long long pi = 0; pi < indent; pi++) {
                     padding = simple_str_concat(padding, "    ");
-                /* current_fn_lines.push(padding + code) */;
                 }
+                simple_string_push(&current_fn_lines, simple_str_concat(padding, code));
             }
             continue;
         }
@@ -1334,11 +1334,11 @@ const char* generate_c_code(const char* source_text) {
         }
         if (in_func) {
             long long fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines);
-            /* func_defs.push(fn_code) */;
-            current_fn_lines = simple_new_int_array();
+            simple_string_push(&func_defs, fn_code);
+            current_fn_lines = simple_new_string_array();
             in_func = 0;
             types = types_before_fn;
-    //  Module-level statement - check if it's a val/var declaration (-> global)
+    // Module-level statement - check if it's a val/var declaration (-> global)
         }
         long long is_module_val = simple_starts_with(trimmed, "val ");
         long long is_module_var = simple_starts_with(trimmed, "var ");
@@ -1351,26 +1351,26 @@ const char* generate_c_code(const char* source_text) {
                 types = simple_str_concat(types, new_types);
             }
             if (strcmp(code, "") != 0) {
-    //  Convert to global: remove const for val (use static), add static for var
-                long long global_code = code;
+    // Convert to global: remove const for val (use static), add static for var
+                const char* global_code = code;
                 if (simple_starts_with(global_code, "long long ")) {
                     global_code = simple_str_concat("static ", global_code);
                 } else if (simple_starts_with(global_code, "const char* ")) {
-    //  Check if init uses a function call (can't do at global scope)
+    // Check if init uses a function call (can't do at global scope)
                     long long str_eq = simple_index_of(global_code, " = ");
                     if (str_eq >= 0) {
                         const char* str_init = simple_substring(global_code, str_eq + 3, simple_strlen(global_code));
                         long long str_has_call = simple_contains(str_init, "(");
                         if (str_has_call) {
                             const char* str_decl = simple_substring(global_code, 0, str_eq);
-                            /* global_defs.push(r"static " + str_decl + r" = NULL;") */;
+                            simple_string_push(&global_defs, simple_str_concat("static ", simple_str_concat(str_decl, " = NULL;")));
                             const char* str_name = simple_substring(str_decl, 12, simple_strlen(str_decl));
                             long long str_semi = simple_index_of(str_init, ";");
                             const char* str_val = str_init;
                             if (str_semi >= 0) {
                                 str_val = simple_substring(str_init, 0, str_semi);
-                            /* main_body.push(r"    " + str_name + r" = " + str_val + r";") */;
                             }
+                            simple_string_push(&main_body, simple_str_concat("    ", simple_str_concat(str_name, simple_str_concat(" = ", simple_str_concat(str_val, ";")))));
                             continue;
                         }
                     }
@@ -1378,36 +1378,36 @@ const char* generate_c_code(const char* source_text) {
                 } else if (simple_starts_with(global_code, "int ")) {
                     global_code = simple_str_concat("static ", global_code);
                 } else if (simple_starts_with(global_code, "SimpleStringArray ")) {
-    //  Arrays need special init - can't call functions in global init
-    //  Extract name and emit as uninitialized, init in main
+    // Arrays need special init - can't call functions in global init
+    // Extract name and emit as uninitialized, init in main
                     long long arr_eq = simple_index_of(global_code, " = ");
                     if (arr_eq >= 0) {
                         const char* arr_decl = simple_substring(global_code, 0, arr_eq);
-                        /* global_defs.push(r"static " + arr_decl + r";") */;
-    //  Add init to main_body
+                        simple_string_push(&global_defs, simple_str_concat("static ", simple_str_concat(arr_decl, ";")));
+    // Add init to main_body
                         const char* arr_name = simple_substring(arr_decl, 18, simple_strlen(arr_decl));
                         long long arr_semi = simple_index_of(arr_name, ";");
                         const char* clean_name = arr_name;
                         if (arr_semi >= 0) {
                             clean_name = simple_substring(arr_name, 0, arr_semi);
-                        /* main_body.push(r"    " + clean_name + r" = simple_new_string_array();") */;
                         }
+                        simple_string_push(&main_body, simple_str_concat("    ", simple_str_concat(clean_name, " = simple_new_string_array();")));
                         continue;
                     }
                     global_code = simple_str_concat("static ", global_code);
                 } else if (simple_starts_with(global_code, "SimpleIntArray ")) {
-    //  Int arrays need deferred init too
+    // Int arrays need deferred init too
                     long long arr_eq = simple_index_of(global_code, " = ");
                     if (arr_eq >= 0) {
                         const char* arr_decl = simple_substring(global_code, 0, arr_eq);
-                        /* global_defs.push(r"static " + arr_decl + r";") */;
+                        simple_string_push(&global_defs, simple_str_concat("static ", simple_str_concat(arr_decl, ";")));
                         const char* arr_name = simple_substring(arr_decl, 15, simple_strlen(arr_decl));
                         long long arr_semi = simple_index_of(arr_name, ";");
                         const char* clean_name = arr_name;
                         if (arr_semi >= 0) {
                             clean_name = simple_substring(arr_name, 0, arr_semi);
-                        /* main_body.push(r"    " + clean_name + r" = simple_new_int_array();") */;
                         }
+                        simple_string_push(&main_body, simple_str_concat("    ", simple_str_concat(clean_name, " = simple_new_int_array();")));
                         continue;
                     }
                     global_code = simple_str_concat("static ", global_code);
@@ -1415,14 +1415,14 @@ const char* generate_c_code(const char* source_text) {
                     long long arr_eq = simple_index_of(global_code, " = ");
                     if (arr_eq >= 0) {
                         const char* arr_decl = simple_substring(global_code, 0, arr_eq);
-                        /* global_defs.push(r"static " + arr_decl + r";") */;
+                        simple_string_push(&global_defs, simple_str_concat("static ", simple_str_concat(arr_decl, ";")));
                         const char* arr_name = simple_substring(arr_decl, 23, simple_strlen(arr_decl));
                         long long arr_semi = simple_index_of(arr_name, ";");
                         const char* clean_name = arr_name;
                         if (arr_semi >= 0) {
                             clean_name = simple_substring(arr_name, 0, arr_semi);
-                        /* main_body.push(r"    " + clean_name + r" = simple_new_string_array_array();") */;
                         }
+                        simple_string_push(&main_body, simple_str_concat("    ", simple_str_concat(clean_name, " = simple_new_string_array_array();")));
                         continue;
                     }
                     global_code = simple_str_concat("static ", global_code);
@@ -1430,30 +1430,30 @@ const char* generate_c_code(const char* source_text) {
                     long long arr_eq = simple_index_of(global_code, " = ");
                     if (arr_eq >= 0) {
                         const char* arr_decl = simple_substring(global_code, 0, arr_eq);
-                        /* global_defs.push(r"static " + arr_decl + r";") */;
+                        simple_string_push(&global_defs, simple_str_concat("static ", simple_str_concat(arr_decl, ";")));
                         const char* arr_name = simple_substring(arr_decl, 20, simple_strlen(arr_decl));
                         long long arr_semi = simple_index_of(arr_name, ";");
                         const char* clean_name = arr_name;
                         if (arr_semi >= 0) {
                             clean_name = simple_substring(arr_name, 0, arr_semi);
-                        /* main_body.push(r"    " + clean_name + r" = simple_new_int_array_array();") */;
                         }
+                        simple_string_push(&main_body, simple_str_concat("    ", simple_str_concat(clean_name, " = simple_new_int_array_array();")));
                         continue;
                     }
                     global_code = simple_str_concat("static ", global_code);
                 } else if (simple_starts_with(global_code, "SimpleStructArray ")) {
-    //  Struct arrays need deferred init
+    // Struct arrays need deferred init
                     long long sarr_eq = simple_index_of(global_code, " = ");
                     if (sarr_eq >= 0) {
                         const char* sarr_decl = simple_substring(global_code, 0, sarr_eq);
-                        /* global_defs.push(r"static " + sarr_decl + r";") */;
+                        simple_string_push(&global_defs, simple_str_concat("static ", simple_str_concat(sarr_decl, ";")));
                         const char* sarr_name = simple_substring(sarr_decl, 18, simple_strlen(sarr_decl));
                         long long sarr_semi = simple_index_of(sarr_name, ";");
                         const char* clean_sarr = sarr_name;
                         if (sarr_semi >= 0) {
                             clean_sarr = simple_substring(sarr_name, 0, sarr_semi);
-                        /* main_body.push(r"    " + clean_sarr + r" = simple_new_struct_array();") */;
                         }
+                        simple_string_push(&main_body, simple_str_concat("    ", simple_str_concat(clean_sarr, " = simple_new_struct_array();")));
                         continue;
                     }
                     global_code = simple_str_concat("static ", global_code);
@@ -1461,19 +1461,19 @@ const char* generate_c_code(const char* source_text) {
                     long long dict_eq = simple_index_of(global_code, " = ");
                     if (dict_eq >= 0) {
                         const char* dict_decl = simple_substring(global_code, 0, dict_eq);
-                        /* global_defs.push(r"static " + dict_decl + r" = NULL;") */;
+                        simple_string_push(&global_defs, simple_str_concat("static ", simple_str_concat(dict_decl, " = NULL;")));
                         long long dict_name_start = simple_index_of(dict_decl, "* ");
                         if (dict_name_start >= 0) {
                             const char* dict_name = simple_substring(dict_decl, dict_name_start + 2, simple_strlen(dict_decl));
-                            /* main_body.push(r"    " + dict_name + r" = simple_dict_new();") */;
+                            simple_string_push(&main_body, simple_str_concat("    ", simple_str_concat(dict_name, " = simple_dict_new();")));
                         }
                         continue;
                     }
                     global_code = simple_str_concat("static ", global_code);
                 } else {
                     global_code = simple_str_concat("static ", global_code);
-                /* global_defs.push(global_code) */;
                 }
+                simple_string_push(&global_defs, global_code);
             }
         } else {
             long long raw_result = translate_statement(trimmed, types);
@@ -1486,67 +1486,66 @@ const char* generate_c_code(const char* source_text) {
             if (strcmp(code, "") != 0) {
                 long long mod_indent = get_indent_level(line);
                 const char* mod_padding = "    ";
-                for (long long mpi = 0; mpi <  mod_indent; mpi++) {
+                for (long long mpi = 0; mpi < mod_indent; mpi++) {
                     mod_padding = simple_str_concat(mod_padding, "    ");
-                /* main_body.push(mod_padding + code) */;
-    //  Flush pending impl method
                 }
+                simple_string_push(&main_body, simple_str_concat(mod_padding, code));
+    // Flush pending impl method
             }
         }
     }
     if (in_impl && in_impl_method) {
         const char* method_code = build_function(simple_str_concat(current_impl_class, simple_str_concat("__", impl_method_name)), impl_method_sig, impl_method_lines);
-        /* func_defs.push(method_code) */;
+        simple_string_push(&func_defs, method_code);
     }
     if (in_func) {
         long long fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines);
-        /* func_defs.push(fn_code) */;
+        simple_string_push(&func_defs, fn_code);
     }
     main_body = close_blocks(main_body);
-    //  Build final C code
+    // Build final C code
     const char* c_code = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n";
     c_code = simple_str_concat(c_code, "#include <stdint.h>\n");
     c_code = simple_str_concat(c_code, "#ifdef _MSC_VER\n#define strdup _strdup\n#endif\n");
-    //  Add C runtime helpers
-    c_code = simple_str_concat(c_code, );
-    //  Add enum definitions first (structs may reference enum types)
+    // Add C runtime helpers
+    c_code = simple_str_concat(c_code, generate_c_runtime());
+    // Add enum definitions first (structs may reference enum types)
     if (enum_defs.len > 0) {
         c_code = simple_str_concat(c_code, "\n// --- Enum Definitions ---\n");
-        for (long long _idx_edef = 0; _idx_edef < enum_defs_len; _idx_edef++) { long long edef = enum_defs[_idx_edef];
+        for (long long _idx_edef = 0; _idx_edef < enum_defs.len; _idx_edef++) { const char* edef = enum_defs.items[_idx_edef];
             c_code = simple_str_concat(c_code, simple_str_concat(edef, "\n\n"));
-    //  Add struct definitions
+    // Add struct definitions
         }
     }
     if (struct_defs.len > 0) {
         c_code = simple_str_concat(c_code, "\n// --- Struct Definitions ---\n");
-        for (long long _idx_sdef = 0; _idx_sdef < struct_defs_len; _idx_sdef++) { long long sdef = struct_defs[_idx_sdef];
+        for (long long _idx_sdef = 0; _idx_sdef < struct_defs.len; _idx_sdef++) { const char* sdef = struct_defs.items[_idx_sdef];
             c_code = simple_str_concat(c_code, simple_str_concat(sdef, "\n\n"));
-    //  Add global variable definitions
+    // Add global variable definitions
         }
     }
     if (global_defs.len > 0) {
         c_code = simple_str_concat(c_code, "\n// --- Global Variables ---\n");
-        for (long long _idx_gdef = 0; _idx_gdef < global_defs_len; _idx_gdef++) { long long gdef = global_defs[_idx_gdef];
+        for (long long _idx_gdef = 0; _idx_gdef < global_defs.len; _idx_gdef++) { const char* gdef = global_defs.items[_idx_gdef];
             c_code = simple_str_concat(c_code, simple_str_concat(gdef, "\n"));
         }
         c_code = simple_str_concat(c_code, "\n");
-    //  Add forward declarations
+    // Add forward declarations
     }
     if (forward_decls.len > 0) {
         c_code = simple_str_concat(c_code, "\n// --- Forward Declarations ---\n");
-        for (long long _idx_fwd = 0; _idx_fwd < forward_decls_len; _idx_fwd++) { long long fwd = forward_decls[_idx_fwd];
+        for (long long _idx_fwd = 0; _idx_fwd < forward_decls.len; _idx_fwd++) { const char* fwd = forward_decls.items[_idx_fwd];
             c_code = simple_str_concat(c_code, simple_str_concat(fwd, "\n"));
         }
         c_code = simple_str_concat(c_code, "\n");
-    //  Add function definitions
+    // Add function definitions
     }
-    for (long long _idx_func = 0; _idx_func < func_defs_len; _idx_func++) { long long func = func_defs[_idx_func];
+    for (long long _idx_func = 0; _idx_func < func_defs.len; _idx_func++) { const char* func = func_defs.items[_idx_func];
         c_code = simple_str_concat(c_code, simple_str_concat(func, "\n\n"));
-    //  Add main
+    // Add main
     }
-    c_code = simple_str_concat(c_code, simple_str_concat("int main(void) {", "\n"));
-    }
-    for (long long _idx_body_line = 0; _idx_body_line < main_body_len; _idx_body_line++) { long long body_line = main_body[_idx_body_line];
+    c_code = simple_str_concat(c_code, simple_str_concat("int main(void) \{", "\n"));
+    for (long long _idx_body_line = 0; _idx_body_line < main_body.len; _idx_body_line++) { const char* body_line = main_body.items[_idx_body_line];
         c_code = simple_str_concat(c_code, simple_str_concat(body_line, "\n"));
     }
     c_code = simple_str_concat(c_code, "    return 0;\n}\n");
@@ -1556,3 +1555,4 @@ const char* generate_c_code(const char* source_text) {
 int main(void) {
     return 0;
 }
+
