@@ -796,6 +796,24 @@ char* spl_f64_to_str(double f) {
     return strdup(buf);
 }
 
+/* ===== Bit-cast Helpers (f64 <-> i64 for DynLoader) ===== */
+
+int64_t spl_f64_to_bits(double f) {
+    int64_t bits;
+    memcpy(&bits, &f, sizeof(double));
+    return bits;
+}
+
+double spl_bits_to_f64(int64_t bits) {
+    double f;
+    memcpy(&f, &bits, sizeof(int64_t));
+    return f;
+}
+
+int64_t spl_str_ptr(const char* s) {
+    return (int64_t)(uintptr_t)s;
+}
+
 char* spl_sprintf(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);

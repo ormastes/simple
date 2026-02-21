@@ -211,6 +211,13 @@ void     spl_print_f64(double f);
 
 char*    spl_i64_to_str(int64_t n);
 char*    spl_f64_to_str(double f);
+
+/* ===== Bit-cast Helpers (f64 <-> i64 for DynLoader) ===== */
+
+int64_t  spl_f64_to_bits(double f);
+double   spl_bits_to_f64(int64_t bits);
+int64_t  spl_str_ptr(const char* s);           /* cast text pointer to i64 */
+
 char*    spl_sprintf(const char* fmt, ...);
 
 /* ===== Process ===== */

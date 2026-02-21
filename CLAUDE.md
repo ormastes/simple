@@ -133,7 +133,7 @@ bin/simple bug-gen                  # Generate bug report
 # C Backend Bootstrap (CMake + Ninja)
 bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
 cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
-ninja -C build
+ninja -C build -j7
 mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
 
 # LLM Integration Testing (requires claude CLI + auth, ~$1-2 per run)

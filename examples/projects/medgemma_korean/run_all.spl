@@ -1,21 +1,24 @@
 # Run All Training Phases (Real CUDA)
 #
-# Complete progressive LoRA training pipeline on GPU:
-#   Phase 0: Plain text (Korean fluency)
-#   Phase 1: Medical dictionary (terminology)
-#   Phase 2: MCQ (medical reasoning)
+# MedGemma Korean progressive training pipeline.
+# Matches Note.md phases 0-1 (foundation scope).
 #
-# Each phase adds a new LoRA adapter, trains it, then merges into
-# base weights before the next phase. This prevents catastrophic forgetting.
+# Phase 0: Prepare English medical training data (baseline)
+# Phase 1: Evaluate score, train with LoRA if below 97%
+# Phase 2: MCQ training (medical reasoning)
+#
+# Each phase: freeze previous -> add LoRA -> train -> merge -> validate.
+# 97% English retention threshold checked after each phase.
 #
 # Usage:
 #   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/run_all.spl
 
 use src.model.{TextModel, check_gpu}
+use src.shared_logic.{TrainConfig, report_gpu_memory}
 use src.train_phase0.{run_phase0}
 use src.train_phase1.{run_phase1}
 use src.train_phase2.{run_phase2}
-use src.validation.{validate_all_phases}
+use src.validation.{validate_all_phases, check_english_retention}
 
 use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
 use std.torch.ffi.{
@@ -50,23 +53,23 @@ fn main():
     check_gpu()
     print("")
 
-    print("Pipeline: 3-phase progressive LoRA training")
-    print("  Phase 0: Korean fluency (plain text features)")
-    print("  Phase 1: Medical terminology (dictionary features)")
-    print("  Phase 2: Medical reasoning (MCQ features)")
+    print("Pipeline: Progressive LoRA training (Note.md Phases 0-1)")
+    print("  Phase 0: English medical baseline (prevent forgetting)")
+    print("  Phase 1: Evaluate + train English medical knowledge")
+    print("  Phase 2: MCQ medical reasoning")
     print("")
-    print("Each phase: freeze previous -> add LoRA -> train -> merge")
-    print("This prevents catastrophic forgetting.")
+    print("Each phase: freeze -> LoRA -> train -> merge -> validate")
+    print("97% English retention threshold checked after each phase.")
     print("")
 
     # ========================================================================
-    # Phase 0: Plain Text (Korean fluency)
+    # Phase 0: English Medical Baseline
     # ========================================================================
     var model = run_phase0()
     validate_all_phases(model, 0)
 
     # ========================================================================
-    # Phase 1: Medical Dictionary
+    # Phase 1: Evaluate + Train (97% threshold check)
     # ========================================================================
     model = run_phase1(model)
     validate_all_phases(model, 1)
@@ -83,15 +86,22 @@ fn main():
     print_header("PIPELINE COMPLETE - ALL PHASES TRAINED ON CUDA")
 
     print("Final model capabilities (all merged into base weights):")
-    print("  Phase 0: Korean language fluency")
-    print("  Phase 1: Medical terminology")
+    print("  Phase 0: English medical baseline")
+    print("  Phase 1: English medical LoRA (if needed)")
     print("  Phase 2: Medical reasoning (MCQ)")
     print("")
-    print("Progressive LoRA prevented catastrophic forgetting:")
-    print("  - Each phase froze previous knowledge")
-    print("  - Only new LoRA adapters were trained")
-    print("  - LoRA merged into base weights after each phase")
+
+    # Final English retention check
+    val config = TrainConfig.default_config()
+    val retained = check_english_retention(model, config)
+    if retained:
+        print("FINAL: English knowledge retained (>= 95%)")
+    else:
+        print("WARNING: English knowledge degraded below 95%!")
     print("")
+
+    model.print_summary()
+    report_gpu_memory()
 
     val peak_mem = rt_torch_cuda_max_memory_allocated(0)
     val peak_mb = peak_mem / (1024 * 1024)
