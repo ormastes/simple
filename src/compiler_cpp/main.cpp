@@ -115,8 +115,8 @@ static int dir_create(const char* p, int recursive) { (void)p;(void)recursive; r
 static const char* cwd(void) { return ""; }
 static const char* env_get(const char* k) { (void)k; return ""; }
 static void env_set(const char* k, const char* v) { (void)k; (void)v; }
-static long long shell() { return 0; }
-static long long file_size_raw(const char* p) { (void)p; return 0; }
+static long long shell(void) { return 0; }
+static long long file_size_raw(void) { return 0; }
 static int cli_file_exists(const char* p) { (void)p; return 0; }
 static long long cli_read_file(SimpleStringArray a) { (void)a; return 0; }
 static SimpleStringArray cli_get_args(void) { return simple_new_string_array(); }
@@ -166,15 +166,14 @@ static long long run_check_dbs(SimpleStringArray a) { (void)a; return 0; }
 static long long run_fix_dbs(SimpleStringArray a) { (void)a; return 0; }
 static long long run_doc_coverage(SimpleStringArray a) { (void)a; return 0; }
 static long long run_stats(SimpleStringArray a) { (void)a; return 0; }
-static long long run_leak_check() { return 0; }
+static long long run_leak_check(void) { return 0; }
 static void print_cli_help(void) { }
 static long long handle_init(SimpleStringArray a) { (void)a; return 0; }
 static const char* read_sdn_run_config(void) { return ""; }
-static long long sdn_line_indent() { return 0; }
+static long long sdn_line_indent(void) { return 0; }
 static const char* strip_sdn_quotes(void) { return ""; }
 static int check_self_contained(void) { return 0; }
 static void simple_error(const char* cat, const char* msg) { fprintf(stderr, "%s: %s\n", cat, msg); }
-static void error(const char* cat, const char* msg) { simple_error(cat, msg); }
 static int jit_native_available(void) { return 0; }
 SimpleStringArray get_cli_args(void);
 const char* get_version(void);

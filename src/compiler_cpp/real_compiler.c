@@ -1053,7 +1053,6 @@ static int expr_is_string(const char* expr) {
     // Known string-returning functions/patterns
     if (contains(expr, "env_get(")) return 1;
     if (contains(expr, "get_version(")) return 1;
-    if (contains(expr, "get_cli_args(")) return 1;
     if (contains(expr, "read_sdn_run_config(")) return 1;
     if (contains(expr, "simple_str_concat(")) return 1;
     if (contains(expr, "simple_substring(")) return 1;
@@ -1346,6 +1345,13 @@ const char* translate_expr(const char* expr) {
         long long bracket = find_str(e, "[");
         if (bracket > 0 && ends_with(e, "]")) {
             const char* obj = trim(substr(e, 0, bracket));
+            // Skip subscript lowering for compound expressions like "a + b[i]".
+            if (contains(obj, " + ") || contains(obj, " - ") || contains(obj, " * ") ||
+                contains(obj, " / ") || contains(obj, " && ") || contains(obj, " || ") ||
+                contains(obj, "==") || contains(obj, "!=") || contains(obj, " < ") ||
+                contains(obj, " > ") || contains(obj, " <= ") || contains(obj, " >= ")) {
+                goto skip_subscript_lowering;
+            }
             const char* rest_b = substr(e, bracket + 1, str_len(e) - 1);
             // Slice: arr[N:]
             long long colon = find_str(rest_b, ":");
@@ -1370,6 +1376,7 @@ const char* translate_expr(const char* expr) {
             return simple_str_concat(tobj, simple_str_concat(".items[", simple_str_concat(translate_expr(idx), "]")));
         }
     }
+skip_subscript_lowering:
 
     // String concatenation: a + b (where one side is string)
     {
@@ -1377,8 +1384,10 @@ const char* translate_expr(const char* expr) {
         if (plus_pos >= 0) {
             const char* left = trim(substr(e, 0, plus_pos));
             const char* right = trim(substr_from(e, plus_pos + 3));
-            int l_is_str = starts_with(left, "\"");
-            int r_is_str = starts_with(right, "\"");
+            int l_is_str = starts_with(left, "\"") || expr_is_string(left) ||
+                           contains(left, ".items[") || contains(left, "parts[");
+            int r_is_str = starts_with(right, "\"") || expr_is_string(right) ||
+                           contains(right, ".items[") || contains(right, "parts[");
             if (l_is_str || r_is_str) {
                 return simple_str_concat("simple_str_concat(", simple_str_concat(
                     translate_expr(left), simple_str_concat(", ", simple_str_concat(translate_expr(right), ")"))));
@@ -1501,6 +1510,11 @@ const char* translate_var_decl(const char* line) {
         raw_name = trim(substr(raw_name, 0, name_colon));
     }
     const char* name = mangle_name(raw_name);
+    if (strcmp(raw_name, "home") == 0) {
+        name = "home_value";
+    } else if (strcmp(raw_name, "cwd") == 0) {
+        name = "cwd_value";
+    }
     const char* value = trim(substr_from(rest, eq + 3));
     const char* c_val = translate_expr(value);
     const char* qualifier = is_val ? "const " : "";
@@ -1512,6 +1526,12 @@ const char* translate_var_decl(const char* line) {
     if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0) {
         return simple_str_concat("int ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
     }
+    if (contains(value, " == ") || contains(value, " != ") ||
+        contains(value, " <= ") || contains(value, " >= ") ||
+        contains(value, " < ") || contains(value, " > ") ||
+        starts_with(value, "not ") || contains(value, " and ") || contains(value, " or ")) {
+        return simple_str_concat("int ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
+    }
     if (strcmp(value, "nil") == 0) {
         return simple_str_concat("const char* ", simple_str_concat(name, " = NULL;"));
     }
@@ -1521,9 +1541,11 @@ const char* translate_var_decl(const char* line) {
     // Function calls that return strings
     if (contains(value, "env_get(") || contains(value, "get_version(") ||
         contains(value, "get_file_stem(") ||
+        contains(value, "cwd(") ||
         contains(value, "read_sdn_run_config(") || contains(value, "get_cli_args(") ||
         contains(value, "cli_get_args(") || contains(value, "rt_cli_get_args(") ||
         contains(value, "sys_get_args(") || contains(value, "get_args(") ||
+        contains(value, "home(") ||
         contains(value, "context_generate(") || contains(value, "context_stats(")) {
         // CLI arg getters return array
         if (contains(value, "get_cli_args(") || contains(value, "cli_get_args(") ||
@@ -1533,7 +1555,7 @@ const char* translate_var_decl(const char* line) {
         }
         return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
     }
-    if (contains(value, "parse_dep") || contains(value, "dir_list(")) {
+    if (contains(value, "parse_dep") || contains(value, "dir_list(") || contains(value, "dir_walk(")) {
         return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
     }
     // Name-based string heuristic for common text-like locals
@@ -1541,7 +1563,8 @@ const char* translate_var_decl(const char* line) {
         contains(name, "name") || contains(name, "content") || contains(name, "output") ||
         contains(name, "manifest") || contains(name, "spec") || contains(name, "branch") ||
         contains(name, "tag") || contains(name, "constraint") || contains(name, "section") ||
-        contains(name, "url") || contains(name, "text") || contains(name, "trim")) {
+        contains(name, "url") || contains(name, "text") || contains(name, "trim") ||
+        contains(name, "prefix") || contains(name, "display") || contains(name, "filename")) {
         return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
     }
     // Struct construction: Name(field: val, ...)
@@ -1779,6 +1802,11 @@ const char* generate_c(const char* source) {
                     SimpleStringArray funcs = simple_split(func_list, ",");
                     for (long long fi = 0; fi < funcs.len; fi++) {
                         const char* fn = trim(funcs.items[fi]);
+                        long long as_pos = find_str(fn, " as ");
+                        if (as_pos >= 0) {
+                            // In `use x (a as b)`, the local symbol is `b`.
+                            fn = trim(substr_from(fn, as_pos + 4));
+                        }
                         if (str_len(fn) > 0) {
                             simple_string_push(&extern_funcs, fn);
                         }
@@ -2057,7 +2085,9 @@ const char* generate_c(const char* source) {
             c_line = simple_str_concat("while (", simple_str_concat(translate_condition(cond), ") {"));
             block_depth++;
         } else if (starts_with(trimmed, "for ") && ends_with(trimmed, ":")) {
-            // for x in arr: → for (long long _i_x = 0; _i_x < arr.len; _i_x++) { const char* x = arr.items[_i_x];
+            // for x in arr:
+            // - array-like: iterate arr.len/arr.items
+            // - string-like: iterate simple_strlen(arr)/simple_char_at
             const char* for_body = trim(substr(trimmed, 4, str_len(trimmed) - 1));
             long long in_pos = find_str(for_body, " in ");
             if (in_pos >= 0) {
@@ -2065,13 +2095,46 @@ const char* generate_c(const char* source) {
                 const char* arr_expr = trim(substr_from(for_body, in_pos + 4));
                 const char* tarr = translate_expr(arr_expr);
                 const char* iter_var = simple_str_concat("_i_", var_name);
-                c_line = simple_str_concat("for (long long ", simple_str_concat(iter_var,
-                    simple_str_concat(" = 0; ", simple_str_concat(iter_var,
-                    simple_str_concat(" < ", simple_str_concat(tarr,
-                    simple_str_concat(".len; ", simple_str_concat(iter_var,
-                    simple_str_concat("++) { const char* ", simple_str_concat(var_name,
-                    simple_str_concat(" = ", simple_str_concat(tarr,
-                    simple_str_concat(".items[", simple_str_concat(iter_var, "];"))))))))))))));
+                long long arr_like = 0;
+                if (contains(arr_expr, ".split(") || contains(arr_expr, "dir_list(") || contains(arr_expr, "dir_walk(") ||
+                    contains(arr_expr, "extract_signatures(") ||
+                    contains(arr_expr, "get_cli_args(") || contains(arr_expr, "cli_get_args(") || contains(arr_expr, "rt_cli_get_args(") ||
+                    contains(arr_expr, "args") || contains(arr_expr, "lines") || contains(arr_expr, "parts") ||
+                    contains(arr_expr, "files") || contains(arr_expr, "items") || contains(arr_expr, "entries") ||
+                    contains(arr_expr, "results") || contains(arr_expr, "modules") || contains(arr_expr, "tokens")) {
+                    arr_like = 1;
+                }
+                if (arr_like) {
+                    const char* l1 = simple_str_concat("for (long long ", iter_var);
+                    const char* l2 = simple_str_concat(l1, " = 0; ");
+                    const char* l3 = simple_str_concat(l2, iter_var);
+                    const char* l4 = simple_str_concat(l3, " < ");
+                    const char* l5 = simple_str_concat(l4, tarr);
+                    const char* l6 = simple_str_concat(l5, ".len; ");
+                    const char* l7 = simple_str_concat(l6, iter_var);
+                    const char* l8 = simple_str_concat(l7, "++) { const char* ");
+                    const char* l9 = simple_str_concat(l8, var_name);
+                    const char* l10 = simple_str_concat(l9, " = ");
+                    const char* l11 = simple_str_concat(l10, tarr);
+                    const char* l12 = simple_str_concat(l11, ".items[");
+                    const char* l13 = simple_str_concat(l12, iter_var);
+                    c_line = simple_str_concat(l13, "];");
+                } else {
+                    const char* l1 = simple_str_concat("for (long long ", iter_var);
+                    const char* l2 = simple_str_concat(l1, " = 0; ");
+                    const char* l3 = simple_str_concat(l2, iter_var);
+                    const char* l4 = simple_str_concat(l3, " < simple_strlen(");
+                    const char* l5 = simple_str_concat(l4, tarr);
+                    const char* l6 = simple_str_concat(l5, "); ");
+                    const char* l7 = simple_str_concat(l6, iter_var);
+                    const char* l8 = simple_str_concat(l7, "++) { const char* ");
+                    const char* l9 = simple_str_concat(l8, var_name);
+                    const char* l10 = simple_str_concat(l9, " = simple_char_at(");
+                    const char* l11 = simple_str_concat(l10, tarr);
+                    const char* l12 = simple_str_concat(l11, ", ");
+                    const char* l13 = simple_str_concat(l12, iter_var);
+                    c_line = simple_str_concat(l13, ");");
+                }
             } else {
                 c_line = "/* TODO: for loop (no 'in') */";
             }
@@ -2235,7 +2298,10 @@ const char* generate_c(const char* source) {
                 } else if (strcmp(fn_orig, "env_set") == 0) {
                     out = simple_str_concat(out, "static void env_set(const char* k, const char* v) { (void)k; (void)v; }\n");
                 } else if (strcmp(fn_orig, "error") == 0) {
-                    out = simple_str_concat(out, "static void simple_error(const char* cat, const char* msg) { fprintf(stderr, \"%s: %s\\n\", cat, msg); }\n");
+                    out = simple_str_concat(out, simple_str_concat("static void ", simple_str_concat(fn, "(const char* cat, const char* msg) { fprintf(stderr, \"%s: %s\\n\", cat, msg); }\n")));
+                    if (strcmp(fn, "simple_error") == 0) {
+                        out = simple_str_concat(out, "static void error(const char* cat, const char* msg) { simple_error(cat, msg); }\n");
+                    }
                 } else if (strcmp(fn_orig, "get_cli_args") == 0 ||
                            strcmp(fn_orig, "cli_get_args") == 0 ||
                            strcmp(fn_orig, "rt_cli_get_args") == 0 ||
@@ -2270,6 +2336,16 @@ const char* generate_c(const char* source) {
                     out = simple_str_concat(out, "static int dir_create(const char* p, int recursive) { (void)p;(void)recursive; return 1; }\n");
                 } else if (strcmp(fn_orig, "dir_list") == 0) {
                     out = simple_str_concat(out, "static SimpleStringArray dir_list(const char* p) { (void)p; return simple_new_string_array(); }\n");
+                } else if (strcmp(fn_orig, "dir_walk") == 0) {
+                    out = simple_str_concat(out, "static SimpleStringArray dir_walk(const char* p) { (void)p; return simple_new_string_array(); }\n");
+                } else if (strcmp(fn_orig, "is_dir") == 0) {
+                    out = simple_str_concat(out, "static int is_dir(const char* p) { (void)p; return 0; }\n");
+                } else if (strcmp(fn_orig, "dir_remove_all") == 0) {
+                    out = simple_str_concat(out, "static long long dir_remove_all(const char* p) { (void)p; return 0; }\n");
+                } else if (strcmp(fn_orig, "file_size") == 0 || strcmp(fn_orig, "file_size_raw") == 0) {
+                    out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "(const char* p) { (void)p; return 0; }\n")));
+                } else if (strcmp(fn_orig, "home") == 0) {
+                    out = simple_str_concat(out, simple_str_concat("static const char* ", simple_str_concat(fn, "(void) { return \"\"; }\n")));
                 } else if (strcmp(fn_orig, "cli_run_tests") == 0 || strcmp(fn_orig, "cli_run_verify") == 0 ||
                            strcmp(fn_orig, "cli_handle_run") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "(SimpleStringArray a, int g, int o) { (void)a;(void)g;(void)o; return 0; }\n")));
@@ -2293,8 +2369,8 @@ const char* generate_c(const char* source) {
                 } else if (strcmp(fn_orig, "exit") == 0) {
                     out = simple_str_concat(out, "static void simple_exit(long long code) { _exit((int)code); }\n");
                 } else {
-                    // Generic stub - no args
-                    out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "(void) { return 0; }\n")));
+                    // Generic stub - K&R style prototype to accept unknown arity in C.
+                    out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "() { return 0; }\n")));
                 }
             }
         }
