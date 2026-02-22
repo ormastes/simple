@@ -8,15 +8,17 @@ Design document tracking which modules exist in both `gc_async_mut/` and `nogc_s
 
 ## Module Parity Table
 
-| Module | `gc_async_mut/` | `nogc_sync_mut/` | `common/` shared types |
-|--------|:--------------:|:----------------:|:----------------------:|
-| `torch` | ✅ | ✅ | `common/torch/interface.spl` — `TorchBackend`, `LayerForward`, `HasParameters` |
-| `cuda` | ✅ | ✅ | — |
-| `gpu` | ✅ | ✅ | `common/gpu/device.spl` — `GpuBackend`, `Gpu`, constructors |
-| `gpu_runtime` | ✅ | ✅ | — |
-| `pure` | ✅ | ✅ | — |
-| `torch/dyn_ffi` | ✅ | ✅ | — (identical, stateless DynLoader wrappers) |
-| `gpu_driver` | ✅ (`gpu.spl`) | ✅ (`gpu_driver/`) | — (local extern fn replaces import) |
+| Module | `gc_async_mut/` | `nogc_sync_mut/` | `nogc_async_mut/` | `common/` shared types |
+|--------|:--------------:|:----------------:|:-----------------:|:----------------------:|
+| `torch` | ✅ | ✅ | ✅ | `common/torch/interface.spl` — `TorchBackend`, `LayerForward`, `HasParameters` |
+| `cuda` | ✅ | ✅ | ✅ | — |
+| `gpu` | ✅ | ✅ | ✅ | `common/gpu/device.spl` — `GpuBackend`, `Gpu`, constructors |
+| `gpu_runtime` | ✅ | ✅ | — | — |
+| `pure` (ML algorithms) | ✅ | ✅ | ✅ | — (tensor, autograd, nn, training, data — no FFI handles) |
+| `torch/dyn_ffi` | ✅ | ✅ | ✅ | — (identical, stateless DynLoader wrappers) |
+| `gpu_driver` | ✅ (`gpu.spl`) | ✅ (`gpu_driver/`) | — | — (local extern fn replaces import) |
+| `ml` (async-specific) | — | — | ✅ | — (async training loops + data pipeline utils) |
+| math blocks `m{}` | ✅ | ✅ | ✅ | — (language feature, available in all modes) |
 
 ### Modules with NoGC copies (originals retained in `gc_async_mut/`)
 
@@ -86,6 +88,10 @@ When migrating user code from GC to NoGC, apply these import substitutions:
 | `use std.gc_async_mut.pure.*` | `use std.nogc_sync_mut.pure.*` |
 | `use std.gc_async_mut.torch.dyn_ffi.*` | `use std.nogc_sync_mut.torch.dyn_ffi.*` |
 | `use std.gc_async_mut.gpu.*` | `use std.nogc_sync_mut.gpu_driver.*` |
+| `use std.nogc_sync_mut.torch.*` | `use std.nogc_async_mut.torch.*` |
+| `use std.nogc_sync_mut.cuda.*` | `use std.nogc_async_mut.cuda.*` |
+| `use std.nogc_sync_mut.gpu.*` | `use std.nogc_async_mut.gpu.*` |
+| `use std.nogc_sync_mut.pure.*` | `use std.nogc_async_mut.pure.*` |
 
 **Shared types** (no import change needed):
 ```simple
@@ -152,6 +158,45 @@ Pure module contains only math/ML algorithms with no FFI handles:
 | `evaluator_broadcast.spl` | `std.gc_async_mut.pure.evaluator` | `std.nogc_sync_mut.pure.evaluator` |
 | `nn_layers.spl` | `std.gc_async_mut.pure.nn` | `std.nogc_sync_mut.pure.nn` |
 | `parser_expr.spl` | `std.gc_async_mut.pure.parser` | `std.nogc_sync_mut.pure.parser` |
+
+---
+
+### nogc_async_mut ML Modules (new, 2026-02-22)
+
+`nogc_async_mut/` now contains full copies of the ML library:
+
+| Subsystem | Files | Source |
+|-----------|------:|--------|
+| `pure/` | 50 | Copy from `nogc_sync_mut/pure/` with import path fix |
+| `torch/` | 8 | Copy from `nogc_sync_mut/torch/` with import path fix |
+| `gpu/` | 5 | Copy from `nogc_sync_mut/gpu/` with import path fix |
+| `cuda/` | 3 | Copy from `nogc_sync_mut/cuda/` with import path fix |
+| `ml/` | 4 | New async-specific training integration |
+
+The `ml/` module is unique to `nogc_async_mut/` and provides:
+- `async_training.spl` — `train_epoch()`, `evaluate_model()`, `train_loop()`
+- `data_pipeline.spl` — `prefetch_batches()`, `shuffle_indices()`
+
+---
+
+## Math Block m{} for ML
+
+`m{}` is a language-level feature — available in **all** library modes (`gc_async_mut`, `nogc_sync_mut`, `nogc_async_mut`). No import required.
+
+```simple
+# Power operator inside m{} uses ^ (outside uses **)
+val loss = m{ 0.5 * (pred - target)^2 }
+
+# Broadcast operators for vectorized math
+val scaled = m{ weights .* inputs }    # element-wise multiply
+val dot    = m{ a @ b }               # matrix multiply
+val t      = m{ matrix' }             # transpose
+
+# Implicit multiplication
+val norm = m{ 2*x^2 + 3x + 1 }       # 3x is 3 * x
+```
+
+All `m{}` expressions produce normal values — they compose with any ML code in any library mode.
 
 ---
 
@@ -228,6 +273,13 @@ find src/lib/nogc_sync_mut/pure/ -name '*.spl' | wc -l          # 50
 find src/lib/nogc_sync_mut/torch/ -name '*.spl' | wc -l         # 8 (was 7, +dyn_ffi.spl)
 find src/lib/nogc_sync_mut/gpu_driver/ -name '*.spl' | wc -l    # 2
 find src/lib/common/gpu/ -name '*.spl' | wc -l                  # 2
+
+# nogc_async_mut file counts
+find src/lib/nogc_async_mut/pure/ -name '*.spl' | wc -l     # 50
+find src/lib/nogc_async_mut/torch/ -name '*.spl' | wc -l    # 8
+find src/lib/nogc_async_mut/gpu/ -name '*.spl' | wc -l      # 5
+find src/lib/nogc_async_mut/cuda/ -name '*.spl' | wc -l     # 3
+find src/lib/nogc_async_mut/ml/ -name '*.spl' | wc -l       # 4
 
 # GC pattern SSpec tests
 find test/unit/lib/gc_async_mut/ -name 'gc_*_spec.spl' | wc -l  # 6

@@ -14,7 +14,7 @@
 # 2. SIMPLE_LIB environment variable path
 # 3. Fallback to src/lib/ (standard library)
 
-use compiler.core.frontend.{core_frontend_parse_isolated}
+use compiler.core.frontend.{core_frontend_parse_isolated, core_frontend_parse_append}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(key: text) -> text
@@ -296,6 +296,11 @@ fn find_numbered_dir_interp(parent: text, segment: text) -> text:
                         return full_path
     ""
 
+# ===== Module Load Depth Guard =====
+
+var _module_load_depth: i64 = 0
+val _MODULE_LOAD_MAX_DEPTH = 16
+
 # ===== Module Loading =====
 
 fn load_module_source(file_path: text) -> text:
@@ -306,10 +311,9 @@ fn load_module_source(file_path: text) -> text:
     source
 
 fn parse_module_ast(source: text, path: text) -> i64:
-    # Parse module into AST
-    # Returns 1 on success, 0 on failure
-    # Uses isolated core frontend path to avoid clobbering caller parse state.
-    if core_frontend_parse_isolated(source, path):
+    # Parse module into AST using APPEND mode to preserve caller's AST.
+    # Returns 1 on success, 0 on failure.
+    if core_frontend_parse_append(source, path):
         return 1
     0
 
@@ -387,17 +391,24 @@ fn load_module(module_name: text, current_file: text) -> i64:
     if module_is_loaded(module_name) == 1:
         return 1
 
+    # Depth guard: prevent runaway transitive loading
+    if _module_load_depth >= _MODULE_LOAD_MAX_DEPTH:
+        return 0
+    _module_load_depth = _module_load_depth + 1
+
     # Resolve module path
     val resolved_path = resolve_module_path(module_name, current_file)
 
     # Load source
     val source = load_module_source(resolved_path)
     if source == "":
+        _module_load_depth = _module_load_depth - 1
         return 0
 
-    # Parse module
+    # Parse module (append mode — preserves caller's AST)
     val parse_ok = parse_module_ast(source, resolved_path)
     if parse_ok == 0:
+        _module_load_depth = _module_load_depth - 1
         return 0
 
     # Begin tracking this module for selective unload
@@ -412,27 +423,32 @@ fn load_module(module_name: text, current_file: text) -> i64:
     # Mark as loaded
     module_mark_loaded(module_name, resolved_path, exports)
 
+    _module_load_depth = _module_load_depth - 1
     1
 
 fn load_module_selective(module_name: text, imported_names: [text], current_file: text) -> i64:
-    # Load module and verify requested names are exported
+    # Load module and register requested names
     # Returns 1 on success, 0 on failure
 
-    # Load the module (full load)
+    # Check if already loaded
+    if module_is_loaded(module_name) == 1:
+        return 1
+
+    # Optimization: if all requested names are already in function table,
+    # skip loading the module entirely (handles built-in functions)
+    var all_available = true
+    for name in imported_names:
+        if func_table_lookup(name) < 0:
+            all_available = false
+            break
+    if all_available and imported_names.len() > 0:
+        module_mark_loaded(module_name, "", imported_names)
+        return 1
+
+    # Full load
     val load_ok = load_module(module_name, current_file)
     if load_ok == 0:
         return 0
-
-    # Find module exports
-    var module_exports: [text] = []
-    var i: i64 = 0
-    for path in loaded_module_paths:
-        if path == module_name:
-            module_exports = loaded_module_exports[i]
-        i = i + 1
-
-    # Verify all requested names are available
-    # (For now, we trust the exports - full validation would require checking function table)
 
     1
 

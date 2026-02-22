@@ -1,7 +1,7 @@
 # Full MCP Server for Simple Language
 #
 # All 34 tools + resources + prompts + completions.
-# Protocol: JSON Lines (one JSON object per line).
+# Protocol: Content-Length framed (std.mcp.protocol).
 #
 # Tool dispatch uses DI-resolved handler adapters (in-process).
 # SessionManager persists across calls for state retention.
@@ -18,8 +18,17 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> text
 extern fn rt_env_get(name: text) -> text
 
-# JSON and response helpers (use std.mcp.helpers for fast load — no app.io.mod chain)
-use std.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_tool_result, make_result_response, make_error_response, min_int}
+# JSON and response helpers
+use std.mcp.helpers.{LB, RB, jp, js, jo1, escape_json, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_result_response, make_error_response}
+use app.mcp.helpers.{make_no_param_tool}
+
+# Protocol I/O
+use std.mcp.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
+
+# SDK server builder + router
+use std.mcp_sdk.server.builder.{ServerConfig, server_config, server_set_instructions, server_set_capabilities, server_add_tool_json}
+use std.mcp_sdk.server.router.{handle_method}
+use std.mcp_sdk.core.types.{McpCapabilities}
 
 # DI runtime
 use compiler.di_runtime.{di_register, di_resolve}
@@ -35,18 +44,12 @@ use app.mcp.handler_adapters.diag_adapter.{create_diag_handler}
 # ============================================================================
 
 val NL = "\n"
-val SERVER_NAME = "simple-mcp"
-val SERVER_VERSION = "3.0.0"
 
 # ============================================================================
 # Module state
 # ============================================================================
 
-# var PROTOCOL = create_protocol_state()  # bypassed: using direct JSON Lines I/O
-var TOOLS_CACHE = ""
-var INIT_CACHE = ""
-var RESOURCES_CACHE = ""
-var PROMPTS_CACHE = ""
+var PROTOCOL = create_protocol_state()
 
 # ============================================================================
 # Entry point
@@ -69,59 +72,110 @@ fn init_di():
     di_register("diag_handler", fn(): create_diag_handler(), true)
 
 # ============================================================================
+# Server config (built once at startup)
+# ============================================================================
+
+fn build_server_config() -> ServerConfig:
+    var cfg = server_config("simple-mcp", "3.0.0")
+    cfg = server_set_instructions(cfg, "Simple language MCP server: 33 tools for debugging, diagnostics, editing, and version control.")
+    cfg = server_set_capabilities(cfg, McpCapabilities(
+        tools: true,
+        tools_list_changed: true,
+        resources: true,
+        resources_subscribe: true,
+        resources_list_changed: true,
+        prompts: true,
+        prompts_list_changed: true,
+        logging: true,
+        completions: true
+    ))
+
+    # Debug tools (16)
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_create_session", "Create a debug session"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_list_sessions", "List active debug sessions"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_close_session", "Close a debug session"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_set_breakpoint", "Set a breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_remove_breakpoint", "Remove a breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_continue", "Continue execution"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_step", "Step through code"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_get_variables", "Get variable values"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_stack_trace", "Get stack trace"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_evaluate", "Evaluate expression"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_set_function_breakpoint", "Set function breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_enable_breakpoint", "Enable/disable breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_get_source", "Get source code"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_watch", "Add watch expression"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_set_variable", "Set variable value"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_terminate", "Terminate debug session"))
+
+    # Debug log tools (6)
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_enable", "Enable debug logging"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_disable", "Disable debug logging"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_clear", "Clear debug logs"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_query", "Query debug logs"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_tree", "Get debug log tree"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_status", "Get debug log status"))
+
+    # Diagnostic tools (12)
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_read", "Read Simple source with diagnostics"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_check", "Check Simple source for errors"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_symbols", "List symbols in file"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_status", "Get project status"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_expand_at", "Expand symbol at position"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_edit", "Edit Simple source file"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_multi_edit", "Edit multiple files"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_run", "Run Simple code"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_diff", "Show file diff"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_log", "Show version history"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_squash", "Squash commits"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_new", "Create new change"))
+
+    cfg
+
+fn make_tool_schema(name: text, description: text) -> text:
+    make_no_param_tool(name, description, false, false, false)
+
+# ============================================================================
 # Server loop
 # ============================================================================
 
 fn start_server():
+    val CFG = build_server_config()
+
     for _iter in range(0, 999999):
-        val line = read_stdin_message()
+        val line = protocol_read_message(PROTOCOL)
         if line == "":
             return
         val method = extract_json_string_v2(line, "method")
         val id = extract_json_value(line, "id")
-        val response = dispatch_method(method, id, line)
-        if response == "EXIT":
-            return
+        var response = ""
+
+        # Intercept methods that need local handling
+        if method == "resources/list":
+            response = handle_resources_list(id)
+        elif method == "resources/templates/list":
+            response = handle_resource_templates_list(id)
+        elif method == "prompts/list":
+            response = handle_prompts_list(id)
+        else:
+            # SDK router handles builtins + returns sentinels for custom dispatch
+            response = handle_method(CFG, method, id, line)
+            if response == "TOOLS_CALL":
+                val tool_name = extract_nested_string(line, "params", "name")
+                response = dispatch_tool(id, tool_name, line)
+            elif response == "RESOURCES_READ":
+                val uri = extract_nested_string(line, "params", "uri")
+                response = handle_resources_read(id, uri)
+            elif response == "PROMPTS_GET":
+                val prompt_name = extract_nested_string(line, "params", "name")
+                response = handle_prompts_get(id, prompt_name, line)
+            elif response == "COMPLETION":
+                response = handle_completion_req(id, line)
+            elif response == "EXIT":
+                return
+
         if response != "":
-            write_stdout_message(response)
-
-# ============================================================================
-# Method dispatch
-# ============================================================================
-
-fn dispatch_method(method: text, id: text, body: text) -> text:
-    if method == "initialize":
-        return handle_initialize(id)
-    elif method == "initialized":
-        return ""
-    elif method == "tools/list":
-        return handle_tools_list(id)
-    elif method == "tools/call":
-        val tool_name = extract_nested_string(body, "params", "name")
-        return dispatch_tool(id, tool_name, body)
-    elif method == "resources/list":
-        return handle_resources_list(id)
-    elif method == "resources/read":
-        val uri = extract_nested_string(body, "params", "uri")
-        return handle_resources_read(id, uri)
-    elif method == "resources/templates/list":
-        return handle_resource_templates_list(id)
-    elif method == "prompts/list":
-        return handle_prompts_list(id)
-    elif method == "prompts/get":
-        val prompt_name = extract_nested_string(body, "params", "name")
-        return handle_prompts_get(id, prompt_name, body)
-    elif method == "completion/complete":
-        return handle_completion_req(id, body)
-    elif method == "ping":
-        return make_result_response(id, LB() + RB())
-    elif method == "shutdown":
-        return make_result_response(id, "null")
-    elif method == "exit":
-        return "EXIT"
-    elif method.starts_with("notifications/"):
-        return ""
-    make_error_response(id, -32601, "Method not found: " + method)
+            protocol_write_message(PROTOCOL, response)
 
 # ============================================================================
 # Tool dispatch
@@ -146,99 +200,6 @@ fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
             return make_error_response(id, -32603, "Handler not available: diag_handler")
         return handler.handle_fn(tool_name, id, body)
     make_error_response(id, -32601, "Unknown tool: " + tool_name)
-
-# ============================================================================
-# Initialize
-# ============================================================================
-
-fn handle_initialize(id: text) -> text:
-    if INIT_CACHE != "":
-        return make_result_response(id, INIT_CACHE)
-
-    var tools_cap = jo1(jp("listChanged", "true"))
-    var resources_cap = jo2(jp("subscribe", "true"), jp("listChanged", "true"))
-    var prompts_cap = jo1(jp("listChanged", "true"))
-
-    var caps = LB()
-    caps = caps + jp("tools", tools_cap)
-    caps = caps + "," + jp("resources", resources_cap)
-    caps = caps + "," + jp("prompts", prompts_cap)
-    caps = caps + "," + jp("logging", LB() + RB())
-    caps = caps + "," + jp("completions", LB() + RB())
-    caps = caps + RB()
-
-    var info = LB()
-    info = info + jp("name", js(SERVER_NAME))
-    info = info + "," + jp("version", js(SERVER_VERSION))
-    info = info + "," + jp("instructions", js("Simple language MCP server: 33 tools for debugging, diagnostics, editing, and version control."))
-    info = info + RB()
-
-    val result = jo3(jp("protocolVersion", js("2025-06-18")), jp("capabilities", caps), jp("serverInfo", info))
-    INIT_CACHE = result
-    make_result_response(id, result)
-
-# ============================================================================
-# Tools list (cached)
-# ============================================================================
-
-fn handle_tools_list(id: text) -> text:
-    if TOOLS_CACHE != "":
-        return make_result_response(id, TOOLS_CACHE)
-
-    var tools = "[" + debug_tool_schemas()
-    tools = tools + "," + debug_log_tool_schemas()
-    tools = tools + "," + diag_tool_schemas()
-    tools = tools + "]"
-
-    val result = jo1(jp("tools", tools))
-    TOOLS_CACHE = result
-    make_result_response(id, result)
-
-fn make_tool_schema(name: text, description: text) -> text:
-    jo3(jp("name", js(name)), jp("description", js(description)), jp("inputSchema", jo1(jp("type", js("object")))))
-
-fn debug_tool_schemas() -> text:
-    var s = make_tool_schema("debug_create_session", "Create a debug session")
-    s = s + "," + make_tool_schema("debug_list_sessions", "List active debug sessions")
-    s = s + "," + make_tool_schema("debug_close_session", "Close a debug session")
-    s = s + "," + make_tool_schema("debug_set_breakpoint", "Set a breakpoint")
-    s = s + "," + make_tool_schema("debug_remove_breakpoint", "Remove a breakpoint")
-    s = s + "," + make_tool_schema("debug_continue", "Continue execution")
-    s = s + "," + make_tool_schema("debug_step", "Step through code")
-    s = s + "," + make_tool_schema("debug_get_variables", "Get variable values")
-    s = s + "," + make_tool_schema("debug_stack_trace", "Get stack trace")
-    s = s + "," + make_tool_schema("debug_evaluate", "Evaluate expression")
-    s = s + "," + make_tool_schema("debug_set_function_breakpoint", "Set function breakpoint")
-    s = s + "," + make_tool_schema("debug_enable_breakpoint", "Enable/disable breakpoint")
-    s = s + "," + make_tool_schema("debug_get_source", "Get source code")
-    s = s + "," + make_tool_schema("debug_watch", "Add watch expression")
-    s = s + "," + make_tool_schema("debug_set_variable", "Set variable value")
-    s = s + "," + make_tool_schema("debug_terminate", "Terminate debug session")
-    s
-
-fn debug_log_tool_schemas() -> text:
-    var s = make_tool_schema("debug_log_enable", "Enable debug logging")
-    s = s + "," + make_tool_schema("debug_log_disable", "Disable debug logging")
-    s = s + "," + make_tool_schema("debug_log_clear", "Clear debug logs")
-    s = s + "," + make_tool_schema("debug_log_query", "Query debug logs")
-    s = s + "," + make_tool_schema("debug_log_tree", "Get debug log tree")
-    s = s + "," + make_tool_schema("debug_log_status", "Get debug log status")
-    s
-
-fn diag_tool_schemas() -> text:
-    var s = make_tool_schema("simple_read", "Read Simple source with diagnostics")
-    s = s + "," + make_tool_schema("simple_check", "Check Simple source for errors")
-    s = s + "," + make_tool_schema("simple_symbols", "List symbols in file")
-    s = s + "," + make_tool_schema("simple_status", "Get project status")
-    s = s + "," + make_tool_schema("simple_expand_at", "Expand symbol at position")
-    s = s + "," + make_tool_schema("simple_edit", "Edit Simple source file")
-    s = s + "," + make_tool_schema("simple_multi_edit", "Edit multiple files")
-    s = s + "," + make_tool_schema("simple_run", "Run Simple code")
-    s = s + "," + make_tool_schema("simple_diff", "Show file diff")
-    s = s + "," + make_tool_schema("simple_log", "Show version history")
-    s = s + "," + make_tool_schema("simple_squash", "Squash commits")
-    s = s + "," + make_tool_schema("simple_new", "Create new change")
-    s
 
 # ============================================================================
 # Resources
@@ -282,10 +243,7 @@ fn build_resources_json() -> text:
     "[" + r + "]"
 
 fn handle_resources_list(id: text) -> text:
-    if RESOURCES_CACHE != "":
-        return make_result_response(id, RESOURCES_CACHE)
     val result = jo1(jp("resources", build_resources_json()))
-    RESOURCES_CACHE = result
     make_result_response(id, result)
 
 fn handle_resource_templates_list(id: text) -> text:
@@ -446,10 +404,7 @@ fn build_prompts_json() -> text:
     all
 
 fn handle_prompts_list(id: text) -> text:
-    if PROMPTS_CACHE != "":
-        return make_result_response(id, PROMPTS_CACHE)
     val result = jo1(jp("prompts", build_prompts_json()))
-    PROMPTS_CACHE = result
     make_result_response(id, result)
 
 fn handle_prompts_get(id: text, prompt_name: text, body: text) -> text:
@@ -556,23 +511,6 @@ fn handle_completion_req(id: text, body: text) -> text:
     completion = completion + RB()
     val result = jo1(jp("completion", completion))
     make_result_response(id, result)
-
-# ============================================================================
-# Protocol I/O (thin delegation to lib.mcp.protocol)
-# ============================================================================
-
-fn read_stdin_message() -> text:
-    """Read one JSON Lines message from stdin. Returns "" on EOF."""
-    var line = input()
-    if line == "":
-        return ""
-    if line.ends_with("\r"):
-        line = line.substring(0, line.len() - 1)
-    line
-
-fn write_stdout_message(body: text):
-    """Write one JSON Lines message to stdout."""
-    print_raw(body + NL)
 
 # ============================================================================
 # Local helpers

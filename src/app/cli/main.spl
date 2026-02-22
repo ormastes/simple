@@ -9,9 +9,8 @@
 #   simple file.smf     - Run compiled binary
 #   simple -c "code"    - Run code string
 
-use std.cli.cli_util (get_cli_args)
 use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, env_set, shell, file_size_raw,
-    cli_file_exists, cli_read_file,
+    cli_file_exists, cli_read_file, cli_get_args,
     cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests,
     cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify,
     cli_run_migrate, cli_run_mcp, cli_run_lsp, cli_run_diff, cli_constr, cli_run_query, cli_info,
@@ -30,13 +29,23 @@ use app.cli.fix_dbs (run_fix_dbs)
 use app.stats.doc_coverage_dynamic (run_doc_coverage)
 use app.stats.dynamic (run_stats)
 use app.leak_check.main (run_leak_check)
-use std.path as path
-use std.db_atomic.{atomic_write, DbConfig}
-use std.src.dl.config_loader.{load_user_config}
 #   simple compile src.spl [-o out.smf]  - Compile to SMF
 #   simple watch file.spl  - Watch and auto-recompile
 
 use app.cli.cli_helpers (print_cli_help, handle_init, read_sdn_run_config, sdn_line_indent, strip_sdn_quotes, check_self_contained)
+
+# Extract CLI args, skipping program name and script path
+fn get_cli_args() -> [str]:
+    val all_args = cli_get_args()
+    var args = []
+    var start_idx = 1
+    if all_args.len() > 1 and all_args[1].ends_with("main.spl"):
+        start_idx = 2
+    var i = start_idx
+    while i < all_args.len():
+        args.push(all_args[i])
+        i = i + 1
+    args
 
 # =========================================================================
 # Version and Help - implemented in Simple
@@ -299,9 +308,6 @@ fn main() -> i64:
     apply_fault_detection(flags)
     apply_jit_env_vars(flags)
 
-    # Load user-level DL config (~/.simple/dl.config.sdn) once at startup
-    load_user_config()
-
     val filtered_args = filter_internal_flags(args)
 
     # If user explicitly requested a JIT backend but native JIT is absent, fail fast
@@ -518,8 +524,7 @@ fn main() -> i64:
             return cli_handle_run(filtered_args, flags.gc_log, flags.gc_off)
 
         case "leak-check":
-            val lc_args = filtered_args[1:]
-            return run_leak_check(lc_args)
+            return run_leak_check()
 
         case _:
             if cli_file_exists(first):

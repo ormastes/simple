@@ -56,6 +56,16 @@ fn count_blank_lines(pattern: text) -> i64:
     val output = run_cmd(cmd)
     output.to_int()
 
+# Count lines inside ```simple/spl/sdoctest fenced blocks in all doc/ .md files
+fn count_md_code_block_lines() -> i64:
+    val cmd = "find doc -name '*.md' -exec awk '/^```(simple|spl|sdoctest)/{{f=1;next}} /^```/{{f=0;next}} f{{c++}} END{{print c+0}}' {{}} \\; | awk '{{s+=$1}} END{{print s+0}}'"
+    run_cmd(cmd).to_int()
+
+# Count >>> input lines in .spl files (sdoctest executable examples)
+fn count_sdoctest_lines_in_spl() -> i64:
+    val cmd = "find src -name '*.spl' -not -path '*/release/*' -not -path '*/build/*' | xargs grep -ch '^[[:space:]]*>>>' 2>/dev/null | awk '{{s+=$1}} END{{print s+0}}'"
+    run_cmd(cmd).to_int()
+
 # Count pattern in file
 fn count_in_file(file: text, pattern: text) -> i64:
     if not file_exists(file):
@@ -223,22 +233,42 @@ fn run_stats(args: [text]):
     var code_lines = 0
     var comment_lines = 0
     var blank_lines = 0
+    var compiler_sloc = 0
+    var app_sloc = 0
+    var lib_sloc = 0
+    var test_sloc = 0
+    var md_example_lines = 0
+    var spl_sdoctest_lines = 0
     if not is_quick:
-        total_lines = count_lines("src")
-        code_lines = count_code_lines("src")
+        # Per-area SLOC (numbered compiler dirs only — avoids double-counting mirror dirs)
+        compiler_sloc = count_code_lines("src/compiler/[0-9]*.*")
+        app_sloc      = count_code_lines("src/app")
+        lib_sloc      = count_code_lines("src/lib")
+        test_sloc     = count_code_lines("test")
+
+        total_lines   = count_lines("src")
+        code_lines    = compiler_sloc + app_sloc + lib_sloc
         comment_lines = count_comment_lines("src")
-        blank_lines = count_blank_lines("src")
+        blank_lines   = count_blank_lines("src")
+
+        # Embedded code in docs and specs
+        md_example_lines   = count_md_code_block_lines()
+        spl_sdoctest_lines = count_sdoctest_lines_in_spl()
 
     if not is_json:
         if total_lines > 0:
-            val code_pct = (code_lines * 100) / total_lines
-            val comment_pct = (comment_lines * 100) / total_lines
-            val blank_pct = (blank_lines * 100) / total_lines
-            print "Lines of Code:"
-            print "  Total:   {total_lines} lines"
-            print "    Code:    {code_lines} ({code_pct}%)"
-            print "    Comment: {comment_lines} ({comment_pct}%)"
-            print "    Blank:   {blank_lines} ({blank_pct}%)"
+            print "Lines of Code (SLOC = no blanks/comments):"
+            print "  compiler:  {compiler_sloc}"
+            print "  app:       {app_sloc}"
+            print "  lib:       {lib_sloc}"
+            print "  ─────────────────────"
+            print "  src total: {code_lines}  (raw: {total_lines}  comment: {comment_lines}  blank: {blank_lines})"
+            print ""
+            print "  test:      {test_sloc}"
+            print ""
+            print "Embedded Code:"
+            print "  .md code blocks (```simple/spl/sdoctest): {md_example_lines} lines"
+            print "  .spl sdoctest (>>> lines):                {spl_sdoctest_lines} lines"
             print ""
 
     # Test statistics
@@ -425,6 +455,7 @@ fn run_stats(args: [text]):
         val json = format_json(
             total_src, app_files, lib_files, std_files, core_files, compiler_files,
             test_files, total_lines, code_lines, comment_lines, blank_lines,
+            compiler_sloc, app_sloc, lib_sloc, test_sloc, md_example_lines, spl_sdoctest_lines,
             test_count, pass_count,
             unit_specs, integration_specs, system_specs,
             sdoctest_code, sdoctest_md,
