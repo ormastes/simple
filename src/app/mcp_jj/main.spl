@@ -11,8 +11,10 @@
 #   simple src/app/mcp_jj/main.spl version     # Show jj version
 
 use app.io.mod (get_args, exit)
-use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, make_tool_result, make_result_response, make_error_response, has_flag}
+use app.mcp.helpers.{get_clean_args, extract_json_string_v2, extract_json_value, extract_nested_string, make_result_response, make_error_response, jp, js, jo1, unwrap_idx}
 use std.mcp.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
+use std.mcp_sdk.server.builder.{ServerConfig, server_config, server_set_instructions, server_add_tool_json}
+use std.mcp_sdk.server.router.{handle_method}
 use jj_runner.{get_default_repo_path, get_jj_version, is_jj_repo}
 use tools_jj.{get_all_jj_tool_schemas, handle_jj_tool}
 use tools_git.{get_all_git_tool_schemas, handle_git_tool}
@@ -22,12 +24,6 @@ use std.text.{NL}
 
 # Protocol state
 var PROTOCOL = create_protocol_state()
-
-# Cache tool schemas to avoid rebuilding on every tools/list request
-var JJ_TOOLS_CACHE: [String] = []
-var JJ_TOOLS_CACHE_BUILT: Bool = false
-var JJ_TOOLS_PAGE_CACHE: Dict<String, String> = {}
-var JJ_INIT_CACHE: Option<String> = nil
 
 fn main():
     val raw_args = get_args()
@@ -61,7 +57,31 @@ fn print_usage():
     print("  JJ_MCP_REPO_PATH      Default repository path (default: cwd)")
     print("  JJ_MCP_SHOW_WARNINGS  Show git compat warnings (default: true)")
 
+# --- Server config (built once at startup) ---
+
+fn build_server_config() -> ServerConfig:
+    val instructions = "This MCP server provides Jujutsu (jj) version control tools. It includes 48 native jj_* tools for full jj functionality, plus 27 git_* compatibility tools that translate git commands to jj equivalents with helpful warnings. Use jj_* tools for best results. If you see git_* tools being called, the response will include a warning explaining the jj equivalent."
+    var cfg = server_config("jj-git-mcp", "1.0.0")
+    cfg = server_set_instructions(cfg, instructions)
+
+    # Register all tool schemas
+    val jj_tools = get_all_jj_tool_schemas()
+    var i = 0
+    while i < jj_tools.len():
+        cfg = server_add_tool_json(cfg, "", jj_tools[i])
+        i = i + 1
+    val git_tools = get_all_git_tool_schemas()
+    i = 0
+    while i < git_tools.len():
+        cfg = server_add_tool_json(cfg, "", git_tools[i])
+        i = i + 1
+
+    cfg
+
+# --- Server loop ---
+
 fn start_server():
+    val CFG = build_server_config()
     var repo_path = ""
 
     var running = true
@@ -76,166 +96,49 @@ fn start_server():
             val id = extract_json_value(line, "id")
             var response = ""
 
-            if method == "initialize":
-                response = make_initialize_response(id)
-            elif method == "initialized" or method == "notifications/initialized":
-                response = ""  # Notification, no response
-            elif method == "shutdown":
-                response = make_result_response(id, "null")
-            elif method == "exit":
-                exit(0)
-            elif method == "ping":
-                response = make_result_response(id, LB() + RB())
-            elif method == "tools/list":
-                val cursor = extract_nested_string(line, "params", "cursor")
-                response = handle_tools_list(id, cursor)
-            elif method == "tools/call":
-                if repo_path == "":
-                    repo_path = get_default_repo_path()
-                val tool_name = extract_nested_string(line, "params", "name")
-                val result = handle_tool_call(id, tool_name, line, repo_path)
-                response = result
-                # Check if git_set_working_dir changed the repo path
-                if tool_name == "git_set_working_dir":
-                    val new_path = extract_repo_path_change(result)
-                    if new_path != "":
-                        repo_path = new_path
-            elif method == "resources/list":
+            # Resources/prompts list handled locally (existing modules)
+            if method == "resources/list":
                 if repo_path == "":
                     repo_path = get_default_repo_path()
                 response = handle_resources_list(id, repo_path)
-            elif method == "resources/read":
-                if repo_path == "":
-                    repo_path = get_default_repo_path()
-                val uri = extract_nested_string(line, "params", "uri")
-                response = handle_resources_read(id, uri, repo_path)
             elif method == "prompts/list":
                 response = handle_prompts_list(id)
-            elif method == "prompts/get":
-                val prompt_name = extract_nested_string(line, "params", "name")
-                response = handle_prompts_get(id, prompt_name)
-            elif method == "notifications/cancelled":
-                response = ""  # Notification, no response
             else:
-                # Notifications (no id) should not get error responses per MCP spec
-                if id == "" or id == "null":
-                    response = ""
-                else:
-                    response = make_error_response(id, -32601, "Method not found: " + method)
+                # SDK router handles builtins + returns sentinels for custom dispatch
+                response = handle_method(CFG, method, id, line)
+                if response == "TOOLS_CALL":
+                    if repo_path == "":
+                        repo_path = get_default_repo_path()
+                    val tool_name = extract_nested_string(line, "params", "name")
+                    response = handle_tool_call(id, tool_name, line, repo_path)
+                    # Check if git_set_working_dir changed the repo path
+                    if tool_name == "git_set_working_dir":
+                        val new_path = extract_repo_path_change(response)
+                        if new_path != "":
+                            repo_path = new_path
+                elif response == "RESOURCES_READ":
+                    if repo_path == "":
+                        repo_path = get_default_repo_path()
+                    val uri = extract_nested_string(line, "params", "uri")
+                    response = handle_resources_read(id, uri, repo_path)
+                elif response == "PROMPTS_GET":
+                    val prompt_name = extract_nested_string(line, "params", "name")
+                    response = handle_prompts_get(id, prompt_name)
+                elif response == "EXIT":
+                    exit(0)
 
             if response != "":
                 write_stdout_message(response)
 
+# --- Protocol I/O ---
+
 fn read_stdin_message() -> String:
-    """Read message using MCP protocol (delegates to protocol module)."""
     protocol_read_message(PROTOCOL)
 
 fn write_stdout_message(body: String):
-    """Write message using MCP protocol (delegates to protocol module)."""
     protocol_write_message(PROTOCOL, body)
 
-# --- Initialize response ---
-
-fn make_initialize_response(id: String) -> String:
-    val result = make_initialize_result()
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn make_initialize_result() -> String:
-    match JJ_INIT_CACHE:
-        case Some(r): return r
-        case nil: ()
-
-    var server_info = LB()
-    server_info = server_info + jp("name", js("jj-git-mcp"))
-    server_info = server_info + ","
-    server_info = server_info + jp("version", js("1.0.0"))
-    server_info = server_info + ","
-    val instructions = "This MCP server provides Jujutsu (jj) version control tools. It includes 48 native jj_* tools for full jj functionality, plus 27 git_* compatibility tools that translate git commands to jj equivalents with helpful warnings. Use jj_* tools for best results. If you see git_* tools being called, the response will include a warning explaining the jj equivalent."
-    server_info = server_info + jp("instructions", js(escape_json(instructions)))
-    server_info = server_info + RB()
-
-    var tools_cap = jo1(jp("listChanged", "true"))
-    var resources_cap = jo1(jp("listChanged", "true"))
-    var prompts_cap = jo1(jp("listChanged", "true"))
-
-    var caps = LB()
-    caps = caps + jp("tools", tools_cap)
-    caps = caps + ","
-    caps = caps + jp("resources", resources_cap)
-    caps = caps + ","
-    caps = caps + jp("prompts", prompts_cap)
-    caps = caps + RB()
-
-    val result = jo3(jp("protocolVersion", js("2025-06-18")), jp("capabilities", caps), jp("serverInfo", server_info))
-    JJ_INIT_CACHE = Some(result)
-    result
-
-# --- Tools ---
-
-fn get_all_tools() -> [String]:
-    var all_tools: [String] = []
-    val jj_tools = get_all_jj_tool_schemas()
-    for tool in jj_tools:
-        all_tools.push(tool)
-    val git_tools = get_all_git_tool_schemas()
-    for tool in git_tools:
-        all_tools.push(tool)
-    all_tools
-
-fn get_all_tools_cached() -> [String]:
-    if JJ_TOOLS_CACHE_BUILT:
-        return JJ_TOOLS_CACHE
-    JJ_TOOLS_CACHE = get_all_tools()
-    JJ_TOOLS_CACHE_BUILT = true
-    JJ_TOOLS_CACHE
-
-fn get_tools_page_cached(offset: Int, page_size: Int) -> String:
-    val key = offset.to_string()
-    match JJ_TOOLS_PAGE_CACHE.get(key):
-        case Some(page): return page
-        case nil: ()
-
-    val all_tools = get_all_tools_cached()
-    val total = all_tools.len()
-    val end = min_int(offset + page_size, total)
-
-    var tools = "["
-    var first = true
-    for i in offset..end:
-        if not first:
-            tools = tools + ","
-        first = false
-        tools = tools + all_tools[i]
-    tools = tools + "]"
-
-    JJ_TOOLS_PAGE_CACHE[key] = tools
-    tools
-
-fn handle_tools_list(id: String, cursor: String) -> String:
-    val page_size = 20
-    var offset = 0
-
-    if cursor != "":
-        if cursor.starts_with("offset:"):
-            val cursor_value = cursor.substring(7)
-            val parse_result = parse_int(cursor_value)
-            if parse_result.ok.?:
-                offset = parse_result.unwrap()
-
-    val all_tools = get_all_tools_cached()
-    val total = all_tools.len()
-    val end = min_int(offset + page_size, total)
-    val has_more = end < total
-
-    val tools = get_tools_page_cached(offset, page_size)
-
-    var result = LB()
-    result = result + jp("tools", tools)
-    if has_more:
-        val next_cursor = "offset:" + end.to_string()
-        result = result + "," + jp("nextCursor", js(next_cursor))
-    result = result + RB()
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+# --- Tool dispatch ---
 
 fn handle_tool_call(id: String, tool_name: String, body: String, repo_path: String) -> String:
     # Try jj_* tools first
@@ -253,44 +156,41 @@ fn handle_tool_call(id: String, tool_name: String, body: String, repo_path: Stri
     make_error_response(id, -32602, "Unknown tool: " + tool_name)
 
 fn extract_repo_path_change(response: String) -> String:
-    # Check if the response contains SET_REPO_PATH: marker
     val marker = "SET_REPO_PATH:"
     val idx = unwrap_idx(response.index_of(marker))
     if idx < 0:
         return ""
-    # Extract path after marker, before any quote/escape
     val after = response.substring(idx + marker.len())
-    # Find the end - it's terminated by a quote
-    val end = unwrap_idx(after.index_of("\""))
-    if end < 0:
+    val end_idx = unwrap_idx(after.index_of("\""))
+    if end_idx < 0:
         return after.trim()
-    after.substring(0, end).trim()
+    after.substring(0, end_idx).trim()
 
 # --- Resources ---
 
 fn handle_resources_list(id: String, repo_path: String) -> String:
     val resources_json = get_all_resources(repo_path)
     val result = jo1(jp("resources", resources_json))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+    make_result_response(id, result)
 
 fn handle_resources_read(id: String, uri: String, repo_path: String) -> String:
     val content = read_resource(uri, repo_path)
     if content == "":
         return make_error_response(id, -32602, "Resource not found: " + uri)
     val result = jo1(jp("contents", "[" + content + "]"))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+    make_result_response(id, result)
 
 # --- Prompts ---
 
 fn handle_prompts_list(id: String) -> String:
     val prompts_json = get_all_prompts()
     val result = jo1(jp("prompts", prompts_json))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+    make_result_response(id, result)
 
 fn handle_prompts_get(id: String, prompt_name: String) -> String:
     val content = get_prompt(prompt_name)
     if content == "":
         return make_error_response(id, -32602, "Prompt not found: " + prompt_name)
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", content))
+    make_result_response(id, content)
 
 export main

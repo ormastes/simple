@@ -439,9 +439,9 @@ static char* simple_format_str(const char* fmt_before, const char* value, const 
 // --- Int to String helper ---
 
 static char* simple_int_to_str(long long value) {
-    char buf[32];
+    static char buf[32];
     snprintf(buf, sizeof(buf), "%lld", value);
-    return strdup(buf);
+    return buf;
 }
 
 // --- Dictionary (linear-scan hash table with string keys) ---
@@ -489,6 +489,10 @@ static void simple_dict_set_int(SimpleDict* d, const char* key, long long value)
     if (!d || !key) return;
     long long idx = simple_dict_find(d, key);
     if (idx >= 0) {
+        if (d->entries[idx].type_tag == SIMPLE_DICT_TYPE_STR && d->entries[idx].value.str_val) {
+            free((char*)d->entries[idx].value.str_val);
+            d->entries[idx].value.str_val = NULL;
+        }
         d->entries[idx].type_tag = SIMPLE_DICT_TYPE_INT;
         d->entries[idx].value.int_val = value;
         return;
@@ -507,6 +511,9 @@ static void simple_dict_set_str(SimpleDict* d, const char* key, const char* valu
     if (!d || !key) return;
     long long idx = simple_dict_find(d, key);
     if (idx >= 0) {
+        if (d->entries[idx].type_tag == SIMPLE_DICT_TYPE_STR && d->entries[idx].value.str_val) {
+            free((char*)d->entries[idx].value.str_val);
+        }
         d->entries[idx].type_tag = SIMPLE_DICT_TYPE_STR;
         d->entries[idx].value.str_val = value ? strdup(value) : strdup("");
         return;
@@ -525,6 +532,10 @@ static void simple_dict_set_ptr(SimpleDict* d, const char* key, void* value) {
     if (!d || !key) return;
     long long idx = simple_dict_find(d, key);
     if (idx >= 0) {
+        if (d->entries[idx].type_tag == SIMPLE_DICT_TYPE_STR && d->entries[idx].value.str_val) {
+            free((char*)d->entries[idx].value.str_val);
+            d->entries[idx].value.str_val = NULL;
+        }
         d->entries[idx].type_tag = SIMPLE_DICT_TYPE_PTR;
         d->entries[idx].value.ptr_val = value;
         return;
@@ -548,7 +559,9 @@ static const char* simple_dict_get(SimpleDict* d, const char* key) {
     }
     // For int values, convert to string
     if (d->entries[idx].type_tag == SIMPLE_DICT_TYPE_INT) {
-        return simple_int_to_str(d->entries[idx].value.int_val);
+        static char int_buf[32];
+        snprintf(int_buf, sizeof(int_buf), "%lld", d->entries[idx].value.int_val);
+        return int_buf;
     }
     return NULL;
 }
@@ -591,9 +604,22 @@ static void simple_dict_remove(SimpleDict* d, const char* key) {
     if (!d || !key) return;
     long long idx = simple_dict_find(d, key);
     if (idx < 0) return;
+    if (d->entries[idx].key) {
+        free((char*)d->entries[idx].key);
+        d->entries[idx].key = NULL;
+    }
+    if (d->entries[idx].type_tag == SIMPLE_DICT_TYPE_STR && d->entries[idx].value.str_val) {
+        free((char*)d->entries[idx].value.str_val);
+        d->entries[idx].value.str_val = NULL;
+    }
     // Shift entries down
     for (long long i = idx; i < d->len - 1; i++) {
         d->entries[i] = d->entries[i + 1];
+    }
+    if (d->len > 0) {
+        d->entries[d->len - 1].key = NULL;
+        d->entries[d->len - 1].type_tag = SIMPLE_DICT_TYPE_INT;
+        d->entries[d->len - 1].value.ptr_val = NULL;
     }
     d->len--;
 }
@@ -646,7 +672,7 @@ static SimpleOption simple_some_str(const char* val) {
     SimpleOption o;
     o.has_value = 1;
     o.type_tag = 1;
-    o.str_val = val ? strdup(val) : strdup("");
+    o.str_val = val ? val : "";
     return o;
 }
 
@@ -706,7 +732,7 @@ static SimpleResult simple_result_ok_str(const char* val) {
     SimpleResult r;
     r.is_ok = 1;
     r.type_tag = 1;
-    r.ok_str = val ? strdup(val) : strdup("");
+    r.ok_str = val ? val : "";
     r.err_str = NULL;
     return r;
 }
@@ -716,7 +742,7 @@ static SimpleResult simple_result_err_str(const char* val) {
     r.is_ok = 0;
     r.type_tag = 1;
     r.ok_str = NULL;
-    r.err_str = val ? strdup(val) : strdup("");
+    r.err_str = val ? val : "";
     return r;
 }
 

@@ -439,6 +439,13 @@ src/runtime/
 20. **Wired cleanup into interpreter JIT.** `jit_cleanup` now clears `jse_*` arrays and resets `jit_epoch = 0`. **DONE** — `jit.spl`
 21. **Test spec:** `test/unit/compiler/loader/generation_sweeper_spec.spl` — sweeper epoch advancement, mark used tracking, stale detection, stats, reset, lifecycle integration delegation. **DONE**
 
+### Phase 6: Interpreter Module Loading Fixes — DONE (2026-02-22)
+
+22. **Added DECL_USE processing to `eval_module()`** — Phase 1.5 between fn/struct registration and val/var evaluation. Previously, `use` statements were only processed in `eval_decl()` but `eval_module()` never called `eval_decl` for DECL_USE tags, so imported modules' symbols were never loaded at module eval time. **DONE** — `eval_stmts.spl`
+23. **Module load depth guard** — Added `_module_load_depth` counter and `_MODULE_LOAD_MAX_DEPTH=16` to prevent runaway transitive loading. `load_module()` increments on entry, decrements on all exit paths, returns 0 if depth exceeded. **DONE** — `module_loader.spl`
+24. **Selective import optimization** — `load_module_selective()` now checks if all `imported_names` already exist in `func_table_lookup()` before loading. Skips full module load if all symbols are already available (handles built-in functions). **DONE** — `module_loader.spl`
+25. **Append-mode parsing** — Changed `parse_module_ast()` from `core_frontend_parse_isolated` (which calls `ast_reset()`, destroying caller's AST) to `core_frontend_parse_append` (preserves caller's AST). **DONE** — `module_loader.spl`
+
 ---
 
 ## Testing Strategy

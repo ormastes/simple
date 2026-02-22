@@ -410,9 +410,9 @@ static char* simple_format_str(const char* fmt_before, const char* value, const 
 // --- Int to String helper ---
 
 static char* simple_int_to_str(long long value) {
-    char buf[32];
+    static char buf[32];
     snprintf(buf, sizeof(buf), "%lld", value);
-    return strdup(buf);
+    return buf;
 }
 
 // --- Dictionary (linear-scan hash table with string keys) ---
@@ -601,7 +601,7 @@ static SimpleOption simple_some_str(const char* val) {
     SimpleOption o;
     o.has_value = 1;
     o.type_tag = 1;
-    o.str_val = val ? strdup(val) : strdup("");
+    o.str_val = val ? val : "";
     return o;
 }
 
@@ -661,7 +661,7 @@ static SimpleResult simple_result_ok_str(const char* val) {
     SimpleResult r;
     r.is_ok = 1;
     r.type_tag = 1;
-    r.ok_str = val ? strdup(val) : strdup("");
+    r.ok_str = val ? val : "";
     r.err_str = NULL;
     return r;
 }
@@ -671,7 +671,7 @@ static SimpleResult simple_result_err_str(const char* val) {
     r.is_ok = 0;
     r.type_tag = 1;
     r.ok_str = NULL;
-    r.err_str = val ? strdup(val) : strdup("");
+    r.err_str = val ? val : "";
     return r;
 }
 
@@ -1235,6 +1235,11 @@ const char* translate_expr(const char* expr) {
             // .len() → simple_strlen(obj) for strings, arr.len for arrays
             if (strcmp(method_part, "len()") == 0) {
                 const char* tobj = translate_expr(obj);
+                /* Heuristic: array-like names use .len */
+                if (contains(obj, "args") || contains(obj, "parts") || contains(obj, "lines") ||
+                    contains(obj, "items") || contains(obj, "files") || contains(obj, "list")) {
+                    return simple_str_concat(tobj, ".len");
+                }
                 /* Heuristic: if obj looks like string, use simple_strlen */
                 if (expr_is_string(obj) || starts_with(obj, "\"") ||
                     contains(obj, "name") || contains(obj, "path") || contains(obj, "text") ||
@@ -1303,6 +1308,11 @@ const char* translate_expr(const char* expr) {
             // .contains("x") → simple_contains(obj, "x")
             if (starts_with(method_part, "contains(") && ends_with(method_part, ")")) {
                 const char* arg = substr(method_part, 9, str_len(method_part) - 1);
+                if (contains(obj, "args") || contains(obj, "parts") || contains(obj, "lines") ||
+                    contains(obj, "items") || contains(obj, "files") || contains(obj, "list")) {
+                    return simple_str_concat("simple_str_array_contains(", simple_str_concat(
+                        translate_expr(obj), simple_str_concat(", ", simple_str_concat(translate_expr(arg), ")"))));
+                }
                 return simple_str_concat("simple_contains(", simple_str_concat(
                     translate_expr(obj), simple_str_concat(", ", simple_str_concat(translate_expr(arg), ")"))));
             }
@@ -1485,7 +1495,12 @@ const char* translate_var_decl(const char* line) {
     if (eq < 0) {
         return simple_str_concat("/* unsupported: ", simple_str_concat(line, " */"));
     }
-    const char* name = mangle_name(trim(substr(rest, 0, eq)));
+    const char* raw_name = trim(substr(rest, 0, eq));
+    long long name_colon = find_str(raw_name, ":");
+    if (name_colon >= 0) {
+        raw_name = trim(substr(raw_name, 0, name_colon));
+    }
+    const char* name = mangle_name(raw_name);
     const char* value = trim(substr_from(rest, eq + 3));
     const char* c_val = translate_expr(value);
     const char* qualifier = is_val ? "const " : "";
@@ -1500,14 +1515,20 @@ const char* translate_var_decl(const char* line) {
     if (strcmp(value, "nil") == 0) {
         return simple_str_concat("const char* ", simple_str_concat(name, " = NULL;"));
     }
-    if (strcmp(value, "[]") == 0 || starts_with(value, "[")) {
+    if (strcmp(value, "[]") == 0 || starts_with(value, "[") || contains(value, ".split(")) {
         return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
     }
     // Function calls that return strings
     if (contains(value, "env_get(") || contains(value, "get_version(") ||
-        contains(value, "read_sdn_run_config(") || contains(value, "get_cli_args(")) {
-        // get_cli_args returns array
-        if (contains(value, "get_cli_args(")) {
+        contains(value, "get_file_stem(") ||
+        contains(value, "read_sdn_run_config(") || contains(value, "get_cli_args(") ||
+        contains(value, "cli_get_args(") || contains(value, "rt_cli_get_args(") ||
+        contains(value, "sys_get_args(") || contains(value, "get_args(") ||
+        contains(value, "context_generate(") || contains(value, "context_stats(")) {
+        // CLI arg getters return array
+        if (contains(value, "get_cli_args(") || contains(value, "cli_get_args(") ||
+            contains(value, "rt_cli_get_args(") || contains(value, "sys_get_args(") ||
+            contains(value, "get_args(")) {
             return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
         }
         return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
@@ -2204,8 +2225,12 @@ const char* generate_c(const char* source) {
                     out = simple_str_concat(out, "static void env_set(const char* k, const char* v) { (void)k; (void)v; }\n");
                 } else if (strcmp(fn_orig, "error") == 0) {
                     out = simple_str_concat(out, "static void simple_error(const char* cat, const char* msg) { fprintf(stderr, \"%s: %s\\n\", cat, msg); }\n");
-                } else if (strcmp(fn_orig, "get_cli_args") == 0) {
-                    out = simple_str_concat(out, "static SimpleStringArray get_cli_args(void) { return simple_new_string_array(); }\n");
+                } else if (strcmp(fn_orig, "get_cli_args") == 0 ||
+                           strcmp(fn_orig, "cli_get_args") == 0 ||
+                           strcmp(fn_orig, "rt_cli_get_args") == 0 ||
+                           strcmp(fn_orig, "sys_get_args") == 0 ||
+                           strcmp(fn_orig, "get_args") == 0) {
+                    out = simple_str_concat(out, simple_str_concat("static SimpleStringArray ", simple_str_concat(fn, "(void) { return simple_new_string_array(); }\n")));
                 } else if (strcmp(fn_orig, "cwd") == 0 || strcmp(fn_orig, "read_sdn_run_config") == 0 ||
                            strcmp(fn_orig, "strip_sdn_quotes") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static const char* ", simple_str_concat(fn, "(void) { return \"\"; }\n")));
@@ -2222,6 +2247,12 @@ const char* generate_c(const char* source) {
                     out = simple_str_concat(out, "static long long cli_run_code(const char* c, int g, int o) { (void)c;(void)g;(void)o; return 0; }\n");
                 } else if (strcmp(fn_orig, "cli_run_repl") == 0) {
                     out = simple_str_concat(out, "static long long cli_run_repl(int g, int o) { (void)g;(void)o; return 0; }\n");
+                } else if (strcmp(fn_orig, "context_generate") == 0) {
+                    out = simple_str_concat(out, "static const char* context_generate(const char* p, const char* t, const char* f) { (void)p;(void)t;(void)f; return \"\"; }\n");
+                } else if (strcmp(fn_orig, "context_stats") == 0) {
+                    out = simple_str_concat(out, "static const char* context_stats(const char* p, const char* t) { (void)p;(void)t; return \"\"; }\n");
+                } else if (strcmp(fn_orig, "file_write") == 0) {
+                    out = simple_str_concat(out, "static int file_write(const char* p, const char* d) { (void)p;(void)d; return 1; }\n");
                 } else if (strcmp(fn_orig, "cli_run_tests") == 0 || strcmp(fn_orig, "cli_run_verify") == 0 ||
                            strcmp(fn_orig, "cli_handle_run") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "(SimpleStringArray a, int g, int o) { (void)a;(void)g;(void)o; return 0; }\n")));
@@ -2296,4 +2327,3 @@ int main(void) {
     return 0;
     return 0;
 }
-

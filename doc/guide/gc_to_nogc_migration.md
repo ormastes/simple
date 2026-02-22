@@ -284,6 +284,132 @@ Ensure both GC and NoGC versions have the same method names and parameter types.
 
 ---
 
+## nogc_sync_mut: ML Usage
+
+`nogc_sync_mut/` has the full ML library (pure, torch, gpu, cuda) for synchronous workloads.
+
+### Import Patterns
+
+```simple
+# Pure ML — tensor, autograd, neural networks, optimizers
+use std.nogc_sync_mut.pure.tensor_f64.{from_data, zeros, randn}
+use std.nogc_sync_mut.pure.autograd.{Tensor, tensor_from_value}
+use std.nogc_sync_mut.pure.nn.embedding.{Embedding}
+use std.nogc_sync_mut.pure.training.{mse_loss, SGD, Adam}
+
+# Torch FFI — GPU-accelerated via LibTorch
+use std.nogc_sync_mut.torch.mod.{Tensor, Linear}
+use std.nogc_sync_mut.torch.torch_training.{MSELoss, SGD, Adam}
+use std.nogc_sync_mut.torch.ops.{cross_entropy_loss_tensor}
+```
+
+### Math Blocks in ML
+
+`m{}` syntax is available in all modes — no import needed:
+
+```simple
+use std.nogc_sync_mut.pure.tensor_f64.{zeros}
+
+# Use m{} for formulas — ^ is power inside m{}, ** outside
+fn mse(pred: f64, target: f64) -> f64:
+    m{ 0.5 * (pred - target)^2 }
+
+fn l2_norm(x: f64, y: f64) -> f64:
+    m{ (x^2 + y^2)^0.5 }
+
+# Broadcast operators for vectorized operations
+# .*, .+, .-, ./, .^ — element-wise
+# @  — matrix multiply
+# '  — transpose (postfix)
+```
+
+### Synchronous Training Example
+
+```simple
+use std.nogc_sync_mut.torch.mod.{Tensor, Linear}
+use std.nogc_sync_mut.torch.torch_training.{MSELoss, SGD}
+
+val model = Linear.create(10, 1)
+val criterion = MSELoss.create()
+val optimizer = SGD.create(model.parameters(), 0.01, 0.9)
+
+val x = Tensor.randn([32, 10])
+val y = Tensor.randn([32, 1])
+val pred = model.forward(x)
+val loss = criterion.forward(pred, y)
+loss.backward()
+optimizer.step()
+optimizer.zero_grad()
+```
+
+---
+
+## nogc_async_mut: Async ML Usage
+
+`nogc_async_mut/` now includes the full ML library (pure, torch, gpu, cuda) plus an async-specific `ml/` integration layer.
+
+### Math Blocks in Async ML
+
+`m{}` works identically in `nogc_async_mut` — no import needed:
+
+```simple
+fn weighted_loss(pred: f64, target: f64, weight: f64) -> f64:
+    m{ weight * (pred - target)^2 }
+```
+
+### Import Patterns
+
+```simple
+# Pure ML (same API as nogc_sync_mut)
+use std.nogc_async_mut.pure.tensor_f64.{from_data, zeros, randn}
+use std.nogc_async_mut.pure.autograd.{Tensor, tensor_from_value}
+use std.nogc_async_mut.pure.nn.embedding.{Embedding}
+use std.nogc_async_mut.pure.training.{mse_loss, SGD, Adam}
+
+# Torch FFI (same API as nogc_sync_mut)
+use std.nogc_async_mut.torch.mod.{Tensor, Linear}
+use std.nogc_async_mut.torch.torch_training.{MSELoss, SGD, Adam}
+
+# Async ML integration (nogc_async_mut only)
+use std.nogc_async_mut.ml.async_training.{train_epoch, evaluate_model, train_loop}
+use std.nogc_async_mut.ml.data_pipeline.{prefetch_batches, shuffle_indices}
+```
+
+### Async Training Example
+
+```simple
+use std.nogc_async_mut.ml.async_training.{train_loop}
+use std.nogc_async_mut.pure.data.dataset.{LabeledDataset}
+use std.nogc_async_mut.pure.data.dataloader.{create_dataloader_labeled}
+use std.nogc_async_mut.pure.training.{mse_loss}
+
+val features = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+val labels = [1.0, 2.0, 3.0]
+val ds = LabeledDataset(features: features, labels: labels)
+
+val train_dl = create_dataloader_labeled(ds, 2, false, false)
+val val_dl = create_dataloader_labeled(ds, 2, false, false)
+
+val model = MyModel()
+val optimizer = SGD.create(model.parameters(), 0.01, 0.9)
+val val_losses = train_loop(model, train_dl, val_dl, optimizer, mse_loss, 10)
+```
+
+### Library Group Comparison
+
+| Feature | `nogc_sync_mut` | `nogc_async_mut` | `gc_async_mut` |
+|---------|:--------------:|:----------------:|:--------------:|
+| Pure ML (tensor, autograd, nn) | ✅ | ✅ | ✅ |
+| Torch FFI | ✅ | ✅ | ✅ |
+| GPU/CUDA | ✅ | ✅ | ✅ |
+| Math blocks `m{}` | ✅ | ✅ | ✅ |
+| Async training loops | — | ✅ | — |
+| Data pipeline utils | — | ✅ | — |
+| Async concurrency | — | ✅ | — |
+| GC-managed lifetime | — | — | ✅ |
+
+---
+
 ## Common Pitfalls
 
 ### 1. Double-free in NoGC

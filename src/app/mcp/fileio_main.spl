@@ -4,20 +4,15 @@
 
 use app.mcp.fileio_protection (ProtectionEngine, RuleType, RuleAction, ProtectionResult, create_engine)
 use app.mcp.fileio_temp (TempManager, create_temp_manager)
-use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, min_int}
+use app.mcp.helpers.{LB, RB, js, extract_json_string_v2, extract_json_value, extract_nested_string, make_tool_result, make_error_response, make_tool_schema_multi, make_prop}
 use app.io.mod (cli_get_args, env_get, shell, exit)
-use std.json.builder.{escape_json}
 use std.text.{NL}
 use std.mcp.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
+use std.mcp_sdk.server.builder.{ServerConfig, server_config, server_set_instructions, server_add_tool_json}
+use std.mcp_sdk.server.router.{handle_method}
 
 # Protocol state
 var PROTOCOL = create_protocol_state()
-
-# Cache tool schemas to avoid rebuilding on every tools/list request
-var FILEIO_TOOLS_CACHE: [String] = []
-var FILEIO_TOOLS_CACHE_BUILT: Bool = false
-var FILEIO_TOOLS_PAGE_CACHE: Dict<String, String> = {}
-var FILEIO_INIT_CACHE: Option<String> = nil
 
 # MCP Server state
 class FileIOServer:
@@ -395,177 +390,22 @@ class FileIOServer:
     fn error_response(message: text) -> text:
         "{\"status\": \"error\", \"message\": \"" + message + "\"}"
 
-# Main entry point
-fn main():
-    val raw_args = cli_get_args()
-    var has_server = false
-    for arg in raw_args:
-        if arg == "server":
-            has_server = true
+# --- Server config (built once at startup) ---
 
-    if not has_server:
-        print "Usage: fileio_main.spl server"
-        return
+fn build_server_config() -> ServerConfig:
+    var cfg = server_config("simple-fileio", "1.0.0")
+    cfg = server_set_instructions(cfg, "Protected file operations (safe_read/safe_write/etc) with rule-based access control.")
 
-    run_server()
+    # Register all tool schemas
+    val tools = get_all_tools()
+    var i = 0
+    while i < tools.len():
+        cfg = server_add_tool_json(cfg, "", tools[i])
+        i = i + 1
 
-# Run MCP server
-fn run_server():
-    val config_path = env_get("SIMPLE_FILEIO_CONFIG") ?? ""
-    val config = if config_path.len() > 0:
-        config_path
-    else:
-        "fileio_protection.sdn"
+    cfg
 
-    val server = FileIOServer.init(config)
-
-    var running = true
-    for _iter in range(0, 999999):
-        if not running:
-            return
-        val line = read_stdin_message()
-        if line == "":
-            running = false
-        else:
-            val method = extract_json_string_v2(line, "method")
-            val id = extract_json_value(line, "id")
-            var response = ""
-
-            if method == "initialize":
-                response = make_initialize_response(id)
-            elif method == "initialized":
-                response = ""  # Notification, no response
-            elif method == "shutdown":
-                response = make_result_response(id, "null")
-            elif method == "exit":
-                exit(0)
-            elif method == "ping":
-                response = make_result_response(id, LB() + RB())
-            elif method == "tools/list":
-                response = handle_tools_list(id)
-            elif method == "tools/call":
-                val tool_name = extract_nested_string(line, "params", "name")
-                if tool_name == "":
-                    response = make_error_response(id, -32602, "Missing tool name")
-                else:
-                    val args = parse_params(line)
-                    val result = server.handle_tool(tool_name, args)
-                    response = make_tool_result(id, result)
-            elif method == "resources/list":
-                response = handle_resources_list(id)
-            elif method == "resources/read":
-                response = make_error_response(id, -32601, "No resources available")
-            elif method == "prompts/list":
-                response = handle_prompts_list(id)
-            elif method == "prompts/get":
-                response = make_error_response(id, -32601, "No prompts available")
-            elif method == "notifications/cancelled":
-                response = ""  # Notification, no response
-            else:
-                response = make_error_response(id, -32601, "Method not found: " + method)
-
-            if response != "":
-                write_stdout_message(response)
-
-# Helper functions
-fn parse_method(json: text) -> text:
-    val search = "\"method\""
-    val idx = json.index_of(search)
-    if not idx.?:
-        return ""
-
-    val start = idx.unwrap() + search.len()
-    val rest = json[start:]
-    val quote_idx = rest.index_of("\"")
-    if not quote_idx.?:
-        return ""
-
-    val value_start = quote_idx.unwrap() + 1
-    val value_rest = rest[value_start:]
-    val close_idx = value_rest.index_of("\"")
-    if not close_idx.?:
-        return ""
-
-    value_rest[0:close_idx.unwrap()]
-
-fn parse_params(json: text) -> text:
-    val search = "\"params\""
-    val idx = json.index_of(search)
-    if not idx.?:
-        return "{}"
-
-    val start = idx.unwrap() + search.len()
-    val rest = json[start:]
-    val brace_idx = rest.index_of("{")
-    if not brace_idx.?:
-        return "{}"
-
-    # Simple brace matching
-    var depth = 0
-    var result = ""
-    for i in brace_idx.unwrap()..rest.len():
-        val ch = rest[i:i+1]
-        result = result + ch
-        if ch == "{":
-            depth = depth + 1
-        else if ch == "}":
-            depth = depth - 1
-            if depth == 0:
-                break
-
-    result
-
-fn read_stdin_message() -> String:
-    """Read message using MCP protocol (delegates to protocol module)."""
-    protocol_read_message(PROTOCOL)
-
-fn write_stdout_message(body: String):
-    """Write message using MCP protocol (delegates to protocol module)."""
-    protocol_write_message(PROTOCOL, body)
-
-fn make_prop(name: String, desc: String) -> String:
-    jp(name, jo2(jp("type", js("string")), jp("description", js(escape_json(desc)))))
-
-fn make_initialize_response(id: String) -> String:
-    val result = make_initialize_result()
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn make_initialize_result() -> String:
-    match FILEIO_INIT_CACHE:
-        case Some(r): return r
-        case nil: ()
-
-    val server_protocol = "2025-06-18"
-
-    var server_info = LB()
-    server_info = server_info + jp("name", js("simple-fileio"))
-    server_info = server_info + ","
-    server_info = server_info + jp("version", js("1.0.0"))
-    server_info = server_info + ","
-    val instructions = "Protected file operations (safe_read/safe_write/etc) with rule-based access control."
-    server_info = server_info + jp("instructions", js(escape_json(instructions)))
-    server_info = server_info + RB()
-
-    var tools_cap = jo1(jp("listChanged", "true"))
-    var caps = jo1(jp("tools", tools_cap))
-
-    val result = jo3(jp("protocolVersion", js(server_protocol)), jp("capabilities", caps), jp("serverInfo", server_info))
-    FILEIO_INIT_CACHE = Some(result)
-    result
-
-fn handle_tools_list(id: String) -> String:
-    val tools = get_tools_page_cached(0, 100)  # all tools fit in one page
-
-    val result = jo1(jp("tools", tools))
-    make_result_response(id, result)
-
-fn handle_resources_list(id: String) -> String:
-    val result = jo1(jp("resources", "[]"))
-    make_result_response(id, result)
-
-fn handle_prompts_list(id: String) -> String:
-    val result = jo1(jp("prompts", "[]"))
-    make_result_response(id, result)
+# --- Tool schema definitions ---
 
 fn get_all_tools() -> [String]:
     [
@@ -583,35 +423,6 @@ fn get_all_tools() -> [String]:
         schema_cleanup_temp(),
         schema_get_temp_dir()
     ]
-
-fn get_all_tools_cached() -> [String]:
-    if FILEIO_TOOLS_CACHE_BUILT:
-        return FILEIO_TOOLS_CACHE
-    FILEIO_TOOLS_CACHE = get_all_tools()
-    FILEIO_TOOLS_CACHE_BUILT = true
-    FILEIO_TOOLS_CACHE
-
-fn get_tools_page_cached(offset: Int, page_size: Int) -> String:
-    val key = offset.to_string() + ":" + page_size.to_string()
-    match FILEIO_TOOLS_PAGE_CACHE.get(key):
-        case Some(page): return page
-        case nil: ()
-
-    val all_tools = get_all_tools_cached()
-    val total = all_tools.len()
-    val end = min_int(offset + page_size, total)
-
-    var tools = "["
-    var first = true
-    for i in offset..end:
-        if not first:
-            tools = tools + ","
-        first = false
-        tools = tools + all_tools[i]
-    tools = tools + "]"
-
-    FILEIO_TOOLS_PAGE_CACHE[key] = tools
-    tools
 
 fn schema_safe_read() -> String:
     val props = LB() + make_prop("path", "Path to read") + RB()
@@ -682,6 +493,96 @@ fn schema_cleanup_temp() -> String:
 fn schema_get_temp_dir() -> String:
     make_tool_schema_multi("get_temp_dir", "Get temp directory path", LB() + RB(), "[]", true, false, true)
 
+# --- Main entry point ---
+
+fn main():
+    val raw_args = cli_get_args()
+    var has_server = false
+    for arg in raw_args:
+        if arg == "server":
+            has_server = true
+
+    if not has_server:
+        print "Usage: fileio_main.spl server"
+        return
+
+    run_server()
+
+# --- Server loop ---
+
+fn run_server():
+    val config_path = env_get("SIMPLE_FILEIO_CONFIG") ?? ""
+    val config = if config_path.len() > 0:
+        config_path
+    else:
+        "fileio_protection.sdn"
+
+    val server = FileIOServer.init(config)
+    val CFG = build_server_config()
+
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            return
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = handle_method(CFG, method, id, line)
+
+            if response == "TOOLS_CALL":
+                val tool_name = extract_nested_string(line, "params", "name")
+                if tool_name == "":
+                    response = make_error_response(id, -32602, "Missing tool name")
+                else:
+                    val args = parse_params(line)
+                    val result = server.handle_tool(tool_name, args)
+                    response = make_tool_result(id, result)
+            elif response == "EXIT":
+                exit(0)
+
+            if response != "":
+                write_stdout_message(response)
+
+# --- Protocol I/O ---
+
+fn read_stdin_message() -> String:
+    protocol_read_message(PROTOCOL)
+
+fn write_stdout_message(body: String):
+    protocol_write_message(PROTOCOL, body)
+
+# --- Params parser ---
+
+fn parse_params(json: text) -> text:
+    val search = "\"params\""
+    val idx = json.index_of(search)
+    if not idx.?:
+        return "{}"
+
+    val start = idx.unwrap() + search.len()
+    val rest = json[start:]
+    val brace_idx = rest.index_of("{")
+    if not brace_idx.?:
+        return "{}"
+
+    # Simple brace matching
+    var depth = 0
+    var result = ""
+    for i in brace_idx.unwrap()..rest.len():
+        val ch = rest[i:i+1]
+        result = result + ch
+        if ch == "{":
+            depth = depth + 1
+        else if ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                break
+
+    result
+
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn get_args() -> [text]:
@@ -691,6 +592,5 @@ fn read_line() -> text:
     input("")
 
 fn print(msg: text):
-    # Print to stdout with newline (for protocol compliance)
     print_raw(msg)
     print_raw(NL)

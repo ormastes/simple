@@ -410,9 +410,9 @@ static char* simple_format_str(const char* fmt_before, const char* value, const 
 // --- Int to String helper ---
 
 static char* simple_int_to_str(long long value) {
-    char buf[32];
+    static char buf[32];
     snprintf(buf, sizeof(buf), "%lld", value);
-    return strdup(buf);
+    return buf;
 }
 
 // --- Dictionary (linear-scan hash table with string keys) ---
@@ -601,7 +601,7 @@ static SimpleOption simple_some_str(const char* val) {
     SimpleOption o;
     o.has_value = 1;
     o.type_tag = 1;
-    o.str_val = val ? strdup(val) : strdup("");
+    o.str_val = val ? val : "";
     return o;
 }
 
@@ -661,7 +661,7 @@ static SimpleResult simple_result_ok_str(const char* val) {
     SimpleResult r;
     r.is_ok = 1;
     r.type_tag = 1;
-    r.ok_str = val ? strdup(val) : strdup("");
+    r.ok_str = val ? val : "";
     r.err_str = NULL;
     return r;
 }
@@ -671,7 +671,7 @@ static SimpleResult simple_result_err_str(const char* val) {
     r.is_ok = 0;
     r.type_tag = 1;
     r.ok_str = NULL;
-    r.err_str = val ? strdup(val) : strdup("");
+    r.err_str = val ? val : "";
     return r;
 }
 

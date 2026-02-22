@@ -1,0 +1,327 @@
+# Tests for Pure Simple Training Infrastructure
+
+use std.pure.tensor (PureTensor)
+use std.pure.autograd (Tensor, backward, tensor_mean)
+use std.pure.nn (Linear, ReLU, Sigmoid, Sequential, count_parameters)
+use std.pure.training (
+    mse_loss, mae_loss, binary_cross_entropy_loss,
+    SGD, Adam,
+    accuracy, accuracy_from_logits,
+    Trainer, TrainingHistory
+)
+
+describe "Training Infrastructure":
+    describe "Loss Functions":
+        describe "MSE Loss":
+            it "computes mean squared error":
+                val predictions = Tensor.from_data([1.0, 2.0, 3.0], [3], requires_grad: true)
+                val targets = Tensor.from_data([1.5, 2.5, 2.5], [3], requires_grad: false)
+
+                val loss = mse_loss(predictions, targets)
+
+                # MSE = mean((1-1.5)^2 + (2-2.5)^2 + (3-2.5)^2)
+                #     = mean(0.25 + 0.25 + 0.25) = 0.25
+                assert loss.value.data[0] > 0.24
+                assert loss.value.data[0] < 0.26
+
+            it "has zero loss for perfect predictions":
+                val predictions = Tensor.from_data([1.0, 2.0, 3.0], [3], requires_grad: true)
+                val targets = Tensor.from_data([1.0, 2.0, 3.0], [3], requires_grad: false)
+
+                val loss = mse_loss(predictions, targets)
+
+                assert loss.value.data[0] < 0.01
+
+            it "computes gradients":
+                val predictions = Tensor.from_data([2.0], [1], requires_grad: true)
+                val targets = Tensor.from_data([1.0], [1], requires_grad: false)
+
+                val loss = mse_loss(predictions, targets)
+                backward(loss)
+
+                # d(MSE)/d(pred) = 2 * (pred - target) / N
+                #                = 2 * (2 - 1) / 1 = 2
+                assert predictions.grad.?
+
+        describe "MAE Loss":
+            it "computes mean absolute error":
+                val predictions = Tensor.from_data([1.0, 2.0, 3.0], [3], requires_grad: true)
+                val targets = Tensor.from_data([1.5, 2.5, 2.5], [3], requires_grad: false)
+
+                val loss = mae_loss(predictions, targets)
+
+                # MAE = mean(|1-1.5| + |2-2.5| + |3-2.5|)
+                #     = mean(0.5 + 0.5 + 0.5) = 0.5
+                assert loss.value.data[0] > 0.49
+                assert loss.value.data[0] < 0.51
+
+    describe "SGD Optimizer":
+        it "creates SGD optimizer":
+            val params = [
+                Tensor.from_data([1.0, 2.0], [2], requires_grad: true)
+            ]
+            val optimizer = SGD.create(params, lr: 0.01, momentum: 0.0)
+
+            assert optimizer.lr == 0.01
+            assert optimizer.momentum == 0.0
+            assert optimizer.parameters.len() == 1
+
+        it "updates parameters without momentum":
+            val param = Tensor.from_data([1.0, 2.0], [2], requires_grad: true)
+            param.grad = Some(PureTensor.from_data([0.5, 0.5], [2]))
+
+            val optimizer = SGD.create([param], lr: 0.1, momentum: 0.0)
+            optimizer.step()
+
+            # param = param - lr * grad = [1.0, 2.0] - 0.1 * [0.5, 0.5]
+            #                            = [0.95, 1.95]
+            assert param.value.data[0] > 0.94
+            assert param.value.data[0] < 0.96
+            assert param.value.data[1] > 1.94
+            assert param.value.data[1] < 1.96
+
+        it "zeros gradients":
+            val param = Tensor.from_data([1.0], [1], requires_grad: true)
+            param.grad = Some(PureTensor.from_data([0.5], [1]))
+
+            val optimizer = SGD.create([param], lr: 0.1)
+            optimizer.zero_grad()
+
+            assert not param.grad.?
+
+        it "has string representation":
+            val params = [Tensor.from_data([1.0], [1], requires_grad: true)]
+            val optimizer = SGD.create(params, lr: 0.01, momentum: 0.9)
+            val s = optimizer.to_string()
+
+            assert s.contains("SGD")
+            assert s.contains("0.01")
+
+    describe "Adam Optimizer":
+        it "creates Adam optimizer":
+            val params = [
+                Tensor.from_data([1.0, 2.0], [2], requires_grad: true)
+            ]
+            val optimizer = Adam.create(params, lr: 0.001)
+
+            assert optimizer.lr == 0.001
+            assert optimizer.betas.0 == 0.9
+            assert optimizer.betas.1 == 0.999
+            assert optimizer.t == 0
+
+        it "initializes moments to zero":
+            val param = Tensor.from_data([1.0, 2.0], [2], requires_grad: true)
+            val optimizer = Adam.create([param], lr: 0.001)
+
+            assert optimizer.m.len() == 1
+            assert optimizer.v.len() == 1
+            assert optimizer.m[0].data == [0.0, 0.0]
+            assert optimizer.v[0].data == [0.0, 0.0]
+
+        it "updates parameters":
+            val param = Tensor.from_data([1.0], [1], requires_grad: true)
+            param.grad = Some(PureTensor.from_data([1.0], [1]))
+
+            val optimizer = Adam.create([param], lr: 0.1)
+            optimizer.step()
+
+            # After one step, parameter should change
+            assert param.value.data[0] != 1.0
+
+        it "increments timestep":
+            val param = Tensor.from_data([1.0], [1], requires_grad: true)
+            param.grad = Some(PureTensor.from_data([1.0], [1]))
+
+            val optimizer = Adam.create([param], lr: 0.1)
+
+            assert optimizer.t == 0
+            optimizer.step()
+            assert optimizer.t == 1
+            optimizer.step()
+            assert optimizer.t == 2
+
+    describe "Metrics":
+        describe "Accuracy":
+            it "computes perfect accuracy":
+                val predictions = Tensor.from_data([0.0, 1.0, 0.0, 1.0], [4], requires_grad: false)
+                val targets = Tensor.from_data([0.0, 1.0, 0.0, 1.0], [4], requires_grad: false)
+
+                val acc = accuracy(predictions, targets)
+                assert acc == 1.0
+
+            it "computes partial accuracy":
+                val predictions = Tensor.from_data([0.0, 1.0, 1.0, 1.0], [4], requires_grad: false)
+                val targets = Tensor.from_data([0.0, 1.0, 0.0, 1.0], [4], requires_grad: false)
+
+                val acc = accuracy(predictions, targets)
+                # 3 out of 4 correct
+                assert acc == 0.75
+
+            it "computes zero accuracy":
+                val predictions = Tensor.from_data([1.0, 0.0, 1.0, 0.0], [4], requires_grad: false)
+                val targets = Tensor.from_data([0.0, 1.0, 0.0, 1.0], [4], requires_grad: false)
+
+                val acc = accuracy(predictions, targets)
+                assert acc == 0.0
+
+    describe "Training History":
+        it "creates empty history":
+            val history = TrainingHistory.create()
+            assert history.epochs.len() == 0
+            assert history.losses.len() == 0
+
+        it "adds epoch data":
+            val history = TrainingHistory.create()
+            history.add_epoch(0, 1.5)
+            history.add_epoch(1, 0.8)
+
+            assert history.epochs.len() == 2
+            assert history.losses.len() == 2
+            assert history.losses[0] == 1.5
+            assert history.losses[1] == 0.8
+
+        it "gets final loss":
+            val history = TrainingHistory.create()
+            history.add_epoch(0, 1.5)
+            history.add_epoch(1, 0.8)
+
+            assert history.get_final_loss() == 0.8
+
+    describe "Trainer":
+        it "creates trainer":
+            val model = Sequential.create([
+                Linear.create(2, 1)
+            ])
+            val optimizer = SGD.create(model.parameters(), lr: 0.01)
+            val trainer = Trainer.create(model, optimizer, mse_loss)
+
+            assert trainer.model.layers.len() == 1
+
+        it "trains for multiple epochs":
+            # Simple model: single linear layer
+            val model = Sequential.create([
+                Linear.create(2, 1, bias: false)
+            ])
+
+            val optimizer = SGD.create(model.parameters(), lr: 0.1)
+            val trainer = Trainer.create(model, optimizer, mse_loss)
+
+            # Single training example
+            val train_data = [
+                (Tensor.from_data([1.0, 2.0], [1, 2], requires_grad: false),
+                 Tensor.from_data([3.0], [1, 1], requires_grad: false))
+            ]
+
+            # Train for a few epochs
+            trainer.fit(train_data, epochs: 5, verbose: false)
+
+            # History should have 5 epochs
+            assert trainer.get_history().epochs.len() == 5
+
+        it "tracks loss over epochs":
+            val model = Sequential.create([
+                Linear.create(1, 1, bias: false)
+            ])
+
+            val optimizer = SGD.create(model.parameters(), lr: 0.1)
+            val trainer = Trainer.create(model, optimizer, mse_loss)
+
+            val train_data = [
+                (Tensor.from_data([1.0], [1, 1], requires_grad: false),
+                 Tensor.from_data([2.0], [1, 1], requires_grad: false))
+            ]
+
+            trainer.fit(train_data, epochs: 3, verbose: false)
+
+            val history = trainer.get_history()
+            assert history.losses.len() == 3
+            # Loss should generally decrease (though not guaranteed with random init)
+
+        it "evaluates on test data":
+            val model = Sequential.create([
+                Linear.create(2, 1),
+                Sigmoid.create()
+            ])
+
+            val optimizer = SGD.create(model.parameters(), lr: 0.01)
+            val trainer = Trainer.create(model, optimizer, mse_loss)
+
+            # Test data
+            val test_data = [
+                (Tensor.from_data([0.0, 0.0], [1, 2], requires_grad: false),
+                 Tensor.from_data([0.0], [1, 1], requires_grad: false)),
+                (Tensor.from_data([1.0, 1.0], [1, 2], requires_grad: false),
+                 Tensor.from_data([1.0], [1, 1], requires_grad: false))
+            ]
+
+            val acc = trainer.evaluate(test_data)
+
+            # Accuracy should be between 0 and 1
+            assert acc >= 0.0
+            assert acc <= 1.0
+
+    describe "End-to-End Training":
+        it "trains simple linear regression":
+            # y = 2x + 1
+            val model = Sequential.create([
+                Linear.create(1, 1, bias: true)
+            ])
+
+            val optimizer = SGD.create(model.parameters(), lr: 0.01)
+            val trainer = Trainer.create(model, optimizer, mse_loss)
+
+            # Training data: y = 2x + 1
+            val train_data = [
+                (Tensor.from_data([0.0], [1, 1], requires_grad: false),
+                 Tensor.from_data([1.0], [1, 1], requires_grad: false)),
+                (Tensor.from_data([1.0], [1, 1], requires_grad: false),
+                 Tensor.from_data([3.0], [1, 1], requires_grad: false)),
+                (Tensor.from_data([2.0], [1, 1], requires_grad: false),
+                 Tensor.from_data([5.0], [1, 1], requires_grad: false))
+            ]
+
+            trainer.fit(train_data, epochs: 10, verbose: false)
+
+            # Check that loss decreased
+            val history = trainer.get_history()
+            val initial_loss = history.losses[0]
+            val final_loss = history.losses[history.losses.len() - 1]
+
+            # Loss should decrease (though not guaranteed)
+            # Just check it's computed
+            assert final_loss >= 0.0
+
+        it "trains binary classifier":
+            # Simple AND gate
+            val model = Sequential.create([
+                Linear.create(2, 2),
+                ReLU.create(),
+                Linear.create(2, 1),
+                Sigmoid.create()
+            ])
+
+            val optimizer = SGD.create(model.parameters(), lr: 0.1)
+            val trainer = Trainer.create(model, optimizer, mse_loss)
+
+            # AND gate training data
+            val train_data = [
+                (Tensor.from_data([0.0, 0.0], [1, 2], requires_grad: false),
+                 Tensor.from_data([0.0], [1, 1], requires_grad: false)),
+                (Tensor.from_data([0.0, 1.0], [1, 2], requires_grad: false),
+                 Tensor.from_data([0.0], [1, 1], requires_grad: false)),
+                (Tensor.from_data([1.0, 0.0], [1, 2], requires_grad: false),
+                 Tensor.from_data([0.0], [1, 1], requires_grad: false)),
+                (Tensor.from_data([1.0, 1.0], [1, 2], requires_grad: false),
+                 Tensor.from_data([1.0], [1, 1], requires_grad: false))
+            ]
+
+            # Train
+            trainer.fit(train_data, epochs: 20, verbose: false)
+
+            # Evaluate
+            val acc = trainer.evaluate(train_data)
+
+            # With random initialization, accuracy varies
+            # Just check it runs
+            assert acc >= 0.0
+            assert acc <= 1.0

@@ -8,7 +8,20 @@ use std.nogc_sync_mut.torch.ffi.{
     rt_torch_stream_create,
     rt_torch_torchstream_sync,
     rt_torch_torchstream_query,
-    rt_torch_torchstream_free
+    rt_torch_torchstream_free,
+    rt_torch_nn_mse_loss,
+    rt_torch_nn_cross_entropy,
+    rt_torch_autograd_grad,
+    rt_torch_torchtensor_add,
+    rt_torch_torchtensor_sub,
+    rt_torch_torchtensor_mul,
+    rt_torch_torchtensor_mul_scalar,
+    rt_torch_torchtensor_add_scalar,
+    rt_torch_torchtensor_div,
+    rt_torch_torchtensor_sqrt,
+    rt_torch_torchtensor_free,
+    rt_torch_tensor_from_data,
+    rt_torch_torchtensor_mean
 }
 
 # ============================================================================
@@ -20,8 +33,12 @@ class MSELoss:
         MSELoss()
 
     fn forward(pred: Tensor, target: Tensor) -> Tensor:
-        val diff = pred.sub(target)
-        diff.mul(diff)
+        """Compute MSE loss: mean((pred - target)^2).
+
+        Uses PyTorch FFI for efficient computation.
+        """
+        val loss_val = rt_torch_nn_mse_loss(pred.handle, target.handle)
+        Tensor.from_handle(rt_torch_tensor_from_data([loss_val], [1]))
 
 
 class CrossEntropyLoss:
@@ -29,7 +46,12 @@ class CrossEntropyLoss:
         CrossEntropyLoss()
 
     fn forward(logits: Tensor, targets: Tensor) -> Tensor:
-        logits.clone()
+        """Compute cross-entropy loss for classification.
+
+        Uses PyTorch FFI for efficient computation.
+        """
+        val loss_val = rt_torch_nn_cross_entropy(logits.handle, targets.handle)
+        Tensor.from_handle(rt_torch_tensor_from_data([loss_val], [1]))
 
 
 # ============================================================================
@@ -58,7 +80,30 @@ class SGD:
         )
 
     fn step():
-        0
+        """Update parameters using SGD with momentum.
+
+        velocity = momentum * velocity + lr * grad
+        param = param - velocity
+        """
+        var i = 0
+        while i < self.parameters.len():
+            val param = self.parameters[i]
+            val grad_handle = rt_torch_autograd_grad(param.handle)
+            if grad_handle != 0:
+                # velocity = momentum * velocity + lr * grad
+                val v_scaled = rt_torch_torchtensor_mul_scalar(self.velocities[i].handle, self.momentum)
+                val g_scaled = rt_torch_torchtensor_mul_scalar(grad_handle, self.lr)
+                val v_new_handle = rt_torch_torchtensor_add(v_scaled, g_scaled)
+                rt_torch_torchtensor_free(v_scaled)
+                rt_torch_torchtensor_free(g_scaled)
+                # Update stored velocity
+                rt_torch_torchtensor_free(self.velocities[i].handle)
+                self.velocities[i] = Tensor.from_handle(v_new_handle)
+                # param = param - velocity
+                val new_param = rt_torch_torchtensor_sub(param.handle, v_new_handle)
+                rt_torch_torchtensor_free(param.handle)
+                self.parameters[i] = Tensor.from_handle(new_param)
+            i = i + 1
 
     fn zero_grad():
         var i = 0
@@ -100,7 +145,68 @@ class Adam:
         )
 
     me step():
+        """Update parameters using Adam algorithm.
+
+        m = beta1 * m + (1 - beta1) * grad
+        v = beta2 * v + (1 - beta2) * grad^2
+        m_hat = m / (1 - beta1^t)
+        v_hat = v / (1 - beta2^t)
+        param = param - lr * m_hat / (sqrt(v_hat) + eps)
+        """
         self.t = self.t + 1
+
+        var i = 0
+        while i < self.parameters.len():
+            val param = self.parameters[i]
+            val grad_handle = rt_torch_autograd_grad(param.handle)
+            if grad_handle != 0:
+                # m = beta1 * m + (1 - beta1) * grad
+                val m_old_scaled = rt_torch_torchtensor_mul_scalar(self.m[i].handle, self.beta1)
+                val g_scaled = rt_torch_torchtensor_mul_scalar(grad_handle, 1 - self.beta1)
+                val m_new = rt_torch_torchtensor_add(m_old_scaled, g_scaled)
+                rt_torch_torchtensor_free(m_old_scaled)
+                rt_torch_torchtensor_free(g_scaled)
+                rt_torch_torchtensor_free(self.m[i].handle)
+                self.m[i] = Tensor.from_handle(m_new)
+
+                # v = beta2 * v + (1 - beta2) * grad^2
+                val v_old_scaled = rt_torch_torchtensor_mul_scalar(self.v[i].handle, self.beta2)
+                val grad_sq = rt_torch_torchtensor_mul(grad_handle, grad_handle)
+                val g2_scaled = rt_torch_torchtensor_mul_scalar(grad_sq, 1 - self.beta2)
+                val v_new = rt_torch_torchtensor_add(v_old_scaled, g2_scaled)
+                rt_torch_torchtensor_free(v_old_scaled)
+                rt_torch_torchtensor_free(grad_sq)
+                rt_torch_torchtensor_free(g2_scaled)
+                rt_torch_torchtensor_free(self.v[i].handle)
+                self.v[i] = Tensor.from_handle(v_new)
+
+                # Bias correction: m_hat = m / (1 - beta1^t), v_hat = v / (1 - beta2^t)
+                var beta1_t = 1.0
+                var beta2_t = 1.0
+                var k = 0
+                while k < self.t:
+                    beta1_t = beta1_t * self.beta1
+                    beta2_t = beta2_t * self.beta2
+                    k = k + 1
+                val m_hat = rt_torch_torchtensor_mul_scalar(m_new, 1.0 / (1.0 - beta1_t))
+                val v_hat = rt_torch_torchtensor_mul_scalar(v_new, 1.0 / (1.0 - beta2_t))
+
+                # param = param - lr * m_hat / (sqrt(v_hat) + eps)
+                val v_sqrt = rt_torch_torchtensor_sqrt(v_hat)
+                val denom = rt_torch_torchtensor_add_scalar(v_sqrt, self.eps)
+                val update = rt_torch_torchtensor_div(m_hat, denom)
+                val update_scaled = rt_torch_torchtensor_mul_scalar(update, self.lr)
+                val new_param = rt_torch_torchtensor_sub(param.handle, update_scaled)
+
+                rt_torch_torchtensor_free(m_hat)
+                rt_torch_torchtensor_free(v_hat)
+                rt_torch_torchtensor_free(v_sqrt)
+                rt_torch_torchtensor_free(denom)
+                rt_torch_torchtensor_free(update)
+                rt_torch_torchtensor_free(update_scaled)
+                rt_torch_torchtensor_free(param.handle)
+                self.parameters[i] = Tensor.from_handle(new_param)
+            i = i + 1
 
     fn zero_grad():
         var i = 0
@@ -133,7 +239,41 @@ class RMSprop:
         )
 
     fn step():
-        0
+        """Update parameters using RMSprop.
+
+        v = alpha * v + (1 - alpha) * grad^2
+        param = param - lr * grad / (sqrt(v) + eps)
+        """
+        var i = 0
+        while i < self.parameters.len():
+            val param = self.parameters[i]
+            val grad_handle = rt_torch_autograd_grad(param.handle)
+            if grad_handle != 0:
+                # v = alpha * v + (1 - alpha) * grad^2
+                val v_old_scaled = rt_torch_torchtensor_mul_scalar(self.v[i].handle, self.alpha)
+                val grad_sq = rt_torch_torchtensor_mul(grad_handle, grad_handle)
+                val g2_scaled = rt_torch_torchtensor_mul_scalar(grad_sq, 1 - self.alpha)
+                val v_new = rt_torch_torchtensor_add(v_old_scaled, g2_scaled)
+                rt_torch_torchtensor_free(v_old_scaled)
+                rt_torch_torchtensor_free(grad_sq)
+                rt_torch_torchtensor_free(g2_scaled)
+                rt_torch_torchtensor_free(self.v[i].handle)
+                self.v[i] = Tensor.from_handle(v_new)
+
+                # param = param - lr * grad / (sqrt(v) + eps)
+                val v_sqrt = rt_torch_torchtensor_sqrt(v_new)
+                val denom = rt_torch_torchtensor_add_scalar(v_sqrt, self.eps)
+                val update = rt_torch_torchtensor_div(grad_handle, denom)
+                val update_scaled = rt_torch_torchtensor_mul_scalar(update, self.lr)
+                val new_param = rt_torch_torchtensor_sub(param.handle, update_scaled)
+
+                rt_torch_torchtensor_free(v_sqrt)
+                rt_torch_torchtensor_free(denom)
+                rt_torch_torchtensor_free(update)
+                rt_torch_torchtensor_free(update_scaled)
+                rt_torch_torchtensor_free(param.handle)
+                self.parameters[i] = Tensor.from_handle(new_param)
+            i = i + 1
 
     fn zero_grad():
         var i = 0

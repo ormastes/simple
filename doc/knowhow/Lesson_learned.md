@@ -35,6 +35,8 @@ with this rule. can make 1M lines.
 use best model like opus for most job.
 least do opusplan mode.
 less intelligent model often make duplication on src code and make dummy or mock codes.
+If you can not do with LLM then rethink you don't have enough money rather other reason.
+money can solve --almost-- all problem.
 
 ## use different model to verify
 Codex less efficiently write long code but can verify duplication and dummy implementation better.
@@ -90,6 +92,11 @@ it is much better to use provided by llm company unless it is too buggy which is
 
 use git yes, I use jj if you see the repository you can findout.
 I like jj and want to be familar to jj but it is much better to use git.
+
+## Don't ask not to do todo
+LLM will make a lot of todo if you let them not to do then it will make "note" ^ ^.
+Rather let it do impl rather todo. it is much safer.
+
 
 ## Use strongly type language which compiled fill like it will run.
 rust, java, erlang are familar with if compile run as meent to be.
