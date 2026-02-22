@@ -73,9 +73,9 @@ fn run_external_check(cfg: LeakCheckConfig) -> LeakCheckResult:
 
     match cfg.external_tool:
         case ExternalTool.Asan:
-            ext_report = run_asan_check(cc, temp_c, temp_bin, cfg.verbose)
+            ext_report = run_asan_check(cc, temp_c, temp_bin, cfg.verbose, cfg.timeout_seconds)
         case ExternalTool.Valgrind:
-            ext_report = run_valgrind_check(cc, temp_c, temp_bin, cfg.verbose)
+            ext_report = run_valgrind_check(cc, temp_c, temp_bin, cfg.verbose, cfg.timeout_seconds)
 
     # Step 5: Cleanup
     shell("rm -rf '{temp_dir}'")
@@ -90,7 +90,7 @@ fn run_external_check(cfg: LeakCheckConfig) -> LeakCheckResult:
     result
 
 # Run ASan-instrumented build and capture output
-fn run_asan_check(cc: text, temp_c: text, temp_bin: text, verbose: bool) -> ExternalLeakReport:
+fn run_asan_check(cc: text, temp_c: text, temp_bin: text, verbose: bool, timeout_seconds: i64) -> ExternalLeakReport:
     # Compile with ASan
     val compile_cmd = "{cc} -fsanitize=address,leak -fno-omit-frame-pointer -g -o '{temp_bin}' '{temp_c}'"
     if verbose:
@@ -110,7 +110,10 @@ fn run_asan_check(cc: text, temp_c: text, temp_bin: text, verbose: bool) -> Exte
     if verbose:
         print "Running ASan-instrumented binary..."
 
-    val run_cmd = "ASAN_OPTIONS=detect_leaks=1 '{temp_bin}' 2>&1"
+    var timeout_prefix = ""
+    if timeout_seconds > 0:
+        timeout_prefix = "timeout {timeout_seconds} "
+    val run_cmd = "{timeout_prefix}env ASAN_OPTIONS=detect_leaks=1 '{temp_bin}' 2>&1"
     val (run_out, run_err, run_exit) = shell(run_cmd)
 
     # ASan output goes to stderr, but we capture both via 2>&1
@@ -122,7 +125,7 @@ fn run_asan_check(cc: text, temp_c: text, temp_bin: text, verbose: bool) -> Exte
     parse_asan_output(combined_output)
 
 # Run Valgrind check
-fn run_valgrind_check(cc: text, temp_c: text, temp_bin: text, verbose: bool) -> ExternalLeakReport:
+fn run_valgrind_check(cc: text, temp_c: text, temp_bin: text, verbose: bool, timeout_seconds: i64) -> ExternalLeakReport:
     # Check if valgrind is available
     val which_valgrind = shell_output("which valgrind 2>/dev/null")
     if which_valgrind == "":
@@ -148,7 +151,10 @@ fn run_valgrind_check(cc: text, temp_c: text, temp_bin: text, verbose: bool) -> 
         return report
 
     # Run under Valgrind
-    val valgrind_cmd = "valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes '{temp_bin}' 2>&1"
+    var timeout_prefix = ""
+    if timeout_seconds > 0:
+        timeout_prefix = "timeout {timeout_seconds} "
+    val valgrind_cmd = "{timeout_prefix}valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes '{temp_bin}' 2>&1"
     if verbose:
         print "Running under Valgrind: {valgrind_cmd}"
 

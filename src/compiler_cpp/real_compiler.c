@@ -835,6 +835,87 @@ int is_alnum(const char* ch) {
     return is_alpha(ch);
 }
 
+/* Convert a Simple type string to the corresponding C type */
+static const char* stype_to_c(const char* stype) {
+    if (!stype || !*stype) return "long long";
+    long long len = (long long)strlen(stype);
+    /* Strip trailing ? (optional type) */
+    if (len > 0 && stype[len-1] == '?') {
+        char* stripped = (char*)malloc(len);
+        memcpy(stripped, stype, len-1);
+        stripped[len-1] = '\0';
+        const char* res = stype_to_c(stripped);
+        free(stripped);
+        return res;
+    }
+    /* Primitive types */
+    if (strcmp(stype, "i64") == 0 || strcmp(stype, "int") == 0) return "long long";
+    if (strcmp(stype, "i32") == 0) return "int";
+    if (strcmp(stype, "i8") == 0 || strcmp(stype, "u8") == 0) return "int";
+    if (strcmp(stype, "f64") == 0 || strcmp(stype, "float") == 0) return "double";
+    if (strcmp(stype, "f32") == 0) return "float";
+    if (strcmp(stype, "bool") == 0) return "int";
+    if (strcmp(stype, "void") == 0) return "void";
+    if (strcmp(stype, "text") == 0 || strcmp(stype, "str") == 0) return "const char*";
+    /* Array types */
+    if (strcmp(stype, "[text]") == 0 || strcmp(stype, "[str]") == 0) return "SimpleStringArray";
+    if (strcmp(stype, "[i64]") == 0 || strcmp(stype, "[int]") == 0 || strcmp(stype, "[bool]") == 0) return "SimpleIntArray";
+    if (strcmp(stype, "[[text]]") == 0 || strcmp(stype, "[[str]]") == 0) return "SimpleStringArrayArray";
+    if (strcmp(stype, "[[i64]]") == 0 || strcmp(stype, "[[int]]") == 0) return "SimpleIntArrayArray";
+    /* [StructName] → SimpleStructArray */
+    if (len > 2 && stype[0] == '[' && stype[len-1] == ']') {
+        if (stype[1] >= 'A' && stype[1] <= 'Z') return "SimpleStructArray";
+    }
+    /* Generic types with <> (Option<T>, Result<T,E>, Dict<K,V>, etc.) → long long */
+    if (strstr(stype, "<") != NULL) return "long long";
+    /* Bare struct/class name (uppercase first char) → use as-is */
+    if (stype[0] >= 'A' && stype[0] <= 'Z') return stype;
+    return "long long";
+}
+
+/* Split param string by comma, skipping commas inside <> brackets */
+static SimpleStringArray split_params_toplevel(const char* s) {
+    SimpleStringArray result = simple_new_string_array();
+    if (!s) return result;
+    long long len = (long long)strlen(s);
+    long long start = 0;
+    int depth = 0;
+    for (long long i = 0; i <= len; i++) {
+        char c = (i < len) ? s[i] : '\0';
+        if (c == '<') { depth++; continue; }
+        if (c == '>') { depth--; continue; }
+        if (c == '\0' || (c == ',' && depth == 0)) {
+            long long plen = i - start;
+            char* part = (char*)malloc(plen + 1);
+            memcpy(part, s + start, plen);
+            part[plen] = '\0';
+            simple_string_push(&result, simple_trim(part));
+            free(part);
+            start = i + 1;
+        }
+    }
+    return result;
+}
+
+/* Find the matching close paren, tracking nested () and <> */
+static long long find_close_paren_from(const char* line, long long open_pos) {
+    long long len = (long long)strlen(line);
+    int depth = 1;
+    int angle = 0;
+    for (long long i = open_pos + 1; i < len; i++) {
+        char c = line[i];
+        if (c == '<') { angle++; continue; }
+        if (c == '>') { angle--; continue; }
+        if (angle > 0) continue;
+        if (c == '(') depth++;
+        else if (c == ')') {
+            depth--;
+            if (depth == 0) return i;
+        }
+    }
+    return -1;
+}
+
 SimpleStringArray parse_fn_sig(const char* line) {
     SimpleStringArray result = simple_new_string_array();
     long long fn_start = find_str(line, "fn ") + 3;
@@ -850,50 +931,27 @@ SimpleStringArray parse_fn_sig(const char* line) {
     const char* ret_type = "long long";
     if (arrow >= 0) {
         const char* ret_raw = trim(substr(line, arrow + 4, str_len(line) - 1));
-        if (strcmp(ret_raw, "text") == 0 || strcmp(ret_raw, "str") == 0) {
-            ret_type = "const char*";
-        } else if (strcmp(ret_raw, "bool") == 0) {
-            ret_type = "int";
-        } else if (strcmp(ret_raw, "i64") == 0) {
-            ret_type = "long long";
-        } else if (strcmp(ret_raw, "[text]") == 0 || strcmp(ret_raw, "[str]") == 0) {
-            ret_type = "SimpleStringArray";
-        } else if (strcmp(ret_raw, "[i64]") == 0) {
-            ret_type = "SimpleIntArray";
-        } else {
-            // Struct or unknown type — use as-is (e.g., GlobalFlags)
-            ret_type = ret_raw;
-        }
+        ret_type = stype_to_c(ret_raw);
     } else {
-        // No return type → void
+        /* No return type → void */
         ret_type = "void";
     }
-    long long close = find_str(line, ")");
+    long long close = find_close_paren_from(line, paren);
+    if (close < 0) close = find_str(line, ")");
     const char* c_params = "void";
     if (close > paren + 1) {
         const char* raw_params = trim(substr(line, paren + 1, close));
         SimpleStringArray params_out = simple_new_string_array();
-        SimpleStringArray parts = simple_split(raw_params, ",");
+        SimpleStringArray parts = split_params_toplevel(raw_params);
         for (long long _idx_p = 0; _idx_p < parts.len; _idx_p++) { const char* p = parts.items[_idx_p];
             const char* pt = trim(p);
+            if (!pt || !*pt) continue;
             long long colon = find_str(pt, ":");
             if (colon >= 0) {
                 const char* pname = trim(substr(pt, 0, colon));
                 const char* ptype = trim(substr_from(pt, colon + 1));
-                if (strcmp(ptype, "text") == 0 || strcmp(ptype, "str") == 0) {
-                    simple_string_push(&params_out, simple_str_concat("const char* ", pname));
-                } else if (strcmp(ptype, "bool") == 0) {
-                    simple_string_push(&params_out, simple_str_concat("int ", pname));
-                } else if (strcmp(ptype, "i64") == 0) {
-                    simple_string_push(&params_out, simple_str_concat("long long ", pname));
-                } else if (strcmp(ptype, "[text]") == 0 || strcmp(ptype, "[str]") == 0) {
-                    simple_string_push(&params_out, simple_str_concat("SimpleStringArray ", pname));
-                } else if (strcmp(ptype, "[i64]") == 0) {
-                    simple_string_push(&params_out, simple_str_concat("SimpleIntArray ", pname));
-                } else {
-                    // Struct or other type — use as-is
-                    simple_string_push(&params_out, simple_str_concat(ptype, simple_str_concat(" ", pname)));
-                }
+                const char* ctype = stype_to_c(ptype);
+                simple_string_push(&params_out, simple_str_concat(ctype, simple_str_concat(" ", pname)));
             } else {
                 simple_string_push(&params_out, simple_str_concat("long long ", pt));
             }
@@ -1457,6 +1515,22 @@ const char* generate_c(const char* source) {
     c_runtime = simple_str_concat(c_runtime, "static char* simple_format_str(const char* b, const char* v, const char* a) { size_t t=strlen(b?b:\"\")+strlen(v?v:\"\")+strlen(a?a:\"\")+1; char*r=malloc(t); snprintf(r,t,\"%s%s%s\",b?b:\"\",v?v:\"\",a?a:\"\"); return r; }\n");
     c_runtime = simple_str_concat(c_runtime, "static char* simple_int_to_str(long long v) { char b[32]; snprintf(b,32,\"%lld\",v); return strdup(b); }\n");
     c_runtime = simple_str_concat(c_runtime, "static const char* simple_substr_from(const char* s, long long start) { if(!s) return \"\"; long long l=strlen(s); if(start>=l) return \"\"; return strdup(s+start); }\n\n");
+    // Integer array type (for [i64])
+    c_runtime = simple_str_concat(c_runtime, "typedef struct { long long* items; long long len; long long cap; } SimpleIntArray;\n");
+    c_runtime = simple_str_concat(c_runtime, "static SimpleIntArray simple_new_int_array(void) { SimpleIntArray a; a.items=(long long*)malloc(16*sizeof(long long)); a.len=0; a.cap=16; return a; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static void simple_int_push(SimpleIntArray* a, long long v) { if(a->len>=a->cap){a->cap*=2;a->items=(long long*)realloc(a->items,a->cap*sizeof(long long));} a->items[a->len++]=v; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static long long simple_int_get(SimpleIntArray a, long long i) { return a.items[i]; }\n\n");
+    // Array of string arrays (for [[text]])
+    c_runtime = simple_str_concat(c_runtime, "typedef struct { SimpleStringArray* items; long long len; long long cap; } SimpleStringArrayArray;\n");
+    c_runtime = simple_str_concat(c_runtime, "static SimpleStringArrayArray simple_new_string_array_array(void) { SimpleStringArrayArray a; a.items=(SimpleStringArray*)malloc(8*sizeof(SimpleStringArray)); a.len=0; a.cap=8; return a; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static void simple_str_arr_push(SimpleStringArrayArray* a, SimpleStringArray v) { if(a->len>=a->cap){a->cap*=2;a->items=(SimpleStringArray*)realloc(a->items,a->cap*sizeof(SimpleStringArray));} a->items[a->len++]=v; }\n\n");
+    // Array of int arrays (for [[i64]])
+    c_runtime = simple_str_concat(c_runtime, "typedef struct { SimpleIntArray* items; long long len; long long cap; } SimpleIntArrayArray;\n");
+    c_runtime = simple_str_concat(c_runtime, "static SimpleIntArrayArray simple_new_int_array_array(void) { SimpleIntArrayArray a; a.items=(SimpleIntArray*)malloc(8*sizeof(SimpleIntArray)); a.len=0; a.cap=8; return a; }\n\n");
+    // Struct array type (for [StructName])
+    c_runtime = simple_str_concat(c_runtime, "typedef struct { void** items; long long len; long long cap; } SimpleStructArray;\n");
+    c_runtime = simple_str_concat(c_runtime, "static SimpleStructArray simple_new_struct_array(void) { SimpleStructArray a; a.items=NULL; a.len=0; a.cap=0; return a; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static void simple_struct_push(SimpleStructArray* a, void* v) { if(a->len>=a->cap){a->cap=a->cap?a->cap*2:8;a->items=(void**)realloc(a->items,a->cap*sizeof(void*));} a->items[a->len++]=v; }\n\n");
     SimpleStringArray lines = simple_split(source, "\n");
     SimpleStringArray struct_defs = simple_new_string_array();
     SimpleStringArray struct_names = simple_new_string_array();
@@ -1493,18 +1567,7 @@ const char* generate_c(const char* source) {
                     if (colon > 0 && !starts_with(sl_nc, "#")) {
                         const char* fname = trim(substr(sl_nc, 0, colon));
                         const char* ftype = trim(substr_from(sl_nc, colon + 1));
-                        const char* ctype = "long long";
-                        if (strcmp(ftype, "text") == 0 || strcmp(ftype, "str") == 0) {
-                            ctype = "const char*";
-                        } else if (strcmp(ftype, "bool") == 0) {
-                            ctype = "int";
-                        } else if (strcmp(ftype, "i64") == 0) {
-                            ctype = "long long";
-                        } else if (strcmp(ftype, "[text]") == 0 || strcmp(ftype, "[str]") == 0) {
-                            ctype = "SimpleStringArray";
-                        } else if (strcmp(ftype, "[i64]") == 0) {
-                            ctype = "SimpleIntArray";
-                        }
+                        const char* ctype = stype_to_c(ftype);
                         struct_body = simple_str_concat(struct_body, simple_str_concat("    ", simple_str_concat(ctype, simple_str_concat(" ", simple_str_concat(fname, ";\n")))));
                     }
                 } else {
