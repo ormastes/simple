@@ -24,21 +24,14 @@ fn print_help():
     print "  -h, --help           Show this help"
 
 fn find_manifest_path() -> text:
-    val cwd = cwd()
-    val sdn_path = "{cwd}/simple.sdn"
-    val toml_path = "{cwd}/simple.toml"
+    val current_dir = cwd()
+    val sdn_path = "{current_dir}/simple.sdn"
+    val toml_path = "{current_dir}/simple.toml"
     if file_exists(sdn_path):
         return sdn_path
     if file_exists(toml_path):
         return toml_path
     ""
-
-fn parse_package_spec(spec: text) -> (text, text):
-    # Parse "name@constraint" or just "name"
-    val parts = spec.split("@")
-    if parts.len() > 1:
-        return (parts[0], parts[1])
-    (spec, "*")
 
 fn add_dependency_to_sdn(content: text, name: text, constraint: text, is_dev: bool, path_dep: text, git_dep: text, git_branch: text, git_tag: text) -> text:
     # Build the dependency entry
@@ -56,7 +49,9 @@ fn add_dependency_to_sdn(content: text, name: text, constraint: text, is_dev: bo
     else:
         dep_entry = "  {name}: {constraint}\n"
 
-    val section = if is_dev: "dev_dependencies" else: "dependencies"
+    var section = "dependencies"
+    if is_dev:
+        section = "dev_dependencies"
     val section_header = "{section}:\n"
 
     # Check if section exists
@@ -70,29 +65,30 @@ fn add_dependency_to_sdn(content: text, name: text, constraint: text, is_dev: bo
             if line.starts_with("{section}:"):
                 in_section = true
                 result.push(line)
-            elif in_section and not inserted:
+                continue
+            if in_section and not inserted:
                 if line.trim() == "" or (not line.starts_with("  ") and not line.starts_with("\t") and line.trim() != ""):
                     # End of section - insert before this line
-                    result.push(dep_entry.trim_end())
+                    result.push(dep_entry)
                     inserted = true
                     in_section = false
                     result.push(line)
                 else:
                     result.push(line)
-            else:
-                result.push(line)
+                continue
+            result.push(line)
         if not inserted:
-            result.push(dep_entry.trim_end())
+            result.push(dep_entry)
         result.join("\n")
     else:
         # Add new section at end
-        content.trim_end() + "\n\n" + section_header + dep_entry
+        content + "\n\n" + section_header + dep_entry
 
 fn main() -> i64:
     val args = get_cli_args()
 
     if args.len() == 0:
-        error("add", "missing package name")
+        print "add: missing package name"
         print ""
         print_help()
         return 1
@@ -123,23 +119,28 @@ fn main() -> i64:
             package_spec = arg
 
     if package_spec == "":
-        error("add", "missing package name")
+        print "add: missing package name"
         return 1
 
     val manifest_path = find_manifest_path()
     if manifest_path == "":
-        error("add", "no simple.sdn or simple.toml found in current directory")
+        print "add: no simple.sdn or simple.toml found in current directory"
         print "Run 'simple init' to create a project first."
         return 1
 
-    val (name, constraint) = parse_package_spec(package_spec)
+    var name = package_spec
+    var constraint = "*"
+    val parts = package_spec.split("@")
+    if parts.len() > 1:
+        name = parts[0]
+        constraint = parts[1]
 
     # Read current manifest
     val content = file_read(manifest_path)
 
     # Check if dependency already exists
     if content.contains("  {name}:") or content.contains("  {name} "):
-        error("add", "dependency '{name}' already exists in manifest")
+        print "add: dependency '{name}' already exists in manifest"
         print "Use 'simple update {name}' to change the version."
         return 1
 
@@ -147,10 +148,12 @@ fn main() -> i64:
     val new_content = add_dependency_to_sdn(content, name, constraint, is_dev, path_dep, git_dep, git_branch, git_tag)
 
     if not file_write(manifest_path, new_content):
-        error("add", "failed to write {manifest_path}")
+        print "add: failed to write {manifest_path}"
         return 1
 
-    val section = if is_dev: "dev dependency" else: "dependency"
+    var section = "dependency"
+    if is_dev:
+        section = "dev dependency"
     if path_dep != "":
         print "Added {section} '{name}' (path: {path_dep})"
     elif git_dep != "":

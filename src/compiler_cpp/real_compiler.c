@@ -1400,6 +1400,14 @@ const char* translate_expr(const char* expr) {
         }
     }
 
+    // Name-based string heuristic for common text-like locals
+    if (contains(name, "path") || contains(name, "dir") || contains(name, "file") ||
+        contains(name, "name") || contains(name, "content") || contains(name, "output") ||
+        contains(name, "manifest") || contains(name, "spec") || contains(name, "branch") ||
+        contains(name, "tag") || contains(name, "constraint") || contains(name, "section") ||
+        contains(name, "url") || contains(name, "text")) {
+        return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
+    }
     // Struct construction: Name(field: val, ...)
     {
         long long paren = find_str(e, "(");
