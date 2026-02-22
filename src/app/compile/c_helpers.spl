@@ -36,44 +36,76 @@ fn get_c_indent(line: text) -> i64:
 
 # Convert Simple type to C type
 fn simple_type_to_c(stype: text) -> text:
-    if stype == "i64" or stype == "int":
+    val s = stype.trim()
+    if s.len() == 0: return "long long"
+    # Strip trailing ? (optional type)
+    if s.ends_with("?"):
+        return simple_type_to_c(s.substring(0, s.len() - 1))
+    # Generic types with <> -> long long (opaque)
+    if s.contains("<"):
         return "long long"
-    if stype == "i32":
+    if s == "i64" or s == "int":
+        return "long long"
+    if s == "i32":
         return "int"
-    if stype == "f64" or stype == "float":
+    if s == "f64" or s == "float":
         return "double"
-    if stype == "f32":
+    if s == "f32":
         return "float"
-    if stype == "bool":
+    if s == "bool":
         return "int"
-    if stype == "text" or stype == "str":
+    if s == "void":
+        return "void"
+    if s == "text" or s == "str":
         return "const char*"
-    if stype == "[text]" or stype == "[str]":
+    if s == "[text]" or s == "[str]":
         return "SimpleStringArray"
-    if stype == "[i64]" or stype == "[int]" or stype == "[bool]":
+    if s == "[i64]" or s == "[int]" or s == "[bool]":
         return "SimpleIntArray"
-    if stype == "[[text]]" or stype == "[[str]]":
+    if s == "[[text]]" or s == "[[str]]":
         return "SimpleStringArrayArray"
-    if stype == "[[i64]]" or stype == "[[int]]":
+    if s == "[[i64]]" or s == "[[int]]":
         return "SimpleIntArrayArray"
     # Struct array: [StructName] -> SimpleStructArray
-    if stype.starts_with("[") and stype.ends_with("]"):
-        val sa_inner = stype.substring(1, stype.len() - 1).trim()
+    if s.starts_with("[") and s.ends_with("]"):
+        val sa_inner = s.substring(1, s.len() - 1).trim()
         if sa_inner.len() > 0:
             val sa_first = sa_inner[0]
             if sa_first >= "A" and sa_first <= "Z":
                 return "SimpleStructArray"
-    # If the type starts with uppercase, treat it as a struct type name
-    if stype.len() > 0:
-        val first_char = stype[0]
+    # Struct/class type name -> use as-is (locally defined or cross-module forward decl)
+    if s.len() > 0:
+        val first_char = s[0]
         val is_upper = first_char >= "A" and first_char <= "Z"
         if is_upper:
-            return stype
+            return s
     "long long"
+
+# Split params by top-level commas (ignoring commas inside <>)
+fn split_params_toplevel(params_str: text) -> [text]:
+    var parts: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    val slen = params_str.len()
+    while i < slen:
+        val ch = params_str.substring(i, i + 1)
+        if ch == "<":
+            depth = depth + 1
+        if ch == ">":
+            depth = depth - 1
+        if ch == "," and depth == 0:
+            parts.push(params_str.substring(start, i).trim())
+            start = i + 1
+        i = i + 1
+    val last = params_str.substring(start, slen).trim()
+    if last.len() > 0:
+        parts.push(last)
+    parts
 
 # Translate Simple parameter list to C
 fn translate_params(params_str: text) -> text:
-    val params = params_str.split(",")
+    val params = split_params_toplevel(params_str)
     var c_parts: [text] = []
     for param in params:
         val p = param.trim()
@@ -104,15 +136,23 @@ fn parse_fn_signature(trimmed: text) -> [text]:
 
     val name = sig.substring(0, paren_idx).trim()
 
-    # Find return type - default to void if no -> annotation
-    val arrow_idx = sig.index_of("->") ?? -1
+    # Find matching close paren for parameter list
+    val close_paren_idx = find_close_paren(sig, paren_idx)
+
+    # Find return type: look for -> AFTER the close paren
     var ret_type = "void"
-    if arrow_idx >= 0:
-        val ret_str = sig.substring(arrow_idx + 2).trim()
-        ret_type = simple_type_to_c(ret_str)
+    if close_paren_idx >= 0:
+        val after_params = sig.substring(close_paren_idx + 1).trim()
+        if after_params.starts_with("->"):
+            val ret_str = after_params.substring(2).trim()
+            ret_type = simple_type_to_c(ret_str)
+    elif sig.contains("->"):
+        val arrow_idx = sig.index_of("->") ?? -1
+        if arrow_idx >= 0:
+            val ret_str = sig.substring(arrow_idx + 2).trim()
+            ret_type = simple_type_to_c(ret_str)
 
     # Parse parameters
-    val close_paren_idx = sig.index_of(")") ?? -1
     var params_str = ""
     if close_paren_idx > paren_idx + 1:
         params_str = sig.substring(paren_idx + 1, close_paren_idx).trim()
