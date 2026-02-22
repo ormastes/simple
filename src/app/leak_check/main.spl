@@ -6,13 +6,14 @@
 #     simple leak-check [options] <source.spl>
 #
 # Supports:
-#   - Internal mode: GC-level allocation tracking
+#   - Internal mode: Process-level memory monitoring via /proc/meminfo
 #   - External mode: ASan or Valgrind via C backend
 #   - Both mode: Run both internal and external checks
 
+extern fn rt_time_now_unix_micros() -> i64
+
 use types
 use config
-use internal_tracker
 use internal_runner
 use external_runner
 use reporter
@@ -32,8 +33,10 @@ fn run_leak_check(args: [text]) -> i64:
         if cfg.mode == LeakCheckMode.External or cfg.mode == LeakCheckMode.Both:
             print "  External tool: {external_tool_to_string(cfg.external_tool)}"
         print "  Report format: {report_format_to_string(cfg.report_format)}"
+        print "  Timeout: {cfg.timeout_seconds}s"
         print ""
 
+    val start_us = rt_time_now_unix_micros()
     var result = empty_leak_check_result()
 
     match cfg.mode:
@@ -57,17 +60,8 @@ fn run_leak_check(args: [text]) -> i64:
             else:
                 result.exit_code = 0
 
-    # Print histograms if verbose and internal mode
-    if (cfg.verbose and (cfg.mode == LeakCheckMode.Internal or cfg.mode == LeakCheckMode.Both)):
-        val size_hist = tracker_build_histogram_by_size()
-        if size_hist.len() > 0:
-            print format_histogram_console(size_hist, "Leaks by size class")
-            print ""
-
-        val loc_hist = tracker_build_histogram_by_location()
-        if loc_hist.len() > 0:
-            print format_histogram_console(loc_hist, "Leaks by source location")
-            print ""
+    val end_us = rt_time_now_unix_micros()
+    result.duration_ms = (end_us - start_us) / 1000
 
     # Write report
     write_report(result, cfg)
