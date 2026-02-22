@@ -45,6 +45,8 @@ set(RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../runtime")
 set(RUNTIME_SOURCES
     ${RUNTIME_DIR}/runtime.c
     ${RUNTIME_DIR}/runtime_thread.c
+    ${RUNTIME_DIR}/runtime_memtrack.c
+    ${RUNTIME_DIR}/runtime_fork.c
 )
 
 # Each generated .c is a standalone self-contained program.

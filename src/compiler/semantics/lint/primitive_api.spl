@@ -1,0 +1,132 @@
+# primitive_api Lint
+#
+# Warns when bare primitives (i64, i32, f64, f32, bool) appear in:
+# - Public function parameter types
+# - Public function return types
+# - Public struct/class field types
+#
+# Does NOT warn on:
+# - Constructor arguments (ActorId(value: 42)) - the literal 42 is fine
+# - Expression-level usage of primitives
+# - Private functions/fields
+# - Code annotated with #[allow(primitive_api)]
+
+from ast import {Node, FunctionDef, StructDef, ClassDef, Type, Visibility, Parameter, Field}
+
+# Bare primitives that should be wrapped in public APIs
+val BARE_PRIMITIVES = ["i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "f64", "f32"]
+
+struct LintWarning:
+    message: text
+    item_name: text
+    field_or_param: text
+
+    fn fmt() -> text:
+        "primitive_api: {self.message} in '{self.item_name}' ({self.field_or_param})"
+
+fn is_bare_primitive(ty: Type) -> bool:
+    """Check if a type is a bare primitive that should be wrapped."""
+    match ty:
+        case Simple(name):
+            for p in BARE_PRIMITIVES:
+                if name == p:
+                    return true
+            false
+        case _: false
+
+fn check_function(func: FunctionDef) -> [LintWarning]:
+    """Check a public function for bare primitive usage."""
+    var warnings = []
+
+    # Only check public functions
+    match func.visibility:
+        case Public: pass
+        case _: return []
+
+    # Check parameters
+    for param in func.params:
+        if param.ty.?:
+            val ty = param.ty.unwrap()
+            if is_bare_primitive(ty):
+                warnings.push(LintWarning(
+                    message: "bare primitive parameter type",
+                    item_name: func.name,
+                    field_or_param: "param '{param.name}'"
+                ))
+
+    # Check return type
+    if func.return_type.?:
+        val ret = func.return_type.unwrap()
+        if is_bare_primitive(ret):
+            warnings.push(LintWarning(
+                message: "bare primitive return type",
+                item_name: func.name,
+                field_or_param: "return type"
+            ))
+
+    warnings
+
+fn check_struct(struct_def: StructDef) -> [LintWarning]:
+    """Check a public struct for bare primitive fields."""
+    var warnings = []
+
+    match struct_def.visibility:
+        case Public: pass
+        case _: return []
+
+    for field in struct_def.fields:
+        if field.ty.?:
+            val ty = field.ty.unwrap()
+            if is_bare_primitive(ty):
+                warnings.push(LintWarning(
+                    message: "bare primitive field type",
+                    item_name: struct_def.name,
+                    field_or_param: "field '{field.name}'"
+                ))
+
+    warnings
+
+fn check_class(class_def: ClassDef) -> [LintWarning]:
+    """Check a public class for bare primitive fields."""
+    var warnings = []
+
+    match class_def.visibility:
+        case Public: pass
+        case _: return []
+
+    for field in class_def.fields:
+        if field.ty.?:
+            val ty = field.ty.unwrap()
+            if is_bare_primitive(ty):
+                warnings.push(LintWarning(
+                    message: "bare primitive field type",
+                    item_name: class_def.name,
+                    field_or_param: "field '{field.name}'"
+                ))
+
+    warnings
+
+fn check_module_items(items: [Node]) -> [LintWarning]:
+    """Run primitive_api lint on all module items."""
+    var warnings = []
+
+    for item in items:
+        match item:
+            case Function(func):
+                val fn_warnings = check_function(func)
+                for w in fn_warnings:
+                    warnings.push(w)
+            case Struct(struct_def):
+                val s_warnings = check_struct(struct_def)
+                for w in s_warnings:
+                    warnings.push(w)
+            case Class(class_def):
+                val c_warnings = check_class(class_def)
+                for w in c_warnings:
+                    warnings.push(w)
+            case _: pass
+
+    warnings
+
+export LintWarning, is_bare_primitive
+export check_function, check_struct, check_class, check_module_items

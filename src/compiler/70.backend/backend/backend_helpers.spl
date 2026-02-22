@@ -8,12 +8,11 @@
 #
 # Split from backend_api.spl for modularity.
 
-use compiler.mir_data.*
-use compiler.core.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, CompileOptions, CompiledModule, CompileError}
-use compiler.backend.llvm_backend (MirToLlvm, LlvmTargetConfig, compile_ir_to_object, llc_available,
-    MirToLlvm__create, LlvmTargetConfig__for_target)
-use compiler.backend.native.mod.{native_compile_result}
-use compiler.backend.c_backend.{MirToC, MirToC__create}
+use compiler.mir.mir_data.*
+use compiler.core.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, CompileOptions, CompiledModule, CompileError,
+    compileerror_backend_error}
+use compiler.backend.llvm_backend.{llc_available}
+use compiler.backend.codegen_factory.{CodegenFactory}
 
 # ============================================================================
 # Helper Functions
@@ -196,60 +195,17 @@ fn compile_module_with_backend(
         verify_output: true
     )
 
-    # Compile based on backend kind
-    match kind:
-        case BackendKind.Llvm:
-            # Check llc availability
-            if not llc_available():
-                return Err(CompileError.backend_error(BackendKind.Llvm,
-                    "llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)"))
+    if kind == BackendKind.Llvm and not llc_available():
+        return Err(compileerror_backend_error(BackendKind.Llvm,
+            "llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)"))
 
-            # Translate MIR to LLVM IR
-            val config = LlvmTargetConfig__for_target(options.target, nil)
-            var translator = MirToLlvm__create(module.name, options.target, nil)
-            val llvm_ir = translator_translate_module(translator, module)
-
-            # Compile IR to object code via llc
-            val result = compile_ir_to_object(llvm_ir, config, options.opt_level)
-            if result_is_err(result):
-                val err_msg = result_unwrap_err(result)
-                return Err(compileerror_backend_error(BackendKind.Llvm, err_msg))
-
-            val bytes = result_value
-            Ok(CompiledModule(
-                name: module.name,
-                # # DESUGARED: object_code: Some(bytes)
-            object_code: bytes,
-                #  # DESUGARED: assembly: nil
-                #  # DESUGARED: llvm_ir: nil
-                #  # DESUGARED: mir_dump: nil
-                symbols: [],
-                compile_time_ms: 0
-            ))
-
-        case BackendKind.Native:
-            # Native backend - direct machine code generation (no external tools)
-            val compiled = native_compile_result(module, CodegenTarget.X86_64)
-            Ok(compiled)
-
-        case BackendKind.CCodegen:
-            # C backend - generate C++20 source code
-            var c_translator = MirToC__create(module.name)
-            val c_source = c_translator.translate_module(module)
-            val h_source = c_translator.build_header()
-            Ok(CompiledModule(
-                name: module.name,
-                object_code: nil,
-                assembly: c_source,
-                has_llvm_ir: true,
-                llvm_ir: h_source,
-                symbols: [],
-                compile_time_ms: 0
-            ))
-
-        case _:
-            Err(CompileError.backend_error(kind,
-                "Backend {kind.to_text()} requires compiled mode."))
+    val codegen = CodegenFactory.create(kind, options)
+    val result = codegen.compile_module(module)
+    match result:
+        case Ok(output):
+            Ok(output.to_compiled_module())
+        case Err(err):
+            Err(err)
 
 fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
     """Get the effective backend name after auto-resolution."""

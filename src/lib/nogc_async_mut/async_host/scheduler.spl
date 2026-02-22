@@ -6,6 +6,7 @@ use std.async_core.*
 use std.async_host.waker.{Waker}
 use std.async_host.future.{HostFuture}
 use std.async_host.thread_safe_queue.{ThreadSafeQueue}
+use std.async_sffi.{waker_check, waker_clear}
 
 struct WorkStealingQueue:
     """Lock-free work-stealing deque.
@@ -230,7 +231,13 @@ impl HostScheduler:
                                     case Some(w): w.wake()
                                     case nil: pass
                             case Poll.Pending:
-                                t.state = TaskState.Suspended
+                                # Check if waker fired during poll
+                                if waker_check(id):
+                                    waker_clear(id)
+                                    t.state = TaskState.Pending
+                                    self.global_queue = self.global_queue.push(id)
+                                else:
+                                    t.state = TaskState.Suspended
 
                         self.tasks[id] = t
                         return true

@@ -161,7 +161,6 @@ src/app/ffi_gen/main.spl  ← The generator (written in Simple)
     ├── Parses @Lib annotations + extern class/fn declarations
     ├── Dispatches to language-specific codegen backend
     │   ├── rust_codegen.spl → Rust wrapper + Cargo.toml
-    │   ├── c_codegen.spl → C wrapper + build.rs (future)
     │   └── ...
     ├── Writes generated crate to build/rust/ffi_gen/
     ├── Calls cargo build (uses build/rust/rust-toolchain.toml)

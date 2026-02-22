@@ -7,7 +7,7 @@
 #endif
 
 // === Simple Runtime Helpers ===
-// Embedded in generated C code by c_codegen.spl
+// Embedded in generated C code by shared MIR C backend (CCodegenAdapter)
 // All functions are static to avoid link conflicts and allow dead code elimination.
 
 // --- String Operations ---
@@ -849,14 +849,14 @@ static const char* stype_to_c(const char* stype) {
         return res;
     }
     /* Primitive types */
-    if (strcmp(stype, "i64") == 0 || strcmp(stype, "int") == 0) return "long long";
+    if (strcmp(stype, "i64") == 0 || strcmp(stype, "int") == 0 || strcmp(stype, "Int") == 0) return "long long";
     if (strcmp(stype, "i32") == 0) return "int";
     if (strcmp(stype, "i8") == 0 || strcmp(stype, "u8") == 0) return "int";
-    if (strcmp(stype, "f64") == 0 || strcmp(stype, "float") == 0) return "double";
+    if (strcmp(stype, "f64") == 0 || strcmp(stype, "float") == 0 || strcmp(stype, "Float") == 0) return "double";
     if (strcmp(stype, "f32") == 0) return "float";
-    if (strcmp(stype, "bool") == 0) return "int";
+    if (strcmp(stype, "bool") == 0 || strcmp(stype, "Bool") == 0) return "int";
     if (strcmp(stype, "void") == 0) return "void";
-    if (strcmp(stype, "text") == 0 || strcmp(stype, "str") == 0) return "const char*";
+    if (strcmp(stype, "text") == 0 || strcmp(stype, "str") == 0 || strcmp(stype, "String") == 0) return "const char*";
     /* Array types */
     if (strcmp(stype, "[text]") == 0 || strcmp(stype, "[str]") == 0) return "SimpleStringArray";
     if (strcmp(stype, "[i64]") == 0 || strcmp(stype, "[int]") == 0 || strcmp(stype, "[bool]") == 0) return "SimpleIntArray";
@@ -916,6 +916,43 @@ static long long find_close_paren_from(const char* line, long long open_pos) {
     return -1;
 }
 
+/* Mangle names that conflict with C keywords or stdlib */
+static const char* mangle_name(const char* name) {
+    if (!name || !*name) return name;
+    if (strcmp(name, "exit") == 0) return "simple_exit";
+    if (strcmp(name, "error") == 0) return "simple_error";
+    if (strcmp(name, "default") == 0) return "default_";
+    if (strcmp(name, "short") == 0) return "short_";
+    if (strcmp(name, "long") == 0) return "long_";
+    if (strcmp(name, "int") == 0) return "int_";
+    if (strcmp(name, "float") == 0) return "float_";
+    if (strcmp(name, "double") == 0) return "double_";
+    if (strcmp(name, "char") == 0) return "char_";
+    if (strcmp(name, "void") == 0) return "void_";
+    if (strcmp(name, "auto") == 0) return "auto_";
+    if (strcmp(name, "register") == 0) return "register_";
+    if (strcmp(name, "volatile") == 0) return "volatile_";
+    if (strcmp(name, "extern") == 0) return "extern_";
+    if (strcmp(name, "static") == 0) return "static_";
+    if (strcmp(name, "const") == 0) return "const_";
+    if (strcmp(name, "signed") == 0) return "signed_";
+    if (strcmp(name, "unsigned") == 0) return "unsigned_";
+    if (strcmp(name, "union") == 0) return "union_";
+    if (strcmp(name, "enum") == 0) return "enum_";
+    if (strcmp(name, "typedef") == 0) return "typedef_";
+    if (strcmp(name, "sizeof") == 0) return "sizeof_";
+    if (strcmp(name, "switch") == 0) return "switch_";
+    if (strcmp(name, "case") == 0) return "case_";
+    if (strcmp(name, "goto") == 0) return "goto_";
+    if (strcmp(name, "inline") == 0) return "inline_";
+    if (strcmp(name, "restrict") == 0) return "restrict_";
+    if (strcmp(name, "bool") == 0) return "bool_";
+    if (strcmp(name, "true") == 0) return "true_";
+    if (strcmp(name, "false") == 0) return "false_";
+    if (strcmp(name, "text") == 0) return "text_";
+    return name;
+}
+
 SimpleStringArray parse_fn_sig(const char* line) {
     SimpleStringArray result = simple_new_string_array();
     long long fn_start = find_str(line, "fn ") + 3;
@@ -926,7 +963,7 @@ SimpleStringArray parse_fn_sig(const char* line) {
         simple_string_push(&result, "void unknown(void);");
         return result;
     }
-    const char* name = trim(substr(line, fn_start, paren));
+    const char* name = mangle_name(trim(substr(line, fn_start, paren)));
     long long arrow = find_str(line, " -> ");
     const char* ret_type = "long long";
     if (arrow >= 0) {
@@ -946,14 +983,16 @@ SimpleStringArray parse_fn_sig(const char* line) {
         for (long long _idx_p = 0; _idx_p < parts.len; _idx_p++) { const char* p = parts.items[_idx_p];
             const char* pt = trim(p);
             if (!pt || !*pt) continue;
+            /* Skip ~keyword-only marker */
+            if (pt[0] == '~') pt = trim(substr_from(pt, 1));
             long long colon = find_str(pt, ":");
             if (colon >= 0) {
-                const char* pname = trim(substr(pt, 0, colon));
+                const char* pname = mangle_name(trim(substr(pt, 0, colon)));
                 const char* ptype = trim(substr_from(pt, colon + 1));
                 const char* ctype = stype_to_c(ptype);
                 simple_string_push(&params_out, simple_str_concat(ctype, simple_str_concat(" ", pname)));
             } else {
-                simple_string_push(&params_out, simple_str_concat("long long ", pt));
+                simple_string_push(&params_out, simple_str_concat("long long ", mangle_name(pt)));
             }
         }
         c_params = simple_string_join(&params_out, ", ");
@@ -1029,7 +1068,17 @@ const char* translate_expr(const char* expr) {
     if (strcmp(e, "true") == 0) return "1";
     if (strcmp(e, "false") == 0) return "0";
     if (strcmp(e, "nil") == 0) return "NULL";
+    if (strcmp(e, "pass_do_nothing") == 0 || strcmp(e, "pass_dn") == 0 ||
+        strcmp(e, "pass_todo") == 0 || strcmp(e, "pass") == 0) return "((void)0)";
+    if (strcmp(e, "self") == 0) return "self";  /* will be handled by struct context */
     if (starts_with(e, "\"")) return e;
+
+    /* Strip numeric separators: 1_000_000 → 1000000 */
+    if (is_digit(e) || (str_len(e) > 2 && e[0] == '0' && (e[1] == 'x' || e[1] == 'X' || e[1] == 'b' || e[1] == 'B' || e[1] == 'o' || e[1] == 'O'))) {
+        if (simple_contains(e, "_")) {
+            e = simple_replace(e, "_", "");
+        }
+    }
 
     // Parenthesized expression
     if (starts_with(e, "(") && ends_with(e, ")")) {
@@ -1044,6 +1093,17 @@ const char* translate_expr(const char* expr) {
     }
 
     // "and" / "or" — find the LAST occurrence to handle left-associativity
+    // Null coalescing: x ?? default → ((x) != NULL ? (x) : (default))
+    {
+        long long qq_pos = find_str(e, " ?? ");
+        if (qq_pos >= 0) {
+            const char* left = trim(substr(e, 0, qq_pos));
+            const char* right = trim(substr_from(e, qq_pos + 4));
+            const char* tl = translate_expr(left);
+            const char* tr = translate_expr(right);
+            return simple_str_concat("((", simple_str_concat(tl, simple_str_concat(") ? (", simple_str_concat(tl, simple_str_concat(") : (", simple_str_concat(tr, "))"))))));
+        }
+    }
     // Split on " and " / " or " (lowest precedence first: or, then and)
     {
         // Find last " or "
@@ -1172,10 +1232,61 @@ const char* translate_expr(const char* expr) {
             const char* obj = trim(substr(e, 0, dot));
             const char* method_part = substr_from(e, dot + 1);
 
-            // .len() → arr.len for arrays, simple_strlen(obj) for strings
+            // .len() → simple_strlen(obj) for strings, arr.len for arrays
             if (strcmp(method_part, "len()") == 0) {
                 const char* tobj = translate_expr(obj);
+                /* Heuristic: if obj looks like string, use simple_strlen */
+                if (expr_is_string(obj) || starts_with(obj, "\"") ||
+                    contains(obj, "name") || contains(obj, "path") || contains(obj, "text") ||
+                    contains(obj, "line") || contains(obj, "msg") || contains(obj, "str") ||
+                    contains(obj, "cmd") || contains(obj, "output") || contains(obj, "content") ||
+                    contains(obj, "source") || contains(obj, "code") || contains(obj, "file") ||
+                    contains(obj, "key") || contains(obj, "value") || contains(obj, "result") ||
+                    contains(obj, "desc") || contains(obj, "prefix") || contains(obj, "suffix") ||
+                    contains(obj, "input") || contains(obj, "version") || contains(obj, "url") ||
+                    contains(obj, "label") || contains(obj, "title") || contains(obj, "format") ||
+                    contains(obj, "simple_") || contains(obj, "trim") || contains(obj, "replace")) {
+                    return simple_str_concat("simple_strlen(", simple_str_concat(tobj, ")"));
+                }
                 return simple_str_concat(tobj, ".len");
+            }
+            // .trim() → simple_trim(obj)
+            if (strcmp(method_part, "trim()") == 0) {
+                return simple_str_concat("simple_trim(", simple_str_concat(translate_expr(obj), ")"));
+            }
+            // .split("x") → simple_split(obj, "x")
+            if (starts_with(method_part, "split(") && ends_with(method_part, ")")) {
+                const char* arg = substr(method_part, 6, str_len(method_part) - 1);
+                return simple_str_concat("simple_split(", simple_str_concat(
+                    translate_expr(obj), simple_str_concat(", ", simple_str_concat(translate_expr(arg), ")"))));
+            }
+            // .index_of("x") → simple_index_of(obj, "x")
+            if (starts_with(method_part, "index_of(") && ends_with(method_part, ")")) {
+                const char* arg = substr(method_part, 9, str_len(method_part) - 1);
+                return simple_str_concat("simple_index_of(", simple_str_concat(
+                    translate_expr(obj), simple_str_concat(", ", simple_str_concat(translate_expr(arg), ")"))));
+            }
+            // .last_index_of("x") → simple_last_index_of(obj, "x")
+            if (starts_with(method_part, "last_index_of(") && ends_with(method_part, ")")) {
+                const char* arg = substr(method_part, 14, str_len(method_part) - 1);
+                return simple_str_concat("simple_last_index_of(", simple_str_concat(
+                    translate_expr(obj), simple_str_concat(", ", simple_str_concat(translate_expr(arg), ")"))));
+            }
+            // .substring(a, b) → simple_substring(obj, a, b)
+            if (starts_with(method_part, "substring(") && ends_with(method_part, ")")) {
+                const char* args_str = substr(method_part, 10, str_len(method_part) - 1);
+                return simple_str_concat("simple_substring(", simple_str_concat(
+                    translate_expr(obj), simple_str_concat(", ", simple_str_concat(args_str, ")"))));
+            }
+            // .join("x") → simple_string_join(&obj, "x")
+            if (starts_with(method_part, "join(") && ends_with(method_part, ")")) {
+                const char* arg = substr(method_part, 5, str_len(method_part) - 1);
+                return simple_str_concat("simple_string_join(&", simple_str_concat(
+                    translate_expr(obj), simple_str_concat(", ", simple_str_concat(translate_expr(arg), ")"))));
+            }
+            // .pop() → simple_string_pop(&obj) / simple_int_pop(&obj)
+            if (strcmp(method_part, "pop()") == 0) {
+                return simple_str_concat("simple_string_pop(&", simple_str_concat(translate_expr(obj), ")"));
             }
             // .starts_with("x") → simple_starts_with(obj, "x")
             if (starts_with(method_part, "starts_with(") && ends_with(method_part, ")")) {
@@ -1324,6 +1435,7 @@ const char* translate_expr(const char* expr) {
                 }
             }
             if (valid && !contains(e, ": ")) {
+                fn_name = mangle_name(fn_name);
                 // Translate each argument
                 const char* args_raw = substr(e, paren + 1, str_len(e) - 1);
                 if (str_len(trim(args_raw)) == 0) {
@@ -1352,7 +1464,8 @@ const char* translate_expr(const char* expr) {
         return "simple_new_string_array() /* TODO: array literal */";
     }
 
-    return e;
+    /* Apply name mangling to bare identifiers */
+    return mangle_name(e);
 }
 
 // Translate a condition (used in if/elif/while) — applies translate_expr
@@ -1372,7 +1485,7 @@ const char* translate_var_decl(const char* line) {
     if (eq < 0) {
         return simple_str_concat("/* unsupported: ", simple_str_concat(line, " */"));
     }
-    const char* name = trim(substr(rest, 0, eq));
+    const char* name = mangle_name(trim(substr(rest, 0, eq)));
     const char* value = trim(substr_from(rest, eq + 3));
     const char* c_val = translate_expr(value);
     const char* qualifier = is_val ? "const " : "";
@@ -1487,9 +1600,10 @@ void fix_fn_body_return(SimpleStringArray* body, const char* sig) {
 }
 
 const char* generate_c(const char* source) {
-    const char* c_runtime = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdint.h>\n#include <stdbool.h>\n\n#define nil NULL\n\n"
+    const char* c_runtime = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>\n#include <unistd.h>\n#include <time.h>\n#include <sys/stat.h>\n\n#define nil NULL\n#define pass_do_nothing ((void)0)\n#define pass_dn ((void)0)\n#define pass_todo ((void)0)\n\n"
         "#pragma GCC diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
-        "#pragma GCC diagnostic ignored \"-Wparentheses-equality\"\n\n";
+        "#pragma GCC diagnostic ignored \"-Wparentheses-equality\"\n"
+        "#pragma GCC diagnostic ignored \"-Wunused-value\"\n\n";
     c_runtime = simple_str_concat(c_runtime, "static long long simple_strlen(const char* s) { return s ? (long long)strlen(s) : 0; }\n\n");
     c_runtime = simple_str_concat(c_runtime, "static char* simple_str_concat(const char* a, const char* b) {\n");
     c_runtime = simple_str_concat(c_runtime, "    if (!a) a = \"\"; if (!b) b = \"\";\n");
@@ -1531,6 +1645,16 @@ const char* generate_c(const char* source) {
     c_runtime = simple_str_concat(c_runtime, "typedef struct { void** items; long long len; long long cap; } SimpleStructArray;\n");
     c_runtime = simple_str_concat(c_runtime, "static SimpleStructArray simple_new_struct_array(void) { SimpleStructArray a; a.items=NULL; a.len=0; a.cap=0; return a; }\n");
     c_runtime = simple_str_concat(c_runtime, "static void simple_struct_push(SimpleStructArray* a, void* v) { if(a->len>=a->cap){a->cap=a->cap?a->cap*2:8;a->items=(void**)realloc(a->items,a->cap*sizeof(void*));} a->items[a->len++]=v; }\n\n");
+    // String utility functions
+    c_runtime = simple_str_concat(c_runtime, "static char* simple_trim(const char* s) {\n    if(!s) return strdup(\"\");\n    while(*s==' '||*s=='\\t'||*s=='\\n'||*s=='\\r') s++;\n    long long l=strlen(s);\n    while(l>0&&(s[l-1]==' '||s[l-1]=='\\t'||s[l-1]=='\\n'||s[l-1]=='\\r')) l--;\n    char* r=malloc(l+1); memcpy(r,s,l); r[l]=0; return r;\n}\n");
+    c_runtime = simple_str_concat(c_runtime, "static long long simple_index_of(const char* s, const char* n) { if(!s||!n) return -1; const char* f=strstr(s,n); return f?(long long)(f-s):-1; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static long long simple_last_index_of(const char* s, const char* n) { if(!s||!n) return -1; long long nl=strlen(n),sl=strlen(s); if(nl>sl) return -1; for(long long i=sl-nl;i>=0;i--) if(strncmp(s+i,n,nl)==0) return i; return -1; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static char* simple_substring(const char* s, long long a, long long b) { if(!s) return strdup(\"\"); long long l=strlen(s); if(a<0)a=0; if(b>l)b=l; if(a>=b) return strdup(\"\"); long long n=b-a; char*r=malloc(n+1); memcpy(r,s+a,n); r[n]=0; return r; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static char* simple_char_at(const char* s, long long i) { if(!s||i<0||i>=(long long)strlen(s)) return strdup(\"\"); char*r=malloc(2); r[0]=s[i]; r[1]=0; return r; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static SimpleStringArray simple_split(const char* s, const char* d) {\n    SimpleStringArray a=simple_new_string_array();\n    if(!s) return a; if(!d||!*d){simple_string_push(&a,s);return a;}\n    long long dl=strlen(d); const char*p=s; const char*f;\n    while((f=strstr(p,d))!=NULL){long long n=f-p;char*t=malloc(n+1);memcpy(t,p,n);t[n]=0;simple_string_push(&a,t);free(t);p=f+dl;}\n    simple_string_push(&a,p); return a;\n}\n");
+    c_runtime = simple_str_concat(c_runtime, "static char* simple_string_join(SimpleStringArray* a, const char* d) {\n    if(!a||a->len==0) return strdup(\"\"); long long dl=strlen(d),t=0;\n    for(long long i=0;i<a->len;i++){t+=strlen(a->items[i]);if(i<a->len-1)t+=dl;}\n    char*r=malloc(t+1);char*p=r;\n    for(long long i=0;i<a->len;i++){long long l=strlen(a->items[i]);memcpy(p,a->items[i],l);p+=l;if(i<a->len-1){memcpy(p,d,dl);p+=dl;}}\n    *p=0; return r;\n}\n");
+    c_runtime = simple_str_concat(c_runtime, "static const char* simple_string_pop(SimpleStringArray* a) { if(a->len==0) return \"\"; return a->items[--a->len]; }\n");
+    c_runtime = simple_str_concat(c_runtime, "static long long simple_int_pop(SimpleIntArray* a) { if(a->len==0) return 0; return a->items[--a->len]; }\n\n");
     SimpleStringArray lines = simple_split(source, "\n");
     SimpleStringArray struct_defs = simple_new_string_array();
     SimpleStringArray struct_names = simple_new_string_array();
@@ -1539,21 +1663,26 @@ const char* generate_c(const char* source) {
     SimpleStringArray main_lines = simple_new_string_array();
     SimpleStringArray extern_funcs = simple_new_string_array();
 
-    // --- First pass: collect struct definitions ---
+    // --- First pass: collect struct/class definitions ---
     {
         int in_struct = 0;
         const char* struct_name = "";
         const char* struct_body = "";
         for (long long si = 0; si < lines.len; si++) {
             const char* sl = trim(lines.items[si]);
-            if (starts_with(sl, "struct ") && ends_with(sl, ":")) {
+            if ((starts_with(sl, "struct ") || starts_with(sl, "class ")) && ends_with(sl, ":")) {
                 if (in_struct && str_len(struct_name) > 0) {
                     // Emit previous struct
                     const char* td = simple_str_concat("typedef struct {\n", simple_str_concat(struct_body, simple_str_concat("} ", simple_str_concat(struct_name, ";\n"))));
                     simple_string_push(&struct_defs, td);
                     simple_string_push(&struct_names, struct_name);
                 }
-                struct_name = trim(substr(sl, 7, str_len(sl) - 1));
+                /* Handle both "struct Name:" and "class Name:" */
+                if (starts_with(sl, "class ")) {
+                    struct_name = trim(substr(sl, 6, str_len(sl) - 1));
+                } else {
+                    struct_name = trim(substr(sl, 7, str_len(sl) - 1));
+                }
                 struct_body = "";
                 in_struct = 1;
             } else if (in_struct) {
@@ -1629,8 +1758,10 @@ const char* generate_c(const char* source) {
         }
     }
     // Also add 'error' as a known extern (used but not in use statements)
-    simple_string_push(&extern_funcs, "error");
-    simple_string_push(&extern_funcs, "jit_native_available");
+    if (!simple_str_array_contains(extern_funcs, "error"))
+        simple_string_push(&extern_funcs, "error");
+    if (!simple_str_array_contains(extern_funcs, "jit_native_available"))
+        simple_string_push(&extern_funcs, "jit_native_available");
 
     // --- Pre-process: join continuation lines (multi-line expressions) ---
     {
@@ -1702,17 +1833,56 @@ const char* generate_c(const char* source) {
         if (starts_with(trimmed, "use ") || starts_with(trimmed, "import ")) {
             continue;
         }
-        // Skip struct definitions (handled in first pass)
-        if (starts_with(trimmed, "struct ") && ends_with(trimmed, ":")) {
+        // Skip type aliases, newtype, alias declarations
+        if (starts_with(trimmed, "type ") || starts_with(trimmed, "alias ") ||
+            starts_with(trimmed, "newtype ") || starts_with(trimmed, "export ")) {
+            continue;
+        }
+        // Skip doc comments (lines that look like documentation)
+        if (starts_with(trimmed, "Returns ") || starts_with(trimmed, "Example") ||
+            starts_with(trimmed, "Args:") || starts_with(trimmed, "Note:") ||
+            starts_with(trimmed, "See ") || starts_with(trimmed, "Usage")) {
+            continue;
+        }
+        // Skip struct/class definitions (handled in first pass)
+        if ((starts_with(trimmed, "struct ") || starts_with(trimmed, "class ")) && ends_with(trimmed, ":")) {
             in_struct_skip = 1;
             continue;
         }
         if (in_struct_skip) {
-            if (starts_with(line, "    ") && !starts_with(trimmed, "fn ")) {
+            if (starts_with(line, "    ") && !starts_with(trimmed, "fn ") && !starts_with(trimmed, "me ") && !starts_with(trimmed, "static fn ")) {
                 continue;  // Skip struct fields
+            }
+            if (starts_with(trimmed, "me ") || starts_with(trimmed, "static fn ")) {
+                continue;  // Skip class methods (me/static fn) for now
             }
             in_struct_skip = 0;
             // Fall through to process this non-struct line
+        }
+        // Skip standalone 'me' method definitions
+        if (starts_with(trimmed, "me ") && ends_with(trimmed, ":")) {
+            in_struct_skip = 1;
+            continue;
+        }
+        // Skip enum definitions
+        if (starts_with(trimmed, "enum ") && ends_with(trimmed, ":")) {
+            in_struct_skip = 1;
+            continue;
+        }
+        // Skip trait definitions
+        if (starts_with(trimmed, "trait ") && ends_with(trimmed, ":")) {
+            in_struct_skip = 1;
+            continue;
+        }
+        // Skip impl blocks
+        if (starts_with(trimmed, "impl ") && ends_with(trimmed, ":")) {
+            in_struct_skip = 1;
+            continue;
+        }
+        // Skip 'extend' blocks
+        if (starts_with(trimmed, "extend ") && ends_with(trimmed, ":")) {
+            in_struct_skip = 1;
+            continue;
         }
     // Function definition
         if (starts_with(trimmed, "fn ") && ends_with(trimmed, ":")) {
@@ -2006,12 +2176,19 @@ const char* generate_c(const char* source) {
 
     // Extern function stubs — emit stubs for imported functions not defined in this file
     {
+        SimpleStringArray emitted_stubs = simple_new_string_array();
         for (long long si = 0; si < extern_funcs.len; si++) {
-            const char* fn = extern_funcs.items[si];
-            // Check if it's already defined as a forward decl
+            const char* fn_orig = extern_funcs.items[si];
+            const char* fn = mangle_name(fn_orig);
+            // Skip duplicates (check both original and mangled)
+            if (simple_str_array_contains(emitted_stubs, fn)) continue;
+            simple_string_push(&emitted_stubs, fn);
+            simple_string_push(&emitted_stubs, fn_orig);
+            // Check if it's already defined as a forward decl (check both names)
             int is_defined = 0;
             for (long long di = 0; di < fwd_decls.len; di++) {
-                if (contains(fwd_decls.items[di], simple_str_concat(" ", simple_str_concat(fn, "(")))) {
+                if (contains(fwd_decls.items[di], simple_str_concat(" ", simple_str_concat(fn, "("))) ||
+                    contains(fwd_decls.items[di], simple_str_concat(" ", simple_str_concat(fn_orig, "(")))) {
                     is_defined = 1;
                     break;
                 }
@@ -2020,51 +2197,53 @@ const char* generate_c(const char* source) {
                 // Emit stub with variadic signature
                 // Known string-returning functions
                 // Emit stub with proper variadic-safe signature
-                // Known function signatures
-                if (strcmp(fn, "env_get") == 0) {
+                // Known function signatures (use mangled fn name)
+                if (strcmp(fn_orig, "env_get") == 0) {
                     out = simple_str_concat(out, "static const char* env_get(const char* k) { (void)k; return \"\"; }\n");
-                } else if (strcmp(fn, "env_set") == 0) {
+                } else if (strcmp(fn_orig, "env_set") == 0) {
                     out = simple_str_concat(out, "static void env_set(const char* k, const char* v) { (void)k; (void)v; }\n");
-                } else if (strcmp(fn, "error") == 0) {
-                    out = simple_str_concat(out, "static void error(const char* cat, const char* msg) { fprintf(stderr, \"%s: %s\\n\", cat, msg); }\n");
-                } else if (strcmp(fn, "get_cli_args") == 0) {
+                } else if (strcmp(fn_orig, "error") == 0) {
+                    out = simple_str_concat(out, "static void simple_error(const char* cat, const char* msg) { fprintf(stderr, \"%s: %s\\n\", cat, msg); }\n");
+                } else if (strcmp(fn_orig, "get_cli_args") == 0) {
                     out = simple_str_concat(out, "static SimpleStringArray get_cli_args(void) { return simple_new_string_array(); }\n");
-                } else if (strcmp(fn, "cwd") == 0 || strcmp(fn, "read_sdn_run_config") == 0 ||
-                           strcmp(fn, "strip_sdn_quotes") == 0) {
+                } else if (strcmp(fn_orig, "cwd") == 0 || strcmp(fn_orig, "read_sdn_run_config") == 0 ||
+                           strcmp(fn_orig, "strip_sdn_quotes") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static const char* ", simple_str_concat(fn, "(void) { return \"\"; }\n")));
-                } else if (strcmp(fn, "jit_available") == 0 || strcmp(fn, "jit_native_available") == 0 ||
-                           strcmp(fn, "check_self_contained") == 0) {
+                } else if (strcmp(fn_orig, "jit_available") == 0 || strcmp(fn_orig, "jit_native_available") == 0 ||
+                           strcmp(fn_orig, "check_self_contained") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static int ", simple_str_concat(fn, "(void) { return 0; }\n")));
-                } else if (strcmp(fn, "file_exists") == 0 || strcmp(fn, "cli_file_exists") == 0) {
+                } else if (strcmp(fn_orig, "file_exists") == 0 || strcmp(fn_orig, "cli_file_exists") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static int ", simple_str_concat(fn, "(const char* p) { (void)p; return 0; }\n")));
-                } else if (strcmp(fn, "load_user_config") == 0 || strcmp(fn, "print_cli_help") == 0) {
+                } else if (strcmp(fn_orig, "load_user_config") == 0 || strcmp(fn_orig, "print_cli_help") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static void ", simple_str_concat(fn, "(void) { }\n")));
-                } else if (strcmp(fn, "cli_run_file") == 0) {
+                } else if (strcmp(fn_orig, "cli_run_file") == 0) {
                     out = simple_str_concat(out, "static long long cli_run_file(const char* p, SimpleStringArray a, int g, int o) { (void)p;(void)a;(void)g;(void)o; return 0; }\n");
-                } else if (strcmp(fn, "cli_run_code") == 0) {
+                } else if (strcmp(fn_orig, "cli_run_code") == 0) {
                     out = simple_str_concat(out, "static long long cli_run_code(const char* c, int g, int o) { (void)c;(void)g;(void)o; return 0; }\n");
-                } else if (strcmp(fn, "cli_run_repl") == 0) {
+                } else if (strcmp(fn_orig, "cli_run_repl") == 0) {
                     out = simple_str_concat(out, "static long long cli_run_repl(int g, int o) { (void)g;(void)o; return 0; }\n");
-                } else if (strcmp(fn, "cli_run_tests") == 0 || strcmp(fn, "cli_run_verify") == 0 ||
-                           strcmp(fn, "cli_handle_run") == 0) {
+                } else if (strcmp(fn_orig, "cli_run_tests") == 0 || strcmp(fn_orig, "cli_run_verify") == 0 ||
+                           strcmp(fn_orig, "cli_handle_run") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "(SimpleStringArray a, int g, int o) { (void)a;(void)g;(void)o; return 0; }\n")));
-                } else if (strcmp(fn, "cli_watch_file") == 0) {
+                } else if (strcmp(fn_orig, "cli_watch_file") == 0) {
                     out = simple_str_concat(out, "static long long cli_watch_file(const char* p) { (void)p; return 0; }\n");
-                } else if (contains(fn, "cli_run") || contains(fn, "cli_compile") ||
-                           contains(fn, "cli_handle") || contains(fn, "cli_constr") ||
-                           contains(fn, "cli_info") || contains(fn, "cli_replay") ||
-                           contains(fn, "cli_gen") || contains(fn, "cli_todo") ||
-                           contains(fn, "cli_watch") || contains(fn, "cli_read") ||
-                           contains(fn, "handle_build") || contains(fn, "handle_init") ||
-                           contains(fn, "run_check") || contains(fn, "run_arch") ||
-                           contains(fn, "run_doc") || contains(fn, "run_stats") ||
-                           contains(fn, "run_fix")) {
+                } else if (contains(fn_orig, "cli_run") || contains(fn_orig, "cli_compile") ||
+                           contains(fn_orig, "cli_handle") || contains(fn_orig, "cli_constr") ||
+                           contains(fn_orig, "cli_info") || contains(fn_orig, "cli_replay") ||
+                           contains(fn_orig, "cli_gen") || contains(fn_orig, "cli_todo") ||
+                           contains(fn_orig, "cli_watch") || contains(fn_orig, "cli_read") ||
+                           contains(fn_orig, "handle_build") || contains(fn_orig, "handle_init") ||
+                           contains(fn_orig, "run_check") || contains(fn_orig, "run_arch") ||
+                           contains(fn_orig, "run_doc") || contains(fn_orig, "run_stats") ||
+                           contains(fn_orig, "run_fix")) {
                     // CLI functions take a SimpleStringArray, return long long
                     out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "(SimpleStringArray a) { (void)a; return 0; }\n")));
-                } else if (contains(fn, "fault_set")) {
+                } else if (contains(fn_orig, "fault_set")) {
                     out = simple_str_concat(out, simple_str_concat("static void ", simple_str_concat(fn, "(long long v) { (void)v; }\n")));
-                } else if (contains(fn, "atomic_write")) {
+                } else if (contains(fn_orig, "atomic_write")) {
                     out = simple_str_concat(out, simple_str_concat("static void ", simple_str_concat(fn, "(const char* p, const char* d) { (void)p;(void)d; }\n")));
+                } else if (strcmp(fn_orig, "exit") == 0) {
+                    out = simple_str_concat(out, "static void simple_exit(long long code) { _exit((int)code); }\n");
                 } else {
                     // Generic stub - no args
                     out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "(void) { return 0; }\n")));

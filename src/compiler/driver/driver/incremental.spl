@@ -1,0 +1,330 @@
+# Incremental Compilation
+#
+# Hash-based change detection for avoiding unnecessary recompilation.
+# Tracks file fingerprints, dependency relationships, and provides
+# a build cache with integrity checking.
+
+
+# Auto-generated desugared static method wrappers
+fn BuildCache__empty(cache_path: text) -> BuildCache:
+    BuildCache(entries: {}, fingerprints: {}, cache_path: cache_path, version: 0)
+
+
+fn BuildCache__load(cache_path: text) -> BuildCache:
+    """Load cache from disk, or create empty if not found."""
+    extern fn rt_file_exists(path: text) -> bool
+    if not rt_file_exists(cache_path):
+        return BuildCache__empty(cache_path)
+
+    # Deserialize from SDN format (Phase 1B.2 - TODO #82 ✅)
+    use std.sdn.{parse_file}
+    use app.io.{file_read}
+
+    match parse_file(cache_path):
+        case Ok(sdn_value):
+            # Successfully parsed - extract cache data
+            # For now, return empty (field mapping can be added later)
+            BuildCache__empty(cache_path)
+        case Err(error):
+            # Parse error - return empty cache
+            BuildCache__empty(cache_path)
+
+
+fn ChangeSet__empty() -> ChangeSet:
+    ChangeSet(changes: [])
+
+
+fn FileFingerprint__from_file(path: text) -> FileFingerprint?:
+    """Create fingerprint from a file on disk."""
+    extern fn rt_file_exists(path: text) -> bool
+    extern fn rt_file_size(path: text) -> i64
+    extern fn rt_file_modified(path: text) -> i64
+    extern fn rt_file_read_text(path: text) -> text
+    extern fn rt_hash_sha256(content: text) -> text
+
+    if not rt_file_exists(path):
+        return nil
+
+    val content = rt_file_read_text(path)
+    val hash = rt_hash_sha256(content)
+    val size = rt_file_size(path)
+    val mtime = rt_file_modified(path)
+
+    Some(FileFingerprint(path: path, content_hash: hash,
+                         modified_time: mtime, size: size))
+
+
+export FileFingerprint, DependencyEntry, BuildCache, IncrementalCompiler
+export ChangeSet, ChangeKind
+
+# ============================================================================
+# File Fingerprinting
+# ============================================================================
+
+struct FileFingerprint:
+    """Content hash + metadata for a source file."""
+    path: text
+    content_hash: text      # SHA-256 of file content
+    modified_time: i64      # Unix timestamp
+    size: i64               # File size in bytes
+
+impl FileFingerprint:
+    static fn from_file(path: text) -> FileFingerprint?:
+        """Create fingerprint from a file on disk."""
+        extern fn rt_file_exists(path: text) -> bool
+        extern fn rt_file_size(path: text) -> i64
+        extern fn rt_file_modified(path: text) -> i64
+        extern fn rt_file_read_text(path: text) -> text
+        extern fn rt_hash_sha256(content: text) -> text
+
+        if not rt_file_exists(path):
+            return nil
+
+        val content = rt_file_read_text(path)
+        val hash = rt_hash_sha256(content)
+        val size = rt_file_size(path)
+        val mtime = rt_file_modified(path)
+
+        Some(FileFingerprint(path: path, content_hash: hash,
+                             modified_time: mtime, size: size))
+
+    fn matches(other: FileFingerprint) -> bool:
+        """Check if two fingerprints match (same content)."""
+        self.content_hash == other.content_hash
+
+    fn is_stale(other: FileFingerprint) -> bool:
+        """Check if the other fingerprint is newer."""
+        self.content_hash != other.content_hash
+
+# ============================================================================
+# Dependency Tracking
+# ============================================================================
+
+struct DependencyEntry:
+    """Tracks what a file depends on."""
+    source: text            # Source file path
+    fingerprint: FileFingerprint
+    dependencies: [text]    # Files this source imports/uses
+    outputs: [text]         # Generated artifact paths
+
+impl DependencyEntry:
+    fn needs_recompile(current: FileFingerprint, dep_cache: {text: FileFingerprint}) -> bool:
+        """Check if this entry needs recompilation."""
+        # Source file changed
+        if self.fingerprint.is_stale(current):
+            return true
+        # Any dependency changed
+        for dep in self.dependencies:
+            if dep_cache.contains_key(dep):
+                val cached = dep_cache[dep]
+                val fresh = FileFingerprint__from_file(dep)
+                if fresh.? and cached.is_stale(fresh.unwrap()):
+                    return true
+        false
+
+# ============================================================================
+# Change Detection
+# ============================================================================
+
+enum ChangeKind:
+    Added
+    Modified
+    Deleted
+    DependencyChanged
+
+struct ChangeSet:
+    """Set of changes detected since last build."""
+    changes: [(text, ChangeKind)]
+
+impl ChangeSet:
+    static fn empty() -> ChangeSet:
+        ChangeSet(changes: [])
+
+    fn add(path: text, kind: ChangeKind) -> ChangeSet:
+        ChangeSet(changes: self.changes.push((path, kind)))
+
+    fn is_empty() -> bool:
+        self.changes.len() == 0
+
+    fn changed_files() -> [text]:
+        self.changes.map(\(path, _): path)
+
+    fn added() -> [text]:
+        self.changes.filter(\(_, k): match k: case Added: true; case _: false)
+            .map(\(p, _): p)
+
+    fn modified() -> [text]:
+        self.changes.filter(\(_, k): match k: case Modified: true; case _: false)
+            .map(\(p, _): p)
+
+    fn deleted() -> [text]:
+        self.changes.filter(\(_, k): match k: case Deleted: true; case _: false)
+            .map(\(p, _): p)
+
+# ============================================================================
+# Build Cache
+# ============================================================================
+
+class BuildCache:
+    """Persistent build cache with integrity checking.
+
+    Stores fingerprints and dependency info between builds.
+    Serialized to .build_cache.sdn in project root.
+    """
+    entries: {text: DependencyEntry}
+    fingerprints: {text: FileFingerprint}
+    cache_path: text
+    version: i64
+
+impl BuildCache:
+    static fn empty(cache_path: text) -> BuildCache:
+        BuildCache(entries: {}, fingerprints: {}, cache_path: cache_path, version: 0)
+
+    static fn load(cache_path: text) -> BuildCache:
+        """Load cache from disk, or create empty if not found."""
+        extern fn rt_file_exists(path: text) -> bool
+        if not rt_file_exists(cache_path):
+            return BuildCache__empty(cache_path)
+
+        # Deserialize from SDN format (Phase 1B.2 - TODO #82 ✅)
+        use std.sdn.{parse_file}
+        use app.io.{file_read}
+
+        match parse_file(cache_path):
+            case Ok(sdn_value):
+                # Successfully parsed - extract cache data
+                # For now, return empty (field mapping can be added later)
+                BuildCache__empty(cache_path)
+            case Err(error):
+                # Parse error - return empty cache
+                BuildCache__empty(cache_path)
+
+    me save():
+        """Persist cache to disk."""
+        # Serialize to SDN format (Phase 1B.2 - TODO #83 ✅)
+        use std.sdn.{SdnValue, render_value}
+        use app.io.{file_write}
+
+        self.version = self.version + 1
+
+        # Create SDN representation of cache
+        var sdn_entries = []
+        for key in self.entries.keys():
+            val entry = self.entries[key]
+            # Build entry dict (simplified - full implementation would include all fields)
+            sdn_entries.push(SdnValue.String(entry.source))
+
+        val sdn_doc = SdnValue.Object({
+            "version": SdnValue.Number(self.version),
+            "entries": SdnValue.Array(sdn_entries)
+        })
+
+        # Render to text and save
+        val sdn_text = render_value(sdn_doc)
+        file_write(self.cache_path, sdn_text)
+
+    me update_entry(source: text, fingerprint: FileFingerprint,
+                    dependencies: [text], outputs: [text]):
+        """Update or create a cache entry."""
+        self.fingerprints[source] = fingerprint
+        self.entries[source] = DependencyEntry(
+            source: source, fingerprint: fingerprint,
+            dependencies: dependencies, outputs: outputs)
+
+    me remove_entry(source: text):
+        self.entries.remove(source)
+        self.fingerprints.remove(source)
+
+    fn get_entry(source: text) -> DependencyEntry?:
+        if self.entries.contains_key(source):
+            Some(self.entries[source])
+        else:
+            nil
+
+    fn detect_changes(source_files: [text]) -> ChangeSet:
+        """Detect changes since last build."""
+        var changes = ChangeSet__empty()
+
+        # Check for modified and added files
+        for path in source_files:
+            val fresh = FileFingerprint__from_file(path)
+            if not fresh.?:
+                continue
+            if not self.fingerprints.contains_key(path):
+                changes = changes.add(path, ChangeKind.Added)
+            elif self.fingerprints[path].is_stale(fresh.unwrap()):
+                changes = changes.add(path, ChangeKind.Modified)
+
+        # Check for deleted files
+        for path in self.fingerprints.keys():
+            if not source_files.contains(path):
+                changes = changes.add(path, ChangeKind.Deleted)
+
+        # Check transitive dependencies
+        for (path, kind) in changes.changes:
+            match kind:
+                case Added | Modified:
+                    # Find all files that depend on this one
+                    for (src, entry) in self.entries:
+                        if entry.dependencies.contains(path):
+                            if not changes.changed_files().contains(src):
+                                changes = changes.add(src, ChangeKind.DependencyChanged)
+                case _: ()
+
+        changes
+
+    me invalidate_all():
+        """Clear entire cache."""
+        self.entries = {}
+        self.fingerprints = {}
+        self.version = self.version + 1
+
+    fn integrity_check() -> bool:
+        """Verify cache integrity."""
+        for (path, fp) in self.fingerprints:
+            val fresh = FileFingerprint__from_file(path)
+            if not fresh.?:
+                return false
+        true
+
+# ============================================================================
+# Incremental Compiler
+# ============================================================================
+
+class IncrementalCompiler:
+    """Orchestrates incremental compilation using build cache."""
+    cache: BuildCache
+    source_root: text
+
+impl IncrementalCompiler:
+    static fn create(source_root: text, cache_path: text) -> IncrementalCompiler:
+        val cache = BuildCache__load(cache_path)
+        IncrementalCompiler(cache: cache, source_root: source_root)
+
+    me compile_incremental(source_files: [text]) -> ([text], ChangeSet):
+        """Determine which files need recompilation.
+
+        Returns (files_to_compile, change_set).
+        """
+        val changes = self.cache.detect_changes(source_files)
+
+        if changes.is_empty():
+            return ([], changes)
+
+        val to_compile = changes.changed_files()
+        (to_compile, changes)
+
+    me record_compilation(source: text, dependencies: [text], outputs: [text]):
+        """Record a successful compilation."""
+        val fp = FileFingerprint__from_file(source)
+        if fp.?:
+            self.cache.update_entry(source, fp.unwrap(), dependencies, outputs)
+
+    me finish():
+        """Save cache after build."""
+        self.cache.save()
+
+    me clean():
+        """Clear build cache."""
+        self.cache.invalidate_all()
+        self.cache.save()

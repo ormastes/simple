@@ -27,6 +27,12 @@ extern "C" {
 /* Include threading library */
 #include "runtime_thread.h"
 
+/* Include memory tracking */
+#include "runtime_memtrack.h"
+
+/* Include fork-without-exec support */
+#include "runtime_fork.h"
+
 /* ===== Tagged Value System ===== */
 
 typedef enum {

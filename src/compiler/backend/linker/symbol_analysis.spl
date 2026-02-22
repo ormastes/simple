@@ -1,0 +1,205 @@
+# Symbol Analysis
+#
+# Symbol dependency graph, reachability analysis, and dead symbol detection.
+# Used by linker to eliminate unused code.
+#
+# Port of rust/compiler/src/linker/analysis/analyzer.rs
+
+
+# Auto-generated desugared static method wrappers
+fn AnalyzedSymbol__create(name: text, visibility: SymbolVisibility) -> AnalyzedSymbol:
+    AnalyzedSymbol(name: name, visibility: visibility, size: 0,
+                   section: "", references: [], ref_kinds: {},
+                   is_reachable: false)
+
+
+fn SymbolGraph__empty() -> SymbolGraph:
+    SymbolGraph(symbols: {}, reverse_refs: {}, entry_points: [])
+
+
+export SymbolVisibility, RefKind, AnalyzedSymbol
+export SymbolGraph, SymbolAnalyzer, AnalysisStats
+
+# ============================================================================
+# Types
+# ============================================================================
+
+enum SymbolVisibility:
+    Local
+    Export
+    Import
+
+impl SymbolVisibility:
+    fn is_exported() -> bool:
+        match self: case Export: true; case _: false
+
+    fn is_imported() -> bool:
+        match self: case Import: true; case _: false
+
+enum RefKind:
+    Call
+    Data
+    Type
+
+# ============================================================================
+# Analyzed Symbol
+# ============================================================================
+
+struct AnalyzedSymbol:
+    name: text
+    visibility: SymbolVisibility
+    size: i64
+    section: text
+    references: [text]          # Symbols this one references
+    ref_kinds: {text: RefKind}
+    is_reachable: bool
+
+impl AnalyzedSymbol:
+    static fn create(name: text, visibility: SymbolVisibility) -> AnalyzedSymbol:
+        AnalyzedSymbol(name: name, visibility: visibility, size: 0,
+                       section: "", references: [], ref_kinds: {},
+                       is_reachable: false)
+
+    fn is_exported() -> bool:
+        self.visibility.is_exported()
+
+    fn is_imported() -> bool:
+        self.visibility.is_imported()
+
+# ============================================================================
+# Symbol Graph
+# ============================================================================
+
+class SymbolGraph:
+    """Dependency graph for symbols with reachability analysis."""
+    symbols: {text: AnalyzedSymbol}
+    reverse_refs: {text: [text]}    # symbol -> who references it
+    entry_points: [text]
+
+impl SymbolGraph:
+    static fn empty() -> SymbolGraph:
+        SymbolGraph(symbols: {}, reverse_refs: {}, entry_points: [])
+
+    me add_symbol(symbol: AnalyzedSymbol):
+        self.symbols[symbol.name] = symbol
+
+    me add_reference(from_name: text, to_name: text, kind: RefKind):
+        if self.symbols.contains_key(from_name):
+            var sym = self.symbols[from_name]
+            self.symbols[from_name] = AnalyzedSymbol(
+                name: sym.name, visibility: sym.visibility, size: sym.size,
+                section: sym.section,
+                references: sym.references.push(to_name),
+                ref_kinds: sym.ref_kinds,
+                is_reachable: sym.is_reachable)
+            # Update reverse refs
+            if self.reverse_refs.contains_key(to_name):
+                self.reverse_refs[to_name] = self.reverse_refs[to_name].push(from_name)
+            else:
+                self.reverse_refs[to_name] = [from_name]
+
+    me add_entry_point(name: text):
+        self.entry_points = self.entry_points.push(name)
+
+    me analyze_reachability():
+        """Mark all symbols reachable from entry points."""
+        var worklist = self.entry_points
+        var visited: {text: bool} = {}
+        var head_idx = 0
+
+        while head_idx < worklist.len():
+            val name = worklist[head_idx]
+            head_idx = head_idx + 1
+
+            if visited.contains_key(name):
+                continue
+            visited[name] = true
+
+            if self.symbols.contains_key(name):
+                val sym = self.symbols[name]
+                self.symbols[name] = AnalyzedSymbol(
+                    name: sym.name, visibility: sym.visibility, size: sym.size,
+                    section: sym.section, references: sym.references,
+                    ref_kinds: sym.ref_kinds, is_reachable: true)
+
+                for ref_name in sym.references:
+                    if not visited.contains_key(ref_name):
+                        worklist = worklist.push(ref_name)
+
+    fn find_dead_symbols() -> [AnalyzedSymbol]:
+        var dead: [AnalyzedSymbol] = []
+        for (_, sym) in self.symbols:
+            if not sym.is_reachable and not sym.is_imported():
+                dead = dead.push(sym)
+        dead
+
+    fn stats() -> AnalysisStats:
+        var total = 0
+        var reachable = 0
+        var dead_count = 0
+        var dead_size = 0
+        var total_size = 0
+        for (_, sym) in self.symbols:
+            total = total + 1
+            total_size = total_size + sym.size
+            if sym.is_reachable:
+                reachable = reachable + 1
+            else:
+                if not sym.is_imported():
+                    dead_count = dead_count + 1
+                    dead_size = dead_size + sym.size
+        AnalysisStats(total_symbols: total, reachable_symbols: reachable,
+                      dead_symbols: dead_count, dead_size: dead_size,
+                      total_size: total_size)
+
+# ============================================================================
+# Analysis Stats
+# ============================================================================
+
+struct AnalysisStats:
+    total_symbols: i64
+    reachable_symbols: i64
+    dead_symbols: i64
+    dead_size: i64
+    total_size: i64
+
+impl AnalysisStats:
+    fn removal_ratio() -> f64:
+        if self.total_size == 0:
+            return 0.0
+        self.dead_size.to_f64() / self.total_size.to_f64()
+
+# ============================================================================
+# Symbol Analyzer (facade)
+# ============================================================================
+
+class SymbolAnalyzer:
+    """High-level symbol analysis facade."""
+    graph: SymbolGraph
+
+impl SymbolAnalyzer:
+    static fn create() -> SymbolAnalyzer:
+        SymbolAnalyzer(graph: SymbolGraph__empty())
+
+    me add_symbol(name: text, visibility: SymbolVisibility, size: i64, section: text):
+        var sym = AnalyzedSymbol__create(name, visibility)
+        self.graph.add_symbol(AnalyzedSymbol(
+            name: name, visibility: visibility, size: size,
+            section: section, references: sym.references,
+            ref_kinds: sym.ref_kinds, is_reachable: false))
+
+    me add_reference(from_name: text, to_name: text, kind: RefKind):
+        self.graph.add_reference(from_name, to_name, kind)
+
+    me set_entry_point(name: text):
+        self.graph.add_entry_point(name)
+
+    me analyze() -> SymbolGraph:
+        self.graph.analyze_reachability()
+        self.graph
+
+    fn get_removable_symbols() -> [text]:
+        self.graph.find_dead_symbols().map(\s: s.name)
+
+    fn stats() -> AnalysisStats:
+        self.graph.stats()

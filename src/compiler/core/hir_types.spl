@@ -1,0 +1,199 @@
+# Core Simple — HIR Type Definitions
+#
+# Seed-compatible HIR types for the shared core library.
+# Integer tags for type kinds and symbol kinds.
+# Tagged structs instead of enum payloads.
+# Typed lookup tables instead of Dict<>.
+#
+# Compiled by seed (Core Simple subset).
+
+# ===== HIR Type Kind Tags =====
+
+val HIR_TYPE_VOID = 0
+val HIR_TYPE_BOOL = 1
+val HIR_TYPE_I64 = 2
+val HIR_TYPE_F64 = 3
+val HIR_TYPE_TEXT = 4
+val HIR_TYPE_ARRAY = 5
+val HIR_TYPE_DICT = 6
+val HIR_TYPE_STRUCT = 7
+val HIR_TYPE_ENUM = 8
+val HIR_TYPE_FN = 9
+val HIR_TYPE_OPTION = 10
+val HIR_TYPE_ANY = 11
+val HIR_TYPE_NIL = 12
+val HIR_TYPE_TUPLE = 13
+val HIR_TYPE_RESULT = 14
+
+# ===== Symbol Kind Tags =====
+
+val SYM_KIND_VAR = 1
+val SYM_KIND_VAL = 2
+val SYM_KIND_FUNCTION = 3
+val SYM_KIND_STRUCT = 4
+val SYM_KIND_EXTERN_FN = 5
+val SYM_KIND_PARAM = 6
+val SYM_KIND_MODULE = 7
+val SYM_KIND_ENUM = 8
+val SYM_KIND_METHOD = 9
+val SYM_KIND_FIELD = 10
+
+# ===== CoreHirType — tagged struct for type representations =====
+# Uses integer tag instead of enum payloads for seed compatibility.
+# - tag: HIR_TYPE_* constant
+# - name: type name (struct/enum name, or empty for primitives)
+# - child: index into type pool for element type (-1 = none)
+#          Used by: ARRAY (element type), OPTION (inner type), FN (return type)
+# - params: parameter type indices
+#           Used by: FN (param types), TUPLE (element types), DICT (key+value types)
+
+struct CoreHirType:
+    tag: i64
+    name: text
+    child: i64
+    params: [i64]
+
+fn make_core_hir_type(tag: i64) -> CoreHirType:
+    CoreHirType(tag: tag, name: "", child: -1, params: [])
+
+fn hir_type_void() -> CoreHirType:
+    make_core_hir_type(HIR_TYPE_VOID)
+
+fn hir_type_bool() -> CoreHirType:
+    make_core_hir_type(HIR_TYPE_BOOL)
+
+fn hir_type_i64() -> CoreHirType:
+    make_core_hir_type(HIR_TYPE_I64)
+
+fn hir_type_f64() -> CoreHirType:
+    make_core_hir_type(HIR_TYPE_F64)
+
+fn hir_type_text() -> CoreHirType:
+    make_core_hir_type(HIR_TYPE_TEXT)
+
+fn hir_type_array(elem_type_idx: i64) -> CoreHirType:
+    var t = make_core_hir_type(HIR_TYPE_ARRAY)
+    t.child = elem_type_idx
+    t
+
+fn hir_type_option(inner_type_idx: i64) -> CoreHirType:
+    var t = make_core_hir_type(HIR_TYPE_OPTION)
+    t.child = inner_type_idx
+    t
+
+fn hir_type_fn(param_type_indices: [i64], ret_type_idx: i64) -> CoreHirType:
+    var t = make_core_hir_type(HIR_TYPE_FN)
+    t.params = param_type_indices
+    t.child = ret_type_idx
+    t
+
+fn hir_type_struct(name: text) -> CoreHirType:
+    var t = make_core_hir_type(HIR_TYPE_STRUCT)
+    t.name = name
+    t
+
+fn hir_type_enum(name: text) -> CoreHirType:
+    var t = make_core_hir_type(HIR_TYPE_ENUM)
+    t.name = name
+    t
+
+# ===== CoreSymbolEntry — single symbol table entry =====
+
+struct CoreSymbolEntry:
+    name: text
+    kind: i64
+    type_idx: i64
+    scope_depth: i64
+    decl_id: i64
+    is_mutable: i64
+
+fn make_core_symbol(name: text, kind: i64) -> CoreSymbolEntry:
+    CoreSymbolEntry(name: name, kind: kind, type_idx: -1, scope_depth: 0, decl_id: -1, is_mutable: 0)
+
+# ===== CoreSymbolTable — typed lookup table (no Dict<>) =====
+
+struct CoreSymbolTable:
+    names: [text]
+    kinds: [i64]
+    type_indices: [i64]
+    scope_depths: [i64]
+    decl_ids: [i64]
+    mutabilities: [i64]
+
+fn make_core_symbol_table() -> CoreSymbolTable:
+    CoreSymbolTable(names: [], kinds: [], type_indices: [], scope_depths: [], decl_ids: [], mutabilities: [])
+
+fn symtab_add(table: CoreSymbolTable, name: text, kind: i64, type_idx: i64, depth: i64, decl_id: i64, is_mut: i64) -> i64:
+    val idx = table.names.len()
+    table.names.push(name)
+    table.kinds.push(kind)
+    table.type_indices.push(type_idx)
+    table.scope_depths.push(depth)
+    table.decl_ids.push(decl_id)
+    table.mutabilities.push(is_mut)
+    idx
+
+fn symtab_find(table: CoreSymbolTable, name: text) -> i64:
+    # Search from end (latest scope first) for shadowing
+    val names: [text] = table.names
+    val count = names.len()
+    if count == 0:
+        return -1
+    for i in range(0, count):
+        val rev_idx = count - 1 - i
+        val entry_name: text = names[rev_idx]
+        if entry_name == name:
+            return rev_idx
+    -1
+
+fn symtab_count(table: CoreSymbolTable) -> i64:
+    val names: [text] = table.names
+    names.len()
+
+# ===== HIR Type Kind Names (debugging) =====
+
+fn hir_type_kind_name(tag: i64) -> text:
+    if tag == HIR_TYPE_VOID: return "void"
+    if tag == HIR_TYPE_BOOL: return "bool"
+    if tag == HIR_TYPE_I64: return "i64"
+    if tag == HIR_TYPE_F64: return "f64"
+    if tag == HIR_TYPE_TEXT: return "text"
+    if tag == HIR_TYPE_ARRAY: return "array"
+    if tag == HIR_TYPE_DICT: return "dict"
+    if tag == HIR_TYPE_STRUCT: return "struct"
+    if tag == HIR_TYPE_ENUM: return "enum"
+    if tag == HIR_TYPE_FN: return "fn"
+    if tag == HIR_TYPE_OPTION: return "option"
+    if tag == HIR_TYPE_ANY: return "any"
+    if tag == HIR_TYPE_NIL: return "nil"
+    if tag == HIR_TYPE_TUPLE: return "tuple"
+    if tag == HIR_TYPE_RESULT: return "result"
+    "unknown"
+
+fn sym_kind_name(kind: i64) -> text:
+    if kind == SYM_KIND_VAR: return "var"
+    if kind == SYM_KIND_VAL: return "val"
+    if kind == SYM_KIND_FUNCTION: return "fn"
+    if kind == SYM_KIND_STRUCT: return "struct"
+    if kind == SYM_KIND_EXTERN_FN: return "extern fn"
+    if kind == SYM_KIND_PARAM: return "param"
+    if kind == SYM_KIND_MODULE: return "module"
+    if kind == SYM_KIND_ENUM: return "enum"
+    if kind == SYM_KIND_METHOD: return "method"
+    if kind == SYM_KIND_FIELD: return "field"
+    "unknown"
+
+export HIR_TYPE_VOID, HIR_TYPE_BOOL, HIR_TYPE_I64, HIR_TYPE_F64, HIR_TYPE_TEXT
+export HIR_TYPE_ARRAY, HIR_TYPE_DICT, HIR_TYPE_STRUCT, HIR_TYPE_ENUM
+export HIR_TYPE_FN, HIR_TYPE_OPTION, HIR_TYPE_ANY, HIR_TYPE_NIL
+export HIR_TYPE_TUPLE, HIR_TYPE_RESULT
+export SYM_KIND_VAR, SYM_KIND_VAL, SYM_KIND_FUNCTION, SYM_KIND_STRUCT
+export SYM_KIND_EXTERN_FN, SYM_KIND_PARAM, SYM_KIND_MODULE, SYM_KIND_ENUM
+export SYM_KIND_METHOD, SYM_KIND_FIELD
+export CoreHirType, make_core_hir_type
+export hir_type_void, hir_type_bool, hir_type_i64, hir_type_f64, hir_type_text
+export hir_type_array, hir_type_option, hir_type_fn, hir_type_struct, hir_type_enum
+export CoreSymbolEntry, make_core_symbol
+export CoreSymbolTable, make_core_symbol_table
+export symtab_add, symtab_find, symtab_count
+export hir_type_kind_name, sym_kind_name

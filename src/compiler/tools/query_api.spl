@@ -1,0 +1,894 @@
+# Compiler Query API for IDE Integration
+#
+# This API provides query capabilities for Language Server Protocol (LSP)
+# and other IDE tooling. It allows on-demand querying of compiler state,
+# symbol information, type inference results, and diagnostics.
+#
+# Design Philosophy:
+# - Incremental: Parse only what's needed
+# - Fast: Cache results, avoid redundant computation
+# - Resilient: Work with partial/broken code
+# - Thread-safe: Multiple queries can run concurrently
+
+import compiler.frontend.treesitter.{TreeSitter}
+import compiler.treesitter_types.{OutlineModule, ParseError, ErrorSeverity}
+import compiler.common.dependency.symbol.{SymbolTable, SymbolEntry, SymbolKind as DepSymbolKind}
+import compiler.types.type_system.checker.{TypeError, TypeChecker}
+import compiler.hir.hir_types.{Scope, ScopeId, HirType}
+import app.io  # For file I/O functions
+
+# --- Core Types ---
+
+# Position in a source file
+struct Position:
+    line: i64    # 0-based line number
+    column: i64  # 0-based column (UTF-8 byte offset)
+
+# Location in source code
+struct Location:
+    file: text
+    start: Position
+    end: Position
+
+# Source range
+struct Range:
+    start: Position
+    end: Position
+
+# Symbol information
+enum SymbolKind:
+    Variable
+    Function
+    Method
+    Class
+    Struct
+    Enum
+    Trait
+    Module
+    Parameter
+    Field
+    EnumVariant
+
+struct Symbol:
+    name: text
+    kind: SymbolKind
+    location: Location
+    type_info: Option<text>  # Human-readable type
+    doc_comment: Option<text>
+    is_public: bool
+    is_mutable: bool
+
+# Completion item
+enum CompletionKind:
+    Variable
+    Function
+    Method
+    Keyword
+    Module
+    Type
+    Field
+    EnumVariant
+
+struct Completion:
+    label: text
+    kind: CompletionKind
+    detail: Option<text>  # Type signature or description
+    documentation: Option<text>
+    insert_text: text
+    sort_priority: i64  # Lower = higher priority
+
+# Diagnostic severity
+enum DiagnosticSeverity:
+    Error
+    Warning
+    Info
+    Hint
+
+# Diagnostic information
+struct Diagnostic:
+    range: Range
+    severity: DiagnosticSeverity
+    message: text
+    code: Option<text>  # Error code like "E0001"
+    source: text        # "simple-parser", "simple-type-checker", etc.
+
+# Hover information
+struct HoverInfo:
+    range: Range
+    contents: text  # Markdown-formatted content
+    type_info: Option<text>
+
+# Definition/reference result
+struct DefinitionResult:
+    locations: [Location]
+    symbol: Option<Symbol>
+
+# --- Compiler Query Context ---
+
+# Main query context - maintains cached state for a project
+class CompilerQueryContext:
+    # Cached parse trees (file path -> AST)
+    cached_asts: Dict<text, AST>
+
+    # Cached symbol tables (file path -> symbol table)
+    cached_symbols: Dict<text, SymbolTable>
+
+    # Cached type inference results (file path -> type map)
+    cached_types: Dict<text, TypeMap>
+
+    # Cached diagnostics (file path -> diagnostics)
+    cached_diagnostics: Dict<text, [Diagnostic]>
+
+    # File modification times for cache invalidation
+    file_mtimes: Dict<text, i64>
+
+    # Project root directory
+    project_root: text
+
+    # Whether to enable incremental parsing
+    incremental: bool
+
+    # Initialize context for a project
+    static fn create(project_root: text) -> CompilerQueryContext:
+        CompilerQueryContext(
+            cached_asts: {},
+            cached_symbols: {},
+            cached_types: {},
+            cached_diagnostics: {},
+            file_mtimes: {},
+            project_root: project_root,
+            incremental: true,
+        )
+
+    # --- Cache Management ---
+
+    # Invalidate cache for a file (called when file changes)
+    me invalidate_file(file_path: text):
+        self.cached_asts.remove(file_path)
+        self.cached_symbols.remove(file_path)
+        self.cached_types.remove(file_path)
+        self.cached_diagnostics.remove(file_path)
+        self.file_mtimes.remove(file_path)
+
+    # Check if cache is valid for a file
+    fn is_cache_valid(file_path: text) -> bool:
+        if not self.file_mtimes.contains(file_path):
+            return false
+
+        val cached_mtime = self.file_mtimes[file_path]
+        val current_mtime = get_file_mtime(file_path)
+
+        cached_mtime == current_mtime
+
+    # --- Parsing ---
+
+    # Parse a file and cache the result
+    me parse_file(file_path: text) -> Result<AST, ParseError>:
+        # Check cache
+        if self.is_cache_valid(file_path) and self.cached_asts.contains(file_path):
+            return Ok(self.cached_asts[file_path])
+
+        # Parse file
+        val source = file_read(file_path)
+        val result = parse_source(source, file_path)
+
+        # Update cache
+        if result.ok.?:
+            self.cached_asts[file_path] = result.unwrap()
+            self.file_mtimes[file_path] = get_file_mtime(file_path)
+
+        result
+
+    # Parse source text (not from file)
+    fn parse_source_text(source: text, file_path: text) -> Result<AST, ParseError>:
+        parse_source(source, file_path)
+
+    # --- Symbol Resolution ---
+
+    # Get symbol table for a file
+    me get_symbol_table(file_path: text) -> Result<SymbolTable, Error>:
+        # Check cache
+        if self.is_cache_valid(file_path) and self.cached_symbols.contains(file_path):
+            return Ok(self.cached_symbols[file_path])
+
+        # Parse first
+        val ast_result = self.parse_file(file_path)
+        if not ast_result.is_ok():
+            return Err(Error("Failed to parse file"))
+
+        val ast = ast_result.unwrap()
+
+        # Build symbol table
+        val symbol_table = build_symbol_table(ast)
+
+        # Cache result
+        self.cached_symbols[file_path] = symbol_table
+
+        Ok(symbol_table)
+
+    # Find symbol at a specific position
+    fn symbol_at(file_path: text, pos: Position) -> Option<Symbol>:
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.is_ok():
+            return nil
+
+        val symbol_table = symbol_table_result.unwrap()
+        find_symbol_at_position(symbol_table, pos)
+
+    # Find all references to a symbol
+    fn find_references(file_path: text, symbol: Symbol) -> [Location]:
+        # Determine which files to search based on symbol kind
+        val candidate_files = match symbol.kind:
+            case SymbolKind.Variable, SymbolKind.Parameter:
+                # Variables are file-scoped, only search current file
+                [file_path]
+
+            case SymbolKind.Function, SymbolKind.Method:
+                # Functions can be imported, search importing files
+                find_files_that_might_import(file_path, self.project_root)
+
+            case SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
+                # Types can be used widely, search all files
+                find_source_files(self.project_root)
+
+            case _:
+                # Default: search all files
+                find_source_files(self.project_root)
+
+        # Search each candidate file for references
+        var all_refs = []
+        for file in candidate_files:
+            val symbol_table_result = self.get_symbol_table(file)
+            if symbol_table_result.ok.?:
+                val table = symbol_table_result.unwrap()
+                val refs = find_symbol_references(table, symbol.name)
+                all_refs.extend(refs)
+
+        all_refs
+
+    # Find definition of symbol at position
+    fn find_definition(file_path: text, pos: Position) -> Option<DefinitionResult>:
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return nil
+
+        val symbol = symbol_opt.unwrap()
+
+        # Return the definition location
+        Some(DefinitionResult(
+            locations: [symbol.location],
+            symbol: Some(symbol),
+        ))
+
+    # --- Type Information ---
+
+    # Get type information at a position
+    fn type_at(file_path: text, pos: Position) -> Option<text>:
+        # Check symbol first (fast path)
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if symbol_opt.?:
+            return symbol_opt.unwrap().type_info
+
+        # Try to infer type from AST
+        val ast_result = self.parse_file(file_path)
+        if not ast_result.is_ok():
+            return nil
+
+        val ast = ast_result.unwrap()
+
+        # Full expression type inference requires type checker integration.
+        # This would involve:
+        # 1. Finding the expression node at the position
+        # 2. Building a type inference context with surrounding scope
+        # 3. Running Hindley-Milner type inference (Algorithm W)
+        # 4. Formatting the inferred type for display
+        eprint("query_api: full expression type inference not yet integrated with type checker")
+
+        nil
+
+    # --- Completions ---
+
+    # Get completions at a position
+    fn completions_at(file_path: text, pos: Position) -> [Completion]:
+        # Get symbol table for context
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.is_ok():
+            return []
+
+        val symbol_table = symbol_table_result.unwrap()
+
+        # Get scope at position
+        val scope = get_scope_at_position(symbol_table, pos)
+
+        # Build completions from:
+        # 1. Variables/functions in scope
+        # 2. Keywords
+        # 3. Imported modules
+        # 4. Struct/enum members (if in member access context)
+
+        val completions = []
+
+        # Add visible symbols
+        for sym in scope.visible_symbols:
+            completions.push(symbol_to_completion(sym))
+
+        # Add keywords
+        for kw in get_context_keywords(pos, scope):
+            completions.push(Completion(
+                label: kw,
+                kind: CompletionKind.Keyword,
+                detail: nil,
+                documentation: nil,
+                insert_text: kw,
+                sort_priority: 10,
+            ))
+
+        completions
+
+    # --- Hover Information ---
+
+    # Get hover information at a position
+    fn hover_at(file_path: text, pos: Position) -> Option<HoverInfo>:
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return nil
+
+        val symbol = symbol_opt.unwrap()
+
+        # Build markdown content
+        var content = "```simple\n"
+        content = content + symbol.name
+
+        if symbol.type_info.?:
+            content = content + ": " + symbol.type_info.unwrap()
+
+        content = content + "\n```\n"
+
+        if symbol.doc_comment.?:
+            content = content + "\n" + symbol.doc_comment.unwrap()
+
+        Some(HoverInfo(
+            range: position_to_range(pos),
+            contents: content,
+            type_info: symbol.type_info,
+        ))
+
+    # --- Diagnostics ---
+
+    # Get diagnostics for a file
+    me get_diagnostics(file_path: text) -> [Diagnostic]:
+        # Check cache
+        if self.is_cache_valid(file_path) and self.cached_diagnostics.contains(file_path):
+            return self.cached_diagnostics[file_path]
+
+        var diagnostics = []
+
+        # Parse and collect parse errors
+        val ast_result = self.parse_file(file_path)
+        if not ast_result.is_ok():
+            val parse_error = ast_result.err.unwrap()
+            diagnostics.push(parse_error_to_diagnostic(parse_error))
+
+        # Type check and collect type errors
+        if ast_result.ok.?:
+            val ast = ast_result.unwrap()
+            val type_errors = type_check_ast(ast)
+            for err in type_errors:
+                diagnostics.push(type_error_to_diagnostic(err))
+
+        # Cache result
+        self.cached_diagnostics[file_path] = diagnostics
+
+        diagnostics
+
+    # --- Document Symbols ---
+
+    # Get all symbols in a document (for outline view)
+    fn document_symbols(file_path: text) -> [Symbol]:
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.is_ok():
+            return []
+
+        val symbol_table = symbol_table_result.unwrap()
+        extract_all_symbols(symbol_table)
+
+    # --- Workspace Symbols ---
+
+    # Search for symbols across the workspace
+    fn workspace_symbols(query: text) -> [Symbol]:
+        # Get all source files in project
+        val files = find_source_files(self.project_root)
+
+        # Search each file for matching symbols
+        var matches = []
+        for file in files:
+            val symbols = self.document_symbols(file)
+            for symbol in symbols:
+                if symbol_matches_query(symbol.name, query):
+                    matches.push(symbol)
+
+        # Rank results by match quality
+        matches.sort_by(\s: rank_symbol_match(s, query))
+
+        # Limit to top 100 results
+        if matches.len() > 100:
+            matches[0:100]
+        else:
+            matches
+
+# --- Helper Functions ---
+
+# Convert position to single-point range
+fn position_to_range(pos: Position) -> Range:
+    Range(start: pos, end: pos)
+
+# Convert parse error to diagnostic
+fn parse_error_to_diagnostic(error: ParseError) -> Diagnostic:
+    val severity = match error.severity:
+        case ErrorSeverity.Error: DiagnosticSeverity.Error
+        case ErrorSeverity.Warning: DiagnosticSeverity.Warning
+        case ErrorSeverity.Info: DiagnosticSeverity.Info
+
+    Diagnostic(
+        range: Range(
+            start: Position(line: error.span.line, column: error.span.col),
+            end: Position(line: error.span.line, column: error.span.col + 1),
+        ),
+        severity: severity,
+        message: error.message,
+        code: Some("E001"),
+        source: "simple-parser",
+    )
+
+# Convert type error to diagnostic
+fn type_error_to_diagnostic(error: TypeError) -> Diagnostic:
+    # TypeError is an enum, extract message
+    val message = error.message()
+
+    Diagnostic(
+        range: Range(
+            start: Position(line: 0, column: 0),
+            end: Position(line: 0, column: 1),
+        ),
+        severity: DiagnosticSeverity.Error,
+        message: message,
+        code: Some("T001"),
+        source: "simple-type-checker",
+    )
+
+# Convert symbol to completion item
+fn symbol_to_completion(symbol: Symbol) -> Completion:
+    val kind = match symbol.kind:
+        SymbolKind.Variable: CompletionKind.Variable
+        SymbolKind.Function: CompletionKind.Function
+        SymbolKind.Method: CompletionKind.Method
+        SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
+            CompletionKind.Type
+        SymbolKind.Field: CompletionKind.Field
+        SymbolKind.EnumVariant: CompletionKind.EnumVariant
+        _: CompletionKind.Variable
+
+    Completion(
+        label: symbol.name,
+        kind: kind,
+        detail: symbol.type_info,
+        documentation: symbol.doc_comment,
+        insert_text: symbol.name,
+        sort_priority: 5,
+    )
+
+# --- FFI Functions (imported from app.io) ---
+
+# These functions are implemented in rust/compiler/src/query_ffi.rs
+# and exposed through app.io module
+
+fn get_file_mtime(path: text) -> i64:
+    io.rt_get_file_mtime(path)
+
+fn parse_source(source: text, file_path: text) -> Result<AST, ParseError>:
+    io.rt_parse_source(source, file_path)
+
+fn build_symbol_table(ast: AST) -> SymbolTable:
+    io.rt_build_symbol_table(ast)
+
+fn find_symbol_at_position(table: SymbolTable, pos: Position) -> Option<Symbol>:
+    io.rt_find_symbol_at_position(table, pos)
+
+fn find_symbol_references(table: SymbolTable, name: text) -> [Location]:
+    io.rt_find_symbol_references(table, name)
+
+fn get_scope_at_position(table: SymbolTable, pos: Position) -> Scope:
+    io.rt_get_scope_at_position(table, pos)
+
+fn get_context_keywords(pos: Position, scope: Scope) -> [text]:
+    io.rt_get_context_keywords(pos, scope)
+
+fn type_check_ast(ast: AST) -> [TypeError]:
+    io.rt_type_check_ast(ast)
+
+fn extract_all_symbols(table: SymbolTable) -> [Symbol]:
+    io.rt_extract_all_symbols(table)
+
+# --- Type Aliases for Compiler Types ---
+
+# AST is OutlineModule from treesitter
+type AST = OutlineModule
+
+# TypeMap for caching type information
+struct TypeMap:
+    types: Dict<text, text>
+
+# --- Workspace Symbol Search Helpers ---
+
+# Find all source files in a directory
+fn find_source_files(root: text) -> [text]:
+    var files = []
+    val entries = io.dir_walk(root)
+
+    for entry in entries:
+        # Only include .spl and .sspec files
+        if entry.ends_with(".spl") or entry.ends_with(".sspec"):
+            # Skip build directories and hidden files
+            if not entry.contains("/target/") and not entry.contains("/."):
+                files.push(entry)
+
+    files
+
+# Check if symbol name matches query (case-insensitive substring)
+fn symbol_matches_query(name: text, query: text) -> bool:
+    val name_lower = name.to_lower()
+    val query_lower = query.to_lower()
+    name_lower.contains(query_lower)
+
+# Rank symbol match quality (lower score = better match)
+fn rank_symbol_match(symbol: Symbol, query: text) -> i64:
+    var score = 0
+
+    # Exact match: highest priority
+    if symbol.name == query:
+        score = -100
+    # Prefix match: high priority
+    elif symbol.name.starts_with(query):
+        score = -50
+    # Contains: lower priority
+    else:
+        score = -20
+
+    # Public symbols get bonus
+    if symbol.is_public:
+        score = score - 10
+
+    score
+
+# Find files that might import the given file
+# Simple heuristic: search all files and check for import statements
+fn find_files_that_might_import(file_path: text, project_root: text) -> [text]:
+    # Extract module name from file path
+    val module_name = extract_module_name(file_path, project_root)
+
+    # Get all source files
+    val all_files = find_source_files(project_root)
+
+    # Search for files that import this module
+    var importing_files = [file_path]  # Always include the file itself
+
+    for file in all_files:
+        if file == file_path:
+            continue
+
+        # Read file and check for import statement
+        if io.file_exists(file):
+            val content = io.file_read(file)
+            if content.contains("import {module_name}") or content.contains("use {module_name}"):
+                importing_files.push(file)
+
+    importing_files
+
+# Extract module name from file path
+fn extract_module_name(file_path: text, project_root: text) -> text:
+    # Remove project root and convert path to module name
+    var module_path = file_path
+
+    if module_path.starts_with(project_root):
+        module_path = module_path[project_root.len():]
+
+    # Remove leading slash
+    if module_path.starts_with("/"):
+        module_path = module_path[1:]
+
+    # Remove .spl extension
+    if module_path.ends_with(".spl"):
+        module_path = module_path[:module_path.len() - 4]
+
+    # Convert path separators to dots
+    module_path.replace("/", ".")
+
+# Desugared static methods for bootstrap interpreter compatibility
+
+fn CompilerQueryContext__create(project_root: text) -> CompilerQueryContext:
+        CompilerQueryContext(
+            cached_asts: {},
+            cached_symbols: {},
+            cached_types: {},
+            cached_diagnostics: {},
+            file_mtimes: {},
+            project_root: project_root,
+            incremental: true,
+        )
+
+    # --- Cache Management ---
+
+    # Invalidate cache for a file (called when file changes)
+    me invalidate_file(file_path: text):
+        self.cached_asts.remove(file_path)
+        self.cached_symbols.remove(file_path)
+        self.cached_types.remove(file_path)
+        self.cached_diagnostics.remove(file_path)
+        self.file_mtimes.remove(file_path)
+
+    # Check if cache is valid for a file
+    fn is_cache_valid(file_path: text) -> bool:
+        if not self.file_mtimes.contains(file_path):
+            return false
+
+        val cached_mtime = self.file_mtimes[file_path]
+        val current_mtime = get_file_mtime(file_path)
+
+        cached_mtime == current_mtime
+
+    # --- Parsing ---
+
+    # Parse a file and cache the result
+    me parse_file(file_path: text) -> Result<AST, ParseError>:
+        # Check cache
+        if self.is_cache_valid(file_path) and self.cached_asts.contains(file_path):
+            return Ok(self.cached_asts[file_path])
+
+        # Parse file
+        val source = file_read(file_path)
+        val result = parse_source(source, file_path)
+
+        # Update cache
+        if result.ok.?:
+            self.cached_asts[file_path] = result.unwrap()
+            self.file_mtimes[file_path] = get_file_mtime(file_path)
+
+        result
+
+    # Parse source text (not from file)
+    fn parse_source_text(source: text, file_path: text) -> Result<AST, ParseError>:
+        parse_source(source, file_path)
+
+    # --- Symbol Resolution ---
+
+    # Get symbol table for a file
+    me get_symbol_table(file_path: text) -> Result<SymbolTable, Error>:
+        # Check cache
+        if self.is_cache_valid(file_path) and self.cached_symbols.contains(file_path):
+            return Ok(self.cached_symbols[file_path])
+
+        # Parse first
+        val ast_result = self.parse_file(file_path)
+        if not ast_result.is_ok():
+            return Err(Error("Failed to parse file"))
+
+        val ast = ast_result.unwrap()
+
+        # Build symbol table
+        val symbol_table = build_symbol_table(ast)
+
+        # Cache result
+        self.cached_symbols[file_path] = symbol_table
+
+        Ok(symbol_table)
+
+    # Find symbol at a specific position
+    fn symbol_at(file_path: text, pos: Position) -> Option<Symbol>:
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.is_ok():
+            return nil
+
+        val symbol_table = symbol_table_result.unwrap()
+        find_symbol_at_position(symbol_table, pos)
+
+    # Find all references to a symbol
+    fn find_references(file_path: text, symbol: Symbol) -> [Location]:
+        # Determine which files to search based on symbol kind
+        val candidate_files = match symbol.kind:
+            case SymbolKind.Variable, SymbolKind.Parameter:
+                # Variables are file-scoped, only search current file
+                [file_path]
+
+            case SymbolKind.Function, SymbolKind.Method:
+                # Functions can be imported, search importing files
+                find_files_that_might_import(file_path, self.project_root)
+
+            case SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
+                # Types can be used widely, search all files
+                find_source_files(self.project_root)
+
+            case _:
+                # Default: search all files
+                find_source_files(self.project_root)
+
+        # Search each candidate file for references
+        var all_refs = []
+        for file in candidate_files:
+            val symbol_table_result = self.get_symbol_table(file)
+            if symbol_table_result.ok.?:
+                val table = symbol_table_result.unwrap()
+                val refs = find_symbol_references(table, symbol.name)
+                all_refs.extend(refs)
+
+        all_refs
+
+    # Find definition of symbol at position
+    fn find_definition(file_path: text, pos: Position) -> Option<DefinitionResult>:
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return nil
+
+        val symbol = symbol_opt.unwrap()
+
+        # Return the definition location
+        Some(DefinitionResult(
+            locations: [symbol.location],
+            symbol: Some(symbol),
+        ))
+
+    # --- Type Information ---
+
+    # Get type information at a position
+    fn type_at(file_path: text, pos: Position) -> Option<text>:
+        # Check symbol first (fast path)
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if symbol_opt.?:
+            return symbol_opt.unwrap().type_info
+
+        # Try to infer type from AST
+        val ast_result = self.parse_file(file_path)
+        if not ast_result.is_ok():
+            return nil
+
+        val ast = ast_result.unwrap()
+
+        # Full expression type inference requires type checker integration.
+        # This would involve:
+        # 1. Finding the expression node at the position
+        # 2. Building a type inference context with surrounding scope
+        # 3. Running Hindley-Milner type inference (Algorithm W)
+        # 4. Formatting the inferred type for display
+        eprint("query_api: full expression type inference not yet integrated with type checker")
+
+        nil
+
+    # --- Completions ---
+
+    # Get completions at a position
+    fn completions_at(file_path: text, pos: Position) -> [Completion]:
+        # Get symbol table for context
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.is_ok():
+            return []
+
+        val symbol_table = symbol_table_result.unwrap()
+
+        # Get scope at position
+        val scope = get_scope_at_position(symbol_table, pos)
+
+        # Build completions from:
+        # 1. Variables/functions in scope
+        # 2. Keywords
+        # 3. Imported modules
+        # 4. Struct/enum members (if in member access context)
+
+        val completions = []
+
+        # Add visible symbols
+        for sym in scope.visible_symbols:
+            completions.push(symbol_to_completion(sym))
+
+        # Add keywords
+        for kw in get_context_keywords(pos, scope):
+            completions.push(Completion(
+                label: kw,
+                kind: CompletionKind.Keyword,
+                detail: nil,
+                documentation: nil,
+                insert_text: kw,
+                sort_priority: 10,
+            ))
+
+        completions
+
+    # --- Hover Information ---
+
+    # Get hover information at a position
+    fn hover_at(file_path: text, pos: Position) -> Option<HoverInfo>:
+        val symbol_opt = self.symbol_at(file_path, pos)
+        if not symbol_opt.?:
+            return nil
+
+        val symbol = symbol_opt.unwrap()
+
+        # Build markdown content
+        var content = "```simple\n"
+        content = content + symbol.name
+
+        if symbol.type_info.?:
+            content = content + ": " + symbol.type_info.unwrap()
+
+        content = content + "\n```\n"
+
+        if symbol.doc_comment.?:
+            content = content + "\n" + symbol.doc_comment.unwrap()
+
+        Some(HoverInfo(
+            range: position_to_range(pos),
+            contents: content,
+            type_info: symbol.type_info,
+        ))
+
+    # --- Diagnostics ---
+
+    # Get diagnostics for a file
+    me get_diagnostics(file_path: text) -> [Diagnostic]:
+        # Check cache
+        if self.is_cache_valid(file_path) and self.cached_diagnostics.contains(file_path):
+            return self.cached_diagnostics[file_path]
+
+        var diagnostics = []
+
+        # Parse and collect parse errors
+        val ast_result = self.parse_file(file_path)
+        if not ast_result.is_ok():
+            val parse_error = ast_result.err.unwrap()
+            diagnostics.push(parse_error_to_diagnostic(parse_error))
+
+        # Type check and collect type errors
+        if ast_result.ok.?:
+            val ast = ast_result.unwrap()
+            val type_errors = type_check_ast(ast)
+            for err in type_errors:
+                diagnostics.push(type_error_to_diagnostic(err))
+
+        # Cache result
+        self.cached_diagnostics[file_path] = diagnostics
+
+        diagnostics
+
+    # --- Document Symbols ---
+
+    # Get all symbols in a document (for outline view)
+    fn document_symbols(file_path: text) -> [Symbol]:
+        val symbol_table_result = self.get_symbol_table(file_path)
+        if not symbol_table_result.is_ok():
+            return []
+
+        val symbol_table = symbol_table_result.unwrap()
+        extract_all_symbols(symbol_table)
+
+    # --- Workspace Symbols ---
+
+    # Search for symbols across the workspace
+    fn workspace_symbols(query: text) -> [Symbol]:
+        # Get all source files in project
+        val files = find_source_files(self.project_root)
+
+        # Search each file for matching symbols
+        var matches = []
+        for file in files:
+            val symbols = self.document_symbols(file)
+            for symbol in symbols:
+                if symbol_matches_query(symbol.name, query):
+                    matches.push(symbol)
+
+        # Rank results by match quality
+        matches.sort_by(\s: rank_symbol_match(s, query))
+
+        # Limit to top 100 results
+        if matches.len() > 100:
+            matches[0:100]
+        else:
+            matches
+

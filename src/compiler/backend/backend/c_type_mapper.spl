@@ -1,0 +1,160 @@
+# C/C++ Type Mapper - C Backend Type Mapping Implementation
+#
+# Maps MIR types to C++20 type strings for the C backend.
+# Implements TypeMapper trait, following the pattern of llvm_type_mapper.spl.
+# Generated code links against runtime.h (spl_ prefix functions).
+
+use compiler.mir.mir_data.*
+use compiler.backend.common.type_mapper.*
+
+# ============================================================================
+# C Type Mapper
+# ============================================================================
+
+class CTypeMapper:
+    """
+    Maps MIR types to C++20 type representations.
+
+    C++ type mappings:
+        I64 -> "int64_t"
+        I32 -> "int32_t"
+        I16 -> "int16_t"
+        I8  -> "int8_t"
+        F64 -> "double"
+        F32 -> "float"
+        Bool -> "int64_t"  (runtime uses i64 for bools)
+        Unit -> "void"
+        Ptr  -> "void*"    (opaque pointers, like runtime)
+    """
+
+    target_bits: i64
+    type_names: Dict  # i64 symbol id -> C type name (for named structs/enums)
+
+    static fn create() -> CTypeMapper:
+        CTypeMapper(target_bits: 64, type_names: {})
+
+    static fn create_for_target(target: CodegenTarget) -> CTypeMapper:
+        if target.is_32bit():
+            CTypeMapper(target_bits: 32, type_names: {})
+        else:
+            CTypeMapper(target_bits: 64, type_names: {})
+
+impl TypeMapper for CTypeMapper:
+    fn map_primitive(ty: PrimitiveType) -> text:
+        match ty:
+            case I64: "int64_t"
+            case I32: "int32_t"
+            case I16: "int16_t"
+            case I8: "int8_t"
+            case F64: "double"
+            case F32: "float"
+            case Bool: "int64_t"
+            case Unit: "void"
+
+    fn map_pointer(pointee: text, mutability: Mutability) -> text:
+        "void*"
+
+    fn backend_name() -> text:
+        "C"
+
+impl CTypeMapper:
+    me register_type(sym_id: i64, c_name: text):
+        """Register a C type name for a MIR struct/enum symbol id (for generic type name sanitization)."""
+        self.type_names[sym_id] = c_name
+
+    fn map_type(ty: MirType) -> text:
+        match ty.kind:
+            case I64: "int64_t"
+            case I32: "int32_t"
+            case I16: "int16_t"
+            case I8: "int8_t"
+            case U64: "uint64_t"
+            case U32: "uint32_t"
+            case U16: "uint16_t"
+            case U8: "uint8_t"
+            case F64: "double"
+            case F32: "float"
+            case Bool: "int64_t"
+            case Unit: "void"
+            case Char: "int16_t"
+            case Ptr(_, _): "void*"
+            case Ref(_, _): "void*"
+            case FuncPtr(_): "void*"
+            case Array(elem, size):
+                val elem_ty = self.map_type(elem)
+                "spl::Array<{elem_ty}>"
+            case Slice(elem):
+                val elem_ty = self.map_type(elem)
+                "spl::Array<{elem_ty}>"
+            case Tuple(elements):
+                if elements.len() == 0:
+                    "void"
+                else:
+                    var types: [text] = []
+                    for elem in elements:
+                        types = types.push(self.map_type(elem))
+                    "std::tuple<{types.join(", ")}>"
+            case Struct(symbol):
+                match self.type_names.get(symbol.id):
+                    case Some(n): n + "*"
+                    case nil: "void*"
+            case Enum(symbol):
+                match self.type_names.get(symbol.id):
+                    case Some(n): n
+                    case nil: "int64_t"
+            case Never: "void"
+            case Opaque(_): "void*"
+            case Promise(_): "void*"
+            case Generator(_, _): "void*"
+            case ActorType(_): "void*"
+            case _: "int64_t"
+
+    fn map_return_type(ty: MirType) -> text:
+        match ty.kind:
+            case Unit: "void"
+            case _: self.map_type(ty)
+
+    fn size_of(ty: MirType) -> i64:
+        match ty.kind:
+            case I64 | U64 | F64: 8
+            case I32 | U32 | F32: 4
+            case I16 | U16 | Char: 2
+            case I8 | U8 | Bool: 1
+            case Unit: 0
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_):
+                self.target_bits / 8
+            case Array(elem, size): self.size_of(elem) * size
+            case _: 8
+
+    fn align_of(ty: MirType) -> i64:
+        match ty.kind:
+            case I64 | U64 | F64: 8
+            case I32 | U32 | F32: 4
+            case I16 | U16 | Char: 2
+            case I8 | U8 | Bool: 1
+            case Ptr(_, _) | Ref(_, _) | FuncPtr(_):
+                self.target_bits / 8
+            case _: 8
+
+# ============================================================================
+# Export
+# ============================================================================
+
+fn CTypeMapper__create() -> CTypeMapper:
+    CTypeMapper__create()
+
+fn CTypeMapper__create_for_target(target: CodegenTarget) -> CTypeMapper:
+    CTypeMapper__create_for_target(target)
+
+
+# Desugared static methods for bootstrap interpreter compatibility
+
+fn None__create_for_target(target: CodegenTarget) -> CTypeMapper:
+    if target.is_32bit():
+        CTypeMapper(target_bits: 32, type_names: {})
+    else:
+        CTypeMapper(target_bits: 64, type_names: {})
+
+
+export CTypeMapper
+export CTypeMapper__create, CTypeMapper__create_for_target

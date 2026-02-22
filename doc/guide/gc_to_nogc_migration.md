@@ -408,6 +408,42 @@ The code is identical — only the import path differs. Ownership semantics are 
 
 ---
 
+## Migrated Modules
+
+The following modules have been migrated from `gc_async_mut/` to `nogc_sync_mut/` as of 2026-02-22:
+
+| Module | Source | Destination | Notes |
+|--------|--------|-------------|-------|
+| `torch` | `gc_async_mut/torch/` | `nogc_sync_mut/torch/` | Reference pattern — complete |
+| `cuda` | `gc_async_mut/cuda/` | `nogc_sync_mut/cuda/` | Remove `owns_handle` from 3 classes, unconditional `drop()` |
+| `gpu` | `gc_async_mut/gpu/` | `nogc_sync_mut/gpu/` | Redirect torch imports to nogc; types from `common/gpu/` |
+| `gpu_runtime` | `gc_async_mut/gpu_runtime/` | `nogc_sync_mut/gpu_runtime/` | Replace borrowed-view pattern with direct FFI calls |
+| `pure` | `gc_async_mut/pure/` | `nogc_sync_mut/pure/` | Copy + fix 6 internal `gc_async_mut` cross-references |
+
+### Shared types extracted to `common/`
+
+GPU device types moved to `src/lib/common/gpu/device.spl`:
+- `GpuBackend` enum (Cuda, Vulkan, None_)
+- `Gpu` struct (backend, device_id, is_initialized)
+- `gpu_cuda()`, `gpu_vulkan()`, `gpu_none()` constructors
+
+Both `gc_async_mut/gpu/` and `nogc_sync_mut/gpu/` import from `std.common.gpu.device`.
+
+### `gpu_runtime` borrowed-view redesign
+
+The GC `gpu_runtime/mod.spl` creates temporary wrappers with `owns_handle: false` to call methods on raw handles:
+
+```simple
+# GC: borrowed-view pattern (creates temporary wrapper object)
+val t = TorchTensorWrapper(handle: h, owns_handle: false)
+t.is_cuda()
+
+# NoGC: direct FFI call (no wrapper)
+rt_torch_torchtensor_is_cuda(h)
+```
+
+---
+
 ## Backend-Agnostic Code (Advanced)
 
 For libraries that must support both modes simultaneously:

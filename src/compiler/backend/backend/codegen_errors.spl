@@ -1,0 +1,258 @@
+# Codegen Errors
+#
+# Standardized error handling for code generation.
+# All error types are defined in Simple for consistency.
+
+use compiler.core.lexer.Span
+
+# ============================================================================
+# Error Types
+# ============================================================================
+
+enum CodegenErrorKind:
+    """Type of codegen error."""
+    ModuleInitFailed
+    FunctionDeclFailed
+    FunctionCompileFailed
+    VerificationFailed     # IR verification errors
+    InvalidSignature
+    UnsupportedType
+    UnsupportedInstruction
+    InvalidTarget
+    FinalizationFailed
+    ObjectEmitFailed
+    JitExecutionFailed
+    UnknownFunction
+    InvalidFunctionCall
+    RuntimeError
+    NameConflict          # Function name conflicts with runtime
+
+struct CodegenError:
+    """Error during code generation."""
+    kind: CodegenErrorKind
+    message: text
+    function_name: text?
+    span: Span?
+    cause: text?
+
+impl CodegenError:
+    static fn new(kind: CodegenErrorKind, message: text) -> CodegenError:
+        CodegenError(
+            kind: kind,
+            message: message,
+            function_name: nil,
+            span: nil,
+            cause: nil
+        )
+
+    static fn module_init(message: text) -> CodegenError:
+        CodegenError__new(CodegenErrorKind.ModuleInitFailed, message)
+
+    static fn function_decl(func_name: text, message: text) -> CodegenError:
+        CodegenError(
+            kind: CodegenErrorKind.FunctionDeclFailed,
+            message: message,
+            function_name: Some(func_name),
+            span: nil,
+            cause: nil
+        )
+
+    static fn function_compile(func_name: text, message: text) -> CodegenError:
+        CodegenError(
+            kind: CodegenErrorKind.FunctionCompileFailed,
+            message: message,
+            function_name: Some(func_name),
+            span: nil,
+            cause: nil
+        )
+
+    static fn unsupported_type(type_name: text) -> CodegenError:
+        CodegenError__new(
+            CodegenErrorKind.UnsupportedType,
+            "unsupported type: {type_name}"
+        )
+
+    static fn unsupported_instruction(inst: text) -> CodegenError:
+        CodegenError__new(
+            CodegenErrorKind.UnsupportedInstruction,
+            "unsupported instruction: {inst}"
+        )
+
+    static fn invalid_target(target: text) -> CodegenError:
+        CodegenError__new(
+            CodegenErrorKind.InvalidTarget,
+            "invalid target: {target}"
+        )
+
+    static fn finalization_failed(message: text) -> CodegenError:
+        CodegenError__new(CodegenErrorKind.FinalizationFailed, message)
+
+    static fn unknown_function(name: text) -> CodegenError:
+        CodegenError__new(
+            CodegenErrorKind.UnknownFunction,
+            "unknown function: {name}"
+        )
+
+    static fn verification_failed(func_name: text, errors: text) -> CodegenError:
+        CodegenError(
+            kind: CodegenErrorKind.VerificationFailed,
+            message: "IR verification failed",
+            function_name: Some(func_name),
+            span: nil,
+            cause: Some(errors)
+        )
+
+    static fn name_conflict(name: text, conflict: text) -> CodegenError:
+        CodegenError__new(
+            CodegenErrorKind.NameConflict,
+            "function '{name}' conflicts with {conflict}"
+        )
+
+    me with_function(func_name: text) -> CodegenError:
+        """Add function name context."""
+        self.function_name = Some(func_name)
+        self
+
+    me with_span(span: Span) -> CodegenError:
+        """Add source location context."""
+        self.span = Some(span)
+        self
+
+    me with_cause(cause: text) -> CodegenError:
+        """Add underlying error cause."""
+        self.cause = Some(cause)
+        self
+
+    fn format() -> text:
+        """Format error for display."""
+        var msg = "[Codegen Error] "
+
+        # Add function context
+        if val Some(func_name) = self.function_name:
+            msg = msg + "in '{func_name}': "
+
+        # Add main message
+        msg = msg + self.message
+
+        # Add span if available
+        if val Some(span) = self.span:
+            msg = msg + " (at line {span.start_line}, col {span.start_col})"
+
+        # Add cause if available
+        if val Some(cause) = self.cause:
+            msg = msg + "\n  Caused by: {cause}"
+
+        msg
+
+# ============================================================================
+# Error Formatting Helpers
+# ============================================================================
+
+fn format_compile_error(func_name: text, stage: text, error: text) -> text:
+    """Format compilation error message."""
+    "failed to compile '{func_name}' at {stage}: {error}"
+
+fn format_verification_error(func_name: text, errors: text) -> text:
+    """Format IR verification error."""
+    "verification errors in '{func_name}':\n{errors}"
+
+fn format_runtime_error(func_name: text, error: text) -> text:
+    """Format runtime execution error."""
+    "runtime error in '{func_name}': {error}"
+
+# ============================================================================
+# Error Recovery
+# ============================================================================
+
+struct ErrorRecoveryStrategy:
+    """Strategy for recovering from errors."""
+    continue_on_error: bool
+    create_stubs: bool
+    max_errors: i64
+
+impl ErrorRecoveryStrategy:
+    static fn strict() -> ErrorRecoveryStrategy:
+        """Fail on first error."""
+        ErrorRecoveryStrategy(
+            continue_on_error: false,
+            create_stubs: false,
+            max_errors: 1
+        )
+
+    static fn lenient() -> ErrorRecoveryStrategy:
+        """Continue on errors, create stubs."""
+        ErrorRecoveryStrategy(
+            continue_on_error: true,
+            create_stubs: true,
+            max_errors: 100
+        )
+
+    static fn testing() -> ErrorRecoveryStrategy:
+        """Continue on errors for testing."""
+        ErrorRecoveryStrategy(
+            continue_on_error: true,
+            create_stubs: true,
+            max_errors: 1000
+        )
+
+struct ErrorContext:
+    """Context for error accumulation."""
+    errors: [CodegenError]
+    warnings: [CodegenError]
+    strategy: ErrorRecoveryStrategy
+
+impl ErrorContext:
+    static fn new(strategy: ErrorRecoveryStrategy) -> ErrorContext:
+        ErrorContext(
+            errors: [],
+            warnings: [],
+            strategy: strategy
+        )
+
+    me add_error(error: CodegenError):
+        """Add an error to context."""
+        self.errors = self.errors.push(error)
+
+    me add_warning(warning: CodegenError):
+        """Add a warning to context."""
+        self.warnings = self.warnings.push(warning)
+
+    fn has_errors() -> bool:
+        """Check if any errors occurred."""
+        self.errors.len() > 0
+
+    fn should_continue() -> bool:
+        """Check if compilation should continue."""
+        if not self.strategy.continue_on_error:
+            return false
+        self.errors.len() < self.strategy.max_errors
+
+    fn error_summary() -> text:
+        """Get summary of all errors."""
+        if not self.has_errors():
+            return "No errors"
+
+        var summary = "{self.errors.len()} error(s):\n"
+        for error in self.errors:
+            summary = summary + "  - {error.format()}\n"
+        summary
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+
+# Auto-generated desugared static method wrappers
+fn CodegenError__new(kind: CodegenErrorKind, message: text) -> CodegenError:
+    CodegenError(
+        kind: kind,
+        message: message,
+        function_name: nil,
+        span: nil,
+        cause: nil
+    )
+
+
+export CodegenErrorKind, CodegenError
+export ErrorRecoveryStrategy, ErrorContext
+export format_compile_error, format_verification_error, format_runtime_error

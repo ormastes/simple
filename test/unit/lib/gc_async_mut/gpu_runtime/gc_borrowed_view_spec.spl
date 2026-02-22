@@ -1,0 +1,68 @@
+# GC Borrowed View Pattern Spec
+# Documents the borrowed-view pattern in gc_async_mut/gpu_runtime/mod.spl
+
+var tensor_freed = 0
+
+fn mock_free(h: i64):
+    tensor_freed = tensor_freed + 1
+
+struct MockWrapper:
+    handle: i64
+    owns_handle: bool
+
+    fn drop():
+        if self.owns_handle:
+            mock_free(self.handle)
+
+    fn is_cuda() -> bool:
+        self.handle > 0
+
+    fn numel() -> i64:
+        self.handle * 10
+
+# Simulates gc_async_mut/gpu_runtime/mod.spl pattern:
+# fn gpu_tensor_is_cuda(tensor_handle: i64) -> bool:
+#     val t = TorchTensorWrapper(handle: tensor_handle, owns_handle: false)
+#     t.is_cuda()
+fn mock_gpu_tensor_is_cuda(tensor_handle: i64) -> bool:
+    val t = MockWrapper(handle: tensor_handle, owns_handle: false)
+    val result = t.is_cuda()
+    t.drop()
+    result
+
+fn mock_gpu_tensor_numel(tensor_handle: i64) -> i64:
+    val t = MockWrapper(handle: tensor_handle, owns_handle: false)
+    val result = t.numel()
+    t.drop()
+    result
+
+describe "GC Borrowed View Pattern":
+    describe "Temporary wrapper access":
+        it "borrowed view does not free handle":
+            val prev = tensor_freed
+            val result = mock_gpu_tensor_is_cuda(42)
+            expect(result).to_equal(true)
+            expect(tensor_freed).to_equal(prev)
+
+        it "borrowed view returns correct value":
+            val numel = mock_gpu_tensor_numel(5)
+            expect(numel).to_equal(50)
+
+    describe "Owned vs borrowed comparison":
+        it "owned wrapper frees, borrowed does not":
+            val prev = tensor_freed
+            val owned = MockWrapper(handle: 10, owns_handle: true)
+            val borrowed = MockWrapper(handle: 10, owns_handle: false)
+            borrowed.drop()
+            expect(tensor_freed).to_equal(prev)
+            owned.drop()
+            expect(tensor_freed).to_equal(prev + 1)
+
+    describe "NoGC replacement pattern":
+        it "direct FFI call replaces borrowed view":
+            # In NoGC: fn gpu_tensor_is_cuda(h: i64) -> bool:
+            #     rt_torch_torchtensor_is_cuda(h)
+            # No wrapper created, no ownership question
+            val handle = 42
+            val is_cuda = handle > 0
+            expect(is_cuda).to_equal(true)

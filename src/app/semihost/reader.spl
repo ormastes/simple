@@ -10,13 +10,102 @@
 #
 # Design: doc/design/semihosting_system_api_design.md
 
-from app.io.mod import {file_read, file_exists, dir_list, dir_walk}
-from baremetal.string_intern import {StringInternTable, StringInternEntry, FormatType, read_string_intern_section}
-from baremetal.system_api import {SemihostOp}
-use std.json.builder.{escape_json}
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn dir_list(path: text) -> [text]:
+    rt_dir_list(path) ?? []
+
+fn escape_json(s: text) -> text:
+    # Simple JSON escaping for output
+    var result = s
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("\n", "\\n")
+    result = result.replace("\t", "\\t")
+    result
 
 export SemiHostReader, Transport, TransportType
-export run_reader, parse_serial_frame
+export run_reader, parse_serial_frame, format_interned_string
+
+# ============================================================================
+# FormatType enum (local definition for portability)
+# ============================================================================
+
+enum FormatType:
+    Void
+    Int8
+    Int16
+    Int32
+    Int64
+    UInt8
+    UInt16
+    UInt32
+    UInt64
+    Float32
+    Float64
+    Bool
+    Char
+    Hex8
+    Hex16
+    Hex32
+    Hex64
+    Binary
+    Pointer
+    Text
+
+# ============================================================================
+# StringIntern Entry (local definition)
+# ============================================================================
+
+class StringInternEntry:
+    handle: i32
+    text: text
+    format_types: [FormatType]
+
+impl StringInternEntry:
+    static fn create(h: i32, fmt: text) -> StringInternEntry:
+        StringInternEntry(handle: h, text: fmt, format_types: [])
+
+# ============================================================================
+# StringIntern Table (local definition)
+# ============================================================================
+
+class StringInternTable:
+    entries: [StringInternEntry]
+    next_handle: i32
+
+impl StringInternTable:
+    static fn with_test_handles() -> StringInternTable:
+        StringInternTable(entries: [], next_handle: 1)
+
+    me add_reserved(handle: i32, format_text: text, types: [FormatType]):
+        val entry = StringInternEntry(handle: handle, text: format_text, format_types: types)
+        self.entries.push(entry)
+        if handle >= self.next_handle:
+            self.next_handle = handle + 1
+
+    fn get(handle: i32) -> StringInternEntry?:
+        var i = 0
+        while i < self.entries.len():
+            val entry = self.entries[i]
+            if entry.handle == handle:
+                return entry
+            i = i + 1
+        nil
+
+    fn all_entries() -> [StringInternEntry]:
+        self.entries
+
+    fn count() -> i32:
+        self.entries.len() as i32
 
 # ============================================================================
 # Transport Types
@@ -128,6 +217,63 @@ impl SemiHostReader:
     me with_json() -> SemiHostReader:
         self.output_json = true
         self
+
+    # Load string table from .smt JSON file
+    me load_smt_json_file(path: text):
+        val content = file_read(path)
+        if content == "":
+            print "[WARN] Empty or missing SMT file: {path}"
+            return
+
+        # Parse JSON string table entries
+        # Format: {"strings": [{"id": N, "text": "...", "params": N, "format_types": []}, ...]}
+        var pos = 0
+        var in_strings = false
+        while pos < content.len():
+            # Look for "id": entries within "strings" array
+            val id_marker = "\"id\":"
+            val id_pos = content.index_of(id_marker, pos)
+            if id_pos < 0:
+                break
+
+            # Extract id value
+            var id_start = id_pos + id_marker.len()
+            # Skip whitespace
+            while id_start < content.len() and (content[id_start] == " " or content[id_start] == "\t"):
+                id_start = id_start + 1
+            var id_end = id_start
+            while id_end < content.len() and content[id_end] >= "0" and content[id_end] <= "9":
+                id_end = id_end + 1
+            val id_str = content.substring(id_start, id_end)
+            val handle = id_str.parse_int() as i32
+
+            # Find "text": after this id
+            val text_marker = "\"text\":"
+            val text_pos = content.index_of(text_marker, id_end)
+            if text_pos < 0:
+                break
+
+            # Extract text value (find opening quote, then closing quote)
+            var quote_start = text_pos + text_marker.len()
+            while quote_start < content.len() and content[quote_start] != "\"":
+                quote_start = quote_start + 1
+            quote_start = quote_start + 1  # skip opening quote
+            var quote_end = quote_start
+            while quote_end < content.len() and content[quote_end] != "\"":
+                # Handle escaped quotes
+                if content[quote_end] == "\\":
+                    quote_end = quote_end + 2
+                else:
+                    quote_end = quote_end + 1
+            val entry_text = content.substring(quote_start, quote_end)
+
+            # Unescape \\n to real newline
+            val clean_text = entry_text.replace("\\n", "\n")
+
+            self.merged_table.add_reserved(handle, clean_text, [])
+            pos = quote_end + 1
+
+        print "[semi-host-reader] Loaded {self.merged_table.count()} entries from SMT file: {path}"
 
     # Main reader loop
     fn run():
@@ -266,8 +412,8 @@ struct SemihostFrame:
     params: [i64]
 
 # Protocol constants
-const PROTO_MAGIC: u8 = 0xAB
-const PROTO_VERSION: u8 = 0x01
+val PROTO_MAGIC = 0xAB
+val PROTO_VERSION = 0x01
 
 # Parse serial frame from buffer
 # Returns (frame, bytes_consumed) or error
@@ -313,8 +459,8 @@ fn parse_serial_frame(buffer: [u8]) -> Result<(SemihostFrame, u32), text>:
 # ============================================================================
 
 # Format interned string with parameters
-fn format_interned_string(template: text, types: [FormatType], params: [i64]) -> text:
-    var result = template
+fn format_interned_string(fmt_str: text, types: [FormatType], params: [i64]) -> text:
+    var result = fmt_str
     var param_idx: u64 = 0
 
     while result.contains("{}") and param_idx < params.len() as u64:
@@ -330,7 +476,7 @@ fn format_interned_string(template: text, types: [FormatType], params: [i64]) ->
 # Format single parameter based on type
 fn format_param(value: i64, fmt_type: FormatType) -> text:
     match fmt_type:
-        case FormatType.None: ""
+        case FormatType.Void: ""
         case FormatType.Int8: (value as i8).to_string()
         case FormatType.Int16: (value as i16).to_string()
         case FormatType.Int32: (value as i32).to_string()
@@ -431,6 +577,7 @@ fn run_reader(args: [text]) -> i32:
     var serial_port = "/dev/ttyUSB0"
     var baud: u32 = 115200
     var file_path = ""
+    var smt_file = ""
     var timestamps = false
     var json_output = false
 
@@ -464,6 +611,8 @@ fn run_reader(args: [text]) -> i32:
         elif arg.starts_with("--file="):
             file_path = arg.substring(7)
             transport_type = TransportType.File
+        elif arg.starts_with("--smt-file="):
+            smt_file = arg.substring(11)
         elif arg == "--timestamps":
             timestamps = true
         elif arg == "--json":
@@ -484,6 +633,8 @@ fn run_reader(args: [text]) -> i32:
 
     # Create and run reader
     var reader = SemiHostReader.new(smf_root, transport)
+    if smt_file != "":
+        reader.load_smt_json_file(smt_file)
     if timestamps:
         reader = reader.with_timestamps()
     if json_output:
@@ -506,6 +657,7 @@ fn print_help():
     print "  --serial-port=PATH  Serial port path (default: /dev/ttyUSB0)"
     print "  --baud=RATE         Serial baud rate (default: 115200)"
     print "  --file=PATH         Read from file (sets transport to file)"
+    print "  --smt-file=PATH    Load string table from .smt JSON file"
     print "  --timestamps        Show timestamps in output"
     print "  --json              Output in JSON format"
     print "  --help, -h          Show this help"

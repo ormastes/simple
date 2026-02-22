@@ -1,0 +1,316 @@
+# Macro Auto-Import Model
+#
+# Implements the macro import/export and `auto import` semantics verified in:
+# verification/macro_auto_import/src/MacroAutoImport.lean
+#
+# Proven Properties (Lean theorems):
+# 1. glob_doesnt_leak_macros_wf: Macros not in auto-import are never in glob import result
+# 2. nonmacros_always_globbed: All non-macros are always in glob import
+# 3. auto_imported_in_glob: Auto-imported macros are in glob import
+# 4. glob_subset: Glob import symbols come from exports
+# 5. empty_auto_import_no_macros: Empty auto-import means no macros in glob
+# 6. autoImported_combine: Combined exports combine auto-imported macros
+#
+# Key Properties (Invariants):
+# 1. **Glob doesn't leak**: If macro `m` is not in `auto import`, then `m` is never
+#    in the result of `globImport`
+# 2. **Explicit always works**: Explicit `use module.macroName` always imports the macro
+#    if it exists and is public
+# 3. **Two-phase visibility**: Macro export happens in Phase 1 (module exports it),
+#    glob participation happens in Phase 2 (directory's `autoImports` lists it)
+
+# Symbol kind distinguishes macros from other symbols
+#
+# Corresponds to Lean: `inductive SymKind | valueOrType | macro`
+enum SymKind:
+    ValueOrType  # Functions, types, constants
+    MacroKind    # Macro definitions
+
+impl SymKind:
+    # Check if this kind is a macro
+    fn is_macro() -> bool:
+        match self:
+            case SymKind.MacroKind:
+                true
+            case SymKind.ValueOrType:
+                false
+
+    # Convert to string for debugging
+    fn to_string() -> text:
+        match self:
+            case SymKind.ValueOrType:
+                "ValueOrType"
+            case SymKind.MacroKind:
+                "Macro"
+
+# A fully-qualified symbol
+#
+# Corresponds to Lean: `structure Symbol where modulePath : String; name : String; kind : SymKind`
+struct MacroSymbol:
+    module_path: text
+    name: text
+    kind: SymKind
+
+impl MacroSymbol:
+    # Create a new symbol
+    static fn new(module_path: text, name: text, kind: SymKind) -> MacroSymbol:
+        MacroSymbol(module_path: module_path, name: name, kind: kind)
+
+    # Create a value/type symbol
+    static fn value_sym(module_path: text, name: text) -> MacroSymbol:
+        MacroSymbol__new(module_path, name, SymKind.ValueOrType)
+
+    # Create a macro symbol
+    static fn macro_sym(module_path: text, name: text) -> MacroSymbol:
+        MacroSymbol__new(module_path, name, SymKind.MacroKind)
+
+    # Get the module path
+    fn get_module_path() -> text:
+        self.module_path
+
+    # Get the symbol name
+    fn get_name() -> text:
+        self.name
+
+    # Get the symbol kind
+    fn get_kind() -> SymKind:
+        self.kind
+
+    # Check if two symbols are equal
+    fn equals(other: MacroSymbol) -> bool:
+        if self.module_path != other.module_path:
+            return false
+        if self.name != other.name:
+            return false
+
+        # Check if kinds match
+        val self_is_macro = self.kind.is_macro()
+        val other_is_macro = other.kind.is_macro()
+        self_is_macro == other_is_macro
+
+# Auto-import declaration from __init__.spl
+#
+# Corresponds to Lean: `structure AutoImport where fromModule : String; macroName : String`
+struct AutoImport:
+    from_module: text
+    macro_name: text
+
+impl AutoImport:
+    # Create a new auto-import declaration
+    static fn new(from_module: text, macro_name: text) -> AutoImport:
+        AutoImport(from_module: from_module, macro_name: macro_name)
+
+    # Get the source module
+    fn get_from_module() -> text:
+        self.from_module
+
+    # Get the macro name
+    fn get_macro_name() -> text:
+        self.macro_name
+
+    # Check if two auto-imports are equal
+    fn equals(other: AutoImport) -> bool:
+        self.from_module == other.from_module and self.macro_name == other.macro_name
+
+# What a module publicly exports
+#
+# Corresponds to Lean: `structure ModuleExports where nonMacros : List Symbol; macros : List Symbol`
+struct MacroExports:
+    non_macros: [MacroSymbol]  # Public non-macro symbols
+    macros: [MacroSymbol]      # Public macros
+
+impl MacroExports:
+    # Create a new empty exports
+    static fn new() -> MacroExports:
+        MacroExports(non_macros: [], macros: [])
+
+    # Add a non-macro symbol
+    me add_non_macro(sym: MacroSymbol):
+        self.non_macros.push(sym)
+
+    # Add a macro symbol
+    me add_macro(sym: MacroSymbol):
+        self.macros.push(sym)
+
+    # Add a symbol (automatically categorized)
+    me add(sym: MacroSymbol):
+        match sym.get_kind():
+            case SymKind.ValueOrType:
+                self.non_macros.push(sym)
+            case SymKind.MacroKind:
+                self.macros.push(sym)
+
+    # Check well-formedness: nonMacros contains only non-macros, macros contains only macros
+    #
+    # Corresponds to Lean: `def wellFormedExports`
+    fn is_well_formed() -> bool:
+        # Check all non_macros are ValueOrType
+        for sym in self.non_macros:
+            val sym_kind = sym.get_kind()
+            match sym_kind:
+                case SymKind.ValueOrType:
+                    ()
+                case SymKind.MacroKind:
+                    return false
+
+        # Check all macros are Macro
+        for sym in self.macros:
+            val sym_kind = sym.get_kind()
+            match sym_kind:
+                case SymKind.MacroKind:
+                    ()
+                case SymKind.ValueOrType:
+                    return false
+
+        true
+
+# Directory manifest for macro handling
+#
+# Corresponds to Lean: `structure DirManifest where name : String; autoImports : List AutoImport`
+struct MacroDirManifest:
+    name: text
+    auto_imports: [AutoImport]
+
+impl MacroDirManifest:
+    # Create a new directory manifest
+    static fn new(name: text) -> MacroDirManifest:
+        MacroDirManifest(name: name, auto_imports: [])
+
+    # Add an auto-import declaration
+    me add_auto_import(ai: AutoImport):
+        self.auto_imports.push(ai)
+
+# Check if a macro is in the auto-import list
+#
+# Corresponds to Lean: `def isAutoImported (m : DirManifest) (sym : Symbol) : Bool`
+fn is_auto_imported(manifest: MacroDirManifest, sym: MacroSymbol) -> bool:
+    # First check if it's a macro
+    val sym_kind = sym.get_kind()
+    match sym_kind:
+        case SymKind.ValueOrType:
+            return false
+        case SymKind.MacroKind:
+            ()
+
+    # Check if it's in the auto-import list
+    val sym_module = sym.get_module_path()
+    val sym_name = sym.get_name()
+    for ai in manifest.auto_imports:
+        val ai_module = ai.get_from_module()
+        val ai_macro = ai.get_macro_name()
+        if ai_module == sym_module and ai_macro == sym_name:
+            return true
+
+    false
+
+# Filter macros that are in auto-import list
+#
+# Corresponds to Lean: `def autoImportedMacros (m : DirManifest) (exports : ModuleExports) : List Symbol`
+fn auto_imported_macros(manifest: MacroDirManifest, exports: MacroExports) -> [MacroSymbol]:
+    var result: [MacroSymbol] = []
+    for sym in exports.macros:
+        if is_auto_imported(manifest, sym):
+            result.push(sym)
+    result
+
+# Glob import result: non-macros + auto-imported macros only
+#
+# Corresponds to Lean: `def globImport (m : DirManifest) (exports : ModuleExports) : List Symbol`
+#
+# This is the key function: it returns all non-macros, plus ONLY the macros
+# that are listed in `auto import`.
+fn glob_import(manifest: MacroDirManifest, exports: MacroExports) -> [MacroSymbol]:
+    var result: [MacroSymbol] = []
+
+    # Add all non-macros
+    for sym in exports.non_macros:
+        result.push(sym)
+
+    # Add only auto-imported macros
+    val auto_macros = auto_imported_macros(manifest, exports)
+    for sym in auto_macros:
+        result.push(sym)
+
+    result
+
+# Explicit import: always works for any public symbol
+#
+# Corresponds to Lean: `def explicitImport (exports : ModuleExports) (name : String) : Option Symbol`
+fn explicit_import(exports: MacroExports, name: text) -> MacroSymbol?:
+    # Check non-macros first
+    for sym in exports.non_macros:
+        val sym_name = sym.get_name()
+        if sym_name == name:
+            return Some(sym)
+
+    # Check macros
+    for sym in exports.macros:
+        val sym_name = sym.get_name()
+        if sym_name == name:
+            return Some(sym)
+
+    nil
+
+# Combine two module exports
+#
+# Corresponds to Lean: `def combineExports (e1 e2 : ModuleExports) : ModuleExports`
+fn combine_exports(e1: MacroExports, e2: MacroExports) -> MacroExports:
+    var result = MacroExports__new()
+
+    # Add all non-macros from both
+    for sym in e1.non_macros:
+        result.non_macros.push(sym)
+    for sym in e2.non_macros:
+        result.non_macros.push(sym)
+
+    # Add all macros from both
+    for sym in e1.macros:
+        result.macros.push(sym)
+    for sym in e2.macros:
+        result.macros.push(sym)
+
+    result
+
+# Public exports
+
+# Auto-generated desugared static method wrappers
+fn AutoImport__new(from_module: text, macro_name: text) -> AutoImport:
+        AutoImport(from_module: from_module, macro_name: macro_name)
+
+    # Get the source module
+
+fn MacroDirManifest__new(name: text) -> MacroDirManifest:
+        MacroDirManifest(name: name, auto_imports: [])
+
+    # Add an auto-import declaration
+
+fn MacroExports__new() -> MacroExports:
+        MacroExports(non_macros: [], macros: [])
+
+    # Add a non-macro symbol
+
+fn MacroSymbol__macro_sym(module_path: text, name: text) -> MacroSymbol:
+        MacroSymbol__new(module_path, name, SymKind.MacroKind)
+
+    # Get the module path
+
+fn MacroSymbol__new(module_path: text, name: text, kind: SymKind) -> MacroSymbol:
+        MacroSymbol(module_path: module_path, name: name, kind: kind)
+
+    # Create a value/type symbol
+
+fn MacroSymbol__value_sym(module_path: text, name: text) -> MacroSymbol:
+        MacroSymbol__new(module_path, name, SymKind.ValueOrType)
+
+    # Create a macro symbol
+
+export SymKind
+export MacroSymbol
+export AutoImport
+export MacroExports
+export MacroDirManifest
+export is_auto_imported
+export auto_imported_macros
+export glob_import
+export explicit_import
+export combine_exports

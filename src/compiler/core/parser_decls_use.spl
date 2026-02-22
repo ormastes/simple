@@ -1,0 +1,309 @@
+# Parser — Use/Export/Binding and Impl Declarations
+#
+# Extracted from parser_decls.spl. Contains:
+# - parse_use_decl, parse_export_decl
+# - parse_val_decl, parse_lazy_val_decl, parse_var_decl
+# - parse_class_body_method, parse_impl_decl, parse_ce_decl
+
+use compiler.core.tokens.{tok_kind_name}
+use compiler.core.tokens.{TOK_IDENT, TOK_STRING_LIT}
+use compiler.core.tokens.{TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR, TOK_KW_LAZY, TOK_KW_STATIC, TOK_KW_ME}
+use compiler.core.tokens.{TOK_KW_USE, TOK_KW_EXPORT}
+use compiler.core.tokens.{TOK_STAR, TOK_ASSIGN, TOK_ARROW}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
+use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
+use compiler.core.tokens.{TOK_INDENT, TOK_DEDENT, TOK_EOF}
+use compiler.core.parser_decls.{parse_type_params}
+
+# ===== Use/Export Declarations =====
+
+fn parse_use_decl() -> i64:
+    parser_advance()
+    # Check for 'use lazy' modifier
+    var is_lazy = 0
+    if par_kind == TOK_KW_LAZY:
+        is_lazy = 1
+        parser_advance()
+    # Handle relative imports: use .X or use ..X
+    var module_path: text = ""
+    if par_kind == TOK_DOTDOT:
+        parser_advance()
+        module_path = ".."
+        if par_kind == TOK_DOT:
+            parser_advance()
+            module_path = "..."
+    elif par_kind == TOK_DOT:
+        parser_advance()
+        module_path = "."
+
+    # Parse module path: a.b.c
+    if par_kind == TOK_IDENT:
+        if module_path != "":
+            module_path = module_path + par_text
+        else:
+            module_path = par_text
+        parser_advance()
+    for i in 0..100:
+        if par_kind != TOK_DOT:
+            break
+        parser_advance()
+        # Check for {name1, name2} import list
+        if par_kind == TOK_LBRACE:
+            break
+        if par_kind == TOK_LPAREN:
+            break
+        # Wildcard import: use X.*
+        if par_kind == TOK_STAR:
+            parser_advance()
+            val wc_result = decl_use_import(module_path, [], 0)
+            if is_lazy == 1:
+                decl_set_lazy(wc_result)
+            return wc_result
+        module_path = module_path + "." + par_text
+        parser_expect(TOK_IDENT)
+        # Check for trailing * without dot: use ffi.io*
+        if par_kind == TOK_STAR:
+            parser_advance()
+            val wc2_result = decl_use_import(module_path, [], 0)
+            if is_lazy == 1:
+                decl_set_lazy(wc2_result)
+            return wc2_result
+
+    # Optional import list: .{name1, name2} or .(name1, name2)
+    var imported_names: [text] = []
+    val has_brace: bool = par_kind == TOK_LBRACE
+    val has_paren: bool = par_kind == TOK_LPAREN
+    val has_import_list: bool = has_brace or has_paren
+    if has_import_list:
+        parser_advance()
+        for i in 0..100:
+            val at_c1: bool = par_kind == TOK_RBRACE
+            val at_c2: bool = par_kind == TOK_RPAREN
+            val at_c: bool = at_c1 or at_c2
+            if at_c:
+                break
+            if par_kind == TOK_EOF:
+                break
+            if par_kind == TOK_IDENT:
+                val orig_name = par_text
+                parser_advance()
+                # Support aliasing: name as alias
+                val is_as: bool = par_kind == TOK_IDENT
+                val as_text: bool = par_text == "as"
+                val has_as: bool = is_as and as_text
+                if has_as:
+                    parser_advance()  # consume "as"
+                    val alias_name = par_text
+                    parser_advance()  # consume alias
+                    imported_names.push(orig_name + ":" + alias_name)
+                else:
+                    imported_names.push(orig_name)
+            if par_kind == TOK_COMMA:
+                parser_advance()
+        # Consume closing ) or }
+        val is_rb: bool = par_kind == TOK_RBRACE
+        val is_rp: bool = par_kind == TOK_RPAREN
+        val is_close: bool = is_rb or is_rp
+        if is_close:
+            parser_advance()
+
+    val use_result = decl_use_import(module_path, imported_names, 0)
+    if is_lazy == 1:
+        decl_set_lazy(use_result)
+    use_result
+
+fn parse_export_decl() -> i64:
+    parser_advance()
+    var names: [text] = []
+    val first_name = par_text
+    parser_expect(TOK_IDENT)
+    # Support aliasing: name as alias
+    val first_is_as: bool = (par_kind == TOK_IDENT) and (par_text == "as")
+    if first_is_as:
+        parser_advance()  # consume "as"
+        val first_alias = par_text
+        parser_advance()  # consume alias
+        names.push(first_name + ":" + first_alias)
+    else:
+        names.push(first_name)
+    for i in 0..100:
+        if par_kind != TOK_COMMA:
+            break
+        parser_advance()
+        val loop_name = par_text
+        parser_expect(TOK_IDENT)
+        # Support aliasing: name as alias
+        val loop_is_as: bool = (par_kind == TOK_IDENT) and (par_text == "as")
+        if loop_is_as:
+            parser_advance()  # consume "as"
+            val loop_alias = par_text
+            parser_advance()  # consume alias
+            names.push(loop_name + ":" + loop_alias)
+        else:
+            names.push(loop_name)
+    decl_export_names(names, 0)
+
+fn parse_val_decl() -> i64:
+    parser_advance()
+    val name = par_text
+    parser_expect(TOK_IDENT)
+
+    var type_tag = 0
+    if par_kind == TOK_COLON:
+        parser_advance()
+        type_tag = parser_parse_type_with_union()
+
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+    decl_val_binding(name, type_tag, init, 0)
+
+fn parse_lazy_val_decl() -> i64:
+    parser_advance()
+    val name = par_text
+    parser_expect(TOK_IDENT)
+
+    var type_tag = 0
+    if par_kind == TOK_COLON:
+        parser_advance()
+        type_tag = parser_parse_type_with_union()
+
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+    decl_lazy_val_binding(name, type_tag, init, 0)
+
+fn parse_var_decl() -> i64:
+    parser_advance()
+    val name = par_text
+    parser_expect(TOK_IDENT)
+
+    var type_tag = 0
+    if par_kind == TOK_COLON:
+        parser_advance()
+        type_tag = parser_parse_type_with_union()
+
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+    decl_var_binding(name, type_tag, init, 0)
+
+# ===== Class/Impl Method Parsing =====
+
+fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i64:
+    # Advance past leading keyword (static fn / fn / me)
+    if is_static:
+        if par_kind == TOK_KW_STATIC:
+            parser_advance()
+        if par_kind == TOK_KW_FN:
+            parser_advance()
+    elif is_me:
+        parser_advance()
+    else:
+        if par_kind == TOK_KW_FN:
+            parser_advance()
+
+    val method_name = par_text
+    parser_expect(TOK_IDENT)
+
+    # Parse optional type parameters: fn map<U>(...)
+    val type_params = parse_type_params()
+
+    parser_expect(TOK_LPAREN)
+
+    var param_names: [text] = []
+    var param_types: [i64] = []
+
+    if par_kind != TOK_RPAREN:
+        val pname = par_text
+        parser_expect(TOK_IDENT)
+        param_names.push(pname)
+        var ptype = 0
+        if par_kind == TOK_COLON:
+            parser_advance()
+            ptype = parser_parse_type()
+        param_types.push(ptype)
+
+        for i in 0..100:
+            if par_kind != TOK_COMMA:
+                break
+            parser_advance()
+            val pn = par_text
+            parser_expect(TOK_IDENT)
+            param_names.push(pn)
+            var pt = 0
+            if par_kind == TOK_COLON:
+                parser_advance()
+                pt = parser_parse_type()
+            param_types.push(pt)
+
+    parser_expect(TOK_RPAREN)
+
+    var ret_type = TYPE_VOID
+    if par_kind == TOK_ARROW:
+        parser_advance()
+        ret_type = parser_parse_type()
+
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+
+    val mangled_name: text = struct_name + "__" + method_name
+    # static_flag: 0=fn (immutable self), 1=static (no self), 2=me (mutable self)
+    var static_flag: i64 = 0
+    if is_static:
+        static_flag = 1
+    if is_me:
+        static_flag = 2
+    val mid = decl_fn(mangled_name, param_names, param_types, ret_type, body, static_flag, type_params, 0)
+    return mid
+
+fn parse_impl_decl() -> i64:
+    # impl StructName:
+    parser_advance()
+    val target_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_COLON)
+    parser_skip_newlines()
+    parser_expect(TOK_INDENT)
+
+    var method_ids: [i64] = []
+
+    for i in 0..1000:
+        parser_skip_newlines()
+        if par_kind == TOK_DEDENT:
+            parser_advance()
+            break
+        if par_kind == TOK_EOF:
+            break
+
+        # Skip docstrings in impl body
+        if par_kind == TOK_STRING_LIT:
+            parser_advance()
+            parser_skip_newlines_and_semicolons()
+            continue
+        if par_kind == TOK_KW_STATIC:
+            val sm_id = parse_class_body_method(target_name, true, false)
+            if sm_id >= 0:
+                method_ids.push(sm_id)
+        elif par_kind == TOK_KW_FN:
+            val fm_id = parse_class_body_method(target_name, false, false)
+            if fm_id >= 0:
+                method_ids.push(fm_id)
+        elif par_kind == TOK_KW_ME:
+            val mm_id = parse_class_body_method(target_name, false, true)
+            if mm_id >= 0:
+                method_ids.push(mm_id)
+        else:
+            # Skip unknown tokens in impl body gracefully
+            parser_advance()
+
+    decl_impl_block(target_name, method_ids, 0)
+
+fn parse_ce_decl() -> i64:
+    # Already consumed 'ce' keyword
+    val builder_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+    decl_ce_block(builder_name, body, 0)
+
+export parse_use_decl, parse_export_decl, parse_val_decl, parse_lazy_val_decl, parse_var_decl
+export parse_class_body_method, parse_impl_decl, parse_ce_decl

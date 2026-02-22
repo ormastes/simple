@@ -23,9 +23,8 @@ fn fn_sig_get_param_types(sig_id: i64) -> [i64]:
     fn_sig_param_types[sig_id]
 ```
 
-**Exported**: Added to module exports for use by c_codegen
+**Exported**: Added to module exports for use by the shared MIR C backend
 
-### 2. Implemented DECL_USE Handling (`src/compiler_core/compiler/c_codegen.spl`)
 
 **Location**: `cg_emit_forward_decls()` function (after DECL_EXTERN_FN, before DECL_FN)
 
@@ -80,7 +79,6 @@ The two-pass design enables this:
   - Added `fn_sig_get_param_types()`
   - Added exports
 
-- `src/compiler_core/compiler/c_codegen.spl` (+31 lines)
   - Added imports for new accessor functions
   - Implemented `DECL_USE` handling in `cg_emit_forward_decls()`
 

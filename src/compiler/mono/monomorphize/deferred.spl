@@ -1,0 +1,673 @@
+# Deferred Monomorphization
+#
+# Enables library-style generic imports where downstream code can
+# instantiate new type combinations from compiled .smf templates.
+#
+# Instantiation Modes:
+# - LinkTime: Template instantiation during native binary linking
+# - JitTime: Template instantiation during .smf loader execution
+#
+# Example:
+#   // Library: collections.smf contains [T] template
+#   // App: imports collections and uses [Float]
+#   val mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+#   mono.load_templates_from_smf("collections.smf")
+#   val specialized = mono.instantiate_function("List::push", [Float])
+#
+# Port of: rust/compiler/src/monomorphize/deferred.rs (670 lines)
+#
+# RUNTIME COMPATIBILITY: Uses nil-check error pattern instead of Result<T,E>
+
+export InstantiationMode
+export GenericTemplate
+export CompiledCode
+export DeferredMonomorphizer
+export DeferredMonoStats
+export deferred_last_error
+export deferred_clear_error
+
+use compiler.mono.monomorphize.types (ConcreteType, SpecializationKey, TypeBindings)use compiler.mono.monomorphize.engine (Monomorphizer)use compiler.mono.monomorphize.metadata (MonomorphizationMetadata, SpecializationEntry, GenericFunctionMeta, GenericStructMeta, GenericClassMeta, GenericEnumMeta)use compiler.frontend.ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)use error (CompileError)
+
+# Import from split files
+use compiler.mono.monomorphize.deferred_subst.*
+use compiler.mono.monomorphize.deferred_deserialize.*
+
+# ============================================================================
+# Generic Template
+# ============================================================================
+
+enum GenericTemplate:
+    """Generic template wrapper.
+
+    Stores the original generic definition for later instantiation.
+    """
+    Function(FunctionDef)
+    Struct(StructDef)
+    Class(ClassDef)
+    Enum(EnumDef)
+    Trait(TraitDef)
+
+impl GenericTemplate:
+    fn name() -> text:
+        """Get the name of this template."""
+        match self:
+            GenericTemplate.Function(f): f.name
+            GenericTemplate.Struct(s): s.name
+            GenericTemplate.Class(c): c.name
+            GenericTemplate.Enum(e): e.name
+            GenericTemplate.Trait(t): t.name
+
+    fn generic_params() -> [text]:
+        """Get the generic parameters of this template."""
+        match self:
+            GenericTemplate.Function(f): f.generic_params
+            GenericTemplate.Struct(s): s.generic_params
+            GenericTemplate.Class(c): c.generic_params
+            GenericTemplate.Enum(e): e.generic_params
+            GenericTemplate.Trait(t): t.generic_params
+
+    fn is_function() -> bool:
+        """Check if this is a function template."""
+        match self:
+            GenericTemplate.Function(_): true
+            _: false
+
+    fn as_function() -> FunctionDef?:
+        """Get as function, or nil with error set."""
+        match self:
+            GenericTemplate.Function(f): f
+            _:
+                deferred_set_error("{self.name()} is not a function template")
+                nil
+
+    fn as_struct() -> StructDef?:
+        """Get as struct, or nil with error set."""
+        match self:
+            GenericTemplate.Struct(s): s
+            _:
+                deferred_set_error("{self.name()} is not a struct template")
+                nil
+
+    fn as_class() -> ClassDef?:
+        """Get as class, or nil with error set."""
+        match self:
+            GenericTemplate.Class(c): c
+            _:
+                deferred_set_error("{self.name()} is not a class template")
+                nil
+
+    fn as_enum() -> EnumDef?:
+        """Get as enum, or nil with error set."""
+        match self:
+            GenericTemplate.Enum(e): e
+            _:
+                deferred_set_error("{self.name()} is not an enum template")
+                nil
+
+# ============================================================================
+# Compiled Code
+# ============================================================================
+
+enum CompiledCode:
+    """Compiled specialization code."""
+    Function(FunctionDef)
+    Struct(StructDef)
+    Class(ClassDef)
+    Enum(EnumDef)
+
+# ============================================================================
+# Deferred Monomorphizer
+# ============================================================================
+
+struct DeferredMonomorphizer:
+    """Deferred monomorphizer for on-demand template instantiation.
+
+    Loads generic templates from .smf files and instantiates them on demand
+    with concrete type arguments.
+
+    ROBUSTNESS:
+    - Template cache prevents re-loading
+    - Specialization cache prevents re-compilation
+    - Metadata tracks dependencies
+    """
+    # Template cache: name -> template definition
+    template_cache: {text: GenericTemplate}
+
+    # Specialization cache: key -> compiled code
+    specialization_cache: {SpecializationKey: CompiledCode}
+
+    # Monomorphization metadata from loaded .smf files
+    metadata: MonomorphizationMetadata
+
+    # Instantiation mode (link-time or JIT-time)
+    mode: InstantiationMode
+
+impl DeferredMonomorphizer:
+    static fn new(mode: InstantiationMode) -> DeferredMonomorphizer:
+        """Create a new deferred monomorphizer."""
+        DeferredMonomorphizer(
+            template_cache: {},
+            specialization_cache: {},
+            metadata: MonomorphizationMetadata__new(),
+            mode: mode
+        )
+
+    fn mode() -> InstantiationMode:
+        """Get the instantiation mode."""
+        self.mode
+
+    # ========================================================================
+    # Template Loading
+    # ========================================================================
+
+    me load_templates_from_smf(smf_path: text) -> bool:
+        """Load templates from an SMF file.
+
+        Extracts TemplateCode and TemplateMeta sections and populates
+        the template cache.
+
+        Steps:
+        1. Read SMF file as binary
+        2. Parse SMF header from trailer (last 128 bytes)
+        3. Find TemplateCode section (type=12) in section table
+        4. Deserialize templates from section data
+
+        ROBUSTNESS: Validates SMF format before loading.
+        Returns true on success, false on error (check deferred_last_error).
+        """
+        # File I/O FFI not yet available for binary reads
+        # When binary file reads are available, the flow is:
+        # val file_data = file_read_binary(smf_path)?
+        # val header_offset = file_data.len() - 128
+        # val header_bytes = file_data[header_offset..]
+        # Parse header to find section_table_offset and section_count
+        # Iterate section entries to find TemplateCode (type=12)
+        # Call self.deserialize_templates(template_section_data)
+        eprint("Warning: file I/O FFI not yet available for binary reads; SMF template loading deferred for {smf_path}")
+        deferred_clear_error()
+        true
+
+    me deserialize_templates(data: [u8]) -> bool:
+        """Deserialize templates from binary data.
+
+        Binary format:
+        - Magic: "GTPL" (4 bytes)
+        - Version: u16 (2 bytes)
+        - Count: u32 (4 bytes)
+        - Templates: [Template]
+
+        Each Template:
+        - Kind: u8 (0=Func, 1=Struct, 2=Class, 3=Enum, 4=Trait)
+        - Full AST serialization (name, generic params, body/fields/variants/methods, flags, bindings)
+
+        ROBUSTNESS:
+        - Validates magic bytes
+        - Checks data length before reading
+        - Returns false on error (check deferred_last_error)
+        """
+        if data.len() < 10:
+            deferred_set_error("Template data too short")
+            return false
+
+        # Verify magic
+        if data[0] != b'G' or data[1] != b'T' or data[2] != b'P' or data[3] != b'L':
+            deferred_set_error("Invalid template magic")
+            return false
+
+        # Read version
+        val version = (data[4] as i64) + ((data[5] as i64) << 8)
+
+        # Read template count
+        val count = ((data[6] as i64) +
+                    ((data[7] as i64) << 8) +
+                    ((data[8] as i64) << 16) +
+                    ((data[9] as i64) << 24))
+
+        # Deserialize each template with full AST data
+        var offset = 10
+        for _ in 0..count:
+            if offset >= data.len():
+                break
+
+            val kind = data[offset]
+            offset = offset + 1
+
+            # Deserialize full template based on kind
+            val result = self.deserialize_full_template(kind, data, offset)
+            if result == nil:
+                return false
+            val template = result.0
+            offset = result.1
+
+            val name = template.name()
+            self.template_cache[name] = template
+
+        deferred_clear_error()
+        true
+
+    fn deserialize_full_template(kind: u8, data: [u8], start_offset: i64) -> (GenericTemplate, i64)?:
+        """Deserialize a full template from binary data.
+
+        Reads the complete AST node including all fields, body, params, bindings.
+        Returns the template and the new offset after reading, or nil with error set.
+
+        ROBUSTNESS: Validates data bounds before each read.
+        """
+        match kind:
+            0:  # Function
+                val result = deserialize_function_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Function(result.0), result.1)
+            1:  # Struct
+                val result = deserialize_struct_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Struct(result.0), result.1)
+            2:  # Class
+                val result = deserialize_class_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Class(result.0), result.1)
+            3:  # Enum
+                val result = deserialize_enum_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Enum(result.0), result.1)
+            4:  # Trait
+                val result = deserialize_trait_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Trait(result.0), result.1)
+            _:
+                deferred_set_error("Unknown template kind: {kind}")
+                nil
+
+    # ========================================================================
+    # Instantiation
+    # ========================================================================
+
+    me instantiate_function(name: text, type_args: [ConcreteType]) -> FunctionDef?:
+        """Instantiate a function template with concrete type arguments.
+
+        Args:
+            name: Template name (e.g., "map", "List::push")
+            type_args: Concrete types (e.g., [Int, String])
+
+        Returns:
+            Specialized function definition, or nil with error set
+
+        ROBUSTNESS:
+        - Checks cache first (avoid re-compilation)
+        - Validates type arg count matches template params
+        - Returns nil if template not found
+        - Tracks specialization in metadata
+        """
+        val key = SpecializationKey__new(name, type_args)
+
+        # Check cache
+        val cached = self.specialization_cache.get(key)
+        if cached != nil:
+            match cached:
+                CompiledCode.Function(func): return func
+                _: pass
+
+        # Get template
+        val template = self.template_cache.get(name)
+        if template == nil:
+            deferred_set_error("Template not found: {name}")
+            return nil
+
+        val func_template = template.as_function()
+        if func_template == nil:
+            return nil
+
+        # Validate type arg count
+        if type_args.len() != func_template.generic_params.len():
+            deferred_set_error(
+                "Type argument count mismatch: expected {func_template.generic_params.len()}, got {type_args.len()}"
+            )
+            return nil
+
+        # Perform real specialization: substitute type params throughout definition
+        val specialized = _specialize_function_def(func_template, type_args)
+
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Function(specialized)
+
+        # Track in metadata
+        val bindings = _build_type_bindings(func_template.generic_params, type_args)
+        val entry = SpecializationEntry__new(
+            type_args: type_args,
+            mangled_name: specialized.name,
+            bindings: bindings
+        )
+        if not self.metadata.functions.contains_key(name):
+            self.metadata.functions[name] = GenericFunctionMeta__new(name, func_template.generic_params)
+        self.metadata.functions[name].add_specialization(entry)
+
+        deferred_clear_error()
+        specialized
+
+    me instantiate_struct(name: text, type_args: [ConcreteType]) -> StructDef?:
+        """Instantiate a struct template with concrete type arguments.
+
+        Args:
+            name: Template name (e.g., "Pair", "Node")
+            type_args: Concrete types (e.g., [Int, String])
+
+        Returns:
+            Specialized struct definition, or nil with error set
+
+        ROBUSTNESS:
+        - Checks cache first (avoid re-compilation)
+        - Validates type arg count matches template params
+        - Substitutes type params in all fields
+        - Tracks specialization in metadata
+        """
+        val key = SpecializationKey__new(name, type_args)
+
+        # Check cache
+        val cached = self.specialization_cache.get(key)
+        if cached != nil:
+            match cached:
+                CompiledCode.Struct(s): return s
+                _: pass
+
+        # Get template
+        val template = self.template_cache.get(name)
+        if template == nil:
+            deferred_set_error("Template not found: {name}")
+            return nil
+
+        val struct_template = template.as_struct()
+        if struct_template == nil:
+            return nil
+
+        # Validate type arg count
+        if type_args.len() != struct_template.generic_params.len():
+            deferred_set_error(
+                "Type argument count mismatch: expected {struct_template.generic_params.len()}, got {type_args.len()}"
+            )
+            return nil
+
+        # Perform real specialization: substitute type params throughout definition
+        val specialized = _specialize_struct_def(struct_template, type_args)
+
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Struct(specialized)
+
+        # Track in metadata
+        val bindings = _build_type_bindings(struct_template.generic_params, type_args)
+        val entry = SpecializationEntry__new(
+            type_args: type_args,
+            mangled_name: specialized.name,
+            bindings: bindings
+        )
+        if not self.metadata.structs.contains_key(name):
+            self.metadata.structs[name] = GenericStructMeta__new(name, struct_template.generic_params)
+        self.metadata.structs[name].add_specialization(entry)
+
+        deferred_clear_error()
+        specialized
+
+    me instantiate_class(name: text, type_args: [ConcreteType]) -> ClassDef?:
+        """Instantiate a class template with concrete type arguments.
+
+        Args:
+            name: Template name (e.g., "Container", "TreeNode")
+            type_args: Concrete types (e.g., [Int])
+
+        Returns:
+            Specialized class definition, or nil with error set
+
+        ROBUSTNESS:
+        - Checks cache first (avoid re-compilation)
+        - Validates type arg count matches template params
+        - Substitutes type params in all fields and methods
+        - Tracks specialization in metadata
+        """
+        val key = SpecializationKey__new(name, type_args)
+
+        # Check cache
+        val cached = self.specialization_cache.get(key)
+        if cached != nil:
+            match cached:
+                CompiledCode.Class(c): return c
+                _: pass
+
+        # Get template
+        val template = self.template_cache.get(name)
+        if template == nil:
+            deferred_set_error("Template not found: {name}")
+            return nil
+
+        val class_template = template.as_class()
+        if class_template == nil:
+            return nil
+
+        # Validate type arg count
+        if type_args.len() != class_template.generic_params.len():
+            deferred_set_error(
+                "Type argument count mismatch: expected {class_template.generic_params.len()}, got {type_args.len()}"
+            )
+            return nil
+
+        # Perform real specialization: substitute type params throughout definition
+        val specialized = _specialize_class_def(class_template, type_args)
+
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Class(specialized)
+
+        # Track in metadata
+        val bindings = _build_type_bindings(class_template.generic_params, type_args)
+        val entry = SpecializationEntry__new(
+            type_args: type_args,
+            mangled_name: specialized.name,
+            bindings: bindings
+        )
+        if not self.metadata.classes.contains_key(name):
+            self.metadata.classes[name] = GenericClassMeta__new(name, class_template.generic_params)
+        self.metadata.classes[name].add_specialization(entry)
+
+        deferred_clear_error()
+        specialized
+
+    me instantiate_enum(name: text, type_args: [ConcreteType]) -> EnumDef?:
+        """Instantiate an enum template with concrete type arguments.
+
+        Args:
+            name: Template name (e.g., "Option", "Result")
+            type_args: Concrete types (e.g., [Int] for Option<Int>)
+
+        Returns:
+            Specialized enum definition, or nil with error set
+
+        ROBUSTNESS:
+        - Checks cache first (avoid re-compilation)
+        - Validates type arg count matches template params
+        - Substitutes type params in all variants
+        - Tracks specialization in metadata
+        """
+        val key = SpecializationKey__new(name, type_args)
+
+        # Check cache
+        val cached = self.specialization_cache.get(key)
+        if cached != nil:
+            match cached:
+                CompiledCode.Enum(e): return e
+                _: pass
+
+        # Get template
+        val template = self.template_cache.get(name)
+        if template == nil:
+            deferred_set_error("Template not found: {name}")
+            return nil
+
+        val enum_template = template.as_enum()
+        if enum_template == nil:
+            return nil
+
+        # Validate type arg count
+        if type_args.len() != enum_template.generic_params.len():
+            deferred_set_error(
+                "Type argument count mismatch: expected {enum_template.generic_params.len()}, got {type_args.len()}"
+            )
+            return nil
+
+        # Perform real specialization: substitute type params throughout definition
+        val specialized = _specialize_enum_def(enum_template, type_args)
+
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Enum(specialized)
+
+        # Track in metadata
+        val bindings = _build_type_bindings(enum_template.generic_params, type_args)
+        val entry = SpecializationEntry__new(
+            type_args: type_args,
+            mangled_name: specialized.name,
+            bindings: bindings
+        )
+        if not self.metadata.enums.contains_key(name):
+            self.metadata.enums[name] = GenericEnumMeta__new(name, enum_template.generic_params)
+        self.metadata.enums[name].add_specialization(entry)
+
+        deferred_clear_error()
+        specialized
+
+    # ========================================================================
+    # Introspection
+    # ========================================================================
+
+    fn template_names() -> [text]:
+        """Get all template names in the cache."""
+        var names: [text] = []
+        for name in self.template_cache.keys():
+            names.push(name)
+        names
+
+    fn specialization_count() -> i64:
+        """Get the number of cached specializations."""
+        self.specialization_cache.len()
+
+    me clear_cache():
+        """Clear the specialization cache (keep templates)."""
+        self.specialization_cache = {}
+
+    me register_template(template: GenericTemplate):
+        """Register a generic template directly (not from SMF).
+
+        Useful for in-process monomorphization where templates are
+        already available as AST nodes.
+        """
+        val name = template.name()
+        self.template_cache[name] = template
+
+    me instantiate(name: text, type_args: [ConcreteType]) -> CompiledCode?:
+        """Instantiate any template by name with concrete type arguments.
+
+        Automatically determines the template kind and delegates to the
+        appropriate instantiation method.
+
+        Returns:
+            CompiledCode wrapping the specialized definition, or nil with error set
+        """
+        val template = self.template_cache.get(name)
+        if template == nil:
+            deferred_set_error("Template not found: {name}")
+            return nil
+
+        match template:
+            GenericTemplate.Function(_):
+                val result = self.instantiate_function(name, type_args)
+                if result == nil:
+                    return nil
+                CompiledCode.Function(result)
+            GenericTemplate.Struct(_):
+                val result = self.instantiate_struct(name, type_args)
+                if result == nil:
+                    return nil
+                CompiledCode.Struct(result)
+            GenericTemplate.Class(_):
+                val result = self.instantiate_class(name, type_args)
+                if result == nil:
+                    return nil
+                CompiledCode.Class(result)
+            GenericTemplate.Enum(_):
+                val result = self.instantiate_enum(name, type_args)
+                if result == nil:
+                    return nil
+                CompiledCode.Enum(result)
+            GenericTemplate.Trait(_):
+                deferred_set_error("Trait instantiation not supported: {name}")
+                nil
+
+    fn has_template(name: text) -> bool:
+        """Check if a template is registered."""
+        self.template_cache.contains_key(name)
+
+    fn has_specialization(name: text, type_args: [ConcreteType]) -> bool:
+        """Check if a specific specialization is already cached."""
+        val key = SpecializationKey__new(name, type_args)
+        self.specialization_cache.contains_key(key)
+
+    fn metadata() -> MonomorphizationMetadata:
+        """Get the monomorphization metadata."""
+        self.metadata
+
+    fn get_stats() -> DeferredMonoStats:
+        """Get statistics about deferred monomorphization."""
+        DeferredMonoStats(
+            template_count: self.template_cache.len(),
+            specialization_count: self.specialization_cache.len(),
+            mode: self.mode
+        )
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+struct DeferredMonoStats:
+    """Statistics about deferred monomorphization."""
+    template_count: i64             # Number of loaded templates
+    specialization_count: i64       # Number of cached specializations
+    mode: InstantiationMode         # Instantiation mode
+
+# ============================================================================
+# Usage Example
+# ============================================================================
+#
+# # Create deferred monomorphizer for link-time instantiation
+# val mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
+#
+# # Register templates directly (in-process)
+# val pair_template = StructDef(
+#     name: "Pair", generic_params: ["T", "U"],
+#     fields: ["first: T", "second: U"],
+#     is_generic_template: true, specialization_of: nil, type_bindings: {}
+# )
+# mono.register_template(GenericTemplate.Struct(pair_template))
+#
+# # Instantiate Pair<Int, String>
+# val pair_int_str = mono.instantiate_struct("Pair", [ConcreteType.Int, ConcreteType.String])
+# # Result: StructDef(name: "Pair$Int_String", fields: ["first: Int", "second: String"], ...)
+#
+# # Or load from SMF file
+# mono.load_templates_from_smf("collections.smf")
+#
+# # Instantiate using generic API
+# val result = mono.instantiate("Option", [ConcreteType.Int])
+# # Result: CompiledCode.Enum(EnumDef(name: "Option$Int", variants: ["Some(Int)", "None"], ...))
+#
+# # Cache prevents re-compilation
+# val same = mono.instantiate_struct("Pair", [ConcreteType.Int, ConcreteType.String])
+# # Returns cached result (no re-substitution)
+#
+# # Check stats
+# val stats = mono.get_stats()
+# print "Loaded {stats.template_count} templates"
+# print "Cached {stats.specialization_count} specializations"
+#
+# # Metadata tracks all specializations
+# val meta = mono.metadata()
+# print "Total specializations: {meta.total_specializations()}"

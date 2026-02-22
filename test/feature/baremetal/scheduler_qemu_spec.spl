@@ -1,0 +1,60 @@
+# Scheduler QEMU Tests
+#
+# Runs cooperative scheduler test ELF on QEMU and verifies
+# priority-based task execution via semihost output.
+#
+# Requires: qemu-system-riscv32, hello_riscv32_scheduler.elf
+
+# @platform: baremetal(riscv32)
+
+val BINARY_PATH = "examples/09_embedded/baremetal/baremetal/hello_riscv32_scheduler.elf"
+val QEMU_BIN = "qemu-system-riscv32"
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn run_qemu(elf_path: text, timeout_ms: i64) -> (text, text, i32):
+    var args: [text] = [
+        "-M", "virt",
+        "-bios", "none",
+        "-kernel", elf_path,
+        "-nographic",
+        "-semihosting-config", "enable=on,target=native",
+    ]
+    rt_process_run_timeout(QEMU_BIN, args, timeout_ms)
+
+fn run_qemu_output(elf_path: text, timeout_ms: i64) -> text:
+    val (stdout, stderr, exit_code) = run_qemu(elf_path, timeout_ms)
+    stdout + stderr
+
+describe "Scheduler QEMU Tests":
+    it "highest priority task completes first":
+        if not file_exists(BINARY_PATH):
+            print "SKIP: Binary not built: {BINARY_PATH}"
+            return
+        val output = run_qemu_output(BINARY_PATH, 10000)
+        expect(output).to_contain("PASS: highest priority task completes first")
+
+    it "all tasks complete after sufficient ticks":
+        if not file_exists(BINARY_PATH):
+            print "SKIP: Binary not built"
+            return
+        val output = run_qemu_output(BINARY_PATH, 10000)
+        expect(output).to_contain("PASS: all tasks complete after sufficient ticks")
+
+    it "tick count matches total work":
+        if not file_exists(BINARY_PATH):
+            print "SKIP: Binary not built"
+            return
+        val output = run_qemu_output(BINARY_PATH, 10000)
+        expect(output).to_contain("PASS: tick count matches total work (6 ticks)")
+
+    it "all scheduler tests complete":
+        if not file_exists(BINARY_PATH):
+            print "SKIP: Binary not built"
+            return
+        val output = run_qemu_output(BINARY_PATH, 10000)
+        expect(output).to_contain("=== Scheduler Tests Complete ===")

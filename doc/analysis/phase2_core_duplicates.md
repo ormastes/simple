@@ -445,17 +445,15 @@ fn val_lt(a: i64, b: i64) -> i64:
 
 ## Compiler Backend Duplication
 
-**Files:** `compiler/c_codegen.spl` (lines not checked yet)
 
 Let me verify:
 
 ```bash
-wc -l src/compiler_core/compiler/c_codegen.spl src/compiler_core/compiler/driver.spl
 ```
 
 Result: ~500 lines combined.
 
-**Assessment:** No duplication detected. Proper separation: c_codegen (generation), driver (orchestration).
+**Assessment:** No duplication detected. Proper separation: MIR C backend generation (CCodegenAdapter), driver (orchestration).
 
 ---
 

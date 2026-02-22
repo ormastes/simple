@@ -1,5 +1,5 @@
 // === Simple Runtime Helpers ===
-// Embedded in generated C code by c_codegen.spl
+// Embedded in generated C code by shared MIR C backend (CCodegenAdapter)
 // All functions are static to avoid link conflicts and allow dead code elimination.
 
 // --- String Operations ---

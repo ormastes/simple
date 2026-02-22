@@ -34,6 +34,7 @@ class Embedding:
     num_embeddings: i64
     embedding_dim: i64
     training: bool
+    last_indices: [i64]
 
     static fn create(num_embeddings: i64, embedding_dim: i64) -> Embedding:
         """Create Embedding layer with random initialization.
@@ -57,7 +58,8 @@ class Embedding:
             weight: weight_tensor,
             num_embeddings: num_embeddings,
             embedding_dim: embedding_dim,
-            training: true
+            training: true,
+            last_indices: []
         )
 
     fn forward(indices: Tensor) -> Tensor:
@@ -77,6 +79,8 @@ class Embedding:
         # Handle 1D input: (batch_size,) -> (batch_size, embedding_dim)
         if input_shape.len() == 1:
             var output_data: [f64] = []
+            # Store indices for backward pass
+            var stored_indices: [i64] = []
 
             # For each index in batch
             var i = 0
@@ -88,12 +92,14 @@ class Embedding:
                 # Bounds check
                 if idx_int < 0.0 or idx_int >= self.num_embeddings:
                     # Out of bounds - return zeros
+                    stored_indices.push(-1)
                     var j = 0
                     while j < self.embedding_dim:
                         output_data.push(0.0)
                         j = j + 1
                 else:
                     # Lookup embedding vector
+                    stored_indices.push(idx_int)
                     var j = 0
                     while j < self.embedding_dim:
                         val offset = idx_int * self.embedding_dim + j
@@ -102,6 +108,7 @@ class Embedding:
 
                 i = i + 1
 
+            self.last_indices = stored_indices
             val output_value = from_data(output_data, [batch_size, self.embedding_dim])
             tensor_from_value(output_value, requires_grad: self.training)
 
@@ -109,6 +116,7 @@ class Embedding:
         else:
             val seq_len = input_shape[1]
             var output_data: [f64] = []
+            var stored_indices: [i64] = []
 
             # For each item in batch
             var batch_idx = 0
@@ -123,12 +131,14 @@ class Embedding:
                     # Bounds check
                     if idx_int < 0.0 or idx_int >= self.num_embeddings:
                         # Out of bounds - return zeros
+                        stored_indices.push(-1)
                         var j = 0
                         while j < self.embedding_dim:
                             output_data.push(0.0)
                             j = j + 1
                     else:
                         # Lookup embedding vector
+                        stored_indices.push(idx_int)
                         var j = 0
                         while j < self.embedding_dim:
                             val offset = idx_int * self.embedding_dim + j
@@ -139,23 +149,45 @@ class Embedding:
 
                 batch_idx = batch_idx + 1
 
+            self.last_indices = stored_indices
             val output_value = from_data(output_data, [batch_size, seq_len, self.embedding_dim])
             tensor_from_value(output_value, requires_grad: self.training)
 
     fn backward(grad_output: Tensor):
         """Backward pass: scatter-add gradients to embedding table.
 
-        For each index that was looked up in forward(), add the corresponding
-        gradient to that row of the weight table.
-
-        Note: Full backward pass requires autograd integration.
-        This is a placeholder for the gradient computation logic.
+        For each index that was looked up in forward(), accumulate
+        the corresponding gradient row into weight.grad.
+        Uses last_indices stored during forward().
         """
-        # Backward pass logic would scatter gradients back to weight.grad
-        # based on which indices were accessed during forward pass.
-        # This requires tracking indices and accumulating gradients.
-        # Implementation blocked by autograd limitations.
-        pass_do_nothing
+        # Initialize weight gradient to zeros
+        var weight_grad_data: [f64] = []
+        val total = self.num_embeddings * self.embedding_dim
+        var k = 0
+        while k < total:
+            weight_grad_data.push(0.0)
+            k = k + 1
+
+        # Scatter-add: for each looked-up index, add grad_output row to weight_grad
+        val grad_data = grad_output.value.data
+        var i = 0
+        while i < self.last_indices.len():
+            val idx = self.last_indices[i]
+            if idx >= 0 and idx < self.num_embeddings:
+                var j = 0
+                while j < self.embedding_dim:
+                    val grad_offset = i * self.embedding_dim + j
+                    val weight_offset = idx * self.embedding_dim + j
+                    weight_grad_data[weight_offset] = weight_grad_data[weight_offset] + grad_data[grad_offset]
+                    j = j + 1
+            i = i + 1
+
+        # Store gradient in weight tensor
+        val grad_tensor = tensor_from_value(
+            from_data(weight_grad_data, [self.num_embeddings, self.embedding_dim]),
+            requires_grad: false
+        )
+        self.weight.grad = Some(grad_tensor.value)
 
     fn parameters() -> [Tensor]:
         """Get list of parameters (just weight)."""

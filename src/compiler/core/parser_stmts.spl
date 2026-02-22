@@ -1,0 +1,609 @@
+# Parser — Statement Module
+#
+# Statement parsing: parse_block, parse_statement, control flow statements,
+# type inference support, and expression-level control flow.
+# Extracted from parser.spl.
+
+use compiler.core.tokens.{tok_kind_name}
+use compiler.core.tokens.{TOK_INT_LIT, TOK_STRING_LIT}
+use compiler.core.tokens.{TOK_IDENT}
+use compiler.core.tokens.{TOK_KW_VAL, TOK_KW_VAR}
+use compiler.core.tokens.{TOK_KW_IF, TOK_KW_ELIF, TOK_KW_ELSE}
+use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_IN}
+use compiler.core.tokens.{TOK_KW_MATCH, TOK_KW_CASE}
+use compiler.core.tokens.{TOK_KW_RETURN, TOK_KW_BREAK, TOK_KW_CONTINUE}
+use compiler.core.tokens.{TOK_KW_AND, TOK_KW_OR, TOK_KW_NOT}
+use compiler.core.tokens.{TOK_KW_PASS, TOK_KW_PASS_TODO, TOK_KW_PASS_DO_NOTHING, TOK_KW_PASS_DN, TOK_KW_IS}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS}
+use compiler.core.tokens.{TOK_ASSIGN}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE}
+use compiler.core.tokens.{TOK_QUESTION}
+use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
+use compiler.core.tokens.{TOK_UNDERSCORE}
+use compiler.core.tokens.{TOK_SEMICOLON}
+use compiler.core.tokens.{TOK_KW_LAZY}
+use compiler.core.tokens.{TOK_KW_DEFER, TOK_KW_ERRDEFER}
+use compiler.core.tokens.{TOK_LABEL}
+use compiler.core.tokens.{TOK_KW_STATIC_FOR, TOK_KW_COMPTIME}
+use compiler.core.tokens.{TOK_KW_BIND, TOK_KW_RECEIVE, TOK_KW_AFTER}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
+use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
+use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_ARRAY_LIT}
+use compiler.core.ast.{expr_ident, expr_call}
+use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
+use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
+use compiler.core.ast.{expr_unit, expr_block}
+use compiler.core.ast.{expr_get}
+use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_lazy_val_decl, stmt_var_decl}
+use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
+use compiler.core.ast.{stmt_match_stmt, stmt_break_stmt, stmt_continue_stmt, stmt_break_labeled, stmt_continue_labeled, stmt_labeled_loop, STMT_LABELED_LOOP}
+use compiler.core.ast.{STMT_STATIC_FOR, stmt_static_for_stmt}
+use compiler.core.ast.{STMT_COMPTIME, stmt_comptime_block, decl_set_comptime}
+use compiler.core.ast.{STMT_RECEIVE, stmt_receive_stmt, STMT_BIND, stmt_bind_stmt}
+use compiler.core.ast.{stmt_defer_stmt, stmt_errdefer_stmt}
+use compiler.core.ast.{arm_new, arm_new_with_binding}
+use compiler.core.ast.{elif_new}
+use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
+use compiler.core.types.{TYPE_ARRAY_ANY}
+use compiler.core.types.{TYPE_NIL}
+use compiler.core.parser.{par_kind, par_text, par_line, par_col, par_errors, par_had_error}
+use compiler.core.parser.{parser_advance, parser_expect, parser_error}
+use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
+use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
+
+# Import expression parsing
+use compiler.core.parser_expr.{parse_expr}
+
+# ===== Type Inference Support =====
+
+fn infer_expr_type_from_parse(expr_id: i64) -> i64:
+    # Simple type inference based on expression kind
+    # Returns TYPE_VOID (0) if type cannot be inferred
+    if expr_id < 0:
+        return 0
+    val e = expr_get(expr_id)
+    val tag = e.tag
+
+    # Literal types
+    if tag == EXPR_INT_LIT:
+        return TYPE_I64
+    if tag == EXPR_FLOAT_LIT:
+        return TYPE_F64
+    if tag == EXPR_STRING_LIT:
+        return TYPE_TEXT
+    if tag == EXPR_BOOL_LIT:
+        return TYPE_BOOL
+    if tag == EXPR_NIL_LIT:
+        return TYPE_NIL
+    if tag == EXPR_ARRAY_LIT:
+        return TYPE_ARRAY_ANY
+
+    # Binary operations - infer from operator
+    if tag == EXPR_BINARY:
+        val op = e.s_val
+        if op == "+" or op == "-" or op == "*" or op == "/":
+            # Could be i64 or f64, default to i64
+            return TYPE_I64
+        if (op == "==" or op == "!=" or op == "<" or op == ">" or
+            op == "<=" or op == ">=" or op == "and" or op == "or"):
+            return TYPE_BOOL
+        return 0
+
+    # Unary operations
+    if tag == EXPR_UNARY:
+        val op = e.s_val
+        if op == "not":
+            return TYPE_BOOL
+        if op == "-":
+            return TYPE_I64
+        return 0
+
+    # Function calls - cannot infer without function signature
+    if tag == EXPR_CALL:
+        return 0
+
+    # Default: cannot infer
+    0
+
+# ===== Block and Statement Parsing =====
+
+fn parse_block() -> [i64]:
+    var stmts: [i64] = []
+    parser_skip_newlines()
+    if par_kind == TOK_INDENT:
+        # Multi-line indented block
+        parser_advance()
+        for i in 0..100000:
+            parser_skip_newlines()
+            if par_kind == TOK_DEDENT:
+                parser_advance()
+                break
+            if par_kind == TOK_EOF:
+                break
+            val s = parse_statement()
+            stmts.push(s)
+            parser_skip_newlines_and_semicolons()
+        return stmts
+    # Single-line body (no indent): parse one statement
+    val s = parse_statement()
+    stmts.push(s)
+    stmts
+
+fn parse_statement() -> i64:
+    if par_kind == TOK_KW_VAL:
+        return parse_val_decl_stmt()
+
+    if par_kind == TOK_KW_LAZY:
+        parser_advance()
+        return parse_lazy_val_decl_stmt()
+
+    if par_kind == TOK_KW_VAR:
+        return parse_var_decl_stmt()
+
+    if par_kind == TOK_KW_RETURN:
+        parser_advance()
+        val is_nl = par_kind == TOK_NEWLINE
+        val is_ded = par_kind == TOK_DEDENT
+        val no_value = is_nl or is_ded
+        if no_value:
+            return stmt_return_stmt(-1, 0)
+        val ret_val = parse_expr()
+        return stmt_return_stmt(ret_val, 0)
+
+    if par_kind == TOK_KW_IF:
+        return parse_if_stmt()
+
+    # Labeled loop: 'label: for/while
+    if par_kind == TOK_LABEL:
+        val loop_label = par_text
+        parser_advance()
+        # Expect colon after label
+        parser_expect(TOK_COLON)
+        # Then parse the loop and wrap in labeled_loop stmt
+        if par_kind == TOK_KW_FOR:
+            val for_s = parse_for_stmt()
+            return stmt_labeled_loop(loop_label, for_s, 0)
+        if par_kind == TOK_KW_WHILE:
+            val while_s = parse_while_stmt()
+            return stmt_labeled_loop(loop_label, while_s, 0)
+        # Fallthrough: ignore label if not followed by loop
+        return parse_statement()
+
+    if par_kind == TOK_KW_FOR:
+        return parse_for_stmt()
+
+    if par_kind == TOK_KW_STATIC_FOR:
+        return parse_static_for_stmt()
+
+    if par_kind == TOK_KW_COMPTIME:
+        parser_advance()
+        if par_kind == TOK_COLON:
+            parser_advance()
+            val ct_body = parse_block()
+            return stmt_comptime_block(ct_body, 0)
+        # comptime fn inside a block: parse the fn as expression statement
+        val ct_expr = parse_expr()
+        return stmt_expr_stmt(ct_expr, 0)
+
+    if par_kind == TOK_KW_WHILE:
+        return parse_while_stmt()
+
+    if par_kind == TOK_KW_MATCH:
+        return parse_match_stmt()
+
+    if par_kind == TOK_KW_BREAK:
+        parser_advance()
+        # Check for labeled break: break 'label
+        if par_kind == TOK_LABEL:
+            val lbl = par_text
+            parser_advance()
+            return stmt_break_labeled(lbl, 0)
+        return stmt_break_stmt(0)
+
+    if par_kind == TOK_KW_CONTINUE:
+        parser_advance()
+        # Check for labeled continue: continue 'label
+        if par_kind == TOK_LABEL:
+            val lbl = par_text
+            parser_advance()
+            return stmt_continue_labeled(lbl, 0)
+        return stmt_continue_stmt(0)
+
+    if par_kind == TOK_KW_RECEIVE:
+        parser_advance()
+        return parse_receive_stmt()
+
+    if par_kind == TOK_KW_BIND:
+        parser_advance()
+        return parse_bind_stmt()
+
+    if par_kind == TOK_KW_DEFER:
+        parser_advance()
+        val deferred = parse_expr()
+        return stmt_defer_stmt(deferred, 0)
+
+    if par_kind == TOK_KW_ERRDEFER:
+        parser_advance()
+        val err_deferred = parse_expr()
+        return stmt_errdefer_stmt(err_deferred, 0)
+
+    if par_kind == TOK_KW_PASS:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        if msg == "":
+            return stmt_expr_stmt(expr_pass(0), 0)
+        return stmt_expr_stmt(expr_pass_with_msg(msg, 0), 0)
+
+    if par_kind == TOK_KW_PASS_TODO:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
+
+    if par_kind == TOK_KW_PASS_DO_NOTHING:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return stmt_expr_stmt(expr_pass_do_nothing(msg, 0), 0)
+
+    if par_kind == TOK_KW_PASS_DN:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return stmt_expr_stmt(expr_pass_dn(msg, 0), 0)
+
+    # Handle bare 'print' keyword (print expr -- no parens)
+    if par_kind == TOK_IDENT:
+        if par_text == "print":
+            parser_advance()
+            val is_nl = par_kind == TOK_NEWLINE
+            val is_ded = par_kind == TOK_DEDENT
+            val is_eof = par_kind == TOK_EOF
+            val no_arg = is_nl or is_ded
+            val no_arg2 = no_arg or is_eof
+            if no_arg2:
+                val callee0 = expr_ident("print", 0)
+                var args0: [i64] = []
+                val call0 = expr_call(callee0, args0, 0)
+                return stmt_expr_stmt(call0, 0)
+            val print_arg = parse_expr()
+            val callee1 = expr_ident("print", 0)
+            var args1: [i64] = []
+            args1.push(print_arg)
+            val call1 = expr_call(callee1, args1, 0)
+            return stmt_expr_stmt(call1, 0)
+
+    # Expression statement (including assignment and walrus)
+    # Note: Walrus operator handled inline during expression parsing
+    val expression = parse_expr()
+    stmt_expr_stmt(expression, 0)
+
+# ===== Val/Var Declaration Statements =====
+
+fn parse_val_decl_stmt() -> i64:
+    parser_advance()
+    val name = par_text
+    parser_expect(TOK_IDENT)
+
+    # Optional type annotation: val x: i64 = ...
+    var type_tag = 0
+    if par_kind == TOK_COLON:
+        parser_advance()
+        type_tag = parser_parse_type()
+
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+
+    # Type inference: if no explicit type, try to infer from initializer
+    if type_tag == 0:
+        type_tag = infer_expr_type_from_parse(init)
+
+    stmt_val_decl(name, type_tag, init, 0)
+
+fn parse_lazy_val_decl_stmt() -> i64:
+    parser_advance()
+    val name = par_text
+    parser_expect(TOK_IDENT)
+
+    var type_tag = 0
+    if par_kind == TOK_COLON:
+        parser_advance()
+        type_tag = parser_parse_type()
+
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+
+    if type_tag == 0:
+        type_tag = infer_expr_type_from_parse(init)
+
+    stmt_lazy_val_decl(name, type_tag, init, 0)
+
+fn parse_var_decl_stmt() -> i64:
+    parser_advance()
+    val name = par_text
+    parser_expect(TOK_IDENT)
+
+    var type_tag = 0
+    if par_kind == TOK_COLON:
+        parser_advance()
+        type_tag = parser_parse_type()
+
+    # Type inference for var declarations handled after initialization
+
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+    stmt_var_decl(name, type_tag, init, 0)
+
+# ===== Control Flow Statements =====
+
+fn parse_if_stmt() -> i64:
+    parser_advance()
+    val cond = parse_expr()
+    parser_expect(TOK_COLON)
+    val then_body = parse_block()
+
+    # Handle elif/else
+    parser_skip_newlines()
+    var else_body: [i64] = []
+
+    if par_kind == TOK_KW_ELIF:
+        # Elif is parsed as nested if in else
+        val nested_if = parse_if_stmt()
+        else_body.push(nested_if)
+    elif par_kind == TOK_KW_ELSE:
+        parser_advance()
+        parser_expect(TOK_COLON)
+        else_body = parse_block()
+
+    # Store elif chain using elif arena
+    val elif_idx = elif_new(cond, then_body, else_body)
+    stmt_if_stmt(cond, then_body, elif_idx, 0)
+
+fn parse_for_stmt() -> i64:
+    parser_advance()
+    val iter_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_KW_IN)
+    val iterable = parse_expr()
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+    stmt_for_stmt(iter_name, iterable, body, 0)
+
+fn parse_static_for_stmt() -> i64:
+    parser_advance()
+    val iter_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_KW_IN)
+    val iterable = parse_expr()
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+    stmt_static_for_stmt(iter_name, iterable, body, 0)
+
+fn parse_while_stmt() -> i64:
+    parser_advance()
+    val cond = parse_expr()
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+    stmt_while_stmt(cond, body, 0)
+
+fn parse_match_stmt() -> i64:
+    parser_advance()
+    val scrutinee = parse_expr()
+    parser_expect(TOK_COLON)
+    parser_skip_newlines()
+    parser_expect(TOK_INDENT)
+
+    var arm_indices: [i64] = []
+    for i in 0..1000:
+        parser_skip_newlines()
+        if par_kind == TOK_DEDENT:
+            parser_advance()
+            break
+        if par_kind == TOK_EOF:
+            break
+
+        if par_kind == TOK_KW_CASE:
+            parser_advance()
+
+            # Support multi-pattern: case X | Y | Z:
+            # Parse first pattern
+            var patterns: [i64] = []
+            patterns.push(parse_expr())
+
+            # Check for pipe separator and collect additional patterns
+            # Support multi-line patterns by skipping newlines/indents before pipes
+            for skip_idx in 0..100:
+                val is_nl = par_kind == TOK_NEWLINE
+                val is_indent = par_kind == TOK_INDENT
+                val should_skip = is_nl or is_indent
+                if not should_skip:
+                    break
+                parser_advance()
+
+            while par_kind == TOK_PIPE:
+                parser_advance()
+                # Skip newlines/indents after pipe
+                for skip_idx in 0..100:
+                    val is_nl = par_kind == TOK_NEWLINE
+                    val is_indent = par_kind == TOK_INDENT
+                    val should_skip = is_nl or is_indent
+                    if not should_skip:
+                        break
+                    parser_advance()
+                patterns.push(parse_expr())
+                # Skip newlines/indents after pattern
+                for skip_idx in 0..100:
+                    val is_nl = par_kind == TOK_NEWLINE
+                    val is_indent = par_kind == TOK_INDENT
+                    val should_skip = is_nl or is_indent
+                    if not should_skip:
+                        break
+                    parser_advance()
+
+            # Check for guard clause: case X if guard_expr:
+            var guard_expr_idx: i64 = -1
+            if par_kind == TOK_KW_IF:
+                parser_advance()
+                guard_expr_idx = parse_expr()
+
+            # Check for pattern binding: case X as binding_name:
+            var pattern_binding = ""
+            if par_kind == TOK_IDENT:
+                if par_text == "as":
+                    parser_advance()
+                    pattern_binding = par_text
+                    parser_expect(TOK_IDENT)
+
+            # Expect colon after all patterns
+            parser_expect(TOK_COLON)
+            val arm_body = parse_block()
+
+            # Create an arm for each pattern (they share the same body and guard)
+            for i in 0..patterns.len():
+                val pattern_idx = patterns[i]
+                val arm_idx = arm_new_with_binding(pattern_idx, guard_expr_idx, arm_body, pattern_binding)
+                arm_indices.push(arm_idx)
+        else:
+            parser_error("expected 'case' in match block")
+            parser_advance()
+
+    stmt_match_stmt(scrutinee, arm_indices, 0)
+
+fn parse_receive_stmt() -> i64:
+    # Already consumed 'receive' keyword
+    parser_expect(TOK_COLON)
+    parser_skip_newlines()
+    parser_expect(TOK_INDENT)
+
+    var arm_indices: [i64] = []
+    var timeout_expr: i64 = -1
+    var timeout_body_idx: i64 = -1
+
+    for i in 0..1000:
+        parser_skip_newlines()
+        if par_kind == TOK_DEDENT:
+            parser_advance()
+            break
+        if par_kind == TOK_EOF:
+            break
+
+        if par_kind == TOK_KW_AFTER:
+            # after TIMEOUT: body -- timeout arm
+            parser_advance()
+            timeout_expr = parse_expr()
+            parser_expect(TOK_COLON)
+            val after_body = parse_block()
+            val after_body_stmt_idx = stmt_block_stmt(after_body, 0)
+            timeout_body_idx = after_body_stmt_idx
+        elif par_kind == TOK_KW_CASE:
+            parser_advance()
+            var patterns: [i64] = []
+            patterns.push(parse_expr())
+            for skip_idx in 0..100:
+                val is_nl = par_kind == TOK_NEWLINE
+                val is_indent = par_kind == TOK_INDENT
+                val should_skip = is_nl or is_indent
+                if not should_skip:
+                    break
+                parser_advance()
+            while par_kind == TOK_PIPE:
+                parser_advance()
+                for skip_idx in 0..100:
+                    val is_nl = par_kind == TOK_NEWLINE
+                    val is_indent = par_kind == TOK_INDENT
+                    val should_skip = is_nl or is_indent
+                    if not should_skip:
+                        break
+                    parser_advance()
+                patterns.push(parse_expr())
+            var guard_expr_idx: i64 = -1
+            if par_kind == TOK_KW_IF:
+                parser_advance()
+                guard_expr_idx = parse_expr()
+            parser_expect(TOK_COLON)
+            val arm_body = parse_block()
+            for j in 0..patterns.len():
+                val pattern_idx = patterns[j]
+                val arm_idx = arm_new_with_binding(pattern_idx, guard_expr_idx, arm_body, "")
+                arm_indices.push(arm_idx)
+        else:
+            parser_error("expected 'case' or 'after' in receive block")
+            parser_advance()
+
+    stmt_receive_stmt(arm_indices, timeout_expr, timeout_body_idx, 0)
+
+fn parse_bind_stmt() -> i64:
+    # Already consumed 'bind' keyword
+    val var_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_ASSIGN)
+    val rhs = parse_expr()
+    stmt_bind_stmt(var_name, rhs, 0)
+
+# ===== Expression-Level Control Flow (for module-level statements) =====
+
+fn parse_if_expr() -> i64:
+    parser_advance()
+    val cond = parse_expr()
+    parser_expect(TOK_COLON)
+    val then_body = parse_block()
+    val then_expr = expr_block(then_body, -1, 0)
+    parser_skip_newlines()
+    var else_expr: i64 = expr_unit(0)
+    if par_kind == TOK_KW_ELIF:
+        else_expr = parse_if_expr()
+    elif par_kind == TOK_KW_ELSE:
+        parser_advance()
+        parser_expect(TOK_COLON)
+        val else_body = parse_block()
+        else_expr = expr_block(else_body, -1, 0)
+    expr_if_expr(cond, then_expr, else_expr, 0)
+
+fn parse_for_expr() -> i64:
+    parser_advance()
+    val iter_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_KW_IN)
+    val iterable = parse_expr()
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+    expr_for_expr(iter_name, iterable, body, 0)
+
+fn parse_while_expr() -> i64:
+    parser_advance()
+    val cond = parse_expr()
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+    expr_while_expr(cond, body, 0)
+
+# ===== Exports =====
+
+export parse_block, parse_statement
+export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
+export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
+export parse_static_for_stmt
+export parse_receive_stmt, parse_bind_stmt
+export parse_if_expr, parse_for_expr, parse_while_expr
+export infer_expr_type_from_parse

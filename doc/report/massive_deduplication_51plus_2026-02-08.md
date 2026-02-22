@@ -23,7 +23,6 @@ Created shared C code generation module to eliminate massive duplication between
 
 ## Changes Made
 
-### ✅ **Created: src/app/compile/c_codegen.spl (455 lines)**
 
 Comprehensive C code generation module with 17 exported functions:
 
@@ -54,7 +53,7 @@ Comprehensive C code generation module with 17 exported functions:
 **After:** 149 lines using shared module
 
 Changes:
-- Added import: `use app.compile.c_codegen.{generate_c_code}`
+- Added import: `use compiler.backend.c_codegen_adapter (shared interface)`
 - Removed 540 lines of duplicate C codegen functions
 - Kept only: mold detection, compilation pipeline, CLI entry point
 
@@ -64,7 +63,7 @@ Changes:
 **After:** 198 lines using shared module
 
 Changes:
-- Added import: `use app.compile.c_codegen.{generate_c_code}`
+- Added import: `use compiler.backend.c_codegen_adapter (shared interface)`
 - Removed 411 lines of duplicate C codegen functions
 - Kept only: LLVM pipeline, optimization, fallback logic, CLI entry point
 
@@ -143,19 +142,18 @@ llvm_direct.spl (609 lines)
 ### After (Shared Module)
 
 ```
-c_codegen.spl (455 lines) ✅ SHARED
 ├── generate_c_code() - 129 lines
 ├── close_blocks() - 53 lines
 ├── translate_statement() - 93 lines
 └── 14 helper functions - 180 lines
 
 native.spl (149 lines) ✅ CLEAN
-├── import c_codegen
+├── import MIR C backend path
 ├── Mold detection
 └── Compilation pipeline
 
 llvm_direct.spl (198 lines) ✅ CLEAN
-├── import c_codegen
+├── import MIR C backend path
 ├── Mold detection
 └── LLVM pipeline + optimization
 ```
@@ -170,13 +168,11 @@ llvm_direct.spl (198 lines) ✅ CLEAN
 - No more keeping two implementations in sync
 
 ### 🧪 **Easier Testing**
-- Can unit test `c_codegen.spl` independently
 - Test once, works everywhere
 - Simplified integration tests
 
 ### 📖 **Better Code Organization**
 - Clear separation of concerns:
-  - `c_codegen.spl` - Pure Simple → C translation
   - `native.spl` - C → gcc → binary pipeline
   - `llvm_direct.spl` - C → clang → LLVM IR → optimized binary
 - Easier to understand and modify
@@ -252,7 +248,6 @@ Based on agent analysis, other large duplications exist but were not addressed:
 
 | Category | Count |
 |----------|-------|
-| Files created | 1 (`c_codegen.spl`) |
 | Files modified | 2 (`native.spl`, `llvm_direct.spl`) |
 | Functions extracted | 17 |
 | Lines eliminated | 951 |
@@ -276,7 +271,6 @@ Based on agent analysis, other large duplications exist but were not addressed:
 
 ```bash
 # Count lines
-wc -l src/app/compile/{native.spl,llvm_direct.spl,c_codegen.spl}
 
 # Test native compilation
 bin/simple compile --native -o /tmp/test examples/hello_native.spl

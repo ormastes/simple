@@ -1,0 +1,193 @@
+# LLVM Target Configuration
+#
+# Shared LLVM target triple and CPU configuration.
+# Used by both Full Simple and Core Simple LLVM backends.
+#
+# Bootstrap-compatible: No generics, no Option types, seed_cpp compilable.
+
+# Interpreter-mode fix: direct extern fn
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn shell(command: text) -> i64:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    code
+
+# ============================================================================
+# Target Triple Generation
+# ============================================================================
+
+fn get_triple_arch(target_name: text) -> text:
+    """
+    Get LLVM architecture string for target.
+
+    Bootstrap-safe: Uses text parameter instead of CodegenTarget enum.
+    Caller must convert enum to string.
+    """
+    match target_name:
+        case "X86_64": "x86_64"
+        case "X86": "i686"
+        case "AArch64": "aarch64"
+        case "Arm": "armv7"
+        case "Riscv64": "riscv64"
+        case "Riscv32": "riscv32"
+        case "Wasm32": "wasm32"
+        case "Wasm64": "wasm64"
+        case _: "x86_64"  # Default to x86_64 for Host
+
+fn get_triple_vendor(os_name: text, is_macos: bool) -> text:
+    """Get LLVM vendor string for OS."""
+    if is_macos:
+        "apple"
+    else:
+        "unknown"
+
+fn get_triple_os(os_name: text, bare_metal: bool) -> text:
+    """Get LLVM OS string."""
+    if bare_metal:
+        "none"
+    else:
+        match os_name:
+            case "linux": "linux"
+            case "freebsd": "freebsd"
+            case "macos": "darwin"
+            case "windows": "windows"
+            case _: "linux"  # Default
+
+fn get_triple_env(os_name: text, bare_metal: bool, arch: text) -> text:
+    """
+    Get LLVM environment string.
+
+    Returns empty string for no environment (bootstrap-safe, no Option type).
+    """
+    if bare_metal:
+        if arch == "armv7":
+            "eabi"
+        else:
+            ""
+    else:
+        match os_name:
+            case "linux":
+                if arch == "armv7":
+                    "gnueabihf"
+                else:
+                    "gnu"
+            case "windows": "msvc"
+            case _: ""
+
+fn build_triple_string(arch: text, vendor: text, os: text, env: text) -> text:
+    """Build LLVM target triple string."""
+    if env == "":
+        "{arch}-{vendor}-{os}"
+    else:
+        "{arch}-{vendor}-{os}-{env}"
+
+# ============================================================================
+# CPU Selection
+# ============================================================================
+
+fn get_default_cpu(target_name: text) -> text:
+    """
+    Get default CPU for target with modern optimizations.
+
+    Defaults to x86-64-v3 (Haswell 2015+) for x86_64, which enables:
+    - AVX2 (256-bit SIMD) for 2-3x vectorization speedup
+    - FMA (fused multiply-add) for better numerical code
+    - BMI1/BMI2 (bit manipulation) for faster bit operations
+    """
+    match target_name:
+        case "X86_64": "x86-64-v3"        # Modern baseline (Haswell 2015+)
+        case "X86": "i686"                 # 32-bit baseline + SSE2
+        case "AArch64": "cortex-a53"       # Common ARM64 baseline
+        case "Arm": "cortex-a7"            # Common ARM32 baseline
+        case "Riscv64": "generic-rv64"     # RISC-V 64-bit
+        case "Riscv32": "generic-rv32"     # RISC-V 32-bit
+        case _: "generic"
+
+fn get_compatibility_cpu(target_name: text) -> text:
+    """
+    Get compatibility CPU for maximum hardware support.
+
+    Uses conservative baselines for older hardware:
+    - x86_64: x86-64 baseline (2003+, no AVX)
+    - Others: Generic baselines
+    """
+    match target_name:
+        case "X86_64": "x86-64"           # Baseline, no AVX
+        case "X86": "i686"                # 32-bit baseline
+        case "AArch64": "generic"         # Generic ARM64
+        case "Arm": "generic"             # Generic ARM32
+        case "Riscv64": "generic-rv64"    # Generic RISC-V 64
+        case "Riscv32": "generic-rv32"    # Generic RISC-V 32
+        case _: "generic"
+
+# ============================================================================
+# Feature Strings
+# ============================================================================
+
+fn get_default_features(target_name: text) -> text:
+    """
+    Get default LLVM feature string for target.
+
+    Returns comma-separated feature flags (e.g., "+avx2,+fma").
+    Returns empty string for no additional features.
+    """
+    match target_name:
+        case "X86_64": ""                           # Features implied by x86-64-v3
+        case "X86": "+sse2"                         # SSE2 for 32-bit
+        case "AArch64": "+neon,+fp-armv8"           # NEON SIMD
+        case "Arm": "+neon,+vfp4"                   # NEON + VFP
+        case "Riscv64": "+m,+a,+f,+d,+c"           # RISC-V extensions
+        case "Riscv32": "+m,+a,+f,+d,+c"           # RISC-V extensions
+        case _: ""
+
+# ============================================================================
+# Architecture Detection
+# ============================================================================
+
+fn detect_host_arch_string() -> text:
+    """
+    Detect host CPU architecture.
+
+    Returns LLVM architecture string (e.g., "x86_64", "aarch64").
+    Requires std.io_runtime.host_arch() to be available.
+    """
+    val result = shell("uname -m")
+    if result.exit_code != 0:
+        return "x86_64"  # Default fallback
+
+    val arch = result.stdout.trim()
+    match arch:
+        case "x86_64": "x86_64"
+        case "aarch64": "aarch64"
+        case "riscv64": "riscv64"
+        case "i686" | "i386": "i686"
+        case "armv7l" | "armv7" | "arm": "armv7"
+        case "riscv32": "riscv32"
+        case _: "x86_64"
+
+fn detect_host_os_string() -> text:
+    """
+    Detect host operating system.
+
+    Returns OS name string ("linux", "macos", "freebsd", "windows").
+    """
+    val result = shell("uname -s")
+    if result.exit_code != 0:
+        return "linux"  # Default fallback
+
+    val os_name = result.stdout.trim()
+    match os_name:
+        case "Linux": "linux"
+        case "Darwin": "macos"
+        case "FreeBSD": "freebsd"
+        case _: "linux"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export get_triple_arch, get_triple_vendor, get_triple_os, get_triple_env
+export build_triple_string
+export get_default_cpu, get_compatibility_cpu
+export get_default_features
+export detect_host_arch_string, detect_host_os_string

@@ -315,7 +315,8 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     if options.coverage:
         val combined = stdout + "\n" + stderr
         val sdn = extract_coverage_sdn(combined)
-        record_coverage_sdn(sdn)
+        # MEMORY DEBUG: record_coverage_sdn commented out (GROUP 3 isolation)
+        # record_coverage_sdn(sdn)
         stdout = strip_coverage_blocks(stdout)
         stderr = strip_coverage_blocks(stderr)
 
@@ -408,7 +409,8 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     if options.coverage:
         val combined = stdout + "\n" + stderr
         val sdn = extract_coverage_sdn(combined)
-        record_coverage_sdn(sdn)
+        # MEMORY DEBUG: record_coverage_sdn commented out (GROUP 3 isolation)
+        # record_coverage_sdn(sdn)
         stdout = strip_coverage_blocks(stdout)
         stderr = strip_coverage_blocks(stderr)
 
@@ -605,7 +607,8 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if options.coverage:
         val combined = stdout + "\n" + stderr
         val sdn = extract_coverage_sdn(combined)
-        record_coverage_sdn(sdn)
+        # MEMORY DEBUG: record_coverage_sdn commented out (GROUP 3 isolation)
+        # record_coverage_sdn(sdn)
         stdout = strip_coverage_blocks(stdout)
         stderr = strip_coverage_blocks(stderr)
 
@@ -774,14 +777,20 @@ fn run_test_file_baremetal_via_interpreter(file_path: text, options: TestOptions
 
 fn find_baremetal_elf(spec_file: text, arch: text) -> text:
     """Find prebuilt ELF for a baremetal spec file."""
+    val base_dir = "examples/09_embedded/baremetal/baremetal"
     # Check for C test ELF in riscv32_test directory
     if arch == "riscv32":
-        val elf = "examples/baremetal/riscv32_test/test_riscv32_intensive.elf"
+        val elf = "{base_dir}/riscv32_test/test_riscv32_intensive.elf"
         if file_exists(elf):
             return elf
-    # Check for assembly-based semihost ELF
+    # Check for SSpec-format semihost ELF
     if arch == "riscv32":
-        val elf = "examples/baremetal/hello_riscv32_semihost.elf"
+        val elf = "{base_dir}/hello_riscv32_sspec.elf"
+        if file_exists(elf):
+            return elf
+    # Check for basic semihost ELF
+    if arch == "riscv32":
+        val elf = "{base_dir}/hello_riscv32_semihost.elf"
         if file_exists(elf):
             return elf
     ""
@@ -836,13 +845,28 @@ fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: tex
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
 fn run_test_file_remote(file_path: text, options: TestOptions, base: text, arch: text) -> TestFileResult:
-    """Stub: Execute test on remote target via GDB MI.
-    Future: upload to remote -> GDB MI -> parse results."""
+    """Execute test on remote target via QEMU.
+
+    For .spl files: run via host interpreter (same as baremetal mode).
+    For .elf files: launch QEMU with semihosting, capture output, parse results.
+    """
     val start = time_now_unix_micros()
-    val end = time_now_unix_micros()
-    val duration_ms = (end - start) / 1000
-    TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 0, pending: 1,
-        duration_ms: duration_ms, error: "remote({arch}) not yet implemented", timed_out: false)
+
+    # .spl files run via host interpreter — they may invoke QEMU themselves
+    if file_path.ends_with(".spl"):
+        return run_test_file_baremetal_via_interpreter(file_path, options, arch)
+
+    # .elf files run directly on QEMU with semihosting
+    if file_path.ends_with(".elf"):
+        return run_test_file_baremetal_qemu(file_path, options, arch, file_path)
+
+    # Unknown file type — try to find a prebuilt ELF for this spec
+    val elf_path = find_baremetal_elf(file_path, arch)
+    if elf_path != "":
+        return run_test_file_baremetal_qemu(file_path, options, arch, elf_path)
+
+    # Fallback: run via host interpreter
+    run_test_file_baremetal_via_interpreter(file_path, options, arch)
 
 # =========================================================================
 # Exports

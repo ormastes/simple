@@ -330,7 +330,6 @@ fn find_node_at_position(tree: Tree, line: Int, column: Int) -> Option<Node>:
 
 **Files:**
 - `/app/compile/c_translate.spl` — 1,896 lines
-- `/app/compile/c_codegen.spl` — 1,124 lines
 - `/app/compile/c_helpers.spl` — 429 lines
 
 **Combined:** 3,449 lines for C code generation alone

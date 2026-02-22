@@ -1,0 +1,89 @@
+# Calling Convention Bridge
+#
+# Maps @callconv attribute strings and function attribute flags to
+# CallingConvention enum values used by code generation.
+#
+# Priority order (highest to lowest):
+# 1. Explicit @callconv("X") — always wins
+# 2. @naked → CallingConvention.Naked
+# 3. @interrupt → CallingConvention.Interrupt
+# 4. Default: CallingConvention.Simple
+#
+# Supported @callconv strings:
+#   "C"          → CallingConvention.C
+#   "Fastcall"   → CallingConvention.Fastcall
+#   "Stdcall"    → CallingConvention.Stdcall
+#   "Vectorcall" → CallingConvention.Vectorcall
+#   "Interrupt"  → CallingConvention.Interrupt
+#   "Naked"      → CallingConvention.Naked
+#   "Simple"     → CallingConvention.Simple
+#   (unknown)    → CallingConvention.Simple (fallback)
+#
+# Usage:
+#   val attr = parse_function_attrs(attrs)
+#   val conv = resolve_callconv(attr)
+
+# ============================================================================
+# Calling Convention Resolution
+# ============================================================================
+
+fn callconv_from_string(name: text) -> text:
+    # Map a @callconv string to the CallingConvention variant name.
+    # Returns variant name as text (avoids importing CallingConvention enum).
+    if name == "C":
+        return "C"
+    elif name == "Fastcall":
+        return "Fastcall"
+    elif name == "Stdcall":
+        return "Stdcall"
+    elif name == "Vectorcall":
+        return "Vectorcall"
+    elif name == "Interrupt":
+        return "Interrupt"
+    elif name == "Naked":
+        return "Naked"
+    elif name == "Simple":
+        return "Simple"
+    else:
+        return "Simple"  # Unknown -> default
+
+fn callconv_is_valid_name(name: text) -> bool:
+    # Check if a calling convention name is recognized.
+    val resolved = callconv_from_string(name)
+    not (resolved == "Simple" and not (name == "Simple" or name == ""))
+
+fn callconv_resolve_from_flags(is_naked: bool, is_interrupt: bool, has_callconv: bool, callconv: text) -> text:
+    # Resolve the calling convention from function attribute flags.
+    # Priority: explicit @callconv > @naked > @interrupt > default
+    if has_callconv and callconv.len() > 0:
+        return callconv_from_string(callconv)
+    elif is_naked:
+        return "Naked"
+    elif is_interrupt:
+        return "Interrupt"
+    else:
+        return "Simple"
+
+fn callconv_needs_prologue(conv: text) -> bool:
+    # Whether this calling convention generates a standard prologue/epilogue.
+    not (conv == "Naked")
+
+fn callconv_is_interrupt_compat(conv: text) -> bool:
+    # Whether the convention is safe for interrupt service routines.
+    conv == "Interrupt" or conv == "Naked"
+
+fn callconv_codegen_hint(conv: text) -> text:
+    # Return a codegen hint string for this convention.
+    if conv == "Simple":
+        return ""  # default, no annotation needed
+    else:
+        return "@callconv(" + conv + ")"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export callconv_from_string, callconv_is_valid_name
+export callconv_resolve_from_flags
+export callconv_needs_prologue, callconv_is_interrupt_compat
+export callconv_codegen_hint
