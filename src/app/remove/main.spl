@@ -19,57 +19,68 @@ fn print_help():
     print "  -h, --help   Show this help"
 
 fn find_manifest_path() -> text:
-    val cwd = cwd()
-    val sdn_path = "{cwd}/simple.sdn"
-    val toml_path = "{cwd}/simple.toml"
+    val current_dir = cwd()
+    val sdn_path = "{current_dir}/simple.sdn"
+    val toml_path = "{current_dir}/simple.toml"
     if file_exists(sdn_path):
         return sdn_path
     if file_exists(toml_path):
         return toml_path
     ""
 
-fn remove_dependency_from_sdn(content: text, name: text, dev_only: bool) -> (text, bool):
+fn remove_dependency_from_sdn(content: text, name: text, dev_only: bool) -> text:
     val lines = content.split("\n")
     var result = []
     var in_target_section = false
     var removing = false
-    var removed = false
     var current_section = ""
 
     for line in lines:
-        # Track sections
-        if not line.starts_with(" ") and not line.starts_with("\t") and line.trim().ends_with(":"):
-            current_section = line.trim().trim_end(":")
-            in_target_section = (not dev_only and current_section == "dependencies") or current_section == "dev_dependencies"
+        if line.starts_with("dependencies:"):
+            current_section = "dependencies"
+            in_target_section = not dev_only
+            result.push(line)
+            continue
+        if line.starts_with("dev_dependencies:"):
+            current_section = "dev_dependencies"
+            in_target_section = true
+            result.push(line)
+            continue
+        if not line.starts_with(" ") and not line.starts_with("\t") and line.ends_with(":"):
+            current_section = ""
+            in_target_section = false
+            result.push(line)
+            continue
 
+        val line_trim = line.trim()
         if in_target_section and not removing:
             # Check if this line starts the dependency entry
-            val trimmed = line.trim()
+            val trimmed = line_trim
             if trimmed.starts_with("{name}:") or trimmed.starts_with("{name} "):
                 removing = true
-                removed = true
                 # Skip this line (don't add to result)
             else:
                 result.push(line)
-        elif removing:
+            continue
+        if removing:
             # Skip continuation lines (indented more than section items)
             val trimmed = line.trim()
             if line.starts_with("    ") and trimmed != "" and not trimmed.ends_with(":"):
                 # Still part of the multi-line dep entry, skip
-                pass
+                removing = true
             else:
                 removing = false
                 result.push(line)
-        else:
-            result.push(line)
+            continue
+        result.push(line)
 
-    (result.join("\n"), removed)
+    result.join("\n")
 
 fn main() -> i64:
     val args = get_cli_args()
 
     if args.len() == 0:
-        error("remove", "missing package name")
+        print "remove: missing package name"
         print ""
         print_help()
         return 1
@@ -87,23 +98,23 @@ fn main() -> i64:
             package_name = arg
 
     if package_name == "":
-        error("remove", "missing package name")
+        print "remove: missing package name"
         return 1
 
     val manifest_path = find_manifest_path()
     if manifest_path == "":
-        error("remove", "no simple.sdn or simple.toml found in current directory")
+        print "remove: no simple.sdn or simple.toml found in current directory"
         return 1
 
     val content = file_read(manifest_path)
-    val (new_content, removed) = remove_dependency_from_sdn(content, package_name, dev_only)
+    val new_content = remove_dependency_from_sdn(content, package_name, dev_only)
 
-    if not removed:
-        error("remove", "dependency '{package_name}' not found in manifest")
+    if new_content == content:
+        print "remove: dependency '{package_name}' not found in manifest"
         return 1
 
     if not file_write(manifest_path, new_content):
-        error("remove", "failed to write {manifest_path}")
+        print "remove: failed to write {manifest_path}"
         return 1
 
     print "Removed dependency '{package_name}'"

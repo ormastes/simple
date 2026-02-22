@@ -1533,12 +1533,15 @@ const char* translate_var_decl(const char* line) {
         }
         return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
     }
+    if (contains(value, "parse_dep") || contains(value, "dir_list(")) {
+        return simple_str_concat("SimpleStringArray ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
+    }
     // Name-based string heuristic for common text-like locals
     if (contains(name, "path") || contains(name, "dir") || contains(name, "file") ||
         contains(name, "name") || contains(name, "content") || contains(name, "output") ||
         contains(name, "manifest") || contains(name, "spec") || contains(name, "branch") ||
         contains(name, "tag") || contains(name, "constraint") || contains(name, "section") ||
-        contains(name, "url") || contains(name, "text")) {
+        contains(name, "url") || contains(name, "text") || contains(name, "trim")) {
         return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
     }
     // Struct construction: Name(field: val, ...)
@@ -2263,6 +2266,10 @@ const char* generate_c(const char* source) {
                     out = simple_str_concat(out, "static int file_write(const char* p, const char* d) { (void)p;(void)d; return 1; }\n");
                 } else if (strcmp(fn_orig, "file_read") == 0) {
                     out = simple_str_concat(out, "static const char* file_read(const char* p) { (void)p; return \"\"; }\n");
+                } else if (strcmp(fn_orig, "dir_create") == 0) {
+                    out = simple_str_concat(out, "static int dir_create(const char* p, int recursive) { (void)p;(void)recursive; return 1; }\n");
+                } else if (strcmp(fn_orig, "dir_list") == 0) {
+                    out = simple_str_concat(out, "static SimpleStringArray dir_list(const char* p) { (void)p; return simple_new_string_array(); }\n");
                 } else if (strcmp(fn_orig, "cli_run_tests") == 0 || strcmp(fn_orig, "cli_run_verify") == 0 ||
                            strcmp(fn_orig, "cli_handle_run") == 0) {
                     out = simple_str_concat(out, simple_str_concat("static long long ", simple_str_concat(fn, "(SimpleStringArray a, int g, int o) { (void)a;(void)g;(void)o; return 0; }\n")));
