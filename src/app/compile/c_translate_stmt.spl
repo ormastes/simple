@@ -8,7 +8,7 @@
 #   - Statement translation dispatcher
 
 use app.compile.c_helpers.{find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr, is_fn_returning_int_arr, is_fn_returning_str_arr}
-use app.compile.c_translate_expr.{translate_expr, translate_condition, is_c_expr_string_result, extract_fn_names, try_translate_compound_assign, gen_array_for_loop}
+use app.compile.c_translate_expr.{translate_expr, translate_condition, is_c_expr_string_result, is_c_expr_heap_string, extract_fn_names, try_translate_compound_assign, gen_array_for_loop}
 use app.compile.c_translate_decl.*
 
 # Translate interpolated print statement - enhanced with %s for string exprs
@@ -381,7 +381,10 @@ fn translate_statement(trimmed: text, types: text) -> text:
         if arg_end >= 0:
             val arg = trimmed.substring(arg_start, arg_end)
             if is_string_array_var(obj, types):
-                return r"simple_string_push(&" + obj + r", " + translate_expr(arg, types) + r");"
+                val c_push_arg = translate_expr(arg, types)
+                if is_c_expr_heap_string(c_push_arg):
+                    return r"{ const char* _push_tmp = " + c_push_arg + r"; simple_string_push(&" + obj + r", _push_tmp); free((char*)_push_tmp); }"
+                return r"simple_string_push(&" + obj + r", " + c_push_arg + r");"
             if is_int_array_var(obj, types):
                 return r"simple_int_push(&" + obj + r", " + translate_expr(arg, types) + r");"
             if is_str_arr_arr_var(obj, types):
@@ -401,7 +404,10 @@ fn translate_statement(trimmed: text, types: text) -> text:
                 return "\{ " + sa_push_elem + "* _e = malloc(sizeof(" + sa_push_elem + ")); *_e = " + c_arg + "; simple_struct_push(&" + obj + ", (void*)_e); }"
             # Check struct field arrays: table.names.push(x)
             if is_struct_field_str_array(obj, types):
-                return r"simple_string_push(&" + obj + r", " + translate_expr(arg, types) + r");"
+                val c_sf_arg = translate_expr(arg, types)
+                if is_c_expr_heap_string(c_sf_arg):
+                    return r"{ const char* _push_tmp = " + c_sf_arg + r"; simple_string_push(&" + obj + r", _push_tmp); free((char*)_push_tmp); }"
+                return r"simple_string_push(&" + obj + r", " + c_sf_arg + r");"
             if is_struct_field_int_array(obj, types):
                 return r"simple_int_push(&" + obj + r", " + translate_expr(arg, types) + r");"
             return r"/* " + trimmed + r" */;"
@@ -466,6 +472,10 @@ fn translate_statement(trimmed: text, types: text) -> text:
                     val idx_expr = lhs.substring(lhs_bracket + 1, lhs_close).trim()
                     val c_idx = translate_expr(idx_expr, types)
                     val c_rhs = translate_expr(rhs, types)
+                    if arr_is_str:
+                        if is_c_expr_heap_string(c_rhs):
+                            return r"{ const char* _set_tmp = " + c_rhs + r"; free((char*)" + arr_name + r".items[" + c_idx + r"]); " + arr_name + r".items[" + c_idx + r"] = strdup(_set_tmp); free((char*)_set_tmp); }"
+                        return r"free((char*)" + arr_name + r".items[" + c_idx + r"]); " + arr_name + r".items[" + c_idx + r"] = strdup(" + c_rhs + r");"
                     return arr_name + r".items[" + c_idx + r"] = " + c_rhs + r";"
 
         # Struct field assignment: obj.field = value
@@ -507,7 +517,10 @@ fn translate_statement(trimmed: text, types: text) -> text:
                     if is_int_array_var(lhs, types):
                         return r"simple_int_push(&" + lhs + r", " + translate_expr(concat_elem, types) + r");"
                     if is_string_array_var(lhs, types):
-                        return r"simple_string_push(&" + lhs + r", " + translate_expr(concat_elem, types) + r");"
+                        val c_ca_arg = translate_expr(concat_elem, types)
+                        if is_c_expr_heap_string(c_ca_arg):
+                            return r"{ const char* _push_tmp = " + c_ca_arg + r"; simple_string_push(&" + lhs + r", _push_tmp); free((char*)_push_tmp); }"
+                        return r"simple_string_push(&" + lhs + r", " + c_ca_arg + r");"
             val c_rhs = translate_expr(rhs, types)
             # Track if assigning a string to a var (e.g., name = "Alice")
             val rhs_is_str = rhs.starts_with("\"")
