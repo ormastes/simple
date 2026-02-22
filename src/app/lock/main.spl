@@ -1,10 +1,8 @@
 # Simple CLI - lock command
 # Lockfile operations: generate, validate, check
 
-use std.cli.cli_util (get_cli_args, find_manifest_path)
-use app.io.mod (file_exists, file_read, file_write)
-use std.cli.package_utils (generate_lockfile_content, parse_deps_from_sdn)
-use std.log.{error}
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, file_write, cwd)
 
 fn print_help():
     print "Usage: simple lock [subcommand] [options]"
@@ -20,40 +18,82 @@ fn print_help():
     print "  --force      Overwrite existing lockfile"
     print "  -h, --help   Show this help"
 
+fn find_manifest_path() -> text:
+    val current_dir = cwd()
+    val sdn_path = "{current_dir}/simple.sdn"
+    val toml_path = "{current_dir}/simple.toml"
+    if file_exists(sdn_path):
+        return sdn_path
+    if file_exists(toml_path):
+        return toml_path
+    ""
+
+fn parse_dep_names_from_sdn(content: text) -> [text]:
+    val lines = content.split("\n")
+    var deps = []
+    var in_deps = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "dependencies:" or trimmed == "dev_dependencies:":
+            in_deps = true
+            continue
+        if in_deps and trimmed == "":
+            in_deps = false
+            continue
+        if in_deps:
+            var is_indented = false
+            if line.starts_with("  ") or line.starts_with("\t"):
+                is_indented = true
+            if not is_indented:
+                in_deps = false
+                continue
+        if in_deps:
+            val parts = trimmed.split(":")
+            if parts.len() > 0:
+                val name = parts[0].trim()
+                if name != "":
+                    deps.push(name)
+    deps
+
 fn handle_generate(force: bool) -> i64:
     val manifest_path = find_manifest_path()
     if manifest_path == "":
-        error("lock", "no simple.sdn or simple.toml found")
+        print "lock: no simple.sdn or simple.toml found"
         return 1
 
-    val cwd = cwd()
-    val lockfile_path = "{cwd}/simple.lock"
+    val current_dir = cwd()
+    val lockfile_path = "{current_dir}/simple.lock"
 
     if file_exists(lockfile_path) and not force:
-        error("lock", "simple.lock already exists (use --force to overwrite)")
+        print "lock: simple.lock already exists (use --force to overwrite)"
         return 1
 
     val content = file_read(manifest_path)
-    val deps = parse_deps_from_sdn(content)
+    val deps = parse_dep_names_from_sdn(content)
 
     if deps.len() == 0:
         print "No dependencies found. Lockfile not generated."
         return 0
 
-    val lock_content = generate_lockfile_content(deps)
+    var lock_content = "lockfile_version: 1\n"
+    lock_content = lock_content + "generated: simple lock generate\n"
+    lock_content = lock_content + "packages:\n"
+    for name in deps:
+        lock_content = lock_content + "  {name}: *\n"
     if not file_write(lockfile_path, lock_content):
-        error("lock", "failed to write simple.lock")
+        print "lock: failed to write simple.lock"
         return 1
 
     print "Generated simple.lock with {deps.len()} packages"
     0
 
 fn handle_validate() -> i64:
-    val cwd = cwd()
-    val lockfile_path = "{cwd}/simple.lock"
+    val current_dir = cwd()
+    val lockfile_path = "{current_dir}/simple.lock"
 
     if not file_exists(lockfile_path):
-        error("lock", "simple.lock not found")
+        print "lock: simple.lock not found"
         return 1
 
     val content = file_read(lockfile_path)
@@ -69,11 +109,11 @@ fn handle_validate() -> i64:
             has_packages = true
 
     if not has_version:
-        error("lock", "lockfile missing version field")
+        print "lock: lockfile missing version field"
         return 1
 
     if not has_packages:
-        error("lock", "lockfile missing packages table")
+        print "lock: lockfile missing packages table"
         return 1
 
     print "Lockfile is valid."
@@ -82,18 +122,18 @@ fn handle_validate() -> i64:
 fn handle_check() -> i64:
     val manifest_path = find_manifest_path()
     if manifest_path == "":
-        error("lock", "no simple.sdn or simple.toml found")
+        print "lock: no simple.sdn or simple.toml found"
         return 1
 
-    val cwd = cwd()
-    val lockfile_path = "{cwd}/simple.lock"
+    val current_dir = cwd()
+    val lockfile_path = "{current_dir}/simple.lock"
 
     if not file_exists(lockfile_path):
         print "Lockfile missing. Run 'simple lock generate' to create it."
         return 1
 
     val manifest_content = file_read(manifest_path)
-    val manifest_deps = parse_deps_from_sdn(manifest_content)
+    val manifest_deps = parse_dep_names_from_sdn(manifest_content)
 
     val lock_content = file_read(lockfile_path)
     # Count packages in lockfile
@@ -130,14 +170,13 @@ fn main() -> i64:
         elif not arg.starts_with("-"):
             subcommand = arg
 
-    match subcommand:
-        case "generate":
-            return handle_generate(force)
-        case "validate":
-            return handle_validate()
-        case "check":
-            return handle_check()
-        case _:
-            error("lock", "unknown subcommand '{subcommand}'")
-            print_help()
-            return 1
+    if subcommand == "generate":
+        return handle_generate(force)
+    if subcommand == "validate":
+        return handle_validate()
+    if subcommand == "check":
+        return handle_check()
+
+    print "lock: unknown subcommand '{subcommand}'"
+    print_help()
+    return 1

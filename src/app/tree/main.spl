@@ -1,8 +1,8 @@
 # Simple CLI - tree command
 # Shows dependency tree
 
-use std.cli.cli_util (get_cli_args, load_manifest_or_exit, parse_dependency_entry)
-use app.io.mod (file_exists)
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, cwd)
 
 fn print_help():
     print "Usage: simple tree [options]"
@@ -14,7 +14,17 @@ fn print_help():
     print "  --dev        Include dev dependencies"
     print "  -h, --help   Show this help"
 
-fn parse_deps_section(content: text, section: text) -> [(text, text)]:
+fn find_manifest_path() -> text:
+    val current_dir = cwd()
+    val sdn_path = "{current_dir}/simple.sdn"
+    val toml_path = "{current_dir}/simple.toml"
+    if file_exists(sdn_path):
+        return sdn_path
+    if file_exists(toml_path):
+        return toml_path
+    ""
+
+fn parse_deps_section(content: text, section: text) -> [text]:
     val lines = content.split("\n")
     var deps = []
     var in_section = false
@@ -27,13 +37,21 @@ fn parse_deps_section(content: text, section: text) -> [(text, text)]:
             if trimmed == "" or (not line.starts_with("  ") and not line.starts_with("\t")):
                 in_section = false
             else:
-                deps = parse_dependency_entry(trimmed, deps)
+                val parts = trimmed.split(":")
+                if parts.len() > 0:
+                    val name = parts[0].trim()
+                    if name != "":
+                        deps.push(name)
     deps
 
-fn print_tree_node(name: text, version: text, prefix: text, is_last: bool, modules_dir: text, max_depth: i64, current_depth: i64):
-    val connector = if is_last: "└── " else: "├── "
-    val status = if file_exists("{modules_dir}/{name}/__init__.spl"): "" else: " (not installed)"
-    print "{prefix}{connector}{name} ({version}){status}"
+fn print_tree_node(name: text, prefix: text, is_last: bool, modules_dir: text, max_depth: i64, current_depth: i64):
+    var connector = "├── "
+    if is_last:
+        connector = "└── "
+    var status = " (not installed)"
+    if file_exists("{modules_dir}/{name}/__init__.spl"):
+        status = ""
+    print "{prefix}{connector}{name} (*){status}"
 
     # Check for transitive deps in the installed package
     if current_depth < max_depth:
@@ -41,11 +59,13 @@ fn print_tree_node(name: text, version: text, prefix: text, is_last: bool, modul
         if file_exists(pkg_manifest):
             val pkg_content = file_read(pkg_manifest)
             val sub_deps = parse_deps_section(pkg_content, "dependencies")
-            val child_prefix = prefix + (if is_last: "    " else: "│   ")
+            var child_prefix = prefix + "│   "
+            if is_last:
+                child_prefix = prefix + "    "
             var i = 0
-            for (sub_name, sub_version) in sub_deps:
+            for sub_name in sub_deps:
                 val sub_last = i == sub_deps.len() - 1
-                print_tree_node(sub_name, sub_version, child_prefix, sub_last, modules_dir, max_depth, current_depth + 1)
+                print_tree_node(sub_name, child_prefix, sub_last, modules_dir, max_depth, current_depth + 1)
                 i = i + 1
 
 fn main() -> i64:
@@ -63,9 +83,15 @@ fn main() -> i64:
         elif arg == "--dev":
             include_dev = true
 
-    val content = load_manifest_or_exit()
+    val manifest_path = find_manifest_path()
+    if manifest_path == "":
+        print "tree: no simple.sdn or simple.toml found in current directory"
+        return 1
+    val content = file_read(manifest_path)
     val deps = parse_deps_section(content, "dependencies")
-    val dev_deps = if include_dev: parse_deps_section(content, "dev_dependencies") else: []
+    var dev_deps = []
+    if include_dev:
+        dev_deps = parse_deps_section(content, "dev_dependencies")
 
     # Parse project name
     var project_name = "unknown"
@@ -78,20 +104,24 @@ fn main() -> i64:
         elif trimmed.starts_with("version:"):
             project_version = trimmed[8:].trim()
 
-    val cwd = cwd()
-    val modules_dir = "{cwd}/simple_modules"
+    val current_dir = cwd()
+    val modules_dir = "{current_dir}/simple_modules"
 
     print "{project_name} v{project_version}"
 
-    val all_deps = deps.merge(dev_deps)
+    var all_deps = []
+    for name in deps:
+        all_deps.push(name)
+    for name in dev_deps:
+        all_deps.push(name)
     if all_deps.len() == 0:
         print "└── (no dependencies)"
         return 0
 
     var i = 0
-    for (name, version) in all_deps:
+    for name in all_deps:
         val is_last = i == all_deps.len() - 1
-        print_tree_node(name, version, "", is_last, modules_dir, max_depth, 0)
+        print_tree_node(name, "", is_last, modules_dir, max_depth, 0)
         i = i + 1
 
     0

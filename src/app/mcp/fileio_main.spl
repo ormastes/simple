@@ -5,14 +5,17 @@
 use app.mcp.fileio_protection (ProtectionEngine, RuleType, RuleAction, ProtectionResult, create_engine)
 use app.mcp.fileio_temp (TempManager, create_temp_manager)
 use app.mcp.helpers.{LB, RB, js, extract_json_string_v2, extract_json_value, extract_nested_string, make_tool_result, make_error_response, make_tool_schema_multi, make_prop}
-use app.io.mod (cli_get_args, env_get, shell, exit)
+use app.io.mod (cli_get_args, env_get, shell)
 use std.text.{NL}
 use std.mcp.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
 use std.mcp_sdk.server.builder.{ServerConfig, server_config, server_set_instructions, server_add_tool_json}
 use std.mcp_sdk.server.router.{handle_method}
 
+extern fn rt_gc_collect()
+
 # Protocol state
 var PROTOCOL = create_protocol_state()
+val GC_COLLECT_EVERY = 100
 
 # MCP Server state
 class FileIOServer:
@@ -65,6 +68,15 @@ class FileIOServer:
             "cleanup_temp": self.tool_cleanup_temp(arguments)
             "get_temp_dir": self.tool_get_temp_dir(arguments)
             _: self.error_response("Unknown tool: " + tool_name)
+
+    # Cleanup temp session state on server shutdown.
+    me shutdown():
+        if self.temp_manager.?:
+            val tm = self.temp_manager.unwrap()
+            if tm.cleanup_on_exit:
+                tm.cleanup_session()
+        self.temp_manager = nil
+        self.engine = nil
 
     # Tool: safe_read
     fn tool_safe_read(arguments: text) -> text:
@@ -405,6 +417,11 @@ fn build_server_config() -> ServerConfig:
 
     cfg
 
+fn build_server_config_isolate() -> ServerConfig:
+    var cfg = server_config("simple-fileio", "1.0.0")
+    cfg = server_set_instructions(cfg, "Leak isolate mode: tool execution disabled for memory leak diagnosis.")
+    cfg
+
 # --- Tool schema definitions ---
 
 fn get_all_tools() -> [String]:
@@ -511,6 +528,11 @@ fn main():
 # --- Server loop ---
 
 fn run_server():
+    val ultra_isolate_mode = (env_get("SIMPLE_MCP_LEAK_ULTRA") ?? "") == "1"
+    if ultra_isolate_mode:
+        run_ultra_minimal_server()
+        return
+
     val config_path = env_get("SIMPLE_FILEIO_CONFIG") ?? ""
     val config = if config_path.len() > 0:
         config_path
@@ -518,30 +540,86 @@ fn run_server():
         "fileio_protection.sdn"
 
     val server = FileIOServer.init(config)
-    val CFG = build_server_config()
+    val isolate_mode = (env_get("SIMPLE_MCP_LEAK_ISOLATE") ?? "") == "1"
+    val CFG = if isolate_mode:
+        build_server_config_isolate()
+    else:
+        build_server_config()
+    var request_count = 0
 
     var running = true
     for _iter in range(0, 999999):
         if not running:
-            return
+            break
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            request_count = request_count + 1
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = handle_method(CFG, method, id, line)
+
+            if response == "TOOLS_CALL":
+                if isolate_mode:
+                    response = make_tool_result(id, "leak-isolate: tool execution disabled")
+                else:
+                    val tool_name = extract_nested_string(line, "params", "name")
+                    if tool_name == "":
+                        response = make_error_response(id, -32602, "Missing tool name")
+                    else:
+                        val args = parse_params(line)
+                        val result = server.handle_tool(tool_name, args)
+                        response = make_tool_result(id, result)
+            elif response == "EXIT":
+                running = false
+                response = ""
+
+            if response != "":
+                write_stdout_message(response)
+
+            # Periodic collection reduces long-session heap growth under heavy MCP traffic.
+            if request_count % GC_COLLECT_EVERY == 0:
+                rt_gc_collect()
+
+    server.shutdown()
+
+fn run_ultra_minimal_server():
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            break
         val line = read_stdin_message()
         if line == "":
             running = false
         else:
             val method = extract_json_string_v2(line, "method")
             val id = extract_json_value(line, "id")
-            var response = handle_method(CFG, method, id, line)
+            var response = ""
 
-            if response == "TOOLS_CALL":
-                val tool_name = extract_nested_string(line, "params", "name")
-                if tool_name == "":
-                    response = make_error_response(id, -32602, "Missing tool name")
-                else:
-                    val args = parse_params(line)
-                    val result = server.handle_tool(tool_name, args)
-                    response = make_tool_result(id, result)
-            elif response == "EXIT":
-                exit(0)
+            if method == "initialize":
+                val result = "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"simple-fileio\",\"version\":\"1.0.0\"}}"
+                response = make_result_response(id, result)
+            elif method == "initialized":
+                response = ""
+            elif method == "tools/list":
+                response = make_result_response(id, "{\"tools\":[]}")
+            elif method == "resources/list":
+                response = make_result_response(id, "{\"resources\":[]}")
+            elif method == "prompts/list":
+                response = make_result_response(id, "{\"prompts\":[]}")
+            elif method == "tools/call":
+                response = make_tool_result(id, "leak-ultra-isolate: noop")
+            elif method == "ping":
+                response = make_result_response(id, "{}")
+            elif method == "shutdown":
+                response = make_result_response(id, "null")
+            elif method == "exit":
+                running = false
+                response = ""
+            else:
+                if id != "" and id != "null":
+                    response = make_error_response(id, -32601, "Method not found: " + method)
 
             if response != "":
                 write_stdout_message(response)

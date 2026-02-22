@@ -10,8 +10,8 @@
 #   simple src/app/mcp_jj/main.spl server     # Start MCP server (stdio)
 #   simple src/app/mcp_jj/main.spl version     # Show jj version
 
-use app.io.mod (get_args, exit)
-use app.mcp.helpers.{get_clean_args, extract_json_string_v2, extract_json_value, extract_nested_string, make_result_response, make_error_response, jp, js, jo1, unwrap_idx}
+use app.io.mod (get_args, exit, env_get)
+use app.mcp.helpers.{get_clean_args, extract_json_string_v2, extract_json_value, extract_nested_string, make_result_response, make_error_response, make_tool_result, jp, js, jo1, unwrap_idx}
 use std.mcp.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
 use std.mcp_sdk.server.builder.{ServerConfig, server_config, server_set_instructions, server_add_tool_json}
 use std.mcp_sdk.server.router.{handle_method}
@@ -22,8 +22,11 @@ use resources.{get_all_resources, read_resource}
 use prompts.{get_all_prompts, get_prompt}
 use std.text.{NL}
 
+extern fn rt_gc_collect()
+
 # Protocol state
 var PROTOCOL = create_protocol_state()
+val GC_COLLECT_EVERY = 100
 
 fn main():
     val raw_args = get_args()
@@ -78,16 +81,96 @@ fn build_server_config() -> ServerConfig:
 
     cfg
 
+fn build_server_config_isolate() -> ServerConfig:
+    var cfg = server_config("jj-git-mcp", "1.0.0")
+    cfg = server_set_instructions(cfg, "Leak isolate mode: tools/resources/prompts execution disabled for diagnosis.")
+    cfg
+
 # --- Server loop ---
 
 fn start_server():
-    val CFG = build_server_config()
+    val ultra_isolate_mode = (env_get("SIMPLE_MCP_LEAK_ULTRA") ?? "") == "1"
+    if ultra_isolate_mode:
+        run_ultra_minimal_server()
+        return
+
+    val isolate_mode = (env_get("SIMPLE_MCP_LEAK_ISOLATE") ?? "") == "1"
+    val CFG = if isolate_mode:
+        build_server_config_isolate()
+    else:
+        build_server_config()
     var repo_path = ""
+    var request_count = 0
 
     var running = true
     for _iter in range(0, 999999):
         if not running:
-            return
+            break
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            request_count = request_count + 1
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = ""
+
+            if isolate_mode:
+                response = handle_method(CFG, method, id, line)
+                if response == "TOOLS_CALL":
+                    response = make_tool_result(id, "leak-isolate: tool execution disabled")
+                elif response == "RESOURCES_READ":
+                    response = make_error_response(id, -32602, "leak-isolate: resources/read disabled")
+                elif response == "PROMPTS_GET":
+                    response = make_error_response(id, -32602, "leak-isolate: prompts/get disabled")
+                elif response == "EXIT":
+                    running = false
+                    response = ""
+            else:
+                # Resources/prompts list handled locally (existing modules)
+                if method == "resources/list":
+                    if repo_path == "":
+                        repo_path = get_default_repo_path()
+                    response = handle_resources_list(id, repo_path)
+                elif method == "prompts/list":
+                    response = handle_prompts_list(id)
+                else:
+                    # SDK router handles builtins + returns sentinels for custom dispatch
+                    response = handle_method(CFG, method, id, line)
+                    if response == "TOOLS_CALL":
+                        if repo_path == "":
+                            repo_path = get_default_repo_path()
+                        val tool_name = extract_nested_string(line, "params", "name")
+                        response = handle_tool_call(id, tool_name, line, repo_path)
+                        # Check if git_set_working_dir changed the repo path
+                        if tool_name == "git_set_working_dir":
+                            val new_path = extract_repo_path_change(response)
+                            if new_path != "":
+                                repo_path = new_path
+                    elif response == "RESOURCES_READ":
+                        if repo_path == "":
+                            repo_path = get_default_repo_path()
+                        val uri = extract_nested_string(line, "params", "uri")
+                        response = handle_resources_read(id, uri, repo_path)
+                    elif response == "PROMPTS_GET":
+                        val prompt_name = extract_nested_string(line, "params", "name")
+                        response = handle_prompts_get(id, prompt_name)
+                    elif response == "EXIT":
+                        running = false
+                        response = ""
+
+            if response != "":
+                write_stdout_message(response)
+
+            # Periodic collection reduces long-session heap growth under heavy MCP traffic.
+            if request_count % GC_COLLECT_EVERY == 0:
+                rt_gc_collect()
+
+fn run_ultra_minimal_server():
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            break
         val line = read_stdin_message()
         if line == "":
             running = false
@@ -96,36 +179,29 @@ fn start_server():
             val id = extract_json_value(line, "id")
             var response = ""
 
-            # Resources/prompts list handled locally (existing modules)
-            if method == "resources/list":
-                if repo_path == "":
-                    repo_path = get_default_repo_path()
-                response = handle_resources_list(id, repo_path)
+            if method == "initialize":
+                val result = "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"jj-git-mcp\",\"version\":\"1.0.0\"}}"
+                response = make_result_response(id, result)
+            elif method == "initialized":
+                response = ""
+            elif method == "tools/list":
+                response = make_result_response(id, "{\"tools\":[]}")
+            elif method == "resources/list":
+                response = make_result_response(id, "{\"resources\":[]}")
             elif method == "prompts/list":
-                response = handle_prompts_list(id)
+                response = make_result_response(id, "{\"prompts\":[]}")
+            elif method == "tools/call":
+                response = make_tool_result(id, "leak-ultra-isolate: noop")
+            elif method == "ping":
+                response = make_result_response(id, "{}")
+            elif method == "shutdown":
+                response = make_result_response(id, "null")
+            elif method == "exit":
+                running = false
+                response = ""
             else:
-                # SDK router handles builtins + returns sentinels for custom dispatch
-                response = handle_method(CFG, method, id, line)
-                if response == "TOOLS_CALL":
-                    if repo_path == "":
-                        repo_path = get_default_repo_path()
-                    val tool_name = extract_nested_string(line, "params", "name")
-                    response = handle_tool_call(id, tool_name, line, repo_path)
-                    # Check if git_set_working_dir changed the repo path
-                    if tool_name == "git_set_working_dir":
-                        val new_path = extract_repo_path_change(response)
-                        if new_path != "":
-                            repo_path = new_path
-                elif response == "RESOURCES_READ":
-                    if repo_path == "":
-                        repo_path = get_default_repo_path()
-                    val uri = extract_nested_string(line, "params", "uri")
-                    response = handle_resources_read(id, uri, repo_path)
-                elif response == "PROMPTS_GET":
-                    val prompt_name = extract_nested_string(line, "params", "name")
-                    response = handle_prompts_get(id, prompt_name)
-                elif response == "EXIT":
-                    exit(0)
+                if id != "" and id != "null":
+                    response = make_error_response(id, -32601, "Method not found: " + method)
 
             if response != "":
                 write_stdout_message(response)
