@@ -22,6 +22,8 @@ class MirToC:
     type_mapper: CTypeMapper
     local_map: Dict
     local_types: Dict
+    stack_slots: Dict
+    stack_slot_sizes: Dict
     string_counter: i64
 
     static fn create(module_name: text) -> MirToC:
@@ -30,6 +32,8 @@ class MirToC:
             type_mapper: CTypeMapper__create(),
             local_map: {},
             local_types: {},
+            stack_slots: {},
+            stack_slot_sizes: {},
             string_counter: 0
         )
 
@@ -39,6 +43,8 @@ class MirToC:
             type_mapper: CTypeMapper__create_for_target(target),
             local_map: {},
             local_types: {},
+            stack_slots: {},
+            stack_slot_sizes: {},
             string_counter: 0
         )
 
@@ -132,6 +138,8 @@ class MirToC:
         for local in body.locals:
             val c_ty = self.type_mapper.map_type(local.type_)
             self.local_types[local.id.id] = c_ty
+        # Precompute stack-backed storage for MIR ops that should not heap-allocate.
+        self.prepare_stack_slots(body)
 
         # Build parameter list
         var params: [text] = []
@@ -151,6 +159,10 @@ class MirToC:
                     val ty = self.type_mapper.map_type(local.type_)
                     if ty != "void":
                         self.builder.emit_local_init(ty, r"_l" + local.id.id, self.zero_value(ty))
+        # Reusable function-local storage slots avoid spl_malloc leaks in generated code.
+        for local_id, slot_name in self.stack_slots:
+            val slot_size = self.stack_slot_sizes[local_id]
+            self.builder.emit(r"alignas(16) unsigned char " + slot_name + r"[" + slot_size + r"];")
 
         self.builder.emit_blank()
 
@@ -174,10 +186,12 @@ class MirToC:
         match inst.kind:
             # === Constants ===
             case Const(dest, value, type_):
-                val dest_name = self.get_local(dest.id)
-                val ty = self.get_local_type(dest.id)
-                val const_val = self.translate_const_value(value)
-                self.builder.emit_assign(dest_name, const_val)
+                if self.translate_composite_const(dest, value):
+                    pass_dn
+                else:
+                    val dest_name = self.get_local(dest.id)
+                    val const_val = self.translate_const_value(value)
+                    self.builder.emit_assign(dest_name, const_val)
 
             # === Copy/Move ===
             case Copy(dest, src):
@@ -200,10 +214,9 @@ class MirToC:
 
             # === Memory Operations ===
             case Alloc(dest, type_):
-                val dest_name = self.get_local(dest.id)
-                val ty = self.type_mapper.map_type(type_)
                 val size = self.type_mapper.size_of(type_)
-                self.builder.emit_assign(dest_name, r"(void*)spl_malloc(" + size + r")")
+                val slot_name = self.ensure_stack_slot(dest.id, size)
+                self.emit_pointer_assign(dest.id, slot_name)
 
             case Load(dest, ptr):
                 val dest_name = self.get_local(dest.id)
@@ -274,15 +287,15 @@ class MirToC:
 
             # === Aggregates ===
             case Aggregate(dest, kind, operands):
-                val dest_name = self.get_local(dest.id)
                 val num_fields = operands.len()
                 val byte_size = num_fields * 8
-                self.builder.emit_comment(r"aggregate construction (" + num_fields + r" fields, " + byte_size + r" bytes)")
-                self.builder.emit_assign(dest_name, r"(int64_t)(intptr_t)spl_malloc(" + byte_size + r")")
+                val slot_name = self.ensure_stack_slot(dest.id, byte_size)
+                self.builder.emit_comment(r"aggregate construction (" + num_fields + r" fields, " + byte_size + r" bytes) [stack slot]")
+                self.emit_pointer_assign(dest.id, slot_name)
                 var field_idx = 0
                 for op in operands:
                     val field_val = self.translate_operand(op)
-                    self.builder.emit(r"((int64_t*)(intptr_t)" + dest_name + r")[" + field_idx + r"] = (int64_t)" + field_val + r";")
+                    self.builder.emit(r"((int64_t*)(void*)" + slot_name + r")[" + field_idx + r"] = (int64_t)" + field_val + r";")
                     field_idx = field_idx + 1
 
             case GetField(dest, base, field):
@@ -411,8 +424,8 @@ class MirToC:
             case GpuMemFence(scope):
                 self.builder.emit_comment("GpuMemFence (requires GPU backend)")
             case GpuSharedAlloc(dest, type_, size):
-                val dest_name = self.get_local(dest.id)
-                self.builder.emit_assign(dest_name, r"(void*)spl_malloc(" + size + r")")
+                val slot_name = self.ensure_stack_slot(dest.id, size)
+                self.emit_pointer_assign(dest.id, slot_name)
             case GpuAtomicOp(dest, op, ptr, value):
                 val dest_name = self.get_local(dest.id)
                 self.builder.emit_assign(dest_name, "0")
@@ -706,6 +719,96 @@ class MirToC:
 
     # === Helpers ===
 
+    me prepare_stack_slots(body: MirBody):
+        self.stack_slots = {}
+        self.stack_slot_sizes = {}
+        for block in body.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Alloc(dest, type_):
+                        self.ensure_stack_slot(dest.id, self.type_mapper.size_of(type_))
+                    case Aggregate(dest, kind, operands):
+                        self.ensure_stack_slot(dest.id, operands.len() * 8)
+                    case GpuSharedAlloc(dest, type_, size):
+                        self.ensure_stack_slot(dest.id, size)
+                    case Const(dest, value, type_):
+                        val sz = self.const_composite_size(value)
+                        if sz > 0:
+                            self.ensure_stack_slot(dest.id, sz)
+                    case _:
+                        pass_dn
+
+    fn slot_name_for_local(local_id: i64) -> text:
+        r"_slot_l" + local_id
+
+    fn normalized_slot_size(size: i64) -> i64:
+        if size <= 0: 1 else: size
+
+    me ensure_stack_slot(local_id: i64, requested_size: i64) -> text:
+        val required = self.normalized_slot_size(requested_size)
+        match self.stack_slots.get(local_id):
+            case Some(existing):
+                val current = self.stack_slot_sizes[local_id]
+                if required > current:
+                    self.stack_slot_sizes[local_id] = required
+                existing
+            case nil:
+                val slot_name = self.slot_name_for_local(local_id)
+                self.stack_slots[local_id] = slot_name
+                self.stack_slot_sizes[local_id] = required
+                slot_name
+
+    me emit_pointer_assign(dest_local_id: i64, ptr_expr: text):
+        val dest_name = self.get_local(dest_local_id)
+        val dest_ty = self.get_local_type(dest_local_id)
+        if dest_ty == "void*":
+            self.builder.emit_assign(dest_name, r"(void*)" + ptr_expr)
+        else:
+            self.builder.emit_assign(dest_name, r"(int64_t)(intptr_t)((void*)" + ptr_expr + r")")
+
+    fn const_composite_size(value: MirConstValue) -> i64:
+        match value:
+            case Array(elements):
+                if elements.len() == 0: 1 else: elements.len() * 8
+            case Tuple(elements):
+                if elements.len() == 0: 1 else: elements.len() * 8
+            case Struct(fields):
+                if fields.len() == 0: 1 else: fields.len() * 8
+            case _:
+                0
+
+    me translate_composite_const(dest: LocalId, value: MirConstValue) -> bool:
+        match value:
+            case Array(elements):
+                val slot_name = self.ensure_stack_slot(dest.id, self.const_composite_size(value))
+                self.emit_pointer_assign(dest.id, slot_name)
+                var idx = 0
+                for elem in elements:
+                    val elem_val = self.const_to_i64_expr(elem)
+                    self.builder.emit(r"((int64_t*)(void*)" + slot_name + r")[" + idx + r"] = " + elem_val + r";")
+                    idx = idx + 1
+                true
+            case Tuple(elements):
+                val slot_name = self.ensure_stack_slot(dest.id, self.const_composite_size(value))
+                self.emit_pointer_assign(dest.id, slot_name)
+                var idx = 0
+                for elem in elements:
+                    val elem_val = self.const_to_i64_expr(elem)
+                    self.builder.emit(r"((int64_t*)(void*)" + slot_name + r")[" + idx + r"] = " + elem_val + r";")
+                    idx = idx + 1
+                true
+            case Struct(fields):
+                val slot_name = self.ensure_stack_slot(dest.id, self.const_composite_size(value))
+                self.emit_pointer_assign(dest.id, slot_name)
+                var idx = 0
+                for field_name, field_val in fields:
+                    val elem_val = self.const_to_i64_expr(field_val)
+                    self.builder.emit(r"((int64_t*)(void*)" + slot_name + r")[" + idx + r"] = " + elem_val + r";")
+                    idx = idx + 1
+                true
+            case _:
+                false
+
     me translate_operand(operand: MirOperand) -> text:
         match operand.kind:
             case Copy(local):
@@ -726,29 +829,45 @@ class MirToC:
             case Zero: "0"
             case Array(elements):
                 if elements.len() == 0:
-                    "(int64_t)(intptr_t)spl_malloc(0) /* empty array */"
+                    "0 /* empty array */"
                 else:
-                    # Allocate and initialize inline
-                    val arr_size = elements.len() * 8
-                    var init_parts: [text] = []
-                    var elem_idx = 0
+                    var init_vals: [text] = []
                     for elem in elements:
-                        val elem_val = self.translate_const_value(elem)
-                        init_parts = init_parts.push(elem_val)
-                        elem_idx = elem_idx + 1
-                    r"(int64_t)(intptr_t)spl_malloc(" + arr_size + r") /* array[" + elements.len() + r"] */"
+                        init_vals = init_vals.push(self.const_to_i64_expr(elem))
+                    r"([]() -> int64_t { static int64_t v[" + elements.len() + r"] = {" + init_vals.join(", ") + r"}; return (int64_t)(intptr_t)v; }())"
             case Tuple(elements):
                 if elements.len() == 0:
                     "0 /* empty tuple */"
                 else:
-                    val tup_size = elements.len() * 8
-                    r"(int64_t)(intptr_t)spl_malloc(" + tup_size + r") /* tuple(" + elements.len() + r") */"
+                    var init_vals: [text] = []
+                    for elem in elements:
+                        init_vals = init_vals.push(self.const_to_i64_expr(elem))
+                    r"([]() -> int64_t { static int64_t v[" + elements.len() + r"] = {" + init_vals.join(", ") + r"}; return (int64_t)(intptr_t)v; }())"
             case Struct(fields):
                 if fields.len() == 0:
                     "0 /* empty struct */"
                 else:
-                    val st_size = fields.len() * 8
-                    r"(int64_t)(intptr_t)spl_malloc(" + st_size + r") /* struct{" + fields.len() + r"} */"
+                    var init_vals: [text] = []
+                    for field_name, field_val in fields:
+                        init_vals = init_vals.push(self.const_to_i64_expr(field_val))
+                    r"([]() -> int64_t { static int64_t v[" + fields.len() + r"] = {" + init_vals.join(", ") + r"}; return (int64_t)(intptr_t)v; }())"
+
+    me const_to_i64_expr(value: MirConstValue) -> text:
+        match value:
+            case Int(val):
+                r"" + val
+            case Float(val):
+                r"(int64_t)(" + val + r")"
+            case Bool(val):
+                if val: "1" else: "0"
+            case Str(_):
+                val str_expr = self.translate_const_value(value)
+                r"(int64_t)(intptr_t)(" + str_expr + r")"
+            case Zero:
+                "0"
+            case _:
+                val nested = self.translate_const_value(value)
+                r"(int64_t)(intptr_t)(" + nested + r")"
 
     fn get_local(id: i64) -> text:
         r"_l" + id
