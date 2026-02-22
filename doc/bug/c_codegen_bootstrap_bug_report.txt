@@ -6,7 +6,8 @@ Status Summary
 - Fixed: static C++ emission issues that can cause generated `.cpp` compile failures.
 - Fixed: CMake generation policy mismatch (root `CMakeLists.txt` generation removed).
 - Fixed: explicit Windows clang-cl detection macros in generated code preamble.
-- Pending: runtime compile verification of generated outputs (deferred by request).
+- Fixed: heap-allocation leak pattern in MIR `Alloc`/`Aggregate`/composite-const C codegen.
+- Pending: runtime compile verification of generated outputs (blocked by current environment errors).
 
 Findings And Fixes
 
@@ -49,11 +50,33 @@ Findings And Fixes
   - `SPL_CLANG_CL` detection macro in generated `.h` and `.cpp` preambles
   - `SPL_UNREACHABLE()` mapping branch using `SPL_CLANG_CL`
 
+7) C codegen heap-leak behavior for MIR stack semantics
+- Area: `c_backend.spl`
+- Issue:
+  - `Alloc` and `Aggregate` emitted `spl_malloc(...)` and never emitted matching free paths.
+  - Composite constants (`Array`/`Tuple`/`Struct`) also emitted heap allocation expressions.
+  - MIR `Alloc` is stack-slot semantics (like LLVM `alloca`), so heap allocation here leaked and diverged from LLVM behavior.
+- Impact:
+  - Generated binaries leak heap memory in code paths with repeated allocations.
+  - Bootstrap builds with C backend are vulnerable to unbounded memory growth in long-running flows.
+- Fix:
+  - Added function-local reusable stack slots precomputed from MIR instructions.
+  - Replaced heap-backed `Alloc`, `Aggregate`, and `GpuSharedAlloc` emission with stack-slot pointer assignment.
+  - Added composite-constant emission paths that initialize stack slots, and static-literal fallback expressions for constant contexts.
+  - Added ownership comments in code around slot allocation to document non-heap lifetime.
+
 Files Changed
 - src/compiler/70.backend/backend/c_ir_builder.spl
 - src/compiler/70.backend/backend/c_backend.spl
 - src/compiler/70.backend/backend/cmake_gen.spl
+- src/compiler/backend/backend/c_ir_builder.spl
+- src/compiler/backend/backend/c_backend.spl
+- src/compiler/backend/backend/cmake_gen.spl
 
 Verification State
 - Static review: complete
-- Build/compile validation: not run in this pass (intentionally deferred)
+- `spl_malloc` check in C backends: complete (none remain in both backend trees)
+- Build/compile validation:
+  - `bin/simple check ...` currently blocked by environment error:
+    `semantic: variable get_cli_args not found`
+  - `c_mir_backend.spl` execution also blocked by existing module/export resolution issues in this workspace
