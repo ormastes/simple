@@ -71,7 +71,6 @@ src/compiler_cpp/          # Generated C++20 output (CMake + Ninja build)
 └── *.cpp                  # Generated C++20 source files
 
 src/app/compile/       # C codegen (all in Simple)
-├── c_codegen.spl      # Main generator: type registry, pre-pass, struct/enum/fn handling
 ├── c_translate.spl    # Expression/statement/control flow translation
 ├── c_helpers.spl      # Type queries, indent, signature parsing
 ├── c_runtime.spl      # Runtime code embedding
@@ -259,7 +258,6 @@ Simple source line-by-line, maintaining a type registry for correct C output.
 Simple source text
     │
     ▼
-c_codegen.spl: generate_c_code()
     ├── Pre-pass: join multi-line expressions
     ├── Enum/struct/class scanning
     ├── Forward declaration generation

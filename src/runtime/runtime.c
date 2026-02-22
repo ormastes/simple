@@ -11,6 +11,7 @@
 #include "platform/platform.h"
 
 #include "runtime.h"
+#include "runtime_memtrack.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,14 +56,14 @@ SplValue spl_float(double f) {
 SplValue spl_str(const char* s) {
     SplValue v;
     v.tag = SPL_STRING;
-    v.as_str = s ? strdup(s) : strdup("");
+    v.as_str = s ? SPL_STRDUP(s, "str") : SPL_STRDUP("", "str");
     return v;
 }
 
 SplValue spl_str_own(char* s) {
     SplValue v;
     v.tag = SPL_STRING;
-    v.as_str = s ? s : strdup("");
+    v.as_str = s ? s : SPL_STRDUP("", "str");
     return v;
 }
 
@@ -162,7 +163,7 @@ SplValue spl_to_string(SplValue v) {
             /* [elem1, elem2, ...] */
             SplArray* a = v.as_array;
             if (!a || a->len == 0) return spl_str("[]");
-            char* buf = (char*)malloc(1024);
+            char* buf = (char*)SPL_MALLOC(1024, "buf");
             int64_t buf_cap = 1024;
             int64_t pos = 0;
             buf[pos++] = '[';
@@ -172,7 +173,7 @@ SplValue spl_to_string(SplValue v) {
                 int64_t slen = (int64_t)strlen(s.as_str);
                 while (pos + slen + 4 > buf_cap) {
                     buf_cap *= 2;
-                    buf = (char*)realloc(buf, buf_cap);
+                    buf = (char*)SPL_REALLOC(buf, buf_cap, "buf");
                 }
                 memcpy(buf + pos, s.as_str, slen);
                 pos += slen;
@@ -190,7 +191,7 @@ SplValue spl_to_string(SplValue v) {
 void spl_free_value(SplValue v) {
     switch (v.tag) {
         case SPL_STRING:
-            free(v.as_str);
+            SPL_FREE(v.as_str);
             break;
         case SPL_ARRAY:
             spl_array_free(v.as_array);
@@ -208,7 +209,7 @@ void spl_free_value(SplValue v) {
  * ================================================================ */
 
 char* spl_str_new(const char* s) {
-    return strdup(s ? s : "");
+    return SPL_STRDUP(s ? s : "", "str");
 }
 
 char* spl_str_concat(const char* a, const char* b) {
@@ -216,7 +217,7 @@ char* spl_str_concat(const char* a, const char* b) {
     if (!b) b = "";
     size_t alen = strlen(a);
     size_t blen = strlen(b);
-    char* result = (char*)malloc(alen + blen + 1);
+    char* result = (char*)SPL_MALLOC(alen + blen + 1, "str");
     memcpy(result, a, alen);
     memcpy(result + alen, b, blen);
     result[alen + blen] = '\0';
@@ -240,27 +241,27 @@ int spl_str_cmp(const char* a, const char* b) {
 }
 
 char* spl_str_slice(const char* s, int64_t start, int64_t end) {
-    if (!s) return strdup("");
+    if (!s) return SPL_STRDUP("", "str");
     int64_t slen = (int64_t)strlen(s);
     if (start < 0) start = slen + start;
     if (end < 0)   end = slen + end;
     if (start < 0) start = 0;
     if (end > slen) end = slen;
-    if (start >= end) return strdup("");
+    if (start >= end) return SPL_STRDUP("", "str");
     int64_t len = end - start;
-    char* result = (char*)malloc(len + 1);
+    char* result = (char*)SPL_MALLOC(len + 1, "str");
     memcpy(result, s + start, len);
     result[len] = '\0';
     return result;
 }
 
 char* spl_str_index_char(const char* s, int64_t idx) {
-    if (!s) return strdup("");
+    if (!s) return SPL_STRDUP("", "str");
     int64_t slen = (int64_t)strlen(s);
     if (idx < 0) idx = slen + idx;
-    if (idx < 0 || idx >= slen) return strdup("");
+    if (idx < 0 || idx >= slen) return SPL_STRDUP("", "str");
     char buf[2] = { s[idx], '\0' };
-    return strdup(buf);
+    return SPL_STRDUP(buf, "str");
 }
 
 uint64_t spl_str_hash(const char* s) {
@@ -293,20 +294,20 @@ int spl_str_ends_with(const char* s, const char* suffix) {
 }
 
 char* spl_str_replace(const char* s, const char* old_s, const char* new_s) {
-    if (!s) return strdup("");
-    if (!old_s || !new_s || strlen(old_s) == 0) return strdup(s);
+    if (!s) return SPL_STRDUP("", "str");
+    if (!old_s || !new_s || strlen(old_s) == 0) return SPL_STRDUP(s, "str");
     size_t old_len = strlen(old_s);
     size_t new_len = strlen(new_s);
     /* Count occurrences */
     size_t count = 0;
     const char* tmp = s;
     while ((tmp = strstr(tmp, old_s)) != NULL) { count++; tmp += old_len; }
-    if (count == 0) return strdup(s);
+    if (count == 0) return SPL_STRDUP(s, "str");
     /* Build result */
     size_t result_len = strlen(s) + count * (new_len - old_len + (new_len < old_len ? 0 : 0));
     /* recalculate properly */
     result_len = strlen(s) - count * old_len + count * new_len;
-    char* result = (char*)malloc(result_len + 1);
+    char* result = (char*)SPL_MALLOC(result_len + 1, "str");
     char* dst = result;
     while (*s) {
         if (strncmp(s, old_s, old_len) == 0) {
@@ -322,12 +323,12 @@ char* spl_str_replace(const char* s, const char* old_s, const char* new_s) {
 }
 
 char* spl_str_trim(const char* s) {
-    if (!s) return strdup("");
+    if (!s) return SPL_STRDUP("", "str");
     while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
     size_t len = strlen(s);
     while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\t' ||
                         s[len-1] == '\n' || s[len-1] == '\r')) len--;
-    char* result = (char*)malloc(len + 1);
+    char* result = (char*)SPL_MALLOC(len + 1, "str");
     memcpy(result, s, len);
     result[len] = '\0';
     return result;
@@ -354,9 +355,9 @@ int64_t spl_str_last_index_of(const char* s, const char* needle) {
 }
 
 char* spl_str_to_upper(const char* s) {
-    if (!s) return strdup("");
+    if (!s) return SPL_STRDUP("", "str");
     size_t len = strlen(s);
-    char* result = (char*)malloc(len + 1);
+    char* result = (char*)SPL_MALLOC(len + 1, "str");
     for (size_t i = 0; i < len; i++) {
         result[i] = (char)toupper((unsigned char)s[i]);
     }
@@ -365,9 +366,9 @@ char* spl_str_to_upper(const char* s) {
 }
 
 char* spl_str_to_lower(const char* s) {
-    if (!s) return strdup("");
+    if (!s) return SPL_STRDUP("", "str");
     size_t len = strlen(s);
-    char* result = (char*)malloc(len + 1);
+    char* result = (char*)SPL_MALLOC(len + 1, "str");
     for (size_t i = 0; i < len; i++) {
         result[i] = (char)tolower((unsigned char)s[i]);
     }
@@ -387,8 +388,8 @@ SplArray* spl_array_new(void) {
 
 SplArray* spl_array_new_cap(int64_t cap) {
     if (cap < 4) cap = 4;
-    SplArray* a = (SplArray*)malloc(sizeof(SplArray));
-    a->items = (SplValue*)calloc(cap, sizeof(SplValue));
+    SplArray* a = (SplArray*)SPL_MALLOC(sizeof(SplArray), "arr");
+    a->items = (SplValue*)SPL_CALLOC(cap, sizeof(SplValue), "arr");
     a->len = 0;
     a->cap = cap;
     return a;
@@ -396,7 +397,7 @@ SplArray* spl_array_new_cap(int64_t cap) {
 
 static void spl_array_grow(SplArray* a) {
     int64_t new_cap = a->cap * 2;
-    a->items = (SplValue*)realloc(a->items, new_cap * sizeof(SplValue));
+    a->items = (SplValue*)SPL_REALLOC(a->items, new_cap * sizeof(SplValue), "arr");
     /* Zero new slots */
     memset(a->items + a->cap, 0, (new_cap - a->cap) * sizeof(SplValue));
     a->cap = new_cap;
@@ -467,8 +468,8 @@ void spl_array_free(SplArray* a) {
     for (int64_t i = 0; i < a->len; i++) {
         spl_free_value(a->items[i]);
     }
-    free(a->items);
-    free(a);
+    SPL_FREE(a->items);
+    SPL_FREE(a);
 }
 
 /* Typed convenience: i64 */
@@ -504,7 +505,7 @@ SplArray* spl_str_split(const char* s, const char* delim) {
     const char* found;
     while ((found = strstr(start, delim)) != NULL) {
         size_t len = (size_t)(found - start);
-        char* part = (char*)malloc(len + 1);
+        char* part = (char*)SPL_MALLOC(len + 1, "str");
         memcpy(part, start, len);
         part[len] = '\0';
         spl_array_push(arr, spl_str_own(part));
@@ -515,7 +516,7 @@ SplArray* spl_str_split(const char* s, const char* delim) {
 }
 
 char* spl_str_join(SplArray* arr, const char* delim) {
-    if (!arr || arr->len == 0) return strdup("");
+    if (!arr || arr->len == 0) return SPL_STRDUP("", "str");
     const char* safe_delim = delim ? delim : "";
     size_t delim_len = strlen(safe_delim);
     size_t total = 0;
@@ -525,7 +526,7 @@ char* spl_str_join(SplArray* arr, const char* delim) {
         total += strlen(s);
         if (i < arr->len - 1) total += delim_len;
     }
-    char* result = (char*)malloc(total + 1);
+    char* result = (char*)SPL_MALLOC(total + 1, "str");
     char* dst = result;
     for (int64_t i = 0; i < arr->len; i++) {
         const char* s = (arr->items[i].tag == SPL_STRING && arr->items[i].as_str)
@@ -557,8 +558,8 @@ SplDict* spl_dict_new_cap(int64_t cap) {
     /* Round up to power of 2 */
     int64_t actual = 4;
     while (actual < cap) actual *= 2;
-    SplDict* d = (SplDict*)malloc(sizeof(SplDict));
-    d->entries = (SplDictEntry*)calloc(actual, sizeof(SplDictEntry));
+    SplDict* d = (SplDict*)SPL_MALLOC(sizeof(SplDict), "dict");
+    d->entries = (SplDictEntry*)SPL_CALLOC(actual, sizeof(SplDictEntry), "dict");
     d->cap = actual;
     d->len = 0;
     d->tombstones = 0;
@@ -568,17 +569,17 @@ SplDict* spl_dict_new_cap(int64_t cap) {
 static void spl_dict_resize(SplDict* d, int64_t new_cap) {
     SplDictEntry* old = d->entries;
     int64_t old_cap = d->cap;
-    d->entries = (SplDictEntry*)calloc(new_cap, sizeof(SplDictEntry));
+    d->entries = (SplDictEntry*)SPL_CALLOC(new_cap, sizeof(SplDictEntry), "dict");
     d->cap = new_cap;
     d->len = 0;
     d->tombstones = 0;
     for (int64_t i = 0; i < old_cap; i++) {
         if (old[i].occupied == 1) {
             spl_dict_set(d, old[i].key, old[i].value);
-            free(old[i].key); /* spl_dict_set made a copy */
+            SPL_FREE(old[i].key); /* spl_dict_set made a copy */
         }
     }
-    free(old);
+    SPL_FREE(old);
 }
 
 void spl_dict_set(SplDict* d, const char* key, SplValue value) {
@@ -593,7 +594,7 @@ void spl_dict_set(SplDict* d, const char* key, SplValue value) {
         SplDictEntry* e = &d->entries[idx];
         if (e->occupied == 0) {
             /* Empty slot — insert */
-            e->key = strdup(key);
+            e->key = SPL_STRDUP(key, "dict");
             e->value = value;
             e->hash = h;
             e->occupied = 1;
@@ -602,7 +603,7 @@ void spl_dict_set(SplDict* d, const char* key, SplValue value) {
         }
         if (e->occupied == -1) {
             /* Tombstone — reuse */
-            e->key = strdup(key);
+            e->key = SPL_STRDUP(key, "dict");
             e->value = value;
             e->hash = h;
             e->occupied = 1;
@@ -671,7 +672,7 @@ int64_t spl_dict_len(SplDict* d) {
 void spl_dict_remove(SplDict* d, const char* key) {
     SplDictEntry* e = spl_dict_find(d, key);
     if (!e) return;
-    free(e->key);
+    SPL_FREE(e->key);
     e->key = NULL;
     e->occupied = -1; /* tombstone */
     d->len--;
@@ -682,12 +683,12 @@ void spl_dict_free(SplDict* d) {
     if (!d) return;
     for (int64_t i = 0; i < d->cap; i++) {
         if (d->entries[i].occupied == 1) {
-            free(d->entries[i].key);
+            SPL_FREE(d->entries[i].key);
             spl_free_value(d->entries[i].value);
         }
     }
-    free(d->entries);
-    free(d);
+    SPL_FREE(d->entries);
+    SPL_FREE(d);
 }
 
 /* ================================================================
@@ -695,13 +696,13 @@ void spl_dict_free(SplDict* d) {
  * ================================================================ */
 
 char* spl_file_read(const char* path) {
-    if (!path) return strdup("");
+    if (!path) return SPL_STRDUP("", "file");
     FILE* f = fopen(path, "rb");
-    if (!f) return strdup("");
+    if (!f) return SPL_STRDUP("", "file");
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
-    char* buf = (char*)malloc(len + 1);
+    char* buf = (char*)SPL_MALLOC(len + 1, "file");
     size_t read_len = fread(buf, 1, len, f);
     buf[read_len] = '\0';
     fclose(f);
@@ -787,13 +788,13 @@ void spl_print_f64(double f) {
 char* spl_i64_to_str(int64_t n) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%lld", (long long)n);
-    return strdup(buf);
+    return SPL_STRDUP(buf, "fmt");
 }
 
 char* spl_f64_to_str(double f) {
     char buf[64];
     snprintf(buf, sizeof(buf), "%g", f);
-    return strdup(buf);
+    return SPL_STRDUP(buf, "fmt");
 }
 
 /* ===== Bit-cast Helpers (f64 <-> i64 for DynLoader) ===== */
@@ -822,8 +823,8 @@ char* spl_sprintf(const char* fmt, ...) {
     va_copy(args_copy, args);
     int len = vsnprintf(NULL, 0, fmt, args_copy);
     va_end(args_copy);
-    if (len < 0) { va_end(args); return strdup(""); }
-    char* buf = (char*)malloc(len + 1);
+    if (len < 0) { va_end(args); return SPL_STRDUP("", "fmt"); }
+    char* buf = (char*)SPL_MALLOC(len + 1, "fmt");
     vsnprintf(buf, len + 1, fmt, args);
     va_end(args);
     return buf;
@@ -839,10 +840,10 @@ int64_t spl_shell(const char* cmd) {
 }
 
 char* spl_shell_output(const char* cmd) {
-    if (!cmd) return strdup("");
+    if (!cmd) return SPL_STRDUP("", "shell");
     FILE* pipe = popen(cmd, "r");
-    if (!pipe) return strdup("");
-    char* buf = (char*)malloc(4096);
+    if (!pipe) return SPL_STRDUP("", "shell");
+    char* buf = (char*)SPL_MALLOC(4096, "shell");
     int64_t buf_cap = 4096;
     int64_t pos = 0;
     char tmp[1024];
@@ -850,7 +851,7 @@ char* spl_shell_output(const char* cmd) {
         size_t chunk = strlen(tmp);
         while (pos + (int64_t)chunk + 1 > buf_cap) {
             buf_cap *= 2;
-            buf = (char*)realloc(buf, buf_cap);
+            buf = (char*)SPL_REALLOC(buf, buf_cap, "shell");
         }
         memcpy(buf + pos, tmp, chunk);
         pos += (int64_t)chunk;
@@ -881,15 +882,15 @@ const char* rt_env_get(const char* key) {
  * ================================================================ */
 
 void* spl_malloc(int64_t size) {
-    return malloc((size_t)size);
+    return SPL_MALLOC((size_t)size, "user");
 }
 
 void spl_free(void* ptr) {
-    free(ptr);
+    SPL_FREE(ptr);
 }
 
 char* spl_strdup(const char* s) {
-    return strdup(s ? s : "");
+    return SPL_STRDUP(s ? s : "", "user");
 }
 
 /* ================================================================
@@ -1106,7 +1107,11 @@ bool rt_exec_manager_has_function(int64_t handle, const char* name) {
 }
 
 void rt_exec_manager_cleanup(int64_t handle) {
-    (void)handle;
+    /* Clean up soft JIT temp file if it exists. */
+    char path[256];
+    snprintf(path, sizeof(path), "tmp/jit/simple_soft_jit_%lld.spl",
+             (long long)handle);
+    remove(path);  /* ignore errors — file may not exist */
 }
 
 /* ================================================================

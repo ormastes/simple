@@ -188,7 +188,6 @@ Full compiler frontend (`src/compiler/frontend.spl`) uses the same core preproce
 
 | Capability | Current core behavior | Status |
 |---|---|---|
-| `asm` text passthrough (single-line, block, braced) | **Working** — `parser.spl:1578-1649`, `c_codegen.spl:508-518` | Done |
 | `asm match: case [target]:` | **Working** — target eval via C preprocessor | Done |
 | `asm assert [target]` | **Working** — emits `static_assert` | Done |
 

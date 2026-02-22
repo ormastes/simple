@@ -1,0 +1,474 @@
+# ELF64 Object File Writer
+#
+# Pure-Simple ELF64 relocatable object file (.o) emitter.
+# Produces valid ELF files that can be linked with standard linkers (ld, lld, mold).
+# ELF64 serialization functions are in elf_writer_serialize.spl.
+#
+# Supported features:
+# - Sections: .text, .data, .rodata, .bss, .symtab, .strtab, .shstrtab, .rela.text
+# - Symbols: local + global, function + data
+# - Relocations: R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_64, R_X86_64_32S
+# - AArch64 relocations: R_AARCH64_CALL26, R_AARCH64_ADR_PREL_PG_HI21, etc.
+# - RISC-V relocations: R_RISCV_CALL_PLT, R_RISCV_PCREL_HI20, etc.
+
+use compiler.backend.backend.native.elf_writer_serialize.*
+
+# ============================================================================
+# ELF Constants
+# ============================================================================
+
+# ELF magic number bytes
+val ELF_MAGIC_0 = 0x7f
+val ELF_MAGIC_1 = 0x45  # 'E'
+val ELF_MAGIC_2 = 0x4c  # 'L'
+val ELF_MAGIC_3 = 0x46  # 'F'
+
+# ELF class
+val ELFCLASS64 = 2
+
+# ELF data encoding
+val ELFDATA2LSB = 1  # Little-endian
+
+# ELF version
+val EV_CURRENT = 1
+
+# ELF OS/ABI
+val ELFOSABI_NONE = 0  # UNIX System V
+
+# ELF type
+val ET_REL = 1  # Relocatable object file
+
+# ELF machine types
+val EM_X86_64 = 62
+val EM_AARCH64 = 183
+val EM_RISCV = 243
+
+# Section header types
+val SHT_NULL = 0
+val SHT_PROGBITS = 1
+val SHT_SYMTAB = 2
+val SHT_STRTAB = 3
+val SHT_RELA = 4
+val SHT_NOBITS = 8
+
+# Section header flags
+val SHF_WRITE = 0x1
+val SHF_ALLOC = 0x2
+val SHF_EXECINSTR = 0x4
+val SHF_INFO_LINK = 0x40
+
+# Symbol bindings
+val STB_LOCAL = 0
+val STB_GLOBAL = 1
+
+# Symbol types
+val STT_NOTYPE = 0
+val STT_FUNC = 2
+val STT_SECTION = 3
+val STT_OBJECT = 1
+
+# Symbol visibility
+val STV_DEFAULT = 0
+
+# Special section indices
+val SHN_UNDEF = 0
+val SHN_ABS = 0xfff1
+
+# x86_64 relocation types
+val R_X86_64_NONE = 0
+val R_X86_64_64 = 1
+val R_X86_64_PC32 = 2
+val R_X86_64_PLT32 = 4
+val R_X86_64_32S = 11
+
+# AArch64 relocation types
+val R_AARCH64_CALL26 = 283
+val R_AARCH64_ADR_PREL_PG_HI21 = 275
+val R_AARCH64_ADD_ABS_LO12_NC = 277
+val R_AARCH64_LDST64_ABS_LO12_NC = 286
+
+# RISC-V relocation types
+val R_RISCV_CALL_PLT = 19
+val R_RISCV_PCREL_HI20 = 23
+val R_RISCV_PCREL_LO12_I = 24
+val R_RISCV_HI20 = 26
+val R_RISCV_LO12_I = 27
+
+# ELF64 header size = 64 bytes
+val ELF64_EHDR_SIZE = 64
+# Section header entry size = 64 bytes
+val ELF64_SHDR_SIZE = 64
+# Symbol table entry size = 24 bytes
+val ELF64_SYM_SIZE = 24
+# Rela entry size = 24 bytes
+val ELF64_RELA_SIZE = 24
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+enum ElfSymbolBind:
+    Local
+    Global
+
+enum ElfSymbolType:
+    NoType
+    Func
+    Object
+    Section
+
+enum ElfRelocType:
+    # x86_64
+    X86_64_None
+    X86_64_64
+    X86_64_PC32
+    X86_64_PLT32
+    X86_64_32S
+    # AArch64
+    AArch64_Call26
+    AArch64_AdrPrelPgHi21
+    AArch64_AddAbsLo12Nc
+    AArch64_Ldst64AbsLo12Nc
+    # RISC-V
+    Riscv_CallPlt
+    Riscv_PcrelHi20
+    Riscv_PcrelLo12I
+    Riscv_Hi20
+    Riscv_Lo12I
+
+
+# ============================================================================
+# ElfRelocType Methods (was: impl ElfRelocType:)
+# ============================================================================
+
+struct ElfSymbol:
+    name: text
+    sym_bind: ElfSymbolBind
+    sym_type: ElfSymbolType
+    section_index: i64
+    value: i64
+    size: i64
+
+struct ElfReloc:
+    offset: i64
+    reloc_type: ElfRelocType
+    symbol_index: i64
+    addend: i64
+
+enum ElfSectionKind:
+    Text
+    Data
+    Rodata
+    Bss
+
+struct ElfSection:
+    name: text
+    kind: ElfSectionKind
+    data: [i64]
+    alignment: i64
+    relocations: [ElfReloc]
+
+# ============================================================================
+# Byte Buffer Helper
+# ============================================================================
+
+struct ByteBuffer:
+    bytes: [i64]
+
+fn new_byte_buffer() -> ByteBuffer:
+    ByteBuffer(bytes: [])
+
+fn buf_len(buf: ByteBuffer) -> i64:
+    buf.bytes_len(bytes)
+
+fn buf_write_u8(buf: ByteBuffer, value: i64) -> ByteBuffer:
+    val b = value % 256
+    var result = buf.bytes
+    result = result + [b]
+    ByteBuffer(bytes: result)
+
+fn buf_write_u16_le(buf: ByteBuffer, value: i64) -> ByteBuffer:
+    val b0 = value % 256
+    val b1 = (value / 256) % 256
+    var result = buf.bytes
+    result = result + [b0, b1]
+    ByteBuffer(bytes: result)
+
+fn unsigned_byte(v: i64) -> i64:
+    val b = v % 256
+    if b < 0:
+        b + 256
+    else:
+        b
+
+fn signed_div256(v: i64) -> i64:
+    # Floor division for negative values: -4/256 = -1 (not 0)
+    if v < 0:
+        val pos = -v
+        val d = pos / 256
+        val r = pos % 256
+        if r > 0:
+            -(d + 1)
+        else:
+            -d
+    else:
+        v / 256
+
+fn buf_write_u32_le(buf: ByteBuffer, value: i64) -> ByteBuffer:
+    val b0 = unsigned_byte(value)
+    val v1 = signed_div256(value)
+    val b1 = unsigned_byte(v1)
+    val v2 = signed_div256(v1)
+    val b2 = unsigned_byte(v2)
+    val v3 = signed_div256(v2)
+    val b3 = unsigned_byte(v3)
+    var result = buf.bytes
+    result = result + [b0, b1, b2, b3]
+    ByteBuffer(bytes: result)
+
+fn buf_write_u64_le(buf: ByteBuffer, value: i64) -> ByteBuffer:
+    # Handle negative values: split into lower and upper 32 bits
+    if value < 0:
+        # For negative values, write all 8 bytes individually
+        var v = value
+        var bytes: [i64] = []
+        var i = 0
+        while i < 8:
+            bytes = bytes + [unsigned_byte(v)]
+            v = signed_div256(v)
+            i = i + 1
+        var result = buf.bytes
+        result = result + bytes
+        ByteBuffer(bytes: result)
+    else:
+        var buf2 = buf_write_u32_le(buf, value % 4294967296)
+        buf2 = buf_write_u32_le(buf2, value / 4294967296)
+        buf2
+
+fn buf_write_bytes(buf: ByteBuffer, data: [i64]) -> ByteBuffer:
+    var result = buf.bytes
+    result = result + data
+    ByteBuffer(bytes: result)
+
+fn buf_write_zeroes(buf: ByteBuffer, count: i64) -> ByteBuffer:
+    var result = buf.bytes
+    for i in 0..count:
+        result = result + [0]
+    ByteBuffer(bytes: result)
+
+fn buf_align_to(buf: ByteBuffer, alignment: i64) -> ByteBuffer:
+    val current = buf.bytes_len(bytes)
+    val remainder = current % alignment
+    if remainder == 0:
+        return buf
+    val padding = alignment - remainder
+    buf_write_zeroes(buf, padding)
+
+# ============================================================================
+# String Table Helper
+# ============================================================================
+
+struct StringTable:
+    data: [i64]
+    offsets: Dict<text, i64>
+
+fn new_string_table() -> StringTable:
+    # String table starts with a null byte
+    StringTable(data: [0], offsets: {})
+
+fn strtab_add(table: StringTable, s: text) -> StringTable:
+    if s == "":
+        return table
+    # Check if already added
+    var existing = table.offsets
+    if existing_contains(existing, s):
+        return table
+    val offset = table.data_len(data)
+    var new_offsets = existing
+    new_offsets[s] = offset
+    # Append string bytes + null terminator using .bytes()
+    var new_data = table.data
+    val str_bytes = s_bytes(s)
+    for i in 0..str_bytes_len(str_bytes):
+        new_data = new_data + [str_bytes[i]]
+    new_data = new_data + [0]  # Null terminator
+    StringTable(data: new_data, offsets: new_offsets)
+
+fn strtab_get_offset(table: StringTable, s: text) -> i64:
+    if s == "":
+        return 0
+    val offsets = table.offsets
+    if offsets_contains(offsets, s):
+        return offsets[s]
+    0
+
+# ============================================================================
+# ELF Writer
+# ============================================================================
+
+struct ElfWriter:
+    machine: i64
+    sections: [ElfSection]
+    symbols: [ElfSymbol]
+
+fn new_elf_writer(machine: i64) -> ElfWriter:
+    ElfWriter(
+        machine: machine,
+        sections: [],
+        symbols: []
+    )
+
+fn elf_writer_x86_64() -> ElfWriter:
+    new_elf_writer(EM_X86_64)
+
+fn elf_writer_aarch64() -> ElfWriter:
+    new_elf_writer(EM_AARCH64)
+
+fn elf_writer_riscv64() -> ElfWriter:
+    new_elf_writer(EM_RISCV)
+
+fn elf_add_section(writer: ElfWriter, section: ElfSection) -> ElfWriter:
+    var new_sections = writer.sections
+    new_sections = new_sections + [section]
+    ElfWriter(
+        machine: writer.machine,
+        sections: new_sections,
+        symbols: writer.symbols
+    )
+
+fn elf_add_symbol(writer: ElfWriter, sym: ElfSymbol) -> ElfWriter:
+    var new_symbols = writer.symbols
+    new_symbols = new_symbols + [sym]
+    ElfWriter(
+        machine: writer.machine,
+        sections: writer.sections,
+        symbols: new_symbols
+    )
+
+fn new_text_section(data: [i64]) -> ElfSection:
+    ElfSection(
+        name: ".text",
+        kind: ElfSectionKind.Text,
+        data: data,
+        alignment: 16,
+        relocations: []
+    )
+
+fn new_data_section(data: [i64]) -> ElfSection:
+    ElfSection(
+        name: ".data",
+        kind: ElfSectionKind.Data,
+        data: data,
+        alignment: 8,
+        relocations: []
+    )
+
+fn new_rodata_section(data: [i64]) -> ElfSection:
+    ElfSection(
+        name: ".rodata",
+        kind: ElfSectionKind.Rodata,
+        data: data,
+        alignment: 8,
+        relocations: []
+    )
+
+fn new_bss_section(size: i64) -> ElfSection:
+    # BSS has no data, just size
+    var zeroes: [i64] = []
+    for i in 0..size:
+        zeroes = zeroes + [0]
+    ElfSection(
+        name: ".bss",
+        kind: ElfSectionKind.Bss,
+        data: zeroes,
+        alignment: 8,
+        relocations: []
+    )
+
+fn section_add_reloc(section: ElfSection, reloc: ElfReloc) -> ElfSection:
+    var new_relocs = section.relocations
+    new_relocs = new_relocs + [reloc]
+    ElfSection(
+        name: section.name,
+        kind: section.kind,
+        data: section.data,
+        alignment: section.alignment,
+        relocations: new_relocs
+    )
+
+fn new_func_symbol(name: text, section_idx: i64, value: i64, size: i64) -> ElfSymbol:
+    ElfSymbol(
+        name: name,
+        sym_bind: ElfSymbolBind.Global,
+        sym_type: ElfSymbolType.Func,
+        section_index: section_idx,
+        value: value,
+        size: size
+    )
+
+fn new_local_func_symbol(name: text, section_idx: i64, value: i64, size: i64) -> ElfSymbol:
+    ElfSymbol(
+        name: name,
+        sym_bind: ElfSymbolBind.Local,
+        sym_type: ElfSymbolType.Func,
+        section_index: section_idx,
+        value: value,
+        size: size
+    )
+
+fn new_data_symbol(name: text, section_idx: i64, value: i64, size: i64) -> ElfSymbol:
+    ElfSymbol(
+        name: name,
+        sym_bind: ElfSymbolBind.Global,
+        sym_type: ElfSymbolType.Object,
+        section_index: section_idx,
+        value: value,
+        size: size
+    )
+
+fn new_extern_symbol(name: text) -> ElfSymbol:
+    ElfSymbol(
+        name: name,
+        sym_bind: ElfSymbolBind.Global,
+        sym_type: ElfSymbolType.NoType,
+        section_index: SHN_UNDEF,
+        value: 0,
+        size: 0
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfWriter, ElfSection, ElfSectionKind, ElfSymbol, ElfSymbolBind, ElfSymbolType
+export ElfReloc, ElfRelocType
+export ByteBuffer, StringTable
+
+export new_elf_writer, elf_writer_x86_64, elf_writer_aarch64, elf_writer_riscv64
+export elf_add_section, elf_add_symbol
+export new_text_section, new_data_section, new_rodata_section, new_bss_section
+export section_add_reloc
+export new_func_symbol, new_local_func_symbol, new_data_symbol, new_extern_symbol
+export write_elf64, elf_write_object
+
+export new_byte_buffer, buf_len, buf_write_u8, buf_write_u16_le, buf_write_u32_le
+export buf_write_u64_le, buf_write_bytes, buf_write_zeroes, buf_align_to
+export new_string_table, strtab_add, strtab_get_offset
+export align_offset, pad_to
+
+export EM_X86_64, EM_AARCH64, EM_RISCV
+export SHN_UNDEF
+
+# ELF internal constants (needed by runtime for transitive module resolution)
+export ELF_MAGIC_0, ELF_MAGIC_1, ELF_MAGIC_2, ELF_MAGIC_3
+export ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ELFOSABI_NONE, ET_REL
+export ELF64_EHDR_SIZE, ELF64_SHDR_SIZE, ELF64_SYM_SIZE, ELF64_RELA_SIZE
+export SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB, SHT_RELA, SHT_NOBITS
+export SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_INFO_LINK
+export STB_LOCAL, STB_GLOBAL
+export STT_NOTYPE, STT_FUNC, STT_SECTION, STT_OBJECT
+export STV_DEFAULT
+
+export R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_64, R_X86_64_32S
+export R_AARCH64_CALL26, R_AARCH64_ADR_PREL_PG_HI21
+export R_RISCV_CALL_PLT, R_RISCV_PCREL_HI20

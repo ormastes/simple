@@ -23,7 +23,6 @@ SIMPLE_COMPILE_RUST=1 bin/release/simple compile src/app/cli/main.spl -o output.
 | `rt_cli_handle_compile` (Cranelift) | **BROKEN** | 219-byte stubs | Always errors in interpreter mode |
 | `compile` CLI command | **BROKEN** | Delegates to `rt_cli_handle_compile` | Same |
 
-### C Codegen Feature Support (c_codegen.spl, 455 lines)
 
 **Supported:**
 - `fn` definitions + calls (with typed params, return types)
@@ -67,7 +66,6 @@ Stage 3 fails because the 219-byte stub can't be loaded as a valid SMF module.
 
 ### Strategy: Incremental C Codegen Enhancement
 
-Build the compiler's self-hosting capability incrementally by enhancing `c_codegen.spl` to support progressively more Simple features, then use the C codegen path instead of the broken `rt_cli_handle_compile`.
 
 ### Phase 1: Enhanced C Codegen (c_codegen_v2.spl)
 
@@ -96,8 +94,7 @@ Build the compiler's self-hosting capability incrementally by enhancing `c_codeg
 
 3. **Module inlining** → Resolve `use` at codegen time
    ```simple
-   use app.compile.c_codegen (generate_c_code)
-   →  // Inline the function from src/app/compile/c_codegen.spl
+   use compiler.backend.c_codegen_adapter (shared Codegen interface path)
    ```
 
 4. **Enums** → C enums + tagged unions
@@ -124,7 +121,7 @@ Build the compiler's self-hosting capability incrementally by enhancing `c_codeg
 **Goal:** Write a minimal compiler using ONLY features from Phase 1's enhanced C codegen. This compiler compiles Simple→C with full feature support.
 
 The mini-compiler would:
-1. Parse Simple source (line-by-line, like current c_codegen but more complete)
+1. Parse Simple source (line-by-line, like current MIR C backend but more complete)
 2. Resolve module imports (inline referenced functions)
 3. Generate C code for ALL Simple features
 4. Invoke gcc to produce native binary

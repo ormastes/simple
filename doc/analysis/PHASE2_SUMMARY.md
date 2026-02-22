@@ -166,7 +166,6 @@ Focuses on src/lib/ duplication:
 ### 5. **Compile/Build Coupling** (11,489 lines)
 **Problem:** Three massive code generators:
 - c_translate.spl (1,896 lines) — translate expressions
-- c_codegen.spl (1,124 lines) — generate functions
 - c_helpers.spl (429 lines) — type checking
 
 **Impact:** Overlapping translate_* functions (condition, method_expr, expr)

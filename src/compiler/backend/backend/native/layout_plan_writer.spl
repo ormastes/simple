@@ -1,0 +1,261 @@
+# Layout Plan Persistence
+#
+# Writes and reads layout plans in SDN format for reuse across builds.
+# Allows caching of layout optimization decisions.
+#
+# SDN Schema:
+# - layout_groups: phase, start_offset, total_size
+# - layout_functions: name, symbol_id, phase, size, hotness, group_id
+# - layout_metadata: total_size, page_count, created_at
+
+use layout_solver.{LayoutPlan, LayoutGroup, LayoutFunctionInfo}
+use mir_data.LayoutPhase
+use app.io.{file_write, file_read, file_exists}
+
+# ============================================================================
+# SDN Serialization
+# ============================================================================
+
+fn write_layout_plan(plan: LayoutPlan, path: text) -> bool:
+    """Write layout plan to SDN file."""
+    val content = serialize_layout_plan(plan)
+    file_write(path, content)
+    true
+
+fn serialize_layout_plan(plan: LayoutPlan) -> text:
+    """Serialize layout plan to SDN format."""
+    var lines: [text] = []
+
+    # Metadata table
+    lines.push("layout_metadata |total_size, page_count, version|")
+    lines.push("    {plan.total_size}, {plan.page_count}, 1")
+    lines.push("")
+
+    # Groups table
+    lines.push("layout_groups |group_id, phase, start_offset, total_size, function_count|")
+    var group_id = 0
+    for group in plan.groups:
+        val phase_str = serialize_phase(group.phase)
+        val func_count = group.functions.len()
+        lines.push("    {group_id}, {phase_str}, {group.start_offset}, {group.total_size}, {func_count}")
+        group_id = group_id + 1
+    lines.push("")
+
+    # Functions table
+    lines.push("layout_functions |function_id, group_id, name, symbol_id, size, hotness|")
+    group_id = 0
+    var function_id = 0
+    for group in plan.groups:
+        for func in group.functions:
+            val escaped_name = escape_sdn_value(func.name)
+            lines.push("    {function_id}, {group_id}, {escaped_name}, {func.symbol_id}, {func.estimated_size}, {func.hotness_score}")
+            function_id = function_id + 1
+        group_id = group_id + 1
+    lines.push("")
+
+    lines.join("\n")
+
+fn serialize_phase(phase: LayoutPhase) -> text:
+    """Serialize phase enum to string."""
+    match phase:
+        LayoutPhase.Startup: "startup"
+        LayoutPhase.FirstFrame: "first_frame"
+        LayoutPhase.Steady: "steady"
+        LayoutPhase.Cold: "cold"
+
+fn escape_sdn_value(value: text) -> text:
+    """Escape special characters in SDN values."""
+    # Add quotes if contains comma or special chars
+    if value.contains(",") or value.contains("\n") or value.contains("\""):
+        return "\"{value.replace("\"", "\\\"")}\""
+    value
+
+# ============================================================================
+# SDN Deserialization
+# ============================================================================
+
+fn read_layout_plan(path: text) -> LayoutPlan?:
+    """Read layout plan from SDN file."""
+    if not file_exists(path):
+        return nil
+
+    val content = file_read(path)
+    if not content.?:
+        return nil
+
+    parse_layout_plan(content.unwrap())
+
+fn parse_layout_plan(content: text) -> LayoutPlan?:
+    """Parse layout plan from SDN content."""
+    val lines = content.split("\n")
+
+    # Parse tables
+    var metadata_table: [(i64, i64, i64)] = []
+    var groups_table: [(i64, text, i64, i64, i64)] = []
+    var functions_table: [(i64, i64, text, i64, i64, f64)] = []
+
+    var current_table = ""
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip empty lines and comments
+        if not trimmed.? or trimmed.starts_with("#"):
+            continue
+
+        # Detect table header
+        if trimmed.contains("|") and not trimmed.starts_with(" "):
+            if trimmed.starts_with("layout_metadata"):
+                current_table = "metadata"
+            elif trimmed.starts_with("layout_groups"):
+                current_table = "groups"
+            elif trimmed.starts_with("layout_functions"):
+                current_table = "functions"
+            continue
+
+        # Parse data rows
+        if trimmed.starts_with(" ") or trimmed.starts_with("\t"):
+            val row = trimmed.trim()
+            if current_table == "metadata":
+                val parsed = parse_metadata_row(row)
+                if parsed.?:
+                    metadata_table.push(parsed.unwrap())
+            elif current_table == "groups":
+                val parsed = parse_group_row(row)
+                if parsed.?:
+                    groups_table.push(parsed.unwrap())
+            elif current_table == "functions":
+                val parsed = parse_function_row(row)
+                if parsed.?:
+                    functions_table.push(parsed.unwrap())
+
+    # Reconstruct layout plan
+    if metadata_table.len() == 0:
+        return nil
+
+    val (total_size, page_count, _version) = metadata_table[0]
+
+    # Build groups
+    var groups: [LayoutGroup] = []
+    for (group_id, phase_str, start_offset, total_size_g, _func_count) in groups_table:
+        # Find functions for this group
+        var group_funcs: [LayoutFunctionInfo] = []
+        for (func_id, g_id, name, symbol_id, size, hotness) in functions_table:
+            if g_id == group_id:
+                val phase = parse_phase(phase_str) ?? LayoutPhase.Steady
+                group_funcs.push(LayoutFunctionInfo(
+                    name: name,
+                    symbol_id: symbol_id,
+                    estimated_size: size,
+                    hotness_score: hotness,
+                    phase: phase
+                ))
+
+        val phase = parse_phase(phase_str) ?? LayoutPhase.Steady
+        groups.push(LayoutGroup(
+            phase: phase,
+            functions: group_funcs,
+            start_offset: start_offset,
+            total_size: total_size_g,
+            page_aligned: true
+        ))
+
+    Some(LayoutPlan(
+        groups: groups,
+        total_size: total_size,
+        page_count: page_count
+    ))
+
+# ============================================================================
+# Row Parsers
+# ============================================================================
+
+fn parse_metadata_row(row: text) -> (i64, i64, i64)?:
+    """Parse metadata row: total_size, page_count, version."""
+    val parts = row.split(",")
+    if parts.len() < 3:
+        return nil
+
+    val total_size = parts[0].trim().to_int()
+    val page_count = parts[1].trim().to_int()
+    val version = parts[2].trim().to_int()
+
+    Some((total_size, page_count, version))
+
+fn parse_group_row(row: text) -> (i64, text, i64, i64, i64)?:
+    """Parse group row: group_id, phase, start_offset, total_size, function_count."""
+    val parts = row.split(",")
+    if parts.len() < 5:
+        return nil
+
+    val group_id = parts[0].trim().to_int()
+    val phase = parts[1].trim()
+    val start_offset = parts[2].trim().to_int()
+    val total_size = parts[3].trim().to_int()
+    val function_count = parts[4].trim().to_int()
+
+    Some((group_id, phase, start_offset, total_size, function_count))
+
+fn parse_function_row(row: text) -> (i64, i64, text, i64, i64, f64)?:
+    """Parse function row: function_id, group_id, name, symbol_id, size, hotness."""
+    val parts = split_sdn_row(row)
+    if parts.len() < 6:
+        return nil
+
+    val function_id = parts[0].trim().to_int()
+    val group_id = parts[1].trim().to_int()
+    val name = unquote_sdn_value(parts[2].trim())
+    val symbol_id = parts[3].trim().to_int()
+    val size = parts[4].trim().to_int()
+    val hotness = parts[5].trim().to_float()
+
+    Some((function_id, group_id, name, symbol_id, size, hotness))
+
+fn split_sdn_row(row: text) -> [text]:
+    """Split SDN row respecting quoted values."""
+    var parts: [text] = []
+    var current = ""
+    var in_quotes = false
+    var i = 0
+
+    while i < row.len():
+        val ch = row[i]
+        if ch == '"':
+            in_quotes = not in_quotes
+            current = current + ch
+        elif ch == ',' and not in_quotes:
+            parts.push(current)
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+
+    if current.? or parts.len() > 0:
+        parts.push(current)
+
+    parts
+
+fn unquote_sdn_value(value: text) -> text:
+    """Remove quotes from SDN value."""
+    if value.len() >= 2 and value.starts_with("\"") and value.ends_with("\""):
+        return value[1..(value.len() - 1)]
+    value
+
+fn parse_phase(phase_str: text) -> LayoutPhase?:
+    """Parse phase string to enum."""
+    if phase_str == "startup":
+        Some(LayoutPhase.Startup)
+    elif phase_str == "first_frame":
+        Some(LayoutPhase.FirstFrame)
+    elif phase_str == "steady":
+        Some(LayoutPhase.Steady)
+    elif phase_str == "cold":
+        Some(LayoutPhase.Cold)
+    else:
+        nil
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export write_layout_plan, read_layout_plan
+export serialize_layout_plan, parse_layout_plan

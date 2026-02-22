@@ -5,8 +5,6 @@
 Manual analysis of code generation and compilation files to identify duplication patterns using structural and semantic comparison.
 
 **Files Analyzed:**
-1. `/home/ormastes/dev/pub/simple/src/compiler_core_legacy/compiler/c_codegen.spl` (2,339 lines)
-2. `/home/ormastes/dev/pub/simple/src/app/compile/c_codegen.spl` (1,124 lines)
 3. `/home/ormastes/dev/pub/simple/src/app/compile/c_translate.spl` (1,896 lines)
 4. `/home/ormastes/dev/pub/simple/src/compiler/mir_lowering.spl` (1,503 lines)
 5. `/home/ormastes/dev/pub/simple/src/compiler_core_legacy/mir_lowering.spl` (1,174 lines)
@@ -85,7 +83,6 @@ fn mirlowering_new(symbols: SymbolTable) -> MirLowering:
 
 ### 2. **C Codegen - Divergent Architectures (60% Overlap)**
 
-**Files:** `src/compiler_core_legacy/compiler/c_codegen.spl` vs `src/app/compile/c_codegen.spl` + `c_translate.spl`
 
 **Impact Score:** ~800 duplicated lines × 2 systems = **1,600 total impact**
 
@@ -93,7 +90,6 @@ fn mirlowering_new(symbols: SymbolTable) -> MirLowering:
 
 #### Architecture Comparison:
 
-| Feature | compiler_core_legacy/compiler/c_codegen.spl | app/compile/c_codegen.spl + c_translate.spl |
 |---------|------------------------------|---------------------------------------------|
 | **Input** | Core AST (struct pools) | Simple source text (line-based parsing) |
 | **Output** | C++ (spl_runtime.h compatible) | C (generic runtime) |
@@ -109,7 +105,6 @@ fn mirlowering_new(symbols: SymbolTable) -> MirLowering:
 Both implement variable type tracking with scoping:
 
 ```simple
-# src/compiler_core_legacy/compiler/c_codegen.spl (lines 72-115)
 var vt_names: [text] = []
 var vt_types: [i64] = []
 var vt_depths: [i64] = []
@@ -131,7 +126,6 @@ fn vt_find(name: text) -> i64:
 vs
 
 ```simple
-# src/app/compile/c_codegen.spl (lines 36-40, uses string registry)
 var types = ";"
 types = types + "text:name;arr:name;fn_text:funcname;"
 # Query via is_text_var(), is_int_array_var(), etc. in c_helpers.spl
@@ -140,7 +134,6 @@ types = types + "text:name;arr:name;fn_text:funcname;"
 **B. Struct Array Tracking (~80 lines each)**
 
 ```simple
-# src/compiler_core_legacy/compiler/c_codegen.spl (lines 141-163)
 var sa_var_names: [text] = []
 var sa_struct_names: [text] = []
 
@@ -160,7 +153,6 @@ fn sa_find(var_name: text) -> text:
 vs
 
 ```simple
-# src/app/compile/c_codegen.spl (lines 152-158, pre-pass)
 if pf_ftype.starts_with("[") and pf_ftype.ends_with("]"):
     val pf_elem = pf_ftype.substring(1, pf_ftype.len() - 1)
     if pf_elem[0] >= "A" and pf_elem[0] <= "Z":
@@ -172,7 +164,6 @@ if pf_ftype.starts_with("[") and pf_ftype.ends_with("]"):
 Both map Simple operators to C operators:
 
 ```simple
-# src/compiler_core_legacy/compiler/c_codegen.spl (lines 371-398)
 fn cg_binary_op_to_cpp(op_tok: i64, left_type: i64, right_type: i64) -> text:
     if op_tok == TOK_PLUS: return "+"
     if op_tok == TOK_MINUS: return "-"
@@ -199,7 +190,6 @@ if op == "+" and is_int: return "(" + left + " + " + right + ")"
 
 ### 3. **Expression Translation Patterns (~400 lines)**
 
-**Files:** `src/compiler_core_legacy/compiler/c_codegen.spl` (cg_expr functions) vs `src/app/compile/c_translate.spl` (translate_expr)
 
 **Pattern:** Both recursively translate Simple expressions to C, with similar patterns for:
 - String literals (escape handling)
@@ -211,7 +201,6 @@ if op == "+" and is_int: return "(" + left + " + " + right + ")"
 **Example - String Escaping:**
 
 ```simple
-# src/compiler_core_legacy/compiler/c_codegen.spl (lines 358-369)
 fn cg_escape_cpp_string(s: text) -> text:
     var result = ""
     for i in range(0, s.len()):
@@ -262,7 +251,6 @@ escaped = escaped.replace(NL, "\\n")
    - **Action:** Create `src/shared/type_tracker.spl` with:
      - `TypeRegistry` struct (replaces vt_*, st_*, sa_* arrays)
      - `add_variable()`, `find_type()`, `push_scope()`, `pop_scope()` methods
-   - **Used by:** `compiler_core_legacy/compiler/c_codegen.spl`, `app/compile/c_codegen.spl`
    - **Reduction:** ~230 lines
    - **Effort:** 1 day
 
@@ -372,11 +360,9 @@ tokens = tokenize(content, config)
 
 ```
 Lines  File
-2,339  src/compiler_core_legacy/compiler/c_codegen.spl
 1,503  src/compiler/mir_lowering.spl
 1,896  src/app/compile/c_translate.spl
 1,174  src/compiler_core_legacy/mir_lowering.spl
-1,124  src/app/compile/c_codegen.spl
 ─────
 8,036  Total
 ```

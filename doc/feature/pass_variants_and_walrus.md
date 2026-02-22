@@ -191,5 +191,5 @@ items := [1, 2, 3]
 - Implementation Plan: `/home/ormastes/.claude/plans/expressive-spinning-ember.md`
 - Test Files: `test/feature/pass_variants_spec.spl`, `test/feature/walrus_operator_spec.spl`
 - Core Modules: `src/compiler_core/{tokens,lexer,ast,parser}.spl`
-- Codegen: `src/compiler_core/{interpreter/eval,compiler/c_codegen}.spl`
+- Codegen: `src/compiler_core/{interpreter/eval,compiler/c_backend}.spl`
 - Seed Compiler: `seed/seed.c`

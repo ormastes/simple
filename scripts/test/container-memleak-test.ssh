@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# Container Memory Leak Detection for Simple Test Runner
+#
+# Runs test files sequentially in a memory-limited container with memtrack
+# enabled, capturing per-file allocation diffs to detect leaks in the test
+# runner itself. Core dumps are enabled for crash analysis.
+#
+# Usage:
+#   bash scripts/test/container-memleak-test.ssh [spec_files...]
+#
+# If no files given, defaults to the 3 memleak spec files.
+# Requires docker or podman.
+
+set -euo pipefail
+
+# =========================================================================
+# Configuration
+# =========================================================================
+
+MEMORY_LIMIT="256m"
+CPU_LIMIT="2.0"
+IMAGE_NAME="simple-test-full:latest"
+CORE_DIR="/tmp/cores"
+OUTPUT_LOG="/tmp/memleak-test-output.log"
+
+# Default test files — sequential memleak measurement specs
+DEFAULT_FILES=(
+    "test/unit/memleak/baseline_memleak_spec.spl"
+    "test/unit/memleak/iteration2_memleak_spec.spl"
+    "test/unit/memleak/iteration3_memleak_spec.spl"
+)
+
+# =========================================================================
+# Detect container runtime
+# =========================================================================
+
+detect_runtime() {
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        echo "docker"
+    elif command -v podman &>/dev/null; then
+        echo "podman"
+    else
+        echo ""
+    fi
+}
+
+RUNTIME=$(detect_runtime)
+if [ -z "$RUNTIME" ]; then
+    echo "ERROR: Neither docker nor podman found. Install one to continue."
+    exit 1
+fi
+echo "Using container runtime: $RUNTIME"
+
+# =========================================================================
+# Build image if needed
+# =========================================================================
+
+if ! $RUNTIME image inspect "$IMAGE_NAME" &>/dev/null; then
+    echo "Image $IMAGE_NAME not found. Building..."
+    $RUNTIME build \
+        -t "$IMAGE_NAME" \
+        -f tools/docker/Dockerfile.test-full \
+        .
+    echo "Image built successfully."
+else
+    echo "Image $IMAGE_NAME found."
+fi
+
+# =========================================================================
+# Determine test files
+# =========================================================================
+
+if [ $# -gt 0 ]; then
+    TEST_FILES=("$@")
+else
+    TEST_FILES=("${DEFAULT_FILES[@]}")
+fi
+
+echo ""
+echo "=== Container Memory Leak Detection ==="
+echo "Memory limit: $MEMORY_LIMIT"
+echo "CPU limit:    $CPU_LIMIT"
+echo "Test files:   ${#TEST_FILES[@]}"
+for f in "${TEST_FILES[@]}"; do
+    echo "  - $f"
+done
+echo ""
+
+# =========================================================================
+# Run each test file sequentially in the same container
+# =========================================================================
+
+# The test runner only accepts a single path argument, so we run each file
+# in a separate container invocation. We use --mem-check to enable per-file
+# memdiff tracking with C-level allocation tracking (SIMPLE_MEMTRACK=1).
+
+> "$OUTPUT_LOG"  # Clear log
+OVERALL_EXIT=0
+FILE_NUM=0
+TOTAL_FILES=${#TEST_FILES[@]}
+
+for f in "${TEST_FILES[@]}"; do
+    FILE_NUM=$((FILE_NUM + 1))
+    CONTAINER_NAME="simple-memleak-test-$$-${FILE_NUM}"
+
+    echo "[$FILE_NUM/$TOTAL_FILES] Running: $f"
+    echo "  Container: $CONTAINER_NAME"
+
+    set +e
+    $RUNTIME run \
+        --rm \
+        --name "$CONTAINER_NAME" \
+        --user "$(id -u):$(id -g)" \
+        --memory="$MEMORY_LIMIT" \
+        --cpus="$CPU_LIMIT" \
+        --ulimit core=-1:-1 \
+        --tmpfs /tmp:rw,exec,size=64m \
+        -v "$(pwd):/workspace:rw" \
+        -e SIMPLE_MEMTRACK=1 \
+        -e SIMPLE_TEST_TEMP_DIR=/tmp/simple-test \
+        "$IMAGE_NAME" \
+        test --mem-check "$f" \
+        2>&1 | tee -a "$OUTPUT_LOG"
+    FILE_EXIT=${PIPESTATUS[0]}
+    set -e
+
+    if [ $FILE_EXIT -ne 0 ]; then
+        echo "  FAILED (exit code $FILE_EXIT)"
+        OVERALL_EXIT=$FILE_EXIT
+    else
+        echo "  PASSED"
+    fi
+    echo ""
+done
+
+echo ""
+echo "=== All files completed (exit code: $OVERALL_EXIT) ==="
+
+# =========================================================================
+# Check for core dumps on host /tmp
+# =========================================================================
+
+echo ""
+echo "Checking for core dumps..."
+CORES=$(ls /tmp/core.* 2>/dev/null || true)
+if [ -n "$CORES" ]; then
+    echo "CORE DUMPS FOUND:"
+    echo "$CORES"
+    mkdir -p "$CORE_DIR"
+    for core in $CORES; do
+        cp "$core" "$CORE_DIR/" 2>/dev/null || true
+    done
+    echo "Core dumps copied to $CORE_DIR/"
+else
+    echo "No core dumps found."
+fi
+
+# =========================================================================
+# Extract memdiff report from output
+# =========================================================================
+
+echo ""
+echo "=== MEMDIFF Summary ==="
+grep -E '\[MEMDIFF\]|Memory Leak Report|TOTAL LEAKED|By tag:|No memory leaks|Phases:|Added:|Memory tracking enabled' "$OUTPUT_LOG" || echo "(no memdiff lines found in output)"
+
+# =========================================================================
+# Final result
+# =========================================================================
+
+echo ""
+echo "Full output: $OUTPUT_LOG"
+if [ $OVERALL_EXIT -ne 0 ]; then
+    echo "RESULT: Some tests failed or crashed (exit code $OVERALL_EXIT)"
+    exit $OVERALL_EXIT
+else
+    echo "RESULT: All tests passed"
+fi

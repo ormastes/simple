@@ -1,0 +1,802 @@
+# Dimension Constraints - Compile-time Dimension Checking
+#
+# This module implements the dimension constraint solver for tensor shape checking.
+# Features:
+# - Compile-time dimension validation
+# - Dimension unification and inference
+# - Error diagnostics with suggestions
+# - Runtime dimension check generation
+#
+# Constraint type definitions are in dim_constraints_types.spl
+
+use compiler.hir.hir.{DimExpr, DimExprKind, HirType, DeviceType}
+use compiler.core.lexer.Span
+use dim_constraints_types.*
+
+struct DimSolver:
+    """Constraint solver for dimension checking."""
+    constraints: [DimConstraint]
+    substitution: Dict<i64, DimExpr>  # Var id -> resolved dimension
+    next_var_id: i64
+    errors: [DimError]
+
+impl DimSolver:
+    static fn new() -> DimSolver:
+        DimSolver(
+            constraints: [],
+            substitution: {},
+            next_var_id: 0,
+            errors: []
+        )
+
+    me fresh_var(span: Span) -> DimExpr:
+        """Create a fresh dimension variable."""
+        val id = self.next_var_id
+        self.next_var_id = self.next_var_id + 1
+        DimExpr__var(id, span)
+
+    me add(c: DimConstraint):
+        """Add a constraint to be solved."""
+        self.constraints = self.constraints.push(c)
+
+    me add_equal(d1: DimExpr, d2: DimExpr, span: Span):
+        """Add equality constraint."""
+        self.add(DimConstraint.Equal(d1, d2, span))
+
+    me add_layer_compatible(out: [DimExpr], in_: [DimExpr], span: Span):
+        """Add layer compatibility constraint for ~> operator."""
+        self.add(DimConstraint.LayerCompatible(out, in_, span))
+
+    # ========================================================================
+    # Unification
+    # ========================================================================
+
+    me unify(d1: DimExpr, d2: DimExpr) -> Result<DimExpr, DimError>:
+        """Unify two dimension expressions.
+
+        Returns the unified dimension, or an error if they can't be unified.
+
+        Unification rules:
+        - Literal(v1) with Literal(v2): v1 == v2 ? Ok(v1) : Err
+        - Var(id) with any: bind id -> any
+        - Dynamic with any: Ok(any)
+        - Broadcast with Literal(1): Ok(1)
+        - Named with same name: Ok
+        """
+        val e1 = self.apply_substitution(d1)
+        val e2 = self.apply_substitution(d2)
+
+        match (e1.kind, e2.kind):
+            # Both literals - must be equal
+            case (Literal(v1), Literal(v2)):
+                if v1 == v2:
+                    Ok(e1)
+                else:
+                    Err(DimError__mismatch(e1, e2, e1.span.merge(e2.span)))
+
+            # Variable bindings
+            case (Var(id1), _):
+                self.bind_var(id1, e2)
+                Ok(e2)
+            case (_, Var(id2)):
+                self.bind_var(id2, e1)
+                Ok(e1)
+
+            # Dynamic accepts anything
+            case (Dynamic, _):
+                Ok(e2)
+            case (_, Dynamic):
+                Ok(e1)
+
+            # Broadcast matches 1
+            case (Broadcast, Literal(1)):
+                Ok(e2)
+            case (Literal(1), Broadcast):
+                Ok(e1)
+            case (Broadcast, Broadcast):
+                Ok(e1)
+
+            # Named dimensions
+            case (Named(n1, lo1, hi1), Named(n2, lo2, hi2)):
+                if n1 == n2:
+                    Ok(e1)
+                else:
+                    Err(DimError__mismatch(e1, e2, e1.span.merge(e2.span)))
+
+            # Const params
+            case (ConstParam(n1), ConstParam(n2)):
+                if n1 == n2:
+                    Ok(e1)
+                else:
+                    Err(DimError__mismatch(e1, e2, e1.span.merge(e2.span)))
+
+            # Arithmetic - try to evaluate
+            case (Add(l1, r1), Add(l2, r2)):
+                val left = self.unify(l1, l2)?
+                val right = self.unify(r1, r2)?
+                Ok(DimExpr(kind: DimExprKind.Add(left, right), span: e1.span))
+
+            case (Mul(l1, r1), Mul(l2, r2)):
+                val left = self.unify(l1, l2)?
+                val right = self.unify(r1, r2)?
+                Ok(DimExpr(kind: DimExprKind.Mul(left, right), span: e1.span))
+
+            case _:
+                # Try to evaluate both and compare
+                val v1 = self.try_eval(e1)
+                val v2 = self.try_eval(e2)
+                if v1.? and v2.?:
+                    if v1.unwrap() == v2.unwrap():
+                        Ok(DimExpr__literal(v1.unwrap(), e1.span))
+                    else:
+                        Err(DimError__mismatch(e1, e2, e1.span.merge(e2.span)))
+                else:
+                    Err(DimError__mismatch(e1, e2, e1.span.merge(e2.span)))
+
+    me bind_var(id: i64, expr: DimExpr):
+        """Bind a variable to an expression."""
+        # Occurs check: don't bind var to expression containing itself
+        if not self.occurs_in(id, expr):
+            self.substitution[id] = expr
+
+    fn occurs_in(id: i64, expr: DimExpr) -> bool:
+        """Check if variable occurs in expression (for occurs check)."""
+        match expr.kind:
+            case Var(vid): vid == id
+            case Add(l, r): self.occurs_in(id, l) or self.occurs_in(id, r)
+            case Mul(l, r): self.occurs_in(id, l) or self.occurs_in(id, r)
+            case Div(l, r): self.occurs_in(id, l) or self.occurs_in(id, r)
+            case _: false
+
+    fn apply_substitution(expr: DimExpr) -> DimExpr:
+        """Apply current substitution to expression."""
+        match expr.kind:
+            case Var(id):
+                if self.substitution[id].?:
+                    self.apply_substitution(self.substitution[id])
+                else:
+                    expr
+            case Add(l, r):
+                val left = self.apply_substitution(l)
+                val right = self.apply_substitution(r)
+                DimExpr(kind: DimExprKind.Add(left, right), span: expr.span)
+            case Mul(l, r):
+                val left = self.apply_substitution(l)
+                val right = self.apply_substitution(r)
+                DimExpr(kind: DimExprKind.Mul(left, right), span: expr.span)
+            case Div(l, r):
+                val left = self.apply_substitution(l)
+                val right = self.apply_substitution(r)
+                DimExpr(kind: DimExprKind.Div(left, right), span: expr.span)
+            case _:
+                expr
+
+    fn try_eval(expr: DimExpr) -> i64?:
+        """Try to evaluate a dimension expression to a constant."""
+        match expr.kind:
+            case Literal(v): Some(v)
+            case Add(l, r):
+                val lv = self.try_eval(l)
+                val rv = self.try_eval(r)
+                if lv.? and rv.?:
+                    Some(lv.unwrap() + rv.unwrap())
+                else:
+                    nil
+            case Mul(l, r):
+                val lv = self.try_eval(l)
+                val rv = self.try_eval(r)
+                if lv.? and rv.?:
+                    Some(lv.unwrap() * rv.unwrap())
+                else:
+                    nil
+            case Div(l, r):
+                val lv = self.try_eval(l)
+                val rv = self.try_eval(r)
+                if lv.? and rv.? and rv.unwrap() != 0:
+                    Some(lv.unwrap() / rv.unwrap())
+                else:
+                    nil
+            case _:
+                nil
+
+    # ========================================================================
+    # Constraint Solving
+    # ========================================================================
+
+    me solve() -> Result<(), [DimError]>:
+        """Solve all collected constraints.
+
+        Returns Ok(()) if all constraints are satisfied,
+        or Err with list of errors otherwise.
+        """
+        for c in self.constraints:
+            val result = self.solve_constraint(c)
+            if not result.is_ok():
+                self.errors = self.errors.push(result.err.unwrap())
+
+        if self.errors.len() > 0:
+            Err(self.errors)
+        else:
+            Ok(())
+
+    me solve_constraint(c: DimConstraint) -> Result<(), DimError>:
+        """Solve a single constraint.
+
+        Returns detailed, actionable error messages when constraints fail.
+        """
+        match c:
+            case Equal(d1, d2, span):
+                val result = self.unify(d1, d2)
+                if not result.is_ok():
+                    Err(result.err.unwrap())
+                else:
+                    Ok(())
+
+            case GreaterEq(d, min, span):
+                val expr = self.apply_substitution(d)
+                val value = self.try_eval(expr)
+                if value.? and value.unwrap() < min:
+                    val v = value.unwrap()
+                    Err(DimError__out_of_range(expr, v, min, 9223372036854775807, span)
+                        .with_note("constraint requires dimension >= {min}")
+                        .with_suggestion("increase the dimension to at least {min}"))
+                else:
+                    Ok(())
+
+            case LessEq(d, max, span):
+                val expr = self.apply_substitution(d)
+                val value = self.try_eval(expr)
+                if value.? and value.unwrap() > max:
+                    val v = value.unwrap()
+                    Err(DimError__out_of_range(expr, v, 0, max, span)
+                        .with_note("constraint requires dimension <= {max}")
+                        .with_suggestion("reduce the dimension to at most {max}"))
+                else:
+                    Ok(())
+
+            case InRange(d, lo, hi, span):
+                val expr = self.apply_substitution(d)
+                val value = self.try_eval(expr)
+                if value.?:
+                    val v = value.unwrap()
+                    if v < lo:
+                        Err(DimError__out_of_range(expr, v, lo, hi, span)
+                            .with_note("value {v} is below minimum {lo}")
+                            .with_suggestion("increase to at least {lo}"))
+                    elif v > hi:
+                        Err(DimError__out_of_range(expr, v, lo, hi, span)
+                            .with_note("value {v} is above maximum {hi}")
+                            .with_suggestion("reduce to at most {hi}"))
+                    else:
+                        Ok(())
+                else:
+                    Ok(())  # Can't check at compile time, will generate runtime check
+
+            case ProductEquals(dims, value, span):
+                var product = 1
+                var all_known = true
+                var dim_strs: [text] = []
+                for d in dims:
+                    val expr = self.apply_substitution(d)
+                    val v = self.try_eval(expr)
+                    if v.?:
+                        product = product * v.unwrap()
+                        dim_strs = dim_strs.push("{v.unwrap()}")
+                    else:
+                        all_known = false
+                        dim_strs = dim_strs.push(expr.format())
+
+                if all_known and product != value:
+                    val dims_str = dim_strs.join(" × ")
+                    Err(DimError(
+                        message: "dimension product mismatch: {dims_str} = {product}, expected {value}",
+                        kind: DimErrorKind.Mismatch,
+                        span: span,
+                        notes: [
+                            DimNote(message: "product of dimensions: {dims_str} = {product}", span: nil, kind: DimNoteKind.Found),
+                            DimNote(message: "expected product: {value}", span: nil, kind: DimNoteKind.Expected)
+                        ],
+                        help: Some("adjust dimensions so their product equals {value}"),
+                        error_code: "E0511"
+                    ))
+                else:
+                    Ok(())
+
+            case LayerCompatible(out, in_, span):
+                # Check that shapes have same length
+                if out.len() != in_.len():
+                    val out_str = format_shape(out)
+                    val in_str = format_shape(in_)
+                    return Err(DimError(
+                        message: "layer rank mismatch: output has {out.len()} dimensions, input expects {in_.len()}",
+                        kind: DimErrorKind.RankMismatch,
+                        span: span,
+                        notes: [
+                            DimNote(message: "previous layer output shape: {out_str} ({out.len()}D)", span: nil, kind: DimNoteKind.Found),
+                            DimNote(message: "next layer input shape: {in_str} ({in_.len()}D)", span: nil, kind: DimNoteKind.Expected),
+                            DimNote(message: "for ~> pipeline, output and input must have same number of dimensions", span: nil, kind: DimNoteKind.Info)
+                        ],
+                        help: Some("use reshape() or add/remove dimensions to match ranks"),
+                        error_code: "E0512"
+                    ))
+
+                # Unify each dimension
+                for i in 0..out.len():
+                    val out_d = self.apply_substitution(out[i])
+                    val in_d = self.apply_substitution(in_[i])
+                    val result = self.unify(out_d, in_d)
+                    if not result.is_ok():
+                        # Create detailed layer incompatibility error
+                        return Err(DimError__layer_incompatible(out, in_, span)
+                            .with_note("mismatch at dimension {i}: {out_d.format()} vs {in_d.format()}"))
+
+                Ok()
+
+            case WidthMatch(s1, s2, operation, span):
+                val expr1 = self.apply_substitution(s1)
+                val expr2 = self.apply_substitution(s2)
+                val result = self.unify(expr1, expr2)
+                if not result.is_ok():
+                    val w1 = expr1.format()
+                    val w2 = expr2.format()
+                    Err(DimError(
+                        message: "VHDL width mismatch in {operation}: {w1} vs {w2}",
+                        kind: DimErrorKind.WidthMismatch,
+                        span: span,
+                        notes: [
+                            DimNote(message: "left signal width: {w1}", span: nil, kind: DimNoteKind.Found),
+                            DimNote(message: "right signal width: {w2}", span: nil, kind: DimNoteKind.Expected)
+                        ],
+                        help: Some("use resize() to match signal widths"),
+                        error_code: "E0700"
+                    ))
+                else:
+                    Ok(())
+
+            case WidthSafe(operands, operator, result_width, span):
+                # Check that arithmetic result fits in result width
+                val res_expr = self.apply_substitution(result_width)
+                val res_val = self.try_eval(res_expr)
+                if res_val.?:
+                    var max_operand_width = 0
+                    for op in operands:
+                        val op_expr = self.apply_substitution(op)
+                        val op_val = self.try_eval(op_expr)
+                        if op_val.? and op_val.unwrap() > max_operand_width:
+                            max_operand_width = op_val.unwrap()
+                    # For add/sub, result needs max(a,b)+1 bits; for mul, a+b bits
+                    var needed = max_operand_width
+                    if operator == "+" or operator == "-":
+                        needed = max_operand_width + 1
+                    elif operator == "*":
+                        var total = 0
+                        for op in operands:
+                            val op_expr = self.apply_substitution(op)
+                            val op_val = self.try_eval(op_expr)
+                            if op_val.?:
+                                total = total + op_val.unwrap()
+                        needed = total
+                    if needed > res_val.unwrap():
+                        Err(DimError(
+                            message: "VHDL width overflow: {operator} needs {needed} bits, result has {res_val.unwrap()}",
+                            kind: DimErrorKind.WidthOverflow,
+                            span: span,
+                            notes: [
+                                DimNote(message: "operator {operator} requires {needed}-bit result", span: nil, kind: DimNoteKind.Expected),
+                                DimNote(message: "result signal is {res_val.unwrap()} bits wide", span: nil, kind: DimNoteKind.Found)
+                            ],
+                            help: Some("widen the result signal or use explicit truncation"),
+                            error_code: "E0701"
+                        ))
+                    else:
+                        Ok(())
+                else:
+                    Ok(())  # Can't check at compile time
+
+            case BoundedLoop(bound, max_allowed, span):
+                val expr = self.apply_substitution(bound)
+                val value = self.try_eval(expr)
+                if value.?:
+                    val v = value.unwrap()
+                    if v > max_allowed:
+                        Err(DimError(
+                            message: "VHDL loop bound {v} exceeds maximum allowed {max_allowed}",
+                            kind: DimErrorKind.UnboundedLoop,
+                            span: span,
+                            notes: [
+                                DimNote(message: "loop iterates {v} times", span: nil, kind: DimNoteKind.Found),
+                                DimNote(message: "maximum allowed iterations: {max_allowed}", span: nil, kind: DimNoteKind.Expected)
+                            ],
+                            help: Some("reduce loop count or convert to FSM"),
+                            error_code: "E0730"
+                        ))
+                    else:
+                        Ok(())
+                else:
+                    # Dynamic bound - cannot verify at compile time
+                    Err(DimError(
+                        message: "VHDL loop bound must be statically determinable",
+                        kind: DimErrorKind.UnboundedLoop,
+                        span: span,
+                        notes: [
+                            DimNote(message: "loop bound: {expr.format()}", span: nil, kind: DimNoteKind.Found),
+                            DimNote(message: "VHDL synthesis requires static loop bounds", span: nil, kind: DimNoteKind.Info)
+                        ],
+                        help: Some("use a compile-time constant for the loop bound"),
+                        error_code: "E0730"
+                    ))
+
+            case ValidRange(hi, lo, span):
+                val hi_expr = self.apply_substitution(hi)
+                val lo_expr = self.apply_substitution(lo)
+                val hi_val = self.try_eval(hi_expr)
+                val lo_val = self.try_eval(lo_expr)
+                if hi_val.? and lo_val.? and hi_val.unwrap() < lo_val.unwrap():
+                    val h = hi_val.unwrap()
+                    val l = lo_val.unwrap()
+                    Err(DimError(
+                        message: "VHDL invalid range: {h} downto {l} (hi < lo)",
+                        kind: DimErrorKind.InvalidRange,
+                        span: span,
+                        notes: [
+                            DimNote(message: "high bound: {h}", span: nil, kind: DimNoteKind.Found),
+                            DimNote(message: "low bound: {l}", span: nil, kind: DimNoteKind.Found)
+                        ],
+                        help: Some("swap bounds or use 'to' for ascending ranges"),
+                        error_code: "E0740"
+                    ))
+                else:
+                    Ok(())
+
+# ============================================================================
+# Dimension Expression Formatting
+# ============================================================================
+
+impl DimExpr:
+    fn format() -> text:
+        """Format dimension expression for display."""
+        match self.kind:
+            case Literal(v): "{v}"
+            case Named(n, lo, hi):
+                if lo.? and hi.?:
+                    "{n}: {lo.unwrap()}..{hi.unwrap()}"
+                else:
+                    n
+            case Var(id): "?{id}"
+            case Dynamic: "?"
+            case Broadcast: "*"
+            case ConstParam(n): n
+            case Add(l, r): "({l.format()} + {r.format()})"
+            case Mul(l, r): "({l.format()} * {r.format()})"
+            case Div(l, r): "({l.format()} / {r.format()})"
+
+fn format_shape(dims: [DimExpr]) -> text:
+    """Format a shape as [d1, d2, ...]."""
+    if dims.len() == 0:
+        return "[]"
+
+    var parts: [text] = []
+    for d in dims:
+        parts = parts.push(d.format())
+
+    "[{parts.join(\", \")}]"
+
+# ============================================================================
+# Where Clause Types (for dimension contracts)
+# ============================================================================
+
+struct WhereClause:
+    """Where clause containing dimension constraints."""
+    constraints: [DimClause]
+    span: Span
+
+"""Dimension constraint in where clause."""
+enum DimClause:
+    DimEqual(left: DimExpr, right: DimExpr)
+    DimRange(dim: text, lo: i64, hi: i64)
+    DimMin(dim: text, min: i64)
+    DimMax(dim: text, max: i64)
+
+impl WhereClause:
+    fn to_constraints(solver: DimSolver, span: Span) -> [DimConstraint]:
+        """Convert where clause to dimension constraints."""
+        var result: [DimConstraint] = []
+        for clause in self.constraints:
+            match clause:
+                case DimEqual(left, right):
+                    result = result.push(DimConstraint.Equal(left, right, span))
+                case DimRange(dim, lo, hi):
+                    val d = DimExpr__named(dim, span)
+                    result = result.push(DimConstraint.InRange(d, lo, hi, span))
+                case DimMin(dim, min):
+                    val d = DimExpr__named(dim, span)
+                    result = result.push(DimConstraint.GreaterEq(d, min, span))
+                case DimMax(dim, max):
+                    val d = DimExpr__named(dim, span)
+                    result = result.push(DimConstraint.LessEq(d, max, span))
+        result
+
+# ============================================================================
+# Runtime Dimension Checking
+# ============================================================================
+
+"""Configuration for when dimension checks are performed.
+
+Used to control the balance between safety and performance.
+"""
+enum DimCheckMode:
+    # No runtime checks (production mode, fastest)
+    None_
+
+    # Debug assertions - panic on mismatch (development mode)
+    Assert
+
+    # Log warning but continue (monitoring mode)
+    Log
+
+    # Strict mode - return error on mismatch (safest)
+    Strict
+
+struct RuntimeDimCheck:
+    """Generated runtime dimension check.
+
+    These are inserted into the code after static analysis to verify
+    dynamic dimensions at runtime before training/inference.
+    """
+    kind: RuntimeDimCheckKind
+    span: Span
+    error_message: text
+
+"""Kind of runtime dimension check."""
+enum RuntimeDimCheckKind:
+    # Check that two shapes are equal
+    ShapeEqual(left_expr: text, right_expr: text)
+
+    # Check that a dimension has a specific value
+    DimEqual(dim_expr: text, expected: i64)
+
+    # Check that a dimension is in range
+    DimRange(dim_expr: text, lo: i64, hi: i64)
+
+    # Check that layer output matches next layer input
+    LayerCompat(output_shape_expr: text, input_shape_expr: text)
+
+impl RuntimeDimCheck:
+    fn generate_code(mode: DimCheckMode) -> text:
+        """Generate runtime check code based on mode."""
+        match mode:
+            case None_:
+                ""  # No check code
+
+            case Assert:
+                match self.kind:
+                    case ShapeEqual(left, right):
+                        "assert {left}.shape == {right}.shape, \"{self.error_message}\""
+                    case DimEqual(dim, expected):
+                        "assert {dim} == {expected}, \"{self.error_message}\""
+                    case DimRange(dim, lo, hi):
+                        "assert {lo} <= {dim} <= {hi}, \"{self.error_message}\""
+                    case LayerCompat(out_, in_):
+                        "assert {out_} == {in_}, \"{self.error_message}\""
+
+            case Log:
+                match self.kind:
+                    case ShapeEqual(left, right):
+                        "if {left}.shape != {right}.shape: log.warn(\"{self.error_message}\")"
+                    case DimEqual(dim, expected):
+                        "if {dim} != {expected}: log.warn(\"{self.error_message}\")"
+                    case DimRange(dim, lo, hi):
+                        "if not ({lo} <= {dim} <= {hi}): log.warn(\"{self.error_message}\")"
+                    case LayerCompat(out_, in_):
+                        "if {out_} != {in_}: log.warn(\"{self.error_message}\")"
+
+            case Strict:
+                match self.kind:
+                    case ShapeEqual(left, right):
+                        "if {left}.shape != {right}.shape: return Err(DimMismatchError(\"{self.error_message}\"))"
+                    case DimEqual(dim, expected):
+                        "if {dim} != {expected}: return Err(DimMismatchError(\"{self.error_message}\"))"
+                    case DimRange(dim, lo, hi):
+                        "if not ({lo} <= {dim} <= {hi}): return Err(DimMismatchError(\"{self.error_message}\"))"
+                    case LayerCompat(out_, in_):
+                        "if {out_} != {in_}: return Err(DimMismatchError(\"{self.error_message}\"))"
+
+struct DimCheckGenerator:
+    """Generates runtime dimension checks for dynamic dimensions.
+
+    Used during code generation to insert runtime checks where
+    compile-time verification is not possible.
+    """
+    mode: DimCheckMode
+    checks: [RuntimeDimCheck]
+
+impl DimCheckGenerator:
+    static fn new(mode: DimCheckMode) -> DimCheckGenerator:
+        DimCheckGenerator(mode: mode, checks: [])
+
+    me add_shape_check(left: text, right: text, span: Span):
+        """Add a shape equality check."""
+        val check = RuntimeDimCheck(
+            kind: RuntimeDimCheckKind.ShapeEqual(left, right),
+            span: span,
+            error_message: "shape mismatch: {left}.shape != {right}.shape"
+        )
+        self.checks = self.checks.push(check)
+
+    me add_dim_check(dim_expr: text, expected: i64, span: Span):
+        """Add a dimension value check."""
+        val check = RuntimeDimCheck(
+            kind: RuntimeDimCheckKind.DimEqual(dim_expr, expected),
+            span: span,
+            error_message: "dimension mismatch: {dim_expr} != {expected}"
+        )
+        self.checks = self.checks.push(check)
+
+    me add_dim_range_check(dim_expr: text, lo: i64, hi: i64, span: Span):
+        """Add a dimension range check."""
+        val check = RuntimeDimCheck(
+            kind: RuntimeDimCheckKind.DimRange(dim_expr, lo, hi),
+            span: span,
+            error_message: "dimension {dim_expr} not in range [{lo}, {hi}]"
+        )
+        self.checks = self.checks.push(check)
+
+    me add_layer_compat_check(output_expr: text, input_expr: text, span: Span):
+        """Add a layer compatibility check for ~> operator."""
+        val check = RuntimeDimCheck(
+            kind: RuntimeDimCheckKind.LayerCompat(output_expr, input_expr),
+            span: span,
+            error_message: "layer dimension mismatch: output {output_expr} != input {input_expr}"
+        )
+        self.checks = self.checks.push(check)
+
+    fn generate_all() -> [text]:
+        """Generate all check code."""
+        var result: [text] = []
+        for check in self.checks:
+            val code = check.generate_code(self.mode)
+            if code.len() > 0:
+                result = result.push(code)
+        result
+
+# ============================================================================
+# Compile-time vs Runtime Decision
+# ============================================================================
+
+impl DimSolver:
+    fn classify_constraint(c: DimConstraint) -> DimCheckTiming:
+        """Determine if a constraint can be checked at compile-time or runtime.
+
+        Returns CompileTime if all dimensions are statically known,
+        Runtime if any dimension is dynamic, or Both if partially known.
+        """
+        match c:
+            case Equal(d1, d2, _):
+                val static1 = self.is_static(d1)
+                val static2 = self.is_static(d2)
+                if static1 and static2:
+                    DimCheckTiming.CompileTime
+                elif not static1 and not static2:
+                    DimCheckTiming.Runtime
+                else:
+                    DimCheckTiming.Both
+
+            case GreaterEq(d, _, _) | LessEq(d, _, _):
+                if self.is_static(d):
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.Runtime
+
+            case InRange(d, _, _, _):
+                if self.is_static(d):
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.Runtime
+
+            case LayerCompatible(out, in_, _):
+                var all_static = true
+                for d in out:
+                    if not self.is_static(d):
+                        all_static = false
+                        break
+                if all_static:
+                    for d in in_:
+                        if not self.is_static(d):
+                            all_static = false
+                            break
+                if all_static:
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.Runtime
+
+            case WidthMatch(s1, s2, _, _):
+                val static1 = self.is_static(s1)
+                val static2 = self.is_static(s2)
+                if static1 and static2:
+                    DimCheckTiming.CompileTime
+                elif not static1 and not static2:
+                    DimCheckTiming.Runtime
+                else:
+                    DimCheckTiming.Both
+
+            case WidthSafe(operands, _, result_width, _):
+                var all_static = self.is_static(result_width)
+                if all_static:
+                    for op in operands:
+                        if not self.is_static(op):
+                            all_static = false
+                            break
+                if all_static:
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.Both
+
+            case BoundedLoop(bound, _, _):
+                if self.is_static(bound):
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.CompileTime  # Always compile-time for VHDL (must be static)
+
+            case ValidRange(hi, lo, _):
+                if self.is_static(hi) and self.is_static(lo):
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.Both
+
+            case _:
+                DimCheckTiming.Runtime
+
+    fn is_static(d: DimExpr) -> bool:
+        """Check if a dimension expression is statically known."""
+        val resolved = self.apply_substitution(d)
+        match resolved.kind:
+            case Literal(_): true
+            case Named(_, lo, hi):
+                # Named dimensions with both bounds are partially static
+                lo.? and hi.?
+            case Dynamic: false
+            case Var(_): false
+            case Broadcast: true  # Broadcast is statically known as 1
+            case ConstParam(_): true  # Const params are compile-time
+            case Add(l, r): self.is_static(l) and self.is_static(r)
+            case Mul(l, r): self.is_static(l) and self.is_static(r)
+            case Div(l, r): self.is_static(l) and self.is_static(r)
+
+"""When a dimension check can be performed."""
+enum DimCheckTiming:
+    CompileTime     # Fully static, check at compile time
+    Runtime         # Dynamic, must check at runtime
+    Both            # Partially static, check what we can at compile time
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+
+# Auto-generated desugared static method wrappers
+fn DimCheckGenerator__new(mode: DimCheckMode) -> DimCheckGenerator:
+    DimCheckGenerator(mode: mode, checks: [])
+
+
+fn DimSolver__new() -> DimSolver:
+    DimSolver(
+        constraints: [],
+        substitution: {},
+        next_var_id: 0,
+        errors: []
+    )
+
+
+export DimConstraint, DimError, DimErrorKind, DimNote, DimNoteKind
+export DimSolver, DimCheckTiming
+export WhereClause, DimClause
+export DimCheckMode, RuntimeDimCheck, RuntimeDimCheckKind, DimCheckGenerator
+export format_shape
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export DimSolver, WhereClause, DimClause
+export DimCheckMode, RuntimeDimCheck, RuntimeDimCheckKind
+export DimCheckGenerator, DimCheckTiming

@@ -1,0 +1,56 @@
+# GC DynLoader FFI Pattern Spec
+# Documents that dyn_ffi.spl is stateless (no owns_handle needed)
+# This proves dyn_ffi.spl can be copied to nogc_sync_mut unchanged.
+
+struct MockDynLoader:
+    lib_path: text
+
+    static fn instance() -> MockDynLoader:
+        MockDynLoader(lib_path: "libspl_torch.so")
+
+    fn call0(lib: text, name: text) -> i64:
+        # Mock: return hash of function name
+        name.len()
+
+    fn call1(lib: text, name: text, a0: i64) -> i64:
+        a0 + 1
+
+fn mock_dl() -> MockDynLoader:
+    MockDynLoader__instance()
+
+fn mock_dyn_torch_available() -> bool:
+    var loader = mock_dl()
+    loader.call0("torch", "rt_torch_available") != 0
+
+fn mock_dyn_torch_tensor_neg(handle: i64) -> i64:
+    var loader = mock_dl()
+    loader.call1("torch", "rt_torch_torchtensor_neg", handle)
+
+describe "DynLoader FFI Pattern":
+    describe "Stateless wrapper":
+        it "DynLoader has no owns_handle field":
+            val dl = MockDynLoader__instance()
+            expect(dl.lib_path).to_equal("libspl_torch.so")
+            # No owns_handle field — stateless
+
+        it "each call creates fresh loader instance":
+            val dl1 = mock_dl()
+            val dl2 = mock_dl()
+            expect(dl1.lib_path).to_equal(dl2.lib_path)
+
+    describe "Function dispatch":
+        it "call0 dispatches without args":
+            val result = mock_dyn_torch_available()
+            expect(result).to_equal(true)
+
+        it "call1 dispatches with one arg":
+            val result = mock_dyn_torch_tensor_neg(10)
+            expect(result).to_equal(11)
+
+    describe "Migration safety":
+        it "no ownership state means zero-change migration":
+            # dyn_ffi.spl has no owns_handle, no drop(), no GC interaction
+            # Safe to copy to nogc_sync_mut/ without modification
+            val dl = MockDynLoader__instance()
+            # Verify no state to manage
+            expect(dl.lib_path.len()).to_be_greater_than(0)

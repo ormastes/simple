@@ -1,0 +1,338 @@
+# Library SMF Reader - Read modules from library SMF archives
+#
+# This module provides functionality to read individual SMF modules from
+# library SMF (.lsm) files using the location index.
+#
+# Usage:
+#   val reader = LibSmfReader.open("libstd_io.lsm")?
+#   val smf_data = reader.get_module("std/io/mod")?
+#   reader.close()
+
+use app.io.{file_read, file_exists}
+use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_MAGIC, LSMF_HEADER_SIZE, LSMF_INDEX_ENTRY_SIZE, fnv1a_hash}
+
+# ============================================================================
+# Lib SMF Reader
+# ============================================================================
+
+"""Reader for library SMF files.
+
+Example:
+    val reader = LibSmfReader__open("libstd_io.lsm")?
+    val modules = reader.list_modules()
+    val smf_data = reader.get_module("std/io/mod")?
+    reader.close()
+"""
+struct LibSmfReader:
+    file_path: text
+    header: LibSmfHeader
+    index: [ModuleIndexEntry]
+    file_data: [u8]
+    verbose: bool
+
+impl LibSmfReader:
+    """Open a library SMF file for reading.
+
+    Args:
+        path: Path to .lsm file
+
+    Returns:
+        LibSmfReader instance or error
+    """
+    static fn open(path: text) -> Result<LibSmfReader, text>:
+        # Check if file exists
+        if not file_exists(path):
+            return Err("Library SMF file not found: {path}")
+
+        # Read entire file into memory
+        val file_result = file_read(path)
+        if file_result.is_err():
+            return Err("Failed to read library file: {path}")
+
+        val file_text = file_result.unwrap()
+        val file_data = text_to_bytes(file_text)
+
+        # Read header
+        if file_data.len() < 128:
+            return Err("File too small to be library SMF")
+
+        var header_bytes: [u8] = []
+        var i = 0
+        while i < 128:
+            header_bytes.push(file_data[i])
+            i = i + 1
+
+        val header_result = LibSmfHeader__from_bytes(header_bytes)
+        if header_result.is_err():
+            return Err(header_result.unwrap_err())
+
+        val header = header_result.unwrap()
+
+        # Validate magic
+        if not header.is_valid():
+            return Err("Invalid library SMF magic number")
+
+        # Read index table
+        var index: [ModuleIndexEntry] = []
+        val index_start = header.index_offset as i64
+        val module_count = header.module_count as i64
+
+        i = 0
+        while i < module_count:
+            val entry_offset = index_start + (i * LSMF_INDEX_ENTRY_SIZE)
+            val entry_result = ModuleIndexEntry__from_bytes(file_data, entry_offset)
+            if entry_result.is_err():
+                return Err("Failed to read index entry {i}: {entry_result.unwrap_err()}")
+
+            index.push(entry_result.unwrap())
+            i = i + 1
+
+        Ok(LibSmfReader(
+            file_path: path,
+            header: header,
+            index: index,
+            file_data: file_data,
+            verbose: false
+        ))
+
+    """Enable verbose output."""
+    me set_verbose(verbose: bool):
+        self.verbose = verbose
+
+    """List all module names in the library."""
+    fn list_modules() -> [text]:
+        var names: [text] = []
+        for entry in self.index:
+            names.push(entry.get_name())
+        names
+
+    """Get the number of modules in the library."""
+    fn module_count() -> i64:
+        self.index.len()
+
+    """Check if a module exists in the library.
+
+    Args:
+        module_name: Module path (e.g., "std/io/mod")
+
+    Returns:
+        true if module exists, false otherwise
+    """
+    fn has_module(module_name: text) -> bool:
+        for entry in self.index:
+            if entry.get_name() == module_name:
+                return true
+        false
+
+    """Get SMF data for a module.
+
+    Args:
+        module_name: Module path (e.g., "std/io/mod")
+
+    Returns:
+        SMF file data as bytes or error
+    """
+    fn get_module(module_name: text) -> Result<[u8], text>:
+        # Find module in index
+        var found_entry: ModuleIndexEntry? = nil
+        for entry in self.index:
+            if entry.get_name() == module_name:
+                found_entry = entry
+                break
+
+        if not found_entry.?:
+            return Err("Module not found in library: {module_name}")
+
+        val entry = found_entry ?? ModuleIndexEntry__new("", 0, 0, 0)
+
+        # Extract module data
+        val offset = entry.offset as i64
+        val size = entry.size as i64
+
+        if offset + size > self.file_data.len():
+            return Err("Module data extends beyond file: {module_name}")
+
+        var module_data: [u8] = []
+        var i = offset
+        while i < offset + size:
+            module_data.push(self.file_data[i])
+            i = i + 1
+
+        # Verify hash
+        val computed_hash = fnv1a_hash(module_data)
+        if computed_hash != entry.hash:
+            return Err("Hash mismatch for module {module_name}: expected {entry.hash}, got {computed_hash}")
+
+        if self.verbose:
+            print "[lib-smf-reader] Loaded module: {module_name} ({size} bytes)"
+
+        Ok(module_data)
+
+    """Get object file data for a module.
+
+    Args:
+        module_name: Module path (e.g., "std/io/mod")
+
+    Returns:
+        Object file data as bytes or error if module has no object file
+    """
+    fn get_object(module_name: text) -> Result<[u8], text>:
+        # Find module in index
+        var found_entry: ModuleIndexEntry? = nil
+        for entry in self.index:
+            if entry.get_name() == module_name:
+                found_entry = entry
+                break
+
+        if not found_entry.?:
+            return Err("Module not found in library: {module_name}")
+
+        val entry = found_entry ?? ModuleIndexEntry__new("", 0, 0, 0)
+
+        # Check if module has object file
+        if not entry.has_object():
+            return Err("Module {module_name} has no object file")
+
+        # Extract object data
+        val offset = entry.obj_offset as i64
+        val size = entry.obj_size as i64
+
+        if offset + size > self.file_data.len():
+            return Err("Object data extends beyond file: {module_name}")
+
+        var obj_data: [u8] = []
+        var i = offset
+        while i < offset + size:
+            obj_data.push(self.file_data[i])
+            i = i + 1
+
+        # Verify hash
+        val computed_hash = fnv1a_hash(obj_data)
+        if computed_hash != entry.obj_hash:
+            return Err("Object hash mismatch for module {module_name}")
+
+        if self.verbose:
+            print "[lib-smf-reader] Loaded object: {module_name} ({size} bytes)"
+
+        Ok(obj_data)
+
+    """Check if a module has an object file.
+
+    Args:
+        module_name: Module path
+
+    Returns:
+        true if module has object file, false otherwise
+    """
+    fn has_object(module_name: text) -> bool:
+        for entry in self.index:
+            if entry.get_name() == module_name:
+                return entry.has_object()
+        false
+
+    """Get module metadata.
+
+    Args:
+        module_name: Module path
+
+    Returns:
+        ModuleIndexEntry or error
+    """
+    fn get_module_info(module_name: text) -> Result<ModuleIndexEntry, text>:
+        for entry in self.index:
+            if entry.get_name() == module_name:
+                return Ok(entry)
+
+        Err("Module not found: {module_name}")
+
+    """Get all module info entries."""
+    fn get_all_modules() -> [ModuleIndexEntry]:
+        self.index
+
+    """Get library header information."""
+    fn get_header() -> LibSmfHeader:
+        self.header
+
+    """Close the reader and release resources."""
+    fn close():
+        # No-op for now (file data already in memory)
+        if self.verbose:
+            print "[lib-smf-reader] Closed {self.file_path}"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+"""Convert text to bytes."""
+fn text_to_bytes(text: text) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < text.len():
+        bytes.push(text[i] as u8)
+        i = i + 1
+    bytes
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+
+# Auto-generated desugared static method wrappers
+fn LibSmfReader__open(path: text) -> Result<LibSmfReader, text>:
+    # Check if file exists
+    if not file_exists(path):
+        return Err("Library SMF file not found: {path}")
+
+    # Read entire file into memory
+    val file_result = file_read(path)
+    if file_result.is_err():
+        return Err("Failed to read library file: {path}")
+
+    val file_text = file_result.unwrap()
+    val file_data = text_to_bytes(file_text)
+
+    # Read header
+    if file_data.len() < 128:
+        return Err("File too small to be library SMF")
+
+    var header_bytes: [u8] = []
+    var i = 0
+    while i < 128:
+        header_bytes.push(file_data[i])
+        i = i + 1
+
+    val header_result = LibSmfHeader__from_bytes(header_bytes)
+    if header_result.is_err():
+        return Err(header_result.unwrap_err())
+
+    val header = header_result.unwrap()
+
+    # Validate magic
+    if not header.is_valid():
+        return Err("Invalid library SMF magic number")
+
+    # Read index table
+    var index: [ModuleIndexEntry] = []
+    val index_start = header.index_offset as i64
+    val module_count = header.module_count as i64
+
+    i = 0
+    while i < module_count:
+        val entry_offset = index_start + (i * LSMF_INDEX_ENTRY_SIZE)
+        val entry_result = ModuleIndexEntry__from_bytes(file_data, entry_offset)
+        if entry_result.is_err():
+            return Err("Failed to read index entry {i}: {entry_result.unwrap_err()}")
+
+        index.push(entry_result.unwrap())
+        i = i + 1
+
+    Ok(LibSmfReader(
+        file_path: path,
+        header: header,
+        index: index,
+        file_data: file_data,
+        verbose: false
+    ))
+
+
+export LibSmfReader

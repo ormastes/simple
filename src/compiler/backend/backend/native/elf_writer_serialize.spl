@@ -1,0 +1,398 @@
+# ELF64 Serialization
+#
+# Extracted from elf_writer.spl. Contains ELF64 binary serialization functions:
+# - write_elf64: Main ELF64 file serialization
+# - write_shdr: Section header entry writer
+# - write_elf_sym: Symbol table entry writer
+# - write_elf_rela: Relocation entry writer
+# - elf_sym_info: Symbol info byte packer
+# - align_offset, pad_to: Alignment helpers
+# - elf_write_object: Convenience wrapper
+
+use compiler.backend.backend.native.elf_writer.*
+
+# ============================================================================
+# ELF64 Writing
+# ============================================================================
+
+fn elf_sym_info(sym_binding: i64, sym_type: i64) -> i64:
+    (sym_binding * 16) + sym_type
+
+fn write_elf64(writer: ElfWriter) -> [i64]:
+    # Build string tables
+    var shstrtab = new_string_table()
+    var strtab = new_string_table()
+
+    # Add section names to shstrtab
+    shstrtab = strtab_add(shstrtab, ".text")
+    shstrtab = strtab_add(shstrtab, ".data")
+    shstrtab = strtab_add(shstrtab, ".rodata")
+    shstrtab = strtab_add(shstrtab, ".bss")
+    shstrtab = strtab_add(shstrtab, ".symtab")
+    shstrtab = strtab_add(shstrtab, ".strtab")
+    shstrtab = strtab_add(shstrtab, ".shstrtab")
+    shstrtab = strtab_add(shstrtab, ".rela.text")
+
+    # Add symbol names to strtab
+    for sym in writer.symbols:
+        strtab = strtab_add(strtab, sym.name)
+
+    # Layout:
+    # 1. ELF header (64 bytes)
+    # 2. Section data (.text, .data, .rodata) - aligned
+    # 3. Symbol table
+    # 4. String table
+    # 5. Rela.text
+    # 6. Section header string table
+    # 7. Section header table
+
+    # Count actual sections present
+    var has_text = false
+    var has_data = false
+    var has_rodata = false
+    var has_bss = false
+    var has_rela_text = false
+
+    var text_data: [i64] = []
+    var data_data: [i64] = []
+    var rodata_data: [i64] = []
+    var bss_size = 0
+    var text_relocs: [ElfReloc] = []
+
+    for section in writer.sections:
+        match section.kind:
+            case Text:
+                has_text = true
+                text_data = section.data
+                if section.relocations_len(relocations) > 0:
+                    has_rela_text = true
+                    text_relocs = section.relocations
+            case Data:
+                has_data = true
+                data_data = section.data
+            case Rodata:
+                has_rodata = true
+                rodata_data = section.data
+            case Bss:
+                has_bss = true
+                bss_size = section.data_len(data)
+
+    # Section indices
+    # 0: null
+    var next_shndx = 1
+    var text_shndx = 0
+    var data_shndx = 0
+    var rodata_shndx = 0
+    var bss_shndx = 0
+    var symtab_shndx = 0
+    var strtab_shndx = 0
+    var rela_text_shndx = 0
+    var shstrtab_shndx = 0
+
+    if has_text:
+        text_shndx = next_shndx
+        next_shndx = next_shndx + 1
+    if has_data:
+        data_shndx = next_shndx
+        next_shndx = next_shndx + 1
+    if has_rodata:
+        rodata_shndx = next_shndx
+        next_shndx = next_shndx + 1
+    if has_bss:
+        bss_shndx = next_shndx
+        next_shndx = next_shndx + 1
+    symtab_shndx = next_shndx
+    next_shndx = next_shndx + 1
+    strtab_shndx = next_shndx
+    next_shndx = next_shndx + 1
+    if has_rela_text:
+        rela_text_shndx = next_shndx
+        next_shndx = next_shndx + 1
+    shstrtab_shndx = next_shndx
+    next_shndx = next_shndx + 1
+    val num_sections = next_shndx
+
+    # Build symbol table
+    # Sort: locals first, then globals (ELF requirement)
+    var local_syms: [ElfSymbol] = []
+    var global_syms: [ElfSymbol] = []
+    for sym in writer.symbols:
+        match sym.sym_bind:
+            case Local:
+                local_syms = local_syms + [sym]
+            case Global:
+                global_syms = global_syms + [sym]
+
+    # Section symbols (local) - one per section
+    var section_syms: [ElfSymbol] = []
+    if has_text:
+        section_syms = section_syms + [ElfSymbol(name: "", sym_bind: ElfSymbolBind.Local, sym_type: ElfSymbolType.Section, section_index: text_shndx, value: 0, size: 0)]
+    if has_data:
+        section_syms = section_syms + [ElfSymbol(name: "", sym_bind: ElfSymbolBind.Local, sym_type: ElfSymbolType.Section, section_index: data_shndx, value: 0, size: 0)]
+    if has_rodata:
+        section_syms = section_syms + [ElfSymbol(name: "", sym_bind: ElfSymbolBind.Local, sym_type: ElfSymbolType.Section, section_index: rodata_shndx, value: 0, size: 0)]
+    if has_bss:
+        section_syms = section_syms + [ElfSymbol(name: "", sym_bind: ElfSymbolBind.Local, sym_type: ElfSymbolType.Section, section_index: bss_shndx, value: 0, size: 0)]
+
+    # Ordered: null sym + section syms + local user syms + global user syms
+    # first_global_index = 1 + section_syms.len + local_syms.len
+    val first_global = 1 + section_syms_len(section_syms) + local_syms_len(local_syms)
+
+    # Build symbol table bytes
+    var symtab_buf = new_byte_buffer()
+    # Null symbol (index 0)
+    symtab_buf = buf_write_zeroes(symtab_buf, ELF64_SYM_SIZE)
+
+    # Write section symbols
+    for sym in section_syms:
+        symtab_buf = write_elf_sym(symtab_buf, sym, strtab)
+
+    # Write local user symbols
+    for sym in local_syms:
+        symtab_buf = write_elf_sym(symtab_buf, sym, strtab)
+
+    # Write global user symbols
+    for sym in global_syms:
+        symtab_buf = write_elf_sym(symtab_buf, sym, strtab)
+
+    # Build relocation table bytes
+    var rela_buf = new_byte_buffer()
+    for reloc in text_relocs:
+        rela_buf = write_elf_rela(rela_buf, reloc)
+
+    # Now compute offsets for all sections
+    var offset = ELF64_EHDR_SIZE
+
+    var text_offset = 0
+    if has_text:
+        offset = align_offset(offset, 16)
+        text_offset = offset
+        offset = offset + text_data_len(text_data)
+
+    var data_offset = 0
+    if has_data:
+        offset = align_offset(offset, 8)
+        data_offset = offset
+        offset = offset + data_data_len(data_data)
+
+    var rodata_offset = 0
+    if has_rodata:
+        offset = align_offset(offset, 8)
+        rodata_offset = offset
+        offset = offset + rodata_data_len(rodata_data)
+
+    # BSS has no file data
+    var bss_offset = 0
+    if has_bss:
+        bss_offset = offset
+
+    # Symbol table
+    offset = align_offset(offset, 8)
+    val symtab_offset = offset
+    val symtab_size = symtab_buf.bytes_len(bytes)
+    offset = offset + symtab_size
+
+    # String table
+    val strtab_offset = offset
+    val strtab_size = strtab.data_len(data)
+    offset = offset + strtab_size
+
+    # Rela.text
+    var rela_text_offset = 0
+    var rela_text_size = 0
+    if has_rela_text:
+        offset = align_offset(offset, 8)
+        rela_text_offset = offset
+        rela_text_size = rela_buf.bytes_len(bytes)
+        offset = offset + rela_text_size
+
+    # Shstrtab
+    val shstrtab_offset = offset
+    val shstrtab_size = shstrtab.data_len(data)
+    offset = offset + shstrtab_size
+
+    # Section headers (aligned to 8)
+    offset = align_offset(offset, 8)
+    val shdr_offset = offset
+
+    # === Write the ELF file ===
+    var buf = new_byte_buffer()
+
+    # ELF header
+    buf = buf_write_u8(buf, ELF_MAGIC_0)
+    buf = buf_write_u8(buf, ELF_MAGIC_1)
+    buf = buf_write_u8(buf, ELF_MAGIC_2)
+    buf = buf_write_u8(buf, ELF_MAGIC_3)
+    buf = buf_write_u8(buf, ELFCLASS64)      # EI_CLASS
+    buf = buf_write_u8(buf, ELFDATA2LSB)     # EI_DATA
+    buf = buf_write_u8(buf, EV_CURRENT)      # EI_VERSION
+    buf = buf_write_u8(buf, ELFOSABI_NONE)   # EI_OSABI
+    buf = buf_write_zeroes(buf, 8)           # EI_ABIVERSION + padding
+    buf = buf_write_u16_le(buf, ET_REL)      # e_type
+    buf = buf_write_u16_le(buf, writer.machine)  # e_machine
+    buf = buf_write_u32_le(buf, EV_CURRENT)  # e_version
+    buf = buf_write_u64_le(buf, 0)           # e_entry
+    buf = buf_write_u64_le(buf, 0)           # e_phoff (no program headers)
+    buf = buf_write_u64_le(buf, shdr_offset) # e_shoff
+    buf = buf_write_u32_le(buf, 0)           # e_flags
+    buf = buf_write_u16_le(buf, ELF64_EHDR_SIZE) # e_ehsize
+    buf = buf_write_u16_le(buf, 0)           # e_phentsize
+    buf = buf_write_u16_le(buf, 0)           # e_phnum
+    buf = buf_write_u16_le(buf, ELF64_SHDR_SIZE) # e_shentsize
+    buf = buf_write_u16_le(buf, num_sections) # e_shnum
+    buf = buf_write_u16_le(buf, shstrtab_shndx) # e_shstrndx
+
+    # Pad to section data
+    if has_text:
+        buf = pad_to(buf, text_offset)
+        buf = buf_write_bytes(buf, text_data)
+
+    if has_data:
+        buf = pad_to(buf, data_offset)
+        buf = buf_write_bytes(buf, data_data)
+
+    if has_rodata:
+        buf = pad_to(buf, rodata_offset)
+        buf = buf_write_bytes(buf, rodata_data)
+
+    # Symtab
+    buf = pad_to(buf, symtab_offset)
+    buf = buf_write_bytes(buf, symtab_buf.bytes)
+
+    # Strtab
+    buf = pad_to(buf, strtab_offset)
+    buf = buf_write_bytes(buf, strtab.data)
+
+    # Rela.text
+    if has_rela_text:
+        buf = pad_to(buf, rela_text_offset)
+        buf = buf_write_bytes(buf, rela_buf.bytes)
+
+    # Shstrtab
+    buf = pad_to(buf, shstrtab_offset)
+    buf = buf_write_bytes(buf, shstrtab.data)
+
+    # Section headers
+    buf = pad_to(buf, shdr_offset)
+
+    # Section 0: null
+    buf = write_shdr(buf, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0)
+
+    # .text section header
+    if has_text:
+        val text_name_off = strtab_get_offset(shstrtab, ".text")
+        buf = write_shdr(buf, text_name_off, SHT_PROGBITS, SHF_ALLOC + SHF_EXECINSTR, 0, text_offset, text_data_len(text_data), 0, 0, 16, 0)
+
+    # .data section header
+    if has_data:
+        val data_name_off = strtab_get_offset(shstrtab, ".data")
+        buf = write_shdr(buf, data_name_off, SHT_PROGBITS, SHF_ALLOC + SHF_WRITE, 0, data_offset, data_data_len(data_data), 0, 0, 8, 0)
+
+    # .rodata section header
+    if has_rodata:
+        val rodata_name_off = strtab_get_offset(shstrtab, ".rodata")
+        buf = write_shdr(buf, rodata_name_off, SHT_PROGBITS, SHF_ALLOC, 0, rodata_offset, rodata_data_len(rodata_data), 0, 0, 8, 0)
+
+    # .bss section header
+    if has_bss:
+        val bss_name_off = strtab_get_offset(shstrtab, ".bss")
+        buf = write_shdr(buf, bss_name_off, SHT_NOBITS, SHF_ALLOC + SHF_WRITE, 0, bss_offset, bss_size, 0, 0, 8, 0)
+
+    # .symtab section header
+    val symtab_name_off = strtab_get_offset(shstrtab, ".symtab")
+    buf = write_shdr(buf, symtab_name_off, SHT_SYMTAB, 0, 0, symtab_offset, symtab_size, strtab_shndx, first_global, 8, ELF64_SYM_SIZE)
+
+    # .strtab section header
+    val strtab_name_off = strtab_get_offset(shstrtab, ".strtab")
+    buf = write_shdr(buf, strtab_name_off, SHT_STRTAB, 0, 0, strtab_offset, strtab_size, 0, 0, 1, 0)
+
+    # .rela.text section header
+    if has_rela_text:
+        val rela_name_off = strtab_get_offset(shstrtab, ".rela.text")
+        buf = write_shdr(buf, rela_name_off, SHT_RELA, SHF_INFO_LINK, 0, rela_text_offset, rela_text_size, symtab_shndx, text_shndx, 8, ELF64_RELA_SIZE)
+
+    # .shstrtab section header
+    val shstrtab_name_off = strtab_get_offset(shstrtab, ".shstrtab")
+    buf = write_shdr(buf, shstrtab_name_off, SHT_STRTAB, 0, 0, shstrtab_offset, shstrtab_size, 0, 0, 1, 0)
+
+    buf.bytes
+
+# Write a single section header
+fn write_shdr(buf: ByteBuffer, name: i64, sh_type: i64, flags: i64, addr: i64, offset: i64, size: i64, link: i64, info: i64, addralign: i64, entsize: i64) -> ByteBuffer:
+    var b = buf
+    b = buf_write_u32_le(b, name)       # sh_name
+    b = buf_write_u32_le(b, sh_type)    # sh_type
+    b = buf_write_u64_le(b, flags)      # sh_flags
+    b = buf_write_u64_le(b, addr)       # sh_addr
+    b = buf_write_u64_le(b, offset)     # sh_offset
+    b = buf_write_u64_le(b, size)       # sh_size
+    b = buf_write_u32_le(b, link)       # sh_link
+    b = buf_write_u32_le(b, info)       # sh_info
+    b = buf_write_u64_le(b, addralign)  # sh_addralign
+    b = buf_write_u64_le(b, entsize)    # sh_entsize
+    b
+
+# Write a single symbol table entry
+fn write_elf_sym(buf: ByteBuffer, sym: ElfSymbol, strtab: StringTable) -> ByteBuffer:
+    val name_offset = strtab_get_offset(strtab, sym.name)
+    var bind_val = 0
+    match sym.sym_bind:
+        case Local: bind_val = STB_LOCAL
+        case Global: bind_val = STB_GLOBAL
+    var type_val = 0
+    match sym.sym_type:
+        case NoType: type_val = STT_NOTYPE
+        case Func: type_val = STT_FUNC
+        case Object: type_val = STT_OBJECT
+        case Section: type_val = STT_SECTION
+    val info = elf_sym_info(bind_val, type_val)
+    var b = buf
+    b = buf_write_u32_le(b, name_offset)    # st_name
+    b = buf_write_u8(b, info)               # st_info
+    b = buf_write_u8(b, STV_DEFAULT)        # st_other
+    b = buf_write_u16_le(b, sym.section_index) # st_shndx
+    b = buf_write_u64_le(b, sym.value)      # st_value
+    b = buf_write_u64_le(b, sym.size)       # st_size
+    b
+
+# Write a single relocation entry
+fn write_elf_rela(buf: ByteBuffer, reloc: ElfReloc) -> ByteBuffer:
+    val reloc_type_val = reloc.reloc_type_to_elf_value(reloc_type)
+    # r_info = (bit_shl(sym_idx, 32)) | type
+    # Since we can't do 64-bit shift easily, compute as two 32-bit halves
+    val r_info_lo = reloc_type_val
+    val r_info_hi = reloc.symbol_index
+    var b = buf
+    b = buf_write_u64_le(b, reloc.offset)    # r_offset
+    # r_info as u64: low 32 bits = type, high 32 bits = symbol index
+    b = buf_write_u32_le(b, r_info_lo)
+    b = buf_write_u32_le(b, r_info_hi)
+    b = buf_write_u64_le(b, reloc.addend)    # r_addend
+    b
+
+fn align_offset(offset: i64, alignment: i64) -> i64:
+    val remainder = offset % alignment
+    if remainder == 0:
+        return offset
+    offset + (alignment - remainder)
+
+fn pad_to(buf: ByteBuffer, target: i64) -> ByteBuffer:
+    val current = buf.bytes_len(bytes)
+    if current >= target:
+        return buf
+    buf_write_zeroes(buf, target - current)
+
+# ============================================================================
+# Convenience: write ELF to byte array for file output
+# ============================================================================
+
+fn elf_write_object(writer: ElfWriter) -> [i64]:
+    write_elf64(writer)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export write_elf64, elf_write_object
+export write_shdr, write_elf_sym, write_elf_rela
+export elf_sym_info, align_offset, pad_to

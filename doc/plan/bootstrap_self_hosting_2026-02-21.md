@@ -210,7 +210,6 @@ Self-hosting is proven if `diff` shows no differences (or only deterministic one
 
 ### 1. C Backend Coverage
 
-The `src/app/compile/c_codegen.spl` mini-backend handles a subset of Simple.
 The full compiler (`src/compiler/`) uses advanced features (generics, traits,
 async, etc.) that the mini-backend may not handle.
 
@@ -237,7 +236,6 @@ generated C source. Files fixed:
 - ✅ `src/app/compile/c_translate_decl.spl`
 - ✅ `src/app/compile/c_translate_expr.spl`
 - ✅ `src/app/compile/c_translate_stmt.spl`
-- ✅ `src/app/compile/c_codegen.spl`
 - ✅ `src/compiler/70.backend/backend/c_backend.spl`
 - ✅ `src/compiler/70.backend/backend/c_ir_builder.spl`
 

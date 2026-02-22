@@ -37,7 +37,6 @@ src/compiler_core/
 │   └── jit.spl             - JIT compilation
 └── compiler/
     ├── driver.spl          - Compilation driver
-    └── c_codegen.spl       - C code generation
 ```
 
 ## Test Coverage Created

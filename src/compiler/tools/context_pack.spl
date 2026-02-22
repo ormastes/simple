@@ -1,0 +1,117 @@
+# Context Pack Generator
+#
+# Generates minimal context for LLM tools by extracting only the symbols
+# used by a specific module. Reduces context by ~90%.
+#
+# Port of rust/compiler/src/context_pack.rs (560 lines)
+#
+
+
+# Auto-generated desugared static method wrappers
+fn ContextPack__create(target: text) -> ContextPack:
+    ContextPack(target: target, functions: {}, types: [],
+                imports: [], symbol_count: 0)
+
+
+export ContextPack, SymbolUsage
+
+use api_surface.*
+
+# ============================================================================
+# Symbol Usage
+# ============================================================================
+
+struct SymbolUsage:
+    """Tracks which symbols a target function/module uses."""
+    used_functions: [text]
+    used_types: [text]
+    required_imports: [text]
+
+impl SymbolUsage:
+    static fn empty() -> SymbolUsage:
+        SymbolUsage(used_functions: [], used_types: [], required_imports: [])
+
+    fn merge(other: SymbolUsage) -> SymbolUsage:
+        SymbolUsage(
+            used_functions: self.used_functions.merge(other.used_functions),
+            used_types: self.used_types.merge(other.used_types),
+            required_imports: self.required_imports.merge(other.required_imports))
+
+# ============================================================================
+# Context Pack
+# ============================================================================
+
+class ContextPack:
+    """Minimal context pack for LLM consumption."""
+    target: text
+    functions: {text: FunctionSignature}
+    types: [text]
+    imports: [text]
+    symbol_count: i64
+
+impl ContextPack:
+    static fn create(target: text) -> ContextPack:
+        ContextPack(target: target, functions: {}, types: [],
+                    imports: [], symbol_count: 0)
+
+    static fn from_usage(target: text, usage: SymbolUsage,
+                         all_symbols: ApiSurface) -> ContextPack:
+        """Build context pack from symbol usage analysis."""
+        var pack = ContextPack__create(target)
+
+        # Collect used functions with transitive deps
+        var to_process = usage.used_functions
+        var processed: [text] = []
+
+        while to_process.?:
+            val func_name = to_process[0]
+            to_process = to_process[1:]
+
+            if processed.contains(func_name):
+                continue
+            processed = processed.push(func_name)
+
+            if all_symbols.functions.contains_key(func_name):
+                pack.functions[func_name] = all_symbols.functions[func_name]
+
+        pack.types = usage.used_types
+        pack.imports = usage.required_imports
+        pack.symbol_count = pack.functions.len() + pack.types.len()
+        pack
+
+    fn to_text() -> text:
+        """Serialize to text for LLM context."""
+        var lines: [text] = [
+            "# Context Pack: {self.target}",
+            "# Symbols: {self.symbol_count}",
+            ""
+        ]
+
+        if self.imports.?:
+            lines = lines.push("## Imports")
+            for imp in self.imports:
+                lines = lines.push("use {imp}")
+            lines = lines.push("")
+
+        if self.types.?:
+            lines = lines.push("## Types")
+            for ty in self.types:
+                lines = lines.push("- {ty}")
+            lines = lines.push("")
+
+        if self.functions.?:
+            lines = lines.push("## Functions")
+            for (name, sig) in self.functions:
+                val params = sig.params.map(\p:
+                    if p.type_name.?: "{p.name}: {p.type_name.unwrap()}"
+                    else: p.name
+                ).join(", ")
+                val ret = if sig.return_type.?: " -> {sig.return_type.unwrap()}" else: ""
+                lines = lines.push("fn {name}({params}){ret}")
+
+        lines.join("\n")
+
+    fn reduction_ratio(total_symbols: i64) -> f64:
+        """Calculate context reduction ratio."""
+        if total_symbols == 0: return 0.0
+        1.0 - (self.symbol_count.to_f64() / total_symbols.to_f64())

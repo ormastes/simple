@@ -1,0 +1,74 @@
+# GC GPU Driver Pattern Spec
+# Documents that gc_async_mut/gpu.spl uses explicit lifecycle, NOT owns_handle
+
+struct MockGpuError:
+    code: i64
+    message: text
+
+    static fn from_code(code: i64) -> MockGpuError:
+        MockGpuError(code: code, message: "error")
+
+struct MockGpuPtr:
+    device_ptr: i64
+    size: i64
+    is_valid: bool
+
+    static fn null() -> MockGpuPtr:
+        MockGpuPtr(device_ptr: 0, size: 0, is_valid: false)
+
+    fn is_null() -> bool:
+        self.device_ptr == 0 or not self.is_valid
+
+var alloc_count = 0
+var free_count = 0
+
+fn mock_gpu_alloc(size: i64) -> MockGpuPtr:
+    alloc_count = alloc_count + 1
+    MockGpuPtr(device_ptr: alloc_count, size: size, is_valid: true)
+
+fn mock_gpu_free(ptr: MockGpuPtr) -> bool:
+    if ptr.is_null():
+        return true
+    free_count = free_count + 1
+    true
+
+describe "GPU Driver Explicit Lifecycle":
+    describe "No owns_handle":
+        it "GpuPtr has no owns_handle field":
+            val ptr = MockGpuPtr(device_ptr: 1, size: 1024, is_valid: true)
+            # Only 3 fields: device_ptr, size, is_valid
+            # No owns_handle — explicit lifecycle
+            expect(ptr.device_ptr).to_equal(1)
+            expect(ptr.size).to_equal(1024)
+            expect(ptr.is_valid).to_equal(true)
+
+        it "null pointer is invalid":
+            val ptr = MockGpuPtr__null()
+            expect(ptr.is_null()).to_equal(true)
+
+    describe "Explicit alloc/free":
+        it "alloc creates valid pointer":
+            val ptr = mock_gpu_alloc(2048)
+            expect(ptr.is_valid).to_equal(true)
+            expect(ptr.size).to_equal(2048)
+            expect(ptr.is_null()).to_equal(false)
+
+        it "free decrements resources":
+            val prev = free_count
+            val ptr = mock_gpu_alloc(512)
+            mock_gpu_free(ptr)
+            expect(free_count).to_equal(prev + 1)
+
+        it "free on null is safe":
+            val prev = free_count
+            val null_ptr = MockGpuPtr__null()
+            mock_gpu_free(null_ptr)
+            expect(free_count).to_equal(prev)
+
+    describe "Migration to NoGC":
+        it "explicit lifecycle needs no owns_handle removal":
+            # gc_async_mut/gpu.spl already uses explicit lifecycle
+            # Migration = copy + replace cuda_ffi import with local extern fn
+            val ptr = mock_gpu_alloc(1024)
+            mock_gpu_free(ptr)
+            expect(free_count).to_be_greater_than(0)

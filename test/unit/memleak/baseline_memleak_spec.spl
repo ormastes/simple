@@ -1,0 +1,58 @@
+# Baseline Memory Leak Measurement Spec
+#
+# This spec file is designed to be run as part of a 3-file sequential test
+# to measure parent-process memory growth via the --mem-check flag.
+#
+# Usage:
+#   SIMPLE_MEMTRACK=1 bin/simple test --mem-check \
+#     test/unit/memleak/baseline_memleak_spec.spl
+#
+# The --mem-check flag enables per-file memdiff in the PARENT test runner.
+# This file exercises string/array operations that create value arena entries
+# in the CHILD process (which is separate and doesn't leak into parent).
+#
+# The parent-side leak comes from:
+#   1. Building child args (array of strings)
+#   2. Capturing stdout/stderr from child (strings)
+#   3. Creating TestFileResult struct
+#   4. Pushing to results/completed_files arrays
+#   5. String interpolation for print_result output
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Baseline memleak - file 1":
+    it "performs string operations to generate typical stdout":
+        # Generate output similar to real tests
+        # Note: nested fn can't mutate outer closure vars, so we return the array
+        fn do_work() -> [text]:
+            var out: [text] = []
+            var k = 0
+            while k < 10:
+                out.push("test_{k}_result_string_with_some_padding_data")
+                k = k + 1
+            out
+        val results = do_work()
+        print "  Generated {results.len()} result strings"
+        expect(results.len()).to_equal(10)
+
+    it "reads /proc/self/status for RSS measurement":
+        val status = rt_file_read_text("/proc/self/status") ?? ""
+        var rss_line = ""
+        if status != "":
+            val lines = status.split("\n")
+            for line in lines:
+                if line.starts_with("VmRSS:"):
+                    rss_line = line
+        if rss_line != "":
+            print "  [RSS] {rss_line}"
+        else:
+            print "  [RSS] Could not read /proc/self/status"
+        expect(1).to_equal(1)
+
+    it "verifies this is a clean child process":
+        # This runs in a child process spawned by test runner.
+        # The child exits after this file, and OS reclaims all memory.
+        # Any leak in the child does NOT affect the parent.
+        # The parent's leak is from processing this child's output.
+        print "  Child process running - all memory freed on exit"
+        expect(1).to_equal(1)

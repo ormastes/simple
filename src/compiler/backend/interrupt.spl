@@ -1,0 +1,322 @@
+# Interrupt Handler Compilation
+#
+# Compiles interrupt handler functions with correct ABI:
+# - Save/restore registers
+# - Disable interrupts during critical sections
+# - Generate vector table entries
+#
+# Syntax:
+#   @interrupt(vector: N)
+#   fn handler():
+#       ...
+#
+# Attributes:
+#   @interrupt(vector: N, priority: P)
+#   @naked      - No prologue/epilogue
+#   @fast       - Minimal save/restore
+#   @noreturn   - Handler never returns
+
+from hir_types import {HirType, SymbolId}
+from hir_definitions import {HirFunction}
+from lexer import {Span}
+
+
+# Auto-generated desugared static method wrappers
+fn CriticalSection__enter() -> CriticalSection:
+    val enabled = disable_interrupts()
+    CriticalSection(was_enabled: enabled)
+
+
+export InterruptHandler, InterruptAttr, InterruptVector
+export compile_interrupt_handler, generate_idt_entry
+
+# Interrupt handler attributes
+struct InterruptAttr:
+    vector: i64             # Interrupt vector number
+    priority: i64           # Priority level (0 = highest)
+    is_naked: bool          # No prologue/epilogue
+    is_fast: bool           # Minimal register save
+    is_noreturn: bool       # Handler never returns
+    is_reentrant: bool      # Can be interrupted
+
+impl InterruptAttr:
+    static fn default_(vector: i64) -> InterruptAttr:
+        InterruptAttr(
+            vector: vector,
+            priority: 7,        # Default to low priority
+            is_naked: false,
+            is_fast: false,
+            is_noreturn: false,
+            is_reentrant: false
+        )
+
+    fn needs_epilogue() -> bool:
+        not self.is_naked and not self.is_noreturn
+
+    fn needs_prologue() -> bool:
+        not self.is_naked
+
+# Compiled interrupt handler
+struct InterruptHandler:
+    function: HirFunction
+    attr: InterruptAttr
+    vector_entry: InterruptVector
+    prologue: text          # Assembly prologue
+    epilogue: text          # Assembly epilogue
+
+impl InterruptHandler:
+    fn vector() -> i64:
+        self.attr.vector
+
+    fn is_exception() -> bool:
+        # Vectors 0-31 are CPU exceptions on x86
+        self.attr.vector < 32
+
+# Interrupt vector table entry
+struct InterruptVector:
+    number: i64             # Vector number
+    handler_addr: i64       # Handler address
+    segment: i64            # Code segment selector
+    type_attr: i64          # Type and attributes
+    dpl: i64                # Descriptor privilege level
+
+impl InterruptVector:
+    # Create a 32-bit interrupt gate entry for IDT
+    fn to_idt_entry_32() -> u64:
+        val offset_low = self.handler_addr & 0xFFFF
+        val offset_high = (self.handler_addr >> 16) & 0xFFFF
+        val selector = self.segment & 0xFFFF
+
+        # Type: 0x8E = 32-bit interrupt gate, DPL=0, Present
+        val type_attr: i64 = 0x8E | ((self.dpl & 3) << 5)
+
+        # Pack into 64-bit entry
+        # Bits 0-15: Offset low
+        # Bits 16-31: Selector
+        # Bits 32-39: Zero
+        # Bits 40-47: Type/Attr
+        # Bits 48-63: Offset high
+        (offset_low) | (selector << 16) | (type_attr << 40) | (offset_high << 48)
+
+# x86 CPU exceptions
+enum CpuException:
+    DivideError          # 0: Divide by zero
+    Debug               # 1: Debug exception
+    Nmi                 # 2: Non-maskable interrupt
+    Breakpoint          # 3: Breakpoint (INT3)
+    Overflow            # 4: Overflow (INTO)
+    BoundRange          # 5: Bound range exceeded
+    InvalidOpcode       # 6: Invalid opcode
+    DeviceNotAvail      # 7: Device not available
+    DoubleFault         # 8: Double fault
+    CoprocessorOverrun  # 9: Coprocessor segment overrun
+    InvalidTss          # 10: Invalid TSS
+    SegmentNotPresent   # 11: Segment not present
+    StackFault          # 12: Stack-segment fault
+    GeneralProtection   # 13: General protection fault
+    PageFault           # 14: Page fault
+    Reserved15          # 15: Reserved
+    FloatingPoint       # 16: x87 FPU error
+    AlignmentCheck      # 17: Alignment check
+    MachineCheck        # 18: Machine check
+    SimdException       # 19: SIMD floating-point exception
+
+impl CpuException:
+    fn vector() -> i64:
+        match self:
+            case CpuException.DivideError: 0
+            case CpuException.Debug: 1
+            case CpuException.Nmi: 2
+            case CpuException.Breakpoint: 3
+            case CpuException.Overflow: 4
+            case CpuException.BoundRange: 5
+            case CpuException.InvalidOpcode: 6
+            case CpuException.DeviceNotAvail: 7
+            case CpuException.DoubleFault: 8
+            case CpuException.CoprocessorOverrun: 9
+            case CpuException.InvalidTss: 10
+            case CpuException.SegmentNotPresent: 11
+            case CpuException.StackFault: 12
+            case CpuException.GeneralProtection: 13
+            case CpuException.PageFault: 14
+            case CpuException.Reserved15: 15
+            case CpuException.FloatingPoint: 16
+            case CpuException.AlignmentCheck: 17
+            case CpuException.MachineCheck: 18
+            case CpuException.SimdException: 19
+
+    fn has_error_code() -> bool:
+        match self:
+            case CpuException.DoubleFault
+               | CpuException.InvalidTss
+               | CpuException.SegmentNotPresent
+               | CpuException.StackFault
+               | CpuException.GeneralProtection
+               | CpuException.PageFault
+               | CpuException.AlignmentCheck:
+                true
+            case _:
+                false
+
+    fn name() -> text:
+        match self:
+            case CpuException.DivideError: "Divide Error"
+            case CpuException.Debug: "Debug"
+            case CpuException.Nmi: "NMI"
+            case CpuException.Breakpoint: "Breakpoint"
+            case CpuException.Overflow: "Overflow"
+            case CpuException.BoundRange: "Bound Range Exceeded"
+            case CpuException.InvalidOpcode: "Invalid Opcode"
+            case CpuException.DeviceNotAvail: "Device Not Available"
+            case CpuException.DoubleFault: "Double Fault"
+            case CpuException.CoprocessorOverrun: "Coprocessor Segment Overrun"
+            case CpuException.InvalidTss: "Invalid TSS"
+            case CpuException.SegmentNotPresent: "Segment Not Present"
+            case CpuException.StackFault: "Stack-Segment Fault"
+            case CpuException.GeneralProtection: "General Protection Fault"
+            case CpuException.PageFault: "Page Fault"
+            case CpuException.Reserved15: "Reserved"
+            case CpuException.FloatingPoint: "x87 FPU Error"
+            case CpuException.AlignmentCheck: "Alignment Check"
+            case CpuException.MachineCheck: "Machine Check"
+            case CpuException.SimdException: "SIMD Exception"
+
+# Generate x86 interrupt handler prologue
+fn generate_x86_prologue(attr: InterruptAttr, has_error_code: bool) -> text:
+    if attr.is_naked:
+        return ""
+
+    var prologue = ""
+
+    # Push error code placeholder if exception doesn't provide one
+    if attr.vector < 32 and not has_error_code:
+        prologue = prologue + "    push 0\n"  # Dummy error code
+
+    # Push interrupt number
+    prologue = prologue + "    push {attr.vector}\n"
+
+    if attr.is_fast:
+        # Minimal save: only scratch registers
+        prologue = prologue + """
+    push eax
+    push ecx
+    push edx
+"""
+    else:
+        # Full register save
+        prologue = prologue + """
+    pusha
+    push ds
+    push es
+    push fs
+    push gs
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+"""
+
+    prologue
+
+# Generate x86 interrupt handler epilogue
+fn generate_x86_epilogue(attr: InterruptAttr) -> text:
+    if attr.is_naked or attr.is_noreturn:
+        return ""
+
+    var epilogue = ""
+
+    if attr.is_fast:
+        epilogue = """
+    pop edx
+    pop ecx
+    pop eax
+    add esp, 8
+    iret
+"""
+    else:
+        epilogue = """
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    popa
+    add esp, 8
+    iret
+"""
+
+    epilogue
+
+# Compile an interrupt handler
+fn compile_interrupt_handler(func: HirFunction, attr: InterruptAttr) -> InterruptHandler:
+    # Determine if this exception has an error code
+    val has_error_code = attr.vector < 32 and CpuException__from_vector(attr.vector)?.has_error_code() ?? false
+
+    val prologue = generate_x86_prologue(attr, has_error_code)
+    val epilogue = generate_x86_epilogue(attr)
+
+    # Create vector table entry
+    val vector_entry = InterruptVector(
+        number: attr.vector,
+        handler_addr: 0,    # Filled in during linking
+        segment: 0x08,      # Kernel code segment
+        type_attr: 0x8E,    # Interrupt gate, present, DPL 0
+        dpl: 0
+    )
+
+    InterruptHandler(
+        function: func,
+        attr: attr,
+        vector_entry: vector_entry,
+        prologue: prologue,
+        epilogue: epilogue
+    )
+
+# Generate IDT entry for a handler
+fn generate_idt_entry(handler: InterruptHandler, handler_addr: i64) -> u64:
+    var entry = handler.vector_entry
+    entry.handler_addr = handler_addr
+    entry.to_idt_entry_32()
+
+# Critical section helpers
+
+# Disable interrupts and return previous state
+fn disable_interrupts() -> bool:
+    # Returns true if interrupts were enabled
+    var was_enabled = false
+    asm """
+        pushfd
+        pop eax
+        test eax, 0x200
+        setz al
+        xor al, 1
+        mov {was_enabled}, al
+        cli
+    """
+    was_enabled
+
+# Restore interrupt state
+fn restore_interrupts(was_enabled: bool):
+    if was_enabled:
+        asm """
+            sti
+        """
+
+# Critical section guard
+struct CriticalSection:
+    was_enabled: bool
+
+impl CriticalSection:
+    static fn enter() -> CriticalSection:
+        val enabled = disable_interrupts()
+        CriticalSection(was_enabled: enabled)
+
+    me exit():
+        restore_interrupts(self.was_enabled)
+
+# With critical section (RAII-style)
+fn with_critical_section<T>(body: fn() -> T) -> T:
+    val cs = CriticalSection__enter()
+    val result = body()
+    cs.exit()
+    result

@@ -85,7 +85,6 @@ cd build/cmake && cmake ../../seed && make
 - `mir.spl`, `mir_types.spl` — Mid-level IR
 - `hir_types.spl` — High-level IR
 - `error.spl` — Error handling
-- `compiler/c_codegen.spl` — C code generation
 - `compiler/driver.spl` — Compilation driver
 - `interpreter/` — Runtime interpreter (env, eval, ops, value, jit)
 
@@ -178,7 +177,6 @@ g++ -fpermissive ──> compiler_v2.exe (388KB, SUCCESS)
 | `src/compiler_core/ast.spl` | AST node constructors/accessors |
 | `src/compiler_core/lexer.spl` | Lexer (tokenizer) |
 | `src/compiler_core/parser.spl` | Parser (arena-based AST) |
-| `src/compiler_core/compiler/c_codegen.spl` | C++ code generation |
 | `src/compiler_core/compiler/driver.spl` | Main entry point |
 | `src/compiler/` | Full compiler source (~292 files) |
 | `src/compiler_core_win/build_win.py` | Build orchestrator script |
@@ -198,7 +196,6 @@ g++ -std=c++20 -O2 -I../../seed ../../src/compiler_seed/seed.cpp -o seed_cpp.exe
 ./seed_cpp.exe ../../src/compiler_core/types.spl ../../src/compiler_core/tokens.spl \
   ../../src/compiler_core/ast_types.spl ../../src/compiler_core/ast.spl \
   ./shim_nl.spl ../../src/compiler_core/lexer.spl ../../src/compiler_core/parser.spl \
-  ../../src/compiler_core/compiler/c_codegen.spl ../../src/compiler_core/compiler/driver.spl \
   > core1.cpp
 g++ -std=c++20 -O2 -I../../seed core1.cpp ../../build/seed/libspl_runtime.a -o core1.exe
 
@@ -274,7 +271,6 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
   - `mir.spl`, `mir_types.spl` - Mid-level IR
   - `hir_types.spl`, `backend_types.spl` - IR types
   - `error.spl` - Error handling
-  - `compiler/c_codegen.spl` - C++ code generation
   - `compiler/driver.spl` - Compilation driver
   - `interpreter/` - Runtime interpreter (env, eval, ops, value, jit, mod)
 
@@ -445,7 +441,7 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
   - `ast.spl`, `parser.spl` - Parsing
   - `mir.spl` - MIR lowering
   - `interpreter/` - Core JIT interpreter (5 files: value, env, ops, eval, jit, mod)
-  - `compiler/` - Core compiler (c_codegen, driver)
+  - `compiler/` - Core compiler (MIR C backend, driver)
 - `build/bootstrap/core_cpp/` - Transpiled C++ output
 - `build/bootstrap/core1/` - Core1 binary directory
   - `simple_core1` - Minimal native compiler (FreeBSD ELF)
@@ -685,7 +681,7 @@ QEMU_PORT=2222 QEMU_USER=freebsd \
 
 **Core2 fixed point achieved (2026-02-12):**
 - `parser.spl` fixed: added `parse_binary_from()` and named constructor arg support in `parse_call_arg()`
-- Minimal file set (9 files): tokens, types, error, lexer, ast_types, ast, parser, c_codegen, driver
+- Minimal file set (9 files): tokens, types, error, lexer, ast_types, ast, parser, MIR C backend, driver
 - v2 and v3 produce **byte-for-byte identical C++ output**
 - SHA256: `0407d9fbf331ec2b441d17c0f659b9d938dfaf527151d37bc7d6e4a06257fa76`
 - Note: `lexer_types.spl` and `lexer_struct.spl` excluded due to conflicting `span_new`/`token_new` definitions with `types.spl`
@@ -793,7 +789,6 @@ Replace Linux ELF placeholders in `bin/release/` with actual native binaries for
 | `src/compiler_core/` | Core Simple source (compiled by seed) |
 | `src/compiler/` | Full Simple source (compiled by core) |
 | `src/compiler/main.spl` | Full compiler entry point |
-| `src/compiler_core/compiler/c_codegen.spl` | C code generation in Core Simple |
 | `src/compiler_core/compiler/driver.spl` | Compilation driver in Core Simple |
 | `build/bootstrap/` | Build artifacts |
 | `build/cmake/` | CMake build directory |

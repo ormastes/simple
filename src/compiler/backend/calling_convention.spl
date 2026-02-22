@@ -1,0 +1,299 @@
+# Calling Convention Definitions
+#
+# Defines ABIs for different architectures and calling conventions.
+# Used by codegen to generate correct function prologues/epilogues.
+
+from std.common.target import {TargetArch}
+
+export CallingConvention, AbiInfo, StructReturn
+export get_abi, get_arg_register, get_ret_register
+
+# How structs are returned
+enum StructReturn:
+    InRegs      # Small structs returned in registers
+    Hidden      # Via hidden first pointer parameter
+    OnStack     # Returned on stack
+
+
+# ============================================================================
+# StructReturn Methods (was: impl StructReturn:)
+# ============================================================================
+
+# Calling convention types
+enum CallingConvention:
+    Simple          # Default Simple ABI
+    C               # Platform C ABI (cdecl, System V, etc.)
+    Fastcall        # Register-heavy convention
+    Stdcall         # Windows stdcall (x86 only)
+    Vectorcall      # SIMD-friendly convention
+    Interrupt       # Interrupt service routine
+    Naked           # No prologue/epilogue
+
+
+# ============================================================================
+# CallingConvention Methods (was: impl CallingConvention:)
+# ============================================================================
+
+# ABI information for a target/convention combination
+struct AbiInfo:
+    arch: TargetArch
+    convention: CallingConvention
+    arg_regs: [text]            # Registers for integer/pointer arguments
+    float_arg_regs: [text]      # Registers for floating point arguments
+    ret_regs: [text]            # Registers for return value
+    float_ret_regs: [text]      # Registers for floating point return
+    callee_saved: [text]        # Must preserve across calls
+    caller_saved: [text]        # Caller must save if needed
+    stack_align: i64            # Stack alignment requirement
+    red_zone: i64               # Red zone size (bytes below SP)
+    struct_return: StructReturn # How structs are returned
+    struct_in_regs_max: i64     # Max bytes for struct in registers
+
+
+# ============================================================================
+# AbiInfo Methods (was: impl AbiInfo:)
+# ============================================================================
+
+# Get ABI info for target/convention
+fn get_abi(arch: TargetArch, conv: CallingConvention) -> i64:
+    # Stub: Pattern matching and AbiInfo struct not supported in seed_cpp
+    0
+
+# --- AVR ABI (8-bit) ---
+fn get_avr_abi(conv: CallingConvention) -> AbiInfo:
+    # AVR uses register pairs for 16-bit values
+    # R25:R24 for first arg/return, R23:R22 for second, etc.
+    AbiInfo(
+        arch: TargetArch.AVR,
+        convention: conv,
+        arg_regs: ["r25:r24", "r23:r22", "r21:r20", "r19:r18"],
+        float_arg_regs: [],  # No FPU
+        ret_regs: ["r25:r24"],
+        float_ret_regs: [],
+        callee_saved: ["r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9",
+                       "r10", "r11", "r12", "r13", "r14", "r15", "r16", "r17",
+                       "r28", "r29"],  # Y register
+        caller_saved: ["r18", "r19", "r20", "r21", "r22", "r23", "r24", "r25",
+                       "r26", "r27", "r30", "r31"],  # X, Z registers
+        stack_align: 1,
+        red_zone: 0,
+        struct_return: StructReturn.Hidden,
+        struct_in_regs_max: 0
+    )
+
+# --- 8051 ABI (8-bit) ---
+fn get_8051_abi(conv: CallingConvention) -> AbiInfo:
+    # 8051 is accumulator-based, limited registers
+    AbiInfo(
+        arch: TargetArch.MCS51,
+        convention: conv,
+        arg_regs: ["r7", "r6", "r5", "r4"],  # R7-R4 for small args
+        float_arg_regs: [],
+        ret_regs: ["a"],  # Accumulator
+        float_ret_regs: [],
+        callee_saved: ["r0", "r1", "r2", "r3"],
+        caller_saved: ["r4", "r5", "r6", "r7", "a", "b"],
+        stack_align: 1,
+        red_zone: 0,
+        struct_return: StructReturn.Hidden,
+        struct_in_regs_max: 0
+    )
+
+# --- MSP430 ABI (16-bit) ---
+fn get_msp430_abi(conv: CallingConvention) -> AbiInfo:
+    # MSP430 EABI: R12-R15 for arguments
+    AbiInfo(
+        arch: TargetArch.MSP430,
+        convention: conv,
+        arg_regs: ["r12", "r13", "r14", "r15"],
+        float_arg_regs: [],  # No FPU
+        ret_regs: ["r12", "r13"],  # R13:R12 for 32-bit return
+        float_ret_regs: [],
+        callee_saved: ["r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"],
+        caller_saved: ["r12", "r13", "r14", "r15"],
+        stack_align: 2,
+        red_zone: 0,
+        struct_return: StructReturn.Hidden,
+        struct_in_regs_max: 4
+    )
+
+# --- x86 ABI (32-bit) ---
+fn get_x86_abi(conv: CallingConvention) -> AbiInfo:
+    match conv:
+        case CallingConvention.Fastcall:
+            # Microsoft fastcall: ECX, EDX for first two args
+            AbiInfo(
+                arch: TargetArch.X86,
+                convention: conv,
+                arg_regs: ["ecx", "edx"],
+                float_arg_regs: [],
+                ret_regs: ["eax", "edx"],
+                float_ret_regs: ["st0"],
+                callee_saved: ["ebx", "esi", "edi", "ebp"],
+                caller_saved: ["eax", "ecx", "edx"],
+                stack_align: 4,
+                red_zone: 0,
+                struct_return: StructReturn.Hidden,
+                struct_in_regs_max: 8
+            )
+        case CallingConvention.Stdcall:
+            # Windows stdcall: args on stack, callee cleans
+            AbiInfo(
+                arch: TargetArch.X86,
+                convention: conv,
+                arg_regs: [],  # All on stack
+                float_arg_regs: [],
+                ret_regs: ["eax", "edx"],
+                float_ret_regs: ["st0"],
+                callee_saved: ["ebx", "esi", "edi", "ebp"],
+                caller_saved: ["eax", "ecx", "edx"],
+                stack_align: 4,
+                red_zone: 0,
+                struct_return: StructReturn.Hidden,
+                struct_in_regs_max: 8
+            )
+        case _:
+            # cdecl (default): all args on stack
+            AbiInfo(
+                arch: TargetArch.X86,
+                convention: conv,
+                arg_regs: [],  # All on stack
+                float_arg_regs: [],
+                ret_regs: ["eax", "edx"],
+                float_ret_regs: ["st0"],
+                callee_saved: ["ebx", "esi", "edi", "ebp"],
+                caller_saved: ["eax", "ecx", "edx"],
+                stack_align: 4,
+                red_zone: 0,
+                struct_return: StructReturn.Hidden,
+                struct_in_regs_max: 8
+            )
+
+# --- x86_64 ABI (64-bit) ---
+fn get_x86_64_abi(conv: CallingConvention) -> AbiInfo:
+    # System V AMD64 ABI (Linux, macOS, BSD)
+    # Windows x64 uses different convention but we default to System V
+    AbiInfo(
+        arch: TargetArch.X86_64,
+        convention: conv,
+        arg_regs: ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
+        float_arg_regs: ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"],
+        ret_regs: ["rax", "rdx"],
+        float_ret_regs: ["xmm0", "xmm1"],
+        callee_saved: ["rbx", "rbp", "r12", "r13", "r14", "r15"],
+        caller_saved: ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"],
+        stack_align: 16,
+        red_zone: 128,
+        struct_return: StructReturn.InRegs,
+        struct_in_regs_max: 16  # Up to 2 eightbytes
+    )
+
+# --- ARM ABI (32-bit) ---
+fn get_arm_abi(conv: CallingConvention) -> AbiInfo:
+    # ARM EABI / AAPCS
+    AbiInfo(
+        arch: TargetArch.Arm,
+        convention: conv,
+        arg_regs: ["r0", "r1", "r2", "r3"],
+        float_arg_regs: ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"],
+        ret_regs: ["r0", "r1"],
+        float_ret_regs: ["s0"],
+        callee_saved: ["r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"],
+        caller_saved: ["r0", "r1", "r2", "r3", "r12", "lr"],
+        stack_align: 8,
+        red_zone: 0,
+        struct_return: StructReturn.InRegs,
+        struct_in_regs_max: 16  # Up to 4 words
+    )
+
+# --- AArch64 ABI (64-bit ARM) ---
+fn get_aarch64_abi(conv: CallingConvention) -> AbiInfo:
+    # AAPCS64
+    AbiInfo(
+        arch: TargetArch.Aarch64,
+        convention: conv,
+        arg_regs: ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"],
+        float_arg_regs: ["v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"],
+        ret_regs: ["x0", "x1"],
+        float_ret_regs: ["v0", "v1"],
+        callee_saved: ["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
+                       "x27", "x28", "x29", "x30"],
+        caller_saved: ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+                       "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+                       "x16", "x17", "x18"],
+        stack_align: 16,
+        red_zone: 0,  # No red zone in AAPCS64
+        struct_return: StructReturn.InRegs,
+        struct_in_regs_max: 16
+    )
+
+# --- RISC-V 32 ABI ---
+fn get_riscv32_abi(conv: CallingConvention) -> AbiInfo:
+    # RISC-V ILP32 ABI
+    AbiInfo(
+        arch: TargetArch.Riscv32,
+        convention: conv,
+        arg_regs: ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"],
+        float_arg_regs: ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"],
+        ret_regs: ["a0", "a1"],
+        float_ret_regs: ["fa0", "fa1"],
+        callee_saved: ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+                       "s8", "s9", "s10", "s11"],
+        caller_saved: ["ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6",
+                       "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"],
+        stack_align: 16,
+        red_zone: 0,
+        struct_return: StructReturn.InRegs,
+        struct_in_regs_max: 16
+    )
+
+# --- RISC-V 64 ABI ---
+fn get_riscv64_abi(conv: CallingConvention) -> AbiInfo:
+    # RISC-V LP64 ABI
+    AbiInfo(
+        arch: TargetArch.Riscv64,
+        convention: conv,
+        arg_regs: ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"],
+        float_arg_regs: ["fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"],
+        ret_regs: ["a0", "a1"],
+        float_ret_regs: ["fa0", "fa1"],
+        callee_saved: ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+                       "s8", "s9", "s10", "s11"],
+        caller_saved: ["ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6",
+                       "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"],
+        stack_align: 16,
+        red_zone: 0,
+        struct_return: StructReturn.InRegs,
+        struct_in_regs_max: 16
+    )
+
+# --- WebAssembly ABI ---
+fn get_wasm_abi(arch: TargetArch, conv: CallingConvention) -> AbiInfo:
+    # WebAssembly is stack-based, no explicit registers
+    AbiInfo(
+        arch: arch,
+        convention: conv,
+        arg_regs: [],   # Stack-based
+        float_arg_regs: [],
+        ret_regs: [],
+        float_ret_regs: [],
+        callee_saved: [],
+        caller_saved: [],
+        stack_align: 16,
+        red_zone: 0,
+        struct_return: StructReturn.OnStack,
+        struct_in_regs_max: 0
+    )
+
+# Get argument register by index
+fn get_arg_register(arch: TargetArch, conv: CallingConvention, index: i64) -> text:
+    val abi = get_abi(arch, conv)
+    abi_arg_reg(abi, index)
+
+# Get return register by index
+fn get_ret_register(arch: TargetArch, conv: CallingConvention, index: i64) -> text:
+    val abi = get_abi(arch, conv)
+    if index < abi.ret_regs_len(ret_regs):
+        abi.ret_regs[index]
+    else:
+        nil

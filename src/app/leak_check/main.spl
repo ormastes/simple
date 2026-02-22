@@ -9,14 +9,17 @@
 #   - Internal mode: Process-level memory monitoring via /proc/meminfo
 #   - External mode: ASan or Valgrind via C backend
 #   - Both mode: Run both internal and external checks
+#   - Runtime mode: Built-in C runtime memtrack (SIMPLE_MEMTRACK=1)
 
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_shell_output(cmd: text) -> text
 
 use types
 use config
 use internal_runner
 use external_runner
 use reporter
+use std.mem_tracker.{mem_enable, mem_disable, mem_snapshot, mem_dump_leaks, parse_leak_dump}
 
 # Main entry point for leak-check command
 fn run_leak_check(args: [text]) -> i64:
@@ -59,6 +62,8 @@ fn run_leak_check(args: [text]) -> i64:
                 result.exit_code = 1
             else:
                 result.exit_code = 0
+        case LeakCheckMode.Runtime:
+            result = run_runtime_check(cfg)
 
     val end_us = rt_time_now_unix_micros()
     result.duration_ms = (end_us - start_us) / 1000
@@ -67,5 +72,50 @@ fn run_leak_check(args: [text]) -> i64:
     write_report(result, cfg)
 
     result.exit_code
+
+# Runtime mode: uses built-in C memtrack to run target and report leaks
+fn run_runtime_check(cfg: LeakCheckConfig) -> LeakCheckResult:
+    # Enable memtrack, take snapshot, run program, dump leaks
+    mem_enable()
+    val snap_id = mem_snapshot()
+
+    # Run the target program with SIMPLE_MEMTRACK=1
+    val cmd = "SIMPLE_MEMTRACK=1 bin/simple run {cfg.source_file}"
+    val output = rt_shell_output(cmd)
+    if cfg.verbose:
+        print output
+
+    # Dump and parse leaks
+    val dump_path = "/tmp/simple_leak_check_runtime.txt"
+    mem_dump_leaks(snap_id, dump_path)
+    val leaks = parse_leak_dump(dump_path)
+
+    mem_disable()
+
+    # Convert to AllocationRecords for compatibility
+    var alloc_records: [AllocationRecord] = []
+    for entry in leaks:
+        alloc_records.push(AllocationRecord(
+            address: entry.alloc_id,
+            size: entry.size,
+            type_id: entry.tag,
+            source_file: "",
+            source_line: 0,
+            source_function: "",
+            timestamp_us: 0,
+            freed: false
+        ))
+
+    var exit_code: i64 = 0
+    if leaks.len() > 0:
+        exit_code = 1
+
+    LeakCheckResult(
+        mode: "runtime",
+        internal_leaks: alloc_records,
+        external_report: empty_external_leak_report(),
+        duration_ms: 0,
+        exit_code: exit_code
+    )
 
 export run_leak_check

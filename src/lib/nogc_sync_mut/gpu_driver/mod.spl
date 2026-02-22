@@ -1,0 +1,316 @@
+# GPU Memory Management API (NoGC)
+#
+# High-level GPU memory management for Simple language.
+# NoGC variant: explicit lifecycle, no owns_handle pattern.
+#
+# Migrated from gc_async_mut/gpu.spl (2026-02-22).
+# Change: replaced `use compiler.loader.cuda_ffi.*` with local extern fn declarations.
+
+# ============================================================================
+# CUDA FFI Declarations (local, replaces compiler.loader.cuda_ffi import)
+# ============================================================================
+
+extern fn rt_cuda_init() -> i64
+extern fn rt_cuda_device_get(device_id: i64) -> i64
+extern fn rt_cuda_device_count() -> i64
+extern fn rt_cuda_device_name(device: i64) -> text
+extern fn rt_cuda_device_compute_capability(device: i64) -> i64
+extern fn rt_cuda_ctx_create(device: i64) -> i64
+extern fn rt_cuda_ctx_destroy(ctx: i64) -> i64
+extern fn rt_cuda_ctx_synchronize() -> i64
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
+extern fn rt_cuda_memcpy_htod(dst: i64, src: i64, size: i64) -> i64
+extern fn rt_cuda_memcpy_dtoh(dst: i64, src: i64, size: i64) -> i64
+extern fn rt_cuda_memset(ptr: i64, value: i64, size: i64) -> i64
+extern fn rt_cuda_module_load(path: text) -> i64
+extern fn rt_cuda_module_load_data(ptx: text) -> i64
+extern fn rt_cuda_module_unload(module: i64) -> i64
+extern fn rt_cuda_launch_kernel(module: i64, func_name: text, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64, args_ptr: i64) -> i64
+extern fn rt_cuda_sync() -> i64
+extern fn rt_cuda_get_error_string(error_code: i64) -> text
+
+# Wrapper functions matching the names used in the API below
+fn cuda_init() -> i64:
+    rt_cuda_init()
+
+fn cuda_device_get(device_id: i64) -> i64:
+    rt_cuda_device_get(device_id)
+
+fn cuda_device_count() -> i64:
+    rt_cuda_device_count()
+
+fn cuda_device_name(device: i64) -> text:
+    rt_cuda_device_name(device)
+
+fn cuda_device_compute_capability(device: i64) -> i64:
+    rt_cuda_device_compute_capability(device)
+
+fn cuda_ctx_create(device: i64) -> i64:
+    rt_cuda_ctx_create(device)
+
+fn cuda_ctx_destroy(ctx: i64) -> i64:
+    rt_cuda_ctx_destroy(ctx)
+
+fn cuda_ctx_synchronize() -> i64:
+    rt_cuda_ctx_synchronize()
+
+fn cuda_mem_alloc(size: i64) -> i64:
+    rt_cuda_mem_alloc(size)
+
+fn cuda_mem_free(ptr: i64) -> i64:
+    rt_cuda_mem_free(ptr)
+
+fn cuda_memcpy_htod(dst: i64, src: i64, size: i64) -> i64:
+    rt_cuda_memcpy_htod(dst, src, size)
+
+fn cuda_memcpy_dtoh(dst: i64, src: i64, size: i64) -> i64:
+    rt_cuda_memcpy_dtoh(dst, src, size)
+
+fn cuda_memset(ptr: i64, value: i64, size: i64) -> i64:
+    rt_cuda_memset(ptr, value, size)
+
+fn cuda_module_load(path: text) -> i64:
+    rt_cuda_module_load(path)
+
+fn cuda_module_load_data(ptx: text) -> i64:
+    rt_cuda_module_load_data(ptx)
+
+fn cuda_module_unload(module: i64) -> i64:
+    rt_cuda_module_unload(module)
+
+fn cuda_launch_kernel(module: i64, func_name: text, grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64, args_ptr: i64) -> i64:
+    rt_cuda_launch_kernel(module, func_name, grid_x, grid_y, grid_z, block_x, block_y, block_z, args_ptr)
+
+fn cuda_sync() -> i64:
+    rt_cuda_sync()
+
+fn cuda_get_error_string(error_code: i64) -> text:
+    rt_cuda_get_error_string(error_code)
+
+# ============================================================================
+# GPU Error Handling
+# ============================================================================
+
+struct GpuError:
+    code: i64
+    message: text
+
+    static fn from_code(code: i64) -> GpuError:
+        GpuError(
+            code: code,
+            message: cuda_get_error_string(code)
+        )
+
+    fn to_text() -> text:
+        "GpuError({self.code}): {self.message}"
+
+# ============================================================================
+# GPU Device
+# ============================================================================
+
+struct GpuDevice:
+    id: i64
+    handle: i64
+
+    static fn default() -> Result<GpuDevice, GpuError>:
+        GpuDevice__get(0)
+
+    static fn get(device_id: i64) -> Result<GpuDevice, GpuError>:
+        val handle = cuda_device_get(device_id)
+        if handle < 0:
+            return Err(GpuError__from_code(handle))
+        Ok(GpuDevice(id: device_id, handle: handle))
+
+    static fn count() -> i64:
+        cuda_device_count()
+
+    fn name() -> text:
+        cuda_device_name(self.handle)
+
+    fn compute_capability() -> (i64, i64):
+        val cap = cuda_device_compute_capability(self.handle)
+        (cap / 10, cap % 10)
+
+# ============================================================================
+# GPU Context
+# ============================================================================
+
+struct GpuContext:
+    handle: i64
+    device: GpuDevice
+
+    static fn create(device: GpuDevice) -> Result<GpuContext, GpuError>:
+        val handle = cuda_ctx_create(device.handle)
+        if handle < 0:
+            return Err(GpuError__from_code(handle))
+        Ok(GpuContext(handle: handle, device: device))
+
+    fn destroy() -> Result<(), GpuError>:
+        val result = cuda_ctx_destroy(self.handle)
+        if result < 0:
+            return Err(GpuError__from_code(result))
+        Ok(())
+
+    fn synchronize() -> Result<(), GpuError>:
+        val result = cuda_ctx_synchronize()
+        if result < 0:
+            return Err(GpuError__from_code(result))
+        Ok(())
+
+# ============================================================================
+# GPU Pointer - Device Memory Handle
+# ============================================================================
+
+class GpuPtr:
+    device_ptr: i64
+    size: i64
+    is_valid: bool
+
+    static fn null() -> GpuPtr:
+        GpuPtr(device_ptr: 0, size: 0, is_valid: false)
+
+    fn is_null() -> bool:
+        self.device_ptr == 0 or not self.is_valid
+
+# ============================================================================
+# GPU Module - Compiled Kernel Container
+# ============================================================================
+
+struct GpuModule:
+    handle: i64
+
+    static fn load_ptx(ptx_code: text) -> Result<GpuModule, GpuError>:
+        val handle = cuda_module_load_data(ptx_code)
+        if handle < 0:
+            return Err(GpuError__from_code(handle))
+        Ok(GpuModule(handle: handle))
+
+    static fn load_file(path: text) -> Result<GpuModule, GpuError>:
+        val handle = cuda_module_load(path)
+        if handle < 0:
+            return Err(GpuError__from_code(handle))
+        Ok(GpuModule(handle: handle))
+
+    fn unload() -> Result<(), GpuError>:
+        val result = cuda_module_unload(self.handle)
+        if result < 0:
+            return Err(GpuError__from_code(result))
+        Ok(())
+
+# ============================================================================
+# Launch Configuration
+# ============================================================================
+
+struct GpuLaunchConfig:
+    grid_x: i64
+    grid_y: i64
+    grid_z: i64
+    block_x: i64
+    block_y: i64
+    block_z: i64
+
+    static fn simple(num_blocks: i64, threads_per_block: i64) -> GpuLaunchConfig:
+        GpuLaunchConfig(
+            grid_x: num_blocks,
+            grid_y: 1,
+            grid_z: 1,
+            block_x: threads_per_block,
+            block_y: 1,
+            block_z: 1
+        )
+
+    static fn grid_2d(grid_x: i64, grid_y: i64, block_x: i64, block_y: i64) -> GpuLaunchConfig:
+        GpuLaunchConfig(
+            grid_x: grid_x,
+            grid_y: grid_y,
+            grid_z: 1,
+            block_x: block_x,
+            block_y: block_y,
+            block_z: 1
+        )
+
+    static fn grid_3d(grid_x: i64, grid_y: i64, grid_z: i64, block_x: i64, block_y: i64, block_z: i64) -> GpuLaunchConfig:
+        GpuLaunchConfig(
+            grid_x: grid_x,
+            grid_y: grid_y,
+            grid_z: grid_z,
+            block_x: block_x,
+            block_y: block_y,
+            block_z: block_z
+        )
+
+    fn total_threads() -> i64:
+        self.grid_x * self.grid_y * self.grid_z * self.block_x * self.block_y * self.block_z
+
+# ============================================================================
+# Top-Level API Functions
+# ============================================================================
+
+fn gpu_init() -> Result<(), GpuError>:
+    val result = cuda_init()
+    if result < 0:
+        return Err(GpuError__from_code(result))
+    Ok(())
+
+fn gpu_alloc(size: i64) -> Result<GpuPtr, GpuError>:
+    val ptr = cuda_mem_alloc(size)
+    if ptr < 0:
+        return Err(GpuError__from_code(ptr))
+    Ok(GpuPtr(device_ptr: ptr, size: size, is_valid: true))
+
+fn gpu_free(gpu_ptr: GpuPtr) -> Result<(), GpuError>:
+    if gpu_ptr.is_null():
+        return Ok(())
+    val result = cuda_mem_free(gpu_ptr.device_ptr)
+    if result < 0:
+        return Err(GpuError__from_code(result))
+    Ok(())
+
+fn gpu_upload(gpu_ptr: GpuPtr, host_ptr: i64, size: i64) -> Result<(), GpuError>:
+    val result = cuda_memcpy_htod(gpu_ptr.device_ptr, host_ptr, size)
+    if result < 0:
+        return Err(GpuError__from_code(result))
+    Ok(())
+
+fn gpu_download(gpu_ptr: GpuPtr, host_ptr: i64, size: i64) -> Result<(), GpuError>:
+    val result = cuda_memcpy_dtoh(host_ptr, gpu_ptr.device_ptr, size)
+    if result < 0:
+        return Err(GpuError__from_code(result))
+    Ok(())
+
+fn gpu_memset(gpu_ptr: GpuPtr, value: i64, size: i64) -> Result<(), GpuError>:
+    val result = cuda_memset(gpu_ptr.device_ptr, value, size)
+    if result < 0:
+        return Err(GpuError__from_code(result))
+    Ok(())
+
+fn gpu_launch(module: GpuModule, func_name: text, config: GpuLaunchConfig, args_ptr: i64) -> Result<(), GpuError>:
+    val result = cuda_launch_kernel(
+        module.handle,
+        func_name,
+        config.grid_x,
+        config.grid_y,
+        config.grid_z,
+        config.block_x,
+        config.block_y,
+        config.block_z,
+        args_ptr
+    )
+    if result < 0:
+        return Err(GpuError__from_code(result))
+    Ok(())
+
+fn gpu_sync() -> Result<(), GpuError>:
+    val result = cuda_sync()
+    if result < 0:
+        return Err(GpuError__from_code(result))
+    Ok(())
+
+# ============================================================================
+# Export
+# ============================================================================
+
+export GpuError, GpuDevice, GpuContext, GpuPtr, GpuModule, GpuLaunchConfig
+export gpu_init, gpu_alloc, gpu_free, gpu_upload, gpu_download
+export gpu_memset, gpu_launch, gpu_sync

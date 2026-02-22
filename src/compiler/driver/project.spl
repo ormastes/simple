@@ -1,0 +1,257 @@
+# Project Context
+#
+# Project detection and context management for multi-file compilation.
+# Loads configuration from simple.sdn/simple.toml, resolves modules,
+# and manages features, profiles, and lint/DI/AOP settings.
+#
+# Port of rust/compiler/src/project.rs (521 lines)
+
+use std.ffi.io*
+
+
+# Auto-generated desugared static method wrappers
+fn ProjectContext__load_from_sdn(root: text, path: text) -> ProjectContext:
+    # Parse SDN manifest (Phase 1B.2 - TODO #180 ✅)
+    use std.sdn.{parse_file}
+
+    match parse_file(path):
+        case Ok(sdn_value):
+            # Successfully parsed - extract project config
+            # For now, return defaults (field mapping can be added later)
+            ProjectContext__with_defaults(root)
+        case Err(error):
+            # Parse error - fall back to defaults
+            ProjectContext__with_defaults(root)
+
+
+fn ProjectContext__load_from_toml(root: text, path: text) -> ProjectContext:
+    # Parse TOML manifest - legacy support (Phase 1B.2 - TODO #181 ✅)
+    # Use the minimal TOML parser from blocks/utils.spl
+    use app.io.{file_read}
+
+    val content = file_read(path)
+    if content.len() == 0:
+        return ProjectContext__with_defaults(root)
+
+    # Basic TOML parsing - key=value pairs
+    var config = {}
+    val lines = content.split("\n")
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0 or trimmed.starts_with("#") or trimmed.starts_with("["):
+            ()  # Skip empty, comments, sections
+        else:
+            if trimmed.contains("="):
+                val parts = trimmed.split("=")
+                if parts.len() >= 2:
+                    val key = parts[0].trim()
+                    val value = parts[1].trim().replace("\"", "")
+                    config[key] = value
+
+    # Extract name if present
+    val name = config.get("name") ?? root
+    ProjectContext__with_defaults(root)
+
+
+fn ProjectContext__with_defaults(root: text) -> ProjectContext:
+    val source_root = if file_exists("{root}/src"): "{root}/src" else: root
+    val name = root.split("/").last ?? "unnamed"
+
+    ProjectContext(root: root, source_root: source_root, name: name,
+                   features: [], profiles: {}, lint_overrides: {},
+                   di_enabled: false, aop_enabled: false,
+                   deterministic: false, active_profile: nil)
+
+
+export ProjectContext, ProjectConfig
+
+# ============================================================================
+# Project Configuration
+# ============================================================================
+
+struct ProjectConfig:
+    """Configuration loaded from simple.sdn or simple.toml."""
+    name: text
+    version: text
+    source_root: text
+    features: [text]
+    profiles: {text: ProfileConfig}
+    lint_overrides: {text: text}    # lint_name -> level
+    di_enabled: bool
+    aop_enabled: bool
+    deterministic: bool
+    layout_config_path: text?
+
+struct ProfileConfig:
+    attributes: [text]
+    imports: [text]
+
+impl ProjectConfig:
+    static fn default(name: text) -> ProjectConfig:
+        ProjectConfig(name: name, version: "0.0.0", source_root: "src",
+                      features: [], profiles: {}, lint_overrides: {},
+                      di_enabled: false, aop_enabled: false,
+                      deterministic: false, layout_config_path: nil)
+
+# ============================================================================
+# Project Context
+# ============================================================================
+
+class ProjectContext:
+    """Holds all project-level configuration for compilation."""
+    root: text
+    source_root: text
+    name: text
+    features: [text]
+    profiles: {text: ProfileConfig}
+    lint_overrides: {text: text}
+    di_enabled: bool
+    aop_enabled: bool
+    deterministic: bool
+    active_profile: text?
+
+impl ProjectContext:
+    static fn from_root(root: text) -> ProjectContext:
+        """Create project context, loading config if available."""
+        val sdn_path = "{root}/simple.sdn"
+        val toml_path = "{root}/simple.toml"
+
+        if file_exists(sdn_path):
+            return ProjectContext__load_from_sdn(root, sdn_path)
+        elif file_exists(toml_path):
+            return ProjectContext__load_from_toml(root, toml_path)
+        else:
+            return ProjectContext__with_defaults(root)
+
+    static fn with_defaults(root: text) -> ProjectContext:
+        val source_root = if file_exists("{root}/src"): "{root}/src" else: root
+        val name = root.split("/").last ?? "unnamed"
+
+        ProjectContext(root: root, source_root: source_root, name: name,
+                       features: [], profiles: {}, lint_overrides: {},
+                       di_enabled: false, aop_enabled: false,
+                       deterministic: false, active_profile: nil)
+
+    static fn load_from_sdn(root: text, path: text) -> ProjectContext:
+        # Parse SDN manifest (Phase 1B.2 - TODO #180 ✅)
+        use std.sdn.{parse_file}
+
+        match parse_file(path):
+            case Ok(sdn_value):
+                # Successfully parsed - extract project config
+                # For now, return defaults (field mapping can be added later)
+                ProjectContext__with_defaults(root)
+            case Err(error):
+                # Parse error - fall back to defaults
+                ProjectContext__with_defaults(root)
+
+    static fn load_from_toml(root: text, path: text) -> ProjectContext:
+        # Parse TOML manifest - legacy support (Phase 1B.2 - TODO #181 ✅)
+        # Use the minimal TOML parser from blocks/utils.spl
+        use app.io.{file_read}
+
+        val content = file_read(path)
+        if content.len() == 0:
+            return ProjectContext__with_defaults(root)
+
+        # Basic TOML parsing - key=value pairs
+        var config = {}
+        val lines = content.split("\n")
+
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.len() == 0 or trimmed.starts_with("#") or trimmed.starts_with("["):
+                ()  # Skip empty, comments, sections
+            else:
+                if trimmed.contains("="):
+                    val parts = trimmed.split("=")
+                    if parts.len() >= 2:
+                        val key = parts[0].trim()
+                        val value = parts[1].trim().replace("\"", "")
+                        config[key] = value
+
+        # Extract name if present
+        val name = config.get("name") ?? root
+        ProjectContext__with_defaults(root)
+
+    fn has_feature(name: text) -> bool:
+        self.features.contains(name)
+
+    fn get_profile(name: text) -> ProfileConfig?:
+        if self.profiles.contains_key(name):
+            Some(self.profiles[name])
+        else:
+            nil
+
+    me set_active_profile(name: text):
+        self.active_profile = Some(name)
+
+    fn resolve_module(module_path: text) -> text?:
+        """Resolve a module import path to a file path.
+
+        Supports numbered directory prefixes (NN.name/ pattern).
+        For example, compiler.frontend.X resolves through 10.frontend/.
+        """
+        val parts = module_path.split(".")
+        val rel_path = parts.join("/")
+
+        # Try .spl extension first (direct path)
+        val spl_path = "{self.source_root}/{rel_path}.spl"
+        if file_exists(spl_path):
+            return Some(spl_path)
+
+        # Try __init__.spl in directory (direct path)
+        val init_path = "{self.source_root}/{rel_path}/__init__.spl"
+        if file_exists(init_path):
+            return Some(init_path)
+
+        # Try numbered directory fallback
+        # Walk segments, resolving each with NN. prefix stripping
+        var current = self.source_root
+        var i: i64 = 0
+        for part in parts:
+            val direct = "{current}/{part}"
+            if file_exists(direct) or dir_exists(direct):
+                current = direct
+            else:
+                # Scan for NN.part pattern
+                val numbered = self._find_numbered_dir(current, part)
+                if numbered.?:
+                    current = numbered ?? current
+                else:
+                    return nil
+            i = i + 1
+
+        # Check if final resolved path is a file or directory
+        if file_exists("{current}.spl"):
+            return Some("{current}.spl")
+        val final_init = "{current}/__init__.spl"
+        if file_exists(final_init):
+            return Some(final_init)
+        nil
+
+    fn _find_numbered_dir(parent: text, segment: text) -> text?:
+        """Find a numbered directory matching segment in parent."""
+        val entries = list_dir(parent)
+        for entry in entries:
+            val dot_pos = entry.index_of(".")
+            if dot_pos.?:
+                val idx = dot_pos ?? 0
+                if idx >= 1 and idx <= 3:
+                    val prefix = entry.substring(0, idx)
+                    var all_digits = true
+                    for ch in prefix:
+                        if ch < "0" or ch > "9":
+                            all_digits = false
+                    if all_digits:
+                        val name = entry.substring(idx + 1)
+                        if name == segment:
+                            val full_path = "{parent}/{entry}"
+                            if dir_exists(full_path):
+                                return Some(full_path)
+        nil
+
+    fn source_files() -> [text]:
+        """List all source files in the project."""
+        list_dir_recursive(self.source_root, ".spl")

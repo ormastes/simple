@@ -56,7 +56,6 @@
 
 | File | Lines | Purpose | Key Types |
 |------|-------|---------|-----------|
-| `compiler/c_codegen.spl` | 2,339 | C code generation for seed | `CCodegen` |
 | `parser.spl` | 2,135 | Core parser (seed-compilable) | `CoreParser` |
 | `interpreter/eval.spl` | 1,797 | Tree-walk interpreter with JIT | `Interpreter` |
 | `ast.spl` | 922 | AST node definitions | `CoreExpr`, `CoreStmt`, `CoreDecl` |
@@ -90,7 +89,6 @@
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `c_codegen.spl` | 2,339 | C code generation |
 | `driver.spl` | 62 | Compiler driver |
 | `test.spl` | 62 | Compiler tests |
 

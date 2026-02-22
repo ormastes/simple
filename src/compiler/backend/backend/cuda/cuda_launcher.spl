@@ -1,0 +1,371 @@
+# CUDA Kernel Launcher - Kernel Execution Management
+#
+# Manages GPU kernel compilation, loading, and execution.
+# Bridges between compiled PTX and the CUDA runtime FFI.
+
+use compiler.backend.cuda.cuda_ffi.*
+use compiler.backend.cuda_backend.{CudaCompiledModule, CudaKernel}
+
+# ============================================================================
+# Launch Configuration
+# ============================================================================
+
+struct LaunchConfig:
+    """
+    GPU kernel launch configuration.
+
+    Specifies grid and block dimensions for kernel execution.
+    Grid = number of thread blocks.
+    Block = number of threads per block.
+
+    Example:
+        val config = LaunchConfig__for_1d(n, 256)
+        launcher.launch("vector_add", config, args_ptr)
+    """
+
+    grid_x: i64
+    grid_y: i64
+    grid_z: i64
+    block_x: i64
+    block_y: i64
+    block_z: i64
+    shared_mem_bytes: i64
+
+    static fn for_1d(total_threads: i64, block_size: i64) -> LaunchConfig:
+        """Create 1D launch config that covers total_threads."""
+        val grid_x = (total_threads + block_size - 1) / block_size
+        LaunchConfig(
+            grid_x: grid_x,
+            grid_y: 1,
+            grid_z: 1,
+            block_x: block_size,
+            block_y: 1,
+            block_z: 1,
+            shared_mem_bytes: 0
+        )
+
+    static fn for_2d(width: i64, height: i64, block_w: i64, block_h: i64) -> LaunchConfig:
+        """Create 2D launch config for image/matrix operations."""
+        val grid_x = (width + block_w - 1) / block_w
+        val grid_y = (height + block_h - 1) / block_h
+        LaunchConfig(
+            grid_x: grid_x,
+            grid_y: grid_y,
+            grid_z: 1,
+            block_x: block_w,
+            block_y: block_h,
+            block_z: 1,
+            shared_mem_bytes: 0
+        )
+
+    static fn for_3d(dim_x: i64, dim_y: i64, dim_z: i64, block_x: i64, block_y: i64, block_z: i64) -> LaunchConfig:
+        """Create 3D launch config."""
+        LaunchConfig(
+            grid_x: (dim_x + block_x - 1) / block_x,
+            grid_y: (dim_y + block_y - 1) / block_y,
+            grid_z: (dim_z + block_z - 1) / block_z,
+            block_x: block_x,
+            block_y: block_y,
+            block_z: block_z,
+            shared_mem_bytes: 0
+        )
+
+    fn with_shared_mem(bytes: i64) -> LaunchConfig:
+        """Set shared memory size for this launch."""
+        LaunchConfig(
+            grid_x: self.grid_x,
+            grid_y: self.grid_y,
+            grid_z: self.grid_z,
+            block_x: self.block_x,
+            block_y: self.block_y,
+            block_z: self.block_z,
+            shared_mem_bytes: bytes
+        )
+
+    fn total_threads() -> i64:
+        """Total number of threads in this launch."""
+        self.grid_x * self.grid_y * self.grid_z * self.block_x * self.block_y * self.block_z
+
+    fn total_blocks() -> i64:
+        """Total number of thread blocks."""
+        self.grid_x * self.grid_y * self.grid_z
+
+    fn threads_per_block() -> i64:
+        """Threads in each block."""
+        self.block_x * self.block_y * self.block_z
+
+    fn validate() -> text?:
+        """Validate launch config. Returns error message or nil."""
+        if self.block_x <= 0 or self.block_y <= 0 or self.block_z <= 0:
+            return Some("Block dimensions must be positive")
+        if self.grid_x <= 0 or self.grid_y <= 0 or self.grid_z <= 0:
+            return Some("Grid dimensions must be positive")
+        val tpb = self.threads_per_block()
+        if tpb > 1024:
+            return Some("Threads per block ({tpb}) exceeds maximum (1024)")
+        nil
+
+# ============================================================================
+# Kernel Launcher
+# ============================================================================
+
+class KernelLauncher:
+    """
+    Manages loading and launching CUDA kernels.
+
+    Loads compiled PTX modules and provides an interface to launch
+    kernels with specified configurations.
+
+    Usage:
+        val launcher = KernelLauncher__create()
+        val module = launcher.load_module(compiled_module)
+        launcher.launch("kernel_name", config, args_ptr)
+        launcher.sync()
+        launcher.unload(module)
+    """
+
+    module_handle: i64
+    is_initialized: bool
+    loaded_kernels: [text]
+
+    static fn create() -> KernelLauncher:
+        """Create a new kernel launcher."""
+        KernelLauncher(
+            module_handle: 0,
+            is_initialized: false,
+            loaded_kernels: []
+        )
+
+    me init() -> i64:
+        """Initialize CUDA runtime. Returns 0 on success."""
+        val result = cuda_init()
+        if result == CUDA_SUCCESS:
+            self.is_initialized = true
+        result
+
+    me load_ptx(ptx_code: text) -> i64:
+        """Load PTX code as a module. Returns module handle or error."""
+        if not self.is_initialized:
+            return CUDA_ERROR_NOT_INITIALIZED
+        val handle = cuda_module_load_data(ptx_code)
+        if handle >= 0:
+            self.module_handle = handle
+        handle
+
+    me load_compiled(compiled: CudaCompiledModule) -> i64:
+        """Load a compiled CUDA module. Returns 0 on success."""
+        val handle = self.load_ptx(compiled.ptx)
+        if handle < 0:
+            return handle
+        # Track loaded kernel names
+        for kernel in compiled.kernels:
+            self.loaded_kernels = self.loaded_kernels.push(kernel.name)
+        CUDA_SUCCESS
+
+    fn has_kernel(name: text) -> bool:
+        """Check if a kernel is loaded."""
+        self.loaded_kernels.contains(name)
+
+    fn launch(name: text, config: LaunchConfig, args_ptr: i64) -> i64:
+        """Launch a kernel. Returns 0 on success."""
+        if not self.is_initialized:
+            return CUDA_ERROR_NOT_INITIALIZED
+        if self.module_handle == 0:
+            return CUDA_ERROR_INVALID_VALUE
+
+        # Validate launch config
+        val validation = config.validate()
+        if validation.?:
+            return CUDA_ERROR_INVALID_VALUE
+
+        cuda_launch_kernel(
+            self.module_handle,
+            name,
+            config.grid_x,
+            config.grid_y,
+            config.grid_z,
+            config.block_x,
+            config.block_y,
+            config.block_z,
+            args_ptr
+        )
+
+    fn sync() -> i64:
+        """Synchronize - wait for all kernels to complete. Returns 0 on success."""
+        cuda_sync()
+
+    me unload() -> i64:
+        """Unload the current module. Returns 0 on success."""
+        if self.module_handle == 0:
+            return CUDA_SUCCESS
+        val result = cuda_module_unload(self.module_handle)
+        if result == CUDA_SUCCESS:
+            self.module_handle = 0
+            self.loaded_kernels = []
+        result
+
+# ============================================================================
+# Export
+# ============================================================================
+
+
+# Desugared static methods for bootstrap interpreter compatibility
+
+fn LaunchConfig__for_1d(total_threads: i64, block_size: i64) -> LaunchConfig:
+    """Create 1D launch config that covers total_threads."""
+    val grid_x = (total_threads + block_size - 1) / block_size
+    LaunchConfig(
+        grid_x: grid_x,
+        grid_y: 1,
+        grid_z: 1,
+        block_x: block_size,
+        block_y: 1,
+        block_z: 1,
+        shared_mem_bytes: 0
+    )
+
+
+
+fn LaunchConfig__for_2d(width: i64, height: i64, block_w: i64, block_h: i64) -> LaunchConfig:
+    """Create 2D launch config for image/matrix operations."""
+    val grid_x = (width + block_w - 1) / block_w
+    val grid_y = (height + block_h - 1) / block_h
+    LaunchConfig(
+        grid_x: grid_x,
+        grid_y: grid_y,
+        grid_z: 1,
+        block_x: block_w,
+        block_y: block_h,
+        block_z: 1,
+        shared_mem_bytes: 0
+    )
+
+
+
+fn LaunchConfig__for_3d(dim_x: i64, dim_y: i64, dim_z: i64, block_x: i64, block_y: i64, block_z: i64) -> LaunchConfig:
+        """Create 3D launch config."""
+        LaunchConfig(
+            grid_x: (dim_x + block_x - 1) / block_x,
+            grid_y: (dim_y + block_y - 1) / block_y,
+            grid_z: (dim_z + block_z - 1) / block_z,
+            block_x: block_x,
+            block_y: block_y,
+            block_z: block_z,
+            shared_mem_bytes: 0
+        )
+
+    fn with_shared_mem(bytes: i64) -> LaunchConfig:
+        """Set shared memory size for this launch."""
+        LaunchConfig(
+            grid_x: self.grid_x,
+            grid_y: self.grid_y,
+            grid_z: self.grid_z,
+            block_x: self.block_x,
+            block_y: self.block_y,
+            block_z: self.block_z,
+            shared_mem_bytes: bytes
+        )
+
+    fn total_threads() -> i64:
+        """Total number of threads in this launch."""
+        self.grid_x * self.grid_y * self.grid_z * self.block_x * self.block_y * self.block_z
+
+    fn total_blocks() -> i64:
+        """Total number of thread blocks."""
+        self.grid_x * self.grid_y * self.grid_z
+
+    fn threads_per_block() -> i64:
+        """Threads in each block."""
+        self.block_x * self.block_y * self.block_z
+
+    fn validate() -> text?:
+        """Validate launch config. Returns error message or nil."""
+        if self.block_x <= 0 or self.block_y <= 0 or self.block_z <= 0:
+            return Some("Block dimensions must be positive")
+        if self.grid_x <= 0 or self.grid_y <= 0 or self.grid_z <= 0:
+            return Some("Grid dimensions must be positive")
+        val tpb = self.threads_per_block()
+        if tpb > 1024:
+            return Some("Threads per block ({tpb}) exceeds maximum (1024)")
+        nil
+
+
+
+fn KernelLauncher__create() -> KernelLauncher:
+        """Create a new kernel launcher."""
+        KernelLauncher(
+            module_handle: 0,
+            is_initialized: false,
+            loaded_kernels: []
+        )
+
+    me init() -> i64:
+        """Initialize CUDA runtime. Returns 0 on success."""
+        val result = cuda_init()
+        if result == CUDA_SUCCESS:
+            self.is_initialized = true
+        result
+
+    me load_ptx(ptx_code: text) -> i64:
+        """Load PTX code as a module. Returns module handle or error."""
+        if not self.is_initialized:
+            return CUDA_ERROR_NOT_INITIALIZED
+        val handle = cuda_module_load_data(ptx_code)
+        if handle >= 0:
+            self.module_handle = handle
+        handle
+
+    me load_compiled(compiled: CudaCompiledModule) -> i64:
+        """Load a compiled CUDA module. Returns 0 on success."""
+        val handle = self.load_ptx(compiled.ptx)
+        if handle < 0:
+            return handle
+        # Track loaded kernel names
+        for kernel in compiled.kernels:
+            self.loaded_kernels = self.loaded_kernels.push(kernel.name)
+        CUDA_SUCCESS
+
+    fn has_kernel(name: text) -> bool:
+        """Check if a kernel is loaded."""
+        self.loaded_kernels.contains(name)
+
+    fn launch(name: text, config: LaunchConfig, args_ptr: i64) -> i64:
+        """Launch a kernel. Returns 0 on success."""
+        if not self.is_initialized:
+            return CUDA_ERROR_NOT_INITIALIZED
+        if self.module_handle == 0:
+            return CUDA_ERROR_INVALID_VALUE
+
+        # Validate launch config
+        val validation = config.validate()
+        if validation.?:
+            return CUDA_ERROR_INVALID_VALUE
+
+        cuda_launch_kernel(
+            self.module_handle,
+            name,
+            config.grid_x,
+            config.grid_y,
+            config.grid_z,
+            config.block_x,
+            config.block_y,
+            config.block_z,
+            args_ptr
+        )
+
+    fn sync() -> i64:
+        """Synchronize - wait for all kernels to complete. Returns 0 on success."""
+        cuda_sync()
+
+    me unload() -> i64:
+        """Unload the current module. Returns 0 on success."""
+        if self.module_handle == 0:
+            return CUDA_SUCCESS
+        val result = cuda_module_unload(self.module_handle)
+        if result == CUDA_SUCCESS:
+            self.module_handle = 0
+            self.loaded_kernels = []
+        result
+
+
+export LaunchConfig, KernelLauncher

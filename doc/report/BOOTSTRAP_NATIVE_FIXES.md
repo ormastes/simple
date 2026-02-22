@@ -164,7 +164,6 @@ Each platform test verifies:
 - `.github/workflows/bootstrap-build.yml` - CI workflow
 - `src/app/compile/native.spl` - Native compilation (GCC/mold)
 - `src/app/compile/llvm_direct.spl` - LLVM optimization pipeline
-- `src/app/compile/c_codegen.spl` - Simple → C code generator
 - `bin/simple` - Multi-platform bootstrap loader
 - `scripts/build-bootstrap.sh` - Bootstrap package builder
 

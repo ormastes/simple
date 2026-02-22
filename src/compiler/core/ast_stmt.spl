@@ -1,0 +1,250 @@
+# Core Simple — AST Statement Nodes
+#
+# Statement kind tags, arena pools, constructors, and accessors.
+# Split from ast.spl for maintainability.
+#
+# See ast.spl for the full AST module documentation.
+
+use compiler.core.ast_expr.{asm_arm_new}
+
+# ===== Statement Kind Tags =====
+val STMT_EXPR = 1
+val STMT_VAL_DECL = 2
+val STMT_VAR_DECL = 3
+val STMT_ASSIGN = 4
+val STMT_RETURN = 5
+val STMT_IF = 6
+val STMT_FOR = 7
+val STMT_WHILE = 8
+val STMT_MATCH = 9
+val STMT_BLOCK = 10
+val STMT_BREAK = 11
+val STMT_CONTINUE = 12
+val STMT_COMPOUND_ASSIGN = 13
+val STMT_DEFER = 14
+val STMT_ERRDEFER = 15
+val STMT_LABELED_LOOP = 16  # 'label: for/while wrapper
+val STMT_STATIC_FOR = 17   # static_for compile-time loop unrolling
+val STMT_COMPTIME = 18     # comptime: block — evaluated eagerly at module load time
+val STMT_RECEIVE = 19    # receive: block statement (Erlang mailbox receive)
+val STMT_BIND = 20       # bind x = expr (inside ce: blocks, monadic bind)
+val STMT_LAZY_VAL_DECL = 21  # lazy val name = expr (deferred initialization)
+val STMT_ASM_ASSERT = 22     # asm assert [spec] - compile-time target guard
+
+# ===== Statement Arena Pools =====
+var stmt_tag: [i64] = []
+var stmt_span: [i64] = []
+var stmt_expr: [i64] = []
+var stmt_name: [text] = []
+var stmt_type_tag: [i64] = []
+var stmt_body: [[i64]] = []
+
+fn stmt_count() -> i64:
+    stmt_tag.len()
+
+fn stmt_alloc(tag: i64, span_id: i64) -> i64:
+    val idx = stmt_tag.len()
+    stmt_tag.push(tag)
+    stmt_span.push(span_id)
+    stmt_expr.push(-1)
+    stmt_name.push("")
+    stmt_type_tag.push(0)
+    stmt_body.push([])
+    idx
+
+# ===== Statement Constructors =====
+
+fn stmt_expr_stmt(expression: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_EXPR, span_id)
+    stmt_expr[idx] = expression
+    idx
+
+fn stmt_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_VAL_DECL, span_id)
+    stmt_name[idx] = name
+    stmt_type_tag[idx] = type_tag
+    stmt_expr[idx] = init_expr
+    idx
+
+fn stmt_lazy_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_LAZY_VAL_DECL, span_id)
+    stmt_name[idx] = name
+    stmt_type_tag[idx] = type_tag
+    stmt_expr[idx] = init_expr
+    idx
+
+fn stmt_var_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_VAR_DECL, span_id)
+    stmt_name[idx] = name
+    stmt_type_tag[idx] = type_tag
+    stmt_expr[idx] = init_expr
+    idx
+
+fn stmt_assign_stmt(target_expr: i64, value_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_ASSIGN, span_id)
+    stmt_expr[idx] = target_expr
+    var body: [i64] = []
+    body.push(value_expr)
+    stmt_body[idx] = body
+    idx
+
+fn stmt_return_stmt(value_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_RETURN, span_id)
+    stmt_expr[idx] = value_expr
+    idx
+
+fn stmt_if_stmt(cond_expr: i64, then_stmts: [i64], elif_idx: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_IF, span_id)
+    stmt_expr[idx] = cond_expr
+    stmt_body[idx] = then_stmts
+    stmt_type_tag[idx] = elif_idx
+    idx
+
+fn stmt_for_stmt(iter_name: text, iterable: i64, body_stmts: [i64], span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_FOR, span_id)
+    stmt_name[idx] = iter_name
+    stmt_expr[idx] = iterable
+    stmt_body[idx] = body_stmts
+    idx
+
+fn stmt_static_for_stmt(iter_name: text, iterable: i64, body_stmts: [i64], span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_STATIC_FOR, span_id)
+    stmt_name[idx] = iter_name
+    stmt_expr[idx] = iterable
+    stmt_body[idx] = body_stmts
+    idx
+
+fn stmt_comptime_block(body_stmts: [i64], span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_COMPTIME, span_id)
+    stmt_body[idx] = body_stmts
+    idx
+
+fn stmt_receive_stmt(arm_indices: [i64], timeout_expr: i64, timeout_body_idx: i64, span_id: i64) -> i64:
+    # receive: block — arm_indices = match arm pool indices,
+    # timeout_expr = after timeout expr (or -1), timeout_body_idx = after body stmt index (or -1)
+    val idx = stmt_alloc(STMT_RECEIVE, span_id)
+    stmt_body[idx] = arm_indices
+    stmt_expr[idx] = timeout_expr
+    stmt_type_tag[idx] = timeout_body_idx
+    idx
+
+fn stmt_bind_stmt(var_name: text, rhs_expr: i64, span_id: i64) -> i64:
+    # bind x = expr — monadic bind inside ce: blocks
+    val idx = stmt_alloc(STMT_BIND, span_id)
+    stmt_name[idx] = var_name
+    stmt_expr[idx] = rhs_expr
+    idx
+
+fn stmt_while_stmt(cond_expr: i64, body_stmts: [i64], span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_WHILE, span_id)
+    stmt_expr[idx] = cond_expr
+    stmt_body[idx] = body_stmts
+    idx
+
+fn stmt_match_stmt(scrutinee: i64, arm_indices: [i64], span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_MATCH, span_id)
+    stmt_expr[idx] = scrutinee
+    stmt_body[idx] = arm_indices
+    idx
+
+fn stmt_block_stmt(body_stmts: [i64], span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_BLOCK, span_id)
+    stmt_body[idx] = body_stmts
+    idx
+
+fn stmt_break_stmt(span_id: i64) -> i64:
+    stmt_alloc(STMT_BREAK, span_id)
+
+fn stmt_break_labeled(label: text, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_BREAK, span_id)
+    stmt_name[idx] = label
+    idx
+
+fn stmt_continue_stmt(span_id: i64) -> i64:
+    stmt_alloc(STMT_CONTINUE, span_id)
+
+fn stmt_continue_labeled(label: text, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_CONTINUE, span_id)
+    stmt_name[idx] = label
+    idx
+
+fn stmt_compound_assign_stmt(op: i64, target_expr: i64, value_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_COMPOUND_ASSIGN, span_id)
+    stmt_expr[idx] = target_expr
+    stmt_type_tag[idx] = op
+    var body: [i64] = []
+    body.push(value_expr)
+    stmt_body[idx] = body
+    idx
+
+fn stmt_defer_stmt(deferred_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_DEFER, span_id)
+    stmt_expr[idx] = deferred_expr
+    idx
+
+fn stmt_errdefer_stmt(deferred_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_ERRDEFER, span_id)
+    stmt_expr[idx] = deferred_expr
+    idx
+
+fn stmt_labeled_loop(label: text, inner_stmt: i64, span_id: i64) -> i64:
+    # Wraps a for/while loop with a label for labeled break/continue
+    val idx = stmt_alloc(STMT_LABELED_LOOP, span_id)
+    stmt_name[idx] = label
+    var body: [i64] = []
+    body.push(inner_stmt)
+    stmt_body[idx] = body
+    idx
+
+fn stmt_asm_assert(archs: [text], os: text, abi: text, backend: text,
+                   ver_ops: [text], ver_vals: [i64], span_id: i64) -> i64:
+    """Create asm assert statement. Stores target spec in a single asm arm."""
+    val arm_idx = asm_arm_new(archs, os, abi, backend, ver_ops, ver_vals, "", false, "", false)
+    val idx = stmt_alloc(STMT_ASM_ASSERT, span_id)
+    stmt_expr[idx] = arm_idx
+    idx
+
+# ===== Statement Accessors =====
+
+fn stmt_get_tag(idx: i64) -> i64:
+    stmt_tag[idx]
+
+fn stmt_get_span(idx: i64) -> i64:
+    stmt_span[idx]
+
+fn stmt_get_expr(idx: i64) -> i64:
+    stmt_expr[idx]
+
+fn stmt_get_name(idx: i64) -> text:
+    stmt_name[idx]
+
+fn stmt_get_type(idx: i64) -> i64:
+    stmt_type_tag[idx]
+
+fn stmt_get_body(idx: i64) -> [i64]:
+    stmt_body[idx]
+
+export STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN
+export STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK
+export STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN, STMT_DEFER, STMT_ERRDEFER
+export STMT_LABELED_LOOP
+export STMT_STATIC_FOR
+export STMT_COMPTIME
+export STMT_RECEIVE
+export STMT_BIND
+export STMT_LAZY_VAL_DECL
+export STMT_ASM_ASSERT
+export stmt_tag, stmt_span, stmt_expr, stmt_name, stmt_type_tag, stmt_body
+export stmt_count, stmt_alloc
+export stmt_expr_stmt, stmt_val_decl, stmt_lazy_val_decl, stmt_var_decl, stmt_assign_stmt
+export stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt
+export stmt_match_stmt, stmt_block_stmt, stmt_break_stmt, stmt_continue_stmt
+export stmt_compound_assign_stmt, stmt_defer_stmt, stmt_errdefer_stmt
+export stmt_break_labeled, stmt_continue_labeled, stmt_labeled_loop
+export stmt_static_for_stmt
+export stmt_comptime_block
+export stmt_receive_stmt
+export stmt_bind_stmt
+export stmt_asm_assert
+export stmt_get_tag, stmt_get_span, stmt_get_expr, stmt_get_name
+export stmt_get_type, stmt_get_body

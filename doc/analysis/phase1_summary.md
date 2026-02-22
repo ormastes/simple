@@ -99,8 +99,6 @@
 **Root Cause:** Dual compilation strategy + historical evolution
 
 **Files:**
-- `src/compiler_core_legacy/compiler/c_codegen.spl` (2,339 lines) - AST-based
-- `src/app/compile/c_codegen.spl` (1,124 lines) - Text-based
 - `src/app/compile/c_translate.spl` (1,896 lines) - Text-based
 - `src/compiler/mir_lowering.spl` (1,503 lines) - Modern syntax
 - `src/compiler_core_legacy/mir_lowering.spl` (1,174 lines) - Desugared
@@ -266,7 +264,7 @@
 
 11. **Create shared type tracker** (230 lines saved)
     - `src/shared/type_tracker.spl` (150 lines new)
-    - Migrate from c_codegen files
+    - Migrate from legacy C codegen files
     - Estimated 2-3 hours
 
 12. **Create iteration module** (200 lines saved)

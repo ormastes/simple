@@ -162,10 +162,9 @@ val content = read_file_or_exit(file_path)
 
 | Metric | Total |
 |--------|-------|
-| Files created | 4 (`file_shell.spl`, `glob.spl`, `c_codegen.spl`, plus helpers) |
 | Files modified | 11 (native.spl, llvm_direct.spl, mcp/*.spl, math.spl, etc.) |
 | Lines eliminated | **1,100+ total** |
-| Largest refactoring | 951 lines (c_codegen extraction) |
+| Largest refactoring | 951 lines (MIR C backend extraction) |
 | Smallest refactoring | 4 lines (mcp file reading) |
 | Test regressions | 0 ✅ |
 

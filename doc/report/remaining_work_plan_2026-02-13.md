@@ -118,7 +118,6 @@ Code commented out waiting for:
 |------|-------|------|
 | `compiler/parser.spl` | 2,453 | impl Parser |
 | `compiler_core_legacy/parser.spl` | 2,322 | impl Parser |
-| `compiler_core_legacy/compiler/c_codegen.spl` | 2,267 | impl CCodegen |
 | `app/compile/c_translate.spl` | 1,871 | impl CTranslator |
 | `compiler_core_legacy/parser.spl` | 1,862 | impl Parser |
 | `app/mcp/main.spl` | 1,854 | MCP orchestration |

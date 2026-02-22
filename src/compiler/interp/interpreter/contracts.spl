@@ -1,0 +1,91 @@
+# Shared Contract Types
+#
+# Contract mode and contract violation types shared between
+# the compiler (MIR-level checking) and interpreter (runtime checking).
+#
+# Used by:
+#   - src/compiler/mir_contract.spl (imports for MIR lowering)
+#   - src/compiler/95.interp/interpreter/ (runtime contract evaluation)
+
+export ContractMode, ContractKind, ContractViolation
+
+# ============================================================================
+# Contract Mode (CTR-040 to CTR-043)
+# ============================================================================
+
+enum ContractMode:
+    """Controls when contract checks are emitted during compilation."""
+    Off         # No contract checks (CTR-040)
+    Boundary    # Only at public API boundaries (CTR-041)
+    All         # Check all contracts (default) (CTR-042)
+    Test        # All contracts + rich diagnostics (CTR-043)
+
+impl ContractMode:
+    static fn from_text(s: text) -> ContractMode?:
+        match s.lower():
+            case "off" | "none": Some(ContractMode.Off)
+            case "boundary" | "public": Some(ContractMode.Boundary)
+            case "all" | "on": Some(ContractMode.All)
+            case "test" | "debug": Some(ContractMode.Test)
+            case _: nil
+
+    fn to_text() -> text:
+        match self:
+            case Off: "off"
+            case Boundary: "boundary"
+            case All: "all"
+            case Test: "test"
+
+    fn has_rich_diagnostics() -> bool:
+        """Test mode includes function name, expression, source location, stack trace."""
+        match self: case Test: true; case _: false
+
+    fn checks_all() -> bool:
+        match self: case All | Test: true; case _: false
+
+    fn should_check(is_public: bool) -> bool:
+        """Whether to emit contract checks for a function."""
+        match self:
+            case Off: false
+            case Boundary: is_public
+            case All | Test: true
+
+# ============================================================================
+# Contract Kind
+# ============================================================================
+
+enum ContractKind:
+    """Type of contract being checked."""
+    Precondition        # requires
+    Postcondition       # ensures
+    Invariant           # invariant
+
+impl ContractKind:
+    fn to_text() -> text:
+        match self:
+            case Precondition: "precondition"
+            case Postcondition: "postcondition"
+            case Invariant: "invariant"
+
+# ============================================================================
+# Contract Violation
+# ============================================================================
+
+struct ContractViolation:
+    """A contract violation detected at runtime."""
+    kind: ContractKind
+    func_name: text
+    expression: text
+    message: text?
+    source_file: text?
+    source_line: i64?
+
+impl ContractViolation:
+    fn format() -> text:
+        val kind_text = self.kind.to_text()
+        var msg = "{kind_text} violation in {self.func_name}: {self.expression}"
+        if self.message.?:
+            msg = msg + " ({self.message.unwrap()})"
+        if self.source_file.? and self.source_line.?:
+            msg = msg + " at {self.source_file.unwrap()}:{self.source_line.unwrap()}"
+        msg

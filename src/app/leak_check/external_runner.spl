@@ -8,8 +8,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete}
-use app.compile.c_codegen.{generate_c_code}
-use app.compile.native.{find_c_compiler, collect_all_sources}
+use app.compile.native.{find_cpp_compiler}
 use types
 use parser
 
@@ -28,56 +27,51 @@ fn run_external_check(cfg: LeakCheckConfig) -> LeakCheckResult:
         result.exit_code = 1
         return result
 
-    # Step 1: Find C compiler
-    val cc = if cfg.compiler_override != "": cfg.compiler_override else: find_c_compiler()
+    # Step 1: Find C++ compiler
+    val cc = if cfg.compiler_override != "": cfg.compiler_override else: find_cpp_compiler()
     if cc == "":
-        print "Error: no C compiler found (tried clang, gcc, cc)"
+        print "Error: no C++ compiler found (tried clang++, clang-cl)"
         result.exit_code = 1
         return result
 
     if cfg.verbose:
-        print "Using C compiler: {cc}"
+        print "Using C++ compiler: {cc}"
 
-    # Step 2: Read and generate C code
-    val source_raw = rt_file_read_text(cfg.source_file)
-    val source_single = source_raw ?? ""
-    if source_single == "":
-        print "Error: cannot read source file: {cfg.source_file}"
-        result.exit_code = 1
-        return result
-
-    val source = collect_all_sources(cfg.source_file, source_single, cfg.verbose)
-    val c_code = generate_c_code(source)
-
-    if cfg.verbose:
-        print "Generated C code: {c_code.len()} bytes"
-
-    # Step 3: Write to temp file
+    # Step 2: Generate C++ via MIR C backend (single-file mode)
     val temp_dir = shell_output("mktemp -d /tmp/simple_leak_check_XXXXXX")
     if temp_dir == "":
         print "Error: failed to create temp directory"
         result.exit_code = 1
         return result
 
-    val temp_c = temp_dir + "/leak_check.c"
-    val temp_bin = temp_dir + "/leak_check_bin"
-
-    if not file_write(temp_c, c_code):
-        print "Error: failed to write temp C file"
+    val temp_cpp = temp_dir + "/leak_check.cpp"
+    val gen_cmd = "bin/simple compile --backend=c -o '{temp_cpp}' '{cfg.source_file}' 2>&1"
+    if cfg.verbose:
+        print "Generating C++: bin/simple compile --backend=c ..."
+    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
+    if gen_exit != 0:
+        print "Error: C++ generation failed"
+        if gen_out != "":
+            print gen_out
         shell("rm -rf '{temp_dir}'")
         result.exit_code = 1
         return result
 
-    # Step 4: Compile and run based on tool selection
+    if cfg.verbose:
+        print "Generated C++ code"
+
+    val temp_bin = temp_dir + "/leak_check_bin"
+
+    # Step 3: Compile and run based on tool selection
     var ext_report = empty_external_leak_report()
 
     match cfg.external_tool:
         case ExternalTool.Asan:
-            ext_report = run_asan_check(cc, temp_c, temp_bin, cfg.verbose, cfg.timeout_seconds)
+            ext_report = run_asan_check(cc, temp_cpp, temp_bin, cfg.verbose, cfg.timeout_seconds)
         case ExternalTool.Valgrind:
-            ext_report = run_valgrind_check(cc, temp_c, temp_bin, cfg.verbose, cfg.timeout_seconds)
+            ext_report = run_valgrind_check(cc, temp_cpp, temp_bin, cfg.verbose, cfg.timeout_seconds)
 
-    # Step 5: Cleanup
+    # Step 4: Cleanup
     shell("rm -rf '{temp_dir}'")
 
     result.external_report = ext_report
@@ -92,7 +86,8 @@ fn run_external_check(cfg: LeakCheckConfig) -> LeakCheckResult:
 # Run ASan-instrumented build and capture output
 fn run_asan_check(cc: text, temp_c: text, temp_bin: text, verbose: bool, timeout_seconds: i64) -> ExternalLeakReport:
     # Compile with ASan
-    val compile_cmd = "{cc} -fsanitize=address,leak -fno-omit-frame-pointer -g -o '{temp_bin}' '{temp_c}'"
+    val rt_sources = "src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c"
+    val compile_cmd = "{cc} -std=c++20 -fsanitize=address,leak -fno-omit-frame-pointer -g -I src/runtime/ '{temp_c}' {rt_sources} -o '{temp_bin}' -lpthread -ldl -lm"
     if verbose:
         print "Compiling with ASan: {compile_cmd}"
 
@@ -136,7 +131,8 @@ fn run_valgrind_check(cc: text, temp_c: text, temp_bin: text, verbose: bool, tim
         return report
 
     # Compile with debug info, no optimization
-    val compile_cmd = "{cc} -g -O0 -o '{temp_bin}' '{temp_c}'"
+    val rt_sources = "src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c"
+    val compile_cmd = "{cc} -std=c++20 -g -O0 -I src/runtime/ '{temp_c}' {rt_sources} -o '{temp_bin}' -lpthread -ldl -lm"
     if verbose:
         print "Compiling for Valgrind: {compile_cmd}"
 

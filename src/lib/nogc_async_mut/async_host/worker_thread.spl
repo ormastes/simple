@@ -17,7 +17,7 @@ class WorkerThread:
     - Handles task suspension/wakeup
 
     Example:
-        val worker = WorkerThread.new(0, local_queue, global_queue)
+        val worker = WorkerThread.new(0, local_queue, global_queue, {})
         worker.run()  # runs in separate OS thread
     """
     worker_id: usize
@@ -25,11 +25,13 @@ class WorkerThread:
     global_queue: ThreadSafeQueue
     is_running: bool
     shutdown_requested: bool
+    task_registry: Dict<usize, fn() -> Poll<()>>
 
     static fn new(
         worker_id: usize,
         local_queue: ThreadSafeQueue,
-        global_queue: ThreadSafeQueue
+        global_queue: ThreadSafeQueue,
+        task_registry: Dict<usize, fn() -> Poll<()>>
     ) -> WorkerThread:
         """Create new worker thread.
 
@@ -37,6 +39,7 @@ class WorkerThread:
             worker_id: Worker index
             local_queue: Thread-local task queue
             global_queue: Shared global task queue
+            task_registry: Registry of task poll functions
 
         Returns:
             Worker thread instance
@@ -46,7 +49,8 @@ class WorkerThread:
             local_queue: local_queue,
             global_queue: global_queue,
             is_running: false,
-            shutdown_requested: false
+            shutdown_requested: false,
+            task_registry: task_registry
         )
 
     me run():
@@ -79,15 +83,20 @@ class WorkerThread:
         # Execute task if found
         match task_id:
             case Some(id):
-                # Task execution would happen here
-                # In real implementation, this would:
-                # 1. Get task from task registry
-                # 2. Poll the task's future
-                # 3. Handle Ready/Pending result
-                # 4. Update task state
-                # For now, just yield CPU
-                thread_yield()
-                return true
+                match self.task_registry.get(id):
+                    case Some(poll_fn):
+                        val result = poll_fn()
+                        match result:
+                            case Poll.Ready(_):
+                                # Task complete, remove from registry
+                                self.task_registry.remove(id)
+                            case Poll.Pending:
+                                # Re-queue task for later
+                                self.local_queue.push(id)
+                        return true
+                    case nil:
+                        # Task not found in registry, skip
+                        return true
             case nil:
                 return false
 

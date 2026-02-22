@@ -87,7 +87,7 @@ After unification:
 
 ### Path A: AST-Direct (--emit-c)
 ```
-source.spl --> lexer --> parser --> AST --> c_codegen --> output.cpp
+source.spl --> lexer --> parser --> AST -> HIR -> MIR -> CCodegenAdapter -> output.cpp
 ```
 Simple, fast. No optimizations. Good for bootstrapping.
 
@@ -200,5 +200,4 @@ Move shared LLVM infra to `src/compiler_shared/llvm/`:
 - `src/compiler/backend/backend_factory.spl` — BackendFactory (CCodegen case)
 - `src/compiler/driver.spl` — CompilerDriver (compile_to_c, aot_compile C routing)
 - `src/app/compile/c_mir_backend.spl` — CLI entry script for MIR C backend
-- `src/app/compile/c_codegen.spl` — AST-direct C codegen (Path A, legacy)
 - `src/compiler_seed/runtime.c` — C runtime (linked with generated C++)

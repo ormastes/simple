@@ -1,0 +1,67 @@
+# GC Tensor Ownership Pattern Spec
+# Documents the owns_handle pattern in gc_async_mut/torch/mod.spl
+
+var tensor_freed = 0
+
+fn mock_tensor_free(h: i64):
+    tensor_freed = tensor_freed + 1
+
+struct MockTensor:
+    handle: i64
+    owns_handle: bool
+
+    static fn create(h: i64) -> MockTensor:
+        MockTensor(handle: h, owns_handle: true)
+
+    fn drop():
+        if self.owns_handle:
+            mock_tensor_free(self.handle)
+
+    fn sub_workaround() -> MockTensor:
+        # In GC mode, sub() creates a temp with owns_handle=false
+        # to prevent double-free when GC collects both original and result
+        var result = MockTensor(handle: self.handle + 100, owns_handle: true)
+        # Intermediate reference — mark as non-owning
+        var temp = MockTensor(handle: self.handle, owns_handle: false)
+        temp.drop()
+        result
+
+    fn mark_borrowed() -> MockTensor:
+        # Pattern from gc_async_mut/torch/mod.spl line 182:
+        # scaled.owns_handle = false
+        MockTensor(handle: self.handle, owns_handle: false)
+
+describe "GC Tensor Ownership":
+    describe "Basic ownership":
+        it "owned tensor frees on drop":
+            val t = MockTensor__create(10)
+            t.drop()
+            expect(tensor_freed).to_be_greater_than(0)
+
+        it "borrowed tensor does not free":
+            val prev = tensor_freed
+            val t = MockTensor(handle: 10, owns_handle: false)
+            t.drop()
+            expect(tensor_freed).to_equal(prev)
+
+    describe "Sub/div workaround":
+        it "sub workaround does not double-free":
+            val prev = tensor_freed
+            val original = MockTensor__create(20)
+            val result = original.sub_workaround()
+            # temp inside sub_workaround was borrowed — no free
+            expect(tensor_freed).to_equal(prev)
+            # Only explicit drops free
+            original.drop()
+            result.drop()
+            expect(tensor_freed).to_equal(prev + 2)
+
+    describe "Mark borrowed pattern":
+        it "marking as borrowed prevents free":
+            val prev = tensor_freed
+            val t = MockTensor__create(30)
+            val borrowed = t.mark_borrowed()
+            borrowed.drop()
+            expect(tensor_freed).to_equal(prev)
+            t.drop()
+            expect(tensor_freed).to_equal(prev + 1)
