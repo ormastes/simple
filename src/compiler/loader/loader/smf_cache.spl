@@ -15,10 +15,7 @@
 # - Auto-loads note.sdn metadata on demand
 # - Reads template bytes directly from mapped memory
 
-use ...monomorphize.note_sdn (NoteSdnMetadata, PossibleInstantiationEntry, InstantiationEntry, InstantiationStatus)
-use ..linker.smf_reader (SmfReaderImpl, SmfHeader)
-use ..linker.smf_header (SMF_HEADER_SIZE)
-# mmap functions not yet available in app.io.mod; memory-mapped file support pending
+use compiler.mono.monomorphize.note_sdn (NoteSdnMetadata, PossibleInstantiationEntry, InstantiationEntry, InstantiationStatus)use compiler.backend.linker.smf_reader (SmfReaderImpl, SmfHeader)use compiler.backend.linker.smf_header (SMF_HEADER_SIZE)# mmap functions not yet available in app.io.mod; memory-mapped file support pending
 # When available, uncomment: use app.io.mod (mmap_file, munmap, mmap_read_bytes, mmap_read_string, file_size_for_mmap, get_page_size, madvise, msync)
 use std.sdn.parser (parse)
 use std.sdn.value (SdnValue)
@@ -154,7 +151,7 @@ impl MappedSmf:
                 Ok(metadata)
             case Err(err):
                 # If parsing fails, return empty metadata (file might not have note.sdn)
-                val empty_metadata = NoteSdnMetadata.new()
+                val empty_metadata = NoteSdnMetadata__new()
                 self.note_sdn = Some(empty_metadata)
                 Ok(empty_metadata)
 
@@ -253,7 +250,7 @@ impl SmfCache:
         # Cache miss - load file
         self.stats.cache_misses = self.stats.cache_misses + 1
 
-        val mapped = MappedSmf.open(path)?
+        val mapped = MappedSmf__open(path)?
 
         # Update stats
         self.stats.total_files = self.stats.total_files + 1
@@ -342,9 +339,7 @@ fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
 
     ROBUSTNESS: Falls back to safe defaults if bytes are too short.
     """
-    use ..linker.smf_enums (Platform, Arch, CompressionType)
-    use ..linker.smf_reader (SmfHeader as ParsedHeader, SmfFlags)
-
+    use compiler.backend.linker.smf_enums (Platform, Arch, CompressionType)    use compiler.backend.linker.smf_reader (SmfHeader as ParsedHeader, SmfFlags)
     if bytes.len() < 128:
         # Insufficient data - return minimal defaults
         return ParsedHeader(
@@ -376,8 +371,8 @@ fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
     val version_minor = bytes[5]
 
     # Read platform and arch
-    val platform = Platform.from_u8(bytes[6])
-    val arch = Arch.from_u8(bytes[7])
+    val platform = Platform__from_u8(bytes[6])
+    val arch = Arch__from_u8(bytes[7])
 
     # Read flags (u32 at offset 8)
     val flags_raw = bytes_to_u32(bytes[8..12])
@@ -449,7 +444,7 @@ fn parse_note_sdn_from_value(value: SdnValue) -> Result<NoteSdnMetadata, text>:
     """
     match value:
         case SdnValue.Dict(dict):
-            var metadata = NoteSdnMetadata.new()
+            var metadata = NoteSdnMetadata__new()
 
             # Parse instantiations table
             if dict.contains_key("instantiations"):
@@ -490,7 +485,7 @@ fn parse_instantiation_row(row: [SdnValue], cols: [text]) -> Result<Instantiatio
     val output_file = get_string_from_value(row[5])?
     val status_str = get_string_from_value(row[6])?
 
-    val status = InstantiationStatus.from_str(status_str)?
+    val status = InstantiationStatus__from_str(status_str)?
 
     Ok(InstantiationEntry(
         template: template,
@@ -541,6 +536,91 @@ fn get_bool_from_value(value: SdnValue) -> Result<bool, text>:
 # ============================================================================
 # Exports
 # ============================================================================
+
+
+# Auto-generated desugared static method wrappers
+fn MappedSmf__open(path: text) -> Result<MappedSmf, text>:
+    """Open and mmap an SMF file."""
+    # Get file size
+    val file_size = file_size_for_mmap(path)
+    if file_size < 0:
+        return Err("Failed to get file size for {path}")
+
+    if file_size < SMF_HEADER_SIZE:
+        return Err("File too small to be valid SMF: {path}")
+
+    # Map entire file with read-only access
+    val (address, mapped_size) = mmap_file(path, PROT_READ, MAP_PRIVATE, 0, 0)
+    if address == 0:
+        return Err("Failed to mmap file: {path}")
+
+    # Advise kernel about sequential access
+    val _ = madvise(address, mapped_size, MADV_SEQUENTIAL)
+
+    # Read header from trailer (v1.1 format: last 128 bytes)
+    val header_offset = mapped_size - SMF_HEADER_SIZE
+    val header_bytes = mmap_read_bytes(address, header_offset, SMF_HEADER_SIZE)
+
+    # Parse header (simplified - full implementation would use SmfHeader.from_bytes)
+    # For now, create minimal header
+    val header = parse_header_minimal(header_bytes)
+
+    # Parse section table to find TemplateCode and note.sdn offsets
+    # Section table format: 64-byte entries starting at header.section_table_offset
+    # Each entry: name_offset(4) name_len(4) type(4) flags(4) offset(8) size(8) ...
+    val section_table_offset = bytes_to_u32(header_bytes[16..20]) as i64
+    val section_table_high = bytes_to_u32(header_bytes[20..24]) as i64
+    val full_section_table_offset = section_table_offset | (section_table_high << 32)
+    val num_sections = header.section_count
+
+    var template_offset = 0i64
+    var note_sdn_offset = 0i64
+
+    if full_section_table_offset > 0 and full_section_table_offset < mapped_size:
+        var si = 0
+        while si < num_sections:
+            val entry_offset = full_section_table_offset + (si as i64 * 64)
+            if entry_offset + 64 > mapped_size:
+                break
+            val entry_bytes = mmap_read_bytes(address, entry_offset, 64)
+            # Section type at offset 8 in entry
+            val sec_type = bytes_to_u32(entry_bytes[8..12])
+            # Section offset at entry offset 16 (8 bytes)
+            val sec_offset = bytes_to_u32(entry_bytes[16..20]) as i64
+            val sec_offset_high = bytes_to_u32(entry_bytes[20..24]) as i64
+            val full_sec_offset = sec_offset | (sec_offset_high << 32)
+            # Type 12 = TemplateCode, Type 13 = TemplateMeta (note.sdn)
+            if sec_type == 12:
+                template_offset = full_sec_offset
+            if sec_type == 13:
+                note_sdn_offset = full_sec_offset
+            si = si + 1
+
+    Ok(MappedSmf(
+        path: path,
+        address: address,
+        size: mapped_size,
+        header: header,
+        note_sdn: nil,
+        template_section_offset: template_offset,
+        note_sdn_section_offset: note_sdn_offset,
+        section_table_offset: full_section_table_offset
+    ))
+
+
+fn SmfCache__new() -> SmfCache:
+    """Create a new SMF cache."""
+    SmfCache(
+        cached_files: {},
+        enabled: true,
+        stats: CacheStats(
+            total_files: 0,
+            total_memory: 0,
+            cache_hits: 0,
+            cache_misses: 0
+        )
+    )
+
 
 export SmfCache
 export MappedSmf
