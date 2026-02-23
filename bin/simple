@@ -201,8 +201,45 @@ main() {
     # Use lightweight entry point for known commands (saves ~160ms)
     local fast_entry
     if fast_entry=$(detect_fast_path "$@"); then
-        run_filtered "$bootstrap" "$DIR/../src/app/cli/$fast_entry" "$@"
-        exit $?
+        local fast_rc=0
+        run_filtered "$bootstrap" "$DIR/../src/app/cli/$fast_entry" "$@" || fast_rc=$?
+        # If compile_c_entry.spl fails (interpreter can't call imported functions),
+        # fall through to simple_codegen for --backend=c
+        if [ $fast_rc -ne 0 ] && [ "$fast_entry" = "compile_c_entry.spl" ]; then
+            local codegen_bin="$DIR/bootstrap/cpp/simple_codegen"
+            if [ -x "$codegen_bin" ]; then
+                # Parse source file and output from args
+                local c_source="" c_output=""
+                local past_compile=false
+                for arg in "$@"; do
+                    case "$arg" in
+                        compile) past_compile=true; continue ;;
+                        --backend=*|--verbose|-v) continue ;;
+                        -o) c_output="__NEXT__"; continue ;;
+                        --emit-c) continue ;;
+                    esac
+                    if [ "$c_output" = "__NEXT__" ]; then
+                        c_output="$arg"; continue
+                    fi
+                    if [ "$past_compile" = "true" ] && [[ "$arg" != -* ]]; then
+                        c_source="$arg"
+                    fi
+                done
+                if [ -z "$c_output" ]; then
+                    c_output="${c_source%.spl}.c"
+                fi
+                if [ -n "$c_source" ]; then
+                    "$codegen_bin" compile "$c_source" "$c_output"
+                    local cg_rc=$?
+                    if [ $cg_rc -eq 0 ]; then
+                        echo "Output: $c_output"
+                        echo "Build with: clang -std=gnu11 -O2 $c_output -lm -o output"
+                    fi
+                    exit $cg_rc
+                fi
+            fi
+        fi
+        exit $fast_rc
     fi
 
     # Fall back to full CLI for all other commands

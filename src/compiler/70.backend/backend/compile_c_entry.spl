@@ -1,0 +1,131 @@
+# C Backend Compile Entry Point
+#
+# Placed in 70.backend/backend/ to resolve imports relative to this directory.
+# backend.spl facade MUST be renamed to backend.spl.bak to prevent cascade loading.
+
+use c_backend.*
+use c_ir_builder.{CIRBuilder__create}
+use c_type_mapper.{CTypeMapper__create}
+use compiler.mir.mir_data.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.mir.mir_lowering.*
+use compiler.core.parser.{SymbolTable, Scope, ScopeId, ScopeKind}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn main() -> i64:
+    val raw_args = sys_get_args()
+    print "[c-compile] args: {raw_args}"
+
+    # Parse CLI args
+    var source_file = ""
+    var output_file = ""
+    var i = 1
+    while i < raw_args.len():
+        val arg = raw_args[i]
+        if arg == "compile":
+            i = i + 1
+        elif arg.starts_with("--backend="):
+            i = i + 1
+        elif arg == "-o" or arg == "--output":
+            if i + 1 < raw_args.len():
+                output_file = raw_args[i + 1]
+                i = i + 2
+            else:
+                i = i + 1
+        elif arg.starts_with("-o"):
+            output_file = arg.slice(2, arg.len())
+            i = i + 1
+        elif arg.starts_with("--output="):
+            output_file = arg.slice(9, arg.len())
+            i = i + 1
+        elif arg.starts_with("-"):
+            i = i + 1
+        else:
+            source_file = arg
+            i = i + 1
+
+    if source_file == "":
+        print "Usage: simple compile --backend=c [-o output.cpp] source.spl"
+        return 1
+
+    if output_file == "":
+        output_file = source_file.replace(".spl", ".cpp")
+
+    # Read source
+    val source_opt = rt_file_read_text(source_file)
+    if source_opt == nil:
+        print "Error: Cannot read file: {source_file}"
+        return 1
+    val source_text = source_opt ?? ""
+
+    print "[c-compile] Compiling {source_file} to C++20..."
+    print "[c-compile] Output: {output_file}"
+
+    # Step 1: Parse using core parser functions
+    print "[c-compile] Step 1: Parsing..."
+    parser_init(source_text)
+    val ast_module = parse_module_body("main")
+    print "[c-compile] Step 1: Done"
+
+    # Step 2: Lower to HIR
+    print "[c-compile] Step 2: Lowering to HIR..."
+    var sym_table = SymbolTable(
+        symbols: {},
+        scopes: {},
+        current_scope: ScopeId(id: 0),
+        next_symbol_id: 0,
+        next_scope_id: 1
+    )
+    sym_table.scopes[0] = Scope(
+        id: ScopeId(id: 0),
+        parent: nil,
+        kind: ScopeKind.Module,
+        symbols: {}
+    )
+    var hir_low = HirLowering(
+        symbols: sym_table,
+        errors: [],
+        current_function: nil,
+        loop_depth: 0
+    )
+    val hir_module = hir_low.lower_module(ast_module)
+    print "[c-compile] Step 2: Done"
+
+    # Step 3: Lower to MIR
+    print "[c-compile] Step 3: Lowering to MIR..."
+    var mir_low = MirLowering.new(sym_table)
+    var mir_module = mir_low.lower_module(hir_module)
+    print "[c-compile] Step 3: Done"
+
+    # Step 4: Generate C++
+    print "[c-compile] Step 4: Generating C++..."
+    val builder = CIRBuilder__create("main")
+    val mapper = CTypeMapper__create()
+    var translator = MirToC(
+        builder: builder,
+        type_mapper: mapper,
+        local_map: {},
+        local_types: {},
+        stack_slots: {},
+        stack_slot_sizes: {},
+        string_counter: 0,
+        str_locals: {}
+    )
+    val cpp_source = translator.translate_module(mir_module)
+    print "[c-compile] Step 4: Done"
+
+    # Step 5: Write output
+    if not rt_file_write_text(output_file, cpp_source):
+        print "Error: Failed to write {output_file}"
+        return 1
+
+    print "[c-compile] Success: {output_file}"
+    print "[c-compile] Build with:"
+    print "  clang++ -std=c++20 -I src/runtime/ {output_file} src/runtime/runtime.c -o output -lpthread -ldl -lm"
+    return 0
