@@ -107,8 +107,8 @@ static void init_interp_paths(void) {
     if (g_interp_bin[0]) return; /* already initialized */
     char self_path[4096] = {0};
     if (get_exe_dir(self_path, sizeof(self_path)) != 0) return;
-    /* Interpreter binary: ../bin/release/simple-0.5.0 (relative to build/) */
-    snprintf(g_interp_bin, sizeof(g_interp_bin), "%s../bin/release/simple-0.5.0", self_path);
+    /* Interpreter binary: ../bin/release/simple-0.6.0 (relative to build/) */
+    snprintf(g_interp_bin, sizeof(g_interp_bin), "%s../bin/release/simple-0.6.0", self_path);
     if (!file_accessible(g_interp_bin)) {
         /* Try: ../bin/release/simple */
         snprintf(g_interp_bin, sizeof(g_interp_bin), "%s../bin/release/simple", self_path);
@@ -473,7 +473,7 @@ const char* get_version(void) {
     if (((strcmp(version, "") != 0) && (version != NULL))) {
     return version;
     }
-    return "0.5.0";
+    return "0.6.1";
 }
 
 void print_version(void) {

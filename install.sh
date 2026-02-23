@@ -25,11 +25,11 @@ elif command -v curl >/dev/null 2>&1; then
     LATEST_URL="https://api.github.com/repos/simple-lang/simple/releases/latest"
     VERSION=$(curl -fsSL "$LATEST_URL" 2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"v\(.*\)".*/\1/')
     if [ -z "$VERSION" ]; then
-        VERSION="0.3.0"
+        VERSION="0.6.1"
         echo -e "${YELLOW}Could not detect latest version, using $VERSION${NC}"
     fi
 else
-    VERSION="0.3.0"
+    VERSION="0.6.1"
 fi
 
 # Detect platform

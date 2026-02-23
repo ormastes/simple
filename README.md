@@ -79,23 +79,23 @@ Download the pre-compiled release for your platform - no build required!
 
 ```bash
 # Linux x86_64
-wget https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-linux-x86_64.tar.gz
-tar -xzf simple-0.5.0-linux-x86_64.tar.gz
-cd simple-0.5.0
+wget https://github.com/simple-lang/simple/releases/download/v0.6.1/simple-0.6.1-linux-x86_64.tar.gz
+tar -xzf simple-0.6.1-linux-x86_64.tar.gz
+cd simple-0.6.1
 export PATH="$PWD/bin:$PATH"
 simple --version
 
 # macOS ARM64 (Apple Silicon)
-curl -LO https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-darwin-aarch64.tar.gz
-tar -xzf simple-0.5.0-darwin-aarch64.tar.gz
-cd simple-0.5.0
+curl -LO https://github.com/simple-lang/simple/releases/download/v0.6.1/simple-0.6.1-darwin-aarch64.tar.gz
+tar -xzf simple-0.6.1-darwin-aarch64.tar.gz
+cd simple-0.6.1
 export PATH="$PWD/bin:$PATH"
 simple --version
 
 # Windows x86_64 (PowerShell)
-Invoke-WebRequest -Uri https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-windows-x86_64.zip -OutFile simple.zip
+Invoke-WebRequest -Uri https://github.com/simple-lang/simple/releases/download/v0.6.1/simple-0.6.1-windows-x86_64.zip -OutFile simple.zip
 Expand-Archive simple.zip
-cd simple-0.5.0
+cd simple-0.6.1
 $env:PATH = "$PWD\bin;$env:PATH"
 simple --version
 ```

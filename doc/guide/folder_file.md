@@ -39,7 +39,7 @@ simple/
 | File | Purpose | Edit When |
 |------|---------|-----------|
 | `simple.sdn` | Main project config (solution-wide) | Changing project structure |
-| `VERSION` | Current version number (0.6.0) | Releasing new version |
+| `VERSION` | Current version number (0.6.1) | Releasing new version |
 
 ### **Hidden Files (Don't Edit)**
 

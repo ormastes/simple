@@ -2,6 +2,30 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.6.1] - 2026-02-23
+
+### Added
+- Async I/O driver infrastructure with platform backends (epoll, io_uring, kqueue, IOCP)
+- Sanitizer CI workflow (ASan builds)
+- Valgrind check script
+- Optimized build script
+
+### Changed
+- Mass test suite repair: +831 passing test cases across all suites
+- MIR codegen trait unification (C/LLVM shared trait)
+- All stale version references updated from 0.5.0 to 0.6.1
+
+### Fixed
+- Memory leak elimination across all 9 categories (slice, substr, lex args, program args, etc.)
+- C backend string escaping and C++ keyword safety
+- Runtime intrinsics for codegen
+- Test runner binary resolution
+- Parse errors in test files
+
+### Infrastructure
+- Bootstrap build updated to use v0.6.0 as base
+- 11-platform release matrix (added FreeBSD x86, Windows x86, Windows ARM64)
+
 ## [0.6.0] - 2026-02-14
 
 ### Added

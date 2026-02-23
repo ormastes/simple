@@ -20,9 +20,14 @@ set "OUTPUT=bin\release\simple"
 set "KEEP_ARTIFACTS=false"
 set "VERBOSE=false"
 set "DEPLOY=auto"
-set "RUNTIME_DIR=src\compiler_cpp\runtime"
+set "RUNTIME_DIR=src\runtime"
 set "COMPILER_DIR=src\compiler"
+set "SEED_DIR=src\compiler_seed"
+set "COMPILER_CORE_DIR=src\compiler_core"
+set "COMPILER_SHARED_DIR=src\compiler\00.common"
+set "SEED_BUILD_DIR=build\seed"
 set "BUILD_DIR=build\bootstrap"
+set "CPP_DIR=src\compiler_cpp"
 set "SEED_CPP="
 set "RUNTIME_LIB="
 
@@ -82,6 +87,21 @@ echo ================================================================
 echo   Simple Compiler - Bootstrap From Scratch ^(Windows^)
 echo ================================================================
 echo.
+
+REM Check if seed directory exists; if not, use committed C code fallback
+if not exist "%SEED_DIR%\seed.cpp" (
+    if exist "%CPP_DIR%\CMakeLists.txt" (
+        echo [bootstrap] Seed directory not found, using committed C code fallback
+        echo [bootstrap] Building from %CPP_DIR% via CMake...
+        echo.
+        call :cmake_fallback
+        if errorlevel 1 exit /b 1
+        goto :end_main
+    ) else (
+        echo [bootstrap] ERROR: Neither %SEED_DIR%\seed.cpp nor %CPP_DIR%\CMakeLists.txt found
+        exit /b 1
+    )
+)
 
 call :step0_prerequisites
 if errorlevel 1 exit /b 1
@@ -471,6 +491,96 @@ if errorlevel 1 (
     exit /b 1
 )
 
+exit /b 0
+
+:cmake_fallback
+REM Build from committed C code in src\compiler_cpp\ using CMake
+where cmake >nul 2>&1
+if errorlevel 1 (
+    echo [bootstrap] ERROR: cmake not found
+    exit /b 1
+)
+
+if "!CXX!"=="" (
+    for %%c in (clang-cl clang++) do (
+        where %%c >nul 2>&1
+        if not errorlevel 1 (
+            set "CXX=%%c"
+            goto :cmake_cxx_found
+        )
+    )
+    echo [bootstrap] WARNING: No clang found, using cmake default
+    :cmake_cxx_found
+)
+
+set "CMAKE_BUILD=build"
+set "CMAKE_ARGS=-S "%CPP_DIR%" -B "%CMAKE_BUILD%" -DCMAKE_BUILD_TYPE=Release"
+if not "!CXX!"=="" (
+    set "CMAKE_ARGS=!CMAKE_ARGS! -DCMAKE_CXX_COMPILER=!CXX!"
+    REM Derive C compiler from CXX
+    set "CC=!CXX!"
+    if /i "!CXX!"=="clang-cl" set "CC=clang-cl"
+    if /i "!CXX!"=="clang++" set "CC=clang"
+    set "CMAKE_ARGS=!CMAKE_ARGS! -DCMAKE_C_COMPILER=!CC!"
+)
+
+cmake !CMAKE_ARGS!
+if errorlevel 1 (
+    echo [bootstrap] ERROR: cmake configuration failed
+    exit /b 1
+)
+
+cmake --build "%CMAKE_BUILD%" --parallel %JOBS%
+if errorlevel 1 (
+    echo [bootstrap] ERROR: cmake build failed
+    exit /b 1
+)
+
+REM Find built artifacts
+set "ARTIFACT="
+if exist "%CMAKE_BUILD%\simple.exe" set "ARTIFACT=%CMAKE_BUILD%\simple.exe"
+if exist "%CMAKE_BUILD%\Release\simple.exe" set "ARTIFACT=%CMAKE_BUILD%\Release\simple.exe"
+if exist "%CMAKE_BUILD%\Debug\simple.exe" set "ARTIFACT=%CMAKE_BUILD%\Debug\simple.exe"
+
+if "!ARTIFACT!"=="" (
+    echo [bootstrap] ERROR: simple.exe not found after cmake build
+    exit /b 1
+)
+
+echo [bootstrap] Built: !ARTIFACT!
+
+REM Verify
+"!ARTIFACT!" --version 2>nul
+echo.
+
+REM Deploy
+if /i "!DEPLOY!"=="true" (
+    for %%d in ("%OUTPUT%") do if not exist "%%~dpd" mkdir "%%~dpd"
+    copy /y "!ARTIFACT!" "%OUTPUT%.exe" >nul
+    copy /y "!ARTIFACT!" "%OUTPUT%" >nul
+    echo [bootstrap] Deployed: !ARTIFACT! -^> %OUTPUT%
+
+    REM Also copy simple_codegen if available
+    set "CODEGEN="
+    if exist "%CMAKE_BUILD%\simple_codegen.exe" set "CODEGEN=%CMAKE_BUILD%\simple_codegen.exe"
+    if exist "%CMAKE_BUILD%\Release\simple_codegen.exe" set "CODEGEN=%CMAKE_BUILD%\Release\simple_codegen.exe"
+    if not "!CODEGEN!"=="" (
+        copy /y "!CODEGEN!" "bin\release\simple_codegen.exe" >nul
+        echo [bootstrap] Deployed: !CODEGEN! -^> bin\release\simple_codegen.exe
+    )
+)
+
+echo.
+echo ================================================================
+echo   Bootstrap Complete ^(CMake fallback^)
+echo ================================================================
+echo   Artifact: !ARTIFACT!
+if /i "!DEPLOY!"=="true" echo   Deployed: %OUTPUT%
+echo.
+exit /b 0
+
+:end_main
+endlocal
 exit /b 0
 
 :cleanup

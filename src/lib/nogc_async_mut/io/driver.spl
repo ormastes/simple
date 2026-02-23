@@ -1,0 +1,229 @@
+"""
+# Async I/O Completion Driver
+
+**Feature IDs:** #IO-100
+**Category:** Runtime
+**Status:** In Progress
+**Design:** doc/design/async_io_nginx_perf_optimization.md
+**Research:** doc/research/async_io_backend_comparison_2026-02-23.md
+
+## Overview
+
+Unified completion-based I/O driver wrapping the C `spl_driver` layer.
+Automatically selects the best backend for the platform:
+
+| Platform     | Primary     | Fallback |
+|-------------|-------------|----------|
+| Linux 5.1+  | io_uring    | epoll    |
+| Linux <5.1  | epoll       | —        |
+| macOS       | kqueue      | —        |
+| FreeBSD     | kqueue+AIO  | —        |
+| Windows     | IOCP        | —        |
+
+## Usage
+
+```simple
+val driver = IoDriver.new()
+print "Backend: {driver.backend_name()}"
+
+# Submit operations (queued until flush)
+val op1 = driver.submit_timeout(1000)
+val count = driver.flush()
+
+# Poll for completions
+val completions = driver.poll(64, 2000)
+for c in completions:
+    print "Op {c.id} completed: result={c.result}"
+
+driver.close()
+```
+
+## Completion Struct
+
+```simple
+struct Completion:
+    id: i64       # operation ID from submit_*
+    result: i64   # bytes transferred (>=0) or negative errno
+    flags: i64    # platform-specific flags
+```
+"""
+
+# ============================================================================
+# FFI Declarations
+# ============================================================================
+
+extern fn rt_driver_create(queue_depth: i64) -> i64
+extern fn rt_driver_destroy(handle: i64)
+extern fn rt_driver_submit_accept(handle: i64, listen_fd: i64) -> i64
+extern fn rt_driver_submit_connect(handle: i64, fd: i64, addr: text, port: i64) -> i64
+extern fn rt_driver_submit_recv(handle: i64, fd: i64, buf_size: i64) -> i64
+extern fn rt_driver_submit_send(handle: i64, fd: i64, data: text, len: i64) -> i64
+extern fn rt_driver_submit_sendfile(handle: i64, sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64
+extern fn rt_driver_submit_read(handle: i64, fd: i64, buf_size: i64, offset: i64) -> i64
+extern fn rt_driver_submit_write(handle: i64, fd: i64, data: text, len: i64, offset: i64) -> i64
+extern fn rt_driver_submit_open(handle: i64, path: text, flags: i64, mode: i64) -> i64
+extern fn rt_driver_submit_close(handle: i64, fd: i64) -> i64
+extern fn rt_driver_submit_fsync(handle: i64, fd: i64) -> i64
+extern fn rt_driver_submit_timeout(handle: i64, timeout_ms: i64) -> i64
+extern fn rt_driver_flush(handle: i64) -> i64
+extern fn rt_driver_poll(handle: i64, max: i64, timeout_ms: i64) -> i64
+extern fn rt_driver_poll_id(handle: i64, index: i64) -> i64
+extern fn rt_driver_poll_result(handle: i64, index: i64) -> i64
+extern fn rt_driver_poll_flags(handle: i64, index: i64) -> i64
+extern fn rt_driver_cancel(handle: i64, op_id: i64) -> bool
+extern fn rt_driver_backend_name(handle: i64) -> text
+extern fn rt_driver_supports_sendfile(handle: i64) -> bool
+extern fn rt_driver_supports_zero_copy(handle: i64) -> bool
+
+# ============================================================================
+# Completion Struct
+# ============================================================================
+
+struct Completion:
+    """Result of a completed I/O operation."""
+    id: i64
+    result: i64
+    flags: i64
+
+# ============================================================================
+# IoDriver Class
+# ============================================================================
+
+class IoDriver:
+    """Unified async I/O completion driver.
+
+    Wraps the C spl_driver layer with automatic backend selection.
+    Single-threaded (one per worker in thread-per-core model).
+
+    Example:
+        val driver = IoDriver.new()
+        val op = driver.submit_timeout(100)
+        driver.flush()
+        val completions = driver.poll(64, 200)
+        driver.close()
+    """
+    handle: i64
+
+    static fn new() -> IoDriver:
+        """Create driver with default queue depth (256)."""
+        val h = rt_driver_create(256)
+        IoDriver(handle: h)
+
+    static fn with_depth(depth: i64) -> IoDriver:
+        """Create driver with custom queue depth."""
+        val h = rt_driver_create(depth)
+        IoDriver(handle: h)
+
+    # ---- Network Operations ----
+
+    fn submit_accept(listen_fd: i64) -> i64:
+        """Submit async accept on a listening socket. Returns op_id."""
+        rt_driver_submit_accept(self.handle, listen_fd)
+
+    fn submit_connect(fd: i64, addr: text, port: i64) -> i64:
+        """Submit async connect. Returns op_id."""
+        rt_driver_submit_connect(self.handle, fd, addr, port)
+
+    fn submit_recv(fd: i64, buf_size: i64) -> i64:
+        """Submit async receive. Returns op_id."""
+        rt_driver_submit_recv(self.handle, fd, buf_size)
+
+    fn submit_send(fd: i64, data: text) -> i64:
+        """Submit async send. Returns op_id."""
+        rt_driver_submit_send(self.handle, fd, data, data.len())
+
+    fn submit_sendfile(sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
+        """Submit async sendfile (zero-copy file-to-socket). Returns op_id."""
+        rt_driver_submit_sendfile(self.handle, sock_fd, file_fd, offset, len)
+
+    # ---- File I/O Operations ----
+
+    fn submit_read(fd: i64, buf_size: i64, offset: i64) -> i64:
+        """Submit async file read. Returns op_id."""
+        rt_driver_submit_read(self.handle, fd, buf_size, offset)
+
+    fn submit_write(fd: i64, data: text, offset: i64) -> i64:
+        """Submit async file write. Returns op_id."""
+        rt_driver_submit_write(self.handle, fd, data, data.len(), offset)
+
+    fn submit_open(path: text, flags: i64, mode: i64) -> i64:
+        """Submit async file open. Returns op_id."""
+        rt_driver_submit_open(self.handle, path, flags, mode)
+
+    fn submit_close(fd: i64) -> i64:
+        """Submit async file close. Returns op_id."""
+        rt_driver_submit_close(self.handle, fd)
+
+    fn submit_fsync(fd: i64) -> i64:
+        """Submit async fsync. Returns op_id."""
+        rt_driver_submit_fsync(self.handle, fd)
+
+    # ---- Timer ----
+
+    fn submit_timeout(timeout_ms: i64) -> i64:
+        """Submit a timeout. Completes after timeout_ms milliseconds. Returns op_id."""
+        rt_driver_submit_timeout(self.handle, timeout_ms)
+
+    # ---- Batch Control ----
+
+    fn flush() -> i64:
+        """Flush all queued operations to the kernel. Returns count submitted."""
+        rt_driver_flush(self.handle)
+
+    fn poll(max: i64, timeout_ms: i64) -> [Completion]:
+        """Poll for completions.
+
+        Args:
+            max: Maximum completions to return
+            timeout_ms: -1=block forever, 0=non-blocking, >0=timeout in ms
+
+        Returns:
+            Array of Completion structs
+        """
+        val count = rt_driver_poll(self.handle, max, timeout_ms)
+        var result: [Completion] = []
+        var i = 0
+        while i < count:
+            val c = Completion(
+                id: rt_driver_poll_id(self.handle, i),
+                result: rt_driver_poll_result(self.handle, i),
+                flags: rt_driver_poll_flags(self.handle, i)
+            )
+            result = result + [c]
+            i = i + 1
+        result
+
+    # ---- Cancel ----
+
+    fn cancel(op_id: i64) -> bool:
+        """Cancel a pending operation. Returns true if cancellation submitted."""
+        rt_driver_cancel(self.handle, op_id)
+
+    # ---- Query ----
+
+    fn backend_name() -> text:
+        """Return backend name: 'io_uring', 'epoll', 'kqueue', or 'iocp'."""
+        rt_driver_backend_name(self.handle)
+
+    fn supports_sendfile() -> bool:
+        """Check if backend supports zero-copy sendfile."""
+        rt_driver_supports_sendfile(self.handle)
+
+    fn supports_zero_copy() -> bool:
+        """Check if backend supports zero-copy send."""
+        rt_driver_supports_zero_copy(self.handle)
+
+    # ---- Lifecycle ----
+
+    me close():
+        """Destroy the driver and release all resources."""
+        if self.handle >= 0:
+            rt_driver_destroy(self.handle)
+            self.handle = -1
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export IoDriver
+export Completion
