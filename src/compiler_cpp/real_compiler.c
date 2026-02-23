@@ -781,6 +781,93 @@ const char* translate_var_decl(const char* line);
 const char* translate_return(const char* line);
 const char* generate_c(const char* source);
 
+// === Struct Method Tracking ===
+
+#define MAX_METHODS_PER_STRUCT 64
+#define MAX_METHOD_STRUCTS 32
+#define MAX_METHOD_BODY_LINES 128
+
+typedef struct {
+    const char* name;           // method name
+    const char* params_raw;     // raw Simple params (excluding self)
+    const char* return_type;    // Simple return type (or "" for void)
+    int is_mutable;             // 1 if 'me' method
+    int is_static;              // 1 if static method
+    const char* body_lines[MAX_METHOD_BODY_LINES]; // method body lines (trimmed)
+    int body_count;
+} MethodInfo;
+
+typedef struct {
+    const char* struct_name;
+    MethodInfo methods[MAX_METHODS_PER_STRUCT];
+    int method_count;
+} StructMethodGroup;
+
+static StructMethodGroup g_struct_methods[MAX_METHOD_STRUCTS];
+static int g_struct_method_count = 0;
+
+// === Variable Type Tracking ===
+
+#define MAX_VAR_TYPES 512
+
+typedef struct {
+    const char* var_name;
+    const char* type_name;  // struct type name
+} VarTypeEntry;
+
+static VarTypeEntry g_var_types[MAX_VAR_TYPES];
+static int g_var_type_count = 0;
+
+static void register_var_type(const char* var_name, const char* type_name) {
+    // Update existing entry if present
+    for (int i = 0; i < g_var_type_count; i++) {
+        if (strcmp(g_var_types[i].var_name, var_name) == 0) {
+            g_var_types[i].type_name = strdup(type_name);
+            return;
+        }
+    }
+    if (g_var_type_count < MAX_VAR_TYPES) {
+        g_var_types[g_var_type_count].var_name = strdup(var_name);
+        g_var_types[g_var_type_count].type_name = strdup(type_name);
+        g_var_type_count++;
+    }
+}
+
+static const char* lookup_var_type(const char* var_name) {
+    for (int i = 0; i < g_var_type_count; i++) {
+        if (strcmp(g_var_types[i].var_name, var_name) == 0) {
+            return g_var_types[i].type_name;
+        }
+    }
+    return NULL;
+}
+
+// Look up if a struct has a method with the given name
+static MethodInfo* lookup_struct_method(const char* struct_name, const char* method_name) {
+    for (int i = 0; i < g_struct_method_count; i++) {
+        if (strcmp(g_struct_methods[i].struct_name, struct_name) == 0) {
+            for (int j = 0; j < g_struct_methods[i].method_count; j++) {
+                if (strcmp(g_struct_methods[i].methods[j].name, method_name) == 0) {
+                    return &g_struct_methods[i].methods[j];
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+// Find which struct has a method with the given name (for when we don't know the struct)
+static const char* find_struct_for_method(const char* method_name) {
+    for (int i = 0; i < g_struct_method_count; i++) {
+        for (int j = 0; j < g_struct_methods[i].method_count; j++) {
+            if (strcmp(g_struct_methods[i].methods[j].name, method_name) == 0) {
+                return g_struct_methods[i].struct_name;
+            }
+        }
+    }
+    return NULL;
+}
+
 const char* trim(const char* s) {
     return simple_trim(s);
 }
@@ -1025,10 +1112,10 @@ const char* translate_print(const char* line) {
                         end_brace = end_brace + 1;
                     }
                     const char* var_expr = substr(inner, i + 1, end_brace);
-                    // Use %s for all interpolated values (convert to string at runtime)
+                    // Use %s with SPL_TO_STR() for type-safe string interpolation
                     fmt = simple_str_concat(fmt, "%s");
-                    // For field access like flags.backend, pass directly as string
-                    args_str = simple_str_concat(args_str, simple_str_concat(", ", translate_expr(var_expr)));
+                    // Wrap in SPL_TO_STR() to auto-convert int/float/string to const char*
+                    args_str = simple_str_concat(args_str, simple_str_concat(", SPL_TO_STR(", simple_str_concat(translate_expr(var_expr), ")")));
                     i = end_brace + 1;
                 } else if (strcmp(ch, "%") == 0) {
                     // Escape % in printf format
@@ -1331,6 +1418,37 @@ const char* translate_expr(const char* expr) {
                 return simple_str_concat("simple_replace(", simple_str_concat(
                     translate_expr(obj), simple_str_concat(", ", simple_str_concat(args_str, ")"))));
             }
+            // Struct method call: obj.method(args) → StructName_method(&obj, args)
+            {
+                long long mp_paren = find_str(method_part, "(");
+                if (mp_paren > 0 && ends_with(method_part, ")")) {
+                    const char* meth_name = trim(substr(method_part, 0, mp_paren));
+                    const char* meth_args_raw = trim(substr(method_part, mp_paren + 1, str_len(method_part) - 1));
+                    // Try to find the struct type for this variable
+                    const char* stype = lookup_var_type(obj);
+                    if (!stype) {
+                        // Try to find any struct with this method name
+                        stype = find_struct_for_method(meth_name);
+                    }
+                    if (stype) {
+                        MethodInfo* mi = lookup_struct_method(stype, meth_name);
+                        if (mi) {
+                            // Build: StructName_method(&obj, translated_args)
+                            const char* call = simple_str_concat(stype, simple_str_concat("_", simple_str_concat(meth_name, "(&")));
+                            call = simple_str_concat(call, simple_str_concat(translate_expr(obj), ""));
+                            if (str_len(meth_args_raw) > 0) {
+                                // Translate each argument
+                                SimpleStringArray margs = simple_split(meth_args_raw, ", ");
+                                for (long long mai = 0; mai < margs.len; mai++) {
+                                    call = simple_str_concat(call, simple_str_concat(", ", translate_expr(trim(margs.items[mai]))));
+                                }
+                            }
+                            call = simple_str_concat(call, ")");
+                            return call;
+                        }
+                    }
+                }
+            }
             // Generic field access: obj.field → obj.field (pass through)
             long long paren = find_str(method_part, "(");
             if (paren < 0) {
@@ -1587,6 +1705,8 @@ const char* translate_var_decl(const char* line) {
                 strcmp(first_ch, "U") == 0 || strcmp(first_ch, "V") == 0 ||
                 strcmp(first_ch, "W") == 0 || strcmp(first_ch, "X") == 0 ||
                 strcmp(first_ch, "Y") == 0 || strcmp(first_ch, "Z") == 0) {
+                // Register variable type for method call resolution
+                register_var_type(name, before);
                 return simple_str_concat(before, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";")))));
             }
         }
@@ -1683,7 +1803,16 @@ const char* generate_c(const char* source) {
     c_runtime = simple_str_concat(c_runtime, "static char* simple_format_long(const char* b, long long v, const char* a) { char buf[256]; snprintf(buf,256,\"%s%lld%s\",b?b:\"\",v,a?a:\"\"); return strdup(buf); }\n");
     c_runtime = simple_str_concat(c_runtime, "static char* simple_format_str(const char* b, const char* v, const char* a) { size_t t=strlen(b?b:\"\")+strlen(v?v:\"\")+strlen(a?a:\"\")+1; char*r=malloc(t); snprintf(r,t,\"%s%s%s\",b?b:\"\",v?v:\"\",a?a:\"\"); return r; }\n");
     c_runtime = simple_str_concat(c_runtime, "static char* simple_int_to_str(long long v) { char b[32]; snprintf(b,32,\"%lld\",v); return strdup(b); }\n");
-    c_runtime = simple_str_concat(c_runtime, "static const char* simple_substr_from(const char* s, long long start) { if(!s) return \"\"; long long l=strlen(s); if(start>=l) return \"\"; return strdup(s+start); }\n\n");
+    c_runtime = simple_str_concat(c_runtime, "static char* simple_double_to_str(double v) { char b[64]; snprintf(b,64,\"%g\",v); return strdup(b); }\n");
+    c_runtime = simple_str_concat(c_runtime, "static const char* simple_substr_from(const char* s, long long start) { if(!s) return \"\"; long long l=strlen(s); if(start>=l) return \"\"; return strdup(s+start); }\n");
+    // _Generic macro for type-safe string interpolation: converts any value to const char*
+    c_runtime = simple_str_concat(c_runtime, "#define SPL_TO_STR(x) _Generic((x), \\\n");
+    c_runtime = simple_str_concat(c_runtime, "    char*: (const char*)(x), \\\n");
+    c_runtime = simple_str_concat(c_runtime, "    const char*: (x), \\\n");
+    c_runtime = simple_str_concat(c_runtime, "    long long: simple_int_to_str(x), \\\n");
+    c_runtime = simple_str_concat(c_runtime, "    int: simple_int_to_str((long long)(x)), \\\n");
+    c_runtime = simple_str_concat(c_runtime, "    double: simple_double_to_str(x), \\\n");
+    c_runtime = simple_str_concat(c_runtime, "    default: \"<unknown>\")\n\n");
     // Integer array type (for [i64])
     c_runtime = simple_str_concat(c_runtime, "typedef struct { long long* items; long long len; long long cap; } SimpleIntArray;\n");
     c_runtime = simple_str_concat(c_runtime, "static SimpleIntArray simple_new_int_array(void) { SimpleIntArray a; a.items=(long long*)malloc(16*sizeof(long long)); a.len=0; a.cap=16; return a; }\n");
@@ -1718,14 +1847,32 @@ const char* generate_c(const char* source) {
     SimpleStringArray main_lines = simple_new_string_array();
     SimpleStringArray extern_funcs = simple_new_string_array();
 
-    // --- First pass: collect struct/class definitions ---
+    // --- First pass: collect struct/class definitions AND methods ---
+    // Reset global method tracking
+    g_struct_method_count = 0;
+    g_var_type_count = 0;
     {
         int in_struct = 0;
+        int in_method = 0;        // currently collecting a method body
+        int method_base_indent = 0; // indent level of the method declaration
         const char* struct_name = "";
         const char* struct_body = "";
+        int cur_struct_method_idx = -1; // index into g_struct_methods for current struct
+        int cur_method_idx = -1;        // index into current struct's methods array
         for (long long si = 0; si < lines.len; si++) {
-            const char* sl = trim(lines.items[si]);
+            const char* raw_line = lines.items[si];
+            const char* sl = trim(raw_line);
+            // Compute indent level: count leading spaces
+            long long leading_spaces = 0;
+            { long long tmp = 0;
+              while (tmp < str_len(raw_line) && raw_line[tmp] == ' ') tmp++;
+              leading_spaces = tmp;
+            }
+            int indent_level = (int)(leading_spaces / 4);
+
             if ((starts_with(sl, "struct ") || starts_with(sl, "class ")) && ends_with(sl, ":")) {
+                // Finish collecting previous method body if any
+                in_method = 0;
                 if (in_struct && str_len(struct_name) > 0) {
                     // Emit previous struct
                     const char* td = simple_str_concat("typedef struct {\n", simple_str_concat(struct_body, simple_str_concat("} ", simple_str_concat(struct_name, ";\n"))));
@@ -1740,9 +1887,90 @@ const char* generate_c(const char* source) {
                 }
                 struct_body = "";
                 in_struct = 1;
+                // Create a method group entry for this struct
+                if (g_struct_method_count < MAX_METHOD_STRUCTS) {
+                    cur_struct_method_idx = g_struct_method_count;
+                    g_struct_methods[cur_struct_method_idx].struct_name = strdup(struct_name);
+                    g_struct_methods[cur_struct_method_idx].method_count = 0;
+                    g_struct_method_count++;
+                }
             } else if (in_struct) {
-                // Check if line is indented (part of struct body)
-                if (starts_with(lines.items[si], "    ") && !starts_with(sl, "fn ") && !starts_with(sl, "me ") && !starts_with(sl, "static ")) {
+                // If we are currently collecting method body lines
+                if (in_method) {
+                    // Method body lines are more deeply indented than the method declaration
+                    if (indent_level > method_base_indent && str_len(sl) > 0) {
+                        // Add this line as method body
+                        if (cur_struct_method_idx >= 0 && cur_method_idx >= 0) {
+                            MethodInfo* mi = &g_struct_methods[cur_struct_method_idx].methods[cur_method_idx];
+                            if (mi->body_count < MAX_METHOD_BODY_LINES) {
+                                mi->body_lines[mi->body_count] = strdup(sl);
+                                mi->body_count++;
+                            }
+                        }
+                        continue;
+                    } else {
+                        // End of method body
+                        in_method = 0;
+                        // Fall through to process this line
+                    }
+                }
+
+                // Check for method declarations inside the struct
+                if (starts_with(raw_line, "    ") &&
+                    (starts_with(sl, "fn ") || starts_with(sl, "me ") || starts_with(sl, "static fn "))) {
+                    // Parse method signature
+                    int is_mutable = starts_with(sl, "me ");
+                    int is_static = starts_with(sl, "static fn ");
+                    const char* sig_part = sl;
+                    if (is_mutable) {
+                        sig_part = trim(substr_from(sl, 3)); // skip "me "
+                    } else if (is_static) {
+                        sig_part = trim(substr_from(sl, 10)); // skip "static fn "
+                    } else {
+                        sig_part = trim(substr_from(sl, 3)); // skip "fn "
+                    }
+
+                    // sig_part is now "method_name(params) -> RetType:" or "method_name(params):" or "method_name():"
+                    long long mp = find_str(sig_part, "(");
+                    if (mp >= 0 && ends_with(sig_part, ":")) {
+                        const char* meth_name = trim(substr(sig_part, 0, mp));
+                        // Find closing paren
+                        long long cp = find_close_paren_from(sig_part, mp);
+                        if (cp < 0) cp = find_str(sig_part, ")");
+                        const char* params_raw = "";
+                        if (cp > mp + 1) {
+                            params_raw = trim(substr(sig_part, mp + 1, cp));
+                        }
+                        // Return type
+                        const char* ret_type = "";
+                        long long arrow = find_str(sig_part, " -> ");
+                        if (arrow >= 0) {
+                            // Return type is between arrow+4 and the trailing ":"
+                            ret_type = trim(substr(sig_part, arrow + 4, str_len(sig_part) - 1));
+                        }
+
+                        // Register method
+                        if (cur_struct_method_idx >= 0 &&
+                            g_struct_methods[cur_struct_method_idx].method_count < MAX_METHODS_PER_STRUCT) {
+                            int mi_idx = g_struct_methods[cur_struct_method_idx].method_count;
+                            MethodInfo* mi = &g_struct_methods[cur_struct_method_idx].methods[mi_idx];
+                            mi->name = strdup(meth_name);
+                            mi->params_raw = strdup(params_raw);
+                            mi->return_type = strdup(ret_type);
+                            mi->is_mutable = is_mutable;
+                            mi->is_static = is_static;
+                            mi->body_count = 0;
+                            g_struct_methods[cur_struct_method_idx].method_count++;
+                            cur_method_idx = mi_idx;
+                        }
+                        in_method = 1;
+                        method_base_indent = indent_level;
+                    }
+                    continue;
+                }
+
+                // Check if line is indented (part of struct body) - field declaration
+                if (starts_with(raw_line, "    ") && !starts_with(sl, "fn ") && !starts_with(sl, "me ") && !starts_with(sl, "static ")) {
                     // Strip inline comments
                     const char* sl_nc = sl;
                     { long long hash = find_str(sl_nc, "#");
@@ -1762,6 +1990,7 @@ const char* generate_c(const char* source) {
                         simple_string_push(&struct_names, struct_name);
                     }
                     in_struct = 0;
+                    in_method = 0;
                 }
             }
         }
@@ -1910,11 +2139,9 @@ const char* generate_c(const char* source) {
             continue;
         }
         if (in_struct_skip) {
-            if (starts_with(line, "    ") && !starts_with(trimmed, "fn ") && !starts_with(trimmed, "me ") && !starts_with(trimmed, "static fn ")) {
-                continue;  // Skip struct fields
-            }
-            if (starts_with(trimmed, "me ") || starts_with(trimmed, "static fn ")) {
-                continue;  // Skip class methods (me/static fn) for now
+            // Skip everything that is indented (struct fields, methods, method bodies)
+            if (starts_with(line, "    ")) {
+                continue;  // Skip struct fields, methods, and method bodies
             }
             in_struct_skip = 0;
             // Fall through to process this non-struct line
@@ -2259,6 +2486,128 @@ const char* generate_c(const char* source) {
         out = simple_str_concat(out, simple_str_concat(struct_defs.items[_idx_sd], "\n"));
     }
     out = simple_str_concat(out, "\n");
+
+    // --- Generate struct method functions ---
+    for (int smi = 0; smi < g_struct_method_count; smi++) {
+        StructMethodGroup* sg = &g_struct_methods[smi];
+        for (int mj = 0; mj < sg->method_count; mj++) {
+            MethodInfo* mi = &sg->methods[mj];
+            // Determine C return type
+            const char* c_ret = "void";
+            if (str_len(mi->return_type) > 0) {
+                c_ret = stype_to_c(mi->return_type);
+            }
+            // Build C parameter list
+            const char* c_params = "";
+            if (mi->is_static) {
+                // Static methods don't get a self parameter
+            } else {
+                // self pointer parameter
+                c_params = simple_str_concat(sg->struct_name, "* self");
+            }
+            // Parse additional params from params_raw
+            if (str_len(mi->params_raw) > 0) {
+                SimpleStringArray mparams = split_params_toplevel(mi->params_raw);
+                for (long long pi = 0; pi < mparams.len; pi++) {
+                    const char* pt = trim(mparams.items[pi]);
+                    if (!pt || !*pt) continue;
+                    // Skip ~keyword-only marker
+                    if (pt[0] == '~') pt = trim(substr_from(pt, 1));
+                    long long colon_pos = find_str(pt, ":");
+                    const char* c_param = "";
+                    if (colon_pos >= 0) {
+                        const char* pname = mangle_name(trim(substr(pt, 0, colon_pos)));
+                        const char* ptype = trim(substr_from(pt, colon_pos + 1));
+                        c_param = simple_str_concat(stype_to_c(ptype), simple_str_concat(" ", pname));
+                    } else {
+                        c_param = simple_str_concat("long long ", mangle_name(pt));
+                    }
+                    if (str_len(c_params) > 0) {
+                        c_params = simple_str_concat(c_params, simple_str_concat(", ", c_param));
+                    } else {
+                        c_params = c_param;
+                    }
+                }
+            }
+            if (str_len(c_params) == 0) c_params = "void";
+            // Build function signature
+            const char* func_name = simple_str_concat(sg->struct_name, simple_str_concat("_", mi->name));
+            const char* func_sig = simple_str_concat("static ", simple_str_concat(c_ret, simple_str_concat(" ", simple_str_concat(func_name, simple_str_concat("(", simple_str_concat(c_params, ")"))))));
+
+            // Build function body
+            const char* func_code = simple_str_concat(func_sig, " {\n");
+            for (int bi = 0; bi < mi->body_count; bi++) {
+                const char* bline = mi->body_lines[bi];
+                // Translate the method body line: replace self.field with self->field
+                // First, translate as a regular statement
+                const char* c_stmt = "";
+                if (starts_with(bline, "return ")) {
+                    const char* ret_expr = trim(substr_from(bline, 7));
+                    // Replace self.X with self->X in the expression
+                    const char* translated = translate_expr(ret_expr);
+                    translated = simple_replace(translated, "self.", "self->");
+                    c_stmt = simple_str_concat("return ", simple_str_concat(translated, ";"));
+                } else if (starts_with(bline, "print ")) {
+                    // Translate print, then fix self references
+                    c_stmt = translate_print(bline);
+                    c_stmt = simple_replace(c_stmt, "self.", "self->");
+                } else if (starts_with(bline, "val ") || starts_with(bline, "var ")) {
+                    c_stmt = translate_var_decl(bline);
+                    c_stmt = simple_replace(c_stmt, "self.", "self->");
+                } else if (starts_with(bline, "if ") && ends_with(bline, ":")) {
+                    const char* cond = trim(substr(bline, 3, str_len(bline) - 1));
+                    c_stmt = simple_str_concat("if (", simple_str_concat(translate_expr(cond), ") {"));
+                    c_stmt = simple_replace(c_stmt, "self.", "self->");
+                } else if (strcmp(bline, "else:") == 0) {
+                    c_stmt = "} else {";
+                } else if (starts_with(bline, "elif ") && ends_with(bline, ":")) {
+                    const char* cond = trim(substr(bline, 5, str_len(bline) - 1));
+                    c_stmt = simple_str_concat("} else if (", simple_str_concat(translate_expr(cond), ") {"));
+                    c_stmt = simple_replace(c_stmt, "self.", "self->");
+                } else if (starts_with(bline, "while ") && ends_with(bline, ":")) {
+                    const char* cond = trim(substr(bline, 6, str_len(bline) - 1));
+                    c_stmt = simple_str_concat("while (", simple_str_concat(translate_expr(cond), ") {"));
+                    c_stmt = simple_replace(c_stmt, "self.", "self->");
+                } else {
+                    // Assignment or expression
+                    long long eq_pos = find_str(bline, " = ");
+                    if (eq_pos >= 0) {
+                        const char* lhs = trim(substr(bline, 0, eq_pos));
+                        const char* rhs = trim(substr_from(bline, eq_pos + 3));
+                        const char* t_lhs = simple_replace(lhs, "self.", "self->");
+                        const char* t_rhs = translate_expr(rhs);
+                        t_rhs = simple_replace(t_rhs, "self.", "self->");
+                        c_stmt = simple_str_concat(t_lhs, simple_str_concat(" = ", simple_str_concat(t_rhs, ";")));
+                    } else {
+                        // Bare expression (possibly implicit return for last line)
+                        const char* translated = translate_expr(bline);
+                        translated = simple_replace(translated, "self.", "self->");
+                        if (bi == mi->body_count - 1 && str_len(mi->return_type) > 0) {
+                            // Last line of a non-void method → implicit return
+                            c_stmt = simple_str_concat("return ", simple_str_concat(translated, ";"));
+                        } else {
+                            c_stmt = simple_str_concat(translated, ";");
+                        }
+                    }
+                }
+                func_code = simple_str_concat(func_code, simple_str_concat("    ", simple_str_concat(c_stmt, "\n")));
+            }
+            // If method has a return type but body is empty, add a default return
+            if (mi->body_count == 0 && str_len(mi->return_type) > 0) {
+                if (strcmp(c_ret, "long long") == 0) {
+                    func_code = simple_str_concat(func_code, "    return 0;\n");
+                } else if (strcmp(c_ret, "double") == 0 || strcmp(c_ret, "float") == 0) {
+                    func_code = simple_str_concat(func_code, "    return 0.0;\n");
+                } else if (strcmp(c_ret, "const char*") == 0) {
+                    func_code = simple_str_concat(func_code, "    return \"\";\n");
+                } else if (strcmp(c_ret, "int") == 0) {
+                    func_code = simple_str_concat(func_code, "    return 0;\n");
+                }
+            }
+            func_code = simple_str_concat(func_code, "}\n");
+            out = simple_str_concat(out, simple_str_concat(func_code, "\n"));
+        }
+    }
 
     // Extern function stubs — emit stubs for imported functions not defined in this file
     {
