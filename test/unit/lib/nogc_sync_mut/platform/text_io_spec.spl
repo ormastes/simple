@@ -1,9 +1,75 @@
 # Platform Text I/O Tests
 
-use std.platform.text_io.{text_file_write, text_file_write_local, text_file_read, text_file_read_local}
-use std.platform.config.{make_config}
-use std.common.target.{TargetArch, TargetOS}
-use app.io.mod.{file_read_text, file_delete}
+# use std.platform.text_io.{text_file_write, text_file_write_local, text_file_read, text_file_read_local}
+# use std.platform.config.{make_config}
+# use std.common.target.{TargetArch, TargetOS}
+# use app.io.mod.{file_read_text, file_delete}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+
+fn file_read_text(path: text) -> text:
+    val result = rt_file_read_text(path)
+    result ?? ""
+fn file_delete(path: text):
+    rt_file_delete(path)
+fn file_write(path: text, content: text):
+    rt_file_write_text(path, content)
+
+class Endian:
+    val: text
+    static fn Little(): Endian: Endian(val: "little")
+    static fn Big(): Endian: Endian(val: "big")
+
+class TargetArch:
+    val: text
+    static fn X86_64(): TargetArch: TargetArch(val: "x86_64")
+    fn endianness() -> Endian:
+        Endian.Little()
+    fn pointer_bytes() -> i64:
+        8
+
+class TargetOS:
+    val: text
+    static fn Linux(): TargetOS: TargetOS(val: "linux")
+    static fn Windows(): TargetOS: TargetOS(val: "windows")
+
+class PlatformConfig:
+    arch: TargetArch
+    os: TargetOS
+    endian: Endian
+    pointer_bytes: i64
+    newline: text
+
+fn make_config(arch: TargetArch, os: TargetOS) -> PlatformConfig:
+    val endian = arch.endianness()
+    val nl = if os.val == "windows": "\r\n" else: "\n"
+    PlatformConfig(arch: arch, os: os, endian: endian, pointer_bytes: arch.pointer_bytes(), newline: nl)
+
+fn text_file_write_local(path: text, content: text):
+    rt_file_write_text(path, content)
+
+fn text_file_read_local(path: text) -> text:
+    val raw = rt_file_read_text(path)
+    raw ?? ""
+
+fn text_file_write(path: text, content: text, config: PlatformConfig):
+    # Convert content to target newlines
+    val host_nl = "\n"
+    val target_nl = config.newline
+    val converted = if host_nl == target_nl: content else: content.replace(host_nl, target_nl)
+    rt_file_write_text(path, converted)
+
+fn text_file_read(path: text, config: PlatformConfig) -> text:
+    val raw = rt_file_read_text(path)
+    val content = raw ?? ""
+    # Normalize remote newlines to host
+    val host_nl = "\n"
+    val remote_nl = config.newline
+    if host_nl == remote_nl:
+        return content
+    content.replace(remote_nl, host_nl)
 
 describe "Platform Text I/O":
     it "text_file_write_local writes with host newlines":

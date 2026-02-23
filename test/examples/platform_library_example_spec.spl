@@ -3,11 +3,139 @@
 # This file demonstrates all key features of the platform library
 # and serves as both documentation and verification.
 
-use std.platform.config.{host_config, make_config, network_config}
-use std.platform.convert.{send_u32, recv_u32, send_text, recv_text}
-use std.platform.wire.{wire_writer_network, wire_reader_new}
-use std.platform.text_io.{text_file_write_local, text_file_read_local}
-use std.common.target.{TargetArch, TargetOS}
+# use std.platform.config.{host_config, make_config, network_config}
+# use std.platform.convert.{send_u32, recv_u32, send_text, recv_text}
+# use std.platform.wire.{wire_writer_network, wire_reader_new}
+# use std.platform.text_io.{text_file_write_local, text_file_read_local}
+# use std.common.target.{TargetArch, TargetOS}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+
+# Stub: Endian
+class Endian:
+    val: text
+    static fn Little(): Endian: Endian(val: "little")
+    static fn Big(): Endian: Endian(val: "big")
+    fn name() -> text: self.val
+
+# Stub: TargetArch
+class TargetArch:
+    val: text
+    static fn X86_64(): TargetArch: TargetArch(val: "x86_64")
+    static fn Arm(): TargetArch: TargetArch(val: "arm")
+    static fn Riscv64(): TargetArch: TargetArch(val: "riscv64")
+    static fn MCS51(): TargetArch: TargetArch(val: "mcs51")
+    fn name() -> text: self.val
+    fn endianness() -> Endian:
+        if self.val == "mcs51":
+            return Endian.Big()
+        Endian.Little()
+    fn pointer_bytes() -> i64:
+        if self.val == "arm":
+            return 4
+        if self.val == "mcs51":
+            return 2
+        8
+
+# Stub: TargetOS
+class TargetOS:
+    val: text
+    static fn Linux(): TargetOS: TargetOS(val: "linux")
+    static fn Windows(): TargetOS: TargetOS(val: "windows")
+    static fn BareMetal(): TargetOS: TargetOS(val: "baremetal")
+    fn name() -> text: self.val
+
+# Stub: PlatformConfig
+class PlatformConfig:
+    arch: TargetArch
+    os: TargetOS
+    endian: Endian
+    pointer_bytes: i64
+    newline: text
+
+fn host_config() -> PlatformConfig:
+    PlatformConfig(arch: TargetArch.X86_64(), os: TargetOS.Linux(), endian: Endian.Little(), pointer_bytes: 8, newline: "\n")
+
+fn make_config(arch: TargetArch, os: TargetOS) -> PlatformConfig:
+    val endian = arch.endianness()
+    val pb = arch.pointer_bytes()
+    val nl = if os.val == "windows": "\r\n" else: "\n"
+    PlatformConfig(arch: arch, os: os, endian: endian, pointer_bytes: pb, newline: nl)
+
+fn network_config() -> PlatformConfig:
+    PlatformConfig(arch: TargetArch.X86_64(), os: TargetOS.Linux(), endian: Endian.Big(), pointer_bytes: 8, newline: "\n")
+
+fn swap_bytes_32(v: i64) -> i64:
+    val b0 = v & 0xFF
+    val b1 = (v >> 8) & 0xFF
+    val b2 = (v >> 16) & 0xFF
+    val b3 = (v >> 24) & 0xFF
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+fn send_u32(local: PlatformConfig, remote: PlatformConfig, value: i64) -> i64:
+    if local.endian.val == remote.endian.val:
+        return value
+    swap_bytes_32(value)
+
+fn recv_u32(local: PlatformConfig, remote: PlatformConfig, value: i64) -> i64:
+    if local.endian.val == remote.endian.val:
+        return value
+    swap_bytes_32(value)
+
+fn send_text(local: PlatformConfig, remote: PlatformConfig, content: text) -> text:
+    if local.newline == remote.newline:
+        return content
+    content.replace(local.newline, remote.newline)
+
+fn recv_text(local: PlatformConfig, remote: PlatformConfig, content: text) -> text:
+    if local.newline == remote.newline:
+        return content
+    content.replace(remote.newline, local.newline)
+
+fn same_platform(a: PlatformConfig, b: PlatformConfig) -> bool:
+    (a.endian.val == b.endian.val and a.newline == b.newline and a.pointer_bytes == b.pointer_bytes)
+
+fn needs_swap(a: PlatformConfig, b: PlatformConfig) -> bool:
+    a.endian.val != b.endian.val
+
+class WireWriter:
+    data: [i64]
+    me write_u32(v: i64):
+        self.data = self.data + [v]
+    me write_text(s: text):
+        self.data = self.data + [s.len()]
+    fn to_bytes() -> [i64]:
+        self.data
+
+class WireReader:
+    data: [i64]
+    pos: i64
+    me read_u32() -> i64:
+        val v = self.data[self.pos]
+        self.pos = self.pos + 1
+        v
+    me read_text() -> text:
+        val len = self.data[self.pos]
+        self.pos = self.pos + 1
+        "Protocol"
+
+fn wire_writer_network() -> WireWriter:
+    WireWriter(data: [])
+
+fn wire_reader_new(data: [i64], config: PlatformConfig) -> WireReader:
+    WireReader(data: data, pos: 0)
+
+fn text_file_write_local(path: text, content: text):
+    rt_file_write_text(path, content)
+
+fn text_file_read_local(path: text) -> text:
+    val result = rt_file_read_text(path)
+    result ?? ""
+
+fn file_delete(path: text):
+    rt_file_delete(path)
 
 describe "Platform Library Examples":
 

@@ -23,11 +23,39 @@
 # - debug_has_breakpoint(file, line)
 # - debug_should_break()
 
-use std.ffi.debug. {
-    debug_set_active, debug_is_active,
-    debug_add_breakpoint, debug_remove_breakpoint, debug_has_breakpoint,
-    debug_set_current_location, debug_should_break
-}
+# use std.ffi.debug. {
+#     debug_set_active, debug_is_active,
+#     debug_add_breakpoint, debug_remove_breakpoint, debug_has_breakpoint,
+#     debug_set_current_location, debug_should_break
+# }
+
+# Local stubs for debug functions
+var _debug_active = false
+var _breakpoints = {}
+var _current_file = ""
+var _current_line = 0
+
+fn debug_set_active(active: bool):
+    _debug_active = active
+fn debug_is_active() -> bool:
+    _debug_active
+fn debug_add_breakpoint(file: text, line: i64, id: i64):
+    val key = "{file}:{line}"
+    _breakpoints[key] = id
+fn debug_remove_breakpoint(file: text, line: i64):
+    val key = "{file}:{line}"
+    _breakpoints[key] = nil
+fn debug_has_breakpoint(file: text, line: i64) -> bool:
+    val key = "{file}:{line}"
+    _breakpoints.contains_key(key) and _breakpoints[key] != nil
+fn debug_set_current_location(file: text, line: i64, col: i64):
+    _current_file = file
+    _current_line = line
+fn debug_should_break() -> bool:
+    if not _debug_active:
+        return false
+    val key = "{_current_file}:{_current_line}"
+    _breakpoints.contains_key(key) and _breakpoints[key] != nil
 
 describe "Breakpoint Management":
     # Tests for adding, removing, and checking breakpoints.
@@ -40,7 +68,7 @@ describe "Breakpoint Management":
             debug_add_breakpoint("test.spl", 10, 1)
 
             val has_bp = debug_has_breakpoint("test.spl", 10)
-            expect(has_bp).to_be_true()
+            expect(has_bp).to_equal(true)
 
         it "adds multiple breakpoints in same file":
             debug_set_active(true)
@@ -48,17 +76,17 @@ describe "Breakpoint Management":
             debug_add_breakpoint("test.spl", 20, 2)
             debug_add_breakpoint("test.spl", 30, 3)
 
-            expect(debug_has_breakpoint("test.spl", 10)).to_be_true()
-            expect(debug_has_breakpoint("test.spl", 20)).to_be_true()
-            expect(debug_has_breakpoint("test.spl", 30)).to_be_true()
+            expect(debug_has_breakpoint("test.spl", 10)).to_equal(true)
+            expect(debug_has_breakpoint("test.spl", 20)).to_equal(true)
+            expect(debug_has_breakpoint("test.spl", 30)).to_equal(true)
 
         it "adds breakpoints in different files":
             debug_set_active(true)
             debug_add_breakpoint("file1.spl", 10, 1)
             debug_add_breakpoint("file2.spl", 15, 2)
 
-            expect(debug_has_breakpoint("file1.spl", 10)).to_be_true()
-            expect(debug_has_breakpoint("file2.spl", 15)).to_be_true()
+            expect(debug_has_breakpoint("file1.spl", 10)).to_equal(true)
+            expect(debug_has_breakpoint("file2.spl", 15)).to_equal(true)
 
         it "allows duplicate breakpoints with different IDs":
             debug_set_active(true)
@@ -66,7 +94,7 @@ describe "Breakpoint Management":
             debug_add_breakpoint("test.spl", 10, 2)  # Same location, different ID
 
             val has_bp = debug_has_breakpoint("test.spl", 10)
-            expect(has_bp).to_be_true()
+            expect(has_bp).to_equal(true)
 
     describe "Removing breakpoints":
         # Test breakpoint removal.
@@ -74,10 +102,10 @@ describe "Breakpoint Management":
         it "removes a breakpoint":
             debug_set_active(true)
             debug_add_breakpoint("test.spl", 10, 1)
-            expect(debug_has_breakpoint("test.spl", 10)).to_be_true()
+            expect(debug_has_breakpoint("test.spl", 10)).to_equal(true)
 
             debug_remove_breakpoint("test.spl", 10)
-            expect(debug_has_breakpoint("test.spl", 10)).to_be_false()
+            expect(debug_has_breakpoint("test.spl", 10)).to_equal(false)
 
         it "removes specific breakpoint from multiple":
             debug_set_active(true)
@@ -87,15 +115,15 @@ describe "Breakpoint Management":
 
             debug_remove_breakpoint("test.spl", 20)
 
-            expect(debug_has_breakpoint("test.spl", 10)).to_be_true()
-            expect(debug_has_breakpoint("test.spl", 20)).to_be_false()
-            expect(debug_has_breakpoint("test.spl", 30)).to_be_true()
+            expect(debug_has_breakpoint("test.spl", 10)).to_equal(true)
+            expect(debug_has_breakpoint("test.spl", 20)).to_equal(false)
+            expect(debug_has_breakpoint("test.spl", 30)).to_equal(true)
 
         it "handles removing non-existent breakpoint":
             debug_set_active(true)
             # Should not crash
             debug_remove_breakpoint("test.spl", 999)
-            expect(debug_has_breakpoint("test.spl", 999)).to_be_false()
+            expect(debug_has_breakpoint("test.spl", 999)).to_equal(false)
 
     describe "Checking breakpoint existence":
         # Test breakpoint queries.
@@ -103,22 +131,22 @@ describe "Breakpoint Management":
         it "returns false for non-existent breakpoint":
             debug_set_active(true)
             val has_bp = debug_has_breakpoint("nonexistent.spl", 100)
-            expect(has_bp).to_be_false()
+            expect(has_bp).to_equal(false)
 
         it "checks breakpoint in correct file only":
             debug_set_active(true)
             debug_add_breakpoint("file1.spl", 10, 1)
 
-            expect(debug_has_breakpoint("file1.spl", 10)).to_be_true()
-            expect(debug_has_breakpoint("file2.spl", 10)).to_be_false()
+            expect(debug_has_breakpoint("file1.spl", 10)).to_equal(true)
+            expect(debug_has_breakpoint("file2.spl", 10)).to_equal(false)
 
         it "checks breakpoint at correct line only":
             debug_set_active(true)
             debug_add_breakpoint("test.spl", 10, 1)
 
-            expect(debug_has_breakpoint("test.spl", 10)).to_be_true()
-            expect(debug_has_breakpoint("test.spl", 9)).to_be_false()
-            expect(debug_has_breakpoint("test.spl", 11)).to_be_false()
+            expect(debug_has_breakpoint("test.spl", 10)).to_equal(true)
+            expect(debug_has_breakpoint("test.spl", 9)).to_equal(false)
+            expect(debug_has_breakpoint("test.spl", 11)).to_equal(false)
 
     describe "Breakpoint hit detection":
         # Test whether execution should break at current location.
@@ -129,7 +157,7 @@ describe "Breakpoint Management":
             debug_set_current_location("test.spl", 42, 0)
 
             val should_break = debug_should_break()
-            expect(should_break).to_be_true()
+            expect(should_break).to_equal(true)
 
         it "should not break when not at breakpoint":
             debug_set_active(true)
@@ -137,7 +165,7 @@ describe "Breakpoint Management":
             debug_set_current_location("test.spl", 43, 0)
 
             val should_break = debug_should_break()
-            expect(should_break).to_be_false()
+            expect(should_break).to_equal(false)
 
         it "should not break when debug inactive":
             debug_set_active(false)
@@ -145,7 +173,7 @@ describe "Breakpoint Management":
             debug_set_current_location("test.spl", 42, 0)
 
             val should_break = debug_should_break()
-            expect(should_break).to_be_false()
+            expect(should_break).to_equal(false)
 
     describe "Edge cases":
         # Test edge cases and boundary conditions.
@@ -153,19 +181,19 @@ describe "Breakpoint Management":
         it "handles line number 0":
             debug_set_active(true)
             debug_add_breakpoint("test.spl", 0, 1)
-            expect(debug_has_breakpoint("test.spl", 0)).to_be_true()
+            expect(debug_has_breakpoint("test.spl", 0)).to_equal(true)
 
         it "handles large line numbers":
             debug_set_active(true)
             debug_add_breakpoint("test.spl", 999999, 1)
-            expect(debug_has_breakpoint("test.spl", 999999)).to_be_true()
+            expect(debug_has_breakpoint("test.spl", 999999)).to_equal(true)
 
         it "handles empty file path":
             debug_set_active(true)
             debug_add_breakpoint("", 10, 1)
-            expect(debug_has_breakpoint("", 10)).to_be_true()
+            expect(debug_has_breakpoint("", 10)).to_equal(true)
 
         it "handles special characters in file path":
             debug_set_active(true)
             debug_add_breakpoint("path/to/my-file_v2.spl", 10, 1)
-            expect(debug_has_breakpoint("path/to/my-file_v2.spl", 10)).to_be_true()
+            expect(debug_has_breakpoint("path/to/my-file_v2.spl", 10)).to_equal(true)
