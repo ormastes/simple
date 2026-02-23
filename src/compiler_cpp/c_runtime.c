@@ -84,12 +84,10 @@ static char* simple_replace(const char* s, const char* old_str, const char* new_
     if (!old_str || !new_str || strlen(old_str) == 0) return strdup(s);
     long long old_len = strlen(old_str);
     long long new_len = strlen(new_str);
-    // Count occurrences
     long long count = 0;
     const char* tmp = s;
     while ((tmp = strstr(tmp, old_str)) != NULL) { count++; tmp += old_len; }
     if (count == 0) return strdup(s);
-    // Build result
     long long result_len = strlen(s) + count * (new_len - old_len);
     char* result = (char*)malloc(result_len + 1);
     char* dst = result;
@@ -135,6 +133,20 @@ static const char* simple_string_pop(SimpleStringArray* arr) {
     if (arr->len == 0) return "";
     arr->len--;
     return arr->items[arr->len];
+}
+
+static void simple_string_array_free(SimpleStringArray* arr) {
+    for (long long i = 0; i < arr->len; i++) {
+        free((char*)arr->items[i]);
+    }
+    free(arr->items);
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
+}
+
+static void simple_str_free(const char* s) {
+    if (s) free((char*)s);
 }
 
 static int simple_str_array_contains(SimpleStringArray arr, const char* needle) {
@@ -221,6 +233,15 @@ static long long simple_int_pop(SimpleIntArray* arr) {
     return arr->items[arr->len];
 }
 
+static void simple_int_array_free(SimpleIntArray* arr) {
+    if (arr->items) {
+        free(arr->items);
+    }
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
+}
+
 // --- Array of String Arrays (for [[text]]) ---
 
 typedef struct {
@@ -271,6 +292,26 @@ static void simple_int_array_push(SimpleIntArrayArray* arr, SimpleIntArray val) 
     arr->len++;
 }
 
+static void simple_string_array_array_free(SimpleStringArrayArray* arr) {
+    for (long long i = 0; i < arr->len; i++) {
+        simple_string_array_free(&arr->items[i]);
+    }
+    if (arr->items) free(arr->items);
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
+}
+
+static void simple_int_array_array_free(SimpleIntArrayArray* arr) {
+    for (long long i = 0; i < arr->len; i++) {
+        simple_int_array_free(&arr->items[i]);
+    }
+    if (arr->items) free(arr->items);
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
+}
+
 // --- Dynamic Struct Array (void* based, for [StructName] types) ---
 
 typedef struct {
@@ -308,6 +349,20 @@ static SimpleStructArray simple_struct_array_copy_push(SimpleStructArray src, vo
     return dst;
 }
 
+static void simple_struct_array_free(SimpleStructArray* arr) {
+    if (arr->items) {
+        for (long long i = 0; i < arr->len; i++) {
+            if (arr->items[i]) {
+                free(arr->items[i]);
+            }
+        }
+        free(arr->items);
+    }
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
+}
+
 static SimpleIntArray simple_int_array_copy_push(SimpleIntArray src, long long item) {
     SimpleIntArray dst;
     dst.cap = src.len + 1;
@@ -325,7 +380,7 @@ static SimpleStringArray simple_string_array_copy_push(SimpleStringArray src, co
     if (dst.cap < 8) dst.cap = 8;
     dst.items = (const char**)malloc(dst.cap * sizeof(const char*));
     for (long long i = 0; i < src.len; i++) {
-        dst.items[i] = src.items[i];
+        dst.items[i] = strdup(src.items[i] ? src.items[i] : "");
     }
     dst.len = src.len;
     dst.items[dst.len++] = strdup(item ? item : "");
@@ -528,7 +583,6 @@ static const char* simple_dict_get(SimpleDict* d, const char* key) {
     if (d->entries[idx].type_tag == SIMPLE_DICT_TYPE_STR) {
         return d->entries[idx].value.str_val;
     }
-    // For int values, convert to string
     if (d->entries[idx].type_tag == SIMPLE_DICT_TYPE_INT) {
         static char int_buf[32];
         snprintf(int_buf, sizeof(int_buf), "%lld", d->entries[idx].value.int_val);
@@ -583,7 +637,6 @@ static void simple_dict_remove(SimpleDict* d, const char* key) {
         free((char*)d->entries[idx].value.str_val);
         d->entries[idx].value.str_val = NULL;
     }
-    // Shift entries down
     for (long long i = idx; i < d->len - 1; i++) {
         d->entries[i] = d->entries[i + 1];
     }
@@ -593,6 +646,22 @@ static void simple_dict_remove(SimpleDict* d, const char* key) {
         d->entries[d->len - 1].value.ptr_val = NULL;
     }
     d->len--;
+}
+
+static void simple_dict_free(SimpleDict* d) {
+    if (!d) return;
+    for (long long i = 0; i < d->len; i++) {
+        if (d->entries[i].key) {
+            free((char*)d->entries[i].key);
+        }
+        if (d->entries[i].type_tag == SIMPLE_DICT_TYPE_STR && d->entries[i].value.str_val) {
+            free((char*)d->entries[i].value.str_val);
+        }
+    }
+    if (d->entries) {
+        free(d->entries);
+    }
+    free(d);
 }
 
 // --- Option Type ---
@@ -627,7 +696,7 @@ static SimpleOption simple_some_str(const char* val) {
     SimpleOption o;
     o.has_value = 1;
     o.type_tag = 1;
-    o.str_val = val ? val : "";
+    o.str_val = strdup(val ? val : "");
     return o;
 }
 
@@ -655,6 +724,14 @@ static const char* simple_option_unwrap_str(SimpleOption o) {
 static void* simple_option_unwrap_ptr(SimpleOption o) {
     if (o.has_value && o.type_tag == 2) return o.ptr_val;
     return NULL;
+}
+
+static void simple_option_free(SimpleOption* o) {
+    if (o->has_value && o->type_tag == 1 && o->str_val) {
+        free((char*)o->str_val);
+        o->str_val = NULL;
+    }
+    o->has_value = 0;
 }
 
 // --- Result Type ---
@@ -687,7 +764,7 @@ static SimpleResult simple_result_ok_str(const char* val) {
     SimpleResult r;
     r.is_ok = 1;
     r.type_tag = 1;
-    r.ok_str = val ? val : "";
+    r.ok_str = strdup(val ? val : "");
     r.err_str = NULL;
     return r;
 }
@@ -697,8 +774,21 @@ static SimpleResult simple_result_err_str(const char* val) {
     r.is_ok = 0;
     r.type_tag = 1;
     r.ok_str = NULL;
-    r.err_str = val ? val : "";
+    r.err_str = strdup(val ? val : "");
     return r;
+}
+
+static void simple_result_free(SimpleResult* r) {
+    if (r->type_tag == 1) {
+        if (r->is_ok && r->ok_str) {
+            free((char*)r->ok_str);
+            r->ok_str = NULL;
+        }
+        if (!r->is_ok && r->err_str) {
+            free((char*)r->err_str);
+            r->err_str = NULL;
+        }
+    }
 }
 
 // --- Tuple Types ---

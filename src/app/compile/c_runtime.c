@@ -286,6 +286,26 @@ static void simple_int_array_push(SimpleIntArrayArray* arr, SimpleIntArray val) 
     arr->len++;
 }
 
+static void simple_string_array_array_free(SimpleStringArrayArray* arr) {
+    for (long long i = 0; i < arr->len; i++) {
+        simple_string_array_free(&arr->items[i]);
+    }
+    if (arr->items) free(arr->items);
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
+}
+
+static void simple_int_array_array_free(SimpleIntArrayArray* arr) {
+    for (long long i = 0; i < arr->len; i++) {
+        simple_int_array_free(&arr->items[i]);
+    }
+    if (arr->items) free(arr->items);
+    arr->items = NULL;
+    arr->len = 0;
+    arr->cap = 0;
+}
+
 // --- Dynamic Struct Array (void* based, for [StructName] types) ---
 
 typedef struct {
@@ -354,7 +374,7 @@ static SimpleStringArray simple_string_array_copy_push(SimpleStringArray src, co
     if (dst.cap < 8) dst.cap = 8;
     dst.items = (const char**)malloc(dst.cap * sizeof(const char*));
     for (long long i = 0; i < src.len; i++) {
-        dst.items[i] = src.items[i];
+        dst.items[i] = strdup(src.items[i] ? src.items[i] : "");
     }
     dst.len = src.len;
     dst.items[dst.len++] = strdup(item ? item : "");
@@ -672,7 +692,7 @@ static SimpleOption simple_some_str(const char* val) {
     SimpleOption o;
     o.has_value = 1;
     o.type_tag = 1;
-    o.str_val = val ? val : "";
+    o.str_val = strdup(val ? val : "");
     return o;
 }
 
@@ -700,6 +720,14 @@ static const char* simple_option_unwrap_str(SimpleOption o) {
 static void* simple_option_unwrap_ptr(SimpleOption o) {
     if (o.has_value && o.type_tag == 2) return o.ptr_val;
     return NULL;
+}
+
+static void simple_option_free(SimpleOption* o) {
+    if (o->has_value && o->type_tag == 1 && o->str_val) {
+        free((char*)o->str_val);
+        o->str_val = NULL;
+    }
+    o->has_value = 0;
 }
 
 // --- Result Type ---
@@ -732,7 +760,7 @@ static SimpleResult simple_result_ok_str(const char* val) {
     SimpleResult r;
     r.is_ok = 1;
     r.type_tag = 1;
-    r.ok_str = val ? val : "";
+    r.ok_str = strdup(val ? val : "");
     r.err_str = NULL;
     return r;
 }
@@ -742,8 +770,21 @@ static SimpleResult simple_result_err_str(const char* val) {
     r.is_ok = 0;
     r.type_tag = 1;
     r.ok_str = NULL;
-    r.err_str = val ? val : "";
+    r.err_str = strdup(val ? val : "");
     return r;
+}
+
+static void simple_result_free(SimpleResult* r) {
+    if (r->type_tag == 1) {
+        if (r->is_ok && r->ok_str) {
+            free((char*)r->ok_str);
+            r->ok_str = NULL;
+        }
+        if (!r->is_ok && r->err_str) {
+            free((char*)r->err_str);
+            r->err_str = NULL;
+        }
+    }
 }
 
 // --- Tuple Types ---

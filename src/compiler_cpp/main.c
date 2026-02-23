@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #define nil NULL
 #define pass_do_nothing ((void)0)
@@ -41,6 +42,7 @@ typedef struct { const char** items; long long len; long long cap; } SimpleStrin
 static SimpleStringArray simple_new_string_array(void) { SimpleStringArray a; a.items=(const char**)malloc(16*sizeof(const char*)); a.len=0; a.cap=16; return a; }
 static void simple_string_push(SimpleStringArray* a, const char* s) { if(a->len>=a->cap){a->cap*=2;a->items=(const char**)realloc(a->items,a->cap*sizeof(const char*));} a->items[a->len++]=strdup(s?s:""); }
 static SimpleStringArray simple_string_array_slice(SimpleStringArray a, long long start) { SimpleStringArray r=simple_new_string_array(); for(long long i=start;i<a.len;i++) simple_string_push(&r,a.items[i]); return r; }
+static void simple_string_array_free(SimpleStringArray* a) { if(a->items){for(long long i=0;i<a->len;i++){free((void*)a->items[i]);} free(a->items); a->items=NULL; a->len=0; a->cap=0;} }
 
 static char* simple_format_long(const char* b, long long v, const char* a) { char buf[256]; snprintf(buf,256,"%s%lld%s",b?b:"",v,a?a:""); return strdup(buf); }
 static char* simple_format_str(const char* b, const char* v, const char* a) { size_t t=strlen(b?b:"")+strlen(v?v:"")+strlen(a?a:"")+1; char*r=malloc(t); snprintf(r,t,"%s%s%s",b?b:"",v?v:"",a?a:""); return r; }
@@ -119,7 +121,14 @@ static long long shell() { return 0; }
 static long long file_size_raw(const char* p) { (void)p; return 0; }
 static int cli_file_exists(const char* p) { (void)p; return 0; }
 static long long cli_read_file(SimpleStringArray a) { (void)a; return 0; }
-static SimpleStringArray cli_get_args(void) { return simple_new_string_array(); }
+static int g_argc_main = 0;
+static char** g_argv_main = NULL;
+static SimpleStringArray cli_get_args(void) {
+    SimpleStringArray a = simple_new_string_array();
+    for (int i = 0; i < g_argc_main; i++)
+        simple_string_push(&a, g_argv_main[i] ? g_argv_main[i] : "");
+    return a;
+}
 static long long cli_run_code(const char* c, int g, int o) { (void)c;(void)g;(void)o; return 0; }
 static long long cli_run_file(const char* p, SimpleStringArray a, int g, int o) { (void)p;(void)a;(void)g;(void)o; return 0; }
 static long long cli_watch_file(const char* p) { (void)p; return 0; }
@@ -150,7 +159,63 @@ static long long cli_run_lex(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_brief(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_ffi_gen(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_i18n(SimpleStringArray a) { (void)a; return 0; }
-static long long cli_compile(SimpleStringArray a) { (void)a; return 0; }
+static long long cli_compile(SimpleStringArray a) {
+    /* Parse compile args: compile [--backend=c] [-o output] source.spl */
+    const char* source_file = NULL;
+    const char* output_file = NULL;
+    const char* backend = "c";
+    int verbose = 0;
+    for (long long i = 0; i < a.len; i++) {
+        const char* arg = a.items[i];
+        if (strcmp(arg, "compile") == 0) continue;
+        if (strncmp(arg, "--backend=", 10) == 0) { backend = arg + 10; continue; }
+        if (strcmp(arg, "--verbose") == 0 || strcmp(arg, "-v") == 0) { verbose = 1; continue; }
+        if (strcmp(arg, "-o") == 0 && i + 1 < a.len) { output_file = a.items[++i]; continue; }
+        if (strncmp(arg, "-o", 2) == 0 && strlen(arg) > 2) { output_file = arg + 2; continue; }
+        if (strncmp(arg, "--output=", 9) == 0) { output_file = arg + 9; continue; }
+        if (arg[0] == '-') continue; /* skip unknown flags */
+        if (!source_file) source_file = arg;
+    }
+    if (!source_file) {
+        fprintf(stderr, "Error: No source file specified\nUsage: simple compile [--backend=c] [-o output] source.spl\n");
+        return 1;
+    }
+    /* Default output file */
+    char out_buf[4096];
+    if (!output_file) {
+        strncpy(out_buf, source_file, sizeof(out_buf) - 5);
+        char* dot = strrchr(out_buf, '.');
+        if (dot) strcpy(dot, ".c"); else strcat(out_buf, ".c");
+        output_file = out_buf;
+    }
+    /* Find simple_codegen in same directory as this binary */
+    char self_path[4096] = {0};
+    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+    if (len <= 0) {
+        fprintf(stderr, "Error: cannot determine binary location\n");
+        return 1;
+    }
+    self_path[len] = '\0';
+    char* last_slash = strrchr(self_path, '/');
+    if (last_slash) *(last_slash + 1) = '\0';
+    char codegen_path[4096];
+    snprintf(codegen_path, sizeof(codegen_path), "%ssimple_codegen", self_path);
+    /* Check codegen exists */
+    if (access(codegen_path, X_OK) != 0) {
+        fprintf(stderr, "Error: simple_codegen not found at %s\n", codegen_path);
+        return 1;
+    }
+    if (verbose) printf("Compiling %s to C (backend=%s)\n", source_file, backend);
+    /* Build and run command */
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd), "'%s' compile '%s' '%s'", codegen_path, source_file, output_file);
+    int rc = system(cmd);
+    if (rc == 0) {
+        printf("Output: %s\n", output_file);
+        printf("Build with: clang -std=gnu11 -O2 %s -lm -o output\n", output_file);
+    }
+    return WEXITSTATUS(rc);
+}
 static long long cli_handle_web(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_handle_diagram(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_handle_run(SimpleStringArray a, int g, int o) { (void)a;(void)g;(void)o; return 0; }
@@ -176,6 +241,7 @@ static int check_self_contained(void) { return 0; }
 static void simple_error(const char* cat, const char* msg) { fprintf(stderr, "%s: %s\n", cat, msg); }
 static void error(const char* cat, const char* msg) { simple_error(cat, msg); }
 static int jit_native_available(void) { return 0; }
+extern void spl_init_args(int argc, char** argv);
 SimpleStringArray get_cli_args(void);
 const char* get_version(void);
 void print_version(void);
@@ -201,6 +267,7 @@ SimpleStringArray get_cli_args(void) {
     simple_string_push(&args, all_args.items[i]);
     i = (i + 1);
     }
+    simple_string_array_free(&all_args);
     return args;
 }
 
@@ -266,7 +333,9 @@ void print_error_with_help(const char* msg) {
 
 long long run_lex_command(const char* path) {
     SimpleStringArray args = get_cli_args();
-    return cli_run_lex(args);
+    long long rc = cli_run_lex(args);
+    simple_string_array_free(&args);
+    return rc;
 }
 
 GlobalFlags parse_global_flags(SimpleStringArray args) {
@@ -301,23 +370,22 @@ GlobalFlags parse_global_flags(SimpleStringArray args) {
     } else if ((strcmp(arg, "--no-jit") == 0)) {
     no_jit = 1;
     } else if (simple_starts_with(arg, "--jit-threshold=")) {
-    const char* val_str = simple_substr_from(arg, 16);
-    jit_threshold = atoll(val_str);
+    jit_threshold = atoll(arg + 16);
     } else if (((strcmp(arg, "--jit-threshold") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     jit_threshold = atoll(args.items[i]);
     } else if (simple_starts_with(arg, "--interpreter-mode=")) {
-    interpreter_mode = simple_substr_from(arg, 19);
+    interpreter_mode = arg + 19;
     } else if (((strcmp(arg, "--interpreter-mode") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     interpreter_mode = args.items[i];
     } else if (simple_starts_with(arg, "--run-config=")) {
-    run_config = simple_substr_from(arg, 13);
+    run_config = arg + 13;
     } else if (((strcmp(arg, "--run-config") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     run_config = args.items[i];
     } else if (simple_starts_with(arg, "--backend=")) {
-    backend = simple_substr_from(arg, 10);
+    backend = arg + 10;
     } else if (((strcmp(arg, "--backend") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     backend = args.items[i];
@@ -328,20 +396,17 @@ GlobalFlags parse_global_flags(SimpleStringArray args) {
     stack_overflow_detection = 0;
     has_stack_overflow_flag = 1;
     } else if (simple_starts_with(arg, "--max-recursion-depth=")) {
-    const char* val_str = simple_substr_from(arg, 21);
-    max_recursion_depth = atoll(val_str);
+    max_recursion_depth = atoll(arg + 21);
     } else if (((strcmp(arg, "--max-recursion-depth") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     max_recursion_depth = atoll(args.items[i]);
     } else if (simple_starts_with(arg, "--timeout=")) {
-    const char* val_str = simple_substr_from(arg, 10);
-    timeout_secs = atoll(val_str);
+    timeout_secs = atoll(arg + 10);
     } else if (((strcmp(arg, "--timeout") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     timeout_secs = atoll(args.items[i]);
     } else if (simple_starts_with(arg, "--execution-limit=")) {
-    const char* val_str = simple_substr_from(arg, 18);
-    execution_limit = atoll(val_str);
+    execution_limit = atoll(arg + 18);
     } else if (((strcmp(arg, "--execution-limit") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     execution_limit = atoll(args.items[i]);
@@ -427,8 +492,21 @@ SimpleStringArray filter_internal_flags(SimpleStringArray args) {
     return result;
 }
 
-int main(void) {
+static SimpleStringArray _main_args;
+static SimpleStringArray _main_filtered;
+static void _main_cleanup(void) {
+    simple_string_array_free(&_main_args);
+    simple_string_array_free(&_main_filtered);
+}
+
+int main(int argc, char** argv) {
+    g_argc_main = argc;
+    g_argv_main = argv;
+    spl_init_args(argc, argv);
     SimpleStringArray args = get_cli_args();
+    _main_args = args;
+    _main_filtered = (SimpleStringArray){NULL, 0, 0};
+    atexit(_main_cleanup);
     if ((args.len == 0)) {
     if (check_self_contained()) {
     return 0;
@@ -438,6 +516,7 @@ int main(void) {
     apply_fault_detection(flags);
     apply_jit_env_vars(flags);
     SimpleStringArray filtered_args = filter_internal_flags(args);
+    _main_filtered = filtered_args;
     if (((strcmp(flags.backend, "auto") != 0) && !(flags.force_interpret))) {
     if (!(jit_native_available())) {
     print_error("requested JIT backend '{flags.backend}' but runtime has no native exec_manager support");
@@ -484,7 +563,9 @@ int main(void) {
     return cli_watch_file(filtered_args.items[1]);
     } else if (strcmp(_match_val, "test") == 0) {
     SimpleStringArray test_args = simple_string_array_slice(filtered_args, 1);
-    return cli_run_tests(test_args, flags.gc_log, flags.gc_off);
+    long long _rc = cli_run_tests(test_args, flags.gc_log, flags.gc_off);
+    simple_string_array_free(&test_args);
+    return _rc;
     } else if (strcmp(_match_val, "lex") == 0) {
     if ((filtered_args.len < 2)) {
     print_error("lex requires a source file");
@@ -501,22 +582,34 @@ int main(void) {
     return cli_run_fmt(filtered_args);
     } else if (strcmp(_match_val, "check") == 0) {
     SimpleStringArray check_args = simple_string_array_slice(filtered_args, 1);
-    return run_check(check_args);
+    long long _rc = run_check(check_args);
+    simple_string_array_free(&check_args);
+    return _rc;
     } else if (strcmp(_match_val, "doc-coverage") == 0) {
     SimpleStringArray dc_args = simple_string_array_slice(filtered_args, 1);
-    return run_doc_coverage(dc_args);
+    long long _rc = run_doc_coverage(dc_args);
+    simple_string_array_free(&dc_args);
+    return _rc;
     } else if (strcmp(_match_val, "check-arch") == 0) {
     SimpleStringArray arch_args = simple_string_array_slice(filtered_args, 1);
-    return run_arch_check(arch_args);
+    long long _rc = run_arch_check(arch_args);
+    simple_string_array_free(&arch_args);
+    return _rc;
     } else if (strcmp(_match_val, "check-dbs") == 0) {
     SimpleStringArray check_db_args = simple_string_array_slice(filtered_args, 1);
-    return run_check_dbs(check_db_args);
+    long long _rc = run_check_dbs(check_db_args);
+    simple_string_array_free(&check_db_args);
+    return _rc;
     } else if (strcmp(_match_val, "fix-dbs") == 0) {
     SimpleStringArray fix_db_args = simple_string_array_slice(filtered_args, 1);
-    return run_fix_dbs(fix_db_args);
+    long long _rc = run_fix_dbs(fix_db_args);
+    simple_string_array_free(&fix_db_args);
+    return _rc;
     } else if (strcmp(_match_val, "grammar-doc") == 0) {
     SimpleStringArray grammar_args = simple_string_array_slice(filtered_args, 1);
-    return cli_run_file("src/app/grammar_doc/mod.spl", grammar_args, flags.gc_log, flags.gc_off);
+    long long _rc = cli_run_file("src/app/grammar_doc/mod.spl", grammar_args, flags.gc_log, flags.gc_off);
+    simple_string_array_free(&grammar_args);
+    return _rc;
     } else if (strcmp(_match_val, "i18n") == 0) {
     return cli_run_i18n(filtered_args);
     } else if (strcmp(_match_val, "migrate") == 0) {
@@ -556,7 +649,9 @@ int main(void) {
     } else if (strcmp(_match_val, "brief") == 0) {
     return cli_run_brief(filtered_args);
     } else if (strcmp(_match_val, "stats") == 0) {
-    run_stats(simple_string_array_slice(filtered_args, 1));
+    SimpleStringArray stats_args = simple_string_array_slice(filtered_args, 1);
+    run_stats(stats_args);
+    simple_string_array_free(&stats_args);
     return 0;
     } else if (strcmp(_match_val, "ffi-gen") == 0) {
     return cli_run_ffi_gen(filtered_args);
@@ -566,14 +661,18 @@ int main(void) {
     return cli_run_file("src/app/desugar/mod.spl", filtered_args, flags.gc_log, flags.gc_off);
     } else if (strcmp(_match_val, "dashboard") == 0) {
     SimpleStringArray dashboard_args = simple_string_array_slice(filtered_args, 1);
-    return cli_run_file("src/app/dashboard/main.spl", dashboard_args, flags.gc_log, flags.gc_off);
+    long long _rc = cli_run_file("src/app/dashboard/main.spl", dashboard_args, flags.gc_log, flags.gc_off);
+    simple_string_array_free(&dashboard_args);
+    return _rc;
     } else if (strcmp(_match_val, "verify") == 0) {
     return cli_run_verify(filtered_args, flags.gc_log, flags.gc_off);
     } else if (strcmp(_match_val, "diagram") == 0) {
     return cli_handle_diagram(filtered_args);
     } else if (strcmp(_match_val, "build") == 0) {
     SimpleStringArray build_args = simple_string_array_slice(filtered_args, 1);
-    return handle_build(build_args);
+    long long _rc = handle_build(build_args);
+    simple_string_array_free(&build_args);
+    return _rc;
     } else if (strcmp(_match_val, "init") == 0) {
     return handle_init(filtered_args);
     } else if (strcmp(_match_val, "add") == 0) {
@@ -606,7 +705,9 @@ int main(void) {
     simple_string_push(&program_args, filtered_args.items[j]);
     j = (j + 1);
             }
-    return cli_run_file(first, program_args, flags.gc_log, flags.gc_off);
+    long long _rc = cli_run_file(first, program_args, flags.gc_log, flags.gc_off);
+    simple_string_array_free(&program_args);
+    return _rc;
     } else {
     print_error_with_help("file not found: {first}");
     return 1;
