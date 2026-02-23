@@ -709,7 +709,9 @@ int main(int argc, char** argv) {
     simple_string_array_free(&program_args);
     return _rc;
     } else {
-    print_error_with_help("file not found: {first}");
+    char _err_msg[4096];
+    snprintf(_err_msg, sizeof(_err_msg), "file not found: %s", first);
+    print_error_with_help(_err_msg);
     return 1;
     }
     }

@@ -137,6 +137,8 @@ static const char* simple_string_pop(SimpleStringArray* arr) {
     return arr->items[arr->len];
 }
 
+static void simple_string_array_free(SimpleStringArray* a) { if(a->items){for(long long i=0;i<a->len;i++){free((void*)a->items[i]);} free(a->items); a->items=NULL; a->len=0; a->cap=0;} }
+
 static int simple_str_array_contains(SimpleStringArray arr, const char* needle) {
     for (long long i = 0; i < arr.len; i++) {
         if (arr.items[i] && needle && strcmp(arr.items[i], needle) == 0) return 1;
@@ -807,6 +809,9 @@ typedef struct {
 static StructMethodGroup g_struct_methods[MAX_METHOD_STRUCTS];
 static int g_struct_method_count = 0;
 
+// Current struct name context (set during method body translation)
+static const char* g_current_struct_name = "";
+
 // === Struct Field Type Tracking ===
 #define MAX_STRUCT_FIELDS 64
 #define MAX_STRUCT_DEFS 64
@@ -1271,6 +1276,14 @@ static int expr_is_string(const char* expr) {
     {
         const char* var_type = lookup_var_type(expr);
         if (var_type && (strcmp(var_type, "text") == 0 || strcmp(var_type, "str") == 0)) return 1;
+    }
+    // Check self.field pattern (struct field access)
+    if (starts_with(expr, "self.")) {
+        const char* field_name = expr + 5;
+        if (str_len(g_current_struct_name) > 0) {
+            const char* ftype = lookup_struct_field_type(g_current_struct_name, field_name);
+            if (ftype && (strcmp(ftype, "text") == 0 || strcmp(ftype, "str") == 0)) return 1;
+        }
     }
     return 0;
 }
@@ -1942,7 +1955,12 @@ const char* translate_var_decl(const char* line) {
                     MethodInfo* mi = lookup_struct_method(obj_type, method);
                     if (mi && str_len(mi->return_type) > 0) {
                         const char* c_ret = stype_to_c(mi->return_type);
-                        register_var_type(name, obj_type);
+                        // Register variable type based on method return type
+                        if (strcmp(c_ret, "const char*") == 0) {
+                            register_var_type(name, "text");
+                        } else {
+                            register_var_type(name, mi->return_type);
+                        }
                         return simple_str_concat(c_ret, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";")))));
                     }
                 }
@@ -1990,7 +2008,7 @@ void fix_fn_body_return(SimpleStringArray* body, const char* sig) {
 }
 
 const char* generate_c(const char* source) {
-    const char* c_runtime = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>\n#include <unistd.h>\n#include <time.h>\n#include <sys/stat.h>\n\n#define nil NULL\n#define pass_do_nothing ((void)0)\n#define pass_dn ((void)0)\n#define pass_todo ((void)0)\n\n"
+    const char* c_runtime = "#define _POSIX_C_SOURCE 200809L\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>\n#include <unistd.h>\n#include <time.h>\n#include <sys/stat.h>\n\n#define nil NULL\n#define pass_do_nothing ((void)0)\n#define pass_dn ((void)0)\n#define pass_todo ((void)0)\n\n"
         "#pragma GCC diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
         "#pragma GCC diagnostic ignored \"-Wparentheses-equality\"\n"
         "#pragma GCC diagnostic ignored \"-Wunused-value\"\n\n";
@@ -2084,6 +2102,9 @@ const char* generate_c(const char* source) {
               leading_spaces = tmp;
             }
             int indent_level = (int)(leading_spaces / 4);
+
+            // Skip empty lines inside struct bodies (don't let them terminate the struct)
+            if (in_struct && str_len(sl) == 0) continue;
 
             if ((starts_with(sl, "struct ") || starts_with(sl, "class ")) && ends_with(sl, ":")) {
                 // Finish collecting previous method body if any
@@ -2185,6 +2206,10 @@ const char* generate_c(const char* source) {
                     continue;
                 }
 
+                // Skip blank lines inside structs — don't end the struct
+                if (str_len(sl) == 0) {
+                    continue;
+                }
                 // Check if line is indented (part of struct body) - field declaration
                 if (starts_with(raw_line, "    ") && !starts_with(sl, "fn ") && !starts_with(sl, "me ") && !starts_with(sl, "static ")) {
                     // Strip inline comments
@@ -2197,6 +2222,7 @@ const char* generate_c(const char* source) {
                         const char* ftype = trim(substr_from(sl_nc, colon + 1));
                         const char* ctype = stype_to_c(ftype);
                         struct_body = simple_str_concat(struct_body, simple_str_concat("    ", simple_str_concat(ctype, simple_str_concat(" ", simple_str_concat(fname, ";\n")))));
+                        register_struct_field(struct_name, fname, ftype);
                     }
                 } else {
                     // End of struct
@@ -2844,6 +2870,9 @@ const char* generate_c(const char* source) {
             const char* func_name = simple_str_concat(sg->struct_name, simple_str_concat("_", mi->name));
             const char* func_sig = simple_str_concat("static ", simple_str_concat(c_ret, simple_str_concat(" ", simple_str_concat(func_name, simple_str_concat("(", simple_str_concat(c_params, ")"))))));
 
+            // Set current struct context for expr_is_string() to resolve self.field types
+            g_current_struct_name = sg->struct_name;
+
             // Build function body with block depth tracking
             const char* func_code = simple_str_concat(func_sig, " {\n");
             int m_block_depth = 0;
@@ -3103,16 +3132,18 @@ const char* generate_c(const char* source) {
 
 int main(void) {
     SimpleStringArray args = rt_cli_get_args();
-    if (args.len < 4) {
-        puts("Usage: real_compiler <source.spl> <output.c>");
+    if (args.len < 3) {
+        puts("Usage: simple_codegen <source.spl> <output.c>");
         puts("  Compiles Simple source to C");
+        simple_string_array_free(&args);
         return 1;
     }
-    const char* source_file = args.items[2];
-    const char* output_file = args.items[3];
+    const char* source_file = args.items[1];
+    const char* output_file = args.items[2];
     const char* source = rt_file_read_text(source_file);
     if (source == NULL) {
         printf("%s\n",simple_str_concat("Error: cannot read ", source_file));
+        simple_string_array_free(&args);
         return 1;
     }
     printf("%s\n",simple_str_concat("Compiling ", simple_str_concat(source_file, " to C...")));
@@ -3120,9 +3151,10 @@ int main(void) {
     long long wrote = rt_file_write_text(output_file, c_code);
     if (!(wrote)) {
         printf("%s\n",simple_str_concat("Error: cannot write ", output_file));
+        simple_string_array_free(&args);
         return 1;
     }
     printf("%s\n",simple_str_concat("Generated: ", output_file));
-    return 0;
+    simple_string_array_free(&args);
     return 0;
 }
