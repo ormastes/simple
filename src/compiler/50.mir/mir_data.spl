@@ -366,6 +366,64 @@ impl MirBuilder:
                 self.blocks[i] = block
                 break
 
+    # ========================================================================
+    # Convenience Methods (for interpreter compatibility)
+    # ========================================================================
+
+    me begin_simple_function(name: text, return_type_kind: text):
+        """Begin a function with simple return type.
+        return_type_kind: "i64", "f64", "bool", "unit", "void"
+        """
+        var ret_type = MirType(kind: MirTypeKind.Unit)
+        if return_type_kind == "i64":
+            ret_type = MirType(kind: MirTypeKind.I64)
+        elif return_type_kind == "f64":
+            ret_type = MirType(kind: MirTypeKind.F64)
+        elif return_type_kind == "bool":
+            ret_type = MirType(kind: MirTypeKind.Bool)
+
+        val sig = MirSignature(params: [], return_type: ret_type, is_variadic: false)
+        val sym = SymbolId(id: self.module.functions.len())
+        self.begin_function(sym, name, sig, nil)
+
+    me emit_const_str(value: text) -> LocalId:
+        """Emit a string constant and return its local."""
+        val str_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.I8), false))
+        val dest = self.new_temp(str_type)
+        self.emit_const(dest, MirConstValue.Str(value), str_type)
+        dest
+
+    me emit_void_call(func_name: text, args: [LocalId]):
+        """Emit a void call to a named function."""
+        val func_type = MirType(kind: MirTypeKind.Unit)
+        var operands: [MirOperand] = []
+        for a in args:
+            operands = operands + [MirOperand(kind: MirOperandKind.Copy(a))]
+
+        val func_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(func_name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [],
+                return_type: func_type,
+                is_variadic: false
+            )))
+        ))
+
+        self.emit(MirInst(
+            kind: MirInstKind.Call(nil, func_op, operands),
+            span: nil
+        ))
+
+    me terminate_return_copy(local: LocalId):
+        """Terminate with return copying a local."""
+        self.set_terminator(MirTerminator.Return(
+            MirOperand(kind: MirOperandKind.Copy(local))
+        ))
+
+    me terminate_return_void():
+        """Terminate with void return."""
+        self.set_terminator(MirTerminator.Return(nil))
+
 # ============================================================================
 # Exports (re-export all from split modules + MirBuilder)
 # ============================================================================
