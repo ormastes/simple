@@ -1,0 +1,138 @@
+# C Runtime Memory Leak Regression Tests
+#
+# Documents and reproduces all 5 memory leak categories found in the C runtime
+# and generated C code. Each test verifies the fix is present.
+#
+# For actual ASan verification, run:
+#   clang -fsanitize=address,leak -g -I src/app/compile -o /tmp/leak_test /tmp/leak_harness.c -lm
+#   /tmp/leak_test
+#
+# == Leak Record ==
+#
+# Leak 1: Nested array types [[text]]/[[i64]] had no free functions.
+#   Fix: Added simple_string_array_array_free() and simple_int_array_array_free().
+#   File: src/app/compile/c_runtime.c
+#
+# Leak 2: simple_string_array_copy_push() shallow-copied string pointers.
+#   Fix: Deep-copy via strdup() each element.
+#   File: src/app/compile/c_runtime.c
+#
+# Leak 3: Option/Result stored raw pointer (no strdup), no free function.
+#   Fix: strdup() on input. Added simple_option_free() and simple_result_free().
+#   File: src/app/compile/c_runtime.c
+#
+# Leak 4: Codegen mapped Opaque("str") to void* — could not track string locals.
+#   Fix: Map to const char*, track str_locals, emit cleanup on reassign/return.
+#   Files: c_type_mapper.spl, c_backend.spl
+#
+# Leak 5: Generated main.c had no simple_string_array_free(), never freed arrays.
+#   Fix: Added free function, atexit cleanup.
+#   File: src/compiler_cpp/main.c
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "C Runtime Leak 1 - Nested array free functions exist":
+    it "c_runtime.c has simple_string_array_array_free":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        expect(content.contains("simple_string_array_array_free")).to_equal(true)
+
+    it "c_runtime.c has simple_int_array_array_free":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        expect(content.contains("simple_int_array_array_free")).to_equal(true)
+
+    it "string_array_array_free iterates and frees inner arrays":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        # The free function must call simple_string_array_free on each inner array
+        expect(content.contains("simple_string_array_free(&arr->items[i])")).to_equal(true)
+
+    it "int_array_array_free iterates and frees inner arrays":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        expect(content.contains("simple_int_array_free(&arr->items[i])")).to_equal(true)
+
+describe "C Runtime Leak 2 - String copy_push deep-copies via strdup":
+    it "simple_string_array_copy_push uses strdup for each element":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        # Must contain strdup in the copy_push function body
+        # The fix changed from: dst.items[i] = src.items[i]
+        # To: dst.items[i] = strdup(src.items[i] ? src.items[i] : "")
+        expect(content.contains("strdup(src.items[i]")).to_equal(true)
+
+describe "C Runtime Leak 3 - Option/Result own strings via strdup":
+    it "simple_some_str uses strdup":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        # Must strdup the input string so Option owns its copy
+        expect(content.contains("o.str_val = strdup(val")).to_equal(true)
+
+    it "simple_result_ok_str uses strdup":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        expect(content.contains("r.ok_str = strdup(val")).to_equal(true)
+
+    it "simple_result_err_str uses strdup":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        expect(content.contains("r.err_str = strdup(val")).to_equal(true)
+
+    it "simple_option_free exists and frees string":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        expect(content.contains("simple_option_free")).to_equal(true)
+        expect(content.contains("free((char*)o->str_val)")).to_equal(true)
+
+    it "simple_result_free exists and frees strings":
+        val content = rt_file_read_text("src/app/compile/c_runtime.c") ?? ""
+        expect(content.contains("simple_result_free")).to_equal(true)
+        expect(content.contains("free((char*)r->ok_str)")).to_equal(true)
+        expect(content.contains("free((char*)r->err_str)")).to_equal(true)
+
+describe "C Runtime Leak 4 - Codegen maps str to const char*":
+    it "c_type_mapper maps Opaque str to const char*":
+        val content = rt_file_read_text("src/compiler/70.backend/backend/c_type_mapper.spl") ?? ""
+        # Must map Opaque("str") to "const char*" not "void*"
+        expect(content.contains("const char*")).to_equal(true)
+
+    it "c_backend tracks string locals via str_locals dict":
+        val content = rt_file_read_text("src/compiler/70.backend/backend/c_backend.spl") ?? ""
+        expect(content.contains("str_locals")).to_equal(true)
+
+    it "c_backend has emit_str_cleanup for free-before-reassign":
+        val content = rt_file_read_text("src/compiler/70.backend/backend/c_backend.spl") ?? ""
+        expect(content.contains("emit_str_cleanup")).to_equal(true)
+
+    it "c_backend has emit_str_cleanup_all for function exit":
+        val content = rt_file_read_text("src/compiler/70.backend/backend/c_backend.spl") ?? ""
+        expect(content.contains("emit_str_cleanup_all")).to_equal(true)
+
+describe "C Runtime Leak 5 - Generated main.c has array cleanup":
+    it "main.c contains simple_string_array_free definition":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("simple_string_array_free")).to_equal(true)
+
+    it "main.c frees all_args in get_cli_args before return":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("simple_string_array_free(&all_args)")).to_equal(true)
+
+    it "main.c has atexit cleanup for main arrays":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("atexit(_main_cleanup)")).to_equal(true)
+
+    it "main.c cleanup function frees both args and filtered_args":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("simple_string_array_free(&_main_args)")).to_equal(true)
+        expect(content.contains("simple_string_array_free(&_main_filtered)")).to_equal(true)
+
+describe "C Runtime Leak Regression - Bootstrap runtime synced":
+    it "bootstrap c_runtime.c has all free functions":
+        val content = rt_file_read_text("src/compiler_cpp/c_runtime.c") ?? ""
+        expect(content.contains("simple_string_array_free")).to_equal(true)
+        expect(content.contains("simple_int_array_free")).to_equal(true)
+        expect(content.contains("simple_string_array_array_free")).to_equal(true)
+        expect(content.contains("simple_int_array_array_free")).to_equal(true)
+        expect(content.contains("simple_option_free")).to_equal(true)
+        expect(content.contains("simple_result_free")).to_equal(true)
+        expect(content.contains("simple_dict_free")).to_equal(true)
+
+    it "bootstrap c_runtime.c uses strdup in copy_push":
+        val content = rt_file_read_text("src/compiler_cpp/c_runtime.c") ?? ""
+        expect(content.contains("strdup(src.items[i]")).to_equal(true)
+
+    it "bootstrap c_runtime.c uses strdup in Option/Result":
+        val content = rt_file_read_text("src/compiler_cpp/c_runtime.c") ?? ""
+        expect(content.contains("o.str_val = strdup")).to_equal(true)

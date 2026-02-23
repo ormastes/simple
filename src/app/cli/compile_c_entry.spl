@@ -1,137 +1,19 @@
-# C Backend Compile Entry Point (Lightweight)
-#
-# Dedicated entry point for `simple compile --backend=c`.
-# Key optimization: imports MirToC directly instead of going through
-# compile_module_with_backend → CodegenFactory → all 10 backends.
-#
-# Invoked by bin/simple when it detects `compile --backend=c`:
-#   bin/release/simple src/app/cli/compile_c_entry.spl compile --backend=c -o out.cpp source.spl
+use compiler.frontend.frontend.*
 
-use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_lowering.{HirLowering}
-use compiler.mir.mir_lowering.{MirLowering__new}
-use compiler.backend.c_backend.{MirToC, MirToC__create}
-use compiler.core.parser.{SymbolTable, Scope, ScopeId, ScopeKind}
+extern fn sys_get_args() -> [text]
 
-# Inline Logger to avoid constructor limitation (only first struct in
-# imported module supports direct construction in interpreter mode)
 struct SimpleLogger:
     level: i64
     fn trace(msg: text):
-        var x = 0
         if self.level >= 20:
             print msg
     fn info(msg: text):
-        var x = 0
         if self.level >= 4:
             print msg
 
-extern fn sys_get_args() -> [text]
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-
-fn create_symbol_table_inline() -> SymbolTable:
-    var table = SymbolTable(
-        symbols: {},
-        scopes: {},
-        current_scope: ScopeId(id: 0),
-        next_symbol_id: 0,
-        next_scope_id: 1
-    )
-    table.scopes[0] = Scope(
-        id: ScopeId(id: 0),
-        parent: nil,
-        kind: ScopeKind.Module,
-        symbols: {}
-    )
-    table
-
-fn create_hir_lowering_inline() -> HirLowering:
-    HirLowering(
-        symbols: create_symbol_table_inline(),
-        errors: [],
-        current_function: nil,
-        loop_depth: 0
-    )
-
 fn main() -> i64:
-    val raw_args = sys_get_args()
-
-    # Parse CLI args
-    var source_file = ""
-    var output_file = ""
-    var verbose = false
-    var i = 2
-    while i < raw_args.len():
-        val arg = raw_args[i]
-        if arg == "compile":
-            i = i + 1
-        elif arg.starts_with("--backend="):
-            i = i + 1
-        elif arg == "-o" or arg == "--output":
-            if i + 1 < raw_args.len():
-                output_file = raw_args[i + 1]
-                i = i + 2
-            else:
-                i = i + 1
-        elif arg.starts_with("-o"):
-            output_file = arg.slice(2, arg.len())
-            i = i + 1
-        elif arg.starts_with("--output="):
-            output_file = arg.slice(9, arg.len())
-            i = i + 1
-        elif arg == "--verbose" or arg == "-v":
-            verbose = true
-            i = i + 1
-        elif arg.starts_with("-"):
-            i = i + 1
-        else:
-            source_file = arg
-            i = i + 1
-
-    if source_file == "":
-        print "Usage: simple compile --backend=c [-o output.cpp] source.spl"
-        return 1
-
-    if output_file == "":
-        output_file = source_file.replace(".spl", ".cpp")
-
-    # Read source
-    val source_opt = rt_file_read_text(source_file)
-    if source_opt == nil:
-        print "Error: Cannot read file: {source_file}"
-        return 1
-    val source_text = source_opt ?? ""
-
-    if verbose:
-        print "Compiling {source_file} to C++20..."
-
-    # Step 1: Parse
-    print "[c-compile] Step 1: Parsing {source_file}..."
     val logger = SimpleLogger(level: 4)
-    val ast_module = parse_full_frontend(source_text, source_file, "main", logger)
-
-    # Step 2: Lower to HIR
-    print "[c-compile] Step 2: Lowering to HIR..."
-    var hir_lowering = create_hir_lowering_inline()
-    val hir_module = hir_lowering.lower_module(ast_module)
-
-    # Step 3: Lower to MIR
-    print "[c-compile] Step 3: Lowering to MIR..."
-    var mir_lowering = MirLowering__new(create_symbol_table_inline())
-    var mir_module = mir_lowering.lower_module(hir_module)
-    mir_module.name = "main"
-
-    # Step 4: Generate C++ (direct MirToC, no CodegenFactory)
-    print "[c-compile] Step 4: Generating C++..."
-    var translator = MirToC__create("main")
-    val cpp_source = translator.translate_module(mir_module)
-
-    # Step 5: Write output
-    if not rt_file_write_text(output_file, cpp_source):
-        print "Error: Failed to write {output_file}"
-        return 1
-
-    print "Output: {output_file}"
-    print "Build with: clang++ -std=c++20 -O2 {output_file} src/runtime/runtime.c -I src/runtime -o output"
+    print "calling parse_full_frontend with wildcard import..."
+    val ast = parse_full_frontend("fn main(): print 42", "test.spl", "main", logger)
+    print "success!"
     return 0
