@@ -1,0 +1,432 @@
+# Serialization - Serialization Functions
+
+use std.text.{char_from_code}
+use serialization.types.{type_int, type_bool, type_nil, type_text, type_list}
+
+# ============================================================================
+# Character Code Functions
+# ============================================================================
+
+fn char_code_safe(c: text) -> i64:
+    """Get ASCII code of character, handling all printable chars."""
+    if c == " ": return 32
+    if c == "!": return 33
+    if c == "\"": return 34
+    if c == "#": return 35
+    if c == "$": return 36
+    if c == "%": return 37
+    if c == "&": return 38
+    if c == "'": return 39
+    if c == "(": return 40
+    if c == ")": return 41
+    if c == "*": return 42
+    if c == "+": return 43
+    if c == ",": return 44
+    if c == "-": return 45
+    if c == ".": return 46
+    if c == "/": return 47
+    if c >= "0" and c <= "9":
+        if c == "0": return 48
+        if c == "1": return 49
+        if c == "2": return 50
+        if c == "3": return 51
+        if c == "4": return 52
+        if c == "5": return 53
+        if c == "6": return 54
+        if c == "7": return 55
+        if c == "8": return 56
+        if c == "9": return 57
+    if c == ":": return 58
+    if c == ";": return 59
+    if c == "<": return 60
+    if c == "=": return 61
+    if c == ">": return 62
+    if c == "?": return 63
+    if c == "@": return 64
+    if c >= "A" and c <= "Z":
+        if c == "A": return 65
+        if c == "B": return 66
+        if c == "C": return 67
+        if c == "D": return 68
+        if c == "E": return 69
+        if c == "F": return 70
+        if c == "G": return 71
+        if c == "H": return 72
+        if c == "I": return 73
+        if c == "J": return 74
+        if c == "K": return 75
+        if c == "L": return 76
+        if c == "M": return 77
+        if c == "N": return 78
+        if c == "O": return 79
+        if c == "P": return 80
+        if c == "Q": return 81
+        if c == "R": return 82
+        if c == "S": return 83
+        if c == "T": return 84
+        if c == "U": return 85
+        if c == "V": return 86
+        if c == "W": return 87
+        if c == "X": return 88
+        if c == "Y": return 89
+        if c == "Z": return 90
+    if c == "[": return 91
+    if c == "\\": return 92
+    if c == "]": return 93
+    if c == "^": return 94
+    if c == "_": return 95
+    if c == "`": return 96
+    if c >= "a" and c <= "z":
+        if c == "a": return 97
+        if c == "b": return 98
+        if c == "c": return 99
+        if c == "d": return 100
+        if c == "e": return 101
+        if c == "f": return 102
+        if c == "g": return 103
+        if c == "h": return 104
+        if c == "i": return 105
+        if c == "j": return 106
+        if c == "k": return 107
+        if c == "l": return 108
+        if c == "m": return 109
+        if c == "n": return 110
+        if c == "o": return 111
+        if c == "p": return 112
+        if c == "q": return 113
+        if c == "r": return 114
+        if c == "s": return 115
+        if c == "t": return 116
+        if c == "u": return 117
+        if c == "v": return 118
+        if c == "w": return 119
+        if c == "x": return 120
+        if c == "y": return 121
+        if c == "z": return 122
+    if c == "{": return 123
+    if c == "|": return 124
+    if c == "}": return 125
+    if c == "~": return 126
+    if c == "\n": return 10
+    if c == "\t": return 9
+    if c == "\r": return 13
+    0
+
+fn char_from_code_safe(code: i64) -> text:
+    """Wrapper for string.char_from_code."""
+    char_from_code(code)
+
+# ============================================================================
+# Varint Encoding
+# ============================================================================
+
+fn write_varint(n: i64) -> [i64]:
+    """Encode integer as variable-length byte array."""
+    if n == 0:
+        return [0]
+
+    var result = []
+    var value = n
+    var is_negative = false
+
+    if value < 0:
+        is_negative = true
+        value = -value
+
+    while value > 0:
+        var byte_val = value % 128
+        value = value / 128
+        if value > 0:
+            byte_val = byte_val + 128
+        result = result.push(byte_val)
+
+    if is_negative:
+        var signed = [255]
+        for b in result:
+            signed = signed.push(b)
+        return signed
+
+    result
+
+fn read_varint(bytes: [i64], offset: i64) -> (i64, i64):
+    """Decode varint from byte array."""
+    var is_negative = false
+    var start = offset
+
+    if bytes[start] == 255:
+        is_negative = true
+        start = start + 1
+
+    var result = 0
+    var shift = 0
+    var pos = start
+
+    while pos < bytes.len():
+        val byte_val = bytes[pos]
+        val value_bits = byte_val % 128
+        result = result + (value_bits * (1 << shift))
+        shift = shift + 7
+        pos = pos + 1
+
+        if byte_val < 128:
+            break
+
+    val consumed = pos - offset
+    if is_negative:
+        result = -result
+
+    (result, consumed)
+
+# ============================================================================
+# Binary Serialization - Primitives
+# ============================================================================
+
+fn serialize_int_bytes(n: i64) -> [i64]:
+    """Serialize integer to byte array with type tag."""
+    var result = [type_int()]
+    val varint = write_varint(n)
+    for b in varint:
+        result = result.push(b)
+    result
+
+fn serialize_bool_bytes(b: bool) -> [i64]:
+    """Serialize boolean to byte array with type tag."""
+    if b:
+        return [type_bool(), 1]
+    [type_bool(), 0]
+
+fn serialize_nil_bytes() -> [i64]:
+    """Serialize nil to byte array with type tag."""
+    [type_nil()]
+
+fn serialize_text_bytes(s: text) -> [i64]:
+    """Serialize text to byte array with type tag and length."""
+    var result = [type_text()]
+    val len_bytes = write_varint(s.len())
+    for b in len_bytes:
+        result = result.push(b)
+
+    # Convert text to byte codes
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i+1]
+        val code = char_code_safe(ch)
+        result = result.push(code)
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Text Serialization - String Escaping
+# ============================================================================
+
+fn escape_string(s: text) -> text:
+    """Escape special characters in string for text serialization."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i+1]
+        if ch == "\"":
+            result = result + "\\\""
+        else if ch == "\\":
+            result = result + "\\\\"
+        else if ch == "\n":
+            result = result + "\\n"
+        else if ch == "\t":
+            result = result + "\\t"
+        else if ch == "\r":
+            result = result + "\\r"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn unescape_string(s: text) -> text:
+    """Unescape special characters from escaped string."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i+1]
+        if ch == "\\":
+            if i + 1 < s.len():
+                val next = s[i+1:i+2]
+                if next == "\"":
+                    result = result + "\""
+                    i = i + 1
+                else if next == "\\":
+                    result = result + "\\"
+                    i = i + 1
+                else if next == "n":
+                    result = result + "\n"
+                    i = i + 1
+                else if next == "t":
+                    result = result + "\t"
+                    i = i + 1
+                else if next == "r":
+                    result = result + "\r"
+                    i = i + 1
+                else:
+                    result = result + ch
+            else:
+                result = result + ch
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn quote_string(s: text) -> text:
+    """Quote and escape string for serialization."""
+    "\"" + escape_string(s) + "\""
+
+fn unquote_string(s: text) -> text:
+    """Remove quotes and unescape string."""
+    if s.len() < 2:
+        return s
+    if s[0:1] == "\"" and s[s.len()-1:s.len()] == "\"":
+        val inner = s[1:s.len()-1]
+        return unescape_string(inner)
+    s
+
+# ============================================================================
+# Text Serialization - Primitives
+# ============================================================================
+
+fn serialize_int(n: i64) -> text:
+    """Serialize integer to text format."""
+    "{n}"
+
+fn serialize_bool(b: bool) -> text:
+    """Serialize boolean to text format."""
+    if b:
+        return "true"
+    "false"
+
+fn serialize_nil() -> text:
+    """Serialize nil to text format."""
+    "nil"
+
+fn serialize_text(s: text) -> text:
+    """Serialize text to quoted, escaped format."""
+    quote_string(s)
+
+# ============================================================================
+# Text Serialization - Collections
+# ============================================================================
+
+fn serialize_list(items: [text]) -> text:
+    """Serialize list of serialized items to text format."""
+    if items.len() == 0:
+        return "[]"
+
+    var result = "["
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            result = result + ", "
+        result = result + items[i]
+        i = i + 1
+    result = result + "]"
+    result
+
+fn serialize_tuple_text(values: [text]) -> text:
+    """Serialize tuple of serialized values to text format."""
+    if values.len() == 0:
+        return "()"
+
+    var result = "("
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            result = result + ", "
+        result = result + values[i]
+        i = i + 1
+    result = result + ")"
+    result
+
+fn serialize_dict(entries: [(text, text)]) -> text:
+    """Serialize dict entries to text format."""
+    if entries.len() == 0:
+        return "{}"
+
+    var result = "{"
+    var i = 0
+    while i < entries.len():
+        if i > 0:
+            result = result + ", "
+        val entry = entries[i]
+        val key = entry.0
+        val value = entry.1
+        result = result + key + ": " + value
+        i = i + 1
+    result = result + "}"
+    result
+
+# ============================================================================
+# List Serialization Helpers
+# ============================================================================
+
+fn serialize_int_list(items: [i64]) -> text:
+    """Serialize list of integers to text format."""
+    var serialized_items = []
+    for item in items:
+        serialized_items = serialized_items.push(serialize_int(item))
+    serialize_list(serialized_items)
+
+fn serialize_text_list(items: [text]) -> text:
+    """Serialize list of text to text format."""
+    var serialized_items = []
+    for item in items:
+        serialized_items = serialized_items.push(serialize_text(item))
+    serialize_list(serialized_items)
+
+fn serialize_bool_list(items: [bool]) -> text:
+    """Serialize list of booleans to text format."""
+    var serialized_items = []
+    for item in items:
+        serialized_items = serialized_items.push(serialize_bool(item))
+    serialize_list(serialized_items)
+
+# ============================================================================
+# Binary List Serialization
+# ============================================================================
+
+fn serialize_int_list_bytes(items: [i64]) -> [i64]:
+    """Serialize list of integers to byte array."""
+    var result = [type_list()]
+    val len_bytes = write_varint(items.len())
+    for b in len_bytes:
+        result = result.push(b)
+
+    for item in items:
+        val item_bytes = serialize_int_bytes(item)
+        for b in item_bytes:
+            result = result.push(b)
+
+    result
+
+fn serialize_text_list_bytes(items: [text]) -> [i64]:
+    """Serialize list of text to byte array."""
+    var result = [type_list()]
+    val len_bytes = write_varint(items.len())
+    for b in len_bytes:
+        result = result.push(b)
+
+    for item in items:
+        val item_bytes = serialize_text_bytes(item)
+        for b in item_bytes:
+            result = result.push(b)
+
+    result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export char_code_safe, char_from_code_safe
+export write_varint, read_varint
+export serialize_int_bytes, serialize_bool_bytes, serialize_nil_bytes, serialize_text_bytes
+export escape_string, unescape_string, quote_string, unquote_string
+export serialize_int, serialize_bool, serialize_nil, serialize_text
+export serialize_list, serialize_tuple_text, serialize_dict
+export serialize_int_list, serialize_text_list, serialize_bool_list
+export serialize_int_list_bytes, serialize_text_list_bytes

@@ -1,0 +1,283 @@
+# Core Type Erasure — Generic Type Monomorphization
+#
+# Implements type erasure via monomorphization (compile-time specialization)
+# Uses arena pattern (parallel arrays) compatible with seed compiler
+#
+# Each generic function call is specialized for specific type arguments
+# Monomorphized instances are cached to avoid re-compilation
+
+use compiler.core.type_subst.{type_subst_reset, type_subst_add, type_subst_lookup}
+
+# ===== Monomorphization Cache =====
+# Maps (function_name, type_args) -> monomorphic_instance_id
+# Uses parallel arrays to avoid struct issues
+
+var mono_cache_fn_names: [text] = []
+var mono_cache_type_args: [[i64]] = []
+var mono_cache_instance_ids: [i64] = []
+var mono_next_instance_id: i64 = 10000  # Start high to avoid conflicts
+
+fn mono_cache_reset():
+    mono_cache_fn_names = []
+    mono_cache_type_args = []
+    mono_cache_instance_ids = []
+    mono_next_instance_id = 10000
+
+fn mono_cache_find(fn_name: text, type_args: [i64]) -> i64:
+    # Search for existing monomorphization
+    for i in range(0, mono_cache_fn_names.len()):
+        if mono_cache_fn_names[i] != fn_name:
+            continue
+        # Check if type arguments match
+        val cached_args = mono_cache_type_args[i]
+        if cached_args.len() != type_args.len():
+            continue
+        var args_match: bool = true
+        for j in range(0, type_args.len()):
+            if cached_args[j] != type_args[j]:
+                args_match = false
+                break
+        if args_match:
+            return mono_cache_instance_ids[i]
+    -1  # Not found
+
+fn mono_cache_register(fn_name: text, type_args: [i64]) -> i64:
+    # Check if already cached
+    val existing = mono_cache_find(fn_name, type_args)
+    if existing != -1:
+        return existing
+    # Create new instance
+    val instance_id = mono_next_instance_id
+    mono_next_instance_id = mono_next_instance_id + 1
+    mono_cache_fn_names.push(fn_name)
+    mono_cache_type_args.push(type_args)
+    mono_cache_instance_ids.push(instance_id)
+    instance_id
+
+# ===== Type Argument String Conversion =====
+# Convert type tags to mangled names for instance identifiers
+
+extern fn type_tag_name(tag: i64) -> text
+
+fn type_args_to_string(type_args: [i64]) -> text:
+    if type_args.len() == 0:
+        return ""
+    var result: text = ""
+    for i in range(0, type_args.len()):
+        if i > 0:
+            result = result + "_"
+        val type_name = type_tag_name(type_args[i])
+        # Sanitize type name for mangling
+        var sanitized: text = type_name
+        sanitized = sanitized.replace("<", "_")
+        sanitized = sanitized.replace(">", "_")
+        sanitized = sanitized.replace("[", "_")
+        sanitized = sanitized.replace("]", "_")
+        sanitized = sanitized.replace(" ", "")
+        result = result + sanitized
+    result
+
+# ===== Monomorphic Function Names =====
+# Generate mangled names for monomorphic instances
+
+fn mono_function_name(base_name: text, type_args: [i64]) -> text:
+    if type_args.len() == 0:
+        return base_name
+    val type_suffix = type_args_to_string(type_args)
+    base_name + "__" + type_suffix
+
+# ===== Generic Function Registry =====
+# Track generic function definitions for monomorphization
+
+var generic_fn_names: [text] = []
+var generic_fn_params: [[text]] = []  # Type parameter names (T, U, etc.)
+var generic_fn_decl_ids: [i64] = []   # AST decl_id for body
+
+fn generic_fn_register(fn_name: text, type_params: [text], decl_id: i64):
+    # Check if already registered
+    for i in range(0, generic_fn_names.len()):
+        if generic_fn_names[i] == fn_name:
+            # Update existing
+            generic_fn_params[i] = type_params
+            generic_fn_decl_ids[i] = decl_id
+            return
+    # Add new
+    generic_fn_names.push(fn_name)
+    generic_fn_params.push(type_params)
+    generic_fn_decl_ids.push(decl_id)
+
+fn generic_fn_find(fn_name: text) -> i64:
+    for i in range(0, generic_fn_names.len()):
+        if generic_fn_names[i] == fn_name:
+            return i
+    -1
+
+fn generic_fn_get_params(fn_id: i64) -> [text]:
+    if fn_id < 0 or fn_id >= generic_fn_params.len():
+        return []
+    generic_fn_params[fn_id]
+
+fn generic_fn_get_decl(fn_id: i64) -> i64:
+    if fn_id < 0 or fn_id >= generic_fn_decl_ids.len():
+        return -1
+    generic_fn_decl_ids[fn_id]
+
+# ===== Monomorphization Entry Point =====
+# Main function: monomorphize generic call
+
+fn monomorphize_generic_call(fn_name: text, type_args: [i64]) -> i64:
+    # Check cache first
+    val cached = mono_cache_find(fn_name, type_args)
+    if cached != -1:
+        return cached
+    # Look up generic function definition
+    val fn_id = generic_fn_find(fn_name)
+    if fn_id == -1:
+        return -1  # Not a generic function
+    # Verify type argument count matches parameters
+    val type_params = generic_fn_get_params(fn_id)
+    if type_params.len() != type_args.len():
+        return -1  # Arity mismatch
+    # Build type substitution map
+    type_subst_reset()
+    for i in range(0, type_params.len()):
+        type_subst_add(type_params[i], type_args[i])
+    # Get function body AST
+    val decl_id = generic_fn_get_decl(fn_id)
+    if decl_id == -1:
+        return -1  # No body
+    # Generate monomorphic instance
+    val instance_id = mono_generate_instance(fn_name, type_args, decl_id)
+    # Cache the instance
+    val final_id = mono_cache_register(fn_name, type_args)
+    final_id
+
+# ===== Monomorphic Instance Generation =====
+# Generate specialized function code
+
+var mono_generated_names: [text] = []
+var mono_generated_decls: [i64] = []
+
+fn mono_generate_instance(base_name: text, type_args: [i64], source_decl: i64) -> i64:
+    # Generate mangled name
+    val mono_name = mono_function_name(base_name, type_args)
+    # Check if already generated
+    for i in range(0, mono_generated_names.len()):
+        if mono_generated_names[i] == mono_name:
+            return i
+    # Clone function AST with type substitutions
+    # This would rewrite the function body, replacing type parameters
+    # with concrete types. For now, we just register the instance.
+    val new_decl_id = mono_clone_and_rewrite(source_decl)
+    # Register generated instance
+    val instance_idx = mono_generated_names.len()
+    mono_generated_names.push(mono_name)
+    mono_generated_decls.push(new_decl_id)
+    instance_idx
+
+fn mono_clone_and_rewrite(source_decl: i64) -> i64:
+    # This would perform deep AST cloning and rewrite type annotations
+    # For bootstrap/interpreter mode, we skip actual cloning
+    # and just return the source decl_id
+    # Full implementation would:
+    # 1. Clone function declaration AST node
+    # 2. Walk expression tree and replace type parameters
+    # 3. Update symbol table with concrete types
+    # 4. Return new decl_id
+    source_decl
+
+# ===== Type Inference for Generic Calls =====
+# Infer type arguments from call site argument types
+
+fn infer_type_arguments(fn_name: text, arg_types: [i64]) -> [i64]:
+    # Look up generic function
+    val fn_id = generic_fn_find(fn_name)
+    if fn_id == -1:
+        return []  # Not generic
+    val type_params = generic_fn_get_params(fn_id)
+    if type_params.len() == 0:
+        return []  # No type parameters
+    # Simple inference: assume parameter types match argument types 1-to-1
+    # More sophisticated inference would use unification algorithm
+    if arg_types.len() < type_params.len():
+        return []  # Not enough arguments for inference
+    # Take first N argument types as type arguments
+    var inferred: [i64] = []
+    for i in range(0, type_params.len()):
+        inferred.push(arg_types[i])
+    inferred
+
+# ===== Monomorphization Statistics =====
+
+fn mono_cache_size() -> i64:
+    mono_cache_fn_names.len()
+
+fn mono_instances_generated() -> i64:
+    mono_generated_names.len()
+
+fn mono_get_instance_name(instance_idx: i64) -> text:
+    if instance_idx < 0 or instance_idx >= mono_generated_names.len():
+        return ""
+    mono_generated_names[instance_idx]
+
+fn mono_list_instances() -> [text]:
+    mono_generated_names
+
+# ===== Generic Class Support =====
+# Similar to generic functions, but for struct/class types
+
+var generic_class_names: [text] = []
+var generic_class_params: [[text]] = []
+var generic_class_decl_ids: [i64] = []
+
+fn generic_class_register(class_name: text, type_params: [text], decl_id: i64):
+    for i in range(0, generic_class_names.len()):
+        if generic_class_names[i] == class_name:
+            generic_class_params[i] = type_params
+            generic_class_decl_ids[i] = decl_id
+            return
+    generic_class_names.push(class_name)
+    generic_class_params.push(type_params)
+    generic_class_decl_ids.push(decl_id)
+
+fn generic_class_find(class_name: text) -> i64:
+    for i in range(0, generic_class_names.len()):
+        if generic_class_names[i] == class_name:
+            return i
+    -1
+
+fn monomorphize_generic_class(class_name: text, type_args: [i64]) -> i64:
+    # Check cache (reuse function cache for classes)
+    val cached = mono_cache_find(class_name, type_args)
+    if cached != -1:
+        return cached
+    # Look up generic class
+    val class_id = generic_class_find(class_name)
+    if class_id == -1:
+        return -1
+    # Generate monomorphic class
+    val instance_id = mono_cache_register(class_name, type_args)
+    instance_id
+
+fn mono_class_name(base_name: text, type_args: [i64]) -> text:
+    mono_function_name(base_name, type_args)
+
+# ===== Public API =====
+
+export monomorphize_generic_call
+export monomorphize_generic_class
+export mono_function_name
+export mono_class_name
+export mono_cache_reset
+export mono_cache_find
+export mono_cache_size
+export mono_instances_generated
+export mono_list_instances
+export generic_fn_register
+export generic_fn_find
+export generic_class_register
+export generic_class_find
+export infer_type_arguments
+export type_subst_clear
+export type_subst_add
+export type_subst_lookup

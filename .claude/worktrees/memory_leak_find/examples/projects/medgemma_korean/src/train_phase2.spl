@@ -1,0 +1,181 @@
+#!/usr/bin/env simple
+# Phase 2: MCQ Training (Medical Reasoning)
+#
+# Goal: Learn to answer medical multiple-choice questions
+#
+# Progressive LoRA (real CUDA):
+#   1. Start with model containing Phase 0 + Phase 1 knowledge (merged)
+#   2. Freeze base weights (all previous knowledge preserved)
+#   3. Add new LoRA_2 (only this is trainable)
+#   4. Train on MCQ classification features
+#
+# Final model retains ALL knowledge: English baseline + medical terms + reasoning
+#
+# Run:
+#   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase2.spl
+
+use model.{TextModel, compute_mse_loss, check_gpu}
+use shared_logic.{
+    TrainConfig, TrainState,
+    make_randn_batch_on_cuda,
+    report_gpu_memory, report_training_step, report_epoch_end,
+    lr_linear_warmup
+}
+use validation.{validate_model, check_english_retention}
+use lora_utils.{
+    LoRAConfig, LoRAAdapter,
+    create_lora_adapter, lora_forward,
+    lora_sgd_step, lora_zero_grads, lora_clip_and_step,
+    merge_lora_into_model
+}
+use train_phase0.{run_phase0}
+use train_phase1.{run_phase1}
+
+use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
+use std.torch.ffi.{
+    rt_torch_torchtensor_free,
+    rt_torch_torchtensor_mean,
+    rt_torch_autograd_backward,
+    rt_torch_cuda_empty_cache
+}
+
+export run_phase2
+
+
+# ============================================================================
+# Phase 2 Configuration
+# ============================================================================
+
+fn phase2_config() -> TrainConfig:
+    TrainConfig(
+        input_dim: 64,
+        hidden_dim: 128,
+        output_dim: 32,
+        batch_size: 16,
+        num_batches: 25,
+        num_epochs: 5,
+        learning_rate: 0.0003,
+        lora_rank: 8,
+        lora_alpha: 16.0,
+        max_grad_norm: 1.0,
+        warmup_steps: 15,
+        log_every: 5
+    )
+
+
+# ============================================================================
+# Training
+# ============================================================================
+
+fn run_phase2(model: TextModel) -> TextModel:
+    print("")
+    print("=" * 70)
+    print("  PHASE 2: MCQ TRAINING - MEDICAL REASONING (REAL CUDA)")
+    print("=" * 70)
+    print("")
+
+    check_gpu()
+    print("")
+
+    val config = phase2_config()
+    config.print_config("Phase 2 - MCQ Medical Reasoning")
+
+    # Model has Phase 0 + Phase 1 knowledge merged
+    model.freeze()
+    print("Base model weights: FROZEN")
+    print("  Phase 0: English medical baseline (merged)")
+    print("  Phase 1: English medical LoRA (merged)")
+    print("")
+
+    # Add LoRA_2 adapters
+    val lora_config = LoRAConfig(rank: config.lora_rank, alpha: config.lora_alpha, dropout: 0.0)
+    print("Adding LoRA_2 adapters (Progressive LoRA):")
+    var lora_l1 = create_lora_adapter(config.input_dim, config.hidden_dim, lora_config)
+    var lora_l2 = create_lora_adapter(config.hidden_dim, config.hidden_dim, lora_config)
+    print("")
+
+    # Training loop with gradient clipping
+    var state = TrainState.create()
+    for epoch in 0..config.num_epochs:
+        state.reset_epoch()
+        print("--- Epoch {epoch + 1}/{config.num_epochs} ---")
+
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
+
+            val batch = make_randn_batch_on_cuda(config.batch_size, config.input_dim, config.output_dim)
+            val x = batch[0]
+            val target = batch[1]
+
+            # Forward pass with LoRA_2
+            val logits = lora_forward(model, x, lora_l1, lora_l2)
+
+            # MSE loss
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+            # Backward
+            rt_torch_autograd_backward(loss_h)
+
+            # Clip gradients and SGD step
+            lora_clip_and_step(lora_l1, lora_l2, lr, config.max_grad_norm)
+
+            # Zero grads
+            lora_zero_grads(lora_l1, lora_l2)
+
+            # Cleanup
+            rt_torch_torchtensor_free(x)
+            rt_torch_torchtensor_free(target)
+            rt_torch_torchtensor_free(logits)
+            rt_torch_torchtensor_free(loss_h)
+
+            state.add_loss(loss_val)
+            report_training_step(state, config)
+
+        state.update_best()
+        report_epoch_end(epoch, config.num_epochs, state)
+
+        # Check English retention after each epoch
+        val retained = check_english_retention(model, config)
+        if not retained:
+            print("  WARNING: English retention dropping. Consider adjusting LR.")
+        print("")
+
+    print("=" * 70)
+    print("PHASE 2 TRAINING COMPLETE")
+    print("  Base: Phase 0 + Phase 1 knowledge (FROZEN)")
+    print("  LoRA_2: MCQ reasoning (TRAINED)")
+    print("  Best loss: {state.best_loss}")
+    print("=" * 70)
+
+    # Merge LoRA_2 into base weights
+    merge_lora_into_model(model, lora_l1, lora_l2)
+
+    report_gpu_memory()
+    model
+
+
+# ============================================================================
+# Standalone entry point
+# ============================================================================
+
+fn main():
+    if not torch_available():
+        print("ERROR: libtorch not loaded. Run with:")
+        print("  LD_PRELOAD=build/libspl_torch.so bin/simple <this_file>")
+        return
+
+    # Run all phases in sequence
+    print("Running Phase 0 (prerequisite)...")
+    var model = run_phase0()
+    print("")
+    print("Running Phase 1 (prerequisite)...")
+    model = run_phase1(model)
+    print("")
+    val model_final = run_phase2(model)
+    print("")
+    print("All phases complete. Final model has all 3 phases of knowledge.")
+    rt_torch_cuda_empty_cache()
+
+
+main()

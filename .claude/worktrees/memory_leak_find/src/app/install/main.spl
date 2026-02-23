@@ -1,0 +1,121 @@
+# Simple CLI - install command
+# Installs all dependencies from simple.sdn/simple.lock
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, file_write, dir_create, cwd)
+
+fn print_help():
+    print "Usage: simple install [options]"
+    print ""
+    print "Install all dependencies from simple.sdn."
+    print "Uses simple.lock if available, otherwise resolves from manifest."
+    print ""
+    print "Options:"
+    print "  --frozen     Only install from lockfile, fail if missing"
+    print "  --dry-run    Show what would be installed without changes"
+    print "  -h, --help   Show this help"
+
+fn find_manifest_path() -> text:
+    val current_dir = cwd()
+    val sdn_path = "{current_dir}/simple.sdn"
+    val toml_path = "{current_dir}/simple.toml"
+    if file_exists(sdn_path):
+        return sdn_path
+    if file_exists(toml_path):
+        return toml_path
+    ""
+
+fn parse_dep_names_from_sdn(content: text) -> [text]:
+    val lines = content.split("\n")
+    var deps = []
+    var in_deps = false
+
+    for line in lines:
+        if line.starts_with("dependencies:") or line.starts_with("dev_dependencies:"):
+            in_deps = true
+            continue
+        if not line.starts_with(" ") and not line.starts_with("\t") and line.ends_with(":"):
+            in_deps = false
+            continue
+        if in_deps and line.starts_with("  "):
+            val trimmed = line.trim()
+            if trimmed != "" and not trimmed.starts_with("#"):
+                val parts = trimmed.split(":")
+                if parts.len() > 0 and parts[0] != "":
+                    deps.push(parts[0].trim())
+    deps
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var frozen = false
+    var dry_run = false
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--frozen":
+            frozen = true
+        elif arg == "--dry-run":
+            dry_run = true
+
+    val manifest_path = find_manifest_path()
+    if manifest_path == "":
+        print "install: no simple.sdn or simple.toml found in current directory"
+        return 1
+
+    val current_dir = cwd()
+    val lockfile_path = "{current_dir}/simple.lock"
+    val modules_dir = "{current_dir}/simple_modules"
+
+    # Check for lockfile
+    if frozen and not file_exists(lockfile_path):
+        print "install: --frozen requires simple.lock to exist"
+        return 1
+
+    val content = file_read(manifest_path)
+    val deps = parse_dep_names_from_sdn(content)
+
+    if deps.len() == 0:
+        print "No dependencies to install."
+        return 0
+
+    if dry_run:
+        print "Would install {deps.len()} dependencies:"
+        for name in deps:
+            print "  {name} (*)"
+        return 0
+
+    # Create simple_modules directory
+    if not dir_create(modules_dir, true):
+        print "install: failed to create simple_modules/"
+        return 1
+
+    print "Installing {deps.len()} dependencies..."
+
+    var installed = 0
+    for name in deps:
+        # Create package directory
+        val pkg_dir = "{modules_dir}/{name}"
+        if not dir_create(pkg_dir, true):
+            print "install: failed to create directory for '{name}'"
+        else:
+            # Write a placeholder module file
+            val mod_content = "# {name} - installed by simple install\n# version: *\n# TODO: actual package download from registry\n"
+            file_write("{pkg_dir}/__init__.spl", mod_content)
+            print "  installed {name} (*)"
+            installed = installed + 1
+
+    print ""
+    print "Installed {installed}/{deps.len()} packages to simple_modules/"
+
+    # Generate lockfile if not frozen
+    if not frozen and not file_exists(lockfile_path):
+        var lock_content = "# simple.lock (generated)\n"
+        for name in deps:
+            lock_content = lock_content + "{name}: *\n"
+        file_write(lockfile_path, lock_content)
+        print "Generated simple.lock"
+
+    0

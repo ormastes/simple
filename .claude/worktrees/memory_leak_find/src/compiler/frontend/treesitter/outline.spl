@@ -1,0 +1,530 @@
+# TreeSitter Outline - Top-Level Parsing Coordinator
+#
+# Provides the main entry points for outline parsing:
+# - Attribute parsing
+# - Top-level item dispatch (parse_top_level_item)
+# - Import/export parsing
+# - Identifier/module path parsing
+# - Block outline parsing and skip policy
+# - TopLevelItem enum definition
+#
+# Delegates to submodules:
+# - outline_lexer.spl  — TreeSitter struct, token handling
+# - outline_types.spl  — type expression parsing
+# - outline_decls.spl  — function/class/struct/enum/trait/impl parsers
+#
+# Outline type definitions are in treesitter_types.spl
+
+use compiler.core.lexer.*
+use treesitter_types.*
+use compiler.frontend.block_types.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo}
+use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
+use compiler.frontend.treesitter.outline_types.*
+use compiler.frontend.treesitter.outline_decls.*
+use compiler.frontend.treesitter.outline_members.*
+
+# ============================================================================
+# Attribute Parsing
+# ============================================================================
+
+fn treesitter_parse_attribute(self: TreeSitter) -> AttributeOutline:
+        """Parse a single attribute: @name or @name(args) or #[name] or #[name(args)]."""
+        val start = self.current.span
+        val is_hash_bracket = self.check(TokenKind.HashLBracket)
+
+        self.advance()  # Consume '@' or '#['
+
+        val name = self.parse_identifier()
+        var args_span: Span = nil
+
+        # Check for arguments: @name(arg1, arg2, ...) or #[name(arg1, arg2, ...)]
+        if self.match_token(TokenKind.LParen):
+            val args_start = self.previous.span.end
+            # Skip to matching right paren (handles nested parens)
+            var depth = 1
+            while depth > 0 and not self.is_at_end():
+                match self.peek():
+                    case LParen:
+                        depth = depth + 1
+                        self.advance()
+                    case RParen:
+                        depth = depth - 1
+                        if depth > 0:
+                            self.advance()
+                    case _:
+                        self.advance()
+            val args_end = self.current.span.start
+            args_span = span_new(args_start, args_end, 0, 0)
+            self.expect(TokenKind.RParen, "expected ')' after attribute arguments")
+
+        # For #[name] or #[name(args)], expect closing ]
+        if is_hash_bracket:
+            self.expect(TokenKind.RBracket, "expected ']' after attribute")
+
+        AttributeOutline(
+            name: name,
+            args_span: args_span,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+# ============================================================================
+# Top-Level Item Dispatch
+# ============================================================================
+
+fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
+        """Parse a top-level item."""
+        # Parse attributes before the declaration (@repr, @packed, @align, etc.)
+        val attrs = self.parse_attributes()
+
+        val doc = self.take_doc_comment()
+        var is_public = false
+
+        # Parse visibility modifiers (pub, pub(friend), pub(package), pri)
+        var visibility_modifier = ""  # "", "friend", "package"
+        if self.match_token(TokenKind.KwPub):
+            is_public = true
+            # Check for pub(friend) or pub(package)
+            if self.check(TokenKind.LParen):
+                self.advance()  # consume (
+                val mod_text = self.parse_identifier()
+                if mod_text == "friend":
+                    visibility_modifier = "friend"
+                elif mod_text == "package":
+                    visibility_modifier = "package"
+                self.expect(TokenKind.RParen, "expected ')' after visibility modifier")
+        elif self.match_token(TokenKind.KwPri):
+            # Explicit private marker (same, )
+            is_public = false
+
+        # Check for `friend <package>` declaration (top-level in __init__.spl)
+        if self.check(TokenKind.Ident) and self.current.text == "friend":
+            val friend_start = self.current.span
+            self.advance()  # consume "friend"
+            val pkg_name = self.parse_identifier()
+            return toplevelitem_FriendDecl(FriendDeclOutline(
+                package_name: pkg_name,
+                span: merge_spans(friend_start, self.previous.span)
+            ))
+
+        # Check for `internal_export` declaration (top-level in __init__.spl)
+        if self.check(TokenKind.Ident) and self.current.text == "internal_export":
+            val ie_start = self.current.span
+            self.advance()  # consume "internal_export"
+            var ie_items: [text] = []
+            ie_items.push(self.parse_identifier())
+            while self.match_token(TokenKind.Comma):
+                ie_items.push(self.parse_identifier())
+            return toplevelitem_InternalExportDecl(InternalExportOutline(
+                items: ie_items,
+                span: merge_spans(ie_start, self.previous.span)
+            ))
+
+        val peeked = self.peek()
+        match peeked:
+            case KwImport:
+                toplevelitem_Import(self.parse_import())
+            case KwExport:
+                toplevelitem_Export(self.parse_export())
+            case KwFn:
+                toplevelitem_Function(self.parse_function_outline(is_public, false, doc))
+            case KwMe:
+                toplevelitem_Function(self.parse_function_outline(is_public, true, doc))
+            case KwStatic:
+                self.advance()
+                if self.check(TokenKind.KwFn):
+                    val f = self.parse_function_outline(is_public, false, doc)
+                    f.is_static = true
+                    toplevelitem_Function(f)
+                elif self.check(TokenKind.Ident):
+                    if self.current.text == "assert":
+                        toplevelitem_StaticAssert(self.parse_static_assert_outline())
+                else:
+                    self.error("expected 'fn' or 'assert' after 'static'")
+                    self.synchronize()
+                    TopLevelItem.Error(ParseError(
+                        message: "expected 'fn' or 'assert' after 'static'",
+                        span: self.current.span,
+                        severity: ErrorSeverity.Error
+                    ))
+            case KwAsync:
+                self.advance()
+                if self.check(TokenKind.KwFn):
+                    val f = self.parse_function_outline(is_public, false, doc)
+                    f.is_async = true
+                    toplevelitem_Function(f)
+                else:
+                    self.error("expected 'fn' after 'async'")
+                    self.synchronize()
+                    TopLevelItem.Error(ParseError(
+                        message: "expected 'fn' after 'async'",
+                        span: self.current.span,
+                        severity: ErrorSeverity.Error
+                    ))
+            case KwClass:
+                toplevelitem_Class(self.parse_class_outline(is_public, doc, attrs))
+            case KwActor:
+                toplevelitem_ActorItem(self.parse_actor_outline(is_public, doc, attrs))
+            case KwStruct:
+                toplevelitem_Struct(self.parse_struct_outline(is_public, doc, attrs))
+            case KwEnum:
+                toplevelitem_Enum(self.parse_enum_outline(is_public, doc))
+            case KwBitfield:
+                toplevelitem_Bitfield(self.parse_bitfield_outline(is_public, doc, attrs))
+            case KwTrait:
+                toplevelitem_Trait(self.parse_trait_outline(is_public, doc))
+            case KwImpl:
+                toplevelitem_Impl(self.parse_impl_outline())
+            case KwType:
+                toplevelitem_TypeAlias(self.parse_type_alias_outline(is_public))
+            case KwVal:
+                toplevelitem_Const(self.parse_const_outline(is_public, attrs))
+            case KwVar:
+                toplevelitem_Const(self.parse_const_outline(is_public, attrs))
+            case KwExtern:
+                self.advance()
+                if self.check(TokenKind.KwFn):
+                    val f = self.parse_extern_function_outline(is_public, doc)
+                    toplevelitem_Function(f)
+                else:
+                    self.error("expected 'fn' after 'extern'")
+                    self.synchronize()
+                    TopLevelItem.Error(ParseError(
+                        message: "expected 'fn' after 'extern'",
+                        span: self.current.span,
+                        severity: ErrorSeverity.Error
+                    ))
+            case KwConst:
+                self.advance()
+                if self.check(TokenKind.KwFn):
+                    val f = self.parse_function_outline(is_public, false, doc)
+                    f.is_const = true
+                    toplevelitem_Function(f)
+                else:
+                    self.error("expected 'fn' after 'const'")
+                    self.synchronize()
+                    TopLevelItem.Error(ParseError(
+                        message: "expected 'fn' after 'const'",
+                        span: self.current.span,
+                        severity: ErrorSeverity.Error
+                    ))
+            case KwKernel:
+                self.advance()
+                if self.check(TokenKind.KwFn):
+                    val f = self.parse_function_outline(is_public, false, doc)
+                    f.is_kernel = true
+                    toplevelitem_Function(f)
+                else:
+                    self.error("expected 'fn' after 'kernel'")
+                    self.synchronize()
+                    TopLevelItem.Error(ParseError(
+                        message: "expected 'fn' after 'kernel'",
+                        span: self.current.span,
+                        severity: ErrorSeverity.Error
+                    ))
+            case _:
+                self.error("expected top-level declaration")
+                self.synchronize()
+                TopLevelItem.Error(ParseError(
+                    message: "unexpected token at top level",
+                    span: self.current.span,
+                    severity: ErrorSeverity.Error
+                ))
+
+
+# ============================================================================
+# Import / Export Parsing
+# ============================================================================
+
+fn treesitter_parse_import(self: TreeSitter) -> ImportOutline:
+        """Parse import declaration."""
+        val start = self.current.span
+        self.advance()  # Consume 'import'
+
+        # Check for 'use lazy' / 'import lazy' modifier
+        var is_lazy = false
+        if self.check(TokenKind.Ident):
+            if self.current.text == "lazy":
+                is_lazy = true
+                self.advance()
+
+        val module = self.parse_module_path()
+        var items: [text] = []
+        var alias: text = nil
+
+        # import foo.bar.baz
+        # import foo.bar.{a, b, c}
+        # import foo.bar as fb
+
+        if self.match_token(TokenKind.Dot):
+            if self.match_token(TokenKind.LBrace):
+                items = self.parse_import_items()
+                self.expect(TokenKind.RBrace, "expected '}' after import items")
+            elif self.match_token(TokenKind.Star):
+                val star: text = "*"
+                items = [star]
+            else:
+                # Continue module path
+                val id: text = self.parse_identifier()
+                items = [id]
+
+        if self.match_token(TokenKind.KwAs):
+            alias = self.parse_identifier()
+
+        self.skip_newlines()
+
+        ImportOutline(
+            module: module,
+            items: items,
+            is_lazy: is_lazy,
+            alias: alias,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_export(self: TreeSitter) -> ExportOutline:
+        """Parse export declaration."""
+        val start = self.current.span
+        self.advance()  # Consume 'export'
+
+        var items: [text] = []
+
+        items = items_push(items, self.parse_identifier())
+        while self.match_token(TokenKind.Comma):
+            items = items_push(items, self.parse_identifier())
+
+        self.skip_newlines()
+
+        ExportOutline(
+            items: items,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_module_path(self: TreeSitter) -> text:
+        """Parse a.b.c module path."""
+        var path = self.parse_identifier()
+
+        while self.match_token(TokenKind.Dot):
+            if self.check(TokenKind.LBrace) or self.check(TokenKind.Star):
+                break
+            path = path + "." + self.parse_identifier()
+
+        path
+
+
+fn treesitter_parse_identifier(self: TreeSitter) -> text:
+        """Parse an identifier."""
+        if self.check(TokenKind.Ident):
+            val name = self.current.text
+            self.advance()
+            name
+        else:
+            self.error("expected identifier")
+            "<error>"
+
+
+# ============================================================================
+# Block Outline Parsing
+# ============================================================================
+
+fn treesitter_parse_block_outline(self: TreeSitter) -> BlockOutline:
+        """Capture block outline without parsing payload.
+
+        Called when a BlockStart token is encountered.
+        Captures the raw payload text for later resolution.
+        """
+        val start = self.current.span
+        val kind = self.current.text
+        self.advance()  # Consume BlockStart
+
+        # Expect opening brace
+        if not self.match_token(TokenKind.LBrace):
+            self.error("expected '{' after block keyword '{kind}'")
+            return BlockOutline(
+                kind: kind,
+                payload: "",
+                payload_span: start,
+                span: start,
+                parent_context: self.current_context,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+
+        # Record payload start
+        val payload_start = self.current.span.start
+        val payload_line = self.current.span.line
+        val payload_col = self.current.span.col
+
+        # Check for BlockPayload token (raw mode blocks)
+        if self.check(TokenKind.BlockPayload):
+            val payload = self.current.text
+            val payload_span = self.current.span
+            self.advance()  # Consume BlockPayload
+
+            # Expect BlockEnd or RBrace
+            if self.check(TokenKind.BlockEnd):
+                self.advance()
+            elif self.check(TokenKind.RBrace):
+                self.advance()
+            else:
+                self.error("expected '}' after block payload")
+
+            return BlockOutline(
+                kind: kind,
+                payload: payload,
+                payload_span: payload_span,
+                span: merge_spans(start, self.previous.span),
+                parent_context: self.current_context,
+                pre_lex_info: nil,
+                outline_info: nil
+            )
+
+        # For normal blocks, capture content by skipping
+        val payload = self.skip_block_content()
+        val payload_end = self.previous.span.end
+        val payload_span = span_new(payload_start, payload_end, payload_line, payload_col)
+
+        # Expect closing brace
+        if self.check(TokenKind.BlockEnd):
+            self.advance()
+        elif self.check(TokenKind.RBrace):
+            self.advance()
+        else:
+            self.error("expected '}' after block content")
+
+        BlockOutline(
+            kind: kind,
+            payload: payload,
+            payload_span: payload_span,
+            span: merge_spans(start, self.previous.span),
+            parent_context: self.current_context,
+            pre_lex_info: nil,
+            outline_info: nil
+        )
+
+
+fn treesitter_skip_block_content(self: TreeSitter) -> text:
+        """Skip block content and return the raw payload text.
+
+        Tracks brace depth to handle nested blocks/braces.
+        Returns the captured text.
+        """
+        val start_pos = self.current.span.start
+        var brace_depth = 1
+
+        while brace_depth > 0 and not self.is_at_end():
+            match self.peek():
+                case LBrace:
+                    brace_depth = brace_depth + 1
+                    self.advance()
+                case RBrace:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        self.advance()
+                    # Don't consume final }
+                case BlockEnd:
+                    brace_depth = brace_depth - 1
+                    if brace_depth > 0:
+                        self.advance()
+                    # Don't consume final BlockEnd
+                case BlockStart:
+                    # Nested block - capture it
+                    var nested = self.parse_block_outline()
+                    nested = self.apply_outline_policy(nested)
+                    self.inline_blocks = self.inline_blocks_push(inline_blocks, nested)
+                case _:
+                    self.advance()
+
+        val end_pos = self.previous.span.end
+        # Return the raw source text for the payload
+        self.lexer.source[start_pos:end_pos]
+
+
+fn treesitter_apply_outline_policy(self: TreeSitter, block: BlockOutline) -> BlockOutline:
+        """Apply skip_policy and treesitter_outline based on fast_mode.
+
+        In fast mode:
+        - Skippable blocks get opaque outline (no analysis)
+        - OutlineRequired blocks get treesitter_outline called
+        - AlwaysFull blocks get treesitter_outline called
+
+        In normal mode:
+        - All blocks get treesitter_outline called (if handler exists)
+        """
+        if not self.has_registry:
+            return block
+
+        val reg = self.registry_value
+        val handler = reg_lookup(reg, block.kind)
+        if not has_handler:
+            return block
+
+        val h = handler_value
+        val policy = h_skip_policy(h)
+        val pre_lex = match block.pre_lex_info:
+            case info: info
+            case nil: prelexinfo_empty()
+
+        if self.fast_mode:
+            match policy:
+                case BlockSkipPolicy.Skippable:
+                    # Store opaque outline, don't analyze
+                    var b = block
+                    b.outline_info = blockoutlineinfo_opaque(block.kind)
+                    return b
+                case BlockSkipPolicy.OutlineRequired:
+                    var b = block
+                    b.outline_info = h_treesitter_outline(h, block.payload, pre_lex)
+                    return b
+                case BlockSkipPolicy.AlwaysFull:
+                    var b = block
+                    b.outline_info = h_treesitter_outline(h, block.payload, pre_lex)
+                    return b
+        else:
+            # Normal mode: always call treesitter_outline
+            var b = block
+            b.outline_info = h_treesitter_outline(h, block.payload, pre_lex)
+            return b
+
+        block
+
+
+# ============================================================================
+# Helper Types
+# ============================================================================
+
+"""Friend declaration outline."""
+struct FriendDeclOutline:
+    package_name: text
+    span: Span
+
+"""Internal export declaration outline."""
+struct InternalExportOutline:
+    items: [text]
+    span: Span
+
+"""Parsed top-level item."""
+enum TopLevelItem:
+    Import(ImportOutline)
+    Export(ExportOutline)
+    Function(FunctionOutline)
+    Class(ClassOutline)
+    ActorItem(ActorOutline)
+    Struct(StructOutline)
+    Enum(EnumOutline)
+    Bitfield(BitfieldOutline)
+    Trait(TraitOutline)
+    Impl(ImplOutline)
+    TypeAlias(TypeAliasOutline)
+    Const(ConstOutline)
+    StaticAssert(StaticAssertOutline)
+    FriendDecl(FriendDeclOutline)
+    InternalExportDecl(InternalExportOutline)
+    Error(ParseError)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TreeSitter, TopLevelItem, FriendDeclOutline, InternalExportOutline

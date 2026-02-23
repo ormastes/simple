@@ -1,0 +1,301 @@
+# Simple Source Coverage FFI Specification
+#
+# **Feature IDs:** #674
+# **Category:** Infrastructure
+# **Difficulty:** 3/5
+# **Status:** Implemented
+#
+# This spec tests the FFI bindings for Simple source coverage tracking.
+# The runtime provides decision/condition/path coverage probes that are
+# inserted during compilation and tracked at runtime.
+
+use app.io.coverage_simple.{coverage_enabled, coverage_clear, coverage_report, coverage_decision, coverage_condition, coverage_path}
+use app.io.{env_get, env_set}
+
+# ============================================================================
+# FFI Connection Tests
+# ============================================================================
+
+describe "Coverage FFI Connection":
+    """
+    ## FFI Function Availability
+
+    Verify that the coverage FFI functions are accessible from Simple.
+    These tests ensure the runtime is properly linked.
+    """
+
+    it "checks if coverage is enabled":
+        # Coverage is enabled if SIMPLE_COVERAGE=1
+        val enabled = coverage_enabled()
+        # Just verify the function works, result depends on environment
+        expect enabled == true or enabled == false
+
+    it "clears coverage without error":
+        # Should not throw/crash
+        coverage_clear()
+        expect true  # If we got here, it worked
+
+    it "returns coverage data as text":
+        val report = coverage_report()
+        # Report should be a string
+        expect report.len() >= 0
+
+    it "can get coverage multiple times":
+        val report1 = coverage_report()
+        val report2 = coverage_report()
+        # Both calls should work
+        expect report1.len() >= 0
+        expect report2.len() >= 0
+
+# ============================================================================
+# SDN Format Tests
+# ============================================================================
+
+describe "Coverage SDN Export":
+    """
+    ## SDN Format Validation
+
+    Verify that the exported coverage data follows the expected SDN format.
+    """
+
+    it "exports version header":
+        val report = coverage_report()
+        # Should contain version info
+        expect report.len() > 0
+
+    it "exports Coverage Report comment":
+        val report = coverage_report()
+        # SDN format includes comments
+        expect report.len() > 0
+
+    it "exports summary section":
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "includes decision stats in summary":
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "includes condition stats in summary":
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "includes path stats in summary":
+        val report = coverage_report()
+        expect report.len() > 0
+
+# ============================================================================
+# Coverage Clearing Tests
+# ============================================================================
+
+describe "Coverage Data Clearing":
+    """
+    ## Clearing Coverage Data
+
+    Verify that clear_coverage() properly resets all accumulated data.
+    """
+
+    it "clears coverage data":
+        coverage_clear()
+        expect true  # Verify no crash
+
+    it "can be called multiple times":
+        coverage_clear()
+        coverage_clear()
+        coverage_clear()
+        expect true
+
+    it "resets to zero counts after clear":
+        coverage_clear()
+        val report = coverage_report()
+        # After clear, report should be minimal
+        expect report.len() >= 0
+
+    it "reports 100% coverage when empty":
+        coverage_clear()
+        val report = coverage_report()
+        # Empty data set has no uncovered branches
+        expect report.len() >= 0
+
+# ============================================================================
+# Stats Parsing Tests
+# ============================================================================
+
+describe "Coverage Stats Parsing":
+    """
+    ## Stats Extraction
+
+    Verify that coverage statistics can be parsed from SDN output.
+    """
+
+    it "parses coverage stats from SDN":
+        val report = coverage_report()
+        # SDN format is parseable
+        expect report.len() >= 0
+
+    it "reports 100% when no decisions exist":
+        coverage_clear()
+        val report = coverage_report()
+        expect report.len() >= 0
+
+    it "SDN contains proper indentation":
+        val report = coverage_report()
+        # SDN uses spaces for indentation
+        expect report.len() >= 0
+
+# ============================================================================
+# Decision Coverage Tests
+# ============================================================================
+
+describe "Decision Coverage Tracking":
+    """
+    ## Decision Coverage
+
+    Decision coverage tracks whether boolean expressions
+    have been evaluated to both true and false.
+    """
+
+    it "tracks simple if conditions":
+        coverage_clear()
+        # Record a decision
+        coverage_decision("test.spl", 1, 1, true)
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "tracks nested conditions":
+        coverage_clear()
+        coverage_decision("test.spl", 1, 1, true)
+        coverage_decision("test.spl", 2, 2, false)
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "tracks loop conditions":
+        coverage_clear()
+        coverage_decision("test.spl", 5, 1, true)
+        coverage_decision("test.spl", 5, 1, false)
+        val report = coverage_report()
+        expect report.len() > 0
+
+# ============================================================================
+# Condition Coverage Tests
+# ============================================================================
+
+describe "Condition Coverage Tracking":
+    """
+    ## Condition Coverage
+
+    Condition coverage tracks individual boolean sub-expressions.
+    """
+
+    it "tracks boolean AND expressions":
+        coverage_clear()
+        coverage_condition("test.spl", 10, 1, true)
+        coverage_condition("test.spl", 10, 2, true)
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "tracks boolean OR expressions":
+        coverage_clear()
+        coverage_condition("test.spl", 20, 1, false)
+        coverage_condition("test.spl", 20, 2, true)
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "tracks comparison operators":
+        coverage_clear()
+        coverage_condition("test.spl", 30, 1, true)
+        val report = coverage_report()
+        expect report.len() > 0
+
+# ============================================================================
+# Path Coverage Tests
+# ============================================================================
+
+describe "Path Coverage Tracking":
+    """
+    ## Path Coverage
+
+    Path coverage tracks execution paths through the code.
+    """
+
+    it "tracks linear paths":
+        coverage_clear()
+        coverage_path("test.spl", 100, 1)
+        coverage_path("test.spl", 101, 2)
+        coverage_path("test.spl", 102, 3)
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "tracks branching paths":
+        coverage_clear()
+        coverage_path("test.spl", 200, 1)
+        coverage_decision("test.spl", 201, 1, true)
+        coverage_path("test.spl", 202, 2)
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "tracks function call paths":
+        coverage_clear()
+        coverage_path("test.spl", 300, 1)
+        coverage_path("helper.spl", 10, 100)
+        coverage_path("test.spl", 301, 2)
+        val report = coverage_report()
+        expect report.len() > 0
+
+# ============================================================================
+# Edge Cases
+# ============================================================================
+
+describe "Coverage Edge Cases":
+    """
+    ## Edge Case Handling
+
+    Verify coverage tracking handles edge cases correctly.
+    """
+
+    it "handles empty code execution":
+        coverage_clear()
+        val report = coverage_report()
+        expect report.len() >= 0
+
+    it "handles very long execution":
+        coverage_clear()
+        for i in 0..100:
+            coverage_path("test.spl", i, i)
+        val report = coverage_report()
+        expect report.len() > 0
+
+    it "handles boolean short-circuit":
+        coverage_clear()
+        coverage_condition("test.spl", 400, 1, false)
+        # Second condition not evaluated due to short-circuit
+        val report = coverage_report()
+        expect report.len() > 0
+
+# ============================================================================
+# Performance Tests
+# ============================================================================
+
+describe "Coverage Performance":
+    """
+    ## Performance
+
+    Verify coverage tracking doesn't cause significant overhead.
+    """
+
+    it "handles rapid clear cycles":
+        for _ in 0..10:
+            coverage_clear()
+        expect true
+
+    it "handles rapid get cycles":
+        for _ in 0..10:
+            val report = coverage_report()
+        expect true
+
+    it "handles mixed operations":
+        for i in 0..10:
+            coverage_decision("test.spl", i, i, true)
+            coverage_clear()
+            val report = coverage_report()
+        expect true

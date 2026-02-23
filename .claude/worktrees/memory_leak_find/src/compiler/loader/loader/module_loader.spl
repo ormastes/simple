@@ -1,0 +1,463 @@
+# Module Loader - Runtime SMF loading with type inference.
+#
+# This module provides runtime module loading capabilities:
+# - Load SMF files at runtime
+# - JIT instantiation of generics via ObjTaker
+# - Module caching and hot-reload support
+# - Symbol resolution with type inference
+#
+# Uses compiler FFI (compiler_ffi module) for:
+# - Type inference (compiler_ctx.infer_types)
+# - Template instantiation (compiler_ctx.instantiate)
+# Benefits: No circular dependency, clean separation
+
+use compiler.loader.loader.compiler_ffi.*use compiler.backend.linker.obj_taker.*use compiler.backend.linker.smf_reader.*use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
+use compiler.loader.loader.object_mapper.{LoaderMapper, LoaderMapperConfig}use compiler.loader.loader.jit_instantiator.*use compiler.loader.loader.resource_lifecycle.{    ResourceLifecycleManager, LifecycleConfig,
+    lifecycle_new, lifecycle_with_defaults,
+    lifecycle_on_module_load, lifecycle_on_symbol_mapped,
+    lifecycle_on_jit_triggered, lifecycle_on_metadata_loaded,
+    lifecycle_unload_module, lifecycle_mark_used, lifecycle_destroy
+}
+use compiler.loader.loader.smf_cache_manager.{SmfCacheManager, smfcachemanager_with_new_cache}
+# ============================================================================
+# Loaded Module
+# ============================================================================
+
+struct LoadedModule:
+    """A loaded SMF module."""
+    path: text
+    reader: SmfReaderImpl
+    symbols: Dict<text, LoadedSymbol>
+    load_time: i64
+    version: i32
+
+struct LoadedSymbol:
+    """A symbol loaded into memory."""
+    name: text
+    address: i64
+    size: i64
+    ty: SymbolType
+    is_jit: bool
+    # Offset within the SMF (for possible reload/relocs)
+    file_offset: i64
+
+
+# ============================================================================
+# LoadedModule Methods (was: impl LoadedModule:)
+# ============================================================================
+
+# ============================================================================
+# Load Result
+# ============================================================================
+
+enum LoadResult:
+    Success(module: LoadedModule)
+    AlreadyLoaded(module: LoadedModule)
+    Error(message: text)
+
+enum SymbolResult:
+    Found(symbol: LoadedSymbol, code: [u8])
+    JitCompiled(symbol: LoadedSymbol, code: [u8])
+    NotFound(name: text)
+    Error(message: text)
+
+# ============================================================================
+# Module Loader Configuration
+# ============================================================================
+
+struct ModuleLoaderConfig:
+    """Configuration for module loading."""
+    enable_jit: bool
+    enable_cache: bool
+    max_cache_size: i32
+    verbose: bool
+    hot_reload: bool
+
+
+# ============================================================================
+# ModuleLoaderConfig Methods (was: impl ModuleLoaderConfig:)
+# ============================================================================
+
+fn moduleloaderconfig_default() -> ModuleLoaderConfig:
+        ModuleLoaderConfig(
+            enable_jit: true,
+            enable_cache: true,
+            max_cache_size: 100,
+            verbose: false,
+            hot_reload: false
+        )
+
+
+# ============================================================================
+# Module Loader
+# ============================================================================
+
+struct ModuleLoader:
+    """Runtime module loader with JIT instantiation support."""
+    # Shared compiler context (FFI handle)
+    compiler_ctx: CompilerContext
+    # ObjTaker for extraction and instantiation
+    obj_taker: ObjTaker
+    # Shared object provider (finder + instantiator)
+    provider: ObjectProvider
+    # JIT instantiator
+    jit: JitInstantiator
+    # Loader policy wrapper over shared exec mapper
+    loader_mapper: LoaderMapper
+    # Loaded modules cache: path -> module
+    modules: Dict<text, LoadedModule>
+    # Global symbol table: name -> (module_path, symbol)
+    global_symbols: Dict<text, (text, LoadedSymbol)>
+    # Resource lifecycle manager — tracks per-module ownership for deallocation
+    lifecycle: ResourceLifecycleManager
+    # Configuration
+    config: ModuleLoaderConfig
+
+
+# ============================================================================
+# ModuleLoader Methods (was: impl ModuleLoader:)
+# ============================================================================
+
+fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
+        """Create a new module loader."""
+        val compiler_ctx = CompilerContext__create()  # FFI handle
+        val obj_taker_config = ObjTakerConfig(
+            enable_caching: config.enable_cache,
+            max_cache_size: config.max_cache_size,
+            verbose: config.verbose,
+            allow_deferred: true
+        )
+        val provider = ObjectProvider__new(ObjectProviderConfig(
+            search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
+            libraries: [],
+            enable_cache: config.enable_cache,
+            verbose: config.verbose
+        ))
+        val jit_config = JitInstantiatorConfig(
+            update_smf: false,
+            max_depth: 50,
+            enabled: config.enable_jit,
+            verbose: config.verbose
+        )
+
+        val smf_cache_mgr = smfcachemanager_with_new_cache()
+        val lifecycle_config = LifecycleConfig(verbose: config.verbose)
+
+        ModuleLoader(
+            compiler_ctx: compiler_ctx,
+            obj_taker: ObjTaker__with_compiler_context(compiler_ctx, obj_taker_config),
+            provider: provider,
+            jit: JitInstantiator__new(jit_config),
+            loader_mapper: LoaderMapper__new(LoaderMapperConfig(
+                allow_replace_on_reload: config.hot_reload
+            )),
+            modules: {},
+            global_symbols: {},
+            lifecycle: lifecycle_new(lifecycle_config, smf_cache_mgr),
+            config: config
+        )
+
+
+fn moduleloader_with_defaults() -> ModuleLoader:
+        """Create loader with default configuration."""
+        moduleloader_new(moduleloaderconfig_default())
+
+
+fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
+        """Load an SMF module.
+
+        If already loaded and hot_reload is disabled, returns existing module.
+        If hot_reload is enabled, reloads the module.
+        """
+        # Check if already loaded
+        if self.modules.contains_key(path):
+            if not self.config.hot_reload:
+                return loadresult_AlreadyLoaded(module: self.modules[path])
+            else:
+                # Unload for reload
+                moduleloader_unload(self, path)
+
+        if self.config.verbose:
+            print "[loader] Loading: {path}"
+
+        # Register with lifecycle manager for resource tracking.
+        lifecycle_on_module_load(self.lifecycle, path, self.jit.exec_mapper.generation, current_time())
+
+        # Prefer shared object provider so we work for .smf and .lsm inputs.
+        var reader_result = self.provider.get_reader(path)
+        if reader_result_is_err(reader_result):
+            # Fallback to direct file reader (legacy path)
+            reader_result = SmfReaderImpl__open(path)
+            if reader_result_is_err(reader_result):
+                return loadresult_Error(message: reader_result.unwrap_err())
+
+        val reader = reader_result_value
+
+        # Build loaded module
+        var symbols: Dict<text, LoadedSymbol> = {}
+        for smf_sym in reader.exported_symbols():
+            # Read code bytes for symbol
+            val code_result = reader.read_code(smf_sym)
+            if code_result_is_err(code_result):
+                return loadresult_Error(message: code_result.unwrap_err())
+
+            val code = code_result_value
+            # Allocate executable memory and write code
+            val exec_addr = moduleloader_allocate_exec_module(self, path, smf_sym.name, code, false)
+            if exec_addr == 0:
+                return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+
+            val loaded_sym = LoadedSymbol(
+                name: smf_sym.name,
+                address: exec_addr,
+                size: smf_sym.size,
+                ty: smf_sym.ty,
+                is_jit: false,
+                file_offset: smf_sym.offset
+            )
+            symbols[smf_sym.name] = loaded_sym
+            self.global_symbols[smf_sym.name] = (path, loaded_sym)
+            # Track symbol in lifecycle manager.
+            lifecycle_on_symbol_mapped(self.lifecycle, path, smf_sym.name)
+
+        val module = LoadedModule(
+            path: path,
+            reader: reader,
+            symbols: symbols,
+            load_time: current_time(),
+            version: 1
+        )
+
+        self.modules[path] = module
+
+        if self.config.verbose:
+            print "[loader] Loaded {symbols.len()} symbols from {path}"
+
+        loadresult_Success(module: module)
+
+
+fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
+        """Reload a module (hot reload)."""
+        moduleloader_unload(self, path)
+        moduleloader_load(self, path)
+
+
+fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
+        """Resolve a symbol, JIT-compiling if necessary."""
+        # Mark symbol as used for generation sweep (LRU tracking).
+        lifecycle_mark_used(self.lifecycle, name)
+
+        # Check global symbol table
+        if self.global_symbols.contains_key(name):
+            val _destruct_0 = self.global_symbols[name]
+            val symbol = _destruct_0[1]
+
+            # Return already-installed executable symbol
+            return symbolresult_Found(symbol: symbol, code: [])
+
+        # Try JIT instantiation
+        if self.config.enable_jit:
+            val jit_result = self.jit.try_jit_instantiate(name)
+            match jit_result:
+                case Success(code, sym_name, address):
+                    var owner_id = "__jit__"
+                    val mapped_rec = self.jit.exec_mapper.get_record(sym_name)
+                    if mapped_rec.?:
+                        owner_id = mapped_rec.unwrap().owner_id
+
+                    val exec_addr = if address.?:
+                        address.unwrap()
+                    else:
+                        moduleloader_allocate_exec_jit(self, owner_id, sym_name, code)
+                    if exec_addr == 0:
+                        return symbolresult_Error(message: "Failed to allocate executable memory for {sym_name}")
+                    val loaded_sym = LoadedSymbol(
+                        name: sym_name,
+                        address: exec_addr,
+                        val _as_0 = code_len(code) as i64
+                        size: _as_0,
+                        ty: SymbolType.Function,
+                        is_jit: true,
+                        file_offset: 0
+                    )
+                    self.global_symbols[sym_name] = (owner_id, loaded_sym)
+                    # Track JIT symbol origin for lifecycle-aware unload.
+                    lifecycle_on_jit_triggered(self.lifecycle, owner_id, sym_name)
+                    return symbolresult_JitCompiled(symbol: loaded_sym, code: code)
+
+                case NotFound(n):
+                    return symbolresult_NotFound(name: n)
+
+                case CompilationError(msg):
+                    return symbolresult_Error(message: msg)
+
+                case _:
+
+        symbolresult_NotFound(name: name)
+
+
+fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
+        """Resolve a generic symbol with explicit type arguments."""
+        val mangled = mangle_name(name, type_args)
+
+        # Check if already instantiated
+        if self.global_symbols.contains_key(mangled):
+            return moduleloader_resolve_symbol(self, mangled)
+
+        # Find template in loaded modules
+        for _item_1 in self.modules:
+            val path = _item_1[0]
+            val module = _item_1[1]
+            for _item_2 in module.symbols:
+                val sym_name = _item_2[0]
+                val symbol = _item_2[1]
+                if sym_name == name:
+                    # Found template - instantiate with ObjTaker
+                    val result = self.obj_taker.take_with_types(
+                        module.reader,
+                        name,
+                        type_args
+                    )
+                    match result:
+                        case Code(bytes, sym, _):
+                            val exec_addr = moduleloader_allocate_exec_module(self, path, mangled, bytes, false)
+                            if exec_addr == 0:
+                                return symbolresult_Error(message: "Failed to allocate executable memory for {mangled}")
+                            val loaded_sym = LoadedSymbol(
+                                name: mangled,
+                                address: exec_addr,
+                                val _as_1 = bytes_len(bytes) as i64
+                                size: _as_1,
+                                ty: sym.ty,
+                                is_jit: true,
+                                file_offset: 0
+                            )
+                            self.global_symbols[mangled] = (path, loaded_sym)
+                            # Track generic instantiation for lifecycle-aware unload.
+                            lifecycle_on_symbol_mapped(self.lifecycle, path, mangled)
+                            lifecycle_on_jit_triggered(self.lifecycle, path, mangled)
+                            return symbolresult_JitCompiled(symbol: loaded_sym, code: bytes)
+
+                        case Error(msg):
+                            return symbolresult_Error(message: msg)
+
+                        case _:
+
+        symbolresult_NotFound(name: mangled)
+
+
+struct LoaderStats:
+    """Loader statistics."""
+    module_count: i32
+    symbol_count: i32
+    jit_stats: JitStats
+    cache_stats: CacheStats
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
+    """Mangle a generic name with type arguments."""
+    if type_args_is_empty(type_args):
+        return base
+
+    val args_str = type_args.map(\t: type_to_string(t)).join("_")
+    "{base}${args_str}"
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn current_time() -> i64:
+    """Get current timestamp in microseconds."""
+    rt_time_now_unix_micros()
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn moduleloader_unload(self: ModuleLoader, path: text):
+    """Unload module and free all associated resources.
+
+    Delegates exec page and SMF cache cleanup to ResourceLifecycleManager,
+    then cleans up higher-level bookkeeping:
+    1. Exec pages (JIT + loader-mapped) — via lifecycle
+    2. SMF cache ref counts — via lifecycle
+    3. Global symbol table entries owned by this module
+    4. JIT bookkeeping (jit_cache, symbol_table)
+    5. JIT symbols mapped under '__jit__' that originated from this module
+    6. Template metadata (loaded_metadata) for this module path
+    7. Module cache entry
+    """
+    if not self.modules.contains_key(path):
+        return
+
+    # 1. Delegate exec page and SMF cache cleanup to lifecycle manager.
+    #    Frees JIT-triggered symbols, loader-mapped pages, SMF ref counts.
+    lifecycle_unload_module(self.lifecycle, self.jit.exec_mapper, path)
+
+    # 2. Collect symbols owned by this module in the global table.
+    var owned_symbols: [text] = []
+    for _item in self.global_symbols:
+        val sym_name = _item[0]
+        val _destruct_3 = _item[1]
+        val owner = _destruct_3[0]
+        if owner == path:
+            owned_symbols = owned_symbols.push(sym_name)
+
+    # 3. Collect JIT symbols triggered by this module but mapped under "__jit__".
+    var jit_symbols_to_free: [text] = []
+    if self.jit.loaded_metadata.contains_key(path):
+        val metadata = self.jit.loaded_metadata[path]
+        for inst in metadata.instantiations:
+            val mangled = inst.mangled_name
+            if self.jit.jit_cache.contains_key(mangled):
+                jit_symbols_to_free = jit_symbols_to_free.push(mangled)
+
+    # 4. Remove global table entries and JIT bookkeeping for owned symbols.
+    #    Exec pages already freed by lifecycle — drop_cached_symbol's unmap is idempotent.
+    for sym_name in owned_symbols:
+        self.global_symbols = self.global_symbols.remove(sym_name)
+        self.jit.drop_cached_symbol(sym_name)
+
+    # 5. Free JIT symbols triggered by this module but owned by "__jit__".
+    for jit_sym in jit_symbols_to_free:
+        self.global_symbols = self.global_symbols.remove(jit_sym)
+        self.jit.drop_cached_symbol(jit_sym)
+
+    # 6. Clear template metadata for this module.
+    if self.jit.loaded_metadata.contains_key(path):
+        self.jit.loaded_metadata = self.jit.loaded_metadata.remove(path)
+
+    # 7. Remove module from cache.
+    self.modules = self.modules.remove(path)
+
+fn moduleloader_allocate_exec_module(self: ModuleLoader, owner_id: text, symbol: text, code: [u8], allow_replace: bool) -> i64:
+    """Allocate executable memory and copy code."""
+    val mapped = self.loader_mapper.map(self.jit.exec_mapper, owner_id, symbol, code, allow_replace)
+    if mapped.is_err():
+        if self.config.verbose:
+            print "[loader] map_symbol failed for {symbol}: {mapped.unwrap_err()}"
+        return 0
+    mapped.unwrap()
+
+fn moduleloader_allocate_exec_jit(self: ModuleLoader, owner_id: text, symbol: text, code: [u8]) -> i64:
+    """Allocate executable memory for JIT fallback path via JIT mapper policy."""
+    val mapped = self.jit.jit_mapper.map(self.jit.exec_mapper, owner_id, symbol, code)
+    if mapped.is_err():
+        if self.config.verbose:
+            print "[loader] jit map failed for {symbol}: {mapped.unwrap_err()}"
+        return 0
+    mapped.unwrap()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ModuleLoader
+export ModuleLoaderConfig
+export LoadedModule
+export LoadedSymbol
+export LoadResult
+export SymbolResult
+export LoaderStats
+export mangle_name

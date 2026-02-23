@@ -1,0 +1,287 @@
+# SemVer Parser and Constraint Matching
+# Implements Semantic Versioning 2.0.0 specification
+#
+# FIXED: Replaced Result<T, E> generic types with simple tuples (bool, value, error)
+# to avoid interpreter hang issues with generics.
+
+use package.types
+
+# ============================================================================
+# Version Parsing
+# ============================================================================
+
+# Return type: (success: bool, version: Version?, error: text)
+fn parse_version(s: text) -> (bool, Version?, text):
+    """Parse a semantic version string.
+
+    Examples:
+        1.2.3
+        1.2.3-alpha.1
+        1.2.3+build.123
+        1.2.3-beta.2+exp.sha.5114f85
+
+    Returns: (true, Version(...), "") on success
+             (false, nil, "error message") on failure
+    """
+    # Split by + to separate build metadata
+    val parts = s.split("+")
+    val version_part = parts[0]
+    var build = nil
+    if parts.length > 1:
+        build = Some(parts[1])
+
+    # Split by - to separate prerelease
+    val pre_parts = version_part.split("-")
+    val core_version = pre_parts[0]
+    var prerelease = nil
+    if pre_parts.length > 1:
+        prerelease = Some(pre_parts[1])
+
+    # Parse core version (MAJOR.MINOR.PATCH)
+    val components = core_version.split(".")
+    if components.length != 3:
+        return (false, nil, "Version must have exactly 3 components (MAJOR.MINOR.PATCH)")
+
+    # Parse each component as integer
+    val (major_ok, major_val, major_err) = parse_int_component(components[0])
+    if not major_ok:
+        return (false, nil, major_err)
+
+    val (minor_ok, minor_val, minor_err) = parse_int_component(components[1])
+    if not minor_ok:
+        return (false, nil, minor_err)
+
+    val (patch_ok, patch_val, patch_err) = parse_int_component(components[2])
+    if not patch_ok:
+        return (false, nil, patch_err)
+
+    val version = Version(
+        major: major_val,
+        minor: minor_val,
+        patch: patch_val,
+        prerelease: prerelease,
+        build: build
+    )
+
+    (true, Some(version), "")
+
+# Return type: (success: bool, value: i64, error: text)
+fn parse_int_component(s: text) -> (bool, i64, text):
+    """Parse a version component as non-negative integer.
+
+    Returns: (true, number, "") on success
+             (false, 0, "error message") on failure
+    """
+    if s.is_empty():
+        return (false, 0, "Version component cannot be empty")
+
+    # Check for negative or non-numeric
+    if s.starts_with("-"):
+        return (false, 0, "Version component cannot be negative")
+
+    # Try to parse as integer
+    val num = s.to_int()
+    if num < 0:
+        return (false, 0, "Version component must be non-negative")
+
+    (true, num, "")
+
+# ============================================================================
+# Version Comparison
+# ============================================================================
+
+fn version_equal(a: Version, b: Version) -> bool:
+    """Check if two versions are equal (ignoring build metadata)"""
+    a.major == b.major and
+    a.minor == b.minor and
+    a.patch == b.patch and
+    a.prerelease == b.prerelease
+
+fn version_greater(a: Version, b: Version) -> bool:
+    """Check if version a > version b"""
+    # Compare major version
+    if a.major != b.major:
+        return a.major > b.major
+
+    # Compare minor version
+    if a.minor != b.minor:
+        return a.minor > b.minor
+
+    # Compare patch version
+    if a.patch != b.patch:
+        return a.patch > b.patch
+
+    # If core versions are equal, compare prerelease
+    # Prerelease versions have lower precedence than normal versions
+    match a.prerelease:
+        Some(a_pre):
+            match b.prerelease:
+                Some(b_pre):
+                    # Both have prerelease, compare lexically
+                    return a_pre > b_pre
+                nil:
+                    # a has prerelease, b doesn't: a < b
+                    return false
+        nil:
+            match b.prerelease:
+                Some(_):
+                    # a doesn't have prerelease, b does: a > b
+                    return true
+                nil:
+                    # Neither has prerelease, versions are equal
+                    return false
+
+fn version_less(a: Version, b: Version) -> bool:
+    """Check if version a < version b"""
+    not version_equal(a, b) and not version_greater(a, b)
+
+fn version_greater_equal(a: Version, b: Version) -> bool:
+    """Check if version a >= version b"""
+    version_greater(a, b) or version_equal(a, b)
+
+fn version_less_equal(a: Version, b: Version) -> bool:
+    """Check if version a <= version b"""
+    version_less(a, b) or version_equal(a, b)
+
+# ============================================================================
+# Constraint Matching
+# ============================================================================
+
+# Return type: (success: bool, constraint: VersionConstraint?, error: text)
+fn parse_constraint(s: text) -> (bool, VersionConstraint?, text):
+    """Parse a version constraint string.
+
+    Supported formats:
+        ^1.2.3      Compatible with 1.x.x (>= 1.2.3, < 2.0.0)
+        ~1.2.3      Compatible with 1.2.x (>= 1.2.3, < 1.3.0)
+        >=1.2.3     Greater than or equal
+        >1.2.3      Greater than
+        <=1.2.3     Less than or equal
+        <1.2.3      Less than
+        =1.2.3      Exact match
+        1.2.3       Exact match (no operator)
+        *           Any version
+    """
+    val trimmed = s.trim()
+
+    # Handle wildcard
+    if trimmed == "*":
+        return (true, Some(VersionConstraint.Any), "")
+
+    # Handle caret (^)
+    if trimmed.starts_with("^"):
+        val version_str = trimmed.substring(1).trim()
+        val (ok, version_opt, err) = parse_version(version_str)
+        if not ok:
+            return (false, nil, err)
+        match version_opt:
+            Some(v):
+                return (true, Some(VersionConstraint.Caret(version: v)), "")
+            nil:
+                return (false, nil, "Failed to parse version")
+
+    # Handle tilde (~)
+    if trimmed.starts_with("~"):
+        val version_str = trimmed.substring(1).trim()
+        val (ok, version_opt, err) = parse_version(version_str)
+        if not ok:
+            return (false, nil, err)
+        match version_opt:
+            Some(v):
+                return (true, Some(VersionConstraint.Tilde(version: v)), "")
+            nil:
+                return (false, nil, "Failed to parse version")
+
+    # Handle comparison operators
+    if trimmed.starts_with(">="):
+        val version_str = trimmed.substring(2).trim()
+        val (ok, version_opt, err) = parse_version(version_str)
+        if not ok:
+            return (false, nil, err)
+        match version_opt:
+            Some(v):
+                return (true, Some(VersionConstraint.GreaterEqual(version: v)), "")
+            nil:
+                return (false, nil, "Failed to parse version")
+
+    if trimmed.starts_with(">"):
+        val version_str = trimmed.substring(1).trim()
+        val (ok, version_opt, err) = parse_version(version_str)
+        if not ok:
+            return (false, nil, err)
+        match version_opt:
+            Some(v):
+                return (true, Some(VersionConstraint.Greater(version: v)), "")
+            nil:
+                return (false, nil, "Failed to parse version")
+
+    if trimmed.starts_with("<="):
+        val version_str = trimmed.substring(2).trim()
+        val (ok, version_opt, err) = parse_version(version_str)
+        if not ok:
+            return (false, nil, err)
+        match version_opt:
+            Some(v):
+                return (true, Some(VersionConstraint.LessEqual(version: v)), "")
+            nil:
+                return (false, nil, "Failed to parse version")
+
+    if trimmed.starts_with("<"):
+        val version_str = trimmed.substring(1).trim()
+        val (ok, version_opt, err) = parse_version(version_str)
+        if not ok:
+            return (false, nil, err)
+        match version_opt:
+            Some(v):
+                return (true, Some(VersionConstraint.Less(version: v)), "")
+            nil:
+                return (false, nil, "Failed to parse version")
+
+    if trimmed.starts_with("="):
+        val version_str = trimmed.substring(1).trim()
+        val (ok, version_opt, err) = parse_version(version_str)
+        if not ok:
+            return (false, nil, err)
+        match version_opt:
+            Some(v):
+                return (true, Some(VersionConstraint.Exact(version: v)), "")
+            nil:
+                return (false, nil, "Failed to parse version")
+
+    # No operator - treat as exact match
+    val (ok, version_opt, err) = parse_version(trimmed)
+    if not ok:
+        return (false, nil, err)
+    match version_opt:
+        Some(v):
+            return (true, Some(VersionConstraint.Exact(version: v)), "")
+        nil:
+            return (false, nil, "Failed to parse version")
+
+fn satisfies(version: Version, constraint: VersionConstraint) -> bool:
+    """Check if a version satisfies a constraint"""
+    match constraint:
+        VersionConstraint.Any:
+            true
+        VersionConstraint.Exact(v):
+            version_equal(version, v)
+        VersionConstraint.Greater(v):
+            version_greater(version, v)
+        VersionConstraint.GreaterEqual(v):
+            version_greater_equal(version, v)
+        VersionConstraint.Less(v):
+            version_less(version, v)
+        VersionConstraint.LessEqual(v):
+            version_less_equal(version, v)
+        VersionConstraint.Caret(v):
+            # ^1.2.3 means >= 1.2.3 and < 2.0.0
+            version_greater_equal(version, v) and version.major == v.major
+        VersionConstraint.Tilde(v):
+            # ~1.2.3 means >= 1.2.3 and < 1.3.0
+            version_greater_equal(version, v) and
+            version.major == v.major and
+            version.minor == v.minor
+
+export parse_version, parse_constraint, satisfies,
+       version_equal, version_greater, version_less,
+       version_greater_equal, version_less_equal

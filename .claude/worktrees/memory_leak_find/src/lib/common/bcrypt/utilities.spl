@@ -1,0 +1,212 @@
+# bcrypt Utilities - Validation, Cost Helpers, Debug API
+#
+# Contains hash format validation, cost factor utilities, constant-time
+# comparison, time estimation, encoding helpers, and testing/debug functions.
+#
+# Depends on: types.spl, verify.spl, key_derivation.spl, hash.spl, salt.spl
+
+use std.common.bcrypt.types.*
+use std.common.bcrypt.verify.*
+use std.common.bcrypt.key_derivation.*
+use std.common.bcrypt.hash.*
+use std.common.bcrypt.salt.*
+
+# ============================================================================
+# VALIDATION
+# ============================================================================
+
+# Check if string is valid bcrypt hash format
+fn is_bcrypt_hash(text_val: text) -> bool:
+    # Must start with $2a$, $2b$, or $2y$
+    var starts_valid = false
+    if text_val.length() >= 4:
+        var prefix = text_val[0] + text_val[1] + text_val[2] + text_val[3]
+        if prefix == "$2a$": starts_valid = true
+        if prefix == "$2b$": starts_valid = true
+        if prefix == "$2y$": starts_valid = true
+
+    # Must be correct length (60 chars total)
+    var correct_len = (text_val.length() == 60)
+
+    var is_valid = starts_valid
+    if not correct_len:
+        is_valid = false
+    is_valid
+
+# Parse hash into all components
+fn hash_to_components(hash_str: text) -> list[text]:
+    parse_hash(hash_str)
+
+# Constant-time string comparison (security)
+fn compare_hashes(hash1: text, hash2: text) -> bool:
+    var len1 = hash1.length()
+    var len2 = hash2.length()
+    var max_len = len1
+    if len2 > len1:
+        max_len = len2
+
+    var differences = 0
+    var i = 0
+    while i < max_len:
+        var c1 = ""
+        var c2 = ""
+        if i < len1:
+            c1 = hash1[i]
+        if i < len2:
+            c2 = hash2[i]
+        if c1 != c2:
+            differences = differences + 1
+        i = i + 1
+
+    (differences == 0)
+
+# Estimate hash time for given cost (in milliseconds, approximate)
+fn estimate_hash_time(cost: i64) -> i64:
+    # Rough estimate: cost 10 takes ~100ms, doubles with each increment
+    var base_time = 100  # milliseconds for cost 10
+    var time = base_time
+    var i = 10
+    while i < cost:
+        time = time * 2
+        i = i + 1
+    while i > cost:
+        time = time / 2
+        i = i - 1
+    time
+
+# ============================================================================
+# COST FACTOR UTILITIES
+# ============================================================================
+
+# Check if cost factor is still secure
+fn is_cost_secure(cost: i64) -> bool:
+    cost >= 10
+
+# Get recommended cost factor for current hardware
+fn recommended_cost() -> i64:
+    RECOMMENDED_COST
+
+# Check if cost is within valid range
+fn is_valid_cost(cost: i64) -> bool:
+    var in_range = (cost >= MIN_COST)
+    if cost > MAX_COST:
+        in_range = false
+    in_range
+
+# Get min cost
+fn get_min_cost() -> i64:
+    MIN_COST
+
+# Get max cost
+fn get_max_cost() -> i64:
+    MAX_COST
+
+# Get default cost
+fn get_default_cost() -> i64:
+    DEFAULT_COST
+
+# ============================================================================
+# ENCODING HELPERS
+# ============================================================================
+
+# Get algorithm version from hash
+fn get_version_from_hash(hash_str: text) -> text:
+    var parsed = parse_hash(hash_str)
+    parsed[0]
+
+# Encode cost to two-digit string
+fn encode_cost(cost: i64) -> text:
+    var result = ""
+    if cost < 10:
+        result = "0" + cost.to_text()
+    if cost >= 10:
+        result = cost.to_text()
+    result
+
+# Decode cost from string
+fn decode_cost(cost_str: text) -> i64:
+    # Simple string to int conversion
+    var cost = 10
+    if cost_str == "04": cost = 4
+    if cost_str == "05": cost = 5
+    if cost_str == "06": cost = 6
+    if cost_str == "07": cost = 7
+    if cost_str == "08": cost = 8
+    if cost_str == "09": cost = 9
+    if cost_str == "10": cost = 10
+    if cost_str == "11": cost = 11
+    if cost_str == "12": cost = 12
+    if cost_str == "13": cost = 13
+    if cost_str == "14": cost = 14
+    if cost_str == "15": cost = 15
+    cost
+
+# Get bcrypt base64 alphabet
+fn get_base64_alphabet() -> text:
+    BCRYPT_BASE64_ALPHABET
+
+# ============================================================================
+# TESTING AND DEBUGGING UTILITIES
+# ============================================================================
+
+# Get Blowfish state for debugging
+fn get_blowfish_state() -> list[list[i64]]:
+    blowfish_init_state()
+
+# Test Blowfish encryption
+fn test_blowfish_encrypt(left: i64, right: i64) -> list[i64]:
+    var state = blowfish_init_state()
+    blowfish_encrypt_block(left, right, state)
+
+# Test bcrypt with known test vector
+fn test_bcrypt_known_vector() -> bool:
+    # Test with known password and salt
+    var password = "password"
+    var salt_bytes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    var cost = 4
+    var hash_result = bcrypt_hash_with_salt(password, salt_bytes, cost)
+    var is_valid = is_bcrypt_hash(hash_result)
+    is_valid
+
+# Display hash components for debugging
+fn debug_hash(hash_str: text) -> list[text]:
+    var parsed = parse_hash(hash_str)
+    var version = parsed[0]
+    var cost_str = parsed[1]
+    var salt_encoded = parsed[2]
+    var hash_encoded = parsed[3]
+
+    var cost = get_cost_from_hash(hash_str)
+    var info = [
+        "Version: " + version,
+        "Cost: " + cost.to_text(),
+        "Cost String: " + cost_str,
+        "Salt (encoded): " + salt_encoded,
+        "Hash (encoded): " + hash_encoded
+    ]
+    info
+
+# Convert hex string to bytes (for testing)
+fn hex_to_bytes(hex: text) -> list[i64]:
+    var bytes = []
+    var hex_map = "0123456789abcdef"
+    var i = 0
+    while i < hex.length():
+        if i + 1 < hex.length():
+            var high_char = hex[i]
+            var low_char = hex[i + 1]
+            var high_val = 0
+            var low_val = 0
+
+            var j = 0
+            while j < hex_map.length():
+                if hex_map[j] == high_char:
+                    high_val = j
+                if hex_map[j] == low_char:
+                    low_val = j
+                j = j + 1
+
+            var byte_val = high_val * 16 + low_val
+            bytes = bytes + [byte_val]
+        i = i + 2
+    bytes

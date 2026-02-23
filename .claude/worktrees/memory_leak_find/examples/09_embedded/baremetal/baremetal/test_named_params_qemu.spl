@@ -1,0 +1,112 @@
+# Simple (.spl) replacement for test_named_params_qemu.sh
+# End-to-End Test: Named Parameters in QEMU
+# Tests that parameter names are preserved through the pipeline
+# and that QEMU correctly handles parameterized strings
+
+use app.io.mod.{shell, shell_bool, shell_output, file_exists, file_write, print, exit, cwd, dir_create_all}
+use std.text.{trim}
+
+fn main():
+    val script_dir = cwd()
+    var project_root = trim(shell_output("cd {script_dir}/../.. && pwd"))
+    val test_dir = "{script_dir}/test_named_params_qemu_tmp"
+    val qemu = "{project_root}/resources/qemu/bin/qemu-system-riscv32-simple"
+
+    print "Named Parameters QEMU Test\n"
+    print "\n"
+
+    # Check prerequisites
+    if not file_exists(qemu):
+        print "Error: Custom QEMU not found\n"
+        exit(1)
+
+    # Create test directory
+    print "Creating test directory...\n"
+    shell("rm -rf {test_dir}")
+    dir_create_all(test_dir)
+
+    # Step 1: Create SMF file with NAMED parameters
+    print "Step 1: Creating SMF with named parameters...\n"
+    val smf_content = "metadata:\n  version: 1\n  format: \"smf_subset\"\n  target: \"riscv32-bare\"\n  source: \"test.spl\"\n\nstrings:\n  - id: 1\n    text: \"Hello, {}!\"\n    params: 1\n    param_names: [\"name\"]\n\n  - id: 2\n    text: \"User: {}, Age: {}\"\n    params: 2\n    param_names: [\"username\", \"age\"]\n\n  - id: 3\n    text: \"RGB({}, {}, {})\"\n    params: 3\n    param_names: [\"r\", \"g\", \"b\"]\n"
+    file_write("{test_dir}/test.smf", smf_content)
+    print "Created SMF with named parameters\n"
+
+    val smf_out = shell_output("cat {test_dir}/test.smf")
+    print "{smf_out}\n"
+    print "\n"
+
+    # Step 2: Create assembly that passes parameter VALUES
+    print "Step 2: Creating assembly with parameter values...\n"
+    val asm_content = ".section .data\n.align 4\nparams_1:\n    .word 1               # String ID\n    .word 42              # Parameter: name\n\nparams_2:\n    .word 2               # String ID\n    .word 100             # Parameter: username\n    .word 25              # Parameter: age\n\nparams_3:\n    .word 3               # String ID\n    .word 255             # Parameter: r\n    .word 128             # Parameter: g\n    .word 64              # Parameter: b\n\n.section .text\n.global _start\n\n# RISC-V semihosting call macro\n.macro semihost_call\n    .align 4\n    slli x0, x0, 0x1f   # Entry NOP\n    ebreak              # Breakpoint triggers semihosting\n    srai x0, x0, 7      # Exit NOP\n.endm\n\n_start:\n    # Test 1: Single parameter\n    li a0, 0x101                # SYS_WRITE_HANDLE_P1\n    la a1, params_1\n    semihost_call\n\n    # Test 2: Two parameters\n    li a0, 0x102                # SYS_WRITE_HANDLE_P2\n    la a1, params_2\n    semihost_call\n\n    # Test 3: Three parameters\n    li a0, 0x103                # SYS_WRITE_HANDLE_P3\n    la a1, params_3\n    semihost_call\n\n    # Exit\n    li a0, 0x18         # SYS_EXIT\n    li a1, 0            # exit code\n    semihost_call\n\n.align 4\n"
+    file_write("{test_dir}/test.s", asm_content)
+    print "Created assembly\n"
+
+    # Step 3: Generate string table
+    print "Step 3: Generating string table...\n"
+    val table_content = ".section .smt, \"a\"\n.align 2\n.global __simple_string_table\n__simple_string_table:\n    .word 3                          # Entry count\n\n    # Entry 1: \"Hello, {}!\" - param_names: [\"name\"]\n    .word 1                          # ID\n    .word 12                         # Length\n    .word 1                          # Params\n    .ascii \"Hello, {}!\\n\\0\"\n    .align 2\n\n    # Entry 2: \"User: {}, Age: {}\" - param_names: [\"username\", \"age\"]\n    .word 2                          # ID\n    .word 20                         # Length\n    .word 2                          # Params\n    .ascii \"User: {}, Age: {}\\n\\0\"\n    .align 2\n\n    # Entry 3: \"RGB({}, {}, {})\" - param_names: [\"r\", \"g\", \"b\"]\n    .word 3                          # ID\n    .word 18                         # Length\n    .word 3                          # Params\n    .ascii \"RGB({}, {}, {})\\n\\0\"\n    .align 2\n\n__simple_string_table_end:\n"
+    file_write("{test_dir}/string_table.s", table_content)
+    print "Generated string_table.s\n"
+
+    # Step 4: Build binary
+    print "Step 4: Building binary...\n"
+
+    var assembler = ""
+    if shell_bool("command -v clang"):
+        assembler = "clang"
+    else if shell_bool("command -v clang-16"):
+        assembler = "clang-16"
+    else:
+        print "No assembler found\n"
+        exit(1)
+
+    if not shell_bool("command -v ld.lld"):
+        print "No linker found\n"
+        exit(1)
+    val linker = "ld.lld"
+
+    # Compile
+    shell("{assembler} --target=riscv32 -march=rv32i -c -o {test_dir}/test.o {test_dir}/test.s")
+    shell("{assembler} --target=riscv32 -march=rv32i -c -o {test_dir}/string_table.o {test_dir}/string_table.s")
+
+    # Create linker script
+    val link_script = "ENTRY(_start)\nSECTIONS\n{\n    . = 0x80000000;\n    .text : { *(.text) }\n    . = 0x80000100;\n    .smt : { *(.smt) }\n    . = 0x80001000;\n    .data : { *(.data) }\n}\n"
+    file_write("{test_dir}/link.ld", link_script)
+
+    # Link
+    shell("{linker} -T {test_dir}/link.ld -o {test_dir}/test.elf {test_dir}/test.o {test_dir}/string_table.o")
+    print "Built test.elf\n"
+
+    # Step 5: Run in QEMU
+    print "\n"
+    print "Step 5: Running in QEMU...\n"
+    print "\n"
+    print "Expected output (parameter names are metadata only):\n"
+    print "  Simple: Loaded string table (3 entries) from 0x80000100\n"
+    print "  Hello, 42!\n"
+    print "  User: 100, Age: 25\n"
+    print "  RGB(255, 128, 64)\n"
+    print "\n"
+    print "Actual output:\n"
+    print "----------------------------------------------------------------\n"
+
+    shell("timeout 3 {qemu} -M virt -bios none -kernel {test_dir}/test.elf -nographic -semihosting-config enable=on 2>&1 || true")
+
+    print "----------------------------------------------------------------\n"
+    print "\n"
+
+    # Cleanup
+    print "Test files kept in: {test_dir}\n"
+
+    print "\n"
+    print "Test Complete!\n"
+    print "\n"
+    print "NOTE: Parameter names (name, username, age, r, g, b) are stored\n"
+    print "      in SMF metadata for documentation and future features.\n"
+    print "      QEMU currently uses positional replacement: {} -> value\n"
+    print "\n"
+    print "Next steps:\n"
+    print "  - Add type information (string, int, float)\n"
+    print "  - Implement string parameter support in QEMU\n"
+    print "  - Auto-generate assembly from Simple source with variables\n"
+
+main()

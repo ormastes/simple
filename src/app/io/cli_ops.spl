@@ -700,24 +700,45 @@ fn cli_info(args: [str]) -> i64:
 # ============================================================================
 
 fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64:
-    """Compile a Simple source file to C-family output.
+    """Compile a Simple source file to C++20 output using the MIR C backend.
 
-    Preferred path: native compile handler (C++20 MIR backend) when explicitly requested.
-    Stable fallback: bootstrap generator (`gen-c`) emitting C (gnu11-style runtime scaffolding).
+    Path 1: Pure Simple MIR C backend via compile_c_entry.spl (interpreter mode).
+    Path 2: Native compile handler (when SIMPLE_COMPILE_RUST=1).
+    Path 3: Bootstrap generator fallback (legacy gen-c).
     """
     var out = output_file
     if out == "":
         out = source_file.replace(".spl", ".cpp")
 
-    val force_native_c = rt_env_get("SIMPLE_COMPILE_RUST") == "1"
     if verbose:
-        if force_native_c:
-            print "Compiling {source_file} to C++20 (native compile handler)"
-        else:
-            print "Compiling {source_file} to C (bootstrap generator fallback)"
+        print "Compiling {source_file} to C++20 (MIR C backend)"
         print "  Output: {out}"
 
-    # Prefer native runtime compile handler when explicitly requested.
+    # Path 1: Use the Pure Simple MIR C backend via interpreter.
+    # This loads the compiler driver in interpreter mode and runs the full pipeline.
+    val simple_bin = _find_simple_binary()
+    val compile_c_script = "src/app/cli/compile_c_entry.spl"
+    if _cli_file_exists_impl(compile_c_script):
+        if verbose:
+            print "Using MIR C backend pipeline (interpreter mode)"
+        var c_cmd = "timeout 600s {simple_bin} {compile_c_script} '{source_file}' '{out}'"
+        val result = _cli_shell(c_cmd)
+        if result.stdout != "":
+            print result.stdout
+        if result.stderr != "":
+            _cli_eprint(result.stderr)
+        if result.exit_code == 124:
+            _cli_eprint("Error: C backend compilation timed out after 600s")
+            return 124
+        if result.exit_code == 0:
+            print "Output: {out}"
+            print "Build with: clang++ -std=c++20 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
+            return 0
+        if verbose:
+            _cli_eprint("MIR C backend failed with exit code {result.exit_code}; trying fallbacks")
+
+    # Path 2: Native runtime compile handler (requires SIMPLE_COMPILE_RUST=1).
+    val force_native_c = rt_env_get("SIMPLE_COMPILE_RUST") == "1"
     if force_native_c and has_native_compiler_ffi():
         var compile_args: [str] = ["compile", source_file, "--backend=c", "-o", out]
         if verbose:
@@ -729,9 +750,9 @@ fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64
             print "Build with: clang++ -std=c++20 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
             return 0
         if verbose:
-            _cli_eprint("Native compile handler failed with exit code {exit_code}; trying bootstrap generator fallback")
+            _cli_eprint("Native compile handler failed with exit code {exit_code}")
 
-    # Fallback: use bootstrap C generator (stable and non-interpreter).
+    # Path 3: Legacy bootstrap C generator.
     val bootstrap_gen = "bin/bootstrap/cpp/simple"
     if _cli_file_exists_impl(bootstrap_gen):
         var c_cmd = "timeout 120s {bootstrap_gen} gen-c '{source_file}' '{out}'"
@@ -740,19 +761,24 @@ fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64
             print result.stdout
         if result.stderr != "":
             _cli_eprint(result.stderr)
-        if result.exit_code == 124:
-            _cli_eprint("Error: bootstrap C generation timed out after 120s")
-            return 124
         if result.exit_code == 0:
             print "Output: {out}"
             print "Build with: clang -std=gnu11 -O2 {out} -lm -o output"
             return 0
-        return result.exit_code
 
     _cli_eprint("Error: C backend generation failed")
-    _cli_eprint("hint: Native compile handler unavailable/failed and bootstrap generator not found")
-    _cli_eprint("hint: Expected fallback at: {bootstrap_gen}")
+    _cli_eprint("hint: Ensure compile_c_entry.spl exists and the compiler driver loads correctly")
     1
+
+fn _find_simple_binary() -> text:
+    """Find the Simple interpreter binary."""
+    if _cli_file_exists_impl("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    if _cli_file_exists_impl("bin/release/simple"):
+        return "bin/release/simple"
+    if _cli_file_exists_impl("bin/simple"):
+        return "bin/simple"
+    "simple"
 
 fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
     """Compile a Simple source file to VHDL output."""

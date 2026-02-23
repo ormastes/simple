@@ -1,0 +1,259 @@
+# Core Interpreter — JIT Engine
+#
+# Seed-compilable JIT compilation support for the core interpreter.
+# Tracks function call counts and delegates to execution manager
+# when hot functions exceed the compilation threshold.
+#
+# Uses chained hash maps (no generics, no Dict<>) for seed compatibility.
+# Call tracking and compiled status checks are O(1) average via hashing.
+#
+# Architecture:
+#   1. Tree-walk all functions initially (cold path)
+#   2. Count calls per function (hash map lookup)
+#   3. When threshold reached, JIT compile via ExecutionManager SFFI
+#   4. Subsequent calls use native code (hot path)
+#   5. Fall back to tree-walk if JIT fails
+
+use app.io.jit_ffi.{jit_available}
+use app.io.jit_ffi.{rt_exec_manager_create, rt_exec_manager_compile, rt_exec_manager_execute, rt_exec_manager_has_function, rt_exec_manager_cleanup}
+
+# ===== JIT State (hash maps for O(1) lookup) =====
+
+# Call tracking hash map (function name → call count)
+var jcc_keys: [text] = []
+var jcc_vals: [i64] = []
+var jcc_buckets: [i64] = []
+var jcc_nexts: [i64] = []
+
+# Compiled status hash map (function name → 1 if compiled)
+var jcn_keys: [text] = []
+var jcn_vals: [i64] = []
+var jcn_buckets: [i64] = []
+var jcn_nexts: [i64] = []
+
+var jit_threshold: i64 = 10
+var jit_handle: i64 = 0
+var jit_verbose: i64 = 0
+var jit_enabled: i64 = 0
+
+# Sweep tracking hash map (function name -> last-used epoch)
+var jse_keys: [text] = []
+var jse_vals: [i64] = []
+var jse_buckets: [i64] = []
+var jse_nexts: [i64] = []
+var jit_epoch: i64 = 0
+
+# ===== JIT Initialization =====
+
+fn jit_init(threshold: i64, verbose: i64):
+    jit_threshold = threshold
+    jit_verbose = verbose
+    jcc_keys = []
+    jcc_vals = []
+    jcc_buckets = hm_make_global_buckets()
+    jcc_nexts = []
+    jcn_keys = []
+    jcn_vals = []
+    jcn_buckets = hm_make_global_buckets()
+    jcn_nexts = []
+    jse_keys = []
+    jse_vals = []
+    jse_buckets = hm_make_global_buckets()
+    jse_nexts = []
+    jit_epoch = 0
+    jit_handle = 0
+    if threshold < 999999:
+        jit_enabled = 1
+    else:
+        jit_enabled = 0
+
+fn jit_init_with_backend(threshold: i64, verbose: i64, backend: text):
+    jit_init(threshold, verbose)
+    if jit_enabled == 1:
+        jit_handle = rt_exec_manager_create(backend)
+        if jit_verbose == 1:
+            print "[jit] Initialized execution manager (handle={jit_handle})"
+
+fn jit_cleanup():
+    if jit_handle != 0:
+        rt_exec_manager_cleanup(jit_handle)
+        jit_handle = 0
+    jcc_keys = []
+    jcc_vals = []
+    jcc_buckets = []
+    jcc_nexts = []
+    jcn_keys = []
+    jcn_vals = []
+    jcn_buckets = []
+    jcn_nexts = []
+    jse_keys = []
+    jse_vals = []
+    jse_buckets = []
+    jse_nexts = []
+    jit_epoch = 0
+    jit_enabled = 0
+
+# ===== Call Tracking (O(1) hash map) =====
+
+fn jit_record_call(fn_name: text):
+    if jit_enabled == 0: return
+    # Track last-used epoch for sweep.
+    jit_mark_symbol_used(fn_name)
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = jcc_buckets[bucket]
+    while idx != -1:
+        if jcc_keys[idx] == fn_name:
+            jcc_vals[idx] = jcc_vals[idx] + 1
+            return
+        idx = jcc_nexts[idx]
+    # New entry
+    val new_idx = jcc_keys.len()
+    jcc_keys.push(fn_name)
+    jcc_vals.push(1)
+    jcc_nexts.push(jcc_buckets[bucket])
+    jcc_buckets[bucket] = new_idx
+
+fn jit_get_call_count(fn_name: text) -> i64:
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = jcc_buckets[bucket]
+    while idx != -1:
+        if jcc_keys[idx] == fn_name:
+            return jcc_vals[idx]
+        idx = jcc_nexts[idx]
+    0
+
+# ===== Compilation Status (O(1) hash map) =====
+
+fn jit_should_compile(fn_name: text) -> bool:
+    if jit_enabled == 0: return false
+    val count = jit_get_call_count(fn_name)
+    count >= jit_threshold
+
+fn jit_is_compiled(fn_name: text) -> bool:
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = jcn_buckets[bucket]
+    while idx != -1:
+        if jcn_keys[idx] == fn_name:
+            return true
+        idx = jcn_nexts[idx]
+    false
+
+fn jit_mark_compiled(fn_name: text):
+    if jit_is_compiled(fn_name) == false:
+        val bucket = hm_hash_text(fn_name) % HM_SIZE
+        val new_idx = jcn_keys.len()
+        jcn_keys.push(fn_name)
+        jcn_vals.push(1)
+        jcn_nexts.push(jcn_buckets[bucket])
+        jcn_buckets[bucket] = new_idx
+        if jit_verbose == 1:
+            print "[jit] Marked as compiled: {fn_name}"
+
+# ===== JIT Compilation =====
+
+fn jit_try_compile(fn_name: text, mir_data: text) -> bool:
+    if jit_handle == 0: return false
+    if jit_is_compiled(fn_name): return true
+    if jit_verbose == 1:
+        print "[jit] Compiling: {fn_name} ({mir_data.len()} bytes MIR)"
+    val result = rt_exec_manager_compile(jit_handle, mir_data)
+    if result == "":
+        jit_mark_compiled(fn_name)
+        return true
+    if jit_verbose == 1:
+        print "[jit] Compilation failed for {fn_name}: {result}"
+    false
+
+# ===== JIT Execution =====
+
+fn jit_try_execute(fn_name: text, args: [i64]) -> i64:
+    # Returns the result or -1 if not JIT-compiled
+    if jit_handle == 0: return -1
+    if jit_is_compiled(fn_name) == false: return -1
+    val has_fn = rt_exec_manager_has_function(jit_handle, fn_name)
+    if has_fn == false: return -1
+    if jit_verbose == 1:
+        print "[jit] Executing natively: {fn_name}"
+    rt_exec_manager_execute(jit_handle, fn_name, args)
+
+# ===== Status Accessors =====
+
+fn jit_is_enabled() -> bool:
+    jit_enabled == 1
+
+fn jit_compiled_count() -> i64:
+    jcn_keys.len()
+
+fn jit_total_tracked() -> i64:
+    jcc_keys.len()
+
+# ===== Sweep Tracking (epoch-based LRU) =====
+
+fn jit_mark_symbol_used(fn_name: text):
+    """Update last-used epoch for a symbol."""
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = jse_buckets[bucket]
+    while idx != -1:
+        if jse_keys[idx] == fn_name:
+            jse_vals[idx] = jit_epoch
+            return
+        idx = jse_nexts[idx]
+    # New entry
+    val new_idx = jse_keys.len()
+    jse_keys.push(fn_name)
+    jse_vals.push(jit_epoch)
+    jse_nexts.push(jse_buckets[bucket])
+    jse_buckets[bucket] = new_idx
+
+fn jit_advance_epoch() -> i64:
+    """Advance sweep epoch. Returns new epoch."""
+    jit_epoch = jit_epoch + 1
+    jit_epoch
+
+fn jit_get_epoch() -> i64:
+    jit_epoch
+
+fn jit_sweep_stale(max_age: i64) -> i64:
+    """Remove JIT entries not used within max_age epochs. Returns count removed."""
+    val threshold = jit_epoch - max_age
+    var freed: i64 = 0
+    var i: i64 = 0
+    while i < jse_keys.len():
+        if jse_vals[i] < threshold:
+            val fn_name = jse_keys[i]
+            # Remove from compiled status if present.
+            if jit_is_compiled(fn_name):
+                jit_cleanup_symbol(fn_name)
+            freed = freed + 1
+        i = i + 1
+    freed
+
+fn jit_cleanup_symbol(fn_name: text):
+    """Remove a single symbol from compiled status tracking."""
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var prev: i64 = -1
+    var idx = jcn_buckets[bucket]
+    while idx != -1:
+        if jcn_keys[idx] == fn_name:
+            # Unlink from chain.
+            if prev == -1:
+                jcn_buckets[bucket] = jcn_nexts[idx]
+            else:
+                jcn_nexts[prev] = jcn_nexts[idx]
+            # Tombstone the slot.
+            jcn_keys[idx] = ""
+            jcn_vals[idx] = 0
+            return
+        prev = idx
+        idx = jcn_nexts[idx]
+
+fn jit_sweep_tracked_count() -> i64:
+    jse_keys.len()
+
+export jit_init, jit_init_with_backend, jit_cleanup
+export jit_record_call, jit_get_call_count
+export jit_should_compile, jit_is_compiled, jit_mark_compiled
+export jit_try_compile, jit_try_execute
+export jit_is_enabled, jit_compiled_count, jit_total_tracked
+export jit_mark_symbol_used, jit_advance_epoch, jit_get_epoch
+export jit_sweep_stale, jit_cleanup_symbol, jit_sweep_tracked_count

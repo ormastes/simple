@@ -1,0 +1,59 @@
+# Minimal Docker image for isolated test execution
+# Base: Alpine Linux 3.18 (~7MB) + Simple runtime (27MB)
+# Total size: ~40MB
+#
+# Build:  docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation .
+# Usage:  docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
+#           simple-test-isolation:latest test/unit/std/string_spec.spl
+
+FROM alpine:3.18
+
+# Install minimal runtime dependencies
+# - bash: required for Simple runtime shell operations
+# - ca-certificates: HTTPS/TLS support
+# - glibc compatibility: Simple runtime built with glibc
+RUN apk add --no-cache \
+    bash \
+    coreutils \
+    ca-certificates \
+    libc6-compat \
+    libstdc++ \
+    && rm -rf /var/cache/apk/*
+
+# Create non-root test user for security
+# UID/GID 1001 avoids conflicts with common system users
+RUN addgroup -g 1001 testuser && \
+    adduser -D -u 1001 -G testuser testuser
+
+# Copy Simple runtime binary (27MB)
+# Pre-built release binary includes interpreter + JIT
+COPY bin/release/simple /usr/local/bin/simple
+RUN chmod +x /usr/local/bin/simple && \
+    chown root:root /usr/local/bin/simple
+
+# Configure workspace directory
+# Tests expect to run from project root
+WORKDIR /workspace
+RUN chown testuser:testuser /workspace
+
+# Security hardening
+# - Drop all capabilities (will be added back selectively if needed)
+# - Non-root user
+# - Read-only filesystem (tmpfs for /tmp added at runtime)
+USER testuser
+
+# Health check: verify Simple runtime is functional
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD /usr/local/bin/simple --version || exit 1
+
+# Default entrypoint: Simple test runner
+# Override with docker run args: docker run ... simple-test-isolation:latest test path/to/spec.spl
+ENTRYPOINT ["/usr/local/bin/simple"]
+CMD ["test"]
+
+# Labels for metadata
+LABEL org.opencontainers.image.title="Simple Language Test Isolation" \
+      org.opencontainers.image.description="Minimal container for isolated Simple test execution" \
+      org.opencontainers.image.version="1.0.0" \
+      org.opencontainers.image.authors="Simple Language Project" \
+      org.opencontainers.image.base.name="docker.io/library/alpine:3.18"

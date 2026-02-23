@@ -1,0 +1,239 @@
+"""
+# Vulkan Compute Backend
+
+**Feature ID:** #GPU-003
+**Category:** Runtime
+**Status:** In Progress
+
+## Overview
+
+Tests Vulkan compute backend functionality including initialization and shutdown,
+device selection and info retrieval, storage buffer allocation and data transfers,
+GLSL compute shader compilation and pipeline creation, descriptor set management,
+command recording and submission, synchronization, error handling, and the
+gpu_vulkan device wrapper. Requires Vulkan SDK to be available.
+
+## Syntax
+
+```simple
+vulkan_init()
+vulkan_select_device(0)
+val buf = vulkan_alloc_storage(1024)
+val shader = vulkan_compile_glsl(VECTOR_ADD_GLSL)
+```
+"""
+# Vulkan Compute Backend Tests
+#
+# Tests specific to Vulkan compute functionality.
+# These tests require Vulkan SDK to be available.
+
+use std.compute.*
+use app.io.vulkan_ffi.*
+use std.spec.{check, check_msg}
+
+fn require_vulkan():
+    if not vulkan_available():
+        print "Skipping: Vulkan not available"
+        return
+
+describe "Vulkan Availability":
+    it "checks Vulkan availability":
+        val available = vulkan_available()
+        check(available or not available)
+
+describe "Vulkan Initialization":
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "initializes Vulkan":
+        require_vulkan()
+        check(vulkan_init())
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "reports device count":
+        require_vulkan()
+        vulkan_init()
+        val count = vulkan_device_count()
+        check(count > 0)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "shuts down cleanly":
+        require_vulkan()
+        vulkan_init()
+        check(vulkan_shutdown())
+
+describe "Vulkan Device Selection":
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "selects device":
+        require_vulkan()
+        vulkan_init()
+        check(vulkan_select_device(0))
+        check(vulkan_get_device() == 0)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "gets device info":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val info = vulkan_device_info(0)
+        check(info.name.len() > 0)
+        check(info.total_memory > 0)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "reports device type":
+        require_vulkan()
+        vulkan_init()
+        val info = vulkan_device_info(0)
+        expect(info.device_type == VulkanDeviceType.Discrete or info.device_type == VulkanDeviceType.Integrated or info.device_type == VulkanDeviceType.Virtual or info.device_type == VulkanDeviceType.CpuOnly or info.device_type).to_equal(VulkanDeviceType.Unknown)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "gets API version":
+        require_vulkan()
+        vulkan_init()
+        val info = vulkan_device_info(0)
+        val (major, minor, patch) = info.api_version
+        check(major >= 1)
+
+describe "Vulkan Buffer Operations":
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "allocates storage buffer":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val buf = vulkan_alloc_storage(1024)
+        check(buf.is_valid)
+        expect(buf.size).to_equal(1024)
+        check(vulkan_free_buffer(buf))
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "allocates different buffer types":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val storage = vulkan_alloc_buffer(1024, VulkanBufferUsage.Storage)
+        check(storage.is_valid)
+        vulkan_free_buffer(storage)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "copies data to buffer":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val buf = vulkan_alloc_storage(16)
+        val data: [u8] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        check(vulkan_copy_to(buf, data))
+        vulkan_free_buffer(buf)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "copies data from buffer":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val buf = vulkan_alloc_storage(16)
+        val src: [u8] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160]
+        vulkan_copy_to(buf, src)
+        var dst: [u8] = []
+        for i in 0..16:
+            dst.push(0)
+        check(vulkan_copy_from(dst, buf))
+        vulkan_free_buffer(buf)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "copies between buffers":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val src = vulkan_alloc_storage(1024)
+        val dst = vulkan_alloc_storage(1024)
+        check(vulkan_copy_buffer(dst, src, 1024))
+        vulkan_free_buffer(src)
+        vulkan_free_buffer(dst)
+
+describe "Vulkan Shader Compilation":
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "compiles GLSL compute shader":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val shader = vulkan_compile_glsl(VECTOR_ADD_GLSL)
+        check(shader.is_valid)
+        vulkan_destroy_shader(shader)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "creates compute pipeline":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val shader = vulkan_compile_glsl(VECTOR_ADD_GLSL)
+        check(shader.is_valid)
+        val pipe = vulkan_create_pipeline(shader, "main")
+        check(pipe.is_valid)
+        vulkan_destroy_pipeline(pipe)
+        vulkan_destroy_shader(shader)
+
+describe "Vulkan Descriptor Sets":
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "creates descriptor set":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val shader = vulkan_compile_glsl(VECTOR_ADD_GLSL)
+        val pipe = vulkan_create_pipeline(shader, "main")
+        val descriptors = vulkan_create_descriptors(pipe)
+        check(descriptors.is_valid)
+        vulkan_destroy_descriptors(descriptors)
+        vulkan_destroy_pipeline(pipe)
+        vulkan_destroy_shader(shader)
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "binds buffers to descriptors":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val shader = vulkan_compile_glsl(VECTOR_ADD_GLSL)
+        val pipe = vulkan_create_pipeline(shader, "main")
+        val descriptors = vulkan_create_descriptors(pipe)
+        val buf = vulkan_alloc_storage(1024)
+        check(vulkan_bind_buffer(descriptors, 0, buf))
+        vulkan_free_buffer(buf)
+        vulkan_destroy_descriptors(descriptors)
+        vulkan_destroy_pipeline(pipe)
+        vulkan_destroy_shader(shader)
+
+describe "Vulkan Command Execution":
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "records and submits commands":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        val cmd = vulkan_begin_compute()
+        check(cmd.is_valid)
+        check(vulkan_end_compute(cmd))
+        check(vulkan_submit_and_wait(cmd))
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "waits for device idle":
+        require_vulkan()
+        vulkan_init()
+        vulkan_select_device(0)
+        check(vulkan_wait_idle())
+
+describe "Vulkan Error Handling":
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "gets last error message":
+        require_vulkan()
+        vulkan_init()
+        val error_text = vulkan_last_error()
+        check(true)
+
+describe "Vulkan GPU Wrapper":
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "creates gpu_vulkan device wrapper":
+        require_vulkan()
+        val device = gpu_vulkan(0)
+        check(device.is_valid())
+        check(device.backend_name() == "Vulkan")
+
+    # @tag(reason: "requires_vulkan")  # @skip - attributes on test cases not supported
+    it "synchronizes via wrapper":
+        require_vulkan()
+        val device = gpu_vulkan(0)
+        check(device.wait_for_idle())

@@ -1,0 +1,145 @@
+# Output formatting for duplication detection results
+
+use app.duplicate_check.detector (DuplicateGroup, DuplicateBlock)
+use app.io.{file_write}
+
+fn print_text_report(groups: [DuplicateGroup]):
+    print "Duplication Analysis Report"
+    print "==========================="
+    print ""
+
+    var total_lines = 0
+    var total_occurrences = 0
+
+    for group in groups:
+        total_lines = total_lines + group.total_lines
+        total_occurrences = total_occurrences + group.occurrences
+
+    print "Found {groups.len()} duplicate groups ({total_lines} total lines duplicated)"
+    print ""
+
+    var group_num = 1
+    for group in groups:
+        val lines_per_block = group.total_lines / group.occurrences
+
+        print "{group_num}. Impact Score: {group.impact_score} ({group.occurrences} occurrences, {lines_per_block} lines each)"
+        print "   Files:"
+
+        for block in group.blocks:
+            print "   - {block.file}:{block.line_start}-{block.line_end}"
+
+        print ""
+
+        if group.blocks.len() > 0:
+            val first_block = group.blocks[0]
+            val preview = first_block.code
+            val preview_lines = preview.split("\n")
+
+            print "   Code preview:"
+            var line_count = 0
+            for line in preview_lines:
+                if line_count < 5:
+                    print "      {line}"
+                    line_count = line_count + 1
+
+            if preview_lines.len() > 5:
+                print "      ..."
+            print ""
+
+        group_num = group_num + 1
+
+    print "Summary:"
+    print "- Total duplicate groups: {groups.len()}"
+    print "- Total occurrences: {total_occurrences}"
+    print "- Total lines duplicated: {total_lines}"
+
+fn print_json_report(groups: [DuplicateGroup]):
+    var total_lines = 0
+    var total_occurrences = 0
+    var files_set = []
+
+    for group in groups:
+        total_lines = total_lines + group.total_lines
+        total_occurrences = total_occurrences + group.occurrences
+
+        for block in group.blocks:
+            if not files_set.contains(block.file):
+                files_set = files_set + [block.file]
+
+    print "{"
+    print "  \"summary\": {"
+    print "    \"total_groups\": {groups.len()},"
+    print "    \"total_occurrences\": {total_occurrences},"
+    print "    \"total_lines\": {total_lines},"
+    print "    \"files_affected\": {files_set.len()}"
+    print "  },"
+    print "  \"duplicates\": ["
+
+    var group_idx = 0
+    for group in groups:
+        val lines_per_block = group.total_lines / group.occurrences
+
+        print "    {"
+        print "      \"group_id\": {group_idx + 1},"
+        print "      \"occurrences\": {group.occurrences},"
+        print "      \"lines_per_block\": {lines_per_block},"
+        print "      \"impact_score\": {group.impact_score},"
+        print "      \"blocks\": ["
+
+        var block_idx = 0
+        for block in group.blocks:
+            print "        {"
+            print "          \"file\": \"{block.file}\","
+            print "          \"line_start\": {block.line_start},"
+            print "          \"line_end\": {block.line_end},"
+            print "          \"hash\": \"{block.hash_value}\""
+            if block_idx < group.blocks.len() - 1:
+                print "        },"
+            else:
+                print "        }"
+            block_idx = block_idx + 1
+
+        print "      ]"
+        if group_idx < groups.len() - 1:
+            print "    },"
+        else:
+            print "    }"
+
+        group_idx = group_idx + 1
+
+    print "  ]"
+    print "}"
+
+fn write_sdn_database(groups: [DuplicateGroup], path: text):
+    var content = "# Duplication database\n\n"
+
+    var total_lines = 0
+    var total_occurrences = 0
+
+    for group in groups:
+        total_lines = total_lines + group.total_lines
+        total_occurrences = total_occurrences + group.occurrences
+
+    content = content + "metadata:\n"
+    content = content + "  total_groups: {groups.len()}\n"
+    content = content + "  total_lines: {total_lines}\n"
+    content = content + "  total_occurrences: {total_occurrences}\n\n"
+
+    content = content + "duplicate_groups |group_id, occurrences, lines, impact|\n"
+    var group_id = 1
+    for group in groups:
+        val lines_per_block = group.total_lines / group.occurrences
+        content = content + "  {group_id}, {group.occurrences}, {lines_per_block}, {group.impact_score}\n"
+        group_id = group_id + 1
+
+    content = content + "\nduplicate_blocks |group_id, file, line_start, line_end, hash|\n"
+    group_id = 1
+    for group in groups:
+        for block in group.blocks:
+            content = content + "  {group_id}, {block.file}, {block.line_start}, {block.line_end}, {block.hash_value}\n"
+        group_id = group_id + 1
+
+    file_write(path, content)
+    print "Database written to: {path}"
+
+export print_text_report, print_json_report, write_sdn_database

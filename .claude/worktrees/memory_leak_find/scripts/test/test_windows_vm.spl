@@ -1,0 +1,121 @@
+#!/usr/bin/env simple
+# Test Simple on Windows VM via QEMU
+#
+# Generates C code on the Linux host, copies to the Windows VM,
+# compiles with gcc inside Windows, and verifies the output.
+#
+# Prerequisites: Windows VM running with SSH + gcc installed
+#
+# Usage: bin/release/simple scripts/test_windows_vm.spl
+
+extern fn rt_file_exists(path: text) -> bool
+
+use app.io.file_shell.{shell, shell_output, file_write, file_delete}
+use app.vm.qemu_manager.{VmConfig, windows_config, vm_is_running, vm_wait_ssh, vm_exec, vm_copy_to}
+
+fn main() -> i64:
+    print "=========================================="
+    print "Simple Windows VM Test"
+    print "=========================================="
+    print ""
+
+    val config = windows_config()
+
+    # Step 1: Check prerequisites
+    print "Step 1: Check Prerequisites"
+    print "----------------------------------------"
+    if not vm_is_running(config):
+        print "SKIP: Windows VM not running (port {config.ssh_port})"
+        print "Start it with: ~/vms/windows/start-windows.sh"
+        return 0
+
+    if not rt_file_exists("bin/release/simple"):
+        print "FAIL: Simple bootstrap binary not found"
+        return 1
+
+    # Check SSH
+    if not vm_wait_ssh(config, 10):
+        print "SKIP: Windows VM SSH not available"
+        return 0
+    print "Prerequisites OK"
+    print ""
+
+    # Step 2: Write multi-file test sources
+    print "Step 2: Create Multi-File Test Sources"
+    print "----------------------------------------"
+    val test_dir = "/tmp/simple_winvm_test"
+    shell("mkdir -p {test_dir}")
+
+    val base_spl = "fn square(x: i64) -> i64:\n    return x * x\n\nexport square\n"
+    val mid_spl = "use base.{square}\n\nfn sum_of_squares(a: i64, b: i64) -> i64:\n    return square(a) + square(b)\n\nexport sum_of_squares\n"
+    val main_spl = "use mid.{sum_of_squares}\n\nfn main():\n    val result = sum_of_squares(3, 4)\n    print \"{result}\"\n"
+
+    file_write("{test_dir}/base.spl", base_spl)
+    file_write("{test_dir}/mid.spl", mid_spl)
+    file_write("{test_dir}/main.spl", main_spl)
+    print "Test sources created"
+    print ""
+
+    # Step 3: Generate C code on host
+    print "Step 3: Generate C Code"
+    print "----------------------------------------"
+    val gen_cmd = "bin/release/simple src/app/compile/native.spl {test_dir}/main.spl {test_dir}/test.c --gen-c-only"
+    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
+    if gen_exit != 0:
+        print "FAIL: C code generation failed"
+        if gen_err != "":
+            print gen_err
+        shell("rm -rf {test_dir}")
+        return 1
+    print gen_out
+    print ""
+
+    # Step 4: Copy C file to Windows VM
+    print "Step 4: Copy to Windows VM"
+    print "----------------------------------------"
+    if not vm_copy_to(config, "{test_dir}/test.c", "C:/tmp/test.c"):
+        print "FAIL: Could not copy C file to Windows VM"
+        shell("rm -rf {test_dir}")
+        return 1
+    print "Copied test.c to Windows VM"
+    print ""
+
+    # Step 5: Compile inside Windows VM
+    print "Step 5: Compile Inside Windows"
+    print "----------------------------------------"
+    val (cc_out, cc_err, cc_exit) = vm_exec(config, "gcc -o C:\\tmp\\test.exe C:\\tmp\\test.c")
+    if cc_exit != 0:
+        print "FAIL: Compilation failed inside Windows VM"
+        if cc_err != "":
+            print cc_err
+        shell("rm -rf {test_dir}")
+        return 1
+    print "Compiled inside Windows VM"
+    print ""
+
+    # Step 6: Run and verify
+    print "Step 6: Verify Output"
+    print "----------------------------------------"
+    val (run_out, run_err, run_exit) = vm_exec(config, "C:\\tmp\\test.exe")
+    val output = run_out.trim()
+
+    # Cleanup
+    shell("rm -rf {test_dir}")
+
+    if output == "25":
+        print "Output: {output}"
+        print ""
+        print "=========================================="
+        print "PASS: Windows VM Test"
+        print "=========================================="
+        print ""
+        print "Summary:"
+        print "  VM: Windows 11 (via QEMU)"
+        print "  Method: Generate C on host, compile in VM"
+        print "  Compiler: gcc (MinGW inside Windows)"
+        print "  Test: 3-file dependency chain"
+        print "  Expected: 25, Got: {output}"
+        return 0
+    else:
+        print "FAIL: Expected output '25', got '{output}'"
+        return 1

@@ -1,0 +1,213 @@
+# MCP SDK - Protocol Type Definitions
+#
+# Structs representing MCP protocol entities: tools, resources, prompts,
+# capabilities, and server info.
+
+use std.mcp_sdk.core.json.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json}
+
+# --- Tool Definition ---
+
+struct ToolDef:
+    name: text
+    description: text
+    input_schema: text
+    read_only: bool
+    destructive: bool
+    idempotent: bool
+    open_world: bool
+
+fn tool_def(name: text, description: text, input_schema: text) -> ToolDef:
+    ToolDef(
+        name: name,
+        description: description,
+        input_schema: input_schema,
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        open_world: false
+    )
+
+fn tool_def_to_json(t: ToolDef) -> text:
+    var annot = LB()
+    var ro_str = "false"
+    if t.read_only:
+        ro_str = "true"
+    annot = annot + jp("readOnlyHint", ro_str)
+    annot = annot + ","
+    var dest_str = "false"
+    if t.destructive:
+        dest_str = "true"
+    annot = annot + jp("destructiveHint", dest_str)
+    annot = annot + ","
+    var idemp_str = "false"
+    if t.idempotent:
+        idemp_str = "true"
+    annot = annot + jp("idempotentHint", idemp_str)
+    annot = annot + ","
+    var ow_str = "false"
+    if t.open_world:
+        ow_str = "true"
+    annot = annot + jp("openWorldHint", ow_str)
+    annot = annot + RB()
+
+    var r = LB()
+    r = r + jp("name", js(t.name))
+    r = r + "," + jp("description", js(escape_json(t.description)))
+    r = r + "," + jp("inputSchema", t.input_schema)
+    r = r + "," + jp("annotations", annot)
+    r = r + RB()
+    r
+
+# --- Resource Definition ---
+
+struct ResourceDef:
+    uri: text
+    name: text
+    description: text
+    mime_type: text
+
+fn resource_def(uri: text, name: text, description: text, mime_type: text) -> ResourceDef:
+    ResourceDef(uri: uri, name: name, description: description, mime_type: mime_type)
+
+fn resource_def_to_json(r: ResourceDef) -> text:
+    var result = LB()
+    result = result + jp("uri", js(r.uri))
+    result = result + "," + jp("name", js(r.name))
+    if r.description != "":
+        result = result + "," + jp("description", js(escape_json(r.description)))
+    if r.mime_type != "":
+        result = result + "," + jp("mimeType", js(r.mime_type))
+    result = result + RB()
+    result
+
+# --- Prompt Definition ---
+
+struct PromptDef:
+    name: text
+    description: text
+    arguments_json: text
+
+fn prompt_def(name: text, description: text, arguments_json: text) -> PromptDef:
+    PromptDef(name: name, description: description, arguments_json: arguments_json)
+
+fn prompt_def_to_json(p: PromptDef) -> text:
+    var r = LB()
+    r = r + jp("name", js(p.name))
+    r = r + "," + jp("description", js(escape_json(p.description)))
+    r = r + "," + jp("arguments", p.arguments_json)
+    r = r + RB()
+    r
+
+# --- MCP Capabilities ---
+
+struct McpCapabilities:
+    tools: bool
+    tools_list_changed: bool
+    resources: bool
+    resources_subscribe: bool
+    resources_list_changed: bool
+    prompts: bool
+    prompts_list_changed: bool
+    logging: bool
+    completions: bool
+
+fn default_capabilities() -> McpCapabilities:
+    McpCapabilities(
+        tools: true,
+        tools_list_changed: true,
+        resources: true,
+        resources_subscribe: false,
+        resources_list_changed: true,
+        prompts: true,
+        prompts_list_changed: true,
+        logging: false,
+        completions: false
+    )
+
+fn capabilities_to_json(c: McpCapabilities) -> text:
+    var r = LB()
+    var first = true
+    if c.tools:
+        var tc = LB()
+        if c.tools_list_changed:
+            tc = tc + jp("listChanged", "true")
+        tc = tc + RB()
+        r = r + jp("tools", tc)
+        first = false
+    if c.resources:
+        if not first:
+            r = r + ","
+        var rc = LB()
+        if c.resources_subscribe:
+            rc = rc + jp("subscribe", "true")
+            if c.resources_list_changed:
+                rc = rc + ","
+        if c.resources_list_changed:
+            rc = rc + jp("listChanged", "true")
+        rc = rc + RB()
+        r = r + jp("resources", rc)
+        first = false
+    if c.prompts:
+        if not first:
+            r = r + ","
+        var pc = LB()
+        if c.prompts_list_changed:
+            pc = pc + jp("listChanged", "true")
+        pc = pc + RB()
+        r = r + jp("prompts", pc)
+        first = false
+    if c.logging:
+        if not first:
+            r = r + ","
+        r = r + jp("logging", LB() + RB())
+        first = false
+    if c.completions:
+        if not first:
+            r = r + ","
+        r = r + jp("completions", LB() + RB())
+    r = r + RB()
+    r
+
+# --- Server Info ---
+
+struct ServerInfo:
+    name: text
+    version: text
+    instructions: text
+
+fn server_info(name: text, version: text) -> ServerInfo:
+    ServerInfo(name: name, version: version, instructions: "")
+
+fn server_info_to_json(s: ServerInfo) -> text:
+    var r = LB()
+    r = r + jp("name", js(s.name))
+    r = r + "," + jp("version", js(s.version))
+    if s.instructions != "":
+        r = r + "," + jp("instructions", js(escape_json(s.instructions)))
+    r = r + RB()
+    r
+
+# --- Tool Result helpers ---
+
+fn make_tool_result(id: text, content: text) -> text:
+    val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(content))))
+    val result = jo1(jp("content", "[" + text_obj + "]"))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_tool_error(id: text, message: text) -> text:
+    val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(message))))
+    var result = LB()
+    result = result + jp("content", "[" + text_obj + "]")
+    result = result + "," + jp("isError", "true")
+    result = result + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# --- Exports ---
+
+export ToolDef, ResourceDef, PromptDef, McpCapabilities, ServerInfo
+export tool_def, tool_def_to_json
+export resource_def, resource_def_to_json
+export prompt_def, prompt_def_to_json
+export default_capabilities, capabilities_to_json
+export server_info, server_info_to_json
+export make_tool_result, make_tool_error

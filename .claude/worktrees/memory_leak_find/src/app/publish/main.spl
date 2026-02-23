@@ -1,0 +1,165 @@
+# Simple CLI - publish command
+# Build package and push to GHCR registry
+
+use std.cli.cli_util (get_cli_args)
+use app.package.registry.types (PublishResult, RegistryConfig)
+use app.package.registry.config (default_config, config_with_overrides, oci_ref_for)
+use app.package.registry.auth (has_credentials, print_auth_error, get_token)
+use app.package.registry.oci (push, oras_available, print_oras_install_help)
+
+use app.io.mod (cwd, file_exists, file_read, process_run, dir_create, process_output)
+use std.log.{error}
+
+fn print_help():
+    print "Usage: simple publish [options]"
+    print ""
+    print "Publish current package to the Simple registry (GHCR)."
+    print ""
+    print "Options:"
+    print "  --dry-run         Show what would be published"
+    print "  --token=TOKEN     Override auth token"
+    print "  --registry=URL    Override registry URL"
+    print "  --allow-dirty     Allow uncommitted changes"
+    print "  -h, --help        Show this help"
+    print ""
+    print "The command reads simple.sdn in the current directory,"
+    print "builds a .spk tarball, and pushes it to GHCR."
+
+fn print_error(msg: text):
+    error("publish", msg)
+
+# Parse name and version from simple.sdn
+fn parse_manifest(content: text) -> [text]:
+    val lines = content.split("\n")
+    var name = ""
+    var version = ""
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("name:"):
+            name = trimmed[5:].trim()
+        elif trimmed.starts_with("version:"):
+            version = trimmed[8:].trim()
+    [name, version]
+
+# Build .spk tarball
+fn build_spk(name: text, version: text) -> text:
+    val cwd = cwd()
+    val spk_name = "{name}-{version}.spk"
+    val spk_path = "{cwd}/target/{spk_name}"
+
+    dir_create("{cwd}/target", true)
+
+    # Create tarball excluding build artifacts and sensitive files
+    val result = process_run("tar", [
+        "czf", spk_path,
+        "--exclude=.jj", "--exclude=.git",
+        "--exclude=target", "--exclude=build",
+        "--exclude=*.o", "--exclude=*.so", "--exclude=*.dylib",
+        "--exclude=.env", "--exclude=credentials.sdn",
+        "-C", cwd, "."
+    ])
+
+    if result != 0:
+        return ""
+    spk_path
+
+# Compute SHA-256 checksum
+fn compute_checksum(path: text) -> text:
+    val output = process_output("sha256sum", [path])
+    if output == "":
+        return ""
+    val parts = output.split(" ")
+    "sha256:{parts[0]}"
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var dry_run = false
+    var token_override = ""
+    var registry_override = ""
+    var allow_dirty = false
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--dry-run":
+            dry_run = true
+        elif arg == "--allow-dirty":
+            allow_dirty = true
+        elif arg.starts_with("--token="):
+            token_override = arg[8:]
+        elif arg.starts_with("--registry="):
+            registry_override = arg[11:]
+
+    val cwd = cwd()
+
+    # Check for manifest
+    var manifest_path = "{cwd}/simple.sdn"
+    if not file_exists(manifest_path):
+        manifest_path = "{cwd}/simple.toml"
+        if not file_exists(manifest_path):
+            print_error("no simple.sdn or simple.toml found in current directory")
+            return 1
+
+    # Parse manifest
+    val content = file_read(manifest_path)
+    val info = parse_manifest(content)
+    val name = info[0]
+    val version = info[1]
+
+    if name == "":
+        print_error("package name not found in manifest")
+        return 1
+    if version == "":
+        print_error("package version not found in manifest")
+        return 1
+
+    val config = config_with_overrides(registry_override, "")
+    val oci_ref = oci_ref_for(config, name, version)
+
+    print "Publishing {name}@{version}"
+    print "  Registry: {config.registry_url}"
+    print "  OCI ref:  {oci_ref}"
+
+    if dry_run:
+        print ""
+        print "(dry run - no changes made)"
+        return 0
+
+    # Check auth
+    if not has_credentials():
+        print_auth_error()
+        return 1
+
+    # Check oras
+    if not oras_available():
+        print_oras_install_help()
+        return 1
+
+    # Build .spk
+    print "Building package..."
+    val spk_path = build_spk(name, version)
+    if spk_path == "":
+        print_error("failed to build .spk tarball")
+        return 1
+
+    # Compute checksum
+    val checksum = compute_checksum(spk_path)
+    print "  Checksum: {checksum}"
+
+    # Push to GHCR
+    print "Pushing to GHCR..."
+    val result = push(spk_path, oci_ref)
+
+    if not result.success:
+        print_error(result.message)
+        return 1
+
+    print ""
+    print "Published {name}@{version}"
+    print "  OCI ref:  {oci_ref}"
+    print "  Checksum: {checksum}"
+    print ""
+    print "Next: submit index update to simple-lang/registry"
+    return 0

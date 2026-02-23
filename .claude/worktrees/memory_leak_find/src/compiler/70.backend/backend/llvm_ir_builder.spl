@@ -1,0 +1,460 @@
+# LLVM IR Builder
+#
+# LlvmIRBuilder class and helper utilities for emitting LLVM IR.
+#
+# Refactored: Split into submodules for modularity:
+# - llvm_passes.spl: LlvmPass enum and passes_for_level
+# - llvm_ir_builder.spl: LlvmIRBuilder class + helper functions (this file)
+# - mir_to_llvm.spl: MirToLlvm translation class
+
+use compiler.backend.llvm_target.{LlvmTargetTriple}
+use compiler.common.attributes.FunctionAttr
+
+# Re-import from split module for re-export (backward compatibility)
+use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
+
+# ============================================================================
+# LLVM IR Builder
+# ============================================================================
+
+class LlvmIRBuilder:
+    """Builds LLVM IR from MIR."""
+    module_name: text
+    target: LlvmTargetTriple
+    instructions: [text]
+    current_function: text?
+    local_counter: i64
+    debug_counter: i64
+    size_type: text            # "i32" for 32-bit targets, "i64" for 64-bit
+    tbaa_counter: i64          # Counter for TBAA metadata nodes
+
+    static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
+        val st = if target.is_32bit(): "i32" else: "i64"
+        LlvmIRBuilder(
+            module_name: name,
+            target: target,
+            instructions: [],
+            current_function: nil,
+            local_counter: 0,
+            debug_counter: 10,
+            size_type: st,
+            tbaa_counter: 100
+        )
+
+    me emit(line: text):
+        """Emit an IR line."""
+        self.instructions = self.instructions.push(line)
+
+    me emit_module_header():
+        """Emit module header."""
+        self.emit("; ModuleID = '{self.module_name}'")
+        self.emit("source_filename = \"{self.module_name}.spl\"")
+        self.emit("target datalayout = \"{self.target.datalayout()}\"")
+        self.emit("target triple = \"{self.target.to_text()}\"")
+        self.emit("")
+
+    me emit_baremetal_attributes():
+        """Emit bare-metal module attributes (no stdlib, panic=abort, etc.)."""
+        self.emit("; Bare-metal attributes")
+        self.emit("!0 = !{!\"no-builtins\"}")
+        self.emit("!1 = !{!\"trap-func-name\", !\"abort\"}")
+        self.emit("")
+
+    me start_function(name: text, params: [text], return_type: text):
+        """Start a function definition with nounwind (Simple has no exceptions)."""
+        self.current_function = Some(name)
+        val param_str = params.join(", ")
+        self.emit("define {return_type} @{name}({param_str}) nounwind {{")
+
+    me start_function_opt(name: text, params: [text], return_type: text, is_readonly: bool, is_small: bool):
+        """Start a function definition with optimization attributes.
+
+        - nounwind: always (Simple has no exceptions)
+        - readonly: function has no side effects (no stores, no non-pure calls)
+        - alwaysinline: function is small (< 10 instructions)
+        """
+        self.current_function = Some(name)
+        val param_str = params.join(", ")
+        var attrs = " nounwind"
+        if is_readonly:
+            attrs = attrs + " readonly"
+        if is_small:
+            attrs = attrs + " alwaysinline"
+        self.emit("define {return_type} @{name}({param_str}){attrs} {{")
+
+    me start_function_with_attrs(name: text, params: [text], return_type: text, func_attr: FunctionAttr):
+        """Start a function definition with attributes."""
+        self.current_function = Some(name)
+        val param_str = params.join(", ")
+        var attrs = ""
+        if func_attr.is_naked:
+            attrs = attrs + " naked"
+        if func_attr.is_noreturn:
+            attrs = attrs + " noreturn"
+        var prefix = "define"
+        if func_attr.is_entry:
+            prefix = "define dso_local"
+        var section_str = ""
+        if func_attr.section.?:
+            section_str = " section \"{func_attr.section.unwrap()}\""
+        self.emit("{prefix} {return_type} @{name}({param_str}){attrs}{section_str} {{")
+
+    me end_function():
+        """End a function definition."""
+        self.emit("}")
+        self.emit("")
+        self.current_function = nil
+
+    me fresh_local() -> text:
+        """Generate a fresh local name."""
+        val id = self.local_counter
+        self.local_counter = self.local_counter + 1
+        "%{id}"
+
+    me emit_alloca(dest: text, ty: text):
+        """Emit alloca instruction with natural alignment."""
+        val alignment = natural_alignment(ty)
+        self.emit("  {dest} = alloca {ty}, align {alignment}")
+
+    me emit_alloca_aligned(dest: text, ty: text, alignment: i64):
+        """Emit alloca with explicit alignment (for SIMD arrays)."""
+        self.emit("  {dest} = alloca {ty}, align {alignment}")
+
+    me emit_load(dest: text, ty: text, ptr: text):
+        """Emit load instruction with natural alignment."""
+        val alignment = natural_alignment(ty)
+        self.emit("  {dest} = load {ty}, ptr {ptr}, align {alignment}")
+
+    me emit_store(ty: text, value: text, ptr: text):
+        """Emit store instruction with natural alignment."""
+        val alignment = natural_alignment(ty)
+        self.emit("  store {ty} {value}, ptr {ptr}, align {alignment}")
+
+    # === Arithmetic with nsw/nuw flags ===
+
+    me emit_add(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit add instruction."""
+        self.emit("  {dest} = add {ty} {lhs}, {rhs}")
+
+    me emit_add_nsw(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit add with no signed wrap (enables LLVM strength reduction)."""
+        self.emit("  {dest} = add nsw {ty} {lhs}, {rhs}")
+
+    me emit_add_nuw(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit add with no unsigned wrap (for array indexing)."""
+        self.emit("  {dest} = add nuw {ty} {lhs}, {rhs}")
+
+    me emit_sub(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit sub instruction."""
+        self.emit("  {dest} = sub {ty} {lhs}, {rhs}")
+
+    me emit_sub_nsw(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit sub with no signed wrap."""
+        self.emit("  {dest} = sub nsw {ty} {lhs}, {rhs}")
+
+    me emit_mul(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit mul instruction."""
+        self.emit("  {dest} = mul {ty} {lhs}, {rhs}")
+
+    me emit_mul_nsw(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit mul with no signed wrap (enables loop strength reduction)."""
+        self.emit("  {dest} = mul nsw {ty} {lhs}, {rhs}")
+
+    me emit_div(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit div instruction (signed)."""
+        self.emit("  {dest} = sdiv {ty} {lhs}, {rhs}")
+
+    me emit_udiv(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit div instruction (unsigned)."""
+        self.emit("  {dest} = udiv {ty} {lhs}, {rhs}")
+
+    me emit_rem(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit remainder instruction (signed modulo)."""
+        self.emit("  {dest} = srem {ty} {lhs}, {rhs}")
+
+    me emit_urem(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit remainder instruction (unsigned modulo)."""
+        self.emit("  {dest} = urem {ty} {lhs}, {rhs}")
+
+    me emit_neg(dest: text, ty: text, value: text):
+        """Emit negation (0 - value)."""
+        self.emit("  {dest} = sub {ty} 0, {value}")
+
+    # === Bitwise Operations ===
+
+    me emit_and(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit bitwise AND."""
+        self.emit("  {dest} = and {ty} {lhs}, {rhs}")
+
+    me emit_or(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit bitwise OR."""
+        self.emit("  {dest} = or {ty} {lhs}, {rhs}")
+
+    me emit_xor(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit bitwise XOR."""
+        self.emit("  {dest} = xor {ty} {lhs}, {rhs}")
+
+    me emit_shl(dest: text, ty: text, value: text, amount: text):
+        """Emit left shift."""
+        self.emit("  {dest} = shl {ty} {value}, {amount}")
+
+    me emit_lshr(dest: text, ty: text, value: text, amount: text):
+        """Emit logical right shift (zero-extend)."""
+        self.emit("  {dest} = lshr {ty} {value}, {amount}")
+
+    me emit_ashr(dest: text, ty: text, value: text, amount: text):
+        """Emit arithmetic right shift (sign-extend)."""
+        self.emit("  {dest} = ashr {ty} {value}, {amount}")
+
+    me emit_not(dest: text, ty: text, value: text):
+        """Emit bitwise NOT (xor with -1)."""
+        self.emit("  {dest} = xor {ty} {value}, -1")
+
+    # === Comparison Operations ===
+
+    me emit_icmp_eq(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit integer equality comparison."""
+        self.emit("  {dest} = icmp eq {ty} {lhs}, {rhs}")
+
+    me emit_icmp_ne(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit integer inequality comparison."""
+        self.emit("  {dest} = icmp ne {ty} {lhs}, {rhs}")
+
+    me emit_icmp_slt(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit signed less-than comparison."""
+        self.emit("  {dest} = icmp slt {ty} {lhs}, {rhs}")
+
+    me emit_icmp_sle(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit signed less-or-equal comparison."""
+        self.emit("  {dest} = icmp sle {ty} {lhs}, {rhs}")
+
+    me emit_icmp_sgt(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit signed greater-than comparison."""
+        self.emit("  {dest} = icmp sgt {ty} {lhs}, {rhs}")
+
+    me emit_icmp_sge(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit signed greater-or-equal comparison."""
+        self.emit("  {dest} = icmp sge {ty} {lhs}, {rhs}")
+
+    me emit_icmp_ult(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit unsigned less-than comparison."""
+        self.emit("  {dest} = icmp ult {ty} {lhs}, {rhs}")
+
+    me emit_icmp_ule(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit unsigned less-or-equal comparison."""
+        self.emit("  {dest} = icmp ule {ty} {lhs}, {rhs}")
+
+    me emit_icmp_ugt(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit unsigned greater-than comparison."""
+        self.emit("  {dest} = icmp ugt {ty} {lhs}, {rhs}")
+
+    me emit_icmp_uge(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit unsigned greater-or-equal comparison."""
+        self.emit("  {dest} = icmp uge {ty} {lhs}, {rhs}")
+
+    me emit_fcmp_oeq(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit floating-point ordered equality."""
+        self.emit("  {dest} = fcmp oeq {ty} {lhs}, {rhs}")
+
+    me emit_fcmp_one(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit floating-point ordered inequality."""
+        self.emit("  {dest} = fcmp one {ty} {lhs}, {rhs}")
+
+    me emit_fcmp_olt(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit floating-point ordered less-than."""
+        self.emit("  {dest} = fcmp olt {ty} {lhs}, {rhs}")
+
+    me emit_fcmp_ole(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit floating-point ordered less-or-equal."""
+        self.emit("  {dest} = fcmp ole {ty} {lhs}, {rhs}")
+
+    me emit_fcmp_ogt(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit floating-point ordered greater-than."""
+        self.emit("  {dest} = fcmp ogt {ty} {lhs}, {rhs}")
+
+    me emit_fcmp_oge(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit floating-point ordered greater-or-equal."""
+        self.emit("  {dest} = fcmp oge {ty} {lhs}, {rhs}")
+
+    # === Memory Operations ===
+
+    me emit_memcpy(dest: text, src: text, size: text):
+        """Emit memcpy intrinsic."""
+        val st = self.size_type
+        self.emit("  call void @llvm.memcpy.p0.p0.{st}(ptr {dest}, ptr {src}, {st} {size}, i1 false)")
+
+    me emit_memset(dest: text, value: text, size: text):
+        """Emit memset intrinsic."""
+        val st = self.size_type
+        self.emit("  call void @llvm.memset.p0.{st}(ptr {dest}, i8 {value}, {st} {size}, i1 false)")
+
+    me emit_gep(dest: text, base_ty: text, ptr: text, indices: [text]):
+        """Emit getelementptr instruction."""
+        val idx_str = indices.join(", ")
+        self.emit("  {dest} = getelementptr {base_ty}, ptr {ptr}, {idx_str}")
+
+    # === Function Calls ===
+
+    me emit_call(dest: text?, ret_ty: text, func: text, args: [text]):
+        """Emit direct call instruction."""
+        val args_str = args.join(", ")
+        if dest.?:
+            self.emit("  {dest.unwrap()} = call {ret_ty} @{func}({args_str})")
+        else:
+            self.emit("  call {ret_ty} @{func}({args_str})")
+
+    me emit_call_indirect(dest: text?, ret_ty: text, func_ptr: text, args: [text]):
+        """Emit indirect call through function pointer."""
+        val args_str = args.join(", ")
+        if dest.?:
+            self.emit("  {dest.unwrap()} = call {ret_ty} {func_ptr}({args_str})")
+        else:
+            self.emit("  call {ret_ty} {func_ptr}({args_str})")
+
+    me emit_ret(ty: text, value: text):
+        """Emit return instruction."""
+        self.emit("  ret {ty} {value}")
+
+    me emit_ret_void():
+        """Emit void return."""
+        self.emit("  ret void")
+
+    me emit_br(label: text):
+        """Emit unconditional branch."""
+        self.emit("  br label %{label}")
+
+    me emit_cond_br(cond: text, true_label: text, false_label: text):
+        """Emit conditional branch."""
+        self.emit("  br i1 {cond}, label %{true_label}, label %{false_label}")
+
+    me emit_switch(value: text, ty: text, default_label: text, cases: [(text, text)]):
+        """Emit switch instruction."""
+        var line = "  switch {ty} {value}, label %{default_label} ["
+        self.emit(line)
+        for (case_val, case_label) in cases:
+            self.emit("    {ty} {case_val}, label %{case_label}")
+        self.emit("  ]")
+
+    me emit_label(name: text):
+        """Emit a label."""
+        self.emit("{name}:")
+
+    # === Debug Info (DWARF) ===
+
+    me emit_debug_info_header(filename: text, directory: text):
+        """Emit DWARF debug info metadata."""
+        self.emit("")
+        self.emit("; Debug information")
+        self.emit("!llvm.dbg.cu = !{!0}")
+        self.emit("!llvm.module.flags = !{!1, !2}")
+        self.emit("")
+        self.emit("!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !3, producer: \"simple-compiler\", isOptimized: false, emissionKind: FullDebug)")
+        self.emit("!1 = !{i32 2, !\"Dwarf Version\", i32 4}")
+        self.emit("!2 = !{i32 2, !\"Debug Info Version\", i32 3}")
+        self.emit("!3 = !DIFile(filename: \"{filename}\", directory: \"{directory}\")")
+
+    me emit_di_subprogram(id: i64, name: text, line: i64):
+        """Emit DISubprogram metadata for a function."""
+        self.emit("!{id} = distinct !DISubprogram(name: \"{name}\", scope: !3, file: !3, line: {line}, type: !{id + 1}, unit: !0)")
+        self.emit("!{id + 1} = !DISubroutineType(types: !{id + 2})")
+        self.emit("!{id + 2} = !{null}")
+
+    me next_debug_id() -> i64:
+        """Get next debug metadata ID."""
+        val id = self.debug_counter
+        self.debug_counter = self.debug_counter + 1
+        id
+
+    # === TBAA Metadata ===
+
+    me emit_tbaa_hierarchy():
+        """Emit TBAA type hierarchy for Simple language types.
+
+        Simple has strict typing with no type punning, enabling aggressive alias analysis.
+        Hierarchy: root -> int/float/ptr/struct subtypes.
+        """
+        val base = self.tbaa_counter
+        self.emit("")
+        self.emit("; TBAA metadata")
+        self.emit("!{base} = !{!\"Simple TBAA\"}")
+        self.emit("!{base + 1} = !{!\"int\", !{base}, i64 0}")
+        self.emit("!{base + 2} = !{!\"float\", !{base}, i64 0}")
+        self.emit("!{base + 3} = !{!\"ptr\", !{base}, i64 0}")
+        self.emit("!{base + 4} = !{!\"bool\", !{base}, i64 0}")
+        self.emit("!{base + 5} = !{!\"struct\", !{base}, i64 0}")
+        # Access tags (type, type, offset)
+        self.emit("!{base + 6} = !{!{base + 1}, !{base + 1}, i64 0}")
+        self.emit("!{base + 7} = !{!{base + 2}, !{base + 2}, i64 0}")
+        self.emit("!{base + 8} = !{!{base + 3}, !{base + 3}, i64 0}")
+        self.emit("!{base + 9} = !{!{base + 4}, !{base + 4}, i64 0}")
+        self.emit("!{base + 10} = !{!{base + 5}, !{base + 5}, i64 0}")
+        self.tbaa_counter = base + 11
+
+    fn tbaa_tag_for_type(ty: text) -> i64:
+        """Get TBAA access tag metadata ID for a given LLVM type."""
+        val base = 100  # Must match tbaa_counter initial value
+        if ty == "i64" or ty == "i32" or ty == "i16" or ty == "i8":
+            return base + 6
+        if ty == "double" or ty == "float":
+            return base + 7
+        if ty == "ptr":
+            return base + 8
+        if ty == "i1":
+            return base + 9
+        # Default: struct tag
+        base + 10
+
+    me emit_load_tbaa(dest: text, ty: text, ptr: text):
+        """Emit load with TBAA metadata for better alias analysis."""
+        val alignment = natural_alignment(ty)
+        val tag = self.tbaa_tag_for_type(ty)
+        self.emit("  {dest} = load {ty}, ptr {ptr}, align {alignment}, !tbaa !{tag}")
+
+    me emit_store_tbaa(ty: text, value: text, ptr: text):
+        """Emit store with TBAA metadata."""
+        val alignment = natural_alignment(ty)
+        val tag = self.tbaa_tag_for_type(ty)
+        self.emit("  store {ty} {value}, ptr {ptr}, align {alignment}, !tbaa !{tag}")
+
+    fn build() -> text:
+        """Build final IR string."""
+        self.instructions.join("\n")
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn natural_alignment(ty: text) -> i64:
+    """Return natural alignment in bytes for an LLVM type."""
+    if ty == "i1":
+        return 1
+    if ty == "i8":
+        return 1
+    if ty == "i16":
+        return 2
+    if ty == "i32" or ty == "float":
+        return 4
+    if ty == "i64" or ty == "double" or ty == "ptr":
+        return 8
+    # Default for structs/arrays
+    8
+
+fn is_integer_type(ty: text) -> bool:
+    """Check if an LLVM type is an integer type (for nsw/nuw flags)."""
+    if ty == "i8" or ty == "i16" or ty == "i32" or ty == "i64":
+        return true
+    false
+
+fn is_signed_int_type(ty: text) -> bool:
+    """Check if type is used as signed integer (i32/i64 in Simple)."""
+    ty == "i32" or ty == "i64"
+
+# Desugared static methods
+fn LlvmIRBuilder__create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
+    LlvmIRBuilder__create(name, target)
+
+# Re-export for backward compatibility
+export LlvmPass, passes_for_level
+export LlvmIRBuilder
+export LlvmIRBuilder__create
+export natural_alignment, is_integer_type, is_signed_int_type

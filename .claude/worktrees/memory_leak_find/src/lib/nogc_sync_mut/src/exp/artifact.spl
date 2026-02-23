@@ -1,0 +1,279 @@
+# Experiment Artifact Store - Content-addressed artifacts
+#
+# Each run can register artifacts (files, checkpoints, models).
+# Artifacts are stored as content-addressed blobs (SHA256 dedup).
+# Per-run artifacts.sdn tracks references to blobs with metadata.
+
+use std.exp.storage
+use std.db_atomic.{atomic_read, atomic_write, DbConfig}
+use app.io.{time_now_unix_micros}
+
+extern fn rt_file_exists(path: str) -> bool
+
+# ============================================================================
+# Artifact Entry
+# ============================================================================
+
+struct ArtifactEntry:
+    """Reference to a stored artifact."""
+    name: text
+    blob_hash: text
+    kind: text          # "file", "checkpoint", "model", "data"
+    metadata: Dict<text, text>
+    timestamp: text
+
+impl ArtifactEntry:
+    fn to_sdn_line() -> text:
+        """Serialize to SDN line."""
+        var meta_parts: [text] = []
+        for key in self.metadata.keys():
+            meta_parts.push("{key}=\"{self.metadata[key]}\"")
+        val meta_str = meta_parts.join(", ")
+        "  {self.name}: hash=\"{self.blob_hash}\", kind=\"{self.kind}\", time=\"{self.timestamp}\", {meta_str}"
+
+# ============================================================================
+# Artifact Store
+# ============================================================================
+
+struct ArtifactStore:
+    """Manages artifacts for a single run."""
+    run_id: text
+    entries: [ArtifactEntry]
+
+impl ArtifactStore:
+    static fn for_run(run_id: text) -> ArtifactStore:
+        """Create or load artifact store for a run."""
+        val entries = load_artifacts(run_id)
+        ArtifactStore(run_id: run_id, entries: entries)
+
+    me register_file(name: text, source_path: text, metadata: Dict<text, text>) -> text:
+        """Register a file as an artifact. Returns blob hash."""
+        val hash = store_blob_file(source_path)
+        val entry = ArtifactEntry(
+            name: name,
+            blob_hash: hash,
+            kind: "file",
+            metadata: metadata,
+            timestamp: "{time_now_unix_micros()}"
+        )
+        self.entries.push(entry)
+        save_artifacts(self.run_id, self.entries)
+
+        # Log event
+        var data: Dict<text, text> = {}
+        data["name"] = name
+        data["hash"] = hash
+        data["kind"] = "file"
+        val event = Event(timestamp: entry.timestamp, kind: "artifact", data: data)
+        append_event(self.run_id, event)
+
+        hash
+
+    me register_checkpoint(name: text, source_path: text, step: i64, metadata: Dict<text, text>) -> text:
+        """Register a checkpoint artifact. Returns blob hash."""
+        val hash = store_blob_file(source_path)
+        var full_meta = metadata
+        full_meta["step"] = "{step}"
+        val entry = ArtifactEntry(
+            name: name,
+            blob_hash: hash,
+            kind: "checkpoint",
+            metadata: full_meta,
+            timestamp: "{time_now_unix_micros()}"
+        )
+        self.entries.push(entry)
+        save_artifacts(self.run_id, self.entries)
+
+        var data: Dict<text, text> = {}
+        data["name"] = name
+        data["hash"] = hash
+        data["kind"] = "checkpoint"
+        data["step"] = "{step}"
+        val event = Event(timestamp: entry.timestamp, kind: "artifact", data: data)
+        append_event(self.run_id, event)
+
+        hash
+
+    me register_data(name: text, content: text, metadata: Dict<text, text>) -> text:
+        """Register inline data as an artifact. Returns blob hash."""
+        val hash = store_blob(content)
+        val entry = ArtifactEntry(
+            name: name,
+            blob_hash: hash,
+            kind: "data",
+            metadata: metadata,
+            timestamp: "{time_now_unix_micros()}"
+        )
+        self.entries.push(entry)
+        save_artifacts(self.run_id, self.entries)
+
+        hash
+
+    fn get_artifact(name: text) -> ArtifactEntry?:
+        """Get artifact entry by name."""
+        for entry in self.entries:
+            if entry.name == name:
+                return Some(entry)
+        nil
+
+    fn get_blob(name: text) -> text?:
+        """Read artifact blob content by name."""
+        val entry = self.get_artifact(name)
+        if entry.?:
+            read_blob(entry.unwrap().blob_hash)
+        else:
+            nil
+
+    fn list_artifacts() -> [ArtifactEntry]:
+        """List all artifacts for this run."""
+        self.entries
+
+    fn referenced_hashes() -> [text]:
+        """Get all blob hashes referenced by this run's artifacts."""
+        self.entries.map(\e: e.blob_hash)
+
+# ============================================================================
+# Persistence
+# ============================================================================
+
+fn save_artifacts(run_id: text, entries: [ArtifactEntry]):
+    """Save artifacts list to run's artifacts.sdn."""
+    var lines: [text] = ["# Artifacts for run {run_id}", "artifacts:"]
+    for entry in entries:
+        lines.push(entry.to_sdn_line())
+    val content = lines.join("\n") + "\n"
+    val path = "{run_dir_path(run_id)}/artifacts.sdn"
+    file_write(path, content)
+
+fn load_artifacts(run_id: text) -> [ArtifactEntry]:
+    """Load artifacts from run's artifacts.sdn (Phase 3.1 - TODO #214 ✅)."""
+    val path = "{run_dir_path(run_id)}/artifacts.sdn"
+    if not rt_file_exists(path):
+        return []
+
+    # Parse SDN artifacts file
+    use std.sdn.{parse, SdnValue}
+
+    val content = file_read_text(path)
+    val parse_result = parse(content)
+    if not parse_result.is_ok():
+        eprintln("[WARNING] Failed to parse artifacts SDN: {parse_result.unwrap_err()}")
+        return []
+
+    val sdn_value = parse_result.unwrap()
+
+    # Extract artifacts from SDN
+    extract_artifacts_from_sdn(sdn_value)
+
+fn file_write(path: text, content: text):
+    """Atomically write file with backup."""
+    val result = atomic_write(path, content, DbConfig__defaults())
+    if not result.is_ok():
+        eprintln("[WARNING] Failed to write {path}: {result.unwrap_err()}")
+        return
+
+# ============================================================================
+# Garbage Collection
+# ============================================================================
+
+pub fn gc_artifacts() -> i64:
+    """Remove unreferenced blobs. Returns number of blobs deleted."""
+    # Collect all referenced hashes across all runs
+    var referenced: Dict<text, bool> = {}
+    val run_ids = list_run_ids()
+    for run_id in run_ids:
+        val store = ArtifactStore__for_run(run_id)
+        for hash in store.referenced_hashes():
+            referenced[hash] = true
+
+    # Delete unreferenced blobs
+    var deleted = 0
+    val all_hashes = list_blob_hashes()
+    for hash in all_hashes:
+        if not referenced.contains_key(hash):
+            if delete_blob(hash):
+                deleted = deleted + 1
+    deleted
+
+# ============================================================================
+# SDN Helper Functions
+# ============================================================================
+
+fn extract_artifacts_from_sdn(sdn_value: SdnValue) -> [ArtifactEntry]:
+    """Extract artifact entries from parsed SDN value.
+
+    Args:
+        sdn_value: Parsed SDN value (should be Dict with artifacts)
+
+    Returns:
+        List of artifact entries
+
+    Example SDN format:
+        artifacts:
+            model_checkpoint: hash="abc123", kind="checkpoint", time="2024-01-01"
+            final_model: hash="def456", kind="model", time="2024-01-02"
+    """
+    use std.sdn.{SdnValue}
+
+    var entries: [ArtifactEntry] = []
+
+    match sdn_value:
+        case SdnValue.Dict(d):
+            # Look for "artifacts" key
+            if d.contains_key("artifacts"):
+                val artifacts_value = d["artifacts"]
+                match artifacts_value:
+                    case SdnValue.Dict(artifacts_dict):
+                        # Each key is an artifact name
+                        for name in artifacts_dict.keys():
+                            val artifact_value = artifacts_dict[name]
+                            match artifact_value:
+                                case SdnValue.Dict(meta):
+                                    # Extract fields
+                                    var blob_hash = ""
+                                    var kind = "file"
+                                    var timestamp = ""
+                                    var metadata: Dict<text, text> = {}
+
+                                    if meta.contains_key("hash"):
+                                        match meta["hash"]:
+                                            case SdnValue.String(s): blob_hash = s
+                                            case _: ()
+
+                                    if meta.contains_key("kind"):
+                                        match meta["kind"]:
+                                            case SdnValue.String(s): kind = s
+                                            case _: ()
+
+                                    if meta.contains_key("time"):
+                                        match meta["time"]:
+                                            case SdnValue.String(s): timestamp = s
+                                            case _: ()
+
+                                    # Collect other metadata
+                                    for key in meta.keys():
+                                        if key != "hash" and key != "kind" and key != "time":
+                                            match meta[key]:
+                                                case SdnValue.String(s):
+                                                    metadata[key] = s
+                                                case _: ()
+
+                                    entries.push(ArtifactEntry(
+                                        name: name,
+                                        blob_hash: blob_hash,
+                                        kind: kind,
+                                        metadata: metadata,
+                                        timestamp: timestamp
+                                    ))
+                                case _: ()
+                    case _: ()
+        case _: ()
+
+    entries
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ArtifactEntry, ArtifactStore
+export gc_artifacts

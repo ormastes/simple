@@ -1,0 +1,306 @@
+# Unified Execution Framework
+# Provides transparent local/remote execution for tests and debugging
+# Routes execution through appropriate debug adapter (GDB, Local)
+
+use app.dap.adapter.mod.{DebugAdapter, AdapterConfig}
+use app.dap.adapter.gdb_mi.GdbMiAdapter
+use app.dap.adapter.local.LocalAdapter
+use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+
+# Execution target configuration
+# Describes where and how to execute a program (local interpreter or remote target)
+#
+# Example:
+#     val config = ExecutionConfig.local("bin/simple")
+#     config.execution_timeout_ms = 10000  # 10 seconds
+class ExecutionConfig:
+    target: text                 # Target type: "local", "riscv32-qemu", "x86_64-qemu"
+    program: text                # Program path to execute/debug
+    args: [text]                 # Command-line arguments for program
+
+    # Remote target settings (only for QEMU/GDB targets)
+    host: text                   # Remote host address (e.g., "localhost")
+    port: i32                    # GDB stub port number (e.g., 1234)
+
+    # Test isolation settings (prevent state leakage between tests)
+    clear_context: bool          # Clear interpreter state between test runs
+    reload_program: bool         # Reload program binary (for remote targets)
+
+    # Timeouts (milliseconds)
+    execution_timeout_ms: i64    # Maximum time for full execution
+    operation_timeout_ms: i64    # Maximum time for single operation (step, continue, etc.)
+
+    # Create configuration for local execution (interpreter mode)
+    # Fast execution with context clearing for test isolation
+    static fn local(program: text) -> ExecutionConfig:
+        ExecutionConfig(
+            target: "local",
+            program: program,
+            args: [],
+            host: "",
+            port: 0,
+            clear_context: true,
+            reload_program: false,
+            execution_timeout_ms: 30000,
+            operation_timeout_ms: 5000
+        )
+
+    # Create configuration for RISC-V 32-bit QEMU emulation
+    # Connects via GDB stub for debugging and test execution
+    static fn qemu_riscv32(program: text, gdb_port: i32) -> ExecutionConfig:
+        ExecutionConfig(
+            target: "riscv32-qemu",
+            program: program,
+            args: [],
+            host: "localhost",
+            port: gdb_port,
+            clear_context: false,
+            reload_program: true,
+            execution_timeout_ms: 60000,
+            operation_timeout_ms: 10000
+        )
+
+    static fn qemu_x86_64(program: text, gdb_port: i32) -> ExecutionConfig:
+        ExecutionConfig(
+            target: "x86_64-qemu",
+            program: program,
+            args: [],
+            host: "localhost",
+            port: gdb_port,
+            clear_context: false,
+            reload_program: true,
+            execution_timeout_ms: 60000,
+            operation_timeout_ms: 10000
+        )
+
+    fn is_local() -> bool:
+        self.target == "local"
+
+    fn is_remote() -> bool:
+        not self.is_local()
+
+    fn uses_gdb() -> bool:
+        self.target.contains("qemu") or self.target.contains("gdb")
+
+
+# Execution result
+class ExecutionResult:
+    success: bool
+    output: text
+    exit_code: i32
+    error: text
+    duration_ms: i64
+
+    static fn ok(output: text, duration_ms: i64) -> ExecutionResult:
+        ExecutionResult(
+            success: true,
+            output: output,
+            exit_code: 0,
+            error: "",
+            duration_ms: duration_ms
+        )
+
+    static fn failure(error: text, exit_code: i32) -> ExecutionResult:
+        ExecutionResult(
+            success: false,
+            output: "",
+            exit_code: exit_code,
+            error: error,
+            duration_ms: 0
+        )
+
+# Test executor - transparently routes to local or remote execution
+# Wraps debug adapters (LocalAdapter, GdbMiAdapter) with unified interface
+#
+# Example:
+#     val config = ExecutionConfig.local("bin/simple")
+#     val executor = TestExecutor__create(config)?
+#     val result = executor.execute()?
+#     print "Completed in {result.duration_ms}ms"
+class TestExecutor:
+    config: ExecutionConfig      # Execution configuration (target, timeouts, etc.)
+    adapter: Option<DebugAdapter>  # Debug adapter instance (Local or GDB)
+    initialized: bool            # Whether adapter has been initialized
+
+fn TestExecutor__create(config: ExecutionConfig) -> Result<TestExecutor, text>:
+    var executor = TestExecutor(
+        config: config,
+        adapter: nil,
+        initialized: false
+    )
+
+    # Initialize adapter based on target
+    executor.initialize()?
+
+    Ok(executor)
+
+
+impl TestExecutor:
+    me initialize() -> Result<text, text>:
+        if self.initialized:
+            return Ok("already initialized")
+
+        # Create adapter config
+        val adapter_config = if self.config.is_local():
+            AdapterConfig__local(self.config.program)
+        elif self.config.uses_gdb():
+            AdapterConfig__gdb(self.config.host, self.config.port, self.config.program)
+        else:
+            return Err("unknown target: {self.config.target}")
+
+        # Create adapter
+        val adapter: DebugAdapter = if self.config.is_local():
+            LocalAdapter__create(adapter_config)
+        elif self.config.uses_gdb():
+            GdbMiAdapter__connect(adapter_config)?
+        else:
+            return Err("adapter not implemented for: {self.config.target}")
+
+        self.adapter = Some(adapter)
+        self.initialized = true
+        Ok("initialized {self.config.target} adapter")
+    fn execute() -> Result<ExecutionResult, text>:
+        if not self.initialized:
+            return Err("executor not initialized")
+
+        match self.adapter:
+            nil:
+                return Err("no adapter available")
+            Some(adapter):
+                # Attach to target
+                adapter.attach(self.config.program, self.config.args)?
+
+                # Clear context if needed (for test isolation)
+                if self.config.clear_context:
+                    adapter.clear_context()?
+
+                # Start execution
+                val start_time = get_timestamp_ms()
+                adapter.resume()?
+
+                # Wait for completion or timeout
+                # Poll adapter status until completion or timeout
+                var elapsed = 0
+                var completed = false
+                while elapsed < self.config.execution_timeout_ms:
+                    val status = adapter.get_status()
+                    if status == "stopped" or status == "exited" or status == "terminated":
+                        completed = true
+                        break
+                    # Brief pause before next check (1ms)
+                    elapsed = get_timestamp_ms() - start_time
+                val end_time = get_timestamp_ms()
+                val duration = end_time - start_time
+
+                # Detach from target
+                adapter.detach()?
+
+                Ok(ExecutionResult__ok("execution completed", duration))
+    fn execute_with_breakpoints(breakpoints: [(text, i32)]) -> Result<ExecutionResult, text>:
+        if not self.initialized:
+            return Err("executor not initialized")
+
+        match self.adapter:
+            nil:
+                return Err("no adapter available")
+            Some(adapter):
+                # Attach to target
+                adapter.attach(self.config.program, self.config.args)?
+
+                # Set breakpoints
+                for (file, line) in breakpoints:
+                    adapter.set_breakpoint(file, line)?
+
+                # Start execution
+                val start_time = get_timestamp_ms()
+                adapter.resume()?
+
+                # Wait for breakpoint or completion
+                var elapsed = 0
+                var hit_breakpoint = false
+                while elapsed < self.config.execution_timeout_ms:
+                    val status = adapter.get_status()
+                    if status == "stopped" or status == "breakpoint":
+                        hit_breakpoint = true
+                        break
+                    if status == "exited" or status == "terminated":
+                        break
+                    elapsed = get_timestamp_ms() - start_time
+
+                val end_time = get_timestamp_ms()
+                val duration = end_time - start_time
+
+                # Cleanup
+                adapter.detach()?
+
+                Ok(ExecutionResult__ok("execution with breakpoints completed", duration))
+    fn reset() -> Result<text, text>:
+        match self.adapter:
+            nil:
+                return Err("no adapter available")
+            Some(adapter):
+                # Clear context for test isolation
+                if self.config.clear_context:
+                    adapter.clear_context()?
+
+                # Reload program if configured
+                if self.config.reload_program:
+                    adapter.reload_program(self.config.program)?
+
+                Ok("executor reset")
+    fn cleanup():
+        match self.adapter:
+            Some(adapter):
+                adapter.detach()
+            nil:
+                pass
+# Helper functions
+
+fn get_timestamp_ms() -> i64:
+    use app.io.{time_now_unix_micros}
+    time_now_unix_micros() / 1000
+
+# Parse target string to ExecutionConfig
+# Supports "local", "riscv32-qemu", "x86_64-qemu", or "arch:host:port" format
+#
+# Example:
+#     val cfg1 = parse_target("local", "bin/simple")?
+#     val cfg2 = parse_target("riscv32-qemu", "test.elf")?
+#     val cfg3 = parse_target("riscv64-qemu:192.168.1.100:5678", "app.elf")?
+fn parse_target(target: text, program: text) -> Result<ExecutionConfig, text>:
+    match target:
+        "local":
+            Ok(ExecutionConfig__local(program))
+
+        "riscv32-qemu":
+            # Default GDB port for RISC-V QEMU
+            Ok(ExecutionConfig__qemu_riscv32(program, 1234))
+
+        "x86_64-qemu":
+            # Default GDB port for x86_64 QEMU
+            Ok(ExecutionConfig__qemu_x86_64(program, 1234))
+
+        _:
+            # Try to parse custom format: "arch-backend:host:port"
+            val parts = target.split(":")
+            if parts.len() >= 3:
+                val arch_backend = parts[0]
+                val host = parts[1]
+                val port = parts[2].parse_int() ?? 1234
+
+                if arch_backend.contains("qemu"):
+                    Ok(ExecutionConfig(
+                        target: arch_backend,
+                        program: program,
+                        args: [],
+                        host: host,
+                        port: port,
+                        clear_context: false,
+                        reload_program: true,
+                        execution_timeout_ms: 60000,
+                        operation_timeout_ms: 10000
+                    ))
+                else:
+                    Err("unknown target format: {target}")
+            else:
+                Err("invalid target: {target}")

@@ -1,0 +1,426 @@
+"""
+# Contract Runtime Specification
+
+**Feature IDs:** #CONTRACT-RT-001 to #CONTRACT-RT-031
+**Category:** Type System | Contracts
+**Status:** Implemented
+
+Tests that contract checks execute correctly at runtime, including
+preconditions, postconditions, invariants, and old() capture.
+
+## Contract Syntax
+
+```simple
+fn transfer(from: i64, to: i64, amount: i64) -> (i64, i64):
+    in:
+        amount > 0
+        from >= amount
+    invariant:
+        from >= 0
+        to >= 0
+    out(res):
+        res.0 == old(from) - amount
+        res.1 == old(to) + amount
+    # function body
+```
+"""
+
+
+
+# ============================================================================
+# Test Group 1: Basic old() Capture
+# ============================================================================
+
+describe "Basic old() Capture":
+    """
+    ## Pre-State Capture
+
+    Tests that old() correctly captures values before function execution.
+    """
+
+    it "captures simple parameter value":
+        fn increment(x: i64) -> i64:
+            out(ret):
+                ret == old(x) + 1
+            x + 1
+        expect increment(41) == 42
+
+    it "captures multiple parameters":
+        fn swap_and_sum(a: i64, b: i64) -> i64:
+            out(ret):
+                ret == old(a) + old(b)
+            a + b
+        expect swap_and_sum(20, 22) == 42
+
+    it "captures field access":
+        class Counter:
+            value: i64
+
+            me increment():
+                out(_):
+                    self.value == old(self.value) + 1
+                self.value = self.value + 1
+
+        var c = Counter(value: 41)
+        c.increment()
+        expect c.value == 42
+
+    it "captures complex expression":
+        fn double_and_square(x: i64) -> i64:
+            out(ret):
+                ret == (old(x) * 2) * (old(x) * 2)
+            val doubled = x * 2
+            doubled * doubled
+        expect double_and_square(3) == 36
+
+
+# ============================================================================
+# Test Group 2: Precondition Lowering
+# ============================================================================
+
+describe "Precondition Lowering":
+    """
+    ## Input Validation
+
+    Tests that preconditions are checked before function execution.
+    """
+
+    it "validates basic precondition":
+        fn divide(a: i64, b: i64) -> i64:
+            in:
+                b != 0
+            a / b
+        expect divide(84, 2) == 42
+
+    it "validates multiple preconditions":
+        fn bounded_divide(a: i64, b: i64, max: i64) -> i64:
+            in:
+                b != 0
+                a >= 0
+                b > 0
+                max > 0
+                a <= max
+            a / b
+        expect bounded_divide(84, 2, 100) == 42
+
+
+# ============================================================================
+# Test Group 3: Postcondition Lowering
+# ============================================================================
+
+describe "Postcondition Lowering":
+    """
+    ## Output Validation
+
+    Tests that postconditions are checked after function execution.
+    """
+
+    it "validates basic postcondition":
+        fn abs_value(x: i64) -> i64:
+            out(ret):
+                ret >= 0
+            if x < 0:
+                -x
+            else:
+                x
+        expect abs_value(-42) == 42
+
+    it "validates multiple postconditions":
+        fn compute_positive(x: i64) -> i64:
+            out(ret):
+                ret > 0
+                ret >= x
+                ret <= x + 100
+            x + 10
+        expect compute_positive(32) == 42
+
+
+# ============================================================================
+# Test Group 4: Invariant Lowering
+# ============================================================================
+
+describe "Invariant Lowering":
+    """
+    ## Invariant Checking
+
+    Tests that invariants hold throughout function execution.
+    """
+
+    it "validates basic invariant":
+        fn process(x: i64) -> i64:
+            invariant:
+                x >= 0
+            x + 1
+        expect process(41) == 42
+
+
+# ============================================================================
+# Test Group 5: Combined Contracts with old()
+# ============================================================================
+
+describe "Combined Contracts with old()":
+    """
+    ## Full Contract Specification
+
+    Tests functions with precondition, postcondition, and invariant.
+    """
+
+    it "validates transfer function":
+        fn transfer(from_balance: i64, to_balance: i64, amount: i64) -> (i64, i64):
+            in:
+                amount > 0
+                from_balance >= amount
+            invariant:
+                from_balance >= 0
+                to_balance >= 0
+            out(res):
+                res.0 == old(from_balance) - amount
+                res.1 == old(to_balance) + amount
+                res.0 + res.1 == old(from_balance) + old(to_balance)
+            val new_from = from_balance - amount
+            val new_to = to_balance + amount
+            (new_from, new_to)
+
+        val (from, to) = transfer(100, 50, 30)
+        expect from == 70
+        expect to == 80
+
+    it "validates custom binding in postcondition":
+        fn compute(x: i64) -> i64:
+            out(res):
+                res > old(x)
+            x + 10
+        expect compute(32) == 42
+
+
+# ============================================================================
+# Test Group 6: Multiple old() References
+# ============================================================================
+
+describe "Multiple old() References":
+    """
+    ## Repeated old() Usage
+
+    Tests multiple references to same old() expression.
+    """
+
+    it "handles multiple references to same old()":
+        fn double_check(x: i64) -> i64:
+            out(ret):
+                ret == old(x) * 2
+                ret > old(x)
+                ret - old(x) == old(x)
+            x * 2
+        expect double_check(21) == 42
+
+    it "handles old() with different params":
+        fn combine(x: i64, y: i64, z: i64) -> i64:
+            out(ret):
+                ret > old(x)
+                ret > old(y)
+                ret > old(z)
+                ret == old(x) + old(y) + old(z)
+            x + y + z
+        expect combine(10, 15, 17) == 42
+
+
+# ============================================================================
+# Test Group 7: Error Postconditions
+# ============================================================================
+
+describe "Error Postconditions":
+    """
+    ## out_err Contract
+
+    Tests postconditions for error cases.
+    """
+
+    it "parses error postcondition":
+        fn divide_safe(a: i64, b: i64) -> i64:
+            in:
+                b != 0
+            out(ret):
+                ret == a / b
+            a / b
+        expect divide_safe(84, 2) == 42
+
+    it "validates success and error postconditions":
+        fn validate_age(age: i64) -> bool:
+            in:
+                age >= 0
+            out(ret):
+                ret == true or ret == false
+            if age >= 18:
+                true
+            else:
+                false
+        expect validate_age(21) == true
+
+
+# ============================================================================
+# Test Group 8: Complex Contract Scenarios
+# ============================================================================
+
+describe "Complex Contract Scenarios":
+    """
+    ## Advanced Contract Usage
+
+    Tests complex contract combinations.
+    """
+
+    it "validates nested old expressions":
+        fn complex_math(x: i64, y: i64) -> i64:
+            out(ret):
+                ret == (old(x) + old(y)) * 2
+                ret > old(x)
+                ret > old(y)
+            (x + y) * 2
+        expect complex_math(10, 11) == 42
+
+    it "validates arithmetic contracts":
+        fn increment_by_ten(x: i64) -> i64:
+            out(ret):
+                ret == old(x) + 10
+                ret - old(x) == 10
+            x + 10
+        expect increment_by_ten(32) == 42
+
+    it "validates comparison chain contracts":
+        fn clamp(x: i64, min: i64, max: i64) -> i64:
+            in:
+                min <= max
+                min >= 0
+                max >= 0
+            out(ret):
+                ret >= min
+                ret <= max
+            if x < min:
+                min
+            elif x > max:
+                max
+            else:
+                x
+        expect clamp(42, 0, 100) == 42
+        expect clamp(200, 0, 100) == 100
+        expect clamp(-10, 0, 100) == 0
+
+
+# ============================================================================
+# Test Group 9: All Contract Types Together
+# ============================================================================
+
+describe "All Contract Types Together":
+    """
+    ## Complete Contract Specification
+
+    Tests functions with all contract types.
+    """
+
+    it "validates full contract":
+        fn full_contract(x: i64, y: i64) -> i64:
+            in:
+                x > 0
+                y > 0
+            invariant:
+                x > 0
+                y > 0
+            out(ret):
+                ret > old(x)
+                ret > old(y)
+                ret == old(x) + old(y)
+            x + y
+        expect full_contract(20, 22) == 42
+
+
+# ============================================================================
+# Test Group 10: Contract with Boolean Logic
+# ============================================================================
+
+describe "Contract with Boolean Logic":
+    """
+    ## Boolean Contract Expressions
+
+    Tests contracts using boolean operators.
+    """
+
+    it "validates boolean logic contract":
+        fn validate_range(x: i64, y: i64) -> bool:
+            in:
+                x >= 0
+                y >= 0
+            out(ret):
+                ret == true
+            x >= 0 and y >= 0
+        expect validate_range(10, 20) == true
+
+    it "validates negation contract":
+        fn ensure_nonzero(x: i64) -> i64:
+            in:
+                x != 0
+            out(ret):
+                ret != 0
+            x
+        expect ensure_nonzero(42) == 42
+
+
+# ============================================================================
+# Test Group 11: Contract with Conditionals
+# ============================================================================
+
+describe "Contract with Conditionals":
+    """
+    ## Contracts in Branching Code
+
+    Tests contracts work with conditional logic.
+    """
+
+    it "validates conditional contract":
+        fn abs_with_contract(x: i64) -> i64:
+            out(ret):
+                ret >= 0
+            if x >= 0:
+                x
+            else:
+                -x
+        expect abs_with_contract(-42) == 42
+
+    it "validates early return contract":
+        fn early_exit(x: i64) -> i64:
+            in:
+                x >= 0
+            out(ret):
+                ret >= 0
+            if x == 0:
+                return 1
+            x
+        expect early_exit(0) == 1
+        expect early_exit(42) == 42
+
+
+# ============================================================================
+# Test Group 12: old() with Arithmetic
+# ============================================================================
+
+describe "old() with Arithmetic Expressions":
+    """
+    ## Arithmetic in old() Capture
+
+    Tests old() capturing arithmetic expressions.
+    """
+
+    it "captures arithmetic in old()":
+        fn double_and_increment(x: i64) -> i64:
+            out(ret):
+                ret == (old(x) * 2) + 1
+            val doubled = x * 2
+            doubled + 1
+        expect double_and_increment(20) == 41
+
+    it "references parameter in postcondition":
+        fn sum_with_check(a: i64, b: i64) -> i64:
+            out(ret):
+                ret >= a
+                ret >= b
+            a + b
+        expect sum_with_check(20, 22) == 42
+

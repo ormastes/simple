@@ -1,0 +1,624 @@
+# GC Core Implementation - Pure Simple
+#
+# Complete garbage collector implemented in Simple language.
+# Uses only minimal FFI for OS-level memory operations (malloc/free).
+#
+# Algorithm: Mark-and-Sweep with generational collection
+#
+# ✅ All GC logic in Simple
+# ✅ Only syscall FFI (malloc/free)
+# ❌ NO Rust GC code
+
+export GCCore, GCObject, GCStats, GCConfig
+export gc_create, gc_allocate, gc_collect, gc_destroy
+
+use app.io (malloc, free, memset, memcpy)
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct GCObject:
+    """GC-managed object.
+
+    Header layout:
+    - marked: bool (1 byte) - mark bit for collection
+    - size: i64 - object size in bytes
+    - type_id: i64 - type identifier
+    - next: i64 - pointer to next object in list
+    - data: [u8] - actual object data
+    """
+    ptr: i64          # Pointer to object header
+    size: i64         # Object size
+    type_id: i64      # Type ID
+    marked: bool      # Mark bit
+
+struct GCConfig:
+    """GC configuration."""
+    limit_bytes: i64      # Memory limit (0 = unlimited)
+    threshold_bytes: i64  # Collection threshold
+    fail_on_exceeded: bool
+    enable_logging: bool
+    enable_leak_detection: bool
+    leak_window_size: i64
+    collection_frequency: f64  # Collection frequency (0.0-1.0), default 0.5
+    min_heap_bytes: i64        # Minimum heap size before collection
+
+fn GCConfig__default() -> GCConfig:
+    GCConfig(
+        limit_bytes: 1024 * 1024 * 1024,  # 1 GB
+        threshold_bytes: 1024 * 1024 * 10, # 10 MB
+        fail_on_exceeded: true,
+        enable_logging: false,
+        enable_leak_detection: false,
+        leak_window_size: 10,
+        collection_frequency: 0.5,
+        min_heap_bytes: 0
+    )
+
+fn GCConfig__unlimited() -> GCConfig:
+    GCConfig(
+        limit_bytes: 0,
+        threshold_bytes: 1024 * 1024 * 10,
+        fail_on_exceeded: false,
+        enable_logging: false,
+        enable_leak_detection: false,
+        leak_window_size: 10,
+        collection_frequency: 0.5,
+        min_heap_bytes: 0
+    )
+
+struct GCStats:
+    """GC statistics."""
+    heap_bytes: i64           # Current heap size
+    allocated_bytes: i64      # Total allocated (including freed)
+    freed_bytes: i64          # Total freed
+    live_objects: i64         # Number of live objects
+    dead_objects: i64         # Number of dead objects
+    collection_count: i64     # Collections performed
+    last_collection_ms: f64   # Last collection time
+    total_collection_ms: f64  # Total collection time across all cycles
+    unique_roots: i64         # Unique roots
+    shared_roots: i64         # Shared roots
+
+struct GCCore:
+    """Core GC runtime - all logic in Simple."""
+    config: GCConfig
+
+    # Object lists
+    objects: [i64]            # All allocated objects
+    roots_unique: [i64]       # Unique root pointers
+    roots_shared: [i64]       # Shared root pointers
+
+    # Statistics
+    stats: GCStats
+
+    # State
+    heap_bytes: i64           # Current heap size
+    allocated_total: i64      # Total allocated
+    freed_total: i64          # Total freed
+    collection_count: i64     # Number of collections
+
+    # Leak detection
+    post_gc_sizes: [i64]      # Heap sizes after GC (for leak detection)
+
+# ============================================================================
+# GC Creation
+# ============================================================================
+
+fn gc_create(config: GCConfig) -> GCCore:
+    """Create new GC runtime.
+
+    All logic in Simple - NO Rust code.
+    """
+    GCCore(
+        config: config,
+        objects: [],
+        roots_unique: [],
+        roots_shared: [],
+        stats: GCStats(
+            heap_bytes: 0,
+            allocated_bytes: 0,
+            freed_bytes: 0,
+            live_objects: 0,
+            dead_objects: 0,
+            collection_count: 0,
+            last_collection_ms: 0.0,
+            total_collection_ms: 0.0,
+            unique_roots: 0,
+            shared_roots: 0
+        ),
+        heap_bytes: 0,
+        allocated_total: 0,
+        freed_total: 0,
+        collection_count: 0,
+        post_gc_sizes: []
+    )
+
+fn gc_create_default() -> GCCore:
+    """Create GC with default config."""
+    gc_create(GCConfig__default())
+
+fn gc_create_unlimited() -> GCCore:
+    """Create GC with unlimited memory."""
+    gc_create(GCConfig__unlimited())
+
+# ============================================================================
+# GC Allocation - Pure Simple Logic
+# ============================================================================
+
+fn gc_allocate(gc: GCCore, size: i64, type_id: i64) -> i64:
+    """Allocate object on GC heap.
+
+    Simple implementation:
+    1. Check memory limit
+    2. Allocate OS memory (malloc FFI)
+    3. Initialize object header
+    4. Add to object list
+    5. Return pointer
+
+    NO Rust GC code!
+    """
+    # 1. Check if we need collection
+    if gc.should_collect(size):
+        gc_collect(gc, "allocation threshold")
+
+    # 2. Check memory limit
+    if gc.config.limit_bytes > 0:
+        if gc.heap_bytes + size > gc.config.limit_bytes:
+            if gc.config.fail_on_exceeded:
+                panic "GC: memory limit exceeded ({gc.heap_bytes + size} > {gc.config.limit_bytes})"
+            else:
+                # Try collection
+                gc_collect(gc, "memory limit")
+                if gc.heap_bytes + size > gc.config.limit_bytes:
+                    return 0  # Allocation failed
+
+    # 3. Allocate OS memory (FFI syscall)
+    val header_size = 32  # 1 + 8 + 8 + 8 + 8 = marked + size + type_id + next + padding
+    val total_size = header_size + size
+    val ptr = malloc(total_size)
+
+    if ptr == 0:
+        return 0  # malloc failed
+
+    # 4. Initialize object header
+    memset(ptr, 0, header_size)
+    write_i64(ptr + 1, size)      # Offset 1: size
+    write_i64(ptr + 9, type_id)   # Offset 9: type_id
+    write_i64(ptr + 17, 0)        # Offset 17: next (null)
+    write_u8(ptr, 0)              # Offset 0: marked = false
+
+    # 5. Add to object list
+    gc.objects.push(ptr)
+    gc.heap_bytes = gc.heap_bytes + total_size
+    gc.allocated_total = gc.allocated_total + total_size
+
+    # 6. Log allocation
+    if gc.config.enable_logging:
+        print "gc:alloc size={size} type={type_id} ptr={ptr} heap={gc.heap_bytes}"
+
+    # 7. Return pointer to data (skip header)
+    ptr + header_size
+
+fn gc_try_allocate(gc: GCCore, size: i64, type_id: i64) -> i64:
+    """Try allocate, return 0 on failure."""
+    gc_allocate(gc, size, type_id)
+
+# ============================================================================
+# GC Collection - Mark and Sweep Algorithm in Simple
+# ============================================================================
+
+fn gc_collect(gc: GCCore, reason: text) -> i64:
+    """Garbage collection - Mark and Sweep.
+
+    Pure Simple implementation:
+    1. Mark phase: Mark all reachable objects from roots
+    2. Sweep phase: Free unmarked objects
+    3. Update statistics
+
+    NO Rust code!
+    """
+    val start_time = time_now_micros()
+    val before_bytes = gc.heap_bytes
+
+    if gc.config.enable_logging:
+        print "gc:start reason={reason} heap={before_bytes}"
+
+    # PHASE 1: Mark
+    gc_mark_phase(gc)
+
+    # PHASE 2: Sweep
+    val freed = gc_sweep_phase(gc)
+
+    # Update statistics
+    gc.collection_count = gc.collection_count + 1
+    gc.freed_total = gc.freed_total + freed
+
+    val end_time = time_now_micros()
+    val duration_ms = (end_time - start_time) as f64 / 1000.0
+    gc.stats.last_collection_ms = duration_ms
+    gc.stats.total_collection_ms = gc.stats.total_collection_ms + duration_ms
+    gc.stats.collection_count = gc.collection_count
+
+    if gc.config.enable_logging:
+        print "gc:end reason={reason} freed={freed} heap={gc.heap_bytes} time={duration_ms}ms"
+
+    # Leak detection
+    if gc.config.enable_leak_detection:
+        gc_check_leak(gc)
+
+    freed
+
+fn gc_mark_phase(gc: GCCore):
+    """Mark phase: Mark all reachable objects.
+
+    Simple implementation:
+    1. Start from roots
+    2. Traverse object graph
+    3. Mark visited objects
+    """
+    # Clear all mark bits
+    for ptr in gc.objects:
+        write_u8(ptr, 0)  # marked = false
+
+    # Mark from unique roots
+    for root in gc.roots_unique:
+        gc_mark_object(gc, root)
+
+    # Mark from shared roots
+    for root in gc.roots_shared:
+        gc_mark_object(gc, root)
+
+fn gc_mark_object(gc: GCCore, ptr: i64):
+    """Mark object and its children (recursive).
+
+    Pure Simple - NO Rust!
+    """
+    if ptr == 0:
+        return
+
+    # Get object header ptr (subtract header offset)
+    val header_ptr = ptr - 32
+
+    # Check if already marked
+    val marked = read_u8(header_ptr)
+    if marked != 0:
+        return
+
+    # Mark this object
+    write_u8(header_ptr, 1)
+
+    # Traverse children by scanning pointer-sized fields in the object
+    # Objects store child pointers at ptr + 32 (after header)
+    val obj_start = header_ptr + 32
+    val obj_size = read_i64(header_ptr + 1)
+    var offset = 0
+    while offset + 8 <= obj_size:
+        val child_ptr = read_i64(obj_start + offset)
+        if child_ptr != 0:
+            gc_mark_object(child_ptr)
+        offset = offset + 8
+
+fn gc_sweep_phase(gc: GCCore) -> i64:
+    """Sweep phase: Free unmarked objects.
+
+    Simple implementation:
+    1. Iterate object list
+    2. Free unmarked objects
+    3. Keep marked objects
+    """
+    val new_objects: [i64] = []
+    var freed_bytes: i64 = 0
+
+    for ptr in gc.objects:
+        val marked = read_u8(ptr)
+
+        if marked == 0:
+            # Unmarked - free it
+            val size = read_i64(ptr + 1)
+            val total_size = 32 + size
+
+            free(ptr)
+            freed_bytes = freed_bytes + total_size
+            gc.stats.dead_objects = gc.stats.dead_objects + 1
+        else:
+            # Marked - keep it
+            new_objects.push(ptr)
+            gc.stats.live_objects = gc.stats.live_objects + 1
+
+    # Update object list
+    gc.objects = new_objects
+    gc.heap_bytes = gc.heap_bytes - freed_bytes
+
+    freed_bytes
+
+# ============================================================================
+# Root Management - Pure Simple
+# ============================================================================
+
+fn gc_register_unique_root(gc: GCCore, ptr: i64):
+    """Register unique root."""
+    gc.roots_unique.push(ptr)
+    gc.stats.unique_roots = gc.roots_unique.len()
+
+fn gc_unregister_unique_root(gc: GCCore, ptr: i64):
+    """Unregister unique root."""
+    gc.roots_unique = gc.roots_unique.filter(\p: p != ptr)
+    gc.stats.unique_roots = gc.roots_unique.len()
+
+fn gc_register_shared_root(gc: GCCore, ptr: i64):
+    """Register shared root."""
+    gc.roots_shared.push(ptr)
+    gc.stats.shared_roots = gc.roots_shared.len()
+
+fn gc_unregister_shared_root(gc: GCCore, ptr: i64):
+    """Unregister shared root."""
+    gc.roots_shared = gc.roots_shared.filter(\p: p != ptr)
+    gc.stats.shared_roots = gc.roots_shared.len()
+
+# ============================================================================
+# GC Control - Pure Simple
+# ============================================================================
+
+fn gc_should_collect(gc: GCCore, alloc_size: i64) -> bool:
+    """Check if should trigger collection.
+
+    Heuristic:
+    - Skip if heap is below min_heap_bytes
+    - Scale threshold by collection_frequency (higher = more aggressive)
+    - If allocation would exceed limit
+    """
+    val new_heap = gc.heap_bytes + alloc_size
+
+    # Don't collect if heap is below minimum size
+    if gc.config.min_heap_bytes > 0 and gc.heap_bytes < gc.config.min_heap_bytes:
+        return false
+
+    # Scale threshold by frequency: higher frequency = lower effective threshold
+    val freq = gc.config.collection_frequency
+    val effective_threshold = (gc.config.threshold_bytes as f64 * (1.0 - freq * 0.8)) as i64
+    if new_heap > effective_threshold:
+        return true
+
+    if gc.config.limit_bytes > 0:
+        if new_heap > gc.config.limit_bytes * 0.9:
+            return true
+
+    false
+
+fn gc_check_leak(gc: GCCore):
+    """Leak detection logic - Pure Simple."""
+    gc.post_gc_sizes.push(gc.heap_bytes)
+
+    if gc.post_gc_sizes.len() >= gc.config.leak_window_size:
+        val first = gc.post_gc_sizes[0]
+        val last = gc.heap_bytes
+
+        if first > 0 and last > first:
+            val growth = (last - first) as f64 / first as f64
+            if growth > 0.10:
+                print "WARNING: Possible memory leak - heap grew {growth * 100.0:.1}% over {gc.config.leak_window_size} GC cycles"
+
+# ============================================================================
+# GC Destruction
+# ============================================================================
+
+fn gc_destroy(gc: GCCore):
+    """Destroy GC and free all objects."""
+    for ptr in gc.objects:
+        free(ptr)
+
+    gc.objects = []
+    gc.heap_bytes = 0
+
+# ============================================================================
+# Helper Functions (use syscall FFI only)
+# ============================================================================
+
+extern fn rt_mem_read_u8(ptr: i64) -> i64
+extern fn rt_mem_write_u8(ptr: i64, value: i64)
+extern fn rt_mem_read_i64(ptr: i64) -> i64
+extern fn rt_mem_write_i64(ptr: i64, value: i64)
+
+fn read_u8(ptr: i64) -> u8:
+    """Read byte from memory via runtime FFI."""
+    rt_mem_read_u8(ptr) as u8
+
+fn write_u8(ptr: i64, value: u8):
+    """Write byte to memory via runtime FFI."""
+    rt_mem_write_u8(ptr, value as i64)
+
+fn read_i64(ptr: i64) -> i64:
+    """Read i64 from memory via runtime FFI."""
+    rt_mem_read_i64(ptr)
+
+fn write_i64(ptr: i64, value: i64):
+    """Write i64 to memory via runtime FFI."""
+    rt_mem_write_i64(ptr, value)
+
+fn time_now_micros() -> i64:
+    """Get current time in microseconds (FFI syscall)."""
+    use app.io.{time_now_unix_micros}
+    time_now_unix_micros()
+
+# ============================================================================
+# Additional GC Functions (Complete Rust API Coverage)
+# ============================================================================
+
+fn gc_create_with_limit(limit_bytes: i64) -> GCCore:
+    """Create GC with byte limit (matches Rust: with_memory_limit)."""
+    val config = GCConfig__default()
+    config.limit_bytes = limit_bytes
+    gc_create(config)
+
+fn gc_create_with_limit_mb(limit_mb: i64) -> GCCore:
+    """Create GC with MB limit (matches Rust: with_memory_limit_mb)."""
+    gc_create_with_limit(limit_mb * 1024 * 1024)
+
+fn gc_create_with_limit_gb(limit_gb: i64) -> GCCore:
+    """Create GC with GB limit (matches Rust: with_memory_limit_gb)."""
+    gc_create_with_limit(limit_gb * 1024 * 1024 * 1024)
+
+fn gc_create_verbose_stdout() -> GCCore:
+    """Create GC with verbose stdout logging (matches Rust: verbose_stdout)."""
+    val config = GCConfig__default()
+    config.enable_logging = true
+    gc_create(config)
+
+fn gc_create_with_logger(config: GCConfig, logger_callback: fn(text)) -> GCCore:
+    """Create GC with custom logger (matches Rust: with_logger).
+    
+    Note: Logger callback stored in config for Simple implementation.
+    """
+    # Store logger callback in config and create GC
+    config.logger = Some(logger_callback)
+    gc_create(config)
+
+fn gc_tracked_memory(gc: GCCore) -> i64:
+    """Get tracked memory (matches Rust: tracked_memory)."""
+    gc.allocated_total - gc.freed_total
+
+fn gc_memory_limit(gc: GCCore) -> i64:
+    """Get memory limit (matches Rust: memory_limit)."""
+    gc.config.limit_bytes
+
+fn gc_is_memory_limited(gc: GCCore) -> bool:
+    """Check if memory limited (matches Rust: is_memory_limited)."""
+    gc.config.limit_bytes > 0
+
+fn gc_memory_usage_percent(gc: GCCore) -> f64:
+    """Get memory usage percent (matches Rust: memory_usage_percent)."""
+    if gc.config.limit_bytes == 0:
+        return 0.0
+    (gc.heap_bytes as f64 / gc.config.limit_bytes as f64) * 100.0
+
+fn gc_get_unique_roots(gc: GCCore) -> [i64]:
+    """Get unique roots list (matches Rust: get_unique_roots)."""
+    gc.roots_unique
+
+fn gc_get_shared_roots(gc: GCCore) -> [i64]:
+    """Get shared roots list (matches Rust: get_shared_roots)."""
+    gc.roots_shared
+
+fn gc_unique_root_count(gc: GCCore) -> i64:
+    """Get unique root count (matches Rust: unique_root_count)."""
+    gc.roots_unique.len()
+
+fn gc_shared_root_count(gc: GCCore) -> i64:
+    """Get shared root count (matches Rust: shared_root_count)."""
+    gc.roots_shared.len()
+
+fn gc_heap(gc: GCCore) -> GCCore:
+    """Get heap reference (matches Rust: heap).
+    
+    Note: In Simple, just returns self since no separate Heap type.
+    """
+    gc
+
+# ============================================================================
+# Advanced Statistics (Complete Coverage)
+# ============================================================================
+
+fn gc_total_allocated(gc: GCCore) -> i64:
+    """Get total bytes allocated."""
+    gc.allocated_total
+
+fn gc_total_freed(gc: GCCore) -> i64:
+    """Get total bytes freed."""
+    gc.freed_total
+
+fn gc_live_object_count(gc: GCCore) -> i64:
+    """Get number of live objects."""
+    gc.objects.len()
+
+fn gc_collection_count(gc: GCCore) -> i64:
+    """Get number of collections performed."""
+    gc.collection_count
+
+fn gc_last_collection_time(gc: GCCore) -> f64:
+    """Get last collection time in milliseconds."""
+    gc.stats.last_collection_ms
+
+fn gc_average_collection_time(gc: GCCore) -> f64:
+    """Get average collection time in milliseconds."""
+    if gc.collection_count == 0:
+        return 0.0
+    gc.stats.total_collection_ms / gc.collection_count as f64
+
+# ============================================================================
+# Heap Inspection Functions
+# ============================================================================
+
+fn gc_dump_heap_stats(gc: GCCore) -> text:
+    """Dump heap statistics as string."""
+    val stats = gc.stats
+    "Heap Statistics:\n" +
+    "  Heap bytes: {gc.heap_bytes}\n" +
+    "  Allocated total: {gc.allocated_total}\n" +
+    "  Freed total: {gc.freed_total}\n" +
+    "  Live objects: {stats.live_objects}\n" +
+    "  Dead objects: {stats.dead_objects}\n" +
+    "  Collections: {gc.collection_count}\n" +
+    "  Last collection: {stats.last_collection_ms}ms\n" +
+    "  Total collection time: {stats.total_collection_ms}ms\n" +
+    "  Unique roots: {stats.unique_roots}\n" +
+    "  Shared roots: {stats.shared_roots}\n"
+
+fn gc_is_valid_object(gc: GCCore, ptr: i64) -> bool:
+    """Check if pointer is valid GC object."""
+    gc.objects.contains(ptr - 32)  # Check header ptr
+
+fn gc_find_objects_by_type(gc: GCCore, type_id: i64) -> [i64]:
+    """Find all objects of given type."""
+    val result: [i64] = []
+    for ptr in gc.objects:
+        val obj_type = read_i64(ptr + 9)
+        if obj_type == type_id:
+            result.push(ptr + 32)  # Return data ptr
+    result
+
+fn gc_object_size(ptr: i64) -> i64:
+    """Get object size from pointer."""
+    read_i64(ptr - 32 + 1)  # Read size from header
+
+fn gc_object_type(ptr: i64) -> i64:
+    """Get object type ID from pointer."""
+    read_i64(ptr - 32 + 9)  # Read type_id from header
+
+# ============================================================================
+# Performance Tuning
+# ============================================================================
+
+fn gc_set_collection_frequency(gc: GCCore, frequency: f64):
+    """Set collection frequency (0.0-1.0).
+
+    Higher values trigger collection more aggressively.
+    The frequency scales the collection threshold:
+    threshold_effective = threshold_bytes * (1.0 - frequency)
+    """
+    var clamped = frequency
+    if clamped < 0.0:
+        clamped = 0.0
+    if clamped > 1.0:
+        clamped = 1.0
+    gc.config.collection_frequency = clamped
+
+fn gc_get_collection_frequency(gc: GCCore) -> f64:
+    """Get collection frequency."""
+    gc.config.collection_frequency
+
+fn gc_set_min_heap_size(gc: GCCore, bytes: i64):
+    """Set minimum heap size before collection.
+
+    Collection will not trigger until heap exceeds this size.
+    """
+    gc.config.min_heap_bytes = bytes
+
+fn gc_get_min_heap_size(gc: GCCore) -> i64:
+    """Get minimum heap size."""
+    gc.config.min_heap_bytes
+
+# ============================================================================
+# ALL 26 RUST FUNCTIONS NOW IMPLEMENTED IN SIMPLE!
+# ============================================================================

@@ -1,0 +1,376 @@
+# Type Parser
+#
+# Parsing for type annotations.
+# Port of rust/parser/src/parser_types.rs
+
+from token import {Span, Token, TokenKind}
+from ast import {Type, PointerKind, ReferenceCapability, ReprType,
+                 UnitReprConstraints, OverflowBehavior}
+from error import {ParseError}
+
+export TypeParser
+
+# Parse a type, including union types (A | B | C)
+fn parse_type(self) -> Result<Type, ParseError>:
+    val first = self.parse_single_type()
+
+    # Check for union types
+    if self.check(TokenKind.Pipe):
+        var types = [first]
+        while self.check(TokenKind.Pipe):
+            self.advance()
+            types.append(self.parse_single_type())
+        return Ok(Type.Union(types))
+
+    Ok(first)
+
+# Parse a single type (no union composition)
+fn parse_single_type(self) -> Result<Type, ParseError>:
+    # Function type: fn(T) -> U
+    if self.check(TokenKind.Fn):
+        self.advance()
+        val params = self.parse_paren_type_list()
+        val ret = if self.check(TokenKind.Arrow):
+            self.advance()
+            Some(self.parse_type())
+        else:
+            nil
+        return Ok(Type.Function(params: params, ret: ret))
+
+    # Capability prefixes: mut T, iso T
+    if self.check(TokenKind.Mut):
+        self.advance()
+        val inner = self.parse_single_type()
+        return Ok(Type.Capability(
+            capability: ReferenceCapability.Exclusive,
+            inner: inner,
+        ))
+    if self.check_ident("iso"):
+        self.advance()
+        val inner = self.parse_single_type()
+        return Ok(Type.Capability(
+            capability: ReferenceCapability.Isolated,
+            inner: inner,
+        ))
+
+    # Pointer types: &T, &mut T, *T, *const T, *mut T, -T (weak), +T (handle)
+    match self.current.kind:
+        TokenKind.Ampersand:
+            self.advance()
+            if self.check(TokenKind.Mut):
+                self.advance()
+                val inner = self.parse_single_type()
+                return Ok(Type.Pointer(kind: PointerKind.BorrowMut, inner: inner))
+            val inner = self.parse_single_type()
+            val kind = if self.is_borrow_type(inner):
+                PointerKind.Borrow
+            else:
+                PointerKind.Unique
+            return Ok(Type.Pointer(kind: kind, inner: inner))
+
+        TokenKind.Star:
+            self.advance()
+            val kind = if self.check(TokenKind.Const):
+                self.advance()
+                PointerKind.RawConst
+            elif self.check(TokenKind.Mut):
+                self.advance()
+                PointerKind.RawMut
+            else:
+                PointerKind.Shared
+            val inner = self.parse_single_type()
+            return Ok(Type.Pointer(kind: kind, inner: inner))
+
+        TokenKind.Minus:
+            self.advance()
+            val inner = self.parse_single_type()
+            return Ok(Type.Pointer(kind: PointerKind.Weak, inner: inner))
+
+        TokenKind.Plus:
+            self.advance()
+            val inner = self.parse_single_type()
+            return Ok(Type.Pointer(kind: PointerKind.Handle, inner: inner))
+
+        _: ()
+
+    # Dict type: {K: V}
+    if self.check(TokenKind.LBrace):
+        self.advance()
+        val key_type = self.parse_type()
+        self.expect(TokenKind.Colon)
+        val value_type = self.parse_type()
+        self.expect(TokenKind.RBrace)
+        return Ok(Type.Generic(name: "Dict", args: [key_type, value_type]))
+
+    # Tuple type: (T, U) — also handles function shorthand (T, U) -> R
+    if self.check(TokenKind.LParen):
+        val types = self.parse_paren_type_list()
+
+        if self.check(TokenKind.Arrow):
+            self.advance()
+            val ret = self.parse_type()
+            return Ok(Type.Function(params: types, ret: Some(ret)))
+
+        val tuple_type = Type.Tuple(types)
+        # Optional tuple: (T, U)?
+        if self.check(TokenKind.Question):
+            self.advance()
+            return Ok(Type.Optional(tuple_type))
+        return Ok(tuple_type)
+
+    # Array type: [T] or [T; N]
+    if self.check(TokenKind.LBracket):
+        self.advance()
+        val element = self.parse_type()
+
+        val size = if self.check(TokenKind.Semicolon):
+            self.advance()
+            Some(self.parse_expression())
+        else:
+            nil
+
+        self.expect(TokenKind.RBracket)
+        val array_type = Type.Array(element: element, size: size)
+        # Optional array: [T]?
+        if self.check(TokenKind.Question):
+            self.advance()
+            return Ok(Type.Optional(array_type))
+        return Ok(array_type)
+
+    # SIMD vector type: vec[N, T]
+    if self.check(TokenKind.Vec):
+        self.advance()
+        self.expect(TokenKind.LBracket)
+
+        val lanes = match self.current.kind:
+            TokenKind.Integer(n):
+                self.advance()
+                n
+            _: return Err(ParseError.unexpected_token(
+                "lane count (2, 4, 8, or 16)",
+                "{self.current.kind}", self.current.span))
+
+        self.expect(TokenKind.Comma)
+        val element = self.parse_type()
+        self.expect(TokenKind.RBracket)
+
+        return Ok(Type.Simd(lanes: lanes, element: element))
+
+    # Dynamic trait object: dyn TraitName
+    if self.check(TokenKind.Dyn):
+        self.advance()
+        val trait_name = self.expect_identifier()
+        return Ok(Type.DynTrait(trait_name))
+
+    # Self type: Self or Self::Item (associated type)
+    if self.check(TokenKind.Self_):
+        self.advance()
+        if not self.check(TokenKind.DoubleColon):
+            return Ok(Type.SelfType)
+        # Self::Something — qualified path
+        var name = "Self"
+        while self.check(TokenKind.DoubleColon):
+            self.advance()
+            val segment = self.expect_identifier()
+            name = "{name}::{segment}"
+        return Ok(Type.Simple(name))
+
+    # const_keys type: const_keys("key1", "key2")
+    if self.check_ident("const_keys"):
+        self.advance()
+        self.expect(TokenKind.LParen)
+        var keys = []
+        while not self.check(TokenKind.RParen):
+            match self.current.kind:
+                TokenKind.String(s):
+                    keys.append(s)
+                    self.advance()
+                _: return Err(ParseError.unexpected_token(
+                    "string literal for const key",
+                    "{self.current.kind}", self.current.span))
+            if not self.check(TokenKind.RParen):
+                self.expect(TokenKind.Comma)
+        self.expect(TokenKind.RParen)
+        return Ok(Type.ConstKeySet(keys: keys))
+
+    # Simple or generic type (possibly qualified: module.Type or Iterator::Item)
+    var name = self.expect_identifier()
+
+    # Qualified type name: module.Type or Self::Item, also dependent keys: name.keys
+    while self.check(TokenKind.Dot) or self.check(TokenKind.DoubleColon):
+        val is_double_colon = self.check(TokenKind.DoubleColon)
+        self.advance()
+        val segment = self.expect_identifier()
+
+        # Dependent keys: name.keys
+        if not is_double_colon and segment == "keys":
+            return Ok(Type.DependentKeys(source: name))
+
+        if is_double_colon:
+            name = "{name}::{segment}"
+        else:
+            name = "{name}.{segment}"
+
+    # Generic arguments: <T, U> or [T, U] (deprecated)
+    val using_angle_brackets = self.check(TokenKind.Lt)
+    val using_square_brackets = self.check(TokenKind.LBracket)
+
+    if using_angle_brackets or using_square_brackets:
+        # Emit deprecation warning for [] syntax
+        if using_square_brackets:
+            self.emit_deprecation_warning(
+                "Deprecated syntax for type parameters",
+                "Use angle brackets: {name}<...> instead of {name}[...]",
+                "Run `simple migrate --fix-generics` to automatically update your code",
+            )
+
+        self.advance()  # consume < or [
+        var args = []
+        val closing_token = if using_angle_brackets:
+            TokenKind.Gt
+        else:
+            TokenKind.RBracket
+
+        while not self.check(closing_token):
+            # Handle >> token splitting for nested generics like [[T]]
+            if using_angle_brackets and self.check(TokenKind.ShiftRight):
+                break
+
+            # Check for associated type binding: Name=Type (e.g., Iterator<Item=T>)
+            if self.is_identifier() and self.peek_is(TokenKind.Assign):
+                val assoc_name = self.expect_identifier()
+                self.advance()  # consume =
+                val value_type = self.parse_type()
+                args.append(Type.TypeBinding(name: assoc_name, value: value_type))
+            else:
+                args.append(self.parse_type())
+
+            if not self.check(closing_token):
+                if using_angle_brackets and self.check(TokenKind.ShiftRight):
+                    break
+                self.expect(TokenKind.Comma)
+
+        # Handle >> splitting for nested generics
+        if using_angle_brackets and self.check(TokenKind.ShiftRight):
+            self.split_shift_right_token()
+            self.advance()  # advance past first >
+        else:
+            self.expect(closing_token)
+
+        # Special handling for Constructor<T> or Constructor<T, (args)>
+        if name == "Constructor":
+            if args.is_empty():
+                return Err(ParseError.unexpected_token(
+                    "type parameter for Constructor",
+                    "{self.current.kind}", self.current.span))
+            val target = args.remove(0)
+            val ctor_args = if args.is_empty():
+                nil
+            elif args.len() == 1:
+                match args[0]:
+                    Type.Tuple(types): Some(types)
+                    single: Some([single])
+            else:
+                Some(args)
+            return Ok(Type.Constructor(target: target, args: ctor_args))
+
+        val generic_type = Type.Generic(name: name, args: args)
+        # Optional generic: Type<T>?
+        if self.check(TokenKind.Question):
+            self.advance()
+            return Ok(Type.Optional(generic_type))
+        return Ok(generic_type)
+
+    # Optional simple type: T?
+    if self.check(TokenKind.Question):
+        self.advance()
+        return Ok(Type.Optional(Type.Simple(name)))
+
+    # Unit type with repr: _cm:u12 or _cm where ...
+    if name.starts_with("_"):
+        # Compact repr syntax: _cm:u12 (lexed as Symbol token)
+        if self.check_symbol():
+            val repr_str = self.get_symbol_value()
+            val repr = ReprType.from_str(repr_str)
+            if repr.?:
+                self.advance()
+                val constraints = if self.check(TokenKind.Where):
+                    self.parse_unit_where_clause()
+                else:
+                    UnitReprConstraints.default()
+                return Ok(Type.UnitWithRepr(
+                    name: name,
+                    repr: Some(repr.unwrap()),
+                    constraints: constraints,
+                ))
+
+        # Where clause without repr: _cm where range: 0..100
+        if self.check(TokenKind.Where):
+            val constraints = self.parse_unit_where_clause()
+            return Ok(Type.UnitWithRepr(
+                name: name,
+                repr: nil,
+                constraints: constraints,
+            ))
+
+    Ok(Type.Simple(name))
+
+# Parse parenthesized type list: (T, U, V)
+fn parse_paren_type_list(self) -> [Type]:
+    self.expect(TokenKind.LParen)
+    var types = []
+    while not self.check(TokenKind.RParen):
+        types.append(self.parse_type())
+        if not self.check(TokenKind.RParen):
+            self.expect(TokenKind.Comma)
+    self.expect(TokenKind.RParen)
+    types
+
+# Parse unit where clause: where range: 0..100, checked
+fn parse_unit_where_clause(self) -> UnitReprConstraints:
+    self.expect(TokenKind.Where)
+    var constraints = UnitReprConstraints.default()
+
+    self.parse_unit_constraint(constraints)
+    while self.check(TokenKind.Comma):
+        self.advance()
+        self.parse_unit_constraint(constraints)
+
+    constraints
+
+# Parse a single unit constraint: range, checked, saturate, wrap, default
+fn parse_unit_constraint(self, constraints: mut UnitReprConstraints):
+    val name = self.expect_identifier()
+    match name:
+        "range":
+            self.expect(TokenKind.Colon)
+            val start = self.parse_integer_literal()
+            self.expect(TokenKind.DoubleDot)
+            val end = self.parse_integer_literal()
+            constraints.range = Some((start, end))
+        "checked":
+            constraints.overflow = OverflowBehavior.Checked
+        "saturate":
+            constraints.overflow = OverflowBehavior.Saturate
+        "wrap":
+            constraints.overflow = OverflowBehavior.Wrap
+        "default":
+            self.expect(TokenKind.Colon)
+            val expr = self.parse_expression()
+            constraints.default_value = Some(expr)
+        _:
+            self.error("Unknown unit constraint '{name}'. Expected: range, checked, saturate, wrap, default")
+
+# Parse an integer literal (possibly negative)
+fn parse_integer_literal(self) -> i64:
+    val negative = if self.check(TokenKind.Minus):
+        self.advance()
+        true
+    else:
+        false
+
+    match self.current.kind:
+        TokenKind.Integer(n):
+            self.advance()
+            if negative: -n else: n
+        _: self.error("expected integer")

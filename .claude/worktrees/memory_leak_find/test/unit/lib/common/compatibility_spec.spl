@@ -1,0 +1,137 @@
+"""
+Feature: SDN Compatibility with Rust Implementation
+Category: SDN Parser
+Status: Complete
+"""
+
+# Tests that compare Simple SDN implementation with Rust SDN implementation.
+#
+# These tests verify that the Simple language SDN parser produces
+# equivalent results to the Rust simple_sdn crate.
+
+use sdn.parser.parse.*
+use sdn.serializer.to_sdn.*
+use sdn.value.SdnValue.*
+
+describe "SDN Rust Compatibility":
+    """
+    Verify that Simple SDN parser produces equivalent results to Rust simple_sdn crate.
+    """
+    context "primitives":
+        it "matches Rust for integers":
+            # Verify integer parsing matches expected behavior
+            val source = "pos: 42\nneg: -17\nzero: 0\nlarge: 999999"
+            match parse(source):
+                case Ok(value):
+                    expect value.get("pos").flatmap(|v| v.as_i64()) == Some(42)
+                    expect value.get("neg").flatmap(|v| v.as_i64()) == Some(-17)
+                    expect value.get("zero").flatmap(|v| v.as_i64()) == Some(0)
+                    expect value.get("large").flatmap(|v| v.as_i64()) == Some(999999)
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "matches Rust for floats":
+            val source = "pi: 3.14159\nneg: -2.718\nzero: 0.0"
+            match parse(source):
+                case Ok(value):
+                    match value.get("pi"):
+                        case Some(v):
+                            match v.as_f64():
+                                case Some(f):
+                                    expect f > 3.14 and f < 3.15
+                                case None:
+                                    fail("Expected float")
+                        case None:
+                            fail("Expected 'pi' key")
+                    expect value.get("zero").flatmap(|v| v.as_f64()) == Some(0.0)
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "matches Rust for strings":
+            val source = "bare: hello\nquoted: \"hello world\"\nescaped: \"line1\\nline2\""
+            match parse(source):
+                case Ok(value):
+                    expect value.get("bare").flatmap(|v| v.as_str()) == Some("hello")
+                    expect value.get("quoted").flatmap(|v| v.as_str()) == Some("hello world")
+                    # Check escaped string contains newline
+                    match value.get("escaped"):
+                        case Some(v):
+                            match v.as_str():
+                                case Some(s):
+                                    expect s.contains("\n") == true
+                                case None:
+                                    fail("Expected string")
+                        case None:
+                            fail("Expected 'escaped' key")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "matches Rust for booleans":
+            val source = "yes: true\nno: false"
+            match parse(source):
+                case Ok(value):
+                    expect value.get("yes").flatmap(|v| v.as_bool()) == Some(true)
+                    expect value.get("no").flatmap(|v| v.as_bool()) == Some(false)
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+    context "collections":
+        it "matches Rust for inline arrays":
+            val source = "items = [1, 2, 3]"
+            match parse(source):
+                case Ok(value):
+                    match value.get("items"):
+                        case Some(arr):
+                            expect arr.is_array() == true
+                            match arr.as_array():
+                                case Some(list):
+                                    expect list.len() == 3
+                                case None:
+                                    fail("Expected array")
+                        case None:
+                            fail("Expected 'items' key")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "matches Rust for block collections":
+            val source = "config:\n    host: localhost\n    port: 8080"
+            match parse(source):
+                case Ok(value):
+                    match value.get("config"):
+                        case Some(cfg):
+                            expect cfg.is_dict() == true
+                            expect cfg.get("host").flatmap(|v| v.as_str()) == Some("localhost")
+                            expect cfg.get("port").flatmap(|v| v.as_i64()) == Some(8080)
+                        case None:
+                            fail("Expected 'config' key")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+    context "serialization":
+        it "produces compatible SDN output":
+            # Verify SDN output is valid and can be re-parsed
+            val source = "name: Alice\nage: 30\nactive: true"
+            match parse(source):
+                case Ok(value):
+                    val output = to_sdn(value)
+                    # Output should be parseable
+                    match parse(output):
+                        case Ok(reparsed):
+                            expect reparsed.get("name").flatmap(|v| v.as_str()) == Some("Alice")
+                            expect reparsed.get("age").flatmap(|v| v.as_i64()) == Some(30)
+                        case Err(e):
+                            fail("Re-parse error: ${e.to_string()}")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "produces compatible output for arrays":
+            val source = "items = [1, 2, 3]"
+            match parse(source):
+                case Ok(value):
+                    val output = to_sdn(value)
+                    # Output should contain the array
+                    expect output.contains("1") == true
+                    expect output.contains("2") == true
+                    expect output.contains("3") == true
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")

@@ -1,0 +1,249 @@
+# RISC-V Inline Assembly Backend
+#
+# Generates RISC-V assembly from inline asm blocks.
+
+use compiler.backend.inline_asm.{InlineAsm, AsmOperand, AsmRegister, AsmOption}
+use std.common.target.{TargetArch}
+
+# ===========================================================================
+# RISC-V Register Allocation
+# ===========================================================================
+
+class RiscVRegisterAllocator:
+    """Allocates RISC-V registers for inline assembly."""
+    arch: TargetArch
+    used_regs: Dict<text, bool>
+
+impl RiscVRegisterAllocator:
+    static fn new(arch: TargetArch) -> RiscVRegisterAllocator:
+        RiscVRegisterAllocator(
+            arch: arch,
+            used_regs: {}
+        )
+
+    fn allocate_reg(reg: AsmRegister) -> text:
+        match reg:
+            # RISC-V integer registers
+            case AsmRegister.X0: "x0"   # zero
+            case AsmRegister.X1: "x1"   # ra (return address)
+            case AsmRegister.X2: "x2"   # sp (stack pointer)
+            case AsmRegister.X3: "x3"   # gp (global pointer)
+            case AsmRegister.X4: "x4"   # tp (thread pointer)
+            case AsmRegister.X5: "x5"   # t0 (temporary)
+            case AsmRegister.X6: "x6"   # t1
+            case AsmRegister.X7: "x7"   # t2
+            case AsmRegister.X8: "x8"   # s0/fp (frame pointer)
+            case AsmRegister.X9: "x9"   # s1
+            case AsmRegister.X10: "x10" # a0 (argument/return)
+            case AsmRegister.X11: "x11" # a1
+            case AsmRegister.X12: "x12" # a2
+            case AsmRegister.X13: "x13" # a3
+            case AsmRegister.X14: "x14" # a4
+            case AsmRegister.X15: "x15" # a5
+            case AsmRegister.X16: "x16" # a6
+            case AsmRegister.X17: "x17" # a7
+
+            # Any - allocate automatically
+            case AsmRegister.Any:
+                self.allocate_any()
+
+            case _:
+                "x0"  # Default (zero register)
+
+    fn allocate_any() -> text:
+        # Prefer temporary registers (t0-t6)
+        val candidates = ["t0", "t1", "t2", "t3", "t4", "t5", "t6"]
+
+        for candidate in candidates:
+            if not self.used_regs.contains(candidate):
+                self.used_regs[candidate] = true
+                return candidate
+
+        "t0"  # Fallback
+
+    fn abi_name(reg: text) -> text:
+        """Convert register number to ABI name."""
+        match reg:
+            case "x0": "zero"
+            case "x1": "ra"
+            case "x2": "sp"
+            case "x3": "gp"
+            case "x4": "tp"
+            case "x5": "t0"
+            case "x6": "t1"
+            case "x7": "t2"
+            case "x8": "s0"
+            case "x9": "s1"
+            case "x10": "a0"
+            case "x11": "a1"
+            case "x12": "a2"
+            case "x13": "a3"
+            case "x14": "a4"
+            case "x15": "a5"
+            case "x16": "a6"
+            case "x17": "a7"
+            case _: reg
+
+# ===========================================================================
+# RISC-V Assembly Generator
+# ===========================================================================
+
+class RiscVAsmGenerator:
+    """Generates RISC-V assembly."""
+    arch: TargetArch
+    allocator: RiscVRegisterAllocator
+
+impl RiscVAsmGenerator:
+    static fn new(arch: TargetArch) -> RiscVAsmGenerator:
+        RiscVAsmGenerator(
+            arch: arch,
+            allocator: RiscVRegisterAllocator__new(arch)
+        )
+
+    fn generate(asm: InlineAsm) -> text:
+        var code = ""
+
+        # Process operands
+        var regs: [text] = []
+        for operand in asm.operands:
+            val reg = operand.register()
+            val reg_name = self.allocator.allocate_reg(reg)
+            regs.push(reg_name)
+
+        # Generate instructions
+        for inst in asm.template:
+            var line = inst
+            for i in 0..regs.len():
+                line = line.replace("{{i}}", regs[i])
+
+            code = code + "  {line}\n"
+
+        code
+
+# ===========================================================================
+# RISC-V-Specific Instructions
+# ===========================================================================
+
+fn csrr(csr: text) -> InlineAsm:
+    """Read CSR (Control and Status Register)."""
+    var asm = InlineAsm__new(["csrr a0, {csr}"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn csrw(csr: text, value: i64) -> InlineAsm:
+    """Write CSR."""
+    var asm = InlineAsm__new(["csrw {csr}, a0"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn csrs(csr: text, mask: i64) -> InlineAsm:
+    """Set bits in CSR."""
+    var asm = InlineAsm__new(["csrs {csr}, a0"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn csrc(csr: text, mask: i64) -> InlineAsm:
+    """Clear bits in CSR."""
+    var asm = InlineAsm__new(["csrc {csr}, a0"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn wfi_riscv() -> InlineAsm:
+    """Wait for interrupt."""
+    var asm = InlineAsm__new(["wfi"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn nop_riscv() -> InlineAsm:
+    """No operation."""
+    InlineAsm__new(["nop"], Span__empty())
+
+fn fence() -> InlineAsm:
+    """Memory fence."""
+    InlineAsm__new(["fence"], Span__empty())
+
+fn fence_i() -> InlineAsm:
+    """Instruction fence."""
+    InlineAsm__new(["fence.i"], Span__empty())
+
+fn ecall() -> InlineAsm:
+    """Environment call (syscall)."""
+    var asm = InlineAsm__new(["ecall"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn ebreak() -> InlineAsm:
+    """Breakpoint."""
+    var asm = InlineAsm__new(["ebreak"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn mret() -> InlineAsm:
+    """Machine-mode return."""
+    var asm = InlineAsm__new(["mret"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm.add_option(AsmOption.NoReturn)
+    asm
+
+fn sret() -> InlineAsm:
+    """Supervisor-mode return."""
+    var asm = InlineAsm__new(["sret"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm.add_option(AsmOption.NoReturn)
+    asm
+
+# Atomic operations
+fn lr_w(addr: text) -> InlineAsm:
+    """Load-reserved word."""
+    var asm = InlineAsm__new(["lr.w a0, (a1)"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn sc_w(addr: text, value: i32) -> InlineAsm:
+    """Store-conditional word."""
+    var asm = InlineAsm__new(["sc.w a0, a1, (a2)"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn amoswap_w(addr: text, value: i32) -> InlineAsm:
+    """Atomic swap word."""
+    var asm = InlineAsm__new(["amoswap.w a0, a1, (a2)"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn amoadd_w(addr: text, value: i32) -> InlineAsm:
+    """Atomic add word."""
+    var asm = InlineAsm__new(["amoadd.w a0, a1, (a2)"], Span__empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+# CSR addresses (common ones)
+fn CSR_MSTATUS() -> text: "mstatus"
+fn CSR_MIE() -> text: "mie"
+fn CSR_MTVEC() -> text: "mtvec"
+fn CSR_MSCRATCH() -> text: "mscratch"
+fn CSR_MEPC() -> text: "mepc"
+fn CSR_MCAUSE() -> text: "mcause"
+fn CSR_MTVAL() -> text: "mtval"
+fn CSR_MIP() -> text: "mip"
+
+# ===========================================================================
+# Exports
+# ===========================================================================
+
+
+# Auto-generated desugared static method wrappers
+fn RiscVRegisterAllocator__new(arch: TargetArch) -> RiscVRegisterAllocator:
+    RiscVRegisterAllocator(
+        arch: arch,
+        used_regs: {}
+    )
+
+
+export RiscVRegisterAllocator, RiscVAsmGenerator
+export csrr, csrw, csrs, csrc
+export wfi_riscv, nop_riscv, fence, fence_i
+export ecall, ebreak, mret, sret
+export lr_w, sc_w, amoswap_w, amoadd_w
+export CSR_MSTATUS, CSR_MIE, CSR_MTVEC, CSR_MSCRATCH
+export CSR_MEPC, CSR_MCAUSE, CSR_MTVAL, CSR_MIP

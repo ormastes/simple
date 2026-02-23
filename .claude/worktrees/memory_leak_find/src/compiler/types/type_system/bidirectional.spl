@@ -1,0 +1,533 @@
+# Bidirectional Type Checking
+#
+# Extends expression inference with expected type propagation.
+# Implements bidirectional type checking for improved inference and error messages.
+#
+# Based on "Complete and Easy Bidirectional Typechecking for Higher-Rank Polymorphism"
+# (Dunfield & Krishnaswami, 2013)
+#
+# Two modes:
+# - Synthesize: Infer type from expression (bottom-up)
+# - Check: Verify expression against expected type (top-down)
+
+from inference.types import {Type, TypeVarId, UnifyError}
+from inference.infer import {InferenceEngine}
+from ast import {Expr, BinOp, UnaryOp, Argument, LambdaParam, Pattern, Block}
+from compiler.types.type_system.checker import {TypeError}
+from compiler.types.type_system.expr_infer import {infer_expr as synthesize_expr}
+from compiler.types.type_system.module_check import {ast_type_to_inference_type_engine}
+
+# ============================================================================
+# Inference Mode
+# ============================================================================
+
+enum InferMode:
+    """Type inference mode for bidirectional checking.
+
+    - Synthesize: Infer type from expression (normal inference)
+    - Check: Check expression against expected type (propagate downward)
+    """
+    Synthesize
+    Check(expected: Type)
+
+
+# ============================================================================
+# InferMode Methods (was: impl InferMode:)
+# ============================================================================
+
+# ============================================================================
+# Bidirectional Expression Inference
+# ============================================================================
+
+fn infer_expr_bidir(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>,
+                    mode: InferMode) -> text:
+    """Infer type of expression with bidirectional type checking.
+
+    - In Synthesize mode: Infer type bottom-up (normal inference)
+    - In Check mode: Verify against expected type top-down
+    """
+
+    match mode:
+        case Synthesize:
+            # No expected type - use normal inference
+            synthesize_expr(engine, expr, env)
+
+        case Check(expected):
+            # Expected type available - propagate downward
+            check_expr(engine, expr, expected, env)
+
+# ============================================================================
+# Check Mode (Top-Down Propagation)
+# ============================================================================
+
+fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
+              env: Dict<text, Type>) -> text:
+    """Check expression against expected type (top-down).
+
+    Propagates expected type to subexpressions for better inference.
+    """
+
+    match expr:
+        # ====================================================================
+        # Literals with Expected Types
+        # ====================================================================
+        case Integer(n):
+            # Use expected type for integer literal if it's an integer type
+            match expected:
+                case Int(bits, signed):
+                    # Check if literal fits in expected type
+                    # For now, assume it fits
+                    Ok(expected)
+                case Var(_):
+                    # Expected is type variable - unify with i64
+                    val inferred = type_Int(bits: 64, signed: true)
+                    engine_unify(engine, inferred, expected)?
+                    Ok(expected)
+                case _:
+                    # Expected is not an integer type - synthesize and check
+                    val inferred = synthesize_expr(engine, expr, env)?
+                    engine_unify(engine, inferred, expected)?
+                    Ok(expected)
+
+        case Float(f):
+            # Use expected type for float literal
+            match expected:
+                case Float(bits):
+                    Ok(expected)
+                case Var(_):
+                    val inferred = type_Float(bits: 64)
+                    engine_unify(engine, inferred, expected)?
+                    Ok(expected)
+                case _:
+                    val inferred = synthesize_expr(engine, expr, env)?
+                    engine_unify(engine, inferred, expected)?
+                    Ok(expected)
+
+        # ====================================================================
+        # Lambda with Expected Function Type
+        # ====================================================================
+        case Lambda(params, body, move_mode, capture_all):
+            # Extract parameter types from expected function type
+            match expected:
+                case Function(expected_params, expected_ret):
+                    # Use expected parameter types
+                    check_lambda(engine, params, body, expected_params, expected_ret, env)
+
+                case Var(_):
+                    # Expected is type variable - create function type and unify
+                    val lambda_ty = synthesize_lambda(engine, params, body, env)?
+                    engine_unify(engine, lambda_ty, expected)?
+                    Ok(expected)
+
+                case _:
+                    # Expected is not a function - synthesize and check
+                    val lambda_ty = synthesize_lambda(engine, params, body, env)?
+                    engine_unify(engine, lambda_ty, expected)?
+                    Ok(expected)
+
+        # ====================================================================
+        # If Expression with Expected Type
+        # ====================================================================
+        case IfExpr(let_pattern, condition, then_branch, else_branch):
+            # Check condition is bool
+            val cond_ty = synthesize_expr(engine, condition, env)?
+            engine_unify(engine, cond_ty, Type.Bool)?
+
+            # Check both branches against expected type
+            val then_ty = check_expr(engine, then_branch, expected, env)?
+
+            if has_else_branch:
+                val else_ty = check_expr(engine, else_branch_value, expected, env)?
+                engine_unify(engine, then_ty, else_ty)?
+
+            Ok(expected)
+
+        # ====================================================================
+        # Match Expression with Expected Type
+        # ====================================================================
+        case MatchCase(subject, arms):
+            # Synthesize subject type
+            val subject_ty = synthesize_expr(engine, subject, env)?
+
+            # Check each arm against expected type
+            for arm in arms:
+                # Bind pattern variables from the arm pattern into a local env
+                var arm_env = env_clone(env)
+                match arm:
+                    case MatchArm(pattern, guard, body):
+                        # Extract bindings from pattern and add to arm environment
+                        val bindings = extract_pattern_bindings(pattern, subject_ty)
+                        for binding in bindings:
+                            arm_env = arm_env_set(arm_env, binding.name, binding.ty)
+                        # Check arm body against expected type
+                        val body_ty = check_expr(engine, body, expected, arm_env)
+                        if has_body_ty:
+                            engine_unify(engine, body_ty_value, expected)
+                    case _:
+                        # Fallback: synthesize and unify
+                        val arm_ty = synthesize_expr(engine, arm, env)
+                        if has_arm_ty:
+                            engine_unify(engine, arm_ty_value, expected)
+
+            Ok(expected)
+
+        # ====================================================================
+        # Array Literal with Expected Type
+        # ====================================================================
+        case Array(elements):
+            # Extract element type from expected array type
+            match expected:
+                case Array(elem_ty, _):
+                    # Check each element against expected element type
+                    for elem in elements:
+                        val _unused_1 = check_expr(engine, elem, elem_ty, env)?
+                    Ok(expected)
+
+                case Var(_):
+                    # Expected is type variable - synthesize and unify
+                    val arr_ty = synthesize_array(engine, elements, env)?
+                    engine_unify(engine, arr_ty, expected)?
+                    Ok(expected)
+
+                case _:
+                    # Expected is not an array - synthesize and check
+                    val arr_ty = synthesize_array(engine, elements, env)?
+                    engine_unify(engine, arr_ty, expected)?
+                    Ok(expected)
+
+        # ====================================================================
+        # Tuple Literal with Expected Type
+        # ====================================================================
+        case Tuple(elements):
+            match expected:
+                case Tuple(expected_elems):
+                    # Check each element against expected type
+                    if elements_len(elements) != expected_elems_len(expected_elems):
+                        return Err(TypeError.Other(
+                            "tuple arity mismatch: expected {expected_elems.len()}, got {elements.len()}"
+                        ))
+
+                    var i = 0
+                    while i < elements_len(elements):
+                        val _unused_2 = check_expr(engine, elements[i], expected_elems[i], env)?
+                        i = i + 1
+
+                    Ok(expected)
+
+                case Var(_):
+                    val tup_ty = synthesize_tuple(engine, elements, env)?
+                    engine_unify(engine, tup_ty, expected)?
+                    Ok(expected)
+
+                case _:
+                    val tup_ty = synthesize_tuple(engine, elements, env)?
+                    engine_unify(engine, tup_ty, expected)?
+                    Ok(expected)
+
+        # ====================================================================
+        # Dict Literal with Expected Type
+        # ====================================================================
+        case Dict(pairs):
+            match expected:
+                case Dict(expected_key, expected_value):
+                    # Check each key-value pair
+                    for _item_0 in pairs:
+                        val k = _item_0[0]
+                        val v = _item_0[1]
+                        val _unused_3 = check_expr(engine, k, expected_key, env)?
+                        val _unused_4 = check_expr(engine, v, expected_value, env)?
+
+                    Ok(expected)
+
+                case Var(_):
+                    val dict_ty = synthesize_dict(engine, pairs, env)?
+                    engine_unify(engine, dict_ty, expected)?
+                    Ok(expected)
+
+                case _:
+                    val dict_ty = synthesize_dict(engine, pairs, env)?
+                    engine_unify(engine, dict_ty, expected)?
+                    Ok(expected)
+
+        # ====================================================================
+        # Function Call with Expected Return Type
+        # ====================================================================
+        case Call(callee, args):
+            # Synthesize function type
+            val callee_ty = synthesize_expr(engine, callee, env)?
+
+            # Create expected function type with expected return
+            var param_types: [Type] = []
+            for arg in args:
+                param_types = param_types_push(param_types, engine.fresh_var())
+
+            val expected_fn_ty = type_Function(params: param_types, ret: expected)
+
+            # Unify with callee type
+            engine_unify(engine, callee_ty, expected_fn_ty)?
+
+            # Check arguments against inferred parameter types
+            var i = 0
+            while i < args_len(args):
+                val _unused_5 = check_expr(engine, args[i].value, param_types[i], env)?
+                i = i + 1
+
+            Ok(expected)
+
+        # ====================================================================
+        # Default: Synthesize and Check
+        # ====================================================================
+        case _:
+            # For other expressions, synthesize type and check compatibility
+            val inferred = synthesize_expr(engine, expr, env)?
+            engine_unify(engine, inferred, expected)?
+            Ok(expected)
+
+# ============================================================================
+# Helper Functions for Synthesis
+# ============================================================================
+
+fn synthesize_lambda(engine: InferenceEngine, params: [LambdaParam], body: Expr,
+                     env: Dict<text, Type>) -> text:
+    """Synthesize lambda type without expected type."""
+    # Create fresh variables for parameters
+    var param_types: [Type] = []
+    var new_env = env
+
+    for param in params:
+        val param_ty = if param.has_ty:
+            ast_type_to_inference_type_engine(param.ty_value, engine)
+        else:
+            engine_fresh_var(engine)
+
+        param_types = param_types_push(param_types, param_ty)
+        new_env[param.name] = param_ty
+
+    # Synthesize body type
+    val body_ty = synthesize_expr(engine, body, new_env)?
+
+    Ok(type_Function(params: param_types, ret: body_ty))
+
+fn check_lambda(engine: InferenceEngine, params: [LambdaParam], body: Expr,
+                expected_params: [Type], expected_ret: Type,
+                env: Dict<text, Type>) -> text:
+    """Check lambda against expected function type."""
+
+    # Check parameter count
+    if params_len(params) != expected_params_len(expected_params):
+        return Err(TypeError.Other(
+            "lambda parameter count mismatch: expected {expected_params.len()}, got {params.len()}"
+        ))
+
+    # Bind parameters with expected types
+    var new_env = env
+    var i = 0
+    while i < params_len(params):
+        new_env[params[i].name] = expected_params[i]
+        i = i + 1
+
+    # Check body against expected return type
+    val body_ty = check_expr(engine, body, expected_ret, new_env)?
+
+    Ok(type_Function(params: expected_params, ret: expected_ret))
+
+fn synthesize_array(engine: InferenceEngine, elements: [Expr],
+                    env: Dict<text, Type>) -> text:
+    """Synthesize array type without expected type."""
+    if not has_elements:
+        val elem_ty = engine_fresh_var(engine)
+        return Ok(type_Array(elem: elem_ty, size: nil))
+
+    # Infer first element type
+    val first_ty = synthesize_expr(engine, elements[0], env)?
+
+    # Unify all other elements
+    var i = 1
+    while i < elements_len(elements):
+        val elem_ty = synthesize_expr(engine, elements[i], env)?
+        engine_unify(engine, first_ty, elem_ty)?
+        i = i + 1
+
+    Ok(type_Array(elem: engine.resolve(first_ty), size: nil))
+
+fn synthesize_tuple(engine: InferenceEngine, elements: [Expr],
+                    env: Dict<text, Type>) -> text:
+    """Synthesize tuple type without expected type."""
+    var elem_types: [Type] = []
+
+    for elem in elements:
+        elem_types = elem_types_push(elem_types, synthesize_expr(engine, elem, env)?)
+
+    Ok(type_Tuple(elements: elem_types))
+
+fn synthesize_dict(engine: InferenceEngine, pairs: [(Expr, Expr)],
+                   env: Dict<text, Type>) -> text:
+    """Synthesize dict type without expected type."""
+    if not has_pairs:
+        val key_ty = engine_fresh_var(engine)
+        val value_ty = engine_fresh_var(engine)
+        return Ok(type_Dict(key: key_ty, value: value_ty))
+
+    # Infer first pair types
+    val _destruct_1 = pairs[0]
+    val first_key = _destruct_1[0]
+    val first_value = _destruct_1[1]
+    val key_ty = synthesize_expr(engine, first_key, env)?
+    val value_ty = synthesize_expr(engine, first_value, env)?
+
+    # Unify all other pairs
+    var i = 1
+    while i < pairs_len(pairs):
+        val _destruct_2 = pairs[i]
+        val k = _destruct_2[0]
+        val v = _destruct_2[1]
+        val k_ty = synthesize_expr(engine, k, env)?
+        val v_ty = synthesize_expr(engine, v, env)?
+        engine_unify(engine, key_ty, k_ty)?
+        engine_unify(engine, value_ty, v_ty)?
+        i = i + 1
+
+    Ok(type_Dict(key: engine.resolve(key_ty), value: engine_resolve(engine, value_ty)))
+
+# ============================================================================
+# Pattern Binding Extraction
+# ============================================================================
+
+struct PatternBinding:
+    """A variable binding extracted from a pattern."""
+    name: text
+    ty: Type
+
+fn extract_pattern_bindings(pattern: Pattern, subject_ty: Type) -> [PatternBinding]:
+    """Extract variable bindings from a pattern for use in match arm bodies.
+
+    Walks the pattern structure and creates type bindings for each named variable.
+    """
+    var bindings: [PatternBinding] = []
+    match pattern:
+        case Ident(name):
+            # Simple variable binding captures the whole subject
+            bindings = bindings_push(bindings, PatternBinding(name: name, ty: subject_ty))
+        case EnumVariant(variant_name, sub_patterns):
+            # Enum variant - sub-patterns bind payload fields
+            # Each sub-pattern gets a fresh type variable since we don't know
+            # the exact field types without full enum resolution
+            for sub in sub_patterns:
+                match sub:
+                    case Ident(name):
+                        val field_ty = engine_fresh_var(engine)
+                        bindings = bindings_push(bindings, PatternBinding(name: name, ty: field_ty))
+                    case _:
+                        pass_dn
+        case Tuple(sub_patterns):
+            # Tuple pattern - bind each element
+            match subject_ty:
+                case Tuple(elem_types):
+                    var i = 0
+                    while i < sub_patterns_len(sub_patterns) and i < elem_types_len(elem_types):
+                        match sub_patterns[i]:
+                            case Ident(name):
+                                bindings = bindings_push(bindings, PatternBinding(name: name, ty: elem_types[i]))
+                            case _:
+                                pass_dn
+                        i = i + 1
+                case _:
+                    pass_dn
+        case Wildcard:
+            pass  # No bindings for wildcard
+        case Literal(_):
+            pass  # No bindings for literals
+        case _:
+            pass  # Unknown pattern kind - no bindings
+    bindings
+
+# ============================================================================
+# Bidirectional Statement Checking
+# ============================================================================
+
+fn check_stmt_bidir(engine: InferenceEngine, stmt: Node, env: Dict<text, Type>,
+                    current_fn_ret_type: Type?) -> text:
+    """Type check statement with bidirectional inference.
+
+    Uses expected types where available (e.g., type annotations).
+    For let/val bindings with type annotations, propagates the annotation
+    as the expected type to the initializer expression for better inference.
+    """
+    match stmt:
+        case ValBinding(name, type_annotation, initializer):
+            # val binding with optional type annotation
+            var new_env = env_clone(env)
+            if type_annotation.?:
+                if has_initializer:
+                    # Type annotation present - use Check mode for initializer
+                    val expected_ty = ast_type_to_inference_type_engine(engine, type_annotation_value)
+                    val init_ty = check_expr(engine, initializer_value, expected_ty, env)?
+                    new_env = new_env_set(new_env, name, init_ty)
+                    Ok(new_env)
+            elif has_initializer:
+                # No annotation - Synthesize mode
+                val init_ty = synthesize_expr(engine, initializer_value, env)?
+                new_env = new_env_set(new_env, name, init_ty)
+                Ok(new_env)
+            else:
+                # No initializer - use annotation or fresh variable
+                val ty = if has_type_annotation:
+                    ast_type_to_inference_type_engine(engine, type_annotation_value)
+                else:
+                    engine_fresh_var(engine)
+                new_env = new_env_set(new_env, name, ty)
+                Ok(new_env)
+
+        case VarBinding(name, type_annotation, initializer):
+            # var binding - same logic as val but mutable
+            var new_env = env_clone(env)
+            if type_annotation.?:
+                if has_initializer:
+                    val expected_ty = ast_type_to_inference_type_engine(engine, type_annotation_value)
+                    val init_ty = check_expr(engine, initializer_value, expected_ty, env)?
+                    new_env = new_env_set(new_env, name, init_ty)
+                    Ok(new_env)
+            elif has_initializer:
+                val init_ty = synthesize_expr(engine, initializer_value, env)?
+                new_env = new_env_set(new_env, name, init_ty)
+                Ok(new_env)
+            else:
+                val ty = if has_type_annotation:
+                    ast_type_to_inference_type_engine(engine, type_annotation_value)
+                else:
+                    engine_fresh_var(engine)
+                new_env = new_env_set(new_env, name, ty)
+                Ok(new_env)
+
+        case _:
+            # Delegate other statements to regular statement checking
+            compiler.types.type_system.stmt_check_check_stmt(stmt_check, engine, stmt, env, current_fn_ret_type)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn infer_with_expected(engine: InferenceEngine, expr: Expr,
+                       expected: Type, env: Dict<text, Type>) -> text:
+    """Convenience function for bidirectional inference.
+
+    If expected type is provided, use Check mode.
+    Otherwise, use Synthesize mode.
+    """
+    val mode = if has_expected:
+        infermode_Check(expected_value)
+    else:
+        InferMode.Synthesize
+
+    infer_expr_bidir(engine, expr, env, mode)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export InferMode, PatternBinding
+export infer_expr_bidir, check_expr
+export synthesize_lambda, check_lambda
+export synthesize_array, synthesize_tuple, synthesize_dict
+export check_stmt_bidir, extract_pattern_bindings
+export infer_with_expected

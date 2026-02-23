@@ -1,0 +1,462 @@
+# Memory Reports
+#
+# Reports for memory-related issues: leaks, GC events, allocation failures.
+# Provides structured memory diagnostics for debugging and monitoring.
+
+import ..level
+import ..location
+import ..report
+
+export MemoryReport, MemoryEvent, MemoryEventKind, LeakInfo, GCStats
+
+# ANSI escape helper
+fn esc_char() -> text:
+    val code: u8 = 27
+    "{code as char}"
+
+# =============================================================================
+# MemoryEventKind: Types of memory events
+# =============================================================================
+
+enum MemoryEventKind:
+    Allocation          # Memory allocated
+    Deallocation        # Memory freed
+    GCStart             # GC cycle started
+    GCEnd               # GC cycle completed
+    GCPause             # GC pause (stop-the-world)
+    LeakDetected        # Memory leak detected
+    AllocationFailure   # Allocation failed
+    HeapGrowth          # Heap expanded
+    HeapShrink          # Heap contracted
+
+impl MemoryEventKind:
+    fn name() -> text:
+        match self:
+            case MemoryEventKind.Allocation: "allocation"
+            case MemoryEventKind.Deallocation: "deallocation"
+            case MemoryEventKind.GCStart: "gc_start"
+            case MemoryEventKind.GCEnd: "gc_end"
+            case MemoryEventKind.GCPause: "gc_pause"
+            case MemoryEventKind.LeakDetected: "leak"
+            case MemoryEventKind.AllocationFailure: "alloc_fail"
+            case MemoryEventKind.HeapGrowth: "heap_grow"
+            case MemoryEventKind.HeapShrink: "heap_shrink"
+
+    fn is_gc_event() -> bool:
+        match self:
+            case MemoryEventKind.GCStart: true
+            case MemoryEventKind.GCEnd: true
+            case MemoryEventKind.GCPause: true
+            case _: false
+
+    fn is_error() -> bool:
+        match self:
+            case MemoryEventKind.LeakDetected: true
+            case MemoryEventKind.AllocationFailure: true
+            case _: false
+
+# =============================================================================
+# LeakInfo: Information about a detected memory leak
+# =============================================================================
+
+struct LeakInfo:
+    address: i64                # Memory address
+    size: i64                   # Size in bytes
+    type_name: text?            # Type of leaked object (if known)
+    allocation_location: SourceLocation?  # Where it was allocated
+    allocation_time: i64        # When it was allocated (timestamp)
+    stack_trace: [text]         # Allocation stack trace (function names)
+
+impl LeakInfo:
+    static fn at_address(address: i64, size: i64) -> LeakInfo:
+        LeakInfo(
+            address: address,
+            size: size,
+            type_name: nil,
+            allocation_location: nil,
+            allocation_time: 0,
+            stack_trace: []
+        )
+
+    fn with_type(type_name: text) -> LeakInfo:
+        LeakInfo(
+            address: self.address,
+            size: self.size,
+            type_name: Some(type_name),
+            allocation_location: self.allocation_location,
+            allocation_time: self.allocation_time,
+            stack_trace: self.stack_trace
+        )
+
+    fn with_location(location: SourceLocation) -> LeakInfo:
+        LeakInfo(
+            address: self.address,
+            size: self.size,
+            type_name: self.type_name,
+            allocation_location: Some(location),
+            allocation_time: self.allocation_time,
+            stack_trace: self.stack_trace
+        )
+
+    fn with_stack(trace: [text]) -> LeakInfo:
+        LeakInfo(
+            address: self.address,
+            size: self.size,
+            type_name: self.type_name,
+            allocation_location: self.allocation_location,
+            allocation_time: self.allocation_time,
+            stack_trace: trace
+        )
+
+    fn format(use_color: bool) -> text:
+        val e = esc_char()
+        val yellow = if use_color: "{e}[33m" else: ""
+        val gray = if use_color: "{e}[90m" else: ""
+        val reset = if use_color: "{e}[0m" else: ""
+
+        var output = "{yellow}Leak:{reset} {self.format_size(self.size)} at 0x{self.address:x}"
+
+        if self.type_name.?:
+            output = output + " ({self.type_name.unwrap()})"
+
+        if self.allocation_location.?:
+            output = output + "\n  allocated at {self.allocation_location.unwrap().format_short()}"
+
+        if not self.stack_trace.is_empty():
+            output = output + "\n  {gray}allocation trace:{reset}"
+            for frame in self.stack_trace:
+                output = output + "\n    {frame}"
+
+        output
+
+    fn format_size(bytes: i64) -> text:
+        if bytes < 1024:
+            "{bytes} B"
+        elif bytes < 1024 * 1024:
+            "{bytes / 1024} KB"
+        elif bytes < 1024 * 1024 * 1024:
+            "{bytes / (1024 * 1024)} MB"
+        else:
+            "{bytes / (1024 * 1024 * 1024)} GB"
+
+# =============================================================================
+# GCStats: Garbage collection statistics
+# =============================================================================
+
+struct GCStats:
+    cycle_number: i64           # GC cycle number
+    duration_ms: i64            # Duration in milliseconds
+    pause_time_ms: i64          # Total pause time
+    objects_scanned: i64        # Objects scanned
+    objects_collected: i64      # Objects collected
+    bytes_freed: i64            # Bytes freed
+    heap_before: i64            # Heap size before GC
+    heap_after: i64             # Heap size after GC
+
+impl GCStats:
+    static fn empty() -> GCStats:
+        GCStats(
+            cycle_number: 0,
+            duration_ms: 0,
+            pause_time_ms: 0,
+            objects_scanned: 0,
+            objects_collected: 0,
+            bytes_freed: 0,
+            heap_before: 0,
+            heap_after: 0
+        )
+
+    fn collection_rate() -> f64:
+        if self.objects_scanned == 0:
+            0.0
+        else:
+            (self.objects_collected as f64) / (self.objects_scanned as f64) * 100.0
+
+    fn compression_ratio() -> f64:
+        if self.heap_before == 0:
+            0.0
+        else:
+            (self.heap_after as f64) / (self.heap_before as f64) * 100.0
+
+    fn format(use_color: bool) -> text:
+        val e = esc_char()
+        val cyan = if use_color: "{e}[36m" else: ""
+        val green = if use_color: "{e}[32m" else: ""
+        val gray = if use_color: "{e}[90m" else: ""
+        val reset = if use_color: "{e}[0m" else: ""
+
+        var output = "{cyan}GC Cycle #{self.cycle_number}{reset}\n"
+        output = output + "  Duration: {self.duration_ms}ms (pause: {self.pause_time_ms}ms)\n"
+        output = output + "  Objects: {self.objects_collected}/{self.objects_scanned} collected"
+        output = output + " ({green}{self.collection_rate():.1}%{reset})\n"
+        output = output + "  Freed: {self.format_size(self.bytes_freed)}\n"
+        output = output + "  Heap: {self.format_size(self.heap_before)} -> {self.format_size(self.heap_after)}"
+        output = output + " ({self.compression_ratio():.1}%)"
+        output
+
+    fn format_size(bytes: i64) -> text:
+        if bytes < 1024:
+            "{bytes} B"
+        elif bytes < 1024 * 1024:
+            "{bytes / 1024} KB"
+        elif bytes < 1024 * 1024 * 1024:
+            "{bytes / (1024 * 1024)} MB"
+        else:
+            "{bytes / (1024 * 1024 * 1024)} GB"
+
+# =============================================================================
+# MemoryEvent: Single memory event
+# =============================================================================
+
+struct MemoryEvent:
+    kind: MemoryEventKind
+    timestamp: i64
+    address: i64?               # Memory address (for alloc/dealloc)
+    size: i64?                  # Size in bytes
+    message: text?              # Optional message
+    location: SourceLocation?   # Source location
+
+impl MemoryEvent:
+    static fn allocation(address: i64, size: i64) -> MemoryEvent:
+        MemoryEvent(
+            kind: MemoryEventKind.Allocation,
+            timestamp: 0,
+            address: Some(address),
+            size: Some(size),
+            message: nil,
+            location: nil
+        )
+
+    static fn deallocation(address: i64, size: i64) -> MemoryEvent:
+        MemoryEvent(
+            kind: MemoryEventKind.Deallocation,
+            timestamp: 0,
+            address: Some(address),
+            size: Some(size),
+            message: nil,
+            location: nil
+        )
+
+    static fn gc_start(cycle: i64) -> MemoryEvent:
+        MemoryEvent(
+            kind: MemoryEventKind.GCStart,
+            timestamp: 0,
+            address: nil,
+            size: nil,
+            message: Some("GC cycle {cycle} started"),
+            location: nil
+        )
+
+    static fn gc_end(cycle: i64, duration_ms: i64) -> MemoryEvent:
+        MemoryEvent(
+            kind: MemoryEventKind.GCEnd,
+            timestamp: 0,
+            address: nil,
+            size: nil,
+            message: Some("GC cycle {cycle} completed in {duration_ms}ms"),
+            location: nil
+        )
+
+    static fn leak(address: i64, size: i64) -> MemoryEvent:
+        MemoryEvent(
+            kind: MemoryEventKind.LeakDetected,
+            timestamp: 0,
+            address: Some(address),
+            size: Some(size),
+            message: nil,
+            location: nil
+        )
+
+    fn at(file: text, line: i64, column: i64) -> MemoryEvent:
+        MemoryEvent(
+            kind: self.kind,
+            timestamp: self.timestamp,
+            address: self.address,
+            size: self.size,
+            message: self.message,
+            location: Some(SourceLocation.at(file, line, column))
+        )
+
+    fn to_report() -> Report:
+        val level = if self.kind.is_error():
+            ReportLevel.Error
+        elif self.kind.is_gc_event():
+            ReportLevel.Debug
+        else:
+            ReportLevel.Info
+
+        var msg = self.message ?? self.kind.name()
+        if self.size.?:
+            msg = msg + " ({self.format_size(self.size.unwrap())})"
+
+        var report = match level:
+            case ReportLevel.Error: Report.error(msg)
+            case ReportLevel.Debug: Report.debug(msg)
+            case _: Report.info(msg)
+
+        report = report.with_kind(ReportKind.MemoryError).with_source("memory")
+
+        if self.location.?:
+            report = report.with_location(self.location.unwrap())
+
+        report
+
+    fn format_size(bytes: i64) -> text:
+        if bytes < 1024:
+            "{bytes} B"
+        elif bytes < 1024 * 1024:
+            "{bytes / 1024} KB"
+        else:
+            "{bytes / (1024 * 1024)} MB"
+
+# =============================================================================
+# MemoryReport: Comprehensive memory diagnostic report
+# =============================================================================
+
+class MemoryReport:
+    events: [MemoryEvent]
+    leaks: [LeakInfo]
+    gc_stats: [GCStats]
+    total_allocated: i64
+    total_freed: i64
+    peak_usage: i64
+    current_usage: i64
+
+impl MemoryReport:
+    static fn empty() -> MemoryReport:
+        MemoryReport(
+            events: [],
+            leaks: [],
+            gc_stats: [],
+            total_allocated: 0,
+            total_freed: 0,
+            peak_usage: 0,
+            current_usage: 0
+        )
+
+    me add_event(event: MemoryEvent):
+        self.events.push(event)
+
+    me add_leak(leak: LeakInfo):
+        self.leaks.push(leak)
+
+    me add_gc_stats(stats: GCStats):
+        self.gc_stats.push(stats)
+
+    me record_allocation(size: i64):
+        self.total_allocated = self.total_allocated + size
+        self.current_usage = self.current_usage + size
+        if self.current_usage > self.peak_usage:
+            self.peak_usage = self.current_usage
+
+    me record_deallocation(size: i64):
+        self.total_freed = self.total_freed + size
+        self.current_usage = self.current_usage - size
+
+    # ==========================================================================
+    # Accessors
+    # ==========================================================================
+
+    fn has_leaks() -> bool:
+        not self.leaks.is_empty()
+
+    fn leak_count() -> i64:
+        self.leaks.len()
+
+    fn total_leaked_bytes() -> i64:
+        var total = 0
+        for leak in self.leaks:
+            total = total + leak.size
+        total
+
+    fn gc_cycle_count() -> i64:
+        self.gc_stats.len()
+
+    fn total_gc_time_ms() -> i64:
+        var total = 0
+        for stats in self.gc_stats:
+            total = total + stats.duration_ms
+        total
+
+    # ==========================================================================
+    # Conversion to Report
+    # ==========================================================================
+
+    fn to_report() -> Report:
+        val level = if self.has_leaks():
+            ReportLevel.Warning
+        else:
+            ReportLevel.Info
+
+        var msg = "Memory report: "
+        msg = msg + "{self.format_size(self.current_usage)} in use, "
+        msg = msg + "{self.format_size(self.peak_usage)} peak"
+
+        if self.has_leaks():
+            msg = msg + ", {self.leak_count()} leak(s) ({self.format_size(self.total_leaked_bytes())})"
+
+        var report = match level:
+            case ReportLevel.Warning: Report.warning(msg)
+            case _: Report.info(msg)
+
+        report = report.with_kind(ReportKind.MemoryError).with_source("memory")
+
+        report = report.with_note("Total allocated: {self.format_size(self.total_allocated)}")
+        report = report.with_note("Total freed: {self.format_size(self.total_freed)}")
+
+        if self.gc_cycle_count() > 0:
+            report = report.with_note("GC cycles: {self.gc_cycle_count()} ({self.total_gc_time_ms()}ms total)")
+
+        report
+
+    # ==========================================================================
+    # Formatting
+    # ==========================================================================
+
+    fn format(use_color: bool) -> text:
+        val e = esc_char()
+        val bold = if use_color: "{e}[1m" else: ""
+        val cyan = if use_color: "{e}[36m" else: ""
+        val yellow = if use_color: "{e}[33m" else: ""
+        val green = if use_color: "{e}[32m" else: ""
+        val reset = if use_color: "{e}[0m" else: ""
+
+        var output = "{bold}Memory Report{reset}\n"
+        output = output + "═══════════════════════════════════════\n"
+
+        # Summary
+        output = output + "\n{cyan}Summary:{reset}\n"
+        output = output + "  Current usage: {self.format_size(self.current_usage)}\n"
+        output = output + "  Peak usage: {self.format_size(self.peak_usage)}\n"
+        output = output + "  Total allocated: {self.format_size(self.total_allocated)}\n"
+        output = output + "  Total freed: {self.format_size(self.total_freed)}\n"
+
+        # Leaks
+        if self.has_leaks():
+            output = output + "\n{yellow}Detected Leaks ({self.leak_count()}):{reset}\n"
+            for leak in self.leaks:
+                output = output + "  " + leak.format(use_color) + "\n"
+
+        # GC Stats
+        if not self.gc_stats.is_empty():
+            output = output + "\n{green}GC Statistics:{reset}\n"
+            output = output + "  Cycles: {self.gc_cycle_count()}\n"
+            output = output + "  Total time: {self.total_gc_time_ms()}ms\n"
+
+            # Show last GC cycle details
+            val last_gc = self.gc_stats[self.gc_stats.len() - 1]
+            output = output + "\n  Last cycle:\n"
+            output = output + "    Objects collected: {last_gc.objects_collected}\n"
+            output = output + "    Bytes freed: {self.format_size(last_gc.bytes_freed)}\n"
+
+        output
+
+    fn format_size(bytes: i64) -> text:
+        if bytes < 1024:
+            "{bytes} B"
+        elif bytes < 1024 * 1024:
+            "{bytes / 1024} KB"
+        elif bytes < 1024 * 1024 * 1024:
+            "{bytes / (1024 * 1024)} MB"
+        else:
+            "{bytes / (1024 * 1024 * 1024)} GB"

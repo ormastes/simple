@@ -1,0 +1,317 @@
+# CUDA Type Mapper - CUDA/PTX-Specific Type Mapping Implementation
+#
+# Maps MIR types to CUDA/PTX type strings.
+# Implements TypeMapper trait for CUDA backend.
+
+use compiler.mir.mir_data.*
+use compiler.backend.common.type_mapper.*
+use compiler.hir.hir_types.MemorySpace
+
+# ============================================================================
+# CUDA Type Mapper
+# ============================================================================
+
+class CudaTypeMapper:
+    """
+    Maps MIR types to CUDA/PTX type representations.
+
+    CUDA uses C-like types with memory space qualifiers:
+    - Integers: long long, int, short, char (signed)
+    - Unsigned: unsigned long long, unsigned int, etc.
+    - Floats: double, float, half (f16)
+    - Pointers: type* with __global__, __shared__, __constant__ qualifiers
+
+    Example mappings:
+        I64 → "long long"
+        F64 → "double"
+        F32 → "float"
+        F16 → "half"
+        Bool → "bool"
+        Ptr(_) with Global → "__global__ type*"
+    """
+
+    compute_capability: (i64, i64)  # e.g., (8, 6) for SM 8.6
+
+    static fn create() -> CudaTypeMapper:
+        """Create mapper for default compute capability (SM 7.0)."""
+        CudaTypeMapper(compute_capability: (7, 0))
+
+    static fn create_sm(major: i64, minor: i64) -> CudaTypeMapper:
+        """Create mapper for specific compute capability."""
+        CudaTypeMapper(compute_capability: (major, minor))
+
+impl TypeMapper for CudaTypeMapper:
+    fn map_primitive(ty: PrimitiveType) -> text:
+        """
+        Map primitive types to CUDA/C types.
+
+        CUDA primitives (C-style):
+        - Integers: long long (64), int (32), short (16), char (8)
+        - Unsigned: unsigned variants
+        - Floats: double (64), float (32), half (16)
+        - Boolean: bool
+        """
+        match ty:
+            case I64: "long long"
+            case I32: "int"
+            case I16: "short"
+            case I8: "signed char"
+            case U64: "unsigned long long"
+            case U32: "unsigned int"
+            case U16: "unsigned short"
+            case U8: "unsigned char"
+            case F64: "double"
+            case F32: "float"
+            case F16: "half"
+            case Bool: "bool"
+            case Unit: "void"
+
+    fn map_pointer(pointee: text, mutability: Mutability) -> text:
+        """
+        Map pointer types to CUDA representation.
+
+        CUDA pointers are C-style with optional const qualifier.
+        Memory space qualifiers are added separately.
+        """
+        match mutability:
+            case Mutable: "{pointee}*"
+            case Immutable: "const {pointee}*"
+
+    fn backend_name() -> text:
+        "CUDA"
+
+    fn map_memory_space(space: MemorySpace) -> text:
+        """
+        Map GPU memory space to CUDA qualifier.
+
+        CUDA memory qualifiers:
+        - __global__: Device global memory
+        - __shared__: Block shared memory
+        - __constant__: Constant memory (cached)
+        - (no qualifier): Thread-local/register
+        """
+        match space:
+            case Global: "__global__"
+            case Shared: "__shared__"
+            case Local: ""  # Thread-local is default
+            case Constant: "__constant__"
+            case Uniform: "__constant__"  # CUDA uses constant for uniform-like access
+
+    fn map_vector_type(elem: text, width: i64) -> text:
+        """
+        Map SIMD/vector type to CUDA vector type.
+
+        CUDA vector types: float2, float4, int2, int4, etc.
+        """
+        if width == 1:
+            elem
+        elif width == 2 or width == 4:
+            "{elem}{width}"
+        else:
+            # Fallback to array for non-standard widths
+            "{elem}[{width}]"
+
+    fn supports_half_precision() -> bool:
+        """
+        Check if compute capability supports half precision.
+        Half precision requires SM 5.3+ for full support.
+        """
+        val (major, minor) = self.compute_capability
+        major > 5 or (major == 5 and minor >= 3)
+
+    fn supports_gpu() -> bool:
+        true
+
+impl CudaTypeMapper:
+    # === CUDA-specific methods ===
+
+    fn map_struct(fields: [(text, MirType)]) -> text:
+        """
+        Map struct type to CUDA representation.
+
+        CUDA structs are C-style structs.
+        """
+        val field_types = fields.map(\f: self.map_type(f.1))
+        "struct {{ {field_types.join('; ')}; }}"
+
+    fn map_array(element: MirType, size: i64) -> text:
+        """
+        Map array type to CUDA representation.
+
+        CUDA arrays are C-style fixed arrays.
+        """
+        val elem_ty = self.map_type(element)
+        "{elem_ty}[{size}]"
+
+    fn map_tuple(elements: [MirType]) -> text:
+        """
+        Map tuple type to CUDA struct representation.
+
+        CUDA doesn't have tuples, use struct with numbered fields.
+        """
+        if elements.length == 0:
+            "struct {{}}"
+        else:
+            val field_decls = elements.enumerate().map(\e:
+                "{self.map_type(e.1)} _{e.0}"
+            )
+            "struct {{ {field_decls.join('; ')}; }}"
+
+    fn map_function(params: [MirType], ret: MirType) -> text:
+        """
+        Map function type to CUDA function pointer.
+        """
+        val param_types = params.map(\p: self.map_type(p))
+        val ret_type = self.map_type(ret)
+        "{ret_type} (*)({param_types.join(', ')})"
+
+    fn map_kernel_signature(name: text, params: [MirType]) -> text:
+        """
+        Generate CUDA kernel signature.
+
+        Example:
+            __global__ void kernel_name(float* a, float* b, int n)
+        """
+        val param_decls = params.enumerate().map(\e:
+            "{self.map_type(e.1)} p{e.0}"
+        )
+        "__global__ void {name}({param_decls.join(', ')})"
+
+    fn map_device_function_signature(name: text, params: [MirType], ret: MirType) -> text:
+        """
+        Generate CUDA device function signature.
+
+        Example:
+            __device__ float helper(float x, float y)
+        """
+        val param_decls = params.enumerate().map(\e:
+            "{self.map_type(e.1)} p{e.0}"
+        )
+        val ret_type = self.map_type(ret)
+        "__device__ {ret_type} {name}({param_decls.join(', ')})"
+
+    fn ptx_type(ty: PrimitiveType) -> text:
+        """
+        Map primitive type to PTX type string.
+
+        PTX types:
+        - .s64, .s32, .s16, .s8 (signed)
+        - .u64, .u32, .u16, .u8 (unsigned)
+        - .f64, .f32, .f16 (float)
+        - .pred (predicate/boolean)
+        """
+        match ty:
+            case I64: ".s64"
+            case I32: ".s32"
+            case I16: ".s16"
+            case I8: ".s8"
+            case U64: ".u64"
+            case U32: ".u32"
+            case U16: ".u16"
+            case U8: ".u8"
+            case F64: ".f64"
+            case F32: ".f32"
+            case F16: ".f16"
+            case Bool: ".pred"
+            case Unit: ""
+
+    fn ptx_state_space(space: MemorySpace) -> text:
+        """
+        Map memory space to PTX state space.
+
+        PTX state spaces:
+        - .global: Device global memory
+        - .shared: Per-CTA shared memory
+        - .local: Per-thread local memory
+        - .const: Constant memory
+        - .param: Kernel parameter memory
+        """
+        match space:
+            case Global: ".global"
+            case Shared: ".shared"
+            case Local: ".local"
+            case Constant: ".const"
+            case Uniform: ".const"
+
+    fn supports_tensor_cores() -> bool:
+        """
+        Check if compute capability supports Tensor Cores.
+        Tensor Cores require SM 7.0+ (Volta).
+        """
+        val (major, _) = self.compute_capability
+        major >= 7
+
+    fn max_threads_per_block() -> i64:
+        """
+        Get maximum threads per block for this compute capability.
+        """
+        1024  # Standard limit for modern GPUs
+
+    fn max_shared_memory() -> i64:
+        """
+        Get maximum shared memory per block in bytes.
+        Varies by compute capability.
+        """
+        val (major, _) = self.compute_capability
+        if major >= 8:
+            163840  # 160 KB for Ampere+
+        elif major >= 7:
+            96 * 1024  # 96 KB for Volta/Turing
+        else:
+            48 * 1024  # 48 KB for older
+
+    fn warp_size() -> i64:
+        """Get warp size (always 32 for NVIDIA GPUs)."""
+        32
+
+    # === Size and alignment (CUDA-specific) ===
+
+    fn size_of(ty: MirType) -> i64:
+        """
+        Get size in bytes of a type (CUDA rules).
+        """
+        match ty.kind:
+            case I64 | U64 | F64: 8
+            case I32 | U32 | F32: 4
+            case I16 | U16: 2
+            case I8 | U8 | Bool: 1
+            case Unit: 0
+            case Ptr(_, _): 8  # 64-bit pointers
+            case Struct(fields):
+                fields.map(\f: self.size_of(f.1)).sum()
+            case Array(elem, size):
+                self.size_of(elem) * size
+            case Tuple(elements):
+                elements.map(\e: self.size_of(e)).sum()
+            case _:
+                error("Cannot compute size of {ty}")
+
+    fn align_of(ty: MirType) -> i64:
+        """
+        Get alignment in bytes of a type (CUDA rules).
+        """
+        match ty.kind:
+            case I64 | U64 | F64 | Ptr(_, _): 8
+            case I32 | U32 | F32: 4
+            case I16 | U16: 2
+            case I8 | U8 | Bool: 1
+            case Struct(fields):
+                if fields.length == 0:
+                    1
+                else:
+                    fields.map(\f: self.align_of(f.1)).max()
+            case Array(elem, _):
+                self.align_of(elem)
+            case Tuple(elements):
+                if elements.length == 0:
+                    1
+                else:
+                    elements.map(\e: self.align_of(e)).max()
+            case _:
+                1
+
+# ============================================================================
+# Export
+# ============================================================================
+
+export CudaTypeMapper

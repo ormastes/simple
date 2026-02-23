@@ -1,0 +1,149 @@
+"""
+# External FFI Function Calls and Native Interoperability
+
+**Feature ID:** #RT-012
+**Category:** Runtime
+**Status:** Active
+
+## Overview
+
+Simple's Foreign Function Interface (FFI) enables calling native runtime functions
+declared with the `extern fn` keyword. This is the foundation for all system-level
+operations, including math, I/O, and process management. This spec validates that
+extern functions can be declared and called correctly, that parameters are marshalled
+across the FFI boundary, that return values (including composite types like `List<text>`)
+are properly converted, and that memory remains stable across repeated FFI calls.
+
+## Syntax
+
+```simple
+extern fn rt_math_sqrt(x: f64) -> f64
+extern fn rt_math_pow(x: f64, y: f64) -> f64
+extern fn sys_get_args() -> List<text>
+
+val result = rt_math_sqrt(16.0)    # returns 4.0
+val args = sys_get_args()           # returns program arguments
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `extern fn` | Declaration that binds a Simple function name to a native runtime symbol |
+| Parameter marshalling | Automatic conversion of Simple types to native types at the FFI boundary |
+| Return type conversion | Native return values are converted back to Simple types (f64, List, text) |
+| Memory safety | FFI calls must not cause use-after-free or dangling references |
+| String marshalling | Text values are safely transferred between the Rust runtime and Simple |
+"""
+
+# Extern function declarations
+extern fn rt_math_sqrt(x: f64) -> f64
+extern fn rt_math_pow(x: f64, y: f64) -> f64
+extern fn sys_get_args() -> List<text>
+
+# ============================================================================
+# Test Group 1: Basic FFI Function Calls
+# ============================================================================
+
+describe "External FFI Functions":
+    """
+    Tests for basic external function invocation through the FFI interface.
+    Verifies that functions can be called, return values are correct,
+    and parameters are properly passed.
+    """
+
+    context "when calling a simple extern function":
+        """
+        ### Scenario: Simple Function Call
+
+        Tests basic FFI function invocation with primitive types.
+        """
+
+        it "calls and returns expected result":
+            val result = rt_math_sqrt(16.0)
+            expect(result == 4.0)
+
+    context "when passing parameters to extern function":
+        """
+        ### Scenario: Parameter Passing
+
+        Verifies that parameters are correctly marshalled to native code.
+        """
+
+        it "receives all parameters correctly":
+            val result = rt_math_pow(2.0, 3.0)
+            expect(result == 8.0)
+
+        it "handles parameter type conversions":
+            val result = rt_math_sqrt(25.0)
+            expect(result == 5.0)
+
+
+# ============================================================================
+# Test Group 2: Return Values and Error Handling
+# ============================================================================
+
+describe "External FFI Return Values":
+    """
+    Tests for handling return values from FFI functions,
+    including error cases and type conversions.
+    """
+
+    context "when extern function returns a value":
+        """
+        ### Scenario: Return Value Handling
+
+        Tests that return values are properly converted and available.
+        """
+
+        it "returns primitive types correctly":
+            val result = rt_math_sqrt(9.0)
+            expect(result == 3.0)
+
+        it "returns composite types correctly":
+            val args = sys_get_args()
+            expect(args.len() >= 1)
+
+    context "when extern function encounters errors":
+        """
+        ### Scenario: Error Propagation
+
+        Tests error handling from native function calls.
+        """
+
+        it "propagates errors from extern function":
+            # Test with NaN input (sqrt of negative number)
+            val result = rt_math_sqrt(-1.0)
+            # NaN is not equal to itself
+            expect(result != result)
+
+
+# ============================================================================
+# Test Group 3: Memory and Resource Management
+# ============================================================================
+
+describe "External FFI Memory Safety":
+    """
+    Tests for memory safety when calling external functions,
+    including pointer handling and resource lifecycle.
+    """
+
+    it "properly manages memory across FFI boundary":
+        # Test that list returned from FFI is valid
+        val args = sys_get_args()
+        val first = args[0]
+        expect(first != "")
+
+    it "prevents use-after-free in FFI calls":
+        # Call FFI function multiple times to ensure memory is stable
+        val r1 = rt_math_sqrt(16.0)
+        val r2 = rt_math_sqrt(16.0)
+        expect(r1 == r2)
+        expect(r1 == 4.0)
+
+    it "handles string marshalling safely":
+        # Get args which involves string marshalling from Rust to Simple
+        val args = sys_get_args()
+        expect(args.len() >= 1)
+        # Program name should be non-empty
+        expect(args[0].len() > 0)

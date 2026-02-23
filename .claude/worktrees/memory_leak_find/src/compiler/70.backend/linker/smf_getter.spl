@@ -1,0 +1,408 @@
+# SMF Getter - Unified interface for loading SMF modules
+#
+# This module provides a unified interface for loading SMF modules from:
+# 1. Single SMF files (.smf)
+# 2. Library SMF archives (.lsm)
+#
+# The SmfGetter automatically detects the file type and provides a consistent
+# API for accessing SMF data regardless of the source.
+#
+# Usage:
+#   val getter = SmfGetter.new()
+#   getter.add_search_path("/usr/lib/simple")
+#   val smf_data = getter.get("std/io/mod")?
+
+use app.io.{file_read, file_exists, path_join}
+use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_HEADER_SIZE, fnv1a_hash}
+use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
+use compiler.backend.linker.smf_reader.{SmfReaderImpl}
+
+# ============================================================================
+# SMF Source Type
+# ============================================================================
+
+"""Type of SMF source."""
+enum SmfSourceType:
+    SingleFile       # Individual .smf file
+    LibraryFile      # Library .lsmf archive
+
+# ============================================================================
+# SMF Location
+# ============================================================================
+
+"""Location information for an SMF module."""
+struct SmfLocation:
+    module_name: text           # Module path (e.g., "std/io/mod")
+    source_type: SmfSourceType  # Single file or library
+    file_path: text             # Path to .smf or .lsmf file
+    offset: i64                 # Offset in file (0 for single files)
+    size: i64                   # Size of SMF data
+
+impl SmfLocation:
+    """Create location for a single SMF file."""
+    static fn single_file(module_name: text, file_path: text, size: i64) -> SmfLocation:
+        SmfLocation(
+            module_name: module_name,
+            source_type: SmfSourceType.SingleFile,
+            file_path: file_path,
+            offset: 0,
+            size: size
+        )
+
+    """Create location for a library SMF module."""
+    static fn library_module(module_name: text, lib_path: text, offset: i64, size: i64) -> SmfLocation:
+        SmfLocation(
+            module_name: module_name,
+            source_type: SmfSourceType.LibraryFile,
+            file_path: lib_path,
+            offset: offset,
+            size: size
+        )
+
+# ============================================================================
+# SMF Getter
+# ============================================================================
+
+"""Unified SMF loader supporting single files and libraries.
+
+The SmfGetter maintains:
+- Search paths for locating modules
+- Cache of library readers (avoiding repeated file reads)
+- Index of module locations (file path + offset)
+
+Example:
+    val getter = SmfGetter.new()
+    getter.add_search_path("/usr/lib/simple")
+    getter.add_library("/usr/lib/simple/libstd.lsm")
+
+    val smf_data = getter.get("std/io/mod")?
+    val reader = getter.get_reader("std/io/mod")?
+"""
+struct SmfGetter:
+    search_paths: [text]                        # Directories to search
+    library_readers: Dict<text, LibSmfReader>   # Cached library readers
+    module_index: Dict<text, SmfLocation>       # Module name -> location
+    verbose: bool
+
+impl SmfGetter:
+    """Create a new SMF getter."""
+    static fn new() -> SmfGetter:
+        SmfGetter(
+            search_paths: [],
+            library_readers: {},
+            module_index: {},
+            verbose: false
+        )
+
+    """Enable verbose output."""
+    me set_verbose(verbose: bool):
+        self.verbose = verbose
+
+    """Add a search path for finding SMF files.
+
+    Args:
+        path: Directory path to search
+    """
+    me add_search_path(path: text):
+        if not self.search_paths.contains(path):
+            self.search_paths.push(path)
+            if self.verbose:
+                print "[smf-getter] Added search path: {path}"
+
+    """Add a library SMF file to the getter.
+
+    This opens the library and indexes all modules inside it.
+
+    Args:
+        lib_path: Path to .lsm file
+
+    Returns:
+        Result indicating success or error
+    """
+    me add_library(lib_path: text) -> Result<(), text>:
+        # Check if already loaded
+        if self.library_readers.contains_key(lib_path):
+            return Ok(())
+
+        # Open library
+        val reader_result = LibSmfReader.open(lib_path)
+        if reader_result.is_err():
+            return Err(reader_result.unwrap_err())
+
+        var reader = reader_result.unwrap()
+        if self.verbose:
+            reader.set_verbose(true)
+
+        # Index all modules
+        val modules = reader.get_all_modules()
+        for entry in modules:
+            val module_name = entry.get_name()
+            val location = SmfLocation.library_module(
+                module_name,
+                lib_path,
+                entry.offset as i64,
+                entry.size as i64
+            )
+            self.module_index[module_name] = location
+
+            if self.verbose:
+                print "[smf-getter] Indexed module: {module_name} from {lib_path}"
+
+        # Cache reader
+        self.library_readers[lib_path] = reader
+
+        if self.verbose:
+            print "[smf-getter] Added library: {lib_path} ({modules.len()} modules)"
+
+        Ok(())
+
+    """Scan search paths for SMF files and libraries.
+
+    This finds all .smf and .lsm files in search paths and indexes them.
+
+    Returns:
+        Result indicating success or error
+    """
+    me scan_search_paths() -> Result<(), text>:
+        for search_path in self.search_paths:
+            if self.verbose:
+                print "[smf-getter] Scanning: {search_path}"
+
+            # Scan directory for .smf and .lsm files
+            val files = dir_walk(search_path)
+            for file_path in files:
+                if file_path.ends_with(".smf") or file_path.ends_with(".lsm"):
+                    # Extract module name from file path
+                    # e.g., "lib/std/io/mod.smf" -> "std/io/mod"
+                    val rel_path = file_path[search_path.len() + 1:]
+                    val module_name = rel_path[0:rel_path.len() - 4]  # Remove extension
+                    self.module_index[module_name] = SmfLocation(
+                        path: file_path,
+                        source_type: "file"
+                    )
+                    if self.verbose:
+                        print "[smf-getter] Found: {module_name} -> {file_path}"
+
+        Ok(())
+
+    """Get SMF data for a module.
+
+    Args:
+        module_name: Module path (e.g., "std/io/mod")
+
+    Returns:
+        SMF file data as bytes or error
+    """
+    fn get(module_name: text) -> Result<[u8], text>:
+        # Check module index first
+        if self.module_index.contains_key(module_name):
+            val location = self.module_index[module_name]
+
+            # Load from appropriate source
+            match location.source_type:
+                case SmfSourceType.SingleFile:
+                    return self.load_single_file(location)
+                case SmfSourceType.LibraryFile:
+                    return self.load_from_library(location)
+
+        # Try to find in search paths
+        val search_result = self.search_for_module(module_name)
+        if search_result.is_ok():
+            return search_result
+
+        Err("Module not found: {module_name}")
+
+    """Get object file data for a module.
+
+    Args:
+        module_name: Module path (e.g., "std/io/mod")
+
+    Returns:
+        Object file data as bytes or error if module has no object
+    """
+    fn get_object(module_name: text) -> Result<[u8], text>:
+        # Check if module is from a library
+        if not self.module_index.contains_key(module_name):
+            return Err("Module not found: {module_name}")
+
+        val location = self.module_index[module_name]
+
+        # Only library modules can have object files
+        match location.source_type:
+            case SmfSourceType.LibraryFile:
+                # Get cached library reader
+                if not self.library_readers.contains_key(location.file_path):
+                    return Err("Library reader not found for: {location.file_path}")
+
+                val reader = self.library_readers[location.file_path]
+
+                # Load object from library
+                return reader.get_object(location.module_name)
+
+            case SmfSourceType.SingleFile:
+                return Err("Single SMF files do not include object files")
+
+    """Get an SMF reader for a module.
+
+    Args:
+        module_name: Module path
+
+    Returns:
+        SmfReaderImpl or error
+    """
+    fn get_reader(module_name: text) -> Result<SmfReaderImpl, text>:
+        # Get SMF data
+        val data_result = self.get(module_name)
+        if data_result.is_err():
+            return Err(data_result.unwrap_err())
+
+        val data = data_result.unwrap()
+
+        # Creating SmfReaderImpl from in-memory data not yet implemented
+        # Would construct an SmfReaderImpl that reads from the byte buffer
+        # instead of from a file path
+        eprint("Warning: SmfReaderImpl from in-memory data not yet implemented for module {module_name}")
+        Err("SmfReaderImpl from memory not yet implemented")
+
+    """Check if a module exists.
+
+    Args:
+        module_name: Module path
+
+    Returns:
+        true if module can be loaded, false otherwise
+    """
+    fn has_module(module_name: text) -> bool:
+        # Check index
+        if self.module_index.contains_key(module_name):
+            return true
+
+        # Try search paths
+        val search_result = self.search_for_module(module_name)
+        search_result.is_ok()
+
+    """List all available modules."""
+    fn list_modules() -> [text]:
+        var modules: [text] = []
+        for module_name in self.module_index.keys():
+            modules.push(module_name)
+        modules
+
+    """Get location information for a module."""
+    fn get_location(module_name: text) -> Result<SmfLocation, text>:
+        if self.module_index.contains_key(module_name):
+            Ok(self.module_index[module_name])
+        else:
+            Err("Module not found: {module_name}")
+
+    # ========================================================================
+    # Private Helper Methods
+    # ========================================================================
+
+    """Load SMF data from a single file."""
+    fn load_single_file(location: SmfLocation) -> Result<[u8], text>:
+        val file_result = file_read(location.file_path)
+        if file_result.is_err():
+            return Err("Failed to read SMF file: {location.file_path}")
+
+        val file_text = file_result.unwrap()
+        val file_data = text_to_bytes(file_text)
+
+        if self.verbose:
+            print "[smf-getter] Loaded single file: {location.module_name} ({file_data.len()} bytes)"
+
+        Ok(file_data)
+
+    """Load SMF data from a library."""
+    fn load_from_library(location: SmfLocation) -> Result<[u8], text>:
+        # Get cached library reader
+        if not self.library_readers.contains_key(location.file_path):
+            return Err("Library reader not found for: {location.file_path}")
+
+        val reader = self.library_readers[location.file_path]
+
+        # Load module from library
+        reader.get_module(location.module_name)
+
+    """Search for a module in search paths."""
+    fn search_for_module(module_name: text) -> Result<[u8], text>:
+        # Convert module name to file path (e.g., "std/io/mod" -> "std/io/mod.smf")
+        val smf_file = "{module_name}.smf"
+
+        # Try each search path
+        for search_path in self.search_paths:
+            val full_path = path_join(search_path, smf_file)
+
+            if file_exists(full_path):
+                # Load and index
+                val file_result = file_read(full_path)
+                if file_result.is_ok():
+                    val file_text = file_result.unwrap()
+                    val file_data = text_to_bytes(file_text)
+
+                    # Add to index
+                    val location = SmfLocation.single_file(
+                        module_name,
+                        full_path,
+                        file_data.len()
+                    )
+                    self.module_index[module_name] = location
+
+                    if self.verbose:
+                        print "[smf-getter] Found and indexed: {module_name} at {full_path}"
+
+                    return Ok(file_data)
+
+        Err("Module {module_name} not found in search paths")
+
+    """Close all resources."""
+    me close():
+        # Close all library readers
+        for lib_path in self.library_readers.keys():
+            val reader = self.library_readers[lib_path]
+            reader.close()
+
+        # Clear caches
+        self.library_readers = {}
+        self.module_index = {}
+
+        if self.verbose:
+            print "[smf-getter] Closed all resources"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+"""Convert text to bytes."""
+fn text_to_bytes(text: text) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < text.len():
+        bytes.push(text[i] as u8)
+        i = i + 1
+    bytes
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+"""Create a getter with standard search paths.
+
+Returns:
+    SmfGetter with /usr/lib/simple and /usr/local/lib/simple
+"""
+fn create_standard_getter() -> SmfGetter:
+    var getter = SmfGetter.new()
+    getter.add_search_path("/usr/lib/simple")
+    getter.add_search_path("/usr/local/lib/simple")
+    getter.add_search_path("/opt/simple/lib")
+    getter
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SmfGetter
+export SmfLocation
+export SmfSourceType
+export create_standard_getter

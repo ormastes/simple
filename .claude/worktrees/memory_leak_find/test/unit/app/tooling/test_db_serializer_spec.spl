@@ -1,0 +1,113 @@
+"""
+# Test DB Serializer Specification
+
+**Feature IDs:** #DB-SERIALIZER
+**Category:** Tooling
+**Status:** Implemented
+
+## Overview
+
+Tests SDN serialization: version header output, field formatting.
+Note: Full roundtrip tests involving StringInterner work in compiled mode
+but have interpreter limitations with self-mutation.
+"""
+
+use app.test_runner_new.test_db_types.*
+use app.test_runner_new.test_db_serializer.serialize_volatile_db
+
+# ============================================================================
+# Test Group 1: Version Header (A3)
+# ============================================================================
+
+describe "serialize_volatile_db":
+    it "includes version header":
+        val output = serialize_volatile_db([], [], [], [], [])
+        expect(output.starts_with("# version: 3.0")).to_equal(true)
+
+    it "includes counters table header with new fields":
+        val output = serialize_volatile_db([], [], [], [], [])
+        expect(output.contains("counters |test_id, total_runs, passed, failed, flaky_count, last_change, last_10_runs, failure_rate_pct|")).to_equal(true)
+
+    it "includes timing table header with extended fields":
+        val output = serialize_volatile_db([], [], [], [], [])
+        expect(output.contains("p99")).to_equal(true)
+        expect(output.contains("baseline_update_reason")).to_equal(true)
+
+    it "serializes counter record":
+        val counters = [CounterRecord(
+            test_id: 0, total_runs: 10, passed: 8, failed: 2,
+            flaky_count: 1, last_change: "no_change",
+            last_10_runs: "", failure_rate_pct: 20.0
+        )]
+        val output = serialize_volatile_db(counters, [], [], [], [])
+        # Output should contain the data row (indented with spaces)
+        val lines = output.split("\n")
+        var has_data_row = false
+        for line in lines:
+            if line.trim().starts_with("0,"):
+                has_data_row = true
+        expect(has_data_row).to_equal(true)
+
+    it "serializes timing record":
+        val timing = [TimingSummary(
+            test_id: 0, last_ms: 100.0, p50: 95.0, p90: 110.0,
+            p95: 120.0, baseline_median: 90.0,
+            p99: 130.0, min_time: 80.0, max_time: 140.0, iqr: 15.0,
+            mean: 98.0, std_dev: 12.0, cv_pct: 12.2,
+            baseline_mean: 95.0, baseline_std_dev: 10.0, baseline_cv_pct: 10.5,
+            baseline_last_updated: "",
+            baseline_run_count: 10, baseline_update_reason: ""
+        )]
+        val output = serialize_volatile_db([], timing, [], [], [])
+        val lines = output.split("\n")
+        var has_timing_data = false
+        for line in lines:
+            if line.trim().starts_with("0,"):
+                has_timing_data = true
+        expect(has_timing_data).to_equal(true)
+
+    it "serializes timing_runs table":
+        val runs = [TimingRun(
+            test_id: 0, timestamp: "2026-01-01T00:00:00Z",
+            duration_ms: 42.5, outlier: false
+        )]
+        val output = serialize_volatile_db([], [], runs, [], [])
+        expect(output.contains("timing_runs")).to_equal(true)
+        expect(output.contains("42.5")).to_equal(true)
+
+    it "serializes changes table":
+        val changes = [ChangeEvent(
+            test_id: 0, change_type: "pass_to_fail", run_id: "run_123"
+        )]
+        val output = serialize_volatile_db([], [], [], changes, [])
+        expect(output.contains("changes")).to_equal(true)
+        expect(output.contains("pass_to_fail")).to_equal(true)
+
+    it "serializes test_runs table":
+        val runs = [RunRecord(
+            run_id: "run_1", start_time: "2026-01-01T00:00:00Z",
+            end_time: "2026-01-01T00:01:00Z", pid: 1234,
+            hostname: "myhost", status: "completed",
+            test_count: 50, passed: 48, failed: 2, crashed: 0, timed_out: 0
+        )]
+        val output = serialize_volatile_db([], [], [], [], runs)
+        expect(output.contains("test_runs")).to_equal(true)
+        expect(output.contains("run_1")).to_equal(true)
+        expect(output.contains("myhost")).to_equal(true)
+
+    it "serializes empty counters with no data rows":
+        val output = serialize_volatile_db([], [], [], [], [])
+        val lines = output.split("\n")
+        # Should have header lines but no data rows with leading spaces
+        var has_counter_data = false
+        var in_counters = false
+        for line in lines:
+            if line.contains("counters |"):
+                in_counters = true
+                continue
+            if in_counters and line.trim().starts_with("0"):
+                has_counter_data = true
+            if line == "":
+                in_counters = false
+        expect(has_counter_data).to_equal(false)
+

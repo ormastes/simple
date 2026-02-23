@@ -1,0 +1,473 @@
+# Report Trait
+#
+# Base class for all reports in the Simple language.
+# Provides unified interface for compiler, runtime, and tool reports.
+
+import .level
+import .location
+use ansi.{ansi_reset, ansi_bold, ansi_bold_blue, ansi_bold_cyan, ansi_bold_green}
+
+export Report, ReportKind, Suggestion, FixConfidence
+
+# =============================================================================
+# ReportKind: Category of report
+# =============================================================================
+
+enum ReportKind:
+    # Compiler reports
+    ParseError          # Syntax/parsing errors
+    TypeError           # Type checking errors
+    NameError           # Undefined names, scope errors
+    LintWarning         # Lint rule violations
+    DeprecationWarning  # Deprecated feature usage
+
+    # Runtime reports
+    RuntimeError        # Runtime failures
+    Panic               # Unrecoverable runtime errors
+    MemoryError         # Memory/GC related issues
+    DebugLog            # Debug information
+
+    # Tool reports
+    BuildError          # Build system errors
+    TestFailure         # Test assertion failures
+    FixSuggestion       # EasyFix suggestions
+
+impl ReportKind:
+    fn name() -> text:
+        match self:
+            case ReportKind.ParseError: "parse error"
+            case ReportKind.TypeError: "type error"
+            case ReportKind.NameError: "name error"
+            case ReportKind.LintWarning: "lint"
+            case ReportKind.DeprecationWarning: "deprecation"
+            case ReportKind.RuntimeError: "runtime error"
+            case ReportKind.Panic: "panic"
+            case ReportKind.MemoryError: "memory error"
+            case ReportKind.DebugLog: "debug"
+            case ReportKind.BuildError: "build error"
+            case ReportKind.TestFailure: "test failure"
+            case ReportKind.FixSuggestion: "fix"
+
+    fn is_compiler() -> bool:
+        match self:
+            case ReportKind.ParseError: true
+            case ReportKind.TypeError: true
+            case ReportKind.NameError: true
+            case ReportKind.LintWarning: true
+            case ReportKind.DeprecationWarning: true
+            case _: false
+
+    fn is_runtime() -> bool:
+        match self:
+            case ReportKind.RuntimeError: true
+            case ReportKind.Panic: true
+            case ReportKind.MemoryError: true
+            case ReportKind.DebugLog: true
+            case _: false
+
+    fn is_tool() -> bool:
+        match self:
+            case ReportKind.BuildError: true
+            case ReportKind.TestFailure: true
+            case ReportKind.FixSuggestion: true
+            case _: false
+
+# =============================================================================
+# FixConfidence: Confidence level for auto-fixes
+# =============================================================================
+
+enum FixConfidence:
+    MachineApplicable   # Safe to auto-apply without review
+    MaybeIncorrect      # Probably correct, review recommended
+    HasPlaceholders     # Contains <#placeholder#>, needs editing
+    Unspecified         # Unknown confidence level
+
+impl FixConfidence:
+    fn name() -> text:
+        match self:
+            case FixConfidence.MachineApplicable: "safe"
+            case FixConfidence.MaybeIncorrect: "likely"
+            case FixConfidence.HasPlaceholders: "placeholder"
+            case FixConfidence.Unspecified: "unknown"
+
+    fn is_safe_to_auto_apply() -> bool:
+        match self:
+            case FixConfidence.MachineApplicable: true
+            case _: false
+
+    fn is_likely_correct() -> bool:
+        match self:
+            case FixConfidence.MachineApplicable: true
+            case FixConfidence.MaybeIncorrect: true
+            case _: false
+
+# =============================================================================
+# Suggestion: Machine-applicable fix suggestion
+# =============================================================================
+
+struct Suggestion:
+    message: text           # Description of the fix
+    location: SourceLocation
+    new_text: text          # Replacement text
+    confidence: FixConfidence
+
+impl Suggestion:
+    # Create a simple replacement suggestion
+    static fn replace(location: SourceLocation, new_text: text, message: text) -> Suggestion:
+        Suggestion(
+            message: message,
+            location: location,
+            new_text: new_text,
+            confidence: FixConfidence.MachineApplicable
+        )
+
+    # Create a suggestion with specified confidence
+    static fn with_confidence(location: SourceLocation, new_text: text, message: text, confidence: FixConfidence) -> Suggestion:
+        Suggestion(
+            message: message,
+            location: location,
+            new_text: new_text,
+            confidence: confidence
+        )
+
+    # Create an insertion suggestion (insert at location)
+    static fn insert(location: SourceLocation, new_text: text, message: text) -> Suggestion:
+        Suggestion(
+            message: message,
+            location: SourceLocation.from_span(
+                location.file,
+                Span.at(location.span.start),
+                location.line,
+                location.column,
+                0,
+                0
+            ),
+            new_text: new_text,
+            confidence: FixConfidence.MachineApplicable
+        )
+
+    # Create a deletion suggestion
+    static fn delete(location: SourceLocation, message: text) -> Suggestion:
+        Suggestion(
+            message: message,
+            location: location,
+            new_text: "",
+            confidence: FixConfidence.MachineApplicable
+        )
+
+    fn format() -> text:
+        "{self.location.format_short()}: {self.message} [{self.confidence.name()}]"
+
+# =============================================================================
+# Report: Base class for all reports
+# =============================================================================
+
+class Report:
+    # Core fields
+    level: ReportLevel
+    kind: ReportKind
+    code: text?             # Error code (e.g., "E0001", "L:print_in_test_spec")
+    message: text
+
+    # Location
+    location: SourceLocation?
+
+    # Additional context
+    labels: [Label]         # Multiple labeled spans
+    notes: [text]           # Additional context notes
+    help: [text]            # Help messages/suggestions
+    suggestions: [Suggestion]  # Machine-applicable fixes
+
+    # Metadata
+    source_name: text?      # Source identifier (e.g., "rustc", "lint", "runtime")
+
+impl Report:
+    # ==========================================================================
+    # Factory methods for creating reports
+    # ==========================================================================
+
+    # Create a basic error report
+    static fn error(message: text) -> Report:
+        Report(
+            level: ReportLevel.Error,
+            kind: ReportKind.RuntimeError,
+            code: nil,
+            message: message,
+            location: nil,
+            labels: [],
+            notes: [],
+            help: [],
+            suggestions: [],
+            source_name: nil
+        )
+
+    # Create a basic warning report
+    static fn warning(message: text) -> Report:
+        Report(
+            level: ReportLevel.Warning,
+            kind: ReportKind.LintWarning,
+            code: nil,
+            message: message,
+            location: nil,
+            labels: [],
+            notes: [],
+            help: [],
+            suggestions: [],
+            source_name: nil
+        )
+
+    # Create an info report
+    static fn info(message: text) -> Report:
+        Report(
+            level: ReportLevel.Info,
+            kind: ReportKind.DebugLog,
+            code: nil,
+            message: message,
+            location: nil,
+            labels: [],
+            notes: [],
+            help: [],
+            suggestions: [],
+            source_name: nil
+        )
+
+    # Create a debug report
+    static fn debug(message: text) -> Report:
+        Report(
+            level: ReportLevel.Debug,
+            kind: ReportKind.DebugLog,
+            code: nil,
+            message: message,
+            location: nil,
+            labels: [],
+            notes: [],
+            help: [],
+            suggestions: [],
+            source_name: nil
+        )
+
+    # Create a fatal error report
+    static fn fatal(message: text) -> Report:
+        Report(
+            level: ReportLevel.Fatal,
+            kind: ReportKind.Panic,
+            code: nil,
+            message: message,
+            location: nil,
+            labels: [],
+            notes: [],
+            help: [],
+            suggestions: [],
+            source_name: nil
+        )
+
+    # ==========================================================================
+    # Builder methods (fluent API)
+    # ==========================================================================
+
+    fn with_code(code: text) -> Report:
+        Report(
+            level: self.level,
+            kind: self.kind,
+            code: Some(code),
+            message: self.message,
+            location: self.location,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help,
+            suggestions: self.suggestions,
+            source_name: self.source_name
+        )
+
+    fn with_kind(kind: ReportKind) -> Report:
+        Report(
+            level: self.level,
+            kind: kind,
+            code: self.code,
+            message: self.message,
+            location: self.location,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help,
+            suggestions: self.suggestions,
+            source_name: self.source_name
+        )
+
+    fn with_location(location: SourceLocation) -> Report:
+        Report(
+            level: self.level,
+            kind: self.kind,
+            code: self.code,
+            message: self.message,
+            location: Some(location),
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help,
+            suggestions: self.suggestions,
+            source_name: self.source_name
+        )
+
+    fn at(file: text, line: i64, column: i64) -> Report:
+        self.with_location(SourceLocation.at(file, line, column))
+
+    fn with_label(label: Label) -> Report:
+        Report(
+            level: self.level,
+            kind: self.kind,
+            code: self.code,
+            message: self.message,
+            location: self.location,
+            labels: self.labels + [label],
+            notes: self.notes,
+            help: self.help,
+            suggestions: self.suggestions,
+            source_name: self.source_name
+        )
+
+    fn with_primary_label(location: SourceLocation, message: text) -> Report:
+        self.with_label(Label.primary(location, message))
+
+    fn with_secondary_label(location: SourceLocation, message: text) -> Report:
+        self.with_label(Label.secondary(location, message))
+
+    fn with_note(note: text) -> Report:
+        Report(
+            level: self.level,
+            kind: self.kind,
+            code: self.code,
+            message: self.message,
+            location: self.location,
+            labels: self.labels,
+            notes: self.notes + [note],
+            help: self.help,
+            suggestions: self.suggestions,
+            source_name: self.source_name
+        )
+
+    fn with_help(help_msg: text) -> Report:
+        Report(
+            level: self.level,
+            kind: self.kind,
+            code: self.code,
+            message: self.message,
+            location: self.location,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help + [help_msg],
+            suggestions: self.suggestions,
+            source_name: self.source_name
+        )
+
+    fn with_suggestion(suggestion: Suggestion) -> Report:
+        Report(
+            level: self.level,
+            kind: self.kind,
+            code: self.code,
+            message: self.message,
+            location: self.location,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help,
+            suggestions: self.suggestions + [suggestion],
+            source_name: self.source_name
+        )
+
+    fn with_source(source: text) -> Report:
+        Report(
+            level: self.level,
+            kind: self.kind,
+            code: self.code,
+            message: self.message,
+            location: self.location,
+            labels: self.labels,
+            notes: self.notes,
+            help: self.help,
+            suggestions: self.suggestions,
+            source_name: Some(source)
+        )
+
+    # ==========================================================================
+    # Accessors
+    # ==========================================================================
+
+    fn is_error() -> bool:
+        self.level.is_error()
+
+    fn is_warning() -> bool:
+        self.level == ReportLevel.Warning
+
+    fn has_suggestions() -> bool:
+        not self.suggestions.is_empty()
+
+    fn has_location() -> bool:
+        self.location.?
+
+    fn get_file() -> text?:
+        if self.location.?:
+            Some(self.location.unwrap().file)
+        else:
+            nil
+
+    fn get_line() -> i64:
+        if self.location.?:
+            self.location.unwrap().line
+        else:
+            0
+
+    # ==========================================================================
+    # Formatting
+    # ==========================================================================
+
+    fn format(source: text, use_color: bool) -> text:
+        val reset = if use_color: ansi_reset() else: ""
+        val bold = if use_color: ansi_bold() else: ""
+        val blue = if use_color: ansi_bold_blue() else: ""
+        val level_color = if use_color: self.level.color() else: ""
+
+        # Header: level[code]: message
+        val code_str = if self.code.?: "[{self.code.unwrap()}]" else: ""
+        var output = "{level_color}{self.level.name()}{code_str}{reset}: {bold}{self.message}{reset}\n"
+
+        # Source name if present
+        if self.source_name.?:
+            output = output + "  [{self.source_name.unwrap()}]\n"
+
+        # Primary location
+        if self.location.?:
+            val loc = self.location.unwrap()
+            output = output + "  {blue}-->{reset} {loc.format_short()}\n"
+            output = output + loc.show_context(source, use_color) + "\n"
+
+        # Labels
+        for label in self.labels:
+            val label_color = if label.primary: level_color else: blue
+            output = output + label.format(source, use_color, label_color)
+
+        # Notes
+        for note in self.notes:
+            val note_color = if use_color: ansi_bold_cyan() else: ""
+            output = output + "  {note_color}= note:{reset} {note}\n"
+
+        # Help
+        for h in self.help:
+            val help_color = if use_color: ansi_bold_green() else: ""
+            output = output + "  {help_color}= help:{reset} {h}\n"
+
+        # Suggestions
+        for suggestion in self.suggestions:
+            val sugg_color = if use_color: ansi_bold_green() else: ""
+            output = output + "  {sugg_color}= suggestion:{reset} {suggestion.message}"
+            output = output + " [{suggestion.confidence.name()}]\n"
+
+        output
+
+    fn format_plain(source: text) -> text:
+        self.format(source, false)
+
+    fn format_short() -> text:
+        val code_str = if self.code.?: "[{self.code.unwrap()}] " else: ""
+        val loc_str = if self.location.?:
+            "{self.location.unwrap().format_short()}: "
+        else:
+            ""
+        "{loc_str}{self.level.name()}: {code_str}{self.message}"

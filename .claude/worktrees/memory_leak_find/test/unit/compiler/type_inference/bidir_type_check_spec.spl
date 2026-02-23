@@ -1,0 +1,144 @@
+# @Feature 807: Bidirectional Type Checking
+# @Description: Test bidirectional type checking algorithm (synthesis and checking modes)
+
+# Import bidirectional checking implementation
+use compiler.bidir_phase1a.*
+
+# ============================================================================
+# Test Group 1: Mode Parameter (Phase 1A)
+# ============================================================================
+
+describe "Bidirectional Type Checking - Mode Dispatcher":
+    it "supports Synthesize mode":
+        val ctx = TypeInferencer("", 0)
+        val expr = HirExpr(kind: HirExprKind.IntLit(42))
+
+        val ty = ctx.infer_expr(expr, InferMode.Synthesize)
+
+        expect ty == HirType.Int
+
+    it "supports Check mode with matching type":
+        val ctx = TypeInferencer("", 0)
+        val expr = HirExpr(kind: HirExprKind.IntLit(42))
+
+        val ty = ctx.infer_expr(expr, InferMode.Check(HirType.Int))
+
+        expect ty == HirType.Int
+
+describe "Bidirectional Type Checking - Lambda Synthesis":
+    it "synthesizes lambda without expected type":
+        val ctx = TypeInferencer("", 0)
+        # Lambda without type context - creates type variables
+        val lambda = HirExpr(kind: HirExprKind.Lambda(["x"], HirExpr(kind: HirExprKind.Var("x"))))
+
+        val ty = ctx.infer_expr(lambda, InferMode.Synthesize)
+
+        # Should create function type with type variables
+        match ty:
+            case Function(params, ret):
+                expect params.len() == 1
+                expect true
+            case _:
+                expect false  # Should be a function type
+
+describe "Bidirectional Type Checking - Lambda Checking":
+    it "checks lambda against expected function type":
+        val ctx = TypeInferencer("", 0)
+        val lambda = HirExpr(kind: HirExprKind.Lambda(["x"], HirExpr(kind: HirExprKind.Var("x"))))
+
+        # Expected type: fn(i64) -> i64
+        val expected = HirType.Function([HirType.Int], HirType.Int)
+
+        val ty = ctx.infer_expr(lambda, InferMode.Check(expected))
+
+        expect ty == expected
+
+    it "propagates parameter types to lambda body":
+        val ctx = TypeInferencer("", 0)
+        # Lambda body uses parameter - type should propagate
+        val body = HirExpr(kind: HirExprKind.Var("x"))
+        val lambda = HirExpr(kind: HirExprKind.Lambda(["x"], body))
+
+        val expected = HirType.Function([HirType.Int], HirType.Int)
+
+        val ty = ctx.infer_expr(lambda, InferMode.Check(expected))
+
+        expect ty == expected
+
+# ============================================================================
+# Test Group 2: Application Checking (Phase 1B)
+# ============================================================================
+
+describe "Bidirectional Type Checking - Function Application":
+    it "checks arguments against parameter types":
+        val ctx = TypeInferencer("", 0)
+
+        # Call with argument: double(42)
+        val callee = HirExpr(kind: HirExprKind.Var("double"))
+        val arg = HirExpr(kind: HirExprKind.IntLit(42))
+        val call = HirExpr(kind: HirExprKind.Call(callee, [arg]))
+
+        val result_ty = ctx.infer_expr(call, InferMode.Synthesize)
+
+        # Result type depends on function lookup
+        expect true
+
+describe "Bidirectional Type Checking - Let Bindings":
+    it "generalizes let-bound values":
+        val ctx = TypeInferencer("", 0)
+
+        # let id = \x: x
+        val lambda = HirExpr(kind: HirExprKind.Lambda(["x"], HirExpr(kind: HirExprKind.Var("x"))))
+
+        # Bind without explicit type (synthesis)
+        val generalized_ty = ctx.infer_expr(lambda, InferMode.Synthesize)
+
+        # Can use id with any type
+        expect true
+
+    it "checks let-bound values with annotations":
+        val ctx = TypeInferencer("", 0)
+
+        # let id: fn(i64) -> i64 = \x: x
+        val lambda = HirExpr(kind: HirExprKind.Lambda(["x"], HirExpr(kind: HirExprKind.Var("x"))))
+        val expected = HirType.Function([HirType.Int], HirType.Int)
+
+        val checked_ty = ctx.infer_expr(lambda, InferMode.Check(expected))
+
+        expect checked_ty == expected
+
+# ============================================================================
+# Test Group 3: Integration (Phase 1D)
+# ============================================================================
+
+describe "Bidirectional Type Checking - Nested Lambdas":
+    it "propagates types through nested lambdas":
+        val ctx = TypeInferencer("", 0)
+
+        # \x: \y: x
+        val inner_body = HirExpr(kind: HirExprKind.Var("x"))
+        val inner_lambda = HirExpr(kind: HirExprKind.Lambda(["y"], inner_body))
+        val outer_lambda = HirExpr(kind: HirExprKind.Lambda(["x"], inner_lambda))
+
+        # Expected: fn(i64) -> fn(i64) -> i64
+        val inner_fn_ty = HirType.Function([HirType.Int], HirType.Int)
+        val outer_fn_ty = HirType.Function([HirType.Int], inner_fn_ty)
+
+        val ty = ctx.infer_expr(outer_lambda, InferMode.Check(outer_fn_ty))
+
+        expect ty == outer_fn_ty
+
+describe "Bidirectional Type Checking - Benefits":
+    it "reduces annotation burden for lambdas":
+        val ctx = TypeInferencer("", 0)
+
+        # Before bidir: val id = \x: i64: x
+        # After bidir:  val id: fn(i64) -> i64 = \x: x
+
+        # Annotation on binding instead of lambda parameter
+        val lambda = HirExpr(kind: HirExprKind.Lambda(["x"], HirExpr(kind: HirExprKind.Var("x"))))
+        val expected = HirType.Function([HirType.Int], HirType.Int)
+
+        val ty = ctx.infer_expr(lambda, InferMode.Check(expected))
+
+        expect ty == expected

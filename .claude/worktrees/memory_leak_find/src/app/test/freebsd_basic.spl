@@ -1,0 +1,423 @@
+# Simple (.spl) replacement for scripts/test-freebsd-qemu-basic.sh
+#
+# Run Basic Tests in FreeBSD QEMU VM
+# Builds Simple compiler in FreeBSD QEMU VM and runs basic test suite.
+# Tests a representative subset to verify FreeBSD build works correctly.
+#
+# Usage:
+#   bin/simple src/app/test/freebsd_basic.spl [--skip-build] [--core-only] [--verbose]
+
+use app.io.mod.{shell, shell_bool, shell_output, env_get, file_exists, exit, get_args, dir_create_all}
+use std.text.{contains, trim}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+fn get_config_vm_path() -> text:
+    val env_val = env_get("QEMU_VM_PATH")
+    if env_val != "":
+        return env_val
+    return "build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64.qcow2"
+
+fn get_config_port() -> text:
+    val env_val = env_get("QEMU_PORT")
+    if env_val != "":
+        return env_val
+    return "2222"
+
+fn get_config_user() -> text:
+    val env_val = env_get("QEMU_USER")
+    if env_val != "":
+        return env_val
+    return "freebsd"
+
+fn get_config_mem() -> text:
+    val env_val = env_get("QEMU_MEM")
+    if env_val != "":
+        return env_val
+    return "4G"
+
+fn get_config_cpus() -> text:
+    val env_val = env_get("QEMU_CPUS")
+    if env_val != "":
+        return env_val
+    return "4"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn log(msg: text):
+    print "[test-freebsd-basic] {msg}"
+
+fn err(msg: text):
+    print "[test-freebsd-basic] ERROR: {msg}"
+
+fn pass_msg(msg: text):
+    print "PASS {msg}"
+
+fn fail_msg(msg: text):
+    print "FAIL {msg}"
+
+fn run_in_vm(remote_cmd: text) -> text:
+    val port = get_config_port()
+    val user = get_config_user()
+    return "ssh -o StrictHostKeyChecking=no -p {port} {user}@localhost \"{remote_cmd}\""
+
+# ============================================================================
+# Step 1: Check VM is running
+# ============================================================================
+
+fn step1_check_vm():
+    val port = get_config_port()
+    val vm_path = get_config_vm_path()
+    val mem = get_config_mem()
+    val cpus = get_config_cpus()
+
+    log("================================================================")
+    log("Step 1: Checking FreeBSD VM")
+    log("================================================================")
+    print ""
+
+    val alive_cmd = run_in_vm("echo VM alive")
+    val alive = shell_bool("{alive_cmd} >/dev/null 2>&1")
+    if alive:
+        pass_msg("FreeBSD VM is running on port {port}")
+    else:
+        log("VM not running, starting...")
+
+        # Check VM image exists
+        if file_exists(vm_path) == false:
+            err("VM image not found: {vm_path}")
+            err("Download with: ./scripts/test-freebsd-qemu-setup.sh --download")
+            exit(1)
+
+        # Start VM
+        var accel = "kvm:tcg"
+        if file_exists("/dev/kvm") == false:
+            accel = "tcg"
+            log("WARNING: Using TCG (KVM not available, will be slower)")
+
+        val pid_file = "build/freebsd/vm/qemu.pid"
+        dir_create_all("build/freebsd/vm")
+
+        val start_cmd = "qemu-system-x86_64 -machine accel={accel} -cpu host -m {mem} -smp {cpus} -drive file={vm_path},format=qcow2,if=virtio -net nic,model=virtio -net user,hostfwd=tcp::{port}-:22 -nographic -daemonize -pidfile {pid_file}"
+        shell(start_cmd)
+
+        log("Waiting for SSH (60 seconds)...")
+        var connected = false
+        for i in 30:
+            val ssh_check = run_in_vm("echo SSH ready")
+            val ssh_ok = shell_bool("{ssh_check} >/dev/null 2>&1")
+            if ssh_ok:
+                connected = true
+                pass_msg("SSH connection established")
+                # break not available, use flag
+            if connected == false:
+                shell("sleep 2")
+
+        if connected == false:
+            fail_msg("SSH connection timeout")
+            exit(1)
+
+    # Check FreeBSD version
+    val ver_cmd = run_in_vm("uname -r")
+    val version = trim(shell_output(ver_cmd))
+    pass_msg("FreeBSD version: {version}")
+
+    print ""
+
+# ============================================================================
+# Step 2: Sync project files
+# ============================================================================
+
+fn step2_sync_project():
+    val port = get_config_port()
+    val user = get_config_user()
+
+    log("================================================================")
+    log("Step 2: Syncing project files to VM")
+    log("================================================================")
+    print ""
+
+    log("Syncing files (excludes .git, build, .jj)...")
+    val sync_result = shell("rsync -az --delete -e \"ssh -p {port} -o StrictHostKeyChecking=no\" --exclude='.git' --exclude='build' --exclude='.jj' --exclude='target' --exclude='*.o' --exclude='*.a' . {user}@localhost:~/simple/ 2>&1")
+    if sync_result.exit_code == 0:
+        pass_msg("Project files synced to VM")
+    else:
+        fail_msg("Project file sync failed")
+        exit(1)
+
+    # Verify files
+    val count_cmd = run_in_vm("find ~/simple -name '*.spl' | wc -l")
+    val file_count = trim(shell_output(count_cmd))
+    pass_msg("Found {file_count} .spl files in VM")
+
+    print ""
+
+# ============================================================================
+# Step 3: Build compiler (optional)
+# ============================================================================
+
+fn step3_build_compiler(skip_build: bool, verbose: bool):
+    val port = get_config_port()
+    val user = get_config_user()
+
+    log("================================================================")
+    log("Step 3: Building Simple compiler")
+    log("================================================================")
+    print ""
+
+    if skip_build:
+        log("Skipping build (--skip-build)")
+
+        # Check if binary exists
+        val check_cmd = run_in_vm("test -f ~/simple/bin/simple")
+        val bin_exists = shell_bool("{check_cmd} >/dev/null 2>&1")
+        if bin_exists:
+            pass_msg("Using existing bin/simple in VM")
+        else:
+            err("No binary found in VM (~/simple/bin/simple)")
+            err("Remove --skip-build to build compiler first")
+            exit(1)
+    else:
+        log("Running FreeBSD bootstrap (this may take 3-6 minutes)...")
+
+        var boot_result_code = 0
+        if verbose:
+            val boot_cmd = run_in_vm("cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --verbose")
+            val boot_result = shell(boot_cmd)
+            boot_result_code = boot_result.exit_code
+        else:
+            val boot_cmd = run_in_vm("cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64")
+            val boot_result = shell(boot_cmd)
+            boot_result_code = boot_result.exit_code
+
+        if boot_result_code == 0:
+            pass_msg("Bootstrap completed successfully")
+        else:
+            fail_msg("Bootstrap failed")
+            exit(1)
+
+        # Verify binary
+        val check_cmd = run_in_vm("test -f ~/simple/bin/simple")
+        val bin_exists = shell_bool("{check_cmd} >/dev/null 2>&1")
+        if bin_exists:
+            pass_msg("Binary created: ~/simple/bin/simple")
+        else:
+            fail_msg("Binary not found after bootstrap")
+            exit(1)
+
+    # Check binary info
+    val info_cmd = run_in_vm("file ~/simple/bin/simple")
+    val binary_info = trim(shell_output(info_cmd))
+    if contains(binary_info, "FreeBSD"):
+        pass_msg("Binary verified: FreeBSD ELF")
+    else:
+        err("Binary verification failed: not FreeBSD ELF")
+        err(binary_info)
+        exit(1)
+
+    # Test version
+    val ver_cmd = run_in_vm("~/simple/bin/simple --version 2>&1 | head -1")
+    val version = trim(shell_output(ver_cmd))
+    pass_msg("Compiler version: {version}")
+
+    print ""
+
+# ============================================================================
+# Step 4: Run basic tests
+# ============================================================================
+
+fn step4_run_tests(core_only: bool, verbose: bool):
+    log("================================================================")
+    log("Step 4: Running basic test suite")
+    log("================================================================")
+    print ""
+
+    # Define test paths based on mode
+    var test_paths = [""]
+    # Clear the placeholder
+    test_paths = []
+
+    if core_only:
+        log("Running core tests only (--core-only)")
+        test_paths = [
+            "test/unit/core/tokens_spec.spl",
+            "test/unit/core/types_spec.spl",
+            "test/unit/core/lexer_spec.spl",
+            "test/unit/core/parser_spec.spl",
+            "test/unit/core/ast_spec.spl"
+        ]
+    else:
+        log("Running basic test suite (core + std + selected app tests)")
+        test_paths = [
+            "test/unit/core/",
+            "test/unit/std/string_spec.spl",
+            "test/unit/std/array_spec.spl",
+            "test/unit/std/math_spec.spl",
+            "test/unit/std/path_spec.spl"
+        ]
+
+    var passed = 0
+    var failed = 0
+
+    for path in test_paths:
+        log("Testing: {path}")
+
+        val test_cmd = run_in_vm("cd ~/simple && bin/simple test {path} 2>&1")
+        val test_result = shell(test_cmd)
+        val test_output = test_result.stdout
+
+        if verbose:
+            print test_output
+
+        # Parse results
+        if contains(test_output, "FAILED"):
+            val path_passed_str = trim(shell_output("echo '{test_output}' | grep -oP '\\d+(?= passed)' | tail -1 || echo 0"))
+            val path_failed_str = trim(shell_output("echo '{test_output}' | grep -oP '\\d+(?= failed)' | tail -1 || echo 0"))
+            var path_passed = int(path_passed_str)
+            var path_failed = int(path_failed_str)
+
+            if path_passed > 0:
+                passed = passed + path_passed
+            if path_failed > 0:
+                failed = failed + path_failed
+                log("  FAIL {path_passed} passed, {path_failed} failed")
+            else:
+                log("  FAIL Test run failed")
+                failed = failed + 1
+        else:
+            val path_passed_str = trim(shell_output("echo '{test_output}' | grep -oP '\\d+(?= passed)' | tail -1 || echo 0"))
+            var path_passed = int(path_passed_str)
+            if path_passed > 0:
+                passed = passed + path_passed
+                log("  PASS {path_passed} tests passed")
+            else:
+                log("  PASS All tests passed")
+
+    print ""
+    log("================================================================")
+    log("Test Results Summary")
+    log("================================================================")
+
+    val total = passed + failed
+    var pct = 0
+    if total > 0:
+        pct = (passed * 100) / total
+    log("Total:  {total} tests")
+    log("Passed: {passed} tests ({pct}%)")
+    log("Failed: {failed} tests")
+    print ""
+
+    if failed == 0:
+        pass_msg("All tests passed!")
+    else:
+        log("Some tests failed")
+        log("Run with --verbose to see detailed output")
+
+    print ""
+
+# ============================================================================
+# Step 5: Retrieve binary (optional)
+# ============================================================================
+
+fn step5_retrieve_binary():
+    val port = get_config_port()
+    val user = get_config_user()
+
+    log("================================================================")
+    log("Step 5: Retrieving binary from VM")
+    log("================================================================")
+    print ""
+
+    log("Syncing bin/simple from VM...")
+    dir_create_all("bin")
+    val sync_result = shell("rsync -az -e \"ssh -p {port} -o StrictHostKeyChecking=no\" {user}@localhost:~/simple/bin/simple bin/simple.freebsd 2>&1")
+
+    if sync_result.exit_code == 0:
+        if file_exists("bin/simple.freebsd"):
+            pass_msg("Binary retrieved: bin/simple.freebsd")
+            val size = trim(shell_output("du -h bin/simple.freebsd | cut -f1"))
+            pass_msg("Binary size: {size}")
+            log("You can test it in QEMU with:")
+            log("  ssh -p {port} {user}@localhost '~/simple/bin/simple --version'")
+        else:
+            log("WARNING: Could not retrieve binary")
+    else:
+        log("WARNING: Could not retrieve binary")
+
+    print ""
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+fn cleanup_vm():
+    val port = get_config_port()
+
+    log("================================================================")
+    log("Cleanup")
+    log("================================================================")
+    print ""
+
+    log("Note: VM is still running on port {port}")
+    log("To stop VM:")
+    log("  kill $(cat build/freebsd/vm/qemu.pid)")
+    log("")
+    log("To keep testing:")
+    log("  bin/simple src/app/test/freebsd_basic.spl --skip-build")
+    print ""
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main():
+    val args = get_args()
+    var skip_build = false
+    var core_only = false
+    var verbose = false
+
+    for arg in args:
+        if arg == "--skip-build":
+            skip_build = true
+        else if arg == "--core-only":
+            core_only = true
+        else if arg == "--verbose":
+            verbose = true
+        else if arg == "--help":
+            print "Run Basic Tests in FreeBSD QEMU VM"
+            print ""
+            print "Usage:"
+            print "  bin/simple src/app/test/freebsd_basic.spl [--skip-build] [--core-only] [--verbose]"
+            print ""
+            print "Options:"
+            print "  --skip-build   Skip bootstrap, use existing bin/simple in VM"
+            print "  --core-only    Run only core tests (lexer, parser, types)"
+            print "  --verbose      Show detailed test output"
+            exit(0)
+        else:
+            print "Unknown option: {arg}"
+            print "Run with --help for usage"
+            exit(1)
+
+    log("========================================================")
+    log("FreeBSD QEMU Basic Test Suite")
+    log("========================================================")
+    print ""
+
+    step1_check_vm()
+    step2_sync_project()
+    step3_build_compiler(skip_build, verbose)
+    step4_run_tests(core_only, verbose)
+    step5_retrieve_binary()
+    cleanup_vm()
+
+    log("========================================================")
+    log("FreeBSD Basic Tests Complete!")
+    log("========================================================")
+    print ""
+
+main()

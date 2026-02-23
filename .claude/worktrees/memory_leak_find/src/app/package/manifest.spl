@@ -1,0 +1,174 @@
+# Package Manifest Operations
+# Parse and generate manifest.sdn files
+
+use app.io.{file_read, shell_output_trimmed}
+use package.types.{PackageInfo, Manifest, Dependency, DependencySource, GitRef, Version, VersionConstraint}
+use package.semver.{parse_version, parse_constraint}
+
+class PackageManifest:
+    name: text
+    version: text
+    package_type: text  # "bootstrap" or "full"
+    platform: text
+    build_timestamp: text
+    build_profile: text
+    build_commit: text
+    runtime_binary: text
+    runtime_size: i64
+    runtime_checksum: text
+    stdlib_files: [text]
+    app_dirs: [text]
+
+    static fn from_file(path: text) -> PackageManifest:
+        val content = file_read(path)
+        val data = sdn.parse(content)
+
+        PackageManifest(
+            name: data.get("package.name") ?? "simple",
+            version: data.get("package.version") ?? "0.0.0",
+            package_type: data.get("package.type") ?? "bootstrap",
+            platform: data.get("package.platform") ?? "unknown",
+            build_timestamp: data.get("build.timestamp") ?? "",
+            build_profile: data.get("build.profile") ?? "release-opt",
+            build_commit: data.get("build.commit") ?? "",
+            runtime_binary: data.get("runtime.binary") ?? "simple",
+            runtime_size: data.get("runtime.size") ?? 0,
+            runtime_checksum: data.get("runtime.checksum") ?? "",
+            stdlib_files: data.get("contents.stdlib") ?? [],
+            app_dirs: data.get("contents.apps") ?? []
+        )
+
+    static fn generate_bootstrap(version: text, platform: text) -> PackageManifest:
+        PackageManifest(
+            name: "simple-bootstrap",
+            version: version,
+            package_type: "bootstrap",
+            platform: platform,
+            build_timestamp: current_timestamp(),
+            build_profile: "release-opt",
+            build_commit: get_git_commit(),
+            runtime_binary: "simple",
+            runtime_size: 0,  # Will be filled during build
+            runtime_checksum: "",  # Will be filled during build
+            stdlib_files: ["core.spl", "io.spl", "json.spl", "http.spl"],
+            app_dirs: ["cli", "run", "compile", "check", "repl"]
+        )
+
+    fn to_sdn() -> text:
+        """
+package:
+  name: {self.name}
+  version: {self.version}
+  type: {self.package_type}
+  platform: {self.platform}
+
+build:
+  timestamp: {self.build_timestamp}
+  profile: {self.build_profile}
+  commit: {self.build_commit}
+
+runtime:
+  binary: {self.runtime_binary}
+  size: {self.runtime_size}
+  checksum: {self.runtime_checksum}
+
+contents:
+  stdlib: {format_list(self.stdlib_files)}
+  apps: {format_list(self.app_dirs)}
+
+install:
+  default_prefix: ~/.local
+  system_prefix: /usr/local
+  binaries:
+    - name: simple
+      target: lib/simple/simple
+      type: symlink
+
+  paths:
+    runtime: lib/simple/
+    stdlib: lib/simple/stdlib/
+    apps: lib/simple/app/
+"""
+
+fn format_list(items: [text]) -> text:
+    if items.is_empty():
+        return "[]"
+
+    var parts = []
+    for item in items:
+        parts.push("    " + item + ",")
+    "[\n" + parts.join("\n") + "\n  ]"
+
+fn current_timestamp() -> text:
+    shell_output_trimmed("date -u +%Y-%m-%dT%H:%M:%SZ", "unknown")
+
+fn get_git_commit() -> text:
+    shell_output_trimmed("git rev-parse HEAD 2>/dev/null", "unknown")
+
+# ============================================================================
+# Manifest Parsing (for package.sdn format)
+# ============================================================================
+
+fn parse_manifest_string(content: text) -> Result<Manifest, text>:
+    """Parse a manifest from SDN string
+
+    Expected format:
+        package:
+          name: myapp
+          version: 1.0.0
+          description: My app
+          authors: [Alice, Bob]
+          license: MIT
+          repository: https://github.com/user/repo
+          homepage: https://example.com
+
+        dependencies:
+          http: ^1.0
+          json: ~2.0.0
+
+        dev_dependencies:
+          test: ^1.0
+    """
+    # TODO: Implement proper SDN parsing
+    # For now, return a minimal valid manifest to prevent timeouts
+
+    # Try to extract basic fields with simple string parsing
+    var name = "unknown"
+    var version_str = "0.1.0"
+
+    # Simple line-by-line parsing (temporary until SDN is ready)
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("name:"):
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                name = parts[1].trim()
+        if trimmed.starts_with("version:"):
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                version_str = parts[1].trim()
+
+    # Parse version
+    val version = parse_version(version_str)?
+
+    # Create minimal manifest
+    val pkg_info = PackageInfo(
+        name: name,
+        version: version,
+        description: nil,
+        authors: [],
+        license: nil,
+        repository: nil,
+        homepage: nil
+    )
+
+    val manifest = Manifest(
+        package: pkg_info,
+        dependencies: [],
+        dev_dependencies: []
+    )
+
+    Ok(manifest)
+
+export PackageManifest, parse_manifest_string

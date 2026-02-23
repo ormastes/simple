@@ -1,0 +1,292 @@
+# MDSOC Layer Dependency Checker — Public Documentation Validation
+#
+# Extracted from layer_checker.spl. Contains:
+# - check_public_documentation: Validates public exports have docs
+# - Helper functions for source file detection and docstring checking
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+use compiler.mdsoc.layer_checker.{LayerChecker, DocViolation}
+
+# ============================================================================
+# Public Documentation Validation
+# ============================================================================
+
+fn check_public_documentation(capsule: VirtualCapsule, checker: LayerChecker):
+    """Validate that all CapsuleVisibility.Public exports have documentation.
+
+    Integrates with app.doc.public_check to reuse existing docstring validation.
+    Adds DocViolation entries to the checker for any undocumented public exports.
+
+    Args:
+        capsule: Virtual capsule with surface bindings
+        checker: LayerChecker to record violations (mutated)
+    """
+    # Filter for Public visibility only
+    var public_names: [text] = []
+    for binding in capsule.surface:
+        if binding.visibility.is_public():
+            public_names = public_names + [binding.name]
+
+    # If no public exports, nothing to check
+    if public_names.len() == 0:
+        return
+
+    # Check each public export for documentation using inline implementation
+    # (Reuses the same pattern as app.doc.public_check.docstring_checker)
+    for name in public_names:
+        val source_file = _find_type_source(capsule.path, name)
+
+        if source_file.len() == 0:
+            # Type not found - create violation
+            val violation = DocViolation.new(
+                name,
+                "unknown",
+                capsule.path,
+                "",
+                0,
+                "Public export '{name}' not found in module"
+            )
+            checker.add_doc_violation(violation)
+            continue
+
+        # Check if documentation exists
+        val has_doc = _has_docstring(source_file, name)
+
+        if not has_doc:
+            val type_kind = _detect_type_kind(source_file, name)
+            val line_num = _find_type_line(source_file, name)
+
+            val violation = DocViolation.new(
+                name,
+                type_kind,
+                capsule.path,
+                source_file,
+                line_num,
+                "Public export '{name}' requires documentation"
+            )
+            checker.add_doc_violation(violation)
+
+fn _find_type_source(module_path: text, type_name: text) -> text:
+    """Find source file containing a type definition.
+
+    Search order: types.spl, {type_name}.spl, mod.spl, __init__.spl, all .spl files.
+    Reuses logic from app.doc.public_check.docstring_checker.find_type_source_file.
+    """
+    # Priority 1: types.spl
+    val types_file = module_path + "/types.spl"
+    if rt_file_exists(types_file) and _contains_type(types_file, type_name):
+        return types_file
+
+    # Priority 2: {type_name}.spl (convert to snake_case)
+    val snake_name = _camel_to_snake(type_name)
+    val dedicated_file = module_path + "/" + snake_name + ".spl"
+    if rt_file_exists(dedicated_file) and _contains_type(dedicated_file, type_name):
+        return dedicated_file
+
+    # Priority 3: mod.spl
+    val mod_file = module_path + "/mod.spl"
+    if rt_file_exists(mod_file) and _contains_type(mod_file, type_name):
+        return mod_file
+
+    # Priority 4: __init__.spl
+    val init_file = module_path + "/__init__.spl"
+    if rt_file_exists(init_file) and _contains_type(init_file, type_name):
+        return init_file
+
+    ""
+
+fn _contains_type(filepath: text, type_name: text) -> bool:
+    """Check if file contains type definition."""
+    if not rt_file_exists(filepath):
+        return false
+
+    val content = rt_file_read_text(filepath) ?? ""
+    val lines = content.split("\n")
+
+    for line in lines:
+        # Check for struct/class/enum
+        if (line.starts_with("struct " + type_name + ":") or
+            line.starts_with("class " + type_name + ":") or
+            line.starts_with("enum " + type_name + ":")):
+            return true
+
+        # Check for function (snake_case)
+        val snake_name = _camel_to_snake(type_name)
+        if line.starts_with("fn " + snake_name + "("):
+            return true
+
+    false
+
+fn _has_docstring(filepath: text, type_name: text) -> bool:
+    """Check if type has documentation (triple-quoted or # comments)."""
+    if not rt_file_exists(filepath):
+        return false
+
+    val content = rt_file_read_text(filepath) ?? ""
+    val lines = content.split("\n")
+
+    var i = 0
+    for line in lines:
+        # Check if this is the type declaration
+        val is_type = (
+            line.starts_with("struct " + type_name + ":") or
+            line.starts_with("class " + type_name + ":") or
+            line.starts_with("enum " + type_name + ":")
+        )
+
+        val snake_name = _camel_to_snake(type_name)
+        val is_fn = line.starts_with("fn " + snake_name + "(")
+
+        if is_type or is_fn:
+            # Check for # comments before declaration
+            if i > 0:
+                val prev_line = lines[i - 1]
+                if prev_line.starts_with("#"):
+                    return true
+
+            # Check for """ after declaration
+            if i + 1 < lines.len():
+                val next_line = lines[i + 1]
+                if next_line.contains("\"\"\""):
+                    return true
+
+        i = i + 1
+
+    false
+
+fn _detect_type_kind(filepath: text, type_name: text) -> text:
+    """Detect if type is struct, class, enum, or fn."""
+    if not rt_file_exists(filepath):
+        return "unknown"
+
+    val content = rt_file_read_text(filepath) ?? ""
+    val lines = content.split("\n")
+
+    for line in lines:
+        if line.starts_with("struct " + type_name + ":"):
+            return "struct"
+        if line.starts_with("class " + type_name + ":"):
+            return "class"
+        if line.starts_with("enum " + type_name + ":"):
+            return "enum"
+
+        val snake_name = _camel_to_snake(type_name)
+        if line.starts_with("fn " + snake_name + "("):
+            return "fn"
+
+    "unknown"
+
+fn _find_type_line(filepath: text, type_name: text) -> i64:
+    """Find line number where type is defined."""
+    if not rt_file_exists(filepath):
+        return 0
+
+    val content = rt_file_read_text(filepath) ?? ""
+    val lines = content.split("\n")
+    var line_num = 1
+
+    for line in lines:
+        if (line.starts_with("struct " + type_name + ":") or
+            line.starts_with("class " + type_name + ":") or
+            line.starts_with("enum " + type_name + ":")):
+            return line_num
+
+        val snake_name = _camel_to_snake(type_name)
+        if line.starts_with("fn " + snake_name + "("):
+            return line_num
+
+        line_num = line_num + 1
+
+    0
+
+fn _camel_to_snake(name: text) -> text:
+    """Convert CamelCase to snake_case."""
+    if name.len() == 0:
+        return name
+
+    var result = ""
+    var i = 0
+
+    for i in range(name.len()):
+        val ch = name.char_at(i)
+
+        # Check if uppercase (A-Z)
+        var is_upper = false
+        if ch >= "A" and ch <= "Z":
+            is_upper = true
+
+        if is_upper:
+            if i > 0:
+                result = result + "_"
+            # Convert to lowercase (A=65 -> a=97, +32)
+            val code = _char_code(ch)
+            val lower = _char_from_code(code + 32)
+            result = result + lower
+        else:
+            result = result + ch
+
+    result
+
+fn _char_code(ch: text) -> i64:
+    """Get ASCII code for character."""
+    if ch == "A": return 65
+    if ch == "B": return 66
+    if ch == "C": return 67
+    if ch == "D": return 68
+    if ch == "E": return 69
+    if ch == "F": return 70
+    if ch == "G": return 71
+    if ch == "H": return 72
+    if ch == "I": return 73
+    if ch == "J": return 74
+    if ch == "K": return 75
+    if ch == "L": return 76
+    if ch == "M": return 77
+    if ch == "N": return 78
+    if ch == "O": return 79
+    if ch == "P": return 80
+    if ch == "Q": return 81
+    if ch == "R": return 82
+    if ch == "S": return 83
+    if ch == "T": return 84
+    if ch == "U": return 85
+    if ch == "V": return 86
+    if ch == "W": return 87
+    if ch == "X": return 88
+    if ch == "Y": return 89
+    if ch == "Z": return 90
+    0
+
+fn _char_from_code(code: i64) -> text:
+    """Get character from ASCII code."""
+    if code == 97: return "a"
+    if code == 98: return "b"
+    if code == 99: return "c"
+    if code == 100: return "d"
+    if code == 101: return "e"
+    if code == 102: return "f"
+    if code == 103: return "g"
+    if code == 104: return "h"
+    if code == 105: return "i"
+    if code == 106: return "j"
+    if code == 107: return "k"
+    if code == 108: return "l"
+    if code == 109: return "m"
+    if code == 110: return "n"
+    if code == 111: return "o"
+    if code == 112: return "p"
+    if code == 113: return "q"
+    if code == 114: return "r"
+    if code == 115: return "s"
+    if code == 116: return "t"
+    if code == 117: return "u"
+    if code == 118: return "v"
+    if code == 119: return "w"
+    if code == 120: return "x"
+    if code == 121: return "y"
+    if code == 122: return "z"
+    ""
+
+export check_public_documentation

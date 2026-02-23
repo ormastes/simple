@@ -1,0 +1,337 @@
+# Method Resolution Strategies
+#
+# Extracted from resolve.spl. Contains MethodResolver methods for:
+# - resolve_method: Main UFCS priority dispatch
+# - format_type: Type formatting for error messages
+# - get_method_suggestions: Fuzzy method name matching
+# - try_instance_method, try_trait_method, try_ufcs: Resolution strategies
+# - is_static_method_call, resolve_static_method: Static dispatch
+# - Error handling helpers
+
+use hir.*
+use lexer.Span
+use compiler.traits.traits.*
+use compiler.35.semantics.resolve.{MethodResolver, MethodResolution, ResolveError}
+
+impl MethodResolver:
+    me resolve_method(receiver: HirExpr, method: text, args: [HirCallArg]) -> MethodResolution:
+        """Resolve a method call using UFCS priority rules.
+
+        Priority:
+        1. Instance method on receiver's type
+        2. Trait method implemented by receiver's type
+        3. Free function where receiver becomes first argument
+        """
+        val receiver_type = receiver.type_
+
+        # If no type information, cannot resolve
+        if not receiver_type.?:
+            self.add_error(
+                ("cannot resolve method '{method}': receiver type is unknown. " +
+                "Ensure the receiver expression has a valid type."),
+                receiver.span
+            )
+            return MethodResolution.Unresolved
+
+        val ty = receiver_type.unwrap()
+        val type_name = self.format_type(ty)
+
+        # Priority 1: Instance method on receiver's type
+        val instance_result = self.try_instance_method(ty, method)
+        if instance_result.?:
+            return instance_result.unwrap()
+
+        # Priority 2: Trait method
+        val trait_result = self.try_trait_method(ty, method)
+        if trait_result.?:
+            return trait_result.unwrap()
+
+        # Priority 3: UFCS - Free function
+        val ufcs_result = self.try_ufcs(ty, method, args)
+        if ufcs_result.?:
+            return ufcs_result.unwrap()
+
+        # No resolution found - provide helpful error message
+        val arg_count = args.len()
+        val suggestions = self.get_method_suggestions(ty, method)
+
+        var error_msg = "no method '{method}' found for type '{type_name}'"
+        error_msg = error_msg + ". Tried: (1) instance method, (2) trait method, (3) free function '{method}({type_name}, ...)'"
+
+        if suggestions.len() > 0:
+            error_msg = error_msg + ". Did you mean: {suggestions.join(\", \")}"
+
+        self.add_error(error_msg, receiver.span)
+        MethodResolution.Unresolved
+
+    fn format_type(ty: HirType) -> text:
+        """Format a type for error messages."""
+        match ty.kind:
+            case Int(bits, signed):
+                if signed:
+                    "i{bits}"
+                else:
+                    "u{bits}"
+            case Float(bits): "f{bits}"
+            case Bool: "bool"
+            case Char: "char"
+            case Str: "text"
+            case Unit: "()"
+            case Named(sym, _):
+                # Try to get symbol name
+                val s = self.symbols.get(sym)
+                if s.?:
+                    s.unwrap().name
+                else:
+                    "<named type>"
+            case Array(elem, _): "[{self.format_type(elem)}]"
+            case Optional(inner): "{self.format_type(inner)}?"
+            case Tuple(elems):
+                var parts: [text] = []
+                for e in elems:
+                    parts = parts.push(self.format_type(e))
+                "({parts.join(\", \")})"
+            case _: "<unknown type>"
+
+    me get_method_suggestions(ty: HirType, method: text) -> [text]:
+        """Get suggestions for similar method names."""
+        var suggestions: [text] = []
+
+        # Get type symbol if named type
+        val type_sym = self.type_checker.get_type_symbol(ty)
+        if type_sym.?:
+            val type_id = type_sym.unwrap()
+            # Look for similar method names in the type
+            val methods = self.symbols.get_methods_for_type(type_id)
+            for m in methods:
+                if self.is_similar(m, method):
+                    suggestions = suggestions.push(m)
+
+        # Look for similar function names
+        val functions = self.symbols.get_all_functions()
+        for f in functions:
+            if self.is_similar(f, method):
+                suggestions = suggestions.push("{f}()")
+
+        suggestions
+
+    fn is_similar(a: text, b: text) -> bool:
+        """Check if two names are similar (for suggestions)."""
+        # Simple heuristic: same prefix or suffix, or edit distance <= 2
+        if not a.?:
+            false
+        elif not b.?:
+            false
+        elif a.len() < 2 or b.len() < 2:
+            false
+        elif a.starts_with(b[0:2]):
+            true
+        elif b.starts_with(a[0:2]):
+            true
+        elif a.ends_with(b[b.len()-2:]):
+            true
+        elif b.ends_with(a[a.len()-2:]):
+            true
+        else:
+            false
+
+    me try_instance_method(receiver_type: HirType, method: text) -> MethodResolution?:
+        """Try to find an instance method on the receiver's type."""
+        val type_sym = self.type_checker.get_type_symbol(receiver_type)
+        if not type_sym.?:
+            return nil
+
+        val type_id = type_sym.unwrap()
+        val method_sym = self.symbols.lookup_method_in_type(type_id, method)
+
+        if method_sym.?:
+            Some(MethodResolution.InstanceMethod(type_id, method_sym.unwrap()))
+        else:
+            nil
+
+    me try_trait_method(receiver_type: HirType, method: text) -> MethodResolution?:
+        """Try to find a trait method implemented by the receiver's type.
+
+        Uses enhanced TraitSolver for:
+        - Generic type matching (impl<T> Trait for Vec<T> matches Vec<i64>)
+        - Supertrait resolution (Ord requires Eq)
+        - Coherence checking (no overlapping impls)
+        """
+        val type_sym = self.type_checker.get_type_symbol(receiver_type)
+        if not type_sym.?:
+            return nil
+
+        val type_id = type_sym.unwrap().id
+
+        # LEGACY PATH: Use simple trait_impls map as fallback
+        # This handles impls that were registered before TraitSolver integration
+        if not self.trait_impls[type_id].?:
+            # Try enhanced TraitSolver path for generic impls
+            return self.try_trait_method_with_solver(receiver_type, method)
+
+        val traits = self.trait_impls[type_id]
+        for trait_id in traits:
+            val method_sym = self.symbols.lookup_trait_method(trait_id, method)
+            if method_sym.?:
+                return Some(MethodResolution.TraitMethod(trait_id, method_sym.unwrap()))
+
+        # If legacy lookup failed, try enhanced solver
+        self.try_trait_method_with_solver(receiver_type, method)
+
+    me try_trait_method_with_solver(receiver_type: HirType, method: text) -> MethodResolution?:
+        """Enhanced trait method resolution using TraitSolver.
+
+        This path handles:
+        - Generic impls: impl<T> Display for Vec<T>
+        - Where clauses: impl<T: Clone> Trait for Foo<T>
+        - Supertrait resolution: impl Ord for Point (requires Eq)
+        """
+        # Iterate over all registered traits to find one with this method
+        for trait_entry in self.trait_solver.trait_methods.entries():
+            val trait_name = trait_entry.key
+            val methods = trait_entry.value
+            # Check if this trait has the method we're looking for
+            if methods.contains(method):
+                # Check if receiver_type implements this trait
+                val impl_result = self.trait_solver.find_impl(receiver_type, trait_name)
+                if impl_result.?:
+                    val impl_block = impl_result.unwrap()
+
+                    # Verify where clause obligations are satisfied
+                    var where_clauses_ok = true
+                    for bound in impl_block.where_clause:
+                        val bound_result = self.trait_solver.solve_trait_bound(bound, receiver_type.span)
+                        if bound_result.is_err():
+                            where_clauses_ok = false
+
+                    if not where_clauses_ok:
+                        # Where clauses not satisfied, skip this impl
+                        continue
+
+                    # Check supertrait obligations
+                    val supertrait_result = self.trait_solver.check_supertraits(
+                        receiver_type, trait_name, receiver_type.span
+                    )
+                    if supertrait_result.is_err():
+                        continue
+
+                    # Found a matching impl with satisfied obligations
+                    return Some(MethodResolution(
+                        trait_name: Some(trait_name),
+                        impl_block: Some(impl_block),
+                        method_name: method,
+                        is_generic: impl_block.type_params.len() > 0
+                    ))
+
+        # No trait method found via solver
+        nil
+
+    me try_ufcs(receiver_type: HirType, method: text, args: [HirCallArg]) -> MethodResolution?:
+        """Try to find a free function for UFCS resolution.
+
+        For `x.method(a, b)` to resolve to `method(x, a, b)`:
+        1. Find a function named `method`
+        2. Check that its first parameter type is compatible with `x`'s type
+        """
+        val func_sym_id = self.symbols.lookup_function(method)
+        if not func_sym_id.?:
+            return nil
+
+        val func_sym = self.symbols.get(func_sym_id.unwrap())
+        if not func_sym.?:
+            return nil
+
+        # Check if the function's first parameter is compatible with receiver type
+        val func = func_sym.unwrap()
+        val func_type = func.type_
+        if not func_type.?:
+            return nil
+
+        match func_type.unwrap().kind:
+            case Function(params, _, _):
+                if params.len() == 0:
+                    return nil
+
+                val first_param_type = params[0]
+                if self.type_checker.is_compatible(receiver_type, first_param_type):
+                    Some(MethodResolution.FreeFunction(func_sym_id.unwrap()))
+                else:
+                    nil
+            case _:
+                nil
+
+    me is_static_method_call(receiver: HirExpr) -> bool:
+        """Check if receiver is a type reference (making this a static method call).
+
+        Static calls: Type.method() where receiver is a class/struct/enum name
+        Instance calls: expr.method() where receiver is a value
+        """
+        match receiver.kind:
+            case Var(symbol):
+                # Check if this symbol is a type (Struct, Class, Enum, or imported type)
+                val sym = self.symbols.get(symbol)
+                if sym.?:
+                    match sym.unwrap().kind:
+                        case Class | Struct | Enum | Import: true
+                        case _: false
+                else:
+                    false
+            case _:
+                false
+
+    me resolve_static_method(receiver: HirExpr, method: text, args: [HirCallArg]) -> MethodResolution:
+        """Resolve a static method call Type.method()"""
+
+        # Get the type symbol from receiver (must be Var referring to a type)
+        val type_sym_id = match receiver.kind:
+            case Var(symbol): Some(symbol)
+            case _: nil
+
+        if not type_sym_id.?:
+            self.add_error(
+                "internal error: is_static_method_call returned true but receiver is not a type reference",
+                receiver.span
+            )
+            return MethodResolution.Unresolved
+
+        val type_id = type_sym_id.unwrap()
+
+        # Look for static method in the type's definition
+        val method_sym = self.symbols.lookup_static_method(type_id, method)
+
+        if method_sym.?:
+            MethodResolution.StaticMethod(type_id, method_sym.unwrap())
+        else:
+            # No static method found - provide helpful error
+            val type_sym = self.symbols.get(type_id)
+            val type_name = if type_sym.?: type_sym.unwrap().name else: "<unknown>"
+
+            self.add_error(
+                "no static method '{method}' found for type '{type_name}'",
+                receiver.span
+            )
+            MethodResolution.Unresolved
+
+    # ========================================================================
+    # Error Handling
+    # ========================================================================
+
+    me add_error(message: text, span: Span):
+        """Add a resolution error."""
+        self.errors = self.errors.push(ResolveError(
+            message: message,
+            span: span
+        ))
+
+    fn has_errors() -> bool:
+        """Check if there are any errors."""
+        self.errors.len() > 0
+
+    fn get_errors() -> [ResolveError]:
+        """Get all errors."""
+        self.errors
+
+export resolve_method, format_type, get_method_suggestions, is_similar
+export try_instance_method, try_trait_method, try_trait_method_with_solver, try_ufcs
+export is_static_method_call, resolve_static_method
+export add_error, has_errors, get_errors

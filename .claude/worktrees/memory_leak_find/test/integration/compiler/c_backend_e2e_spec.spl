@@ -1,0 +1,126 @@
+# C Backend End-to-End Integration Tests
+#
+# Tests the MIR-to-C++20 code generation backend.
+
+use std.spec
+use compiler.backend.c_type_mapper.{CTypeMapper, CTypeMapper__create}
+use compiler.backend.c_ir_builder.{CIRBuilder, CIRBuilder__create}
+use compiler.backend.c_backend.{MirToC, MirToC__create}
+use compiler.core.backend_types.{BackendKind, BACKEND_CCODEGEN}
+use compiler.backend.backend_helpers.{backend_for_name, available_backends}
+
+# ============================================================================
+# Type Mapper Tests
+# ============================================================================
+
+describe "C Backend - Type Mapper":
+    context "primitive types":
+        it "maps i64":
+            val mapper = CTypeMapper__create()
+            val result = mapper.map_primitive(PrimitiveType.I64)
+            expect(result).to_equal("int64_t")
+
+        it "maps f64":
+            val mapper = CTypeMapper__create()
+            val result = mapper.map_primitive(PrimitiveType.F64)
+            expect(result).to_equal("double")
+
+        it "maps bool as int64_t":
+            val mapper = CTypeMapper__create()
+            val result = mapper.map_primitive(PrimitiveType.Bool)
+            expect(result).to_equal("int64_t")
+
+        it "maps unit as void":
+            val mapper = CTypeMapper__create()
+            val result = mapper.map_primitive(PrimitiveType.Unit)
+            expect(result).to_equal("void")
+
+    context "pointer types":
+        it "maps pointers to void*":
+            val mapper = CTypeMapper__create()
+            val result = mapper.map_pointer("int64_t", Mutability.Mutable)
+            expect(result).to_equal("void*")
+
+    context "backend name":
+        it "returns C":
+            val mapper = CTypeMapper__create()
+            expect(mapper.backend_name()).to_equal("C")
+
+# ============================================================================
+# IR Builder Tests
+# ============================================================================
+
+describe "C Backend - IR Builder":
+    context "file header":
+        it "emits includes and runtime header":
+            var builder = CIRBuilder__create("test_module")
+            builder.emit_file_header()
+            val output = builder.build()
+            expect(output).to_contain("#include <cstdint>")
+            expect(output).to_contain("#include \"runtime.h\"")
+            expect(output).to_contain("test_module")
+
+    context "function generation":
+        it "emits function definition":
+            var builder = CIRBuilder__create("test")
+            builder.start_function("int64_t", "my_func", "int64_t _l0")
+            builder.emit_assign("_l1", "_l0 + 1")
+            builder.emit_return(Some("_l1"))
+            builder.end_function()
+            val output = builder.build()
+            expect(output).to_contain("int64_t my_func(int64_t _l0)")
+            expect(output).to_contain("_l1 = _l0 + 1")
+            expect(output).to_contain("return _l1")
+
+    context "control flow":
+        it "emits labels and gotos":
+            var builder = CIRBuilder__create("test")
+            builder.start_function("void", "test_fn", "void")
+            builder.emit_label("bb0")
+            builder.emit_goto("bb1")
+            builder.emit_label("bb1")
+            builder.emit_return(nil)
+            builder.end_function()
+            val output = builder.build()
+            expect(output).to_contain("bb0:")
+            expect(output).to_contain("goto bb1")
+            expect(output).to_contain("bb1:")
+
+    context "string literals":
+        it "adds string constants":
+            var builder = CIRBuilder__create("test")
+            val name = builder.add_string_literal("hello")
+            expect(name).to_equal("_str_0")
+            val output = builder.build()
+            expect(output).to_contain("static const char _str_0[]")
+
+# ============================================================================
+# Backend Registration Tests
+# ============================================================================
+
+describe "C Backend - Registration":
+    context "backend lookup":
+        it "finds C backend by name 'c'":
+            val kind = backend_for_name("c")
+            expect(kind.?).to_equal(true)
+
+        it "finds C backend by name 'cpp'":
+            val kind = backend_for_name("cpp")
+            expect(kind.?).to_equal(true)
+
+        it "finds C backend by name 'ccodegen'":
+            val kind = backend_for_name("ccodegen")
+            expect(kind.?).to_equal(true)
+
+    context "available backends":
+        it "includes CCodegen in available backends":
+            val backends = available_backends()
+            var found = false
+            for b in backends:
+                if b == BackendKind.CCodegen:
+                    found = true
+            expect(found).to_equal(true)
+
+    context "backend kind":
+        it "has correct integer tag":
+            expect(BACKEND_CCODEGEN).to_equal(9)

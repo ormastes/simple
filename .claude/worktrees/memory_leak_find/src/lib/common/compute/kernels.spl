@@ -1,0 +1,186 @@
+# GPU Built-in Kernels
+#
+# Common GPU compute kernels implemented for both CUDA and Vulkan.
+
+use compute.device.*
+use compute.memory.*
+use app.io.cuda_ffi.*
+use app.io.vulkan_ffi.*
+
+# ============================================================================
+# Kernel Definition Helper
+# ============================================================================
+
+struct GpuKFunc:
+    name: text
+    cuda_module: CudaModule?
+    cuda_func: CudaFunc?
+    vulkan_pipe: VulkanPipeline?
+    vulkan_shader: VulkanShader?
+    backend: GpuBackend
+    is_valid: bool
+
+fn kernel_compile_cuda(ptx_source: text, entry_point: text) -> GpuKFunc:
+    val module = cuda_compile(ptx_source)
+    if not module.is_valid:
+        GpuKFunc(name: entry_point, cuda_module: Some(module), cuda_func: nil, vulkan_pipe: nil, vulkan_shader: nil, backend: GpuBackend.Cuda, is_valid: false)
+    else:
+        val cfn = cuda_get_kernel(module, entry_point)
+        GpuKFunc(name: entry_point, cuda_module: Some(module), cuda_func: Some(cfn), vulkan_pipe: nil, vulkan_shader: nil, backend: GpuBackend.Cuda, is_valid: cfn.is_valid)
+
+fn kernel_compile_vulkan(glsl_source: text, entry_point: text) -> GpuKFunc:
+    val shader = vulkan_compile_glsl(glsl_source)
+    if not shader.is_valid:
+        GpuKFunc(name: entry_point, cuda_module: nil, cuda_func: nil, vulkan_pipe: nil, vulkan_shader: Some(shader), backend: GpuBackend.Vulkan, is_valid: false)
+    else:
+        val pipe = vulkan_create_pipeline(shader, entry_point)
+        GpuKFunc(name: entry_point, cuda_module: nil, cuda_func: nil, vulkan_pipe: Some(pipe), vulkan_shader: Some(shader), backend: GpuBackend.Vulkan, is_valid: pipe.is_valid)
+
+fn kernel_destroy(kf: GpuKFunc) -> bool:
+    if kf.backend == GpuBackend.Cuda:
+        var success = true
+        if kf.cuda_module.?:
+            val m = kf.cuda_module?
+            success = cuda_unload(m) and success
+        success
+    elif kf.backend == GpuBackend.Vulkan:
+        var success = true
+        if kf.vulkan_pipe.?:
+            val p = kf.vulkan_pipe?
+            success = vulkan_destroy_pipeline(p) and success
+        if kf.vulkan_shader.?:
+            val s = kf.vulkan_shader?
+            success = vulkan_destroy_shader(s) and success
+        success
+    else:
+        true
+
+# ============================================================================
+# Kernel Execution
+# ============================================================================
+
+struct KernelLaunch:
+    gx: i64
+    gy: i64
+    gz: i64
+    blk_x: i64
+    blk_y: i64
+    blk_z: i64
+    shared_mem: i64
+
+fn launch_1d(total: i64, blk_size: i64) -> KernelLaunch:
+    val grid_size = (total + blk_size - 1) / blk_size
+    KernelLaunch(gx: grid_size, gy: 1, gz: 1, blk_x: blk_size, blk_y: 1, blk_z: 1, shared_mem: 0)
+
+fn launch_2d(width: i64, height: i64, blk_x: i64, blk_y: i64) -> KernelLaunch:
+    val gx = (width + blk_x - 1) / blk_x
+    val gy = (height + blk_y - 1) / blk_y
+    KernelLaunch(gx: gx, gy: gy, gz: 1, blk_x: blk_x, blk_y: blk_y, blk_z: 1, shared_mem: 0)
+
+fn kernel_run(kf: GpuKFunc, launch: KernelLaunch, buffers: [GpuBuffer]) -> bool:
+    if not kf.is_valid:
+        false
+    elif kf.backend == GpuBackend.Cuda:
+        var args: [i64] = []
+        for buf in buffers:
+            args.push(buf.raw_ptr())
+        if kf.cuda_func.?:
+            val cfn = kf.cuda_func?
+            val config = CudaLaunchConfig(gx: launch.gx, gy: launch.gy, gz: launch.gz, blk_x: launch.blk_x, blk_y: launch.blk_y, blk_z: launch.blk_z, shared_mem: launch.shared_mem)
+            cuda_launch(cfn, config, args)
+        else:
+            false
+    elif kf.backend == GpuBackend.Vulkan:
+        if kf.vulkan_pipe.?:
+            val pipe = kf.vulkan_pipe?
+            val descriptors = vulkan_create_descriptors(pipe)
+            if not descriptors.is_valid:
+                return false
+            var binding: i64 = 0
+            for buf in buffers:
+                if buf.vulkan_buf.?:
+                    val vbuf = buf.vulkan_buf?
+                    vulkan_bind_buffer(descriptors, binding, vbuf)
+                binding = binding + 1
+            val cmd = vulkan_begin_compute()
+            val success = vulkan_cmd_bind_pipeline(cmd, pipe) and vulkan_cmd_bind_descriptors(cmd, descriptors) and vulkan_cmd_dispatch(cmd, launch.gx, launch.gy, launch.gz) and vulkan_end_compute(cmd) and vulkan_submit_and_wait(cmd)
+            vulkan_destroy_descriptors(descriptors)
+            success
+        else:
+            false
+    else:
+        false
+
+# ============================================================================
+# Built-in CUDA Kernels (PTX)
+# ============================================================================
+
+val VECTOR_ADD_PTX = ".version 7.0\n.target sm_50\n.address_size 64\n\n.visible .entry vector_add(\n    .param .u64 a,\n    .param .u64 b,\n    .param .u64 c,\n    .param .u64 n\n) {\n    .reg .pred p;\n    .reg .f32 fa, fb, fc;\n    .reg .b64 pa, pb, pc;\n    .reg .b64 offset;\n    .reg .b32 tid, ntid, ctaid, idx;\n    .reg .b64 n64, idx64;\n\n    mov.u32 tid, %tid.x;\n    mov.u32 ntid, %ntid.x;\n    mov.u32 ctaid, %ctaid.x;\n    mad.lo.u32 idx, ctaid, ntid, tid;\n\n    ld.param.u64 n64, [n];\n    cvt.u64.u32 idx64, idx;\n    setp.ge.u64 p, idx64, n64;\n    @p bra done;\n\n    ld.param.u64 pa, [a];\n    ld.param.u64 pb, [b];\n    ld.param.u64 pc, [c];\n\n    shl.b64 offset, idx64, 2;\n\n    add.u64 pa, pa, offset;\n    add.u64 pb, pb, offset;\n    add.u64 pc, pc, offset;\n\n    ld.global.f32 fa, [pa];\n    ld.global.f32 fb, [pb];\n    add.f32 fc, fa, fb;\n    st.global.f32 [pc], fc;\n\ndone:\n    ret;\n}"
+
+val SCALAR_MUL_PTX = ".version 7.0\n.target sm_50\n.address_size 64\n\n.visible .entry scalar_mul(\n    .param .u64 arr,\n    .param .f32 scalar,\n    .param .u64 n\n) {\n    .reg .pred p;\n    .reg .f32 val, s, result;\n    .reg .b64 ptr;\n    .reg .b64 offset;\n    .reg .b32 tid, ntid, ctaid, idx;\n    .reg .b64 n64, idx64;\n\n    mov.u32 tid, %tid.x;\n    mov.u32 ntid, %ntid.x;\n    mov.u32 ctaid, %ctaid.x;\n    mad.lo.u32 idx, ctaid, ntid, tid;\n\n    ld.param.u64 n64, [n];\n    cvt.u64.u32 idx64, idx;\n    setp.ge.u64 p, idx64, n64;\n    @p bra done;\n\n    ld.param.u64 ptr, [arr];\n    ld.param.f32 s, [scalar];\n    shl.b64 offset, idx64, 2;\n    add.u64 ptr, ptr, offset;\n\n    ld.global.f32 val, [ptr];\n    mul.f32 result, val, s;\n    st.global.f32 [ptr], result;\n\ndone:\n    ret;\n}"
+
+# ============================================================================
+# Built-in Vulkan Kernels (GLSL)
+# ============================================================================
+
+val VECTOR_ADD_GLSL = "#version 450\n#extension GL_EXT_shader_explicit_arithmetic_types : enable\n\nlayout(local_size_x = 256) in;\n\nlayout(set = 0, binding = 0) readonly buffer A { float a[]; };\nlayout(set = 0, binding = 1) readonly buffer B { float b[]; };\nlayout(set = 0, binding = 2) writeonly buffer C { float c[]; };\n\nlayout(push_constant) uniform PushConstants {\n    uint n;\n};\n\nvoid main() {\n    uint idx = gl_GlobalInvocationID.x;\n    if (idx < n) {\n        c[idx] = a[idx] + b[idx];\n    }\n}"
+
+val SCALAR_MUL_GLSL = "#version 450\n\nlayout(local_size_x = 256) in;\n\nlayout(set = 0, binding = 0) buffer Data { float data[]; };\n\nlayout(push_constant) uniform PushConstants {\n    float scalar;\n    uint n;\n};\n\nvoid main() {\n    uint idx = gl_GlobalInvocationID.x;\n    if (idx < n) {\n        data[idx] = data[idx] * scalar;\n    }\n}"
+
+# ============================================================================
+# High-Level Kernel API
+# ============================================================================
+
+fn gpu_vector_add(device: Gpu, a: GpuBuffer, b: GpuBuffer, c: GpuBuffer, n: i64) -> bool:
+    if not device.is_valid():
+        false
+    elif device.backend == GpuBackend.Cuda:
+        val kf = kernel_compile_cuda(VECTOR_ADD_PTX, "vector_add")
+        if not kf.is_valid:
+            return false
+        val launch = launch_1d(n, 256)
+        val success = kernel_run(kf, launch, [a, b, c])
+        kernel_destroy(kf)
+        success and cuda_sync()
+    elif device.backend == GpuBackend.Vulkan:
+        val kf = kernel_compile_vulkan(VECTOR_ADD_GLSL, "main")
+        if not kf.is_valid:
+            return false
+        val launch = launch_1d(n, 256)
+        val success = kernel_run(kf, launch, [a, b, c])
+        kernel_destroy(kf)
+        success and vulkan_wait_idle()
+    else:
+        false
+
+fn gpu_scalar_mul(device: Gpu, arr: GpuBuffer, scalar: f32, n: i64) -> bool:
+    if not device.is_valid():
+        false
+    elif device.backend == GpuBackend.Cuda:
+        val kf = kernel_compile_cuda(SCALAR_MUL_PTX, "scalar_mul")
+        if not kf.is_valid:
+            return false
+        val launch = launch_1d(n, 256)
+        val success = kernel_run(kf, launch, [arr])
+        kernel_destroy(kf)
+        success and cuda_sync()
+    elif device.backend == GpuBackend.Vulkan:
+        val kf = kernel_compile_vulkan(SCALAR_MUL_GLSL, "main")
+        if not kf.is_valid:
+            return false
+        val launch = launch_1d(n, 256)
+        val success = kernel_run(kf, launch, [arr])
+        kernel_destroy(kf)
+        success and vulkan_wait_idle()
+    else:
+        false
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GpuKFunc, kernel_compile_cuda, kernel_compile_vulkan, kernel_destroy
+export KernelLaunch, launch_1d, launch_2d, kernel_run
+export gpu_vector_add, gpu_scalar_mul
+export VECTOR_ADD_PTX, SCALAR_MUL_PTX
+export VECTOR_ADD_GLSL, SCALAR_MUL_GLSL

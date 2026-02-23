@@ -1,0 +1,456 @@
+# Literal Converter Specification
+#
+# Tests for the shared LiteralConverter class.
+# Ensures consistent literal conversion across all backends.
+
+"""
+# Literal Converter Specification
+
+**Feature ID**: #backend-literal-conversion
+**Category**: Backend
+**Status**: In Progress
+
+The LiteralConverter provides shared logic for converting HIR literals to
+backend values. This ensures all backends produce identical values for the
+same literals, preventing subtle semantic differences.
+
+## Related Files
+- `src/compiler/backend/common/literal_converter.spl` - LiteralConverter class
+- `src/compiler/backend_types.spl` - Value enum
+"""
+
+use compiler.backend.common.literal_converter.*
+use compiler.backend_types.*
+use compiler.mir_data.*
+use std.timing.{time_now, time_elapsed}
+
+describe "LiteralConverter":
+    """
+    Shared literal conversion logic for all backends.
+    """
+
+    context "integer literals":
+        it "converts positive integer":
+            val result = LiteralConverter.convert_int(42, nil)
+
+            expect result.is_int()
+            expect result.as_int() == 42
+
+        it "converts negative integer":
+            val result = LiteralConverter.convert_int(-100, nil)
+
+            expect result.is_int()
+            expect result.as_int() == -100
+
+        it "converts zero":
+            val result = LiteralConverter.convert_int(0, nil)
+
+            expect result.is_int()
+            expect result.as_int() == 0
+
+        it "converts maximum i64":
+            val max_i64 = 9223372036854775807  # 2^63 - 1
+            val result = LiteralConverter.convert_int(max_i64, nil)
+
+            expect result.as_int() == max_i64
+
+        it "converts minimum i64":
+            # @skip - min i64 literal too large for parser
+            # val min_i64 = -9223372036854775808  # -2^63
+            # val result = LiteralConverter.convert_int(min_i64, nil)
+            #
+            # expect result.as_int() == min_i64
+            ()
+
+        it "preserves type information when provided":
+            val ty = MirType(kind: MirTypeKind.I32)
+            val result = LiteralConverter.convert_int(42, Some(ty))
+
+            expect result.is_int()
+            expect result.get_type() == Some(ty)
+
+    context "floating-point literals":
+        it "converts positive float":
+            val result = LiteralConverter.convert_float(3.14, nil)
+
+            expect result.is_float()
+            expect (result.as_float() - 3.14).abs() < 0.001
+
+        it "converts negative float":
+            val result = LiteralConverter.convert_float(-2.718, nil)
+
+            expect result.is_float()
+            expect (result.as_float() + 2.718).abs() < 0.001
+
+        it "converts zero float":
+            val result = LiteralConverter.convert_float(0.0, nil)
+
+            expect result.is_float()
+            expect result.as_float() == 0.0
+
+        it "converts infinity":
+            val inf = 1.0 / 0.0
+            val result = LiteralConverter.convert_float(inf, nil)
+
+            expect result.is_float()
+            expect result.as_float().is_infinite()
+
+        it "converts NaN":
+            val nan = 0.0 / 0.0
+            val result = LiteralConverter.convert_float(nan, nil)
+
+            expect result.is_float()
+            expect result.as_float().is_nan()
+
+        it "distinguishes f32 and f64":
+            val ty_f32 = MirType(kind: MirTypeKind.F32)
+            val ty_f64 = MirType(kind: MirTypeKind.F64)
+
+            val result_f32 = LiteralConverter.convert_float(3.14, Some(ty_f32))
+            val result_f64 = LiteralConverter.convert_float(3.14, Some(ty_f64))
+
+            expect result_f32.get_type() == Some(ty_f32)
+            expect result_f64.get_type() == Some(ty_f64)
+
+    context "string literals":
+        it "converts empty string":
+            val result = LiteralConverter.convert_string("")
+
+            expect result.is_string()
+            expect result.as_string() == ""
+
+        it "converts simple string":
+            val result = LiteralConverter.convert_string("Hello, World!")
+
+            expect result.is_string()
+            expect result.as_string() == "Hello, World!"
+
+        it "converts string with escapes":
+            val result = LiteralConverter.convert_string("Line1\nLine2\tTabbed")
+
+            expect result.is_string()
+            expect result.as_string().contains("\n")
+            expect result.as_string().contains("\t")
+
+        it "converts string with unicode":
+            val result = LiteralConverter.convert_string("Hello 世界 🌍")
+
+            expect result.is_string()
+            expect result.as_string() == "Hello 世界 🌍"
+
+        it "preserves exact string content":
+            val original = "!@#$%^&*()_+-=[]{}|;':\",./<>?"
+            val result = LiteralConverter.convert_string(original)
+
+            expect result.as_string() == original
+
+    context "boolean literals":
+        it "converts true":
+            val result = LiteralConverter.convert_bool(true)
+
+            expect result.is_bool()
+            expect result.as_bool() == true
+
+        it "converts false":
+            val result = LiteralConverter.convert_bool(false)
+
+            expect result.is_bool()
+            expect result.as_bool() == false
+
+    context "nil literals":
+        it "converts nil":
+            val result = LiteralConverter.convert_nil()
+
+            expect result.is_nil()
+
+        it "nil equals nil":
+            val nil1 = LiteralConverter.convert_nil()
+            val nil2 = LiteralConverter.convert_nil()
+
+            expect nil1 == nil2
+
+    context "array literals":
+        it "converts empty array":
+            val result = LiteralConverter.convert_array([])
+
+            expect result.is_array()
+            expect result.as_array().length == 0
+
+        it "converts array of integers":
+            val elements = [
+                LiteralConverter.convert_int(1, nil),
+                LiteralConverter.convert_int(2, nil),
+                LiteralConverter.convert_int(3, nil)
+            ]
+            val result = LiteralConverter.convert_array(elements)
+
+            expect result.is_array()
+            expect result.as_array().length == 3
+            expect result.as_array()[0].as_int() == 1
+            expect result.as_array()[1].as_int() == 2
+            expect result.as_array()[2].as_int() == 3
+
+        it "converts array of strings":
+            val elements = [
+                LiteralConverter.convert_string("hello"),
+                LiteralConverter.convert_string("world")
+            ]
+            val result = LiteralConverter.convert_array(elements)
+
+            expect result.is_array()
+            expect result.as_array().length == 2
+            expect result.as_array()[0].as_string() == "hello"
+            expect result.as_array()[1].as_string() == "world"
+
+        it "converts nested arrays":
+            val inner1 = LiteralConverter.convert_array([
+                LiteralConverter.convert_int(1, nil)
+            ])
+            val inner2 = LiteralConverter.convert_array([
+                LiteralConverter.convert_int(2, nil)
+            ])
+            val outer = LiteralConverter.convert_array([inner1, inner2])
+
+            expect outer.is_array()
+            expect outer.as_array().length == 2
+            expect outer.as_array()[0].is_array()
+            expect outer.as_array()[1].is_array()
+
+        it "converts mixed-type array":
+            val elements = [
+                LiteralConverter.convert_int(42, nil),
+                LiteralConverter.convert_string("hello"),
+                LiteralConverter.convert_bool(true)
+            ]
+            val result = LiteralConverter.convert_array(elements)
+
+            expect result.is_array()
+            expect result.as_array().length == 3
+            expect result.as_array()[0].is_int()
+            expect result.as_array()[1].is_string()
+            expect result.as_array()[2].is_bool()
+
+    context "tuple literals":
+        it "converts empty tuple (unit)":
+            val result = LiteralConverter.convert_tuple([])
+
+            expect result.is_tuple()
+            expect result.as_tuple().length == 0
+
+        it "converts pair tuple":
+            val elements = [
+                LiteralConverter.convert_int(1, nil),
+                LiteralConverter.convert_string("one")
+            ]
+            val result = LiteralConverter.convert_tuple(elements)
+
+            expect result.is_tuple()
+            expect result.as_tuple().length == 2
+            expect result.as_tuple()[0].as_int() == 1
+            expect result.as_tuple()[1].as_string() == "one"
+
+        it "converts triple tuple":
+            val elements = [
+                LiteralConverter.convert_int(10, nil),
+                LiteralConverter.convert_float(3.14, nil),
+                LiteralConverter.convert_bool(true)
+            ]
+            val result = LiteralConverter.convert_tuple(elements)
+
+            expect result.is_tuple()
+            expect result.as_tuple().length == 3
+
+        it "converts nested tuples":
+            val inner = LiteralConverter.convert_tuple([
+                LiteralConverter.convert_int(1, nil),
+                LiteralConverter.convert_int(2, nil)
+            ])
+            val outer = LiteralConverter.convert_tuple([
+                inner,
+                LiteralConverter.convert_int(3, nil)
+            ])
+
+            expect outer.is_tuple()
+            expect outer.as_tuple().length == 2
+            expect outer.as_tuple()[0].is_tuple()
+
+    context "dictionary literals":
+        it "converts empty dict":
+            val result = LiteralConverter.convert_dict([])
+
+            expect result.is_dict()
+            expect result.as_dict().len() == 0
+
+        it "converts string-keyed dict":
+            val pairs = [
+                (LiteralConverter.convert_string("name"),
+                 LiteralConverter.convert_string("Alice")),
+                (LiteralConverter.convert_string("age"),
+                 LiteralConverter.convert_int(30, nil))
+            ]
+            val result = LiteralConverter.convert_dict(pairs)
+
+            expect result.is_dict()
+            expect result.as_dict().len() == 2
+            val name_val = result.as_dict()[LiteralConverter.convert_string("name")]
+            expect name_val.as_string() == "Alice"
+
+        it "converts int-keyed dict":
+            val pairs = [
+                (LiteralConverter.convert_int(1, nil),
+                 LiteralConverter.convert_string("one")),
+                (LiteralConverter.convert_int(2, nil),
+                 LiteralConverter.convert_string("two"))
+            ]
+            val result = LiteralConverter.convert_dict(pairs)
+
+            expect result.is_dict()
+            expect result.as_dict().len() == 2
+
+        it "handles duplicate keys (last wins)":
+            val pairs = [
+                (LiteralConverter.convert_string("key"),
+                 LiteralConverter.convert_int(1, nil)),
+                (LiteralConverter.convert_string("key"),
+                 LiteralConverter.convert_int(2, nil))
+            ]
+            val result = LiteralConverter.convert_dict(pairs)
+
+            expect result.as_dict().len() == 1
+            val key_val = result.as_dict()[LiteralConverter.convert_string("key")]
+            expect key_val.as_int() == 2
+
+        it "converts nested dicts":
+            val inner = LiteralConverter.convert_dict([
+                (LiteralConverter.convert_string("x"),
+                 LiteralConverter.convert_int(10, nil))
+            ])
+            val outer = LiteralConverter.convert_dict([
+                (LiteralConverter.convert_string("nested"), inner)
+            ])
+
+            expect outer.is_dict()
+            val nested_val = outer.as_dict()[LiteralConverter.convert_string("nested")]
+            expect nested_val.is_dict()
+            pass  # End of nested test
+
+    context "consistency across calls":
+        it "same int produces equal values":
+            val v1 = LiteralConverter.convert_int(42, nil)
+            val v2 = LiteralConverter.convert_int(42, nil)
+
+            expect v1 == v2
+
+        it "same string produces equal values":
+            val v1 = LiteralConverter.convert_string("test")
+            val v2 = LiteralConverter.convert_string("test")
+
+            expect v1 == v2
+
+        it "same bool produces equal values":
+            val v1 = LiteralConverter.convert_bool(true)
+            val v2 = LiteralConverter.convert_bool(true)
+
+            expect v1 == v2
+
+        it "nil is always equal":
+            val v1 = LiteralConverter.convert_nil()
+            val v2 = LiteralConverter.convert_nil()
+
+            expect v1 == v2
+
+    context "value immutability":
+        it "converted values are immutable":
+            val original = [
+                LiteralConverter.convert_int(1, nil),
+                LiteralConverter.convert_int(2, nil)
+            ]
+            val result = LiteralConverter.convert_array(original)
+
+            # Modifying original doesn't affect result
+            original.push(LiteralConverter.convert_int(3, nil))
+
+            expect result.as_array().length == 2
+
+    context "edge cases":
+        it "handles very long strings efficiently":
+            val long_string = "x".repeat(10000)
+            val result = LiteralConverter.convert_string(long_string)
+
+            expect result.as_string().length == 10000
+
+        it "handles large arrays efficiently":
+            val elements = [for i in 0..1000:
+                LiteralConverter.convert_int(i, nil)
+            ]
+            val result = LiteralConverter.convert_array(elements)
+
+            expect result.as_array().length == 1000
+
+        it "handles deeply nested structures":
+            var nested = LiteralConverter.convert_int(0, nil)
+            for _ in 0..100:
+                nested = LiteralConverter.convert_array([nested])
+
+            expect nested.is_array()
+
+describe "LiteralConverter Integration":
+    """
+    Integration tests with backend usage.
+    """
+
+    context "backend consistency":
+        it "all backends use same converter":
+            # Interpreter backend
+            val interp_value = LiteralConverter.convert_int(42, nil)
+
+            # LLVM backend would use same converter
+            val llvm_value = LiteralConverter.convert_int(42, nil)
+
+            # Should produce identical values
+            expect interp_value == llvm_value
+
+        it "guarantees semantic equivalence":
+            val lit1 = LiteralConverter.convert_string("Hello")
+            val lit2 = LiteralConverter.convert_string("Hello")
+
+            # Any backend using this converter will see same value
+            expect lit1 == lit2
+            expect lit1.as_string() == lit2.as_string()
+
+describe "LiteralConverter Performance":
+    """
+    Performance characteristics of literal conversion.
+    """
+
+    slow_it "converts 10k integers efficiently":
+        val start = time_now()
+        for i in 0..10000:
+            val _ = LiteralConverter.convert_int(i, nil)
+        val elapsed = time_elapsed(start)
+
+        # Should be fast (< 50ms for 10k conversions)
+        expect elapsed < 50
+
+    slow_it "converts 1k strings efficiently":
+        val strings = [for i in 0..1000: "string_{i}"]
+
+        val start = time_now()
+        for s in strings:
+            val _ = LiteralConverter.convert_string(s)
+        val elapsed = time_elapsed(start)
+
+        # Should be fast (< 20ms for 1k conversions)
+        expect elapsed < 20
+
+    slow_it "converts large arrays efficiently":
+        val elements = [for i in 0..1000:
+            LiteralConverter.convert_int(i, nil)
+        ]
+
+        val start = time_now()
+        val _ = LiteralConverter.convert_array(elements)
+        val elapsed = time_elapsed(start)
+
+        # Should be fast (< 10ms for 1k element array)
+        expect elapsed < 10

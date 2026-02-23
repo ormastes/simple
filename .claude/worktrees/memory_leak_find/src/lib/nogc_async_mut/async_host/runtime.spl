@@ -1,0 +1,153 @@
+# HostRuntime - Full-Featured Async Runtime
+#
+# Main runtime for host applications with work-stealing and structured concurrency.
+# Supports both single-threaded and multi-threaded execution.
+
+use std.async_core.*
+use std.async_host.scheduler.{HostScheduler}
+use std.async_host.handle.{HostTaskHandle}
+use std.async_host.joinset.{HostJoinSet}
+use std.thread_sffi.{thread_cpu_count}
+
+enum RuntimeMode:
+    """Runtime execution mode."""
+    SingleThreaded    # All tasks on main thread
+    MultiThreaded     # Tasks distributed across OS threads
+
+class HostRuntime:
+    """Complete async runtime for host applications.
+
+    Combines scheduler, I/O, and timers.
+    Supports both single-threaded and multi-threaded execution.
+
+    Example (single-threaded):
+        val runtime = HostRuntime.new()
+        val handle = runtime.run_task(async: work())
+        runtime.block_on(handle.join())
+
+    Example (multi-threaded):
+        val runtime = HostRuntime.multi_threaded(4)
+        val handle = runtime.run_task(async: work())
+        runtime.block_on(handle.join())
+    """
+    scheduler: HostScheduler
+    next_id: usize
+    mode: RuntimeMode
+    num_threads: usize
+
+    static fn new() -> HostRuntime:
+        """Create single-threaded runtime.
+
+        Returns:
+            Runtime with 1 worker (main thread)
+        """
+        HostRuntime(
+            scheduler: HostScheduler.new(1),
+            next_id: 0,
+            mode: RuntimeMode.SingleThreaded,
+            num_threads: 1
+        )
+
+    static fn with_workers(count: usize) -> HostRuntime:
+        """Create single-threaded runtime with multiple work queues.
+
+        Note: This creates multiple queues but runs on single thread.
+        For true parallelism, use multi_threaded().
+
+        Args:
+            count: Number of work queues
+
+        Returns:
+            Single-threaded runtime with work-stealing
+        """
+        HostRuntime(
+            scheduler: HostScheduler.new(count),
+            next_id: 0,
+            mode: RuntimeMode.SingleThreaded,
+            num_threads: 1
+        )
+
+    static fn multi_threaded(num_threads: usize) -> HostRuntime:
+        """Create multi-threaded runtime with OS threads.
+
+        Tasks are distributed across OS threads for true parallel execution.
+
+        Args:
+            num_threads: Number of OS threads (0 = auto-detect CPU count)
+
+        Returns:
+            Multi-threaded runtime
+
+        Example:
+            val runtime = HostRuntime.multi_threaded(4)
+            # Spawns 4 OS worker threads
+        """
+        var threads = num_threads
+        if threads == 0:
+            threads = thread_cpu_count()
+            if threads < 1:
+                threads = 4  # fallback
+
+        HostRuntime(
+            scheduler: HostScheduler.new_multi_threaded(threads),
+            next_id: 0,
+            mode: RuntimeMode.MultiThreaded,
+            num_threads: threads
+        )
+
+    fn is_multi_threaded() -> bool:
+        """Check if runtime uses multiple OS threads.
+
+        Returns:
+            true if multi-threaded, false if single-threaded
+        """
+        match self.mode:
+            case RuntimeMode.MultiThreaded: true
+            case RuntimeMode.SingleThreaded: false
+
+    me run_task<T>(f: fn() -> T) -> HostTaskHandle<T>:
+        """Run task and return handle."""
+        var result_store: Option<T> = nil
+        val poll_fn = \:
+            val result = f()
+            result_store = Some(result)
+            Poll.Ready(())
+        val id = self.scheduler.schedule(Priority.Normal, poll_fn)
+        HostTaskHandle(
+            task_id: id,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+
+    me run_task_with_priority<T>(f: fn() -> T, priority: Priority) -> HostTaskHandle<T>:
+        """Run with specific priority."""
+        var result_store: Option<T> = nil
+        val poll_fn = \:
+            val result = f()
+            result_store = Some(result)
+            Poll.Ready(())
+        val id = self.scheduler.schedule(priority, poll_fn)
+        HostTaskHandle(
+            task_id: id,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+
+    me block_on<T>(future: HostFuture<T>) -> T:
+        """Block until future completes."""
+        while not future.is_ready():
+            self.scheduler.run_one()
+        future.poll().unwrap()
+
+    me run():
+        """Run all pending tasks."""
+        self.scheduler.run()
+
+
+export HostRuntime, RuntimeMode

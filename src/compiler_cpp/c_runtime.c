@@ -124,7 +124,7 @@ static SimpleStringArray simple_new_string_array(void) {
 
 static void simple_string_push(SimpleStringArray* arr, const char* s) {
     if (arr->len >= arr->cap) {
-        arr->cap *= 2;
+        arr->cap = arr->cap == 0 ? 8 : arr->cap * 2;
         arr->items = (const char**)realloc(arr->items, arr->cap * sizeof(const char*));
     }
     arr->items[arr->len] = strdup(s ? s : "");
@@ -208,7 +208,7 @@ static SimpleIntArray simple_new_int_array(void) {
 
 static void simple_int_push(SimpleIntArray* arr, long long val) {
     if (arr->len >= arr->cap) {
-        arr->cap *= 2;
+        arr->cap = arr->cap == 0 ? 8 : arr->cap * 2;
         arr->items = (long long*)realloc(arr->items, arr->cap * sizeof(long long));
     }
     arr->items[arr->len] = val;
@@ -239,7 +239,7 @@ static SimpleStringArrayArray simple_new_string_array_array(void) {
 
 static void simple_string_array_push(SimpleStringArrayArray* arr, SimpleStringArray val) {
     if (arr->len >= arr->cap) {
-        arr->cap *= 2;
+        arr->cap = arr->cap == 0 ? 8 : arr->cap * 2;
         arr->items = (SimpleStringArray*)realloc(arr->items, arr->cap * sizeof(SimpleStringArray));
     }
     arr->items[arr->len] = val;
@@ -264,7 +264,7 @@ static SimpleIntArrayArray simple_new_int_array_array(void) {
 
 static void simple_int_array_push(SimpleIntArrayArray* arr, SimpleIntArray val) {
     if (arr->len >= arr->cap) {
-        arr->cap *= 2;
+        arr->cap = arr->cap == 0 ? 8 : arr->cap * 2;
         arr->items = (SimpleIntArray*)realloc(arr->items, arr->cap * sizeof(SimpleIntArray));
     }
     arr->items[arr->len] = val;
@@ -469,7 +469,7 @@ static void simple_dict_set_int(SimpleDict* d, const char* key, long long value)
         return;
     }
     if (d->len >= d->cap) {
-        d->cap *= 2;
+        d->cap = d->cap == 0 ? 8 : d->cap * 2;
         d->entries = (SimpleDictEntry*)realloc(d->entries, d->cap * sizeof(SimpleDictEntry));
     }
     d->entries[d->len].key = strdup(key);
@@ -490,7 +490,7 @@ static void simple_dict_set_str(SimpleDict* d, const char* key, const char* valu
         return;
     }
     if (d->len >= d->cap) {
-        d->cap *= 2;
+        d->cap = d->cap == 0 ? 8 : d->cap * 2;
         d->entries = (SimpleDictEntry*)realloc(d->entries, d->cap * sizeof(SimpleDictEntry));
     }
     d->entries[d->len].key = strdup(key);
@@ -512,7 +512,7 @@ static void simple_dict_set_ptr(SimpleDict* d, const char* key, void* value) {
         return;
     }
     if (d->len >= d->cap) {
-        d->cap *= 2;
+        d->cap = d->cap == 0 ? 8 : d->cap * 2;
         d->entries = (SimpleDictEntry*)realloc(d->entries, d->cap * sizeof(SimpleDictEntry));
     }
     d->entries[d->len].key = strdup(key);

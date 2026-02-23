@@ -1,0 +1,583 @@
+# @no_alloc
+# Core Simple — Monomorphized Runtime Types
+#
+# Shared core library: type system, spans, tokens, symbols, scopes.
+# All operations are free functions — no generics, no me methods, no closures.
+# Arena pattern: parallel arrays instead of structs.
+#
+# Types are represented as integer tags and opaque i64 handles.
+# The C codegen translates these to proper spl_* calls.
+
+# ===== String Operations (delegated to runtime built-ins) =====
+# These use Simple's built-in text type directly.
+# The C codegen will emit spl_str_* calls for these.
+
+fn str_concat(a: text, b: text) -> text:
+    a + b
+
+fn str_len(s: text) -> i64:
+    s.len()
+
+fn str_eq(a: text, b: text) -> bool:
+    a == b
+
+fn str_slice(s: text, start: i64, end_idx: i64) -> text:
+    s[start:end_idx]
+
+fn str_char_at(s: text, idx: i64) -> text:
+    s[idx]
+
+fn str_contains(s: text, needle: text) -> bool:
+    s.contains(needle)
+
+fn str_starts_with(s: text, prefix: text) -> bool:
+    s.starts_with(prefix)
+
+fn str_ends_with(s: text, suffix: text) -> bool:
+    s.ends_with(suffix)
+
+fn str_index_of(s: text, needle: text) -> i64:
+    val result = s.index_of(needle)
+    if result == nil:
+        return -1
+    result
+
+fn str_trim(s: text) -> text:
+    s.trim()
+
+fn str_replace(s: text, old_s: text, new_s: text) -> text:
+    s.replace(old_s, new_s)
+
+# ===== Integer/Text Conversion =====
+
+fn int_to_str(n: i64) -> text:
+    if n == 0:
+        return "0"
+    var neg: bool = false
+    var v: i64 = n
+    if n < 0:
+        neg = true
+        v = 0 - n
+    var result: text = ""
+    for k in 0..20:
+        if v == 0:
+            break
+        val d = v % 10
+        var ch: text = "0"
+        if d == 1: ch = "1"
+        if d == 2: ch = "2"
+        if d == 3: ch = "3"
+        if d == 4: ch = "4"
+        if d == 5: ch = "5"
+        if d == 6: ch = "6"
+        if d == 7: ch = "7"
+        if d == 8: ch = "8"
+        if d == 9: ch = "9"
+        result = ch + result
+        v = v / 10
+    if neg:
+        return "-" + result
+    result
+
+fn bool_to_str(b: bool) -> text:
+    if b:
+        return "true"
+    "false"
+
+# ===== Span (Source Location) =====
+# Stored as 4 integers per span to avoid struct issues with the runtime parser.
+
+var span_pool_start: [i64] = []
+var span_pool_end: [i64] = []
+var span_pool_line: [i64] = []
+var span_pool_col: [i64] = []
+
+fn span_new(start: i64, end_pos: i64, line: i64, col: i64) -> i64:
+    val idx = span_pool_start.len()
+    span_pool_start.push(start)
+    span_pool_end.push(end_pos)
+    span_pool_line.push(line)
+    span_pool_col.push(col)
+    idx
+
+fn span_start(span_id: i64) -> i64:
+    span_pool_start[span_id]
+
+fn span_end(span_id: i64) -> i64:
+    span_pool_end[span_id]
+
+fn span_line(span_id: i64) -> i64:
+    span_pool_line[span_id]
+
+fn span_col(span_id: i64) -> i64:
+    span_pool_col[span_id]
+
+fn span_dummy() -> i64:
+    span_new(0, 0, 0, 0)
+
+# ===== Token =====
+# A token is (kind: i64, span: i64, text: text)
+# Stored in parallel arrays for arena allocation.
+
+var tok_pool_kind: [i64] = []
+var tok_pool_span: [i64] = []
+var tok_pool_text: [text] = []
+
+fn token_new(kind: i64, span_id: i64, value: text) -> i64:
+    val idx = tok_pool_kind.len()
+    tok_pool_kind.push(kind)
+    tok_pool_span.push(span_id)
+    tok_pool_text.push(value)
+    idx
+
+fn token_kind(tok_id: i64) -> i64:
+    tok_pool_kind[tok_id]
+
+fn token_span(tok_id: i64) -> i64:
+    tok_pool_span[tok_id]
+
+fn token_text(tok_id: i64) -> text:
+    tok_pool_text[tok_id]
+
+# ===== Symbol Table =====
+# Maps names to (type_tag, scope_depth, declaration_index)
+# Uses Simple built-in dict (string keys).
+
+var sym_names: [text] = []
+var sym_types: [i64] = []
+var sym_depths: [i64] = []
+var sym_decl_ids: [i64] = []
+var sym_mutable: [i64] = []
+
+# Symbol type constants
+val SYM_VAR = 1
+val SYM_VAL = 2
+val SYM_FN = 3
+val SYM_STRUCT = 4
+val SYM_EXTERN_FN = 5
+val SYM_PARAM = 6
+val SYM_MODULE = 7
+
+fn symbol_new(name: text, sym_type: i64, depth: i64, decl_id: i64, is_mut: i64) -> i64:
+    val idx = sym_names.len()
+    sym_names.push(name)
+    sym_types.push(sym_type)
+    sym_depths.push(depth)
+    sym_decl_ids.push(decl_id)
+    sym_mutable.push(is_mut)
+    idx
+
+fn symbol_name(sym_id: i64) -> text:
+    sym_names[sym_id]
+
+fn symbol_type(sym_id: i64) -> i64:
+    sym_types[sym_id]
+
+fn symbol_depth(sym_id: i64) -> i64:
+    sym_depths[sym_id]
+
+fn symbol_decl(sym_id: i64) -> i64:
+    sym_decl_ids[sym_id]
+
+fn symbol_is_mutable(sym_id: i64) -> bool:
+    sym_mutable[sym_id] == 1
+
+# ===== Scope Stack =====
+# Simple scope tracking: each scope has a start index into the symbol table.
+# When exiting scope, symbols after that index are "hidden" (not removed).
+
+var scope_starts: [i64] = []
+var current_scope_depth: i64 = 0
+
+fn scope_push() -> i64:
+    scope_starts.push(sym_names.len())
+    current_scope_depth = current_scope_depth + 1
+    current_scope_depth
+
+fn scope_pop() -> i64:
+    current_scope_depth = current_scope_depth - 1
+    val start = scope_starts[scope_starts.len() - 1]
+    # We don't actually remove symbols, just track depth
+    start
+
+fn scope_depth() -> i64:
+    current_scope_depth
+
+# ===== Type Tags =====
+# Bootstrap uses integer tags for types instead of a full type system.
+
+val TYPE_VOID = 0
+val TYPE_BOOL = 1
+val TYPE_I64 = 2
+val TYPE_F64 = 3
+val TYPE_TEXT = 4
+val TYPE_ARRAY_I64 = 5
+val TYPE_ARRAY_TEXT = 6
+val TYPE_ARRAY_BOOL = 7
+val TYPE_ARRAY_ANY = 8
+val TYPE_DICT = 9
+val TYPE_STRUCT = 10
+val TYPE_FN = 11
+val TYPE_ANY = 12
+val TYPE_NIL = 13
+val TYPE_OPTION = 14
+val TYPE_OPTION_I64 = 15
+val TYPE_OPTION_F64 = 16
+val TYPE_OPTION_TEXT = 17
+val TYPE_OPTION_BOOL = 18
+val TYPE_RESULT = 19
+val TYPE_FUTURE = 20
+val TYPE_POLL = 21
+val TYPE_TASK = 22
+val TYPE_GENERIC_ERASED = 23
+val TYPE_UNION = 24
+val TYPE_INTERSECTION = 25
+val TYPE_REFINEMENT = 26
+val TYPE_NAMED_BASE = 1000
+
+fn type_tag_name(tag: i64) -> text:
+    if tag >= TYPE_NAMED_BASE:
+        val nid = tag - TYPE_NAMED_BASE
+        val nm = named_type_name(nid)
+        if nm != "":
+            return nm
+        return "named_" + int_to_str(nid)
+    if tag == TYPE_VOID:
+        return "void"
+    if tag == TYPE_BOOL:
+        return "bool"
+    if tag == TYPE_I64:
+        return "i64"
+    if tag == TYPE_F64:
+        return "f64"
+    if tag == TYPE_TEXT:
+        return "text"
+    if tag == TYPE_ARRAY_I64:
+        return "[i64]"
+    if tag == TYPE_ARRAY_TEXT:
+        return "[text]"
+    if tag == TYPE_ARRAY_BOOL:
+        return "[bool]"
+    if tag == TYPE_ARRAY_ANY:
+        return "[any]"
+    if tag == TYPE_DICT:
+        return "dict"
+    if tag == TYPE_STRUCT:
+        return "struct"
+    if tag == TYPE_FN:
+        return "fn"
+    if tag == TYPE_ANY:
+        return "any"
+    if tag == TYPE_NIL:
+        return "nil"
+    if tag == TYPE_OPTION:
+        return "Option"
+    if tag == TYPE_OPTION_I64:
+        return "Option<i64>"
+    if tag == TYPE_OPTION_F64:
+        return "Option<f64>"
+    if tag == TYPE_OPTION_TEXT:
+        return "Option<text>"
+    if tag == TYPE_OPTION_BOOL:
+        return "Option<bool>"
+    if tag == TYPE_RESULT:
+        return "Result"
+    if tag == TYPE_FUTURE:
+        return "Future"
+    if tag == TYPE_POLL:
+        return "Poll"
+    if tag == TYPE_TASK:
+        return "Task"
+    if tag == TYPE_GENERIC_ERASED:
+        return "Generic"
+    if tag == TYPE_UNION:
+        return "Union"
+    if tag == TYPE_INTERSECTION:
+        return "Intersection"
+    if tag == TYPE_REFINEMENT:
+        return "Refinement"
+    "unknown"
+
+fn type_tag_to_c(tag: i64) -> text:
+    if tag == TYPE_VOID:
+        return "void"
+    if tag == TYPE_BOOL:
+        return "int"
+    if tag == TYPE_I64:
+        return "int64_t"
+    if tag == TYPE_F64:
+        return "double"
+    if tag == TYPE_TEXT:
+        return "const char*"
+    if tag == TYPE_ARRAY_I64:
+        return "SplArray*"
+    if tag == TYPE_ARRAY_TEXT:
+        return "SplArray*"
+    if tag == TYPE_ARRAY_BOOL:
+        return "SplArray*"
+    if tag == TYPE_ARRAY_ANY:
+        return "SplArray*"
+    if tag == TYPE_DICT:
+        return "SplDict*"
+    if tag == TYPE_STRUCT:
+        return "void*"
+    if tag == TYPE_FN:
+        return "void*"
+    if tag == TYPE_ANY:
+        return "SplValue"
+    if tag == TYPE_NIL:
+        return "SplValue"
+    if tag == TYPE_OPTION:
+        return "SplOption*"
+    if tag == TYPE_OPTION_I64:
+        return "SplOption*"
+    if tag == TYPE_OPTION_F64:
+        return "SplOption*"
+    if tag == TYPE_OPTION_TEXT:
+        return "SplOption*"
+    if tag == TYPE_OPTION_BOOL:
+        return "SplOption*"
+    if tag == TYPE_RESULT:
+        return "SplResult*"
+    if tag == TYPE_FUTURE:
+        return "SplFuture*"
+    if tag == TYPE_POLL:
+        return "SplPoll*"
+    if tag == TYPE_TASK:
+        return "SplTask*"
+    if tag == TYPE_GENERIC_ERASED:
+        return "SplValue"
+    if tag == TYPE_UNION:
+        return "SplValue"
+    if tag == TYPE_INTERSECTION:
+        return "SplValue"
+    if tag == TYPE_REFINEMENT:
+        return "SplValue"
+    if tag >= TYPE_NAMED_BASE:
+        val nid = tag - TYPE_NAMED_BASE
+        val nm = named_type_name(nid)
+        if nm != "":
+            return nm
+        return "int64_t"
+    "int64_t"
+
+# ===== Named Type Registry =====
+# Maps struct/enum names to their field information.
+
+var named_type_names: [text] = []
+var named_type_field_names: [[text]] = []
+var named_type_field_types: [[i64]] = []
+
+fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i64:
+    val idx = named_type_names.len()
+    named_type_names.push(name)
+    named_type_field_names.push(field_names)
+    named_type_field_types.push(field_types)
+    idx
+
+fn named_type_update(type_id: i64, field_names: [text], field_types: [i64]):
+    named_type_field_names[type_id] = field_names
+    named_type_field_types[type_id] = field_types
+
+fn named_type_find(name: text) -> i64:
+    for i in range(0, named_type_names.len()):
+        if named_type_names[i] == name:
+            return i
+    -1
+
+fn named_type_name(type_id: i64) -> text:
+    named_type_names[type_id]
+
+fn named_type_fields(type_id: i64) -> [text]:
+    named_type_field_names[type_id]
+
+fn named_type_field_type_tags(type_id: i64) -> [i64]:
+    named_type_field_types[type_id]
+
+# ===== Function Signature Registry =====
+# Tracks function signatures for cross-file resolution and C forward declarations.
+
+var fn_sig_names: [text] = []
+var fn_sig_param_names: [[text]] = []
+var fn_sig_param_types: [[i64]] = []
+var fn_sig_ret_types: [i64] = []
+var fn_sig_is_extern: [i64] = []
+
+fn fn_sig_register(name: text, param_names: [text], param_types: [i64], ret_type: i64, is_ext: i64) -> i64:
+    val idx = fn_sig_names.len()
+    fn_sig_names.push(name)
+    fn_sig_param_names.push(param_names)
+    fn_sig_param_types.push(param_types)
+    fn_sig_ret_types.push(ret_type)
+    fn_sig_is_extern.push(is_ext)
+    idx
+
+fn fn_sig_find(name: text) -> i64:
+    for i in range(0, fn_sig_names.len()):
+        if fn_sig_names[i] == name:
+            return i
+    -1
+
+fn fn_sig_name(sig_id: i64) -> text:
+    fn_sig_names[sig_id]
+
+fn fn_sig_ret_type(sig_id: i64) -> i64:
+    fn_sig_ret_types[sig_id]
+
+fn fn_sig_param_count(sig_id: i64) -> i64:
+    fn_sig_param_names[sig_id].len()
+
+fn fn_sig_is_extern_fn(sig_id: i64) -> bool:
+    fn_sig_is_extern[sig_id] == 1
+
+fn fn_sig_get_param_names(sig_id: i64) -> [text]:
+    fn_sig_param_names[sig_id]
+
+fn fn_sig_get_param_types(sig_id: i64) -> [i64]:
+    fn_sig_param_types[sig_id]
+
+# ===== Generic Parameter Registry =====
+# Tracks type parameters for generic classes and functions.
+# Each entry represents a type parameter (T, U, K, V, etc.)
+
+var generic_param_names: [text] = []
+var generic_param_contexts: [text] = []
+var generic_param_ids: [i64] = []
+
+fn generic_param_register(name: text, context: text) -> i64:
+    val idx = generic_param_names.len()
+    generic_param_names.push(name)
+    generic_param_contexts.push(context)
+    generic_param_ids.push(idx)
+    idx
+
+fn generic_param_find(name: text, context: text) -> i64:
+    for i in range(0, generic_param_names.len()):
+        if (generic_param_names[i] == name and
+            generic_param_contexts[i] == context):
+            return i
+    -1
+
+fn generic_param_name(param_id: i64) -> text:
+    generic_param_names[param_id]
+
+fn generic_param_context(param_id: i64) -> text:
+    generic_param_contexts[param_id]
+
+fn generic_param_count() -> i64:
+    generic_param_names.len()
+
+# ===== Union Type Registry =====
+# Tracks union types (A | B | C)
+
+var union_type_members: [[i64]] = []
+
+fn union_type_register(member_types: [i64]) -> i64:
+    val idx = union_type_members.len()
+    union_type_members.push(member_types)
+    TYPE_UNION
+
+fn union_type_get_members(union_id: i64) -> [i64]:
+    if union_id < union_type_members.len():
+        return union_type_members[union_id]
+    []
+
+# ===== Intersection Type Registry =====
+# Tracks intersection types (A & B & C)
+
+var intersection_type_members: [[i64]] = []
+
+fn intersection_type_register(member_types: [i64]) -> i64:
+    val idx = intersection_type_members.len()
+    intersection_type_members.push(member_types)
+    TYPE_INTERSECTION
+
+fn intersection_type_get_members(inter_id: i64) -> [i64]:
+    if inter_id < intersection_type_members.len():
+        return intersection_type_members[inter_id]
+    []
+
+# ===== Refinement Type Registry =====
+# Tracks refinement types (x: i64 where x > 0)
+
+var refinement_base_types: [i64] = []
+var refinement_predicates: [text] = []
+
+fn refinement_type_register(base_type: i64, predicate: text) -> i64:
+    val idx = refinement_base_types.len()
+    refinement_base_types.push(base_type)
+    refinement_predicates.push(predicate)
+    TYPE_REFINEMENT
+
+fn refinement_type_base(ref_id: i64) -> i64:
+    if ref_id < refinement_base_types.len():
+        return refinement_base_types[ref_id]
+    TYPE_ANY
+
+fn refinement_type_predicate(ref_id: i64) -> text:
+    if ref_id < refinement_predicates.len():
+        return refinement_predicates[ref_id]
+    ""
+
+# ===== Pool Reset =====
+# Call before parsing a new file to reset all pools.
+
+fn reset_all_pools():
+    span_pool_start = []
+    span_pool_end = []
+    span_pool_line = []
+    span_pool_col = []
+    tok_pool_kind = []
+    tok_pool_span = []
+    tok_pool_text = []
+    sym_names = []
+    sym_types = []
+    sym_depths = []
+    sym_decl_ids = []
+    sym_mutable = []
+    scope_starts = []
+    current_scope_depth = 0
+    named_type_names = []
+    named_type_field_names = []
+    named_type_field_types = []
+    fn_sig_names = []
+    fn_sig_param_names = []
+    fn_sig_param_types = []
+    fn_sig_ret_types = []
+    fn_sig_is_extern = []
+    generic_param_names = []
+    generic_param_contexts = []
+    generic_param_ids = []
+    union_type_members = []
+    intersection_type_members = []
+    refinement_base_types = []
+    refinement_predicates = []
+
+export str_concat, str_len, str_eq, str_slice, str_char_at
+export str_contains, str_starts_with, str_ends_with
+export str_index_of, str_trim, str_replace
+export int_to_str, bool_to_str
+export span_new, span_start, span_end, span_line, span_col, span_dummy
+export token_new, token_kind, token_span, token_text
+export symbol_new, symbol_name, symbol_type, symbol_depth, symbol_decl, symbol_is_mutable
+export SYM_VAR, SYM_VAL, SYM_FN, SYM_STRUCT, SYM_EXTERN_FN, SYM_PARAM, SYM_MODULE
+export scope_push, scope_pop, scope_depth
+export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
+export TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY
+export TYPE_DICT, TYPE_STRUCT, TYPE_FN, TYPE_ANY, TYPE_NIL, TYPE_NAMED_BASE
+export TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL
+export TYPE_RESULT
+export TYPE_FUTURE, TYPE_POLL, TYPE_TASK
+export TYPE_GENERIC_ERASED, TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT
+export type_tag_name, type_tag_to_c
+export named_type_register, named_type_update, named_type_find, named_type_name
+export named_type_fields, named_type_field_type_tags
+export fn_sig_register, fn_sig_find, fn_sig_name, fn_sig_ret_type
+export fn_sig_param_count, fn_sig_is_extern_fn
+export fn_sig_get_param_names, fn_sig_get_param_types
+export generic_param_register, generic_param_find, generic_param_name
+export generic_param_context, generic_param_count
+export union_type_register, union_type_get_members
+export intersection_type_register, intersection_type_get_members
+export refinement_type_register, refinement_type_base, refinement_type_predicate
+export reset_all_pools

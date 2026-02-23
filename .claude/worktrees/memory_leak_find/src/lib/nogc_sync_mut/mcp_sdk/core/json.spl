@@ -1,0 +1,212 @@
+# MCP SDK - JSON Building and Parsing Helpers
+#
+# Provides battle-tested JSON construction and extraction functions.
+# Extracted from app.mcp.helpers for SDK reuse.
+
+use std.text.{escape_json}
+
+# Local definitions (runtime can't re-export imported symbols)
+fn LB() -> text:
+    (123 as char).to_string()
+
+fn RB() -> text:
+    (125 as char).to_string()
+
+fn Q() -> text:
+    "\""
+
+fn jp(key: text, value: text) -> text:
+    Q() + key + Q() + ":" + value
+
+fn js(value: text) -> text:
+    Q() + escape_json(value) + Q()
+
+# Build JSON object with 1 pair
+fn jo1(pair: String) -> String:
+    var r = LB()
+    r = r + pair
+    r = r + RB()
+    r
+
+# Build JSON object with 2 pairs
+fn jo2(p1: String, p2: String) -> String:
+    var r = LB()
+    r = r + p1
+    r = r + ","
+    r = r + p2
+    r = r + RB()
+    r
+
+# Build JSON object with 3 pairs
+fn jo3(p1: String, p2: String, p3: String) -> String:
+    var r = LB()
+    r = r + p1
+    r = r + ","
+    r = r + p2
+    r = r + ","
+    r = r + p3
+    r = r + RB()
+    r
+
+# Build JSON object with 4 pairs
+fn jo4(p1: String, p2: String, p3: String, p4: String) -> String:
+    var r = LB()
+    r = r + p1
+    r = r + "," + p2
+    r = r + "," + p3
+    r = r + "," + p4
+    r = r + RB()
+    r
+
+# Build JSON object with 5 pairs
+fn jo5(p1: String, p2: String, p3: String, p4: String, p5: String) -> String:
+    var r = LB()
+    r = r + p1
+    r = r + "," + p2
+    r = r + "," + p3
+    r = r + "," + p4
+    r = r + "," + p5
+    r = r + RB()
+    r
+
+# Build JSON array from list of strings
+fn ja(items: [String]) -> String:
+    var r = "["
+    var first = true
+    for item in items:
+        if not first:
+            r = r + ","
+        first = false
+        r = r + item
+    r = r + "]"
+    r
+
+# --- Option unwrap helpers ---
+
+fn unwrap_idx(opt: Option<Int>) -> Int:
+    match opt:
+        case Some(i):
+            return i
+        case nil:
+            return -1
+
+# --- JSON parsing helpers ---
+
+# Extract a string value for a given key from JSON
+fn extract_json_string(json: String, key: String) -> String:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+
+    var idx = -1
+    match idx_opt:
+        Some(i): idx = i
+        nil: idx = -1
+
+    if idx < 0:
+        return ""
+
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+
+    if trimmed.starts_with(quote):
+        val rest = trimmed.substring(1)
+        val end_opt = rest.index_of(quote)
+
+        var end = -1
+        match end_opt:
+            Some(i): end = i
+            nil: end = -1
+        if end >= 0:
+            return rest.substring(0, end)
+    ""
+
+# Extract a raw value (number, boolean, null) for a given key
+fn extract_json_value(json: String, key: String) -> String:
+    val search = Q() + key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    var end = 0
+    for ch in trimmed:
+        if ch == "," or ch == RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
+
+# Extract a string from a nested JSON object
+fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> String:
+    val search = Q() + outer_key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    extract_json_string(after, inner_key)
+
+# Extract arguments dict from MCP request body
+fn extract_arguments_dict(body: String) -> String:
+    val params_search = Q() + "params" + Q() + ":"
+    val params_idx = unwrap_idx(body.index_of(params_search))
+    if params_idx < 0:
+        return ""
+
+    val params_start = params_idx + params_search.len()
+    val params_section = body.substring(params_start)
+
+    val args_search = Q() + "arguments" + Q() + ":"
+    val args_idx = unwrap_idx(params_section.index_of(args_search))
+    if args_idx < 0:
+        return ""
+
+    val args_start = args_idx + args_search.len()
+    val after_args = params_section.substring(args_start)
+    val trimmed = after_args.trim()
+
+    if not trimmed.starts_with(LB()):
+        return ""
+
+    # Find matching closing brace
+    var brace_count = 0
+    var idx2 = 0
+    var args_content = ""
+
+    for ch in trimmed:
+        if ch == LB():
+            brace_count = brace_count + 1
+        elif ch == RB():
+            brace_count = brace_count - 1
+            if brace_count == 0:
+                args_content = trimmed.substring(0, idx2 + 1)
+                break
+        idx2 = idx2 + 1
+
+    args_content
+
+# Extract a boolean value for a given key
+fn extract_json_bool(json: String, key: String) -> bool:
+    val raw = extract_json_value(json, key)
+    raw == "true"
+
+# Extract an integer value for a given key
+fn extract_json_int(json: String, key: String) -> i64:
+    val raw = extract_json_value(json, key)
+    if raw == "null" or raw == "":
+        return 0
+    int(raw)
+
+# --- Exports ---
+
+export LB, RB, Q
+export jp, js, jo1, jo2, jo3, jo4, jo5, ja
+export escape_json
+export unwrap_idx
+export extract_json_string, extract_json_value, extract_nested_string
+export extract_arguments_dict, extract_json_bool, extract_json_int

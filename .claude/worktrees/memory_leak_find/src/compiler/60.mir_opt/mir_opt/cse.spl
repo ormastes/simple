@@ -1,0 +1,370 @@
+# Common Subexpression Elimination (CSE)
+#
+# Identifies and eliminates redundant computations.
+#
+# Transformation:
+#   val a = x + y
+#   val b = z * 2
+#   val c = x + y    # Redundant! Same as 'a'
+#
+# After:
+#   val a = x + y
+#   val b = z * 2
+#   val c = a        # Reuse computed value
+#
+# Benefits:
+# - Reduces redundant computation
+# - Saves CPU cycles
+# - Reduces register pressure
+# - Enables further optimization
+#
+# Algorithm:
+# 1. Build expression table (expression -> local that computes it)
+# 2. For each instruction:
+#    a. Compute expression hash/key
+#    b. If expression already computed, reuse result
+#    c. Otherwise, add to table
+#
+# Limitations:
+# - Only within single basic block (local CSE)
+# - Doesn't handle memory operations (complex aliasing)
+# - Conservative about side effects
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir_opt.mod.{MirPass}
+
+# ============================================================================
+# Expression Representation
+# ============================================================================
+
+enum Expression:
+    """
+    Canonical representation of an expression for CSE.
+
+    Two expressions are equal if they compute the same value.
+    """
+    BinOp(op: MirBinOp, left: LocalId, right: LocalId)
+    UnaryOp(op: MirUnaryOp, operand: LocalId)
+    Load(ptr: LocalId)
+    GetField(base: LocalId, field: i64)
+    ConstInt(value: i64)
+    ConstFloat(value: f64)
+    ConstBool(value: bool)
+
+impl Expression:
+    fn to_key() -> text:
+        """
+        Convert expression to string key for hashing.
+
+        Used for expression table lookup.
+        """
+        match self:
+            case BinOp(op, left, right):
+                "binop_{op}_{left.id}_{right.id}"
+
+            case UnaryOp(op, operand):
+                "unary_{op}_{operand.id}"
+
+            case Load(ptr):
+                "load_{ptr.id}"
+
+            case GetField(base, field):
+                "getfield_{base.id}_{field}"
+
+            case ConstInt(value):
+                "const_int_{value}"
+
+            case ConstFloat(value):
+                "const_float_{value}"
+
+            case ConstBool(value):
+                "const_bool_{value}"
+
+    fn is_pure() -> bool:
+        """
+        Check if expression is pure (no side effects).
+
+        Pure expressions can be safely eliminated or reordered.
+        """
+        match self:
+            case BinOp(_, _, _): true
+            case UnaryOp(_, _): true
+            case ConstInt(_): true
+            case ConstFloat(_): true
+            case ConstBool(_): true
+            case Load(_): false         # Memory access - not pure
+            case GetField(_, _): true   # Field access is pure
+            case _: false
+
+# ============================================================================
+# Expression Table
+# ============================================================================
+
+class ExpressionTable:
+    """
+    Maps expressions to the locals that compute them.
+
+    Used to detect redundant computations.
+    """
+    table: Dict<text, LocalId>  # expression key -> local that computes it
+    eliminated: i64
+
+impl ExpressionTable:
+    static fn new() -> ExpressionTable:
+        ExpressionTable(
+            table: {},
+            eliminated: 0
+        )
+
+    fn lookup(expr: Expression) -> LocalId?:
+        """
+        Look up expression in table.
+
+        Returns Some(local) if expression was computed before.
+        """
+        val key = expr.to_key()
+        if key in self.table:
+            Some(self.table[key])
+        else:
+            nil
+
+    me insert(expr: Expression, local: LocalId):
+        """Record that local computes this expression."""
+        val key = expr.to_key()
+        self.table[key] = local
+
+    me clear():
+        """Clear table (for new basic block)."""
+        self.table = {}
+
+    fn size() -> i64:
+        """Number of expressions in table."""
+        self.table.len()
+
+# ============================================================================
+# Common Subexpression Elimination Pass
+# ============================================================================
+
+class CommonSubexprElimination:
+    """
+    CSE optimization pass.
+
+    Eliminates redundant computations within basic blocks.
+    """
+    expr_table: ExpressionTable
+    eliminated_count: i64
+    reused_count: i64
+
+impl CommonSubexprElimination:
+    static fn new() -> CommonSubexprElimination:
+        CommonSubexprElimination(
+            expr_table: ExpressionTable.new(),
+            eliminated_count: 0,
+            reused_count: 0
+        )
+
+    fn name() -> text:
+        "common_subexpr_elim"
+
+    fn description() -> text:
+        "Eliminates redundant computations by reusing previous results"
+
+    fn is_analysis_pass() -> bool:
+        false
+
+    fn dependencies() -> [text]:
+        ["copy_propagation"]  # Works better after copy prop
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        """
+        Run CSE on a function.
+
+        Process each basic block independently (local CSE).
+        """
+        var optimized_blocks: [MirBlock] = []
+
+        for block in func.blocks:
+            # Clear expression table for new block
+            self.expr_table.clear()
+
+            val optimized = self.eliminate_block(block)
+            optimized_blocks.push(optimized)
+
+        copy_mir_function_with_blocks(func, optimized_blocks)
+
+    # ========================================================================
+    # Block-Level CSE
+    # ========================================================================
+
+    me eliminate_block(block: MirBlock) -> MirBlock:
+        """
+        Eliminate common subexpressions in a block.
+
+        Strategy:
+        1. Scan instructions sequentially
+        2. For each pure expression:
+           a. Check if already computed
+           b. If yes, replace with copy
+           c. If no, add to table
+        """
+        var optimized_instructions: [MirInst] = []
+
+        for inst in block.instructions:
+            val optimized = self.try_eliminate_instruction(inst)
+            optimized_instructions.push(optimized)
+
+        MirBlock(
+            id: block.id,
+            label: block.label,
+            instructions: optimized_instructions,
+            terminator: block.terminator
+        )
+
+    me try_eliminate_instruction(inst: MirInst) -> MirInst:
+        """
+        Try to eliminate instruction via CSE.
+
+        Returns:
+        - Original instruction if can't eliminate
+        - Copy instruction if redundant computation found
+        """
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                # Try to build expression from operands
+                val expr_opt = self.operands_to_binop_expr(op, left, right)
+                if not expr_opt.?:
+                    return inst
+
+                val expr = expr_opt.unwrap()
+
+                # Check if already computed
+                val cached = self.expr_table.lookup(expr)
+                if cached.?:
+                    # Redundant! Replace with copy
+                    self.eliminated_count = self.eliminated_count + 1
+                    self.reused_count = self.reused_count + 1
+                    return MirInst(
+                        kind: MirInstKind.Copy(dest, cached.unwrap()),
+                        span: inst.span
+                    )
+
+                # First occurrence - add to table
+                self.expr_table.insert(expr, dest)
+                inst
+
+            case UnaryOp(dest, op, operand):
+                val expr_opt = self.operand_to_unaryop_expr(op, operand)
+                if not expr_opt.?:
+                    return inst
+
+                val expr = expr_opt.unwrap()
+
+                val cached = self.expr_table.lookup(expr)
+                if cached.?:
+                    self.eliminated_count = self.eliminated_count + 1
+                    self.reused_count = self.reused_count + 1
+                    return MirInst(
+                        kind: MirInstKind.Copy(dest, cached.unwrap()),
+                        span: inst.span
+                    )
+
+                self.expr_table.insert(expr, dest)
+                inst
+
+            case GetField(dest, base, field):
+                val expr_opt = self.operand_to_getfield_expr(base, field)
+                if not expr_opt.?:
+                    return inst
+
+                val expr = expr_opt.unwrap()
+
+                val cached = self.expr_table.lookup(expr)
+                if cached.?:
+                    self.eliminated_count = self.eliminated_count + 1
+                    self.reused_count = self.reused_count + 1
+                    return MirInst(
+                        kind: MirInstKind.Copy(dest, cached.unwrap()),
+                        span: inst.span
+                    )
+
+                self.expr_table.insert(expr, dest)
+                inst
+
+            case Store(_, _):
+                # Store may invalidate expressions (conservative)
+                self.expr_table.clear()
+                inst
+
+            case Call(_, _, _):
+                # Function call may have side effects (conservative)
+                self.expr_table.clear()
+                inst
+
+            case _:
+                # Other instructions don't participate in CSE
+                inst
+
+    # ========================================================================
+    # Expression Construction
+    # ========================================================================
+
+    fn operands_to_binop_expr(op: MirBinOp, left: MirOperand, right: MirOperand) -> Expression?:
+        """
+        Try to construct expression from binary operation.
+
+        Returns nil if operands are not suitable (e.g., constants).
+        """
+        val left_local = self.operand_to_local(left)
+        val right_local = self.operand_to_local(right)
+
+        if left_local.? and right_local.?:
+            Some(Expression.BinOp(op, left_local.unwrap(), right_local.unwrap()))
+        else:
+            nil
+
+    fn operand_to_unaryop_expr(op: MirUnaryOp, operand: MirOperand) -> Expression?:
+        """Try to construct expression from unary operation."""
+        val local = self.operand_to_local(operand)
+        if local.?:
+            Some(Expression.UnaryOp(op, local.unwrap()))
+        else:
+            nil
+
+    fn operand_to_getfield_expr(base: MirOperand, field: i64) -> Expression?:
+        """Try to construct expression from field access."""
+        val local = self.operand_to_local(base)
+        if local.?:
+            Some(Expression.GetField(local.unwrap(), field))
+        else:
+            nil
+
+    fn operand_to_local(operand: MirOperand) -> LocalId?:
+        """Extract local from operand if possible."""
+        match operand.kind:
+            case Copy(local): Some(local)
+            case Move(local): Some(local)
+            case Const(_, _): nil  # Constants handled separately
+
+    # ========================================================================
+    # Statistics
+    # ========================================================================
+
+    fn stats_summary() -> text:
+        """Generate summary of optimization work."""
+        "CSE: eliminated {self.eliminated_count} redundant computations, reused {self.reused_count} values"
+
+# ============================================================================
+# Factory Function
+# ============================================================================
+
+fn create_cse_pass() -> CommonSubexprElimination:
+    """Create a new CSE pass instance."""
+    CommonSubexprElimination.new()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CommonSubexprElimination, create_cse_pass
+export Expression, ExpressionTable

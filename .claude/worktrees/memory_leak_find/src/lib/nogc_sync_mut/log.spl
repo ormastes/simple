@@ -1,0 +1,215 @@
+# Log Module - Runtime-guarded logging
+#
+# Lightweight, interpreter-safe log module that reads SIMPLE_LOG env var
+# once at module load time. When logging is disabled (default), log calls
+# cost only a single integer comparison (~1ns).
+#
+# Usage:
+#   use std.log.{log_debug, log_info, log_warn, log_error}
+#
+#   log_debug("test_runner", "Loading file {path}")  # no-op if SIMPLE_LOG < debug
+#   log_info("cli", "Starting test run")
+#
+# Environment:
+#   SIMPLE_LOG=trace   → show everything
+#   SIMPLE_LOG=debug   → show debug + above
+#   SIMPLE_LOG=info    → show info + above
+#   SIMPLE_LOG=warn    → show warn + error only
+#   SIMPLE_LOG=error   → show errors only
+#   (unset or "off")   → silent (all log calls become no-ops)
+#
+# Note: Due to module import limitations, this module may not be directly
+# importable via `use std.log.{...}` from all contexts. For files loaded
+# via the test runner or CLI, use the inline pattern instead:
+#
+#   use app.io.mod (env_get)
+#   fn _is_debug_enabled() -> bool:
+#       val env = env_get("SIMPLE_LOG")
+#       env == "debug" or env == "trace"
+
+extern fn rt_env_get(key: text) -> text
+
+# Level constants
+val LOG_OFF = 0
+val LOG_FATAL = 1
+val LOG_ERROR = 2
+val LOG_WARN = 3
+val LOG_INFO = 4
+val LOG_DEBUG = 5
+val LOG_TRACE = 6
+val LOG_VERBOSE = 7
+val LOG_ALL = 10
+
+# Read SIMPLE_LOG once at module load time
+fn _parse_log_level() -> i64:
+    val env = rt_env_get("SIMPLE_LOG")
+    if env == "all":
+        return 10
+    if env == "verbose":
+        return 7
+    if env == "trace":
+        return 6
+    if env == "debug":
+        return 5
+    if env == "info":
+        return 4
+    if env == "warn":
+        return 3
+    if env == "error":
+        return 2
+    if env == "fatal":
+        return 1
+    0
+
+# Global mutable state (Note: May not persist across module imports in interpreter)
+# FIXED: Don't call _parse_log_level() at module init (causes FFI hang in interpreter)
+# Use lazy initialization instead
+var GLOBAL_LOG_LEVEL: i64 = -1  # -1 means not initialized
+var SCOPE_LEVELS = {}
+
+# Lazy initialization helper
+fn _ensure_initialized():
+    if GLOBAL_LOG_LEVEL == -1:
+        GLOBAL_LOG_LEVEL = _parse_log_level()
+
+# Compatibility: Keep LOG_LEVEL for existing code (lazy evaluated)
+fn get_log_level() -> i64:
+    _ensure_initialized()
+    GLOBAL_LOG_LEVEL
+
+# ============================================================================
+# Level Management Functions
+# ============================================================================
+
+fn level_name(level: i64) -> text:
+    if level == 0:
+        return "off"
+    if level == 1:
+        return "fatal"
+    if level == 2:
+        return "error"
+    if level == 3:
+        return "warn"
+    if level == 4:
+        return "info"
+    if level == 5:
+        return "debug"
+    if level == 6:
+        return "trace"
+    if level == 7:
+        return "verbose"
+    if level == 10:
+        return "all"
+    "unknown"
+
+fn parse_level(name: text) -> i64:
+    if name == "off":
+        return LOG_OFF
+    if name == "fatal":
+        return LOG_FATAL
+    if name == "error":
+        return LOG_ERROR
+    if name == "warn":
+        return LOG_WARN
+    if name == "info":
+        return LOG_INFO
+    if name == "debug":
+        return LOG_DEBUG
+    if name == "trace":
+        return LOG_TRACE
+    if name == "verbose":
+        return LOG_VERBOSE
+    if name == "all":
+        return LOG_ALL
+    LOG_INFO  # Default to INFO for unknown
+
+fn set_level(level: i64):
+    _ensure_initialized()
+    GLOBAL_LOG_LEVEL = level
+
+fn get_global_level() -> i64:
+    _ensure_initialized()
+    GLOBAL_LOG_LEVEL
+
+fn set_scope_level(scope: text, level: i64):
+    SCOPE_LEVELS[scope] = level
+
+fn get_level(scope: text) -> i64:
+    _ensure_initialized()
+    if SCOPE_LEVELS.contains_key(scope):
+        SCOPE_LEVELS[scope]
+    else:
+        GLOBAL_LOG_LEVEL
+
+fn clear_scopes():
+    SCOPE_LEVELS = {}
+
+fn is_enabled(level: i64, scope: text) -> bool:
+    val current_level = get_level(scope)
+    level <= current_level
+
+# ============================================================================
+# Logging Functions (with scope parameter)
+# ============================================================================
+
+fn fatal(scope: text, msg: text):
+    if 1 <= _parse_log_level():  # LOG_FATAL = 1; use _parse_log_level() to avoid module-var capture issue
+        print "[FATAL] [{scope}] {msg}"
+
+fn error(scope: text, msg: text):
+    if 2 <= _parse_log_level():  # LOG_ERROR = 2
+        print "[ERROR] [{scope}] {msg}"
+
+fn warn(scope: text, msg: text):
+    if 3 <= _parse_log_level():  # LOG_WARN = 3
+        print "[WARN] [{scope}] {msg}"
+
+fn info(scope: text, msg: text):
+    if 4 <= _parse_log_level():  # LOG_INFO = 4
+        print "[INFO] [{scope}] {msg}"
+
+fn debug(scope: text, msg: text):
+    if 5 <= _parse_log_level():  # LOG_DEBUG = 5
+        print "[DEBUG] [{scope}] {msg}"
+
+fn trace(scope: text, msg: text):
+    if 6 <= _parse_log_level():  # LOG_TRACE = 6
+        print "[TRACE] [{scope}] {msg}"
+
+fn verbose(scope: text, msg: text):
+    if 7 <= _parse_log_level():  # LOG_VERBOSE = 7
+        print "[VERBOSE] [{scope}] {msg}"
+
+# ============================================================================
+# Convenience Functions (without scope - use "default" scope)
+# ============================================================================
+
+fn log_info(msg: text):
+    info("default", msg)
+
+fn log_error(msg: text):
+    error("default", msg)
+
+fn log_debug(msg: text):
+    debug("default", msg)
+
+fn log_verbose(msg: text):
+    verbose("default", msg)
+
+# General log function with explicit level
+fn log(level: i64, scope: text, msg: text):
+    if level <= get_level(scope):
+        var prefix = level_name(level)
+        print "[{prefix.upper()}] [{scope}] {msg}"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export LOG_OFF, LOG_FATAL, LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE, LOG_VERBOSE, LOG_ALL
+export level_name, parse_level
+export set_level, get_global_level, get_level
+export set_scope_level, clear_scopes
+export is_enabled
+export log, fatal, error, warn, info, debug, trace, verbose
+export log_info, log_error, log_debug, log_verbose

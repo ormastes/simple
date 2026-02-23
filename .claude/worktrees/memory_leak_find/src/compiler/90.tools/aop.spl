@@ -1,0 +1,153 @@
+# Aspect-Oriented Programming - Full Simple Extensions
+#
+# Runtime advice with lambdas, Any type, class-based aspects.
+# Core AOP (types, pointcuts, config, weaving, diagnostics) is in core.aop.
+#
+# Port of rust/compiler/src/weaving/ (1,382 lines) into shared module.
+
+use compiler.core.aop.{PointcutKind, Pointcut, AdviceKind, AdviceForm}
+use compiler.core.aop.{DiagnosticLevel, JoinPointKind}
+use compiler.core.aop.{InstructionInfo, AdviceCallInfo, AdviceMatchResult}
+use compiler.core.aop.{JoinPointContext, JoinPoint, MatchedAdvice}
+use compiler.core.aop.{MirBlockInfo, WeavingRule, WeavingConfig}
+use compiler.core.aop.{WeavingDiagnostic, WeavingResult}
+use compiler.core.aop.{glob_match, matches_predicate, predicate_specificity}
+use compiler.core.aop.{weavingconfig_all_rules}
+use compiler.core.aop.{detect_join_points, match_advice_for_join_point, weave_function}
+
+use compiler.core.aop_debug_log.{debug_log_enter, debug_log_exit, debug_log_is_enabled}
+
+# Temporary workaround: Define Logger locally since compiler.common.config.Logger isn't being transpiled
+struct Logger:
+    level: i64
+    fn log(level: i64, prefix: text, message: text):
+        if level <= self.level:
+            print "[{prefix}] {message}"
+
+# use compiler.config (Logger)
+
+export PointcutKind, Pointcut, AdviceKind, AdviceForm, Advice
+export LogAspect, TracingAspect, ContractAspect
+export JoinPointKind, JoinPoint, JoinPointContext
+export MatchedAdvice, WeavingRule, WeavingConfig, WeavingResult
+export WeavingDiagnostic, DiagnosticLevel
+export AopWeaver
+
+# ============================================================================
+# Advice (Full Simple - uses function type with Any)
+# ============================================================================
+
+struct Advice:
+    kind: AdviceKind
+    pointcut: Pointcut
+    handler: fn(text, [Any]) -> Any
+    order: i64
+
+# ============================================================================
+# Aspects (Runtime - Full Simple classes)
+# ============================================================================
+
+class LogAspect:
+    level: i64
+
+    fn log_aop(prefix: text, message: text):
+        if self.level > 0:
+            print "[AOP] {prefix} {message}"
+
+    fn before(name: text, args: [Any]):
+        self.log_aop(">>", name)
+
+    fn after(name: text, result: Any):
+        self.log_aop("<<", name)
+
+    fn around(name: text, args: [Any], proceed: fn() -> Any) -> Any:
+        self.before(name, args)
+        val result = proceed()
+        self.after(name, result)
+        result
+
+class TracingAspect:
+    level: i64
+
+    fn before(name: text, args: [Any]):
+        print "[TRACE] enter {name}"
+
+    fn after(name: text, result: Any):
+        print "[TRACE] exit {name}"
+
+class ContractAspect:
+    enabled: bool
+
+    fn check_pre(name: text, args: [Any]) -> bool:
+        # Stub: Dict access not supported in seed_cpp
+        true
+
+    fn check_post(name: text, result: Any) -> bool:
+        # Stub: Dict access not supported in seed_cpp
+        true
+
+# ============================================================================
+# AOP Weaver (Full Simple - runtime advice + MIR delegation to core)
+# ============================================================================
+
+class AopWeaver:
+    advices: [Advice]
+    config: WeavingConfig
+    logger: Logger
+
+    # --- Runtime advice registration ---
+
+    me add_before(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.Before, pointcut: pointcut,
+            handler: handler, order: order))
+
+    me add_after(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.After, pointcut: pointcut,
+            handler: handler, order: order))
+
+    me add_around(pointcut: Pointcut, handler: fn(text, [Any]) -> Any, order: i64):
+        self.advices = self.advices.push(Advice(
+            kind: AdviceKind.Around, pointcut: pointcut,
+            handler: handler, order: order))
+
+    me add_log_aspect(aspect: LogAspect, pointcut: Pointcut):
+        self.add_before(pointcut, \name, args: aspect.before(name, args), 100)
+        self.add_after(pointcut, \name, args: aspect.after(name, args[0]), 100)
+
+    me add_tracing_aspect(aspect: TracingAspect, pointcut: Pointcut):
+        self.add_before(pointcut, \name, args: aspect.before(name, args), 50)
+        self.add_after(pointcut, \name, args: aspect.after(name, args[0]), 50)
+
+    me add_debug_log_aspect(pointcut: Pointcut):
+        self.add_before(pointcut, \name, args:
+            if debug_log_is_enabled():
+                debug_log_enter(name, "", "", 0, "")
+        , 200)
+        self.add_after(pointcut, \name, args:
+            if debug_log_is_enabled():
+                debug_log_exit(name, "", 0, 0)
+        , 200)
+
+    fn advices_for(fn_name: text) -> [Advice]:
+        var matching: [Advice] = []
+        for advice in self.advices:
+            if advice.pointcut_matches_name(pointcut, fn_name):
+                matching = matching_push(matching, advice)
+        matching_sort_by(matching, \a, b: a.order - b.order)
+
+    # --- MIR-level weaving (delegates to core free functions) ---
+
+    me set_config(new_config: WeavingConfig):
+        self.config = new_config
+
+    fn weave_mir_function(func_name: text, module_path: text,
+                          attributes: [text], effects: [text],
+                          blocks: [MirBlockInfo]) -> i64:
+        # Stub: MIR weaving not supported in seed_cpp
+        0
+
+    fn weave(mir: Any) -> Any:
+        # Legacy runtime weave - returns MIR unchanged if config not set
+        mir

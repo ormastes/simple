@@ -1,0 +1,226 @@
+"""
+# GOT/PLT Builder for Native Backend
+
+**Feature ID:** #COMPILER-002
+**Category:** Compiler
+**Status:** Active
+
+## Overview
+
+Tests the Global Offset Table (GOT) and Procedure Linkage Table (PLT) builder for the native
+x86_64 backend. Validates basic structure creation, GOT/PLT size calculations (8 bytes per GOT
+entry, 16 bytes per PLT entry), x86_64 PLT stub generation including JMP opcode encoding and
+RIP-relative addressing, symbol management with deduplication, sequential index assignment,
+correct GOT offset allocation, and little-endian i32 encoding for the helper functions.
+
+## Syntax
+
+```simple
+var builder = GotPltBuilder(got_entries: [], plt_entries: [], got_size: 0, plt_size: 0, next_got_offset: 0, next_plt_index: 0)
+val index = builder.add_symbol("printf")
+expect(builder.got_entries.len()).to_equal(1)
+
+val stub = generate_plt_stub_x86_64(0, 0)
+expect(stub.len()).to_equal(16)
+expect(stub[0]).to_equal(0xFF)
+```
+"""
+use std.spec
+use compiler.backend.native.got_plt_builder.{GotPltBuilder, generate_plt_stub_x86_64, encode_i32_le}
+
+describe "GOT/PLT Builder - Basic Structure":
+    it "creates new builder with empty state":
+        val builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+        expect(builder.got_entries.len()).to_equal(0)
+        expect(builder.plt_entries.len()).to_equal(0)
+        expect(builder.next_got_offset).to_equal(0)
+        expect(builder.next_plt_index).to_equal(0)
+
+    it "calculates GOT size correctly":
+        val builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 24,  # 3 entries * 8 bytes
+            next_plt_index: 0
+        )
+        expect(builder.get_got_size()).to_equal(24)
+
+    it "calculates PLT size correctly":
+        val builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 3  # 3 entries
+        )
+        expect(builder.get_plt_size()).to_equal(48)  # 3 * 16 bytes
+
+describe "GOT/PLT Builder - PLT Stub Generation":
+    it "generates valid x86_64 PLT stub":
+        val stub = generate_plt_stub_x86_64(0, 0)
+        # Should be 16 bytes
+        expect(stub.len()).to_equal(16)
+        # First byte should be 0xFF (JMP opcode)
+        expect(stub[0]).to_equal(0xFF)
+        # Second byte should be 0x25 (ModRM for RIP-relative)
+        expect(stub[1]).to_equal(0x25)
+
+    it "includes PLT index in stub":
+        val stub = generate_plt_stub_x86_64(42, 0)
+        # Byte 6 should be 0x68 (PUSH opcode)
+        expect(stub[6]).to_equal(0x68)
+        # Bytes 7-10 should encode 42 in little-endian
+        expect(stub[7]).to_equal(42)
+        expect(stub[8]).to_equal(0)
+        expect(stub[9]).to_equal(0)
+        expect(stub[10]).to_equal(0)
+
+    it "includes GOT offset in stub":
+        val stub = generate_plt_stub_x86_64(0, 256)
+        # Bytes 2-5 encode GOT offset (256) in little-endian
+        expect(stub[2]).to_equal(0)
+        expect(stub[3]).to_equal(1)  # 256 = 0x0100
+        expect(stub[4]).to_equal(0)
+        expect(stub[5]).to_equal(0)
+
+describe "GOT/PLT Builder - Symbol Management":
+    it "adds first symbol correctly":
+        var builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+        val index = builder.add_symbol("printf")
+        expect(index).to_equal(0)
+        expect(builder.got_entries.len()).to_equal(1)
+        expect(builder.plt_entries.len()).to_equal(1)
+
+    it "allocates GOT entry with correct offset":
+        var builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+        builder.add_symbol("malloc")
+        val entry = builder.got_entries[0]
+        expect(entry.symbol).to_equal("malloc")
+        expect(entry.offset).to_equal(0)
+
+    it "increments GOT offset by 8 bytes per symbol":
+        var builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+        builder.add_symbol("printf")
+        builder.add_symbol("malloc")
+        expect(builder.next_got_offset).to_equal(16)
+
+    it "reuses existing symbol without duplication":
+        var builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+        val idx1 = builder.add_symbol("printf")
+        val idx2 = builder.add_symbol("printf")
+        expect(idx1).to_equal(idx2)
+        expect(builder.plt_entries.len()).to_equal(1)
+        expect(builder.got_entries.len()).to_equal(1)
+
+describe "GOT/PLT Builder - Multiple Symbols":
+    it "handles multiple unique symbols":
+        var builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+        builder.add_symbol("printf")
+        builder.add_symbol("malloc")
+        builder.add_symbol("free")
+        expect(builder.plt_entries.len()).to_equal(3)
+        expect(builder.got_entries.len()).to_equal(3)
+        expect(builder.get_got_size()).to_equal(24)  # 3 * 8 bytes
+        expect(builder.get_plt_size()).to_equal(48)  # 3 * 16 bytes
+
+    it "assigns sequential indices to symbols":
+        var builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+        val idx0 = builder.add_symbol("printf")
+        val idx1 = builder.add_symbol("malloc")
+        val idx2 = builder.add_symbol("free")
+        expect(idx0).to_equal(0)
+        expect(idx1).to_equal(1)
+        expect(idx2).to_equal(2)
+
+    it "assigns correct GOT offsets":
+        var builder = GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+        builder.add_symbol("printf")
+        builder.add_symbol("malloc")
+        builder.add_symbol("free")
+        expect(builder.got_entries[0].offset).to_equal(0)
+        expect(builder.got_entries[1].offset).to_equal(8)
+        expect(builder.got_entries[2].offset).to_equal(16)
+
+describe "GOT/PLT Builder - Helper Functions":
+    it "encodes i32 in little-endian":
+        val bytes = encode_i32_le(0x12345678)
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0x78)
+        expect(bytes[1]).to_equal(0x56)
+        expect(bytes[2]).to_equal(0x34)
+        expect(bytes[3]).to_equal(0x12)
+
+    it "encodes zero correctly":
+        val bytes = encode_i32_le(0)
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0)
+        expect(bytes[1]).to_equal(0)
+        expect(bytes[2]).to_equal(0)
+        expect(bytes[3]).to_equal(0)
+
+    it "encodes small positive number":
+        val bytes = encode_i32_le(42)
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(42)
+        expect(bytes[1]).to_equal(0)
+        expect(bytes[2]).to_equal(0)
+        expect(bytes[3]).to_equal(0)

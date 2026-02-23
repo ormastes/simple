@@ -1,0 +1,166 @@
+# Unified Registry - Blocks and Literals
+#
+# Central registry for both block definitions and literal definitions.
+# Ensures that each prefix can only be registered as either a block OR a literal.
+
+use compiler.common.config.{LiteralDefinition, LiteralsConfig}
+use compiler.blocks.definition.{BlockDefinition}
+use compiler.blocks.registry.{BlockRegistry}
+
+# ============================================================================
+# Prefix Kind Enum
+# ============================================================================
+
+enum PrefixKind:
+    """Type of prefix: block or literal."""
+    Block(BlockDefinition)
+    Literal(LiteralDefinition)
+
+# ============================================================================
+# Unified Registry
+# ============================================================================
+
+struct UnifiedRegistry:
+    """Registry for both blocks and literals.
+
+    Each prefix can only be registered as ONE thing (block OR literal).
+    This prevents ambiguity when parsing prefix{...} syntax.
+
+    Example:
+    ```simple
+    val registry = UnifiedRegistry__new()
+
+    # Register set literal
+    registry.register_literal("s", set_lit_def)
+
+    # Check prefix type
+    if registry.is_literal_prefix("s"):
+        # Parse as set literal
+    ```
+    """
+    prefixes: Dict<text, PrefixKind>  # prefix -> kind mapping
+
+impl UnifiedRegistry:
+    static fn new() -> UnifiedRegistry:
+        """Create an empty registry."""
+        UnifiedRegistry(prefixes: {})
+
+    static fn from_config(
+        literals_config: LiteralsConfig,
+        block_registry: BlockRegistry
+    ) -> UnifiedRegistry:
+        """Build unified registry from configuration.
+
+        Args:
+            literals_config: Literal syntax configuration
+            block_registry: Existing block registry
+
+        Returns:
+            Registry with all blocks and literals registered
+        """
+        var reg = UnifiedRegistry__new()
+
+        # Register literal types with prefixes
+        if literals_config.array.enabled and literals_config.array.prefix != "":
+            reg.register_literal(literals_config.array.prefix, literals_config.array)
+
+        if literals_config.dict.enabled and literals_config.dict.prefix != "":
+            reg.register_literal(literals_config.dict.prefix, literals_config.dict)
+
+        if literals_config.set.enabled and literals_config.set.prefix != "":
+            reg.register_literal(literals_config.set.prefix, literals_config.set)
+
+        # Register custom literals
+        for name, lit_def in literals_config.custom:
+            if lit_def.enabled and lit_def.prefix != "":
+                reg.register_literal(lit_def.prefix, lit_def)
+
+        # Register blocks from block registry
+        for keyword in block_registry.all_keywords():
+            if val Some(block_def) = block_registry.lookup(keyword):
+                reg.register_block(keyword, block_def)
+
+        reg
+
+    me register_block(name: text, def: BlockDefinition):
+        """Register a block prefix (e.g., 'm', 'sh', 'loss').
+
+        Panics if prefix is already registered.
+        """
+        if self.prefixes.has(name):
+            panic("Prefix '{name}' already registered")
+        self.prefixes[name] = PrefixKind.Block(def)
+
+    me register_literal(name: text, def: LiteralDefinition):
+        """Register a literal prefix (e.g., 's', 'arr', 'sorted').
+
+        Panics if prefix is already registered.
+        """
+        if self.prefixes.has(name):
+            panic("Prefix '{name}' already registered")
+        self.prefixes[name] = PrefixKind.Literal(def)
+
+    fn lookup(prefix: text) -> PrefixKind?:
+        """Look up prefix in registry.
+
+        Returns:
+            Some(PrefixKind) if registered, nil otherwise
+        """
+        self.prefixes.get(prefix)
+
+    fn is_block_prefix(prefix: text) -> bool:
+        """Check if prefix is registered as a block."""
+        match self.lookup(prefix):
+            case Some(PrefixKind.Block(_)): true
+            case _: false
+
+    fn is_literal_prefix(prefix: text) -> bool:
+        """Check if prefix is registered as a literal."""
+        match self.lookup(prefix):
+            case Some(PrefixKind.Literal(_)): true
+            case _: false
+
+    fn get_literal_def(prefix: text) -> LiteralDefinition?:
+        """Get literal definition for prefix.
+
+        Returns:
+            Some(LiteralDefinition) if registered as literal, nil otherwise
+        """
+        match self.lookup(prefix):
+            case Some(PrefixKind.Literal(def)): Some(def)
+            case _: nil
+
+    fn get_block_def(prefix: text) -> BlockDefinition?:
+        """Get block definition for prefix.
+
+        Returns:
+            Some(BlockDefinition) if registered as block, nil otherwise
+        """
+        match self.lookup(prefix):
+            case Some(PrefixKind.Block(def)): Some(def)
+            case _: nil
+
+    fn all_prefixes() -> [text]:
+        """Return all registered prefixes."""
+        self.prefixes.keys()
+
+    fn count() -> i64:
+        """Return number of registered prefixes."""
+        self.prefixes.len()
+
+    me clear():
+        """Remove all registered prefixes."""
+        self.prefixes = {}
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+
+# Auto-generated desugared static method wrappers
+fn UnifiedRegistry__new() -> UnifiedRegistry:
+    """Create an empty registry."""
+    UnifiedRegistry(prefixes: {})
+
+
+export PrefixKind, UnifiedRegistry

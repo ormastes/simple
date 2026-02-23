@@ -1,0 +1,137 @@
+# Core Simple — AST Tests
+# WARNING (2026-02-22): This test hits the 16GB memory limit when run via
+# test runner because `use compiler.core.ast.*` triggers massive module
+# loading in the child process. See test_runner_main.spl header comments.
+use compiler.core.ast.*
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS}
+use compiler.core.types.{TYPE_I64, TYPE_TEXT}
+
+
+describe "core.ast":
+    before_each:
+        ast_reset()
+
+    describe "expressions":
+        it "creates literals and identifiers":
+            val e1 = expr_int_lit(42, 0)
+            val e2 = expr_float_lit("3.14", 0)
+            val e3 = expr_string_lit("hi", 0)
+            val e4 = expr_bool_lit(1, 0)
+            val e5 = expr_nil_lit(0)
+            val e6 = expr_ident("x", 0)
+            expect(expr_get_tag(e1)).to_equal(EXPR_INT_LIT)
+            expect(expr_get_int(e1)).to_equal(42)
+            expect(expr_get_tag(e2)).to_equal(EXPR_FLOAT_LIT)
+            expect(expr_get_float(e2)).to_equal("3.14")
+            expect(expr_get_tag(e3)).to_equal(EXPR_STRING_LIT)
+            expect(expr_get_str(e3)).to_equal("hi")
+            expect(expr_get_tag(e4)).to_equal(EXPR_BOOL_LIT)
+            expect(expr_get_int(e4)).to_equal(1)
+            expect(expr_get_tag(e5)).to_equal(EXPR_NIL_LIT)
+            expect(expr_get_tag(e6)).to_equal(EXPR_IDENT)
+            expect(expr_get_str(e6)).to_equal("x")
+
+        it "creates binary and unary":
+            val left = expr_int_lit(1, 0)
+            val right = expr_int_lit(2, 0)
+            val bin = expr_binary(TOK_PLUS, left, right, 0)
+            val un = expr_unary(TOK_MINUS, right, 0)
+            expect(expr_get_tag(bin)).to_equal(EXPR_BINARY)
+            expect(expr_get_left(bin)).to_equal(left)
+            expect(expr_get_right(bin)).to_equal(right)
+            expect(expr_get_int(bin)).to_equal(TOK_PLUS)
+            expect(expr_get_tag(un)).to_equal(EXPR_UNARY)
+            expect(expr_get_left(un)).to_equal(right)
+            expect(expr_get_int(un)).to_equal(TOK_MINUS)
+
+        it "creates arrays, tuples, dicts":
+            val a = expr_array_lit([expr_int_lit(1, 0), expr_int_lit(2, 0)], 0)
+            val t = expr_tuple([expr_int_lit(3, 0), expr_int_lit(4, 0)], 0)
+            val d = expr_dict_lit([expr_string_lit("k", 0)], [expr_int_lit(9, 0)], 0)
+            expect(expr_get_tag(a)).to_equal(EXPR_ARRAY_LIT)
+            expect(expr_get_args(a).len()).to_equal(2)
+            expect(expr_get_tag(t)).to_equal(EXPR_TUPLE)
+            expect(expr_get_args(t).len()).to_equal(2)
+            expect(expr_get_tag(d)).to_equal(EXPR_DICT_LIT)
+            expect(expr_get_args(d).len()).to_equal(2)
+
+        it "creates struct literals and ranges":
+            val s = expr_struct_lit("Point", [expr_ident("x", 0)], [expr_int_lit(1, 0)], 0)
+            val r = expr_range(expr_int_lit(0, 0), expr_int_lit(10, 0), 1, 0)
+            expect(expr_get_tag(s)).to_equal(EXPR_STRUCT_LIT)
+            expect(expr_get_str(s)).to_equal("Point")
+            expect(expr_get_tag(r)).to_equal(EXPR_RANGE)
+            expect(expr_get_extra(r)).to_equal(1)
+
+        it "creates assignments":
+            val target = expr_ident("x", 0)
+            val value = expr_int_lit(5, 0)
+            val asn = expr_assign(target, value, 0)
+            val casn = expr_compound_assign(TOK_PLUS, target, value, 0)
+            expect(expr_get_tag(asn)).to_equal(EXPR_ASSIGN)
+            expect(expr_get_tag(casn)).to_equal(EXPR_COMPOUND_ASSIGN)
+
+        it "formats kind names":
+            expect(expr_kind_name(EXPR_INT_LIT)).to_equal("IntLit")
+            expect(expr_kind_name(EXPR_BINARY)).to_equal("Binary")
+            expect(expr_kind_name(EXPR_MATCH)).to_equal("Match")
+            expect(expr_kind_name(EXPR_STRUCT_LIT)).to_equal("StructLit")
+            expect(expr_kind_name(9999)).to_equal("Unknown(9999)")
+
+    describe "statements":
+        it "creates val/var declarations":
+            val init = expr_int_lit(1, 0)
+            val sv = stmt_val_decl("x", TYPE_I64, init, 0)
+            val sv2 = stmt_var_decl("y", 0, init, 0)
+            expect(stmt_get_tag(sv)).to_equal(STMT_VAL_DECL)
+            expect(stmt_get_name(sv)).to_equal("x")
+            expect(stmt_get_type(sv)).to_equal(TYPE_I64)
+            expect(stmt_get_tag(sv2)).to_equal(STMT_VAR_DECL)
+
+        it "creates control flow statements":
+            val cond = expr_bool_lit(1, 0)
+            val body = [stmt_return_stmt(expr_int_lit(1, 0), 0)]
+            val sif = stmt_if_stmt(cond, body, [], 0)
+            val sfor = stmt_for_stmt("i", expr_range(expr_int_lit(0, 0), expr_int_lit(1, 0), 0, 0), body, 0)
+            val swhile = stmt_while_stmt(cond, body, 0)
+            val smatch = stmt_match_stmt(cond, [], 0)
+            expect(stmt_get_tag(sif)).to_equal(STMT_IF)
+            expect(stmt_get_tag(sfor)).to_equal(STMT_FOR)
+            expect(stmt_get_tag(swhile)).to_equal(STMT_WHILE)
+            expect(stmt_get_tag(smatch)).to_equal(STMT_MATCH)
+
+    describe "declarations":
+        it "creates functions and structs":
+            val body = [stmt_return_stmt(expr_int_lit(1, 0), 0)]
+            val df = decl_fn("add", ["a"], [TYPE_I64], TYPE_I64, body, 0)
+            var no_defs: [i64] = []
+            val ds = decl_struct_def("Point", ["x"], [TYPE_I64], no_defs, 0)
+            val de = decl_enum_def("E", ["A"], 0)
+            expect(decl_get_tag(df)).to_equal(DECL_FN)
+            expect(decl_get_name(df)).to_equal("add")
+            expect(decl_get_param_names(df).len()).to_equal(1)
+            expect(decl_get_ret_type(df)).to_equal(TYPE_I64)
+            expect(decl_get_tag(ds)).to_equal(DECL_STRUCT)
+            expect(decl_get_fields(ds).len()).to_equal(1)
+            expect(decl_get_field_types(ds)[0]).to_equal(TYPE_I64)
+            expect(decl_get_tag(de)).to_equal(DECL_ENUM)
+
+        it "creates use/export/val/var":
+            val du = decl_use_import("mod", ["x"], 0)
+            val dx = decl_export_names(["x"], 0)
+            val dv = decl_val_binding("x", TYPE_I64, expr_int_lit(1, 0), 0)
+            val dvar = decl_var_binding("y", TYPE_TEXT, expr_string_lit("s", 0), 0)
+            expect(decl_get_tag(du)).to_equal(DECL_USE)
+            expect(decl_get_imports(du).len()).to_equal(1)
+            expect(decl_get_tag(dx)).to_equal(DECL_EXPORT)
+            expect(decl_get_tag(dv)).to_equal(DECL_VAL)
+            expect(decl_get_tag(dvar)).to_equal(DECL_VAR)
+            expect(decl_get_is_pub(dv)).to_equal(false)
+
+    describe "module":
+        it "tracks module path and decls":
+            module_set_path("m.spl")
+            expect(module_get_path()).to_equal("m.spl")
+            val d = decl_val_binding("x", TYPE_I64, expr_int_lit(1, 0), 0)
+            module_add_decl(d)
+            expect(module_get_decls().len()).to_equal(1)

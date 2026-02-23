@@ -1,0 +1,199 @@
+# Unification Algorithm
+#
+# Robinson's unification with occurs check.
+# Shared by compiler, loader, and linker.
+
+use compiler.hir.inference.types.*
+
+# ============================================================================
+# Unifier
+# ============================================================================
+
+class Unifier:
+    """Type unifier with substitution tracking.
+
+    Maintains a mapping from type variables to their resolved types.
+    Supports occurs check to prevent infinite types.
+    """
+    substitutions: Dict<i64, Type>
+    next_var: i64
+
+impl Unifier:
+    static fn empty() -> Unifier:
+        Unifier(substitutions: {}, next_var: 0)
+
+    me fresh_var() -> Type:
+        """Create a fresh type variable."""
+        val id = TypeVarId(id: self.next_var)
+        self.next_var = self.next_var + 1
+        Type.Var(id: id)
+
+    me unify(t1: Type, t2: Type) -> Result<(), UnifyError>:
+        """Unify two types, updating substitutions."""
+        val t1 = self.resolve(t1)
+        val t2 = self.resolve(t2)
+
+        match (t1, t2):
+            case (Var(id1), Var(id2)):
+                if id1.eq(id2):
+                    Ok(())
+                else:
+                    self.substitutions[id1.id] = t2
+                    Ok(())
+
+            case (Var(id), t) | (t, Var(id)):
+                if self.occurs_check(id, t):
+                    Err(UnifyError.InfiniteType(id, t))
+                else:
+                    self.substitutions[id.id] = t
+                    Ok(())
+
+            case (Function(p1, r1), Function(p2, r2)):
+                if p1.len() != p2.len():
+                    return Err(UnifyError.ArityMismatch(p1.len(), p2.len()))
+                var i = 0
+                while i < p1.len():
+                    self.unify(p1[i], p2[i])?
+                    i = i + 1
+                self.unify(r1, r2)
+
+            case (Array(e1, _), Array(e2, _)):
+                self.unify(e1, e2)
+
+            case (Tuple(elems1), Tuple(elems2)):
+                if elems1.len() != elems2.len():
+                    return Err(UnifyError.ArityMismatch(elems1.len(), elems2.len()))
+                var i = 0
+                while i < elems1.len():
+                    self.unify(elems1[i], elems2[i])?
+                    i = i + 1
+                Ok(())
+
+            case (Optional(i1), Optional(i2)):
+                self.unify(i1, i2)
+
+            case (Result(o1, e1), Result(o2, e2)):
+                self.unify(o1, o2)?
+                self.unify(e1, e2)
+
+            case (Generic(n1, a1), Generic(n2, a2)):
+                if n1 != n2:
+                    return Err(UnifyError.CannotUnify(t1, t2))
+                if a1.len() != a2.len():
+                    return Err(UnifyError.ArityMismatch(a1.len(), a2.len()))
+                var i = 0
+                while i < a1.len():
+                    self.unify(a1[i], a2[i])?
+                    i = i + 1
+                Ok(())
+
+            case (Int(b1, s1), Int(b2, s2)):
+                if b1 == b2 and s1 == s2:
+                    Ok(())
+                else:
+                    Err(UnifyError.CannotUnify(t1, t2))
+
+            case (Float(b1), Float(b2)):
+                if b1 == b2:
+                    Ok(())
+                else:
+                    Err(UnifyError.CannotUnify(t1, t2))
+
+            case (Dict(k1, v1), Dict(k2, v2)):
+                self.unify(k1, k2)?
+                self.unify(v1, v2)
+
+            case (Borrow(i1), Borrow(i2)):
+                self.unify(i1, i2)
+
+            case (BorrowMut(i1), BorrowMut(i2)):
+                self.unify(i1, i2)
+
+            case (Named(n1), Named(n2)):
+                if n1 == n2:
+                    Ok(())
+                else:
+                    Err(UnifyError.CannotUnify(t1, t2))
+
+            case (Simd(l1, e1), Simd(l2, e2)):
+                if l1 == l2:
+                    self.unify(e1, e2)
+                else:
+                    Err(UnifyError.CannotUnify(t1, t2))
+
+            case (Bool, Bool) | (Str, Str) | (Nil, Nil) | (Unit, Unit):
+                Ok(())
+
+            case _:
+                Err(UnifyError.CannotUnify(t1, t2))
+
+    fn resolve(ty: Type) -> Type:
+        """Follow substitution chain to find the resolved type."""
+        match ty:
+            case Var(id):
+                if self.substitutions.contains(id.id):
+                    self.resolve(self.substitutions[id.id])
+                else:
+                    ty
+            case _: ty
+
+    fn occurs_check(id: TypeVarId, ty: Type) -> bool:
+        """Check if type variable occurs in type (prevents infinite types)."""
+        val resolved = self.resolve(ty)
+        match resolved:
+            case Var(other_id): id.eq(other_id)
+            case Function(params, ret):
+                params.any(\p: self.occurs_check(id, p)) or self.occurs_check(id, ret)
+            case Array(elem, _): self.occurs_check(id, elem)
+            case Tuple(elems): elems.any(\e: self.occurs_check(id, e))
+            case Optional(inner): self.occurs_check(id, inner)
+            case Result(ok, err): self.occurs_check(id, ok) or self.occurs_check(id, err)
+            case Generic(_, args): args.any(\a: self.occurs_check(id, a))
+            case Dict(key, value): self.occurs_check(id, key) or self.occurs_check(id, value)
+            case Borrow(inner) | BorrowMut(inner): self.occurs_check(id, inner)
+            case Union(types): types.any(\t: self.occurs_check(id, t))
+            case Simd(_, elem): self.occurs_check(id, elem)
+            case _: false
+
+    fn apply(ty: Type) -> Type:
+        """Apply all substitutions to a type."""
+        match ty:
+            case Var(id):
+                if self.substitutions.contains(id.id):
+                    self.apply(self.substitutions[id.id])
+                else:
+                    ty
+            case Function(params, ret):
+                Type.Function(
+                    params: params.map(\p: self.apply(p)),
+                    ret: self.apply(ret)
+                )
+            case Array(elem, size):
+                Type.Array(elem: self.apply(elem), size: size)
+            case Tuple(elems):
+                Type.Tuple(elements: elems.map(\e: self.apply(e)))
+            case Optional(inner):
+                Type.Optional(inner: self.apply(inner))
+            case Result(ok, err):
+                Type.Result(ok: self.apply(ok), err: self.apply(err))
+            case Generic(name, args):
+                Type.Generic(base: name, args: args.map(\a: self.apply(a)))
+            case Dict(key, value):
+                Type.Dict(key: self.apply(key), value: self.apply(value))
+            case Borrow(inner):
+                Type.Borrow(inner: self.apply(inner))
+            case BorrowMut(inner):
+                Type.BorrowMut(inner: self.apply(inner))
+            case Union(types):
+                Type.Union(types: types.map(\t: self.apply(t)))
+            case Simd(lanes, elem):
+                Type.Simd(lanes: lanes, element: self.apply(elem))
+            case _: ty
+
+
+# Auto-generated desugared static method wrappers
+fn Unifier__empty() -> Unifier:
+    Unifier(substitutions: {}, next_var: 0)
+
+
+export Unifier

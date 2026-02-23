@@ -1,0 +1,281 @@
+# GPU Testing Helpers
+#
+# Utilities for testing GPU compute functionality.
+# Use these in SSpec tests to conditionally skip tests when GPU is unavailable.
+
+use std.compute.*
+
+# ============================================================================
+# Test Skipping Utilities
+# ============================================================================
+
+"""
+Skip test if no GPU is available.
+Use at the start of GPU tests.
+"""
+fn require_gpu():
+    if not gpu_available():
+        skip("No GPU available")
+
+"""
+Skip test if CUDA is not available.
+"""
+fn require_cuda():
+    if not cuda_available():
+        skip("CUDA not available")
+
+# Forward declaration - cuda_available is from app.io.cuda_ffi
+fn cuda_available() -> bool:
+    use app.io.cuda_ffi
+    app.io.cuda_ffi.cuda_available()
+
+"""
+Skip test if Vulkan is not available.
+"""
+fn require_vulkan():
+    if not vulkan_available():
+        skip("Vulkan not available")
+
+# Forward declaration - vulkan_available is from app.io.vulkan_ffi
+fn vulkan_available() -> bool:
+    use app.io.vulkan_ffi
+    app.io.vulkan_ffi.vulkan_available()
+
+"""
+Skip test if GPU compute is not working.
+This performs a quick smoke test.
+"""
+fn require_gpu_working():
+    require_gpu()
+    if not gpu_test_basic():
+        skip("GPU compute test failed")
+
+"""
+Skip placeholder (would be provided by test framework).
+"""
+fn skip(reason: text):
+    # The actual skip implementation depends on the test framework
+    # This would throw a SkipException or similar
+    panic("SKIP: {reason}")
+
+# ============================================================================
+# Test Fixtures
+# ============================================================================
+
+"""
+GPU test context - provides a GPU device for tests.
+"""
+struct GpuTestContext:
+    device: Gpu
+    buffers: [GpuBuffer]
+
+"""
+Create a GPU test context.
+"""
+fn gpu_test_context() -> GpuTestContext:
+    val dev = gpu_default()
+    GpuTestContext(device: dev, buffers: [])
+
+impl GpuTestContext:
+    """
+    Check if the context is valid.
+    """
+    fn is_valid() -> bool:
+        self.device.is_valid()
+
+    """
+    Allocate a buffer and track it for cleanup.
+    """
+    me alloc(size: i64) -> GpuBuffer:
+        val buffer = gpu_alloc(self.device, size)
+        self.buffers.push(buffer)
+        buffer
+
+    """
+    Allocate a float buffer.
+    """
+    me alloc_floats(count: i64) -> GpuBuffer:
+        self.alloc(count * 4)
+
+    """
+    Clean up all allocated resources.
+    """
+    me cleanup():
+        for buffer in self.buffers:
+            gpu_free(buffer)
+        self.buffers = []
+        self.device.wait_for_idle()
+
+"""
+Run a test with GPU context, ensuring cleanup.
+"""
+fn with_gpu_test<T>(test_fn: fn(GpuTestContext) -> T) -> T:
+    var ctx = gpu_test_context()
+    if not ctx.is_valid():
+        skip("GPU not available")
+
+    val result = test_fn(ctx)
+    ctx.cleanup()
+    result
+
+# ============================================================================
+# Assertion Helpers
+# ============================================================================
+
+"""
+Assert that two GPU buffers contain approximately equal float values.
+"""
+fn assert_gpu_floats_eq(actual: GpuBuffer, expected: [f32], tolerance: f32):
+    val count = expected.len()
+    val size = count * 4
+
+    # Copy GPU buffer to host
+    var host_data: [u8] = []
+    for i in 0..size:
+        host_data.push(0)
+
+    if not gpu_copy_from(host_data, actual):
+        panic("Failed to copy GPU buffer to host")
+
+    # Compare values
+    for i in 0..count:
+        val offset = i * 4
+        val actual_val = bytes_to_f32(host_data, offset)
+        val expected_val = expected[i]
+        val diff = (actual_val - expected_val).abs()
+
+        if diff > tolerance:
+            panic("GPU float mismatch at index {i}: expected {expected_val}, got {actual_val} (diff={diff})")
+
+"""
+Convert 4 bytes to f32 (little-endian).
+"""
+fn bytes_to_f32(bytes: [u8], offset: i64) -> f32:
+    # NOTE: This is a simplified implementation.
+    # A real implementation would use proper byte conversion.
+    # For now, this is a placeholder.
+    0.0
+
+"""
+Assert that a GPU operation succeeded.
+"""
+fn assert_gpu_ok(success: bool, operation: text):
+    if not success:
+        panic("GPU operation failed: {operation}")
+
+"""
+Assert GPU buffer is valid.
+"""
+fn assert_gpu_valid(buffer: GpuBuffer):
+    if not buffer.is_valid:
+        panic("GPU buffer is not valid")
+
+# ============================================================================
+# Benchmark Helpers
+# ============================================================================
+
+"""
+Time a GPU operation (includes sync).
+Returns elapsed time in milliseconds.
+"""
+fn gpu_time_ms(device: Gpu, operation: fn() -> bool) -> f64:
+    use std.time
+
+    device.wait_for_idle()  # Ensure clean start
+
+    val start = time.now_ms()
+    val success = operation()
+    device.wait_for_idle()  # Wait for completion
+    val end = time.now_ms()
+
+    if not success:
+        -1.0  # Indicate failure
+    else:
+        (end - start) as f64
+
+"""
+Benchmark a GPU operation with multiple iterations.
+"""
+struct GpuBenchmarkResult:
+    iterations: i64
+    total_ms: f64
+    avg_ms: f64
+    min_ms: f64
+    max_ms: f64
+
+fn gpu_benchmark(device: Gpu, iterations: i64, operation: fn() -> bool) -> GpuBenchmarkResult:
+    var total: f64 = 0.0
+    var min_time: f64 = 999999.0
+    var max_time: f64 = 0.0
+
+    for i in 0..iterations:
+        val elapsed = gpu_time_ms(device, operation)
+        if elapsed < 0.0:
+            val avg = if i > 0: total / (i as f64) else: 0.0
+            return GpuBenchmarkResult(iterations: i, total_ms: total, avg_ms: avg, min_ms: min_time, max_ms: max_time)
+
+        total = total + elapsed
+        if elapsed < min_time:
+            min_time = elapsed
+        if elapsed > max_time:
+            max_time = elapsed
+
+    val avg_result = total / (iterations as f64)
+    GpuBenchmarkResult(iterations: iterations, total_ms: total, avg_ms: avg_result, min_ms: min_time, max_ms: max_time)
+
+# ============================================================================
+# Data Generation Helpers
+# ============================================================================
+
+"""
+Create a host array of f32 filled with a constant value.
+"""
+fn make_f32_array(count: i64, value: f32) -> [u8]:
+    var bytes: [u8] = []
+    val f32_bytes = f32_to_bytes(value)
+    for i in 0..count:
+        for b in f32_bytes:
+            bytes.push(b)
+    bytes
+
+"""
+Convert f32 to 4 bytes (little-endian).
+"""
+fn f32_to_bytes(value: f32) -> [u8]:
+    # Simplified - real implementation would use proper conversion
+    [0, 0, 0, 0]
+
+"""
+Create a host array with sequential f32 values.
+"""
+fn make_f32_sequence(start: f32, count: i64) -> [u8]:
+    var bytes: [u8] = []
+    for i in 0..count:
+        val value = start + (i as f32)
+        val f32_bytes = f32_to_bytes(value)
+        for b in f32_bytes:
+            bytes.push(b)
+    bytes
+
+"""
+Create random f32 data for testing.
+"""
+fn make_random_f32(count: i64) -> [u8]:
+    use std.random
+    var bytes: [u8] = []
+    for i in 0..count:
+        val value = random.f32() * 100.0
+        val f32_bytes = f32_to_bytes(value)
+        for b in f32_bytes:
+            bytes.push(b)
+    bytes
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export require_gpu, require_cuda, require_vulkan, require_gpu_working
+export GpuTestContext, gpu_test_context, with_gpu_test
+export assert_gpu_floats_eq, assert_gpu_ok, assert_gpu_valid
+export gpu_time_ms, GpuBenchmarkResult, gpu_benchmark
+export make_f32_array, make_f32_sequence, make_random_f32

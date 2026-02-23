@@ -1,0 +1,98 @@
+# Constraint Generation and Solving
+#
+# Generates type constraints from expressions and solves them
+# using the shared unifier.
+
+use compiler.hir.inference.types.*
+use compiler.hir.inference.unify (Unifier)
+
+# ============================================================================
+# Constraint Set
+# ============================================================================
+
+class ConstraintSet:
+    """Collection of type constraints to solve."""
+    constraints: [Constraint]
+    errors: [text]
+
+impl ConstraintSet:
+    static fn empty() -> ConstraintSet:
+        ConstraintSet(constraints: [], errors: [])
+
+    me add_eq(t1: Type, t2: Type):
+        """Add equality constraint: t1 = t2."""
+        self.constraints = self.constraints.push(Constraint.Eq(t1, t2))
+
+    me add_has_field(field_name: text, field_type: Type):
+        """Add structural constraint: type has field."""
+        self.constraints = self.constraints.push(
+            Constraint.HasField(field_name, field_type)
+        )
+
+    me add_callable(params: [Type], ret: Type):
+        """Add callable constraint: type is callable with given signature."""
+        self.constraints = self.constraints.push(
+            Constraint.Callable(params: params, ret: ret)
+        )
+
+    me solve(unifier: Unifier) -> Result<(), [text]>:
+        """Solve all constraints using the unifier.
+
+        Returns Ok(()) if all constraints are satisfied,
+        or Err with list of unsatisfiable constraint descriptions.
+        """
+        var errors: [text] = []
+
+        for constraint in self.constraints:
+            match constraint:
+                case Eq(t1, t2):
+                    val result = unifier.unify(t1, t2)
+                    if not result.is_ok():
+                        errors = errors.push("Cannot unify types")
+
+                case Callable(params, ret):
+                    val fn_type = Type.Function(params: params, ret: ret)
+                    # Caller should unify this with the actual callee type
+                    pass
+
+                case HasField(name, ty):
+                    # Structural typing check - deferred to type checker
+                    pass
+
+                case Subtype(sub, super_):
+                    # Subtyping - for now treat as equality
+                    val result = unifier.unify(sub, super_)
+                    if not result.is_ok():
+                        errors = errors.push("Subtype constraint failed")
+
+        if errors.is_empty():
+            Ok(())
+        else:
+            self.errors = errors
+            Err(errors)
+
+    me solve_ranked(unifier: Unifier) -> Result<(), [text]>:
+        """Solve constraints in priority order.
+
+        Eq constraints first (most informative), then Subtype, then structural.
+        This produces better error messages and avoids premature binding.
+        """
+        var eq_constraints: [Constraint] = []
+        var sub_constraints: [Constraint] = []
+        var structural: [Constraint] = []
+
+        for c in self.constraints:
+            match c:
+                case Eq(_, _): eq_constraints = eq_constraints.push(c)
+                case Subtype(_, _): sub_constraints = sub_constraints.push(c)
+                case _: structural = structural.push(c)
+
+        # Solve in ranked order
+        self.constraints = eq_constraints.merge(sub_constraints).merge(structural)
+        self.solve(unifier)
+
+    fn pending_count() -> i64:
+        """Number of unsolved constraints."""
+        self.constraints.len()
+
+export ConstraintSet

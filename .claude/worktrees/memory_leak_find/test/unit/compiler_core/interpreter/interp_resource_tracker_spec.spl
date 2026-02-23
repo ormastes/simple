@@ -1,0 +1,480 @@
+# Interpreter Resource Tracker Specification
+#
+# Feature IDs: #2011-2020
+# Category: Infrastructure
+# Difficulty: 3/5
+# Status: Implemented
+# Design: doc/design/resource_lifecycle_manager_design.md
+#
+# Overview:
+# InterpreterResourceTracker provides per-module name tracking for the
+# interpreter's function table, struct table, enum registry, and global
+# environment. When a module is unloaded, all its registered names are
+# selectively removed from the tables.
+#
+# NOTE: The actual implementation depends on hm_* hashmap functions from the
+# compiler internals which are not available in interpreter-mode runtime.
+# These tests use self-contained mock implementations with parallel arrays
+# to verify the CONCEPT of resource tracking (register, unregister, lookup,
+# cleanup) without importing compiler modules.
+
+# ============================================================================
+# Mock Function Table — parallel arrays
+# ============================================================================
+
+var ft_names: [text] = []
+var ft_values: [i64] = []
+
+fn ft_reset():
+    ft_names = []
+    ft_values = []
+
+fn ft_register(name: text, value: i64):
+    var i: i64 = 0
+    for n in ft_names:
+        if n == name:
+            ft_values = ft_set_at(ft_values, i, value)
+            return
+        i = i + 1
+    ft_names = ft_names + [name]
+    ft_values = ft_values + [value]
+
+fn ft_set_at(arr: [i64], idx: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    var i: i64 = 0
+    for v in arr:
+        if i == idx:
+            result = result + [value]
+        else:
+            result = result + [v]
+        i = i + 1
+    result
+
+fn ft_lookup(name: text) -> i64:
+    var i: i64 = 0
+    for n in ft_names:
+        if n == name:
+            return ft_values[i]
+        i = i + 1
+    -1
+
+fn ft_remove(name: text) -> bool:
+    var idx: i64 = -1
+    var i: i64 = 0
+    for n in ft_names:
+        if n == name:
+            idx = i
+        i = i + 1
+    if idx < 0:
+        return false
+    var new_names: [text] = []
+    var new_values: [i64] = []
+    i = 0
+    for n in ft_names:
+        if i != idx:
+            new_names = new_names + [n]
+            new_values = new_values + [ft_values[i]]
+        i = i + 1
+    ft_names = new_names
+    ft_values = new_values
+    true
+
+# ============================================================================
+# Mock Struct Table — parallel arrays
+# ============================================================================
+
+var st_names: [text] = []
+var st_values: [i64] = []
+
+fn st_reset():
+    st_names = []
+    st_values = []
+
+fn st_register(name: text, value: i64):
+    st_names = st_names + [name]
+    st_values = st_values + [value]
+
+fn st_lookup(name: text) -> i64:
+    var i: i64 = 0
+    for n in st_names:
+        if n == name:
+            return st_values[i]
+        i = i + 1
+    -1
+
+fn st_remove(name: text) -> bool:
+    var idx: i64 = -1
+    var i: i64 = 0
+    for n in st_names:
+        if n == name:
+            idx = i
+        i = i + 1
+    if idx < 0:
+        return false
+    var new_names: [text] = []
+    var new_values: [i64] = []
+    i = 0
+    for n in st_names:
+        if i != idx:
+            new_names = new_names + [n]
+            new_values = new_values + [st_values[i]]
+        i = i + 1
+    st_names = new_names
+    st_values = new_values
+    true
+
+# ============================================================================
+# Mock Global Env — parallel arrays
+# ============================================================================
+
+var ge_names: [text] = []
+var ge_values: [i64] = []
+
+fn ge_reset():
+    ge_names = []
+    ge_values = []
+
+fn ge_define(name: text, value: i64):
+    ge_names = ge_names + [name]
+    ge_values = ge_values + [value]
+
+fn ge_lookup(name: text) -> i64:
+    var i: i64 = 0
+    for n in ge_names:
+        if n == name:
+            return ge_values[i]
+        i = i + 1
+    -1
+
+fn ge_remove(name: text) -> bool:
+    var idx: i64 = -1
+    var i: i64 = 0
+    for n in ge_names:
+        if n == name:
+            idx = i
+        i = i + 1
+    if idx < 0:
+        return false
+    var new_names: [text] = []
+    var new_values: [i64] = []
+    i = 0
+    for n in ge_names:
+        if i != idx:
+            new_names = new_names + [n]
+            new_values = new_values + [ge_values[i]]
+        i = i + 1
+    ge_names = new_names
+    ge_values = new_values
+    true
+
+# ============================================================================
+# Mock Interpreter Resource Tracker — parallel arrays
+# (mirrors the design from interp_resource_tracker.spl)
+# ============================================================================
+
+var irt_paths: [text] = []
+var irt_func_keys: [text] = []
+var irt_func_vals: [text] = []
+var irt_struct_keys: [text] = []
+var irt_struct_vals: [text] = []
+var irt_global_keys: [text] = []
+var irt_global_vals: [text] = []
+
+fn mock_irt_init():
+    irt_paths = []
+    irt_func_keys = []
+    irt_func_vals = []
+    irt_struct_keys = []
+    irt_struct_vals = []
+    irt_global_keys = []
+    irt_global_vals = []
+    ft_reset()
+    st_reset()
+    ge_reset()
+
+fn mock_irt_begin_module(module_path: text):
+    for p in irt_paths:
+        if p == module_path:
+            return
+    irt_paths = irt_paths + [module_path]
+
+fn mock_irt_is_tracked(module_path: text) -> bool:
+    for p in irt_paths:
+        if p == module_path:
+            return true
+    false
+
+fn mock_irt_tracked_count() -> i64:
+    var count: i64 = 0
+    for p in irt_paths:
+        if p != "":
+            count = count + 1
+    count
+
+fn mock_irt_track_func(module_path: text, name: text):
+    if mock_irt_is_tracked(module_path) == false:
+        return
+    irt_func_keys = irt_func_keys + [module_path]
+    irt_func_vals = irt_func_vals + [name]
+
+fn mock_irt_track_struct(module_path: text, name: text):
+    if mock_irt_is_tracked(module_path) == false:
+        return
+    irt_struct_keys = irt_struct_keys + [module_path]
+    irt_struct_vals = irt_struct_vals + [name]
+
+fn mock_irt_track_global(module_path: text, name: text):
+    if mock_irt_is_tracked(module_path) == false:
+        return
+    irt_global_keys = irt_global_keys + [module_path]
+    irt_global_vals = irt_global_vals + [name]
+
+fn mock_irt_get_func_count(module_path: text) -> i64:
+    var count: i64 = 0
+    var i: i64 = 0
+    for k in irt_func_keys:
+        if k == module_path:
+            count = count + 1
+        i = i + 1
+    count
+
+fn mock_irt_get_struct_count(module_path: text) -> i64:
+    var count: i64 = 0
+    var i: i64 = 0
+    for k in irt_struct_keys:
+        if k == module_path:
+            count = count + 1
+        i = i + 1
+    count
+
+fn mock_irt_unload_module(module_path: text) -> i64:
+    var found: bool = false
+    var path_idx: i64 = -1
+    var pi: i64 = 0
+    for p in irt_paths:
+        if p == module_path:
+            found = true
+            path_idx = pi
+        pi = pi + 1
+    if found == false:
+        return 0
+
+    var removed: i64 = 0
+
+    # Remove tracked functions from function table
+    var new_fk: [text] = []
+    var new_fv: [text] = []
+    var i: i64 = 0
+    for k in irt_func_keys:
+        if k == module_path:
+            ft_remove(irt_func_vals[i])
+            removed = removed + 1
+        else:
+            new_fk = new_fk + [k]
+            new_fv = new_fv + [irt_func_vals[i]]
+        i = i + 1
+    irt_func_keys = new_fk
+    irt_func_vals = new_fv
+
+    # Remove tracked structs from struct table
+    var new_sk: [text] = []
+    var new_sv: [text] = []
+    i = 0
+    for k in irt_struct_keys:
+        if k == module_path:
+            st_remove(irt_struct_vals[i])
+            removed = removed + 1
+        else:
+            new_sk = new_sk + [k]
+            new_sv = new_sv + [irt_struct_vals[i]]
+        i = i + 1
+    irt_struct_keys = new_sk
+    irt_struct_vals = new_sv
+
+    # Remove tracked globals from env
+    var new_gk: [text] = []
+    var new_gv: [text] = []
+    i = 0
+    for k in irt_global_keys:
+        if k == module_path:
+            ge_remove(irt_global_vals[i])
+            removed = removed + 1
+        else:
+            new_gk = new_gk + [k]
+            new_gv = new_gv + [irt_global_vals[i]]
+        i = i + 1
+    irt_global_keys = new_gk
+    irt_global_vals = new_gv
+
+    # Tombstone the path slot
+    var new_paths: [text] = []
+    i = 0
+    for p in irt_paths:
+        if i == path_idx:
+            new_paths = new_paths + [""]
+        else:
+            new_paths = new_paths + [p]
+        i = i + 1
+    irt_paths = new_paths
+
+    removed
+
+# ============================================================================
+# Test Group 1: Function Table Remove
+# ============================================================================
+
+describe "func_table_remove":
+
+    it "removes a registered function":
+        ft_reset()
+        ft_register("test_remove_fn", 100)
+        val before = ft_lookup("test_remove_fn")
+        expect(before).to_equal(100)
+        val removed = ft_remove("test_remove_fn")
+        expect(removed).to_equal(true)
+        val after = ft_lookup("test_remove_fn")
+        expect(after).to_equal(-1)
+
+    it "returns false for unknown function":
+        ft_reset()
+        val removed = ft_remove("nonexistent_fn_xyz")
+        expect(removed).to_equal(false)
+
+    it "remove does not break other entries":
+        ft_reset()
+        ft_register("tr_keep_a", 200)
+        ft_register("tr_remove_b", 201)
+        ft_register("tr_keep_c", 202)
+        ft_remove("tr_remove_b")
+        expect(ft_lookup("tr_keep_a")).to_equal(200)
+        expect(ft_lookup("tr_keep_c")).to_equal(202)
+        expect(ft_lookup("tr_remove_b")).to_equal(-1)
+
+# ============================================================================
+# Test Group 2: Struct Table Remove
+# ============================================================================
+
+describe "struct_table_remove":
+
+    it "removes a registered struct":
+        st_reset()
+        st_register("TestRemoveStruct", 300)
+        val before = st_lookup("TestRemoveStruct")
+        expect(before).to_equal(300)
+        val removed = st_remove("TestRemoveStruct")
+        expect(removed).to_equal(true)
+        val after = st_lookup("TestRemoveStruct")
+        expect(after).to_equal(-1)
+
+    it "returns false for unknown struct":
+        st_reset()
+        val removed = st_remove("UnknownStructXYZ")
+        expect(removed).to_equal(false)
+
+# ============================================================================
+# Test Group 3: Global Variable Remove
+# ============================================================================
+
+describe "env_remove_global":
+
+    it "removes a global variable":
+        ge_reset()
+        ge_define("test_remove_global", 500)
+        val before = ge_lookup("test_remove_global")
+        expect(before).to_equal(500)
+        val removed = ge_remove("test_remove_global")
+        expect(removed).to_equal(true)
+        val after = ge_lookup("test_remove_global")
+        expect(after).to_equal(-1)
+
+    it "returns false for unknown global":
+        ge_reset()
+        val removed = ge_remove("nonexistent_global_xyz")
+        expect(removed).to_equal(false)
+
+# ============================================================================
+# Test Group 4: Interpreter Resource Tracker
+# ============================================================================
+
+describe "InterpreterResourceTracker":
+
+    describe "module tracking":
+        it "begins tracking a module":
+            mock_irt_init()
+            mock_irt_begin_module("test_module_a")
+            expect(mock_irt_is_tracked("test_module_a")).to_equal(true)
+            expect(mock_irt_tracked_count()).to_equal(1)
+
+        it "does not double-track":
+            mock_irt_init()
+            mock_irt_begin_module("test_module_dup")
+            mock_irt_begin_module("test_module_dup")
+            expect(mock_irt_tracked_count()).to_equal(1)
+
+        it "tracks multiple modules":
+            mock_irt_init()
+            mock_irt_begin_module("mod_x")
+            mock_irt_begin_module("mod_y")
+            expect(mock_irt_tracked_count()).to_equal(2)
+
+    describe "name registration":
+        it "tracks function names":
+            mock_irt_init()
+            mock_irt_begin_module("fn_mod")
+            mock_irt_track_func("fn_mod", "func_a")
+            mock_irt_track_func("fn_mod", "func_b")
+            expect(mock_irt_get_func_count("fn_mod")).to_equal(2)
+
+        it "tracks struct names":
+            mock_irt_init()
+            mock_irt_begin_module("st_mod")
+            mock_irt_track_struct("st_mod", "Point")
+            expect(mock_irt_get_struct_count("st_mod")).to_equal(1)
+
+        it "ignores tracking for unregistered module":
+            mock_irt_init()
+            mock_irt_track_func("unknown_mod", "func_a")
+            expect(mock_irt_tracked_count()).to_equal(0)
+
+    describe "module unload":
+        it "removes tracked functions from table":
+            mock_irt_init()
+            mock_irt_begin_module("unload_test_mod")
+            ft_register("irt_test_fn_1", 900)
+            ft_register("irt_test_fn_2", 901)
+            mock_irt_track_func("unload_test_mod", "irt_test_fn_1")
+            mock_irt_track_func("unload_test_mod", "irt_test_fn_2")
+            val removed = mock_irt_unload_module("unload_test_mod")
+            expect(removed).to_be_greater_than(0)
+            expect(ft_lookup("irt_test_fn_1")).to_equal(-1)
+            expect(ft_lookup("irt_test_fn_2")).to_equal(-1)
+
+        it "removes tracked globals from env":
+            mock_irt_init()
+            mock_irt_begin_module("global_unload_mod")
+            ge_define("irt_test_global", 800)
+            mock_irt_track_global("global_unload_mod", "irt_test_global")
+            mock_irt_unload_module("global_unload_mod")
+            expect(ge_lookup("irt_test_global")).to_equal(-1)
+
+        it "tombstones tracker slot after unload":
+            mock_irt_init()
+            mock_irt_begin_module("tombstone_mod")
+            mock_irt_track_func("tombstone_mod", "fn_x")
+            mock_irt_unload_module("tombstone_mod")
+            expect(mock_irt_is_tracked("tombstone_mod")).to_equal(false)
+            expect(mock_irt_tracked_count()).to_equal(0)
+
+        it "returns 0 for untracked module":
+            mock_irt_init()
+            val removed = mock_irt_unload_module("never_tracked")
+            expect(removed).to_equal(0)
+
+    describe "init resets state":
+        it "clears all tracking on init":
+            mock_irt_init()
+            mock_irt_begin_module("pre_init_mod")
+            mock_irt_track_func("pre_init_mod", "fn_pre")
+            mock_irt_init()
+            expect(mock_irt_tracked_count()).to_equal(0)
+            expect(mock_irt_is_tracked("pre_init_mod")).to_equal(false)

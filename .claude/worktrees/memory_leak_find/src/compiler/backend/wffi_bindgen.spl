@@ -1,0 +1,171 @@
+# WFFI Bindgen - Annotation-Driven Wrapper Generation
+#
+# Generates Simple WFFI wrapper code from @wffi-annotated extern fn declarations.
+#
+# Example input:
+#   @wffi("libm.so")
+#   extern fn sqrt(x: f64) -> f64
+#   extern fn sin(x: f64) -> f64
+#
+# Generated output (fn source text):
+#   fn wffi_load_libm() -> i64:
+#       rt_wffi_load("libm.so")
+#   fn sqrt(x: f64) -> f64:
+#       rt_wffi_call_f64(wffi_libm_handle, "sqrt", x)
+#   fn sin(x: f64) -> f64:
+#       rt_wffi_call_f64(wffi_libm_handle, "sin", x)
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct WffiParam:
+    # A parameter in a WFFI function binding.
+    name: text          # Parameter name (e.g., "x")
+    type_name: text     # Type name (e.g., "f64", "i64", "text")
+
+struct WffiFunction:
+    # A single WFFI function binding.
+    name: text                  # Function name (e.g., "sqrt")
+    params: [WffiParam]         # Parameters
+    has_return: bool            # Whether function returns a value
+    return_type: text           # Return type name (e.g., "f64")
+
+struct WffiBinding:
+    # A complete WFFI library binding.
+    lib_name: text              # Library name (e.g., "libm.so")
+    functions: [WffiFunction]   # Functions in this binding
+    handle_var: text            # Name of the handle variable
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn wffi_param_new(name: text, type_name: text) -> WffiParam:
+    WffiParam(name: name, type_name: type_name)
+
+fn wffi_function_new(name: text, params: [WffiParam], has_return: bool, return_type: text) -> WffiFunction:
+    WffiFunction(name: name, params: params, has_return: has_return, return_type: return_type)
+
+fn wffi_binding_new(lib_name: text) -> WffiBinding:
+    # Create a new WffiBinding for the given library.
+    val safe_name = lib_name_to_safe(lib_name)
+    WffiBinding(lib_name: lib_name, functions: [], handle_var: "wffi_" + safe_name + "_handle")
+
+fn wffi_binding_add_fn(binding: WffiBinding, func: WffiFunction) -> WffiBinding:
+    # Return a new binding with the function added.
+    val new_fns = binding.functions + [func]
+    WffiBinding(lib_name: binding.lib_name, functions: new_fns, handle_var: binding.handle_var)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn lib_name_to_safe(lib_name: text) -> text:
+    # Convert "libm.so" or "libm.so.6" to "libm" (safe identifier).
+    var result = lib_name
+    # Strip "lib" prefix
+    if result.len() >= 3:
+        if result[0:3] == "lib":
+            result = result[3:result.len()]
+    # Strip ".so" suffix and everything after
+    var i: i64 = 0
+    while i < result.len():
+        if result[i:i+1] == ".":
+            result = result[0:i]
+            i = result.len()  # stop
+        i = i + 1
+    result
+
+fn wffi_rt_call_fn(return_type: text) -> text:
+    # Map a return type to the appropriate rt_wffi_call_* function name.
+    if return_type == "f64":
+        return "rt_wffi_call_f64"
+    elif return_type == "i64":
+        return "rt_wffi_call_i64"
+    elif return_type == "bool":
+        return "rt_wffi_call_bool"
+    elif return_type == "text":
+        return "rt_wffi_call_text"
+    elif return_type == "i32":
+        return "rt_wffi_call_i32"
+    else:
+        return "rt_wffi_call_i64"  # fallback for unknown types
+
+fn wffi_params_to_text(params: [WffiParam]) -> text:
+    # Format parameter list as "name: type, ..." text.
+    var result = ""
+    var i: i64 = 0
+    while i < params.len():
+        val p = params[i]
+        if i > 0:
+            result = result + ", "
+        result = result + p.name + ": " + p.type_name
+        i = i + 1
+    result
+
+fn wffi_param_names_to_text(params: [WffiParam]) -> text:
+    # Format parameter names as "name1, name2, ..." text.
+    var result = ""
+    var i: i64 = 0
+    while i < params.len():
+        val p = params[i]
+        if i > 0:
+            result = result + ", "
+        result = result + p.name
+        i = i + 1
+    result
+
+fn wffi_generate_loader(binding: WffiBinding) -> text:
+    # Generate the library loader function.
+    val safe = lib_name_to_safe(binding.lib_name)
+    val load_fn = "wffi_load_" + safe
+    var code = "fn " + load_fn + "() -> i64:\n"
+    code = code + "    rt_wffi_load(\"" + binding.lib_name + "\")\n"
+    code = code + "\n"
+    code = code + "var " + binding.handle_var + ": i64 = 0\n"
+    code = code + "\n"
+    code = code + "fn " + safe + "_init():\n"
+    code = code + "    " + binding.handle_var + " = " + load_fn + "()\n"
+    code
+
+fn wffi_generate_function(binding: WffiBinding, func: WffiFunction) -> text:
+    # Generate wrapper code for a single function.
+    val param_list = wffi_params_to_text(func.params)
+    val param_names = wffi_param_names_to_text(func.params)
+    var code = ""
+    if func.has_return:
+        val call_fn = wffi_rt_call_fn(func.return_type)
+        code = "fn " + func.name + "(" + param_list + ") -> " + func.return_type + ":\n"
+        code = code + "    " + call_fn + "(" + binding.handle_var + ", \"" + func.name + "\""
+        if param_names.len() > 0:
+            code = code + ", " + param_names
+        code = code + ")\n"
+    else:
+        code = "fn " + func.name + "(" + param_list + "):\n"
+        code = code + "    rt_wffi_call_void(" + binding.handle_var + ", \"" + func.name + "\""
+        if param_names.len() > 0:
+            code = code + ", " + param_names
+        code = code + ")\n"
+    code
+
+fn generate_wffi_wrappers(binding: WffiBinding) -> text:
+    # Generate the complete wrapper source code for a WffiBinding.
+    var source = "# Auto-generated WFFI wrappers for " + binding.lib_name + "\n"
+    source = source + "# Generated by @wffi bindgen\n\n"
+    source = source + wffi_generate_loader(binding) + "\n"
+    var i: i64 = 0
+    while i < binding.functions.len():
+        val func = binding.functions[i]
+        source = source + wffi_generate_function(binding, func) + "\n"
+        i = i + 1
+    source
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export WffiParam, WffiFunction, WffiBinding
+export wffi_param_new, wffi_function_new, wffi_binding_new, wffi_binding_add_fn
+export lib_name_to_safe, wffi_rt_call_fn, wffi_params_to_text, wffi_param_names_to_text
+export wffi_generate_loader, wffi_generate_function, generate_wffi_wrappers

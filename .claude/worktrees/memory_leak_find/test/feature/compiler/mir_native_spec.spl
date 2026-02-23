@@ -1,0 +1,214 @@
+"""
+# MIR Native Specification
+
+**Feature IDs:** #TBD
+**Category:** Compiler
+**Status:** In Progress
+
+## Overview
+
+Tests the MIR → Native Backend pipeline by constructing a MirModule manually
+and running it through ISel → RegAlloc → Encode → ELF → Link → Run.
+"""
+
+use std.spec
+use compiler.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module}
+use compiler.backend.native.regalloc.{regalloc_module}
+use compiler.backend.native.encode_x86_64.{encode_module}
+use compiler.backend.native.mach_inst.{MachModule, EncodedFunction}
+use compiler.backend.native.elf_writer.{ElfWriter, ElfReloc, ElfRelocType, elf_writer_x86_64, elf_add_section, elf_add_symbol, new_text_section, new_data_section, new_rodata_section, section_add_reloc, new_func_symbol, new_extern_symbol, write_elf64}
+
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+fn byte_to_hex(b: i64) -> text:
+    val digits = "0123456789abcdef"
+    val hi = b / 16
+    val lo = b % 16
+    "{digits[hi]}{digits[lo]}"
+
+fn emit_elf(encoded: [EncodedFunction], mach_mod: MachModule) -> [i64]:
+    var writer = elf_writer_x86_64()
+    var all_code: [i64] = []
+    var func_offsets: Dict<text, i64> = {}
+    var all_relocs: [ElfReloc] = []
+    var sym_names: [text] = []
+    var sym_name_to_idx: Dict<text, i64> = {}
+
+    var rodata_offset = 0
+    var data_label_offsets: Dict<text, i64> = {}
+    for entry in mach_mod.data_sections:
+        if entry.is_readonly:
+            if not sym_name_to_idx.contains(entry.name):
+                val idx = sym_names.len()
+                sym_names = sym_names + [entry.name]
+                sym_name_to_idx[entry.name] = idx
+                data_label_offsets[entry.name] = rodata_offset
+            rodata_offset = rodata_offset + entry.data.len()
+
+    for ext_sym in mach_mod.extern_symbols:
+        if not sym_name_to_idx.contains(ext_sym):
+            val idx = sym_names.len()
+            sym_names = sym_names + [ext_sym]
+            sym_name_to_idx[ext_sym] = idx
+
+    for func in encoded:
+        if not sym_name_to_idx.contains(func.name):
+            val idx = sym_names.len()
+            sym_names = sym_names + [func.name]
+            sym_name_to_idx[func.name] = idx
+
+    var num_content_sections = 1
+    var has_rodata = false
+    var has_data = false
+    for entry in mach_mod.data_sections:
+        if entry.is_readonly:
+            has_rodata = true
+        else:
+            has_data = true
+    if has_rodata:
+        num_content_sections = num_content_sections + 1
+    if has_data:
+        num_content_sections = num_content_sections + 1
+
+    val sym_base = 1 + num_content_sections
+
+    for func in encoded:
+        var padding = all_code.len() % 16
+        if padding != 0:
+            padding = 16 - padding
+        var pi = 0
+        while pi < padding:
+            all_code = all_code + [0xcc]
+            pi = pi + 1
+        func_offsets[func.name] = all_code.len()
+        val code_start = all_code.len()
+        all_code = all_code + func.code
+        for reloc in func.relocations:
+            var reloc_type = ElfRelocType.X86_64_PLT32
+            if reloc.reloc_type == 2:
+                reloc_type = ElfRelocType.X86_64_PC32
+            elif reloc.reloc_type == 1:
+                reloc_type = ElfRelocType.X86_64_64
+            var sym_idx = 0
+            if sym_name_to_idx.contains(reloc.symbol_name):
+                sym_idx = sym_name_to_idx[reloc.symbol_name]
+            all_relocs = all_relocs + [ElfReloc(
+                offset: code_start + reloc.offset,
+                reloc_type: reloc_type,
+                symbol_index: sym_base + sym_idx,
+                addend: reloc.addend
+            )]
+
+    var text_section = new_text_section(all_code)
+    for reloc in all_relocs:
+        text_section = section_add_reloc(text_section, reloc)
+    writer = elf_add_section(writer, text_section)
+
+    var rodata_bytes: [i64] = []
+    for entry in mach_mod.data_sections:
+        if entry.is_readonly:
+            rodata_bytes = rodata_bytes + entry.data
+    if rodata_bytes.len() > 0:
+        writer = elf_add_section(writer, new_rodata_section(rodata_bytes))
+
+    var data_bytes: [i64] = []
+    for entry in mach_mod.data_sections:
+        if not entry.is_readonly:
+            data_bytes = data_bytes + entry.data
+    if data_bytes.len() > 0:
+        writer = elf_add_section(writer, new_data_section(data_bytes))
+
+    for entry in mach_mod.data_sections:
+        if entry.is_readonly:
+            if data_label_offsets.contains(entry.name):
+                val sym = ElfSymbol(
+                    name: entry.name,
+                    sym_bind: ElfSymbolBind.Local,
+                    sym_type: ElfSymbolType.Object,
+                    section_index: 2,
+                    value: data_label_offsets[entry.name],
+                    size: entry.data.len()
+                )
+                writer = elf_add_symbol(writer, sym)
+
+    for ext_sym in mach_mod.extern_symbols:
+        writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
+
+    for func in encoded:
+        var foffset = 0
+        if func_offsets.contains(func.name):
+            foffset = func_offsets[func.name]
+        val sym = new_func_symbol(func.name, 1, foffset, func.code.len())
+        writer = elf_add_symbol(writer, sym)
+
+    write_elf64(writer)
+
+fn build_hello_mir_module() -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val main_sig = MirSignature(params: [], return_type: i64_type, is_variadic: false)
+    val local_return = MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return)
+    val local_str = MirLocal(id: LocalId(id: 1), name: Some("str_ptr"), type_: i64_type, kind: LocalKind.Temp)
+    val local_ret = MirLocal(id: LocalId(id: 2), name: Some("ret_val"), type_: i64_type, kind: LocalKind.Temp)
+    val inst_str = MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Str("hello from MIR!"), i64_type), span: nil)
+    val inst_call = MirInst(kind: MirInstKind.Call(nil, MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("puts"), i64_type)), [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))]), span: nil)
+    val inst_zero = MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(0), i64_type), span: nil)
+    val entry_block = MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: [inst_str, inst_call, inst_zero], terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))))))
+    val dummy_span = Span(start: 0, end: 0, line: 0, col: 0)
+    val main_func = MirFunction(symbol: SymbolId.new(0), name: "main", signature: main_sig, locals: [local_return, local_str, local_ret], blocks: [entry_block], entry_block: BlockId.new(0), span: dummy_span, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = main_func
+    MirModule(name: "hello_mir", functions: functions, statics: {}, constants: {}, types: {})
+
+
+describe "MIR Native":
+    it "runs ISel on manually constructed MIR module":
+        skip_on_interpreter "requires native backend":
+            val module = build_hello_mir_module()
+            val mach_module = isel_module(module)
+            expect(mach_module.functions.len() > 0).to_equal(true)
+
+    it "produces non-empty ELF from MIR module":
+        skip_on_interpreter "requires native backend":
+            val module = build_hello_mir_module()
+            val mach_module = isel_module(module)
+            val allocated = regalloc_module(mach_module)
+            val encoded_funcs = encode_module(allocated)
+            val elf_bytes = emit_elf(encoded_funcs, allocated)
+            expect(elf_bytes.len() > 0).to_equal(true)
+
+    it "runs hello MIR binary and produces correct output":
+        skip_on_interpreter "requires native backend and linker":
+            val module = build_hello_mir_module()
+            val mach_module = isel_module(module)
+            val allocated = regalloc_module(mach_module)
+            val encoded_funcs = encode_module(allocated)
+            val elf_bytes = emit_elf(encoded_funcs, allocated)
+
+            var offset = 0
+            while offset < elf_bytes.len():
+                var chunk = ""
+                var end_idx = offset + 800
+                if end_idx > elf_bytes.len():
+                    end_idx = elf_bytes.len()
+                var j = offset
+                while j < end_idx:
+                    chunk = chunk + byte_to_hex(elf_bytes[j])
+                    j = j + 1
+                if offset == 0:
+                    shell("echo -n '{chunk}' > /tmp/mir_native_spec.hex")
+                else:
+                    shell("echo -n '{chunk}' >> /tmp/mir_native_spec.hex")
+                offset = end_idx
+
+            shell("xxd -r -p /tmp/mir_native_spec.hex /tmp/mir_native_spec.o")
+            shell("rm -f /tmp/mir_native_spec.hex")
+            val link_r = rt_process_run("cc", ["-o", "/tmp/mir_native_spec", "/tmp/mir_native_spec.o", "-no-pie"])
+            expect(link_r[2]).to_equal(0)
+
+            val run_r = rt_process_run("/tmp/mir_native_spec", [])
+            expect(run_r[0].trim()).to_equal("hello from MIR!")

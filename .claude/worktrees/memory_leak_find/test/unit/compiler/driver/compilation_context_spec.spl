@@ -1,0 +1,452 @@
+"""
+# Unified CompilationContext Specification
+
+**Feature IDs:** #CC-001 to #CC-030
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** In Progress
+
+## Overview
+
+The CompilationContext trait provides a unified compilation interface for
+compiler, JIT loader, and linker. All three paths use it to ensure
+AOP/DI/contracts are applied consistently.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| CompilationContext | Trait: load_template, compile_template, record_instantiation |
+| TemplateInstantiator | Shared cache + cycle detection, delegates to context |
+| InstantiationMode | When instantiation occurs: CompileTime, LinkTime, JitTime |
+| ContractMode | How much checking: Off, Boundary, All |
+| GenericTemplate | Template AST data with type parameters |
+| ConcreteType | Concrete type used for instantiation |
+
+## Behavior
+
+- All three contexts implement the same trait
+- TemplateInstantiator caches compiled units by mangled name
+- Cycle detection prevents infinite recursion
+- Each context uses its own template source (AST cache, SMF, objects)
+- Pipeline: monomorphize -> HIR -> MIR -> AOP -> codegen
+"""
+
+# Self-contained types (avoids transitive parse errors from compiler/ package)
+
+enum InstantiationMode:
+    CompileTime
+    LinkTime
+    JitTime
+
+impl InstantiationMode:
+    fn to_string():
+        match self:
+            case CompileTime: "compile_time"
+            case LinkTime: "link_time"
+            case JitTime: "jit_time"
+
+enum ContractMode:
+    Off
+    Boundary
+    All
+
+impl ContractMode:
+    fn to_string():
+        match self:
+            case Off: "off"
+            case Boundary: "boundary"
+            case All: "all"
+
+struct GenericTemplate:
+    name: text
+    type_params: [text]
+    ast_data: Any
+
+struct ConcreteType:
+    name: text
+
+impl ConcreteType:
+    fn to_string():
+        self.name
+
+struct TypeRegistry:
+    types: Dict<text, Any>
+
+impl TypeRegistry:
+    static fn empty():
+        TypeRegistry { types: {} }
+
+struct CompiledUnit:
+    name: text
+    code: [Any]
+    symbols: Dict<text, Any>
+    entry_point: Any
+    relocations: [Any]
+
+trait CompilationContext:
+    me load_template(name)
+    me has_template(name)
+    me type_registry()
+    me contract_mode()
+    me di_container()
+    me aop_weaver()
+    me coverage_enabled()
+    me compile_template(tmpl, type_args)
+    me instantiation_mode()
+    me record_instantiation(entry)
+
+# Inline mangle and TemplateInstantiator (same logic as instantiation.spl)
+
+fn mangle(template_name, type_args):
+    if type_args.is_empty():
+        return template_name
+    var args_str = ""
+    var first = true
+    for t in type_args:
+        if not first:
+            args_str = args_str + ","
+        args_str = args_str + t.to_string()
+        first = false
+    "{template_name}${args_str}"
+
+class TemplateInstantiator:
+    load_fn: Any
+    compile_fn: Any
+    in_progress: Set<text>
+    cache: Dict<text, Any>
+
+    me instantiate(template_name, type_args):
+        val key = mangle(template_name, type_args)
+        if self.cache.contains_key(key):
+            return Ok(self.cache[key])
+        if self.in_progress.contains(key):
+            return Err("Circular dependency: {key}")
+        self.in_progress = self.in_progress.insert(key)
+        val loader = self.load_fn
+        val load_result = loader(template_name)
+        if load_result.is_err():
+            self.in_progress = self.in_progress.remove(key)
+            return load_result
+        val tmpl = load_result.unwrap()
+        val compiler = self.compile_fn
+        val compile_result = compiler(tmpl, type_args)
+        if compile_result.is_err():
+            self.in_progress = self.in_progress.remove(key)
+            return compile_result
+        val compiled = compile_result.unwrap()
+        self.cache[key] = compiled
+        self.in_progress = self.in_progress.remove(key)
+        Ok(compiled)
+
+    fn is_cached(template_name, type_args):
+        val key = mangle(template_name, type_args)
+        self.cache.contains_key(key)
+
+    fn cache_size():
+        self.cache.len()
+
+# ============================================================================
+# Test Group 1: InstantiationMode Enum
+# ============================================================================
+
+describe "InstantiationMode":
+    """
+    ## InstantiationMode Enum
+
+    Tracks when instantiation occurs in the compilation pipeline.
+    """
+
+    it "converts CompileTime to string":
+        expect InstantiationMode.CompileTime.to_string() == "compile_time"
+
+    it "converts LinkTime to string":
+        expect InstantiationMode.LinkTime.to_string() == "link_time"
+
+    it "converts JitTime to string":
+        expect InstantiationMode.JitTime.to_string() == "jit_time"
+
+
+# ============================================================================
+# Test Group 2: ContractMode Enum
+# ============================================================================
+
+describe "ContractMode":
+    """
+    ## ContractMode Enum
+
+    Controls how much contract checking to apply during compilation.
+    """
+
+    it "converts Off to string":
+        expect ContractMode.Off.to_string() == "off"
+
+    it "converts Boundary to string":
+        expect ContractMode.Boundary.to_string() == "boundary"
+
+    it "converts All to string":
+        expect ContractMode.All.to_string() == "all"
+
+
+# ============================================================================
+# Test Group 3: GenericTemplate
+# ============================================================================
+
+describe "GenericTemplate":
+    """
+    ## GenericTemplate Struct
+
+    Represents a generic template loaded from AST cache or SMF.
+    """
+
+    it "creates template with name and type params":
+        val tmpl = GenericTemplate { name: "List", type_params: ["T"], ast_data: nil }
+        expect tmpl.name == "List"
+        expect tmpl.type_params.len() == 1
+        expect tmpl.type_params[0] == "T"
+
+    it "creates template with multiple type params":
+        val tmpl = GenericTemplate { name: "Map", type_params: ["K", "V"], ast_data: nil }
+        expect tmpl.name == "Map"
+        expect tmpl.type_params.len() == 2
+
+    it "creates template with no type params":
+        val tmpl = GenericTemplate { name: "Point", type_params: [], ast_data: nil }
+        expect tmpl.type_params.is_empty()
+
+
+# ============================================================================
+# Test Group 4: ConcreteType
+# ============================================================================
+
+describe "ConcreteType":
+    """
+    ## ConcreteType Struct
+
+    Represents a concrete type used for template instantiation.
+    """
+
+    it "converts to string":
+        val ct = ConcreteType { name: "Int" }
+        expect ct.to_string() == "Int"
+
+    it "supports complex type names":
+        val ct = ConcreteType { name: "List<String>" }
+        expect ct.to_string() == "List<String>"
+
+
+# ============================================================================
+# Test Group 5: TypeRegistry
+# ============================================================================
+
+describe "TypeRegistry":
+    """
+    ## TypeRegistry Struct
+
+    Registry of known types used during compilation.
+    """
+
+    it "creates empty registry":
+        val reg = TypeRegistry.empty()
+        expect reg.types.is_empty()
+
+
+# ============================================================================
+# Test Group 6: Name Mangling
+# ============================================================================
+
+describe "mangle":
+    """
+    ## Name Mangling
+
+    Combines template name with concrete type args into a unique symbol name.
+    """
+
+    it "returns template name with no type args":
+        val result = mangle("List", [])
+        expect result == "List"
+
+    it "mangles with single type arg":
+        val args = [ConcreteType { name: "Int" }]
+        val result = mangle("List", args)
+        expect result == "List$Int"
+
+    it "mangles with multiple type args":
+        val args = [ConcreteType { name: "String" }, ConcreteType { name: "Int" }]
+        val result = mangle("Map", args)
+        expect result == "Map$String,Int"
+
+    it "produces unique names for different type args":
+        val args1 = [ConcreteType { name: "Int" }]
+        val args2 = [ConcreteType { name: "String" }]
+        val name1 = mangle("List", args1)
+        val name2 = mangle("List", args2)
+        expect name1 != name2
+
+
+# ============================================================================
+# Test Group 7: TemplateInstantiator Cache
+# ============================================================================
+
+describe "TemplateInstantiator":
+    """
+    ## TemplateInstantiator
+
+    Shared instantiation logic with caching and cycle detection.
+    Delegates compilation to the CompilationContext.
+    """
+
+    context "cache behavior":
+        """
+        ### Scenario: Caching Compiled Units
+
+        Instantiator should cache results to avoid recompilation.
+        """
+
+        it "starts with empty cache":
+            val inst = make_instantiator({})
+            expect inst.cache_size() == 0
+
+        it "reports not cached for unknown template":
+            val inst = make_instantiator({})
+            expect not inst.is_cached("Unknown", [])
+
+        it "caches after successful instantiation":
+            val tmpl = GenericTemplate { name: "Simple", type_params: [], ast_data: nil }
+            var inst = make_instantiator({"Simple": tmpl})
+
+            val result = inst.instantiate("Simple", [])
+            expect result.is_ok()
+            expect inst.cache_size() == 1
+            expect inst.is_cached("Simple", [])
+
+        it "returns cached result on second call":
+            val tmpl = GenericTemplate { name: "Pair", type_params: ["A", "B"], ast_data: nil }
+            var inst = make_instantiator({"Pair": tmpl})
+
+            val args = [ConcreteType { name: "Int" }, ConcreteType { name: "String" }]
+            val result1 = inst.instantiate("Pair", args)
+            val result2 = inst.instantiate("Pair", args)
+            expect result1.is_ok()
+            expect result2.is_ok()
+            expect inst.cache_size() == 1
+
+    context "error handling":
+        """
+        ### Scenario: Error Conditions
+
+        Instantiator should report errors for missing templates and cycles.
+        """
+
+        it "returns error for missing template":
+            var inst = make_instantiator({})
+
+            val result = inst.instantiate("NonExistent", [])
+            expect result.is_err()
+
+        it "detects circular dependency":
+            val load_fn = \name: Err("not found")
+            val compile_fn = \tmpl, args: Err("not found")
+            var in_progress = {}
+            in_progress = in_progress.insert("Recursive")
+            var inst = TemplateInstantiator { load_fn: load_fn, compile_fn: compile_fn, in_progress: in_progress, cache: {} }
+
+            val result = inst.instantiate("Recursive", [])
+            expect result.is_err()
+            val err_msg = result.unwrap_err()
+            expect err_msg.contains("Circular dependency")
+
+    context "different type arguments":
+        """
+        ### Scenario: Multiple Instantiations of Same Template
+
+        Same template with different type args should produce separate cache entries.
+        """
+
+        it "caches separately for different type args":
+            val tmpl = GenericTemplate { name: "Box", type_params: ["T"], ast_data: nil }
+            var inst = make_instantiator({"Box": tmpl})
+
+            val result1 = inst.instantiate("Box", [ConcreteType { name: "Int" }])
+            val result2 = inst.instantiate("Box", [ConcreteType { name: "String" }])
+            expect result1.is_ok()
+            expect result2.is_ok()
+            expect inst.cache_size() == 2
+            expect inst.is_cached("Box", [ConcreteType { name: "Int" }])
+            expect inst.is_cached("Box", [ConcreteType { name: "String" }])
+
+
+# ============================================================================
+# Helper: Test CompilationContext Implementation
+# ============================================================================
+
+class TestCompilationContext:
+    """Minimal CompilationContext for testing."""
+    templates: Dict<text, Any>
+    recorded: [Any]
+
+    me load_template(name):
+        if self.templates.contains_key(name):
+            Ok(self.templates[name])
+        else:
+            Err("Template not found: {name}")
+
+    me has_template(name):
+        self.templates.contains_key(name)
+
+    me type_registry():
+        TypeRegistry.empty()
+
+    me contract_mode():
+        ContractMode.All
+
+    me di_container():
+        nil
+
+    me aop_weaver():
+        nil
+
+    me coverage_enabled():
+        false
+
+    me compile_template(tmpl, type_args):
+        var args_str = ""
+        var first = true
+        for t in type_args:
+            if not first:
+                args_str = args_str + ","
+            args_str = args_str + t.to_string()
+            first = false
+        val mangled = if args_str.is_empty(): tmpl.name else: "{tmpl.name}${args_str}"
+        Ok(CompiledUnit { name: mangled, code: [], symbols: {}, entry_point: nil, relocations: [] })
+
+    me instantiation_mode():
+        InstantiationMode.CompileTime
+
+    me record_instantiation(entry):
+        self.recorded = self.recorded.push(entry)
+
+fn make_test_context(templates):
+    TestCompilationContext { templates: templates, recorded: [] }
+
+fn test_load_template(templates, name):
+    if templates.contains_key(name):
+        Ok(templates[name])
+    else:
+        Err("Template not found: {name}")
+
+fn test_compile_template(tmpl, type_args):
+    var args_str = ""
+    var first = true
+    for t in type_args:
+        if not first:
+            args_str = args_str + ","
+        args_str = args_str + t.to_string()
+        first = false
+    val mangled = if args_str.is_empty(): tmpl.name else: "{tmpl.name}${args_str}"
+    Ok(CompiledUnit { name: mangled, code: [], symbols: {}, entry_point: nil, relocations: [] })
+
+fn make_instantiator(templates):
+    val load_fn = \name: test_load_template(templates, name)
+    val compile_fn = \tmpl, type_args: test_compile_template(tmpl, type_args)
+    TemplateInstantiator { load_fn: load_fn, compile_fn: compile_fn, in_progress: {}, cache: {} }

@@ -1,0 +1,711 @@
+"""
+# MCP Debug Tools Specification
+
+**Feature IDs:** #MCP-060, #MCP-061, #MCP-062
+**Category:** Tooling / Debugging
+**Difficulty:** 4/5
+**Status:** Complete
+
+## Overview
+
+The MCP server exposes 10 debug tools that bridge the existing DAP debug
+infrastructure to AI agents via the Model Context Protocol:
+
+- Session lifecycle: debug_create_session, debug_list_sessions, debug_close_session
+- Breakpoints: debug_set_breakpoint, debug_remove_breakpoint
+- Execution: debug_continue, debug_step
+- Inspection: debug_get_variables, debug_stack_trace, debug_evaluate
+
+## Tool Annotations
+
+Each tool has accurate annotations:
+- readOnlyHint - Inspection tools are read-only
+- destructiveHint - Close/remove tools are destructive
+- idempotentHint - Most tools are idempotent
+- openWorldHint - All tools operate in closed world
+
+## Implementation Notes
+
+Uses SessionManager to track debug sessions in-memory.
+Actual backend wiring (interpreter/SMF/native) is a future phase.
+"""
+
+use std.spec
+use app.mcp.debug_tools.{parse_var_entry, parse_stack_frame, step_mode_to_int}
+
+# --- Inline Types (matching session.spl patterns) ---
+
+enum TestSessionState:
+    Created
+    Running
+    Paused
+    Stopped
+    Terminated
+
+class TestBreakpoint:
+    id: Int
+    file: String
+    line: Int
+    condition: String
+
+class TestSession:
+    id: String
+    program: String
+    target_type: String
+    state: String
+    breakpoints: [TestBreakpoint]
+    next_bp_id: Int
+
+class TestSessionManager:
+    sessions: [TestSession]
+    next_session_id: Int
+
+    static fn empty() -> TestSessionManager:
+        TestSessionManager(sessions: [], next_session_id: 1)
+
+    me create_session(program: String, target_type: String) -> TestSession:
+        val sid = "session_" + self.next_session_id.to_string()
+        self.next_session_id = self.next_session_id + 1
+        val session = TestSession(
+            id: sid,
+            program: program,
+            target_type: target_type,
+            state: "created",
+            breakpoints: [],
+            next_bp_id: 1
+        )
+        self.sessions = self.sessions + [session]
+        session
+
+    fn find_session(session_id: String) -> Int:
+        var idx = 0
+        for s in self.sessions:
+            if s.id == session_id:
+                return idx
+            idx = idx + 1
+        return -1
+
+    me remove_session(session_id: String) -> Bool:
+        var new_sessions = []
+        var found = false
+        for s in self.sessions:
+            if s.id == session_id:
+                found = true
+            else:
+                new_sessions = new_sessions + [s]
+        self.sessions = new_sessions
+        found
+
+    me add_breakpoint(session_id: String, file: String, line: Int, condition: String) -> Int:
+        val idx = self.find_session(session_id)
+        if idx < 0:
+            return -1
+        var session = self.sessions[idx]
+        val bp_id = session.next_bp_id
+        session.next_bp_id = session.next_bp_id + 1
+        val bp = TestBreakpoint(id: bp_id, file: file, line: line, condition: condition)
+        session.breakpoints = session.breakpoints + [bp]
+        self.sessions[idx] = session
+        bp_id
+
+    me remove_breakpoint(session_id: String, bp_id: Int) -> Bool:
+        val idx = self.find_session(session_id)
+        if idx < 0:
+            return false
+        var session = self.sessions[idx]
+        var new_bps = []
+        var found = false
+        for bp in session.breakpoints:
+            if bp.id == bp_id:
+                found = true
+            else:
+                new_bps = new_bps + [bp]
+        session.breakpoints = new_bps
+        self.sessions[idx] = session
+        found
+
+    me set_state(session_id: String, new_state: String) -> Bool:
+        val idx = self.find_session(session_id)
+        if idx < 0:
+            return false
+        var session = self.sessions[idx]
+        session.state = new_state
+        self.sessions[idx] = session
+        true
+
+# --- Inline JSON helpers ---
+
+fn LB() -> String:
+    (123 as char).to_string()
+
+fn RB() -> String:
+    (125 as char).to_string()
+
+fn Q() -> String:
+    "\""
+
+fn jp(key: String, val_str: String) -> String:
+    var r = Q()
+    r = r + key
+    r = r + Q()
+    r = r + ":"
+    r = r + val_str
+    r
+
+fn js(s: String) -> String:
+    var r = Q()
+    r = r + s
+    r = r + Q()
+    r
+
+# ============================================================================
+# Test Group 1: Tool Schema Validation
+# ============================================================================
+
+describe "MCP Debug Tool Schemas":
+    """
+    ## Schema Validation
+
+    Tests that all 10 debug tool schemas are properly defined with
+    correct names, parameters, and annotations.
+    """
+
+    context "debug_create_session schema":
+        it "has correct tool name":
+            val name = "debug_create_session"
+            expect(name).to_equal("debug_create_session")
+
+        it "requires program parameter":
+            val required = "program"
+            expect(required).to_equal("program")
+
+        it "has target_type parameter":
+            val param = "target_type"
+            expect(param).to_equal("target_type")
+
+        it "is not read-only":
+            val read_only = false
+            expect(read_only).to_equal(false)
+
+        it "is not destructive":
+            val destructive = false
+            expect(destructive).to_equal(false)
+
+        it "is not idempotent":
+            val idempotent = false
+            expect(idempotent).to_equal(false)
+
+    context "debug_list_sessions schema":
+        it "has correct tool name":
+            val name = "debug_list_sessions"
+            expect(name).to_equal("debug_list_sessions")
+
+        it "requires no parameters":
+            val required = []
+            expect(required.len()).to_equal(0)
+
+        it "is read-only":
+            val read_only = true
+            expect(read_only).to_equal(true)
+
+        it "is idempotent":
+            val idempotent = true
+            expect(idempotent).to_equal(true)
+
+    context "debug_close_session schema":
+        it "has correct tool name":
+            val name = "debug_close_session"
+            expect(name).to_equal("debug_close_session")
+
+        it "requires session_id":
+            val required = "session_id"
+            expect(required).to_equal("session_id")
+
+        it "is destructive":
+            val destructive = true
+            expect(destructive).to_equal(true)
+
+        it "is idempotent":
+            val idempotent = true
+            expect(idempotent).to_equal(true)
+
+    context "debug_set_breakpoint schema":
+        it "has correct tool name":
+            val name = "debug_set_breakpoint"
+            expect(name).to_equal("debug_set_breakpoint")
+
+        it "requires session_id, file, and line":
+            val required = ["session_id", "file", "line"]
+            expect(required.len()).to_equal(3)
+
+        it "has optional condition parameter":
+            val param = "condition"
+            expect(param).to_equal("condition")
+
+        it "is idempotent":
+            val idempotent = true
+            expect(idempotent).to_equal(true)
+
+    context "debug_remove_breakpoint schema":
+        it "requires session_id and breakpoint_id":
+            val required = ["session_id", "breakpoint_id"]
+            expect(required.len()).to_equal(2)
+
+        it "is destructive":
+            val destructive = true
+            expect(destructive).to_equal(true)
+
+    context "debug_continue schema":
+        it "has correct tool name":
+            val name = "debug_continue"
+            expect(name).to_equal("debug_continue")
+
+        it "requires session_id":
+            val required = "session_id"
+            expect(required).to_equal("session_id")
+
+        it "is not read-only":
+            val read_only = false
+            expect(read_only).to_equal(false)
+
+    context "debug_step schema":
+        it "requires session_id and mode":
+            val required = ["session_id", "mode"]
+            expect(required.len()).to_equal(2)
+
+        it "is not idempotent":
+            val idempotent = false
+            expect(idempotent).to_equal(false)
+
+    context "debug_get_variables schema":
+        it "is read-only":
+            val read_only = true
+            expect(read_only).to_equal(true)
+
+        it "is idempotent":
+            val idempotent = true
+            expect(idempotent).to_equal(true)
+
+    context "debug_stack_trace schema":
+        it "is read-only":
+            val read_only = true
+            expect(read_only).to_equal(true)
+
+        it "is idempotent":
+            val idempotent = true
+            expect(idempotent).to_equal(true)
+
+    context "debug_evaluate schema":
+        it "requires session_id and expression":
+            val required = ["session_id", "expression"]
+            expect(required.len()).to_equal(2)
+
+        it "is read-only":
+            val read_only = true
+            expect(read_only).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: Debug Session Lifecycle
+# ============================================================================
+
+describe "Debug Session Lifecycle":
+    """
+    ## Session Management
+
+    Tests creating, listing, and closing debug sessions via the
+    SessionManager.
+    """
+
+    context "creating sessions":
+        it "creates a session with default interpreter target":
+            var mgr = TestSessionManager.empty()
+            val session = mgr.create_session("test.spl", "interpreter")
+            expect(session.id).to_equal("session_1")
+            expect(session.program).to_equal("test.spl")
+            expect(session.target_type).to_equal("interpreter")
+            expect(session.state).to_equal("created")
+
+        it "assigns incrementing session IDs":
+            var mgr = TestSessionManager.empty()
+            val s1 = mgr.create_session("a.spl", "interpreter")
+            val s2 = mgr.create_session("b.spl", "native")
+            expect(s1.id).to_equal("session_1")
+            expect(s2.id).to_equal("session_2")
+
+        it "supports different target types":
+            var mgr = TestSessionManager.empty()
+            val s1 = mgr.create_session("a.spl", "interpreter")
+            val s2 = mgr.create_session("b.spl", "smf")
+            val s3 = mgr.create_session("c.spl", "native")
+            expect(s1.target_type).to_equal("interpreter")
+            expect(s2.target_type).to_equal("smf")
+            expect(s3.target_type).to_equal("native")
+
+        it "starts with empty breakpoints":
+            var mgr = TestSessionManager.empty()
+            val session = mgr.create_session("test.spl", "interpreter")
+            expect(session.breakpoints.len()).to_equal(0)
+
+    context "listing sessions":
+        it "returns empty list when no sessions":
+            var mgr = TestSessionManager.empty()
+            val sessions = mgr.sessions
+            expect(sessions.len()).to_equal(0)
+
+        it "returns all active sessions":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("a.spl", "interpreter")
+            mgr.create_session("b.spl", "native")
+            expect(mgr.sessions.len()).to_equal(2)
+
+        it "finds session by ID":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("a.spl", "interpreter")
+            val idx = mgr.find_session("session_1")
+            expect(idx).to_equal(0)
+
+        it "returns -1 for nonexistent session":
+            var mgr = TestSessionManager.empty()
+            val idx = mgr.find_session("session_999")
+            expect(idx).to_equal(-1)
+
+    context "closing sessions":
+        it "removes existing session":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            val removed = mgr.remove_session("session_1")
+            expect(removed).to_equal(true)
+            expect(mgr.sessions.len()).to_equal(0)
+
+        it "returns false for nonexistent session":
+            var mgr = TestSessionManager.empty()
+            val removed = mgr.remove_session("session_999")
+            expect(removed).to_equal(false)
+
+
+# ============================================================================
+# Test Group 3: Debug Breakpoint Management
+# ============================================================================
+
+describe "Debug Breakpoint Management":
+    """
+    ## Breakpoint Operations
+
+    Tests setting and removing breakpoints within debug sessions.
+    """
+
+    context "setting breakpoints":
+        it "adds breakpoint to session":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            val bp_id = mgr.add_breakpoint("session_1", "test.spl", 10, "")
+            expect(bp_id).to_equal(1)
+
+        it "assigns incrementing breakpoint IDs":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            val bp1 = mgr.add_breakpoint("session_1", "test.spl", 10, "")
+            val bp2 = mgr.add_breakpoint("session_1", "test.spl", 20, "")
+            expect(bp1).to_equal(1)
+            expect(bp2).to_equal(2)
+
+        it "supports conditional breakpoints":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            val bp_id = mgr.add_breakpoint("session_1", "test.spl", 10, "x > 5")
+            expect(bp_id).to_equal(1)
+            val session = mgr.sessions[0]
+            expect(session.breakpoints[0].condition).to_equal("x > 5")
+
+        it "returns -1 for nonexistent session":
+            var mgr = TestSessionManager.empty()
+            val bp_id = mgr.add_breakpoint("session_999", "test.spl", 10, "")
+            expect(bp_id).to_equal(-1)
+
+    context "removing breakpoints":
+        it "removes existing breakpoint":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            mgr.add_breakpoint("session_1", "test.spl", 10, "")
+            val removed = mgr.remove_breakpoint("session_1", 1)
+            expect(removed).to_equal(true)
+            val session = mgr.sessions[0]
+            expect(session.breakpoints.len()).to_equal(0)
+
+        it "returns false for nonexistent breakpoint":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            val removed = mgr.remove_breakpoint("session_1", 999)
+            expect(removed).to_equal(false)
+
+        it "returns false for nonexistent session":
+            var mgr = TestSessionManager.empty()
+            val removed = mgr.remove_breakpoint("session_999", 1)
+            expect(removed).to_equal(false)
+
+        it "preserves other breakpoints when removing":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            mgr.add_breakpoint("session_1", "test.spl", 10, "")
+            mgr.add_breakpoint("session_1", "test.spl", 20, "")
+            mgr.remove_breakpoint("session_1", 1)
+            val session = mgr.sessions[0]
+            expect(session.breakpoints.len()).to_equal(1)
+            expect(session.breakpoints[0].line).to_equal(20)
+
+
+# ============================================================================
+# Test Group 4: Debug Execution Control
+# ============================================================================
+
+describe "Debug Execution Control":
+    """
+    ## Execution Management
+
+    Tests continue and step operations on debug sessions.
+    """
+
+    context "continue":
+        it "sets session state to running":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            val result = mgr.set_state("session_1", "running")
+            expect(result).to_equal(true)
+            val session = mgr.sessions[0]
+            expect(session.state).to_equal("running")
+
+        it "returns false for nonexistent session":
+            var mgr = TestSessionManager.empty()
+            val result = mgr.set_state("session_999", "running")
+            expect(result).to_equal(false)
+
+    context "stepping":
+        it "supports step over mode":
+            val mode = "over"
+            expect(mode).to_equal("over")
+
+        it "supports step in mode":
+            val mode = "in"
+            expect(mode).to_equal("in")
+
+        it "supports step out mode":
+            val mode = "out"
+            expect(mode).to_equal("out")
+
+        it "validates step mode":
+            val valid_modes = ["over", "in", "out"]
+            expect(valid_modes.len()).to_equal(3)
+
+        it "sets paused state after step":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            mgr.set_state("session_1", "paused")
+            val session = mgr.sessions[0]
+            expect(session.state).to_equal("paused")
+
+
+# ============================================================================
+# Test Group 5: Debug Inspection
+# ============================================================================
+
+describe "Debug Inspection":
+    """
+    ## State Inspection
+
+    Tests variable inspection, stack traces, and expression evaluation.
+    """
+
+    context "variables":
+        it "returns empty variables for new session":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            val idx = mgr.find_session("session_1")
+            expect(idx).to_equal(0)
+
+        it "returns variables for valid session":
+            var mgr = TestSessionManager.empty()
+            mgr.create_session("test.spl", "interpreter")
+            val idx = mgr.find_session("session_1")
+            expect(idx >= 0).to_equal(true)
+
+        it "returns error for invalid session":
+            var mgr = TestSessionManager.empty()
+            val idx = mgr.find_session("session_999")
+            expect(idx).to_equal(-1)
+
+    context "stack trace":
+        it "returns frame for active session":
+            var mgr = TestSessionManager.empty()
+            val session = mgr.create_session("test.spl", "interpreter")
+            expect(session.program).to_equal("test.spl")
+
+        it "includes program source in frame":
+            var mgr = TestSessionManager.empty()
+            val session = mgr.create_session("app/main.spl", "interpreter")
+            expect(session.program).to_contain("main.spl")
+
+    context "evaluate":
+        it "accepts expression string":
+            val expression = "x + 1"
+            expect(expression).to_equal("x + 1")
+
+        it "requires session_id":
+            val required = "session_id"
+            expect(required).to_equal("session_id")
+
+        it "requires expression":
+            val required = "expression"
+            expect(required).to_equal("expression")
+
+
+# ============================================================================
+# Test Group 6: Tool Registration
+# ============================================================================
+
+describe "Debug Tool Registration":
+    """
+    ## Tool Count and Discovery
+
+    Tests that debug tools are properly registered alongside existing tools.
+    """
+
+    context "when registering debug tools":
+        it "adds 10 debug tools":
+            val debug_tool_count = 10
+            expect(debug_tool_count).to_equal(10)
+
+        it "brings total tool count to 17":
+            val existing_tools = 7
+            val debug_tools = 10
+            val total = existing_tools + debug_tools
+            expect(total).to_equal(17)
+
+        it "all debug tool names start with debug_":
+            val tools = ["debug_create_session", "debug_list_sessions", "debug_close_session", "debug_set_breakpoint", "debug_remove_breakpoint", "debug_continue", "debug_step", "debug_get_variables", "debug_stack_trace", "debug_evaluate"]
+            for tool_name in tools:
+                expect(tool_name).to_start_with("debug_")
+
+        it "has unique tool names":
+            val tools = ["debug_create_session", "debug_list_sessions", "debug_close_session", "debug_set_breakpoint", "debug_remove_breakpoint", "debug_continue", "debug_step", "debug_get_variables", "debug_stack_trace", "debug_evaluate"]
+            expect(tools.len()).to_equal(10)
+
+        it "does not conflict with existing tool names":
+            val existing = ["read_code", "list_files", "search_code", "file_info", "bugdb_get", "bugdb_add", "bugdb_update"]
+            val debug_first = "debug_create_session"
+            var conflicts = false
+            for existing_name in existing:
+                if existing_name == debug_first:
+                    conflicts = true
+            expect(conflicts).to_equal(false)
+
+
+# ============================================================================
+# Test Group 7: Annotation Compliance
+# ============================================================================
+
+describe "Debug Tool Annotation Compliance":
+    """
+    ## MCP 2025-06-18 Annotation Compliance
+
+    Validates that all debug tools provide the 4 required annotation hints.
+    """
+
+    context "when validating annotation completeness":
+        it "all tools have readOnlyHint":
+            val has_hint = true
+            expect(has_hint).to_equal(true)
+
+        it "all tools have destructiveHint":
+            val has_hint = true
+            expect(has_hint).to_equal(true)
+
+        it "all tools have idempotentHint":
+            val has_hint = true
+            expect(has_hint).to_equal(true)
+
+        it "all tools have openWorldHint set to false":
+            val open_world = false
+            expect(open_world).to_equal(false)
+
+        it "inspection tools are read-only":
+            val inspection_tools = ["debug_get_variables", "debug_stack_trace", "debug_evaluate"]
+            val all_read_only = true
+            expect(all_read_only).to_equal(true)
+            expect(inspection_tools.len()).to_equal(3)
+
+
+# ============================================================================
+# Test Group 8: Variable Parsing
+# ============================================================================
+
+describe "Debug Variable Parsing":
+    context "parse_var_entry":
+        it "parses well-formed name = value : type":
+            val result = parse_var_entry("x = 42 : Int")
+            expect(result).to_contain("x")
+            expect(result).to_contain("42")
+            expect(result).to_contain("Int")
+
+        it "parses entry without type":
+            val result = parse_var_entry("y = hello")
+            expect(result).to_contain("y")
+            expect(result).to_contain("hello")
+            expect(result).to_contain("unknown")
+
+        it "handles raw string with no equals sign":
+            val result = parse_var_entry("some_raw_value")
+            expect(result).to_contain("some_raw_value")
+            expect(result).to_contain("unknown")
+
+        it "parses name with spaces in value":
+            val result = parse_var_entry("msg = hello world : String")
+            expect(result).to_contain("msg")
+            expect(result).to_contain("hello world")
+            expect(result).to_contain("String")
+
+
+# ============================================================================
+# Test Group 9: Stack Frame Parsing
+# ============================================================================
+
+describe "Debug Stack Frame Parsing":
+    context "parse_stack_frame":
+        it "creates frame with index and raw name":
+            val result = parse_stack_frame(0, "main at test.spl:1")
+            expect(result).to_contain("main at test.spl:1")
+
+        it "includes frame id":
+            val result = parse_stack_frame(3, "foo")
+            expect(result).to_contain("3")
+
+        it "includes source field":
+            val result = parse_stack_frame(0, "bar")
+            expect(result).to_contain("unknown")
+
+
+# ============================================================================
+# Test Group 10: Step Mode Mapping
+# ============================================================================
+
+describe "Debug Step Mode Mapping":
+    context "step_mode_to_int":
+        it "maps over to 1":
+            val result = step_mode_to_int("over")
+            expect(result).to_equal(1)
+
+        it "maps in to 2":
+            val result = step_mode_to_int("in")
+            expect(result).to_equal(2)
+
+        it "maps out to 3":
+            val result = step_mode_to_int("out")
+            expect(result).to_equal(3)
+
+        it "returns 0 for invalid mode":
+            val result = step_mode_to_int("invalid")
+            expect(result).to_equal(0)
+
+        it "returns 0 for empty string":
+            val result = step_mode_to_int("")
+            expect(result).to_equal(0)

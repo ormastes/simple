@@ -1,0 +1,439 @@
+"""
+Effect System - Automatic Async/Sync Inference
+
+Infers function effects (Sync/Async) based on suspension operators and call graph.
+
+## Algorithm
+
+1. Initialize all functions as Sync
+2. Mark built-in async functions (FFI)
+3. Fixed-point iteration:
+   - Scan function bodies for suspension operators (~, ~=, if~, while~, for~)
+   - Scan function calls (async calls → function becomes async)
+   - Repeat until no changes
+4. Validate `fn sync` annotations
+5. Wrap async function return types in Promise<T>
+
+## Example
+
+```simple
+fn fetch_data():
+    val response = ~http.get("https://api.com")  # Suspension operator
+    response.body
+
+# Inferred: Effect.Async, returns Promise<String>
+```
+
+## Status
+
+Phase 3A: Infrastructure (Complete)
+- Effect enum ✅
+- EffectEnv class ✅
+- Built-in annotations ✅
+
+Phase 3B: Body scanning (see effects_solver.spl - EffectScanner)
+Phase 3C: Fixed-point solver (see effects_solver.spl - EffectSolver)
+Phase 3D: Promise wrapping (planned)
+"""
+
+# Note: This is Phase 3A infrastructure only - placeholder types used
+# Real HIR integration will happen in Phase 3B-D
+
+# Placeholder types (will be replaced with real HIR types later)
+type Symbol = text
+type Span = text
+type HirFunction = text
+type HirExpr = text
+
+# ============================================================================
+# Effect Type
+# ============================================================================
+
+enum Effect:
+    """
+    Function effect: Sync or Async
+
+    - Sync: Returns T directly, no suspension points
+    - Async: Returns Promise<T>, contains suspension operators or async calls
+    """
+    Sync
+    Async
+
+    fn to_string() -> text:
+        match self:
+            case Sync: "sync"
+            case Async: "async"
+
+    fn is_async() -> bool:
+        """Check if effect is Async"""
+        match self:
+            case Async: true
+            case Sync: false
+
+    fn is_sync() -> bool:
+        """Check if effect is Sync"""
+        match self:
+            case Sync: true
+            case Async: false
+
+    fn combine(other: Effect) -> Effect:
+        """
+        Combine two effects: if either is Async, result is Async
+
+        Examples:
+            Sync__combine(Sync) == Sync
+            Sync__combine(Async) == Async
+            Async__combine(Sync) == Async
+            Async__combine(Async) == Async
+        """
+        match (self, other):
+            case (Async, _): Async
+            case (_, Async): Async
+            case (Sync, Sync): Sync
+
+impl Effect:
+    static fn combine_all(effects: [Effect]) -> Effect:
+        """
+        Combine multiple effects: if any is Async, result is Async
+
+        Example:
+            Effect__combine_all([Sync, Sync, Async, Sync]) == Async
+        """
+        var result = Effect.Sync
+        for eff in effects:
+            result = result.combine(eff)
+        result
+
+# ============================================================================
+# Effect Environment
+# ============================================================================
+
+class EffectEnv:
+    """
+    Tracks function effects during inference
+
+    Fields:
+    - effects: Function symbol → inferred effect
+    - builtins: Built-in FFI function effects (http.get, file.read_async, etc.)
+    - dirty: Functions whose effect changed (for fixed-point iteration)
+    """
+    effects: Dict<Symbol, Effect>
+    builtins: Dict<text, Effect>
+    dirty: Set<Symbol>
+
+impl EffectEnv:
+    static fn new() -> EffectEnv:
+        """Create new effect environment with built-in annotations"""
+        EffectEnv(
+            effects: {},
+            builtins: init_builtins(),
+            dirty: Set__new()
+        )
+
+    fn get_effect(sym: Symbol) -> Effect:
+        """
+        Get effect for function symbol
+
+        Priority:
+        1. Local effects (inferred)
+        2. Built-ins (FFI annotations)
+        3. Default to Sync
+        """
+        # Check local effects first
+        if val Some(eff) = self.effects.get(sym):
+            return eff
+
+        # Check builtins by function name (Symbol is text for now)
+        if val Some(eff) = self.builtins.get(sym):
+            return eff
+
+        # Default to Sync
+        Effect.Sync
+
+    fn set_effect(sym: Symbol, eff: Effect):
+        """
+        Set effect for function symbol
+
+        If effect changed, mark symbol as dirty for next iteration
+        """
+        val old_eff = self.get_effect(sym)
+
+        if old_eff != eff:
+            self.effects[sym] = eff
+            self.dirty.insert(sym)
+
+    fn is_dirty() -> bool:
+        """Check if any functions changed effect (for fixed-point check)"""
+        not self.dirty.is_empty()
+
+    fn clear_dirty():
+        """Clear dirty set (start new fixed-point iteration)"""
+        self.dirty.clear()
+
+    fn iter_effects() -> [(Symbol, Effect)]:
+        """Iterate over all inferred effects"""
+        self.effects.iter().collect()
+
+    fn count_async() -> i64:
+        """Count number of async functions"""
+        var count = 0
+        for (_, eff) in self.effects.iter():
+            if eff.is_async():
+                count = count + 1
+        count
+
+    fn count_sync() -> i64:
+        """Count number of sync functions"""
+        var count = 0
+        for (_, eff) in self.effects.iter():
+            if eff.is_sync():
+                count = count + 1
+        count
+
+# ============================================================================
+# Built-in Effect Annotations (FFI Functions)
+# ============================================================================
+
+fn init_builtins() -> Dict<text, Effect>:
+    """
+    Initialize built-in effect annotations for FFI functions
+
+    Categories:
+    - HTTP: All async (network I/O)
+    - File: Async variants marked
+    - Sleep/Timer: Async
+    - Sync I/O: Marked sync explicitly
+    """
+    var builtins = Dict__new()
+
+    # HTTP module - all async
+    builtins["http.get"] = Effect.Async
+    builtins["http.post"] = Effect.Async
+    builtins["http.put"] = Effect.Async
+    builtins["http.delete"] = Effect.Async
+    builtins["http.patch"] = Effect.Async
+    builtins["http.request"] = Effect.Async
+
+    # WebSocket - async
+    builtins["websocket.connect"] = Effect.Async
+    builtins["websocket.send"] = Effect.Async
+    builtins["websocket.receive"] = Effect.Async
+
+    # File I/O - async variants
+    builtins["file.read_async"] = Effect.Async
+    builtins["file.write_async"] = Effect.Async
+    builtins["file.append_async"] = Effect.Async
+    builtins["file.read"] = Effect.Sync      # Blocking sync variant
+    builtins["file.write"] = Effect.Sync     # Blocking sync variant
+
+    # Timer/Sleep - async
+    builtins["sleep"] = Effect.Async
+    builtins["timer.wait"] = Effect.Async
+    builtins["timeout"] = Effect.Async
+
+    # Database - async
+    builtins["db.query"] = Effect.Async
+    builtins["db.execute"] = Effect.Async
+    builtins["db.transaction"] = Effect.Async
+
+    # Process - async
+    builtins["process.spawn"] = Effect.Async
+    builtins["process.wait"] = Effect.Async
+
+    # Console/stdio - sync (buffered)
+    builtins["print"] = Effect.Sync
+    builtins["println"] = Effect.Sync
+    builtins["eprint"] = Effect.Sync
+    builtins["eprintln"] = Effect.Sync
+
+    # Math/String/Collection ops - all sync
+    # (No need to list, default is Sync)
+
+    builtins
+
+# ============================================================================
+# Effect Error
+# ============================================================================
+
+class EffectError:
+    """
+    Effect inference error
+
+    Examples:
+    - Function annotated `fn sync` but contains suspension operators
+    - Suspend operator on non-Promise type
+    - Fixed-point solver failed to converge
+    """
+    message: text
+    func_symbol: Symbol
+    span: Span
+
+    fn to_string() -> text:
+        "[Effect Error] {self.func_symbol}: {self.message} at {self.span}"
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+class EffectStats:
+    """Statistics about effect inference run"""
+    total_functions: i64
+    async_functions: i64
+    sync_functions: i64
+    iterations: i64
+    builtins_count: i64
+
+    fn to_string() -> text:
+        """
+        Effect Inference Statistics:
+        - Total functions: 150
+        - Async functions: 42 (28%)
+        - Sync functions: 108 (72%)
+        - Fixed-point iterations: 3
+        - Built-in annotations: 30
+        """
+        val async_pct = if self.total_functions > 0:
+            (self.async_functions * 100) / self.total_functions
+        else:
+            0
+
+        val sync_pct = if self.total_functions > 0:
+            (self.sync_functions * 100) / self.total_functions
+        else:
+            0
+
+        """
+Effect Inference Statistics:
+- Total functions: {self.total_functions}
+- Async functions: {self.async_functions} ({async_pct}%)
+- Sync functions: {self.sync_functions} ({sync_pct}%)
+- Fixed-point iterations: {self.iterations}
+- Built-in annotations: {self.builtins_count}
+        """
+
+# ============================================================================
+# Module Functions
+# ============================================================================
+
+fn effect_to_string(eff: Effect) -> text:
+    """Convert effect to string (convenience function)"""
+    eff.to_string()
+
+fn is_async(eff: Effect) -> bool:
+    """Check if effect is async (convenience function)"""
+    eff.is_async()
+
+fn is_sync(eff: Effect) -> bool:
+    """Check if effect is sync (convenience function)"""
+    eff.is_sync()
+
+# ============================================================================
+# Tests (Inline Unit Tests)
+# ============================================================================
+
+fn test_effect_basic():
+    """Test basic effect operations"""
+    val sync = Effect.Sync
+    val async = Effect.Async
+
+    # to_string
+    assert sync.to_string() == "sync"
+    assert async.to_string() == "async"
+
+    # is_async / is_sync
+    assert sync.is_sync()
+    assert not sync.is_async()
+    assert async.is_async()
+    assert not async.is_sync()
+
+fn test_effect_combine():
+    """Test effect combination"""
+    val sync = Effect.Sync
+    val async = Effect.Async
+
+    assert sync.combine(sync) == Effect.Sync
+    assert sync.combine(async) == Effect.Async
+    assert async.combine(sync) == Effect.Async
+    assert async.combine(async) == Effect.Async
+
+fn test_effect_combine_all():
+    """Test combining multiple effects"""
+    assert Effect__combine_all([]) == Effect.Sync
+    assert Effect__combine_all([Effect.Sync, Effect.Sync]) == Effect.Sync
+    assert Effect__combine_all([Effect.Sync, Effect.Async]) == Effect.Async
+    assert Effect__combine_all([Effect.Async, Effect.Sync, Effect.Sync]) == Effect.Async
+
+fn test_effect_env_basic():
+    """Test EffectEnv creation and basic operations"""
+    val env = EffectEnv__new()
+
+    # Should have built-ins
+    assert env.builtins.len() > 0
+
+    # Check specific built-ins
+    assert env.get_effect("http.get") == Effect.Async
+    assert env.get_effect("print") == Effect.Sync
+    assert env.get_effect("unknown_function") == Effect.Sync  # Default
+
+fn test_effect_env_set_get():
+    """Test setting and getting effects"""
+    val env = EffectEnv__new()
+    val sym = "my_function"
+
+    # Initially Sync (default)
+    assert env.get_effect(sym) == Effect.Sync
+
+    # Set to Async
+    env.set_effect(sym, Effect.Async)
+    assert env.get_effect(sym) == Effect.Async
+
+    # Should be marked dirty
+    assert env.is_dirty()
+
+fn test_effect_env_dirty():
+    """Test dirty tracking"""
+    val env = EffectEnv__new()
+    val sym = "test"
+
+    # Initially not dirty
+    assert not env.is_dirty()
+
+    # Setting same effect shouldn't mark dirty
+    env.set_effect(sym, Effect.Sync)
+    env.clear_dirty()
+    env.set_effect(sym, Effect.Sync)
+    assert not env.is_dirty()
+
+    # Changing effect should mark dirty
+    env.set_effect(sym, Effect.Async)
+    assert env.is_dirty()
+
+fn test_builtins():
+    """Test built-in effect annotations"""
+    val builtins = init_builtins()
+
+    # Check HTTP functions are async
+    assert builtins["http.get"] == Effect.Async
+    assert builtins["http.post"] == Effect.Async
+
+    # Check sync I/O
+    assert builtins["print"] == Effect.Sync
+    assert builtins["file.read"] == Effect.Sync
+
+    # Check async I/O
+    assert builtins["file.read_async"] == Effect.Async
+    assert builtins["sleep"] == Effect.Async
+
+# Run tests if executed directly
+fn main():
+    print "Running effect system tests..."
+
+    test_effect_basic()
+    test_effect_combine()
+    test_effect_combine_all()
+    test_effect_env_basic()
+    test_effect_env_set_get()
+    test_effect_env_dirty()
+    test_builtins()
+
+    print "✅ All effect system infrastructure tests passed!"

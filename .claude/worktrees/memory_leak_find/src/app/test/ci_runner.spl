@@ -1,0 +1,323 @@
+# CI Test Runner
+#
+# Provides consistent test execution across CI environments
+# Simple (.spl) replacement for scripts/ci-test.sh
+#
+# Features:
+# - Auto-detects container runtime (podman/docker)
+# - Resource profiles (fast/standard/slow/intensive/critical)
+# - Hardened container execution (read-only, no-caps)
+# - JSON result parsing
+# - Cross-platform support
+
+use app.io.mod.{shell, shell_bool, shell_output, process_run, env_get, cpu_count, cwd, file_exists, file_read, get_args, exit}
+use std.text.{contains, starts_with, trim, split}
+use std.path.{join}
+
+# Configuration
+val DEFAULT_IMAGE = "simple-test-isolation:latest"
+val DEFAULT_RUNTIME = "auto"
+val DEFAULT_PROFILE = "fast"
+val DEFAULT_FORMAT = "json"
+
+# ANSI color codes
+val COLOR_RED = "\x1b[0;31m"
+val COLOR_GREEN = "\x1b[0;32m"
+val COLOR_YELLOW = "\x1b[1;33m"
+val COLOR_BLUE = "\x1b[0;34m"
+val COLOR_RESET = "\x1b[0m"
+
+# Resource limits by profile
+class ResourceProfile:
+    memory: text
+    cpu: text
+    timeout: text
+
+fn get_profile(name: text) -> ResourceProfile:
+    """Get resource limits for a profile"""
+    if name == "fast":
+        return ResourceProfile(memory: "128m", cpu: "0.5", timeout: "30")
+    else if name == "standard":
+        return ResourceProfile(memory: "512m", cpu: "1.0", timeout: "120")
+    else if name == "slow":
+        return ResourceProfile(memory: "1g", cpu: "2.0", timeout: "600")
+    else if name == "intensive":
+        return ResourceProfile(memory: "2g", cpu: "4.0", timeout: "1800")
+    else if name == "critical":
+        return ResourceProfile(memory: "4g", cpu: "8.0", timeout: "3600")
+    else:
+        # Default to fast
+        return ResourceProfile(memory: "128m", cpu: "0.5", timeout: "30")
+
+# Logging functions
+fn log_info(msg: text):
+    print "{COLOR_BLUE}[INFO]{COLOR_RESET} {msg}"
+
+fn log_success(msg: text):
+    print "{COLOR_GREEN}[SUCCESS]{COLOR_RESET} {msg}"
+
+fn log_warning(msg: text):
+    print "{COLOR_YELLOW}[WARNING]{COLOR_RESET} {msg}"
+
+fn log_error(msg: text):
+    print "{COLOR_RED}[ERROR]{COLOR_RESET} {msg}"
+
+# Container runtime detection
+fn detect_runtime(runtime_pref: text) -> text:
+    """Detect available container runtime"""
+
+    if runtime_pref != "auto":
+        return runtime_pref
+
+    # Try podman first (better security, rootless)
+    if shell_bool("command -v podman"):
+        return "podman"
+
+    # Fall back to docker
+    if shell_bool("command -v docker"):
+        return "docker"
+
+    log_error("No container runtime found (podman or docker required)")
+    exit(1)
+    ""  # Unreachable, but needed for type checker
+
+fn build_container(runtime: text, image: text, project_root: text):
+    """Build container image if it doesn't exist"""
+
+    log_info("Checking if container image exists: {image}")
+
+    # Check if image exists
+    val inspect_cmd = "{runtime} image inspect {image}"
+    if not shell_bool(inspect_cmd):
+        log_info("Building container image: {image}")
+
+        val dockerfile = join(project_root, "tools/docker/Dockerfile.test-isolation")
+        val build_cmd = "{runtime} build -t {image} -f {dockerfile} {project_root}"
+
+        val result = shell(build_cmd)
+        if result.exit_code != 0:
+            log_error("Container build failed: {result.stderr}")
+            exit(1)
+
+        log_success("Container built: {image}")
+    else:
+        log_info("Container image already exists: {image}")
+
+fn run_tests(runtime: text, profile_name: text, test_path: text, output_file: text, image: text, project_root: text) -> i64:
+    """Run tests in container with resource limits"""
+
+    val profile = get_profile(profile_name)
+
+    log_info("Running tests with profile: {profile_name}")
+    log_info("  Memory: {profile.memory}, CPU: {profile.cpu} cores, Timeout: {profile.timeout}s")
+    log_info("  Test path: {test_path}")
+    log_info("  Output: {output_file}")
+
+    # Build container command
+    var cmd = "{runtime} run --rm"
+
+    # Security options (hardened container)
+    cmd = cmd + " --read-only"
+    cmd = cmd + " --tmpfs /tmp:rw,noexec,nosuid"
+    cmd = cmd + " --cap-drop=ALL"
+    cmd = cmd + " --security-opt=no-new-privileges"
+
+    # Resource limits
+    cmd = cmd + " --memory={profile.memory}"
+    cmd = cmd + " --cpus={profile.cpu}"
+
+    # Volume mounts (read-only workspace)
+    cmd = cmd + " -v {project_root}:/workspace:ro"
+
+    # Container image
+    cmd = cmd + " {image}"
+
+    # Test command inside container
+    cmd = cmd + " test {test_path}"
+    cmd = cmd + " --profile={profile_name}"
+    cmd = cmd + " --timeout={profile.timeout}"
+    cmd = cmd + " --format=json"
+
+    log_info("Executing: {cmd}")
+
+    # Run container and capture output
+    val result = shell("{cmd} > {output_file} 2>&1")
+
+    result.exit_code
+
+fn parse_json_value(content: text, key: text) -> text:
+    """Simple JSON value extraction (for summary.total, etc.)"""
+    # This is a simplified parser - assumes format: "key": value
+    # For production, would use proper JSON parser
+
+    val search_key = "\"{key}\":"
+    val lines = split(content, "\n")
+
+    for line in lines:
+        if contains(line, search_key):
+            # Extract value after the colon
+            val parts = split(line, ":")
+            if parts.len() >= 2:
+                var value = parts[1]
+                # Remove whitespace, comma, quotes
+                value = trim(value)
+                value = value.replace(",", "")
+                value = value.replace("\"", "")
+                return value
+
+    "0"
+
+fn parse_results(output_file: text, output_format: text) -> i64:
+    """Parse test results and display summary"""
+
+    if not file_exists(output_file):
+        log_warning("No test results file found: {output_file}")
+        return 1
+
+    val content = file_read(output_file)
+
+    if output_format == "json":
+        log_info("Parsing JSON test results...")
+
+        # Check if jq is available for better parsing
+        if shell_bool("command -v jq"):
+            # Use jq for robust parsing
+            val total_cmd = "jq -r '.summary.total // 0' {output_file}"
+            val passed_cmd = "jq -r '.summary.passed // 0' {output_file}"
+            val failed_cmd = "jq -r '.summary.failed // 0' {output_file}"
+            val skipped_cmd = "jq -r '.summary.skipped // 0' {output_file}"
+
+            val total = shell_output(total_cmd).trim()
+            val passed = shell_output(passed_cmd).trim()
+            val failed = shell_output(failed_cmd).trim()
+            val skipped = shell_output(skipped_cmd).trim()
+
+            print ""
+            log_info("========== Test Results ==========")
+            log_info("Total:   {total}")
+            log_success("Passed:  {passed}")
+            log_error("Failed:  {failed}")
+            log_warning("Skipped: {skipped}")
+            log_info("==================================")
+            print ""
+
+            # Convert failed to i64 for comparison
+            val failed_count = int(failed)
+            if failed_count > 0:
+                log_error("{failed} test(s) failed")
+                return 1
+            else:
+                log_success("All tests passed!")
+                return 0
+        else:
+            # Fallback: simple JSON parsing without jq
+            log_warning("jq not installed - using simplified JSON parsing")
+            log_info("Install jq for detailed test reports: apt install jq")
+
+            val total = parse_json_value(content, "total")
+            val passed = parse_json_value(content, "passed")
+            val failed = parse_json_value(content, "failed")
+
+            print ""
+            log_info("Total: {total}, Passed: {passed}, Failed: {failed}")
+            print ""
+
+            val failed_count = int(failed)
+            if failed_count > 0:
+                return 1
+            else:
+                return 0
+    else:
+        # Plain text output - just show the file
+        print content
+        return 0
+
+fn show_help():
+    """Display help text"""
+    print "Usage: simple run src/app/test/ci_runner.spl [TEST_PATH]"
+    print ""
+    print "CI Test Runner for Simple Language"
+    print ""
+    print "Arguments:"
+    print "  TEST_PATH    Path to test directory or file (default: test/)"
+    print ""
+    print "Environment Variables:"
+    print "  CONTAINER_IMAGE      Container image name (default: simple-test-isolation:latest)"
+    print "  CONTAINER_RUNTIME    Container runtime: auto|docker|podman (default: auto)"
+    print "  TEST_PROFILE         Resource profile: fast|standard|slow|intensive|critical (default: fast)"
+    print "  OUTPUT_FORMAT        Output format: json|progress|doc (default: json)"
+    print ""
+    print "Examples:"
+    print "  # Run all tests with fast profile"
+    print "  simple run src/app/test/ci_runner.spl"
+    print ""
+    print "  # Run unit tests with standard profile"
+    print "  TEST_PROFILE=standard simple run src/app/test/ci_runner.spl test/unit/"
+    print ""
+    print "  # Run slow tests with custom container"
+    print "  CONTAINER_IMAGE=simple-test:dev TEST_PROFILE=slow simple run src/app/test/ci_runner.spl test/system/"
+    print ""
+    print "  # Use Podman instead of Docker"
+    print "  CONTAINER_RUNTIME=podman simple run src/app/test/ci_runner.spl"
+    print ""
+    print "Resource Profiles:"
+    print "  fast       - Unit tests (128MB, 0.5 CPU, 30s timeout)"
+    print "  standard   - Integration tests (512MB, 1.0 CPU, 120s timeout)"
+    print "  slow       - System tests (1GB, 2.0 CPU, 600s timeout)"
+    print "  intensive  - Heavy workloads (2GB, 4.0 CPU, 1800s timeout)"
+    print "  critical   - QEMU/baremetal (4GB, 8.0 CPU, 3600s timeout)"
+
+fn main():
+    """Entry point"""
+    val args = get_args()
+
+    # Check for help flag
+    if args.len() > 1:
+        if args[1] == "-h" or args[1] == "--help":
+            show_help()
+            exit(0)
+
+    log_info("Simple Language CI Test Runner")
+    log_info("================================")
+    print ""
+
+    # Get project root
+    val project_root = cwd()
+
+    # Get configuration from environment
+    val container_image = env_get("CONTAINER_IMAGE") ?? DEFAULT_IMAGE
+    val container_runtime_pref = env_get("CONTAINER_RUNTIME") ?? DEFAULT_RUNTIME
+    val test_profile = env_get("TEST_PROFILE") ?? DEFAULT_PROFILE
+    val output_format = env_get("OUTPUT_FORMAT") ?? DEFAULT_FORMAT
+
+    # Detect runtime
+    val runtime = detect_runtime(container_runtime_pref)
+    log_info("Using container runtime: {runtime}")
+
+    # Build container if needed
+    build_container(runtime, container_image, project_root)
+
+    # Get test path from arguments or use default
+    val test_path = if args.len() > 1:
+        args[1]
+    else:
+        "test/"
+
+    val output_file = "test-results-{test_profile}.json"
+
+    # Run tests
+    log_info("Starting test execution...")
+    val test_exit_code = run_tests(runtime, test_profile, test_path, output_file, container_image, project_root)
+
+    # Parse results
+    val parse_code = if test_exit_code == 0:
+        log_success("Tests completed successfully")
+        parse_results(output_file, output_format)
+    else:
+        log_error("Tests failed or timed out")
+        parse_results(output_file, output_format)
+        1
+
+    exit(parse_code)
+
+export main

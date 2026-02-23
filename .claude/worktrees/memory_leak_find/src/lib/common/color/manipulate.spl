@@ -1,0 +1,226 @@
+# Color Manipulation Functions
+#
+# Purpose: Color transformations and adjustments
+#
+
+use std.common.validation.{clamp}
+# Contains:
+# - Lightness/darkness adjustments
+# - Saturation adjustments
+# - Hue rotation
+# - Alpha channel manipulation
+# - Color inversion and grayscale
+
+# ============================================================================
+# Color Manipulation Functions
+# ============================================================================
+
+fn lighten(color: Color, amount: i64) -> Color:
+    """Lighten color by amount (0-100). Increases lightness in HSL space."""
+    val hsl_tuple = rgb_to_hsl(color)
+    val h = hsl_tuple.0
+    val s = hsl_tuple.1
+    val l = hsl_tuple.2
+    val new_l = clamp(l + amount, 0, 100)
+    hsl_to_rgb(h, s, new_l)
+
+fn darken(color: Color, amount: i64) -> Color:
+    """Darken color by amount (0-100). Decreases lightness in HSL space."""
+    val hsl_tuple = rgb_to_hsl(color)
+    val h = hsl_tuple.0
+    val s = hsl_tuple.1
+    val l = hsl_tuple.2
+    val new_l = clamp(l - amount, 0, 100)
+    hsl_to_rgb(h, s, new_l)
+
+fn saturate(color: Color, amount: i64) -> Color:
+    """Increase saturation by amount (0-100)."""
+    val hsl_tuple = rgb_to_hsl(color)
+    val h = hsl_tuple.0
+    val s = hsl_tuple.1
+    val l = hsl_tuple.2
+    val new_s = clamp(s + amount, 0, 100)
+    hsl_to_rgb(h, new_s, l)
+
+fn desaturate(color: Color, amount: i64) -> Color:
+    """Decrease saturation by amount (0-100)."""
+    val hsl_tuple = rgb_to_hsl(color)
+    val h = hsl_tuple.0
+    val s = hsl_tuple.1
+    val l = hsl_tuple.2
+    val new_s = clamp(s - amount, 0, 100)
+    hsl_to_rgb(h, new_s, l)
+
+fn invert(color: Color) -> Color:
+    """Invert color (complementary RGB inversion)."""
+    from_rgba(255 - color.r, 255 - color.g, 255 - color.b, color.a)
+
+fn grayscale(color: Color) -> Color:
+    """Convert color to grayscale using luminance formula."""
+    val lum = luminance(color)
+    val gray = (lum * 255) / 100
+    from_rgba(gray, gray, gray, color.a)
+
+fn adjust_hue(color: Color, degrees: i64) -> Color:
+    """Rotate hue by degrees (0-360)."""
+    val hsl_tuple = rgb_to_hsl(color)
+    val h = hsl_tuple.0
+    val s = hsl_tuple.1
+    val l = hsl_tuple.2
+    val new_h = (h + degrees) % 360
+    hsl_to_rgb(new_h, s, l)
+
+fn set_alpha(color: Color, alpha: i64) -> Color:
+    """Set alpha channel (0-255)."""
+    from_rgba(color.r, color.g, color.b, clamp(alpha, 0, 255))
+
+# ============================================================================
+# Helper Functions (imported from convert and utilities)
+# ============================================================================
+
+
+fn luminance(color: Color) -> i64:
+    """Calculate relative luminance (0-100) using sRGB formula."""
+    val lum = (2126 * color.r + 7152 * color.g + 722 * color.b) / 10000
+    (lum * 100) / 255
+
+fn from_rgba(r: i64, g: i64, b: i64, a: i64) -> Color:
+    """Create a color from RGBA values (0-255)."""
+    Color(
+        r: clamp(r, 0, 255),
+        g: clamp(g, 0, 255),
+        b: clamp(b, 0, 255),
+        a: clamp(a, 0, 255)
+    )
+
+fn rgb_to_hsl(color: Color) -> (i64, i64, i64):
+    """Convert RGB to HSL. Returns (h: 0-360, s: 0-100, l: 0-100)."""
+    val r_norm = color.r / 255
+    val g_norm = color.g / 255
+    val b_norm = color.b / 255
+
+    val max_val = max3(r_norm, g_norm, b_norm)
+    val min_val = min3(r_norm, g_norm, b_norm)
+    val delta = max_val - min_val
+
+    val l = (max_val + min_val) / 2
+
+    if delta == 0:
+        return (0, 0, l * 100)
+
+    var s = 0
+    if l < 50:
+        s = delta / (max_val + min_val)
+    else:
+        s = delta / (200 - max_val - min_val)
+
+    var h = 0
+    if max_val == r_norm:
+        val hue_component = (g_norm - b_norm) / delta
+        h = (hue_component * 60) % 360
+    else:
+        if max_val == g_norm:
+            val hue_component = (b_norm - r_norm) / delta
+            h = ((hue_component + 2) * 60) % 360
+        else:
+            val hue_component = (r_norm - g_norm) / delta
+            h = ((hue_component + 4) * 60) % 360
+
+    if h < 0:
+        h = h + 360
+
+    (h, s * 100, l * 100)
+
+fn hsl_to_rgb(h: i64, s: i64, l: i64) -> Color:
+    """Convert HSL to RGB."""
+    val h_norm = h % 360
+    val s_norm = clamp(s, 0, 100)
+    val l_norm = clamp(l, 0, 100)
+
+    if s_norm == 0:
+        val gray = (l_norm * 255) / 100
+        return from_rgb(gray, gray, gray)
+
+    var c = 0
+    if l_norm < 50:
+        c = (2 * l_norm * s_norm) / 100
+    else:
+        c = (200 - 2 * l_norm) * s_norm / 100
+
+    val x = c * (100 - abs((h_norm % 120) - 60)) / 100
+    val m = l_norm - c / 2
+
+    var r_prime = 0
+    var g_prime = 0
+    var b_prime = 0
+
+    if h_norm < 60:
+        r_prime = c
+        g_prime = x
+        b_prime = 0
+    else:
+        if h_norm < 120:
+            r_prime = x
+            g_prime = c
+            b_prime = 0
+        else:
+            if h_norm < 180:
+                r_prime = 0
+                g_prime = c
+                b_prime = x
+            else:
+                if h_norm < 240:
+                    r_prime = 0
+                    g_prime = x
+                    b_prime = c
+                else:
+                    if h_norm < 300:
+                        r_prime = x
+                        g_prime = 0
+                        b_prime = c
+                    else:
+                        r_prime = c
+                        g_prime = 0
+                        b_prime = x
+
+    val r = ((r_prime + m) * 255) / 100
+    val g = ((g_prime + m) * 255) / 100
+    val b = ((b_prime + m) * 255) / 100
+
+    from_rgb(r, g, b)
+
+fn from_rgb(r: i64, g: i64, b: i64) -> Color:
+    """Create a color from RGB values (0-255)."""
+    Color(
+        r: clamp(r, 0, 255),
+        g: clamp(g, 0, 255),
+        b: clamp(b, 0, 255),
+        a: 255
+    )
+
+fn max3(a: i64, b: i64, c: i64) -> i64:
+    """Get maximum of three values."""
+    var result = a
+    if b > result:
+        result = b
+    if c > result:
+        result = c
+    result
+
+fn min3(a: i64, b: i64, c: i64) -> i64:
+    """Get minimum of three values."""
+    var result = a
+    if b < result:
+        result = b
+    if c < result:
+        result = c
+    result
+
+fn abs(value: i64) -> i64:
+    """Absolute value."""
+    if value < 0:
+        return 0 - value
+    value
+
+export lighten, darken, saturate, desaturate, invert, grayscale
+export adjust_hue, set_alpha

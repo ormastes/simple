@@ -1,0 +1,445 @@
+"""Network Module - TCP, UDP, and HTTP networking primitives.
+
+@tag:stdlib
+@tag:api
+
+This module provides comprehensive network I/O capabilities including TCP sockets,
+UDP datagrams, and HTTP/HTTPS client operations. All network operations use Result
+types for error handling (no exceptions).
+
+# Architecture
+
+The network module is organized into four submodules:
+- **tcp**: Connection-oriented reliable byte streams (TcpListener, TcpStream)
+- **udp**: Connectionless datagram sockets (UdpSocket)
+- **http**: High-level HTTP/HTTPS client (HttpClient, HttpRequest, HttpResponse)
+- **ffi**: Low-level extern function bindings (internal use)
+
+# TCP Socket Programming
+
+TCP provides reliable, ordered, connection-oriented communication:
+
+```simple
+# TCP Server Example
+use std.net.tcp.{TcpListener, TcpStream}
+use std.error.*
+
+fn start_echo_server():
+    # Bind to address and start listening
+    val listener = match TcpListener__bind("127.0.0.1:8080"):
+        case Ok(l): l
+        case Err(e):
+            print "Failed to bind: {e.message}"
+            return
+
+    print "Server listening on 127.0.0.1:8080"
+
+    # Accept connections in loop
+    var running = true
+    while running:
+        # Accept incoming connection
+        val stream = match listener.accept():
+            case Ok(s): s
+            case Err(e):
+                print "Accept failed: {e.message}"
+                continue
+
+        # Read request
+        val data = match stream.read(1024):
+            case Ok(d): d
+            case Err(e):
+                print "Read failed: {e.message}"
+                stream.close()
+                continue
+
+        # Echo response back
+        val written = match stream.write_all(data):
+            case Ok(()): true
+            case Err(e):
+                print "Write failed: {e.message}"
+                false
+
+        stream.close()
+```
+
+```simple
+# TCP Client Example
+use std.net.tcp.{TcpStream}
+use std.error.*
+
+fn send_http_request():
+    # Connect to server
+    val stream = match TcpStream__connect("example.com:80"):
+        case Ok(s): s
+        case Err(e):
+            print "Connection failed: {e.message}"
+            return
+
+    # Send HTTP GET request
+    val request = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    val req_bytes = request.as_bytes()
+
+    val written = match stream.write_all(req_bytes):
+        case Ok(()): true
+        case Err(e):
+            print "Write failed: {e.message}"
+            stream.close()
+            return
+
+    # Read response
+    val response = match stream.read(4096):
+        case Ok(data): bytes_to_string(data)
+        case Err(e):
+            print "Read failed: {e.message}"
+            stream.close()
+            return
+
+    print "Response:\n{response}"
+    stream.close()
+```
+
+# UDP Socket Programming
+
+UDP provides connectionless, unreliable datagram transmission:
+
+```simple
+# UDP Server Example
+use std.net.udp.{UdpSocket}
+use std.error.*
+
+fn start_udp_echo_server():
+    # Bind to address
+    val socket = match UdpSocket__bind("127.0.0.1:8080"):
+        case Ok(s): s
+        case Err(e):
+            print "Failed to bind: {e.message}"
+            return
+
+    print "UDP server listening on 127.0.0.1:8080"
+
+    # Receive and echo datagrams
+    var running = true
+    while running:
+        # Receive datagram with sender address
+        val (data, sender_addr) = match socket.recv_from(1024):
+            case Ok((d, a)): (d, a)
+            case Err(e):
+                print "Receive failed: {e.message}"
+                continue
+
+        print "Received {data.len()} bytes from {sender_addr}"
+
+        # Echo back to sender
+        val sent = match socket.send_to(data, sender_addr):
+            case Ok(n): n
+            case Err(e):
+                print "Send failed: {e.message}"
+                0
+
+        print "Echoed {sent} bytes"
+```
+
+```simple
+# UDP Client Example
+use std.net.udp.{UdpSocket}
+use std.error.*
+
+fn send_udp_message():
+    # Bind to any local port
+    val socket = match UdpSocket__bind("0.0.0.0:0"):
+        case Ok(s): s
+        case Err(e):
+            print "Failed to bind: {e.message}"
+            return
+
+    # Send datagram
+    val message = "Hello, UDP!".as_bytes()
+    val sent = match socket.send_to(message, "127.0.0.1:8080"):
+        case Ok(n): n
+        case Err(e):
+            print "Send failed: {e.message}"
+            0
+
+    print "Sent {sent} bytes"
+
+    # Receive response (with timeout)
+    socket.set_read_timeout(Some(5000))  # 5 second timeout
+
+    val (response, sender) = match socket.recv_from(1024):
+        case Ok((d, a)): (d, a)
+        case Err(e):
+            print "Receive failed or timed out: {e.message}"
+            socket.close()
+            return
+
+    print "Received response: {bytes_to_string(response)}"
+    socket.close()
+```
+
+# HTTP Client Operations
+
+High-level HTTP/HTTPS client with automatic request building:
+
+```simple
+# HTTP GET Request
+use std.net.http.{HttpClient, get}
+use std.error.*
+
+fn fetch_api_data():
+    # Simple GET request (convenience function)
+    val resp = match get("https://api.example.com/users"):
+        case Ok(r): r
+        case Err(e):
+            print "Request failed: {e.message}"
+            return
+
+    # Check status
+    if resp.is_success():
+        print "Success! Status: {resp.status}"
+        print "Body:\n{resp.body_text()}"
+    else if resp.is_client_error():
+        print "Client error {resp.status}: {resp.reason}"
+    else if resp.is_server_error():
+        print "Server error {resp.status}: {resp.reason}"
+
+    # Access headers
+    val content_type = resp.header("content-type") ?? "unknown"
+    print "Content-Type: {content_type}"
+```
+
+```simple
+# HTTP POST with Custom Headers
+use std.net.http.{HttpClient, HttpMethod, HttpRequest}
+use std.error.*
+
+fn post_json_data():
+    # Create client with custom settings
+    val client = HttpClient__new()
+        .set_timeout(Some(10000))      # 10 second timeout
+        .set_follow_redirects(true)
+
+    # Build custom request
+    val json_body = '{"name": "Alice", "age": 30}'
+    val req = HttpRequest__new(HttpMethod.POST, "/api/users")
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("User-Agent", "SimpleHTTP/1.0")
+        .body_text(json_body)
+
+    # Send request
+    val resp = match client.request("https://api.example.com", req):
+        case Ok(r): r
+        case Err(e):
+            print "Request failed: {e.message}"
+            return
+
+    if resp.is_success():
+        print "Created! Status: {resp.status}"
+        print "Response: {resp.body_text()}"
+    else:
+        print "Failed with status {resp.status}"
+```
+
+# Network Address Handling
+
+Network addresses use the format "host:port" where host can be:
+- IPv4 address: "192.168.1.1:8080"
+- IPv6 address: "[::1]:8080" (note brackets)
+- Hostname: "example.com:80"
+- Wildcard: "0.0.0.0:8080" (listen on all interfaces)
+- Localhost: "127.0.0.1:8080" or "localhost:8080"
+
+Special addresses:
+- "0.0.0.0:PORT" - Listen on all IPv4 interfaces (server)
+- "127.0.0.1:PORT" - Localhost only (local testing)
+- "::" - All IPv6 interfaces
+- "::1" - IPv6 localhost
+
+# Error Handling Patterns
+
+All network operations return Result types for error handling:
+
+```simple
+# Pattern 1: Match expression (recommended)
+val result = match TcpStream__connect("example.com:80"):
+    case Ok(stream):
+        # Use stream...
+        stream
+    case Err(error):
+        print "Connection failed: {error.message}"
+        return nil  # Or handle error appropriately
+
+# Pattern 2: Immediate error propagation (if in Result-returning function)
+# Note: ? operator may be unreliable in runtime, use match instead
+val stream = match TcpStream__connect("example.com:80"):
+    case Ok(s): s
+    case Err(e): return Err(e)
+
+# Pattern 3: Default value fallback
+val data = match stream.read(1024):
+    case Ok(d): d
+    case Err(e): []  # Empty array as default
+```
+
+Common network errors:
+- Connection refused (server not listening)
+- Connection timeout (server unreachable)
+- Connection reset (server closed connection)
+- Address in use (port already bound)
+- Address not available (invalid bind address)
+- Network unreachable (no route to host)
+
+# Timeout Configuration
+
+Configure timeouts to prevent indefinite blocking:
+
+```simple
+# TCP read/write timeouts
+val stream = TcpStream__connect("example.com:80")?
+stream.set_read_timeout(Some(5000))   # 5 seconds
+stream.set_write_timeout(Some(3000))  # 3 seconds
+
+# UDP receive timeout
+val socket = UdpSocket__bind("0.0.0.0:8080")?
+socket.set_read_timeout(Some(10000))  # 10 seconds
+
+# HTTP client timeout
+val client = HttpClient__new().set_timeout(Some(30000))  # 30 seconds
+
+# Connect with timeout
+val stream = TcpStream__connect_timeout("example.com:80", 5000)?
+```
+
+# Non-Blocking I/O
+
+Enable non-blocking mode for asynchronous operations:
+
+```simple
+# Non-blocking TCP
+val listener = TcpListener__bind("127.0.0.1:8080")?
+listener.set_nonblocking(true)
+
+val accept_result = listener.accept()  # Returns immediately
+match accept_result:
+    case Ok(stream):
+        # Connection available
+        handle_client(stream)
+    case Err(e):
+        # Would block - no connection yet
+        # Try again later
+        pass_do_nothing
+
+# Non-blocking UDP
+val socket = UdpSocket__bind("0.0.0.0:8080")?
+socket.set_nonblocking(true)
+
+val recv_result = socket.recv_from(1024)  # Returns immediately
+# Handle WouldBlock error appropriately
+```
+
+# Performance Tuning
+
+TCP_NODELAY disables Nagle's algorithm for low-latency applications:
+
+```simple
+# Disable Nagle's algorithm (send small packets immediately)
+val stream = TcpStream__connect("example.com:80")?
+stream.set_nodelay(true)
+
+# Useful for:
+# - Real-time protocols (gaming, VoIP)
+# - Request-response patterns (RPC)
+# - Interactive applications
+```
+
+# Multicast UDP
+
+Join multicast groups for one-to-many communication:
+
+```simple
+# Multicast receiver
+val socket = UdpSocket__bind("0.0.0.0:8080")?
+socket.set_multicast_loop(true)           # Enable loopback
+socket.join_multicast("239.0.0.1")        # Join group
+
+# Receive multicast datagrams
+val (data, sender) = socket.recv_from(1024)?
+
+# Leave group when done
+socket.leave_multicast("239.0.0.1")
+
+# Multicast sender
+val sender_socket = UdpSocket__bind("0.0.0.0:0")?
+sender_socket.set_broadcast(true)
+sender_socket.send_to("Broadcast message".as_bytes(), "239.0.0.1:8080")?
+```
+
+# URL Parsing and Building
+
+Parse and manipulate URLs programmatically:
+
+```simple
+# Parse URL
+use std.net.http.{Url, UrlBuilder}
+
+val url = Url__parse("https://example.com:8080/api/users?page=2&limit=10#section")?
+print "Scheme: {url.scheme()}"     # "https"
+print "Host: {url.host()}"         # "example.com"
+print "Port: {url.port()?}"        # Some(8080)
+print "Path: {url.path()}"         # "/api/users"
+print "Query: {url.query()?}"      # Some("page=2&limit=10")
+print "Fragment: {url.fragment()?}" # Some("section")
+
+# Parse query parameters
+val params = url.query_params()
+val page = params.get("page") ?? "1"
+val limit = params.get("limit") ?? "20"
+
+# Build URL programmatically
+val built_url = UrlBuilder__new()
+    .scheme("https")
+    .host("api.example.com")
+    .port(443)
+    .path("/v1/users")
+    .query_param("page", "1")
+    .query_param("limit", "50")
+    .fragment("results")
+    .build()
+
+print "Built URL: {built_url}"
+# Output: https://api.example.com:443/v1/users?page=1&limit=50#results
+```
+
+# Module Exports
+
+All networking types and functions are available through submodules:
+
+```simple
+use std.net.tcp.{TcpListener, TcpStream}
+use std.net.udp.{UdpSocket}
+use std.net.http.{HttpClient, HttpMethod, HttpRequest, HttpResponse, Url, UrlBuilder}
+use std.net.http.{get, post, download}  # Convenience functions
+```
+
+Internal FFI bindings (advanced use only):
+```simple
+use std.net.ffi.{tcp_stream_connect, udp_socket_bind, http_request, url_parse}
+```
+
+# See Also
+
+- `std.error` - Error handling with Result types
+- `std.platform` - Platform abstraction for cross-platform networking
+- `std.async` - Asynchronous networking (future)
+
+# Implementation Notes
+
+- All network operations are synchronous (blocking) by default
+- Timeouts prevent indefinite blocking
+- Non-blocking mode enables polling-based I/O
+- Result types provide type-safe error handling
+- No exception handling (try/catch not supported)
+- FFI bindings connect to native OS networking APIs
+"""
+
+# All submodules are automatically available when importing std.net

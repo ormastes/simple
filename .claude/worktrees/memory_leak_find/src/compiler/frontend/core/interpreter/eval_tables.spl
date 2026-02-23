@@ -1,0 +1,660 @@
+# Core Interpreter — Function/Struct/Enum Tables & Annotation Scanner
+#
+# Split from eval.spl. Contains:
+# - Function table (hash map): func_table_register, func_table_lookup, etc.
+# - Function return type table: func_register_return_type, func_lookup_return_type
+# - Must-Use registry (R9): must_use_register, must_use_is_registered, etc.
+# - Annotation scanner: must_use_scan_source (scans for @must_use, @init, @teardown, @when, @cfg)
+# - Struct definition table: struct_table_register, struct_table_lookup, etc.
+# - Enum type registry: enum_table_register, enum_table_lookup, etc.
+# - Phantom struct registry: phantom_struct_register, phantom_struct_is_registered
+# - Match exhaustiveness helpers
+#
+# All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
+
+use compiler.core.cfg_platform.{cfg_detect_os, cfg_detect_arch, cfg_detect_cpu, cfg_eval_key_value}
+
+# ===== Function Table (Hash Map) =====
+# Maps function name -> decl_id for call resolution
+var ft_keys: [text] = []
+var ft_vals: [i64] = []
+var ft_buckets: [i64] = []
+var ft_nexts: [i64] = []
+
+# ===== Function Return Types (Hash Map) =====
+var frt_keys: [text] = []
+var frt_vals: [i64] = []
+var frt_buckets: [i64] = []
+var frt_nexts: [i64] = []
+
+# ===== Must-Use Function Registry (Hash Map, R9) =====
+var mu_keys: [text] = []
+var mu_reasons: [text] = []
+var mu_buckets: [i64] = []
+var mu_nexts: [i64] = []
+var must_use_critical_mode: bool = false
+
+# @init and @teardown function name lists
+var init_functions: [text] = []
+var teardown_functions: [text] = []
+
+# @when conditional compilation — skipped decl names
+var when_disabled_decls: [text] = []
+
+fn when_check_condition(condition: text) -> bool:
+    # Evaluate @when condition for build/profile and target predicates.
+    val cond = condition.trim()
+
+    if cond == "true": return true
+    if cond == "false": return false
+    if cond == "debug": return true     # Always true in interpreter mode
+    if cond == "release": return false  # False in interpreter mode
+    if cond == "interpreter": return true
+    if cond == "compiled": return false
+
+    # Platform shorthands
+    if cond == "win" or cond == "windows":
+        return cfg_detect_os() == "windows"
+    if cond == "linux":
+        return cfg_detect_os() == "linux"
+    if cond == "mac" or cond == "macos" or cond == "darwin":
+        return cfg_detect_os() == "macos"
+    if cond == "freebsd":
+        return cfg_detect_os() == "freebsd"
+    if cond == "openbsd":
+        return cfg_detect_os() == "openbsd"
+    if cond == "netbsd":
+        return cfg_detect_os() == "netbsd"
+    if cond == "android":
+        return cfg_detect_os() == "android"
+    if cond == "unix":
+        val os = cfg_detect_os()
+        val is_unix = os == "linux" or os == "macos"
+        val is_unix2 = os == "freebsd" or os == "openbsd"
+        val is_unix3 = os == "netbsd" or os == "android"
+        return is_unix or is_unix2 or is_unix3 or os == "unix"
+
+    # CPU/arch shorthands
+    if cond == "x86_64" or cond == "amd64" or cond == "x64":
+        return cfg_detect_arch() == "x86_64"
+    if cond == "x86" or cond == "i386" or cond == "i686":
+        return cfg_detect_arch() == "x86"
+    if cond == "aarch64" or cond == "arm64":
+        return cfg_detect_arch() == "aarch64"
+    if cond == "arm" or cond == "armv7" or cond == "armv6":
+        return cfg_detect_arch() == "arm"
+    if cond == "riscv64":
+        return cfg_detect_arch() == "riscv64"
+    if cond == "riscv32":
+        return cfg_detect_arch() == "riscv32"
+    if cond == "ppc64le" or cond == "ppc64el" or cond == "powerpc64le":
+        return cfg_detect_arch() == "ppc64le"
+
+    # Key-value forms: os=linux, os=="linux", arch=x86_64, cpu=arm64, feature=foo.
+    if cond.contains("=="):
+        val parts = cond.split("==")
+        if parts.len() >= 2:
+            return cfg_eval_key_value(parts[0], parts[1])
+    if cond.contains("="):
+        val parts = cond.split("=")
+        if parts.len() >= 2:
+            return cfg_eval_key_value(parts[0], parts[1])
+
+    # Unknown condition: default to true (don't skip existing code silently).
+    true
+
+fn func_table_reset():
+    ft_keys = []
+    ft_vals = []
+    ft_buckets = hm_make_global_buckets()
+    ft_nexts = []
+    frt_keys = []
+    frt_vals = []
+    frt_buckets = hm_make_global_buckets()
+    frt_nexts = []
+    mu_keys = []
+    mu_reasons = []
+    mu_buckets = hm_make_global_buckets()
+    mu_nexts = []
+    must_use_critical_mode = false
+
+fn func_table_register(name: text, decl_id: i64):
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = ft_buckets[bucket]
+    while idx != -1:
+        if ft_keys[idx] == name:
+            ft_vals[idx] = decl_id
+            return
+        idx = ft_nexts[idx]
+    # New entry
+    val new_idx = ft_keys.len()
+    ft_keys.push(name)
+    ft_vals.push(decl_id)
+    ft_nexts.push(ft_buckets[bucket])
+    ft_buckets[bucket] = new_idx
+
+fn func_table_lookup(name: text) -> i64:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = ft_buckets[bucket]
+    while idx != -1:
+        if ft_keys[idx] == name:
+            return ft_vals[idx]
+        idx = ft_nexts[idx]
+    -1
+
+fn func_table_remove(name: text) -> bool:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var prev: i64 = -1
+    var idx = ft_buckets[bucket]
+    while idx != -1:
+        if ft_keys[idx] == name:
+            if prev == -1:
+                ft_buckets[bucket] = ft_nexts[idx]
+            else:
+                ft_nexts[prev] = ft_nexts[idx]
+            ft_keys[idx] = ""
+            ft_vals[idx] = -1
+            return true
+        prev = idx
+        idx = ft_nexts[idx]
+    false
+
+fn func_remove_return_type(name: text) -> bool:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var prev: i64 = -1
+    var idx = frt_buckets[bucket]
+    while idx != -1:
+        if frt_keys[idx] == name:
+            if prev == -1:
+                frt_buckets[bucket] = frt_nexts[idx]
+            else:
+                frt_nexts[prev] = frt_nexts[idx]
+            frt_keys[idx] = ""
+            frt_vals[idx] = -1
+            return true
+        prev = idx
+        idx = frt_nexts[idx]
+    false
+
+fn func_register_return_type(name: text, ret_type: i64):
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = frt_buckets[bucket]
+    while idx != -1:
+        if frt_keys[idx] == name:
+            frt_vals[idx] = ret_type
+            return
+        idx = frt_nexts[idx]
+    val new_idx = frt_keys.len()
+    frt_keys.push(name)
+    frt_vals.push(ret_type)
+    frt_nexts.push(frt_buckets[bucket])
+    frt_buckets[bucket] = new_idx
+
+fn func_lookup_return_type(name: text) -> i64:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = frt_buckets[bucket]
+    while idx != -1:
+        if frt_keys[idx] == name:
+            return frt_vals[idx]
+        idx = frt_nexts[idx]
+    -1
+
+# ===== Must-Use Registry Functions (R9) =====
+
+fn must_use_register(name: text, reason: text):
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = mu_buckets[bucket]
+    while idx != -1:
+        if mu_keys[idx] == name:
+            mu_reasons[idx] = reason
+            return
+        idx = mu_nexts[idx]
+    val new_idx = mu_keys.len()
+    mu_keys.push(name)
+    mu_reasons.push(reason)
+    mu_nexts.push(mu_buckets[bucket])
+    mu_buckets[bucket] = new_idx
+
+fn must_use_is_registered(name: text) -> bool:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = mu_buckets[bucket]
+    while idx != -1:
+        if mu_keys[idx] == name: return true
+        idx = mu_nexts[idx]
+    false
+
+fn must_use_get_reason(name: text) -> text:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = mu_buckets[bucket]
+    while idx != -1:
+        if mu_keys[idx] == name: return mu_reasons[idx]
+        idx = mu_nexts[idx]
+    ""
+
+fn must_use_is_critical() -> bool:
+    must_use_critical_mode
+
+fn must_use_scan_source(source: text):
+    mu_keys = []
+    mu_reasons = []
+    mu_buckets = hm_make_global_buckets()
+    mu_nexts = []
+    must_use_critical_mode = false
+    # Split source into lines and scan for comment annotations
+    var lines: [text] = []
+    var line_chars: [text] = []
+    var ci: i64 = 0
+    for _unused in source:
+        if ci >= source.len(): break
+        val ch = source[ci]
+        if ch == "\n":
+            lines.push(line_chars.join(""))
+            line_chars = []
+        else:
+            line_chars.push(ch)
+        ci = ci + 1
+    if line_chars.len() > 0:
+        lines.push(line_chars.join(""))
+    # Scan for annotations
+    var pending_must_use: bool = false
+    var pending_reason: text = ""
+    var pending_init: bool = false
+    var pending_teardown: bool = false
+    var pending_when: text = ""
+    var li: i64 = 0
+    for line in lines:
+        # Trim leading spaces
+        var trimmed_chars: [text] = []
+        var started: bool = false
+        var ti: i64 = 0
+        for _c in line:
+            if ti >= line.len(): break
+            val lc = line[ti]
+            if started:
+                trimmed_chars.push(lc)
+            elif lc != " " and lc != "\t":
+                started = true
+                trimmed_chars.push(lc)
+            ti = ti + 1
+        val trimmed = trimmed_chars.join("")
+        # Check for @profile(critical)
+        if trimmed.starts_with("# @profile(critical)"):
+            must_use_critical_mode = true
+        # Check for @tailrec annotation — marks function for tail-call optimization
+        if trimmed.starts_with("# @tailrec"):
+            pending_init = false  # @tailrec isn't @init
+            pending_teardown = false
+            # Simply note the next fn as tailrec-annotated for warning purposes
+
+        # Check for @init annotation
+        if trimmed.starts_with("# @init"):
+            pending_init = true
+        # Check for @teardown annotation
+        if trimmed.starts_with("# @teardown"):
+            pending_teardown = true
+        # Check for @when(condition) conditional compilation (comment form: backward compat)
+        if trimmed.starts_with("# @when("):
+            # Extract condition: "# @when(condition)"
+            var when_cond_chars: [text] = []
+            var wci: i64 = 8
+            for _wc in trimmed:
+                if wci >= trimmed.len(): break
+                val wch = trimmed[wci]
+                if wch == ")": break
+                when_cond_chars.push(wch)
+                wci = wci + 1
+            val when_cond = when_cond_chars.join("")
+            pending_when = when_cond
+        # Check for @cfg(condition) — new proper syntax (no # prefix)
+        if trimmed.starts_with("@cfg("):
+            var cfg_chars: [text] = []
+            var cci: i64 = 5
+            var cfg_depth: i64 = 1
+            for _cc in trimmed:
+                if cci >= trimmed.len(): break
+                val cch = trimmed[cci]
+                if cch == "(":
+                    cfg_depth = cfg_depth + 1
+                if cch == ")":
+                    cfg_depth = cfg_depth - 1
+                    if cfg_depth == 0: break
+                cfg_chars.push(cch)
+                cci = cci + 1
+            var cfg_cond = cfg_chars.join("").trim()
+            # Convert @cfg("key", "value") to key=value form
+            if cfg_cond.contains(","):
+                val cfg_parts = cfg_cond.split(",")
+                if cfg_parts.len() >= 2:
+                    var cfg_key = cfg_parts[0].trim()
+                    var cfg_val = cfg_parts[1].trim()
+                    # Strip quotes
+                    if cfg_key.len() >= 2 and cfg_key.starts_with("\"") and cfg_key.ends_with("\""):
+                        cfg_key = cfg_key[1:cfg_key.len() - 1]
+                    if cfg_val.len() >= 2 and cfg_val.starts_with("\"") and cfg_val.ends_with("\""):
+                        cfg_val = cfg_val[1:cfg_val.len() - 1]
+                    cfg_cond = "{cfg_key}={cfg_val}"
+            pending_when = cfg_cond
+        # Check for @must_use
+        if trimmed.starts_with("# @must_use"):
+            pending_must_use = true
+            # Extract reason from @must_use("reason")
+            pending_reason = ""
+            if trimmed.contains("(\""):
+                # Find text between (" and ")
+                var in_reason: bool = false
+                var reason_chars: [text] = []
+                var ri: i64 = 0
+                for _rc in trimmed:
+                    if ri >= trimmed.len(): break
+                    if in_reason:
+                        val rc2 = trimmed[ri]
+                        if rc2 == "\"":
+                            in_reason = false
+                        else:
+                            reason_chars.push(rc2)
+                    elif ri + 1 < trimmed.len():
+                        val rc3 = trimmed[ri]
+                        val rc4 = trimmed[ri + 1]
+                        if rc3 == "(" and rc4 == "\"":
+                            in_reason = true
+                            ri = ri + 1
+                    ri = ri + 1
+                pending_reason = reason_chars.join("")
+        # Check if line declares a function (and we have a pending annotation)
+        if pending_must_use:
+            if trimmed.starts_with("fn "):
+                # Extract function name
+                var fname_chars: [text] = []
+                var fi: i64 = 3
+                for _fc in trimmed:
+                    if fi >= trimmed.len(): break
+                    val fc2 = trimmed[fi]
+                    if fc2 == "(" or fc2 == " " or fc2 == ":": break
+                    fname_chars.push(fc2)
+                    fi = fi + 1
+                val fname = fname_chars.join("")
+                if fname != "":
+                    must_use_register(fname, pending_reason)
+                pending_must_use = false
+                pending_reason = ""
+            elif trimmed.starts_with("# ") == false and trimmed != "":
+                # Non-comment, non-empty line without fn => cancel pending
+                pending_must_use = false
+                pending_reason = ""
+        # Handle @init and @teardown function registration
+        if pending_init or pending_teardown or pending_when != "":
+            if trimmed.starts_with("fn ") or trimmed.starts_with("val ") or trimmed.starts_with("var "):
+                # Extract declaration name
+                var anno_fname_chars: [text] = []
+                var anno_fi: i64 = 3
+                if trimmed.starts_with("val ") or trimmed.starts_with("var "):
+                    anno_fi = 4
+                for _afc in trimmed:
+                    if anno_fi >= trimmed.len(): break
+                    val afc2 = trimmed[anno_fi]
+                    if afc2 == "(" or afc2 == " " or afc2 == ":" or afc2 == "=": break
+                    anno_fname_chars.push(afc2)
+                    anno_fi = anno_fi + 1
+                val anno_fname = anno_fname_chars.join("")
+                if anno_fname != "":
+                    if pending_init:
+                        init_functions.push(anno_fname)
+                    if pending_teardown:
+                        teardown_functions.push(anno_fname)
+                    if pending_when != "":
+                        val when_ok = when_check_condition(pending_when)
+                        if when_ok == false:
+                            when_disabled_decls.push(anno_fname)
+                pending_init = false
+                pending_teardown = false
+                pending_when = ""
+            elif trimmed.starts_with("# ") == false and trimmed != "":
+                pending_init = false
+                pending_teardown = false
+                pending_when = ""
+        li = li + 1
+
+# ===== Struct Definition Table (Hash Map) =====
+# Maps struct name -> decl_id for constructor resolution
+var st_keys: [text] = []
+var st_vals: [i64] = []
+var st_buckets: [i64] = []
+var st_nexts: [i64] = []
+var st_module_paths: [text] = []
+
+fn struct_table_reset():
+    st_keys = []
+    st_vals = []
+    st_buckets = hm_make_global_buckets()
+    st_nexts = []
+    st_module_paths = []
+
+fn struct_table_register(name: text, decl_id: i64):
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = st_buckets[bucket]
+    while idx != -1:
+        if st_keys[idx] == name:
+            st_vals[idx] = decl_id
+            st_module_paths[idx] = module_get_path()
+            return
+        idx = st_nexts[idx]
+    val new_idx = st_keys.len()
+    st_keys.push(name)
+    st_vals.push(decl_id)
+    st_nexts.push(st_buckets[bucket])
+    st_buckets[bucket] = new_idx
+    st_module_paths.push(module_get_path())
+
+fn struct_table_lookup(name: text) -> i64:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = st_buckets[bucket]
+    while idx != -1:
+        if st_keys[idx] == name:
+            return st_vals[idx]
+        idx = st_nexts[idx]
+    -1
+
+fn struct_table_remove(name: text) -> bool:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var prev: i64 = -1
+    var idx = st_buckets[bucket]
+    while idx != -1:
+        if st_keys[idx] == name:
+            if prev == -1:
+                st_buckets[bucket] = st_nexts[idx]
+            else:
+                st_nexts[prev] = st_nexts[idx]
+            st_keys[idx] = ""
+            st_vals[idx] = -1
+            st_module_paths[idx] = ""
+            return true
+        prev = idx
+        idx = st_nexts[idx]
+    false
+
+fn struct_table_get_module(name: text) -> text:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = st_buckets[bucket]
+    while idx != -1:
+        if st_keys[idx] == name:
+            return st_module_paths[idx]
+        idx = st_nexts[idx]
+    ""
+
+# ===== Enum Type Registry =====
+# Tracks enum type names and their variants for exhaustiveness checking.
+# Variants stored as comma-separated text to avoid [[text]] arrays.
+var enum_reg_names: [text] = []
+var enum_reg_variants: [text] = []
+
+fn enum_table_reset():
+    enum_reg_names = []
+    enum_reg_variants = []
+
+fn enum_table_register(name: text, variants: [text]):
+    # Check if already registered
+    var i: i64 = 0
+    for existing in enum_reg_names:
+        if existing == name:
+            return
+        i = i + 1
+    enum_reg_names.push(name)
+    enum_reg_variants.push(variants.join(","))
+
+fn enum_table_lookup(name: text) -> text:
+    # Returns comma-separated variants, or "" if not found
+    var i: i64 = 0
+    for ename in enum_reg_names:
+        if ename == name:
+            return enum_reg_variants[i]
+        i = i + 1
+    ""
+
+fn enum_table_remove(name: text) -> bool:
+    var i: i64 = 0
+    for ename in enum_reg_names:
+        if ename == name:
+            enum_reg_names[i] = ""
+            enum_reg_variants[i] = ""
+            return true
+        i = i + 1
+    false
+
+# ===== Phantom Struct Registry =====
+# Tracks struct names explicitly registered as phantom types.
+var phantom_reg_names: [text] = []
+
+fn phantom_struct_register(name: text):
+    # Register a struct name as a phantom type marker
+    for existing in phantom_reg_names:
+        if existing == name: return
+    phantom_reg_names.push(name)
+
+fn phantom_struct_is_registered(name: text) -> bool:
+    for pname in phantom_reg_names:
+        if pname == name: return true
+    false
+
+fn phantom_reg_reset():
+    phantom_reg_names = []
+
+# ===== Match Exhaustiveness Helpers =====
+
+fn match_arm_is_wildcard(pattern_eid: i64) -> bool:
+    # Returns true if pattern_eid is a wildcard (_) or bare identifier (binding)
+    # A pattern_eid < 0 means unconditional match
+    if pattern_eid < 0: return true
+    val e_node = expr_get(pattern_eid)
+    val tag = e_node.tag
+    if tag == EXPR_IDENT:
+        val pname = e_node.s_val
+        if pname == "_": return true
+        # A bare identifier is a binding pattern — also catches all
+        return true
+    false
+
+fn match_arm_get_enum_type(pattern_eid: i64) -> text:
+    # Extracts enum type name from a pattern like Status.Ok (EXPR_FIELD_ACCESS)
+    # Returns "" if pattern is not an enum variant pattern
+    if pattern_eid < 0: return ""
+    val e_node = expr_get(pattern_eid)
+    val tag = e_node.tag
+    if tag == EXPR_FIELD_ACCESS:
+        val base_eid = e_node.left
+        if base_eid >= 0:
+            val base_node = expr_get(base_eid)
+            if base_node.tag == EXPR_IDENT:
+                return base_node.s_val
+    ""
+
+fn match_arm_get_variant_name(pattern_eid: i64) -> text:
+    # Extracts variant name from a pattern like Status.Ok -> "Ok"
+    if pattern_eid < 0: return ""
+    val e_node = expr_get(pattern_eid)
+    val tag = e_node.tag
+    if tag == EXPR_FIELD_ACCESS:
+        return e_node.s_val
+    ""
+
+fn check_match_exhaustive(arm_ids: [i64], type_name: text):
+    # Check if match arms cover all variants of the given enum type.
+    # Emits a warning if variants are missing and no wildcard present.
+    if type_name == "": return
+    val variants_csv = enum_table_lookup(type_name)
+    if variants_csv == "": return
+
+    # Check if any arm is a wildcard (catches all)
+    var has_wildcard: bool = false
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        if match_arm_is_wildcard(pattern_eid):
+            has_wildcard = true
+    if has_wildcard: return
+
+    # Collect covered variant names from arms
+    var covered: [text] = []
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        val variant = match_arm_get_variant_name(pattern_eid)
+        if variant != "":
+            covered.push(variant)
+
+    # Split variants_csv into individual variants
+    var all_variants: [text] = []
+    var chars: [text] = []
+    var ci2: i64 = 0
+    for _c2 in variants_csv:
+        if ci2 >= variants_csv.len(): break
+        val ch2 = variants_csv[ci2]
+        if ch2 == ",":
+            if chars.len() > 0:
+                all_variants.push(chars.join(""))
+                chars = []
+        else:
+            chars.push(ch2)
+        ci2 = ci2 + 1
+    if chars.len() > 0:
+        all_variants.push(chars.join(""))
+
+    # Find missing variants
+    var missing: [text] = []
+    for variant in all_variants:
+        var found: bool = false
+        for cov in covered:
+            if cov == variant:
+                found = true
+        if found == false:
+            missing.push(variant)
+
+    if missing.len() > 0:
+        var msg = "warning: non-exhaustive match on '" + type_name + "' — missing: "
+        var mi: i64 = 0
+        for mv in missing:
+            if mi > 0:
+                msg = msg + ", "
+            msg = msg + mv
+            mi = mi + 1
+        eval_warnings.push(msg)
+
+fn infer_match_enum_type(arm_ids: [i64]) -> text:
+    # Try to infer enum type from match arms by looking for EXPR_FIELD_ACCESS patterns
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        val etype = match_arm_get_enum_type(pattern_eid)
+        if etype != "":
+            return etype
+    ""
+
+export func_table_reset, func_table_register, func_table_lookup, func_table_remove
+export func_register_return_type, func_lookup_return_type, func_remove_return_type
+export must_use_register, must_use_is_registered, must_use_get_reason, must_use_is_critical
+export must_use_scan_source, must_use_critical_mode
+export init_functions, teardown_functions, when_disabled_decls
+export when_check_condition
+export struct_table_reset, struct_table_register, struct_table_lookup, struct_table_get_module, struct_table_remove
+export enum_table_reset, enum_table_register, enum_table_lookup, enum_table_remove
+export enum_reg_names, enum_reg_variants
+export phantom_struct_register, phantom_struct_is_registered, phantom_reg_reset
+export match_arm_is_wildcard, match_arm_get_enum_type, match_arm_get_variant_name
+export check_match_exhaustive, infer_match_enum_type
+export ft_keys

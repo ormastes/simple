@@ -1,0 +1,344 @@
+# Cryptography SFFI Wrapper
+# SFFI pattern for cryptographic operations
+# Dependencies: ring, argon2 (Rust crates)
+
+use app.io.sffi_common.{SffiResult, sffi_success, sffi_error, is_empty_string, is_valid_hex}
+
+# ============================================================================
+# Tier 1: Extern Function Declarations (Raw FFI)
+# ============================================================================
+
+# --- Hashing Functions ---
+
+extern fn rt_hash_sha256(data: text) -> text
+extern fn rt_hash_sha512(data: text) -> text
+extern fn rt_hash_sha3_256(data: text) -> text
+extern fn rt_hash_blake3(data: text) -> text
+
+# --- HMAC Functions ---
+
+extern fn rt_hmac_sha256(key: text, data: text) -> text
+extern fn rt_hmac_sha512(key: text, data: text) -> text
+
+# --- Password Hashing (Argon2id) ---
+
+extern fn rt_password_hash(password: text) -> text
+extern fn rt_password_verify(password: text, hash: text) -> i64
+
+# --- Password Hashing (Bcrypt) ---
+
+extern fn rt_password_hash_bcrypt(password: text, cost: i64) -> text
+extern fn rt_password_verify_bcrypt(password: text, hash: text) -> i64
+
+# --- Encryption (AES-256-GCM) ---
+
+extern fn rt_encrypt_aes256(key: text, data: text) -> text
+extern fn rt_decrypt_aes256(key: text, encrypted: text) -> text
+
+# --- Key Generation ---
+
+extern fn rt_generate_key(length: i64) -> text
+extern fn rt_generate_key_hex(length: i64) -> text
+
+# --- Key Derivation (PBKDF2) ---
+
+extern fn rt_derive_key_pbkdf2(password: text, salt: text, iterations: i64, length: i64) -> text
+
+# --- Random Generation ---
+
+extern fn rt_random_bytes(length: i64) -> text
+extern fn rt_random_hex(length: i64) -> text
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+# --- Hash Functions ---
+
+fn hash_sha256(data: text) -> text:
+    """Hash data using SHA-256
+
+    Returns: Hex-encoded hash (64 characters)
+    """
+    rt_hash_sha256(data)
+
+fn hash_sha512(data: text) -> text:
+    """Hash data using SHA-512
+
+    Returns: Hex-encoded hash (128 characters)
+    """
+    rt_hash_sha512(data)
+
+fn hash_sha3_256(data: text) -> text:
+    """Hash data using SHA3-256
+
+    Returns: Hex-encoded hash (64 characters)
+    """
+    rt_hash_sha3_256(data)
+
+fn hash_blake3(data: text) -> text:
+    """Hash data using BLAKE3 (fast)
+
+    Returns: Hex-encoded hash (64 characters)
+    """
+    rt_hash_blake3(data)
+
+fn hash(data: text) -> text:
+    """Default hash function (SHA-256)
+
+    Returns: Hex-encoded hash
+    """
+    hash_sha256(data)
+
+# --- HMAC Functions ---
+
+fn hmac_sha256(key: text, data: text) -> text:
+    """Compute HMAC-SHA256
+
+    Args:
+        key: Secret key for HMAC
+        data: Data to authenticate
+
+    Returns: Hex-encoded HMAC (64 characters)
+    """
+    rt_hmac_sha256(key, data)
+
+fn hmac_sha512(key: text, data: text) -> text:
+    """Compute HMAC-SHA512
+
+    Args:
+        key: Secret key for HMAC
+        data: Data to authenticate
+
+    Returns: Hex-encoded HMAC (128 characters)
+    """
+    rt_hmac_sha512(key, data)
+
+fn hmac(key: text, data: text) -> text:
+    """Default HMAC function (HMAC-SHA256)
+
+    Returns: Hex-encoded HMAC
+    """
+    hmac_sha256(key, data)
+
+# --- Password Hashing (Argon2id - Recommended) ---
+
+fn password_hash(password: text) -> text:
+    """Hash password using Argon2id (recommended)
+
+    Args:
+        password: Password to hash
+
+    Returns: Argon2id hash string (includes salt, parameters)
+            Format: $argon2id$v=19$m=4096,t=3,p=1$salt$hash
+            Empty string on error
+
+    Example:
+        hash = password_hash("my_password")
+        if hash != "":
+            # Store hash in database
+    """
+    rt_password_hash(password)
+
+fn password_verify(password: text, hash: text) -> bool:
+    """Verify password against Argon2id hash
+
+    Args:
+        password: Password to verify
+        hash: Argon2id hash string
+
+    Returns: true if password matches, false otherwise
+
+    Example:
+        if password_verify(input_password, stored_hash):
+            # Password is correct
+    """
+    val result = rt_password_verify(password, hash)
+    result == 1
+
+fn password_check(password: text, hash: text) -> bool:
+    """Alias for password_verify"""
+    password_verify(password, hash)
+
+# --- Password Hashing (Bcrypt - Legacy Support) ---
+
+fn password_hash_bcrypt(password: text, cost: i64) -> text:
+    """Hash password using bcrypt
+
+    Args:
+        password: Password to hash
+        cost: Cost factor (4-31, typically 12)
+
+    Returns: Bcrypt hash string (includes salt)
+            Format: $2b$12$salt$hash
+            Empty string on error
+
+    Note: Prefer password_hash() (Argon2id) for new code
+    """
+    rt_password_hash_bcrypt(password, cost)
+
+fn password_verify_bcrypt(password: text, hash: text) -> bool:
+    """Verify password against bcrypt hash
+
+    Returns: true if password matches, false otherwise
+    """
+    val result = rt_password_verify_bcrypt(password, hash)
+    result == 1
+
+# --- Encryption (AES-256-GCM) ---
+
+fn encrypt_aes256(key: text, data: text) -> text:
+    """Encrypt data using AES-256-GCM
+
+    Args:
+        key: Encryption key (hex string, 64 characters = 32 bytes)
+        data: Plaintext data to encrypt
+
+    Returns: Encrypted data (hex-encoded: nonce + ciphertext + tag)
+            Empty string on error
+
+    Note: AES-GCM provides authenticated encryption (confidentiality + integrity)
+    """
+    rt_encrypt_aes256(key, data)
+
+fn decrypt_aes256(key: text, encrypted: text) -> text:
+    """Decrypt data using AES-256-GCM
+
+    Args:
+        key: Encryption key (hex string, 64 characters = 32 bytes)
+        encrypted: Encrypted data from encrypt_aes256()
+
+    Returns: Decrypted plaintext data
+            Empty string on error (invalid key, corrupted data, or auth failure)
+    """
+    rt_decrypt_aes256(key, encrypted)
+
+fn encrypt(key: text, data: text) -> text:
+    """Default encryption function (AES-256-GCM)"""
+    encrypt_aes256(key, data)
+
+fn decrypt(key: text, encrypted: text) -> text:
+    """Default decryption function (AES-256-GCM)"""
+    decrypt_aes256(key, encrypted)
+
+# --- Key Generation ---
+
+fn generate_key(length: i64) -> text:
+    """Generate cryptographically secure random key
+
+    Args:
+        length: Key length in bytes (typically 32 for AES-256)
+
+    Returns: Base64-encoded key
+    """
+    rt_generate_key(length)
+
+fn generate_key_hex(length: i64) -> text:
+    """Generate cryptographically secure random key (hex-encoded)
+
+    Args:
+        length: Key length in bytes (typically 32 for AES-256)
+
+    Returns: Hex-encoded key (length*2 characters)
+
+    Example:
+        key = generate_key_hex(32)  # 64 hex chars = 32 bytes
+    """
+    rt_generate_key_hex(length)
+
+fn generate_aes256_key() -> text:
+    """Generate AES-256 encryption key (32 bytes, hex-encoded)
+
+    Returns: 64-character hex string
+    """
+    generate_key_hex(32)
+
+# --- Key Derivation (PBKDF2) ---
+
+fn derive_key_pbkdf2(password: text, salt: text, iterations: i64, length: i64) -> text:
+    """Derive key from password using PBKDF2-HMAC-SHA256
+
+    Args:
+        password: Password to derive key from
+        salt: Salt (hex string)
+        iterations: Number of iterations (typically 100000+)
+        length: Desired key length in bytes
+
+    Returns: Derived key (hex-encoded)
+
+    Example:
+        salt = random_hex(16)
+        key = derive_key_pbkdf2("password", salt, 100000, 32)
+    """
+    rt_derive_key_pbkdf2(password, salt, iterations, length)
+
+fn derive_key(password: text, salt: text) -> text:
+    """Derive AES-256 key from password (convenience function)
+
+    Uses PBKDF2 with 100000 iterations and 32-byte output
+    """
+    derive_key_pbkdf2(password, salt, 100000, 32)
+
+# --- Random Generation ---
+
+fn random_bytes(length: i64) -> text:
+    """Generate cryptographically secure random bytes
+
+    Args:
+        length: Number of bytes to generate
+
+    Returns: Base64-encoded random data
+    """
+    rt_random_bytes(length)
+
+fn random_hex(length: i64) -> text:
+    """Generate cryptographically secure random bytes (hex-encoded)
+
+    Args:
+        length: Number of bytes to generate
+
+    Returns: Hex-encoded random data (length*2 characters)
+
+    Example:
+        salt = random_hex(16)  # 32 hex chars = 16 bytes
+    """
+    rt_random_hex(length)
+
+fn random_salt() -> text:
+    """Generate random salt for password hashing (16 bytes, hex)
+
+    Returns: 32-character hex string
+    """
+    random_hex(16)
+
+# --- Helper Functions ---
+
+fn hash_verify(data: text, expected_hash: text) -> bool:
+    """Verify data matches expected hash (SHA-256)
+
+    Returns: true if hash matches, false otherwise
+    """
+    val computed_hash = hash_sha256(data)
+    computed_hash == expected_hash
+
+fn hmac_verify(key: text, data: text, expected_hmac: text) -> bool:
+    """Verify HMAC matches expected value (timing-safe)
+
+    Returns: true if HMAC matches, false otherwise
+    """
+    val computed_hmac = hmac_sha256(key, data)
+    computed_hmac == expected_hmac
+
+# ============================================================================
+# Export Functions
+# ============================================================================
+
+export hash_sha256, hash_sha512, hash_sha3_256, hash_blake3, hash
+export hmac_sha256, hmac_sha512, hmac
+export password_hash, password_verify, password_check
+export password_hash_bcrypt, password_verify_bcrypt
+export encrypt_aes256, decrypt_aes256, encrypt, decrypt
+export generate_key, generate_key_hex, generate_aes256_key
+export derive_key_pbkdf2, derive_key
+export random_bytes, random_hex, random_salt
+export hash_verify, hmac_verify

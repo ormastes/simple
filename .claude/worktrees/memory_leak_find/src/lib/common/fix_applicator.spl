@@ -1,0 +1,131 @@
+# Fix Application Engine
+#
+# Applies machine-applicable fixes to source files, handling
+# overlapping spans by sorting and rejecting conflicts.
+#
+# Port of rust/common/src/fix_applicator.rs
+
+from diagnostic import {EasyFix, FixConfidence, Replacement, SourceRegistry, Span}
+use std.db_atomic.{atomic_write, DbConfig}
+
+# ============================================================================
+# Errors
+# ============================================================================
+
+enum FixError:
+    """Error type for fix application."""
+    ConflictingReplacements(file: text, fix_id_a: text, fix_id_b: text)
+    FileNotFound(text)
+    IoError(text)
+
+impl FixError:
+    fn to_text() -> text:
+        match self:
+            case ConflictingReplacements(file, a, b):
+                "conflicting fixes in {file}: {a} and {b}"
+            case FileNotFound(f):
+                "file not found: {f}"
+            case IoError(msg):
+                "IO error: {msg}"
+
+# ============================================================================
+# Fix Report
+# ============================================================================
+
+struct FixReport:
+    """Report of applied fixes."""
+    applied: i64
+    skipped: i64
+    modified_files: [text]
+    details: [text]
+
+impl FixReport:
+    static fn empty() -> FixReport:
+        FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
+
+# ============================================================================
+# Fix Applicator
+# ============================================================================
+
+fn apply_fixes(fixes: [EasyFix], sources: SourceRegistry) -> Result<Dict<text, text>, FixError>:
+    """Apply fixes to source content. Returns map of file -> new content."""
+    # Group replacements by file
+    var by_file: Dict<text, [(text, Replacement)]> = {}
+    for fix in fixes:
+        for replacement in fix.replacements:
+            if not by_file.contains(replacement.file):
+                by_file[replacement.file] = []
+            by_file[replacement.file] = by_file[replacement.file].push((fix.id, replacement))
+
+    var results: Dict<text, text> = {}
+
+    for (file, replacements) in by_file:
+        val source = sources.get(file)
+        if not source.?:
+            return Err(FixError.FileNotFound(file))
+
+        # Sort by start position descending (apply from end to start)
+        var sorted = replacements.sort_by(\a, b: b.1.span.start - a.1.span.start)
+
+        # Check for overlapping spans
+        var i = 0
+        while i < sorted.len() - 1:
+            val (id_a, rep_a) = sorted[i]
+            val (id_b, rep_b) = sorted[i + 1]
+            # Since sorted descending, rep_a.start >= rep_b.start
+            # Overlap if rep_b.end > rep_a.start
+            if rep_b.span.end > rep_a.span.start:
+                return Err(FixError.ConflictingReplacements(
+                    file: file,
+                    fix_id_a: id_a,
+                    fix_id_b: id_b
+                ))
+            i = i + 1
+
+        # Apply replacements from end to start
+        var new_source = source.unwrap()
+        for (_, replacement) in sorted:
+            val start = replacement.span.start
+            val end = replacement.span.end
+            if start <= new_source.len() and end <= new_source.len():
+                new_source = new_source[0:start] + replacement.new_text + new_source[end:]
+
+        results[file] = new_source
+
+    Ok(results)
+
+fn apply_to_disk(fixes: [EasyFix], sources: SourceRegistry, dry_run: bool) -> Result<FixReport, FixError>:
+    """Apply fixes in-place to files on disk."""
+    val new_contents = apply_fixes(fixes, sources)?
+    var report = FixReport__empty()
+    report.applied = fixes.len()
+
+    for (file, content) in new_contents:
+        report.modified_files = report.modified_files.push(file)
+        if not dry_run:
+            # Atomically write fixed file with backup (CRITICAL - modifying source code!)
+            val write_result = atomic_write(file, content, DbConfig__defaults())
+            if not write_result.is_ok():
+                return Err(FixError.IoError("Failed to write {file}: {write_result.unwrap_err()}"))
+
+    for fix in fixes:
+        report.details = report.details.push("[{fix.id}] {fix.description}")
+
+    Ok(report)
+
+fn filter_by_confidence(fixes: [EasyFix], min_confidence: FixConfidence) -> [EasyFix]:
+    """Filter fixes by minimum confidence level."""
+    fixes.filter(\f:
+        match (min_confidence, f.confidence):
+            case (Safe, Safe): true
+            case (Likely, Safe) | (Likely, Likely): true
+            case (Uncertain, _): true
+            case _: false
+    )
+
+fn filter_by_id(fixes: [EasyFix], id_prefix: text) -> [EasyFix]:
+    """Filter fixes by ID prefix."""
+    fixes.filter(\f: f.id.starts_with(id_prefix))
+
+export FixError, FixReport
+export apply_fixes, apply_to_disk, filter_by_confidence, filter_by_id

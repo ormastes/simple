@@ -1,0 +1,393 @@
+#!/usr/bin/env simple
+# TLS/SSL SFFI Wrapper
+#
+# SFFI pattern for TLS (Transport Layer Security) operations.
+# Provides secure socket connections, certificate management, and HTTPS support.
+#
+# Rust crate: rustls (https://docs.rs/rustls/)
+# Note: rustls is already used by HTTP wrapper, so this extends that functionality
+
+use app.io.sffi_common.{is_valid_handle, is_invalid_handle}
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+# --- TLS Client ---
+
+extern fn rt_tls_client_connect(host: text, port: i64) -> i64
+extern fn rt_tls_client_connect_with_sni(host: text, port: i64, server_name: text) -> i64
+extern fn rt_tls_client_write(conn: i64, data: text) -> i64
+extern fn rt_tls_client_read(conn: i64, max_bytes: i64) -> text
+extern fn rt_tls_client_close(conn: i64) -> bool
+
+# --- TLS Server ---
+
+extern fn rt_tls_server_create(port: i64, cert_path: text, key_path: text) -> i64
+extern fn rt_tls_server_accept(server: i64) -> i64  # Returns client connection
+extern fn rt_tls_server_write(conn: i64, data: text) -> i64
+extern fn rt_tls_server_read(conn: i64, max_bytes: i64) -> text
+extern fn rt_tls_server_close_connection(conn: i64) -> bool
+extern fn rt_tls_server_shutdown(server: i64) -> bool
+
+# --- Certificate Management ---
+
+extern fn rt_tls_load_cert(cert_path: text) -> i64
+extern fn rt_tls_load_key(key_path: text) -> i64
+extern fn rt_tls_verify_cert(cert: i64) -> bool
+extern fn rt_tls_get_cert_subject(cert: i64) -> text
+extern fn rt_tls_get_cert_issuer(cert: i64) -> text
+extern fn rt_tls_get_cert_expiry(cert: i64) -> text
+extern fn rt_tls_free_cert(cert: i64) -> bool
+
+# --- Client Configuration ---
+
+extern fn rt_tls_client_config_new() -> i64
+extern fn rt_tls_client_config_add_root_cert(config: i64, cert_path: text) -> bool
+extern fn rt_tls_client_config_set_alpn(config: i64, protocols: [text]) -> bool
+extern fn rt_tls_client_config_enable_sni(config: i64, enabled: bool) -> bool
+extern fn rt_tls_client_config_set_verify_mode(config: i64, verify: bool) -> bool
+extern fn rt_tls_client_config_free(config: i64) -> bool
+
+# --- Server Configuration ---
+
+extern fn rt_tls_server_config_new(cert_path: text, key_path: text) -> i64
+extern fn rt_tls_server_config_set_alpn(config: i64, protocols: [text]) -> bool
+extern fn rt_tls_server_config_require_client_cert(config: i64, require: bool) -> bool
+extern fn rt_tls_server_config_free(config: i64) -> bool
+
+# --- Connection Info ---
+
+extern fn rt_tls_get_peer_cert(conn: i64) -> i64
+extern fn rt_tls_get_protocol_version(conn: i64) -> text
+extern fn rt_tls_get_cipher_suite(conn: i64) -> text
+extern fn rt_tls_get_negotiated_alpn(conn: i64) -> text
+extern fn rt_tls_is_handshake_complete(conn: i64) -> bool
+
+# --- Utilities ---
+
+extern fn rt_tls_generate_self_signed_cert(common_name: text, days_valid: i64, cert_out: text, key_out: text) -> bool
+extern fn rt_tls_hash_cert(cert_path: text) -> text  # SHA-256 fingerprint
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+# --- Core Types ---
+
+struct TlsClientConnection:
+    handle: i64
+    host: text
+    port: i64
+    is_valid: bool
+
+struct TlsServerConnection:
+    handle: i64
+    is_valid: bool
+
+struct TlsServer:
+    handle: i64
+    port: i64
+    is_valid: bool
+
+struct TlsCertificate:
+    handle: i64
+    is_valid: bool
+
+struct TlsClientConfig:
+    handle: i64
+    is_valid: bool
+
+struct TlsServerConfig:
+    handle: i64
+    is_valid: bool
+
+struct TlsConnectionInfo:
+    protocol_version: text
+    cipher_suite: text
+    alpn_protocol: text
+    peer_cert_subject: text
+
+# --- TLS Client ---
+
+fn tls_connect(host: text, port: i64) -> TlsClientConnection:
+    """Connect to TLS server
+
+    Args:
+        host: Server hostname/IP
+        port: Port number (443 for HTTPS)
+
+    Returns: TlsClientConnection (check is_valid)
+
+    Example:
+        conn = tls_connect("example.com", 443)
+        if conn.is_valid:
+            tls_write(conn, "GET / HTTP/1.1\r\n\r\n")
+            response = tls_read(conn, 4096)
+    """
+    val handle = rt_tls_client_connect(host, port)
+    TlsClientConnection(handle: handle, host: host, port: port, is_valid: is_valid_handle(handle))
+
+fn tls_connect_with_sni(host: text, port: i64, server_name: text) -> TlsClientConnection:
+    """Connect to TLS server with custom SNI (Server Name Indication)
+
+    Args:
+        host: Server IP address
+        port: Port number
+        server_name: SNI hostname
+
+    Returns: TlsClientConnection
+
+    Example:
+        # Connect to CDN with specific SNI
+        conn = tls_connect_with_sni("192.0.2.1", 443, "cdn.example.com")
+    """
+    val handle = rt_tls_client_connect_with_sni(host, port, server_name)
+    TlsClientConnection(handle: handle, host: host, port: port, is_valid: is_valid_handle(handle))
+
+fn tls_write(conn: TlsClientConnection, data: text) -> i64:
+    """Write data to TLS connection
+
+    Args:
+        data: Data to send
+
+    Returns: Number of bytes written
+
+    Example:
+        bytes_sent = tls_write(conn, "Hello, server!")
+    """
+    if is_invalid_handle(conn.handle):
+        return 0
+
+    rt_tls_client_write(conn.handle, data)
+
+fn tls_read(conn: TlsClientConnection, max_bytes: i64) -> text:
+    """Read data from TLS connection
+
+    Args:
+        max_bytes: Maximum bytes to read
+
+    Returns: Data received
+
+    Example:
+        data = tls_read(conn, 4096)
+        print "Received: {data}"
+    """
+    if is_invalid_handle(conn.handle):
+        return ""
+
+    rt_tls_client_read(conn.handle, max_bytes)
+
+fn tls_close(conn: TlsClientConnection) -> bool:
+    """Close TLS connection"""
+    if is_invalid_handle(conn.handle):
+        return false
+
+    rt_tls_client_close(conn.handle)
+
+# --- TLS Server ---
+
+fn tls_server_create(port: i64, cert_path: text, key_path: text) -> TlsServer:
+    """Create TLS server
+
+    Args:
+        port: Port to listen on
+        cert_path: Path to certificate file (PEM format)
+        key_path: Path to private key file (PEM format)
+
+    Returns: TlsServer (check is_valid)
+
+    Example:
+        server = tls_server_create(8443, "cert.pem", "key.pem")
+        if server.is_valid:
+            conn = tls_server_accept(server)
+    """
+    val handle = rt_tls_server_create(port, cert_path, key_path)
+    TlsServer(handle: handle, port: port, is_valid: is_valid_handle(handle))
+
+fn tls_server_accept(server: TlsServer) -> TlsServerConnection:
+    """Accept incoming TLS connection
+
+    Returns: TlsServerConnection for client
+
+    Example:
+        conn = tls_server_accept(server)
+        if conn.is_valid:
+            data = tls_server_read(conn, 1024)
+    """
+    if is_invalid_handle(server.handle):
+        return TlsServerConnection(handle: 0, is_valid: false)
+
+    val handle = rt_tls_server_accept(server.handle)
+    TlsServerConnection(handle: handle, is_valid: is_valid_handle(handle))
+
+fn tls_server_write(conn: TlsServerConnection, data: text) -> i64:
+    """Write data to client connection"""
+    if is_invalid_handle(conn.handle):
+        return 0
+
+    rt_tls_server_write(conn.handle, data)
+
+fn tls_server_read(conn: TlsServerConnection, max_bytes: i64) -> text:
+    """Read data from client connection"""
+    if is_invalid_handle(conn.handle):
+        return ""
+
+    rt_tls_server_read(conn.handle, max_bytes)
+
+fn tls_server_close_connection(conn: TlsServerConnection) -> bool:
+    """Close client connection"""
+    if is_invalid_handle(conn.handle):
+        return false
+
+    rt_tls_server_close_connection(conn.handle)
+
+fn tls_server_shutdown(server: TlsServer) -> bool:
+    """Shutdown TLS server"""
+    if is_invalid_handle(server.handle):
+        return false
+
+    rt_tls_server_shutdown(server.handle)
+
+# --- Certificate Management ---
+
+fn tls_load_cert(cert_path: text) -> TlsCertificate:
+    """Load certificate from file
+
+    Args:
+        cert_path: Path to certificate (PEM format)
+
+    Returns: TlsCertificate (check is_valid)
+    """
+    val handle = rt_tls_load_cert(cert_path)
+    TlsCertificate(handle: handle, is_valid: is_valid_handle(handle))
+
+fn tls_verify_cert(cert: TlsCertificate) -> bool:
+    """Verify certificate is valid
+
+    Returns: true if certificate is valid and not expired
+    """
+    if is_invalid_handle(cert.handle):
+        return false
+
+    rt_tls_verify_cert(cert.handle)
+
+fn tls_get_cert_subject(cert: TlsCertificate) -> text:
+    """Get certificate subject (e.g., CN=example.com)"""
+    if is_invalid_handle(cert.handle):
+        return ""
+
+    rt_tls_get_cert_subject(cert.handle)
+
+fn tls_get_cert_issuer(cert: TlsCertificate) -> text:
+    """Get certificate issuer"""
+    if is_invalid_handle(cert.handle):
+        return ""
+
+    rt_tls_get_cert_issuer(cert.handle)
+
+fn tls_get_cert_expiry(cert: TlsCertificate) -> text:
+    """Get certificate expiration date
+
+    Returns: ISO 8601 timestamp
+    """
+    if is_invalid_handle(cert.handle):
+        return ""
+
+    rt_tls_get_cert_expiry(cert.handle)
+
+fn tls_free_cert(cert: TlsCertificate) -> bool:
+    """Free certificate resources"""
+    if is_invalid_handle(cert.handle):
+        return false
+
+    rt_tls_free_cert(cert.handle)
+
+# --- Connection Info ---
+
+fn tls_get_connection_info(conn: TlsClientConnection) -> TlsConnectionInfo:
+    """Get TLS connection information
+
+    Returns: TlsConnectionInfo with protocol, cipher, etc.
+
+    Example:
+        info = tls_get_connection_info(conn)
+        print "Protocol: {info.protocol_version}"
+        print "Cipher: {info.cipher_suite}"
+    """
+    if is_invalid_handle(conn.handle):
+        return TlsConnectionInfo(
+            protocol_version: "",
+            cipher_suite: "",
+            alpn_protocol: "",
+            peer_cert_subject: ""
+        )
+
+    val protocol = rt_tls_get_protocol_version(conn.handle)
+    val cipher = rt_tls_get_cipher_suite(conn.handle)
+    val alpn = rt_tls_get_negotiated_alpn(conn.handle)
+
+    val peer_cert_handle = rt_tls_get_peer_cert(conn.handle)
+    var peer_subject = ""
+    if is_valid_handle(peer_cert_handle):
+        peer_subject = rt_tls_get_cert_subject(peer_cert_handle)
+
+    TlsConnectionInfo(
+        protocol_version: protocol,
+        cipher_suite: cipher,
+        alpn_protocol: alpn,
+        peer_cert_subject: peer_subject
+    )
+
+fn tls_is_handshake_complete(conn: TlsClientConnection) -> bool:
+    """Check if TLS handshake is complete"""
+    if is_invalid_handle(conn.handle):
+        return false
+
+    rt_tls_is_handshake_complete(conn.handle)
+
+# --- Utilities ---
+
+fn tls_generate_self_signed_cert(common_name: text, days_valid: i64, cert_out: text, key_out: text) -> bool:
+    """Generate self-signed certificate
+
+    Args:
+        common_name: Certificate CN (e.g., "localhost")
+        days_valid: Number of days certificate is valid
+        cert_out: Output path for certificate
+        key_out: Output path for private key
+
+    Returns: true if successful
+
+    Example:
+        if tls_generate_self_signed_cert("localhost", 365, "cert.pem", "key.pem"):
+            print "Self-signed certificate generated"
+    """
+    rt_tls_generate_self_signed_cert(common_name, days_valid, cert_out, key_out)
+
+fn tls_cert_fingerprint(cert_path: text) -> text:
+    """Get SHA-256 fingerprint of certificate
+
+    Args:
+        cert_path: Path to certificate file
+
+    Returns: Hex-encoded SHA-256 hash
+
+    Example:
+        fingerprint = tls_cert_fingerprint("cert.pem")
+        print "Fingerprint: {fingerprint}"
+    """
+    rt_tls_hash_cert(cert_path)
+
+# ============================================================================
+# Export Functions
+# ============================================================================
+
+export TlsClientConnection, TlsServerConnection, TlsServer, TlsCertificate
+export TlsClientConfig, TlsServerConfig, TlsConnectionInfo
+export tls_connect, tls_connect_with_sni, tls_write, tls_read, tls_close
+export tls_server_create, tls_server_accept, tls_server_write, tls_server_read
+export tls_server_close_connection, tls_server_shutdown
+export tls_load_cert, tls_verify_cert, tls_get_cert_subject, tls_get_cert_issuer, tls_get_cert_expiry, tls_free_cert
+export tls_get_connection_info, tls_is_handshake_complete
+export tls_generate_self_signed_cert, tls_cert_fingerprint

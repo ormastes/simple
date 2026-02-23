@@ -1,0 +1,161 @@
+# MCP SDK - JSON-RPC 2.0 Message Building and Parsing
+#
+# Provides functions for constructing and parsing JSON-RPC 2.0 messages
+# used by the MCP protocol.
+
+use std.mcp_sdk.core.json.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, extract_json_string, extract_json_value}
+
+# --- JSON-RPC 2.0 Response builders ---
+
+# Build a successful JSON-RPC result response
+fn jsonrpc_result(id: String, result: String) -> String:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# Build a JSON-RPC error response
+fn jsonrpc_error(id: String, code: i64, message: String) -> String:
+    val err = jo2(jp("code", code.to_string()), jp("message", js(escape_json(message))))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+# Build a JSON-RPC error response with data
+fn jsonrpc_error_with_data(id: String, code: i64, message: String, data: String) -> String:
+    var err = LB()
+    err = err + jp("code", code.to_string())
+    err = err + "," + jp("message", js(escape_json(message)))
+    err = err + "," + jp("data", data)
+    err = err + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+# Build a JSON-RPC notification (no id field)
+fn jsonrpc_notification(method: String, params: String) -> String:
+    var r = LB()
+    r = r + jp("jsonrpc", js("2.0"))
+    r = r + "," + jp("method", js(method))
+    r = r + "," + jp("params", params)
+    r = r + RB()
+    r
+
+# Build a JSON-RPC notification with no params
+fn jsonrpc_notification_bare(method: String) -> String:
+    jo2(jp("jsonrpc", js("2.0")), jp("method", js(method)))
+
+# Build a JSON-RPC request (client-to-server or server-to-client)
+fn jsonrpc_request(id: String, method: String, params: String) -> String:
+    var r = LB()
+    r = r + jp("jsonrpc", js("2.0"))
+    r = r + "," + jp("id", id)
+    r = r + "," + jp("method", js(method))
+    r = r + "," + jp("params", params)
+    r = r + RB()
+    r
+
+# --- JSON-RPC 2.0 Parsing ---
+
+# Extract the method from a JSON-RPC message
+fn jsonrpc_parse_method(msg: String) -> String:
+    extract_json_string(msg, "method")
+
+# Extract the id from a JSON-RPC message (returns raw value: number or string)
+fn jsonrpc_parse_id(msg: String) -> String:
+    extract_json_value(msg, "id")
+
+# Extract the params object (as raw JSON string)
+fn jsonrpc_parse_params(msg: String) -> String:
+    val search = Q() + "params" + Q() + ":"
+    var idx = -1
+    match msg.index_of(search):
+        Some(i): idx = i
+        nil: return ""
+    val start = idx + search.len()
+    val after = msg.substring(start).trim()
+
+    if after.starts_with(LB()):
+        # Object: find matching closing brace
+        var depth = 0
+        var pos = 0
+        for ch in after:
+            if ch == LB():
+                depth = depth + 1
+            elif ch == RB():
+                depth = depth - 1
+                if depth == 0:
+                    return after.substring(0, pos + 1)
+            pos = pos + 1
+        return ""
+    elif after.starts_with("["):
+        # Array: find matching closing bracket
+        var depth2 = 0
+        var pos2 = 0
+        for ch in after:
+            if ch == "[":
+                depth2 = depth2 + 1
+            elif ch == "]":
+                depth2 = depth2 - 1
+                if depth2 == 0:
+                    return after.substring(0, pos2 + 1)
+            pos2 = pos2 + 1
+        return ""
+    ""
+
+# Check if a JSON-RPC message is a notification (no id field)
+fn jsonrpc_is_notification(msg: String) -> bool:
+    val id_val = extract_json_value(msg, "id")
+    id_val == "null"
+
+# Check if a JSON-RPC message has an error field
+fn jsonrpc_is_error(msg: String) -> bool:
+    val search = Q() + "error" + Q() + ":"
+    var found = false
+    match msg.index_of(search):
+        Some(_): found = true
+        nil: found = false
+    found
+
+# Extract error code from a JSON-RPC error response
+fn jsonrpc_error_code(msg: String) -> i64:
+    val search = Q() + "error" + Q() + ":"
+    var idx = -1
+    match msg.index_of(search):
+        Some(i): idx = i
+        nil: return 0
+    val after = msg.substring(idx + search.len())
+    val code_str = extract_json_value(after, "code")
+    if code_str == "null":
+        return 0
+    int(code_str)
+
+# Extract error message from a JSON-RPC error response
+fn jsonrpc_error_message(msg: String) -> String:
+    val search = Q() + "error" + Q() + ":"
+    var idx = -1
+    match msg.index_of(search):
+        Some(i): idx = i
+        nil: return ""
+    val after = msg.substring(idx + search.len())
+    extract_json_string(after, "message")
+
+# --- Standard JSON-RPC error codes ---
+
+fn error_code_parse_error() -> i64:
+    -32700
+
+fn error_code_invalid_request() -> i64:
+    -32600
+
+fn error_code_method_not_found() -> i64:
+    -32601
+
+fn error_code_invalid_params() -> i64:
+    -32602
+
+fn error_code_internal_error() -> i64:
+    -32603
+
+# --- Exports ---
+
+export jsonrpc_result, jsonrpc_error, jsonrpc_error_with_data
+export jsonrpc_notification, jsonrpc_notification_bare, jsonrpc_request
+export jsonrpc_parse_method, jsonrpc_parse_id, jsonrpc_parse_params
+export jsonrpc_is_notification, jsonrpc_is_error
+export jsonrpc_error_code, jsonrpc_error_message
+export error_code_parse_error, error_code_invalid_request
+export error_code_method_not_found, error_code_invalid_params, error_code_internal_error

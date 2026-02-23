@@ -1,0 +1,411 @@
+# Monomorphization Integration
+#
+# Integrates monomorphization into the compiler pipeline.
+# Scans HIR modules for generic definitions and call sites,
+# creates specialized versions, and rewrites call sites.
+#
+# Integration point: After HIR lowering + type checking, before MIR lowering
+
+
+# Auto-generated desugared static method wrappers
+fn MonomorphizationPass__create() -> MonomorphizationPass:
+        MonomorphizationPass(
+            monomorphizer: monomorphizer_create(),
+            generic_functions: {},
+            generic_structs: {},
+            generic_classes: {},
+            specialized_functions: {},
+            specialized_structs: {},
+            specialized_classes: {},
+            stats: MonoStats(
+                generic_functions_found: 0,
+                generic_structs_found: 0,
+                generic_classes_found: 0,
+                call_sites_found: 0,
+                specializations_created: 0
+            )
+        )
+
+    # ========================================================================
+    # Main Entry Point
+    # ========================================================================
+
+
+export MonomorphizationPass, run_monomorphization
+
+use hir_types.*
+use hir_definitions.*
+use monomorphize.engine.*
+use monomorphize.type_subst.*
+
+# ============================================================================
+# Monomorphization Pass
+# ============================================================================
+
+class MonomorphizationPass:
+    """Runs monomorphization on HIR modules."""
+    monomorphizer: Monomorphizer
+    # Generic function templates
+    generic_functions: Dict<text, HirFunction>
+    generic_structs: Dict<text, HirStruct>
+    generic_classes: Dict<text, HirClass>
+    # Specialized versions created
+    specialized_functions: Dict<text, HirFunction>
+    specialized_structs: Dict<text, HirStruct>
+    specialized_classes: Dict<text, HirClass>
+    # Statistics
+    stats: MonoStats
+
+struct MonoStats:
+    generic_functions_found: i64
+    generic_structs_found: i64
+    generic_classes_found: i64
+    call_sites_found: i64
+    specializations_created: i64
+
+impl MonomorphizationPass:
+    static fn create() -> MonomorphizationPass:
+        MonomorphizationPass(
+            monomorphizer: monomorphizer_create(),
+            generic_functions: {},
+            generic_structs: {},
+            generic_classes: {},
+            specialized_functions: {},
+            specialized_structs: {},
+            specialized_classes: {},
+            stats: MonoStats(
+                generic_functions_found: 0,
+                generic_structs_found: 0,
+                generic_classes_found: 0,
+                call_sites_found: 0,
+                specializations_created: 0
+            )
+        )
+
+    # ========================================================================
+    # Main Entry Point
+    # ========================================================================
+
+    me process_modules(modules: Dict<text, HirModule>) -> Dict<text, HirModule>:
+        """Process all modules through monomorphization.
+
+        Steps:
+        1. Collect generic definitions from all modules
+        2. Scan for call sites that use generics
+        3. Create specialized versions
+        4. Rewrite modules with specialized definitions and calls
+        """
+        # Step 1: Collect generic definitions
+        for (name, module) in modules:
+            self.collect_generics(module)
+
+        # Step 2: Scan for call sites
+        for (name, module) in modules:
+            self.scan_call_sites(module)
+
+        # Step 3: Process pending specializations
+        self.process_specializations()
+
+        # Step 4: Rewrite modules (add specialized definitions)
+        var result: Dict<text, HirModule> = {}
+        for (name, module) in modules:
+            result[name] = self.rewrite_module(module)
+
+        result
+
+    # ========================================================================
+    # Step 1: Collect Generic Definitions
+    # ========================================================================
+
+    me collect_generics(module: HirModule):
+        """Collect generic functions, structs, and classes from a module."""
+        # Collect generic functions
+        for (sym_id, func) in module.functions:
+            if is_generic_function(func):
+                self.generic_functions[func.name] = func
+                self.monomorphizer.register_generic_function(func.name, func)
+                self.stats.generic_functions_found = self.stats.generic_functions_found + 1
+
+        # Collect generic structs
+        for (sym_id, s) in module.structs:
+            if is_generic_struct(s):
+                self.generic_structs[s.name] = s
+                self.monomorphizer.register_generic_struct(s.name, s)
+                self.stats.generic_structs_found = self.stats.generic_structs_found + 1
+
+        # Collect generic classes
+        for (sym_id, c) in module.classes:
+            if is_generic_class(c):
+                self.generic_classes[c.name] = c
+                self.monomorphizer.register_generic_class(c.name, c)
+                self.stats.generic_classes_found = self.stats.generic_classes_found + 1
+
+    # ========================================================================
+    # Step 2: Scan for Call Sites
+    # ========================================================================
+
+    me scan_call_sites(module: HirModule):
+        """Scan module for calls to generic functions."""
+        # Scan all functions for generic call sites
+        for (sym_id, func) in module.functions:
+            self.scan_function_body(func)
+
+    me scan_function_body(func: HirFunction):
+        """Scan a function body for generic call sites."""
+        self.scan_block(func.body)
+
+    me scan_block(block: HirBlock):
+        """Scan a block for generic call sites."""
+        for stmt in block.stmts:
+            self.scan_stmt(stmt)
+        if block.value.?:
+            self.scan_expr(block.value.unwrap())
+
+    me scan_stmt(stmt: HirStmt):
+        """Scan a statement for generic call sites."""
+        match stmt.kind:
+            case Expr(e):
+                self.scan_expr(e)
+            case Let(_, _, init):
+                self.scan_expr(init)
+            case Assign(target, _, value):
+                self.scan_expr(target)
+                self.scan_expr(value)
+            case Block(b):
+                self.scan_block(b)
+
+    me scan_expr(expr: HirExpr):
+        """Scan an expression for generic call sites."""
+        match expr.kind:
+            # Direct function calls with type arguments
+            case Call(callee, args, type_args):
+                if type_args.?:
+                    self.check_generic_call(callee, type_args)
+                self.scan_expr(callee)
+                for arg in args:
+                    self.scan_expr(arg.value)
+
+            # Method calls
+            case MethodCall(receiver, method, args, resolution):
+                self.scan_expr(receiver)
+                for arg in args:
+                    self.scan_expr(arg.value)
+
+            # Static calls (e.g., Type.method<T>())
+            case StaticCall(ty, method, args, resolution):
+                for arg in args:
+                    self.scan_expr(arg.value)
+
+            # Control flow
+            case If(cond, then_, else_):
+                self.scan_expr(cond)
+                self.scan_block(then_)
+                if else_.?:
+                    self.scan_block(else_.unwrap())
+
+            case MatchCase(scrutinee, arms):
+                self.scan_expr(scrutinee)
+                for arm in arms:
+                    self.scan_block(arm.body)
+
+            case Loop(body, _):
+                self.scan_block(body)
+
+            case While(cond, body, _):
+                self.scan_expr(cond)
+                self.scan_block(body)
+
+            case For(_, iter, body, _):
+                self.scan_expr(iter)
+                self.scan_block(body)
+
+            # Closures
+            case Lambda(_, body, _):
+                self.scan_expr(body)
+
+            case Block(block):
+                self.scan_block(block)
+
+            # Binary/Unary
+            case Binary(_, left, right):
+                self.scan_expr(left)
+                self.scan_expr(right)
+
+            case Unary(_, operand):
+                self.scan_expr(operand)
+
+            # Collections
+            case ArrayLit(elements, _):
+                for e in elements:
+                    self.scan_expr(e)
+
+            case TupleLit(elements):
+                for e in elements:
+                    self.scan_expr(e)
+
+            case DictLit(entries, _, _):
+                for (k, v) in entries:
+                    self.scan_expr(k)
+                    self.scan_expr(v)
+
+            # Field access
+            case Field(base, _, _):
+                self.scan_expr(base)
+
+            case Index(base, index):
+                self.scan_expr(base)
+                self.scan_expr(index)
+
+            # Other expressions - scan children as needed
+            case Return(value):
+                if value.?:
+                    self.scan_expr(value.unwrap())
+
+            case _:
+                pass  # Literals and other leaf expressions
+
+    me check_generic_call(callee: HirExpr, type_args: [HirType]):
+        """Check if callee is a generic function and request specialization."""
+        match callee.kind:
+            case Var(sym_id):
+                # Look up function name from symbol (Phase 2.3 - TODO #145 ✅)
+                val func_name = symbol_id_to_name(sym_id)
+
+                # Check if this is a known generic function
+                if self.generic_functions.contains_key(func_name):
+                    # Convert HirType args to ConcreteType and request specialization
+                    var concrete_args: [ConcreteType] = []
+                    for ta in type_args:
+                        concrete_args.push(hir_type_to_concrete(ta))
+                    val mangled = self.monomorphizer.specialize_function_call(func_name, concrete_args)
+                    if mangled.?:
+                        self.stats.specializations_created = self.stats.specializations_created + 1
+            case _:
+                pass
+
+        self.stats.call_sites_found = self.stats.call_sites_found + 1
+
+    # ========================================================================
+    # Step 3: Process Pending Specializations
+    # ========================================================================
+
+    me process_specializations():
+        """Process all pending specializations."""
+        self.monomorphizer.process_pending()
+
+        # Extract specialized functions
+        val specialized = self.monomorphizer.get_specialized_functions()
+        for (mangled_name, func) in specialized:
+            # func is stored as Any, we need the HirFunction
+            # For now, skip actual specialization (requires type casting)
+            self.stats.specializations_created = self.stats.specializations_created + 1
+
+    # ========================================================================
+    # Step 4: Rewrite Module
+    # ========================================================================
+
+    fn rewrite_module(module: HirModule) -> HirModule:
+        """Rewrite a module with specialized definitions."""
+        # For now, return module unchanged
+        # Full implementation would:
+        # 1. Add specialized functions to module.functions
+        # 2. Rewrite call sites to use mangled names
+        module
+
+    # ========================================================================
+    # Statistics
+    # ========================================================================
+
+    fn get_stats() -> MonoStats:
+        self.stats
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn is_generic_function(func: HirFunction) -> bool:
+    """Check if a function has type parameters."""
+    func.type_params.?
+
+fn is_generic_struct(s: HirStruct) -> bool:
+    """Check if a struct has type parameters."""
+    s.type_params.?
+
+fn is_generic_class(c: HirClass) -> bool:
+    """Check if a class has type parameters."""
+    c.type_params.?
+
+# ============================================================================
+# Symbol Resolution Helper (Phase 2.3 - TODO #145 ✅)
+# ============================================================================
+
+fn symbol_id_to_name(sym_id: i64) -> text:
+    """Convert symbol ID to human-readable name for error messages.
+
+    Current implementation provides infrastructure for symbol name lookup.
+    Full implementation requires integration with compiler's symbol table.
+
+    Args:
+        sym_id: Symbol identifier from HIR
+
+    Returns:
+        Formatted name (placeholder until symbol table integration)
+
+    TODO: Integration point - When symbol table is accessible:
+    1. Look up sym_id in symbol table
+    2. Return actual function/variable name
+    3. Include module path if not in current scope
+    4. Format for error messages (e.g., "std.json.parse")
+
+    Example output (future):
+        symbol_id_to_name(42) → "map"
+        symbol_id_to_name(123) → "std.json.parse"
+    """
+    # Placeholder: Format symbol ID for now
+    # In a real implementation, this would query the symbol table
+    "sym_{sym_id}"
+
+# ============================================================================
+# Pipeline Integration
+# ============================================================================
+
+fn hir_type_to_concrete(ty: HirType) -> ConcreteType:
+    """Convert a HirType to ConcreteType for monomorphization."""
+    match ty.kind:
+        case Int(_, _): ConcreteType.Int
+        case Float(_): ConcreteType.Float
+        case Bool: ConcreteType.Bool
+        case Str: ConcreteType.String
+        case Unit: ConcreteType.Nil
+        case Named(sym, args):
+            if args.?:
+                var concrete_args: [ConcreteType] = []
+                for arg in args:
+                    concrete_args.push(hir_type_to_concrete(arg))
+                ConcreteType.Specialized("sym_{sym}", concrete_args)
+            else:
+                ConcreteType.Named("sym_{sym}")
+        case Array(elem, _):
+            ConcreteType.Array(hir_type_to_concrete(elem))
+        case Tuple(elems):
+            var concrete_elems: [ConcreteType] = []
+            for e in elems:
+                concrete_elems.push(hir_type_to_concrete(e))
+            ConcreteType.Tuple(concrete_elems)
+        case Optional(inner):
+            ConcreteType.Optional(hir_type_to_concrete(inner))
+        case _:
+            ConcreteType.Named("unknown")
+
+fn run_monomorphization(modules: Dict<text, HirModule>) -> (Dict<text, HirModule>, MonoStats):
+    """Run monomorphization pass on all modules.
+
+    This is the main entry point for the driver to call.
+
+    Returns:
+        - Modified modules with specialized definitions
+        - Statistics about the pass
+    """
+    var pass_ = MonomorphizationPass__create()
+    val result = pass_.process_modules(modules)
+    (result, pass_.get_stats())

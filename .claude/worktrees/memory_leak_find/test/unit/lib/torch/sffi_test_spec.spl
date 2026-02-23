@@ -1,0 +1,507 @@
+# SFFI Integration Tests - Self-Contained
+#
+# Tests for mock PyTorch-like API using inline mock classes.
+# All classes are defined inline - NO imports from src/lib/.
+# This validates the SFFI integration patterns without requiring
+# the actual SFFI bridge or runtime library.
+
+# ============================================================================
+# Mock Classes (self-contained, no external imports)
+# ============================================================================
+
+class MockTensor:
+    """Mock tensor for testing SFFI patterns."""
+    data: [f64]
+    shape: [i64]
+    requires_grad: bool
+    grad_data: [f64]
+
+    static fn create(data: [f64], shape: [i64]) -> MockTensor:
+        MockTensor(data: data, shape: shape, requires_grad: false, grad_data: [])
+
+    static fn create_with_grad(data: [f64], shape: [i64]) -> MockTensor:
+        var grad: [f64] = []
+        var i = 0
+        while i < data.len():
+            grad.push(0.0)
+            i = i + 1
+        MockTensor(data: data, shape: shape, requires_grad: true, grad_data: grad)
+
+    fn numel() -> i64:
+        self.data.len()
+
+    fn get(idx: i64) -> f64:
+        self.data[idx]
+
+    fn dim() -> i64:
+        self.shape.len()
+
+    fn size(d: i64) -> i64:
+        self.shape[d]
+
+    fn add_tensor(other: MockTensor) -> MockTensor:
+        var result: [f64] = []
+        var i = 0
+        while i < self.data.len():
+            result.push(self.data[i] + other.data[i])
+            i = i + 1
+        MockTensor.create(result, self.shape)
+
+    fn mul_scalar(scalar: f64) -> MockTensor:
+        var result: [f64] = []
+        var i = 0
+        while i < self.data.len():
+            result.push(self.data[i] * scalar)
+            i = i + 1
+        MockTensor.create(result, self.shape)
+
+    fn sub_tensor(other: MockTensor) -> MockTensor:
+        var result: [f64] = []
+        var i = 0
+        while i < self.data.len():
+            result.push(self.data[i] - other.data[i])
+            i = i + 1
+        MockTensor.create(result, self.shape)
+
+    fn mean_val() -> f64:
+        var total = 0.0
+        for v in self.data:
+            total = total + v
+        total / self.data.len()
+
+    fn sum_val() -> f64:
+        var total = 0.0
+        for v in self.data:
+            total = total + v
+        total
+
+    fn to_string() -> text:
+        "MockTensor(shape={self.shape}, numel={self.numel()})"
+
+class MockLinear:
+    """Mock linear layer: y = x * W^T + b."""
+    in_features: i64
+    out_features: i64
+    weight_data: [f64]
+    bias_data: [f64]
+
+    static fn create(in_features: i64, out_features: i64) -> MockLinear:
+        # Initialize weights to small values based on index
+        var weights: [f64] = []
+        var i = 0
+        val total_w = out_features * in_features
+        while i < total_w:
+            weights.push(0.1 * (i + 1))
+            i = i + 1
+        # Initialize bias to zeros
+        var bias: [f64] = []
+        i = 0
+        while i < out_features:
+            bias.push(0.0)
+            i = i + 1
+        MockLinear(in_features: in_features, out_features: out_features,
+                   weight_data: weights, bias_data: bias)
+
+    fn forward(input: MockTensor) -> MockTensor:
+        """Compute y = x * W^T + b for single sample."""
+        var result: [f64] = []
+        var o = 0
+        while o < self.out_features:
+            var sum = self.bias_data[o]
+            var j = 0
+            while j < self.in_features:
+                val w_idx = o * self.in_features + j
+                sum = sum + input.data[j] * self.weight_data[w_idx]
+                j = j + 1
+            result.push(sum)
+            o = o + 1
+        MockTensor.create(result, [self.out_features])
+
+    fn parameter_count() -> i64:
+        self.in_features * self.out_features + self.out_features
+
+    fn to_string() -> text:
+        "MockLinear(in={self.in_features}, out={self.out_features})"
+
+class MockSGD:
+    """Mock SGD optimizer."""
+    lr: f64
+    momentum: f64
+    param_values: [f64]
+    velocity: [f64]
+
+    static fn create(params: [f64], lr: f64, momentum: f64) -> MockSGD:
+        var vel: [f64] = []
+        var i = 0
+        while i < params.len():
+            vel.push(0.0)
+            i = i + 1
+        MockSGD(lr: lr, momentum: momentum, param_values: params, velocity: vel)
+
+    me zero_grad():
+        """Reset gradients (mock: no-op since we pass grads to step)."""
+        pass_do_nothing
+
+    me step(gradients: [f64]):
+        """Update parameters: param = param - lr * grad (with momentum)."""
+        var i = 0
+        while i < self.param_values.len():
+            self.velocity[i] = self.momentum * self.velocity[i] + self.lr * gradients[i]
+            self.param_values[i] = self.param_values[i] - self.velocity[i]
+            i = i + 1
+
+    fn get_param(idx: i64) -> f64:
+        self.param_values[idx]
+
+    fn to_string() -> text:
+        "MockSGD(lr={self.lr}, momentum={self.momentum})"
+
+class MockMSELoss:
+    """Mock MSE loss function."""
+    reduction: text
+
+    static fn create() -> MockMSELoss:
+        MockMSELoss(reduction: "mean")
+
+    fn forward(pred: MockTensor, target: MockTensor) -> f64:
+        """Compute MSE = mean((pred - target)^2)."""
+        var sq_sum = 0.0
+        var i = 0
+        while i < pred.data.len():
+            val diff = pred.data[i] - target.data[i]
+            sq_sum = sq_sum + diff * diff
+            i = i + 1
+        sq_sum / pred.data.len()
+
+    fn backward_grad(pred: MockTensor, target: MockTensor) -> [f64]:
+        """Compute gradient of MSE w.r.t. pred: 2*(pred-target)/N."""
+        var grads: [f64] = []
+        val n = pred.data.len()
+        var i = 0
+        while i < n:
+            val grad = 2.0 * (pred.data[i] - target.data[i]) / n
+            grads.push(grad)
+            i = i + 1
+        grads
+
+    fn to_string() -> text:
+        "MockMSELoss(reduction={self.reduction})"
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "SFFI Integration Tests":
+    describe "Tensor Operations":
+        it "creates tensor with data and shape":
+            val t = MockTensor.create([1.0, 2.0, 3.0, 4.0], [2, 2])
+            expect(t.data.len()).to_equal(4)
+            expect(t.shape).to_equal([2, 2])
+
+        it "returns correct numel":
+            val t = MockTensor.create([1.0, 2.0, 3.0], [3])
+            expect(t.numel()).to_equal(3)
+
+        it "accesses elements by index":
+            val t = MockTensor.create([10.0, 20.0, 30.0], [3])
+            expect(t.get(0)).to_equal(10.0)
+            expect(t.get(1)).to_equal(20.0)
+            expect(t.get(2)).to_equal(30.0)
+
+        it "returns correct dimensions":
+            val t = MockTensor.create([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+            expect(t.dim()).to_equal(2)
+            expect(t.size(0)).to_equal(2)
+            expect(t.size(1)).to_equal(3)
+
+        it "adds two tensors element-wise":
+            val a = MockTensor.create([1.0, 2.0, 3.0], [3])
+            val b = MockTensor.create([4.0, 5.0, 6.0], [3])
+            val c = a.add_tensor(b)
+            expect(c.data[0]).to_equal(5.0)
+            expect(c.data[1]).to_equal(7.0)
+            expect(c.data[2]).to_equal(9.0)
+
+        it "multiplies tensor by scalar":
+            val t = MockTensor.create([2.0, 3.0, 4.0], [3])
+            val result = t.mul_scalar(2.0)
+            expect(result.data[0]).to_equal(4.0)
+            expect(result.data[1]).to_equal(6.0)
+            expect(result.data[2]).to_equal(8.0)
+
+        it "subtracts two tensors element-wise":
+            val a = MockTensor.create([5.0, 8.0, 3.0], [3])
+            val b = MockTensor.create([1.0, 2.0, 3.0], [3])
+            val c = a.sub_tensor(b)
+            expect(c.data[0]).to_equal(4.0)
+            expect(c.data[1]).to_equal(6.0)
+            expect(c.data[2]).to_equal(0.0)
+
+        it "computes mean value":
+            val t = MockTensor.create([2.0, 4.0, 6.0], [3])
+            expect(t.mean_val()).to_equal(4.0)
+
+        it "computes sum value":
+            val t = MockTensor.create([1.0, 2.0, 3.0], [3])
+            expect(t.sum_val()).to_equal(6.0)
+
+        it "creates tensor with gradient tracking":
+            val t = MockTensor.create_with_grad([1.0, 2.0], [2])
+            expect(t.requires_grad).to_equal(true)
+            expect(t.grad_data.len()).to_equal(2)
+
+        it "creates tensor without gradient tracking":
+            val t = MockTensor.create([1.0, 2.0], [2])
+            expect(t.requires_grad).to_equal(false)
+
+        it "has string representation":
+            val t = MockTensor.create([1.0], [1])
+            val s = t.to_string()
+            expect(s).to_contain("MockTensor")
+
+    describe "Linear Layer":
+        it "creates linear layer with correct dimensions":
+            val layer = MockLinear.create(3, 2)
+            expect(layer.in_features).to_equal(3)
+            expect(layer.out_features).to_equal(2)
+
+        it "initializes weights with correct count":
+            val layer = MockLinear.create(4, 3)
+            expect(layer.weight_data.len()).to_equal(12)
+
+        it "initializes bias to zeros":
+            val layer = MockLinear.create(3, 2)
+            expect(layer.bias_data[0]).to_equal(0.0)
+            expect(layer.bias_data[1]).to_equal(0.0)
+
+        it "computes forward pass":
+            val layer = MockLinear.create(2, 1)
+            # weight = [0.1, 0.2], bias = [0.0]
+            val input = MockTensor.create([1.0, 1.0], [2])
+            val output = layer.forward(input)
+            # y = 1.0*0.1 + 1.0*0.2 + 0.0 = 0.3
+            expect(output.data[0]).to_be_greater_than(0.29)
+            expect(output.data[0]).to_be_less_than(0.31)
+
+        it "produces output with correct shape":
+            val layer = MockLinear.create(3, 2)
+            val input = MockTensor.create([1.0, 2.0, 3.0], [3])
+            val output = layer.forward(input)
+            expect(output.shape).to_equal([2])
+            expect(output.data.len()).to_equal(2)
+
+        it "counts parameters correctly":
+            val layer = MockLinear.create(4, 3)
+            # weights: 4*3=12, bias: 3, total: 15
+            expect(layer.parameter_count()).to_equal(15)
+
+        it "has correct output values for known weights":
+            val layer = MockLinear.create(2, 2)
+            # W = [[0.1, 0.2], [0.3, 0.4]], b = [0, 0]
+            val input = MockTensor.create([1.0, 0.0], [2])
+            val output = layer.forward(input)
+            # out[0] = 1.0*0.1 + 0.0*0.2 = 0.1
+            # out[1] = 1.0*0.3 + 0.0*0.4 = 0.3
+            expect(output.data[0]).to_be_greater_than(0.09)
+            expect(output.data[0]).to_be_less_than(0.11)
+            expect(output.data[1]).to_be_greater_than(0.29)
+            expect(output.data[1]).to_be_less_than(0.31)
+
+        it "has string representation":
+            val layer = MockLinear.create(3, 2)
+            val s = layer.to_string()
+            expect(s).to_contain("MockLinear")
+
+    describe "SGD Optimizer":
+        it "creates optimizer with learning rate":
+            val opt = MockSGD.create([1.0, 2.0], 0.01, 0.0)
+            expect(opt.lr).to_equal(0.01)
+            expect(opt.momentum).to_equal(0.0)
+
+        it "updates parameters with gradient step":
+            val opt = MockSGD.create([1.0, 2.0], 0.1, 0.0)
+            opt.step([1.0, 1.0])
+            # param = param - lr * grad = [1.0 - 0.1, 2.0 - 0.1] = [0.9, 1.9]
+            expect(opt.get_param(0)).to_be_greater_than(0.89)
+            expect(opt.get_param(0)).to_be_less_than(0.91)
+            expect(opt.get_param(1)).to_be_greater_than(1.89)
+            expect(opt.get_param(1)).to_be_less_than(1.91)
+
+        it "updates with momentum":
+            val opt = MockSGD.create([1.0], 0.1, 0.9)
+            # Step 1: vel = 0.9*0 + 0.1*1.0 = 0.1, param = 1.0 - 0.1 = 0.9
+            opt.step([1.0])
+            expect(opt.get_param(0)).to_be_greater_than(0.89)
+            expect(opt.get_param(0)).to_be_less_than(0.91)
+            # Step 2: vel = 0.9*0.1 + 0.1*1.0 = 0.19, param = 0.9 - 0.19 = 0.71
+            opt.step([1.0])
+            expect(opt.get_param(0)).to_be_greater_than(0.70)
+            expect(opt.get_param(0)).to_be_less_than(0.72)
+
+        it "applies zero gradient with no change":
+            val opt = MockSGD.create([5.0, 3.0], 0.1, 0.0)
+            opt.step([0.0, 0.0])
+            expect(opt.get_param(0)).to_equal(5.0)
+            expect(opt.get_param(1)).to_equal(3.0)
+
+        it "handles large learning rate":
+            val opt = MockSGD.create([10.0], 1.0, 0.0)
+            opt.step([3.0])
+            # param = 10.0 - 1.0*3.0 = 7.0
+            expect(opt.get_param(0)).to_equal(7.0)
+
+        it "handles negative gradients":
+            val opt = MockSGD.create([0.0], 0.1, 0.0)
+            opt.step([-2.0])
+            # param = 0.0 - 0.1*(-2.0) = 0.2
+            expect(opt.get_param(0)).to_be_greater_than(0.19)
+            expect(opt.get_param(0)).to_be_less_than(0.21)
+
+        it "zero_grad does not crash":
+            val opt = MockSGD.create([1.0], 0.01, 0.0)
+            opt.zero_grad()
+            expect(opt.lr).to_equal(0.01)
+
+        it "has string representation":
+            val opt = MockSGD.create([1.0], 0.01, 0.9)
+            val s = opt.to_string()
+            expect(s).to_contain("MockSGD")
+
+    describe "MSE Loss":
+        it "creates loss function":
+            val loss_fn = MockMSELoss.create()
+            expect(loss_fn.reduction).to_equal("mean")
+
+        it "computes zero loss for identical inputs":
+            val loss_fn = MockMSELoss.create()
+            val pred = MockTensor.create([1.0, 2.0, 3.0], [3])
+            val target = MockTensor.create([1.0, 2.0, 3.0], [3])
+            val loss = loss_fn.forward(pred, target)
+            expect(loss).to_equal(0.0)
+
+        it "computes correct MSE":
+            val loss_fn = MockMSELoss.create()
+            val pred = MockTensor.create([1.0, 2.0], [2])
+            val target = MockTensor.create([2.0, 4.0], [2])
+            # MSE = ((1-2)^2 + (2-4)^2) / 2 = (1+4)/2 = 2.5
+            val loss = loss_fn.forward(pred, target)
+            expect(loss).to_equal(2.5)
+
+        it "computes loss for single element":
+            val loss_fn = MockMSELoss.create()
+            val pred = MockTensor.create([3.0], [1])
+            val target = MockTensor.create([1.0], [1])
+            # MSE = (3-1)^2 / 1 = 4.0
+            val loss = loss_fn.forward(pred, target)
+            expect(loss).to_equal(4.0)
+
+        it "computes correct gradients":
+            val loss_fn = MockMSELoss.create()
+            val pred = MockTensor.create([2.0], [1])
+            val target = MockTensor.create([1.0], [1])
+            val grads = loss_fn.backward_grad(pred, target)
+            # grad = 2*(2-1)/1 = 2.0
+            expect(grads[0]).to_equal(2.0)
+
+        it "computes gradients for multi-element":
+            val loss_fn = MockMSELoss.create()
+            val pred = MockTensor.create([1.0, 3.0], [2])
+            val target = MockTensor.create([2.0, 1.0], [2])
+            val grads = loss_fn.backward_grad(pred, target)
+            # grad[0] = 2*(1-2)/2 = -1.0
+            # grad[1] = 2*(3-1)/2 = 2.0
+            expect(grads[0]).to_equal(-1.0)
+            expect(grads[1]).to_equal(2.0)
+
+        it "produces zero gradient for perfect predictions":
+            val loss_fn = MockMSELoss.create()
+            val pred = MockTensor.create([5.0, 3.0], [2])
+            val target = MockTensor.create([5.0, 3.0], [2])
+            val grads = loss_fn.backward_grad(pred, target)
+            expect(grads[0]).to_equal(0.0)
+            expect(grads[1]).to_equal(0.0)
+
+        it "has string representation":
+            val loss_fn = MockMSELoss.create()
+            val s = loss_fn.to_string()
+            expect(s).to_contain("MockMSELoss")
+
+    describe "Training Loop":
+        it "simulates a single training step":
+            # Setup: simple linear function y = 2x
+            val layer = MockLinear.create(1, 1)
+            val loss_fn = MockMSELoss.create()
+            val opt = MockSGD.create(layer.weight_data, 0.01, 0.0)
+
+            # Input and target
+            val input = MockTensor.create([1.0], [1])
+            val target = MockTensor.create([2.0], [1])
+
+            # Forward pass
+            val output = layer.forward(input)
+            val loss = loss_fn.forward(output, target)
+
+            # Loss should be non-negative
+            expect(loss).to_be_greater_than(-0.01)
+
+        it "reduces loss over multiple steps":
+            val loss_fn = MockMSELoss.create()
+            # Simulate param trying to reach target value 3.0
+            val opt = MockSGD.create([0.0], 0.1, 0.0)
+
+            # Step 1: pred=0, target=3, loss=9, grad=2*(0-3)/1=-6
+            val pred1 = MockTensor.create([opt.get_param(0)], [1])
+            val target = MockTensor.create([3.0], [1])
+            val loss1 = loss_fn.forward(pred1, target)
+            val grads1 = loss_fn.backward_grad(pred1, target)
+            opt.step(grads1)
+
+            # Step 2
+            val pred2 = MockTensor.create([opt.get_param(0)], [1])
+            val loss2 = loss_fn.forward(pred2, target)
+            val grads2 = loss_fn.backward_grad(pred2, target)
+            opt.step(grads2)
+
+            # Step 3
+            val pred3 = MockTensor.create([opt.get_param(0)], [1])
+            val loss3 = loss_fn.forward(pred3, target)
+
+            # Loss should decrease over training steps
+            expect(loss2).to_be_less_than(loss1)
+            expect(loss3).to_be_less_than(loss2)
+
+        it "converges toward target with enough steps":
+            val loss_fn = MockMSELoss.create()
+            val opt = MockSGD.create([0.0], 0.05, 0.0)
+            val target = MockTensor.create([2.0], [1])
+
+            # Run 20 steps
+            var step = 0
+            while step < 20:
+                val pred = MockTensor.create([opt.get_param(0)], [1])
+                val grads = loss_fn.backward_grad(pred, target)
+                opt.step(grads)
+                step = step + 1
+
+            # After 20 steps with lr=0.05, should be close to 2.0
+            val final_pred = opt.get_param(0)
+            expect(final_pred).to_be_greater_than(1.5)
+            expect(final_pred).to_be_less_than(2.5)
+
+        it "computes end-to-end forward and backward":
+            val layer = MockLinear.create(2, 1)
+            val loss_fn = MockMSELoss.create()
+
+            # Forward
+            val input = MockTensor.create([1.0, 2.0], [2])
+            val target = MockTensor.create([1.0], [1])
+            val output = layer.forward(input)
+            val loss = loss_fn.forward(output, target)
+
+            # Backward
+            val grads = loss_fn.backward_grad(output, target)
+
+            # Verify gradient shape matches output
+            expect(grads.len()).to_equal(1)
+            # Loss should be computable
+            expect(loss).to_be_greater_than(-0.01)

@@ -1,0 +1,277 @@
+# FSM Utility Functions
+
+
+fn join_state_names(states: [text]) -> text:
+    """Join state names with underscore for composite states."""
+    if states.len() == 0:
+        return "empty"
+    var result = states[0]
+    for i in 1..states.len():
+        result = result + "_" + states[i]
+    result
+
+fn fsm_to_string(fsm: FSM) -> text:
+    """Convert FSM to human-readable string representation."""
+    var result = "FSM:" + "\n"
+    result = result + "  Initial: " + fsm.initial_state + "\n"
+    result = result + "  Current: " + fsm.current + "\n"
+    result = result + "  Deterministic: " + fsm.deterministic.to_text() + "\n"
+
+    result = result + "  States (" + fsm.states.len().to_text() + "):" + "\n"
+    for i in 0..fsm.states.len():
+        var state = fsm.states[i]
+        var marker = ""
+        if state.accepting:
+            marker = " [ACCEPT]"
+        result = result + "    " + state.name + marker + "\n"
+
+    result = result + "  Transitions (" + fsm.transitions.len().to_text() + "):" + "\n"
+    for i in 0..fsm.transitions.len():
+        var trans = fsm.transitions[i]
+        result = result + "    " + trans.from_state + " --(" + trans.symbol + ")--> " + trans.to_state + "\n"
+
+    result
+
+fn fsm_step_trace(fsm: FSM, symbols: [text]) -> text:
+    """Trace FSM execution step by step, returning detailed log."""
+    var trace = "FSM Execution Trace:" + "\n"
+    trace = trace + "Initial state: " + fsm.initial_state + "\n" + "\n"
+
+    var current_fsm = reset_fsm(fsm)
+
+    for i in 0..symbols.len():
+        var symbol = symbols[i]
+        trace = trace + "Step " + (i + 1).to_text() + ": Input '" + symbol + "'" + "\n"
+        trace = trace + "  From state: " + current_fsm.current + "\n"
+
+        current_fsm = process_input(current_fsm, symbol)
+
+        trace = trace + "  To state: " + current_fsm.current + "\n"
+        if current_fsm.current == "":
+            trace = trace + "  ERROR: No valid transition!" + "\n"
+            return trace
+        trace = trace + "\n"
+
+    trace = trace + "Final state: " + current_fsm.current + "\n"
+    if is_accepting_state(current_fsm):
+        trace = trace + "Result: ACCEPTED" + "\n"
+    else:
+        trace = trace + "Result: REJECTED" + "\n"
+
+    trace
+
+# FSM Construction from Patterns
+
+fn fsm_from_pattern(pattern: text) -> FSM:
+    """Create simple FSM from pattern string (basic literal matching)."""
+    var fsm = create_fsm()
+
+    # Create chain of states for literal pattern
+    for i in 0..(pattern.len() + 1):
+        var state_name = "q" + i.to_text()
+        var is_final = false
+        if i == pattern.len():
+            is_final = true
+        fsm = add_state(fsm, state_name, is_final)
+
+    fsm = set_initial_state(fsm, "q0")
+
+    # Add transitions for each character
+    for i in 0..pattern.len():
+        var from = "q" + i.to_text()
+        var to = "q" + (i + 1).to_text()
+        var symbol = pattern[i:i+1]
+        fsm = add_transition(fsm, from, to, symbol)
+
+    fsm
+
+fn fsm_concat(fsm1: FSM, fsm2: FSM) -> FSM:
+    """Concatenate two FSMs (accepts L1 followed by L2)."""
+    # This is a simplified version - full implementation requires state renaming
+    var result = create_fsm()
+
+    # Add all states from fsm1 (non-accepting now)
+    for i in 0..fsm1.states.len():
+        var state = fsm1.states[i]
+        result = add_state(result, "1_" + state.name, false)
+
+    # Add all states from fsm2
+    for i in 0..fsm2.states.len():
+        var state = fsm2.states[i]
+        result = add_state(result, "2_" + state.name, state.accepting)
+
+    # Copy transitions from fsm1
+    for i in 0..fsm1.transitions.len():
+        var trans = fsm1.transitions[i]
+        result = add_transition(result, "1_" + trans.from_state, "1_" + trans.to_state, trans.symbol)
+
+    # Copy transitions from fsm2
+    for i in 0..fsm2.transitions.len():
+        var trans = fsm2.transitions[i]
+        result = add_transition(result, "2_" + trans.from_state, "2_" + trans.to_state, trans.symbol)
+
+    # Add epsilon transitions from fsm1 accepting states to fsm2 initial
+    for i in 0..fsm1.states.len():
+        if fsm1.states[i].accepting:
+            result = add_transition(result, "1_" + fsm1.states[i].name, "2_" + fsm2.initial_state, "epsilon")
+
+    result = set_initial_state(result, "1_" + fsm1.initial_state)
+    result
+
+fn fsm_union(fsm1: FSM, fsm2: FSM) -> FSM:
+    """Create union of two FSMs (accepts L1 or L2)."""
+    var result = create_fsm()
+
+    # Add new initial state
+    result = add_state(result, "union_start", false)
+    result = set_initial_state(result, "union_start")
+
+    # Add all states from both FSMs
+    for i in 0..fsm1.states.len():
+        var state = fsm1.states[i]
+        result = add_state(result, "1_" + state.name, state.accepting)
+
+    for i in 0..fsm2.states.len():
+        var state = fsm2.states[i]
+        result = add_state(result, "2_" + state.name, state.accepting)
+
+    # Copy all transitions
+    for i in 0..fsm1.transitions.len():
+        var trans = fsm1.transitions[i]
+        result = add_transition(result, "1_" + trans.from_state, "1_" + trans.to_state, trans.symbol)
+
+    for i in 0..fsm2.transitions.len():
+        var trans = fsm2.transitions[i]
+        result = add_transition(result, "2_" + trans.from_state, "2_" + trans.to_state, trans.symbol)
+
+    # Add epsilon transitions from new start to both initial states
+    result = add_transition(result, "union_start", "1_" + fsm1.initial_state, "epsilon")
+    result = add_transition(result, "union_start", "2_" + fsm2.initial_state, "epsilon")
+
+    result
+
+fn fsm_kleene_star(fsm: FSM) -> FSM:
+    """Create Kleene star of FSM (accepts zero or more repetitions)."""
+    var result = create_fsm()
+
+    # Add new initial state (also accepting for empty string)
+    result = add_state(result, "star_start", true)
+    result = set_initial_state(result, "star_start")
+
+    # Add all original states
+    for i in 0..fsm.states.len():
+        var state = fsm.states[i]
+        result = add_state(result, "s_" + state.name, state.accepting)
+
+    # Copy all transitions
+    for i in 0..fsm.transitions.len():
+        var trans = fsm.transitions[i]
+        result = add_transition(result, "s_" + trans.from_state, "s_" + trans.to_state, trans.symbol)
+
+    # Epsilon transition from new start to original initial
+    result = add_transition(result, "star_start", "s_" + fsm.initial_state, "epsilon")
+
+    # Epsilon transitions from accepting states back to original initial
+    for i in 0..fsm.states.len():
+        if fsm.states[i].accepting:
+            result = add_transition(result, "s_" + fsm.states[i].name, "s_" + fsm.initial_state, "epsilon")
+
+    result
+
+# Example FSM Constructors
+
+fn fsm_example_binary_divisible_by_3() -> FSM:
+    """Create FSM that accepts binary numbers divisible by 3."""
+    var fsm = create_fsm()
+
+    # States represent remainder when divided by 3
+    fsm = add_state(fsm, "r0", true)   # remainder 0 (divisible)
+    fsm = add_state(fsm, "r1", false)  # remainder 1
+    fsm = add_state(fsm, "r2", false)  # remainder 2
+
+    fsm = set_initial_state(fsm, "r0")
+
+    # Transitions: when reading bit, new_remainder = (old_remainder * 2 + bit) % 3
+    # r0 + '0' -> r0 (0*2+0=0, 0%3=0)
+    fsm = add_transition(fsm, "r0", "r0", "0")
+    # r0 + '1' -> r1 (0*2+1=1, 1%3=1)
+    fsm = add_transition(fsm, "r0", "r1", "1")
+    # r1 + '0' -> r2 (1*2+0=2, 2%3=2)
+    fsm = add_transition(fsm, "r1", "r2", "0")
+    # r1 + '1' -> r0 (1*2+1=3, 3%3=0)
+    fsm = add_transition(fsm, "r1", "r0", "1")
+    # r2 + '0' -> r1 (2*2+0=4, 4%3=1)
+    fsm = add_transition(fsm, "r2", "r1", "0")
+    # r2 + '1' -> r2 (2*2+1=5, 5%3=2)
+    fsm = add_transition(fsm, "r2", "r2", "1")
+
+    fsm
+
+fn fsm_example_lexer_token() -> FSM:
+    """Create FSM that recognizes identifier tokens (letter followed by letters/digits)."""
+    var fsm = create_fsm()
+
+    fsm = add_state(fsm, "start", false)
+    fsm = add_state(fsm, "ident", true)
+    fsm = set_initial_state(fsm, "start")
+
+    # First character must be letter
+    var letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for i in 0..letters.len():
+        var letter = letters[i:i+1]
+        fsm = add_transition(fsm, "start", "ident", letter)
+
+    # Subsequent characters can be letters or digits
+    for i in 0..letters.len():
+        var letter = letters[i:i+1]
+        fsm = add_transition(fsm, "ident", "ident", letter)
+
+    var digits = "0123456789"
+    for i in 0..digits.len():
+        var digit = digits[i:i+1]
+        fsm = add_transition(fsm, "ident", "ident", digit)
+
+    fsm
+
+fn fsm_example_protocol_validator() -> FSM:
+    """Create FSM that validates simple protocol: CONNECT -> AUTH -> (DATA)* -> DISCONNECT."""
+    var fsm = create_fsm()
+
+    fsm = add_state(fsm, "init", false)
+    fsm = add_state(fsm, "connected", false)
+    fsm = add_state(fsm, "authenticated", false)
+    fsm = add_state(fsm, "ready", false)
+    fsm = add_state(fsm, "closed", true)
+
+    fsm = set_initial_state(fsm, "init")
+
+    fsm = add_transition(fsm, "init", "connected", "CONNECT")
+    fsm = add_transition(fsm, "connected", "authenticated", "AUTH")
+    fsm = add_transition(fsm, "authenticated", "ready", "DATA")
+    fsm = add_transition(fsm, "ready", "ready", "DATA")
+    fsm = add_transition(fsm, "ready", "closed", "DISCONNECT")
+
+    fsm
+
+fn fsm_example_game_state() -> FSM:
+    """Create FSM for simple game state machine."""
+    var fsm = create_fsm()
+
+    fsm = add_state_with_data(fsm, "menu", false, "Main Menu")
+    fsm = add_state_with_data(fsm, "playing", false, "In Game")
+    fsm = add_state_with_data(fsm, "paused", false, "Game Paused")
+    fsm = add_state_with_data(fsm, "won", true, "Victory")
+    fsm = add_state_with_data(fsm, "lost", true, "Defeat")
+
+    fsm = set_initial_state(fsm, "menu")
+
+    fsm = add_transition(fsm, "menu", "playing", "start")
+    fsm = add_transition(fsm, "playing", "paused", "pause")
+    fsm = add_transition(fsm, "paused", "playing", "resume")
+    fsm = add_transition(fsm, "paused", "menu", "quit")
+    fsm = add_transition(fsm, "playing", "won", "win")
+    fsm = add_transition(fsm, "playing", "lost", "die")
+    fsm = add_transition(fsm, "won", "menu", "continue")
+    fsm = add_transition(fsm, "lost", "menu", "retry")
+
+    fsm

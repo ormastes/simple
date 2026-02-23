@@ -1,0 +1,282 @@
+# DI Config Loader - SDN-Based DI Configuration
+#
+# Parses config/di.sdn and registers services with the DI runtime.
+# Supports profile-based lazy/eager resolution and per-service overrides.
+#
+# Usage:
+#   di_setup_from_config("config/di.sdn")
+#   di_setup_from_config_with_profile("config/di.sdn", "prod")
+#
+# See Also:
+#   - config/di.sdn - Configuration file
+#   - src/compiler/di_runtime.spl - DI runtime engine
+#   - doc/design/di_auto_lazy_proxy.md - Design document
+
+use compiler.common.di_runtime.{di_register, di_reset}
+
+export DiServiceConfig, DiProfileConfig, DiConfig
+export load_di_config, parse_di_config, should_be_lazy, di_setup_from_config, di_setup_from_config_with_profile
+
+# ============================================================================
+# Config Structs
+# ============================================================================
+
+struct DiServiceConfig:
+    name: text
+    module_path: text
+    factory_name: text
+    lazy_mode: text       # "auto", "true", "false"
+    is_singleton: bool
+
+struct DiProfileConfig:
+    name: text
+    lazy_default: bool
+
+struct DiConfig:
+    default_profile: text
+    profiles: [DiProfileConfig]
+    services: [DiServiceConfig]
+
+# ============================================================================
+# Config Loading
+# ============================================================================
+
+# Load DI config from file content text.
+#
+# Parses the SDN text manually (line-based) to extract profiles and services.
+# This avoids importing the full SDN parser to keep the DI bootstrap chain minimal.
+#
+# Parameters:
+#   content: SDN text content (caller reads the file)
+#
+# Returns:
+#   DiConfig with parsed profiles and services
+fn load_di_config(content: text) -> DiConfig:
+    if content == "":
+        print "DI CONFIG WARN: empty config content, using defaults"
+        return default_config()
+    parse_di_config(content)
+
+# ============================================================================
+# Lightweight SDN Parser (line-based)
+# ============================================================================
+
+# Parse DI config from SDN text content.
+#
+# Uses line-based parsing with indent tracking to extract:
+#   - default_profile from di.default_profile
+#   - profile entries from di.profiles.<name>.lazy
+#   - service entries from di.services.<name>.*
+fn parse_di_config(content: text) -> DiConfig:
+    val lines = content.split("\n")
+    var default_profile = "dev"
+    var profiles: [DiProfileConfig] = []
+    var services: [DiServiceConfig] = []
+
+    # State machine: track current section and current item
+    var section = ""        # "profiles", "services", ""
+    var current_name = ""   # Current profile/service name
+    var svc_module = ""
+    var svc_factory = ""
+    var svc_lazy = "auto"
+    var svc_singleton = true
+    var prof_lazy = false
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        i = i + 1
+
+        # Skip comments and blank lines
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        val indent = count_indent(line)
+
+        # Top-level keys (indent 2 under "di:")
+        if indent == 2:
+            # Flush previous item
+            if section == "services" and current_name != "":
+                services.push(DiServiceConfig(
+                    name: current_name,
+                    module_path: svc_module,
+                    factory_name: svc_factory,
+                    lazy_mode: svc_lazy,
+                    is_singleton: svc_singleton))
+                current_name = ""
+            if section == "profiles" and current_name != "":
+                profiles.push(DiProfileConfig(name: current_name, lazy_default: prof_lazy))
+                current_name = ""
+
+            if trimmed.starts_with("default_profile:"):
+                default_profile = extract_value(trimmed, "default_profile:")
+                section = ""
+            elif trimmed == "profiles:":
+                section = "profiles"
+            elif trimmed == "services:":
+                section = "services"
+            else:
+                section = ""
+            continue
+
+        # Profile/service name (indent 4)
+        if indent == 4:
+            # Flush previous item
+            if section == "services" and current_name != "":
+                services.push(DiServiceConfig(
+                    name: current_name,
+                    module_path: svc_module,
+                    factory_name: svc_factory,
+                    lazy_mode: svc_lazy,
+                    is_singleton: svc_singleton))
+            if section == "profiles" and current_name != "":
+                profiles.push(DiProfileConfig(name: current_name, lazy_default: prof_lazy))
+
+            # Parse new item name (strip trailing ":")
+            if trimmed.ends_with(":"):
+                var name_raw = trimmed.substring(0, trimmed.len() - 1)
+                current_name = name_raw.trim()
+            else:
+                current_name = trimmed.trim()
+            # Reset service fields
+            svc_module = ""
+            svc_factory = ""
+            svc_lazy = "auto"
+            svc_singleton = true
+            prof_lazy = false
+            continue
+
+        # Item properties (indent 6)
+        if indent == 6:
+            if section == "profiles":
+                if trimmed.starts_with("lazy:"):
+                    val lazy_val = extract_value(trimmed, "lazy:")
+                    prof_lazy = lazy_val == "true"
+            elif section == "services":
+                if trimmed.starts_with("module:"):
+                    svc_module = extract_value(trimmed, "module:")
+                elif trimmed.starts_with("factory:"):
+                    svc_factory = extract_value(trimmed, "factory:")
+                elif trimmed.starts_with("lazy:"):
+                    svc_lazy = extract_value(trimmed, "lazy:")
+                elif trimmed.starts_with("singleton:"):
+                    val sin_val = extract_value(trimmed, "singleton:")
+                    svc_singleton = sin_val == "true"
+            continue
+
+    # Flush last item
+    if section == "services" and current_name != "":
+        services.push(DiServiceConfig(
+            name: current_name,
+            module_path: svc_module,
+            factory_name: svc_factory,
+            lazy_mode: svc_lazy,
+            is_singleton: svc_singleton))
+    if section == "profiles" and current_name != "":
+        profiles.push(DiProfileConfig(name: current_name, lazy_default: prof_lazy))
+
+    DiConfig(
+        default_profile: default_profile,
+        profiles: profiles,
+        services: services)
+
+# ============================================================================
+# Profile Resolution
+# ============================================================================
+
+# Determine if a service should be lazy given its config and the active profile.
+#
+# Resolution:
+#   - lazy_mode "true"  -> always lazy
+#   - lazy_mode "false" -> always eager
+#   - lazy_mode "auto"  -> use profile's lazy_default
+fn should_be_lazy(service: DiServiceConfig, profile: DiProfileConfig) -> bool:
+    if service.lazy_mode == "true":
+        return true
+    if service.lazy_mode == "false":
+        return false
+    # "auto" -> profile default
+    profile.lazy_default
+
+# Find a profile by name in the config. Returns default (eager) if not found.
+fn find_profile(config: DiConfig, name: text) -> DiProfileConfig:
+    var idx = 0
+    while idx < config.profiles.len():
+        val p = config.profiles[idx]
+        if p.name == name:
+            return p
+        idx = idx + 1
+    # Not found: default to eager
+    DiProfileConfig(name: name, lazy_default: false)
+
+# ============================================================================
+# Setup API
+# ============================================================================
+
+# Load config from SDN content and register all services with the DI runtime.
+#
+# Parameters:
+#   content: SDN config text (caller reads the file)
+#   profile_env: Value of SIMPLE_PROFILE env var (pass "" if not set)
+fn di_setup_from_config(content: text, profile_env: text):
+    val config = load_di_config(content)
+    var profile_name = config.default_profile
+    if profile_env != "":
+        profile_name = profile_env
+    di_setup_from_config_with_profile(content, profile_name)
+
+# Load config and register services using an explicit profile name.
+fn di_setup_from_config_with_profile(content: text, profile_name: text):
+    val config = load_di_config(content)
+    val profile = find_profile(config, profile_name)
+
+    var idx = 0
+    while idx < config.services.len():
+        val svc = config.services[idx]
+        val lazy = should_be_lazy(svc, profile)
+        # Register with a placeholder factory that logs unresolved services.
+        # Real factories are registered by the application during startup.
+        val svc_name = svc.name
+        di_register(svc_name, fn(): _placeholder_factory(svc_name), lazy)
+        idx = idx + 1
+
+# Placeholder factory for services registered via config but not yet bound
+# to a real factory. Returns nil and logs a warning.
+fn _placeholder_factory(name: text):
+    print "DI WARN: service '{name}' resolved but no factory bound"
+    nil
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn default_config() -> DiConfig:
+    DiConfig(
+        default_profile: "dev",
+        profiles: [
+            DiProfileConfig(name: "dev", lazy_default: false),
+            DiProfileConfig(name: "prod", lazy_default: true),
+            DiProfileConfig(name: "test", lazy_default: false)
+        ],
+        services: [])
+
+fn extract_value(line: text, prefix: text) -> text:
+    val plen = prefix.len()
+    if line.len() <= plen:
+        return ""
+    val rest = line.substring(plen)
+    rest.trim()
+
+fn count_indent(line: text) -> i64:
+    var count = 0
+    val llen = line.len()
+    while count < llen:
+        val ch = line.substring(count, count + 1)
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count

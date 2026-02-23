@@ -1,0 +1,331 @@
+# Process Execution - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+# Extern fn declarations (runtime resolves at file level)
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+# Platform detection - inlined to avoid bootstrap runtime limitations
+fn _is_windows_platform() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+# ============================================================================
+# Process Result struct
+# ============================================================================
+
+struct ProcessResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+    limit_exceeded: bool
+    limit_type: text
+
+# ============================================================================
+# Process Execution
+# ============================================================================
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    var resolved_cmd = cmd
+    if _is_windows_platform():
+        if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
+            val check = rt_process_run("where", [cmd + ".exe"])
+            if check.2 == 0:
+                resolved_cmd = cmd + ".exe"
+    else:
+        if not cmd.contains("/"):
+            val check = rt_process_run("which", [cmd])
+            if check.2 == 0 and check.0.trim() != "":
+                resolved_cmd = check.0.trim()
+    rt_process_run(resolved_cmd, args)
+
+fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    """Unix implementation using 'timeout' command"""
+    val timeout_secs = if timeout_ms <= 0:
+        120
+    else:
+        val secs = timeout_ms / 1000
+        if secs < 1: 1 else: secs
+
+    var timeout_args: [text] = ["{timeout_secs}", cmd]
+    timeout_args.merge(args)
+
+    val (out, err, code) = rt_process_run("timeout", timeout_args)
+
+    if code == 124:
+        (out, err + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+    else:
+        (out, err, code)
+
+fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    """Windows implementation using async spawn + temp files"""
+    val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
+
+    var temp_dir = rt_env_get("TEMP")
+    if temp_dir == "":
+        temp_dir = rt_env_get("TMP")
+    if temp_dir == "":
+        temp_dir = "C:\\Windows\\Temp"
+
+    val pid_str = "{rt_getpid()}"
+    val time_str = "{rt_time_now_unix_micros()}"
+    val stdout_file = "{temp_dir}\\simple_out_{pid_str}_{time_str}.txt"
+    val stderr_file = "{temp_dir}\\simple_err_{pid_str}_{time_str}.txt"
+
+    var args_str = ""
+    for arg in args:
+        if args_str == "":
+            args_str = arg
+        else:
+            args_str = args_str + " " + arg
+
+    val full_cmd = if args_str == "":
+        "{cmd} > \"{stdout_file}\" 2> \"{stderr_file}\""
+    else:
+        "{cmd} {args_str} > \"{stdout_file}\" 2> \"{stderr_file}\""
+
+    val pid = rt_process_spawn_async("cmd", ["/c", full_cmd])
+    val exit_code = rt_process_wait(pid, effective_timeout)
+
+    var stdout = ""
+    var stderr = ""
+
+    if rt_file_exists(stdout_file):
+        stdout = rt_file_read_text(stdout_file)
+        rt_file_delete(stdout_file)
+
+    if rt_file_exists(stderr_file):
+        stderr = rt_file_read_text(stderr_file)
+        rt_file_delete(stderr_file)
+
+    if exit_code == -2:
+        rt_process_kill(pid)
+        val timeout_secs = effective_timeout / 1000
+        (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+    else:
+        (stdout, stderr, exit_code)
+
+fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    """Platform-agnostic timeout wrapper"""
+    if _is_windows_platform():
+        process_run_timeout_windows(cmd, args, timeout_ms)
+    else:
+        process_run_timeout_unix(cmd, args, timeout_ms)
+
+fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> ProcessResult:
+    """
+    Execute a process with resource limits enforced via ulimit.
+
+    Args:
+        cmd: Command to execute
+        args: Command arguments
+        timeout_ms: Wall-clock timeout in milliseconds
+        memory_bytes: Virtual memory limit in bytes
+        cpu_seconds: CPU time limit in seconds
+        max_fds: Maximum file descriptors
+        max_procs: Maximum processes
+
+    Returns:
+        ProcessResult with limit violation detection
+    """
+    if _is_windows_platform():
+        eprint("[WARNING] Resource limits not supported on Windows - using timeout only")
+        val (stdout, stderr, exit_code) = process_run_timeout(cmd, args, timeout_ms)
+        return ProcessResult(
+            stdout: stdout,
+            stderr: stderr,
+            exit_code: exit_code,
+            limit_exceeded: exit_code == -1,
+            limit_type: if exit_code == -1: "timeout" else: ""
+        )
+
+    val timeout_sec = if timeout_ms > 0: timeout_ms / 1000 else: 120
+    val memory_kb = if memory_bytes > 0: memory_bytes / 1024 else: 0
+
+    var limit_cmds = ""
+    if memory_kb > 0:
+        limit_cmds = limit_cmds + "ulimit -v {memory_kb} 2>/dev/null || true; "
+    if cpu_seconds > 0:
+        limit_cmds = limit_cmds + "ulimit -t {cpu_seconds} 2>/dev/null || true; "
+    if max_fds > 0:
+        limit_cmds = limit_cmds + "ulimit -n {max_fds} 2>/dev/null || true; "
+
+    var args_str = ""
+    for arg in args:
+        val escaped = arg.replace("'", "'\\''")
+        if args_str == "":
+            args_str = "'{escaped}'"
+        else:
+            args_str = args_str + " '{escaped}'"
+
+    val full_cmd = if args_str == "": "{cmd}" else: "{cmd} {args_str}"
+    val timeout_buffer = timeout_sec + 5
+    val wrapped_cmd = "{limit_cmds}exec timeout --kill-after=5s {timeout_buffer}s {full_cmd}"
+
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", wrapped_cmd])
+
+    var limit_exceeded = false
+    var limit_type = ""
+
+    if code == 124:
+        limit_exceeded = true
+        limit_type = "timeout"
+    elif code == 137:
+        limit_exceeded = true
+        limit_type = "timeout"
+    elif code == 139:
+        limit_exceeded = true
+        limit_type = "memory"
+    else:
+        val stderr_lower = stderr.lower()
+        if stderr_lower.contains("cpu time limit exceeded") or stderr_lower.contains("cpu time"):
+            limit_exceeded = true
+            limit_type = "cpu"
+        elif stderr_lower.contains("cannot allocate memory") or stderr_lower.contains("out of memory"):
+            limit_exceeded = true
+            limit_type = "memory"
+        elif stderr_lower.contains("too many open files"):
+            limit_exceeded = true
+            limit_type = "fds"
+        elif stderr_lower.contains("resource temporarily unavailable"):
+            limit_exceeded = true
+            limit_type = "procs"
+
+    ProcessResult(
+        stdout: stdout,
+        stderr: stderr,
+        exit_code: code,
+        limit_exceeded: limit_exceeded,
+        limit_type: limit_type
+    )
+
+fn process_output(cmd: text, args: [text]) -> text:
+    val (stdout, stderr, code) = process_run(cmd, args)
+    stdout
+
+# ============================================================================
+# Shell Functions
+# ============================================================================
+
+fn shell(command: text) -> ProcessResult:
+    val (shell_path, shell_args) = if _is_windows_platform():
+        ("cmd.exe", ["/c", command])
+    else:
+        ("/bin/sh", ["-c", command])
+
+    val (stdout, stderr, code) = rt_process_run(shell_path, shell_args)
+    ProcessResult(stdout: stdout, stderr: stderr, exit_code: code, limit_exceeded: false, limit_type: "")
+
+fn shell_bool(command: text) -> bool:
+    val result = shell(command)
+    result.exit_code == 0
+
+fn shell_output(command: text, default: text) -> text:
+    val result = shell(command)
+    if result.exit_code == 0:
+        result.stdout
+    else:
+        default
+
+fn shell_output_trimmed(command: text, default: text) -> text:
+    val result = shell(command)
+    if result.exit_code == 0:
+        result.stdout.trim()
+    else:
+        default
+
+fn shell_lines(command: text) -> [text]:
+    val result = shell(command)
+    if result.exit_code == 0 and result.stdout.?:
+        result.stdout.trim().split("\n")
+    else:
+        []
+
+fn shell_int(command: text, default: i64) -> i64:
+    val result = shell(command)
+    if result.exit_code == 0:
+        val trimmed = result.stdout.trim()
+        if trimmed.len() > 0:
+            int(trimmed)
+        else:
+            default
+    else:
+        default
+
+# ============================================================================
+# Async Process Management
+# ============================================================================
+
+fn process_spawn_async(cmd: text, args: [text]) -> i64:
+    """
+    Spawn a process asynchronously (non-blocking).
+
+    Returns: Process ID (pid) on success, -1 on failure.
+
+    Example:
+        val pid = process_spawn_async("sleep", ["10"])
+        # ... do other work ...
+        val exit_code = process_wait(pid, 0)  # Wait for completion
+    """
+    rt_process_spawn_async(cmd, args)
+
+fn process_wait(pid: i64, timeout_ms: i64) -> i64:
+    """
+    Wait for a process to complete.
+
+    Args:
+        pid: Process ID from process_spawn_async
+        timeout_ms: Timeout in milliseconds (0 = wait forever)
+
+    Returns:
+        Exit code on success
+        -1 on error
+        -2 on timeout
+    """
+    rt_process_wait(pid, timeout_ms)
+
+fn process_is_running(pid: i64) -> bool:
+    """
+    Check if a process is still running.
+
+    Returns: true if running, false if exited or invalid pid
+    """
+    rt_process_is_running(pid)
+
+fn process_kill(pid: i64) -> bool:
+    """
+    Terminate a running process.
+
+    Sends SIGTERM (Unix) or TerminateProcess (Windows).
+    On Unix, escalates to SIGKILL if process doesn't exit.
+
+    Returns: true on success, false on failure
+    """
+    rt_process_kill(pid)
+
+# ============================================================================
+# Eprint (stderr simulation)
+# ============================================================================
+
+fn eprint(msg: text):
+    print "[STDERR] {msg}"
+
+export ProcessResult
+export process_run, process_run_timeout, process_run_with_limits
+export process_output, shell
+export shell_bool, shell_output, shell_output_trimmed, shell_lines, shell_int
+export process_spawn_async, process_wait, process_is_running, process_kill
+export eprint

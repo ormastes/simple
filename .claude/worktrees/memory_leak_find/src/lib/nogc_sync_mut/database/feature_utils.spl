@@ -1,0 +1,285 @@
+# Feature Database Utilities
+#
+# SSpec metadata parsing and feature management utilities.
+# Used by FeatureDatabase and test runner.
+
+use app.io.{file_read, file_exists}
+
+# ============================================================================
+# SSpec Metadata Structures
+# ============================================================================
+
+struct SSpecItem:
+    id: text
+    name: text
+    category: text
+    modes: [text]
+    skip_modes: [text]
+    platforms: [text]
+    is_ignored: bool
+    file_path: text
+
+# ============================================================================
+# SSpec Metadata Parsing
+# ============================================================================
+
+# Parse SSpec metadata from source file
+# Extracts #[id("...")], #[modes(...)], etc. from describe/feature blocks
+fn parse_sspec_metadata(file_path: text) -> [SSpecItem]:
+    if not file_exists(file_path):
+        return []
+
+    val content = file_read(file_path)
+    val lines = content.split("\n")
+    var items: [SSpecItem] = []
+
+    var current_id = ""
+    var current_modes: [text] = []
+    var current_skip_modes: [text] = []
+    var current_platforms: [text] = []
+    var current_ignored = false
+
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+
+        # Parse attribute annotations #[...]
+        if trimmed.starts_with("#["):
+            # Parse id
+            if trimmed.contains("id("):
+                val id_start = trimmed.index_of("id(\"") ?? -1
+                if id_start >= 0:
+                    val after = trimmed[id_start + 4:]
+                    val id_end = after.index_of("\")") ?? -1
+                    if id_end >= 0:
+                        current_id = after[0:id_end]
+
+            # Parse modes
+            if trimmed.contains("modes("):
+                current_modes = parse_attr_list(trimmed, "modes")
+
+            # Parse skip_modes
+            if trimmed.contains("skip_modes("):
+                current_skip_modes = parse_attr_list(trimmed, "skip_modes")
+
+            # Parse platforms
+            if trimmed.contains("platforms("):
+                current_platforms = parse_attr_list(trimmed, "platforms")
+
+            # Parse ignore
+            if trimmed.contains("ignore"):
+                current_ignored = true
+
+        # Parse describe/feature blocks
+        elif trimmed.starts_with("describe ") or trimmed.starts_with("feature "):
+            val name = extract_quoted_string(trimmed)
+            if current_id != "" or name != "":
+                val cat = extract_category_from_path(file_path)
+                items.push(SSpecItem(
+                    id: if current_id != "": current_id else: name,
+                    name: name,
+                    category: cat,
+                    modes: current_modes,
+                    skip_modes: current_skip_modes,
+                    platforms: current_platforms,
+                    is_ignored: current_ignored,
+                    file_path: file_path
+                ))
+            # Reset attributes for next block
+            current_id = ""
+            current_modes = []
+            current_skip_modes = []
+            current_platforms = []
+            current_ignored = false
+
+        i = i + 1
+
+    items
+
+# Parse attribute list from #[attr(val1, val2, ...)]
+fn parse_attr_list(line: text, attr_name: text) -> [text]:
+    val start_pattern = attr_name + "("
+    val start = line.index_of(start_pattern) ?? -1
+    if start < 0:
+        return []
+    val after = line[start + start_pattern.len():]
+    val end = after.index_of(")") ?? -1
+    if end < 0:
+        return []
+    val inner = after[0:end]
+    var items: [text] = []
+    val parts = inner.split(",")
+    for part in parts:
+        # BUG-14 workaround: Break chained method calls
+        val trimmed = part.trim()
+        val cleaned = trimmed.replace("\"", "")
+        if cleaned != "":
+            items.push(cleaned)
+    items
+
+# Extract quoted string from line (first occurrence)
+fn extract_quoted_string(line: text) -> text:
+    val q1 = line.index_of("\"") ?? -1
+    if q1 < 0:
+        return ""
+    val after = line[q1 + 1:]
+    val q2 = after.index_of("\"") ?? -1
+    if q2 < 0:
+        return ""
+    after[0:q2]
+
+# Extract category from file path
+# e.g., "test/system/features/control_flow/..." -> "control_flow"
+fn extract_category_from_path(file_path: text) -> text:
+    val parts = file_path.split("/")
+    var i = 0
+    while i < parts.len():
+        if parts[i] == "features" and i + 1 < parts.len():
+            return parts[i + 1]
+        i = i + 1
+    # Fallback: use parent directory name
+    if parts.len() >= 2:
+        return parts[parts.len() - 2]
+    "uncategorized"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Parse integer with fallback value (replacement for missing .to_int_or() method)
+fn to_int_or(s: text, default: i64) -> i64:
+    if s.len() == 0:
+        return default
+
+    # Check if string contains only digits (with optional leading -)
+    var start_idx = 0
+    if s[0:1] == "-":
+        start_idx = 1
+        if s.len() == 1:  # Just "-" is invalid
+            return default
+
+    var i = start_idx
+    while i < s.len():
+        val c = s[i:i+1]
+        if c < "0" or c > "9":
+            return default
+        i = i + 1
+
+    # Valid integer string - safe to parse
+    s.to_int()
+
+# ============================================================================
+# Feature ID Comparison (Semantic Sorting)
+# ============================================================================
+
+# Compare feature IDs semantically for sorting
+# Handles numeric parts: "1.2" < "1.10" (not string sort)
+fn compare_feature_id(a: text, b: text) -> i64:
+    val a_parts = a.split(".")
+    val b_parts = b.split(".")
+    val max_len = if a_parts.len() > b_parts.len():
+        a_parts.len()
+    else:
+        b_parts.len()
+
+    var i = 0
+    while i < max_len:
+        val a_val = if i < a_parts.len(): a_parts[i] else: ""
+        val b_val = if i < b_parts.len(): b_parts[i] else: ""
+
+        # Try numeric comparison first
+        val a_num = to_int_or(a_val, -1)
+        val b_num = to_int_or(b_val, -1)
+        if a_num >= 0 and b_num >= 0:
+            if a_num != b_num:
+                return a_num - b_num
+        else:
+            # String comparison
+            if a_val < b_val:
+                return -1
+            if a_val > b_val:
+                return 1
+        i = i + 1
+
+    a_parts.len() - b_parts.len()
+
+# ============================================================================
+# Feature Sorting and Validation
+# ============================================================================
+
+# Sort features by ID using semantic comparison - O(n log n) merge sort
+fn sort_features_by_id(features: [Feature]) -> [Feature]:
+    if features.len() <= 1:
+        return features
+    val mid = features.len() / 2
+    var left: [Feature] = []
+    var right: [Feature] = []
+    for i in 0..mid:
+        left = left.push(features[i])
+    for i in mid..features.len():
+        right = right.push(features[i])
+    merge_features(left=sort_features_by_id(left), right=sort_features_by_id(right))
+
+fn merge_features(left: [Feature], right: [Feature]) -> [Feature]:
+    var result: [Feature] = []
+    var i = 0
+    var j = 0
+    while i < left.len() and j < right.len():
+        if compare_feature_id(left[i].id, right[j].id) <= 0:
+            result = result.push(left[i])
+            i = i + 1
+        else:
+            result = result.push(right[j])
+            j = j + 1
+    while i < left.len():
+        result = result.push(left[i])
+        i = i + 1
+    while j < right.len():
+        result = result.push(right[j])
+        j = j + 1
+    result
+
+# Find duplicate feature IDs
+fn find_duplicate_ids(features: [Feature]) -> [text]:
+    var seen: Dict<text, bool> = {}
+    var duplicates: [text] = []
+    for f in features:
+        if seen.contains_key(f.id):
+            duplicates.push(f.id)
+        else:
+            seen[f.id] = true
+    duplicates
+
+# Mark features as invalid if their spec file doesn't exist
+fn mark_orphaned_features(features: [Feature], known_spec_files: [text]) -> [Feature]:
+    var spec_set: Dict<text, bool> = {}
+    for path in known_spec_files:
+        spec_set[path] = true
+
+    var updated: [Feature] = []
+    for f in features:
+        val spec = f.spec_file
+        var is_valid = f.valid
+        if spec != "" and spec.ends_with(".spl"):
+            if not spec_set.contains_key(spec):
+                is_valid = false
+
+        updated.push(Feature(
+            id: f.id,
+            category: f.category,
+            name: f.name,
+            description: f.description,
+            spec_file: f.spec_file,
+            pure_status: f.pure_status,
+            hybrid_status: f.hybrid_status,
+            llvm_status: f.llvm_status,
+            created_at: f.created_at,
+            updated_at: f.updated_at,
+            valid: is_valid
+        ))
+
+    updated
+
+export SSpecItem
+export parse_sspec_metadata, parse_attr_list, extract_quoted_string, extract_category_from_path
+export compare_feature_id, sort_features_by_id, find_duplicate_ids, mark_orphaned_features

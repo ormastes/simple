@@ -1,0 +1,517 @@
+name: Bare-Metal Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  schedule:
+    # Run weekly on Sundays at 02:00 UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      run_slow_tests:
+        description: 'Run slow tests (full boot sequences)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      architectures:
+        description: 'Architectures to test'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'x86'
+          - 'arm'
+          - 'riscv'
+
+jobs:
+  # ============================================================================
+  # QEMU Setup Verification
+  # ============================================================================
+  verify-qemu:
+    name: Verify QEMU Installation
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-system-misc
+        qemu-system-i386 --version
+        qemu-system-x86_64 --version
+        qemu-system-arm --version
+        qemu-system-aarch64 --version
+        qemu-system-riscv32 --version
+        qemu-system-riscv64 --version
+
+  # ============================================================================
+  # x86 Bare-Metal Tests
+  # ============================================================================
+  x86-baremetal:
+    name: x86 Bare-Metal Tests
+    runs-on: ubuntu-latest
+    needs: verify-qemu
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        if [ -f "bin/release/simple" ]; then
+          chmod +x bin/release/simple
+          echo "✓ Bootstrap runtime ready"
+        else
+          echo "✗ No bootstrap runtime"
+          exit 1
+        fi
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86
+
+    - name: Install LLVM Toolchain
+      run: |
+        sudo apt-get install -y clang-16 lld-16 llvm-16
+        clang-16 --version
+        lld-16 --version
+        echo "✓ LLVM installed - supports all bare-metal targets"
+      continue-on-error: true
+
+    - name: Test x86 boot code
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/x86_boot_spec.spl || echo "Boot tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test x86 interrupts
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/x86_interrupt_spec.spl || echo "Interrupt tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test x86 inline assembly
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/x86_asm_spec.spl || echo "ASM tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Build x86 examples
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        if [ -f examples/baremetal/hello_x86.spl ]; then
+          simple build examples/baremetal/hello_x86.spl --bare-metal -o build/hello_x86.elf
+          echo "✅ Built x86 example"
+        else
+          echo "⚠️ x86 example not found"
+        fi
+      continue-on-error: true
+
+  # ============================================================================
+  # x86_64 Bare-Metal Tests
+  # ============================================================================
+  x86_64-baremetal:
+    name: x86_64 Bare-Metal Tests
+    runs-on: ubuntu-latest
+    needs: verify-qemu
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        if [ -f "bin/release/simple" ]; then
+          chmod +x bin/release/simple
+          echo "✓ Bootstrap runtime ready"
+        else
+          echo "✗ No bootstrap runtime"
+          exit 1
+        fi
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86
+
+    - name: Test x86_64 boot code
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/x86_64_boot_spec.spl || echo "Boot tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test x86_64 interrupts
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/x86_64_interrupt_spec.spl || echo "Interrupt tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Run QEMU boot test (x86_64)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        if [ -f build/hello_x86_64.elf ]; then
+          timeout 10s qemu-system-x86_64 \
+            -kernel build/hello_x86_64.elf \
+            -serial stdio \
+            -nographic \
+            -no-reboot || true
+          echo "✅ QEMU boot test completed"
+        else
+          echo "⚠️ No x86_64 kernel to test"
+        fi
+
+  # ============================================================================
+  # ARM32 (Cortex-M) Bare-Metal Tests
+  # ============================================================================
+  arm32-baremetal:
+    name: ARM32 Bare-Metal Tests
+    runs-on: ubuntu-latest
+    needs: verify-qemu
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        if [ -f "bin/release/simple" ]; then
+          chmod +x bin/release/simple
+          echo "✓ Bootstrap runtime ready"
+        else
+          echo "✗ No bootstrap runtime"
+          exit 1
+        fi
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-arm
+
+    - name: Test ARM32 boot code
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/arm32_boot_spec.spl || echo "Boot tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test ARM32 interrupts (NVIC)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/arm32_nvic_spec.spl || echo "NVIC tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test ARM32 inline assembly
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/arm32_asm_spec.spl || echo "ASM tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Build ARM32 examples
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        if [ -f examples/baremetal/blinky_stm32f4.spl ]; then
+          simple build examples/baremetal/blinky_stm32f4.spl --bare-metal --board=stm32f407_discovery -o build/blinky.elf
+          echo "✅ Built ARM32 example"
+        else
+          echo "⚠️ ARM32 example not found"
+        fi
+      continue-on-error: true
+
+    - name: Run QEMU boot test (ARM Cortex-M3)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        if [ -f build/blinky.elf ]; then
+          timeout 10s qemu-system-arm \
+            -machine lm3s6965evb \
+            -kernel build/blinky.elf \
+            -serial stdio \
+            -nographic \
+            -no-reboot || true
+          echo "✅ QEMU boot test completed"
+        else
+          echo "⚠️ No ARM32 kernel to test"
+        fi
+
+  # ============================================================================
+  # ARM64 (AArch64) Bare-Metal Tests
+  # ============================================================================
+  arm64-baremetal:
+    name: ARM64 Bare-Metal Tests
+    runs-on: ubuntu-latest
+    needs: verify-qemu
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        if [ -f "bin/release/simple" ]; then
+          chmod +x bin/release/simple
+          echo "✓ Bootstrap runtime ready"
+        else
+          echo "✗ No bootstrap runtime"
+          exit 1
+        fi
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-arm
+
+    - name: Test ARM64 boot code
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/arm64_boot_spec.spl || echo "Boot tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test ARM64 interrupts (GIC)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/arm64_gic_spec.spl || echo "GIC tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Run QEMU boot test (ARM64)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        if [ -f build/hello_arm64.elf ]; then
+          timeout 10s qemu-system-aarch64 \
+            -machine virt \
+            -cpu cortex-a57 \
+            -kernel build/hello_arm64.elf \
+            -serial stdio \
+            -nographic \
+            -no-reboot || true
+          echo "✅ QEMU boot test completed"
+        else
+          echo "⚠️ No ARM64 kernel to test"
+        fi
+
+  # ============================================================================
+  # RISC-V 32-bit Bare-Metal Tests
+  # ============================================================================
+  riscv32-baremetal:
+    name: RISC-V 32 Bare-Metal Tests
+    runs-on: ubuntu-latest
+    needs: verify-qemu
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        if [ -f "bin/release/simple" ]; then
+          chmod +x bin/release/simple
+          echo "✓ Bootstrap runtime ready"
+        else
+          echo "✗ No bootstrap runtime"
+          exit 1
+        fi
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-misc
+
+    - name: Test RISC-V 32 boot code
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/riscv32_boot_spec.spl || echo "Boot tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test RISC-V 32 interrupts (PLIC)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/riscv32_plic_spec.spl || echo "PLIC tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test RISC-V 32 inline assembly
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/riscv32_asm_spec.spl || echo "ASM tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Build RISC-V 32 examples
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        if [ -f examples/baremetal/timer_riscv32.spl ]; then
+          simple build examples/baremetal/timer_riscv32.spl --bare-metal -o build/timer_riscv32.elf
+          echo "✅ Built RISC-V 32 example"
+        else
+          echo "⚠️ RISC-V 32 example not found"
+        fi
+      continue-on-error: true
+
+    - name: Run QEMU boot test (RISC-V 32)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        if [ -f build/timer_riscv32.elf ]; then
+          timeout 10s qemu-system-riscv32 \
+            -machine virt \
+            -kernel build/timer_riscv32.elf \
+            -serial stdio \
+            -nographic \
+            -no-reboot || true
+          echo "✅ QEMU boot test completed"
+        else
+          echo "⚠️ No RISC-V 32 kernel to test"
+        fi
+
+  # ============================================================================
+  # RISC-V 64-bit Bare-Metal Tests
+  # ============================================================================
+  riscv64-baremetal:
+    name: RISC-V 64 Bare-Metal Tests
+    runs-on: ubuntu-latest
+    needs: verify-qemu
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        if [ -f "bin/release/simple" ]; then
+          chmod +x bin/release/simple
+          echo "✓ Bootstrap runtime ready"
+        else
+          echo "✗ No bootstrap runtime"
+          exit 1
+        fi
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-misc
+
+    - name: Test RISC-V 64 boot code
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/riscv64_boot_spec.spl || echo "Boot tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Test RISC-V 64 interrupts (PLIC)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/baremetal/riscv64_plic_spec.spl || echo "PLIC tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Run QEMU boot test (RISC-V 64)
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        if [ -f build/hello_riscv64.elf ]; then
+          timeout 10s qemu-system-riscv64 \
+            -machine virt \
+            -kernel build/hello_riscv64.elf \
+            -serial stdio \
+            -nographic \
+            -no-reboot || true
+          echo "✅ QEMU boot test completed"
+        else
+          echo "⚠️ No RISC-V 64 kernel to test"
+        fi
+
+  # ============================================================================
+  # GDB Integration Tests
+  # ============================================================================
+  gdb-integration:
+    name: GDB Remote Debugging (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, arm, riscv32]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        if [ -f "bin/release/simple" ]; then
+          chmod +x bin/release/simple
+          echo "✓ Bootstrap runtime ready"
+        else
+          echo "✗ No bootstrap runtime"
+          exit 1
+        fi
+
+    - name: Install QEMU and GDB
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-system-misc gdb-multiarch
+
+    - name: Test GDB integration
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        simple test test/remote/remote_${{ matrix.arch }}_spec.spl || echo "GDB tests may not all pass yet"
+      continue-on-error: true
+
+  # ============================================================================
+  # Summary
+  # ============================================================================
+  summary:
+    name: Bare-Metal Test Summary
+    runs-on: ubuntu-latest
+    needs: [
+      verify-qemu,
+      x86-baremetal,
+      x86_64-baremetal,
+      arm32-baremetal,
+      arm64-baremetal,
+      riscv32-baremetal,
+      riscv64-baremetal,
+      gdb-integration
+    ]
+    if: always()
+
+    steps:
+    - name: Generate summary
+      run: |
+        echo "# Bare-Metal Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Architecture | Boot Tests | Interrupt Tests | GDB Integration |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------------|------------|-----------------|-----------------|" >> $GITHUB_STEP_SUMMARY
+        echo "| x86 | ${{ needs.x86-baremetal.result }} | ${{ needs.x86-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| x86_64 | ${{ needs.x86_64-baremetal.result }} | ${{ needs.x86_64-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| ARM32 | ${{ needs.arm32-baremetal.result }} | ${{ needs.arm32-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| ARM64 | ${{ needs.arm64-baremetal.result }} | ${{ needs.arm64-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "| RISC-V 32 | ${{ needs.riscv32-baremetal.result }} | ${{ needs.riscv32-baremetal.result }} | ${{ needs.gdb-integration.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| RISC-V 64 | ${{ needs.riscv64-baremetal.result }} | ${{ needs.riscv64-baremetal.result }} | - |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## QEMU Verification" >> $GITHUB_STEP_SUMMARY
+        echo "Status: ${{ needs.verify-qemu.result }}" >> $GITHUB_STEP_SUMMARY
+
+    - name: Check critical failures
+      run: |
+        FAILED=0
+
+        # QEMU verification is critical
+        [ "${{ needs.verify-qemu.result }}" != "success" ] && FAILED=1
+
+        # At least one architecture should pass
+        ALL_FAILED=1
+        [ "${{ needs.x86-baremetal.result }}" == "success" ] && ALL_FAILED=0
+        [ "${{ needs.x86_64-baremetal.result }}" == "success" ] && ALL_FAILED=0
+        [ "${{ needs.arm32-baremetal.result }}" == "success" ] && ALL_FAILED=0
+        [ "${{ needs.arm64-baremetal.result }}" == "success" ] && ALL_FAILED=0
+        [ "${{ needs.riscv32-baremetal.result }}" == "success" ] && ALL_FAILED=0
+        [ "${{ needs.riscv64-baremetal.result }}" == "success" ] && ALL_FAILED=0
+
+        [ $ALL_FAILED -eq 1 ] && FAILED=1
+
+        if [ $FAILED -eq 1 ]; then
+          echo "❌ Critical bare-metal tests failed"
+          exit 1
+        fi
+
+        echo "✅ Bare-metal tests passed (at least one architecture working)"

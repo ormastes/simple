@@ -1,0 +1,154 @@
+"""
+Rate Limiter Tests
+Feature: Token Bucket Rate Limiting
+Category: FailSafe, Rate Limiting
+Status: In Progress
+
+Tests for token bucket algorithm and rate limiting.
+"""
+
+use std.failsafe.core.*
+use std.failsafe.ratelimit.*
+use std.spec.{check, check_msg}
+
+describe "RateLimitConfig":
+    it "creates default config":
+        val config = RateLimitConfig__default()
+        expect(config.requests_per_second == 100.0)
+        expect(config.burst_size == 50)
+        expect(config.penalty_duration_ms == 1000)
+
+    it "creates strict config":
+        val config = RateLimitConfig__strict()
+        expect(config.requests_per_second == 50.0)
+        expect(config.burst_size == 20)
+        expect(config.penalty_duration_ms == 5000)
+
+    it "creates permissive config":
+        val config = RateLimitConfig__permissive()
+        expect(config.requests_per_second == 1000.0)
+        expect(config.burst_size == 500)
+        expect(config.penalty_duration_ms == 100)
+
+describe "TokenBucket":
+    it "creates bucket with capacity":
+        val bucket = TokenBucket__new(100.0, 10.0)
+        expect(bucket.capacity == 100.0)
+        expect(bucket.tokens == 100.0)
+        expect(bucket.refill_rate == 10.0)
+
+    it "consumes tokens":
+        var bucket = TokenBucket__new(10.0, 1.0)
+        expect(bucket.try_consume(5.0))
+        expect(bucket.tokens == 5.0)
+
+    it "rejects when insufficient tokens":
+        var bucket = TokenBucket__new(5.0, 1.0)
+        expect(not bucket.try_consume(10.0))
+        expect(bucket.tokens == 5.0)
+
+    it "reports available tokens":
+        var bucket = TokenBucket__new(10.0, 1.0)
+        bucket.try_consume(3.0)
+        expect(bucket.available() == 7.0)
+
+    it "resets to full":
+        var bucket = TokenBucket__new(10.0, 1.0)
+        bucket.try_consume(8.0)
+        expect(bucket.tokens == 2.0)
+        bucket.reset()
+        expect(bucket.tokens == 10.0)
+
+describe "RateLimitDecision":
+    it "checks allowed states":
+        expect(RateLimitDecision.Allow__is_allowed())
+        expect(not RateLimitDecision.Deny(1000).is_allowed())
+        expect(RateLimitDecision.Penalize(500).is_allowed())
+
+describe "RateLimiter":
+    it "creates limiter with config":
+        val limiter = RateLimiter__new(RateLimitConfig__default())
+        expect(limiter.enabled)
+        expect(limiter.config.requests_per_second == 100.0)
+
+    it "creates default limiter":
+        val limiter = RateLimiter__default()
+        expect(limiter.config.requests_per_second == 100.0)
+
+    it "allows requests under limit":
+        var limiter = RateLimiter__default()
+        match limiter.check("client1"):
+            case RateLimitDecision.Allow:
+                expect(true)
+            case _:
+                expect(false)
+
+    it "tracks client requests":
+        var limiter = RateLimiter__default()
+        limiter.check("client1")
+        limiter.check("client1")
+        limiter.check("client2")
+
+        # Check that client requests are tracked
+        expect(limiter.client_requests.len() == 2)
+
+    it "resets state":
+        var limiter = RateLimiter__default()
+        limiter.check("client1")
+        limiter.check("client2")
+
+        limiter.reset()
+
+        expect(limiter.client_requests.len() == 0)
+        expect(limiter.global_bucket.tokens == limiter.global_bucket.capacity)
+
+    it "can be disabled":
+        var limiter = RateLimiter__default()
+        limiter.disable()
+
+        # When disabled, always allows
+        match limiter.check("client1"):
+            case RateLimitDecision.Allow:
+                expect(true)
+            case _:
+                expect(false)
+
+    it "can be enabled":
+        var limiter = RateLimiter__default()
+        limiter.disable()
+        expect(not limiter.enabled)
+        limiter.enable()
+        expect(limiter.enabled)
+
+describe "RateLimitStats":
+    it "creates stats":
+        val stats = RateLimitStats__new()
+        expect(stats.allowed_requests == 0)
+        expect(stats.denied_requests == 0)
+
+    it "calculates total requests":
+        var stats = RateLimitStats__new()
+        stats.allowed_requests = 80
+        stats.denied_requests = 20
+
+        expect(stats.total_requests() == 100)
+
+    it "calculates denial rate":
+        var stats = RateLimitStats__new()
+        stats.allowed_requests = 80
+        stats.denied_requests = 20
+
+        expect(stats.denial_rate() == 0.2)
+
+    it "handles zero division":
+        val stats = RateLimitStats__new()
+        expect(stats.denial_rate() == 0.0)
+
+describe "rate_limit_check":
+    it "returns Ok on allow":
+        var limiter = RateLimiter__default()
+        match rate_limit_check(limiter, "client1"):
+            case FailSafeResult.Ok(_):
+                expect(true)
+            case FailSafeResult.Err(_):
+                expect(false)

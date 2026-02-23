@@ -1,0 +1,181 @@
+# tools_git_branch.spl - Branch/checkout/merge git compatibility tools (5 tools)
+#
+# Tools: branch, checkout, merge, rebase, cherry_pick
+
+use app.mcp_jj.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, make_tool_result, make_error_response, make_tool_schema_multi, make_tool_schema, make_no_param_tool, make_prop, make_prop_bool, make_prop_int, extract_nested_string, extract_arguments_dict}
+use app.mcp_jj.jj_runner.{JjResult, jj_run, jj_run_with_args, shell_quote}
+use app.mcp_jj.warning.{git_compat_warning, git_compat_warning_no_equiv, show_warnings}
+use std.text.{NL}
+
+# =============================================================================
+# Tool 10: git_branch -> jj bookmark
+# =============================================================================
+
+fn schema_git_branch() -> String:
+    var props = LB()
+    props = props + make_prop("action", "Action: list, create, delete, rename (default: list)")
+    props = props + "," + make_prop("name", "Branch/bookmark name")
+    props = props + "," + make_prop("new_name", "New name (for rename)")
+    props = props + "," + make_prop("revision", "Revision to point the bookmark to")
+    props = props + RB()
+    make_tool_schema_multi("git_branch", "[Git compat] Manage branches (translates to jj bookmark)", props, "[]", false, false, false)
+
+fn handle_git_branch(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val action = args.get("action") ?? "list"
+    val name = args.get("name") ?? ""
+    val new_name = args.get("new_name") ?? ""
+    val revision = args.get("revision") ?? ""
+    val warning = git_compat_warning("git_branch", "jj bookmark", "jj_bookmark")
+    if action == "list":
+        val result = jj_run("bookmark list", repo_path)
+        if result.success:
+            make_tool_result(id, warning + "Note: Git branches are called 'bookmarks' in jj.{NL}" + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    elif action == "create":
+        if name == "":
+            return make_error_response(id, -32602, "Missing required parameter: name (for create)")
+        var cmd = "bookmark create " + shell_quote(name)
+        if revision != "":
+            cmd = cmd + " -r " + shell_quote(revision)
+        val result = jj_run(cmd, repo_path)
+        if result.success:
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    elif action == "delete":
+        if name == "":
+            return make_error_response(id, -32602, "Missing required parameter: name (for delete)")
+        val result = jj_run("bookmark delete " + shell_quote(name), repo_path)
+        if result.success:
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    elif action == "rename":
+        if name == "" or new_name == "":
+            return make_error_response(id, -32602, "Missing required parameters: name, new_name (for rename)")
+        val result = jj_run("bookmark rename " + shell_quote(name) + " " + shell_quote(new_name), repo_path)
+        if result.success:
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    else:
+        make_error_response(id, -32602, "Unknown action: " + action + ". Use: list, create, delete, rename")
+
+# =============================================================================
+# Tool 11: git_checkout -> jj new / jj edit
+# =============================================================================
+
+fn schema_git_checkout() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Branch name, commit hash, or ref to checkout (required)")
+    props = props + "," + make_prop_bool("create", "Create a new branch (translates to jj new)")
+    props = props + RB()
+    val required = "[" + js("revision") + "]"
+    make_tool_schema_multi("git_checkout", "[Git compat] Switch to revision (translates to jj new/edit)", props, required, false, false, false)
+
+fn handle_git_checkout(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val revision = args.get("revision") ?? ""
+    val create = args.get("create") ?? ""
+    if revision == "":
+        return make_error_response(id, -32602, "Missing required parameter: revision")
+    var cmd = "new"
+    if create != "true":
+        # Default behavior: jj new creates a new change on top of revision
+        cmd = "new"
+    val result = jj_run(cmd + " " + shell_quote(revision), repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_checkout", "jj new", "jj_new")
+        var msg = warning
+        msg = msg + "Note: In jj, 'checkout' does not exist. Instead:{NL}"
+        msg = msg + "  - 'jj new REV' creates a new empty change on top of REV (like git checkout + new commit){NL}"
+        msg = msg + "  - 'jj edit REV' edits an existing change directly{NL}"
+        msg = msg + "The working copy always represents the current change.{NL}"
+        msg = msg + result.stdout
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 12: git_merge -> jj new with multiple parents
+# =============================================================================
+
+fn schema_git_merge() -> String:
+    make_tool_schema("git_merge", "[Git compat] Merge branches (translates to jj new with multiple parents)", "branches", "Branches to merge (space-separated, required)", true, false, false, false)
+
+fn handle_git_merge(id: String, body: String, repo_path: String) -> String:
+    val branches = extract_nested_string(body, "arguments", "branches")
+    if branches == "":
+        return make_error_response(id, -32602, "Missing required parameter: branches")
+    # In jj, merging is done by creating a new change with multiple parents
+    val cmd = "new @ " + branches
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_merge", "jj new (multi-parent)", "jj_new")
+        var msg = warning
+        msg = msg + "Note: In jj, merging creates a new change with multiple parents.{NL}"
+        msg = msg + "The command 'jj new @ branch1 branch2' creates a merge change.{NL}"
+        msg = msg + result.stdout
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 13: git_rebase -> jj rebase
+# =============================================================================
+
+fn schema_git_rebase() -> String:
+    var props = LB()
+    props = props + make_prop("destination", "Destination revision to rebase onto (required)")
+    props = props + "," + make_prop("source", "Source revision to rebase (default: current change)")
+    props = props + RB()
+    val required = "[" + js("destination") + "]"
+    make_tool_schema_multi("git_rebase", "[Git compat] Rebase changes (translates to jj rebase)", props, required, false, true, false)
+
+fn handle_git_rebase(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val destination = args.get("destination") ?? ""
+    val source = args.get("source") ?? ""
+    if destination == "":
+        return make_error_response(id, -32602, "Missing required parameter: destination")
+    var cmd = "rebase -d " + shell_quote(destination)
+    if source != "":
+        cmd = cmd + " -s " + shell_quote(source)
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_rebase", "jj rebase", "jj_rebase")
+        var msg = warning
+        msg = msg + "Note: jj rebase does not support interactive mode. All rebasing is automatic.{NL}"
+        msg = msg + result.stdout
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 14: git_cherry_pick -> jj duplicate
+# =============================================================================
+
+fn schema_git_cherry_pick() -> String:
+    make_tool_schema("git_cherry_pick", "[Git compat] Cherry-pick commits (translates to jj duplicate)", "revisions", "Revisions to cherry-pick (space-separated, required)", true, false, false, false)
+
+fn handle_git_cherry_pick(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    if revisions == "":
+        return make_error_response(id, -32602, "Missing required parameter: revisions")
+    val result = jj_run("duplicate " + revisions, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_cherry_pick", "jj duplicate", "jj_duplicate")
+        var msg = warning
+        msg = msg + "Note: 'jj duplicate' creates copies of changes. Unlike git cherry-pick, it preserves the original.{NL}"
+        msg = msg + result.stdout
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+export schema_git_branch, handle_git_branch
+export schema_git_checkout, handle_git_checkout
+export schema_git_merge, handle_git_merge
+export schema_git_rebase, handle_git_rebase
+export schema_git_cherry_pick, handle_git_cherry_pick

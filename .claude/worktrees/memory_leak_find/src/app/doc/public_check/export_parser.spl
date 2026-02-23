@@ -1,0 +1,211 @@
+# Export Parser - Parse export statements from module files
+# Handles single-line and multi-line export statements
+
+# External dependencies
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+# Export information struct
+struct ExportInfo:
+    name: text
+    type_kind: text
+    source_file: text
+    line_number: i64
+
+impl ExportInfo:
+    static fn create(name: text, type_kind: text, source_file: text, line_number: i64) -> ExportInfo:
+        ExportInfo(name: name, type_kind: type_kind, source_file: source_file, line_number: line_number)
+
+# Find the mod.spl or __init__.spl file for a module directory
+fn find_mod_file(module_dir: text) -> text:
+    # Try mod.spl first
+    val mod_path = "{module_dir}/mod.spl"
+    if rt_file_exists(mod_path):
+        return mod_path
+
+    # Try __init__.spl
+    val init_path = "{module_dir}/__init__.spl"
+    if rt_file_exists(init_path):
+        return init_path
+
+    # Not found
+    return ""
+
+# Parse a comma-separated list of export names
+fn parse_export_list(export_line: text) -> [text]:
+    var result = []
+
+    # Remove "export " prefix
+    var line = export_line
+    if line.starts_with("export "):
+        line = line.substring(7)
+
+    # Split by comma
+    val parts = line.split(",")
+
+    for part in parts:
+        # Trim whitespace
+        var name = part
+
+        # Remove leading/trailing whitespace manually
+        var start = 0
+        var end_val = name.len()
+
+        # Find first non-space
+        var i = 0
+        for i in range(name.len()):
+            val ch = name.char_at(i)
+            if ch != " " and ch != "\t" and ch != "\n" and ch != "\r":
+                start = i
+                break
+
+        # Find last non-space
+        var j = name.len() - 1
+        var found_end = false
+        for k in range(name.len()):
+            j = name.len() - 1 - k
+            if j < 0:
+                break
+            val ch = name.char_at(j)
+            if (ch != " " and ch != "\t" and ch != "\n" and ch != "\r"):
+                end_val = j + 1
+                found_end = true
+                break
+
+        if start < end_val:
+            name = name.substring(start, end_val)
+        else:
+            name = ""
+
+        # Skip empty names
+        if name == "":
+            continue
+
+        # Add to result
+        result = result + [name]
+
+    return result
+
+# Parse export statements from file content
+fn parse_export_statements(content: text, source_file: text) -> [ExportInfo]:
+    var result = []
+
+    # Split into lines
+    val lines = content.split("\n")
+
+    # Track multi-line export state
+    var in_export = false
+    var export_buffer = ""
+    var export_start_line = 0
+
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+
+        # Trim the line
+        var trimmed = line
+        var start = 0
+        var end_val = trimmed.len()
+
+        # Find first non-space
+        var i = 0
+        for i in range(trimmed.len()):
+            val ch = trimmed.char_at(i)
+            if ch != " " and ch != "\t":
+                start = i
+                break
+
+        # Find last non-space
+        var j = trimmed.len() - 1
+        var found_end = false
+        for k in range(trimmed.len()):
+            j = trimmed.len() - 1 - k
+            if j < 0:
+                break
+            val ch = trimmed.char_at(j)
+            if (ch != " " and ch != "\t" and ch != "\n" and ch != "\r"):
+                end_val = j + 1
+                found_end = true
+                break
+
+        if start < end_val:
+            trimmed = trimmed.substring(start, end_val)
+        else:
+            trimmed = ""
+
+        # Check if this is start of export
+        if trimmed.starts_with("export "):
+            if not in_export:
+                in_export = true
+                export_buffer = trimmed
+                export_start_line = line_num
+            else:
+                # Previous export didn't finish - process it first
+                val names = parse_export_list(export_buffer)
+                for name in names:
+                    val info = ExportInfo.create(name, "unknown", source_file, export_start_line)
+                    result = result + [info]
+
+                # Start new export
+                export_buffer = trimmed
+                export_start_line = line_num
+
+            # Check if this line completes the export (no trailing comma)
+            if not trimmed.ends_with(","):
+                # Complete export on this line
+                val names = parse_export_list(export_buffer)
+                for name in names:
+                    val info = ExportInfo.create(name, "unknown", source_file, export_start_line)
+                    result = result + [info]
+
+                in_export = false
+                export_buffer = ""
+
+        # Continue multi-line export
+        if in_export and not trimmed.starts_with("export "):
+            if trimmed != "":
+                export_buffer = export_buffer + " " + trimmed
+
+                # Check if this line completes the export
+                if not trimmed.ends_with(","):
+                    # Complete export
+                    val names = parse_export_list(export_buffer)
+                    for name in names:
+                        val info = ExportInfo.create(name, "unknown", source_file, export_start_line)
+                        result = result + [info]
+
+                    in_export = false
+                    export_buffer = ""
+
+    # Handle incomplete export at end of file
+    if in_export and export_buffer != "":
+        val names = parse_export_list(export_buffer)
+        for name in names:
+            val info = ExportInfo.create(name, "unknown", source_file, export_start_line)
+            result = result + [info]
+
+    return result
+
+# Find all module exports from a module directory
+fn find_module_exports(module_dir: text) -> [ExportInfo]:
+    # Find the module file
+    val mod_file = find_mod_file(module_dir)
+
+    if mod_file == "":
+        return []
+
+    # Read the file
+    val content = rt_file_read_text(mod_file) ?? ""
+
+    if content == "":
+        return []
+
+    # Parse export statements
+    return parse_export_statements(content, mod_file)
+
+# Export public API
+export ExportInfo
+export find_module_exports
+export find_mod_file
+export parse_export_statements
+export parse_export_list

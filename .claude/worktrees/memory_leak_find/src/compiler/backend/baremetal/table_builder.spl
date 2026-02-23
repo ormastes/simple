@@ -1,0 +1,255 @@
+# Full String Table Builder
+#
+# Takes parsed SMF metadata and builds a full indexed string table
+# ready for embedding in binary's .smt section.
+
+use compiler.backend.baremetal.smf_parser.{SMFMetadata, SMFStringEntry}
+
+# Full table entry (with computed fields for binary layout)
+class FullStringEntry:
+    id: i32
+    text: text
+    length: i32          # Including null terminator
+    param_count: i32
+    aligned_size: i32    # Total size aligned to 4 bytes
+
+impl FullStringEntry:
+    static fn from_smf_entry(entry: SMFStringEntry) -> FullStringEntry:
+        val text_len = entry.text.len() + 1  # Include null terminator
+        val aligned = align_to_4(12 + text_len)  # Header (12 bytes) + text
+
+        FullStringEntry(
+            id: entry.id,
+            text: entry.text,
+            length: text_len,
+            param_count: entry.params,
+            aligned_size: aligned
+        )
+
+# Full indexed string table
+class FullStringTable:
+    entries: [FullStringEntry]
+    total_size: i32
+
+impl FullStringTable:
+    static fn empty() -> FullStringTable:
+        FullStringTable(entries: [], total_size: 4)  # 4 bytes for count
+
+    me add(entry: FullStringEntry):
+        self.entries.push(entry)
+        self.total_size = self.total_size + entry.aligned_size
+
+    fn count() -> i32:
+        self.entries.len()
+
+    # Get entry by ID
+    fn get_by_id(id: i32) -> FullStringEntry?:
+        for entry in self.entries:
+            if entry.id == id:
+                return Some(entry)
+        nil
+
+# Build full table from SMF metadata
+fn build_full_table(metadata: SMFMetadata) -> FullStringTable:
+    var table = FullStringTable__empty()
+
+    # Convert each SMF entry to full entry
+    for smf_entry in metadata.strings:
+        val full_entry = FullStringEntry__from_smf_entry(smf_entry)
+        table.add(full_entry)
+
+    table
+
+# Align value to 4-byte boundary
+fn align_to_4(value: i32) -> i32:
+    (value + 3) & ~3
+
+# Calculate table statistics
+class TableStats:
+    entry_count: i32
+    total_size: i32
+    min_string_len: i32
+    max_string_len: i32
+    avg_string_len: i32
+    total_string_bytes: i32
+    total_header_bytes: i32
+
+impl TableStats:
+    static fn from_table(table: FullStringTable) -> TableStats:
+        var min_len = 999999
+        var max_len = 0
+        var total_str_bytes = 0
+        var total_hdr_bytes = table.count() * 12  # Each entry has 12-byte header
+
+        for entry in table.entries:
+            val str_len = entry.text.len()
+
+            if str_len < min_len:
+                min_len = str_len
+            if str_len > max_len:
+                max_len = str_len
+
+            total_str_bytes = total_str_bytes + entry.length
+
+        val avg_len = if table.count() > 0:
+            total_str_bytes / table.count()
+        else:
+            0
+
+        TableStats(
+            entry_count: table.count(),
+            total_size: table.total_size,
+            min_string_len: min_len,
+            max_string_len: max_len,
+            avg_string_len: avg_len,
+            total_string_bytes: total_str_bytes,
+            total_header_bytes: total_hdr_bytes
+        )
+
+# Print table statistics
+fn print_table_stats(stats: TableStats):
+    print "String Table Statistics:"
+    print "  Entries:           {stats.entry_count}"
+    print "  Total size:        {stats.total_size} bytes"
+    print "  String lengths:"
+    print "    Min:             {stats.min_string_len} bytes"
+    print "    Max:             {stats.max_string_len} bytes"
+    print "    Average:         {stats.avg_string_len} bytes"
+    print "  Memory breakdown:"
+    print "    Headers:         {stats.total_header_bytes} bytes (4 + count*12)"
+    print "    String data:     {stats.total_string_bytes} bytes"
+    print "    Padding:         {stats.total_size - stats.total_header_bytes - stats.total_string_bytes - 4} bytes"
+
+# Validate table (check for duplicate IDs, etc.)
+fn validate_table(table: FullStringTable) -> bool:
+    var seen_ids: [i32] = []
+    var valid = true
+
+    for entry in table.entries:
+        # Check for duplicate IDs
+        if seen_ids.contains(entry.id):
+            print "Error: Duplicate string ID: {entry.id}"
+            valid = false
+        else:
+            seen_ids.push(entry.id)
+
+        # Check for empty strings
+        if entry.text.len() == 0:
+            print "Warning: Empty string at ID {entry.id}"
+
+        # Check for invalid parameters
+        if entry.param_count < 0:
+            print "Error: Invalid param count for ID {entry.id}: {entry.param_count}"
+            valid = false
+
+    valid
+
+# Sort table by ID (ensures consistent ordering)
+fn sort_table_by_id(table: FullStringTable) -> FullStringTable:
+    var sorted = FullStringTable__empty()
+
+    # Simple insertion sort by ID
+    var sorted_entries: [FullStringEntry] = []
+
+    for entry in table.entries:
+        # Find insertion position
+        var inserted = false
+        var i = 0
+
+        while i < sorted_entries.len():
+            if entry.id < sorted_entries[i].id:
+                # Insert before this position
+                sorted_entries = insert_at(sorted_entries, i, entry)
+                inserted = true
+                break
+            i = i + 1
+
+        if not inserted:
+            sorted_entries.push(entry)
+
+    # Rebuild table with sorted entries
+    for entry in sorted_entries:
+        sorted.add(entry)
+
+    sorted
+
+# Helper: Insert element at position
+fn insert_at(arr: [FullStringEntry], pos: i32, elem: FullStringEntry) -> [FullStringEntry]:
+    var result: [FullStringEntry] = []
+    var i = 0
+
+    while i < arr.len():
+        if i == pos:
+            result.push(elem)
+        result.push(arr[i])
+        i = i + 1
+
+    if pos >= arr.len():
+        result.push(elem)
+
+    result
+
+# Test function
+fn test_table_builder():
+    # Parse SMF file
+    val metadata = parse_smf_file("hello_world.smf")
+
+    # Build full table
+    val table = build_full_table(metadata)
+
+    # Validate
+    if validate_table(table):
+        print "✓ Table valid"
+    else:
+        print "✗ Table has errors"
+
+    # Show statistics
+    val stats = TableStats__from_table(table)
+    print_table_stats(stats)
+
+    # Sort by ID
+    val sorted = sort_table_by_id(table)
+
+    print ""
+    print "Table entries (sorted by ID):"
+    for entry in sorted.entries:
+        print "  [{entry.id}] \"{entry.text}\" ({entry.length} bytes, {entry.param_count} params)"
+
+
+# Auto-generated desugared static method wrappers
+fn FullStringTable__empty() -> FullStringTable:
+    FullStringTable(entries: [], total_size: 4)  # 4 bytes for count
+
+
+fn TableStats__from_table(table: FullStringTable) -> TableStats:
+            var min_len = 999999
+            var max_len = 0
+            var total_str_bytes = 0
+            var total_hdr_bytes = table.count() * 12  # Each entry has 12-byte header
+
+            for entry in table.entries:
+                val str_len = entry.text.len()
+
+                if str_len < min_len:
+                    min_len = str_len
+                if str_len > max_len:
+                    max_len = str_len
+
+                total_str_bytes = total_str_bytes + entry.length
+
+            val avg_len = if table.count() > 0:
+                total_str_bytes / table.count()
+            else:
+                0
+
+            TableStats(
+                entry_count: table.count(),
+                total_size: table.total_size,
+                min_string_len: min_len,
+                max_string_len: max_len,
+                avg_string_len: avg_len,
+                total_string_bytes: total_str_bytes,
+                total_header_bytes: total_hdr_bytes
+            )
+
+    # Print table statistics

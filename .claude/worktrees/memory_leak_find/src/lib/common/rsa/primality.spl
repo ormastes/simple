@@ -1,0 +1,201 @@
+# RSA Primality Testing and Prime Generation
+#
+# Miller-Rabin test, prime generation, safe primes
+
+import src.std.array as array
+import src.std.rsa.types as types
+import src.std.rsa.modular as modular
+import src.std.rsa.random as random
+
+# Small primes for trial division
+fn get_small_primes() -> list:
+    return [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293, 307, 311, 313, 317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397, 401, 409, 419, 421, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503, 509, 521, 523, 541]
+
+# Trial division with small primes
+fn is_divisible_by_small_prime(n: list) -> bool:
+    val small_primes = get_small_primes()
+    var i = 0
+    val len = array.length(small_primes)
+
+    while i < len:
+        val prime = array.get(small_primes, i)
+        val prime_bi = types.bigint_from_i64(prime)
+        val divmod_result = types.bigint_divmod(n, prime_bi)
+        val remainder = array.get(divmod_result, 1)
+
+        if types.bigint_is_zero(remainder):
+            return true
+
+        i = i + 1
+
+    return false
+
+# Miller-Rabin primality test
+fn miller_rabin_test(n: list, rounds: i64) -> bool:
+    if types.bigint_is_zero(n):
+        return false
+    if types.bigint_is_one(n):
+        return false
+
+    val two = types.bigint_from_i64(2)
+    val cmp_two = types.bigint_compare(n, two)
+    if cmp_two == 0:
+        return true
+
+    val divmod_2 = types.bigint_divmod(n, two)
+    val rem_2 = array.get(divmod_2, 1)
+    if types.bigint_is_zero(rem_2):
+        return false
+
+    val n_minus_1 = types.bigint_sub(n, types.bigint_one())
+    var r = 0
+    var d = n_minus_1
+
+    while true:
+        val divmod_result = types.bigint_divmod(d, two)
+        val remainder = array.get(divmod_result, 1)
+        if !types.bigint_is_zero(remainder):
+            break
+        r = r + 1
+        d = array.get(divmod_result, 0)
+
+    var round = 0
+    while round < rounds:
+        val n_minus_3 = types.bigint_sub(n, types.bigint_from_i64(3))
+        val a_temp = random.random_bigint_range(two, n_minus_3)
+        val a = types.bigint_add(a_temp, types.bigint_one())
+
+        var x = modular.bigint_mod_exp(a, d, n)
+
+        val cmp_1 = types.bigint_compare(x, types.bigint_one())
+        val cmp_n1 = types.bigint_compare(x, n_minus_1)
+
+        if cmp_1 == 0:
+            round = round + 1
+            pass
+        else:
+            if cmp_n1 == 0:
+                round = round + 1
+                pass
+            else:
+                var i = 0
+                var is_composite = true
+
+                while i < r - 1:
+                    x = types.bigint_mul(x, x)
+                    x = types.bigint_mod(x, n)
+
+                    val cmp_n1_2 = types.bigint_compare(x, n_minus_1)
+                    if cmp_n1_2 == 0:
+                        is_composite = false
+                        break
+
+                    i = i + 1
+
+                if is_composite:
+                    return false
+
+                round = round + 1
+
+    return true
+
+# Check if number is probably prime (40 rounds of Miller-Rabin)
+fn is_probably_prime(n: list) -> bool:
+    return miller_rabin_test(n, 40)
+
+# Check if number is prime with specified confidence
+fn is_prime_with_rounds(n: list, rounds: i64) -> bool:
+    if is_divisible_by_small_prime(n):
+        return false
+
+    return miller_rabin_test(n, rounds)
+
+# Fermat primality test (less reliable than Miller-Rabin)
+fn fermat_test(n: list) -> bool:
+    if types.bigint_is_zero(n):
+        return false
+    if types.bigint_is_one(n):
+        return false
+
+    val two = types.bigint_from_i64(2)
+    val cmp = types.bigint_compare(n, two)
+    if cmp == 0:
+        return true
+
+    val n_minus_1 = types.bigint_sub(n, types.bigint_one())
+    val result = modular.bigint_mod_exp(two, n_minus_1, n)
+
+    return types.bigint_is_one(result)
+
+# Generate a random odd number with specified bits
+fn generate_random_odd(bits: i64) -> list:
+    var n = random.random_bigint(bits)
+
+    n = types.bigint_set_bit(n, bits - 1)
+    n = types.bigint_set_bit(n, 0)
+
+    return n
+
+# Generate a random prime with specified number of bits
+fn generate_prime(bits: i64) -> list:
+    if bits < 2:
+        return types.bigint_from_i64(2)
+
+    var attempts = 0
+    while attempts < 10000:
+        val candidate = generate_random_odd(bits)
+
+        if is_divisible_by_small_prime(candidate):
+            attempts = attempts + 1
+            pass
+        else:
+            val is_prime = is_probably_prime(candidate)
+            if is_prime:
+                return candidate
+
+            attempts = attempts + 1
+
+    return types.bigint_from_i64(65537)
+
+# Find next prime after n
+fn next_prime(n: list) -> list:
+    var candidate = n
+
+    val two = types.bigint_from_i64(2)
+    val divmod_2 = types.bigint_divmod(candidate, two)
+    val rem = array.get(divmod_2, 1)
+    if types.bigint_is_zero(rem):
+        candidate = types.bigint_add(candidate, types.bigint_one())
+
+    var attempts = 0
+    while attempts < 10000:
+        if is_divisible_by_small_prime(candidate):
+            candidate = types.bigint_add(candidate, two)
+            attempts = attempts + 1
+            pass
+        else:
+            val is_prime = is_probably_prime(candidate)
+            if is_prime:
+                return candidate
+
+            candidate = types.bigint_add(candidate, two)
+            attempts = attempts + 1
+
+    return n
+
+# Generate a safe prime (p where (p-1)/2 is also prime)
+fn generate_safe_prime(bits: i64) -> list:
+    var attempts = 0
+    while attempts < 1000:
+        val q = generate_prime(bits - 1)
+        val two = types.bigint_from_i64(2)
+        val p_temp = types.bigint_mul(q, two)
+        val p = types.bigint_add(p_temp, types.bigint_one())
+
+        val is_prime = is_probably_prime(p)
+        if is_prime:
+            return p
+
+        attempts = attempts + 1
+
+    return generate_prime(bits)

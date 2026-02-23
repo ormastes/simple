@@ -1,0 +1,333 @@
+"""
+# CompilerServices Error Cases
+
+**Feature ID:** #BACKEND-002
+**Category:** Compiler
+**Status:** Active
+
+## Overview
+
+Tests failure paths and edge cases for noop port behavior in CompilerServices. Validates that
+noop ports handle degenerate inputs gracefully, including empty strings, empty lists, and
+nonexistent paths. Verifies idempotency of repeated calls, that the noop logger does not crash
+on empty messages, that the noop module loader returns sensible defaults, and that the noop
+desugarer passes input through unchanged. Also confirms independent factory instances.
+
+## Syntax
+
+```simple
+val svc = create_default_services()
+val f = svc.lexer.tokenize_fn
+val result = f("")
+expect(result.len()).to_equal(0)
+
+val rf = svc.module_loader.resolve_fn
+val result = rf("/src/main.spl", "std.string")
+expect(result).to_equal("std.string")
+```
+"""
+# CompilerServices Error Cases - Negative/Edge Path Tests
+#
+# Tests failure paths and edge cases of noop port behavior:
+# - noop ports with degenerate inputs (empty strings, empty lists)
+# - multiple calls to noop ports are idempotent
+# - noop logger does not crash on empty messages
+# - noop module loader returns sensible defaults for nonexistent paths
+# - noop desugarer passes through input unchanged
+#
+# Feature: 2 (Pipeline Stage Ports)
+# Source: src/compiler/compiler_services.spl
+
+use compiler.compiler_services.{
+    create_default_services,
+    LexerPort,
+    ParserPort,
+    DesugarPort,
+    TypeCheckPort,
+    HirLowerPort,
+    MirLowerPort,
+    LoggerPort,
+    ModuleLoaderPort,
+    CompilerServices
+}
+
+# ============================================================================
+# Noop lexer: degenerate inputs
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop lexer degenerate inputs":
+
+    it "tokenize empty string returns empty list":
+        val svc = create_default_services()
+        val f = svc.lexer.tokenize_fn
+        val result = f("")
+        expect(result.len()).to_equal(0)
+
+    it "tokenize whitespace-only input returns empty list":
+        val svc = create_default_services()
+        val f = svc.lexer.tokenize_fn
+        val result = f("   \t\n")
+        expect(result.len()).to_equal(0)
+
+    it "tokenize any input always returns empty list for noop":
+        val svc = create_default_services()
+        val f = svc.lexer.tokenize_fn
+        val result = f("val x = 1 + 2")
+        expect(result.len()).to_equal(0)
+
+    it "calling tokenize twice is idempotent":
+        val svc = create_default_services()
+        val f = svc.lexer.tokenize_fn
+        val r1 = f("some source")
+        val r2 = f("some source")
+        expect(r1.len()).to_equal(0)
+        expect(r2.len()).to_equal(0)
+
+# ============================================================================
+# Noop parser: degenerate inputs
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop parser degenerate inputs":
+
+    it "parse empty token list with empty source returns no errors":
+        val svc = create_default_services()
+        val f = svc.parser.parse_fn
+        val result = f([], "")
+        expect(result.len()).to_equal(0)
+
+    it "parse non-empty token list with empty source returns no errors":
+        val svc = create_default_services()
+        val f = svc.parser.parse_fn
+        val result = f(["tok1", "tok2"], "")
+        expect(result.len()).to_equal(0)
+
+    it "parse empty token list with non-empty source returns no errors":
+        val svc = create_default_services()
+        val f = svc.parser.parse_fn
+        val result = f([], "val x = 1")
+        expect(result.len()).to_equal(0)
+
+    it "calling parse twice returns empty errors both times":
+        val svc = create_default_services()
+        val f = svc.parser.parse_fn
+        val r1 = f([], "")
+        val r2 = f(["a", "b"], "src")
+        expect(r1.len()).to_equal(0)
+        expect(r2.len()).to_equal(0)
+
+# ============================================================================
+# Noop desugarer: edge cases
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop desugarer edge cases":
+
+    it "desugar empty string returns empty string":
+        val svc = create_default_services()
+        val f = svc.desugarer.desugar_fn
+        val result = f("")
+        expect(result).to_equal("")
+
+    it "desugar whitespace-only returns whitespace unchanged":
+        val svc = create_default_services()
+        val f = svc.desugarer.desugar_fn
+        val result = f("   ")
+        expect(result).to_equal("   ")
+
+    it "desugar returns input text unchanged for noop":
+        val svc = create_default_services()
+        val f = svc.desugarer.desugar_fn
+        val src = "fn foo(x: i64): x * 2"
+        val result = f(src)
+        expect(result).to_equal(src)
+
+    it "calling desugar twice returns same result":
+        val svc = create_default_services()
+        val f = svc.desugarer.desugar_fn
+        val src = "val x = 1"
+        val r1 = f(src)
+        val r2 = f(src)
+        expect(r1).to_equal(src)
+        expect(r2).to_equal(src)
+
+# ============================================================================
+# Noop type checker: degenerate inputs
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop type checker degenerate inputs":
+
+    it "check empty module name returns no errors":
+        val svc = create_default_services()
+        val f = svc.type_checker.check_fn
+        val result = f("")
+        expect(result.len()).to_equal(0)
+
+    it "check nonexistent module name returns no errors for noop":
+        val svc = create_default_services()
+        val f = svc.type_checker.check_fn
+        val result = f("nonexistent/module")
+        expect(result.len()).to_equal(0)
+
+    it "calling check multiple times returns empty each time":
+        val svc = create_default_services()
+        val f = svc.type_checker.check_fn
+        val r1 = f("module_a")
+        val r2 = f("module_b")
+        expect(r1.len()).to_equal(0)
+        expect(r2.len()).to_equal(0)
+
+# ============================================================================
+# Noop HIR lowerer: degenerate inputs
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop HIR lowerer degenerate inputs":
+
+    it "lower empty module name returns no errors":
+        val svc = create_default_services()
+        val f = svc.hir_lowerer.lower_fn
+        val result = f("")
+        expect(result.len()).to_equal(0)
+
+    it "lower nonexistent module returns no errors for noop":
+        val svc = create_default_services()
+        val f = svc.hir_lowerer.lower_fn
+        val result = f("does/not/exist")
+        expect(result.len()).to_equal(0)
+
+# ============================================================================
+# Noop MIR lowerer: degenerate inputs
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop MIR lowerer degenerate inputs":
+
+    it "lower empty module name returns no errors":
+        val svc = create_default_services()
+        val f = svc.mir_lowerer.lower_fn
+        val result = f("")
+        expect(result.len()).to_equal(0)
+
+    it "lower any module returns no errors for noop":
+        val svc = create_default_services()
+        val f = svc.mir_lowerer.lower_fn
+        val result = f("any/module")
+        expect(result.len()).to_equal(0)
+
+# ============================================================================
+# Noop logger: does not crash on degenerate inputs
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop logger degenerate inputs":
+
+    it "info_fn does not crash on empty message":
+        val svc = create_default_services()
+        val lf = svc.logger.info_fn
+        lf("")
+        expect(true).to_equal(true)
+
+    it "debug_fn does not crash on empty message":
+        val svc = create_default_services()
+        val lf = svc.logger.debug_fn
+        lf("")
+        expect(true).to_equal(true)
+
+    it "warn_fn does not crash on empty message":
+        val svc = create_default_services()
+        val lf = svc.logger.warn_fn
+        lf("")
+        expect(true).to_equal(true)
+
+    it "error_fn does not crash on empty message":
+        val svc = create_default_services()
+        val lf = svc.logger.error_fn
+        lf("")
+        expect(true).to_equal(true)
+
+    it "calling all log levels in sequence does not crash":
+        val svc = create_default_services()
+        val logger = svc.logger
+        val dbg = logger.debug_fn
+        val inf = logger.info_fn
+        val wrn = logger.warn_fn
+        val err = logger.error_fn
+        dbg("debug msg")
+        inf("info msg")
+        wrn("warn msg")
+        err("error msg")
+        expect(logger.name).to_equal("noop-logger")
+
+# ============================================================================
+# Noop module loader: degenerate inputs
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop module loader degenerate inputs":
+
+    it "load_fn returns empty string for nonexistent path":
+        val svc = create_default_services()
+        val rf = svc.module_loader.load_fn
+        val result = rf("nonexistent/module")
+        expect(result).to_equal("")
+
+    it "load_fn returns empty string for empty path":
+        val svc = create_default_services()
+        val rf = svc.module_loader.load_fn
+        val result = rf("")
+        expect(result).to_equal("")
+
+    it "resolve_fn returns import name unchanged for noop":
+        val svc = create_default_services()
+        val rf = svc.module_loader.resolve_fn
+        val result = rf("/src/main.spl", "std.string")
+        expect(result).to_equal("std.string")
+
+    it "resolve_fn returns empty string for empty import name":
+        val svc = create_default_services()
+        val rf = svc.module_loader.resolve_fn
+        val result = rf("/src/main.spl", "")
+        expect(result).to_equal("")
+
+    it "resolve_fn with both empty args returns empty string":
+        val svc = create_default_services()
+        val rf = svc.module_loader.resolve_fn
+        val result = rf("", "")
+        expect(result).to_equal("")
+
+# ============================================================================
+# Noop backend: degenerate behavior
+# ============================================================================
+
+describe "CompilerServices Error Cases: noop backend degenerate inputs":
+
+    it "supports_jit_fn always returns false for noop":
+        val svc = create_default_services()
+        val f = svc.backend.supports_jit_fn
+        val r1 = f()
+        val r2 = f()
+        expect(r1).to_equal(false)
+        expect(r2).to_equal(false)
+
+    it "target_triple_fn always returns noop for noop backend":
+        val svc = create_default_services()
+        val f = svc.backend.target_triple_fn
+        val r1 = f()
+        val r2 = f()
+        expect(r1).to_equal("noop")
+        expect(r2).to_equal("noop")
+
+# ============================================================================
+# Multiple create_default_services calls are independent
+# ============================================================================
+
+describe "CompilerServices Error Cases: independent factory instances":
+
+    it "two factory calls produce independent services":
+        val svc1 = create_default_services()
+        val svc2 = create_default_services()
+        expect(svc1.lexer.name).to_equal("noop-lexer")
+        expect(svc2.lexer.name).to_equal("noop-lexer")
+
+    it "noop services from different factory calls return same results":
+        val svc1 = create_default_services()
+        val svc2 = create_default_services()
+        val f1 = svc1.lexer.tokenize_fn
+        val f2 = svc2.lexer.tokenize_fn
+        expect(f1("x").len()).to_equal(0)
+        expect(f2("x").len()).to_equal(0)

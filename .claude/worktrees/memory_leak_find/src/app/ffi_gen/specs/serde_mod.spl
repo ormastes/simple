@@ -1,0 +1,91 @@
+# Serde Module - Full Specification
+#
+# Complete specification for generating serde.rs with:
+# - JSON serialization/deserialization
+# - TOML parsing
+# - YAML support
+#
+# Usage: simple ffi-gen --gen-module specs/serde_mod.spl
+
+use app.ffi_gen.types*
+use app.ffi_gen.module_gen (ModuleBuilder)
+
+# ============================================================================
+# Module Specification
+# ============================================================================
+
+fn serde_module() -> ModuleSpec:
+    var builder = ModuleBuilder__start("serde")
+        .doc("Serialization FFI\n\nJSON, TOML, YAML, and bincode serialization.")
+
+    # Imports
+    builder = builder
+        .add_import_items("std::ffi", ["CStr", "CString"])
+        .add_import("std::os::raw::c_char")
+        .add_import("serde_json::Value")
+
+    # Serde functions
+    builder = builder
+        .add_fn(fn_rt_json_parse())
+        .add_fn(fn_rt_json_stringify())
+        .add_fn(fn_rt_json_get())
+        .add_fn(fn_rt_toml_parse())
+
+    builder.build()
+
+# ============================================================================
+# Serde Functions
+# ============================================================================
+
+fn fn_rt_json_parse() -> FFIFnSpec:
+    var spec = FFIFnSpec__unsafe_extern_c("rt_json_parse",
+        [FFIParamSpec__raw_ptr("json_str", "*const c_char")],
+        "bool",
+        "let json = CStr::from_ptr(json_str as *const i8).to_string_lossy();\n" +
+        "serde_json::from_str::<Value>(json.as_ref()).is_ok()"
+    )
+    spec.doc = "Check if JSON string is valid"
+    spec
+
+fn fn_rt_json_stringify() -> FFIFnSpec:
+    var spec = FFIFnSpec__unsafe_extern_c("rt_json_stringify",
+        [FFIParamSpec__raw_ptr("_data", "*const c_char")],
+        "*mut c_char",
+        "// TODO: Implement JSON stringification\n" +
+        "std::ptr::null_mut()"
+    )
+    spec.doc = "Convert data to JSON string (stub)"
+    spec
+
+fn fn_rt_json_get() -> FFIFnSpec:
+    var spec = FFIFnSpec__unsafe_extern_c("rt_json_get",
+        [FFIParamSpec__raw_ptr("json_str", "*const c_char"),
+         FFIParamSpec__raw_ptr("path", "*const c_char")],
+        "*mut c_char",
+        "let json = CStr::from_ptr(json_str as *const i8).to_string_lossy();\n" +
+        "let path_str = CStr::from_ptr(path as *const i8).to_string_lossy();\n" +
+        "match serde_json::from_str::<Value>(json.as_ref()) {\n" +
+        "    Ok(val) => {\n" +
+        "        let result = val.get(path_str.as_ref())\n" +
+        "            .and_then(|v| serde_json::to_string(v).ok());\n" +
+        "        match result {\n" +
+        "            Some(s) => CString::new(s).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut()),\n" +
+        "            None => std::ptr::null_mut(),\n" +
+        "        }\n" +
+        "    }\n" +
+        "    Err(_) => std::ptr::null_mut(),\n" +
+        "}"
+    )
+    spec.doc = "Get value from JSON by path"
+    spec
+
+fn fn_rt_toml_parse() -> FFIFnSpec:
+    var spec = FFIFnSpec__unsafe_extern_c("rt_toml_parse",
+        [FFIParamSpec__raw_ptr("toml_str", "*const c_char")],
+        "bool",
+        "let toml = CStr::from_ptr(toml_str as *const i8).to_string_lossy();\n" +
+        "toml::from_str::<toml::Value>(toml.as_ref()).is_ok()"
+    )
+    spec.doc = "Check if TOML string is valid"
+    spec
+export serde_module

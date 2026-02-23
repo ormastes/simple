@@ -1,0 +1,245 @@
+# Code Optimizer - Pure Simple Implementation
+# Analyzes Simple code and suggests performance optimizations
+
+
+import io
+
+# Optimization suggestion
+class OptSuggestion:
+    severity: text  # "critical", "warning", "info"
+    file: text
+    line: i64
+    message: text
+    suggestion: text
+
+    fn to_string() -> text:
+        val icon = match self.severity:
+            "critical": "🔴"
+            "warning": "⚠️ "
+            "info": "💡"
+            _: "  "
+
+        "{icon} {self.file}:{self.line} - {self.message}\n   → {self.suggestion}"
+
+# Optimization patterns to detect
+fn analyze_code(file_path: text) -> List<OptSuggestion>:
+    var suggestions = []
+
+    if not io.file_exists(file_path):
+        return suggestions
+
+    val content = io.read_file(file_path)
+    val lines = content.split("\n")
+
+    for (line_num, line) in lines.enumerate():
+        val line_num = line_num + 1
+
+        # Pattern 1: Repeated function calls in loops
+        if line.contains("for ") and line.contains(" in "):
+            if lines[line_num].contains(".len()") or lines[line_num].contains(".size()"):
+                suggestions.push(OptSuggestion(
+                    severity: "warning",
+                    file: file_path,
+                    line: line_num + 1,
+                    message: "Function call in loop condition",
+                    suggestion: "Cache .len() result before loop: val n = items.len()"
+                ))
+
+        # Pattern 2: String concatenation in loops
+        if line.contains("for ") and line.contains(" in "):
+            var check_line = line_num
+            while check_line < lines.len():
+                val current_line = lines[check_line]
+                if current_line.starts_with("for "):
+                    break
+                if current_line.contains(" + ") and current_line.contains("\""):
+                    suggestions.push(OptSuggestion(
+                        severity: "warning",
+                        file: file_path,
+                        line: check_line + 1,
+                        message: "String concatenation in loop",
+                        suggestion: "Use list.join() or string builder for better performance"
+                    ))
+                    break
+                check_line = check_line + 1
+
+        # Pattern 3: Nested loops
+        if line.contains("for "):
+            var nest_level = 1
+            var check_line = line_num
+            while check_line < lines.len():
+                val current_line = lines[check_line]
+                if current_line.contains("    for "):
+                    nest_level = nest_level + 1
+                    if nest_level >= 3:
+                        suggestions.push(OptSuggestion(
+                            severity: "critical",
+                            file: file_path,
+                            line: check_line + 1,
+                            message: "Triple-nested loop detected (O(n³))",
+                            suggestion: "Consider algorithm optimization or data structure change"
+                        ))
+                        break
+                check_line = check_line + 1
+
+        # Pattern 4: Dict/Array lookup in tight loops
+        if line.contains("for ") and line.contains(" in "):
+            var check_line = line_num
+            while check_line < lines.len() and check_line < line_num + 20:
+                val inner = lines[check_line]
+                if inner.contains("[") and inner.contains("]"):
+                    if inner.count("[") > 2:
+                        suggestions.push(OptSuggestion(
+                            severity: "info",
+                            file: file_path,
+                            line: check_line + 1,
+                            message: "Multiple indexing operations in loop",
+                            suggestion: "Consider extracting to local variable"
+                        ))
+                check_line = check_line + 1
+
+        # Pattern 5: Recursive calls without memoization
+        if line.contains("fn "):
+            val func_name = extract_function_name(line)
+            var check_line = line_num
+            var has_recursion = false
+            var has_memo = false
+
+            while check_line < lines.len() and check_line < line_num + 50:
+                val inner = lines[check_line]
+                if inner.contains(func_name + "("):
+                    has_recursion = true
+                if inner.contains("@memoize") or inner.contains("cache"):
+                    has_memo = true
+                if inner.starts_with("fn ") and check_line > line_num:
+                    break
+                check_line = check_line + 1
+
+            if has_recursion and not has_memo:
+                suggestions.push(OptSuggestion(
+                    severity: "warning",
+                    file: file_path,
+                    line: line_num,
+                    message: "Recursive function without memoization",
+                    suggestion: "Add @memoize decorator or manual caching for repeated inputs"
+                ))
+
+        # Pattern 6: Large list/dict literals in hot paths
+        if (line.contains("[") and line.count(",") > 10) or (line.contains("{") and line.count(":") > 10):
+            if is_in_loop_or_function(lines, line_num):
+                suggestions.push(OptSuggestion(
+                    severity: "info",
+                    file: file_path,
+                    line: line_num,
+                    message: "Large literal created in hot path",
+                    suggestion: "Consider moving to const or module-level variable"
+                ))
+
+    suggestions
+
+fn extract_function_name(line: text) -> text:
+    if line.contains("fn "):
+        val parts = line.split("fn ")[1].split("(")
+        if parts.len() > 0:
+            return parts[0].trim()
+    ""
+
+fn is_in_loop_or_function(lines: List<text>, line_num: i64) -> bool:
+    var indent = 0
+    for i in 0..line_num:
+        if lines[i].starts_with("fn ") or lines[i].contains("for ") or lines[i].contains("while "):
+            indent = count_indent(lines[i])
+
+    val current_indent = count_indent(lines[line_num])
+    current_indent > indent
+
+fn count_indent(line: text) -> i64:
+    var count = 0
+    for ch in line.chars():
+        if ch == ' ':
+            count = count + 1
+        else:
+            break
+    count / 4  # Assuming 4-space indentation
+
+# Analyze entire project
+fn analyze_project(dir: text) -> List<OptSuggestion>:
+    var all_suggestions = []
+
+    val files = io.find_files(dir, "*.spl")
+    for file in files:
+        val suggestions = analyze_code(file)
+        for sugg in suggestions:
+            all_suggestions.push(sugg)
+
+    all_suggestions
+
+# Generate optimization report
+fn generate_report(suggestions: List<OptSuggestion>) -> text:
+    var lines = ["Code Optimization Report", "=" * 80, ""]
+
+    # Count by severity
+    var critical = 0
+    var warning = 0
+    var info = 0
+
+    for sugg in suggestions:
+        match sugg.severity:
+            "critical": critical = critical + 1
+            "warning": warning = warning + 1
+            "info": info = info + 1
+
+    lines.push("Summary:")
+    lines.push("  Critical: {critical}")
+    lines.push("  Warnings: {warning}")
+    lines.push("  Info:     {info}")
+    lines.push("")
+
+    # Group by severity
+    lines.push("Critical Issues:")
+    lines.push("-" * 80)
+    for sugg in suggestions:
+        if sugg.severity == "critical":
+            lines.push(sugg.to_string())
+            lines.push("")
+
+    lines.push("\nWarnings:")
+    lines.push("-" * 80)
+    for sugg in suggestions:
+        if sugg.severity == "warning":
+            lines.push(sugg.to_string())
+            lines.push("")
+
+    lines.push("\nInfo:")
+    lines.push("-" * 80)
+    for sugg in suggestions:
+        if sugg.severity == "info":
+            lines.push(sugg.to_string())
+            lines.push("")
+
+    lines.join("\n")
+
+# Main entry point
+fn main():
+    val args = rt_get_args()
+
+    if args.len() < 2:
+        print "Usage: simple perf/optimizer.spl <file-or-dir>"
+        return
+
+    val target = args[1]
+
+    var suggestions = []
+    if io.is_dir(target):
+        suggestions = analyze_project(target)
+    else:
+        suggestions = analyze_code(target)
+
+    if suggestions.is_empty():
+        print "✓ No optimization suggestions found"
+        return
+
+    print generate_report(suggestions)
+
+# SFFI hooks
+extern fn rt_get_args() -> List<text>

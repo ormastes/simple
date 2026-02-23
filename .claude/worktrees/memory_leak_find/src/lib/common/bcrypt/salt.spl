@@ -1,0 +1,127 @@
+# bcrypt Salt Generation and Base64 Encoding
+#
+# Contains bcrypt-specific base64 encoding/decoding, random byte generation,
+# and salt formatting functions.
+#
+# Depends on: types.spl (constants, bitwise ops)
+
+use std.common.bcrypt.types.*
+
+# ============================================================================
+# BCRYPT BASE64 ENCODING
+# ============================================================================
+
+# Encode bytes to bcrypt base64
+fn bcrypt_encode_base64(bytes: list[i64]) -> text:
+    var result = ""
+    var i = 0
+    while i < bytes.length():
+        # Process 3 bytes at a time into 4 base64 chars
+        var b0 = bytes[i]
+        var b1 = 0
+        var b2 = 0
+        if i + 1 < bytes.length():
+            b1 = bytes[i + 1]
+        if i + 2 < bytes.length():
+            b2 = bytes[i + 2]
+
+        # Convert to 4 6-bit values
+        var c0 = u32_shr(b0, 2)
+        var c1_temp = u32_shl(u32_and(b0, 3), 4)
+        var c1 = u32_or(c1_temp, u32_shr(b1, 4))
+        var c2_temp = u32_shl(u32_and(b1, 15), 2)
+        var c2 = u32_or(c2_temp, u32_shr(b2, 6))
+        var c3 = u32_and(b2, 63)
+
+        result = result + BCRYPT_BASE64_ALPHABET[c0]
+        result = result + BCRYPT_BASE64_ALPHABET[c1]
+        if i + 1 < bytes.length():
+            result = result + BCRYPT_BASE64_ALPHABET[c2]
+        if i + 2 < bytes.length():
+            result = result + BCRYPT_BASE64_ALPHABET[c3]
+
+        i = i + 3
+
+    result
+
+# Decode bcrypt base64 to bytes
+fn bcrypt_decode_base64(encoded: text) -> list[i64]:
+    var bytes = []
+    var i = 0
+    while i < encoded.length():
+        # Find indices in alphabet
+        var c0_idx = 0
+        var c1_idx = 0
+        var c2_idx = 0
+        var c3_idx = 0
+
+        var j = 0
+        while j < BCRYPT_BASE64_ALPHABET.length():
+            if BCRYPT_BASE64_ALPHABET[j] == encoded[i]:
+                c0_idx = j
+            if i + 1 < encoded.length():
+                if BCRYPT_BASE64_ALPHABET[j] == encoded[i + 1]:
+                    c1_idx = j
+            if i + 2 < encoded.length():
+                if BCRYPT_BASE64_ALPHABET[j] == encoded[i + 2]:
+                    c2_idx = j
+            if i + 3 < encoded.length():
+                if BCRYPT_BASE64_ALPHABET[j] == encoded[i + 3]:
+                    c3_idx = j
+            j = j + 1
+
+        # Convert back to bytes
+        var b0_temp = u32_shl(c0_idx, 2)
+        var b0 = u32_or(b0_temp, u32_shr(c1_idx, 4))
+        bytes = bytes + [b0]
+
+        if i + 2 < encoded.length():
+            var b1_temp = u32_shl(u32_and(c1_idx, 15), 4)
+            var b1 = u32_or(b1_temp, u32_shr(c2_idx, 2))
+            bytes = bytes + [b1]
+
+        if i + 3 < encoded.length():
+            var b2_temp = u32_shl(u32_and(c2_idx, 3), 6)
+            var b2 = u32_or(b2_temp, c3_idx)
+            bytes = bytes + [b2]
+
+        i = i + 4
+
+    bytes
+
+# ============================================================================
+# SALT GENERATION
+# ============================================================================
+
+# Generate random bytes (simplified - use proper CSPRNG in production)
+fn generate_random_bytes(count: i64) -> list[i64]:
+    var bytes = []
+    var i = 0
+    # Simple pseudo-random (NOT SECURE - for demonstration only)
+    var seed = 12345
+    while i < count:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        var byte_val = seed % 256
+        bytes = bytes + [byte_val]
+        i = i + 1
+    bytes
+
+# Generate bcrypt salt
+fn generate_salt() -> list[i64]:
+    generate_random_bytes(BCRYPT_SALT_LEN)
+
+# Generate salt with specific cost
+fn generate_salt_with_cost(cost: i64) -> list[i64]:
+    generate_salt()
+
+# Encode salt to bcrypt format
+fn encode_salt(salt_bytes: list[i64], cost: i64) -> text:
+    var encoded_salt = bcrypt_encode_base64(salt_bytes)
+    # Trim to 22 characters
+    var result = ""
+    var i = 0
+    while i < 22:
+        if i < encoded_salt.length():
+            result = result + encoded_salt[i]
+        i = i + 1
+    result

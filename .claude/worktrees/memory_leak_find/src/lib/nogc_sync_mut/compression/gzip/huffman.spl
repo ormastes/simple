@@ -1,0 +1,359 @@
+# Huffman Coding and Decoding
+#
+# Purpose: Huffman tree construction and coding operations
+#
+# Contains:
+# - Huffman tree node creation
+# - Frequency table building
+# - Huffman tree construction
+# - Code table generation
+# - Data encoding/decoding
+# - Fixed Huffman codes (DEFLATE standard)
+#
+# Huffman tree node: (symbol, frequency, left, right)
+# - symbol: character or nil for internal nodes
+# - frequency: occurrence count
+# - left, right: child nodes
+
+mod compression.gzip.types
+
+# =============================================================================
+# HUFFMAN CODING
+# =============================================================================
+
+# Create Huffman leaf node
+fn huffman_leaf(symbol, freq):
+    return [symbol, freq, nil, nil]
+
+# Create Huffman internal node
+fn huffman_internal(freq, left, right):
+    return [nil, freq, left, right]
+
+# Get node frequency
+fn huffman_node_freq(node):
+    if node == nil:
+        return 0
+    return node[1]
+
+# Check if node is leaf
+fn huffman_node_is_leaf(node):
+    if node == nil:
+        return false
+    return node[2] == nil
+
+# Build frequency table from tokens
+fn huffman_freq_table(tokens):
+    if tokens == nil:
+        return []
+
+    var freqs = []
+    var i = 0
+
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val token_type = token[0]
+        val value = token[1]
+
+        # Count symbol frequency
+        var symbol = value
+        if token_type == 1:
+            # For matches, use special code (256+)
+            symbol = 256 + (value % 30)  # Distance codes
+
+        var found = false
+        var j = 0
+        var new_freqs = []
+
+        loop:
+            if j >= freqs.length():
+                break
+
+            val entry = freqs[j]
+            val sym = entry[0]
+            val count = entry[1]
+
+            if sym == symbol:
+                new_freqs = new_freqs + [[sym, count + 1]]
+                found = true
+            else:
+                new_freqs = new_freqs + [[sym, count]]
+
+            j = j + 1
+
+        if found:
+            freqs = new_freqs
+        else:
+            freqs = freqs + [[symbol, 1]]
+
+        i = i + 1
+
+    return freqs
+
+# Build Huffman tree from frequency table
+fn huffman_build_tree(freqs):
+    if freqs == nil:
+        return nil
+
+    if freqs.length() == 0:
+        return nil
+
+    # Create leaf nodes
+    var nodes = []
+    var i = 0
+
+    loop:
+        if i >= freqs.length():
+            break
+
+        val entry = freqs[i]
+        val symbol = entry[0]
+        val count = entry[1]
+        nodes = nodes + [huffman_leaf(symbol, count)]
+
+        i = i + 1
+
+    # Build tree bottom-up
+    loop:
+        if nodes.length() <= 1:
+            break
+
+        # Find two minimum frequency nodes
+        var min1_idx = huffman_find_min_node(nodes, -1)
+        val min1 = nodes[min1_idx]
+        nodes = huffman_remove_node(nodes, min1_idx)
+
+        var min2_idx = huffman_find_min_node(nodes, -1)
+        val min2 = nodes[min2_idx]
+        nodes = huffman_remove_node(nodes, min2_idx)
+
+        # Create parent node
+        val combined_freq = huffman_node_freq(min1) + huffman_node_freq(min2)
+        val parent = huffman_internal(combined_freq, min1, min2)
+        nodes = nodes + [parent]
+
+    if nodes.length() > 0:
+        return nodes[0]
+
+    return nil
+
+# Find minimum frequency node index
+fn huffman_find_min_node(nodes, exclude_idx):
+    if nodes == nil:
+        return -1
+
+    var min_idx = -1
+    var min_freq = 999999999
+
+    var i = 0
+    loop:
+        if i >= nodes.length():
+            break
+
+        if i != exclude_idx:
+            val freq = huffman_node_freq(nodes[i])
+            if freq < min_freq:
+                min_freq = freq
+                min_idx = i
+
+        i = i + 1
+
+    return min_idx
+
+# Remove node at index
+fn huffman_remove_node(nodes, idx):
+    if nodes == nil:
+        return []
+
+    var result = []
+    var i = 0
+
+    loop:
+        if i >= nodes.length():
+            break
+
+        if i != idx:
+            result = result + [nodes[i]]
+
+        i = i + 1
+
+    return result
+
+# Generate Huffman code table from tree
+# Returns: array of (symbol, code_bits, code_length)
+fn huffman_generate_codes(tree):
+    if tree == nil:
+        return []
+
+    var codes = []
+    codes = huffman_traverse_tree(tree, 0, 0, codes)
+    return codes
+
+# Traverse tree to generate codes
+fn huffman_traverse_tree(node, code_bits, code_len, codes):
+    if node == nil:
+        return codes
+
+    if huffman_node_is_leaf(node):
+        val symbol = node[0]
+        var result = codes + [[symbol, code_bits, code_len]]
+        return result
+
+    val left = node[2]
+    val right = node[3]
+
+    # Left child: append 0
+    var new_codes = huffman_traverse_tree(left, code_bits << 1, code_len + 1, codes)
+
+    # Right child: append 1
+    new_codes = huffman_traverse_tree(right, (code_bits << 1) | 1, code_len + 1, new_codes)
+
+    return new_codes
+
+# Look up Huffman code for symbol
+fn huffman_lookup(codes, symbol):
+    if codes == nil:
+        return nil
+
+    var i = 0
+    loop:
+        if i >= codes.length():
+            break
+
+        val entry = codes[i]
+        val sym = entry[0]
+
+        if sym == symbol:
+            return [entry[1], entry[2]]
+
+        i = i + 1
+
+    return nil
+
+# Encode data using Huffman codes
+fn huffman_encode(data, codes):
+    if data == nil:
+        return []
+
+    var bits = []
+    var i = 0
+
+    loop:
+        if i >= data.length():
+            break
+
+        val symbol = data[i]
+        val code_info = huffman_lookup(codes, symbol)
+
+        if code_info != nil:
+            val code_bits = code_info[0]
+            val code_len = code_info[1]
+
+            # Append bits
+            var j = code_len - 1
+            loop:
+                if j < 0:
+                    break
+
+                val bit = (code_bits >> j) & 1
+                bits = bits + [bit]
+
+                j = j - 1
+
+        i = i + 1
+
+    return bits
+
+# Decode Huffman encoded bits
+fn huffman_decode(bits, tree):
+    if bits == nil:
+        return []
+
+    if tree == nil:
+        return []
+
+    var result = []
+    var current = tree
+    var i = 0
+
+    loop:
+        if i >= bits.length():
+            break
+
+        val bit = bits[i]
+
+        if bit == 0:
+            current = current[2]  # Go left
+        else:
+            current = current[3]  # Go right
+
+        if huffman_node_is_leaf(current):
+            val symbol = current[0]
+            result = result + [symbol]
+            current = tree  # Reset to root
+
+        i = i + 1
+
+    return result
+
+# =============================================================================
+# FIXED HUFFMAN CODES (DEFLATE Standard)
+# =============================================================================
+
+# Generate fixed Huffman codes (DEFLATE RFC 1951)
+fn deflate_fixed_huffman():
+    var codes = []
+
+    # Literal/length codes 0-143: 8 bits (00110000 - 10111111)
+    var i = 0
+    loop:
+        if i > 143:
+            break
+        codes = codes + [[i, 0b00110000 + i, 8]]
+        i = i + 1
+
+    # Literal/length codes 144-255: 9 bits (110010000 - 111111111)
+    i = 144
+    loop:
+        if i > 255:
+            break
+        codes = codes + [[i, 0b110010000 + (i - 144), 9]]
+        i = i + 1
+
+    # Literal/length codes 256-279: 7 bits (0000000 - 0010111)
+    i = 256
+    loop:
+        if i > 279:
+            break
+        codes = codes + [[i, i - 256, 7]]
+        i = i + 1
+
+    # Literal/length codes 280-287: 8 bits (11000000 - 11000111)
+    i = 280
+    loop:
+        if i > 287:
+            break
+        codes = codes + [[i, 0b11000000 + (i - 280), 8]]
+        i = i + 1
+
+    return codes
+
+# Generate fixed distance codes
+fn deflate_fixed_distances():
+    var codes = []
+
+    # All distance codes are 5 bits
+    var i = 0
+    loop:
+        if i >= 30:
+            break
+
+        codes = codes + [[i, i, 5]]
+
+        i = i + 1
+
+    return codes
+
+export *

@@ -1,0 +1,443 @@
+# Validation Utilities for MedGemma Korean Training
+#
+# Provides:
+#   - Model validation with loss measurement
+#   - MCQ accuracy computation (argmax prediction vs target)
+#   - 97% accuracy threshold check
+#   - English retention validation across phases
+#   - Comprehensive per-phase validation reporting
+
+use model.{TextModel, compute_mse_loss, check_gpu}
+use shared_logic.{
+    TrainConfig, EMBEDDING_SEQ_LEN,
+    make_randn_batch_on_cuda, compute_ce_loss
+}
+use lora_utils.{
+    LoRAConfig, LoRAAdapter,
+    create_lora_adapter, lora_forward
+}
+use embedding_utils.{
+    KorEngEmbedding, RoPECache,
+    make_embedding_batch, embed_with_routing, apply_rope, mean_pool_seq
+}
+use layer_utils.{
+    ExtendedModel, extended_lora_forward
+}
+
+use std.torch.ffi.{
+    rt_torch_tensor_randn,
+    rt_torch_torchtensor_cuda,
+    rt_torch_torchtensor_free,
+    rt_torch_torchtensor_mean,
+    rt_torch_torchtensor_sub,
+    rt_torch_torchtensor_mul,
+    rt_torch_torchtensor_sum,
+    rt_torch_torchtensor_argmax,
+    rt_torch_torchtensor_softmax,
+    rt_torch_torchtensor_add_scalar,
+    rt_torch_torchtensor_pow,
+    rt_torch_autograd_no_grad_begin,
+    rt_torch_autograd_no_grad_end
+}
+
+export ValidationResult, validate_model, validate_with_lora
+export validate_accuracy, validate_all_phases, check_english_retention
+export validate_extended_model, validate_korean_accuracy, validate_exam_accuracy
+export validate_per_layer_retention, validate_all_phases_extended
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val ACCURACY_THRESHOLD = 0.97
+val RETENTION_THRESHOLD = 0.95
+val NUM_VAL_BATCHES = 5
+val VAL_BATCH_SIZE = 8
+
+# ============================================================================
+# Validation Result
+# ============================================================================
+
+class ValidationResult:
+    phase_name: text
+    avg_loss: f64
+    accuracy: f64
+    passed: bool
+    threshold: f64
+
+    fn print_result():
+        var status = "PASS"
+        if not self.passed:
+            status = "FAIL"
+        print("  [{status}] {self.phase_name}: loss={self.avg_loss}, accuracy={self.accuracy} (threshold={self.threshold})")
+
+
+# ============================================================================
+# Validation: Model without LoRA
+# ============================================================================
+
+fn validate_model(model: TextModel, phase_name: text, threshold: f64) -> ValidationResult:
+    print("  Validating: {phase_name}")
+    rt_torch_autograd_no_grad_begin()
+
+    val input_dim = model.config.input_dim
+    val output_dim = model.config.output_dim
+
+    var total_loss = 0.0
+    for i in 0..NUM_VAL_BATCHES:
+        val batch = make_randn_batch_on_cuda(VAL_BATCH_SIZE, input_dim, output_dim)
+        val x = batch[0]
+        val target = batch[1]
+
+        val logits = model.forward(x)
+        val loss_h = compute_mse_loss(logits, target)
+        val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+        total_loss = total_loss + loss_val
+
+        rt_torch_torchtensor_free(x)
+        rt_torch_torchtensor_free(target)
+        rt_torch_torchtensor_free(logits)
+        rt_torch_torchtensor_free(loss_h)
+
+    rt_torch_autograd_no_grad_end()
+
+    val avg_loss = total_loss / NUM_VAL_BATCHES
+    val passed = avg_loss < threshold
+
+    val result = ValidationResult(
+        phase_name: phase_name,
+        avg_loss: avg_loss,
+        accuracy: 0.0,
+        passed: passed,
+        threshold: threshold
+    )
+    result.print_result()
+    result
+
+
+# ============================================================================
+# Validation: Model with LoRA adapters
+# ============================================================================
+
+fn validate_with_lora(
+    model: TextModel,
+    lora_l1: LoRAAdapter,
+    lora_l2: LoRAAdapter,
+    phase_name: text,
+    threshold: f64
+) -> ValidationResult:
+    print("  Validating (with LoRA): {phase_name}")
+    rt_torch_autograd_no_grad_begin()
+
+    val input_dim = model.config.input_dim
+    val output_dim = model.config.output_dim
+
+    var total_loss = 0.0
+    for i in 0..NUM_VAL_BATCHES:
+        val batch = make_randn_batch_on_cuda(VAL_BATCH_SIZE, input_dim, output_dim)
+        val x = batch[0]
+        val target = batch[1]
+
+        val logits = lora_forward(model, x, lora_l1, lora_l2)
+        val loss_h = compute_mse_loss(logits, target)
+        val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+        total_loss = total_loss + loss_val
+
+        rt_torch_torchtensor_free(x)
+        rt_torch_torchtensor_free(target)
+        rt_torch_torchtensor_free(logits)
+        rt_torch_torchtensor_free(loss_h)
+
+    rt_torch_autograd_no_grad_end()
+
+    val avg_loss = total_loss / NUM_VAL_BATCHES
+    val passed = avg_loss < threshold
+
+    val result = ValidationResult(
+        phase_name: phase_name,
+        avg_loss: avg_loss,
+        accuracy: 0.0,
+        passed: passed,
+        threshold: threshold
+    )
+    result.print_result()
+    result
+
+
+# ============================================================================
+# MCQ Accuracy Validation
+# ============================================================================
+
+# Compute approximate accuracy of model predictions.
+# Uses argmax over output dim to get predicted class,
+# compares to target using soft matching (1/(1 + diff^2) approximation).
+# Returns accuracy as f64 (0.0 to 1.0).
+#
+# With synthetic random data, accuracy will be ~random (1/output_dim).
+# With real MCQ data, accuracy should reach 97%+.
+fn validate_accuracy(model: TextModel, config: TrainConfig) -> f64:
+    rt_torch_autograd_no_grad_begin()
+
+    var total_accuracy = 0.0
+    var num_batches = 0
+
+    for i in 0..NUM_VAL_BATCHES:
+        val batch = make_randn_batch_on_cuda(VAL_BATCH_SIZE, config.input_dim, config.output_dim)
+        val x = batch[0]
+        val target = batch[1]
+
+        val logits = model.forward(x)
+
+        # Get predicted class indices via argmax
+        val preds = rt_torch_torchtensor_argmax(logits, 1, false)
+        val target_classes = rt_torch_torchtensor_argmax(target, 1, false)
+
+        # Soft accuracy: mean(1 / (1 + (pred - target)^2))
+        val diff = rt_torch_torchtensor_sub(preds, target_classes)
+        val diff_sq = rt_torch_torchtensor_mul(diff, diff)
+        rt_torch_torchtensor_free(diff)
+        val denom = rt_torch_torchtensor_add_scalar(diff_sq, 1.0)
+        rt_torch_torchtensor_free(diff_sq)
+        val inv = rt_torch_torchtensor_pow(denom, -1.0)
+        rt_torch_torchtensor_free(denom)
+        val batch_accuracy = rt_torch_torchtensor_mean(inv)
+        rt_torch_torchtensor_free(inv)
+
+        total_accuracy = total_accuracy + batch_accuracy
+        num_batches = num_batches + 1
+
+        rt_torch_torchtensor_free(x)
+        rt_torch_torchtensor_free(target)
+        rt_torch_torchtensor_free(logits)
+        rt_torch_torchtensor_free(preds)
+        rt_torch_torchtensor_free(target_classes)
+
+    rt_torch_autograd_no_grad_end()
+
+    if num_batches == 0:
+        return 0.0
+    total_accuracy / num_batches
+
+
+# ============================================================================
+# English Retention Check
+# ============================================================================
+
+# Check that English medical accuracy hasn't dropped below retention threshold.
+# Returns true if model retains English knowledge.
+fn check_english_retention(model: TextModel, config: TrainConfig) -> bool:
+    print("  Checking English retention...")
+    val accuracy = validate_accuracy(model, config)
+    val passed = accuracy >= RETENTION_THRESHOLD
+    if passed:
+        print("  English retention: {accuracy} >= {RETENTION_THRESHOLD} PASS")
+    else:
+        print("  English retention: {accuracy} < {RETENTION_THRESHOLD} FAIL")
+        print("  WARNING: Catastrophic forgetting detected!")
+    passed
+
+
+# ============================================================================
+# Comprehensive Validation (all phases)
+# ============================================================================
+
+fn validate_all_phases(model: TextModel, current_phase: i64):
+    print("")
+    print("-" * 70)
+    print("VALIDATION AFTER PHASE {current_phase}")
+    print("-" * 70)
+
+    val threshold = 100.0
+
+    if current_phase >= 0:
+        val r0 = validate_model(model, "Phase 0: English medical baseline", threshold)
+
+    if current_phase >= 1:
+        val r1 = validate_model(model, "Phase 1: English medical LoRA", threshold)
+
+    if current_phase >= 2:
+        val r2 = validate_model(model, "Phase 2: MCQ reasoning", threshold)
+
+    # English retention check
+    val config = TrainConfig.default_config()
+    val retained = check_english_retention(model, config)
+
+    print("-" * 70)
+    print("")
+
+
+# ============================================================================
+# Extended Model Validation (Phases 3-6)
+# ============================================================================
+
+# Validate extended model (with embeddings) using synthetic data.
+# Creates embedding batches, runs through extended forward, measures MSE loss.
+fn validate_extended_model(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, phase_name: text, threshold: f64) -> ValidationResult:
+    print("  Validating extended: {phase_name}")
+    rt_torch_autograd_no_grad_begin()
+
+    val output_dim = ext.base.config.output_dim
+    var total_loss = 0.0
+
+    for i in 0..NUM_VAL_BATCHES:
+        val batch = make_embedding_batch(VAL_BATCH_SIZE, EMBEDDING_SEQ_LEN, ext.emb, output_dim)
+        val kor_ids = batch[0]
+        val eng_ids = batch[1]
+        val mask_h = batch[2]
+        val target = batch[3]
+
+        val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask_h, lora_l1, lora_l2)
+        val loss_h = compute_mse_loss(logits, target)
+        val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+        total_loss = total_loss + loss_val
+
+        rt_torch_torchtensor_free(kor_ids)
+        rt_torch_torchtensor_free(eng_ids)
+        rt_torch_torchtensor_free(mask_h)
+        rt_torch_torchtensor_free(target)
+        rt_torch_torchtensor_free(logits)
+        rt_torch_torchtensor_free(loss_h)
+
+    rt_torch_autograd_no_grad_end()
+
+    val avg_loss = total_loss / NUM_VAL_BATCHES
+    val passed = avg_loss < threshold
+
+    val result = ValidationResult(
+        phase_name: phase_name,
+        avg_loss: avg_loss,
+        accuracy: 0.0,
+        passed: passed,
+        threshold: threshold
+    )
+    result.print_result()
+    result
+
+
+# ============================================================================
+# Korean Accuracy Validation
+# ============================================================================
+
+# Approximate accuracy on Korean data via soft argmax matching.
+# Uses synthetic Korean-heavy embedding batches.
+fn validate_korean_accuracy(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig) -> f64:
+    print("  Checking Korean accuracy...")
+    rt_torch_autograd_no_grad_begin()
+
+    var total_accuracy = 0.0
+    var num_batches = 0
+
+    for i in 0..NUM_VAL_BATCHES:
+        val batch = make_embedding_batch(VAL_BATCH_SIZE, EMBEDDING_SEQ_LEN, ext.emb, config.output_dim)
+        val kor_ids = batch[0]
+        val eng_ids = batch[1]
+        val mask_h = batch[2]
+        val target = batch[3]
+
+        val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask_h, lora_l1, lora_l2)
+
+        # Soft accuracy via argmax comparison
+        val preds = rt_torch_torchtensor_argmax(logits, 1, false)
+        val target_classes = rt_torch_torchtensor_argmax(target, 1, false)
+
+        val diff = rt_torch_torchtensor_sub(preds, target_classes)
+        val diff_sq = rt_torch_torchtensor_mul(diff, diff)
+        rt_torch_torchtensor_free(diff)
+        val denom = rt_torch_torchtensor_add_scalar(diff_sq, 1.0)
+        rt_torch_torchtensor_free(diff_sq)
+        val inv = rt_torch_torchtensor_pow(denom, -1.0)
+        rt_torch_torchtensor_free(denom)
+        val batch_accuracy = rt_torch_torchtensor_mean(inv)
+        rt_torch_torchtensor_free(inv)
+
+        total_accuracy = total_accuracy + batch_accuracy
+        num_batches = num_batches + 1
+
+        rt_torch_torchtensor_free(kor_ids)
+        rt_torch_torchtensor_free(eng_ids)
+        rt_torch_torchtensor_free(mask_h)
+        rt_torch_torchtensor_free(target)
+        rt_torch_torchtensor_free(logits)
+        rt_torch_torchtensor_free(preds)
+        rt_torch_torchtensor_free(target_classes)
+
+    rt_torch_autograd_no_grad_end()
+
+    if num_batches == 0:
+        return 0.0
+    val accuracy = total_accuracy / num_batches
+    print("  Korean accuracy: {accuracy}")
+    accuracy
+
+
+# ============================================================================
+# Exam Accuracy Validation
+# ============================================================================
+
+# Validate on simulated medical exam format.
+# Uses same embedding batch structure but interprets output as MCQ choices.
+fn validate_exam_accuracy(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig) -> f64:
+    print("  Checking exam accuracy...")
+    # Exam accuracy uses same pipeline as Korean accuracy with synthetic data.
+    # In production, this would use real Korean medical exam validation data.
+    val accuracy = validate_korean_accuracy(ext, lora_l1, lora_l2, config)
+    accuracy
+
+
+# ============================================================================
+# Per-Layer English Retention Check
+# ============================================================================
+
+# Check that the base model's English accuracy hasn't degraded.
+# Compares base model (frozen) on English data.
+# Returns true if retention >= 97%.
+fn validate_per_layer_retention(ext: ExtendedModel, config: TrainConfig) -> bool:
+    print("  Checking per-layer English retention...")
+    val accuracy = validate_accuracy(ext.base, config)
+    val threshold = 0.97
+    val passed = accuracy >= threshold
+    if passed:
+        print("  Per-layer retention: {accuracy} >= {threshold} PASS")
+    else:
+        print("  Per-layer retention: {accuracy} < {threshold} FAIL")
+    passed
+
+
+# ============================================================================
+# Comprehensive Extended Validation (Phases 3-6)
+# ============================================================================
+
+fn validate_all_phases_extended(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, current_phase: i64):
+    print("")
+    print("-" * 70)
+    print("EXTENDED VALIDATION AFTER PHASE {current_phase}")
+    print("-" * 70)
+
+    val threshold = 100.0
+
+    # Base model validation (phases 0-2 knowledge)
+    val r_base = validate_model(ext.base, "Base model (phases 0-2 merged)", threshold)
+
+    # Extended model validation
+    if current_phase >= 3:
+        val r3 = validate_extended_model(ext, lora_l1, lora_l2, "Phase 3: Embedding training", threshold)
+
+    if current_phase >= 4:
+        val r4 = validate_extended_model(ext, lora_l1, lora_l2, "Phase 4: Korean text", threshold)
+
+    if current_phase >= 5:
+        val r5 = validate_extended_model(ext, lora_l1, lora_l2, "Phase 5: Korean translation", threshold)
+
+    if current_phase >= 6:
+        val r6 = validate_extended_model(ext, lora_l1, lora_l2, "Phase 6: Reasoning", threshold)
+
+    # English retention
+    val config = TrainConfig.default_config()
+    val retained = check_english_retention(ext.base, config)
+
+    print("-" * 70)
+    print("")

@@ -1,0 +1,508 @@
+# Atomic Text Database Library
+#
+# Thread-safe, atomic SDN-based database with file locking and concurrent access.
+# Combines the best patterns from test_db_io.spl and db.spl into a shared stdlib.
+#
+# Features:
+# - File locking with timeout
+# - Atomic writes (write-temp-rename)
+# - Automatic backups
+# - Read-modify-write transactions
+# - Stale lock detection
+# - Size limits
+#
+# Usage:
+#   use std.db_atomic.{AtomicTable, DbConfig}
+#
+#   val config = DbConfig.defaults()
+#   val table = AtomicTable.load("data.sdn", "todos", config)
+#
+#   # Atomic update
+#   val result = table.update(|content| {
+#       content + "\n    new_row"
+#   })
+
+use app.io.mod (file_exists, file_read, file_atomic_write, file_copy, file_lock, file_unlock, getpid, hostname, time_now_unix_micros)
+
+# =========================================================================
+# Configuration
+# =========================================================================
+
+struct DbConfig:
+    """Configuration for atomic database operations."""
+    lock_timeout_secs: i64      # Max seconds to wait for lock
+    max_file_size_mb: i64       # Max file size (MB)
+    create_backups: bool        # Create .bak files before writes
+    backup_count: i64           # Number of backups to keep (0 = all)
+    enable_logging: bool        # Log operations to stderr
+
+impl DbConfig:
+    static fn defaults() -> DbConfig:
+        """Default configuration - safe and conservative."""
+        DbConfig(
+            lock_timeout_secs: 10,
+            max_file_size_mb: 500,
+            create_backups: true,
+            backup_count: 5,
+            enable_logging: false
+        )
+
+    static fn no_backups() -> DbConfig:
+        """Config without backups - faster but less safe."""
+        DbConfig(
+            lock_timeout_secs: 10,
+            max_file_size_mb: 500,
+            create_backups: false,
+            backup_count: 0,
+            enable_logging: false
+        )
+
+    static fn strict() -> DbConfig:
+        """Strict configuration - maximum safety."""
+        DbConfig(
+            lock_timeout_secs: 30,
+            max_file_size_mb: 100,
+            create_backups: true,
+            backup_count: 10,
+            enable_logging: true
+        )
+
+# =========================================================================
+# File Lock
+# =========================================================================
+
+struct FileLock:
+    """OS-level file lock with automatic cleanup."""
+    handle: i64
+    path: text
+    pid: i64
+    acquired_at: i64
+
+impl FileLock:
+    static fn acquire(path: text, timeout_secs: i64) -> Result<FileLock, text>:
+        """Acquire exclusive file lock.
+
+        Args:
+            path: File path to lock
+            timeout_secs: Maximum seconds to wait
+
+        Returns:
+            Ok(lock) on success
+            Err(message) on failure (timeout, permission, etc.)
+        """
+        val handle = file_lock(path, timeout_secs)
+        if handle < 0:
+            return Err("Failed to acquire lock for {path} (timeout: {timeout_secs}s)")
+
+        Ok(FileLock(
+            handle: handle,
+            path: path,
+            pid: getpid(),
+            acquired_at: time_now_unix_micros()
+        ))
+
+    fn release() -> bool:
+        """Release lock. Returns true on success."""
+        file_unlock(self.handle)
+
+    fn is_valid() -> bool:
+        """Check if lock handle is valid."""
+        self.handle > 0
+
+    fn age_seconds() -> i64:
+        """Get lock age in seconds."""
+        val now = time_now_unix_micros()
+        (now - self.acquired_at) / 1000000
+
+# =========================================================================
+# Atomic Operations
+# =========================================================================
+
+fn atomic_read(path: text, config: DbConfig) -> Result<text, text>:
+    """Atomically read file with size limit check.
+
+    Args:
+        path: File path
+        config: Database configuration
+
+    Returns:
+        Ok(content) on success
+        Err(message) if file doesn't exist, too large, or read fails
+    """
+    if not file_exists(path):
+        return Ok("")  # Non-existent file is empty, not an error
+
+    val content = file_read(path)
+    val size_mb = content.len() / (1024 * 1024)
+
+    if size_mb > config.max_file_size_mb:
+        return Err("File {path} exceeds size limit ({size_mb} MB > {config.max_file_size_mb} MB)")
+
+    Ok(content)
+
+fn atomic_write(path: text, content: text, config: DbConfig) -> Result<(), text>:
+    """Atomically write file with locking and backup.
+
+    Uses write-temp-rename pattern for atomicity.
+
+    Args:
+        path: File path
+        content: Content to write
+        config: Database configuration
+
+    Returns:
+        Ok(()) on success
+        Err(message) on lock failure, write failure, etc.
+    """
+    # Acquire lock
+    val lock_result = FileLock__acquire(path, config.lock_timeout_secs)
+    if not lock_result.is_ok():
+        return Err(lock_result.unwrap_err())
+
+    val lock = lock_result.unwrap()
+
+    # Guard against overwriting non-empty with empty
+    if content.trim() == "" and file_exists(path):
+        val existing = file_read(path)
+        if existing.trim() != "":
+            lock.release()
+            return Err("Safety: refusing to overwrite non-empty {path} with empty content")
+
+    # Create backup if configured
+    if config.create_backups and file_exists(path):
+        create_backup(path, config.backup_count)
+
+    # Atomic write (write-temp-rename pattern)
+    val success = file_atomic_write(path, content)
+    lock.release()
+
+    if success:
+        Ok(())
+    else:
+        Err("Failed to write {path}")
+
+fn atomic_update(path: text, updater: fn(text) -> text, config: DbConfig) -> Result<(), text>:
+    """Atomically read-modify-write file with locking.
+
+    The updater function receives the current content and returns new content.
+    The entire operation is protected by a file lock.
+
+    Args:
+        path: File path
+        updater: Function that transforms content
+        config: Database configuration
+
+    Returns:
+        Ok(()) on success
+        Err(message) on lock failure, read failure, or write failure
+
+    Example:
+        atomic_update("data.sdn", |content| {
+            content + "\n    new_row"
+        }, DbConfig__defaults())
+    """
+    # Acquire lock
+    val lock_result = FileLock__acquire(path, config.lock_timeout_secs)
+    if not lock_result.is_ok():
+        return Err(lock_result.unwrap_err())
+
+    val lock = lock_result.unwrap()
+
+    # Read current content
+    var content = ""
+    if file_exists(path):
+        content = file_read(path)
+
+    # Apply transformation
+    val new_content = updater(content)
+
+    # Create backup before write
+    if config.create_backups and file_exists(path):
+        create_backup(path, config.backup_count)
+
+    # Atomic write
+    val success = file_atomic_write(path, new_content)
+    lock.release()
+
+    if success:
+        Ok(())
+    else:
+        Err("Failed to write {path}")
+
+# =========================================================================
+# Backup Management
+# =========================================================================
+
+fn create_backup(path: text, keep_count: i64):
+    """Create numbered backup and rotate old backups.
+
+    Creates path.bak.1, path.bak.2, etc. up to keep_count.
+    If keep_count = 0, keeps all backups (no rotation).
+    """
+    if keep_count > 0:
+        # Rotate existing backups: .bak.N -> .bak.N+1
+        var i = keep_count - 1
+        while i > 0:
+            val old_path = "{path}.bak.{i}"
+            val new_path = "{path}.bak.{i + 1}"
+            if file_exists(old_path):
+                file_copy(old_path, new_path)
+            i = i - 1
+
+        # Move current .bak to .bak.1
+        val bak_path = "{path}.bak"
+        if file_exists(bak_path):
+            file_copy(bak_path, "{path}.bak.1")
+
+    # Create new backup
+    file_copy(path, "{path}.bak")
+
+fn list_backups(path: text) -> [text]:
+    """List all backup files for a given path."""
+    var backups: [text] = []
+
+    # Check primary backup
+    if file_exists("{path}.bak"):
+        backups.push("{path}.bak")
+
+    # Check numbered backups
+    var i = 1
+    while i <= 100:  # Reasonable upper limit
+        val backup_path = "{path}.bak.{i}"
+        if file_exists(backup_path):
+            backups.push(backup_path)
+        else:
+            break
+        i = i + 1
+
+    backups
+
+# =========================================================================
+# Atomic Table
+# =========================================================================
+
+struct AtomicTable:
+    """Thread-safe SDN table with atomic operations."""
+    path: text
+    table_name: text
+    config: DbConfig
+
+    # Cached data (use with caution - may be stale)
+    columns: [text]
+    rows: [[text]]
+    dirty: bool
+
+impl AtomicTable:
+    static fn create(path: text, table_name: text, columns: [text], config: DbConfig) -> Result<AtomicTable, text>:
+        """Create new atomic table file.
+
+        Args:
+            path: File path
+            table_name: Name of table in SDN file
+            columns: Column names
+            config: Database configuration
+
+        Returns:
+            Ok(table) on success
+            Err(message) if file already exists or write fails
+        """
+        if file_exists(path):
+            return Err("File {path} already exists")
+
+        # Create table header
+        val header = "{table_name} |{columns.join(\", \")}|\n"
+
+        # Write with locking
+        val result = atomic_write(path, header, config)
+        if not result.is_ok():
+            return Err(result.unwrap_err())
+
+        Ok(AtomicTable(
+            path: path,
+            table_name: table_name,
+            config: config,
+            columns: columns,
+            rows: [],
+            dirty: false
+        ))
+
+    static fn load(path: text, table_name: text, config: DbConfig) -> Result<AtomicTable, text>:
+        """Load existing atomic table.
+
+        Args:
+            path: File path
+            table_name: Name of table in SDN file
+            config: Database configuration
+
+        Returns:
+            Ok(table) on success
+            Err(message) if file doesn't exist or parse fails
+        """
+        val content_result = atomic_read(path, config)
+        if not content_result.is_ok():
+            return Err(content_result.unwrap_err())
+
+        val content = content_result.unwrap()
+
+        # Parse table using std.sdn
+        use std.sdn.{parse, SdnValue}
+
+        val parse_result = parse(content)
+        if not parse_result.is_ok():
+            return Err("Failed to parse SDN: {parse_result.unwrap_err()}")
+
+        val sdn_value = parse_result.unwrap()
+
+        # Extract table data from SDN
+        val table_data = extract_table_from_sdn(sdn_value, table_name)
+        if not table_data.is_ok():
+            return Err(table_data.unwrap_err())
+
+        val (columns, rows) = table_data.unwrap()
+
+        Ok(AtomicTable(
+            path: path,
+            table_name: table_name,
+            config: config,
+            columns: columns,
+            rows: rows,
+            dirty: false
+        ))
+
+    fn add_row(row: [text]) -> Result<(), text>:
+        """Atomically add a row to the table.
+
+        Args:
+            row: Row values (must match column count)
+
+        Returns:
+            Ok(()) on success
+            Err(message) on validation or write failure
+        """
+        if row.len() != self.columns.len():
+            return Err("Row has {row.len()} values, expected {self.columns.len()}")
+
+        # Serialize row
+        val values = row.map(\v:
+            if v.contains(",") or v.contains(" "):
+                "\"{v}\""
+            else:
+                v
+        )
+        val row_line = "    {values.join(\", \")}\n"
+
+        # Atomic append
+        atomic_update(self.path, \content: content + row_line, self.config)
+
+    fn update(updater: fn(text) -> text) -> Result<(), text>:
+        """Atomically update the entire file.
+
+        Args:
+            updater: Function that transforms file content
+
+        Returns:
+            Ok(()) on success
+            Err(message) on lock or write failure
+        """
+        atomic_update(self.path, updater, self.config)
+
+    fn reload() -> Result<(), text>:
+        """Reload table from disk (discards in-memory changes)."""
+        val content_result = atomic_read(self.path, self.config)
+        if not content_result.is_ok():
+            return Err(content_result.unwrap_err())
+
+        # Parse content and update self.columns, self.rows
+        use std.sdn.{parse, SdnValue}
+
+        val content = content_result.unwrap()
+        val parse_result = parse(content)
+        if not parse_result.is_ok():
+            return Err("Failed to parse SDN: {parse_result.unwrap_err()}")
+
+        val sdn_value = parse_result.unwrap()
+        val table_data = extract_table_from_sdn(sdn_value, self.table_name)
+        if not table_data.is_ok():
+            return Err(table_data.unwrap_err())
+
+        val (columns, rows) = table_data.unwrap()
+        self.columns = columns
+        self.rows = rows
+        self.dirty = false
+        Ok(())
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+fn extract_table_from_sdn(sdn_value: SdnValue, table_name: text) -> Result<([text], [[text]]), text>:
+    """Extract table data from parsed SDN value.
+
+    Args:
+        sdn_value: Parsed SDN value (must be Dict containing table)
+        table_name: Name of table to extract
+
+    Returns:
+        Ok((columns, rows)) on success
+        Err(message) if table not found or wrong format
+
+    Example SDN format:
+        todos |id, name, status|
+            1, "Task 1", "done"
+            2, "Task 2", "pending"
+    """
+    use std.sdn.{SdnValue}
+
+    # SDN file should be a dict with table_name as key
+    match sdn_value:
+        case SdnValue.Dict(d):
+            if not d.contains_key(table_name):
+                return Err("Table '{table_name}' not found in SDN")
+
+            val table_value = d[table_name]
+            match table_value:
+                case SdnValue.Table(fields, types, rows):
+                    # Convert fields (Option) to required columns
+                    var columns: [text] = []
+                    if fields.?:
+                        columns = fields.unwrap()
+                    else:
+                        return Err("Table has no column headers")
+
+                    # Convert SdnValue rows to text rows
+                    var text_rows: [[text]] = []
+                    for row in rows:
+                        var text_row: [text] = []
+                        for cell in row:
+                            text_row.push(sdn_value_to_text(cell))
+                        text_rows.push(text_row)
+
+                    Ok((columns, text_rows))
+
+                case _:
+                    Err("Value for '{table_name}' is not a table")
+
+        case _:
+            Err("SDN root must be a dictionary")
+
+fn sdn_value_to_text(value: SdnValue) -> text:
+    """Convert SdnValue to text representation."""
+    use std.sdn.{SdnValue}
+
+    match value:
+        case SdnValue.Null: ""
+        case SdnValue.Bool(b): if b: "true" else: "false"
+        case SdnValue.Int(i): "{i}"
+        case SdnValue.Float(f): "{f}"
+        case SdnValue.String(s): s
+        case _: "<complex>"  # Arrays, dicts, tables
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export DbConfig
+export FileLock
+export AtomicTable
+export atomic_read, atomic_write, atomic_update
+export create_backup, list_backups

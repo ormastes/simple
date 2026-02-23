@@ -1,0 +1,377 @@
+"""
+Async Host Runtime Tests
+Feature: Full-featured async runtime for host applications
+Category: Runtime
+Status: Active
+
+Tests for the host async runtime including dynamic JoinSet,
+FuturesUnordered, work-stealing scheduler, and waker system.
+
+All implementations are Pure Simple (async_sffi uses no external FFI).
+"""
+
+use std.spec
+use std.async_core.{Poll, TaskState, Priority, AsyncError, CancellationToken}
+use std.async_sffi.{task_alloc_id, task_reset_counter, waker_signal, waker_check, waker_reset}
+use std.async_host.future.{HostFuture, FutureState}
+use std.async_host.promise.{HostPromise}
+use std.async_host.handle.{HostTaskHandle}
+use std.async_host.joinset.{HostJoinSet}
+use std.async_host.unordered.{HostFuturesUnordered}
+use std.async_host.scheduler.{WorkStealingQueue, HostScheduler}
+use std.async_host.runtime.{HostRuntime}
+use std.async_host.waker.{Waker, Context}
+use std.async_host.combinators.{join_all, select, race}
+
+describe "HostFuture":
+    before_each:
+        waker_reset()
+
+    it "creates ready future":
+        val f = HostFuture.ready(42)
+        expect(f.is_ready()).to_equal(true)
+
+    it "creates pending future":
+        val f = HostFuture.pending()
+        expect(f.is_ready()).to_equal(false)
+
+    it "creates failed future":
+        val f = HostFuture.failed(AsyncError.Timeout)
+        expect(f.is_ready()).to_equal(false)
+
+    it "completes future and wakes waiters":
+        var future = HostFuture.pending()
+        val waker = Waker.new(0, 0)
+        val cx = Context.from_waker(waker)
+        # Poll to register waker
+        future.poll(cx)
+        # Complete the future (wakes all registered wakers)
+        future.complete(42)
+        expect(future.is_ready()).to_equal(true)
+        expect(waker_check(0)).to_equal(true)
+
+    it "maps future value":
+        val f = HostFuture.ready(21)
+        val mapped = f.map(\x: x * 2)
+        expect(mapped.is_ready()).to_equal(true)
+        val cx = Context.from_waker(Waker.new(0, 0))
+        val result = mapped.poll(cx)
+        expect(result.unwrap()).to_equal(42)
+
+    it "chains futures with then":
+        val f = HostFuture.ready(21)
+        val chained = f.then(\x: HostFuture.ready(x * 2))
+        expect(chained.is_ready()).to_equal(true)
+
+describe "HostPromise":
+    it "creates future-promise pair":
+        val (future, promise) = HostPromise.new()
+        expect(promise.is_completed()).to_equal(false)
+        expect(future.is_ready()).to_equal(false)
+
+    it "completes future through promise":
+        val (future, promise) = HostPromise.new()
+        val result = promise.complete(42)
+        expect(result).to_equal(true)
+        expect(future.is_ready()).to_equal(true)
+
+    it "prevents double completion":
+        val (future, promise) = HostPromise.new()
+        val first = promise.complete(42)
+        expect(first).to_equal(true)
+        val second = promise.complete(99)
+        expect(second).to_equal(false)
+
+    it "can fail promise":
+        val (future, promise) = HostPromise.new()
+        val result = promise.fail(AsyncError.Timeout)
+        expect(result).to_equal(true)
+
+describe "HostTaskHandle":
+    it "reports finished when completed":
+        val handle = HostTaskHandle(
+            task_id: 0,
+            state: TaskState.Completed,
+            result: Some(42),
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+        expect(handle.is_finished()).to_equal(true)
+
+    it "reports not finished when running":
+        val handle = HostTaskHandle(
+            task_id: 0,
+            state: TaskState.Running,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+        expect(handle.is_finished()).to_equal(false)
+
+    it "try_join returns result":
+        val handle = HostTaskHandle(
+            task_id: 0,
+            state: TaskState.Completed,
+            result: Some(42),
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+        match handle.try_join():
+            case Some(v): expect(v).to_equal(42)
+            case nil: expect(true).to_equal(false)
+
+    it "supports cancellation":
+        val handle = HostTaskHandle(
+            task_id: 0,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+        handle.cancel()
+        expect(handle.is_cancelled()).to_equal(true)
+
+    it "try_join_result returns error on failure":
+        val handle = HostTaskHandle(
+            task_id: 0,
+            state: TaskState.Completed,
+            result: nil,
+            error: Some(AsyncError.Timeout),
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+        match handle.try_join_result():
+            case Some(Err(e)): expect(e.message()).to_equal("operation timed out")
+            case _: expect(true).to_equal(false)
+
+describe "HostJoinSet":
+    before_each:
+        task_reset_counter()
+
+    it "creates empty set":
+        val set = HostJoinSet.new()
+        expect(set.len()).to_equal(0)
+        expect(set.is_empty()).to_equal(true)
+
+    it "spawns tasks":
+        val set = HostJoinSet.new()
+        val id = set.add_task(\: 42)
+        expect(set.len()).to_equal(1)
+
+    it "grows dynamically":
+        val set = HostJoinSet.new()
+        for i in 0..10:
+            set.add_task(\: i)
+        expect(set.len()).to_equal(10)
+
+    it "supports cancellation":
+        val set = HostJoinSet.new()
+        set.add_task(\: 1)
+        set.add_task(\: 2)
+        set.cancel_all()
+        expect(set.len()).to_equal(2)
+
+    it "tracks pending count":
+        val set = HostJoinSet.new()
+        set.add_task(\: 10)
+        set.add_task(\: 20)
+        set.add_task(\: 30)
+        expect(set.pending_count()).to_equal(3)
+
+describe "HostFuturesUnordered":
+    it "creates empty collection":
+        val futs = HostFuturesUnordered.new()
+        expect(futs.len()).to_equal(0)
+        expect(futs.is_empty()).to_equal(true)
+
+    it "pushes futures dynamically":
+        val futs = HostFuturesUnordered.new()
+        futs.push(HostFuture.ready(1))
+        futs.push(HostFuture.ready(2))
+        futs.push(HostFuture.ready(3))
+        expect(futs.len()).to_equal(3)
+
+    it "returns ready futures":
+        val futs = HostFuturesUnordered.new()
+        futs.push(HostFuture.ready(42))
+        match futs.try_next():
+            case Some(v): expect(v).to_equal(42)
+            case nil: expect(true).to_equal(false)
+
+    it "removes returned futures":
+        val futs = HostFuturesUnordered.new()
+        futs.push(HostFuture.ready(42))
+        expect(futs.len()).to_equal(1)
+        futs.try_next()
+        expect(futs.len()).to_equal(0)
+
+describe "WorkStealingQueue":
+    it "creates empty queue":
+        var q = WorkStealingQueue.new()
+        expect(q.is_empty()).to_equal(true)
+
+    it "push and pop (LIFO)":
+        var q = WorkStealingQueue.new()
+        q.push(1)
+        q.push(2)
+        q.push(3)
+        match q.pop():
+            case Some(v): expect(v).to_equal(3)
+            case nil: expect(true).to_equal(false)
+        match q.pop():
+            case Some(v): expect(v).to_equal(2)
+            case nil: expect(true).to_equal(false)
+        match q.pop():
+            case Some(v): expect(v).to_equal(1)
+            case nil: expect(true).to_equal(false)
+
+    it "steal from other end (FIFO)":
+        var q = WorkStealingQueue.new()
+        q.push(1)
+        q.push(2)
+        q.push(3)
+        match q.steal():
+            case Some(v): expect(v).to_equal(1)
+            case nil: expect(true).to_equal(false)
+        match q.steal():
+            case Some(v): expect(v).to_equal(2)
+            case nil: expect(true).to_equal(false)
+        match q.steal():
+            case Some(v): expect(v).to_equal(3)
+            case nil: expect(true).to_equal(false)
+
+describe "HostScheduler":
+    it "creates scheduler with workers":
+        val scheduler = HostScheduler.new(4)
+        expect(scheduler.is_idle()).to_equal(true)
+
+    it "spawns tasks":
+        val scheduler = HostScheduler.new(1)
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        expect(scheduler.has_runnable()).to_equal(true)
+
+    it "runs tasks":
+        val scheduler = HostScheduler.new(1)
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        scheduler.run_one()
+        expect(scheduler.is_idle()).to_equal(true)
+
+    it "respects priority":
+        val scheduler = HostScheduler.new(1)
+        scheduler.schedule(Priority.Low, \: Poll.Ready(()))
+        scheduler.schedule(Priority.Critical, \: Poll.Ready(()))
+        # Critical prepended to queue, runs first
+        scheduler.run_one()
+        expect(scheduler.has_runnable()).to_equal(true)
+        scheduler.run_one()
+        expect(scheduler.is_idle()).to_equal(true)
+
+    it "wakes suspended tasks":
+        val scheduler = HostScheduler.new(1)
+        val id = scheduler.schedule(Priority.Normal, \: Poll.Pending)
+        scheduler.run_one()
+        # Task is suspended, not in any queue
+        expect(scheduler.has_runnable()).to_equal(false)
+        # Wake the task
+        scheduler.wake_task(id)
+        expect(scheduler.has_runnable()).to_equal(true)
+
+describe "HostRuntime":
+    it "creates runtime":
+        val runtime = HostRuntime.new()
+        expect(runtime.is_multi_threaded()).to_equal(false)
+
+    it "creates runtime with custom workers":
+        val runtime = HostRuntime.with_workers(4)
+        expect(runtime.is_multi_threaded()).to_equal(false)
+
+    it "block_on waits for future":
+        val runtime = HostRuntime.new()
+        val result = runtime.block_on(HostFuture.ready(42))
+        expect(result).to_equal(42)
+
+describe "Host Combinators":
+    it "join_all waits for all futures":
+        val futures = [HostFuture.ready(1), HostFuture.ready(2), HostFuture.ready(3)]
+        val result = join_all(futures)
+        expect(result.is_ready()).to_equal(true)
+
+    it "select returns first ready":
+        val futures = [HostFuture.ready(42), HostFuture.pending()]
+        val result = select(futures)
+        expect(result.is_ready()).to_equal(true)
+
+    it "race returns first value":
+        val futures = [HostFuture.ready(42), HostFuture.pending()]
+        val result = race(futures)
+        expect(result.is_ready()).to_equal(true)
+
+describe "Waker":
+    before_each:
+        waker_reset()
+
+    it "creates waker":
+        val waker = Waker.new(0, 0)
+        expect(waker.task_id).to_equal(0)
+
+    it "tracks wake count":
+        var waker = Waker.new(0, 0)
+        waker.wake()
+        waker.wake()
+        expect(waker.wake_count).to_equal(2)
+
+    it "will_wake checks same task":
+        val w1 = Waker.new(5, 0)
+        val w2 = Waker.new(5, 0)
+        expect(w1.will_wake(w2)).to_equal(true)
+
+describe "CancellationToken":
+    it "starts uncancelled":
+        val token = CancellationToken.new()
+        expect(token.is_cancelled()).to_equal(false)
+
+    it "can be cancelled":
+        var token = CancellationToken.new()
+        token.cancel()
+        expect(token.is_cancelled()).to_equal(true)
+
+    it "check returns error when cancelled":
+        var token = CancellationToken.new()
+        token.cancel()
+        match token.check():
+            case Err(msg): expect(msg).to_equal("cancelled")
+            case Ok(_): expect(true).to_equal(false)
+
+describe "Host Integration":
+    it "runs parallel tasks":
+        val scheduler = HostScheduler.new(1)
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        scheduler.run()
+        expect(scheduler.is_idle()).to_equal(true)
+
+    it "handles mixed priorities":
+        val scheduler = HostScheduler.new(1)
+        scheduler.schedule(Priority.Critical, \: Poll.Ready(()))
+        scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        scheduler.schedule(Priority.Low, \: Poll.Ready(()))
+        scheduler.run()
+        expect(scheduler.is_idle()).to_equal(true)
+
+    it "streams futures as they complete":
+        val futs = HostFuturesUnordered.new()
+        futs.push(HostFuture.ready(10))
+        futs.push(HostFuture.ready(20))
+        var count = 0
+        match futs.try_next():
+            case Some(_): count = count + 1
+            case nil: pass_do_nothing
+        match futs.try_next():
+            case Some(_): count = count + 1
+            case nil: pass_do_nothing
+        expect(count).to_equal(2)

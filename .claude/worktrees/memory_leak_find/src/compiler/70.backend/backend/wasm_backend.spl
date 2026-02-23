@@ -1,0 +1,776 @@
+# WebAssembly Backend
+#
+# Compiles Simple programs to WebAssembly for browser deployment.
+# Provides:
+# - WASM binary generation
+# - JavaScript glue code generation
+# - Browser FFI via @extern("browser")
+# - WASI support for non-browser environments
+#
+# Usage:
+#   val backend = WasmBackend.create(WasmTarget.Browser)
+#   val result = backend.compile_module(mir_module)
+#   result.write_to_files("output")
+
+use compiler.mir.mir_data.*
+use compiler.backend.backend_api.*
+use compiler.backend.wasm_type_mapper.WasmTypeMapper
+use compiler.backend.wasm.wat_codegen.{MirToWat, MirToWat__create, MirToWat__create_standalone}
+use compiler.interp.interpreter.llvm.tools.{find_wat2wasm, wat2wasm_available}
+
+# ============================================================================
+# WASM Target
+# ============================================================================
+
+enum WasmTarget:
+    """WebAssembly target environment."""
+    Browser     # Browser with JavaScript glue
+    Wasi        # WASI for standalone/CLI
+    Minimal     # Minimal runtime (no JS, no WASI)
+
+impl WasmTarget:
+    fn to_text() -> text:
+        match self:
+            case Browser: "browser"
+            case Wasi: "wasi"
+            case Minimal: "minimal"
+
+    fn needs_js_glue() -> bool:
+        match self:
+            case Browser: true
+            case _: false
+
+    fn needs_wasi_imports() -> bool:
+        match self:
+            case Wasi: true
+            case _: false
+
+# ============================================================================
+# WASM Type System
+# ============================================================================
+
+enum WasmType:
+    """WebAssembly value types."""
+    I32
+    I64
+    F32
+    F64
+    FuncRef
+    ExternRef
+
+impl WasmType:
+    fn to_text() -> text:
+        match self:
+            case I32: "i32"
+            case I64: "i64"
+            case F32: "f32"
+            case F64: "f64"
+            case FuncRef: "funcref"
+            case ExternRef: "externref"
+
+fn mir_type_to_wasm(ty: MirType, target: CodegenTarget) -> WasmType:
+    """
+    Convert MIR type to WASM type using shared type mapper.
+
+    Note: For new code, consider using WasmTypeMapper directly for more control.
+    This function provides backwards compatibility with existing code.
+    """
+    val mapper = WasmTypeMapper__create_for_target(target)
+    val type_str = mapper.map_type(ty)
+
+    # Convert text back to WasmType enum for backwards compatibility
+    match type_str:
+        case "i64": WasmType.I64
+        case "i32": WasmType.I32
+        case "f64": WasmType.F64
+        case "f32": WasmType.F32
+        case _: WasmType.I32  # Default for unknown types
+
+# ============================================================================
+# WASM Import/Export
+# ============================================================================
+
+struct WasmImport:
+    """An imported function/global."""
+    module_name: text
+    field_name: text
+    kind: WasmImportKind
+
+enum WasmImportKind:
+    Function(params: [WasmType], results: [WasmType])
+    Global(ty: WasmType, mutable: bool)
+    Memory(min_pages: i64, max_pages: i64?)
+    Table(element_type: WasmType, min_size: i64, max_size: i64?)
+
+struct WasmExport:
+    """An exported function/global."""
+    name: text
+    kind: WasmExportKind
+
+enum WasmExportKind:
+    Function(index: i64)
+    Global(index: i64)
+    Memory(index: i64)
+    Table(index: i64)
+
+# ============================================================================
+# Browser FFI
+# ============================================================================
+
+struct BrowserBinding:
+    """A browser FFI binding from @extern("browser")."""
+    simple_name: text      # Name in Simple code
+    js_module: text        # JavaScript module (e.g., "console", "document")
+    js_function: text      # JavaScript function name
+    params: [WasmType]
+    result: WasmType?
+
+impl BrowserBinding:
+    static fn console_log() -> BrowserBinding:
+        BrowserBinding(
+            simple_name: "print",
+            js_module: "console",
+            js_function: "log",
+            params: [WasmType.I32],  # String pointer
+            result: nil
+        )
+
+    static fn alert() -> BrowserBinding:
+        BrowserBinding(
+            simple_name: "alert",
+            js_module: "window",
+            js_function: "alert",
+            params: [WasmType.I32],
+            result: nil
+        )
+
+    fn to_import() -> WasmImport:
+        WasmImport(
+            module_name: "browser",
+            field_name: self.js_function,
+            kind: WasmImportKind.Function(
+                params: self.params,
+                results: if self.result.?: [self.result.unwrap()] else: []
+            )
+        )
+
+# ============================================================================
+# JavaScript Glue Code Generator
+# ============================================================================
+
+class JsGlueGenerator:
+    """Generates JavaScript glue code for browser deployment."""
+    bindings: [BrowserBinding]
+    exports: [text]
+    memory_pages: i64
+
+    static fn create() -> JsGlueGenerator:
+        JsGlueGenerator(
+            bindings: [],
+            exports: [],
+            memory_pages: 16  # Default 1MB
+        )
+
+    me add_binding(binding: BrowserBinding):
+        """Add a browser binding."""
+        self.bindings = self.bindings.push(binding)
+
+    me add_export(name: text):
+        """Add an exported function."""
+        self.exports = self.exports.push(name)
+
+    fn generate() -> text:
+        """Generate JavaScript glue code."""
+        var js = "// Generated JavaScript glue code\n"
+        js = "{js}\n"
+
+        # Memory setup
+        js = "{js}const memory = new WebAssembly.Memory({{ initial: {self.memory_pages} }});\n\n"
+
+        # String helper
+        js = "{js}function readString(ptr, len) {{\n"
+        js = "{js}  const bytes = new Uint8Array(memory.buffer, ptr, len);\n"
+        js = "{js}  return new TextDecoder().decode(bytes);\n"
+        js = "{js}}}\n\n"
+
+        # Import object
+        js = "{js}const imports = {{\n"
+        js = "{js}  env: {{\n"
+        js = "{js}    memory: memory,\n"
+        js = "{js}  }},\n"
+
+        # Browser bindings
+        js = "{js}  browser: {{\n"
+        for binding in self.bindings:
+            js = "{js}    {binding.js_function}: ({self.generate_params(binding)}) => {{\n"
+            js = "{js}      {self.generate_body(binding)}\n"
+            js = "{js}    }},\n"
+        js = "{js}  }},\n"
+        js = "{js}}};\n\n"
+
+        # Loader
+        js = "{js}async function loadWasm(wasmPath) {{\n"
+        js = "{js}  const response = await fetch(wasmPath);\n"
+        js = "{js}  const bytes = await response.arrayBuffer();\n"
+        js = "{js}  const {{ instance }} = await WebAssembly.instantiate(bytes, imports);\n"
+        js = "{js}  return instance.exports;\n"
+        js = "{js}}}\n\n"
+
+        # Export list
+        js = "{js}export {{ loadWasm }};\n"
+
+        js
+
+    fn generate_params(binding: BrowserBinding) -> text:
+        var params: [text] = []
+        for i in 0..binding.params.len():
+            params = params.push("arg{i}")
+        params.join(", ")
+
+    fn generate_body(binding: BrowserBinding) -> text:
+        match binding.js_module:
+            case "console":
+                "console.{binding.js_function}(readString(arg0, arg1));"
+            case "window":
+                "window.{binding.js_function}(readString(arg0, arg1));"
+            case _:
+                "{binding.js_module}.{binding.js_function}();"
+
+# ============================================================================
+# WASM Text Format (WAT) Builder
+# ============================================================================
+
+class WatBuilder:
+    """Builds WebAssembly text format."""
+    lines: [text]
+    indent_level: i64
+
+    static fn create() -> WatBuilder:
+        WatBuilder(lines: [], indent_level: 0)
+
+    me emit(line: text):
+        """Emit a line with current indentation."""
+        val indent = "  ".repeat(self.indent_level)
+        self.lines = self.lines.push("{indent}{line}")
+
+    me begin_module(name: text):
+        """Start a module."""
+        self.emit("(module ${name}")
+        self.indent_level = self.indent_level + 1
+
+    me end_module():
+        """End a module."""
+        self.indent_level = self.indent_level - 1
+        self.emit(")")
+
+    me emit_import(import_def: WasmImport):
+        """Emit an import."""
+        match import_def.kind:
+            case Function(params, results):
+                val param_str = params.map(\t: t.to_text()).join(" ")
+                val result_str = results.map(\t: t.to_text()).join(" ")
+                self.emit("(import \"{import_def.module_name}\" \"{import_def.field_name}\" (func (param {param_str}) (result {result_str})))")
+            case Memory(min, max):
+                val max_str = if max.?: " {max.unwrap()}" else: ""
+                self.emit("(import \"{import_def.module_name}\" \"{import_def.field_name}\" (memory {min}{max_str}))")
+            case _:
+                pass
+
+    me emit_export(export_def: WasmExport):
+        """Emit an export."""
+        match export_def.kind:
+            case Function(idx):
+                self.emit("(export \"{export_def.name}\" (func {idx}))")
+            case Memory(idx):
+                self.emit("(export \"{export_def.name}\" (memory {idx}))")
+            case _:
+                pass
+
+    me begin_func(name: text, params: [WasmType], results: [WasmType]):
+        """Start a function."""
+        val param_str = params.map(\t: "(param {t.to_text()})").join(" ")
+        val result_str = results.map(\t: "(result {t.to_text()})").join(" ")
+        self.emit("(func ${name} {param_str} {result_str}")
+        self.indent_level = self.indent_level + 1
+
+    me end_func():
+        """End a function."""
+        self.indent_level = self.indent_level - 1
+        self.emit(")")
+
+    me emit_local(ty: WasmType):
+        """Emit a local variable."""
+        self.emit("(local {ty.to_text()})")
+
+    me emit_i32_const(value: i64):
+        """Emit i32.const."""
+        self.emit("i32.const {value}")
+
+    me emit_i64_const(value: i64):
+        """Emit i64.const."""
+        self.emit("i64.const {value}")
+
+    me emit_local_get(idx: i64):
+        """Emit local.get."""
+        self.emit("local.get {idx}")
+
+    me emit_local_set(idx: i64):
+        """Emit local.set."""
+        self.emit("local.set {idx}")
+
+    me emit_call(func_idx: i64):
+        """Emit call by index."""
+        self.emit("call {func_idx}")
+
+    me emit_call_named(name: text):
+        """Emit call by function name."""
+        self.emit("call ${name}")
+
+    me emit_call_indirect(type_idx: i64):
+        """Emit call_indirect."""
+        self.emit("call_indirect (type {type_idx})")
+
+    me emit_return():
+        """Emit return."""
+        self.emit("return")
+
+    me emit_drop():
+        """Emit drop (discard top of stack)."""
+        self.emit("drop")
+
+    me emit_unreachable():
+        """Emit unreachable (trap)."""
+        self.emit("unreachable")
+
+    # Control flow instructions
+    me emit_block(label: text):
+        """Emit block start."""
+        self.emit("(block ${label}")
+        self.indent_level = self.indent_level + 1
+
+    me emit_loop(label: text):
+        """Emit loop start."""
+        self.emit("(loop ${label}")
+        self.indent_level = self.indent_level + 1
+
+    me emit_if():
+        """Emit if start."""
+        self.emit("(if")
+        self.indent_level = self.indent_level + 1
+
+    me emit_else():
+        """Emit else."""
+        self.indent_level = self.indent_level - 1
+        self.emit(")(else")
+        self.indent_level = self.indent_level + 1
+
+    me emit_end():
+        """Emit end (close block/loop/if)."""
+        self.indent_level = self.indent_level - 1
+        self.emit(")")
+
+    me emit_br(label: text):
+        """Emit unconditional branch."""
+        self.emit("br ${label}")
+
+    me emit_br_if(label: text):
+        """Emit conditional branch."""
+        self.emit("br_if ${label}")
+
+    me emit_br_table(labels: [text], default_label: text):
+        """Emit branch table."""
+        var label_str = ""
+        for label in labels:
+            label_str = label_str + " ${label}"
+        self.emit("br_table{label_str} ${default_label}")
+
+    # Variable instructions
+    me emit_local_tee(idx: i64):
+        """Emit local.tee (set and keep on stack)."""
+        self.emit("local.tee {idx}")
+
+    me emit_local_named_get(name: text):
+        """Emit local.get by name."""
+        self.emit("local.get ${name}")
+
+    me emit_local_named_set(name: text):
+        """Emit local.set by name."""
+        self.emit("local.set ${name}")
+
+    me emit_global_get(name: text):
+        """Emit global.get."""
+        self.emit("global.get ${name}")
+
+    me emit_global_set(name: text):
+        """Emit global.set."""
+        self.emit("global.set ${name}")
+
+    # Memory instructions
+    me emit_i32_load(offset: i64, align: i64):
+        """Emit i32.load."""
+        self.emit("i32.load offset={offset} align={align}")
+
+    me emit_i32_store(offset: i64, align: i64):
+        """Emit i32.store."""
+        self.emit("i32.store offset={offset} align={align}")
+
+    me emit_i64_load(offset: i64, align: i64):
+        """Emit i64.load."""
+        self.emit("i64.load offset={offset} align={align}")
+
+    me emit_i64_store(offset: i64, align: i64):
+        """Emit i64.store."""
+        self.emit("i64.store offset={offset} align={align}")
+
+    me emit_f64_load(offset: i64, align: i64):
+        """Emit f64.load."""
+        self.emit("f64.load offset={offset} align={align}")
+
+    me emit_f64_store(offset: i64, align: i64):
+        """Emit f64.store."""
+        self.emit("f64.store offset={offset} align={align}")
+
+    # Numeric instructions
+    me emit_f64_const(value: f64):
+        """Emit f64.const."""
+        self.emit("f64.const {value}")
+
+    me emit_i32_add():
+        """Emit i32.add."""
+        self.emit("i32.add")
+
+    me emit_i32_sub():
+        """Emit i32.sub."""
+        self.emit("i32.sub")
+
+    me emit_i32_mul():
+        """Emit i32.mul."""
+        self.emit("i32.mul")
+
+    me emit_i32_div_s():
+        """Emit i32.div_s (signed division)."""
+        self.emit("i32.div_s")
+
+    me emit_i32_rem_s():
+        """Emit i32.rem_s (signed remainder)."""
+        self.emit("i32.rem_s")
+
+    me emit_i64_add():
+        """Emit i64.add."""
+        self.emit("i64.add")
+
+    me emit_i64_sub():
+        """Emit i64.sub."""
+        self.emit("i64.sub")
+
+    me emit_i64_mul():
+        """Emit i64.mul."""
+        self.emit("i64.mul")
+
+    me emit_i64_div_s():
+        """Emit i64.div_s."""
+        self.emit("i64.div_s")
+
+    me emit_i64_rem_s():
+        """Emit i64.rem_s."""
+        self.emit("i64.rem_s")
+
+    me emit_f64_add():
+        """Emit f64.add."""
+        self.emit("f64.add")
+
+    me emit_f64_sub():
+        """Emit f64.sub."""
+        self.emit("f64.sub")
+
+    me emit_f64_mul():
+        """Emit f64.mul."""
+        self.emit("f64.mul")
+
+    me emit_f64_div():
+        """Emit f64.div."""
+        self.emit("f64.div")
+
+    # Comparison instructions
+    me emit_i32_eq():
+        """Emit i32.eq."""
+        self.emit("i32.eq")
+
+    me emit_i32_ne():
+        """Emit i32.ne."""
+        self.emit("i32.ne")
+
+    me emit_i32_lt_s():
+        """Emit i32.lt_s."""
+        self.emit("i32.lt_s")
+
+    me emit_i32_le_s():
+        """Emit i32.le_s."""
+        self.emit("i32.le_s")
+
+    me emit_i32_gt_s():
+        """Emit i32.gt_s."""
+        self.emit("i32.gt_s")
+
+    me emit_i32_ge_s():
+        """Emit i32.ge_s."""
+        self.emit("i32.ge_s")
+
+    me emit_i64_eq():
+        """Emit i64.eq."""
+        self.emit("i64.eq")
+
+    me emit_i64_ne():
+        """Emit i64.ne."""
+        self.emit("i64.ne")
+
+    me emit_i64_lt_s():
+        """Emit i64.lt_s."""
+        self.emit("i64.lt_s")
+
+    me emit_i64_le_s():
+        """Emit i64.le_s."""
+        self.emit("i64.le_s")
+
+    me emit_i64_gt_s():
+        """Emit i64.gt_s."""
+        self.emit("i64.gt_s")
+
+    me emit_i64_ge_s():
+        """Emit i64.ge_s."""
+        self.emit("i64.ge_s")
+
+    me emit_f64_eq():
+        """Emit f64.eq."""
+        self.emit("f64.eq")
+
+    me emit_f64_ne():
+        """Emit f64.ne."""
+        self.emit("f64.ne")
+
+    me emit_f64_lt():
+        """Emit f64.lt."""
+        self.emit("f64.lt")
+
+    me emit_f64_le():
+        """Emit f64.le."""
+        self.emit("f64.le")
+
+    me emit_f64_gt():
+        """Emit f64.gt."""
+        self.emit("f64.gt")
+
+    me emit_f64_ge():
+        """Emit f64.ge."""
+        self.emit("f64.ge")
+
+    # Logical/bitwise instructions
+    me emit_i32_and():
+        """Emit i32.and."""
+        self.emit("i32.and")
+
+    me emit_i32_or():
+        """Emit i32.or."""
+        self.emit("i32.or")
+
+    me emit_i32_xor():
+        """Emit i32.xor."""
+        self.emit("i32.xor")
+
+    me emit_i32_shl():
+        """Emit i32.shl."""
+        self.emit("i32.shl")
+
+    me emit_i32_shr_s():
+        """Emit i32.shr_s."""
+        self.emit("i32.shr_s")
+
+    me emit_i32_shr_u():
+        """Emit i32.shr_u."""
+        self.emit("i32.shr_u")
+
+    me emit_i32_eqz():
+        """Emit i32.eqz (compare to zero)."""
+        self.emit("i32.eqz")
+
+    me emit_nop():
+        """Emit nop."""
+        self.emit("nop")
+
+    fn build() -> text:
+        """Build final WAT string."""
+        self.lines.join("\n")
+
+# ============================================================================
+# WASM Backend
+# ============================================================================
+
+class WasmBackend:
+    """WebAssembly compilation backend."""
+    target: WasmTarget
+    opt_level: OptimizationLevel
+    memory_pages: i64
+    browser_bindings: [BrowserBinding]
+    type_mapper: WasmTypeMapper     # Type mapper for MIR → Wasm types
+
+    static fn create(target: WasmTarget) -> WasmBackend:
+        # Default to Wasm32 (most common target)
+        val codegen_target = CodegenTarget.Wasm32
+        WasmBackend(
+            target: target,
+            opt_level: OptimizationLevel.Size,  # Default to size opt for WASM
+            memory_pages: 16,
+            browser_bindings: [],
+            type_mapper: WasmTypeMapper__create_for_target(codegen_target)
+        )
+
+    static fn browser() -> WasmBackend:
+        WasmBackend__create(WasmTarget.Browser)
+
+    static fn wasi() -> WasmBackend:
+        WasmBackend__create(WasmTarget.Wasi)
+
+    me add_browser_binding(binding: BrowserBinding):
+        """Add a browser FFI binding."""
+        self.browser_bindings = self.browser_bindings.push(binding)
+
+    fn compile_module(module: MirModule) -> Result<WasmCompileResult, CompileError>:
+        """Compile a MIR module to WebAssembly.
+
+        Uses MirToWat translator for full MIR instruction translation.
+        Optionally converts WAT to binary WASM via wat2wasm.
+        """
+        # Select translator based on target
+        var use_wasi = self.target.needs_wasi_imports()
+        var translator = if use_wasi:
+            MirToWat__create(module.name)
+        else:
+            MirToWat__create_standalone(module.name)
+
+        # Translate full MIR module to WAT text
+        val wat = translator.translate_module(module)
+
+        # Try to compile WAT to binary WASM
+        var wasm_bytes: [u8]? = nil
+        if wat2wasm_available():
+            val result = wat_to_wasm_binary(wat, module.name)
+            if result.?:
+                wasm_bytes = result
+
+        # Generate JS glue if needed
+        var js_glue: text? = nil
+        if self.target.needs_js_glue():
+            var glue_gen = JsGlueGenerator__create()
+            for binding in self.browser_bindings:
+                glue_gen.add_binding(binding)
+            for func in module.functions:
+                if not func.is_extern:
+                    glue_gen.add_export(func.name)
+            js_glue = Some(glue_gen.generate())
+
+        Ok(WasmCompileResult(
+            module_name: module.name,
+            wat: wat,
+            wasm: wasm_bytes,
+            js_glue: js_glue,
+            compile_time_ms: 0
+        ))
+
+struct WasmCompileResult:
+    """Result of WASM compilation."""
+    module_name: text
+    wat: text                # WebAssembly text format
+    wasm: [u8]?             # WebAssembly binary
+    js_glue: text?          # JavaScript glue code
+    compile_time_ms: i64
+
+impl WasmCompileResult:
+    fn has_js_glue() -> bool:
+        self.js_glue.?
+
+    fn write_to_files(base_path: text) -> Result<(), text>:
+        """Write compilation outputs to files."""
+        # Would write:
+        # - {base_path}.wat
+        # - {base_path}.wasm
+        # - {base_path}.js (if js_glue present)
+        Ok(())
+
+# ============================================================================
+# WAT to WASM Binary Compilation
+# ============================================================================
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_process_run(cmd: text) -> i64
+extern fn rt_file_delete(path: text) -> bool
+
+fn wat_to_wasm_binary(wat: text, module_name: text) -> [u8]?:
+    """Convert WAT text to WASM binary using wat2wasm.
+
+    Writes WAT to a temp file, runs wat2wasm, reads back binary.
+    Returns nil if wat2wasm is not available or compilation fails.
+    """
+    val wat2wasm = find_wat2wasm()
+    if wat2wasm == "":
+        return nil
+
+    val wat_path = "/tmp/simple_wasm_{module_name}.wat"
+    val wasm_path = "/tmp/simple_wasm_{module_name}.wasm"
+
+    # Write WAT to temp file
+    val wrote = rt_file_write_text(wat_path, wat)
+    if not wrote:
+        return nil
+
+    # Run wat2wasm
+    val exit_code = rt_process_run("{wat2wasm} {wat_path} -o {wasm_path}")
+    if exit_code != 0:
+        rt_file_delete(wat_path)
+        return nil
+
+    # Read back WASM binary
+    val wasm_bytes = rt_file_read_bytes(wasm_path)
+
+    # Clean up temp files
+    rt_file_delete(wat_path)
+    rt_file_delete(wasm_path)
+
+    if wasm_bytes.len() > 0:
+        Some(wasm_bytes)
+    else:
+        nil
+
+# ============================================================================
+# Desugared Static Methods
+# ============================================================================
+
+fn WatBuilder__create() -> WatBuilder:
+    WatBuilder.create()
+
+fn WasmBackend__create(target: WasmTarget) -> WasmBackend:
+    WasmBackend.create(target)
+
+fn WasmBackend__browser() -> WasmBackend:
+    WasmBackend.browser()
+
+fn WasmBackend__wasi() -> WasmBackend:
+    WasmBackend.wasi()
+
+fn JsGlueGenerator__create() -> JsGlueGenerator:
+    JsGlueGenerator.create()
+
+fn WasmTypeMapper__create_for_target(target: CodegenTarget) -> WasmTypeMapper:
+    WasmTypeMapper.create_for_target(target)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export WasmTarget, WasmType, mir_type_to_wasm
+export WasmImport, WasmImportKind, WasmExport, WasmExportKind
+export BrowserBinding, JsGlueGenerator
+export WatBuilder, WasmBackend, WasmCompileResult
+export wat_to_wasm_binary
+export WatBuilder__create, WasmBackend__create, WasmBackend__browser, WasmBackend__wasi
+export JsGlueGenerator__create

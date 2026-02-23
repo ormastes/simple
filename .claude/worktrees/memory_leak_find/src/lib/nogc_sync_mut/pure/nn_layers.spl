@@ -1,0 +1,275 @@
+# Pure Simple Neural Network Layers (Extended)
+#
+# Extracted from nn.spl. Contains:
+# - BatchNorm1d: Batch normalization over 1D inputs
+# - LayerNorm: Layer normalization
+# - Embedding: Embedding lookup table
+# - Helper functions: count_parameters, zero_grad, linear_create, calculate_conv2d_output_size
+
+use std.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros, tensor_ones, tensor_randn}
+use std.nogc_sync_mut.pure.nn.{Linear}
+
+class BatchNorm1d:
+    """Batch Normalization over 1D inputs"""
+    num_features: i64
+    eps: f64
+    momentum: f64
+    weight: PureTensor<f64>
+    bias: PureTensor<f64>
+    running_mean: PureTensor<f64>
+    running_var: PureTensor<f64>
+    training: bool
+
+    static fn create(num_features: i64, eps: f64, momentum: f64) -> BatchNorm1d:
+        val weight = tensor_ones([num_features])
+        val bias = tensor_zeros([num_features])
+        val running_mean = tensor_zeros([num_features])
+        val running_var = tensor_ones([num_features])
+        BatchNorm1d(num_features: num_features, eps: eps, momentum: momentum, weight: weight, bias: bias, running_mean: running_mean, running_var: running_var, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        """Normalize using running_mean/running_var, then scale and shift."""
+        var result_data: [f64] = []
+        var i = 0
+        while i < x.data.len():
+            val feature_idx = i % self.num_features
+            val mean_val = self.running_mean.data[feature_idx]
+            val var_val = self.running_var.data[feature_idx]
+            # Compute sqrt(var + eps) using Newton's method
+            val var_eps = var_val + self.eps
+            var sqrt_val = var_eps
+            var iter = 0
+            while iter < 20:
+                sqrt_val = 0.5 * (sqrt_val + var_eps / sqrt_val)
+                iter = iter + 1
+            val normalized = (x.data[i] - mean_val) / sqrt_val
+            val scaled = normalized * self.weight.data[feature_idx] + self.bias.data[feature_idx]
+            result_data.push(scaled)
+            i = i + 1
+        tensor_from_data(result_data, x.shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        [self.weight, self.bias]
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "BatchNorm1d(num_features={self.num_features}, eps={self.eps}, momentum={self.momentum})"
+
+class LayerNorm:
+    """Layer Normalization"""
+    normalized_shape: i64
+    eps: f64
+    weight: PureTensor<f64>
+    bias: PureTensor<f64>
+    training: bool
+
+    static fn create(normalized_shape: i64, eps: f64) -> LayerNorm:
+        val weight = tensor_ones([normalized_shape])
+        val bias = tensor_zeros([normalized_shape])
+        LayerNorm(normalized_shape: normalized_shape, eps: eps, weight: weight, bias: bias, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        """Compute mean and variance across all elements, normalize, scale and shift."""
+        # Compute mean
+        var sum = 0.0
+        var i = 0
+        while i < x.data.len():
+            sum = sum + x.data[i]
+            i = i + 1
+        val mean_val = sum / x.data.len()
+
+        # Compute variance
+        var var_sum = 0.0
+        i = 0
+        while i < x.data.len():
+            val diff = x.data[i] - mean_val
+            var_sum = var_sum + diff * diff
+            i = i + 1
+        val var_val = var_sum / x.data.len()
+
+        # Compute sqrt(var + eps) using Newton's method
+        val var_eps = var_val + self.eps
+        var sqrt_val = var_eps
+        var iter = 0
+        while iter < 20:
+            sqrt_val = 0.5 * (sqrt_val + var_eps / sqrt_val)
+            iter = iter + 1
+
+        # Normalize, scale and shift
+        var result_data: [f64] = []
+        i = 0
+        while i < x.data.len():
+            val feature_idx = i % self.normalized_shape
+            val normalized = (x.data[i] - mean_val) / sqrt_val
+            val scaled = normalized * self.weight.data[feature_idx] + self.bias.data[feature_idx]
+            result_data.push(scaled)
+            i = i + 1
+        tensor_from_data(result_data, x.shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        [self.weight, self.bias]
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "LayerNorm(normalized_shape={self.normalized_shape}, eps={self.eps})"
+
+class Embedding:
+    """Embedding lookup table: indices -> dense vectors
+
+    Maps integer indices to dense vector representations.
+    Used for word embeddings, token embeddings, etc.
+
+    Args:
+        num_embeddings: Size of the embedding dictionary (vocabulary size)
+        embedding_dim: Dimension of each embedding vector
+
+    Shape:
+        Input: Integer indices (as f64), shape (batch_size,) or (batch_size, seq_len)
+        Output: Dense vectors, shape (batch_size, embedding_dim) or (batch_size, seq_len, embedding_dim)
+    """
+    weight: PureTensor<f64>
+    num_embeddings: i64
+    embedding_dim: i64
+    training: bool
+
+    static fn create(num_embeddings: i64, embedding_dim: i64) -> Embedding:
+        """Create Embedding layer with random initialization."""
+        # Initialize embedding table with small random values
+        val weight_init = tensor_randn([num_embeddings, embedding_dim])
+
+        # Scale down initial weights (multiply by 0.1)
+        var scaled_data: [f64] = []
+        for v in weight_init.data:
+            scaled_data.push(v * 0.1)
+
+        val weight = tensor_from_data(scaled_data, [num_embeddings, embedding_dim])
+
+        Embedding(
+            weight: weight,
+            num_embeddings: num_embeddings,
+            embedding_dim: embedding_dim,
+            training: true
+        )
+
+    fn forward(indices: PureTensor<f64>) -> PureTensor<f64>:
+        """Forward pass: lookup embeddings by indices."""
+        val input_shape = indices.shape
+        val batch_size = input_shape[0]
+
+        # Handle 1D input: (batch_size,) -> (batch_size, embedding_dim)
+        if input_shape.len() == 1:
+            var output_data: [f64] = []
+
+            # For each index in batch
+            var i = 0
+            while i < batch_size:
+                val idx_f64 = indices.data[i]
+                val idx_i64 = idx_f64
+
+                # Bounds check
+                if idx_i64 < 0.0 or idx_i64 >= self.num_embeddings:
+                    var j = 0
+                    while j < self.embedding_dim:
+                        output_data.push(0.0)
+                        j = j + 1
+                else:
+                    var j = 0
+                    while j < self.embedding_dim:
+                        val weight_idx = idx_i64 * self.embedding_dim + j
+                        output_data.push(self.weight.data[weight_idx])
+                        j = j + 1
+
+                i = i + 1
+
+            tensor_from_data(output_data, [batch_size, self.embedding_dim])
+
+        # Handle 2D input: (batch_size, seq_len) -> (batch_size, seq_len, embedding_dim)
+        else:
+            val seq_len = input_shape[1]
+            var output_data: [f64] = []
+
+            var batch_idx = 0
+            while batch_idx < batch_size:
+                var seq_idx = 0
+                while seq_idx < seq_len:
+                    val idx_f64 = indices.data[batch_idx * seq_len + seq_idx]
+                    val idx_i64 = idx_f64
+
+                    if idx_i64 < 0.0 or idx_i64 >= self.num_embeddings:
+                        var j = 0
+                        while j < self.embedding_dim:
+                            output_data.push(0.0)
+                            j = j + 1
+                    else:
+                        var j = 0
+                        while j < self.embedding_dim:
+                            val weight_idx = idx_i64 * self.embedding_dim + j
+                            output_data.push(self.weight.data[weight_idx])
+                            j = j + 1
+
+                    seq_idx = seq_idx + 1
+
+                batch_idx = batch_idx + 1
+
+            tensor_from_data(output_data, [batch_size, seq_len, self.embedding_dim])
+
+    fn parameters() -> [PureTensor<f64>]:
+        """Get list of parameters (just weight)."""
+        [self.weight]
+
+    me train():
+        """Set layer to training mode."""
+        self.training = true
+
+    me eval():
+        """Set layer to evaluation mode."""
+        self.training = false
+
+    fn to_string() -> text:
+        """String representation."""
+        "Embedding(num_embeddings={self.num_embeddings}, embedding_dim={self.embedding_dim})"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn count_parameters(model: any) -> i64:
+    """Count total number of parameters in a model."""
+    val params = model.parameters()
+    var total = 0
+    for param in params:
+        var param_size = 1
+        for dim in param.shape:
+            param_size = param_size * dim
+        total = total + param_size
+    total
+
+fn zero_grad(model: any):
+    """Zero all gradients in the model."""
+    val params = model.parameters()
+    for param in params:
+        if param.grad.?:
+            param.grad = PureTensor.zeros_like(param.grad.unwrap())
+    ()
+
+# Module-level factory function (for backwards compatibility)
+fn linear_create(in_features: i64, out_features: i64, use_bias: bool) -> Linear:
+    """Create Linear layer (legacy API)."""
+    Linear.create(in_features, out_features, use_bias)
+
+fn calculate_conv2d_output_size(input_size: i64, kernel_size: i64, stride: i64, padding: i64) -> i64:
+    """Calculate output size for Conv2d operation."""
+    (input_size + 2 * padding - kernel_size) / stride + 1
+
+export BatchNorm1d, LayerNorm, Embedding
+export count_parameters, zero_grad, linear_create, calculate_conv2d_output_size

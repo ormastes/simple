@@ -1,0 +1,287 @@
+# Loop Optimization
+#
+# Optimizes loop structures for better performance.
+#
+# Transformations:
+#   1. Loop-Invariant Code Motion (LICM)
+#   2. Loop Unrolling
+#   3. Strength Reduction
+#
+# Example - Loop-Invariant Code Motion:
+#   for i in 0..100:
+#       val x = a * b    # Invariant! (doesn't depend on i)
+#       val y = x + i
+#
+# After LICM:
+#   val x = a * b        # Hoisted out of loop
+#   for i in 0..100:
+#       val y = x + i
+#
+# Example - Loop Unrolling:
+#   for i in 0..4:
+#       process(i)
+#
+# After unrolling:
+#   process(0)
+#   process(1)
+#   process(2)
+#   process(3)
+#
+# Benefits:
+# - LICM: Eliminates redundant computation in loops
+# - Unrolling: Reduces loop overhead, enables more optimization
+# - Strength reduction: Replaces expensive ops with cheaper ones
+#
+# Costs:
+# - Increases code size (unrolling)
+# - May hurt I-cache if too aggressive
+# - Compile time overhead
+#
+# Strategy:
+# - LICM: Always beneficial (moves invariant code out)
+# - Unrolling: Only small loops (< 8 iterations)
+# - Strength reduction: When profitable (mul -> add in loop)
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir_opt.mod.{MirPass}
+use compiler.mir_opt.mir_opt.loop_detect.{EdgePair, LoopInfo, LoopDetector}
+use compiler.mir_opt.mir_opt.loop_licm.{LoopInvariantMotion}
+use compiler.mir_opt.mir_opt.loop_strength.{StrengthReduction}
+
+# ============================================================================
+# Loop Unrolling
+# ============================================================================
+
+class LoopUnroller:
+    """
+    Unrolls small loops to reduce overhead.
+
+    Strategy:
+    - Only unroll loops with constant iteration count
+    - Only small loops (< 8 iterations)
+    - Trade code size for reduced loop overhead
+
+    Example:
+      for i in 0..4:
+          body(i)
+
+    Becomes:
+      body(0); body(1); body(2); body(3)
+    """
+    detector: LoopDetector
+    unroll_threshold: i64
+    unrolled_count: i64
+
+impl LoopUnroller:
+    static fn new(threshold: i64) -> LoopUnroller:
+        LoopUnroller(
+            detector: LoopDetector.new(),
+            unroll_threshold: threshold,
+            unrolled_count: 0
+        )
+
+    me optimize_function(func: MirFunction) -> MirFunction:
+        """Run loop unrolling on function."""
+        # Detect loops
+        self.detector.detect_loops(func)
+
+        if self.detector.loops.len() == 0:
+            return func
+
+        # For each loop, try to unroll if beneficial
+        var optimized_blocks = func.blocks
+
+        for loop in self.detector.loops:
+            val iter_count = loop.iteration_count()
+            if iter_count.? and iter_count.unwrap() <= self.unroll_threshold:
+                # Small loop - unroll it
+                optimized_blocks = self.unroll_loop(optimized_blocks, loop, iter_count.unwrap())
+                self.unrolled_count = self.unrolled_count + 1
+
+        copy_mir_function_with_blocks(func, optimized_blocks)
+
+    me unroll_loop(blocks: [MirBlock], loop: LoopInfo, count: i64) -> [MirBlock]:
+        """Unroll loop by duplicating body instructions count times.
+
+        Strategy: Replace loop body with count copies of the body instructions
+        in the header block, removing the backedge. This eliminates loop overhead
+        (branch, counter increment) for small loops.
+        """
+        # Pre-compute loop block membership set for O(1) lookup
+        var loop_block_set = {}
+        loop_block_set["{loop.header.id}"] = true
+        for bid in loop.body:
+            loop_block_set["{bid.id}"] = true
+
+        # Collect body instructions from all loop body blocks
+        var body_insts: [MirInst] = []
+        for block in blocks:
+            if loop_block_set.contains_key("{block.id.id}"):
+                if block.id.id != loop.header.id:
+                    for inst in block.instructions:
+                        body_insts = body_insts.push(inst)
+
+        if body_insts.len() == 0:
+            return blocks
+
+        # Build unrolled instructions: duplicate body 'count' times
+        var unrolled: [MirInst] = []
+        for iteration in 0..count:
+            for inst in body_insts:
+                unrolled = unrolled.push(inst)
+
+        # Replace header block: keep header instructions + add unrolled body
+        # Remove backedge (loop body blocks become empty)
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            if block.id.id == loop.header.id:
+                # Header gets original instructions + unrolled body
+                var combined: [MirInst] = []
+                for inst in block.instructions:
+                    combined = combined.push(inst)
+                for inst in unrolled:
+                    combined = combined.push(inst)
+                new_blocks = new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: combined, terminator: block.terminator
+                ))
+            elif loop_block_set.contains_key("{block.id.id}"):
+                # Body blocks become empty (instructions moved to header)
+                new_blocks = new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: [], terminator: block.terminator
+                ))
+            else:
+                new_blocks = new_blocks.push(block)
+
+        new_blocks
+
+# ============================================================================
+# Combined Loop Optimization Pass
+# ============================================================================
+
+class LoopOptimization:
+    """
+    Combined loop optimization pass.
+
+    Applies multiple loop optimizations:
+    1. Loop-Invariant Code Motion (LICM)
+    2. Strength Reduction (in loop bodies)
+    3. Loop Unrolling (small loops)
+
+    Run order matters:
+    - LICM first (moves invariants out)
+    - Strength reduction (simplifies remaining ops)
+    - Unrolling last (duplicates simplified code)
+    """
+    licm: LoopInvariantMotion
+    strength_reduction: StrengthReduction
+    unroller: LoopUnroller
+    enabled_licm: bool
+    enabled_strength: bool
+    enabled_unroll: bool
+
+impl LoopOptimization:
+    static fn new(
+        enable_licm: bool,
+        enable_strength: bool,
+        enable_unroll: bool,
+        unroll_threshold: i64
+    ) -> LoopOptimization:
+        LoopOptimization(
+            licm: LoopInvariantMotion.new(),
+            strength_reduction: StrengthReduction.new(),
+            unroller: LoopUnroller.new(unroll_threshold),
+            enabled_licm: enable_licm,
+            enabled_strength: enable_strength,
+            enabled_unroll: enable_unroll
+        )
+
+    static fn conservative() -> LoopOptimization:
+        """Conservative loop optimization (LICM only)."""
+        LoopOptimization.new(
+            enable_licm: true,
+            enable_strength: false,
+            enable_unroll: false,
+            unroll_threshold: 4
+        )
+
+    static fn aggressive() -> LoopOptimization:
+        """Aggressive loop optimization (all passes)."""
+        LoopOptimization.new(
+            enable_licm: true,
+            enable_strength: true,
+            enable_unroll: true,
+            unroll_threshold: 8
+        )
+
+    fn name() -> text:
+        "loop_optimization"
+
+    fn description() -> text:
+        "Optimizes loops via LICM, strength reduction, and unrolling"
+
+    fn is_analysis_pass() -> bool:
+        false
+
+    fn dependencies() -> [text]:
+        ["constant_folding", "copy_propagation"]
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        """
+        Run loop optimizations on function.
+
+        Order:
+        1. LICM (move invariants out)
+        2. Strength reduction (simplify ops)
+        3. Unrolling (duplicate small loops)
+        """
+        var current = func
+
+        # Phase 1: Loop-Invariant Code Motion
+        if self.enabled_licm:
+            current = self.licm.optimize_function(current)
+
+        # Phase 2: Strength Reduction
+        if self.enabled_strength:
+            current = self.strength_reduction.optimize_function(current)
+
+        # Phase 3: Loop Unrolling
+        if self.enabled_unroll:
+            current = self.unroller.optimize_function(current)
+
+        current
+
+    # ========================================================================
+    # Statistics
+    # ========================================================================
+
+    fn stats_summary() -> text:
+        """Generate summary of optimization work."""
+        val licm_count = self.licm.hoisted_count
+        val reduced_count = self.strength_reduction.reduced_count
+        val unrolled_count = self.unroller.unrolled_count
+
+        "LoopOpt: hoisted {licm_count} invariants, reduced {reduced_count} ops, unrolled {unrolled_count} loops"
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn create_loop_opt_conservative() -> LoopOptimization:
+    """Create conservative loop optimization pass (LICM only)."""
+    LoopOptimization.conservative()
+
+fn create_loop_opt_pass() -> LoopOptimization:
+    """Create standard loop optimization pass."""
+    LoopOptimization.aggressive()
+
+# ============================================================================
+# Exports (re-export all public symbols for backward compatibility)
+# ============================================================================
+
+export LoopOptimization
+export LoopInvariantMotion, LoopUnroller, StrengthReduction
+export LoopDetector, LoopInfo, EdgePair
+export create_loop_opt_conservative, create_loop_opt_pass

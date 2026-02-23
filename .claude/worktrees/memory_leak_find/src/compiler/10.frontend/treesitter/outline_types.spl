@@ -1,0 +1,185 @@
+# TreeSitter Outline Types - Type Outline Parsing
+#
+# Handles parsing of type expressions:
+# named types, tuple types, array types, function types,
+# reference types, atomic types, isolated types, optional types.
+#
+# Split from outline.spl for modularity.
+
+use compiler.core.lexer.*
+use treesitter_types.*
+use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
+
+# ============================================================================
+# Type Outline Parsing
+# ============================================================================
+
+fn treesitter_parse_type_outline(self: TreeSitter) -> TypeOutline:
+        """Parse a type expression."""
+        val start = self.current.span
+        var type_ = self.parse_primary_type()
+
+        # Optional suffix
+        if self.match_token(TokenKind.Question):
+            type_ = TypeOutline(
+                kind: typeoutlinekind_Optional(type_),
+                span: merge_spans(start, self.previous.span)
+            )
+
+        type_
+
+
+fn treesitter_parse_primary_type(self: TreeSitter) -> TypeOutline:
+        """Parse primary type expression."""
+        val start = self.current.span
+
+        match self.peek():
+            case Ident:
+                self.parse_named_type()
+            case LParen:
+                self.parse_tuple_type()
+            case LBracket:
+                self.parse_array_type()
+            case KwFn:
+                self.parse_function_type()
+            case Ampersand:
+                self.parse_reference_type()
+            case At:
+                self.parse_atomic_type()
+            case Tilde:
+                self.parse_isolated_type()
+            case Underscore:
+                self.advance()
+                TypeOutline(kind: TypeOutlineKind.Infer, span: start)
+            case _:
+                self.error("expected type")
+                TypeOutline(kind: TypeOutlineKind.Infer, span: start)
+
+
+fn treesitter_parse_named_type(self: TreeSitter) -> TypeOutline:
+        """Parse named type with optional type arguments."""
+        val start = self.current.span
+        val name = self.parse_identifier()
+
+        var args: [TypeOutline] = []
+        if self.match_token(TokenKind.Lt):
+            if not self.check(TokenKind.Gt):
+                args = args_push(args, self.parse_type_outline())
+                while self.match_token(TokenKind.Comma):
+                    if self.check(TokenKind.Gt):
+                        break
+                    args = args_push(args, self.parse_type_outline())
+            self.expect(TokenKind.Gt, "expected '>' after type arguments")
+
+        TypeOutline(
+            kind: typeoutlinekind_Named(name, args),
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_tuple_type(self: TreeSitter) -> TypeOutline:
+        """Parse tuple type (A, B, C)."""
+        val start = self.current.span
+        self.advance()  # Consume '('
+
+        var elements: [TypeOutline] = []
+        if not self.check(TokenKind.RParen):
+            elements = elements_push(elements, self.parse_type_outline())
+            while self.match_token(TokenKind.Comma):
+                if self.check(TokenKind.RParen):
+                    break
+                elements = elements_push(elements, self.parse_type_outline())
+
+        self.expect(TokenKind.RParen, "expected ')' after tuple type")
+
+        TypeOutline(
+            kind: typeoutlinekind_Tuple(elements),
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_array_type(self: TreeSitter) -> TypeOutline:
+        """Parse array type [T]."""
+        val start = self.current.span
+        self.advance()  # Consume '['
+
+        val element = self.parse_type_outline()
+        self.expect(TokenKind.RBracket, "expected ']' after array element type")
+
+        TypeOutline(
+            kind: typeoutlinekind_Array(element),
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_function_type(self: TreeSitter) -> TypeOutline:
+        """Parse function type fn(A, B) -> C."""
+        val start = self.current.span
+        self.advance()  # Consume 'fn'
+
+        self.expect(TokenKind.LParen, "expected '(' after 'fn'")
+        var params: [TypeOutline] = []
+        if not self.check(TokenKind.RParen):
+            params = params_push(params, self.parse_type_outline())
+            while self.match_token(TokenKind.Comma):
+                if self.check(TokenKind.RParen):
+                    break
+                params = params_push(params, self.parse_type_outline())
+        self.expect(TokenKind.RParen, "expected ')' after function parameters")
+
+        var ret = TypeOutline(kind: TypeOutlineKind.Named("()", []), span: start)
+        if self.match_token(TokenKind.Arrow):
+            ret = self.parse_type_outline()
+
+        TypeOutline(
+            kind: typeoutlinekind_Function(params, ret),
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_reference_type(self: TreeSitter) -> TypeOutline:
+        """Parse reference type &T or &mut T."""
+        val start = self.current.span
+        self.advance()  # Consume '&'
+
+        var mutable = false
+        if self.check(TokenKind.Ident):
+            if self.current.text == "mut":
+                self.advance()
+                mutable = true
+
+        val inner = self.parse_type_outline()
+
+        TypeOutline(
+            kind: typeoutlinekind_Reference(inner, mutable),
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_atomic_type(self: TreeSitter) -> TypeOutline:
+        """Parse atomic type @T (Arc - atomic ref-counted)."""
+        val start = self.current.span
+        self.advance()  # Consume '@'
+        val inner = self.parse_type_outline()
+        TypeOutline(
+            kind: typeoutlinekind_Atomic(inner),
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_isolated_type(self: TreeSitter) -> TypeOutline:
+        """Parse isolated type bitwise_not(T) (iso - isolated capability)."""
+        val start = self.current.span
+        self.advance()  # Consume '~'
+        val inner = self.parse_type_outline()
+        TypeOutline(
+            kind: typeoutlinekind_Isolated(inner),
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TreeSitter

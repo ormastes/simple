@@ -1,0 +1,161 @@
+#!/usr/bin/env simple
+# Phase 0: Prepare English Medical Training Data
+#
+# Goal: Train base model on English medical data to establish baseline.
+# This prevents English data forgetting in later phases.
+#
+# Note.md Phase 0: "Prepare english medical training data"
+#   - Loads pre-tokenized English medical training data
+#   - Trains with MSE loss (cross-entropy deferred to Phase 1+)
+#   - Validates baseline performance
+#   - Freezes base knowledge via LoRA merge
+#
+# Data: data/pretokenized/phase0_english_train.jsonl
+#   Falls back to synthetic data if file not found.
+#
+# Run:
+#   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase0.spl
+
+use model.{TextModel, ModelConfig, compute_mse_loss, check_gpu}
+use shared_logic.{
+    TrainConfig, TrainState,
+    make_randn_batch_on_cuda,
+    report_gpu_memory, report_training_step, report_epoch_end,
+    lr_linear_warmup
+}
+use data_loader.{DataLoader, generate_synthetic_batch}
+use lora_utils.{
+    LoRAConfig, LoRAAdapter,
+    create_lora_adapter, lora_forward,
+    lora_sgd_step, lora_zero_grads,
+    merge_lora_into_model
+}
+
+use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
+use std.torch.ffi.{
+    rt_torch_torchtensor_free,
+    rt_torch_torchtensor_mean,
+    rt_torch_autograd_backward,
+    rt_torch_cuda_empty_cache
+}
+
+export run_phase0
+
+
+# ============================================================================
+# Phase 0 Training
+# ============================================================================
+
+fn run_phase0() -> TextModel:
+    print("")
+    print("=" * 70)
+    print("  PHASE 0: ENGLISH MEDICAL DATA PREPARATION (REAL CUDA)")
+    print("=" * 70)
+    print("")
+
+    check_gpu()
+    print("")
+
+    # Configuration
+    val config = TrainConfig.phase0()
+    config.print_config("Phase 0 - English Medical")
+
+    # Create model on CUDA
+    var model = TextModel.create(config.input_dim, config.hidden_dim, config.output_dim)
+    model.print_summary()
+    print("")
+
+    # Data loader - tries to load real data, falls back to synthetic
+    val data_path = "examples/projects/medgemma_korean/data/pretokenized/phase0_english_train.jsonl"
+    val loader = DataLoader.create(data_path, config.batch_size, config.input_dim)
+
+    # Freeze base model weights
+    model.freeze()
+    print("Base model weights: FROZEN")
+
+    # Add LoRA_0 adapters (only these are trainable)
+    val lora_config = LoRAConfig(rank: config.lora_rank, alpha: config.lora_alpha, dropout: 0.0)
+    print("")
+    print("Adding LoRA_0 adapters:")
+    var lora_l1 = create_lora_adapter(config.input_dim, config.hidden_dim, lora_config)
+    var lora_l2 = create_lora_adapter(config.hidden_dim, config.hidden_dim, lora_config)
+    print("")
+
+    # Training loop
+    var state = TrainState.create()
+    for epoch in 0..config.num_epochs:
+        state.reset_epoch()
+        print("--- Epoch {epoch + 1}/{config.num_epochs} ---")
+
+        for batch_idx in 0..config.num_batches:
+            # Get learning rate with warmup
+            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
+
+            # Generate batch (synthetic for now)
+            val batch = make_randn_batch_on_cuda(config.batch_size, config.input_dim, config.output_dim)
+            val x = batch[0]
+            val target = batch[1]
+
+            # Forward pass with LoRA
+            val logits = lora_forward(model, x, lora_l1, lora_l2)
+
+            # Compute MSE loss
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+            # Backward pass
+            rt_torch_autograd_backward(loss_h)
+
+            # SGD update (only LoRA params)
+            lora_sgd_step(lora_l1, lora_l2, lr)
+
+            # Zero gradients
+            lora_zero_grads(lora_l1, lora_l2)
+            model.zero_grads()
+
+            # Cleanup
+            rt_torch_torchtensor_free(x)
+            rt_torch_torchtensor_free(target)
+            rt_torch_torchtensor_free(logits)
+            rt_torch_torchtensor_free(loss_h)
+
+            state.add_loss(loss_val)
+            report_training_step(state, config)
+
+        state.update_best()
+        report_epoch_end(epoch, config.num_epochs, state)
+        print("")
+
+    print("=" * 70)
+    print("PHASE 0 TRAINING COMPLETE")
+    print("  English medical baseline established")
+    print("  Base model: FROZEN (unchanged)")
+    print("  LoRA_0: TRAINED on English medical data")
+    print("  Best loss: {state.best_loss}")
+    print("=" * 70)
+
+    # Merge LoRA_0 into base weights
+    merge_lora_into_model(model, lora_l1, lora_l2)
+
+    report_gpu_memory()
+    model
+
+
+# ============================================================================
+# Standalone entry point
+# ============================================================================
+
+fn main():
+    if not torch_available():
+        print("ERROR: libtorch not loaded. Run with:")
+        print("  LD_PRELOAD=build/libspl_torch.so bin/simple <this_file>")
+        return
+
+    val model = run_phase0()
+    print("")
+    print("Phase 0 complete. English medical baseline established.")
+    print("Model ready for Phase 1 (evaluation + LoRA).")
+    rt_torch_cuda_empty_cache()
+
+
+main()

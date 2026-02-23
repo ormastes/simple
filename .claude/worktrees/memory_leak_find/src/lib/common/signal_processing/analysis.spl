@@ -1,0 +1,314 @@
+# Signal Processing - Analysis Module
+#
+# Spectral analysis, envelope detection, signal metrics, and peak/zero crossing detection
+
+use signal_processing.types.{TWO_PI, sin_f64, cos_f64, sqrt_f64, abs_f64, log10_f64, array_mean, array_copy}
+use signal_processing.window.{window_hamming, apply_window}
+use signal_processing.transform.{autocorrelate}
+
+# ============================================================================
+# SPECTRAL ANALYSIS
+# ============================================================================
+
+fn periodogram(signal: list, sig_len: i64, power_spectrum: list):
+    # Simple periodogram (power spectral density estimate)
+    # This is a simplified version - real FFT would be used
+    var i = 0
+    while i < sig_len / 2:
+        var freq_component_real = 0.0
+        var freq_component_imag = 0.0
+
+        var j = 0
+        while j < sig_len:
+            var phase = TWO_PI * i * j / sig_len
+            freq_component_real = freq_component_real + signal[j] * cos_f64(phase)
+            freq_component_imag = freq_component_imag + signal[j] * sin_f64(phase)
+            j = j + 1
+
+        var magnitude_sq = freq_component_real * freq_component_real + freq_component_imag * freq_component_imag
+        power_spectrum[i] = magnitude_sq / (sig_len * sig_len)
+        i = i + 1
+    pass
+
+fn welch_method(signal: list, sig_len: i64, segment_len: i64, overlap: i64, power_spectrum: list):
+    # Welch's method for spectral estimation
+    var hop_size = segment_len - overlap
+    var num_segments = (sig_len - overlap) / hop_size
+
+    # Initialize output
+    var i = 0
+    while i < segment_len / 2:
+        power_spectrum[i] = 0.0
+        i = i + 1
+
+    # Window
+    var window = []
+    window_hamming(segment_len, window)
+
+    # Process segments
+    var seg = 0
+    while seg < num_segments:
+        var start = seg * hop_size
+        if start + segment_len > sig_len:
+            break
+
+        var segment = []
+        var windowed = []
+
+        i = 0
+        while i < segment_len:
+            segment[i] = signal[start + i]
+            i = i + 1
+
+        apply_window(segment, window, windowed, segment_len)
+
+        var seg_spectrum = []
+        periodogram(windowed, segment_len, seg_spectrum)
+
+        i = 0
+        while i < segment_len / 2:
+            power_spectrum[i] = power_spectrum[i] + seg_spectrum[i]
+            i = i + 1
+
+        seg = seg + 1
+
+    # Average
+    if num_segments > 0:
+        i = 0
+        while i < segment_len / 2:
+            power_spectrum[i] = power_spectrum[i] / num_segments
+            i = i + 1
+    pass
+
+# ============================================================================
+# ENVELOPE DETECTION
+# ============================================================================
+
+fn envelope_hilbert(signal: list, sig_len: i64, envelope: list):
+    # Simplified envelope detection using Hilbert transform approximation
+    # This uses finite difference approximation
+    var i = 0
+    while i < sig_len:
+        var window = 5
+        var analytic_imag = 0.0
+
+        var j = 1
+        while j <= window / 2:
+            var forward_idx = i + j
+            var backward_idx = i - j
+
+            if forward_idx < sig_len and backward_idx >= 0:
+                analytic_imag = analytic_imag + (signal[forward_idx] - signal[backward_idx]) / j
+            j = j + 1
+
+        var magnitude = sqrt_f64(signal[i] * signal[i] + analytic_imag * analytic_imag)
+        envelope[i] = magnitude
+        i = i + 1
+    pass
+
+fn envelope_peak_detection(signal: list, sig_len: i64, window_size: i64, envelope: list):
+    # Peak-based envelope detection
+    var i = 0
+    while i < sig_len:
+        var max_val = 0.0
+        var j = 0
+        while j < window_size:
+            var idx = i - window_size / 2 + j
+            if idx >= 0 and idx < sig_len:
+                var abs_val = abs_f64(signal[idx])
+                if abs_val > max_val:
+                    max_val = abs_val
+            j = j + 1
+        envelope[i] = max_val
+        i = i + 1
+    pass
+
+fn envelope_rms(signal: list, sig_len: i64, window_size: i64, envelope: list):
+    # RMS-based envelope detection
+    var i = 0
+    while i < sig_len:
+        var sum_sq = 0.0
+        var count = 0
+        var j = 0
+        while j < window_size:
+            var idx = i - window_size / 2 + j
+            if idx >= 0 and idx < sig_len:
+                sum_sq = sum_sq + signal[idx] * signal[idx]
+                count = count + 1
+            j = j + 1
+
+        if count > 0:
+            envelope[i] = sqrt_f64(sum_sq / count)
+        else:
+            envelope[i] = 0.0
+        i = i + 1
+    pass
+
+# ============================================================================
+# SIGNAL METRICS
+# ============================================================================
+
+fn rms_value(signal: list, sig_len: i64) -> f64:
+    # Root mean square value
+    var sum_sq = 0.0
+    var i = 0
+    while i < sig_len:
+        sum_sq = sum_sq + signal[i] * signal[i]
+        i = i + 1
+    return sqrt_f64(sum_sq / sig_len)
+
+fn peak_value(signal: list, sig_len: i64) -> f64:
+    # Peak absolute value
+    var max_val = 0.0
+    var i = 0
+    while i < sig_len:
+        var abs_val = abs_f64(signal[i])
+        if abs_val > max_val:
+            max_val = abs_val
+        i = i + 1
+    return max_val
+
+fn crest_factor(signal: list, sig_len: i64) -> f64:
+    # Crest factor (peak / RMS)
+    var peak = peak_value(signal, sig_len)
+    var rms = rms_value(signal, sig_len)
+    if rms == 0.0:
+        return 0.0
+    return peak / rms
+
+fn signal_power(signal: list, sig_len: i64) -> f64:
+    # Average signal power
+    var sum_sq = 0.0
+    var i = 0
+    while i < sig_len:
+        sum_sq = sum_sq + signal[i] * signal[i]
+        i = i + 1
+    return sum_sq / sig_len
+
+fn snr_ratio(signal: list, noise: list, sig_len: i64) -> f64:
+    # Signal-to-noise ratio
+    var signal_pwr = signal_power(signal, sig_len)
+    var noise_pwr = signal_power(noise, sig_len)
+    if noise_pwr == 0.0:
+        return 0.0
+    return signal_pwr / noise_pwr
+
+fn snr_db(signal: list, noise: list, sig_len: i64) -> f64:
+    # Signal-to-noise ratio in dB
+    var ratio = snr_ratio(signal, noise, sig_len)
+    if ratio <= 0.0:
+        return 0.0
+    return 10.0 * log10_f64(ratio)
+
+fn thd_estimate(signal: list, sig_len: i64, fundamental_freq: f64, sample_rate: f64, num_harmonics: i64) -> f64:
+    # Total harmonic distortion estimate
+    var fundamental_power = 0.0
+    var harmonic_power = 0.0
+
+    # Estimate fundamental power (simplified)
+    var spectrum = []
+    periodogram(signal, sig_len, spectrum)
+
+    var fund_bin = fundamental_freq * sig_len / sample_rate
+    fundamental_power = spectrum[fund_bin]
+
+    # Estimate harmonic powers
+    var h = 2
+    while h <= num_harmonics:
+        var harm_bin = h * fund_bin
+        if harm_bin < sig_len / 2:
+            harmonic_power = harmonic_power + spectrum[harm_bin]
+        h = h + 1
+
+    if fundamental_power == 0.0:
+        return 0.0
+    return sqrt_f64(harmonic_power / fundamental_power)
+
+fn sinad_db(signal: list, noise_and_distortion: list, sig_len: i64) -> f64:
+    # Signal to noise and distortion ratio in dB
+    var signal_pwr = signal_power(signal, sig_len)
+    var nad_pwr = signal_power(noise_and_distortion, sig_len)
+    if nad_pwr == 0.0:
+        return 0.0
+    return 10.0 * log10_f64(signal_pwr / nad_pwr)
+
+# ============================================================================
+# ZERO CROSSING AND PEAK DETECTION
+# ============================================================================
+
+fn zero_crossings(signal: list, sig_len: i64) -> i64:
+    # Count zero crossings
+    var count = 0
+    var i = 1
+    while i < sig_len:
+        var product = signal[i - 1] * signal[i]
+        if product < 0.0:
+            count = count + 1
+        i = i + 1
+    return count
+
+fn zero_crossing_rate(signal: list, sig_len: i64, sample_rate: f64) -> f64:
+    # Zero crossing rate (crossings per second)
+    var crossings = zero_crossings(signal, sig_len)
+    var duration = sig_len / sample_rate
+    return crossings / duration
+
+fn find_peaks(signal: list, sig_len: i64, threshold: f64, peak_indices: list) -> i64:
+    # Find peaks above threshold
+    var num_peaks = 0
+    var i = 1
+    while i < sig_len - 1:
+        var is_peak = signal[i] > signal[i - 1]
+        is_peak = is_peak and signal[i] > signal[i + 1]
+        is_peak = is_peak and signal[i] > threshold
+
+        if is_peak:
+            peak_indices[num_peaks] = i
+            num_peaks = num_peaks + 1
+        i = i + 1
+    return num_peaks
+
+fn find_valleys(signal: list, sig_len: i64, threshold: f64, valley_indices: list) -> i64:
+    # Find valleys below threshold
+    var num_valleys = 0
+    var i = 1
+    while i < sig_len - 1:
+        var is_valley = signal[i] < signal[i - 1]
+        is_valley = is_valley and signal[i] < signal[i + 1]
+        is_valley = is_valley and signal[i] < threshold
+
+        if is_valley:
+            valley_indices[num_valleys] = i
+            num_valleys = num_valleys + 1
+        i = i + 1
+    return num_valleys
+
+# ============================================================================
+# FREQUENCY ESTIMATION
+# ============================================================================
+
+fn estimate_frequency_zero_crossing(signal: list, sig_len: i64, sample_rate: f64) -> f64:
+    # Estimate fundamental frequency using zero crossing rate
+    var zcr = zero_crossing_rate(signal, sig_len, sample_rate)
+    return zcr / 2.0
+
+fn estimate_frequency_autocorr(signal: list, sig_len: i64, sample_rate: f64) -> f64:
+    # Estimate fundamental frequency using autocorrelation
+    var max_lag = sig_len / 2
+    var autocorr = []
+    autocorrelate(signal, sig_len, max_lag, autocorr)
+
+    # Find first peak after zero lag
+    var peak_lag = 1
+    var max_val = autocorr[1]
+    var i = 2
+    while i < max_lag:
+        if autocorr[i] > max_val:
+            var is_peak = autocorr[i] > autocorr[i - 1]
+            is_peak = is_peak and autocorr[i] > autocorr[i + 1]
+            if is_peak:
+                max_val = autocorr[i]
+                peak_lag = i
+        i = i + 1
+
+    return sample_rate / peak_lag

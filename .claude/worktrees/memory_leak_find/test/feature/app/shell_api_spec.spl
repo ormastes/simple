@@ -1,0 +1,305 @@
+"""
+# Shell API Specification
+
+**Status:** Implementing
+**Feature IDs:** #900-905
+**Keywords:** shell, process, filesystem, io, scripting
+**Topics:** stdlib, scripting
+
+## Overview
+
+Shell API provides access to system operations commonly used in shell scripts:
+- Process execution with output capture
+- File system operations (read, write, list, delete)
+- Path manipulation
+- Environment variables
+- Exit codes and error handling
+
+This API enables writing shell scripts in Simple language, replacing Python and Bash scripts.
+
+## Design Goals
+
+1. **Simple and intuitive** - Match common shell/Python patterns
+2. **Safe by default** - Error handling built-in
+3. **Cross-platform** - Works on Linux, macOS, Windows
+4. **Composable** - Easy to chain operations
+5. **Testable** - Can be unit tested unlike shell scripts
+
+## Related Specifications
+
+- **File I/O** - File operations
+- **Process Management** - Process control
+- **Error Handling** - Result types
+"""
+
+## Test: Process Execution
+
+"""
+### Scenario: Execute command and capture output
+
+Shell scripts frequently need to run commands and capture their output.
+The API should make this simple and handle errors gracefully.
+"""
+
+use std.spec.{check, check_msg}
+it "execute_command_basic":
+    """
+    Execute a simple command and get output as string.
+    """
+    val result = shell.run("echo hello")
+    check(result.ok())
+    check(result.stdout == "hello\n")
+    check(result.exit_code == 0)
+
+it "execute_command_with_args":
+    """
+    Execute command with arguments safely (no shell injection).
+    """
+    val result = shell.run("ls", ["-la", "/tmp"])
+    check(result.ok())
+    check(result.stdout.contains("total"))
+
+it "execute_command_capture_stderr":
+    """
+    Capture both stdout and stderr separately.
+    """
+    val result = shell.run("ls /nonexistent")
+    check(not result.ok())
+    check(result.stderr.contains("No such file"))
+    check(result.exit_code != 0)
+
+## Test: File Operations
+
+"""
+### Scenario: Read and write files
+
+Common file operations needed by scripts.
+"""
+
+it "read_file_contents":
+    """
+    Read entire file as string.
+    """
+    val content = file.read_text("/etc/hostname")
+    check(content.len() > 0)
+    check(not content.contains("\0"))
+
+it "write_file_contents":
+    """
+    Write string to file, creating if needed.
+    """
+    file.write_text("/tmp/test.txt", "hello world")
+    val content = file.read_text("/tmp/test.txt")
+    check(content == "hello world")
+
+it "append_to_file":
+    """
+    Append to existing file.
+    """
+    file.write_text("/tmp/test.txt", "line 1\n")
+    file.append_text("/tmp/test.txt", "line 2\n")
+    val content = file.read_text("/tmp/test.txt")
+    check(content == "line 1\nline 2\n")
+
+it "check_file_exists":
+    """
+    Check if file or directory exists.
+    """
+    check(file.exists("/etc/hostname"))
+    check(not file.exists("/nonexistent/file.txt"))
+
+## Test: Directory Operations
+
+"""
+### Scenario: List and manipulate directories
+
+Scripts often need to traverse directories and find files.
+"""
+
+it "list_directory":
+    """
+    List all entries in a directory.
+    """
+    val entries = dir.list("/tmp")
+    check(entries.len() > 0)
+    # Returns list of names
+    check(entries.all(fn(e): e is str))
+
+it "list_directory_with_pattern":
+    """
+    List files matching a glob pattern.
+    """
+    val txt_files = dir.glob("/tmp", "*.txt")
+    # All entries should end with .txt
+    check(txt_files.all(fn(f): f.ends_with(".txt")))
+
+it "create_directory":
+    """
+    Create directory with parents.
+    """
+    dir.create("/tmp/test/nested/path", recursive: true)
+    check(dir.exists("/tmp/test/nested/path"))
+
+it "remove_directory":
+    """
+    Remove directory and contents.
+    """
+    dir.remove("/tmp/test", recursive: true)
+    check(not dir.exists("/tmp/test"))
+
+## Test: Path Operations
+
+"""
+### Scenario: Manipulate file paths
+
+Path operations are common in scripts for building file paths.
+"""
+
+it "join_paths":
+    """
+    Join path components safely.
+    """
+    val path = path.join("/home", "user", "file.txt")
+    check(path == "/home/user/file.txt")
+
+it "get_basename":
+    """
+    Extract filename from path.
+    """
+    check(path.basename("/home/user/file.txt") == "file.txt")
+    check(path.basename("/home/user/") == "user")
+
+it "get_dirname":
+    """
+    Extract directory from path.
+    """
+    check(path.dirname("/home/user/file.txt") == "/home/user")
+
+it "get_extension":
+    """
+    Extract file extension.
+    """
+    check(path.ext("/home/user/file.txt") == ".txt")
+    check(path.ext("/home/user/archive.tar.gz") == ".gz")
+
+it "absolute_path":
+    """
+    Convert relative path to absolute.
+    """
+    val abs = path.absolute("../file.txt")
+    check(abs.starts_with("/"))
+
+## Test: Environment Variables
+
+"""
+### Scenario: Access environment variables
+
+Scripts need to read and set environment variables.
+"""
+
+it "get_environment_variable":
+    """
+    Read environment variable with default.
+    """
+    val home = env.get("HOME", default: "/tmp")
+    check(home.len() > 0)
+    
+    val missing = env.get("NONEXISTENT_VAR", default: "default")
+    check(missing == "default")
+
+it "set_environment_variable":
+    """
+    Set environment variable for child processes.
+    """
+    env.set("MY_VAR", "value")
+    val result = shell.run("echo $MY_VAR")
+    check(result.stdout.trim() == "value")
+
+## Test: Error Handling
+
+"""
+### Scenario: Handle errors gracefully
+
+Scripts need robust error handling.
+"""
+
+it "command_failure_result":
+    """
+    Failed commands return Result with error info.
+    """
+    val result = shell.run("false")
+    check(not result.ok())
+    check(result.exit_code == 1)
+
+it "file_not_found_error":
+    """
+    File operations return Result types.
+    """
+    # This should return Result<str, Error>
+    # Can use ? operator or check explicitly
+    val result = try file.read_text("/nonexistent")
+    check(result.is_err())
+
+## Test: Piping and Chaining
+
+"""
+### Scenario: Chain commands like shell pipes
+
+Enable composable operations.
+"""
+
+it "pipe_commands":
+    """
+    Pipe output of one command to another.
+    """
+    val result = shell.pipe([
+        ["echo", "hello world"],
+        ["grep", "world"],
+        ["wc", "-l"]
+    ])
+    check(result.stdout.trim() == "1")
+
+it "chain_operations":
+    """
+    Chain multiple file operations.
+    """
+    file.write_text("/tmp/input.txt", "line1\nline2\nline3")
+    
+    val lines = file.read_text("/tmp/input.txt")
+        .split("\n")
+        .filter(fn(l): l.len() > 0)
+    
+    check(lines.len() == 3)
+
+## Test: Script Utilities
+
+"""
+### Scenario: Common script utilities
+
+Helper functions for common script patterns.
+"""
+
+it "find_files_recursive":
+    """
+    Find all files matching pattern recursively.
+    """
+    val files = file.find("/tmp", pattern: "*.txt", recursive: true)
+    check(files.all(fn(f): f.ends_with(".txt")))
+
+it "copy_file":
+    """
+    Copy file from source to destination.
+    """
+    file.write_text("/tmp/source.txt", "content")
+    file.copy("/tmp/source.txt", "/tmp/dest.txt")
+    check(file.read_text("/tmp/dest.txt") == "content")
+
+it "move_file":
+    """
+    Move/rename file.
+    """
+
+    file.write_text("/tmp/old.txt", "content")
+    file.move("/tmp/old.txt", "/tmp/new.txt")
+    check(file.exists("/tmp/new.txt"))
+    check(not file.exists("/tmp/old.txt"))

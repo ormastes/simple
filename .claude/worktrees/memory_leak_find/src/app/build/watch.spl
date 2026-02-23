@@ -1,0 +1,250 @@
+# Build Watch Mode
+#
+# Watches for file changes and automatically rebuilds
+
+export WatchConfig, WatchResult, FileChangeEvent, default_watch_config
+
+use app.build.types (BuildConfig, BuildResult, BuildProfile, profile_to_string)
+use app.build.orchestrator (orchestrate_build)
+use app.build.metrics (MetricsTracker, print_metrics)
+use app.io.{current_time_ms, thread_sleep_ms, dir_list}
+
+# Watch configuration
+struct WatchConfig:
+    profile: BuildProfile
+    watch_paths: [text]
+    ignore_patterns: [text]
+    debounce_ms: i64
+    clear_console: bool
+    run_tests: bool
+    notify: bool
+
+# Watch result
+struct WatchResult:
+    total_rebuilds: i64
+    successful_rebuilds: i64
+    failed_rebuilds: i64
+    total_duration_ms: i64
+
+impl WatchResult:
+    fn summary() -> text:
+        "Rebuilds: {self.successful_rebuilds}/{self.total_rebuilds} successful"
+
+# File change event
+struct FileChangeEvent:
+    path: text
+    event_type: text  # "modified", "created", "deleted"
+    timestamp: i64
+
+# Watch orchestrator
+class WatchOrchestrator:
+    # Start watching and rebuilding
+    static fn start(config: WatchConfig) -> WatchResult:
+        print "Starting watch mode..."
+        print "Profile: {profile_to_string(config.profile)}"
+        print "Watching paths: {config.watch_paths}"
+        print "Debounce: {config.debounce_ms}ms"
+        print ""
+        print "Press Ctrl+C to stop"
+        print ""
+
+        # Initial build
+        print "[{current_time_str()}] Initial build..."
+        val build_config = create_build_config(config)
+        val initial_result = orchestrate_build(build_config)
+
+        if initial_result.success:
+            print_success_message(initial_result)
+        else:
+            print_error_message(initial_result)
+
+        var total_rebuilds: i64 = 1
+        var successful_rebuilds: i64 = if initial_result.success: 1 else: 0
+        var failed_rebuilds: i64 = if initial_result.success: 0 else: 1
+        var start_time = current_time_ms()
+
+        # Watch loop using polling-based file change detection
+        print ""
+        print "Watch mode active. Polling for changes every {config.debounce_ms}ms..."
+
+        # Build initial file snapshot for change detection
+        var last_snapshot = build_file_snapshot(config.watch_paths, config.ignore_patterns)
+
+        # Poll for changes
+        var running = true
+        for tick in 0..1000000:
+            thread_sleep_ms(config.debounce_ms)
+
+            # Check for file changes
+            val current_snapshot = build_file_snapshot(config.watch_paths, config.ignore_patterns)
+            val changes = detect_changes(last_snapshot, current_snapshot)
+
+            if changes.len() > 0:
+                if config.clear_console:
+                    print "\n\n\n"
+
+                print "[{format_time_ms(current_time_ms())}] Changes detected:"
+                for change in changes:
+                    print "  {change.event_type}: {change.path}"
+
+                # Rebuild
+                print ""
+                print "[{format_time_ms(current_time_ms())}] Rebuilding..."
+                val rebuild_result = orchestrate_build(build_config)
+                total_rebuilds = total_rebuilds + 1
+
+                if rebuild_result.success:
+                    successful_rebuilds = successful_rebuilds + 1
+                    print_success_message(rebuild_result)
+                else:
+                    failed_rebuilds = failed_rebuilds + 1
+                    print_error_message(rebuild_result)
+
+                # Update snapshot after rebuild
+                last_snapshot = current_snapshot
+
+        WatchResult(
+            total_rebuilds: total_rebuilds,
+            successful_rebuilds: successful_rebuilds,
+            failed_rebuilds: failed_rebuilds,
+            total_duration_ms: current_time_ms() - start_time
+        )
+
+    # Quick watch with defaults
+    static fn quick() -> WatchResult:
+        val config = default_watch_config()
+        WatchOrchestrator.start(config)
+
+# File watcher using polling
+class FileWatcher:
+    # Watch for changes using polling
+    static fn watch(paths: [text], callback: fn(FileChangeEvent)) -> bool:
+        # Polling-based implementation (no OS-specific APIs needed)
+        true
+
+    # Check if path should be ignored
+    static fn should_ignore(path: text, patterns: [text]) -> bool:
+        for pattern in patterns:
+            if path.contains(pattern):
+                return true
+        false
+
+# Debouncer (prevents rebuild on every keystroke)
+class Debouncer:
+    # Debounce events - deduplicate events within debounce window
+    static fn debounce(events: [FileChangeEvent], debounce_ms: i64) -> [FileChangeEvent]:
+        if events.len() <= 1:
+            return events
+        # Deduplicate by path, keeping only the latest event per path
+        var seen: Dict<text, bool> = {}
+        var deduped: [FileChangeEvent] = []
+        # Iterate backwards to keep latest
+        var i = events.len() - 1
+        for idx in 0..events.len():
+            val event = events[events.len() - 1 - idx]
+            if not seen.has(event.path):
+                seen[event.path] = true
+                deduped.push(event)
+        deduped
+
+# File snapshot for change detection (path -> size as simple hash)
+struct FileSnapshot:
+    files: Dict<text, i64>
+
+# Build a snapshot of all watched files
+fn build_file_snapshot(watch_paths: [text], ignore_patterns: [text]) -> FileSnapshot:
+    var files: Dict<text, i64> = {}
+    for watch_path in watch_paths:
+        val entries = dir_list(watch_path)
+        for entry in entries:
+            var should_skip = false
+            for pattern in ignore_patterns:
+                if entry.contains(pattern):
+                    should_skip = true
+                    break
+            if not should_skip:
+                # Use string length as a quick change indicator
+                files[entry] = entry.len()
+    FileSnapshot(files: files)
+
+# Detect changes between two snapshots
+fn detect_changes(old_snap: FileSnapshot, new_snap: FileSnapshot) -> [FileChangeEvent]:
+    val now = current_time_ms()
+    var changes: [FileChangeEvent] = []
+    # Check for new or modified files
+    for path in new_snap.files.keys():
+        if not old_snap.files.has(path):
+            changes.push(FileChangeEvent(path: path, event_type: "created", timestamp: now))
+        elif old_snap.files[path] != new_snap.files[path]:
+            changes.push(FileChangeEvent(path: path, event_type: "modified", timestamp: now))
+    # Check for deleted files
+    for path in old_snap.files.keys():
+        if not new_snap.files.has(path):
+            changes.push(FileChangeEvent(path: path, event_type: "deleted", timestamp: now))
+    changes
+
+# Format milliseconds timestamp as readable time
+fn format_time_ms(ms: i64) -> text:
+    val total_seconds = ms / 1000
+    val hours = (total_seconds / 3600) % 24
+    val minutes = (total_seconds / 60) % 60
+    val seconds = total_seconds % 60
+    "{hours}:{minutes}:{seconds}"
+
+# Create build config from watch config
+fn create_build_config(watch_config: WatchConfig) -> BuildConfig:
+    BuildConfig(
+        profile: watch_config.profile,
+        features: [],
+        workspace_root: "build/rust/ffi_gen",
+        target_dir: "build/rust/ffi_gen/target",
+        jobs: 4,
+        verbose: false
+    )
+
+# Print success message
+fn print_success_message(result: BuildResult):
+    val duration_sec = result.duration_ms / 1000
+    print ""
+    print "✓ Build succeeded in {duration_sec}s"
+    print ""
+
+# Print error message
+fn print_error_message(result: BuildResult):
+    print ""
+    print "✗ Build failed"
+    if result.stderr.len() > 0:
+        print "Errors:"
+        print result.stderr
+    print ""
+
+# Get current time string
+fn current_time_str() -> text:
+    format_time_ms(current_time_ms())
+
+# Default watch configuration
+fn default_watch_config() -> WatchConfig:
+    WatchConfig(
+        profile: BuildProfile.Debug,
+        watch_paths: ["src/", "build/rust/"],
+        ignore_patterns: ["target/", ".git/", "*.swp", "*.tmp"],
+        debounce_ms: 500,
+        clear_console: true,
+        run_tests: false,
+        notify: true
+    )
+
+# Print watch result
+fn print_watch_result(result: WatchResult):
+    print ""
+    print "=========================================="
+    print "Watch Mode Summary"
+    print "=========================================="
+    print ""
+    print result.summary()
+    print ""
+    print "Statistics:"
+    print "  Total rebuilds:      {result.total_rebuilds}"
+    print "  Successful:          {result.successful_rebuilds}"
+    print "  Failed:              {result.failed_rebuilds}"
+    print "  Total duration:      {result.total_duration_ms}ms"

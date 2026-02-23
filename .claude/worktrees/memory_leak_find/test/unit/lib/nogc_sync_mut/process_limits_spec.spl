@@ -1,0 +1,227 @@
+# Test specification for std.process_limits module
+#
+# Tests resource profile system for process limit management.
+
+use std.spec.{describe, it, expect}
+use std.process_limits.{ResourceProfile}
+use std.process_limits.{profile_fast, profile_standard, profile_slow, profile_intensive, profile_critical}
+use std.process_limits.{profile_from_name, profile_from_test_markers, get_profile_for_test}
+use std.process_limits.{apply_limits, profile_is_sufficient, profile_describe}
+
+describe "ResourceProfile struct":
+    it "creates fast profile with correct values":
+        val prof = profile_fast()
+        expect(prof.name).to_equal("fast")
+        expect(prof.cpu_ms).to_equal(1000)
+        expect(prof.mem_mb).to_equal(128)
+        expect(prof.timeout_ms).to_equal(2000)
+        expect(prof.max_fds).to_equal(100)
+        expect(prof.max_procs).to_equal(10)
+
+    it "creates standard profile with correct values":
+        val prof = profile_standard()
+        expect(prof.name).to_equal("standard")
+        expect(prof.cpu_ms).to_equal(5000)
+        expect(prof.mem_mb).to_equal(512)
+        expect(prof.timeout_ms).to_equal(10000)
+        expect(prof.max_fds).to_equal(500)
+        expect(prof.max_procs).to_equal(50)
+
+    it "creates slow profile with correct values":
+        val prof = profile_slow()
+        expect(prof.name).to_equal("slow")
+        expect(prof.cpu_ms).to_equal(30000)
+        expect(prof.mem_mb).to_equal(1024)
+        expect(prof.timeout_ms).to_equal(60000)
+        expect(prof.max_fds).to_equal(1000)
+        expect(prof.max_procs).to_equal(100)
+
+    it "creates intensive profile with correct values":
+        val prof = profile_intensive()
+        expect(prof.name).to_equal("intensive")
+        expect(prof.cpu_ms).to_equal(120000)
+        expect(prof.mem_mb).to_equal(4096)
+        expect(prof.timeout_ms).to_equal(300000)
+        expect(prof.max_fds).to_equal(2000)
+        expect(prof.max_procs).to_equal(200)
+
+    it "creates critical profile with correct values":
+        val prof = profile_critical()
+        expect(prof.name).to_equal("critical")
+        expect(prof.cpu_ms).to_equal(600000)
+        expect(prof.mem_mb).to_equal(8192)
+        expect(prof.timeout_ms).to_equal(900000)
+        expect(prof.max_fds).to_equal(4000)
+        expect(prof.max_procs).to_equal(500)
+
+describe "profile_from_name":
+    it "returns fast profile for 'fast' name":
+        val prof = profile_from_name("fast")
+        expect(prof.name).to_equal("fast")
+
+    it "returns standard profile for 'standard' name":
+        val prof = profile_from_name("standard")
+        expect(prof.name).to_equal("standard")
+
+    it "returns slow profile for 'slow' name":
+        val prof = profile_from_name("slow")
+        expect(prof.name).to_equal("slow")
+
+    it "returns intensive profile for 'intensive' name":
+        val prof = profile_from_name("intensive")
+        expect(prof.name).to_equal("intensive")
+
+    it "returns critical profile for 'critical' name":
+        val prof = profile_from_name("critical")
+        expect(prof.name).to_equal("critical")
+
+    it "returns standard profile for unknown name":
+        val prof = profile_from_name("unknown")
+        expect(prof.name).to_equal("standard")
+
+describe "profile_from_test_markers":
+    it "returns critical profile for critical marker":
+        val markers = ["critical"]
+        val prof = profile_from_test_markers(markers)
+        expect(prof.name).to_equal("critical")
+
+    it "returns intensive profile for intensive marker":
+        val markers = ["intensive"]
+        val prof = profile_from_test_markers(markers)
+        expect(prof.name).to_equal("intensive")
+
+    it "returns slow profile for slow_it marker":
+        val markers = ["slow_it"]
+        val prof = profile_from_test_markers(markers)
+        expect(prof.name).to_equal("slow")
+
+    it "returns fast profile for fast marker":
+        val markers = ["fast"]
+        val prof = profile_from_test_markers(markers)
+        expect(prof.name).to_equal("fast")
+
+    it "returns standard profile for empty markers":
+        val markers = []
+        val prof = profile_from_test_markers(markers)
+        expect(prof.name).to_equal("standard")
+
+    it "prioritizes critical over intensive":
+        val markers = ["intensive", "critical"]
+        val prof = profile_from_test_markers(markers)
+        expect(prof.name).to_equal("critical")
+
+    it "prioritizes intensive over slow_it":
+        val markers = ["slow_it", "intensive"]
+        val prof = profile_from_test_markers(markers)
+        expect(prof.name).to_equal("intensive")
+
+describe "get_profile_for_test":
+    it "uses markers when provided":
+        val prof = get_profile_for_test("test/unit/foo_spec.spl", ["intensive"])
+        expect(prof.name).to_equal("intensive")
+
+    it "detects qemu tests as intensive":
+        val prof = get_profile_for_test("test/integration/qemu/boot_spec.spl", [])
+        expect(prof.name).to_equal("intensive")
+
+    it "detects baremetal tests as intensive":
+        val prof = get_profile_for_test("test/integration/baremetal/startup_spec.spl", [])
+        expect(prof.name).to_equal("intensive")
+
+    it "detects database tests as slow":
+        val prof = get_profile_for_test("test/lib/database/query_spec.spl", [])
+        expect(prof.name).to_equal("slow")
+
+    it "detects integration tests as slow":
+        val prof = get_profile_for_test("test/integration/compiler/build_spec.spl", [])
+        expect(prof.name).to_equal("slow")
+
+    it "detects compiler tests as slow":
+        val prof = get_profile_for_test("test/compiler/backend/optimizer_spec.spl", [])
+        expect(prof.name).to_equal("slow")
+
+    it "detects unit tests as fast":
+        val prof = get_profile_for_test("test/unit/std/string_spec.spl", [])
+        expect(prof.name).to_equal("fast")
+
+    it "uses standard for unknown test paths":
+        val prof = get_profile_for_test("test/other/something_spec.spl", [])
+        expect(prof.name).to_equal("standard")
+
+describe "apply_limits":
+    it "converts profile to limit parameters":
+        val prof = profile_fast()
+        val (cmd, args_str, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs) = apply_limits("echo", ["hello"], prof)
+
+        expect(cmd).to_equal("echo")
+        expect(args_str).to_equal("hello")
+        expect(timeout_ms).to_equal(2000)
+        expect(memory_bytes).to_equal(134217728)
+        expect(cpu_seconds).to_equal(1)
+        expect(max_fds).to_equal(100)
+        expect(max_procs).to_equal(10)
+
+    it "handles multiple arguments":
+        val prof = profile_standard()
+        val (cmd, args_str, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs) = apply_limits("ls", ["-la", "/tmp"], prof)
+
+        expect(cmd).to_equal("ls")
+        expect(args_str).to_equal("-la /tmp")
+        expect(timeout_ms).to_equal(10000)
+        expect(memory_bytes).to_equal(536870912)
+        expect(cpu_seconds).to_equal(5)
+
+    it "handles empty arguments":
+        val prof = profile_fast()
+        val (cmd, args_str, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs) = apply_limits("pwd", [], prof)
+
+        expect(cmd).to_equal("pwd")
+        expect(args_str).to_equal("")
+
+describe "profile_is_sufficient":
+    it "returns true when available >= required":
+        val required = profile_fast()
+        val available = profile_standard()
+        expect(profile_is_sufficient(required, available)).to_equal(true)
+
+    it "returns true when profiles are equal":
+        val required = profile_standard()
+        val available = profile_standard()
+        expect(profile_is_sufficient(required, available)).to_equal(true)
+
+    it "returns false when available < required":
+        val required = profile_slow()
+        val available = profile_fast()
+        expect(profile_is_sufficient(required, available)).to_equal(false)
+
+    it "checks all limits correctly":
+        val required = profile_intensive()
+        val available = profile_critical()
+        expect(profile_is_sufficient(required, available)).to_equal(true)
+
+describe "profile_describe":
+    it "generates human-readable description":
+        val prof = profile_fast()
+        val desc = profile_describe(prof)
+        expect(desc).to_contain("Profile: fast")
+        expect(desc).to_contain("CPU: 1s")
+        expect(desc).to_contain("Memory: 128MB")
+        expect(desc).to_contain("Timeout: 2s")
+        expect(desc).to_contain("FDs: 100")
+        expect(desc).to_contain("Procs: 10")
+
+    it "correctly formats slow profile":
+        val prof = profile_slow()
+        val desc = profile_describe(prof)
+        expect(desc).to_contain("Profile: slow")
+        expect(desc).to_contain("CPU: 30s")
+        expect(desc).to_contain("Memory: 1024MB")
+        expect(desc).to_contain("Timeout: 60s")
+
+    it "correctly formats intensive profile":
+        val prof = profile_intensive()
+        val desc = profile_describe(prof)
+        expect(desc).to_contain("Profile: intensive")
+        expect(desc).to_contain("CPU: 120s")
+        expect(desc).to_contain("Memory: 4096MB")
+        expect(desc).to_contain("Timeout: 300s")

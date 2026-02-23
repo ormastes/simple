@@ -1,0 +1,441 @@
+# B-Tree Utility Functions
+#
+# Purpose: Helper functions, bulk operations, queries, and set operations
+#
+# Contains:
+# - Fill factor and metrics
+# - Range queries
+# - Bulk load operations
+# - Set operations (union, intersection, difference)
+# - Advanced queries (nth smallest/largest, closest, median)
+# - Visualization and debugging
+
+mod b_tree.types
+mod b_tree.search
+mod b_tree.insert
+mod b_tree.traverse
+mod b_tree.statistics
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+# Get fill factor (average node utilization)
+fn get_fill_factor(tree):
+    val root = tree_root(tree)
+    val t = tree_t(tree)
+    val max = (2 * t) - 1
+    val total_keys = count_keys_in_node(root)
+    val total_nodes = count_nodes_in_subtree(root)
+    val max_possible = total_nodes * max
+    val factor = (total_keys * 100) / max_possible
+    factor
+
+# Convert B-tree to sorted list
+fn btree_to_list(tree):
+    inorder_traversal(tree)
+
+# Range query: find all keys in [min_key, max_key]
+fn range_query_node(node, min_key, max_key):
+    val keys = node_keys(node)
+    val children = node_children(node)
+    val is_leaf = node_is_leaf(node)
+    val n = node_n(node)
+
+    var result = []
+
+    if is_leaf:
+        for i in 0..n:
+            val k = keys.i
+            val above_min = k >= min_key
+            val below_max = k <= max_key
+            val in_range = above_min
+            val also_in_range = below_max
+            if in_range:
+                if also_in_range:
+                    result = list_append(result, k)
+        result
+    else:
+        for i in 0..n:
+            val k = keys.i
+            val check_left = k >= min_key
+            if check_left:
+                val child = children.i
+                val child_results = range_query_node(child, min_key, max_key)
+                result = list_concat(result, child_results)
+
+            val in_range = k >= min_key
+            val also_in_range = k <= max_key
+            if in_range:
+                if also_in_range:
+                    result = list_append(result, k)
+
+        # Check last child
+        val last_key = keys.(n - 1)
+        val check_right = last_key <= max_key
+        if check_right:
+            val last_child = children.n
+            val last_results = range_query_node(last_child, min_key, max_key)
+            result = list_concat(result, last_results)
+        result
+
+# Range query on B-tree
+fn range_query(tree, min_key, max_key):
+    val root = tree_root(tree)
+    range_query_node(root, min_key, max_key)
+
+# ============================================================================
+# Visualization Functions
+# ============================================================================
+
+# Print node with indentation
+fn print_node_helper(node, level):
+    val keys = node_keys(node)
+    val children = node_children(node)
+    val is_leaf = node_is_leaf(node)
+    val n = node_n(node)
+
+    # Print indentation
+    var indent = ""
+    for i in 0..level:
+        indent = indent + "  "
+
+    # Print keys
+    print "{indent}Keys: {keys}"
+
+    # Print children recursively
+    val is_not_leaf = !is_leaf
+    if is_not_leaf:
+        for i in 0..(n + 1):
+            val child = children.i
+            print_node_helper(child, level + 1)
+
+# Print ASCII visualization of B-tree
+fn print_tree(tree):
+    print "B-Tree Structure:"
+    print "=================="
+    val root = tree_root(tree)
+    val t = tree_t(tree)
+    val height = tree_height(tree)
+    print "Minimum degree (t): {t}"
+    print "Height: {height}"
+    print "Total keys: {btree_size(tree)}"
+    print "Total nodes: {count_nodes(tree)}"
+    print ""
+    print_node_helper(root, 0)
+
+# ============================================================================
+# Bulk Operations
+# ============================================================================
+
+# Bulk load sorted keys into B-tree (optimized)
+# Assumes keys are already sorted
+fn bulk_load(tree, sorted_keys):
+    var current_tree = tree
+    val len = list_length(sorted_keys)
+    for i in 0..len:
+        val key = sorted_keys.i
+        current_tree = btree_insert(current_tree, key)
+    current_tree
+
+# Create B-tree from unsorted list
+fn btree_from_list(lst, t):
+    var tree = create_btree(t)
+    val len = list_length(lst)
+    for i in 0..len:
+        val key = lst.i
+        tree = btree_insert(tree, key)
+    tree
+
+# ============================================================================
+# Advanced Statistics
+# ============================================================================
+
+# Get average keys per node
+fn avg_keys_per_node(tree):
+    val total_keys = btree_size(tree)
+    val total_nodes = count_nodes(tree)
+    val avg = total_keys / total_nodes
+    avg
+
+# Get number of leaf nodes
+fn count_leaf_nodes(node):
+    val is_leaf = node_is_leaf(node)
+    if is_leaf:
+        1
+    else:
+        val children = node_children(node)
+        val n = node_n(node)
+        var count = 0
+        for i in 0..(n + 1):
+            val child = children.i
+            val child_count = count_leaf_nodes(child)
+            count = count + child_count
+        count
+
+# Get number of internal nodes
+fn count_internal_nodes(tree):
+    val total = count_nodes(tree)
+    val root = tree_root(tree)
+    val leaves = count_leaf_nodes(root)
+    val internals = total - leaves
+    internals
+
+# Check if tree is empty
+fn is_empty(tree):
+    val size = btree_size(tree)
+    val empty = size == 0
+    empty
+
+# Clear all keys from tree
+fn clear_tree(tree):
+    val t = tree_t(tree)
+    create_btree(t)
+
+# ============================================================================
+# Key Existence and Membership
+# ============================================================================
+
+# Check if key exists (alias for btree_search)
+fn contains(tree, key):
+    btree_search(tree, key)
+
+# Get all keys greater than threshold
+fn keys_greater_than(tree, threshold):
+    val all_keys = inorder_traversal(tree)
+    var result = []
+    val len = list_length(all_keys)
+    for i in 0..len:
+        val k = all_keys.i
+        val greater = k > threshold
+        if greater:
+            result = list_append(result, k)
+    result
+
+# Get all keys less than threshold
+fn keys_less_than(tree, threshold):
+    val all_keys = inorder_traversal(tree)
+    var result = []
+    val len = list_length(all_keys)
+    for i in 0..len:
+        val k = all_keys.i
+        val less = k < threshold
+        if less:
+            result = list_append(result, k)
+    result
+
+# Get nth smallest key (0-indexed)
+fn nth_smallest(tree, n):
+    val sorted = inorder_traversal(tree)
+    val len = list_length(sorted)
+    val valid = n < len
+    if valid:
+        sorted.n
+    else:
+        nil
+
+# Get nth largest key (0-indexed)
+fn nth_largest(tree, n):
+    val sorted = inorder_traversal(tree)
+    val len = list_length(sorted)
+    val valid = n < len
+    if valid:
+        val idx = len - 1 - n
+        sorted.idx
+    else:
+        nil
+
+# ============================================================================
+# Comparison and Set Operations
+# ============================================================================
+
+# Get union of two B-trees (all keys from both)
+fn btree_union(tree1, tree2):
+    val keys1 = inorder_traversal(tree1)
+    val keys2 = inorder_traversal(tree2)
+    val all_keys = list_concat(keys1, keys2)
+    val t = tree_t(tree1)
+    bulk_load(create_btree(t), all_keys)
+
+# Get intersection of two B-trees (keys in both)
+fn btree_intersection(tree1, tree2):
+    val keys1 = inorder_traversal(tree1)
+    var common = []
+    val len = list_length(keys1)
+    for i in 0..len:
+        val k = keys1.i
+        val in_tree2 = btree_search(tree2, k)
+        if in_tree2:
+            common = list_append(common, k)
+    val t = tree_t(tree1)
+    bulk_load(create_btree(t), common)
+
+# Get difference of two B-trees (keys in tree1 but not tree2)
+fn btree_difference(tree1, tree2):
+    val keys1 = inorder_traversal(tree1)
+    var diff = []
+    val len = list_length(keys1)
+    for i in 0..len:
+        val k = keys1.i
+        val in_tree2 = btree_search(tree2, k)
+        if !in_tree2:
+            diff = list_append(diff, k)
+    val t = tree_t(tree1)
+    bulk_load(create_btree(t), diff)
+
+# Check if tree1 is subset of tree2
+fn is_subset(tree1, tree2):
+    val keys1 = inorder_traversal(tree1)
+    var all_found = true
+    val len = list_length(keys1)
+    for i in 0..len:
+        val k = keys1.i
+        val found = btree_search(tree2, k)
+        if !found:
+            all_found = false
+    all_found
+
+# Check if two trees are equal (same keys)
+fn btree_equals(tree1, tree2):
+    val keys1 = inorder_traversal(tree1)
+    val keys2 = inorder_traversal(tree2)
+    val len1 = list_length(keys1)
+    val len2 = list_length(keys2)
+    val same_size = len1 == len2
+    if !same_size:
+        false
+    else:
+        var equal = true
+        for i in 0..len1:
+            val k1 = keys1.i
+            val k2 = keys2.i
+            val match = k1 == k2
+            if !match:
+                equal = false
+        equal
+
+# ============================================================================
+# Advanced Queries
+# ============================================================================
+
+# Find closest key to target
+fn find_closest(tree, target):
+    val all_keys = inorder_traversal(tree)
+    val len = list_length(all_keys)
+    val has_keys = len > 0
+    if !has_keys:
+        nil
+    else:
+        var closest = all_keys.0
+        var min_diff = abs(closest - target)
+        for i in 1..len:
+            val k = all_keys.i
+            val diff = abs(k - target)
+            val better = diff < min_diff
+            if better:
+                closest = k
+                min_diff = diff
+        closest
+
+# Absolute value helper
+fn abs(x):
+    val negative = x < 0
+    if negative:
+        0 - x
+    else:
+        x
+
+# Find k smallest keys
+fn k_smallest(tree, k):
+    val sorted = inorder_traversal(tree)
+    var result = []
+    val len = list_length(sorted)
+    val limit = k
+    val actual_limit = len
+    val use_limit = limit < actual_limit
+    var final_limit = 0
+    if use_limit:
+        final_limit = limit
+    else:
+        final_limit = actual_limit
+    for i in 0..final_limit:
+        val key = sorted.i
+        result = list_append(result, key)
+    result
+
+# Find k largest keys
+fn k_largest(tree, k):
+    val sorted = inorder_traversal(tree)
+    val len = list_length(sorted)
+    var result = []
+    val limit = k
+    val actual_limit = len
+    val use_limit = limit < actual_limit
+    var start = 0
+    if use_limit:
+        start = len - limit
+    else:
+        start = 0
+    for i in start..len:
+        val key = sorted.i
+        result = list_append(result, key)
+    result
+
+# Count keys in range
+fn count_range(tree, min_key, max_key):
+    val keys = range_query(tree, min_key, max_key)
+    list_length(keys)
+
+# Get median key
+fn get_median(tree):
+    val sorted = inorder_traversal(tree)
+    val len = list_length(sorted)
+    val has_keys = len > 0
+    if !has_keys:
+        nil
+    else:
+        val mid = len / 2
+        sorted.mid
+
+# ============================================================================
+# Debug and Inspection
+# ============================================================================
+
+# Get node at specific path (list of indices)
+fn get_node_at_path(tree, path):
+    val root = tree_root(tree)
+    var current = root
+    val path_len = list_length(path)
+    for i in 0..path_len:
+        val idx = path.i
+        val is_leaf = node_is_leaf(current)
+        if is_leaf:
+            current
+        else:
+            val children = node_children(current)
+            val n = node_n(current)
+            val valid = idx <= n
+            if valid:
+                current = children.idx
+    current
+
+# Get all keys at specific level
+fn get_level_keys(tree, level):
+    val root = tree_root(tree)
+    keys_at_level(root, level, 0)
+
+# Count keys at specific level
+fn count_keys_at_level(tree, level):
+    val keys = get_level_keys(tree, level)
+    list_length(keys)
+
+# Get tree depth (same as height)
+fn get_depth(tree):
+    btree_height(tree)
+
+# Check tree balance (all leaves at same level)
+fn is_balanced(tree):
+    # B-trees are always balanced by definition
+    true
+
+export *

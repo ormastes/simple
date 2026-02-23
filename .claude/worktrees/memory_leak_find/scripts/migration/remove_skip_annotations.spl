@@ -1,0 +1,232 @@
+#!/usr/bin/env simple
+"""
+Batch Remove @skip/@pending Annotations
+
+Removes outdated @skip and @pending annotations from test files that are actually passing.
+Based on comprehensive test audit showing 170+ of 180 tests are actually PASSING.
+
+Usage:
+  bin/simple scripts/remove_skip_annotations.spl --dry-run   # Preview changes
+  bin/simple scripts/remove_skip_annotations.spl             # Apply changes
+"""
+
+use app.io.file_ops.{file_read, file_write, file_exists}
+use std.text.{contains, starts_with, trim}
+
+# List of test files that are PASSING and should have @skip/@pending removed
+val PASSING_TESTS = [
+    # Parser Bugs - ALL FIXED
+    "test/unit/compiler/match_empty_array_bug_spec.spl",
+    "test/system/print_return_spec.spl",
+    "test/unit/std/runtime_value_spec.spl",
+
+    # Async/Concurrency - ALL WORKING
+    "test/unit/std/async_spec.spl",
+    "test/unit/std/async_host_spec.spl",
+    "test/unit/std/async_embedded_spec.spl",
+    "test/feature/async_features_spec.spl",
+    "test/feature/stackless_coroutines_spec.spl",
+    "test/feature/actor_model_spec.spl",
+    "test/feature/actors_spec.spl",
+    "test/unit/std/generators_spec.spl",
+    "test/unit/std/async_io_spec.spl",
+
+    # LSP - ALL WORKING
+    "test/unit/app/lsp/references_spec.spl",
+    "test/unit/app/lsp/hover_spec.spl",
+    "test/unit/app/lsp/definition_spec.spl",
+    "test/unit/app/lsp/document_sync_spec.spl",
+    "test/unit/app/lsp/message_dispatcher_spec.spl",
+    "test/unit/app/lsp/server_lifecycle_spec.spl",
+    "test/unit/app/lsp/diagnostics_spec.spl",
+    "test/unit/app/lsp/completion_spec.spl",
+
+    # Compiler Backend - ALL WORKING
+    "test/unit/compiler/effect_inference_spec.spl",
+    "test/unit/compiler/backend/native_ffi_spec.spl",
+    "test/unit/compiler/backend/backend_capability_spec.spl",
+    "test/unit/compiler/backend/instruction_coverage_spec.spl",
+    "test/unit/compiler/backend/exhaustiveness_validator_spec.spl",
+    "test/unit/compiler/backend/differential_testing_spec.spl",
+    "test/unit/compiler/linker_spec.spl",
+    "test/unit/compiler/linker_context_spec.spl",
+    "test/unit/compiler/jit_context_spec.spl",
+
+    # Syntax Features - ALL WORKING
+    "test/feature/set_literal_spec.spl",
+    "test/feature/custom_literal_spec.spl",
+    "test/feature/bitfield_spec.spl",
+    "test/unit/compiler/baremetal_syntax_spec.spl",
+    "test/system/macro_consteval_simple_spec.spl",
+    "test/feature/parser_error_recovery_spec.spl",
+    "test/feature/effect_annotations_spec.spl",
+    "test/feature/generics_advanced_spec.spl",
+    "test/feature/generator_state_machine_codegen_spec.spl",
+
+    # Verification - ALL WORKING
+    "test/unit/compiler/verification/lean_basic_spec.spl",
+    "test/unit/compiler/verification/verification_diagnostics_spec.spl",
+    "test/unit/compiler/verification/z3_integration_spec.spl",
+
+    # Package Management - ALL WORKING
+    "test/unit/app/package/dependency_resolution_spec.spl",
+    "test/unit/app/package/version_constraints_spec.spl",
+    "test/unit/app/package/lockfile_spec.spl",
+    "test/unit/app/package/manifest_spec.spl",
+    "test/unit/app/package/registry_spec.spl",
+
+    # ML/Deep Learning - ALL WORKING
+    "test/unit/std/ml/tensor_spec.spl",
+    "test/unit/std/ml/autograd_spec.spl",
+    "test/unit/std/ml/neural_network_spec.spl",
+    "test/unit/std/ml/optimizer_spec.spl",
+    "test/unit/std/ml/loss_functions_spec.spl",
+    "test/unit/std/ml/layers_spec.spl",
+    "test/unit/std/ml/activation_spec.spl",
+    "test/unit/std/ml/training_spec.spl",
+
+    # Physics Engine - ALL WORKING
+    "test/unit/std/physics/rigid_body_spec.spl",
+    "test/unit/std/physics/collision_detection_spec.spl",
+    "test/unit/std/physics/constraint_solver_spec.spl",
+    "test/unit/std/physics/spatial_hash_spec.spl",
+    "test/unit/std/physics/verlet_integration_spec.spl",
+    "test/unit/std/physics/broadphase_spec.spl",
+    "test/unit/std/physics/narrowphase_spec.spl",
+
+    # Game Engine - ALL WORKING
+    "test/unit/std/game/entity_component_spec.spl",
+    "test/unit/std/game/scene_graph_spec.spl",
+    "test/unit/std/game/input_system_spec.spl",
+    "test/unit/std/game/animation_spec.spl",
+    "test/unit/std/game/audio_spec.spl",
+    "test/unit/std/game/particle_system_spec.spl",
+    "test/unit/std/game/tilemap_spec.spl",
+    "test/unit/std/game/sprite_batch_spec.spl",
+
+    # Tooling - ALL WORKING (already done by agent)
+    "test/unit/app/tooling/json_utils_spec.spl",
+    "test/unit/app/tooling/html_utils_spec.spl",
+    "test/unit/app/tooling/retry_utils_spec.spl",
+    "test/unit/app/tooling/regex_utils_spec.spl",
+
+    # Other Features - ALL WORKING
+    "test/unit/lib/qemu_spec.spl",
+    "test/system/interpreter_bugs_spec.spl",
+]
+
+# Tests to KEEP @skip/@pending (actually broken or correctly skipped)
+val KEEP_SKIP = [
+    "test/unit/std/env_spec.spl",              # FFI hang
+    "test/unit/std/log_spec.spl",              # FFI hang
+    "test/unit/std/mock_phase5_spec.spl",      # Algorithm issue
+    "test/unit/app/package/semver_spec.spl",   # Generic types
+    "test/unit/app/tooling/arg_parsing_spec.spl",  # Static methods unsupported
+    "test/unit/app/diagram/call_flow_profiling_spec.spl",  # Missing FFI
+    "test/unit/app/mcp/failure_analysis_spec.spl",  # Module missing
+    "test/unit/app/mcp/prompts_spec.spl",      # Type mismatch
+]
+
+fn remove_annotations(content: text) -> text:
+    """Remove @skip and @pending annotations from content."""
+    var lines = content.split("\n")
+    var result_lines: [text] = []
+
+    for line in lines:
+        val trimmed = line.trim()
+        # Skip lines that are just @skip or @pending
+        if trimmed == "# @skip" or trimmed == "# @pending":
+            continue
+        if trimmed == "@skip" or trimmed == "@pending":
+            continue
+        # Keep all other lines
+        result_lines.append(line)
+
+    # Rejoin with newlines
+    var result = ""
+    for i in 0..result_lines.len():
+        result = result + result_lines[i]
+        if i < result_lines.len() - 1:
+            result = result + "\n"
+    result
+
+fn process_file(path: text, dry_run: bool) -> (bool, text):
+    """Process a single test file. Returns (changed, message)."""
+    if not file_exists(path):
+        return (false, "File not found: {path}")
+
+    val content = file_read(path)
+
+    # Check if file has @skip or @pending
+    val has_skip = content.contains("@skip")
+    val has_pending = content.contains("@pending")
+
+    if not has_skip and not has_pending:
+        return (false, "No annotations found: {path}")
+
+    # Remove annotations
+    val new_content = remove_annotations(content)
+
+    if new_content == content:
+        return (false, "No changes: {path}")
+
+    # Write if not dry run
+    if not dry_run:
+        file_write(path, new_content)
+        return (true, "Updated: {path}")
+    else:
+        return (true, "Would update: {path}")
+
+fn main():
+    # Check for --dry-run flag
+    var dry_run = false
+    # TODO: Parse command line args properly
+    # For now, default to dry-run for safety
+    dry_run = true
+
+    print "Simple Test Annotation Remover"
+    print "==============================="
+    print ""
+    if dry_run:
+        print "DRY RUN MODE - No files will be modified"
+        print "Run without --dry-run to apply changes"
+    else:
+        print "LIVE MODE - Files will be modified"
+    print ""
+
+    var total = 0
+    var changed = 0
+    var skipped = 0
+
+    for path in PASSING_TESTS:
+        total = total + 1
+
+        # Skip if in KEEP_SKIP list
+        var should_keep = false
+        for keep_path in KEEP_SKIP:
+            if path == keep_path:
+                should_keep = true
+                break
+
+        if should_keep:
+            skipped = skipped + 1
+            print "SKIP: {path} (correctly marked)"
+            continue
+
+        val (did_change, message) = process_file(path, dry_run)
+        print message
+
+        if did_change:
+            changed = changed + 1
+
+    print ""
+    print "Summary:"
+    print "--------"
+    print "Total files: {total}"
+    print "Changed: {changed}"
+    print "Skipped: {skipped}"
+    print "Unchanged: {total - changed - skipped}"
+
+    if dry_run:
+        print ""
+        print "This was a DRY RUN. Run without --dry-run to apply changes."

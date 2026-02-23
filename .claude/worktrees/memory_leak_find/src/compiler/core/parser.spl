@@ -1,0 +1,351 @@
+# Core Simple — Recursive Descent Parser
+#
+# Shared core library: parses tokens into an AST stored in the arena.
+# Handles function/struct/enum declarations, val/var bindings, use/export,
+# expressions, statements, and indentation-based blocks.
+#
+# Design: All state in module-level vars. Functions modify state.
+# Works when compiled to C; NOT in the interpreter (closure bug).
+#
+# Split into modules:
+#   parser_preprocessor.spl — conditional compilation (@when/@cfg)
+#   parser_expr.spl         — expression parsing
+#   parser_stmts.spl        — statement parsing
+#   parser_decls.spl        — declaration and module body parsing
+
+use compiler.core.tokens.{tok_kind_name}
+use compiler.core.tokens.{TOK_IDENT}
+use compiler.core.tokens.{TOK_KW_FN, TOK_KW_DYN}
+use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
+use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA}
+use compiler.core.tokens.{TOK_ARROW, TOK_PIPE}
+use compiler.core.tokens.{TOK_QUESTION}
+use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
+use compiler.core.tokens.{TOK_SEMICOLON}
+use compiler.core.lexer.{lex_init, lex_next, lex_cur_kind, lex_cur_text, lex_cur_line, lex_cur_col}
+use compiler.core.ast.{module_set_path}
+use compiler.core.ast.{ast_reset}
+use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
+use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY}
+use compiler.core.types.{TYPE_NIL}
+use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
+use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
+use compiler.core.types.{TYPE_UNION}
+use compiler.core.types.{int_to_str}
+use compiler.core.types.{named_type_find}
+use compiler.core.types.{union_type_register}
+
+# Import from split modules
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals, preprocess_conditionals}
+use compiler.core.parser_expr.{parse_expr, parse_assignment, parse_or, parse_and, parse_not}
+use compiler.core.parser_expr.{parse_comparison, parse_null_coalesce, parse_range}
+use compiler.core.parser_expr.{parse_addition, parse_multiplication, parse_unary, parse_postfix, parse_primary}
+use compiler.core.parser_expr.{parse_call_arg, parse_postfix_on, parse_binary_from}
+use compiler.core.parser_stmts.{parse_block, parse_statement}
+use compiler.core.parser_stmts.{parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt}
+use compiler.core.parser_stmts.{parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt}
+use compiler.core.parser_stmts.{parse_receive_stmt, parse_bind_stmt}
+use compiler.core.parser_stmts.{parse_if_expr, parse_for_expr, parse_while_expr}
+use compiler.core.parser_decls.{parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl}
+use compiler.core.parser_decls.{parse_impl_decl, parse_class_body_method}
+use compiler.core.parser_decls.{parse_use_decl, parse_export_decl, parse_val_decl, parse_lazy_val_decl, parse_var_decl}
+use compiler.core.parser_decls.{parse_ce_decl}
+use compiler.core.parser_decls.{parse_module_body}
+
+# ===== Parser State =====
+
+var par_kind: i64 = 0
+var par_text: text = ""
+var par_line: i64 = 0
+var par_col: i64 = 0
+var par_errors: [text] = []
+var par_had_error: bool = false
+var par_struct_names: [text] = []
+
+# ===== Parser Init =====
+
+fn parser_init(source: text):
+    lex_init(source)
+    ast_reset()
+    par_errors = []
+    par_had_error = false
+    parser_advance()
+
+fn parser_advance():
+    par_kind = lex_next()
+    par_text = lex_cur_text
+    par_line = lex_cur_line
+    par_col = lex_cur_col
+
+# ===== Token Checking =====
+
+fn parser_check(expected: i64) -> bool:
+    par_kind == expected
+
+fn parser_match_tok(expected: i64) -> bool:
+    if par_kind != expected:
+        return false
+    parser_advance()
+    true
+
+fn parser_expect(expected: i64) -> bool:
+    if par_kind == expected:
+        parser_advance()
+        return true
+    val msg = "line " + int_to_str(par_line) + ":" + int_to_str(par_col) + ": expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind) + " '" + par_text + "'"
+    par_errors.push(msg)
+    par_had_error = true
+    false
+
+fn parser_error(msg: text):
+    val full = "line " + int_to_str(par_line) + ":" + int_to_str(par_col) + ": " + msg
+    par_errors.push(full)
+    par_had_error = true
+
+# ===== Skip Newlines =====
+
+fn parser_skip_newlines():
+    for i in 0..10000:
+        if par_kind != TOK_NEWLINE:
+            break
+        parser_advance()
+
+fn parser_skip_newlines_and_semicolons():
+    for i in 0..10000:
+        val is_nl = par_kind == TOK_NEWLINE
+        val is_semi = par_kind == TOK_SEMICOLON
+        val should_skip = is_nl or is_semi
+        if not should_skip:
+            break
+        parser_advance()
+
+# ===== Type Annotation Parsing =====
+
+fn parser_parse_type() -> i64:
+    # dyn Trait -- dynamic dispatch type (parsed as named type)
+    if par_kind == TOK_KW_DYN:
+        parser_advance()
+        # Parse the trait name
+        val dyn_name = par_text
+        if par_kind == TOK_IDENT:
+            parser_advance()
+        # Return as named type (interpreter uses structural subtyping anyway)
+        val dyn_id = named_type_find(dyn_name)
+        if dyn_id >= 0:
+            return TYPE_NAMED_BASE + dyn_id
+        return TYPE_ANY
+    val type_name = par_text
+    if par_kind == TOK_IDENT:
+        parser_advance()
+        # Check for generic type: Option<T>, Result<T, E>, Dict<K,V>, etc.
+        val has_lt: bool = par_kind == TOK_LT
+        val has_lt_gen: bool = par_kind == TOK_LT_GENERIC
+        val has_generic: bool = has_lt or has_lt_gen
+        if has_generic:
+            parser_advance()
+            val inner_type = parser_parse_type()
+            # Handle multi-param generics: Dict<K, V>, Result<T, E>
+            for i in 0..10:
+                if par_kind != TOK_COMMA:
+                    break
+                parser_advance()
+                val extra_type = parser_parse_type()
+            parser_expect(TOK_GT)
+            # Handle Option<T>
+            if type_name == "Option":
+                if inner_type == TYPE_I64:
+                    return TYPE_OPTION_I64
+                if inner_type == TYPE_F64:
+                    return TYPE_OPTION_F64
+                if inner_type == TYPE_TEXT:
+                    return TYPE_OPTION_TEXT
+                if inner_type == TYPE_BOOL:
+                    return TYPE_OPTION_BOOL
+                return TYPE_OPTION
+            # Handle Result<T, E> (simplified - just return TYPE_RESULT)
+            if type_name == "Result":
+                return TYPE_RESULT
+            # Dict<K,V> -> TYPE_DICT
+            if type_name == "Dict":
+                return TYPE_DICT
+            # Unknown generic type - check if base is a named struct
+            val gid = named_type_find(type_name)
+            if gid >= 0:
+                return TYPE_NAMED_BASE + gid
+            return TYPE_VOID
+        # Check for postfix ? for Option shorthand: i64? -> Option<i64>
+        if par_kind == TOK_QUESTION:
+            parser_advance()
+            if type_name == "i64":
+                return TYPE_OPTION_I64
+            if type_name == "f64":
+                return TYPE_OPTION_F64
+            if type_name == "text":
+                return TYPE_OPTION_TEXT
+            if type_name == "bool":
+                return TYPE_OPTION_BOOL
+            return TYPE_OPTION
+        # Simple primitive types
+        if type_name == "i64":
+            return TYPE_I64
+        if type_name == "f64":
+            return TYPE_F64
+        if type_name == "text":
+            return TYPE_TEXT
+        if type_name == "bool":
+            return TYPE_BOOL
+        if type_name == "Option":
+            return TYPE_OPTION
+        if type_name == "Result":
+            return TYPE_RESULT
+        # Check for struct type
+        val sid = named_type_find(type_name)
+        if sid >= 0:
+            return TYPE_NAMED_BASE + sid
+        return TYPE_VOID
+    if par_kind == TOK_LBRACKET:
+        # Array type: [i64], [text], etc.
+        parser_advance()
+        val elem_type = parser_parse_type()
+        parser_expect(TOK_RBRACKET)
+        # Nested array types [[T]] -> TYPE_ARRAY_ANY
+        val is_nested = elem_type == TYPE_ARRAY_I64
+        val is_nested2 = elem_type == TYPE_ARRAY_TEXT
+        val is_nested3 = elem_type == TYPE_ARRAY_BOOL
+        val is_nested4 = elem_type == TYPE_ARRAY_ANY
+        val any_nested = is_nested or is_nested2
+        val any_nested2 = any_nested or is_nested3
+        val any_nested3 = any_nested2 or is_nested4
+        if any_nested3:
+            return TYPE_ARRAY_ANY
+        if elem_type == TYPE_I64:
+            return TYPE_ARRAY_I64
+        if elem_type == TYPE_TEXT:
+            return TYPE_ARRAY_TEXT
+        if elem_type == TYPE_BOOL:
+            return TYPE_ARRAY_BOOL
+        return TYPE_ARRAY_I64
+    # Function type: fn(T, T) -> T
+    if par_kind == TOK_KW_FN:
+        parser_advance()
+        parser_expect(TOK_LPAREN)
+        if par_kind != TOK_RPAREN:
+            parser_parse_type()
+            for i in 0..100:
+                if par_kind != TOK_COMMA:
+                    break
+                parser_advance()
+                if par_kind == TOK_RPAREN:
+                    break
+                parser_parse_type()
+        parser_expect(TOK_RPAREN)
+        if par_kind == TOK_ARROW:
+            parser_advance()
+            parser_parse_type()
+        return TYPE_FN
+    # Tuple type: (T, T)
+    if par_kind == TOK_LPAREN:
+        parser_advance()
+        if par_kind != TOK_RPAREN:
+            parser_parse_type()
+            for i in 0..100:
+                if par_kind != TOK_COMMA:
+                    break
+                parser_advance()
+                if par_kind == TOK_RPAREN:
+                    break
+                parser_parse_type()
+        parser_expect(TOK_RPAREN)
+        return TYPE_ANY
+    # Dict type: {K: V}
+    if par_kind == TOK_LBRACE:
+        parser_advance()
+        if par_kind != TOK_RBRACE:
+            parser_parse_type()
+            if par_kind == TOK_COLON:
+                parser_advance()
+                parser_parse_type()
+        parser_expect(TOK_RBRACE)
+        return TYPE_DICT
+    parser_error("expected type annotation")
+    TYPE_VOID
+
+# Parses a type that may be a union: A | B | C
+fn parser_parse_type_with_union() -> i64:
+    val base = parser_parse_type()
+    if par_kind != TOK_PIPE:
+        return base
+    # Check that the pipe isn't a |> pipe-forward
+    var members: [i64] = []
+    members.push(base)
+    while par_kind == TOK_PIPE:
+        parser_advance()
+        val next = parser_parse_type()
+        members.push(next)
+    union_type_register(members)
+
+# ===== Top-Level Module Entry Points =====
+
+fn parse_module(source: text, path: text):
+    val preprocessed = _pp_preprocess_conditionals(source)
+    parser_init(preprocessed)
+    module_set_path(path)
+    parse_module_body()
+
+fn parse_module_file(source: text, path: text):
+    # Parse additional file without resetting AST
+    val preprocessed = _pp_preprocess_conditionals(source)
+    lex_init(preprocessed)
+    par_errors = []
+    par_had_error = false
+    parser_advance()
+    module_set_path(path)
+    parse_module_body()
+
+fn parser_has_errors() -> bool:
+    par_had_error
+
+fn parser_get_errors() -> [text]:
+    par_errors
+
+fn parser_error_count() -> i64:
+    par_errors.len()
+
+# ===== Exports =====
+
+# Parser state (needed by split modules and external consumers)
+export par_kind, par_text, par_line, par_col, par_errors, par_had_error, par_struct_names
+
+# Core parser functions (defined here)
+export parser_init, parser_advance, parser_check, parser_match_tok, parser_expect
+export parser_error, parser_skip_newlines, parser_skip_newlines_and_semicolons
+export parser_parse_type, parser_parse_type_with_union
+
+# Module entry points (defined here)
+export parse_module, parse_module_file
+export parser_has_errors, parser_get_errors, parser_error_count
+
+# Re-export from parser_preprocessor
+export preprocess_conditionals
+
+# Re-export from parser_expr
+export parse_expr, parse_assignment, parse_or, parse_and, parse_not
+export parse_comparison, parse_null_coalesce, parse_range
+export parse_addition, parse_multiplication, parse_unary, parse_postfix, parse_primary
+export parse_call_arg, parse_postfix_on, parse_binary_from
+
+# Re-export from parser_stmts
+export parse_block, parse_statement
+export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
+export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
+export parse_receive_stmt, parse_bind_stmt
+export parse_if_expr, parse_for_expr, parse_while_expr
+
+# Re-export from parser_decls
+export parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl
+export parse_impl_decl, parse_class_body_method
+export parse_use_decl, parse_export_decl, parse_val_decl, parse_lazy_val_decl, parse_var_decl
+export parse_ce_decl
+export parse_module_body

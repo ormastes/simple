@@ -1,0 +1,177 @@
+# TreeSitter Outline Lexer - TreeSitter Struct & Token Handling
+#
+# Defines the TreeSitter struct and core token-level operations:
+# constructors, advance, peek, check, match, expect, is_at_end.
+#
+# Split from outline.spl for modularity.
+
+use compiler.core.lexer.*
+use treesitter_types.*
+use compiler.frontend.block_types.{PreLexInfo, BlockSkipPolicy, BlockOutlineInfo}
+use compiler.blocks.registry.{BlockRegistry, block_registry}
+
+# ============================================================================
+# TreeSitter Parser
+# ============================================================================
+
+struct TreeSitter:
+    """Outline parser for Simple source code."""
+    lexer: Lexer
+    current: Token
+    previous: Token
+    errors: [ParseError]
+    # # DESUGARED: doc_comment: text
+    has_doc_comment: bool
+    doc_comment: text
+    inline_blocks: [BlockOutline]  # Blocks found while skipping expressions
+    # # DESUGARED: current_context: text
+    has_current_context: bool
+    current_context: text
+    fast_mode: bool         # If true, skip Skippable blocks and only outline OutlineRequired
+    heuristic_mode: bool    # If true, use line-based error-tolerant parsing instead of lexer
+    # # DESUGARED: registry: BlockRegistry
+    has_registry: bool
+    registry: BlockRegistry
+
+
+# ============================================================================
+# TreeSitter Methods (was: impl TreeSitter:)
+# ============================================================================
+
+fn treesitter_new(source: text) -> TreeSitter:
+        val lexer = lexer_new(source)
+        var ts = TreeSitter(
+            lexer: lexer,
+            current: token_eof(0, 1),
+            previous: token_eof(0, 1),
+            errors: [],
+            doc_comment: nil,
+            inline_blocks: [],
+            current_context: nil,
+            fast_mode: false,
+            heuristic_mode: false,
+            registry: nil
+        )
+        ts_advance(ts)  # Prime the parser
+        ts
+
+
+fn treesitter_with_fast_mode(fast_mode: bool) -> TreeSitter:
+        """Create a TreeSitter with fast_mode setting.
+
+        In fast mode, Skippable blocks are stored as opaque outlines,
+        and only OutlineRequired blocks get treesitter_outline called.
+        """
+        val lexer = Lexer.new("")
+        TreeSitter(
+            lexer: lexer,
+            current: token_eof(0, 1),
+            previous: token_eof(0, 1),
+            errors: [],
+            #  # DESUGARED: doc_comment: nil
+            inline_blocks: [],
+            #  # DESUGARED: current_context: nil
+            fast_mode: fast_mode,
+            heuristic_mode: false,
+            # # DESUGARED: registry: Some(block_registry())
+            registry: block_registry()
+        )
+
+
+fn treesitter_with_heuristic_mode(enabled: bool) -> TreeSitter:
+        """Create TreeSitter with heuristic mode for error-tolerant parsing.
+
+        Heuristic mode uses line-based scanning instead of full lexer tokenization.
+        Always produces results, even with syntax errors.
+        Ideal for LSP/IDE use where speed and tolerance matter more than accuracy.
+        """
+        val lexer = Lexer.new("")
+        TreeSitter(
+            lexer: lexer,
+            current: token_eof(0, 1),
+            previous: token_eof(0, 1),
+            errors: [],
+            #  # DESUGARED: doc_comment: nil
+            inline_blocks: [],
+            #  # DESUGARED: current_context: nil
+            fast_mode: false,
+            heuristic_mode: enabled,
+            registry: nil
+        )
+
+
+fn treesitter_with_source(self: TreeSitter, source: text) -> TreeSitter:
+        self.lexer = lexer_new(source)
+        self.advance()
+        self
+
+
+fn treesitter_advance(self: TreeSitter) -> Token:
+        """Advance to next token."""
+        self.previous = self.current
+
+        # Copy-modify-reassign: nested field mutations don't propagate in interpreter
+        var lexer = self.lexer
+        self.current = lexer_next_token(lexer)
+
+        # Accumulate doc comments
+        # Guard against EOF and nil tokens before checking text
+        while self.current.kind == TokenKind.Ident:
+            if not self.current.has_text:
+                break
+            if not self.current.text.starts_with("##"):
+                break
+            val comment = self.current.text[2:].trim()
+            self.doc_comment = match self.doc_comment:
+                # case # DESUGARED: dc: Some(dc + "\n" + comment)
+                case dc: dc + "\n" + comment
+                # case # DESUGARED: nil: Some(comment)
+                case nil: comment
+            self.current = lexer_next_token(lexer)
+
+        self.lexer = lexer
+        self.previous
+
+
+fn treesitter_peek(self: TreeSitter) -> TokenKind:
+        """Peek at current token kind."""
+        self.current.kind
+
+
+fn treesitter_check(self: TreeSitter, kind: TokenKind) -> bool:
+        """Check if current token matches kind."""
+        self.current.kind == kind
+
+
+fn treesitter_match_token(self: TreeSitter, kind: TokenKind) -> bool:
+        """Match and consume token if it matches."""
+        if self.check(kind):
+            self.advance()
+            true
+        else:
+            false
+
+
+fn treesitter_expect(self: TreeSitter, kind: TokenKind, message: text) -> bool:
+        """Expect a token, report error if not found."""
+        if self.current.kind == kind:
+            self.advance()
+            true
+        else:
+            self.error(message)
+            false
+
+
+fn treesitter_is_at_end(self: TreeSitter) -> bool:
+        """Check if at end of input (Eof or nil token)."""
+        val kind = self.current.kind
+        if not has_kind:
+            return true
+        kind == TokenKind.Eof
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TreeSitter

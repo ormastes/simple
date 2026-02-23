@@ -1,0 +1,612 @@
+# Test Report
+#
+# Reports for test execution results, failures, and summaries.
+# Provides structured test diagnostics with timing and failure details.
+
+import ..level
+import ..location
+import ..report
+
+export TestReport, TestResult, TestStatus, TestFailure, TestSuite, TestSummary
+
+# ANSI escape helper
+fn esc_char() -> text:
+    val code: u8 = 27
+    "{code as char}"
+
+# =============================================================================
+# TestStatus: Possible states of a test
+# =============================================================================
+
+enum TestStatus:
+    Passed          # Test passed
+    Failed          # Test failed (assertion)
+    Error           # Test error (exception/panic)
+    Skipped         # Test skipped
+    Timeout         # Test timed out
+    Pending         # Test not yet implemented
+
+impl TestStatus:
+    fn name() -> text:
+        match self:
+            case TestStatus.Passed: "passed"
+            case TestStatus.Failed: "failed"
+            case TestStatus.Error: "error"
+            case TestStatus.Skipped: "skipped"
+            case TestStatus.Timeout: "timeout"
+            case TestStatus.Pending: "pending"
+
+    fn symbol() -> text:
+        match self:
+            case TestStatus.Passed: "."
+            case TestStatus.Failed: "F"
+            case TestStatus.Error: "E"
+            case TestStatus.Skipped: "S"
+            case TestStatus.Timeout: "T"
+            case TestStatus.Pending: "P"
+
+    fn color() -> text:
+        val e = esc_char()
+        match self:
+            case TestStatus.Passed: "{e}[32m"
+            case TestStatus.Failed: "{e}[31m"
+            case TestStatus.Error: "{e}[31m"
+            case TestStatus.Skipped: "{e}[33m"
+            case TestStatus.Timeout: "{e}[35m"
+            case TestStatus.Pending: "{e}[36m"
+
+    fn is_success() -> bool:
+        self == TestStatus.Passed
+
+    fn is_failure() -> bool:
+        match self:
+            case TestStatus.Failed: true
+            case TestStatus.Error: true
+            case TestStatus.Timeout: true
+            case _: false
+
+    fn is_skipped() -> bool:
+        match self:
+            case TestStatus.Skipped: true
+            case TestStatus.Pending: true
+            case _: false
+
+# =============================================================================
+# TestFailure: Details about a test failure
+# =============================================================================
+
+struct TestFailure:
+    message: text               # Failure message
+    expected: text?             # Expected value (for assertions)
+    actual: text?               # Actual value (for assertions)
+    location: SourceLocation?   # Where the failure occurred
+    diff: text?                 # Diff output (for text comparisons)
+    stack_trace: [text]         # Stack trace
+
+impl TestFailure:
+    # Create a simple failure
+    static fn message_only(message: text) -> TestFailure:
+        TestFailure(
+            message: message,
+            expected: nil,
+            actual: nil,
+            location: nil,
+            diff: nil,
+            stack_trace: []
+        )
+
+    # Create an assertion failure
+    static fn assertion(expected: text, actual: text, message: text) -> TestFailure:
+        TestFailure(
+            message: message,
+            expected: Some(expected),
+            actual: Some(actual),
+            location: nil,
+            diff: nil,
+            stack_trace: []
+        )
+
+    # Create a failure with location
+    static fn at(message: text, location: SourceLocation) -> TestFailure:
+        TestFailure(
+            message: message,
+            expected: nil,
+            actual: nil,
+            location: Some(location),
+            diff: nil,
+            stack_trace: []
+        )
+
+    fn with_location(location: SourceLocation) -> TestFailure:
+        TestFailure(
+            message: self.message,
+            expected: self.expected,
+            actual: self.actual,
+            location: Some(location),
+            diff: self.diff,
+            stack_trace: self.stack_trace
+        )
+
+    fn with_diff(diff: text) -> TestFailure:
+        TestFailure(
+            message: self.message,
+            expected: self.expected,
+            actual: self.actual,
+            location: self.location,
+            diff: Some(diff),
+            stack_trace: self.stack_trace
+        )
+
+    fn with_stack(trace: [text]) -> TestFailure:
+        TestFailure(
+            message: self.message,
+            expected: self.expected,
+            actual: self.actual,
+            location: self.location,
+            diff: self.diff,
+            stack_trace: trace
+        )
+
+    fn has_values() -> bool:
+        self.expected.? and self.actual.?
+
+    fn format(use_color: bool) -> text:
+        val e = esc_char()
+        val red = if use_color: "{e}[31m" else: ""
+        val green = if use_color: "{e}[32m" else: ""
+        val gray = if use_color: "{e}[90m" else: ""
+        val reset = if use_color: "{e}[0m" else: ""
+
+        var output = "{red}{self.message}{reset}"
+
+        if self.location.?:
+            output = output + "\n  at {self.location.unwrap().format_short()}"
+
+        if self.has_values():
+            output = output + "\n  {green}Expected:{reset} {self.expected.unwrap()}"
+            output = output + "\n  {red}Actual:{reset}   {self.actual.unwrap()}"
+
+        if self.diff.?:
+            output = output + "\n  {gray}Diff:{reset}\n{self.diff.unwrap()}"
+
+        if not self.stack_trace.is_empty():
+            output = output + "\n  {gray}Stack trace:{reset}"
+            for frame in self.stack_trace:
+                output = output + "\n    {frame}"
+
+        output
+
+# =============================================================================
+# TestResult: Result of a single test
+# =============================================================================
+
+class TestResult:
+    name: text                  # Test name
+    status: TestStatus
+    duration_ms: i64            # Duration in milliseconds
+    failure: TestFailure?       # Failure details (if failed)
+    output: text?               # Captured stdout/stderr
+    file: text?                 # Test file
+    line: i64                   # Line number (0 if unknown)
+    tags: [text]                # Test tags
+
+impl TestResult:
+    # Create a passed test
+    static fn passed(name: text, duration_ms: i64) -> TestResult:
+        TestResult(
+            name: name,
+            status: TestStatus.Passed,
+            duration_ms: duration_ms,
+            failure: nil,
+            output: nil,
+            file: nil,
+            line: 0,
+            tags: []
+        )
+
+    # Create a failed test
+    static fn failed(name: text, failure: TestFailure, duration_ms: i64) -> TestResult:
+        TestResult(
+            name: name,
+            status: TestStatus.Failed,
+            duration_ms: duration_ms,
+            failure: Some(failure),
+            output: nil,
+            file: nil,
+            line: 0,
+            tags: []
+        )
+
+    # Create an error test
+    static fn error(name: text, message: text, duration_ms: i64) -> TestResult:
+        TestResult(
+            name: name,
+            status: TestStatus.Error,
+            duration_ms: duration_ms,
+            failure: Some(TestFailure.message_only(message)),
+            output: nil,
+            file: nil,
+            line: 0,
+            tags: []
+        )
+
+    # Create a skipped test
+    static fn skipped(name: text, reason: text?) -> TestResult:
+        var result = TestResult(
+            name: name,
+            status: TestStatus.Skipped,
+            duration_ms: 0,
+            failure: nil,
+            output: nil,
+            file: nil,
+            line: 0,
+            tags: []
+        )
+        if reason.?:
+            result.failure = Some(TestFailure.message_only(reason.unwrap()))
+        result
+
+    # Create a timeout test
+    static fn timeout(name: text, duration_ms: i64) -> TestResult:
+        TestResult(
+            name: name,
+            status: TestStatus.Timeout,
+            duration_ms: duration_ms,
+            failure: Some(TestFailure.message_only("Test timed out after {duration_ms}ms")),
+            output: nil,
+            file: nil,
+            line: 0,
+            tags: []
+        )
+
+    # Create a pending test
+    static fn pending(name: text) -> TestResult:
+        TestResult(
+            name: name,
+            status: TestStatus.Pending,
+            duration_ms: 0,
+            failure: nil,
+            output: nil,
+            file: nil,
+            line: 0,
+            tags: []
+        )
+
+    # ==========================================================================
+    # Builder methods
+    # ==========================================================================
+
+    fn in_file(file: text, line: i64) -> TestResult:
+        TestResult(
+            name: self.name,
+            status: self.status,
+            duration_ms: self.duration_ms,
+            failure: self.failure,
+            output: self.output,
+            file: Some(file),
+            line: line,
+            tags: self.tags
+        )
+
+    fn with_output(output: text) -> TestResult:
+        TestResult(
+            name: self.name,
+            status: self.status,
+            duration_ms: self.duration_ms,
+            failure: self.failure,
+            output: Some(output),
+            file: self.file,
+            line: self.line,
+            tags: self.tags
+        )
+
+    fn with_tags(tags: [text]) -> TestResult:
+        TestResult(
+            name: self.name,
+            status: self.status,
+            duration_ms: self.duration_ms,
+            failure: self.failure,
+            output: self.output,
+            file: self.file,
+            line: self.line,
+            tags: tags
+        )
+
+    # ==========================================================================
+    # Accessors
+    # ==========================================================================
+
+    fn is_success() -> bool:
+        self.status.is_success()
+
+    fn is_failure() -> bool:
+        self.status.is_failure()
+
+    fn is_skipped() -> bool:
+        self.status.is_skipped()
+
+    fn has_output() -> bool:
+        self.output.? and not self.output.unwrap().is_empty()
+
+    fn location() -> SourceLocation?:
+        if self.file.?:
+            Some(SourceLocation.at(self.file.unwrap(), self.line, 1))
+        else:
+            nil
+
+    # ==========================================================================
+    # Conversion to Report
+    # ==========================================================================
+
+    fn to_report() -> Report:
+        val level = if self.is_failure():
+            ReportLevel.Error
+        elif self.is_skipped():
+            ReportLevel.Warning
+        else:
+            ReportLevel.Info
+
+        var msg = "{self.status.name()}: {self.name}"
+        if self.duration_ms > 0:
+            msg = msg + " ({self.duration_ms}ms)"
+
+        var report = match level:
+            case ReportLevel.Error: Report.error(msg)
+            case ReportLevel.Warning: Report.warning(msg)
+            case _: Report.info(msg)
+
+        report = report.with_kind(ReportKind.TestFailure).with_source("test")
+
+        if self.file.?:
+            report = report.at(self.file.unwrap(), self.line, 1)
+
+        if self.failure.?:
+            val fail = self.failure.unwrap()
+            report = report.with_note(fail.message)
+            if fail.expected.?:
+                report = report.with_note("expected: {fail.expected.unwrap()}")
+            if fail.actual.?:
+                report = report.with_note("actual: {fail.actual.unwrap()}")
+
+        report
+
+    # ==========================================================================
+    # Formatting
+    # ==========================================================================
+
+    fn format(use_color: bool) -> text:
+        val e = esc_char()
+        val status_color = if use_color: self.status.color() else: ""
+        val reset = if use_color: "{e}[0m" else: ""
+        val bold = if use_color: "{e}[1m" else: ""
+
+        var output = "{status_color}{self.status.symbol()}{reset} {bold}{self.name}{reset}"
+
+        if self.duration_ms > 0:
+            output = output + " ({self.duration_ms}ms)"
+
+        if self.file.?:
+            output = output + "\n  {self.file.unwrap()}:{self.line}"
+
+        if self.failure.? and self.is_failure():
+            output = output + "\n" + self.failure.unwrap().format(use_color)
+
+        output
+
+    fn format_short() -> text:
+        "{self.status.symbol()} {self.name}"
+
+# =============================================================================
+# TestSuite: Collection of test results for a file/module
+# =============================================================================
+
+class TestSuite:
+    name: text                  # Suite name (usually file path)
+    results: [TestResult]
+    duration_ms: i64
+    setup_failure: TestFailure? # Failure during setup
+
+impl TestSuite:
+    static fn named(name: text) -> TestSuite:
+        TestSuite(
+            name: name,
+            results: [],
+            duration_ms: 0,
+            setup_failure: nil
+        )
+
+    me add(result: TestResult):
+        self.results.push(result)
+
+    me set_duration(duration_ms: i64):
+        self.duration_ms = duration_ms
+
+    me set_setup_failure(failure: TestFailure):
+        self.setup_failure = Some(failure)
+
+    fn count() -> i64:
+        self.results.len()
+
+    fn passed_count() -> i64:
+        self.results.filter(\r: r.status == TestStatus.Passed).len()
+
+    fn failed_count() -> i64:
+        self.results.filter(\r: r.is_failure()).len()
+
+    fn skipped_count() -> i64:
+        self.results.filter(\r: r.is_skipped()).len()
+
+    fn has_failures() -> bool:
+        self.setup_failure.? or self.results.any(\r: r.is_failure())
+
+    fn all_passed() -> bool:
+        self.setup_failure == nil and self.results.all(\r: r.is_success())
+
+    fn failures() -> [TestResult]:
+        self.results.filter(\r: r.is_failure())
+
+    fn format(use_color: bool) -> text:
+        val e = esc_char()
+        val bold = if use_color: "{e}[1m" else: ""
+        val reset = if use_color: "{e}[0m" else: ""
+
+        var output = "{bold}{self.name}{reset}\n"
+
+        if self.setup_failure.?:
+            output = output + "  Setup failed: " + self.setup_failure.unwrap().format(use_color) + "\n"
+
+        for result in self.results:
+            output = output + "  " + result.format(use_color) + "\n"
+
+        output
+
+# =============================================================================
+# TestSummary: Summary of all test results
+# =============================================================================
+
+class TestSummary:
+    suites: [TestSuite]
+    total_tests: i64
+    passed: i64
+    failed: i64
+    errors: i64
+    skipped: i64
+    timeout: i64
+    pending: i64
+    duration_ms: i64
+
+impl TestSummary:
+    static fn empty() -> TestSummary:
+        TestSummary(
+            suites: [],
+            total_tests: 0,
+            passed: 0,
+            failed: 0,
+            errors: 0,
+            skipped: 0,
+            timeout: 0,
+            pending: 0,
+            duration_ms: 0
+        )
+
+    me add_suite(suite: TestSuite):
+        self.suites.push(suite)
+        self.duration_ms = self.duration_ms + suite.duration_ms
+
+        for result in suite.results:
+            self.total_tests = self.total_tests + 1
+            match result.status:
+                case TestStatus.Passed: self.passed = self.passed + 1
+                case TestStatus.Failed: self.failed = self.failed + 1
+                case TestStatus.Error: self.errors = self.errors + 1
+                case TestStatus.Skipped: self.skipped = self.skipped + 1
+                case TestStatus.Timeout: self.timeout = self.timeout + 1
+                case TestStatus.Pending: self.pending = self.pending + 1
+
+    fn has_failures() -> bool:
+        self.failed > 0 or self.errors > 0 or self.timeout > 0
+
+    fn all_passed() -> bool:
+        self.failed == 0 and self.errors == 0 and self.timeout == 0
+
+    fn failure_count() -> i64:
+        self.failed + self.errors + self.timeout
+
+    fn all_failures() -> [TestResult]:
+        var failures: [TestResult] = []
+        for suite in self.suites:
+            for result in suite.failures():
+                failures.push(result)
+        failures
+
+    fn to_report() -> Report:
+        val level = if self.has_failures():
+            ReportLevel.Error
+        else:
+            ReportLevel.Info
+
+        val msg = "{self.passed}/{self.total_tests} tests passed"
+
+        var report = match level:
+            case ReportLevel.Error: Report.error(msg)
+            case _: Report.info(msg)
+
+        report = report.with_source("test")
+
+        if self.failed > 0:
+            report = report.with_note("{self.failed} failed")
+        if self.errors > 0:
+            report = report.with_note("{self.errors} errors")
+        if self.timeout > 0:
+            report = report.with_note("{self.timeout} timed out")
+        if self.skipped > 0:
+            report = report.with_note("{self.skipped} skipped")
+
+        report
+
+    fn format(use_color: bool) -> text:
+        val e = esc_char()
+        val bold = if use_color: "{e}[1m" else: ""
+        val green = if use_color: "{e}[32m" else: ""
+        val red = if use_color: "{e}[31m" else: ""
+        val yellow = if use_color: "{e}[33m" else: ""
+        val reset = if use_color: "{e}[0m" else: ""
+
+        var output = ""
+
+        # Show failures first
+        if self.has_failures():
+            output = output + "{bold}Failures:{reset}\n"
+            for failure in self.all_failures():
+                output = output + failure.format(use_color) + "\n\n"
+
+        # Summary line
+        output = output + "{bold}Test Summary:{reset}\n"
+
+        val status_color = if self.all_passed(): green else: red
+        output = output + "  {status_color}{self.passed}/{self.total_tests} passed{reset}"
+
+        if self.failed > 0:
+            output = output + ", {red}{self.failed} failed{reset}"
+        if self.errors > 0:
+            output = output + ", {red}{self.errors} errors{reset}"
+        if self.timeout > 0:
+            output = output + ", {yellow}{self.timeout} timeout{reset}"
+        if self.skipped > 0:
+            output = output + ", {yellow}{self.skipped} skipped{reset}"
+        if self.pending > 0:
+            output = output + ", {self.pending} pending"
+
+        output = output + "\n  Duration: {self.duration_ms}ms\n"
+
+        output
+
+    fn format_progress() -> text:
+        var symbols = ""
+        for suite in self.suites:
+            for result in suite.results:
+                symbols = symbols + result.status.symbol()
+        symbols
+
+# =============================================================================
+# TestReport: Unified test report (alias for convenience)
+# =============================================================================
+
+class TestReport:
+    summary: TestSummary
+
+impl TestReport:
+    static fn from_summary(summary: TestSummary) -> TestReport:
+        TestReport(summary: summary)
+
+    fn has_failures() -> bool:
+        self.summary.has_failures()
+
+    fn all_passed() -> bool:
+        self.summary.all_passed()
+
+    fn to_report() -> Report:
+        self.summary.to_report()
+
+    fn format(use_color: bool) -> text:
+        self.summary.format(use_color)

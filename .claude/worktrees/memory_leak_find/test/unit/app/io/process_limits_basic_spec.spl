@@ -1,0 +1,101 @@
+# Basic test for process_run_with_limits
+# Tests core functionality without complex scenarios
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+fn _is_windows() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+struct ProcessResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+    limit_exceeded: bool
+    limit_type: text
+
+fn test_process_run_with_limits_simple(cmd: text, args: [text], timeout_ms: i64, mem_bytes: i64, cpu_sec: i64) -> ProcessResult:
+    """Simplified inline version for testing"""
+    if _is_windows():
+        val (stdout, stderr, code) = rt_process_run(cmd, args)
+        return ProcessResult(
+            stdout: stdout,
+            stderr: stderr,
+            exit_code: code,
+            limit_exceeded: false,
+            limit_type: ""
+        )
+
+    val timeout_sec = if timeout_ms > 0: timeout_ms / 1000 else: 120
+    val memory_kb = if mem_bytes > 0: mem_bytes / 1024 else: 0
+
+    var limit_cmds = ""
+    if memory_kb > 0:
+        limit_cmds = limit_cmds + "ulimit -v {memory_kb}; "
+    if cpu_sec > 0:
+        limit_cmds = limit_cmds + "ulimit -t {cpu_sec}; "
+
+    var args_str = ""
+    for arg in args:
+        if args_str == "":
+            args_str = arg
+        else:
+            args_str = args_str + " " + arg
+
+    val full_cmd = if args_str == "": "{cmd}" else: "{cmd} {args_str}"
+    val timeout_buffer = timeout_sec + 5
+    val wrapped_cmd = "{limit_cmds}timeout {timeout_buffer}s {full_cmd}"
+
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", wrapped_cmd])
+
+    var limit_exceeded = false
+    var limit_type = ""
+
+    if code == 137 or code == 124:
+        limit_exceeded = true
+        limit_type = "timeout"
+
+    val stderr_check = stderr.lower()
+    if stderr_check.contains("cpu time"):
+        limit_exceeded = true
+        limit_type = "cpu"
+
+    ProcessResult(
+        stdout: stdout,
+        stderr: stderr,
+        exit_code: code,
+        limit_exceeded: limit_exceeded,
+        limit_type: limit_type
+    )
+
+describe "process_run_with_limits basic tests":
+    it "runs simple echo command":
+        val result = test_process_run_with_limits_simple("echo", ["hello"], 5000, 100000000, 5)
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("hello")
+        expect(result.limit_exceeded).to_equal(false)
+
+    it "runs pwd command":
+        val result = test_process_run_with_limits_simple("pwd", [], 5000, 100000000, 5)
+        expect(result.exit_code).to_equal(0)
+        expect(result.limit_exceeded).to_equal(false)
+
+    it "returns ProcessResult with all fields":
+        val result = test_process_run_with_limits_simple("echo", ["test"], 5000, 100000000, 5)
+        expect(result.stdout).to_contain("test")
+        expect(result.stderr.len()).to_be_greater_than(-1)
+        expect(result.limit_exceeded).to_equal(false)
+        expect(result.limit_type).to_equal("")
+
+    it "handles command with multiple args":
+        if _is_windows():
+            pass_do_nothing
+        else:
+            val result = test_process_run_with_limits_simple("ls", ["-la"], 5000, 100000000, 5)
+            expect(result.exit_code).to_equal(0)

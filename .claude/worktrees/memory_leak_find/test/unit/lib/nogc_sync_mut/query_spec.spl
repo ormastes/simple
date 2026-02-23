@@ -1,0 +1,711 @@
+"""
+# SDN Table Query API Specification
+
+**Feature IDs:** #SDN-100 to #SDN-110
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Provides a fluent query API for SDN named tables, enabling SQL-like
+queries on SDN database files (test_db.sdn, feature_db.sdn, etc.).
+
+## Syntax
+
+```simple
+use sdn.query.TableQuery.*
+
+val query = TableQuery.from(table)
+    .select(["name", "status"])
+    .filter(\row: row["status"] == "failed")
+    .order_by("name", Order.Asc)
+    .limit(10)
+
+val results = query.execute()
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| TableQuery | Fluent query builder for SDN tables |
+| Row | Dict representing a single table row with field access |
+| Predicate | Function taking Row and returning bool for filtering |
+
+## Behavior
+
+- Queries operate on SDN Table values with named fields
+- All operations are lazy until execute() is called
+- Results are returned as List of Row dicts
+- Supports chaining for fluent API
+"""
+
+use sdn.query.*
+use sdn.value.SdnValue.*
+use sdn.parser.parse.*
+
+# ============================================================================
+# Test Group 1: Basic Query Operations
+# ============================================================================
+
+describe "SDN Table Query":
+    """
+    ## Basic Query Operations
+
+    Tests for core query functionality on SDN named tables.
+    """
+
+    context "from table":
+        """
+        ### Creating queries from tables
+
+        TableQuery.from() creates a query from an SDN Table value.
+        """
+
+        it "creates query from named table":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val query = TableQuery.from(table)
+                            expect query.is_valid() == true
+                        case None:
+                            fail("Expected tests table")
+                case Err(e):
+                    fail("Parse error")
+
+        it "returns error for non-table value":
+            val source = """
+data:
+    key: value
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("data"):
+                        case Some(dict):
+                            val query = TableQuery.from(dict)
+                            expect query.is_valid() == false
+                        case None:
+                            fail("Expected data")
+                case Err(_):
+                    fail("Parse error")
+
+    context "select columns":
+        """
+        ### Selecting specific columns
+
+        select() limits which columns appear in results.
+        """
+
+        it "selects all columns by default":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table).execute()
+                            expect results.len() == 2
+                            expect results[0].has_key("id") == true
+                            expect results[0].has_key("name") == true
+                            expect results[0].has_key("status") == true
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "selects specific columns":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .select(["name", "status"])
+                                .execute()
+                            expect results.len() == 2
+                            expect results[0].has_key("id") == false
+                            expect results[0].has_key("name") == true
+                            expect results[0].has_key("status") == true
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "handles non-existent column gracefully":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .select(["name", "nonexistent"])
+                                .execute()
+                            expect results[0].has_key("name") == true
+                            expect results[0].has_key("nonexistent") == false
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+    context "filter clause":
+        """
+        ### Filtering rows
+
+        filter() filters rows based on a predicate function.
+        """
+
+        it "filters rows matching predicate":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "failed")
+                                .execute()
+                            expect results.len() == 1
+                            expect results[0].get_str("name") == "test2"
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "returns empty list when no matches":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "nonexistent")
+                                .execute()
+                            expect results.len() == 0
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "chains multiple filter clauses":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+    3, test3, hanging
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") != "passed")
+                                .filter(\row: row.get_i32("id") > 1)
+                                .execute()
+                            expect results.len() == 1
+                            expect results[0].get_str("name") == "test3"
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+    context "order by":
+        """
+        ### Sorting results
+
+        order_by() sorts results by a column.
+        """
+
+        it "orders by column ascending":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .order_by("name", Order.Asc)
+                                .execute()
+                            expect results[0].get_str("name") == "test1"
+                            expect results[1].get_str("name") == "test2"
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "orders by column descending":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .order_by("name", Order.Desc)
+                                .execute()
+                            expect results[0].get_str("name") == "test2"
+                            expect results[1].get_str("name") == "test1"
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "orders by numeric column":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .order_by("id", Order.Desc)
+                                .execute()
+                            expect results[0].get_i32("id") == 2
+                            expect results[1].get_i32("id") == 1
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+    context "limit and offset":
+        """
+        ### Pagination
+
+        limit() and offset() control result pagination.
+        """
+
+        it "limits results":
+            val source = """
+items |id, name|
+    1, item1
+    2, item2
+    3, item3
+    4, item4
+    5, item5
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("items"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .limit(3)
+                                .execute()
+                            expect results.len() == 3
+                        case None:
+                            fail("Expected items table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "applies offset":
+            val source = """
+items |id, name|
+    1, item1
+    2, item2
+    3, item3
+    4, item4
+    5, item5
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("items"):
+                        case Some(table):
+                            val results = TableQuery.from(table)
+                                .offset(2)
+                                .limit(2)
+                                .execute()
+                            expect results.len() == 2
+                            expect results[0].get_i32("id") == 3
+                        case None:
+                            fail("Expected items table")
+                case Err(_):
+                    fail("Parse error")
+
+    context "count":
+        """
+        ### Counting rows
+
+        count() returns the number of matching rows.
+        """
+
+        it "counts all rows":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val count = TableQuery.from(table).count()
+                            expect count == 2
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "counts filtered rows":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+    3, test3, hanging
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val count = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "failed")
+                                .count()
+                            expect count == 1
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+
+# ============================================================================
+# Test Group 2: Row Access Methods
+# ============================================================================
+
+describe "SDN Query Row":
+    """
+    ## Row Access Methods
+
+    Tests for Row helper methods that make querying easier.
+    """
+
+    context "type-safe accessors":
+        it "gets string value":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table).execute()
+                            expect results[0].get_str("name") == "test1"
+                            expect results[0].get_str("id") == ""
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "gets integer value":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table).execute()
+                            expect results[0].get_i32("id") == 1
+                            expect results[0].get_i32("name") == 0
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "gets value with default":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val results = TableQuery.from(table).execute()
+                            expect results[0].get_str_or("missing", "default") == "default"
+                            expect results[0].get_i32_or("missing", -1) == -1
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+
+# ============================================================================
+# Test Group 3: Parsing from SDN Source
+# ============================================================================
+
+describe "SDN Query from Source":
+    """
+    ## Querying SDN Source
+
+    Tests for querying tables parsed from SDN text.
+    """
+
+    context "parsing named tables":
+        it "queries parsed table":
+            val source = """
+tests |id, name, status|
+    1, test_a, passed
+    2, test_b, failed
+    3, test_c, passed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val failed = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "failed")
+                                .execute()
+
+                            expect failed.len() == 1
+                            expect failed[0].get_str("name") == "test_b"
+                        case None:
+                            fail("Expected tests table")
+                case Err(e):
+                    fail("Parse error: {e}")
+
+
+# ============================================================================
+# Test Group 4: Common Query Patterns
+# ============================================================================
+
+describe "SDN Query Patterns":
+    """
+    ## Common Query Patterns
+
+    Tests for typical query patterns used with test/feature databases.
+    """
+
+    context "test database queries":
+        it "finds failed tests":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+    3, test3, hanging
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val failed = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "failed")
+                                .select(["name", "status"])
+                                .execute()
+                            expect failed.len() == 1
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "finds hanging tests":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+    3, test3, hanging
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val hanging = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "hanging")
+                                .count()
+                            expect hanging == 1
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "summarizes by status":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+    3, test3, hanging
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val passed = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "passed")
+                                .count()
+                            val failed = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "failed")
+                                .count()
+                            val hanging = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "hanging")
+                                .count()
+                            expect passed == 1
+                            expect failed == 1
+                            expect hanging == 1
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+
+# ============================================================================
+# Test Group 5: Query Convenience Methods
+# ============================================================================
+
+describe "SDN Query Convenience":
+    """
+    ## Convenience Methods
+
+    High-level query methods for common operations.
+    """
+
+    context "first and last":
+        it "gets first matching row":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val first = TableQuery.from(table).first()
+                            expect first.is_some() == true
+                            expect first.unwrap().get_str("name") == "test1"
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "gets last matching row":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val last = TableQuery.from(table).last()
+                            expect last.is_some() == true
+                            expect last.unwrap().get_str("name") == "test2"
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "returns None when no rows":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val result = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "nonexistent")
+                                .first()
+                            expect result.is_none() == true
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+    context "any and is_empty":
+        it "checks if any matching rows":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+    3, test3, hanging
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val has_failed = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "failed")
+                                .any()
+                            expect has_failed == true
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+        it "checks if query result is empty":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+    3, test3, hanging
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val no_skipped = TableQuery.from(table)
+                                .filter(\row: row.get_str("status") == "skipped")
+                                .is_empty()
+                            expect no_skipped == true
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")
+
+    context "pluck single column":
+        it "extracts single column as list":
+            val source = """
+tests |id, name, status|
+    1, test1, passed
+    2, test2, failed
+"""
+            match parse(source):
+                case Ok(doc):
+                    match doc.get("tests"):
+                        case Some(table):
+                            val names = TableQuery.from(table).pluck("name")
+                            expect names.len() == 2
+                            expect names.contains("test1") == true
+                            expect names.contains("test2") == true
+                        case None:
+                            fail("Expected tests table")
+                case Err(_):
+                    fail("Parse error")

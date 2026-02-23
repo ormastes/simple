@@ -1,0 +1,81 @@
+# HostFuturesUnordered - Stream Futures
+#
+# Stream futures as each completes (unordered).
+
+use std.async_core.*
+use std.async_host.future.{HostFuture}
+
+class HostFuturesUnordered<T>:
+    """Dynamic collection of futures yielding as each completes.
+
+    Like Rust's futures::FuturesUnordered:
+    - Push futures dynamically
+    - Yields results as futures complete
+    - Efficient polling
+
+    Example:
+        var futs = HostFuturesUnordered<i64>.new()
+        futs.push(fetch1())
+        futs.push(fetch2())
+
+        while val Some(result) = await futs.next():
+            print "Got: {result}"
+    """
+    futures: [HostFuture<T>]
+    waker: Option<Waker>
+
+    static fn new() -> HostFuturesUnordered<T>:
+        HostFuturesUnordered(futures: [], waker: nil)
+
+    fn len() -> usize:
+        self.futures.len()
+
+    fn is_empty() -> bool:
+        self.futures.is_empty()
+
+    me push(f: HostFuture<T>):
+        """Add future to collection."""
+        self.futures = self.futures.push(f)
+
+    fn try_next() -> Option<T>:
+        """Non-blocking: poll all and return first ready."""
+        for idx in 0..self.futures.len():
+            if self.futures[idx].is_ready():
+                match self.futures[idx].poll():
+                    case Poll.Ready(value):
+                        self.futures = self.futures.remove(idx)
+                        return Some(value)
+                    case Poll.Pending:
+                        pass
+        nil
+
+    fn next() -> HostFuture<Option<T>>:
+        """Awaitable: get next completed result."""
+        match self.try_next():
+            case Some(value):
+                val ready: HostFuture<Option<T>> = HostFuture.ready(Some(value))
+                ready
+            case nil:
+                if self.is_empty():
+                    val ready_nil: HostFuture<Option<T>> = HostFuture.ready(nil)
+                    ready_nil
+                else:
+                    val pending: HostFuture<Option<T>> = HostFuture.pending()
+                    pending
+
+    fn poll_next(cx: Context) -> Poll<Option<T>>:
+        """Poll with context."""
+        match self.try_next():
+            case Some(value):
+                Poll.Ready(Some(value))
+            case nil:
+                if self.is_empty():
+                    Poll.Ready(nil)
+                else:
+                    self.waker = Some(cx.waker())
+                    Poll.Pending
+
+# Note: HostFuturesUnordered implements FuturesUnorderedCore<T> via duck typing
+
+
+export HostFuturesUnordered

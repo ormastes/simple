@@ -1,0 +1,116 @@
+# Module Resolution
+#
+# Resolves module paths to filesystem locations.
+# Backed by Lean 4 formal verification proofs.
+# Port of rust/dependency_tracker/src/resolution.rs
+
+use app.io.{file_exists}
+
+export ModPath, Segment, FileKind, ResolutionResult, resolve, well_formed
+export to_file_path, to_dir_path
+
+# A module path segment (non-empty identifier)
+struct Segment:
+    name: text
+
+impl Segment:
+    static fn from_name(name: text) -> Segment?:
+        if name.len() == 0:
+            nil
+        else:
+            Some(Segment(name: name))
+
+# A module path (non-empty list of segments, e.g., "crate.sys.http")
+struct ModPath:
+    segments: [Segment]
+
+impl ModPath:
+    static fn from_segments(segments: [Segment]) -> ModPath?:
+        if segments.len() == 0:
+            nil
+        else:
+            Some(ModPath(segments: segments))
+
+    # Parse a dot-separated path string
+    static fn parse(path: text) -> ModPath?:
+        val parts = path.split(".")
+        var segments = []
+        for part in parts:
+            val seg = Segment.from_name(part)
+            if seg.?:
+                segments.push(seg.unwrap())
+        ModPath.from_segments(segments)
+
+    fn is_absolute() -> bool:
+        self.segments.len() > 0 and self.segments[0].name == "crate"
+
+    fn without_crate_prefix() -> ModPath?:
+        if self.is_absolute() and self.segments.len() > 1:
+            ModPath.from_segments(self.segments[1:])
+        elif not self.is_absolute():
+            Some(self)
+        else:
+            nil
+
+    fn to_text() -> text:
+        self.segments.map(\s: s.name).join(".")
+
+# Module can be a file or directory with __init__.spl
+enum FileKind:
+    File        # foo.spl
+    Directory   # foo/__init__.spl
+
+# Resolution result
+enum ResolutionResult:
+    Unique(path: text, kind: FileKind)
+    Ambiguous(file_path: text, dir_path: text)
+    NotFound
+
+# Convert module path to file path (foo.spl)
+fn to_file_path(base: text, mod_path: ModPath) -> text:
+    val rel = mod_path.without_crate_prefix()
+    if not rel.?:
+        return base
+    val parts = rel.unwrap().segments.map(\s: s.name)
+    val last_idx = parts.len() - 1
+    var path = base
+    for i in 0..last_idx:
+        path = path + "/" + parts[i]
+    path + "/" + parts[last_idx] + ".spl"
+
+# Convert module path to directory path (foo/__init__.spl)
+fn to_dir_path(base: text, mod_path: ModPath) -> text:
+    val rel = mod_path.without_crate_prefix()
+    if not rel.?:
+        return base + "/__init__.spl"
+    val parts = rel.unwrap().segments.map(\s: s.name)
+    var path = base
+    for part in parts:
+        path = path + "/" + part
+    path + "/__init__.spl"
+
+# Resolve a module path to a filesystem location
+fn resolve(base: text, mod_path: ModPath) -> ResolutionResult:
+    val fp = to_file_path(base, mod_path)
+    val dp = to_dir_path(base, mod_path)
+
+    val fp_exists = file_exists(fp)
+    val dp_exists = file_exists(dp)
+
+    if fp_exists and dp_exists:
+        ResolutionResult.Ambiguous(file_path: fp, dir_path: dp)
+    elif fp_exists:
+        ResolutionResult.Unique(path: fp, kind: FileKind.File)
+    elif dp_exists:
+        ResolutionResult.Unique(path: dp, kind: FileKind.Directory)
+    else:
+        ResolutionResult.NotFound
+
+# Check if a filesystem is well-formed (no module has both file and dir form)
+fn well_formed(base: text, modules: [ModPath]) -> bool:
+    for mod_path in modules:
+        val fp = to_file_path(base, mod_path)
+        val dp = to_dir_path(base, mod_path)
+        if file_exists(fp) and file_exists(dp):
+            return false
+    true

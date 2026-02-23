@@ -1,0 +1,282 @@
+"""
+# MCP FileIO Main Intensive Specification
+
+Covers FileIOServer tool handlers and parsing helpers
+in `src/app/mcp/fileio_main.spl`.
+"""
+
+use std.spec
+use std.text.{NL}
+use app.io.mod.{shell}
+use app.io.file_ops.{file_write, file_read, file_exists}
+import app.mcp.fileio_main
+
+fn setup_server() -> FileIOServer:
+    val config_path = "/tmp/mcp_fileio_config.sdn"
+    val config = "protected_paths|pattern,type,action,reason{NL}" +
+        "\"/tmp/mcp_deny.txt\", exact, deny, \"deny\NL +
+        "\"/tmp/mcp_deny_dest.txt\", exact, deny, \"deny\NL +
+        "\"/tmp/mcp_redirect.txt\", exact, redirect, \"redirect\NL +
+        "\"/tmp/mcp_redirect_dest.txt\", exact, redirect, \"redirect\NL +
+        "\"/tmp/mcp_atomic.sdn\", exact, atomic, \"atomic\"{NL}"
+    file_write(config_path, config)
+    FileIOServer.init(config_path)
+
+fn write_text(path: text, content: text):
+    file_write(path, content)
+
+fn read_text(path: text) -> text:
+    file_read(path) ?? ""
+
+
+describe "FileIO Main - Parsing Helpers":
+    it "parses method and params":
+        expect(parse_method("{\"method\":\"ping\"}")).to_equal("ping")
+        expect(parse_method("{\"method\":123}")).to_equal("")
+        expect(parse_method("{}" )).to_equal("")
+        val json = "{\"params\":{\"name\":\"safe_read\",\"arguments\":{\"path\":\"x\"}}}"
+        val params = parse_params(json)
+        expect(params.contains("\"name\"" )).to_equal(true)
+        expect(parse_params("{\"id\":1}")).to_equal("{}")
+
+    it "parses arguments and handles missing values":
+        val server = setup_server()
+        expect(server.parse_arg("{\"path\":\"/tmp/x\"}", "path")).to_equal("/tmp/x")
+        expect(server.parse_arg("{\"path\":123}", "path")).to_equal("")
+        expect(server.parse_arg("{\"other\":\"x\"}", "path")).to_equal("")
+        expect(server.parse_path_arg("{\"path\":\"/tmp/y\"}")).to_equal("/tmp/y")
+        expect(server.parse_content_arg("{\"content\":\"hi\"}")).to_equal("hi")
+
+    it "formats file lists":
+        val server = setup_server()
+        expect(server.files_to_json([])).to_equal("[]")
+        val json = server.files_to_json(["a", "b"])
+        expect(json.contains("\"a\"")).to_equal(true)
+        expect(json.contains("\"b\"")).to_equal(true)
+
+    it "lists tools":
+        val resp = handle_tools_list("1")
+        expect(resp.contains("safe_read")).to_equal(true)
+        expect(resp.contains("safe_write")).to_equal(true)
+
+
+describe "FileIO Main - Safe Read":
+    it "reads allowed files":
+        val server = setup_server()
+        val path = "/tmp/mcp_allow_read.txt"
+        write_text(path, "hello")
+        val resp = server.tool_safe_read("{\"path\":\"{path}\"}")
+        expect(resp.contains("success")).to_equal(true)
+        expect(resp.contains("hello")).to_equal(true)
+
+    it "denies protected reads":
+        val server = setup_server()
+        val resp = server.tool_safe_read("{\"path\":\"/tmp/mcp_deny.txt\"}")
+        expect(resp.contains("Read denied")).to_equal(true)
+
+    it "reads redirected files":
+        val server = setup_server()
+        shell("mkdir -p tmp/fileio_temp")
+        write_text("tmp/fileio_temp/mcp_redirect.txt", "temp-data")
+        val resp = server.tool_safe_read("{\"path\":\"/tmp/mcp_redirect.txt\"}")
+        expect(resp.contains("temp-data")).to_equal(true)
+
+    it "reads atomic-protected files":
+        val server = setup_server()
+        val path = "/tmp/mcp_atomic.sdn"
+        write_text(path, "atomic")
+        val resp = server.tool_safe_read("{\"path\":\"{path}\"}")
+        expect(resp.contains("atomic")).to_equal(true)
+
+    it "handles missing path":
+        val server = setup_server()
+        val resp = server.tool_safe_read("{\"content\":\"x\"}")
+        expect(resp.contains("Missing 'path'")).to_equal(true)
+
+
+describe "FileIO Main - Safe Write/Delete/Append":
+    it "writes allowed files":
+        val server = setup_server()
+        val path = "/tmp/mcp_allow_write.txt"
+        val resp = server.tool_safe_write("{\"path\":\"{path}\",\"content\":\"hi\"}")
+        expect(resp.contains("success")).to_equal(true)
+        expect(read_text(path).contains("hi")).to_equal(true)
+
+    it "writes redirected files to temp":
+        val server = setup_server()
+        val path = "/tmp/mcp_redirect.txt"
+        val temp_path = server.temp_manager.get_temp_path(path)
+        val resp = server.tool_safe_write("{\"path\":\"{path}\",\"content\":\"temp\"}")
+        expect(resp.contains("temp")).to_equal(true)
+        expect(read_text(temp_path).contains("temp")).to_equal(true)
+
+    it "rejects atomic writes when required":
+        val server = setup_server()
+        val resp = server.tool_safe_write("{\"path\":\"/tmp/mcp_atomic.sdn\",\"content\":\"x\"}")
+        expect(resp.contains("Atomic write required")).to_equal(true)
+
+    it "rejects denied writes":
+        val server = setup_server()
+        val resp = server.tool_safe_write("{\"path\":\"/tmp/mcp_deny.txt\",\"content\":\"x\"}")
+        expect(resp.contains("Write denied")).to_equal(true)
+
+    it "deletes allowed files":
+        val server = setup_server()
+        val path = "/tmp/mcp_allow_delete.txt"
+        write_text(path, "bye")
+        val resp = server.tool_safe_delete("{\"path\":\"{path}\"}")
+        expect(resp.contains("success")).to_equal(true)
+        expect(file_exists(path)).to_equal(false)
+
+    it "deletes redirected temp files":
+        val server = setup_server()
+        val path = "/tmp/mcp_redirect.txt"
+        val temp_path = server.temp_manager.get_temp_path(path)
+        write_text(temp_path, "bye")
+        val resp = server.tool_safe_delete("{\"path\":\"{path}\"}")
+        expect(resp.contains("success")).to_equal(true)
+        expect(file_exists(temp_path)).to_equal(false)
+
+    it "rejects denied delete":
+        val server = setup_server()
+        val resp = server.tool_safe_delete("{\"path\":\"/tmp/mcp_deny.txt\"}")
+        expect(resp.contains("Delete denied")).to_equal(true)
+
+    it "rejects atomic delete":
+        val server = setup_server()
+        val resp = server.tool_safe_delete("{\"path\":\"/tmp/mcp_atomic.sdn\"}")
+        expect(resp.contains("Cannot delete atomic")).to_equal(true)
+
+    it "appends to allowed files":
+        val server = setup_server()
+        val path = "/tmp/mcp_allow_append.txt"
+        write_text(path, "a")
+        val resp = server.tool_safe_append("{\"path\":\"{path}\",\"content\":\"b\"}")
+        expect(resp.contains("success")).to_equal(true)
+        expect(read_text(path).contains("ab")).to_equal(true)
+
+    it "appends to redirected files":
+        val server = setup_server()
+        val path = "/tmp/mcp_redirect.txt"
+        val temp_path = server.temp_manager.get_temp_path(path)
+        write_text(temp_path, "a")
+        val resp = server.tool_safe_append("{\"path\":\"{path}\",\"content\":\"b\"}")
+        expect(resp.contains("temp")).to_equal(true)
+        expect(read_text(temp_path).contains("ab")).to_equal(true)
+
+    it "rejects append on atomic":
+        val server = setup_server()
+        val resp = server.tool_safe_append("{\"path\":\"/tmp/mcp_atomic.sdn\",\"content\":\"x\"}")
+        expect(resp.contains("Atomic write required")).to_equal(true)
+
+    it "rejects append on denied":
+        val server = setup_server()
+        val resp = server.tool_safe_append("{\"path\":\"/tmp/mcp_deny.txt\",\"content\":\"x\"}")
+        expect(resp.contains("Append denied")).to_equal(true)
+
+
+describe "FileIO Main - Copy and Move":
+    it "rejects copy when source denied":
+        val server = setup_server()
+        val resp = server.tool_safe_copy("{\"src\":\"/tmp/mcp_deny.txt\",\"dest\":\"/tmp/mcp_allow_copy.txt\"}")
+        expect(resp.contains("Source read denied")).to_equal(true)
+
+    it "copies to allowed destination":
+        val server = setup_server()
+        val src = "/tmp/mcp_src_copy.txt"
+        val dest = "/tmp/mcp_allow_copy.txt"
+        write_text(src, "copy")
+        val resp = server.tool_safe_copy("{\"src\":\"{src}\",\"dest\":\"{dest}\"}")
+        expect(resp.contains("success")).to_equal(true)
+        expect(read_text(dest).contains("copy")).to_equal(true)
+
+    it "copies to redirected destination":
+        val server = setup_server()
+        val src = "/tmp/mcp_src_copy2.txt"
+        val dest = "/tmp/mcp_redirect_dest.txt"
+        write_text(src, "copy2")
+        val temp_dest = server.temp_manager.get_temp_path(dest)
+        val resp = server.tool_safe_copy("{\"src\":\"{src}\",\"dest\":\"{dest}\"}")
+        expect(resp.contains("temp")).to_equal(true)
+        expect(read_text(temp_dest).contains("copy2")).to_equal(true)
+
+    it "rejects copy when dest denied":
+        val server = setup_server()
+        val resp = server.tool_safe_copy("{\"src\":\"/tmp/mcp_src_copy.txt\",\"dest\":\"/tmp/mcp_deny_dest.txt\"}")
+        expect(resp.contains("Destination write denied")).to_equal(true)
+
+    it "rejects copy when dest atomic":
+        val server = setup_server()
+        val resp = server.tool_safe_copy("{\"src\":\"/tmp/mcp_src_copy.txt\",\"dest\":\"/tmp/mcp_atomic.sdn\"}")
+        expect(resp.contains("Atomic write required")).to_equal(true)
+
+    it "rejects move when source denied":
+        val server = setup_server()
+        val resp = server.tool_safe_move("{\"src\":\"/tmp/mcp_deny.txt\",\"dest\":\"/tmp/mcp_allow_move.txt\"}")
+        expect(resp.contains("Source delete denied")).to_equal(true)
+
+    it "moves to allowed destination":
+        val server = setup_server()
+        val src = "/tmp/mcp_src_move.txt"
+        val dest = "/tmp/mcp_allow_move.txt"
+        write_text(src, "move")
+        val resp = server.tool_safe_move("{\"src\":\"{src}\",\"dest\":\"{dest}\"}")
+        expect(resp.contains("success")).to_equal(true)
+        expect(file_exists(src)).to_equal(false)
+        expect(read_text(dest).contains("move")).to_equal(true)
+
+    it "moves to redirected destination":
+        val server = setup_server()
+        val src = "/tmp/mcp_src_move2.txt"
+        val dest = "/tmp/mcp_redirect_dest.txt"
+        write_text(src, "move2")
+        val temp_dest = server.temp_manager.get_temp_path(dest)
+        val resp = server.tool_safe_move("{\"src\":\"{src}\",\"dest\":\"{dest}\"}")
+        expect(resp.contains("temp")).to_equal(true)
+        expect(read_text(temp_dest).contains("move2")).to_equal(true)
+
+    it "rejects move when dest denied":
+        val server = setup_server()
+        val resp = server.tool_safe_move("{\"src\":\"/tmp/mcp_src_move.txt\",\"dest\":\"/tmp/mcp_deny_dest.txt\"}")
+        expect(resp.contains("Destination write denied")).to_equal(true)
+
+    it "rejects move when dest atomic":
+        val server = setup_server()
+        val resp = server.tool_safe_move("{\"src\":\"/tmp/mcp_src_move.txt\",\"dest\":\"/tmp/mcp_atomic.sdn\"}")
+        expect(resp.contains("Atomic write required")).to_equal(true)
+
+
+describe "FileIO Main - Other Tools":
+    it "lists protected files and checks protection":
+        val server = setup_server()
+        val list_resp = server.tool_list_protected_files("{}")
+        expect(list_resp.contains("success")).to_equal(true)
+        val info_resp = server.tool_check_protection("{\"path\":\"/tmp/mcp_deny.txt\"}")
+        expect(info_resp.contains("Deny")).to_equal(true)
+
+    it "adds protection rules and handles missing pattern":
+        val server = setup_server()
+        val missing = server.tool_add_protection_rule("{}")
+        expect(missing.contains("Missing 'pattern'")).to_equal(true)
+        val rules = [
+            "{\"pattern\":\"/tmp/a\",\"type\":\"exact\",\"action\":\"deny\",\"reason\":\"r\"}",
+            "{\"pattern\":\"/tmp/b\",\"type\":\"glob\",\"action\":\"protect\",\"reason\":\"r\"}",
+            "{\"pattern\":\"/tmp/c\",\"type\":\"regex\",\"action\":\"redirect\",\"reason\":\"r\"}",
+            "{\"pattern\":\"/tmp/d\",\"type\":\"unknown\",\"action\":\"atomic\",\"reason\":\"r\"}",
+            "{\"pattern\":\"/tmp/e\",\"type\":\"exact\",\"action\":\"allow\",\"reason\":\"r\"}",
+            "{\"pattern\":\"/tmp/f\",\"type\":\"exact\",\"action\":\"unknown\",\"reason\":\"r\"}"
+        ]
+        for r in rules:
+            val resp = server.tool_add_protection_rule(r)
+            expect(resp.contains("success")).to_equal(true)
+
+    it "manages temp files":
+        val server = setup_server()
+        val temp_path = server.temp_manager.get_temp_path("/tmp/mcp_temp.txt")
+        write_text(temp_path, "temp")
+        val list_resp = server.tool_list_temp_files("{}")
+        expect(list_resp.contains("success")).to_equal(true)
+        val dir_resp = server.tool_get_temp_dir("{}")
+        expect(dir_resp.contains("tmp/fileio_temp")).to_equal(true)
+        val clean_resp = server.tool_cleanup_temp("{}")
+        expect(clean_resp.contains("success")).to_equal(true)

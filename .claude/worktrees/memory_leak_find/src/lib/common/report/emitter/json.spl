@@ -1,0 +1,305 @@
+# JSON Emitter
+#
+# Machine-readable JSON output for tooling integration.
+# Provides structured JSON output compatible with various tools.
+
+import ..level
+import ..location
+import ..report
+import ..collector
+
+export JsonEmitter, JsonStyle
+
+# =============================================================================
+# JsonStyle: Configuration for JSON output
+# =============================================================================
+
+class JsonStyle:
+    pretty: bool                # Pretty-print with indentation
+    indent: i64                 # Spaces per indent level (if pretty)
+    include_source: bool        # Include source snippets
+    include_suggestions: bool   # Include fix suggestions
+    wrap_in_array: bool         # Wrap single reports in array
+
+impl JsonStyle:
+    static fn default_style() -> JsonStyle:
+        JsonStyle(
+            pretty: false,
+            indent: 2,
+            include_source: false,
+            include_suggestions: true,
+            wrap_in_array: true
+        )
+
+    static fn pretty_style() -> JsonStyle:
+        JsonStyle(
+            pretty: true,
+            indent: 2,
+            include_source: true,
+            include_suggestions: true,
+            wrap_in_array: true
+        )
+
+    static fn compact() -> JsonStyle:
+        JsonStyle(
+            pretty: false,
+            indent: 0,
+            include_source: false,
+            include_suggestions: false,
+            wrap_in_array: false
+        )
+
+# =============================================================================
+# JsonEmitter: Emits JSON output
+# =============================================================================
+
+class JsonEmitter:
+    style: JsonStyle
+    sources: SourceRegistry
+
+impl JsonEmitter:
+    static fn default_emitter() -> JsonEmitter:
+        JsonEmitter(
+            style: JsonStyle.default_style(),
+            sources: SourceRegistry.empty()
+        )
+
+    static fn pretty() -> JsonEmitter:
+        JsonEmitter(
+            style: JsonStyle.pretty_style(),
+            sources: SourceRegistry.empty()
+        )
+
+    me add_source(path: text, content: text):
+        self.sources.add(path, content)
+
+    me set_style(style: JsonStyle):
+        self.style = style
+
+    # ==========================================================================
+    # JSON encoding helpers
+    # ==========================================================================
+
+    fn escape_string(s: text) -> text:
+        s.replace("\\", "\\\\")
+         .replace("\"", "\\\"")
+         .replace("\n", "\\n")
+         .replace("\r", "\\r")
+         .replace("\t", "\\t")
+
+    fn encode_string(s: text) -> text:
+        "\"{self.escape_string(s)}\""
+
+    fn encode_optional_string(s: text?) -> text:
+        if s.?:
+            self.encode_string(s.unwrap())
+        else:
+            "null"
+
+    fn encode_number(n: i64) -> text:
+        "{n}"
+
+    fn indent_str(level: i64) -> text:
+        if self.style.pretty:
+            " ".repeat(level * self.style.indent)
+        else:
+            ""
+
+    fn newline() -> text:
+        if self.style.pretty: "\n" else: ""
+
+    fn separator() -> text:
+        if self.style.pretty: ", " else: ","
+
+    # ==========================================================================
+    # Emit methods
+    # ==========================================================================
+
+    fn emit(report: Report) -> text:
+        self.emit_report(report, 0)
+
+    fn emit_report(report: Report, indent_level: i64) -> text:
+        val nl = self.newline()
+        val ind = self.indent_str(indent_level)
+        val ind1 = self.indent_str(indent_level + 1)
+        val ind2 = self.indent_str(indent_level + 2)
+
+        var obj = "{{$nl}"
+
+        # Core fields
+        obj = obj + "{ind1}\"level\": {self.encode_string(report.level.name())},{nl}"
+        obj = obj + "{ind1}\"kind\": {self.encode_string(report.kind.name())},{nl}"
+        obj = obj + "{ind1}\"message\": {self.encode_string(report.message)}"
+
+        # Optional code
+        if report.code.?:
+            obj = obj + ",{nl}{ind1}\"code\": {self.encode_string(report.code.unwrap())}"
+
+        # Optional source
+        if report.source_name.?:
+            obj = obj + ",{nl}{ind1}\"source\": {self.encode_string(report.source_name.unwrap())}"
+
+        # Location
+        if report.location.?:
+            obj = obj + ",{nl}{ind1}\"location\": " + self.emit_location(report.location.unwrap(), indent_level + 1)
+
+        # Labels
+        if not report.labels.is_empty():
+            obj = obj + ",{nl}{ind1}\"labels\": ["
+            var first = true
+            for label in report.labels:
+                if not first:
+                    obj = obj + ","
+                obj = obj + "{nl}{ind2}" + self.emit_label(label, indent_level + 2)
+                first = false
+            obj = obj + "{nl}{ind1}]"
+
+        # Notes
+        if not report.notes.is_empty():
+            obj = obj + ",{nl}{ind1}\"notes\": ["
+            var first = true
+            for note in report.notes:
+                if not first:
+                    obj = obj + ","
+                obj = obj + "{nl}{ind2}{self.encode_string(note)}"
+                first = false
+            obj = obj + "{nl}{ind1}]"
+
+        # Help
+        if not report.help.is_empty():
+            obj = obj + ",{nl}{ind1}\"help\": ["
+            var first = true
+            for h in report.help:
+                if not first:
+                    obj = obj + ","
+                obj = obj + "{nl}{ind2}{self.encode_string(h)}"
+                first = false
+            obj = obj + "{nl}{ind1}]"
+
+        # Suggestions
+        if self.style.include_suggestions and not report.suggestions.is_empty():
+            obj = obj + ",{nl}{ind1}\"suggestions\": ["
+            var first = true
+            for suggestion in report.suggestions:
+                if not first:
+                    obj = obj + ","
+                obj = obj + "{nl}{ind2}" + self.emit_suggestion(suggestion, indent_level + 2)
+                first = false
+            obj = obj + "{nl}{ind1}]"
+
+        obj = obj + "{nl}{ind}}}"
+        obj
+
+    fn emit_location(location: SourceLocation, indent_level: i64) -> text:
+        val nl = self.newline()
+        val ind = self.indent_str(indent_level)
+        val ind1 = self.indent_str(indent_level + 1)
+
+        var obj = "{{$nl}"
+        obj = obj + "{ind1}\"file\": {self.encode_string(location.file)},{nl}"
+        obj = obj + "{ind1}\"line\": {location.line},{nl}"
+        obj = obj + "{ind1}\"column\": {location.column}"
+
+        if location.end_line > 0:
+            obj = obj + ",{nl}{ind1}\"endLine\": {location.end_line}"
+        if location.end_column > 0:
+            obj = obj + ",{nl}{ind1}\"endColumn\": {location.end_column}"
+
+        if location.span.start > 0 or location.span.end > 0:
+            obj = obj + ",{nl}{ind1}\"span\": {{$nl}"
+            obj = obj + "{self.indent_str(indent_level + 2)}\"start\": {location.span.start},{nl}"
+            obj = obj + "{self.indent_str(indent_level + 2)}\"end\": {location.span.end}{nl}"
+            obj = obj + "{ind1}}}"
+
+        # Include source snippet if enabled
+        if self.style.include_source:
+            val source = self.sources.get(location.file)
+            if source.?:
+                val lines = source.unwrap().split("\n")
+                if location.line > 0 and location.line <= lines.len():
+                    val line_text = lines[location.line - 1]
+                    obj = obj + ",{nl}{ind1}\"sourceText\": {self.encode_string(line_text)}"
+
+        obj = obj + "{nl}{ind}}}"
+        obj
+
+    fn emit_label(label: Label, indent_level: i64) -> text:
+        val nl = self.newline()
+        val ind = self.indent_str(indent_level)
+        val ind1 = self.indent_str(indent_level + 1)
+
+        var obj = "{{$nl}"
+        obj = obj + "{ind1}\"message\": {self.encode_string(label.message)},{nl}"
+        obj = obj + "{ind1}\"primary\": {if label.primary: \"true\" else: \"false\"},{nl}"
+        obj = obj + "{ind1}\"location\": " + self.emit_location(label.location, indent_level + 1)
+        obj = obj + "{nl}{ind}}}"
+        obj
+
+    fn emit_suggestion(suggestion: Suggestion, indent_level: i64) -> text:
+        val nl = self.newline()
+        val ind = self.indent_str(indent_level)
+        val ind1 = self.indent_str(indent_level + 1)
+
+        var obj = "{{$nl}"
+        obj = obj + "{ind1}\"message\": {self.encode_string(suggestion.message)},{nl}"
+        obj = obj + "{ind1}\"newText\": {self.encode_string(suggestion.new_text)},{nl}"
+        obj = obj + "{ind1}\"confidence\": {self.encode_string(suggestion.confidence.name())},{nl}"
+        obj = obj + "{ind1}\"location\": " + self.emit_location(suggestion.location, indent_level + 1)
+        obj = obj + "{nl}{ind}}}"
+        obj
+
+    # ==========================================================================
+    # Emit multiple reports
+    # ==========================================================================
+
+    fn emit_all(reports: [Report]) -> text:
+        val nl = self.newline()
+        val ind1 = self.indent_str(1)
+
+        if reports.is_empty():
+            return "[]"
+
+        if reports.len() == 1 and not self.style.wrap_in_array:
+            return self.emit(reports[0])
+
+        var output = "[{nl}"
+        var first = true
+        for report in reports:
+            if not first:
+                output = output + ",{nl}"
+            output = output + "{ind1}" + self.emit_report(report, 1)
+            first = false
+        output = output + "{nl}]"
+        output
+
+    fn emit_collector(collector: ReportCollector) -> text:
+        val nl = self.newline()
+        val ind1 = self.indent_str(1)
+
+        val reports = collector.filter_displayable()
+
+        var output = "{{$nl}"
+        output = output + "{ind1}\"reports\": " + self.emit_all(reports) + ",{nl}"
+        output = output + "{ind1}\"summary\": {{$nl}"
+        output = output + "{self.indent_str(2)}\"total\": {collector.len()},{nl}"
+        output = output + "{self.indent_str(2)}\"errors\": {collector.error_count()},{nl}"
+        output = output + "{self.indent_str(2)}\"warnings\": {collector.warning_count()}{nl}"
+        output = output + "{ind1}}}{nl}"
+        output = output + "}}"
+        output
+
+    # ==========================================================================
+    # Line-delimited JSON (for streaming)
+    # ==========================================================================
+
+    fn emit_ndjson(reports: [Report]) -> text:
+        # Newline-delimited JSON (one JSON object per line)
+        var old_style = self.style
+        self.style = JsonStyle.compact()
+
+        var lines: [text] = []
+        for report in reports:
+            lines.push(self.emit(report))
+
+        self.style = old_style
+        lines.join("\n")

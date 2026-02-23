@@ -1,0 +1,416 @@
+# SDN Lexer
+#
+# Tokenizer with INDENT/DEDENT handling for indentation-significant parsing.
+# Port of rust/sdn/src/lexer.rs
+
+
+from value import {Span}
+
+export Token, TokenKind, Lexer, tokenize
+
+# Token kinds
+enum TokenKind:
+    # Literals
+    Integer(i64)
+    Float(f64)
+    Str(text)
+    Bool(bool)
+    Null
+
+    # Identifiers
+    Identifier(text)
+
+    # Keywords
+    Table
+
+    # Operators and punctuation
+    Colon       # :
+    Equals      # =
+    Pipe        # |
+    Comma       # ,
+    LBrace      # {
+    RBrace      # }
+    LBracket    # [
+    RBracket    # ]
+    LParen      # (
+    RParen      # )
+
+    # Whitespace-significant
+    Newline
+    Indent
+    Dedent
+
+    # End of file
+    Eof
+
+impl TokenKind:
+    fn name() -> text:
+        match self:
+            case TokenKind.Integer(_): "integer"
+            case TokenKind.Float(_): "float"
+            case TokenKind.Str(_): "string"
+            case TokenKind.Bool(_): "bool"
+            case TokenKind.Null: "null"
+            case TokenKind.Identifier(_): "identifier"
+            case TokenKind.Table: "table"
+            case TokenKind.Colon: ":"
+            case TokenKind.Equals: "="
+            case TokenKind.Pipe: "|"
+            case TokenKind.Comma: ","
+            case TokenKind.LBrace: "{"
+            case TokenKind.RBrace: "}"
+            case TokenKind.LBracket: "["
+            case TokenKind.RBracket: "]"
+            case TokenKind.LParen: "("
+            case TokenKind.RParen: ")"
+            case TokenKind.Newline: "newline"
+            case TokenKind.Indent: "INDENT"
+            case TokenKind.Dedent: "DEDENT"
+            case TokenKind.Eof: "EOF"
+
+    fn is_eof() -> bool:
+        match self:
+            case TokenKind.Eof: true
+            case _: false
+
+# Token with kind and source location
+struct Token:
+    kind: TokenKind
+    span: Span
+    lexeme: text
+
+# SDN Lexer with indentation tracking
+class Lexer:
+    source: text
+    pos: i64
+    line: i64
+    column: i64
+    indent_stack: [i64]
+    pending_tokens: [Token]
+    at_line_start: bool
+    bracket_depth: i64
+
+impl Lexer:
+    static fn from_source(source: text) -> Lexer:
+        Lexer(
+            source: source,
+            pos: 0,
+            line: 1,
+            column: 1,
+            indent_stack: [0],
+            pending_tokens: [],
+            at_line_start: true,
+            bracket_depth: 0
+        )
+
+    # Tokenize entire source into a list of tokens
+    fn tokenize() -> [Token]:
+        var tokens = []
+        while true:
+            val token = self.next_token()
+            val is_eof = token.kind.is_eof()
+            tokens.push(token)
+            if is_eof:
+                break
+        tokens
+
+    # Get the next token
+    me next_token() -> Token:
+        # Return pending tokens first (INDENT/DEDENT)
+        if self.pending_tokens.len() > 0:
+            return self.pending_tokens.pop()
+
+        # Handle indentation at line start
+        if self.at_line_start:
+            self.at_line_start = false
+            if self.bracket_depth == 0:
+                val indent_token = self.handle_indentation()
+                if indent_token.?:
+                    return indent_token.unwrap()
+            else:
+                # Skip whitespace inside brackets
+                while self.pos < self.source.len():
+                    val ch = self.source[self.pos]
+                    if ch == " " or ch == "\t":
+                        self.pos = self.pos + 1
+                        self.column = self.column + 1
+                    elif ch == "\n":
+                        self.pos = self.pos + 1
+                        self.line = self.line + 1
+                        self.column = 1
+                    else:
+                        break
+
+        self.skip_whitespace()
+
+        val start_pos = self.pos
+        val start_line = self.line
+        val start_col = self.column
+
+        # EOF
+        if self.pos >= self.source.len():
+            # Generate remaining DEDENTs
+            while self.indent_stack.len() > 1:
+                self.indent_stack.pop()
+                self.pending_tokens.push(Token(
+                    kind: TokenKind.Dedent,
+                    span: Span(start: start_pos, end: start_pos, line: start_line, column: start_col),
+                    lexeme: ""
+                ))
+            if self.pending_tokens.len() > 0:
+                return self.pending_tokens.pop()
+            return Token(
+                kind: TokenKind.Eof,
+                span: Span(start: start_pos, end: start_pos, line: start_line, column: start_col),
+                lexeme: ""
+            )
+
+        val ch = self.source[self.pos]
+        self.pos = self.pos + 1
+        self.column = self.column + 1
+
+        val kind = if ch == "\n":
+            self.line = self.line + 1
+            self.column = 1
+            self.at_line_start = true
+            TokenKind.Newline
+        elif ch == "(":
+            self.bracket_depth = self.bracket_depth + 1
+            TokenKind.LParen
+        elif ch == ")":
+            if self.bracket_depth > 0:
+                self.bracket_depth = self.bracket_depth - 1
+            TokenKind.RParen
+        elif ch == "[":
+            self.bracket_depth = self.bracket_depth + 1
+            TokenKind.LBracket
+        elif ch == "]":
+            if self.bracket_depth > 0:
+                self.bracket_depth = self.bracket_depth - 1
+            TokenKind.RBracket
+        elif ch == "{":
+            self.bracket_depth = self.bracket_depth + 1
+            TokenKind.LBrace
+        elif ch == "}":
+            if self.bracket_depth > 0:
+                self.bracket_depth = self.bracket_depth - 1
+            TokenKind.RBrace
+        elif ch == ",":
+            TokenKind.Comma
+        elif ch == ":":
+            TokenKind.Colon
+        elif ch == "=":
+            TokenKind.Equals
+        elif ch == "|":
+            TokenKind.Pipe
+        elif ch == "#":
+            self.skip_comment()
+            return self.next_token()
+        elif ch == "\"":
+            self.scan_string()
+        elif ch == "-" and self.pos < self.source.len() and self.source[self.pos].is_digit():
+            self.scan_number(ch)
+        elif ch.is_digit():
+            self.scan_number(ch)
+        elif ch.is_alpha() or ch == "_":
+            self.scan_identifier(ch)
+        else:
+            return self.next_token()
+
+        val end_pos = self.pos
+        val lexeme = self.source[start_pos:end_pos]
+        Token(
+            kind: kind,
+            span: Span(start: start_pos, end: end_pos, line: start_line, column: start_col),
+            lexeme: lexeme
+        )
+
+    me skip_whitespace():
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if ch == " " or ch == "\t":
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+            else:
+                break
+
+    me skip_comment():
+        while self.pos < self.source.len():
+            if self.source[self.pos] == "\n":
+                break
+            self.pos = self.pos + 1
+            self.column = self.column + 1
+
+    me handle_indentation() -> Token?:
+        val start_pos = self.pos
+        val start_line = self.line
+
+        # Count spaces at start of line
+        var indent = 0
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if ch == " ":
+                indent = indent + 1
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+            elif ch == "\t":
+                indent = indent + 4
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+            elif ch == "\n":
+                # Empty line - skip
+                self.pos = self.pos + 1
+                self.line = self.line + 1
+                self.column = 1
+                indent = 0
+            elif ch == "#":
+                # Comment line - skip
+                self.skip_comment()
+                if self.pos < self.source.len() and self.source[self.pos] == "\n":
+                    self.pos = self.pos + 1
+                    self.line = self.line + 1
+                    self.column = 1
+                    indent = 0
+                else:
+                    break
+            else:
+                break
+
+        val current_indent = self.indent_stack[-1]
+
+        if indent > current_indent:
+            self.indent_stack.push(indent)
+            Some(Token(
+                kind: TokenKind.Indent,
+                span: Span(start: start_pos, end: self.pos, line: start_line, column: 1),
+                lexeme: ""
+            ))
+        elif indent < current_indent:
+            # Multiple DEDENTs possible
+            while self.indent_stack.len() > 0:
+                val top = self.indent_stack[-1]
+                if top > indent:
+                    self.indent_stack.pop()
+                    self.pending_tokens.push(Token(
+                        kind: TokenKind.Dedent,
+                        span: Span(start: start_pos, end: self.pos, line: start_line, column: 1),
+                        lexeme: ""
+                    ))
+                else:
+                    break
+            if self.pending_tokens.len() > 0:
+                Some(self.pending_tokens.pop())
+            else:
+                nil
+        else:
+            nil
+
+    me scan_string() -> TokenKind:
+        var chars: [text] = []
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if ch == "\"":
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+                break
+            elif ch == "\\":
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+                if self.pos < self.source.len():
+                    val escaped = self.source[self.pos]
+                    self.pos = self.pos + 1
+                    self.column = self.column + 1
+                    if escaped == "n":
+                        chars = chars.push("\n")
+                    elif escaped == "t":
+                        chars = chars.push("\t")
+                    elif escaped == "r":
+                        chars = chars.push("\r")
+                    elif escaped == "\\":
+                        chars = chars.push("\\")
+                    elif escaped == "\"":
+                        chars = chars.push("\"")
+                    else:
+                        chars = chars.push("\\")
+                        chars = chars.push(escaped)
+            else:
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+                chars = chars.push(ch)
+        val value = chars.join("")
+        TokenKind.Str(value)
+
+    me scan_number(first: text) -> TokenKind:
+        var chars: [text] = [first]
+        var has_dot = false
+        var has_exp = false
+
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if ch.is_digit():
+                chars = chars.push(ch)
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+            elif ch == "_":
+                # Underscore separator
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+            elif ch == "." and not has_dot and not has_exp:
+                # Check if next char is digit
+                if self.pos + 1 < self.source.len() and self.source[self.pos + 1].is_digit():
+                    chars = chars.push(".")
+                    has_dot = true
+                    self.pos = self.pos + 1
+                    self.column = self.column + 1
+                else:
+                    break
+            elif (ch == "e" or ch == "E") and not has_exp:
+                chars = chars.push(ch)
+                has_exp = true
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+                # Handle optional sign
+                if self.pos < self.source.len():
+                    val sign = self.source[self.pos]
+                    if sign == "+" or sign == "-":
+                        chars = chars.push(sign)
+                        self.pos = self.pos + 1
+                        self.column = self.column + 1
+            else:
+                break
+
+        val value = chars.join("")
+        if has_dot or has_exp:
+            TokenKind.Float(value.to_f64() ?? 0.0)
+        else:
+            TokenKind.Int(value.to_i64() ?? 0)
+
+    me scan_identifier(first: text) -> TokenKind:
+        var chars: [text] = [first]
+
+        while self.pos < self.source.len():
+            val ch = self.source[self.pos]
+            if ch.is_alnum() or ch == "_" or ch == "/" or ch == "." or ch == "-" or ch == "#":
+                chars = chars.push(ch)
+                self.pos = self.pos + 1
+                self.column = self.column + 1
+            else:
+                break
+
+        val value = chars.join("")
+        # Check keywords
+        if value == "true":
+            TokenKind.Bool(true)
+        elif value == "false":
+            TokenKind.Bool(false)
+        elif value == "null" or value == "nil":
+            TokenKind.Null
+        elif value == "table":
+            TokenKind.Table
+        else:
+            TokenKind.Identifier(value)
+
+# Convenience function
+fn tokenize(source: text) -> [Token]:
+    var lexer = Lexer.from_source(source)
+    lexer.tokenize()

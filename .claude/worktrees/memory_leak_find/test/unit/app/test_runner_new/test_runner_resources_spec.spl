@@ -1,0 +1,239 @@
+# Test Runner Resources Tests
+
+use std.spec.{describe, it, expect}
+use test_runner_resources.{ResourceLimits, default_resource_limits, resource_limits_for_slow_tests}
+use test_runner_resources.{resource_limits_disabled, format_violation_alert, has_violations}
+use test_runner_resources.{format_resource_metrics, append_resource_info_to_output}
+use std.resource_tracker.{ResourceUsageRecord}
+
+describe "ResourceLimits":
+    it "creates default resource limits":
+        val limits = default_resource_limits()
+
+        expect(limits.cpu_percent_limit).to_equal(200.0)
+        expect(limits.memory_mb_limit).to_equal(512)
+        expect(limits.fd_limit).to_equal(1024)
+        expect(limits.enabled).to_equal(true)
+
+    it "creates limits for slow tests":
+        val limits = resource_limits_for_slow_tests()
+
+        expect(limits.cpu_percent_limit).to_equal(400.0)
+        expect(limits.memory_mb_limit).to_equal(1024)
+        expect(limits.fd_limit).to_equal(2048)
+        expect(limits.enabled).to_equal(true)
+
+    it "creates disabled limits":
+        val limits = resource_limits_disabled()
+
+        expect(limits.cpu_percent_limit).to_equal(0.0)
+        expect(limits.memory_mb_limit).to_equal(0)
+        expect(limits.enabled).to_equal(false)
+
+describe "format_violation_alert":
+    it "formats CPU violation alert":
+        val record = ResourceUsageRecord(
+            test_file: "test.spl",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 250.0,
+            max_memory_mb: 100,
+            avg_cpu_percent: 200.0,
+            avg_memory_mb: 90,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 1,
+            violations: "cpu"
+        )
+
+        val alert = format_violation_alert("test.spl", record)
+
+        expect(alert).to_contain("RESOURCE VIOLATION")
+        expect(alert).to_contain("test.spl")
+        expect(alert).to_contain("CPU")
+        expect(alert).to_contain("250")
+
+    it "formats memory violation alert":
+        val record = ResourceUsageRecord(
+            test_file: "test.spl",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 50.0,
+            max_memory_mb: 1024,
+            avg_cpu_percent: 40.0,
+            avg_memory_mb: 900,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 1,
+            violations: "memory"
+        )
+
+        val alert = format_violation_alert("test.spl", record)
+
+        expect(alert).to_contain("Memory")
+        expect(alert).to_contain("1024")
+
+    it "formats multiple violations":
+        val record = ResourceUsageRecord(
+            test_file: "test.spl",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 250.0,
+            max_memory_mb: 1024,
+            avg_cpu_percent: 200.0,
+            avg_memory_mb: 900,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 1,
+            violations: "cpu,memory"
+        )
+
+        val alert = format_violation_alert("test.spl", record)
+
+        expect(alert).to_contain("CPU")
+        expect(alert).to_contain("Memory")
+
+    it "returns empty string for no violations":
+        val record = ResourceUsageRecord(
+            test_file: "test.spl",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 50.0,
+            max_memory_mb: 100,
+            avg_cpu_percent: 40.0,
+            avg_memory_mb: 90,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 1,
+            violations: ""
+        )
+
+        val alert = format_violation_alert("test.spl", record)
+
+        expect(alert).to_equal("")
+
+describe "has_violations":
+    it "returns true for violations":
+        val record = ResourceUsageRecord(
+            test_file: "",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 0.0,
+            max_memory_mb: 0,
+            avg_cpu_percent: 0.0,
+            avg_memory_mb: 0,
+            max_open_fds: 0,
+            max_threads: 0,
+            sample_count: 0,
+            violations: "cpu"
+        )
+
+        expect(has_violations(record)).to_equal(true)
+
+    it "returns false for no violations":
+        val record = ResourceUsageRecord(
+            test_file: "",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 0.0,
+            max_memory_mb: 0,
+            avg_cpu_percent: 0.0,
+            avg_memory_mb: 0,
+            max_open_fds: 0,
+            max_threads: 0,
+            sample_count: 0,
+            violations: ""
+        )
+
+        expect(has_violations(record)).to_equal(false)
+
+describe "format_resource_metrics":
+    it "formats metrics as single line":
+        val record = ResourceUsageRecord(
+            test_file: "",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 125.5,
+            max_memory_mb: 256,
+            avg_cpu_percent: 100.0,
+            avg_memory_mb: 200,
+            max_open_fds: 42,
+            max_threads: 4,
+            sample_count: 10,
+            violations: ""
+        )
+
+        val formatted = format_resource_metrics(record)
+
+        expect(formatted).to_contain("CPU")
+        expect(formatted).to_contain("125.5")
+        expect(formatted).to_contain("Mem")
+        expect(formatted).to_contain("256")
+        expect(formatted).to_contain("FDs")
+        expect(formatted).to_contain("42")
+
+describe "append_resource_info_to_output":
+    it "appends resource info to output":
+        val record = ResourceUsageRecord(
+            test_file: "test.spl",
+            timestamp_ms: 0,
+            duration_ms: 500,
+            max_cpu_percent: 75.0,
+            max_memory_mb: 128,
+            avg_cpu_percent: 60.0,
+            avg_memory_mb: 100,
+            max_open_fds: 25,
+            max_threads: 3,
+            sample_count: 5,
+            violations: ""
+        )
+
+        val output = "Test output line 1\nTest output line 2"
+        val result = append_resource_info_to_output("test.spl", record, output)
+
+        expect(result).to_contain("Test output line 1")
+        expect(result).to_contain("Resource Usage")
+        expect(result).to_contain("CPU")
+        expect(result).to_contain("Memory")
+
+    it "includes violation warning in output":
+        val record = ResourceUsageRecord(
+            test_file: "test.spl",
+            timestamp_ms: 0,
+            duration_ms: 500,
+            max_cpu_percent: 250.0,
+            max_memory_mb: 128,
+            avg_cpu_percent: 200.0,
+            avg_memory_mb: 100,
+            max_open_fds: 25,
+            max_threads: 3,
+            sample_count: 5,
+            violations: "cpu"
+        )
+
+        val output = "Test passed"
+        val result = append_resource_info_to_output("test.spl", record, output)
+
+        expect(result).to_contain("WARNING")
+        expect(result).to_contain("Resource violations")
+        expect(result).to_contain("cpu")
+
+    it "returns original output when no samples":
+        val record = ResourceUsageRecord(
+            test_file: "test.spl",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 0.0,
+            max_memory_mb: 0,
+            avg_cpu_percent: 0.0,
+            avg_memory_mb: 0,
+            max_open_fds: 0,
+            max_threads: 0,
+            sample_count: 0,
+            violations: ""
+        )
+
+        val output = "Test output"
+        val result = append_resource_info_to_output("test.spl", record, output)
+
+        expect(result).to_equal(output)

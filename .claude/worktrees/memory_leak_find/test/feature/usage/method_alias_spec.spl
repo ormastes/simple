@@ -1,0 +1,96 @@
+"""
+# Method Alias Forwarding Specification
+
+**Feature IDs:** #FWD-002
+**Category:** Syntax
+**Difficulty:** 3/5
+**Status:** In Progress
+
+## Overview
+
+Tests that `alias fn` and `alias me` in class bodies desugar into
+correct forwarding methods. The desugar transforms:
+  `alias fn len = inner.len`       -> `fn len(): self.inner.len()`
+  `alias fn push(item) = inner.push` -> `fn push(item): self.inner.push(item)`
+  `alias me increment = inner.increment` -> `me increment(): self.inner.increment()`
+
+These tests verify the generated delegation patterns work correctly
+by writing the equivalent hand-expanded code.
+"""
+
+# ============================================================================
+# Inner types that will be forwarded to
+# ============================================================================
+
+class Counter:
+    count: i64
+    fn get_count() -> i64:
+        self.count
+    fn get_count_plus(n: i64) -> i64:
+        self.count + n
+    me increment():
+        self.count = self.count + 1
+    me add(n: i64):
+        self.count = self.count + n
+
+# Wrapper with hand-written delegation (what desugar generates)
+# alias fn get_count = inner.get_count
+# alias fn get_count_plus(n) = inner.get_count_plus
+# alias me increment = inner.increment
+# alias me add(n) = inner.add
+class Wrapper:
+    inner: Counter
+    fn get_count() -> i64:
+        self.inner.get_count()
+    fn get_count_plus(n: i64) -> i64:
+        self.inner.get_count_plus(n)
+    me increment():
+        self.inner.increment()
+    me add(n: i64):
+        self.inner.add(n)
+
+fn make_wrapper(n: i64) -> Wrapper:
+    Wrapper(inner: Counter(count: n))
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "method alias forwarding":
+    context "immutable forwarding (alias fn)":
+        it "forwards no-arg method":
+            val w = make_wrapper(42)
+            expect(w.get_count()).to_equal(42)
+
+        it "forwards method with argument":
+            val w = make_wrapper(10)
+            expect(w.get_count_plus(5)).to_equal(15)
+
+        it "forwards zero value correctly":
+            val w = make_wrapper(0)
+            expect(w.get_count()).to_equal(0)
+
+    context "mutable forwarding (alias me)":
+        it "forwards no-arg mutable method":
+            var w = make_wrapper(5)
+            w.increment()
+            expect(w.get_count()).to_equal(6)
+
+        it "forwards mutable method with argument":
+            var w = make_wrapper(10)
+            w.add(7)
+            expect(w.get_count()).to_equal(17)
+
+        it "chains multiple mutable forwards":
+            var w = make_wrapper(0)
+            w.increment()
+            w.increment()
+            w.add(10)
+            expect(w.get_count()).to_equal(12)
+
+    context "forwarding preserves inner state":
+        it "reads after mutation reflect changes":
+            var w = make_wrapper(100)
+            w.add(-50)
+            val result = w.get_count_plus(25)
+            expect(result).to_equal(75)

@@ -1,0 +1,225 @@
+# Leak Check - Report Generation
+#
+# Generates console, SDN, and Markdown reports from leak check results.
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+use types
+
+# Generate console-formatted report
+fn report_console(result: LeakCheckResult) -> text:
+    var output = ""
+    output = output + "=== Leak Check Report ===\n"
+    output = output + "Mode: {result.mode}\n"
+    output = output + "\n"
+
+    # Internal leaks section
+    if result.mode == "internal" or result.mode == "both":
+        output = output + "--- Internal (GC) Leak Detection ---\n"
+        if result.internal_leaks.len() == 0:
+            output = output + "No internal leaks detected.\n"
+        else:
+            output = output + "Leaked allocations: {result.internal_leaks.len()}\n"
+            var total_bytes: i64 = 0
+            for leak in result.internal_leaks:
+                total_bytes = total_bytes + leak.size
+                output = output + "  [{leak.type_id}] {leak.size} bytes"
+                if leak.source_file != "":
+                    output = output + " at {leak.source_file}:{leak.source_line}"
+                output = output + "\n"
+            output = output + "Total leaked: {format_bytes(total_bytes)}\n"
+        output = output + "\n"
+
+    # External leaks section
+    if result.mode == "external" or result.mode == "both":
+        val ext = result.external_report
+        output = output + "--- External ({ext.tool}) Leak Detection ---\n"
+        if ext.definitely_lost_bytes == 0 and ext.indirectly_lost_bytes == 0 and ext.possibly_lost_bytes == 0:
+            output = output + "No external leaks detected.\n"
+        else:
+            output = output + "Definitely lost: {format_bytes(ext.definitely_lost_bytes)}\n"
+            output = output + "Indirectly lost: {format_bytes(ext.indirectly_lost_bytes)}\n"
+            output = output + "Possibly lost:   {format_bytes(ext.possibly_lost_bytes)}\n"
+            output = output + "Still reachable: {format_bytes(ext.still_reachable_bytes)}\n"
+            output = output + "\n"
+            if ext.leaks.len() > 0:
+                output = output + "Leak details ({ext.leaks.len()} blocks):\n"
+                for leak in ext.leaks:
+                    output = output + "  {leak.category}: {format_bytes(leak.bytes)} in {leak.blocks} block(s)\n"
+                    for frame in leak.stack_frames:
+                        output = output + "    {frame}\n"
+        output = output + "\n"
+
+    # Verdict
+    if result.exit_code == 0:
+        output = output + "VERDICT: No leaks detected.\n"
+    else:
+        output = output + "VERDICT: Leaks detected!\n"
+
+    output
+
+# Generate SDN-formatted report
+fn report_sdn(result: LeakCheckResult) -> text:
+    var output = ""
+    output = output + "# Leak Check Report\n\n"
+
+    output = output + "leak_check:\n"
+    output = output + "    mode: \"{result.mode}\"\n"
+    output = output + "    duration_ms: {result.duration_ms}\n"
+    output = output + "    exit_code: {result.exit_code}\n"
+    output = output + "\n"
+
+    # Internal leaks
+    if result.mode == "internal" or result.mode == "both":
+        output = output + "internal_leaks |address, size, type_id, source_file, source_line|\n"
+        for leak in result.internal_leaks:
+            val escaped_file = escape_sdn(leak.source_file)
+            output = output + "    {leak.address}, {leak.size}, \"{leak.type_id}\", \"{escaped_file}\", {leak.source_line}\n"
+        output = output + "\n"
+
+    # External report
+    if result.mode == "external" or result.mode == "both":
+        val ext = result.external_report
+        output = output + "external_report:\n"
+        output = output + "    tool: \"{ext.tool}\"\n"
+        output = output + "    definitely_lost_bytes: {ext.definitely_lost_bytes}\n"
+        output = output + "    indirectly_lost_bytes: {ext.indirectly_lost_bytes}\n"
+        output = output + "    possibly_lost_bytes: {ext.possibly_lost_bytes}\n"
+        output = output + "    still_reachable_bytes: {ext.still_reachable_bytes}\n"
+        output = output + "\n"
+
+        output = output + "external_leaks |bytes, blocks, category|\n"
+        for leak in ext.leaks:
+            output = output + "    {leak.bytes}, {leak.blocks}, \"{leak.category}\"\n"
+        output = output + "\n"
+
+    output
+
+# Generate Markdown-formatted report
+fn report_markdown(result: LeakCheckResult) -> text:
+    var output = ""
+    output = output + "# Leak Check Report\n\n"
+    output = output + "**Mode:** {result.mode}\n\n"
+
+    # Internal leaks
+    if result.mode == "internal" or result.mode == "both":
+        output = output + "## Internal (GC) Leaks\n\n"
+        if result.internal_leaks.len() == 0:
+            output = output + "No internal leaks detected.\n\n"
+        else:
+            output = output + "| Address | Size | Type | Source | Line |\n"
+            output = output + "|---------|------|------|--------|------|\n"
+            for leak in result.internal_leaks:
+                output = output + "| {leak.address} | {format_bytes(leak.size)} | {leak.type_id} | {leak.source_file} | {leak.source_line} |\n"
+            output = output + "\n"
+
+    # External leaks
+    if result.mode == "external" or result.mode == "both":
+        val ext = result.external_report
+        output = output + "## External ({ext.tool}) Leaks\n\n"
+        output = output + "| Category | Bytes |\n"
+        output = output + "|----------|-------|\n"
+        output = output + "| Definitely lost | {format_bytes(ext.definitely_lost_bytes)} |\n"
+        output = output + "| Indirectly lost | {format_bytes(ext.indirectly_lost_bytes)} |\n"
+        output = output + "| Possibly lost | {format_bytes(ext.possibly_lost_bytes)} |\n"
+        output = output + "| Still reachable | {format_bytes(ext.still_reachable_bytes)} |\n"
+        output = output + "\n"
+
+        if ext.leaks.len() > 0:
+            output = output + "### Leak Details\n\n"
+            for leak in ext.leaks:
+                output = output + "**{leak.category}:** {format_bytes(leak.bytes)} in {leak.blocks} block(s)\n\n"
+                if leak.stack_frames.len() > 0:
+                    output = output + "```\n"
+                    for frame in leak.stack_frames:
+                        output = output + "{frame}\n"
+                    output = output + "```\n\n"
+
+    # Verdict
+    if result.exit_code == 0:
+        output = output + "## Verdict\n\nNo leaks detected.\n"
+    else:
+        output = output + "## Verdict\n\nLeaks detected!\n"
+
+    output
+
+# Format a histogram as ASCII bar chart for console output
+fn format_histogram_console(buckets: [AllocBucket], title: text) -> text:
+    var output = "{title}:\n"
+    if buckets.len() == 0:
+        output = output + "  (no data)\n"
+        return output
+
+    # Find max count for scaling
+    var max_count: i64 = 0
+    for bucket in buckets:
+        if bucket.count > max_count:
+            max_count = bucket.count
+
+    val bar_width = 40
+    for bucket in buckets:
+        # Pad label to 12 chars
+        var label = bucket.label
+        while label.len() < 12:
+            label = label + " "
+
+        # Calculate bar length
+        var bar_len = 0
+        if max_count > 0:
+            bar_len = (bucket.count * bar_width) / max_count
+            if bar_len == 0 and bucket.count > 0:
+                bar_len = 1
+
+        var bar = ""
+        var bi = 0
+        while bi < bar_len:
+            bar = bar + "#"
+            bi = bi + 1
+
+        output = output + "  {label} |{bar} ({bucket.count} allocs, {format_bytes(bucket.total_bytes)})\n"
+
+    output
+
+# Write report to file or stdout
+fn write_report(result: LeakCheckResult, cfg: LeakCheckConfig):
+    var report_text = ""
+    match cfg.report_format:
+        case ReportFormat.Console:
+            report_text = report_console(result)
+        case ReportFormat.Sdn:
+            report_text = report_sdn(result)
+        case ReportFormat.Markdown:
+            report_text = report_markdown(result)
+
+    if cfg.output_file != "":
+        if rt_file_write_text(cfg.output_file, report_text):
+            print "Report written to: {cfg.output_file}"
+        else:
+            print "Error: failed to write report to: {cfg.output_file}"
+    else:
+        print report_text
+
+# Format byte count with appropriate units
+fn format_bytes(bytes: i64) -> text:
+    if bytes >= 1073741824:
+        val gb = bytes / 1073741824
+        val remainder = (bytes % 1073741824) / 10737418
+        "{gb}.{remainder} GB"
+    elif bytes >= 1048576:
+        val mb = bytes / 1048576
+        val remainder = (bytes % 1048576) / 10485
+        "{mb}.{remainder} MB"
+    elif bytes >= 1024:
+        val kb = bytes / 1024
+        "{kb} KB"
+    else:
+        "{bytes} B"
+
+# Escape string for SDN format
+fn escape_sdn(s: text) -> text:
+    var result = s.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result
+
+export report_console, report_sdn, report_markdown
+export format_histogram_console, write_report, format_bytes, escape_sdn

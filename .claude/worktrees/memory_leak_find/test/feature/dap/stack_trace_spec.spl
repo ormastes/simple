@@ -1,0 +1,276 @@
+# DAP: Stack Trace Management
+"""
+**Category:** System/DAP
+**Status:** Passing
+**Priority:** P0
+
+Tests stack frame tracking and stack trace generation.
+
+## Features Tested
+
+- Pushing stack frames
+- Popping stack frames
+- Stack depth tracking
+- Stack trace formatting
+- Multiple frames in trace
+- Frame information accuracy
+
+## Stack Frame Format
+
+Each frame in the trace includes:
+- Function name
+- File path
+- Line number
+- Column number
+
+Format: "file:line:column:function_name"
+
+## Implementation
+
+Uses FFI functions:
+- debug_push_frame(func, file, line, column)
+- debug_pop_frame()
+- debug_stack_depth()
+- debug_stack_trace()
+"""
+
+use std.ffi.debug. {
+    debug_set_active, debug_push_frame, debug_pop_frame,
+    debug_stack_depth, debug_stack_trace
+}
+
+describe "Stack Frame Management":
+    """Tests for stack frame push/pop operations."""
+
+    describe "Pushing frames":
+        """Test adding frames to call stack."""
+
+        it "pushes a single frame":
+            debug_set_active(true)
+            val initial_depth = debug_stack_depth()
+
+            debug_push_frame("main", "main.spl", 10, 0)
+
+            val new_depth = debug_stack_depth()
+            expect(new_depth).to_equal(initial_depth + 1)
+
+        it "pushes multiple frames":
+            debug_set_active(true)
+            val initial_depth = debug_stack_depth()
+
+            debug_push_frame("main", "main.spl", 10, 0)
+            debug_push_frame("process", "utils.spl", 25, 5)
+            debug_push_frame("validate", "validation.spl", 42, 10)
+
+            val new_depth = debug_stack_depth()
+            expect(new_depth).to_equal(initial_depth + 3)
+
+        it "tracks frame information":
+            debug_set_active(true)
+            debug_push_frame("factorial", "math.spl", 15, 8)
+
+            val trace = debug_stack_trace()
+            expect(trace).to_contain("factorial")
+            expect(trace).to_contain("math.spl")
+
+    describe "Popping frames":
+        """Test removing frames from call stack."""
+
+        it "pops a single frame":
+            debug_set_active(true)
+            debug_push_frame("test", "test.spl", 10, 0)
+            val depth_before = debug_stack_depth()
+
+            debug_pop_frame()
+
+            val depth_after = debug_stack_depth()
+            expect(depth_after).to_equal(depth_before - 1)
+
+        it "pops frames in LIFO order":
+            debug_set_active(true)
+            debug_push_frame("func1", "file1.spl", 10, 0)
+            debug_push_frame("func2", "file2.spl", 20, 0)
+            debug_push_frame("func3", "file3.spl", 30, 0)
+
+            val depth_before = debug_stack_depth()
+            debug_pop_frame()
+            debug_pop_frame()
+
+            val depth_after = debug_stack_depth()
+            expect(depth_after).to_equal(depth_before - 2)
+
+        it "handles popping from empty stack":
+            debug_set_active(true)
+            # Should not crash
+            debug_pop_frame()
+
+            val depth = debug_stack_depth()
+            expect(depth).to(be_gte(0))
+
+    describe "Stack depth tracking":
+        """Test accurate depth counting."""
+
+        it "starts at zero depth":
+            debug_set_active(true)
+            # Fresh debug state should have depth 0
+            val depth = debug_stack_depth()
+            expect(depth).to(be_gte(0))
+
+        it "increments on push":
+            debug_set_active(true)
+            val initial = debug_stack_depth()
+
+            debug_push_frame("test", "test.spl", 10, 0)
+            expect(debug_stack_depth()).to_equal(initial + 1)
+
+            debug_push_frame("test", "test.spl", 10, 0)
+            expect(debug_stack_depth()).to_equal(initial + 2)
+
+        it "decrements on pop":
+            debug_set_active(true)
+            debug_push_frame("test", "test.spl", 10, 0)
+            debug_push_frame("test", "test.spl", 10, 0)
+            val depth_before = debug_stack_depth()
+
+            debug_pop_frame()
+            expect(debug_stack_depth()).to_equal(depth_before - 1)
+
+    describe "Stack trace generation":
+        """Test stack trace string generation."""
+
+        it "generates trace for single frame":
+            debug_set_active(true)
+            debug_push_frame("main", "main.spl", 42, 5)
+
+            val trace = debug_stack_trace()
+            expect(trace.len()).to(be_gt(0))
+            expect(trace).to_contain("main")
+
+        it "generates trace for multiple frames":
+            debug_set_active(true)
+            debug_push_frame("main", "main.spl", 10, 0)
+            debug_push_frame("process_data", "processor.spl", 55, 12)
+            debug_push_frame("validate_input", "validator.spl", 78, 8)
+
+            val trace = debug_stack_trace()
+            expect(trace).to_contain("main")
+            expect(trace).to_contain("process_data")
+            expect(trace).to_contain("validate_input")
+
+        it "includes file paths in trace":
+            debug_set_active(true)
+            debug_push_frame("func1", "src/app/module1.spl", 20, 0)
+            debug_push_frame("func2", "src/lib/module2.spl", 30, 0)
+
+            val trace = debug_stack_trace()
+            expect(trace).to_contain("module1.spl")
+            expect(trace).to_contain("module2.spl")
+
+        it "includes line numbers in trace":
+            debug_set_active(true)
+            debug_push_frame("func", "test.spl", 123, 0)
+
+            val trace = debug_stack_trace()
+            expect(trace).to_contain("123")
+
+        it "returns empty trace for empty stack":
+            debug_set_active(true)
+            # No frames pushed
+            val trace = debug_stack_trace()
+            # Should return empty or minimal trace
+            expect(trace.len()).to_be_greater_than(-1)
+
+    describe "Recursive call tracking":
+        """Test tracking recursive function calls."""
+
+        it "tracks recursive calls":
+            debug_set_active(true)
+            debug_push_frame("factorial", "math.spl", 10, 0)
+            debug_push_frame("factorial", "math.spl", 10, 0)  # Recursive
+            debug_push_frame("factorial", "math.spl", 10, 0)  # Recursive
+
+            val depth = debug_stack_depth()
+            expect(depth).to(be_gte(3))
+
+        it "maintains separate frame instances":
+            debug_set_active(true)
+            debug_push_frame("fib", "math.spl", 5, 0)
+            debug_push_frame("fib", "math.spl", 5, 0)
+            val trace = debug_stack_trace()
+
+            # Should show both instances
+            # Count occurrences of "fib" in trace
+            var count = 0
+            val lines = trace.split("\n")
+            for line in lines:
+                if line.contains("fib"):
+                    count = count + 1
+
+            expect(count).to(be_gte(2))
+
+    describe "Edge cases":
+        """Test boundary conditions and special cases."""
+
+        it "handles frames with zero line/column":
+            debug_set_active(true)
+            debug_push_frame("func", "test.spl", 0, 0)
+
+            val trace = debug_stack_trace()
+            expect(trace).to_contain("func")
+
+        it "handles frames with large line numbers":
+            debug_set_active(true)
+            debug_push_frame("func", "huge_file.spl", 999999, 500)
+
+            val trace = debug_stack_trace()
+            expect(trace).to_contain("999999")
+
+        it "handles empty function names":
+            debug_set_active(true)
+            debug_push_frame("", "test.spl", 10, 0)
+
+            val trace = debug_stack_trace()
+            # Should not crash
+            expect(trace.len()).to_be_greater_than(-1)
+
+        it "handles empty file paths":
+            debug_set_active(true)
+            debug_push_frame("func", "", 10, 0)
+
+            val trace = debug_stack_trace()
+            expect(trace).to_contain("func")
+
+        it "handles special characters in names":
+            debug_set_active(true)
+            debug_push_frame("func_with_underscores", "my-file.spl", 10, 0)
+
+            val trace = debug_stack_trace()
+            expect(trace).to_contain("func_with_underscores")
+
+    describe "Performance":
+        """Test performance with many frames."""
+
+        it "handles deep call stacks":
+            debug_set_active(true)
+
+            # Push 100 frames
+            for i in 0..100:
+                debug_push_frame("func", "test.spl", i, 0)
+
+            val depth = debug_stack_depth()
+            expect(depth).to(be_gte(100))
+
+            val trace = debug_stack_trace()
+            expect(trace.len()).to(be_gt(0))
+
+        it "efficiently pops many frames":
+            debug_set_active(true)
+
+            for i in 0..50:
+                debug_push_frame("func", "test.spl", i, 0)
+
+            for i in 0..50:
+                debug_pop_frame()
+
+            val depth = debug_stack_depth()
+            expect(depth).to(be_gte(0))

@@ -1,0 +1,505 @@
+# Core Simple — Arena-Based AST
+#
+# Shared core library: AST nodes stored in parallel arrays (arena pattern).
+# Each node is referenced by an i64 index. No structs, no enums with
+# payloads, no generics, no me methods.
+#
+# Node types:
+#   - Expr (expressions): integer tags in EXPR_* constants  (see ast_expr.spl)
+#   - Stmt (statements): integer tags in STMT_* constants   (see ast_stmt.spl)
+#   - Decl (declarations): integer tags in DECL_* constants (this file)
+#   - Param (function parameters)
+#   - Field (struct fields)
+#   - MatchArm (match case arms)
+
+# ===== Import from split modules =====
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
+
+# ===== Declaration Kind Tags =====
+val DECL_FN = 1
+val DECL_EXTERN_FN = 2
+val DECL_STRUCT = 3
+val DECL_VAL = 4
+val DECL_VAR = 5
+val DECL_USE = 6
+val DECL_EXPORT = 7
+val DECL_ENUM = 8
+val DECL_IMPL = 9
+val DECL_CLASS = 10
+val DECL_CE = 11         # ce NAME: computation expression invocation
+val DECL_LAZY_VAL = 12   # lazy val name = expr (module-level deferred init)
+
+# ===== Declaration Arena Pools =====
+var decl_tag: [i64] = []
+var decl_span: [i64] = []
+var decl_name: [text] = []
+var decl_params: [[i64]] = []
+var decl_param_names: [[text]] = []
+var decl_param_types: [[i64]] = []
+var decl_ret_type: [i64] = []
+var decl_body_stmts: [[i64]] = []
+var decl_field_names: [[text]] = []
+var decl_field_types: [[i64]] = []
+var decl_field_defaults: [[i64]] = []
+var decl_imports: [[text]] = []
+var decl_is_pub: [i64] = []
+var decl_is_async: [i64] = []
+var decl_is_comptime: [i64] = []
+var decl_type_params: [[text]] = []
+var decl_is_lazy: [i64] = []
+
+fn decl_count() -> i64:
+    decl_tag.len()
+
+fn decl_alloc(tag: i64, span_id: i64) -> i64:
+    val idx = decl_tag.len()
+    decl_tag.push(tag)
+    decl_span.push(span_id)
+    decl_name.push("")
+    decl_params.push([])
+    decl_param_names.push([])
+    decl_param_types.push([])
+    decl_ret_type.push(0)
+    decl_body_stmts.push([])
+    decl_field_names.push([])
+    decl_field_types.push([])
+    decl_field_defaults.push([])
+    decl_imports.push([])
+    decl_is_pub.push(0)
+    decl_is_async.push(0)
+    decl_is_comptime.push(0)
+    decl_type_params.push([])
+    decl_is_lazy.push(0)
+    idx
+
+# ===== Declaration Constructors =====
+
+fn decl_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, body: [i64], is_async: i64, type_params: [text], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_FN, span_id)
+    decl_name[idx] = name
+    decl_param_names[idx] = param_names
+    decl_param_types[idx] = param_types
+    decl_ret_type[idx] = ret_type
+    decl_body_stmts[idx] = body
+    decl_is_async[idx] = is_async
+    decl_type_params[idx] = type_params
+    idx
+
+fn decl_extern_fn(name: text, param_names: [text], param_types: [i64], ret_type: i64, type_params: [text], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_EXTERN_FN, span_id)
+    decl_name[idx] = name
+    decl_param_names[idx] = param_names
+    decl_param_types[idx] = param_types
+    decl_ret_type[idx] = ret_type
+    decl_type_params[idx] = type_params
+    idx
+
+fn decl_struct_def(name: text, field_names: [text], field_types: [i64], field_defaults: [i64], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_STRUCT, span_id)
+    decl_name[idx] = name
+    decl_field_names[idx] = field_names
+    decl_field_types[idx] = field_types
+    decl_field_defaults[idx] = field_defaults
+    idx
+
+fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_VAL, span_id)
+    decl_name[idx] = name
+    decl_ret_type[idx] = type_tag
+    var body: [i64] = []
+    body.push(init_expr)
+    decl_body_stmts[idx] = body
+    idx
+
+fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_LAZY_VAL, span_id)
+    decl_name[idx] = name
+    decl_ret_type[idx] = type_tag
+    var body: [i64] = []
+    body.push(init_expr)
+    decl_body_stmts[idx] = body
+    idx
+
+fn decl_var_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_VAR, span_id)
+    decl_name[idx] = name
+    decl_ret_type[idx] = type_tag
+    var body: [i64] = []
+    body.push(init_expr)
+    decl_body_stmts[idx] = body
+    idx
+
+fn decl_use_import(module_path: text, imported_names: [text], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_USE, span_id)
+    decl_name[idx] = module_path
+    decl_imports[idx] = imported_names
+    idx
+
+fn decl_export_names(names: [text], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_EXPORT, span_id)
+    decl_imports[idx] = names
+    idx
+
+fn decl_enum_def(name: text, variant_names: [text], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_ENUM, span_id)
+    decl_name[idx] = name
+    decl_field_names[idx] = variant_names
+    idx
+
+fn decl_impl_block(target_name: text, method_decl_ids: [i64], span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_IMPL, span_id)
+    decl_name[idx] = target_name
+    decl_body_stmts[idx] = method_decl_ids
+    idx
+
+fn decl_ce_block(builder_name: text, body_stmts: [i64], span_id: i64) -> i64:
+    # ce NAME: block — builder_name = computation expression builder name,
+    # body_stmts = list of statement indices in ce body
+    val idx = decl_alloc(DECL_CE, span_id)
+    decl_name[idx] = builder_name
+    decl_body_stmts[idx] = body_stmts
+    idx
+
+# ===== Declaration Accessors =====
+
+fn decl_get_tag(idx: i64) -> i64:
+    decl_tag[idx]
+
+fn decl_get_span(idx: i64) -> i64:
+    decl_span[idx]
+
+fn decl_get_name(idx: i64) -> text:
+    decl_name[idx]
+
+fn decl_get_param_names(idx: i64) -> [text]:
+    decl_param_names[idx]
+
+fn decl_get_param_types(idx: i64) -> [i64]:
+    decl_param_types[idx]
+
+fn decl_get_ret_type(idx: i64) -> i64:
+    decl_ret_type[idx]
+
+fn decl_get_body(idx: i64) -> [i64]:
+    decl_body_stmts[idx]
+
+fn decl_get_fields(idx: i64) -> [text]:
+    decl_field_names[idx]
+
+fn decl_get_field_types(idx: i64) -> [i64]:
+    decl_field_types[idx]
+
+fn decl_get_field_defaults(idx: i64) -> [i64]:
+    decl_field_defaults[idx]
+
+fn decl_get_imports(idx: i64) -> [text]:
+    decl_imports[idx]
+
+fn decl_get_is_pub(idx: i64) -> bool:
+    decl_is_pub[idx] == 1
+
+fn decl_get_is_async(idx: i64) -> i64:
+    decl_is_async[idx]
+
+fn decl_get_type_params(idx: i64) -> [text]:
+    decl_type_params[idx]
+
+fn decl_set_type_params(idx: i64, params: [text]):
+    decl_type_params[idx] = params
+
+fn decl_set_comptime(idx: i64):
+    decl_is_comptime[idx] = 1
+
+fn decl_get_is_comptime(idx: i64) -> bool:
+    if idx < 0: return false
+    if idx >= decl_is_comptime.len(): return false
+    decl_is_comptime[idx] == 1
+
+fn decl_set_lazy(idx: i64):
+    decl_is_lazy[idx] = 1
+
+fn decl_get_is_lazy(idx: i64) -> i64:
+    if idx < 0: return 0
+    if idx >= decl_is_lazy.len(): return 0
+    decl_is_lazy[idx]
+
+# ===== Match Arm Arena =====
+# A match arm is (pattern_expr, guard_expr, body_stmts, binding_name)
+
+var arm_pattern: [i64] = []
+var arm_guard: [i64] = []
+var arm_body: [[i64]] = []
+var arm_binding: [text] = []
+
+fn arm_new(pattern: i64, guard: i64, body: [i64]) -> i64:
+    val idx = arm_pattern.len()
+    arm_pattern.push(pattern)
+    arm_guard.push(guard)
+    arm_body.push(body)
+    arm_binding.push("")
+    idx
+
+fn arm_new_with_binding(pattern: i64, guard: i64, body: [i64], binding: text) -> i64:
+    val idx = arm_pattern.len()
+    arm_pattern.push(pattern)
+    arm_guard.push(guard)
+    arm_body.push(body)
+    arm_binding.push(binding)
+    idx
+
+fn arm_get_pattern(idx: i64) -> i64:
+    arm_pattern[idx]
+
+fn arm_get_guard(idx: i64) -> i64:
+    arm_guard[idx]
+
+fn arm_get_body(idx: i64) -> [i64]:
+    arm_body[idx]
+
+fn arm_get_binding(idx: i64) -> text:
+    arm_binding[idx]
+
+# ===== If Branch Arena =====
+# For elif chains: (cond_expr, then_stmts)
+# Stored separately from main if to support multiple elif branches.
+
+var elif_cond: [i64] = []
+var elif_body: [[i64]] = []
+var elif_else: [[i64]] = []
+
+fn elif_new(cond: i64, body: [i64], else_body: [i64]) -> i64:
+    val idx = elif_cond.len()
+    elif_cond.push(cond)
+    elif_body.push(body)
+    elif_else.push(else_body)
+    idx
+
+fn elif_get_cond(idx: i64) -> i64:
+    elif_cond[idx]
+
+fn elif_get_body(idx: i64) -> [i64]:
+    elif_body[idx]
+
+fn elif_get_else(idx: i64) -> [i64]:
+    elif_else[idx]
+
+# ===== Module (Top-Level AST) =====
+# A module is a list of declarations.
+
+var module_path: text = ""
+var module_decls: [i64] = []
+
+fn module_set_path(path: text):
+    module_path = path
+
+fn module_get_path() -> text:
+    module_path
+
+fn module_add_decl(decl_idx: i64):
+    module_decls.push(decl_idx)
+
+fn module_get_decls() -> [i64]:
+    module_decls
+
+# ===== AST Reset =====
+
+fn ast_reset():
+    expr_tag = []
+    expr_span = []
+    expr_i_val = []
+    expr_f_val = []
+    expr_s_val = []
+    expr_left = []
+    expr_right = []
+    expr_extra = []
+    expr_args = []
+    expr_stmts = []
+    stmt_tag = []
+    stmt_span = []
+    stmt_expr = []
+    stmt_name = []
+    stmt_type_tag = []
+    stmt_body = []
+    decl_tag = []
+    decl_span = []
+    decl_name = []
+    decl_params = []
+    decl_param_names = []
+    decl_param_types = []
+    decl_ret_type = []
+    decl_body_stmts = []
+    decl_field_names = []
+    decl_field_types = []
+    decl_field_defaults = []
+    decl_imports = []
+    decl_is_pub = []
+    decl_type_params = []
+    arm_pattern = []
+    arm_guard = []
+    arm_body = []
+    arm_binding = []
+    elif_cond = []
+    elif_body = []
+    elif_else = []
+    module_path = ""
+    module_decls = []
+    asm_arm_archs = []
+    asm_arm_os = []
+    asm_arm_abi = []
+    asm_arm_backend = []
+    asm_arm_ver_ops = []
+    asm_arm_ver_vals = []
+    asm_arm_asm_text = []
+    asm_arm_is_compile_error = []
+    asm_arm_error_msg = []
+    asm_arm_is_wildcard = []
+
+# ===== Struct Builders for Interpreter =====
+# These functions construct Core* structs from the arena arrays
+# Needed by the interpreter which expects struct-based access
+
+fn expr_get(idx: i64) -> CoreExpr:
+    CoreExpr(
+        tag: expr_tag[idx],
+        span_id: expr_span[idx],
+        i_val: expr_i_val[idx],
+        f_val: expr_f_val[idx],
+        s_val: expr_s_val[idx],
+        left: expr_left[idx],
+        right: expr_right[idx],
+        extra: expr_extra[idx],
+        args: expr_args[idx],
+        stmts: expr_stmts[idx]
+    )
+
+fn stmt_get(idx: i64) -> CoreStmt:
+    CoreStmt(
+        tag: stmt_tag[idx],
+        span_id: stmt_span[idx],
+        expr_idx: stmt_expr[idx],
+        name: stmt_name[idx],
+        type_tag: stmt_type_tag[idx],
+        body: stmt_body[idx]
+    )
+
+fn decl_get(idx: i64) -> CoreDecl:
+    CoreDecl(
+        tag: decl_tag[idx],
+        span_id: decl_span[idx],
+        name: decl_name[idx],
+        param_names: decl_param_names[idx],
+        param_types: decl_param_types[idx],
+        ret_type: decl_ret_type[idx],
+        body_stmts: decl_body_stmts[idx],
+        field_names: decl_field_names[idx],
+        field_types: decl_field_types[idx],
+        field_defaults: decl_field_defaults[idx],
+        imports: decl_imports[idx],
+        is_pub: decl_is_pub[idx],
+        type_params: decl_type_params[idx]
+    )
+
+# ===== Yield Detection Utilities =====
+# These access both expr and stmt pools so they stay in the unified module.
+
+fn expr_contains_yield(eid: i64) -> bool:
+    if eid < 0: return false
+    val tag = expr_tag[eid]
+    if tag == EXPR_YIELD: return true
+    if tag == EXPR_LAMBDA: return false
+    if expr_contains_yield(expr_left[eid]): return true
+    if expr_contains_yield(expr_right[eid]): return true
+    if expr_contains_yield(expr_extra[eid]): return true
+    for arg_eid in expr_args[eid]:
+        if expr_contains_yield(arg_eid): return true
+    for child_sid in expr_stmts[eid]:
+        if stmt_contains_yield(child_sid): return true
+    false
+
+fn stmt_contains_yield(sid: i64) -> bool:
+    if sid < 0: return false
+    if expr_contains_yield(stmt_expr[sid]): return true
+    for child_sid in stmt_body[sid]:
+        if stmt_contains_yield(child_sid): return true
+    false
+
+fn stmts_contain_yield(body_stmts: [i64]) -> bool:
+    for sid in body_stmts:
+        if stmt_contains_yield(sid): return true
+    false
+
+# ===== Re-exports from ast_expr =====
+export EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT
+export EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_INDEX
+export EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_ARRAY_LIT
+export EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK
+export EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE
+export EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_DICT_LIT, EXPR_LAMBDA
+export EXPR_STRUCT_LIT, EXPR_TUPLE, EXPR_SLICE
+export EXPR_NULL_COALESCE, EXPR_OPTIONAL_CHAIN, EXPR_CAST
+export EXPR_UNIT, EXPR_INTERPOLATED_STRING, EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN, EXPR_SUFFIXED_LIT
+export EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN, EXPR_ASYNC_BLOCK
+export EXPR_DO_BLOCK, EXPR_ATOM, EXPR_SPREAD, EXPR_ASM, EXPR_ASM_MATCH
+export expr_count, expr_alloc
+export expr_int_lit, expr_float_lit, expr_string_lit, expr_bool_lit, expr_nil_lit
+export expr_ident, expr_binary, expr_unary, expr_call, expr_index
+export expr_field_access, expr_method_call, expr_array_lit
+export expr_if_expr, expr_match_expr, expr_for_expr, expr_while_expr, expr_block
+export expr_return_expr, expr_break_expr, expr_continue_expr, expr_range
+export expr_assign, expr_compound_assign, expr_dict_lit, expr_lambda
+export expr_struct_lit, expr_tuple, expr_slice
+export expr_null_coalesce, expr_optional_chain, expr_cast
+export expr_unit, expr_interpolated_string, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn
+export expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool
+export expr_await, expr_yield, expr_spawn
+export expr_do_block, expr_atom, expr_spread, expr_asm, expr_asm_match, expr_asm_assert
+export expr_get_tag, expr_get_span, expr_get_int, expr_get_float, expr_get_str
+export expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_stmts
+export expr_kind_name
+export asm_arm_new, asm_arm_archs, asm_arm_os, asm_arm_abi, asm_arm_backend
+export asm_arm_ver_ops, asm_arm_ver_vals, asm_arm_asm_text
+export asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_is_wildcard
+
+# ===== Re-exports from ast_stmt =====
+export STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN
+export STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK
+export STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN, STMT_DEFER, STMT_ERRDEFER
+export stmt_count, stmt_alloc
+export stmt_expr_stmt, stmt_val_decl, stmt_var_decl, stmt_assign_stmt
+export stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt
+export stmt_match_stmt, stmt_block_stmt, stmt_break_stmt, stmt_continue_stmt
+export stmt_compound_assign_stmt, stmt_defer_stmt, stmt_errdefer_stmt
+export stmt_break_labeled, stmt_continue_labeled, stmt_labeled_loop
+export STMT_LABELED_LOOP
+export STMT_STATIC_FOR, stmt_static_for_stmt
+export STMT_COMPTIME, stmt_comptime_block
+export STMT_RECEIVE, stmt_receive_stmt
+export STMT_BIND, stmt_bind_stmt
+export STMT_LAZY_VAL_DECL, stmt_lazy_val_decl
+export STMT_ASM_ASSERT, stmt_asm_assert
+export stmt_get_tag, stmt_get_span, stmt_get_expr, stmt_get_name
+export stmt_get_type, stmt_get_body
+
+# ===== Exports from this file =====
+export stmts_contain_yield
+export decl_set_comptime, decl_get_is_comptime
+export decl_set_lazy, decl_get_is_lazy
+export DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_VAL, DECL_VAR
+export DECL_USE, DECL_EXPORT, DECL_ENUM, DECL_IMPL, DECL_CLASS
+export DECL_CE, decl_ce_block
+export DECL_LAZY_VAL, decl_lazy_val_binding
+export decl_count, decl_alloc
+export decl_fn, decl_extern_fn, decl_struct_def
+export decl_val_binding, decl_var_binding
+export decl_use_import, decl_export_names, decl_enum_def, decl_impl_block
+export decl_get_tag, decl_get_span, decl_get_name
+export decl_get_param_names, decl_get_param_types, decl_get_ret_type
+export decl_get_body, decl_get_fields, decl_get_field_types, decl_get_field_defaults
+export decl_get_imports, decl_get_is_pub, decl_get_is_async
+export decl_get_type_params, decl_set_type_params
+export arm_new, arm_new_with_binding, arm_get_pattern, arm_get_guard, arm_get_body, arm_get_binding
+export elif_new, elif_get_cond, elif_get_body, elif_get_else
+export module_set_path, module_get_path, module_add_decl, module_get_decls
+export ast_reset, expr_get, stmt_get, decl_get

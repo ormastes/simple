@@ -1,0 +1,116 @@
+"""
+MCP Tasks Specification
+Feature: MCP Task Lifecycle
+Category: MCP, Tasks
+Status: Complete
+"""
+
+use std.spec
+use app.mcp.tasks.{TaskManager, TaskInfo, task_state_to_string}
+
+describe "MCP Task Manager":
+    it "creates task with auto-incremented ID":
+        var mgr = TaskManager.create()
+        val id1 = mgr.enqueue("tools/call", "{}")
+        val id2 = mgr.enqueue("resources/read", "{}")
+        expect(id1).to_equal("task-1")
+        expect(id2).to_equal("task-2")
+
+    it "lists all tasks":
+        var mgr = TaskManager.create()
+        mgr.enqueue("tools/call", "{}")
+        mgr.enqueue("resources/read", "{}")
+        val tasks = mgr.list_tasks()
+        expect(tasks.len()).to_equal(2)
+
+    it "gets task by ID":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("tools/call", "{\"name\":\"read_code\"}")
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task.method).to_equal("tools/call")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "returns nil for non-existent task":
+        var mgr = TaskManager.create()
+        expect(mgr.get_task("nonexistent")).to_be_nil()
+
+describe "MCP Task State Transitions":
+    it "starts in pending state":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("pending")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "transitions to running":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        mgr.start_task(id)
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("running")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "transitions to completed":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        mgr.start_task(id)
+        mgr.complete_task(id, "{\"success\":true}")
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("completed")
+                expect(task.result_json.contains("success")).to_equal(true)
+            case nil:
+                expect(false).to_equal(true)
+
+    it "transitions to failed":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        mgr.start_task(id)
+        mgr.fail_task(id, "Something went wrong")
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("failed")
+                expect(task.error_msg).to_equal("Something went wrong")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "cancels a task":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        expect(mgr.cancel_task(id)).to_equal(true)
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("cancelled")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "returns false cancelling non-existent task":
+        var mgr = TaskManager.create()
+        expect(mgr.cancel_task("nonexistent")).to_equal(false)
+
+describe "MCP Task Progress":
+    it "updates progress":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        mgr.update_progress(id, 50, 100)
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task.progress).to_equal(50)
+                expect(task.total).to_equal(100)
+            case nil:
+                expect(false).to_equal(true)
+
+describe "MCP Task JSON Output":
+    it "produces valid JSON":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("tools/call", "{}")
+        val json = mgr.list_tasks_json()
+        expect(json.starts_with("[")).to_equal(true)
+        expect(json.ends_with("]")).to_equal(true)
+        expect(json.contains("tools/call")).to_equal(true)

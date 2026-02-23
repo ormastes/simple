@@ -1,0 +1,123 @@
+# Context Management and Environment Operations
+#
+# Manages the type inference context:
+# - Context initialization (new, with_builtins, with_dim_check_mode)
+# - Builtin function registration
+# - Environment operations (lookup, bind_mono, bind_poly)
+# - Error recording
+#
+# The context holds the type environment, substitution, trait solver,
+# and dimension solver state throughout type inference.
+
+use compiler.hir.hir.*
+use compiler.core.lexer.*
+use compiler.types.dim_constraints.*
+use compiler.traits.traits.*
+use type_infer_types.*
+
+impl HmInferContext:
+    # =========================================================================
+    # Context Construction
+    # =========================================================================
+
+    static fn new() -> HmInferContext:
+        """Create a new inference context at level 0.
+
+        Default dimension check mode is Assert (debug assertions).
+        """
+        HmInferContext(
+            env: empty_type_env(),
+            level: 0,
+            next_var: 0,
+            subst: Substitution.new(),
+            errors: [],
+            dim_solver: DimSolver.new(),
+            runtime_checks: DimCheckGenerator.new(DimCheckMode.Assert),
+            dim_check_mode: DimCheckMode.Assert,
+            trait_solver: TraitSolver.create(),
+            function_bounds: {}
+        )
+
+    static fn with_dim_check_mode(mode: DimCheckMode) -> HmInferContext:
+        """Create a new inference context with specified dimension check mode."""
+        HmInferContext(
+            env: empty_type_env(),
+            level: 0,
+            next_var: 0,
+            subst: Substitution.new(),
+            errors: [],
+            dim_solver: DimSolver.new(),
+            runtime_checks: DimCheckGenerator.new(mode),
+            dim_check_mode: mode,
+            trait_solver: TraitSolver.create(),
+            function_bounds: {}
+        )
+
+    static fn with_builtins() -> HmInferContext:
+        """Create a context with pre-defined builtins."""
+        var ctx = HmInferContext.new()
+        ctx.add_builtins()
+        ctx
+
+    # =========================================================================
+    # Builtin Registration
+    # =========================================================================
+
+    me add_builtins():
+        """Add built-in polymorphic functions."""
+        val dummy_span = Span(start: 0, end: 0, line: 0, col: 0)
+
+        # identity: forall a. a -> a
+        val a = self.fresh_var(dummy_span)
+        val identity_ty = HirType(
+            kind: HirTypeKind.Function([a], a, []),
+            span: dummy_span
+        )
+        val identity_scheme = self.generalize_all(identity_ty)
+        self.env["identity"] = identity_scheme
+
+        # print: forall a. a -> ()
+        val b = self.fresh_var(dummy_span)
+        val print_ty = HirType(
+            kind: HirTypeKind.Function([b], HirType(kind: HirTypeKind.Unit, span: dummy_span), []),
+            span: dummy_span
+        )
+        val print_scheme = self.generalize_all(print_ty)
+        self.env["print"] = print_scheme
+
+        # len: forall a. [a] -> i64
+        val c = self.fresh_var(dummy_span)
+        val len_ty = HirType(
+            kind: HirTypeKind.Function(
+                [HirType(kind: HirTypeKind.Array(c, nil), span: dummy_span)],
+                HirType(kind: HirTypeKind.Int(64, true), span: dummy_span),
+                []
+            ),
+            span: dummy_span
+        )
+        val len_scheme = self.generalize_all(len_ty)
+        self.env["len"] = len_scheme
+
+    # =========================================================================
+    # Environment Operations
+    # =========================================================================
+
+    me lookup(name: text, span: Span) -> Result<HirType, TypeInferError>:
+        """Look up a name in the environment and instantiate its scheme."""
+        if self.env[name].?:
+            val scheme = self.env[name]
+            Ok(self.instantiate(scheme))
+        else:
+            Err(TypeInferError.Undefined(name, span))
+
+    me bind_mono(name: text, ty: HirType):
+        """Bind a name to a monomorphic type (no generalization)."""
+        self.env[name] = TypeScheme.mono(ty)
+
+    me bind_poly(name: text, scheme: TypeScheme):
+        """Bind a name to a polymorphic type scheme."""
+        self.env[name] = scheme
+
+    me error(err: TypeInferError):
+        """Record an error."""
+        self.errors = self.errors.push(err)

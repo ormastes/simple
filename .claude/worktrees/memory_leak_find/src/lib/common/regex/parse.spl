@@ -1,0 +1,233 @@
+# Regular Expression Parsing Module
+
+import string
+from .types import CharClass
+
+# ============================================================================
+# CHARACTER CLASS PREDICATES
+# ============================================================================
+
+fn is_digit_char(ch: text) -> bool:
+    """Check if character is a digit (0-9)."""
+    val code = string.char_code(ch)
+    code >= 48 and code <= 57
+
+fn is_alpha_char(ch: text) -> bool:
+    """Check if character is alphabetic (a-z, A-Z)."""
+    val code = string.char_code(ch)
+    val is_upper = code >= 65 and code <= 90
+    val is_lower = code >= 97 and code <= 122
+    is_upper or is_lower
+
+fn is_alphanumeric_char(ch: text) -> bool:
+    """Check if character is alphanumeric."""
+    is_alpha_char(ch) or is_digit_char(ch)
+
+fn is_word_char(ch: text) -> bool:
+    """Check if character is a word character (alphanumeric or underscore)."""
+    is_alphanumeric_char(ch) or ch == "_"
+
+fn is_whitespace_char(ch: text) -> bool:
+    """Check if character is whitespace."""
+    ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+
+fn is_hex_digit_char(ch: text) -> bool:
+    """Check if character is a hexadecimal digit."""
+    val code = string.char_code(ch)
+    val is_num = code >= 48 and code <= 57
+    val is_upper_hex = code >= 65 and code <= 70
+    val is_lower_hex = code >= 97 and code <= 102
+    is_num or is_upper_hex or is_lower_hex
+
+fn is_special_char(ch: text) -> bool:
+    """Check if character has special meaning in regex."""
+    ch == "." or ch == "*" or ch == "+" or ch == "?" or ch == "|" or ch == "(" or ch == ")" or ch == "[" or ch == "]" or ch == "{" or ch == "}" or ch == "^" or ch == "$" or ch == "\\"
+
+# ============================================================================
+# ESCAPE SEQUENCES
+# ============================================================================
+
+fn escape_special(text_str: text) -> text:
+    """Escape special regex characters in text for literal matching."""
+    var result = ""
+    var i = 0
+    while i < text_str.len():
+        val ch = text_str[i:i + 1]
+        if is_special_char(ch):
+            result = result + "\\" + ch
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn unescape(text_str: text) -> text:
+    """Remove escape backslashes from text."""
+    var result = ""
+    var i = 0
+    while i < text_str.len():
+        val ch = text_str[i:i + 1]
+        if ch == "\\":
+            if i + 1 < text_str.len():
+                result = result + text_str[i + 1:i + 2]
+                i = i + 2
+            else:
+                result = result + ch
+                i = i + 1
+        else:
+            result = result + ch
+            i = i + 1
+    result
+
+fn expand_escape_sequence(esc: text) -> text:
+    """Expand escape sequence like \n, \t, \d, \w, \s to character class."""
+    if esc == "n": return "\n"
+    if esc == "t": return "\t"
+    if esc == "r": return "\r"
+    if esc == "d": return "0123456789"
+    if esc == "w": return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    if esc == "s": return " \t\n\r"
+    if esc == "D": return "NOT_DIGIT"
+    if esc == "W": return "NOT_WORD"
+    if esc == "S": return "NOT_SPACE"
+    esc
+
+fn is_escape_class(esc: text) -> bool:
+    """Check if escape sequence represents a character class."""
+    esc == "d" or esc == "w" or esc == "s" or esc == "D" or esc == "W" or esc == "S"
+
+# ============================================================================
+# CHARACTER CLASS PARSING
+# ============================================================================
+
+fn parse_char_class(pattern: text, start: i64) -> CharClass:
+    """Parse character class [...] or [^...] starting at position start.
+    Returns CharClass object. Assumes pattern[start] is '['."""
+    var negated = false
+    var pos = start + 1
+
+    # Check for negation
+    if pos < pattern.len() and pattern[pos:pos + 1] == "^":
+        negated = true
+        pos = pos + 1
+
+    var chars = ""
+    var ranges: [text] = []
+
+    # Parse until closing ]
+    while pos < pattern.len():
+        val ch = pattern[pos:pos + 1]
+
+        if ch == "]":
+            break
+
+        if ch == "\\":
+            # Escape sequence
+            if pos + 1 < pattern.len():
+                val esc = pattern[pos + 1:pos + 2]
+                val expanded = expand_escape_sequence(esc)
+                chars = chars + expanded
+                pos = pos + 2
+            else:
+                pos = pos + 1
+        else:
+            # Check for range (a-z)
+            val is_range_start = pos + 2 < pattern.len()
+            if is_range_start:
+                val next_ch = pattern[pos + 1:pos + 2]
+                if next_ch == "-":
+                    val range_end = pattern[pos + 2:pos + 3]
+                    val range_str = ch + "-" + range_end
+                    ranges = ranges.push(range_str)
+                    pos = pos + 3
+                else:
+                    chars = chars + ch
+                    pos = pos + 1
+            else:
+                chars = chars + ch
+                pos = pos + 1
+
+    CharClass(chars: chars, ranges: ranges, negated: negated)
+
+fn char_class_matches(cc: CharClass, ch: text) -> bool:
+    """Check if character matches character class."""
+    var matched = false
+
+    # Check direct character list
+    var i = 0
+    while i < cc.chars.len():
+        if cc.chars[i:i + 1] == ch:
+            matched = true
+            break
+        i = i + 1
+
+    # Check ranges
+    if not matched:
+        val code = string.char_code(ch)
+        for range_str in cc.ranges:
+            val start_ch = range_str[0:1]
+            val end_ch = range_str[2:3]
+            val start_code = string.char_code(start_ch)
+            val end_code = string.char_code(end_ch)
+            if code >= start_code and code <= end_code:
+                matched = true
+                break
+
+    # Apply negation
+    if cc.negated:
+        not matched
+    else:
+        matched
+
+# ============================================================================
+# PATTERN VALIDATION
+# ============================================================================
+
+fn is_valid_pattern(pattern: text) -> bool:
+    """Check if regex pattern is syntactically valid."""
+    val result = validate_pattern(pattern)
+    result == ""
+
+fn validate_pattern(pattern: text) -> text:
+    """Validate regex pattern. Returns empty string if valid, error message otherwise."""
+    var paren_depth = 0
+    var bracket_depth = 0
+    var i = 0
+
+    while i < pattern.len():
+        val ch = pattern[i:i + 1]
+
+        if ch == "\\":
+            # Escape sequence - skip next character
+            if i + 1 >= pattern.len():
+                return "Pattern ends with backslash"
+            i = i + 2
+        else:
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            else:
+                if ch == ")":
+                    paren_depth = paren_depth - 1
+                    if paren_depth < 0:
+                        return "Unmatched closing parenthesis"
+                else:
+                    if ch == "[":
+                        bracket_depth = bracket_depth + 1
+                    else:
+                        if ch == "]":
+                            bracket_depth = bracket_depth - 1
+                            if bracket_depth < 0:
+                                return "Unmatched closing bracket"
+            i = i + 1
+
+    if paren_depth != 0:
+        return "Unmatched opening parenthesis"
+    if bracket_depth != 0:
+        return "Unmatched opening bracket"
+
+    ""
+
+export is_digit_char, is_alpha_char, is_alphanumeric_char
+export is_word_char, is_whitespace_char, is_hex_digit_char, is_special_char
+export escape_special, unescape, expand_escape_sequence, is_escape_class
+export parse_char_class, char_class_matches
+export is_valid_pattern, validate_pattern

@@ -1,0 +1,235 @@
+# Tests for ImportGraph cycle detection (DFS algorithm)
+# Task #16: DFS cycle detection
+
+use compiler.dependency.graph.{
+    ImportKind, ImportEdge, CyclicDependencyError, ImportGraph
+}
+
+describe "ImportGraph cycle detection":
+    context "no cycles":
+        it "empty graph has no cycles":
+            val graph = ImportGraph.new()
+            val result = graph.check_cycles()
+            match result:
+                case Some(_):
+                    fail("Expected no cycle in empty graph")
+                case nil:
+                    pass
+
+        it "single module has no cycles":
+            var graph = ImportGraph.new()
+            graph.add_module("a")
+            val result = graph.check_cycles()
+            match result:
+                case Some(_):
+                    fail("Expected no cycle in single module")
+                case nil:
+                    pass
+
+        it "linear chain has no cycles":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "c")
+            graph.add_use("c", "d")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(_):
+                    fail("Expected no cycle in linear chain")
+                case nil:
+                    pass
+
+        it "tree structure has no cycles":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("a", "c")
+            graph.add_use("b", "d")
+            graph.add_use("b", "e")
+            graph.add_use("c", "f")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(_):
+                    fail("Expected no cycle in tree")
+                case nil:
+                    pass
+
+        it "diamond structure has no cycles":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("a", "c")
+            graph.add_use("b", "d")
+            graph.add_use("c", "d")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(_):
+                    fail("Expected no cycle in diamond")
+                case nil:
+                    pass
+
+    context "simple cycles":
+        it "detects self-loop":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "a")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val cycle = err.get_cycle()
+                    expect cycle.len() >= 2
+                case nil:
+                    fail("Expected cycle for self-loop")
+
+        it "detects two-node cycle":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "a")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val cycle = err.get_cycle()
+                    expect cycle.len() >= 2
+                case nil:
+                    fail("Expected cycle for a->b->a")
+
+        it "detects three-node cycle":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "c")
+            graph.add_use("c", "a")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val cycle = err.get_cycle()
+                    expect cycle.len() >= 3
+                case nil:
+                    fail("Expected cycle for a->b->c->a")
+
+    context "complex cycles":
+        it "detects cycle in larger graph":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "c")
+            graph.add_use("c", "d")
+            graph.add_use("d", "e")
+            graph.add_use("e", "b")  # Creates cycle b->c->d->e->b
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val cycle = err.get_cycle()
+                    expect cycle.len() >= 4
+                case nil:
+                    fail("Expected cycle in larger graph")
+
+        it "detects cycle with branches":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("a", "c")
+            graph.add_use("b", "d")
+            graph.add_use("c", "d")
+            graph.add_use("d", "a")  # Creates cycle a->b->d->a (or a->c->d->a)
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val cycle = err.get_cycle()
+                    expect cycle.len() >= 3
+                case nil:
+                    fail("Expected cycle with branches")
+
+        it "finds first cycle in graph with multiple cycles":
+            var graph = ImportGraph.new()
+            # Cycle 1: a->b->a
+            graph.add_use("a", "b")
+            graph.add_use("b", "a")
+            # Cycle 2: c->d->c
+            graph.add_use("c", "d")
+            graph.add_use("d", "c")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val cycle = err.get_cycle()
+                    expect cycle.len() >= 2
+                case nil:
+                    fail("Expected cycle in graph with multiple cycles")
+
+    context "type-only imports":
+        it "type-only import does not create cycle":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_type_use("b", "a")  # Type-only back-edge
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(_):
+                    fail("Expected no cycle with type-only import")
+                case nil:
+                    pass
+
+        it "mixed imports - cycle only through regular imports":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_type_use("b", "c")  # Type-only
+            graph.add_use("c", "a")  # Creates potential cycle if type edges counted
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(_):
+                    fail("Expected no cycle when type-only breaks the cycle")
+                case nil:
+                    pass
+
+        it "regular cycle detected even with type-only edges present":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "c")
+            graph.add_use("c", "a")  # Real cycle
+            graph.add_type_use("a", "d")  # Type-only edge (irrelevant)
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val cycle = err.get_cycle()
+                    expect cycle.len() >= 3
+                case nil:
+                    fail("Expected cycle through regular imports")
+
+    context "cycle path validation":
+        it "cycle path contains all nodes in cycle":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "c")
+            graph.add_use("c", "a")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val cycle = err.get_cycle()
+                    # Cycle should be [a, b, c, a] or [b, c, a, b] or [c, a, b, c]
+                    expect cycle.len() >= 3
+                    # First and last should be same (completing the cycle)
+                    if cycle.len() > 0:
+                        val first = cycle[0]
+                        val last = cycle[cycle.len() - 1]
+                        expect first == last
+                case nil:
+                    fail("Expected cycle")
+
+        it "error message contains cycle description":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "a")
+
+            val result = graph.check_cycles()
+            match result:
+                case Some(err):
+                    val msg = err.to_string()
+                    expect msg.contains("Circular dependency detected")
+                    expect msg.contains("->")
+                case nil:
+                    fail("Expected cycle error")
