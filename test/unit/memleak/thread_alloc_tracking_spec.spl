@@ -1,0 +1,81 @@
+# Thread/Mutex/Condvar Allocation Tracking Tests (WI-1)
+#
+# Verifies that threading primitive allocations in runtime_thread.c
+# use SPL_MALLOC/SPL_FREE macros instead of raw malloc/free.
+#
+# For actual ASan verification:
+#   ASAN_OPTIONS=detect_leaks=1 build-asan/simple test test/unit/memleak/thread_alloc_tracking_spec.spl
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "WI-1: runtime_thread.c includes memtrack header":
+    it "includes runtime_memtrack.h":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("#include \"runtime_memtrack.h\"")).to_equal(true)
+
+describe "WI-1: Thread allocations use SPL_MALLOC":
+    it "thread create uses SPL_MALLOC for pthread_t":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_MALLOC(sizeof(pthread_t), \"thread\")")).to_equal(true)
+
+    it "thread create error path uses SPL_FREE":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_FREE(thread)")).to_equal(true)
+
+describe "WI-1: Mutex allocations use SPL_MALLOC":
+    it "mutex create uses SPL_MALLOC for pthread_mutex_t":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_MALLOC(sizeof(pthread_mutex_t), \"mutex\")")).to_equal(true)
+
+    it "mutex error path uses SPL_FREE":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_FREE(mutex)")).to_equal(true)
+
+    it "Windows mutex uses SPL_MALLOC with cs_mutex tag":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_MALLOC(sizeof(CRITICAL_SECTION), \"cs_mutex\")")).to_equal(true)
+
+    it "Windows mutex destroy uses SPL_FREE":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_FREE(cs)")).to_equal(true)
+
+describe "WI-1: Condvar allocations use SPL_MALLOC":
+    it "condvar create uses SPL_MALLOC for pthread_cond_t":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_MALLOC(sizeof(pthread_cond_t), \"condvar\")")).to_equal(true)
+
+    it "condvar error path uses SPL_FREE":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_FREE(cond)")).to_equal(true)
+
+    it "Windows condvar uses SPL_MALLOC with cv_condvar tag":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_MALLOC(sizeof(CONDITION_VARIABLE), \"cv_condvar\")")).to_equal(true)
+
+    it "Windows condvar destroy uses SPL_FREE":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        expect(content.contains("SPL_FREE(cv)")).to_equal(true)
+
+describe "WI-1: No raw malloc/free in thread functions":
+    it "thread_create has no raw malloc":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        # All malloc calls should be SPL_MALLOC, except in static init
+        # Verify pthread_t allocation is tracked
+        val lines = content.split("\n")
+        var raw_thread_malloc = false
+        for line in lines:
+            val trimmed = line.trim()
+            if (trimmed.contains("malloc(sizeof(pthread_t))") and
+                not trimmed.contains("SPL_MALLOC")):
+                raw_thread_malloc = true
+        expect(raw_thread_malloc).to_equal(false)
+
+    it "thread pool spawn also uses SPL_MALLOC":
+        val content = rt_file_read_text("src/runtime/runtime_thread.c") ?? ""
+        # Count SPL_MALLOC for thread — should appear twice (create + pool_spawn)
+        var count = 0
+        val lines = content.split("\n")
+        for line in lines:
+            if line.contains("SPL_MALLOC(sizeof(pthread_t), \"thread\")"):
+                count = count + 1
+        expect(count).to_equal(2)

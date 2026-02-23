@@ -61,6 +61,34 @@ int64_t spl_memtrack_count_since(int64_t snapshot_id);
 /* Sum bytes of live allocations with alloc_id > snapshot_id */
 int64_t spl_memtrack_bytes_since(int64_t snapshot_id);
 
+/* ===== Allocation Listener ===== */
+
+/* Allocation event kinds */
+typedef enum {
+    SPL_ALLOC_MALLOC  = 0,
+    SPL_ALLOC_CALLOC  = 1,
+    SPL_ALLOC_REALLOC = 2,
+    SPL_ALLOC_STRDUP  = 3,
+    SPL_ALLOC_FREE    = 4
+} SplAllocEventKind;
+
+/* Allocation event (passed to listener callback) */
+typedef struct {
+    SplAllocEventKind kind;
+    void*       ptr;        /* New pointer (NULL for free) */
+    void*       old_ptr;    /* Previous pointer (realloc/free only) */
+    int64_t     size;       /* Requested size (0 for free) */
+    const char* tag;        /* Allocation tag */
+    int64_t     alloc_id;   /* Monotonic allocation ID */
+} SplAllocEvent;
+
+/* Listener callback type */
+typedef void (*spl_alloc_listener_fn)(const SplAllocEvent* event, void* user_data);
+
+/* Register/clear listener — only one listener active at a time */
+void spl_memtrack_set_listener(spl_alloc_listener_fn fn, void* user_data);
+void spl_memtrack_clear_listener(void);
+
 /* ===== Tracked allocation wrappers ===== */
 
 static inline void* spl_rt_malloc(size_t size, const char* tag) {

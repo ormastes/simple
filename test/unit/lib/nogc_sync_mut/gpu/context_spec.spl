@@ -1,46 +1,46 @@
 # NoGC GPU Context Tests
 #
 # Tests verify the NoGC GPU context module structural patterns:
-#   - GpuBackend enum and Gpu struct from common/gpu/device
+#   - DeviceBackend enum and Device struct from common/gpu/device
 #   - Context class with NoGC Stream (no owns_handle)
 #   - Backend detection and device constructors
 
 # ============================================================================
-# Mock GPU Backend enum and Gpu struct
+# Mock Device Backend enum and Device struct
 # (mirrors common/gpu/device.spl)
 # ============================================================================
 
-enum MockGpuBackend:
-    """GPU backend type (NoGC)."""
+enum MockDeviceBackend:
+    # Device backend type (NoGC).
     Cuda
     Vulkan
     None_
 
-struct MockGpu:
-    """GPU device handle (pure data, no ownership)."""
-    backend: MockGpuBackend
+struct MockDevice:
+    # Device handle (pure data, no ownership).
+    backend: MockDeviceBackend
     device_id: i32
     is_initialized: bool
 
-impl MockGpu:
+impl MockDevice:
     fn is_valid() -> bool:
         self.is_initialized
 
-    fn sync() -> bool:
+    fn sync_device() -> bool:
         true
 
-fn mock_gpu_cuda(device_id: i32) -> MockGpu:
-    MockGpu(backend: MockGpuBackend.Cuda, device_id: device_id, is_initialized: true)
+fn make_cuda_device(device_id: i32) -> MockDevice:
+    MockDevice(backend: MockDeviceBackend.Cuda, device_id: device_id, is_initialized: true)
 
-fn mock_gpu_none() -> MockGpu:
-    MockGpu(backend: MockGpuBackend.None, device_id: -1, is_initialized: true)
+fn make_none_device() -> MockDevice:
+    MockDevice(backend: MockDeviceBackend.None_, device_id: -1, is_initialized: true)
 
 # ============================================================================
 # Mock Stream (mirrors nogc_sync_mut/torch Stream — no owns_handle)
 # ============================================================================
 
 class MockStream:
-    """NoGC stream — no owns_handle, unconditional drop."""
+    # NoGC stream — no owns_handle, unconditional drop.
     handle: i64
     device_id: i64
 
@@ -49,10 +49,10 @@ class MockStream:
 
     fn drop():
         # Unconditional — unique ownership always owns
-        pass_dn
+        0
 
     fn synchronize():
-        pass_dn
+        0
 
     fn query() -> bool:
         true
@@ -62,35 +62,35 @@ class MockStream:
 # ============================================================================
 
 class MockContext:
-    """Mock GPU context — NoGC pattern."""
-    backend: MockGpuBackend
-    device: MockGpu
+    # Mock device context — NoGC pattern.
+    backend: MockDeviceBackend
+    device: MockDevice
     default_stream: MockStream?
 
     static fn default_ctx() -> MockContext:
-        val gpu = mock_gpu_cuda(0)
+        val dev = make_cuda_device(0)
         val stream = MockStream.create(0)
-        MockContext(backend: MockGpuBackend.Cuda, device: gpu, default_stream: Some(stream))
+        MockContext(backend: MockDeviceBackend.Cuda, device: dev, default_stream: Some(stream))
 
     static fn cpu_ctx() -> MockContext:
-        val gpu = mock_gpu_none()
-        MockContext(backend: MockGpuBackend.None, device: gpu, default_stream: nil)
+        val dev = make_none_device()
+        MockContext(backend: MockDeviceBackend.None_, device: dev, default_stream: nil)
 
     fn backend_name() -> text:
         match self.backend:
-            case MockGpuBackend.Cuda: "CUDA"
-            case MockGpuBackend.Vulkan: "Vulkan"
-            case MockGpuBackend.None: "CPU"
+            case MockDeviceBackend.Cuda: "CUDA"
+            case MockDeviceBackend.Vulkan: "Vulkan"
+            case MockDeviceBackend.None_: "CPU"
 
     fn device_id() -> i32:
         self.device.device_id
 
-    fn sync():
+    fn sync_device():
         match self.default_stream:
             case Some(s):
                 s.synchronize()
             case nil:
-                self.device.sync()
+                self.device.sync_device()
 
     fn drop():
         # NoGC: Stream? field — drop() is unconditional if present
@@ -100,31 +100,31 @@ class MockContext:
 # Tests
 # ============================================================================
 
-describe "NoGC GPU common types":
+describe "NoGC device common types":
 
-    it "GpuBackend enum variants are distinct":
-        val cuda = MockGpuBackend.Cuda
-        val vulkan = MockGpuBackend.Vulkan
-        val none = MockGpuBackend.None
+    it "DeviceBackend enum variants are distinct":
+        val cuda = MockDeviceBackend.Cuda
+        val vulkan = MockDeviceBackend.Vulkan
+        val none = MockDeviceBackend.None_
         expect(cuda == vulkan).to_equal(false)
         expect(cuda == none).to_equal(false)
 
-    it "gpu_cuda() creates valid Gpu struct":
-        val gpu = mock_gpu_cuda(0)
-        expect(gpu.is_valid()).to_equal(true)
-        expect(gpu.device_id).to_equal(0)
+    it "make_cuda_device creates valid device struct":
+        val dev = make_cuda_device(0)
+        expect(dev.is_valid()).to_equal(true)
+        expect(dev.device_id).to_equal(0)
 
-    it "gpu_none() creates CPU fallback with device_id -1":
-        val gpu = mock_gpu_none()
-        expect(gpu.is_valid()).to_equal(true)
-        expect(gpu.device_id).to_equal(-1)
+    it "make_none_device creates CPU fallback with device_id -1":
+        val dev = make_none_device()
+        expect(dev.is_valid()).to_equal(true)
+        expect(dev.device_id).to_equal(-1)
 
-    it "Gpu.sync() returns true (stub)":
-        val gpu = mock_gpu_cuda(0)
-        expect(gpu.sync()).to_equal(true)
+    it "Device.sync_device() returns true (stub)":
+        val dev = make_cuda_device(0)
+        expect(dev.sync_device()).to_equal(true)
 
 
-describe "NoGC GPU Context":
+describe "NoGC Device Context":
 
     it "Context has no owns_handle in Stream (NoGC invariant)":
         val ctx = MockContext.default_ctx()
@@ -159,12 +159,12 @@ describe "NoGC GPU Context":
             case nil:
                 expect(true).to_equal(true)
 
-    it "Context.sync() works with CUDA stream":
+    it "Context.sync_device() works with CUDA stream":
         val ctx = MockContext.default_ctx()
-        ctx.sync()
+        ctx.sync_device()
         expect(true).to_equal(true)
 
-    it "Context.sync() works with CPU fallback":
+    it "Context.sync_device() works with CPU fallback":
         val ctx = MockContext.cpu_ctx()
-        ctx.sync()
+        ctx.sync_device()
         expect(true).to_equal(true)

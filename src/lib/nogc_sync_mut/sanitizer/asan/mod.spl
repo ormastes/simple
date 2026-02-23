@@ -1,0 +1,149 @@
+# ASan — Address Sanitizer
+# @tag:api
+#
+# Cooperative address sanitizer for detecting:
+# - Use-after-free (accessing freed allocation)
+# - Double-free (freeing already-freed allocation)
+# - Buffer overflow (accessing beyond allocation bounds)
+#
+# Usage:
+#     asan_enable()
+#     val id = asan_on_alloc(1, 64, "buffer")
+#     asan_check_access(1)                    # ok
+#     asan_on_free(1)
+#     asan_check_access(1)                    # records error event
+#     asan_report()
+
+use types.{SanEvent, san_event}
+
+# =========================================================================
+# Module-level state (parallel arrays)
+# =========================================================================
+
+var g_asan_ids: [i64] = []
+var g_asan_sizes: [i64] = []
+var g_asan_tags: [text] = []
+var g_asan_freed: [bool] = []
+var g_asan_events: [SanEvent] = []
+var g_asan_enabled: bool = false
+
+# =========================================================================
+# Enable / Disable
+# =========================================================================
+
+fn asan_enable():
+    g_asan_enabled = true
+
+fn asan_disable():
+    g_asan_enabled = false
+
+fn asan_is_enabled() -> bool:
+    g_asan_enabled
+
+# =========================================================================
+# Internal lookup
+# =========================================================================
+
+fn asan_find_index(id: i64) -> i64:
+    var i = 0
+    while i < g_asan_ids.len():
+        if g_asan_ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+# =========================================================================
+# Allocation tracking
+# =========================================================================
+
+fn asan_on_alloc(id: i64, size: i64, tag: text):
+    if g_asan_enabled == false:
+        return
+    g_asan_ids.push(id)
+    g_asan_sizes.push(size)
+    g_asan_tags.push(tag)
+    g_asan_freed.push(false)
+
+fn asan_on_free(id: i64):
+    if g_asan_enabled == false:
+        return
+    val idx = asan_find_index(id)
+    if idx < 0:
+        g_asan_events.push(san_event("asan", "error", "free of unknown allocation id={id}", "asan_on_free"))
+        return
+    if g_asan_freed[idx] == true:
+        val tag = g_asan_tags[idx]
+        g_asan_events.push(san_event("asan", "fatal", "double-free detected for id={id} tag={tag}", "asan_on_free"))
+        return
+    g_asan_freed[idx] = true
+
+# =========================================================================
+# Access checking
+# =========================================================================
+
+fn asan_check_access(id: i64) -> bool:
+    if g_asan_enabled == false:
+        return true
+    val idx = asan_find_index(id)
+    if idx < 0:
+        g_asan_events.push(san_event("asan", "error", "access to unknown allocation id={id}", "asan_check_access"))
+        return false
+    if g_asan_freed[idx] == true:
+        val tag = g_asan_tags[idx]
+        g_asan_events.push(san_event("asan", "fatal", "use-after-free for id={id} tag={tag}", "asan_check_access"))
+        return false
+    true
+
+fn asan_check_bounds(id: i64, offset: i64, access_size: i64) -> bool:
+    if g_asan_enabled == false:
+        return true
+    val idx = asan_find_index(id)
+    if idx < 0:
+        g_asan_events.push(san_event("asan", "error", "bounds check on unknown allocation id={id}", "asan_check_bounds"))
+        return false
+    if g_asan_freed[idx] == true:
+        val tag = g_asan_tags[idx]
+        g_asan_events.push(san_event("asan", "fatal", "use-after-free for id={id} tag={tag}", "asan_check_bounds"))
+        return false
+    val alloc_size = g_asan_sizes[idx]
+    if offset < 0:
+        g_asan_events.push(san_event("asan", "fatal", "buffer underflow for id={id} offset={offset}", "asan_check_bounds"))
+        return false
+    if offset + access_size > alloc_size:
+        g_asan_events.push(san_event("asan", "fatal", "buffer overflow for id={id} offset={offset} access={access_size} size={alloc_size}", "asan_check_bounds"))
+        return false
+    true
+
+# =========================================================================
+# Reporting
+# =========================================================================
+
+fn asan_error_count() -> i64:
+    g_asan_events.len()
+
+fn asan_report():
+    if g_asan_events.len() == 0:
+        print "ASan: no errors detected"
+        return
+    print "ASan: {g_asan_events.len()} error(s) detected"
+    var i = 0
+    while i < g_asan_events.len():
+        val ev = g_asan_events[i]
+        print "  [{ev.severity}] {ev.message} at {ev.location}"
+        i = i + 1
+
+fn asan_get_events() -> [SanEvent]:
+    g_asan_events
+
+fn asan_reset():
+    g_asan_ids = []
+    g_asan_sizes = []
+    g_asan_tags = []
+    g_asan_freed = []
+    g_asan_events = []
+    g_asan_enabled = false
+
+export asan_enable, asan_disable, asan_is_enabled
+export asan_on_alloc, asan_on_free
+export asan_check_access, asan_check_bounds
+export asan_error_count, asan_report, asan_get_events, asan_reset

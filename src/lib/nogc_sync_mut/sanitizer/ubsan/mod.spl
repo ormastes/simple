@@ -1,0 +1,176 @@
+# UBSan — Undefined Behavior Sanitizer
+# @tag:api
+#
+# Pure arithmetic and safety checks. No FFI needed.
+# Detects: null deref, integer overflow, division by zero, bounds violations,
+# shift range violations, unreachable code.
+#
+# Usage:
+#     ubsan_enable()
+#     val result = ubsan_add_i64(9223372036854775807, 1)  # overflow!
+#     ubsan_check_index(5, 10)                             # out of bounds!
+#     ubsan_report()
+
+use types.{SanEvent, san_event}
+
+# =========================================================================
+# Constants
+# =========================================================================
+
+val UBSAN_MAX_I64: i64 = 9223372036854775807
+val UBSAN_MIN_I64: i64 = -9223372036854775807
+
+# =========================================================================
+# Module-level state
+# =========================================================================
+
+var g_ubsan_events: [SanEvent] = []
+var g_ubsan_enabled: bool = false
+
+# =========================================================================
+# Enable / Disable
+# =========================================================================
+
+fn ubsan_enable():
+    g_ubsan_enabled = true
+
+fn ubsan_disable():
+    g_ubsan_enabled = false
+
+fn ubsan_is_enabled() -> bool:
+    g_ubsan_enabled
+
+# =========================================================================
+# Null / nil check
+# =========================================================================
+
+fn ubsan_check_not_nil(value: i64, context: text) -> bool:
+    if g_ubsan_enabled == false:
+        return true
+    if value == 0:
+        g_ubsan_events.push(san_event("ubsan", "fatal", "null pointer dereference in {context}", "ubsan_check_not_nil"))
+        return false
+    true
+
+# =========================================================================
+# Overflow-checked arithmetic
+# =========================================================================
+
+fn ubsan_add_i64(a: i64, b: i64) -> i64:
+    if g_ubsan_enabled:
+        if b > 0:
+            if a > UBSAN_MAX_I64 - b:
+                g_ubsan_events.push(san_event("ubsan", "fatal", "signed integer overflow: {a} + {b}", "ubsan_add_i64"))
+        if b < 0:
+            if a < UBSAN_MIN_I64 - b:
+                g_ubsan_events.push(san_event("ubsan", "fatal", "signed integer underflow: {a} + {b}", "ubsan_add_i64"))
+    a + b
+
+fn ubsan_sub_i64(a: i64, b: i64) -> i64:
+    if g_ubsan_enabled:
+        if b < 0:
+            if a > UBSAN_MAX_I64 + b:
+                g_ubsan_events.push(san_event("ubsan", "fatal", "signed integer overflow: {a} - {b}", "ubsan_sub_i64"))
+        if b > 0:
+            if a < UBSAN_MIN_I64 + b:
+                g_ubsan_events.push(san_event("ubsan", "fatal", "signed integer underflow: {a} - {b}", "ubsan_sub_i64"))
+    a - b
+
+fn ubsan_mul_i64(a: i64, b: i64) -> i64:
+    if g_ubsan_enabled:
+        if a != 0:
+            if b != 0:
+                if a > 0:
+                    if b > 0:
+                        if a > UBSAN_MAX_I64 / b:
+                            g_ubsan_events.push(san_event("ubsan", "fatal", "signed integer overflow: {a} * {b}", "ubsan_mul_i64"))
+                    else:
+                        if b < UBSAN_MIN_I64 / a:
+                            g_ubsan_events.push(san_event("ubsan", "fatal", "signed integer underflow: {a} * {b}", "ubsan_mul_i64"))
+                else:
+                    if b > 0:
+                        if a < UBSAN_MIN_I64 / b:
+                            g_ubsan_events.push(san_event("ubsan", "fatal", "signed integer underflow: {a} * {b}", "ubsan_mul_i64"))
+                    else:
+                        if a < UBSAN_MAX_I64 / b:
+                            g_ubsan_events.push(san_event("ubsan", "fatal", "signed integer overflow: {a} * {b}", "ubsan_mul_i64"))
+    a * b
+
+fn ubsan_div_i64(a: i64, b: i64) -> i64:
+    if g_ubsan_enabled:
+        if b == 0:
+            g_ubsan_events.push(san_event("ubsan", "fatal", "division by zero: {a} / 0", "ubsan_div_i64"))
+            return 0
+    if b == 0:
+        return 0
+    a / b
+
+# =========================================================================
+# Shift check
+# =========================================================================
+
+fn ubsan_shl_i64(a: i64, shift: i64) -> i64:
+    if g_ubsan_enabled:
+        if shift < 0:
+            g_ubsan_events.push(san_event("ubsan", "error", "negative shift amount: {a} << {shift}", "ubsan_shl_i64"))
+            return a
+        if shift >= 64:
+            g_ubsan_events.push(san_event("ubsan", "error", "shift exceeds bit width: {a} << {shift}", "ubsan_shl_i64"))
+            return 0
+    a
+
+# =========================================================================
+# Bounds check
+# =========================================================================
+
+fn ubsan_check_index(arr_len: i64, idx: i64) -> bool:
+    if g_ubsan_enabled == false:
+        return true
+    if idx < 0:
+        g_ubsan_events.push(san_event("ubsan", "fatal", "index out of bounds: index {idx} < 0", "ubsan_check_index"))
+        return false
+    if idx >= arr_len:
+        g_ubsan_events.push(san_event("ubsan", "fatal", "index out of bounds: index {idx} >= length {arr_len}", "ubsan_check_index"))
+        return false
+    true
+
+# =========================================================================
+# Unreachable
+# =========================================================================
+
+fn ubsan_unreachable(context: text):
+    if g_ubsan_enabled:
+        g_ubsan_events.push(san_event("ubsan", "fatal", "reached unreachable code in {context}", "ubsan_unreachable"))
+
+# =========================================================================
+# Reporting
+# =========================================================================
+
+fn ubsan_error_count() -> i64:
+    g_ubsan_events.len()
+
+fn ubsan_report():
+    if g_ubsan_events.len() == 0:
+        print "UBSan: no errors detected"
+        return
+    print "UBSan: {g_ubsan_events.len()} error(s) detected"
+    var i = 0
+    while i < g_ubsan_events.len():
+        val ev = g_ubsan_events[i]
+        print "  [{ev.severity}] {ev.message} at {ev.location}"
+        i = i + 1
+
+fn ubsan_get_events() -> [SanEvent]:
+    g_ubsan_events
+
+fn ubsan_reset():
+    g_ubsan_events = []
+    g_ubsan_enabled = false
+
+export ubsan_enable, ubsan_disable, ubsan_is_enabled
+export ubsan_check_not_nil
+export ubsan_add_i64, ubsan_sub_i64, ubsan_mul_i64, ubsan_div_i64
+export ubsan_shl_i64
+export ubsan_check_index
+export ubsan_unreachable
+export ubsan_error_count, ubsan_report, ubsan_get_events, ubsan_reset

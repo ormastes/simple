@@ -1,0 +1,230 @@
+# TSan — Thread Sanitizer
+# @tag:api
+#
+# Simplified happens-before race detector. Tracks recent accesses per variable
+# and detects conflicting unsynchronized accesses from different threads.
+# Also tracks lock ordering to detect potential deadlocks.
+#
+# Usage:
+#     tsan_enable()
+#     tsan_write("counter", "main.spl:10")     # from thread 1
+#     tsan_read("counter", "worker.spl:20")     # from thread 2 — race!
+#     tsan_report()
+
+use types.{SanEvent, san_event}
+
+# =========================================================================
+# Module-level state
+# =========================================================================
+
+# Recent accesses — parallel arrays
+var g_tsan_var_ids: [text] = []
+var g_tsan_thread_ids: [i64] = []
+var g_tsan_is_writes: [bool] = []
+var g_tsan_locations: [text] = []
+var g_tsan_timestamps: [i64] = []
+
+# Lock ordering — parallel arrays
+var g_tsan_lock_holders: [text] = []
+var g_tsan_lock_threads: [i64] = []
+
+# Lock order edges for deadlock detection
+var g_tsan_lock_order_from: [text] = []
+var g_tsan_lock_order_to: [text] = []
+
+var g_tsan_events: [SanEvent] = []
+var g_tsan_enabled: bool = false
+var g_tsan_clock: i64 = 0
+var g_tsan_current_thread: i64 = 0
+
+# =========================================================================
+# Enable / Disable
+# =========================================================================
+
+fn tsan_enable():
+    g_tsan_enabled = true
+
+fn tsan_disable():
+    g_tsan_enabled = false
+
+fn tsan_is_enabled() -> bool:
+    g_tsan_enabled
+
+fn tsan_set_thread(thread_id: i64):
+    g_tsan_current_thread = thread_id
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn tsan_tick() -> i64:
+    g_tsan_clock = g_tsan_clock + 1
+    g_tsan_clock
+
+fn tsan_check_race(var_id: text, is_write: bool, location: text):
+    val current_thread = g_tsan_current_thread
+    var i = 0
+    while i < g_tsan_var_ids.len():
+        if g_tsan_var_ids[i] == var_id:
+            if g_tsan_thread_ids[i] != current_thread:
+                # Different thread accessed same variable
+                # Race if at least one is a write
+                if is_write == true:
+                    val other_loc = g_tsan_locations[i]
+                    val other_thread = g_tsan_thread_ids[i]
+                    g_tsan_events.push(san_event("tsan", "fatal", "data race on '{var_id}': thread {current_thread} write vs thread {other_thread} at {other_loc}", location))
+                else:
+                    if g_tsan_is_writes[i] == true:
+                        val other_loc = g_tsan_locations[i]
+                        val other_thread = g_tsan_thread_ids[i]
+                        g_tsan_events.push(san_event("tsan", "fatal", "data race on '{var_id}': thread {current_thread} read vs thread {other_thread} write at {other_loc}", location))
+        i = i + 1
+
+fn tsan_record_access(var_id: text, is_write: bool, location: text):
+    val ts = tsan_tick()
+    # Remove old entries for same var+thread
+    var new_vars: [text] = []
+    var new_threads: [i64] = []
+    var new_writes: [bool] = []
+    var new_locs: [text] = []
+    var new_ts: [i64] = []
+    var i = 0
+    while i < g_tsan_var_ids.len():
+        val dominated = g_tsan_var_ids[i] == var_id
+        if dominated:
+            val same_thread = g_tsan_thread_ids[i] == g_tsan_current_thread
+            if same_thread == false:
+                new_vars.push(g_tsan_var_ids[i])
+                new_threads.push(g_tsan_thread_ids[i])
+                new_writes.push(g_tsan_is_writes[i])
+                new_locs.push(g_tsan_locations[i])
+                new_ts.push(g_tsan_timestamps[i])
+        else:
+            new_vars.push(g_tsan_var_ids[i])
+            new_threads.push(g_tsan_thread_ids[i])
+            new_writes.push(g_tsan_is_writes[i])
+            new_locs.push(g_tsan_locations[i])
+            new_ts.push(g_tsan_timestamps[i])
+        i = i + 1
+    new_vars.push(var_id)
+    new_threads.push(g_tsan_current_thread)
+    new_writes.push(is_write)
+    new_locs.push(location)
+    new_ts.push(ts)
+    g_tsan_var_ids = new_vars
+    g_tsan_thread_ids = new_threads
+    g_tsan_is_writes = new_writes
+    g_tsan_locations = new_locs
+    g_tsan_timestamps = new_ts
+
+# =========================================================================
+# Public access tracking
+# =========================================================================
+
+fn tsan_read(var_id: text, location: text):
+    if g_tsan_enabled == false:
+        return
+    tsan_check_race(var_id, false, location)
+    tsan_record_access(var_id, false, location)
+
+fn tsan_write(var_id: text, location: text):
+    if g_tsan_enabled == false:
+        return
+    tsan_check_race(var_id, true, location)
+    tsan_record_access(var_id, true, location)
+
+# =========================================================================
+# Lock ordering
+# =========================================================================
+
+fn tsan_find_held_lock(thread_id: i64) -> text:
+    var i = 0
+    while i < g_tsan_lock_holders.len():
+        if g_tsan_lock_threads[i] == thread_id:
+            return g_tsan_lock_holders[i]
+        i = i + 1
+    ""
+
+fn tsan_has_order_edge(from_lock: text, to_lock: text) -> bool:
+    var i = 0
+    while i < g_tsan_lock_order_from.len():
+        if g_tsan_lock_order_from[i] == from_lock:
+            if g_tsan_lock_order_to[i] == to_lock:
+                return true
+        i = i + 1
+    false
+
+fn tsan_lock_acquire(lock_id: text):
+    if g_tsan_enabled == false:
+        return
+    val held = tsan_find_held_lock(g_tsan_current_thread)
+    if held != "":
+        # Check for lock order violation (potential deadlock)
+        if tsan_has_order_edge(lock_id, held):
+            g_tsan_events.push(san_event("tsan", "error", "lock order violation: acquiring '{lock_id}' while holding '{held}' (reverse order observed)", "tsan_lock_acquire"))
+        if tsan_has_order_edge(held, lock_id) == false:
+            g_tsan_lock_order_from.push(held)
+            g_tsan_lock_order_to.push(lock_id)
+    g_tsan_lock_holders.push(lock_id)
+    g_tsan_lock_threads.push(g_tsan_current_thread)
+
+fn tsan_lock_release(lock_id: text):
+    if g_tsan_enabled == false:
+        return
+    var new_holders: [text] = []
+    var new_threads: [i64] = []
+    var found: bool = false
+    var i = 0
+    while i < g_tsan_lock_holders.len():
+        if found == false:
+            if g_tsan_lock_holders[i] == lock_id:
+                if g_tsan_lock_threads[i] == g_tsan_current_thread:
+                    found = true
+                    i = i + 1
+                    continue
+        new_holders.push(g_tsan_lock_holders[i])
+        new_threads.push(g_tsan_lock_threads[i])
+        i = i + 1
+    g_tsan_lock_holders = new_holders
+    g_tsan_lock_threads = new_threads
+
+# =========================================================================
+# Reporting
+# =========================================================================
+
+fn tsan_error_count() -> i64:
+    g_tsan_events.len()
+
+fn tsan_report():
+    if g_tsan_events.len() == 0:
+        print "TSan: no races detected"
+        return
+    print "TSan: {g_tsan_events.len()} event(s) detected"
+    var i = 0
+    while i < g_tsan_events.len():
+        val ev = g_tsan_events[i]
+        print "  [{ev.severity}] {ev.message} at {ev.location}"
+        i = i + 1
+
+fn tsan_get_events() -> [SanEvent]:
+    g_tsan_events
+
+fn tsan_reset():
+    g_tsan_var_ids = []
+    g_tsan_thread_ids = []
+    g_tsan_is_writes = []
+    g_tsan_locations = []
+    g_tsan_timestamps = []
+    g_tsan_lock_holders = []
+    g_tsan_lock_threads = []
+    g_tsan_lock_order_from = []
+    g_tsan_lock_order_to = []
+    g_tsan_events = []
+    g_tsan_enabled = false
+    g_tsan_clock = 0
+    g_tsan_current_thread = 0
+
+export tsan_enable, tsan_disable, tsan_is_enabled, tsan_set_thread
+export tsan_read, tsan_write
+export tsan_lock_acquire, tsan_lock_release
+export tsan_error_count, tsan_report, tsan_get_events, tsan_reset

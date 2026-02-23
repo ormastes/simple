@@ -1,33 +1,40 @@
-"""
-# Numeric Robustness Specification Tests
+# # Numeric Robustness Specification Tests
+#
+# **Feature IDs:** #NR-001 to #NR-010
+# **Category:** Stdlib
+# **Status:** In Progress
+#
+# ## Overview
+#
+# Tests for the numeric robustness system defined in `doc/spec/numeric_robustness.md`.
+# Verifies checked arithmetic, fault detection, saturating operations,
+# robust float comparison, tiny canonicalization, and PyTorch interop helpers.
+#
+# ## Key Concepts
+#
+# | Concept | Description |
+# |---------|-------------|
+# | CheckedF64 | Float result that may contain a fault (NaN, Inf, DivByZero, etc.) |
+# | CheckedI64 | Integer result that may contain a fault (DivByZero, Overflow, etc.) |
+# | Fault | Text tag identifying the numeric hazard that occurred |
+# | Saturating | Arithmetic that clamps to min/max on overflow instead of faulting |
+# | Dual tolerance | Float comparison using both relative and absolute tolerance |
+# | Tiny canonicalization | Flushing subnormal/tiny values to signed zero |
+#
+# ## Related Specifications
+#
+# - [Numeric Robustness Spec](../../../doc/spec/numeric_robustness.md)
 
-**Feature IDs:** #NR-001 to #NR-010
-**Category:** Stdlib
-**Status:** In Progress
+# Local math helpers (avoid import issues with std.math)
+fn math_abs(x: f64) -> f64:
+    if x < 0.0:
+        return -x
+    x
 
-## Overview
-
-Tests for the numeric robustness system defined in `doc/spec/numeric_robustness.md`.
-Verifies checked arithmetic, fault detection, saturating operations,
-robust float comparison, tiny canonicalization, and PyTorch interop helpers.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| CheckedF64 | Float result that may contain a fault (NaN, Inf, DivByZero, etc.) |
-| CheckedI64 | Integer result that may contain a fault (DivByZero, Overflow, etc.) |
-| Fault | Text tag identifying the numeric hazard that occurred |
-| Saturating | Arithmetic that clamps to min/max on overflow instead of faulting |
-| Dual tolerance | Float comparison using both relative and absolute tolerance |
-| Tiny canonicalization | Flushing subnormal/tiny values to signed zero |
-
-## Related Specifications
-
-- [Numeric Robustness Spec](../../../doc/spec/numeric_robustness.md)
-"""
-
-use std.math.{math_abs, math_max}
+fn math_max(a: f64, b: f64) -> f64:
+    if a > b:
+        return a
+    b
 
 # ============================================================================
 # Fault Constants
@@ -108,7 +115,7 @@ fn recover_i64(r: CheckedI64, fallback: i64) -> i64:
 # ============================================================================
 
 fn checked_div_f64(x: f64, y: f64) -> CheckedF64:
-    """Checked float division. Detects 0/0, x/0, and returns fault."""
+    # Checked float division. Detects 0/0, x/0, and returns fault.
     if y == 0.0:
         if x == 0.0:
             return fault_f64(FAULT_NAN)
@@ -118,7 +125,7 @@ fn checked_div_f64(x: f64, y: f64) -> CheckedF64:
     ok_f64(x / y)
 
 fn checked_sqrt_f64(x: f64) -> CheckedF64:
-    """Checked square root. Faults on negative input."""
+    # Checked square root. Faults on negative input.
     if x < 0.0:
         return fault_f64(FAULT_INVALIDOP)
     # Use Newton's method for integer-safe sqrt approximation
@@ -132,7 +139,7 @@ fn checked_sqrt_f64(x: f64) -> CheckedF64:
     ok_f64(guess)
 
 fn checked_log_f64(x: f64) -> CheckedF64:
-    """Checked natural log. Faults on negative input, -Inf on zero."""
+    # Checked natural log. Faults on negative input, -Inf on zero.
     if x < 0.0:
         return fault_f64(FAULT_INVALIDOP)
     if x == 0.0:
@@ -158,7 +165,7 @@ val MAX_I64 = 9223372036854775807
 val MIN_I64 = -9223372036854775807 - 1
 
 fn checked_div_i64(a: i64, b: i64) -> CheckedI64:
-    """Checked integer division. Detects div-by-zero and MIN/-1 overflow."""
+    # Checked integer division. Detects div-by-zero and MIN/-1 overflow.
     if b == 0:
         return fault_i64(FAULT_DIVBYZERO)
     if (a == MIN_I64 and b == -1):
@@ -166,13 +173,13 @@ fn checked_div_i64(a: i64, b: i64) -> CheckedI64:
     ok_i64(a / b)
 
 fn checked_mod_i64(a: i64, b: i64) -> CheckedI64:
-    """Checked integer modulo. Detects div-by-zero."""
+    # Checked integer modulo. Detects div-by-zero.
     if b == 0:
         return fault_i64(FAULT_DIVBYZERO)
     ok_i64(a % b)
 
 fn checked_add_i64(a: i64, b: i64) -> CheckedI64:
-    """Checked integer addition. Detects overflow in both directions."""
+    # Checked integer addition. Detects overflow in both directions.
     if (a > 0 and b > MAX_I64 - a):
         return fault_i64(FAULT_OVERFLOW)
     if (a < 0 and b < MIN_I64 - a):
@@ -180,7 +187,7 @@ fn checked_add_i64(a: i64, b: i64) -> CheckedI64:
     ok_i64(a + b)
 
 fn checked_sub_i64(a: i64, b: i64) -> CheckedI64:
-    """Checked integer subtraction. Detects overflow."""
+    # Checked integer subtraction. Detects overflow.
     if (b > 0 and a < MIN_I64 + b):
         return fault_i64(FAULT_OVERFLOW)
     if (b < 0 and a > MAX_I64 + b):
@@ -188,7 +195,7 @@ fn checked_sub_i64(a: i64, b: i64) -> CheckedI64:
     ok_i64(a - b)
 
 fn checked_mul_i64(a: i64, b: i64) -> CheckedI64:
-    """Checked integer multiplication. Detects overflow via back-division."""
+    # Checked integer multiplication. Detects overflow via back-division.
     if a == 0 or b == 0:
         return ok_i64(0)
     val result = a * b
@@ -197,13 +204,13 @@ fn checked_mul_i64(a: i64, b: i64) -> CheckedI64:
     ok_i64(result)
 
 fn checked_shl_i64(x: i64, k: i64) -> CheckedI64:
-    """Checked left shift. Faults if shift amount is negative or >= 64."""
+    # Checked left shift. Faults if shift amount is negative or >= 64.
     if (k < 0 or k >= 64):
         return fault_i64(FAULT_SHIFT_RANGE)
     ok_i64(x << k)
 
 fn checked_shr_i64(x: i64, k: i64) -> CheckedI64:
-    """Checked right shift. Faults if shift amount is negative or >= 64."""
+    # Checked right shift. Faults if shift amount is negative or >= 64.
     if (k < 0 or k >= 64):
         return fault_i64(FAULT_SHIFT_RANGE)
     ok_i64(x >> k)
@@ -213,7 +220,7 @@ fn checked_shr_i64(x: i64, k: i64) -> CheckedI64:
 # ============================================================================
 
 fn saturate_add_i64(a: i64, b: i64) -> i64:
-    """Add with saturation: clamps to i64 bounds on overflow."""
+    # Add with saturation: clamps to i64 bounds on overflow.
     if (a > 0 and b > MAX_I64 - a):
         return MAX_I64
     if (a < 0 and b < MIN_I64 - a):
@@ -221,7 +228,7 @@ fn saturate_add_i64(a: i64, b: i64) -> i64:
     a + b
 
 fn saturate_sub_i64(a: i64, b: i64) -> i64:
-    """Subtract with saturation: clamps to i64 bounds on overflow."""
+    # Subtract with saturation: clamps to i64 bounds on overflow.
     if (b > 0 and a < MIN_I64 + b):
         return MIN_I64
     if (b < 0 and a > MAX_I64 + b):
@@ -229,7 +236,7 @@ fn saturate_sub_i64(a: i64, b: i64) -> i64:
     a - b
 
 fn saturate_mul_i64(a: i64, b: i64) -> i64:
-    """Multiply with saturation: clamps to i64 bounds on overflow."""
+    # Multiply with saturation: clamps to i64 bounds on overflow.
     if a == 0 or b == 0:
         return 0
     val result = a * b
@@ -254,7 +261,7 @@ fn float_eq_robust(a: f64, b: f64, rel_tol: f64, abs_tol: f64) -> bool:
     diff <= abs_tol + rel_tol * max_val
 
 fn float_eq(a: f64, b: f64) -> bool:
-    """Convenience float comparison with common defaults."""
+    # Convenience float comparison with common defaults.
     float_eq_robust(a, b, 1e-9, 1e-12)
 
 # ============================================================================
@@ -264,7 +271,7 @@ fn float_eq(a: f64, b: f64) -> bool:
 var TINY_EPS = 1e-20
 
 fn canonicalize_tiny(x: f64) -> f64:
-    """Flush tiny values to signed zero under small_like_zero policy."""
+    # Flush tiny values to signed zero under small_like_zero policy.
     if (x > 0.0 and x < TINY_EPS):
         return 0.0
     if (x < 0.0 and x > -TINY_EPS):
@@ -272,7 +279,7 @@ fn canonicalize_tiny(x: f64) -> f64:
     x
 
 fn canonicalize_tiny_with_eps(x: f64, eps: f64) -> f64:
-    """Flush tiny values with custom epsilon."""
+    # Flush tiny values with custom epsilon.
     if (x > 0.0 and x < eps):
         return 0.0
     if (x < 0.0 and x > -eps):
@@ -284,11 +291,11 @@ fn canonicalize_tiny_with_eps(x: f64, eps: f64) -> f64:
 # ============================================================================
 
 fn nan_to_num(x: f64, nan_val: f64, posinf_val: f64, neginf_val: f64) -> f64:
-    """Replace fault-producing values. Works on checked results."""
+    # Replace fault-producing values. Works on checked results.
     x
 
 fn nan_to_num_checked(r: CheckedF64, nan_val: f64, posinf_val: f64, neginf_val: f64) -> f64:
-    """Map a CheckedF64 result to a plain f64 by replacing faults."""
+    # Map a CheckedF64 result to a plain f64 by replacing faults.
     if is_ok_f64(r):
         return r.value
     if r.fault == FAULT_NAN:
@@ -306,7 +313,7 @@ fn nan_to_num_checked(r: CheckedF64, nan_val: f64, posinf_val: f64, neginf_val: 
     nan_val
 
 fn nan_to_num_default(r: CheckedF64) -> f64:
-    """Default nan_to_num: NaN->0, +Inf->max, -Inf->min."""
+    # Default nan_to_num: NaN->0, +Inf->max, -Inf->min.
     nan_to_num_checked(r, 0.0, 9999999.0, -9999999.0)
 
 # ============================================================================
@@ -314,7 +321,7 @@ fn nan_to_num_default(r: CheckedF64) -> f64:
 # ============================================================================
 
 fn checked_f64_to_i64(x: f64) -> CheckedI64:
-    """Checked float-to-int conversion. Faults on out-of-range values."""
+    # Checked float-to-int conversion. Faults on out-of-range values.
     if (x > 9223372036854775807.0 or x < -9223372036854775807.0):
         return fault_i64(FAULT_INVALID_CAST)
     ok_i64(int(x))
@@ -329,13 +336,11 @@ fn checked_f64_to_i64(x: f64) -> CheckedI64:
 # ============================================================================
 
 describe "Checked Float Division":
-    """
-    ## Float Division Fault Detection
-
-    Verifies that `checked_div_f64` correctly identifies all IEEE-754
-    division hazards: 0/0 (NaN), positive/0 (+Inf), negative/0 (-Inf),
-    and passes through normal division.
-    """
+    # ## Float Division Fault Detection
+    #
+    # Verifies that `checked_div_f64` correctly identifies all IEEE-754
+    # division hazards: 0/0 (NaN), positive/0 (+Inf), negative/0 (-Inf),
+    # and passes through normal division.
 
     context "normal division":
         it "divides two positive numbers":
@@ -365,11 +370,9 @@ describe "Checked Float Division":
             expect(close).to_equal(true)
 
     context "division by zero":
-        """
-        ### Scenario: Division by Zero
-
-        IEEE-754 defines: x/0 = +Inf (x>0), x/0 = -Inf (x<0), 0/0 = NaN.
-        """
+        # ### Scenario: Division by Zero
+        #
+        # IEEE-754 defines: x/0 = +Inf (x>0), x/0 = -Inf (x<0), 0/0 = NaN.
 
         it "detects 0/0 as NaN fault":
             val r = checked_div_f64(0.0, 0.0)
@@ -401,12 +404,10 @@ describe "Checked Float Division":
 # ============================================================================
 
 describe "Checked Float Domain Functions":
-    """
-    ## Domain-Restricted Float Functions
-
-    Tests `checked_sqrt_f64` and `checked_log_f64` for correct fault
-    detection on invalid domain inputs (negative sqrt, negative/zero log).
-    """
+    # ## Domain-Restricted Float Functions
+    #
+    # Tests `checked_sqrt_f64` and `checked_log_f64` for correct fault
+    # detection on invalid domain inputs (negative sqrt, negative/zero log).
 
     context "checked sqrt":
         it "computes sqrt of positive number":
@@ -464,12 +465,10 @@ describe "Checked Float Domain Functions":
 # ============================================================================
 
 describe "Checked Integer Division":
-    """
-    ## Integer Division Fault Detection
-
-    Verifies `checked_div_i64` and `checked_mod_i64` detect division by zero
-    and the special MIN_INT / -1 overflow case.
-    """
+    # ## Integer Division Fault Detection
+    #
+    # Verifies `checked_div_i64` and `checked_mod_i64` detect division by zero
+    # and the special MIN_INT / -1 overflow case.
 
     context "normal division":
         it "divides two positive numbers":
@@ -514,12 +513,10 @@ describe "Checked Integer Division":
             expect(r.fault).to_equal(FAULT_DIVBYZERO)
 
     context "MIN_INT / -1 overflow":
-        """
-        ### Scenario: MIN_INT / -1
-
-        The result would be MAX_INT + 1, which overflows.
-        This is the only division that can overflow for integers.
-        """
+        # ### Scenario: MIN_INT / -1
+        #
+        # The result would be MAX_INT + 1, which overflows.
+        # This is the only division that can overflow for integers.
 
         it "detects MIN_INT / -1 as overflow":
             val r = checked_div_i64(MIN_I64, -1)
@@ -540,12 +537,10 @@ describe "Checked Integer Division":
 # ============================================================================
 
 describe "Checked Integer Addition":
-    """
-    ## Integer Overflow Detection
-
-    Verifies that `checked_add_i64` and `checked_sub_i64` detect overflow
-    in both positive and negative directions.
-    """
+    # ## Integer Overflow Detection
+    #
+    # Verifies that `checked_add_i64` and `checked_sub_i64` detect overflow
+    # in both positive and negative directions.
 
     context "normal addition":
         it "adds two positive numbers":
@@ -616,11 +611,9 @@ describe "Checked Integer Addition":
 # ============================================================================
 
 describe "Checked Integer Multiplication":
-    """
-    ## Multiplication Overflow Detection
-
-    Uses back-division (result / a != b) to detect overflow.
-    """
+    # ## Multiplication Overflow Detection
+    #
+    # Uses back-division (result / a != b) to detect overflow.
 
     context "normal multiplication":
         it "multiplies two small numbers":
@@ -664,11 +657,9 @@ describe "Checked Integer Multiplication":
 # ============================================================================
 
 describe "Checked Bit Shifts":
-    """
-    ## Shift Range Validation
-
-    Verifies that shifts with amounts < 0 or >= 64 are caught as faults.
-    """
+    # ## Shift Range Validation
+    #
+    # Verifies that shifts with amounts < 0 or >= 64 are caught as faults.
 
     context "valid shifts":
         it "shifts left by small amount":
@@ -716,12 +707,10 @@ describe "Checked Bit Shifts":
 # ============================================================================
 
 describe "Saturating Arithmetic":
-    """
-    ## Zig-Inspired Saturation
-
-    Saturating operations clamp to MIN/MAX instead of faulting.
-    Returns plain i64, not Checked<i64>, since saturation IS the handling.
-    """
+    # ## Zig-Inspired Saturation
+    #
+    # Saturating operations clamp to MIN/MAX instead of faulting.
+    # Returns plain i64, not Checked<i64>, since saturation IS the handling.
 
     context "saturating addition":
         it "adds normally when no overflow":
@@ -770,14 +759,12 @@ describe "Saturating Arithmetic":
 # ============================================================================
 
 describe "Robust Float Comparison":
-    """
-    ## Dual Tolerance: Relative + Absolute
-
-    Formula: abs(a-b) <= abs_tol + rel_tol * max(abs(a), abs(b))
-
-    Absolute-only fails at large magnitudes. Relative-only fails near zero.
-    Combined formula handles all ranges correctly.
-    """
+    # ## Dual Tolerance: Relative + Absolute
+    #
+    # Formula: abs(a-b) <= abs_tol + rel_tol * max(abs(a), abs(b))
+    #
+    # Absolute-only fails at large magnitudes. Relative-only fails near zero.
+    # Combined formula handles all ranges correctly.
 
     context "exact equality":
         it "detects identical values":
@@ -790,12 +777,10 @@ describe "Robust Float Comparison":
             expect(float_eq(-1.5, -1.5)).to_equal(true)
 
     context "near-zero comparison":
-        """
-        ### Scenario: Values Near Zero
-
-        Near zero, absolute tolerance dominates.
-        This is where relative-only comparison fails.
-        """
+        # ### Scenario: Values Near Zero
+        #
+        # Near zero, absolute tolerance dominates.
+        # This is where relative-only comparison fails.
 
         it "treats very small difference as equal":
             expect(float_eq_robust(0.0, 1e-15, 1e-9, 1e-12)).to_equal(true)
@@ -807,12 +792,10 @@ describe "Robust Float Comparison":
             expect(float_eq_robust(0.0, -1e-15, 1e-9, 1e-12)).to_equal(true)
 
     context "large value comparison":
-        """
-        ### Scenario: Large Magnitude Values
-
-        At large magnitudes, relative tolerance dominates.
-        This is where absolute-only comparison fails.
-        """
+        # ### Scenario: Large Magnitude Values
+        #
+        # At large magnitudes, relative tolerance dominates.
+        # This is where absolute-only comparison fails.
 
         it "treats close large values as equal":
             val a = 1000000000.0
@@ -846,12 +829,10 @@ describe "Robust Float Comparison":
 # ============================================================================
 
 describe "Tiny Canonicalization":
-    """
-    ## Small-Like-Zero Policy
-
-    Under `small_like_zero` mode, values smaller than epsilon
-    in absolute value are flushed to zero. Mirrors FTZ/DAZ hardware behavior.
-    """
+    # ## Small-Like-Zero Policy
+    #
+    # Under `small_like_zero` mode, values smaller than epsilon
+    # in absolute value are flushed to zero. Mirrors FTZ/DAZ hardware behavior.
 
     context "positive tiny values":
         it "flushes small positive to zero":
@@ -894,12 +875,10 @@ describe "Tiny Canonicalization":
 # ============================================================================
 
 describe "Fault Recovery and nan_to_num":
-    """
-    ## Recovery Patterns
-
-    Tests the recovery helpers that convert Checked results back to plain values
-    by mapping faults to specified fallback values. Mirrors PyTorch's nan_to_num.
-    """
+    # ## Recovery Patterns
+    #
+    # Tests the recovery helpers that convert Checked results back to plain values
+    # by mapping faults to specified fallback values. Mirrors PyTorch's nan_to_num.
 
     context "recover_f64":
         it "passes through valid values":
@@ -964,11 +943,9 @@ describe "Fault Recovery and nan_to_num":
             expect(nan_to_num_default(r)).to_equal(-9999999.0)
 
     context "composition: checked -> recovery":
-        """
-        ### Scenario: End-to-End Pipeline
-
-        Tests the full workflow: checked operation -> fault detection -> recovery.
-        """
+        # ### Scenario: End-to-End Pipeline
+        #
+        # Tests the full workflow: checked operation -> fault detection -> recovery.
 
         it "recovers from division by zero":
             val r = checked_div_f64(1.0, 0.0)
@@ -995,11 +972,9 @@ describe "Fault Recovery and nan_to_num":
 # ============================================================================
 
 describe "Checked Float-to-Int Conversion":
-    """
-    ## Type Conversion Safety
-
-    Verifies `checked_f64_to_i64` catches out-of-range values.
-    """
+    # ## Type Conversion Safety
+    #
+    # Verifies `checked_f64_to_i64` catches out-of-range values.
 
     context "normal conversions":
         it "converts integer-valued float":
@@ -1038,12 +1013,10 @@ describe "Checked Float-to-Int Conversion":
 # ============================================================================
 
 describe "Checked Operation Composition":
-    """
-    ## Composing Multiple Checked Operations
-
-    Tests chaining checked operations where any step can fault,
-    demonstrating the propagation pattern from the spec.
-    """
+    # ## Composing Multiple Checked Operations
+    #
+    # Tests chaining checked operations where any step can fault,
+    # demonstrating the propagation pattern from the spec.
 
     context "chained float operations":
         it "chains two successful divisions":

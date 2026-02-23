@@ -1,147 +1,69 @@
-"""
-# Database SDN Table Import/Export Validation
-
-**Feature ID:** #700 Database SDN table import/export
-**Category:** Uncategorized
-**Status:** Fixed
-
-## Overview
-
-Validates that SdnTable can correctly parse SDN format including
-quoted values containing commas, and export back to SDN format.
-Tests the core split_sdn_row, strip_quotes, and quote_if_needed helpers.
-"""
+# # Database SDN Table Import/Export Validation
+#
+# **Feature ID:** #700 Database SDN table import/export
+# **Category:** Uncategorized
+# **Status:** Fixed
+#
+# ## Overview
+#
+# Validates that SdnTable can correctly parse SDN format including
+# quoted values containing commas, and export back to SDN format.
+# Tests the core split_sdn_row, strip_quotes, and quote_if_needed helpers.
 
 use std.spec
 
 # ============================================================================
-# SDN Row Parsing Tests
+# Type Definitions (must be before any usage)
 # ============================================================================
 
-describe "Feature #700 - SDN Row Parsing":
-    """
-    Tests for quote-aware CSV splitting of SDN table rows.
-    Handles quoted values that contain commas.
-    """
+# SdnTable is the FIRST (and only) struct so its constructor works
+# (runtime limitation: only first struct supports direct construction)
+# Rows are plain Dict<text, text> to avoid second-struct constructor issue
+struct SdnTable:
+    name: text
+    columns: [text]
+    rows: [Dict<text, text>]
+    index: Dict<text, i64>
 
-    context "simple row parsing":
-        it "parses unquoted values":
-            val line = "1, Alice, true"
-            val parts = split_sdn_row(line)
-            expect(parts.len()).to_equal(3)
-            expect(parts[0].trim()).to_equal("1")
-            expect(parts[1].trim()).to_equal("Alice")
-            expect(parts[2].trim()).to_equal("true")
+    fn to_sdn() -> text:
+        var result = "{self.name} |"
+        result = result + self.columns.join(", ")
+        result = result + "|\n"
 
-        it "parses numeric values":
-            val line = "42, 100, 200"
-            val parts = split_sdn_row(line)
-            expect(parts.len()).to_equal(3)
-            expect(parts[0].trim()).to_equal("42")
+        var ri = 0
+        while ri < self.rows.len():
+            var row = self.rows[ri]
+            result = result + "    "
+            var values = []
+            var ci = 0
+            while ci < self.columns.len():
+                var col = self.columns[ci]
+                var raw_value = sdn_row_get(row, col)
+                var formatted = quote_if_needed(raw_value)
+                values.push(formatted)
+                ci = ci + 1
+            result = result + values.join(", ")
+            result = result + "\n"
+            ri = ri + 1
 
-    context "quoted value parsing":
-        it "parses quoted strings without commas":
-            val line = '1, "Alice", true'
-            val parts = split_sdn_row(line)
-            expect(parts.len()).to_equal(3)
+        result
 
-        it "parses quoted strings with commas":
-            val line = '1, "hello, world", true'
-            val parts = split_sdn_row(line)
-            expect(parts.len()).to_equal(3)
-            val middle = parts[1].trim()
-            val unquoted = strip_quotes(middle)
-            expect(unquoted).to_equal("hello, world")
-
-        it "handles multiple quoted fields":
-            val line = '"Testing Framework", "Describe Blocks", "BDD describe blocks"'
-            val parts = split_sdn_row(line)
-            expect(parts.len()).to_equal(3)
-
-    context "strip_quotes helper":
-        it "strips surrounding double quotes":
-            val result = strip_quotes('"hello"')
-            expect(result).to_equal("hello")
-
-        it "leaves unquoted values unchanged":
-            val result = strip_quotes("plain")
-            expect(result).to_equal("plain")
-
-        it "leaves empty string unchanged":
-            val result = strip_quotes("")
-            expect(result).to_equal("")
-
-        it "leaves single char unchanged":
-            val result = strip_quotes("x")
-            expect(result).to_equal("x")
-
-    context "quote_if_needed helper":
-        it "quotes values with commas":
-            val result = quote_if_needed("hello, world")
-            expect(result).to_contain('"')
-            expect(result).to_start_with('"')
-            expect(result).to_end_with('"')
-
-        it "leaves values without commas unquoted":
-            val result = quote_if_needed("hello")
-            expect(result).to_equal("hello")
-
-        it "leaves empty values unquoted":
-            val result = quote_if_needed("")
-            expect(result).to_equal("")
+    me add_row(row: Dict<text, text>) -> bool:
+        if row.contains_key("id"):
+            var id_val = row["id"]
+            self.index[id_val] = self.rows.len()
+        self.rows.push(row)
+        true
 
 # ============================================================================
-# SDN Table Round-Trip Tests
-# ============================================================================
-
-describe "Feature #700 - SDN Table Round-Trip":
-    """
-    Tests that SDN tables can be parsed and exported correctly,
-    preserving data through a round-trip.
-    """
-
-    context "simple table parsing":
-        it "parses basic SDN table":
-            val content = "users |id, name, active|\n    1, Alice, true\n    2, Bob, false"
-            val table = parse_sdn_table(content)
-            expect(table != nil).to_equal(true)
-
-        it "parses table with correct column count":
-            val content = "users |id, name|\n    1, Alice\n    2, Bob"
-            val table_opt = parse_sdn_table(content)
-            # Table should be parsed successfully
-            expect(table_opt != nil).to_equal(true)
-
-    context "table export":
-        it "exports table to SDN format":
-            val table = SdnTable.new("test_table", ["id", "value"])
-            val row1 = SdnRow.empty()
-            row1.set("id", "1")
-            row1.set("value", "hello")
-            table.add_row(row1)
-
-            val exported = table.to_sdn()
-            expect(exported).to_contain("test_table")
-            expect(exported).to_contain("id")
-            expect(exported).to_contain("value")
-            expect(exported).to_contain("hello")
-
-    context "quoted value round-trip":
-        it "preserves values with commas through export":
-            val table = SdnTable.new("data", ["id", "description"])
-            val row = SdnRow.empty()
-            row.set("id", "1")
-            row.set("description", "hello, world")
-            table.add_row(row)
-
-            val exported = table.to_sdn()
-            # Value with comma should be quoted in export
-            expect(exported).to_contain('"hello, world"')
-
-# ============================================================================
-# Helper function definitions for import
+# Helper function definitions
 # (These test the functions from lib.database.core)
 # ============================================================================
+
+fn sdn_row_get(row: Dict<text, text>, column: text) -> text:
+    if row.contains_key(column):
+        return row[column]
+    ""
 
 fn split_sdn_row(line: text) -> [text]:
     var parts = []
@@ -150,7 +72,7 @@ fn split_sdn_row(line: text) -> [text]:
     var i = 0
 
     while i < line.len():
-        val ch = line[i]
+        var ch = line[i]
         if ch == '"':
             in_quotes = not in_quotes
             current = current + ch
@@ -176,102 +98,183 @@ fn quote_if_needed(value: text) -> text:
         return '"' + value + '"'
     value
 
+# Factory functions (runtime doesn't resolve ClassName__method or ClassName.method)
+fn SdnRow__empty() -> Dict<text, text>:
+    {}
+
+fn SdnTable__new(tname: text, cols: [text]) -> SdnTable:
+    SdnTable(name: tname, columns: cols, rows: [], index: {})
+
 fn parse_sdn_table(content: text) -> SdnTable?:
-    SdnTable.parse(content)
+    var lines = content.split("\n")
+    if not lines.?:
+        return nil
 
-# Minimal reimplementation of needed types for testing
-# (avoid module import issues in bootstrap runtime)
-struct SdnRow:
-    fields: Dict<text, text>
+    var header_idx = -1
+    var table_name = ""
+    var columns = []
 
-    static fn empty() -> SdnRow:
-        SdnRow(fields: {})
-
-    fn get(column: text) -> text?:
-        if self.fields.contains_key(column):
-            Some(self.fields[column])
+    var li = 0
+    while li < lines.len():
+        var trimmed = lines[li].trim()
+        if trimmed.contains("|") and not trimmed.starts_with("#"):
+            var parts = trimmed.split("|")
+            if parts.len() >= 3:
+                table_name = parts[0].trim()
+                var col_part = parts[1].trim()
+                var raw_cols = col_part.split(",")
+                columns = raw_cols.map(\c: c.trim())
+                header_idx = li
+                li = lines.len()
+            else:
+                li = li + 1
         else:
-            nil
+            li = li + 1
 
-    me set(column: text, value: text):
-        self.fields[column] = value
+    if header_idx == -1:
+        return nil
 
-    fn has(column: text) -> bool:
-        self.fields.contains_key(column)
+    var table = SdnTable(name: table_name, columns: columns, rows: [], index: {})
+    var ri = header_idx + 1
+    while ri < lines.len():
+        var line = lines[ri].trim()
+        ri = ri + 1
+        if not line.? or line.starts_with("#"):
+            continue
 
-class SdnTable:
-    name: text
-    columns: [text]
-    rows: [SdnRow]
-    index: Dict<text, i64>
+        var parts = split_sdn_row(line)
+        if parts.len() != columns.len():
+            continue
 
-    static fn new(name: text, columns: [text]) -> SdnTable:
-        SdnTable(name: name, columns: columns, rows: [], index: {})
+        var row = {}
+        var ji = 0
+        while ji < columns.len():
+            var col = columns[ji]
+            var raw_val = parts[ji].trim()
+            var unquoted = strip_quotes(raw_val)
+            row[col] = unquoted
+            ji = ji + 1
 
-    static fn parse(content: text) -> SdnTable?:
-        val lines = content.split("\n")
-        if not lines.?:
-            return nil
+        table.add_row(row)
 
-        var header_idx = -1
-        var table_name = ""
-        var columns = []
+    Some(table)
 
-        for (i, line) in lines.enumerate():
-            val trimmed = line.trim()
-            if trimmed.contains("|") and not trimmed.starts_with("#"):
-                val parts = trimmed.split("|")
-                if parts.len() >= 3:
-                    table_name = parts[0].trim()
-                    val col_part = parts[1].trim()
-                    val raw_cols = col_part.split(",")
-                    columns = raw_cols.map(\c: c.trim())
-                    header_idx = i
-                    break
+# ============================================================================
+# SDN Row Parsing Tests
+# ============================================================================
 
-        if header_idx == -1:
-            return nil
+describe "Feature #700 - SDN Row Parsing":
+    # Tests for quote-aware CSV splitting of SDN table rows.
+    # Handles quoted values that contain commas.
 
-        val table = SdnTable(name: table_name, columns: columns, rows: [], index: {})
-        for i in (header_idx + 1)..lines.len():
-            val line = lines[i].trim()
-            if not line.? or line.starts_with("#"):
-                continue
+    context "simple row parsing":
+        it "parses unquoted values":
+            var line = "1, Alice, true"
+            var parts = split_sdn_row(line)
+            expect(parts.len()).to_equal(3)
+            expect(parts[0].trim()).to_equal("1")
+            expect(parts[1].trim()).to_equal("Alice")
+            expect(parts[2].trim()).to_equal("true")
 
-            val parts = split_sdn_row(line)
-            if parts.len() != columns.len():
-                continue
+        it "parses numeric values":
+            var line = "42, 100, 200"
+            var parts = split_sdn_row(line)
+            expect(parts.len()).to_equal(3)
+            expect(parts[0].trim()).to_equal("42")
 
-            val row = SdnRow(fields: {})
-            for (j, col) in columns.enumerate():
-                val value = parts[j].trim()
-                val unquoted = strip_quotes(value)
-                row.set(col, unquoted)
+    context "quoted value parsing":
+        it "parses quoted strings without commas":
+            var line = '1, "Alice", true'
+            var parts = split_sdn_row(line)
+            expect(parts.len()).to_equal(3)
 
+        it "parses quoted strings with commas":
+            var line = '1, "hello, world", true'
+            var parts = split_sdn_row(line)
+            expect(parts.len()).to_equal(3)
+            var middle = parts[1].trim()
+            var unquoted = strip_quotes(middle)
+            expect(unquoted).to_equal("hello, world")
+
+        it "handles multiple quoted fields":
+            var line = '"Testing Framework", "Describe Blocks", "BDD describe blocks"'
+            var parts = split_sdn_row(line)
+            expect(parts.len()).to_equal(3)
+
+    context "strip_quotes helper":
+        it "strips surrounding double quotes":
+            var result = strip_quotes('"hello"')
+            expect(result).to_equal("hello")
+
+        it "leaves unquoted values unchanged":
+            var result = strip_quotes("plain")
+            expect(result).to_equal("plain")
+
+        it "leaves empty string unchanged":
+            var result = strip_quotes("")
+            expect(result).to_equal("")
+
+        it "leaves single char unchanged":
+            var result = strip_quotes("x")
+            expect(result).to_equal("x")
+
+    context "quote_if_needed helper":
+        it "quotes values with commas":
+            var result = quote_if_needed("hello, world")
+            expect(result).to_contain('"')
+            expect(result).to_start_with('"')
+            expect(result).to_end_with('"')
+
+        it "leaves values without commas unquoted":
+            var result = quote_if_needed("hello")
+            expect(result).to_equal("hello")
+
+        it "leaves empty values unquoted":
+            var result = quote_if_needed("")
+            expect(result).to_equal("")
+
+# ============================================================================
+# SDN Table Round-Trip Tests
+# ============================================================================
+
+describe "Feature #700 - SDN Table Round-Trip":
+    # Tests that SDN tables can be parsed and exported correctly,
+    # preserving data through a round-trip.
+
+    context "simple table parsing":
+        it "parses basic SDN table":
+            var content = "users |id, name, active|\n    1, Alice, true\n    2, Bob, false"
+            var table = parse_sdn_table(content)
+            expect(table != nil).to_equal(true)
+
+        it "parses table with correct column count":
+            var content = "users |id, name|\n    1, Alice\n    2, Bob"
+            var table_opt = parse_sdn_table(content)
+            # Table should be parsed successfully
+            expect(table_opt != nil).to_equal(true)
+
+    context "table export":
+        it "exports table to SDN format":
+            var table = SdnTable__new("test_table", ["id", "value"])
+            var row1 = SdnRow__empty()
+            row1["id"] = "1"
+            row1["value"] = "hello"
+            table.add_row(row1)
+
+            var exported = table.to_sdn()
+            expect(exported).to_contain("test_table")
+            expect(exported).to_contain("id")
+            expect(exported).to_contain("value")
+            expect(exported).to_contain("hello")
+
+    context "quoted value round-trip":
+        it "preserves values with commas through export":
+            var table = SdnTable__new("data", ["id", "description"])
+            var row = SdnRow__empty()
+            row["id"] = "1"
+            row["description"] = "hello, world"
             table.add_row(row)
 
-        Some(table)
-
-    fn to_sdn() -> text:
-        var result = "{self.name} |"
-        result = result + self.columns.join(", ")
-        result = result + "|\n"
-
-        for row in self.rows:
-            result = result + "    "
-            var values = []
-            for col in self.columns:
-                val value = row.get(col) ?? ""
-                val formatted = quote_if_needed(value)
-                values.push(formatted)
-            result = result + values.join(", ")
-            result = result + "\n"
-
-        result
-
-    me add_row(row: SdnRow) -> bool:
-        if row.has("id"):
-            val id = row.get("id")?
-            self.index[id] = self.rows.len()
-        self.rows.push(row)
-        true
+            var exported = table.to_sdn()
+            # Value with comma should be quoted in export
+            expect(exported).to_contain('"hello, world"')

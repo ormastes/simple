@@ -15,6 +15,11 @@
 
 int g_memtrack_enabled = 0;
 
+/* ===== Allocation listener ===== */
+
+static spl_alloc_listener_fn g_listener_fn   = NULL;
+static void*                 g_listener_data = NULL;
+
 /* ===== Hash table entry ===== */
 
 typedef struct {
@@ -139,6 +144,17 @@ void spl_memtrack_record(void* ptr, int64_t size, const char* tag) {
             e->alloc_id = ++g_alloc_id;
             e->occupied = 1;
             g_len++;
+            /* Notify listener */
+            if (g_listener_fn) {
+                SplAllocEvent ev;
+                ev.kind     = SPL_ALLOC_MALLOC;
+                ev.ptr      = ptr;
+                ev.old_ptr  = NULL;
+                ev.size     = size;
+                ev.tag      = tag;
+                ev.alloc_id = e->alloc_id;
+                g_listener_fn(&ev, g_listener_data);
+            }
             return;
         }
         if (e->ptr == ptr) {
@@ -146,6 +162,17 @@ void spl_memtrack_record(void* ptr, int64_t size, const char* tag) {
             e->size     = size;
             e->tag      = tag;
             e->alloc_id = ++g_alloc_id;
+            /* Notify listener */
+            if (g_listener_fn) {
+                SplAllocEvent ev;
+                ev.kind     = SPL_ALLOC_REALLOC;
+                ev.ptr      = ptr;
+                ev.old_ptr  = ptr;
+                ev.size     = size;
+                ev.tag      = tag;
+                ev.alloc_id = e->alloc_id;
+                g_listener_fn(&ev, g_listener_data);
+            }
             return;
         }
         idx = (idx + 1) & (g_cap - 1);
@@ -156,6 +183,17 @@ void spl_memtrack_unrecord(void* ptr) {
     if (!ptr) return;
     MemtrackEntry* e = memtrack_find(ptr);
     if (!e) return;
+    /* Notify listener before removing */
+    if (g_listener_fn) {
+        SplAllocEvent ev;
+        ev.kind     = SPL_ALLOC_FREE;
+        ev.ptr      = NULL;
+        ev.old_ptr  = ptr;
+        ev.size     = 0;
+        ev.tag      = e->tag;
+        ev.alloc_id = e->alloc_id;
+        g_listener_fn(&ev, g_listener_data);
+    }
     e->ptr      = NULL;
     e->occupied = -1;  /* tombstone */
     g_len--;
@@ -235,4 +273,16 @@ int64_t spl_memtrack_bytes_since(int64_t snapshot_id) {
         }
     }
     return total;
+}
+
+/* ===== Allocation Listener ===== */
+
+void spl_memtrack_set_listener(spl_alloc_listener_fn fn, void* user_data) {
+    g_listener_fn   = fn;
+    g_listener_data = user_data;
+}
+
+void spl_memtrack_clear_listener(void) {
+    g_listener_fn   = NULL;
+    g_listener_data = NULL;
 }

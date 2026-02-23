@@ -697,6 +697,41 @@ void spl_dict_free(SplDict* d) {
 
 char* spl_file_read(const char* path) {
     if (!path) return SPL_STRDUP("", "file");
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+    /* Use mmap for files >= 4KB — avoids malloc+copy overhead.
+     * For source files (typically 1-50KB), mmap lets the OS page in
+     * directly from the page cache without a user-space buffer copy. */
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return SPL_STRDUP("", "file");
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        return SPL_STRDUP("", "file");
+    }
+    size_t len = (size_t)st.st_size;
+    if (len >= 4096) {
+        /* mmap path: map file, copy to owned buffer, unmap */
+        void* mapped = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (mapped != MAP_FAILED) {
+            /* Advise sequential access for readahead */
+            madvise(mapped, len, MADV_SEQUENTIAL);
+            char* buf = (char*)SPL_MALLOC(len + 1, "file");
+            memcpy(buf, mapped, len);
+            buf[len] = '\0';
+            munmap(mapped, len);
+            close(fd);
+            return buf;
+        }
+        /* mmap failed — fall through to read() */
+    }
+    /* Small file or mmap fallback: use read() */
+    char* buf = (char*)SPL_MALLOC(len + 1, "file");
+    ssize_t nread = read(fd, buf, len);
+    buf[nread > 0 ? nread : 0] = '\0';
+    close(fd);
+    return buf;
+#else
+    /* Windows / Emscripten: use fopen/fread */
     FILE* f = fopen(path, "rb");
     if (!f) return SPL_STRDUP("", "file");
     fseek(f, 0, SEEK_END);
@@ -707,6 +742,7 @@ char* spl_file_read(const char* path) {
     buf[read_len] = '\0';
     fclose(f);
     return buf;
+#endif
 }
 
 int spl_file_write(const char* path, const char* content) {

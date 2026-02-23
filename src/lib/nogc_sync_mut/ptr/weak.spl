@@ -1,0 +1,120 @@
+# Weak Reference — Global Weak Reference Table
+# @tag:api
+#
+# WeakRef provides non-owning references that don't prevent deallocation.
+# Uses a global table to track target liveness and strong reference counts.
+#
+# Usage:
+#     val target_id = weak_register(42)
+#     val w = weak_create(target_id)
+#     val v = weak_upgrade(w)             # returns 42
+#     weak_invalidate(target_id)
+#     val v2 = weak_upgrade(w)            # returns -1 (expired)
+
+# =========================================================================
+# Module-level state (parallel arrays)
+# =========================================================================
+
+var g_weak_values: [i64] = []
+var g_weak_alive: [bool] = []
+var g_weak_generations: [i64] = []
+var g_weak_strong_counts: [i64] = []
+var g_weak_next_id: i64 = 0
+
+struct WeakRef:
+    target_id: i64
+    generation: i64
+
+# =========================================================================
+# Registration
+# =========================================================================
+
+fn weak_register(value: i64) -> i64:
+    val id = g_weak_next_id
+    g_weak_next_id = g_weak_next_id + 1
+    g_weak_values.push(value)
+    g_weak_alive.push(true)
+    g_weak_generations.push(0)
+    g_weak_strong_counts.push(1)
+    id
+
+fn weak_reset():
+    g_weak_values = []
+    g_weak_alive = []
+    g_weak_generations = []
+    g_weak_strong_counts = []
+    g_weak_next_id = 0
+
+# =========================================================================
+# Weak reference creation
+# =========================================================================
+
+fn weak_create(target_id: i64) -> WeakRef:
+    if target_id < 0:
+        return WeakRef(target_id: -1, generation: -1)
+    if target_id >= g_weak_alive.len():
+        return WeakRef(target_id: -1, generation: -1)
+    WeakRef(target_id: target_id, generation: g_weak_generations[target_id])
+
+# =========================================================================
+# Upgrade (dereference)
+# =========================================================================
+
+fn weak_upgrade(ref: WeakRef) -> i64:
+    if ref.target_id < 0:
+        return -1
+    if ref.target_id >= g_weak_alive.len():
+        return -1
+    if g_weak_alive[ref.target_id] == false:
+        return -1
+    if g_weak_generations[ref.target_id] != ref.generation:
+        return -1
+    g_weak_values[ref.target_id]
+
+fn weak_is_alive(ref: WeakRef) -> bool:
+    if ref.target_id < 0:
+        return false
+    if ref.target_id >= g_weak_alive.len():
+        return false
+    if g_weak_alive[ref.target_id] == false:
+        return false
+    g_weak_generations[ref.target_id] == ref.generation
+
+# =========================================================================
+# Invalidation
+# =========================================================================
+
+fn weak_invalidate(target_id: i64):
+    if target_id >= 0:
+        if target_id < g_weak_alive.len():
+            g_weak_alive[target_id] = false
+            g_weak_generations[target_id] = g_weak_generations[target_id] + 1
+
+# =========================================================================
+# Strong count management
+# =========================================================================
+
+fn weak_add_strong(target_id: i64):
+    if target_id >= 0:
+        if target_id < g_weak_strong_counts.len():
+            g_weak_strong_counts[target_id] = g_weak_strong_counts[target_id] + 1
+
+fn weak_remove_strong(target_id: i64):
+    if target_id >= 0:
+        if target_id < g_weak_strong_counts.len():
+            g_weak_strong_counts[target_id] = g_weak_strong_counts[target_id] - 1
+            if g_weak_strong_counts[target_id] <= 0:
+                weak_invalidate(target_id)
+
+fn weak_strong_count(target_id: i64) -> i64:
+    if target_id < 0:
+        return 0
+    if target_id >= g_weak_strong_counts.len():
+        return 0
+    g_weak_strong_counts[target_id]
+
+export WeakRef
+export weak_register, weak_reset
+export weak_create, weak_upgrade, weak_is_alive
+export weak_invalidate
+export weak_add_strong, weak_remove_strong, weak_strong_count

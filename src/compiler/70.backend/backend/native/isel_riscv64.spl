@@ -17,7 +17,7 @@
 
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirBinOp, MirUnaryOp, MirOperand, MirOperandKind, MirConstValue, MirTerminator, MirType, MirTypeKind, LocalId, LocalKind, BlockId, SwitchCase}
 use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_id, Operand, OperandKind, op_reg, op_phys, op_virt, op_imm, op_mem, op_label, op_sym, operand_get_reg, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, DataEntry, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
-use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op}
+use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
 use compiler.backend.native.mach_inst.{RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7, RV_X8, RV_X9, RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15, RV_X16, RV_X17, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X28, RV_X29, RV_X30, RV_X31}
 use compiler.backend.native.mach_inst.{RV_ARG_REGS, RV_CALLEE_SAVED}
 use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC, RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET, RV_OP_CALL, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ}
@@ -43,45 +43,24 @@ fn rv_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Low
             rv_lower_const_int(ctx, v)
         case Bool(v):
             val imm_val = if v: 1 else: 0
-            var new_ctx = isel_alloc_vreg(ctx)
-            val vreg = isel_get_vreg(new_ctx)
-            val dest = op_reg(virtual_reg(vreg))
-            # LI is a pseudo-instruction that loads an immediate
-            val inst = new_mach_inst(RV_OP_LI, [dest, op_imm(imm_val)])
-            LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
+            isel_emit_one(ctx, RV_OP_LI, [op_imm(imm_val)])
         case Str(s):
             var new_ctx = isel_add_string_data(ctx, s, char_to_ascii)
             val label = isel_last_string_label(new_ctx)
-            new_ctx = isel_alloc_vreg(new_ctx)
-            val vreg = isel_get_vreg(new_ctx)
-            val dest = op_reg(virtual_reg(vreg))
-            # AUIPC + ADDI for PC-relative address loading
-            val auipc_inst = new_mach_inst(RV_OP_AUIPC, [dest, op_sym(label)])
-            val addi_inst = new_mach_inst(RV_OP_ADDI, [dest, dest, op_sym(label)])
-            LoweredOperand(insts: [auipc_inst, addi_inst], result: dest, ctx: new_ctx)
+            val low = isel_fresh_dest(new_ctx)
+            val auipc_inst = new_mach_inst(RV_OP_AUIPC, [low.result, op_sym(label)])
+            val addi_inst = new_mach_inst(RV_OP_ADDI, [low.result, low.result, op_sym(label)])
+            LoweredOperand(insts: [auipc_inst, addi_inst], result: low.result, ctx: low.ctx)
         case Zero:
-            # MV rd, x0 (zero register)
-            var new_ctx = isel_alloc_vreg(ctx)
-            val vreg = isel_get_vreg(new_ctx)
-            val dest = op_reg(virtual_reg(vreg))
-            val inst = new_mach_inst(RV_OP_LI, [dest, op_imm(0)])
-            LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
+            isel_emit_one(ctx, RV_OP_LI, [op_imm(0)])
         case _:
-            var new_ctx = isel_alloc_vreg(ctx)
-            val vreg = isel_get_vreg(new_ctx)
-            val dest = op_reg(virtual_reg(vreg))
-            val inst = new_mach_inst(RV_OP_LI, [dest, op_imm(0)])
-            LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
+            isel_emit_one(ctx, RV_OP_LI, [op_imm(0)])
 
 fn rv_lower_const_int(ctx: ISelContext, v: i64) -> LoweredOperand:
     # RISC-V LI is a pseudo-instruction that the assembler/encoder expands
     # to LUI + ADDI (or longer sequences) as needed. At ISel level we emit
     # a single LI pseudo and let the encoder handle materialization.
-    var new_ctx = isel_alloc_vreg(ctx)
-    val vreg = isel_get_vreg(new_ctx)
-    val dest = op_reg(virtual_reg(vreg))
-    val inst = new_mach_inst(RV_OP_LI, [dest, op_imm(v)])
-    LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
+    isel_emit_one(ctx, RV_OP_LI, [op_imm(v)])
 
 # ============================================================================
 # Instruction Selection - Core Entry Point
@@ -314,44 +293,34 @@ fn rv_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand
 
 fn rv_isel_cmp_eq(dest: Operand, left: Operand, right: Operand, ctx: ISelContext) -> [MachInst]:
     # EQ: SUB tmp, rs1, rs2; SEQZ dest, tmp
-    # SEQZ is pseudo for SLTIU rd, rs, 1
+    val low = isel_fresh_dest(ctx)
     var insts: [MachInst] = []
-    var tmp_ctx = isel_alloc_vreg(ctx)
-    val tmp_vreg = isel_get_vreg(tmp_ctx)
-    val tmp_op = op_reg(virtual_reg(tmp_vreg))
-    insts = insts + [new_mach_inst(RV_OP_SUB, [tmp_op, left, right])]
-    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, tmp_op])]
+    insts = insts + [new_mach_inst(RV_OP_SUB, [low.result, left, right])]
+    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, low.result])]
     insts
 
 fn rv_isel_cmp_ne(dest: Operand, left: Operand, right: Operand, ctx: ISelContext) -> [MachInst]:
     # NE: SUB tmp, rs1, rs2; SNEZ dest, tmp
-    # SNEZ is pseudo for SLTU rd, x0, rs
+    val low = isel_fresh_dest(ctx)
     var insts: [MachInst] = []
-    var tmp_ctx = isel_alloc_vreg(ctx)
-    val tmp_vreg = isel_get_vreg(tmp_ctx)
-    val tmp_op = op_reg(virtual_reg(tmp_vreg))
-    insts = insts + [new_mach_inst(RV_OP_SUB, [tmp_op, left, right])]
-    insts = insts + [new_mach_inst(RV_OP_SNEZ, [dest, tmp_op])]
+    insts = insts + [new_mach_inst(RV_OP_SUB, [low.result, left, right])]
+    insts = insts + [new_mach_inst(RV_OP_SNEZ, [dest, low.result])]
     insts
 
 fn rv_isel_cmp_le(dest: Operand, left: Operand, right: Operand, ctx: ISelContext) -> [MachInst]:
     # LE: NOT (right < left) => SLT tmp, right, left; SEQZ dest, tmp
+    val low = isel_fresh_dest(ctx)
     var insts: [MachInst] = []
-    var tmp_ctx = isel_alloc_vreg(ctx)
-    val tmp_vreg = isel_get_vreg(tmp_ctx)
-    val tmp_op = op_reg(virtual_reg(tmp_vreg))
-    insts = insts + [new_mach_inst(RV_OP_SLT, [tmp_op, right, left])]
-    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, tmp_op])]
+    insts = insts + [new_mach_inst(RV_OP_SLT, [low.result, right, left])]
+    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, low.result])]
     insts
 
 fn rv_isel_cmp_ge(dest: Operand, left: Operand, right: Operand, ctx: ISelContext) -> [MachInst]:
     # GE: NOT (left < right) => SLT tmp, left, right; SEQZ dest, tmp
+    val low = isel_fresh_dest(ctx)
     var insts: [MachInst] = []
-    var tmp_ctx = isel_alloc_vreg(ctx)
-    val tmp_vreg = isel_get_vreg(tmp_ctx)
-    val tmp_op = op_reg(virtual_reg(tmp_vreg))
-    insts = insts + [new_mach_inst(RV_OP_SLT, [tmp_op, left, right])]
-    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, tmp_op])]
+    insts = insts + [new_mach_inst(RV_OP_SLT, [low.result, left, right])]
+    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, low.result])]
     insts
 
 # ============================================================================
@@ -542,9 +511,9 @@ fn rv_isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], de
     for i in 0..targets_len(targets):
         val target = targets[i]
         # Load case value into temp vreg
-        current_ctx = isel_alloc_vreg(current_ctx)
-        val case_vreg = isel_get_vreg(current_ctx)
-        val case_op = op_reg(virtual_reg(case_vreg))
+        val case_low = isel_fresh_dest(current_ctx)
+        current_ctx = case_low.ctx
+        val case_op = case_low.result
         insts = insts + [new_mach_inst(RV_OP_LI, [case_op, op_imm(target.value)])]
         # BEQ value, case_value, target_label
         insts = insts + [new_mach_inst(RV_OP_BEQ, [val_low.result, case_op, op_label(target.target.id)])]

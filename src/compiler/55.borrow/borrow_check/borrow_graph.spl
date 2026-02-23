@@ -80,6 +80,89 @@ struct Place:
 
 
 # ============================================================================
+# Place/Kind Conflict Detection
+# ============================================================================
+
+fn place_base_equals(a: PlaceBase, b: PlaceBase) -> bool:
+    """Check if two place bases are equal."""
+    match a:
+        case Local(a_id):
+            match b:
+                case Local(b_id): a_id == b_id
+                case _: false
+        case Static(a_name):
+            match b:
+                case Static(b_name): a_name == b_name
+                case _: false
+        case Promoted(a_id):
+            match b:
+                case Promoted(b_id): a_id == b_id
+                case _: false
+
+fn place_elem_equals(a: PlaceElem, b: PlaceElem) -> bool:
+    """Check if two place projection elements are equal."""
+    match a:
+        case Deref:
+            match b:
+                case Deref: true
+                case _: false
+        case Field(a_idx):
+            match b:
+                case Field(b_idx): a_idx == b_idx
+                case _: false
+        case Index(a_local):
+            match b:
+                case Index(b_local): a_local == b_local
+                case _: false
+        case ConstantIndex(a_idx):
+            match b:
+                case ConstantIndex(b_idx): a_idx == b_idx
+                case _: false
+        case Downcast(a_v):
+            match b:
+                case Downcast(b_v): a_v == b_v
+                case _: false
+
+fn place_conflicts_with(a: Place, b: Place) -> bool:
+    """Check if two places conflict (one is a prefix of the other).
+
+    Two places conflict when they refer to overlapping memory.
+    Examples: x conflicts with x.field, x[0] conflicts with x.
+    """
+    val same_base = place_base_equals(a.base, b.base)
+    if not same_base:
+        return false
+    # One is prefix of the other (e.g., x vs x.field)
+    val a_len = a.projections.len()
+    val b_len = b.projections.len()
+    val min_len = if a_len < b_len: a_len else: b_len
+    var i = 0
+    while i < min_len:
+        if not place_elem_equals(a.projections[i], b.projections[i]):
+            return false
+        i = i + 1
+    true
+
+fn kind_conflicts_with(a: BorrowKind, b: BorrowKind) -> bool:
+    """Check if two borrow kinds conflict.
+
+    Shared+Shared is OK, anything else conflicts.
+    """
+    match a:
+        case Shared:
+            match b:
+                case Shared: false
+                case _: true
+        case _: true
+
+fn kind_is_mutable(kind: BorrowKind) -> bool:
+    """Check if a borrow kind is mutable."""
+    match kind:
+        case Mutable: true
+        case Unique: true
+        case Shared: false
+
+# ============================================================================
 # Place Methods (was: impl Place:)
 # ============================================================================
 
@@ -218,7 +301,7 @@ class BorrowSet:
         var result: [Borrow] = []
         for id in self.borrows_keys(borrows):
             val borrow = self.borrows[id]
-            if borrow.place_conflicts_with(place, place):
+            if place_conflicts_with(borrow.place, place):
                 result = result_push(result, borrow)
         result
 
@@ -226,8 +309,8 @@ class BorrowSet:
         """Check if there's a conflicting borrow."""
         for id in self.borrows_keys(borrows):
             val borrow = self.borrows[id]
-            if borrow.place_conflicts_with(place, place):
-                if borrow.kind_conflicts_with(kind, kind):
+            if place_conflicts_with(borrow.place, place):
+                if kind_conflicts_with(borrow.kind, kind):
                     return borrow
         nil
 
@@ -371,7 +454,7 @@ class BorrowGraph:
         # Find conflicting borrows
         val conflicts = borrow_set_borrows_of(borrow_set, place)
         for borrow in conflicts:
-            if borrow.kind_is_mutable(kind):
+            if kind_is_mutable(borrow.kind):
                 self.errors = self.errors.push(BorrowError(
                     message: "Assignment while mutably borrowed: {place.to_text()}",
                     # # DESUGARED: borrow: Some(borrow)
@@ -414,6 +497,8 @@ class BorrowGraph:
 export PlaceBase, PlaceElem, Place
 export BorrowKind, Borrow, BorrowSet
 export BorrowError, BorrowGraph
+export place_base_equals, place_elem_equals, place_conflicts_with
+export kind_conflicts_with, kind_is_mutable
 
 # Export desugared static methods
 export Place__local
