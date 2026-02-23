@@ -1,11 +1,11 @@
 # C Runtime Memory Leak Regression Tests
 #
-# Documents and reproduces all 5 memory leak categories found in the C runtime
+# Documents and reproduces all 9 memory leak categories found in the C runtime
 # and generated C code. Each test verifies the fix is present.
 #
 # For actual ASan verification, run:
-#   clang -fsanitize=address,leak -g -I src/app/compile -o /tmp/leak_test /tmp/leak_harness.c -lm
-#   /tmp/leak_test
+#   cmake -B build-asan -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_C_FLAGS="-fsanitize=address,leak -g" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,leak" -S src/compiler_cpp
+#   ninja -C build-asan && ASAN_OPTIONS=detect_leaks=1 build-asan/simple --version
 #
 # == Leak Record ==
 #
@@ -27,6 +27,22 @@
 #
 # Leak 5: Generated main.c had no simple_string_array_free(), never freed arrays.
 #   Fix: Added free function, atexit cleanup.
+#   File: src/compiler_cpp/main.c
+#
+# Leak 6: simple_string_array_slice() results in command dispatch never freed.
+#   Fix: Store result, call handler, free array, then return.
+#   File: src/compiler_cpp/main.c
+#
+# Leak 7: simple_substr_from() returned strdup'd strings for flag parsing, never freed.
+#   Fix: Use pointer arithmetic (arg + N) instead of simple_substr_from().
+#   File: src/compiler_cpp/main.c
+#
+# Leak 8: run_lex_command() called get_cli_args() but never freed the array.
+#   Fix: Free args before return.
+#   File: src/compiler_cpp/main.c
+#
+# Leak 9: program_args in default file-execution branch never freed.
+#   Fix: Store return code, free array, then return.
 #   File: src/compiler_cpp/main.c
 
 extern fn rt_file_read_text(path: text) -> text
@@ -136,3 +152,45 @@ describe "C Runtime Leak Regression - Bootstrap runtime synced":
     it "bootstrap c_runtime.c uses strdup in Option/Result":
         val content = rt_file_read_text("src/compiler_cpp/c_runtime.c") ?? ""
         expect(content.contains("o.str_val = strdup")).to_equal(true)
+
+describe "C Runtime Leak 6 - Sliced arrays freed in command dispatch":
+    it "main.c frees test_args after cli_run_tests":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("simple_string_array_free(&test_args)")).to_equal(true)
+
+    it "main.c frees build_args after handle_build":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("simple_string_array_free(&build_args)")).to_equal(true)
+
+    it "main.c frees check_args after run_check":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("simple_string_array_free(&check_args)")).to_equal(true)
+
+    it "main.c frees stats_args after run_stats":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("simple_string_array_free(&stats_args)")).to_equal(true)
+
+describe "C Runtime Leak 7 - No substr_from in flag parsing":
+    it "main.c uses pointer arithmetic for jit-threshold":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("atoll(arg + 16)")).to_equal(true)
+
+    it "main.c uses pointer arithmetic for backend":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("backend = arg + 10")).to_equal(true)
+
+    it "main.c uses pointer arithmetic for timeout":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("atoll(arg + 10)")).to_equal(true)
+
+describe "C Runtime Leak 8 - run_lex_command frees args":
+    it "main.c frees args in run_lex_command":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        # run_lex_command must free the args array before returning
+        expect(content.contains("long long rc = cli_run_lex(args)")).to_equal(true)
+        expect(content.contains("simple_string_array_free(&args)")).to_equal(true)
+
+describe "C Runtime Leak 9 - program_args freed in default branch":
+    it "main.c frees program_args before return":
+        val content = rt_file_read_text("src/compiler_cpp/main.c") ?? ""
+        expect(content.contains("simple_string_array_free(&program_args)")).to_equal(true)
