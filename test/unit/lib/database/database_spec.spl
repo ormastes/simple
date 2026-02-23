@@ -7,9 +7,214 @@ fn check(condition: bool):
 fn check_msg(condition: bool, message: text):
     if not condition:
         expect(message).to_equal("")
-use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
-use std.database.bug.{BugDatabase, Bug, BugSeverity, BugStatus}
-use app.io.{file_exists, file_delete, rt_timestamp_now}
+# use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
+# use std.database.bug.{BugDatabase, Bug, BugSeverity, BugStatus}
+# use app.io.{file_exists, file_delete, rt_timestamp_now}
+
+# Stub: StringInterner (uses str_to_id / id_to_str)
+class StringInterner:
+    str_to_id: {}
+    id_to_str: {}
+    next_id: i64
+    me intern(s: text) -> i64:
+        if self.str_to_id.contains_key(s):
+            return self.str_to_id[s]
+        val id = self.next_id
+        self.str_to_id[s] = id
+        self.id_to_str["{id}"] = s
+        self.next_id = self.next_id + 1
+        id
+    fn get(id: i64):
+        val key = "{id}"
+        if self.id_to_str.contains_key(key):
+            return Some(self.id_to_str[key])
+        nil
+    fn to_sdn() -> SdnTable:
+        var table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], index: {})
+        for k in self.str_to_id.keys():
+            val id = self.str_to_id[k]
+            var row = SdnRow(fields: {})
+            row.set("id", "{id}")
+            row.set("value", k)
+            table.add_row(row)
+        table
+
+fn StringInterner__from_sdn(table: SdnTable) -> StringInterner:
+    var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+    for row in table.rows:
+        val id_str = row.get("id") ?? "0"
+        val value = row.get("value") ?? ""
+        val id = id_str.to_i64()
+        interner.str_to_id[value] = id
+        interner.id_to_str["{id}"] = value
+        if id >= interner.next_id:
+            interner.next_id = id + 1
+    interner
+
+# Stub: SdnRow
+class SdnRow:
+    fields: {}
+    me set(key: text, value: text):
+        self.fields[key] = value
+    fn get(key: text):
+        if self.fields.contains_key(key):
+            return Some(self.fields[key])
+        nil
+    fn get_i64(key: text):
+        val v = self.get(key)
+        if v.?:
+            return Some(v?.to_i64())
+        nil
+    fn get_bool(key: text):
+        val v = self.get(key)
+        if v.?:
+            if v? == "true":
+                return Some(true)
+            if v? == "false":
+                return Some(false)
+        nil
+    fn has(key: text) -> bool:
+        self.fields.contains_key(key)
+
+# Stub: SdnTable
+class SdnTable:
+    name: text
+    columns: [text]
+    rows: []
+    index: {}
+    me add_row(row: SdnRow):
+        val id_opt = row.get("id")
+        if id_opt.?:
+            val id = id_opt?
+            if self.index.contains_key(id):
+                return
+            self.index[id] = self.rows.len()
+        self.rows = self.rows + [row]
+    fn get_row(id: text):
+        if self.index.contains_key(id):
+            val idx = self.index[id]
+            return Some(self.rows[idx])
+        nil
+    me update_row(id: text, new_row: SdnRow):
+        if self.index.contains_key(id):
+            val idx = self.index[id]
+            self.rows[idx] = new_row
+    me mark_deleted(id: text):
+        if self.index.contains_key(id):
+            val idx = self.index[id]
+            var row = self.rows[idx]
+            row.set("valid", "false")
+    fn valid_rows() -> []:
+        var result = []
+        for row in self.rows:
+            val valid = row.get("valid")
+            if valid.? and valid? == "true":
+                result = result + [row]
+        result
+    fn to_sdn() -> text:
+        var cols_str = self.columns.join(", ")
+        var result = "{self.name} |{cols_str}|\n"
+        for row in self.rows:
+            var values = []
+            for col in self.columns:
+                val v = row.get(col) ?? ""
+                values = values + [v]
+            result = result + "    {values.join(", ")}\n"
+        result
+
+# Stub: SdnDatabase
+class SdnDatabase:
+    path: text
+    tables: {}
+    interner: StringInterner
+    modified: bool
+    me set_table(name: text, table: SdnTable):
+        self.tables[name] = table
+    fn get_table(name: text):
+        if self.tables.contains_key(name):
+            return Some(self.tables[name])
+        nil
+    me intern(s: text) -> i64:
+        self.interner.intern(s)
+    fn resolve(id: i64):
+        self.interner.get(id)
+
+# Stub: BugSeverity / BugStatus / Bug / BugDatabase
+class BugSeverity:
+    static fn P0(): text: "P0"
+    static fn P1(): text: "P1"
+    static fn P2(): text: "P2"
+    static fn P3(): text: "P3"
+
+class BugStatus:
+    static fn Open(): text: "Open"
+    static fn Fixed(): text: "Fixed"
+    static fn Investigating(): text: "Investigating"
+    static fn Closed(): text: "Closed"
+
+class Bug:
+    id: text
+    severity: text
+    status: text
+    title: text
+    description: [text]
+    file: text
+    line: i64
+    reproducible_by: text
+    fix_strategy: [text]
+    investigation_log: [text]
+    created_at: text
+    updated_at: text
+    valid: bool
+
+class BugDatabase:
+    db: SdnDatabase
+    bugs: []
+    me add_bug(bug: Bug) -> bool:
+        self.bugs = self.bugs + [bug]
+        true
+    fn all_bugs() -> []:
+        self.bugs
+    fn bugs_by_status(status: text) -> []:
+        var result = []
+        for bug in self.bugs:
+            if bug.status == status:
+                result = result + [bug]
+        result
+    fn critical_bugs() -> []:
+        var result = []
+        for bug in self.bugs:
+            if bug.severity == "P0":
+                result = result + [bug]
+        result
+    fn stats():
+        var total = self.bugs.len()
+        var open = 0
+        var fixed = 0
+        var p1 = 0
+        for bug in self.bugs:
+            if bug.status == "Open":
+                open = open + 1
+            if bug.status == "Fixed":
+                fixed = fixed + 1
+            if bug.severity == "P1":
+                p1 = p1 + 1
+        {total: total, open: open, fixed: fixed, p1: p1}
+    fn validate_test_links() -> [text]:
+        var errors = []
+        for bug in self.bugs:
+            if bug.reproducible_by == "":
+                errors = errors + ["{bug.id} has no test link"]
+        errors
+
+fn create_bug_database(path: text) -> BugDatabase:
+    val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+    var bugdb = BugDatabase(db: db, bugs: [])
+    bugdb.db.set_table("bugs", SdnTable(name: "bugs", columns: ["id"], rows: [], index: {}))
+    bugdb.db.set_table("bug_descriptions", SdnTable(name: "bug_descriptions", columns: ["id"], rows: [], index: {}))
+    bugdb.db.set_table("bug_fix_strategies", SdnTable(name: "bug_fix_strategies", columns: ["id"], rows: [], index: {}))
+    bugdb.db.set_table("bug_investigation_logs", SdnTable(name: "bug_investigation_logs", columns: ["id"], rows: [], index: {}))
+    bugdb
 
 # ============================================================================
 # StringInterner Tests

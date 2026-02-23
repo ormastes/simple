@@ -1,0 +1,143 @@
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
+class DiContainer:
+    bindings: text
+    singletons: text
+    profile: text
+    all_bindings: list
+    locked: bool
+
+    fn _is_env_locked() -> bool:
+        val sys = rt_env_get("SIMPLE_SYSTEM_TEST")
+        val di_test = rt_env_get("SIMPLE_DI_TEST")
+        if sys == "1":
+            if di_test == "1":
+                return false
+            return true
+        false
+
+    fn is_locked() -> bool:
+        if self.locked:
+            return true
+        self._is_env_locked()
+
+    me lock():
+        self.locked = true
+
+    me unlock():
+        self.locked = false
+
+    me bind_instance(key: text, value):
+        if self.is_locked():
+            return nil
+        var new_bindings = []
+        for entry in self.all_bindings:
+            if entry[0] != key:
+                new_bindings = new_bindings + [entry]
+        new_bindings = new_bindings + [[key, value]]
+        self.all_bindings = new_bindings
+
+    me bind(key: text, factory):
+        if self.is_locked():
+            return nil
+        val value = factory()
+        var new_bindings = []
+        for entry in self.all_bindings:
+            if entry[0] != key:
+                new_bindings = new_bindings + [entry]
+        new_bindings = new_bindings + [[key, value]]
+        self.all_bindings = new_bindings
+
+    me bind_for_profile(key: text, prof, factory):
+        if self.is_locked():
+            return nil
+        val value = factory()
+        var new_bindings = []
+        for entry in self.all_bindings:
+            if entry[0] != key:
+                new_bindings = new_bindings + [entry]
+        new_bindings = new_bindings + [[key, value]]
+        self.all_bindings = new_bindings
+
+    me bind_tagged(key: text, tags: list, factory):
+        if self.is_locked():
+            return nil
+        val value = factory()
+        var new_bindings = []
+        for entry in self.all_bindings:
+            if entry[0] != key:
+                new_bindings = new_bindings + [entry]
+        new_bindings = new_bindings + [[key, value]]
+        self.all_bindings = new_bindings
+
+    fn has(key: text) -> bool:
+        for entry in self.all_bindings:
+            if entry[0] == key:
+                return true
+        false
+
+    fn resolve(key: text):
+        for entry in self.all_bindings:
+            if entry[0] == key:
+                return entry[1]
+        nil
+
+    fn resolve_or(key: text, default_val):
+        for entry in self.all_bindings:
+            if entry[0] == key:
+                return entry[1]
+        default_val
+
+class _CompilerProfile:
+    Dev: text
+val CompilerProfile = _CompilerProfile(Dev: "dev")
+
+fn di_is_system_test_locked() -> bool:
+    val sys = rt_env_get("SIMPLE_SYSTEM_TEST")
+    val di_test = rt_env_get("SIMPLE_DI_TEST")
+    if sys == "1":
+        if di_test == "1":
+            return false
+        return true
+    false
+
+describe "locked container rejects bindings":
+    it "bind_instance on locked container does not store value":
+        val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+        di.bind_instance("existing", "before")
+        di.lock()
+        di.bind_instance("new_key", "should_not_appear")
+        expect(di.has("new_key")).to_equal(false)
+
+    it "bind factory on locked container does not register":
+        val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+        di.lock()
+        di.bind("FactoryKey", fn(): "factory_result")
+        expect(di.has("FactoryKey")).to_equal(false)
+
+    it "bind_for_profile on locked container does not register":
+        val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+        di.lock()
+        di.bind_for_profile("ProfileKey", CompilerProfile.Dev, fn(): "profiled")
+        expect(di.has("ProfileKey")).to_equal(false)
+
+    it "locked container does not overwrite previously bound value":
+        val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+        di.bind_instance("Service", "original")
+        di.lock()
+        di.bind_instance("Service", "overwrite_attempt")
+        expect(di.resolve("Service")).to_equal("original")
+
+    it "is_locked returns true after explicit lock":
+        val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+        expect(di.is_locked()).to_equal(false)
+        di.lock()
+        expect(di.is_locked()).to_equal(true)
+
+    it "is_locked returns false after unlock":
+        val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+        di.lock()
+        expect(di.is_locked()).to_equal(true)
+        di.unlock()
+        expect(di.is_locked()).to_equal(false)

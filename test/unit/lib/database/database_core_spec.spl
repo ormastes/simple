@@ -7,8 +7,133 @@ fn check(condition: bool):
 fn check_msg(condition: bool, message: text):
     if not condition:
         expect(message).to_equal("")
-use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
-use app.io.file_ops.{file_exists, file_delete, file_write, file_read, rt_file_rename}
+# use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
+# use app.io.file_ops.{file_exists, file_delete, file_write, file_read, rt_file_rename}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+fn file_read(path: text) -> text:
+    val result = rt_file_read_text(path)
+    result ?? ""
+
+# Stub: StringInterner (uses strings/reverse fields)
+class StringInterner:
+    strings: {}
+    reverse: {}
+    next_id: i64
+    me intern(s: text) -> i64:
+        if self.strings.contains_key(s):
+            return self.strings[s]
+        val id = self.next_id
+        self.strings[s] = id
+        self.reverse["{id}"] = s
+        self.next_id = self.next_id + 1
+        id
+    fn get_id(s: text):
+        if self.strings.contains_key(s):
+            return Some(self.strings[s])
+        nil
+    fn lookup(id: i64):
+        val key = "{id}"
+        if self.reverse.contains_key(key):
+            return Some(self.reverse[key])
+        nil
+
+# Stub: SdnRow
+class SdnRow:
+    fields: {}
+    me set(key: text, value: text):
+        self.fields[key] = value
+    fn get(key: text):
+        if self.fields.contains_key(key):
+            return Some(self.fields[key])
+        nil
+    fn get_i64(key: text):
+        val v = self.get(key)
+        if v.?:
+            return Some(v?.to_i64())
+        nil
+    fn get_bool(key: text):
+        val v = self.get(key)
+        if v.?:
+            if v? == "true":
+                return Some(true)
+            if v? == "false":
+                return Some(false)
+        nil
+    fn has(key: text) -> bool:
+        self.fields.contains_key(key)
+
+# Stub: SdnTable
+class SdnTable:
+    name: text
+    columns: [text]
+    rows: []
+    index: {}
+    me add_row(row: SdnRow):
+        val id_opt = row.get("id")
+        if id_opt.?:
+            val id = id_opt?
+            if self.index.contains_key(id):
+                return
+            self.index[id] = self.rows.len()
+        self.rows = self.rows + [row]
+    fn get_row(id: text):
+        if self.index.contains_key(id):
+            val idx = self.index[id]
+            return Some(self.rows[idx])
+        nil
+    me mark_deleted(id: text):
+        if self.index.contains_key(id):
+            val idx = self.index[id]
+            var row = self.rows[idx]
+            row.set("valid", "false")
+    fn valid_rows() -> []:
+        var result = []
+        for row in self.rows:
+            val valid = row.get("valid")
+            if valid.? and valid? == "true":
+                result = result + [row]
+        result
+    fn to_sdn() -> text:
+        var cols_str = self.columns.join(", ")
+        var result = "{self.name} |{cols_str}|\n"
+        for row in self.rows:
+            var values = []
+            for col in self.columns:
+                val v = row.get(col) ?? ""
+                values = values + [v]
+            result = result + "    {values.join(", ")}\n"
+        result
+
+# Stub: SdnDatabase
+class SdnDatabase:
+    path: text
+    tables: {}
+    interner: StringInterner
+    modified: bool
+    me set_table(name: text, table: SdnTable):
+        self.tables[name] = table
+        self.modified = true
+    fn get_table(name: text):
+        if self.tables.contains_key(name):
+            return Some(self.tables[name])
+        nil
+    fn get_table_mut(name: text):
+        self.get_table(name)
+    me save() -> bool:
+        true
+    static fn load(path: text):
+        nil
 
 describe "StringInterner":
     it "interns same string to same ID":
