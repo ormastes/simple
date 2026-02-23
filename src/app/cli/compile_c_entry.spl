@@ -1,7 +1,8 @@
-# C Backend Compile Entry Point (Minimal)
+# C Backend Compile Entry Point (Lightweight)
 #
 # Dedicated entry point for `simple compile --backend=c`.
-# Uses minimal imports to avoid loading the full compiler driver.
+# Key optimization: imports MirToC directly instead of going through
+# compile_module_with_backend → CodegenFactory → all 10 backends.
 #
 # Invoked by bin/simple when it detects `compile --backend=c`:
 #   bin/release/simple src/app/cli/compile_c_entry.spl compile --backend=c -o out.cpp source.spl
@@ -9,7 +10,7 @@
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.{HirLowering}
 use compiler.mir.mir_lowering.{MirLowering__new}
-use compiler.backend.backend.{compile_module_with_backend}
+use compiler.backend.c_backend.{MirToC, MirToC__create}
 use compiler.common.config.{Logger}
 use compiler.core.parser.{SymbolTable, Scope, ScopeId, ScopeKind}
 
@@ -94,26 +95,25 @@ fn main() -> i64:
         print "Compiling {source_file} to C++20..."
 
     # Step 1: Parse
+    print "[c-compile] Step 1: Parsing {source_file}..."
     val logger = Logger(level: 4)
     val ast_module = parse_full_frontend(source_text, source_file, "main", logger)
 
     # Step 2: Lower to HIR
+    print "[c-compile] Step 2: Lowering to HIR..."
     var hir_lowering = create_hir_lowering_inline()
     val hir_module = hir_lowering.lower_module(ast_module)
 
     # Step 3: Lower to MIR
+    print "[c-compile] Step 3: Lowering to MIR..."
     var mir_lowering = MirLowering__new(create_symbol_table_inline())
     var mir_module = mir_lowering.lower_module(hir_module)
     mir_module.name = "main"
 
-    # Step 4: Generate C++
-    val compiled = compile_module_with_backend("c", mir_module, false)
-    if compiled.is_err():
-        print "Error: C codegen failed"
-        return 1
-
-    val module = compiled.unwrap()
-    val cpp_source = module.assembly
+    # Step 4: Generate C++ (direct MirToC, no CodegenFactory)
+    print "[c-compile] Step 4: Generating C++..."
+    var translator = MirToC__create("main")
+    val cpp_source = translator.translate_module(mir_module)
 
     # Step 5: Write output
     if not rt_file_write_text(output_file, cpp_source):
