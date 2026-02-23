@@ -278,7 +278,7 @@ fn lex_scan_string():
     val start_line: i64 = lex_line
     val start_col: i64 = lex_col
     val quote: text = lex_advance()
-    var result: text = ""
+    var parts: [text] = []
 
     # Check for triple-quote string: """ or '''
     val tq1: text = lex_peek()
@@ -289,10 +289,13 @@ fn lex_scan_string():
     if is_triple:
         lex_advance()
         lex_advance()
-        # Scan until closing triple-quote
+        # Scan until closing triple-quote — use slice-based accumulation
+        var seg_start: i64 = lex_pos
         for i in 0..1000000:
             if lex_at_end():
-                lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+                if lex_pos > seg_start:
+                    parts = parts.push(lex_source[seg_start:lex_pos])
+                lex_make_token(TOK_STRING_LIT, parts.join(""), start_line, start_col)
                 return
             val tc: text = lex_peek()
             val tn1: text = lex_peek_next()
@@ -303,16 +306,22 @@ fn lex_scan_string():
             val close12: bool = close1 and close2
             val close_all: bool = close12 and close3
             if close_all:
+                if lex_pos > seg_start:
+                    parts = parts.push(lex_source[seg_start:lex_pos])
                 lex_advance()
                 lex_advance()
                 lex_advance()
-                lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+                lex_make_token(TOK_STRING_LIT, parts.join(""), start_line, start_col)
                 return
-            result = result + lex_advance()
-        lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+            lex_advance()
+        if lex_pos > seg_start:
+            parts = parts.push(lex_source[seg_start:lex_pos])
+        lex_make_token(TOK_STRING_LIT, parts.join(""), start_line, start_col)
         return
 
     var done: bool = false
+    # Track start of current non-escape segment for slice-based accumulation
+    var seg_start: i64 = lex_pos
 
     for i in 0..100000:
         if done:
@@ -325,32 +334,39 @@ fn lex_scan_string():
             lex_make_token(TOK_ERROR, "unterminated string", start_line, start_col)
             return
         if c == quote:
+            # Flush pending segment
+            if lex_pos > seg_start:
+                parts = parts.push(lex_source[seg_start:lex_pos])
             lex_advance()
             done = true
         elif c == "\\":
+            # Flush pending segment before escape
+            if lex_pos > seg_start:
+                parts = parts.push(lex_source[seg_start:lex_pos])
             lex_advance()
             val esc: text = lex_advance()
             if esc == "n":
-                result = result + "\n"
+                parts = parts.push("\n")
             elif esc == "t":
-                result = result + "\t"
+                parts = parts.push("\t")
             elif esc == "r":
-                result = result + "\r"
+                parts = parts.push("\r")
             elif esc == "\\":
-                result = result + "\\"
+                parts = parts.push("\\")
             elif esc == "\"":
-                result = result + "\""
+                parts = parts.push("\"")
             elif esc == "'":
-                result = result + "'"
+                parts = parts.push("'")
             elif esc == "0":
-                result = result + "\0"
+                parts = parts.push("\0")
             else:
-                result = result + "\\"
-                result = result + esc
+                parts = parts.push("\\")
+                parts = parts.push(esc)
+            seg_start = lex_pos
         else:
-            result = result + lex_advance()
+            lex_advance()
 
-    lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+    lex_make_token(TOK_STRING_LIT, parts.join(""), start_line, start_col)
 
 # ===== Identifier/Keyword Scanning =====
 

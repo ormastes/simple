@@ -6,6 +6,7 @@
  */
 
 #include "runtime_thread.h"
+#include "runtime_memtrack.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -167,13 +168,13 @@ spl_thread_handle spl_thread_create(void* (*entry_point)(void*), void* arg) {
     }
 
 #ifdef SPL_THREAD_PTHREAD
-    pthread_t* thread = (pthread_t*)malloc(sizeof(pthread_t));
+    pthread_t* thread = (pthread_t*)SPL_MALLOC(sizeof(pthread_t), "thread");
     if (!thread) {
         return 0;
     }
 
     if (pthread_create(thread, NULL, entry_point, arg) != 0) {
-        free(thread);
+        SPL_FREE(thread);
         return 0;
     }
 
@@ -205,7 +206,7 @@ bool spl_thread_join(spl_thread_handle handle) {
     }
 
     bool success = (pthread_join(*thread, NULL) == 0);
-    free(thread);
+    SPL_FREE(thread);
     free_handle(handle);
     return success;
 
@@ -230,7 +231,7 @@ bool spl_thread_detach(spl_thread_handle handle) {
     }
 
     bool success = (pthread_detach(*thread) == 0);
-    free(thread);
+    SPL_FREE(thread);
     free_handle(handle);
     return success;
 
@@ -283,20 +284,20 @@ void spl_thread_yield(void) {
 
 spl_mutex_handle spl_mutex_create(void) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_t* mutex = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_t* mutex = (pthread_mutex_t*)SPL_MALLOC(sizeof(pthread_mutex_t), "mutex");
     if (!mutex) {
         return 0;
     }
 
     if (pthread_mutex_init(mutex, NULL) != 0) {
-        free(mutex);
+        SPL_FREE(mutex);
         return 0;
     }
 
     return alloc_handle(HANDLE_MUTEX, mutex);
 
 #else  /* Windows */
-    CRITICAL_SECTION* cs = (CRITICAL_SECTION*)malloc(sizeof(CRITICAL_SECTION));
+    CRITICAL_SECTION* cs = (CRITICAL_SECTION*)SPL_MALLOC(sizeof(CRITICAL_SECTION), "cs_mutex");
     if (!cs) {
         return 0;
     }
@@ -370,7 +371,7 @@ void spl_mutex_destroy(spl_mutex_handle handle) {
     pthread_mutex_t* mutex = (pthread_mutex_t*)get_handle(handle, HANDLE_MUTEX);
     if (mutex) {
         pthread_mutex_destroy(mutex);
-        free(mutex);
+        SPL_FREE(mutex);
         free_handle(handle);
     }
 
@@ -378,7 +379,7 @@ void spl_mutex_destroy(spl_mutex_handle handle) {
     CRITICAL_SECTION* cs = (CRITICAL_SECTION*)get_handle(handle, HANDLE_MUTEX);
     if (cs) {
         DeleteCriticalSection(cs);
-        free(cs);
+        SPL_FREE(cs);
         free_handle(handle);
     }
 #endif
@@ -390,20 +391,20 @@ void spl_mutex_destroy(spl_mutex_handle handle) {
 
 spl_condvar_handle spl_condvar_create(void) {
 #ifdef SPL_THREAD_PTHREAD
-    pthread_cond_t* cond = (pthread_cond_t*)malloc(sizeof(pthread_cond_t));
+    pthread_cond_t* cond = (pthread_cond_t*)SPL_MALLOC(sizeof(pthread_cond_t), "condvar");
     if (!cond) {
         return 0;
     }
 
     if (pthread_cond_init(cond, NULL) != 0) {
-        free(cond);
+        SPL_FREE(cond);
         return 0;
     }
 
     return alloc_handle(HANDLE_CONDVAR, cond);
 
 #else  /* Windows */
-    CONDITION_VARIABLE* cv = (CONDITION_VARIABLE*)malloc(sizeof(CONDITION_VARIABLE));
+    CONDITION_VARIABLE* cv = (CONDITION_VARIABLE*)SPL_MALLOC(sizeof(CONDITION_VARIABLE), "cv_condvar");
     if (!cv) {
         return 0;
     }
@@ -514,7 +515,7 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
     pthread_cond_t* cond = (pthread_cond_t*)get_handle(handle, HANDLE_CONDVAR);
     if (cond) {
         pthread_cond_destroy(cond);
-        free(cond);
+        SPL_FREE(cond);
         free_handle(handle);
     }
 
@@ -522,7 +523,7 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
     CONDITION_VARIABLE* cv = (CONDITION_VARIABLE*)get_handle(handle, HANDLE_CONDVAR);
     if (cv) {
         /* Windows condition variables don't need explicit cleanup */
-        free(cv);
+        SPL_FREE(cv);
         free_handle(handle);
     }
 #endif
@@ -597,7 +598,7 @@ spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
 
     /* Use standard thread creation with wrapper */
 #ifdef SPL_THREAD_PTHREAD
-    pthread_t* thread = (pthread_t*)malloc(sizeof(pthread_t));
+    pthread_t* thread = (pthread_t*)SPL_MALLOC(sizeof(pthread_t), "thread");
     if (!thread) {
         return 0;
     }
@@ -605,7 +606,7 @@ spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
     int result = pthread_create(thread, NULL, worker_thread_wrapper,
                                 (void*)(intptr_t)pool_id);
     if (result != 0) {
-        free(thread);
+        SPL_FREE(thread);
         return 0;
     }
 

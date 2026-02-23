@@ -1,0 +1,132 @@
+# LSan — Leak Sanitizer
+# @tag:api
+#
+# Thin wrapper over the existing mem_tracker module.
+# Adds named checkpoints and suppression tags for leak detection.
+#
+# Usage:
+#     lsan_enable()
+#     lsan_checkpoint("before_test")
+#     # ... code that allocates ...
+#     val leaks = lsan_check_since("before_test")
+#     lsan_report()
+
+use types.{SanEvent, san_event}
+use std.mem_tracker.{mem_enable, mem_disable, mem_is_enabled, mem_snapshot, mem_count_since, mem_bytes_since}
+
+# =========================================================================
+# Module-level state
+# =========================================================================
+
+var g_lsan_checkpoint_names: [text] = []
+var g_lsan_checkpoint_ids: [i64] = []
+var g_lsan_suppress: [text] = []
+var g_lsan_events: [SanEvent] = []
+var g_lsan_enabled: bool = false
+
+# =========================================================================
+# Enable / Disable
+# =========================================================================
+
+fn lsan_enable():
+    g_lsan_enabled = true
+    mem_enable()
+
+fn lsan_disable():
+    g_lsan_enabled = false
+    mem_disable()
+
+fn lsan_is_enabled() -> bool:
+    g_lsan_enabled
+
+# =========================================================================
+# Checkpoints
+# =========================================================================
+
+fn lsan_checkpoint(name: text):
+    if g_lsan_enabled == false:
+        return
+    val snap_id = mem_snapshot()
+    g_lsan_checkpoint_names.push(name)
+    g_lsan_checkpoint_ids.push(snap_id)
+
+fn lsan_find_checkpoint(name: text) -> i64:
+    var i = g_lsan_checkpoint_names.len() - 1
+    while i >= 0:
+        if g_lsan_checkpoint_names[i] == name:
+            return g_lsan_checkpoint_ids[i]
+        i = i - 1
+    -1
+
+# =========================================================================
+# Leak checking
+# =========================================================================
+
+fn lsan_check_since(name: text) -> i64:
+    if g_lsan_enabled == false:
+        return 0
+    val snap_id = lsan_find_checkpoint(name)
+    if snap_id < 0:
+        g_lsan_events.push(san_event("lsan", "warning", "checkpoint not found: {name}", "lsan_check_since"))
+        return 0
+    val count = mem_count_since(snap_id)
+    if count > 0:
+        val bytes = mem_bytes_since(snap_id)
+        g_lsan_events.push(san_event("lsan", "error", "leak detected since '{name}': {count} allocations, {bytes} bytes", "lsan_check_since"))
+    count
+
+fn lsan_bytes_since(name: text) -> i64:
+    if g_lsan_enabled == false:
+        return 0
+    val snap_id = lsan_find_checkpoint(name)
+    if snap_id < 0:
+        return 0
+    mem_bytes_since(snap_id)
+
+# =========================================================================
+# Suppression
+# =========================================================================
+
+fn lsan_suppress_tag(tag: text):
+    g_lsan_suppress.push(tag)
+
+fn lsan_is_suppressed(tag: text) -> bool:
+    var i = 0
+    while i < g_lsan_suppress.len():
+        if g_lsan_suppress[i] == tag:
+            return true
+        i = i + 1
+    false
+
+# =========================================================================
+# Reporting
+# =========================================================================
+
+fn lsan_error_count() -> i64:
+    g_lsan_events.len()
+
+fn lsan_report():
+    if g_lsan_events.len() == 0:
+        print "LSan: no leaks detected"
+        return
+    print "LSan: {g_lsan_events.len()} event(s)"
+    var i = 0
+    while i < g_lsan_events.len():
+        val ev = g_lsan_events[i]
+        print "  [{ev.severity}] {ev.message} at {ev.location}"
+        i = i + 1
+
+fn lsan_get_events() -> [SanEvent]:
+    g_lsan_events
+
+fn lsan_reset():
+    g_lsan_checkpoint_names = []
+    g_lsan_checkpoint_ids = []
+    g_lsan_suppress = []
+    g_lsan_events = []
+    g_lsan_enabled = false
+
+export lsan_enable, lsan_disable, lsan_is_enabled
+export lsan_checkpoint, lsan_check_since, lsan_bytes_since
+export lsan_suppress_tag, lsan_is_suppressed
+export lsan_error_count, lsan_report, lsan_get_events, lsan_reset

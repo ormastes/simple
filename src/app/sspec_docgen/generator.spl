@@ -29,18 +29,16 @@ fn humanize_filename(stem: str) -> str:
         name = name[:-5]
     # Replace underscores with spaces and capitalize each word
     val words = name.split("_")
-    var result = ""
+    var parts: [text] = []
     for word in words:
         if word == "":
             continue
-        if result != "":
-            result = result + " "
         # Capitalize first letter
         if word.len() > 0:
             val first = word[0:1].upper()
             val rest = word[1:]
-            result = result + first + rest
-    result + " Specification"
+            parts.push(first + rest)
+    parts.join(" ") + " Specification"
 
 fn count_test_items(content: str) -> (i64, i64, i64):
     # Returns (total_it, skipped_it, pending_it)
@@ -69,10 +67,11 @@ fn build_auto_overview(content: str) -> str:
             describes.push(name)
     if describes.len() == 0:
         return ""
-    var result = "Tests covering:"
+    var parts: [text] = []
+    parts.push("Tests covering:")
     for d in describes:
-        result = result + "\n" + "- " + d
-    result
+        parts.push("\n- " + d)
+    parts.join("")
 
 fn get_current_date() -> str:
     use app.io.{shell_output_trimmed}
@@ -80,21 +79,16 @@ fn get_current_date() -> str:
 
 fn build_metadata_line(metadata: FeatureMetadata) -> str:
     # Build compact pipe-separated metadata line with optional doc links
-    var result = ""
+    var parts: [text] = []
     if metadata.id != "":
-        result = result + "**Feature ID:** {metadata.id}"
+        parts.push("**Feature ID:** {metadata.id}")
     if metadata.category != "":
-        if result != "":
-            result = result + " | "
-        result = result + "**Category:** {metadata.category}"
+        parts.push("**Category:** {metadata.category}")
     if metadata.difficulty != "":
-        if result != "":
-            result = result + " | "
-        result = result + "**Difficulty:** {metadata.difficulty}"
+        parts.push("**Difficulty:** {metadata.difficulty}")
     if metadata.status != "":
-        if result != "":
-            result = result + " | "
-        result = result + "**Status:** {metadata.status}"
+        parts.push("**Status:** {metadata.status}")
+    var result = parts.join(" | ")
     # Doc links shown as separate lines when present
     if metadata.requirement != "":
         result = result + "\n**Requirements:** {metadata.requirement}"
@@ -124,15 +118,15 @@ fn extract_content_section(block_content: str) -> str:
 
     if section_start >= 0:
         # Build from first ## heading to end
-        var result = ""
+        var parts: [text] = []
         var k = section_start
         while k < lines.len():
-            result = result + lines[k] + "\n"
+            parts.push(lines[k] + "\n")
             k = k + 1
-        return result.trim()
+        return parts.join("").trim()
 
     # No ## heading: strip title/metadata lines
-    var result = ""
+    var parts: [text] = []
     var found_content = false
     for line in lines:
         val trimmed = line.trim()
@@ -159,9 +153,9 @@ fn extract_content_section(block_content: str) -> str:
         if not is_meta:
             if trimmed != "" or found_content:
                 found_content = true
-                result = result + line + "\n"
+                parts.push(line + "\n")
 
-    result.trim()
+    parts.join("").trim()
 
 fn generate_feature_doc(doc: SspecDoc, output_dir: str) -> Result<str, str>:
     val file_name = get_file_stem(doc.file_path)
@@ -174,10 +168,10 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: str) -> Result<str, str>:
     elif not has_docstring:
         feature_name = humanize_filename(file_name)
 
-    var md = ""
+    var md_parts: [text] = []
 
     # H1 title
-    md = md + "# {feature_name}\n\n"
+    md_parts.push("# {feature_name}\n\n")
 
     # Metadata line: from docstring or auto-generated
     var meta = doc.metadata
@@ -213,27 +207,27 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: str) -> Result<str, str>:
 
     val meta_line = build_metadata_line(meta)
     if meta_line != "":
-        md = md + "{meta_line}\n\n"
+        md_parts.push("{meta_line}\n\n")
 
     # Source reference
-    md = md + "_Source: `{doc.file_path}`_\n\n"
+    md_parts.push("_Source: `{doc.file_path}`_\n\n")
 
-    md = md + "---\n\n"
+    md_parts.push("---\n\n")
 
     # Content from docstring OR auto-generated overview
     if has_docstring:
         val first_block = doc.doc_blocks[0]
         val content = extract_content_section(first_block.content)
         if content != "":
-            md = md + content + "\n"
-            md = md + "\n---\n\n"
+            md_parts.push(content + "\n")
+            md_parts.push("\n---\n\n")
     else:
         # Auto-generate overview from test structure
         val overview = build_auto_overview(doc.raw_content)
         if overview != "":
-            md = md + "## Overview\n\n"
-            md = md + overview + "\n"
-            md = md + "\n---\n\n"
+            md_parts.push("## Overview\n\n")
+            md_parts.push(overview + "\n")
+            md_parts.push("\n---\n\n")
 
     # Test stats summary
     val counts = count_test_items(doc.raw_content)
@@ -241,23 +235,24 @@ fn generate_feature_doc(doc: SspecDoc, output_dir: str) -> Result<str, str>:
     val skip_tests = counts[1]
     val pending_tests = counts[2]
     if total_tests > 0 or skip_tests > 0 or pending_tests > 0:
-        md = md + "## Test Summary\n\n"
-        md = md + "| Metric | Count |\n"
-        md = md + "|--------|-------|\n"
-        md = md + "| Tests | {total_tests} |\n"
+        md_parts.push("## Test Summary\n\n")
+        md_parts.push("| Metric | Count |\n")
+        md_parts.push("|--------|-------|\n")
+        md_parts.push("| Tests | {total_tests} |\n")
         if skip_tests > 0:
-            md = md + "| Skipped | {skip_tests} |\n"
+            md_parts.push("| Skipped | {skip_tests} |\n")
         if pending_tests > 0:
-            md = md + "| Pending | {pending_tests} |\n"
-        md = md + "\n"
+            md_parts.push("| Pending | {pending_tests} |\n")
+        md_parts.push("\n")
 
     # Test structure section
     val structure = extract_test_structure(doc.raw_content)
     if structure != "":
-        md = md + "## Test Structure\n\n"
-        md = md + structure + "\n"
+        md_parts.push("## Test Structure\n\n")
+        md_parts.push(structure + "\n")
 
     # Write to file
+    val md = md_parts.join("")
     val output_path = "{output_dir}/{file_name}.md"
     val ok = native_fs_write_string(output_path, md)
     if not ok:
@@ -312,21 +307,21 @@ fn calculate_coverage(doc_lines: i64) -> i64:
         0
 
 fn generate_index_page(entries: [FeatureEntry], output_dir: str, stats: DocStats) -> Result<str, str>:
-    var md = ""
+    var md_parts: [text] = []
 
     # Header
-    md = md + "# Test Specification Index\n\n"
-    md = md + "*Generated: {get_current_date()}*\n\n"
+    md_parts.push("# Test Specification Index\n\n")
+    md_parts.push("*Generated: {get_current_date()}*\n\n")
 
     # Quick stats
-    md = md + "## Quick Stats\n\n"
-    md = md + "- **Total Features:** {stats.total_specs}\n"
-    md = md + "- **Complete Documentation:** {stats.specs_with_docs} ({stats.coverage_percent()}%)\n"
-    md = md + "- **Stubs Remaining:** {stats.specs_without_docs}\n"
-    md = md + "- **Total Lines:** {stats.total_doc_lines}\n"
+    md_parts.push("## Quick Stats\n\n")
+    md_parts.push("- **Total Features:** {stats.total_specs}\n")
+    md_parts.push("- **Complete Documentation:** {stats.specs_with_docs} ({stats.coverage_percent()}%)\n")
+    md_parts.push("- **Stubs Remaining:** {stats.specs_without_docs}\n")
+    md_parts.push("- **Total Lines:** {stats.total_doc_lines}\n")
     if stats.total_warnings > 0:
-        md = md + "- **Warnings:** {stats.total_warnings}\n"
-    md = md + "\n---\n\n"
+        md_parts.push("- **Warnings:** {stats.total_warnings}\n")
+    md_parts.push("\n---\n\n")
 
     # Group by category
     var categories = {}
@@ -343,16 +338,17 @@ fn generate_index_page(entries: [FeatureEntry], output_dir: str, stats: DocStats
     val cat_names = categories.keys()
     for cat_name in cat_names:
         val cat_entries = categories[cat_name]
-        md = md + "## {cat_name} ({cat_entries.len()} features)\n\n"
-        md = md + "| Feature | Status | Tests | Coverage | Details |\n"
-        md = md + "|---------|--------|-------|----------|----------|\n"
+        md_parts.push("## {cat_name} ({cat_entries.len()} features)\n\n")
+        md_parts.push("| Feature | Status | Tests | Coverage | Details |\n")
+        md_parts.push("|---------|--------|-------|----------|----------|\n")
 
         for entry in cat_entries:
-            md = md + "| [{entry.title}]({entry.filename}) | {entry.status} | {entry.test_count} | {entry.coverage} | {entry.doc_lines} lines |\n"
+            md_parts.push("| [{entry.title}]({entry.filename}) | {entry.status} | {entry.test_count} | {entry.coverage} | {entry.doc_lines} lines |\n")
 
-        md = md + "\n"
+        md_parts.push("\n")
 
     # Write to file
+    val md = md_parts.join("")
     val output_path = "{output_dir}/INDEX.md"
     val ok = native_fs_write_string(output_path, md)
     if not ok:

@@ -1,0 +1,301 @@
+# Sanitizer Library Unit Tests
+# @tag:test
+#
+# Tests all sanitizer modules: ASan, UBSan, TSan, MSan, and unified API.
+# LSan tests are skipped because they require mem_tracker FFI.
+
+use std.sanitizer.asan.mod.{asan_enable, asan_disable, asan_on_alloc, asan_on_free, asan_check_access, asan_check_bounds, asan_error_count, asan_reset}
+use std.sanitizer.ubsan.mod.{ubsan_enable, ubsan_disable, ubsan_add_i64, ubsan_sub_i64, ubsan_div_i64, ubsan_check_index, ubsan_check_not_nil, ubsan_unreachable, ubsan_error_count, ubsan_reset}
+use std.sanitizer.tsan.mod.{tsan_enable, tsan_disable, tsan_set_thread, tsan_read, tsan_write, tsan_lock_acquire, tsan_lock_release, tsan_error_count, tsan_reset}
+use std.sanitizer.msan.mod.{msan_enable, msan_disable, msan_alloc_uninit, msan_alloc_init, msan_init, msan_free_region, msan_check_init, msan_check_not_freed, msan_check_overlap, msan_error_count, msan_reset}
+use std.sanitizer.mod.{san_enable_all, san_disable_all, san_report_all, san_reset_all, san_total_errors}
+
+
+# ============================================================================
+# ASan Tests
+# ============================================================================
+
+describe "ASan - use-after-free":
+    it "detects access to freed allocation":
+        asan_reset()
+        asan_enable()
+        asan_on_alloc(1, 64, "buffer")
+        val ok1 = asan_check_access(1)
+        expect(ok1).to_equal(true)
+        asan_on_free(1)
+        val ok2 = asan_check_access(1)
+        expect(ok2).to_equal(false)
+        expect(asan_error_count()).to_equal(1)
+        asan_reset()
+
+describe "ASan - double-free":
+    it "detects freeing already freed":
+        asan_reset()
+        asan_enable()
+        asan_on_alloc(2, 32, "obj")
+        asan_on_free(2)
+        asan_on_free(2)
+        expect(asan_error_count()).to_equal(1)
+        asan_reset()
+
+describe "ASan - buffer overflow":
+    it "detects out-of-bounds access":
+        asan_reset()
+        asan_enable()
+        asan_on_alloc(3, 16, "small_buf")
+        val ok1 = asan_check_bounds(3, 0, 8)
+        expect(ok1).to_equal(true)
+        val ok2 = asan_check_bounds(3, 8, 16)
+        expect(ok2).to_equal(false)
+        expect(asan_error_count()).to_equal(1)
+        asan_reset()
+
+describe "ASan - buffer underflow":
+    it "detects negative offset":
+        asan_reset()
+        asan_enable()
+        asan_on_alloc(4, 16, "buf")
+        val ok = asan_check_bounds(4, -1, 4)
+        expect(ok).to_equal(false)
+        asan_reset()
+
+describe "ASan - no false positives":
+    it "valid access has no errors":
+        asan_reset()
+        asan_enable()
+        asan_on_alloc(5, 100, "big_buf")
+        val ok1 = asan_check_access(5)
+        val ok2 = asan_check_bounds(5, 0, 50)
+        val ok3 = asan_check_bounds(5, 50, 50)
+        expect(ok1).to_equal(true)
+        expect(ok2).to_equal(true)
+        expect(ok3).to_equal(true)
+        expect(asan_error_count()).to_equal(0)
+        asan_reset()
+
+describe "ASan - disabled does nothing":
+    it "no errors when disabled":
+        asan_reset()
+        asan_on_alloc(6, 64, "x")
+        asan_on_free(6)
+        asan_on_free(6)
+        expect(asan_error_count()).to_equal(0)
+        asan_reset()
+
+
+# ============================================================================
+# UBSan Tests
+# ============================================================================
+
+describe "UBSan - overflow on add":
+    it "detects integer overflow":
+        ubsan_reset()
+        ubsan_enable()
+        val big = 9223372036854775807
+        val result = ubsan_add_i64(big, 1)
+        expect(ubsan_error_count()).to_equal(1)
+        ubsan_reset()
+
+describe "UBSan - division by zero":
+    it "detects div by zero":
+        ubsan_reset()
+        ubsan_enable()
+        val result = ubsan_div_i64(42, 0)
+        expect(result).to_equal(0)
+        expect(ubsan_error_count()).to_equal(1)
+        ubsan_reset()
+
+describe "UBSan - bounds check":
+    it "detects out of bounds index":
+        ubsan_reset()
+        ubsan_enable()
+        val ok1 = ubsan_check_index(5, 3)
+        expect(ok1).to_equal(true)
+        val ok2 = ubsan_check_index(5, 5)
+        expect(ok2).to_equal(false)
+        val ok3 = ubsan_check_index(5, -1)
+        expect(ok3).to_equal(false)
+        expect(ubsan_error_count()).to_equal(2)
+        ubsan_reset()
+
+describe "UBSan - null pointer":
+    it "detects null deref":
+        ubsan_reset()
+        ubsan_enable()
+        val ok1 = ubsan_check_not_nil(42, "test")
+        expect(ok1).to_equal(true)
+        val ok2 = ubsan_check_not_nil(0, "test")
+        expect(ok2).to_equal(false)
+        expect(ubsan_error_count()).to_equal(1)
+        ubsan_reset()
+
+describe "UBSan - valid arithmetic":
+    it "no false positives":
+        ubsan_reset()
+        ubsan_enable()
+        val r1 = ubsan_add_i64(100, 200)
+        val r2 = ubsan_sub_i64(300, 100)
+        val r3 = ubsan_div_i64(100, 5)
+        expect(r1).to_equal(300)
+        expect(r2).to_equal(200)
+        expect(r3).to_equal(20)
+        expect(ubsan_error_count()).to_equal(0)
+        ubsan_reset()
+
+describe "UBSan - unreachable":
+    it "detects unreachable code":
+        ubsan_reset()
+        ubsan_enable()
+        ubsan_unreachable("should_not_reach")
+        expect(ubsan_error_count()).to_equal(1)
+        ubsan_reset()
+
+
+# ============================================================================
+# TSan Tests
+# ============================================================================
+
+describe "TSan - read-write race":
+    it "detects race between write and read":
+        tsan_reset()
+        tsan_enable()
+        tsan_set_thread(1)
+        tsan_write("counter", "writer.spl:10")
+        tsan_set_thread(2)
+        tsan_read("counter", "reader.spl:20")
+        expect(tsan_error_count()).to_equal(1)
+        tsan_reset()
+
+describe "TSan - write-write race":
+    it "detects race between two writes":
+        tsan_reset()
+        tsan_enable()
+        tsan_set_thread(1)
+        tsan_write("shared", "t1.spl:5")
+        tsan_set_thread(2)
+        tsan_write("shared", "t2.spl:5")
+        expect(tsan_error_count()).to_equal(1)
+        tsan_reset()
+
+describe "TSan - no race on read-read":
+    it "concurrent reads are safe":
+        tsan_reset()
+        tsan_enable()
+        tsan_set_thread(1)
+        tsan_read("data", "t1.spl:1")
+        tsan_set_thread(2)
+        tsan_read("data", "t2.spl:1")
+        expect(tsan_error_count()).to_equal(0)
+        tsan_reset()
+
+describe "TSan - no race same thread":
+    it "same thread accesses are safe":
+        tsan_reset()
+        tsan_enable()
+        tsan_set_thread(1)
+        tsan_write("x", "a.spl:1")
+        tsan_read("x", "a.spl:2")
+        expect(tsan_error_count()).to_equal(0)
+        tsan_reset()
+
+describe "TSan - lock acquire and release":
+    it "no error on basic lock usage":
+        tsan_reset()
+        tsan_enable()
+        tsan_set_thread(1)
+        tsan_lock_acquire("lock_a")
+        tsan_lock_release("lock_a")
+        expect(tsan_error_count()).to_equal(0)
+        tsan_reset()
+
+
+# ============================================================================
+# MSan Tests
+# ============================================================================
+
+describe "MSan - uninitialized read":
+    it "detects uninitialized access":
+        msan_reset()
+        msan_enable()
+        msan_alloc_uninit("buf", 64)
+        val ok = msan_check_init("buf")
+        expect(ok).to_equal(false)
+        expect(msan_error_count()).to_equal(1)
+        msan_reset()
+
+describe "MSan - initialized read":
+    it "allows access after init":
+        msan_reset()
+        msan_enable()
+        msan_alloc_uninit("buf2", 32)
+        msan_init("buf2")
+        val ok = msan_check_init("buf2")
+        expect(ok).to_equal(true)
+        expect(msan_error_count()).to_equal(0)
+        msan_reset()
+
+describe "MSan - use-after-free":
+    it "detects freed access":
+        msan_reset()
+        msan_enable()
+        msan_alloc_init("obj", 16)
+        msan_free_region("obj")
+        val ok = msan_check_not_freed("obj")
+        expect(ok).to_equal(false)
+        expect(msan_error_count()).to_equal(1)
+        msan_reset()
+
+describe "MSan - double-free":
+    it "detects second free":
+        msan_reset()
+        msan_enable()
+        msan_alloc_init("obj2", 16)
+        msan_free_region("obj2")
+        msan_free_region("obj2")
+        expect(msan_error_count()).to_equal(1)
+        msan_reset()
+
+describe "MSan - overlapping copy":
+    it "detects overlap in same region":
+        msan_reset()
+        msan_enable()
+        msan_alloc_init("region", 100)
+        val ok = msan_check_overlap("region", 10, "region", 20, 30)
+        expect(ok).to_equal(false)
+        expect(msan_error_count()).to_equal(1)
+        msan_reset()
+
+describe "MSan - no overlap different regions":
+    it "allows copy between regions":
+        msan_reset()
+        msan_enable()
+        msan_alloc_init("src", 64)
+        msan_alloc_init("dst", 64)
+        val ok = msan_check_overlap("src", 0, "dst", 0, 32)
+        expect(ok).to_equal(true)
+        expect(msan_error_count()).to_equal(0)
+        msan_reset()
+
+describe "MSan - pre-initialized alloc":
+    it "alloc_init is immediately readable":
+        msan_reset()
+        msan_enable()
+        msan_alloc_init("ready", 8)
+        val ok = msan_check_init("ready")
+        expect(ok).to_equal(true)
+        expect(msan_error_count()).to_equal(0)
+        msan_reset()
+
+
+# ============================================================================
+# Unified API Tests
+# ============================================================================
+
+describe "Unified - enable and reset":
+    it "san_enable_all and san_reset_all work":
+        san_reset_all()
+        san_enable_all()
+        ubsan_check_not_nil(0, "test")
+        expect(san_total_errors()).to_be_greater_than(0)
+        san_reset_all()
+        expect(san_total_errors()).to_equal(0)

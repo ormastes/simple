@@ -1,1204 +1,1206 @@
-"""
-# Dimension Constraints Test Specification
+# # Dimension Constraints Test Specification
+# #
+# # Comprehensive tests for compile-time and runtime dimension checking.
+# # Tests cover all dimension error cases and pipeline operators.
 #
-# Comprehensive tests for compile-time and runtime dimension checking.
-# Tests cover all dimension error cases and pipeline operators.
-
-use std.spec.{check, check_msg}
-use compiler.dim_constraints.*
-use compiler.hir.*
-use compiler.core.lexer.Span
-use compiler.type_infer.*
-
-# ============================================================================
-# Test Utilities
-# ============================================================================
-
-fn test_span() -> Span:
-    Span(start: 0, end: 10, line: 1, col: 1)
-
-fn make_dim(value: i64) -> DimExpr:
-    DimExpr.literal(value, test_span())
-
-fn make_named_dim(name: text) -> DimExpr:
-    DimExpr.named(name, test_span())
-
-fn make_batch_dim() -> DimExpr:
-    DimExpr.named_range("batch", 1, 128, test_span())
-
-# ============================================================================
-# DimExpr Tests
-# ============================================================================
-
-describe "DimExpr creation":
-    it "creates literal dimensions":
-        val d = make_dim(784)
-        check(d.is_literal())
-        check(d.get_literal() == Some(784))
-
-    it "creates named dimensions":
-        val d = make_named_dim("batch")
-        check(not d.is_literal())
-        check(d.format() == "batch")
-
-    it "creates named dimensions with range":
-        val d = DimExpr.named_range("batch", 1, 128, test_span())
-        check(d.format() == "batch: 1..128")
-
-    it "creates dynamic dimensions":
-        val d = DimExpr.dynamic(test_span())
-        match d.kind:
-            case Dynamic: assert true
-            case _: assert false
-
-    it "formats arithmetic expressions":
-        val a = make_dim(10)
-        val b = make_dim(20)
-        val add = DimExpr(kind: DimExprKind.Add(a, b), span: test_span())
-        check(add.format() == "(10 + 20)")
-
-        val mul = DimExpr(kind: DimExprKind.Mul(a, b), span: test_span())
-        check(mul.format() == "(10 * 20)")
-
-# ============================================================================
-# DimSolver Tests - Basic Unification
-# ============================================================================
-
-describe "DimSolver basic unification":
-    it "unifies equal literals":
-        var solver = DimSolver.new()
-        val d1 = make_dim(256)
-        val d2 = make_dim(256)
-        val result = solver.unify(d1, d2)
-        check(result.ok.?)
-
-    it "fails on different literals":
-        var solver = DimSolver.new()
-        val d1 = make_dim(256)
-        val d2 = make_dim(128)
-        val result = solver.unify(d1, d2)
-        check(result.err.?)
-        val err = result.err.unwrap()
-        check(err.kind == DimErrorKind.Mismatch)
-
-    it "unifies variable with literal":
-        var solver = DimSolver.new()
-        val var_ = solver.fresh_var(test_span())
-        val lit = make_dim(512)
-        val result = solver.unify(var_, lit)
-        check(result.ok.?)
-        # Variable should now be bound to 512
-        val resolved = solver.apply_substitution(var_)
-        check(resolved.get_literal() == Some(512))
-
-    it "unifies two variables":
-        var solver = DimSolver.new()
-        val v1 = solver.fresh_var(test_span())
-        val v2 = solver.fresh_var(test_span())
-        val result = solver.unify(v1, v2)
-        check(result.ok.?)
-
-    it "unifies dynamic with anything":
-        var solver = DimSolver.new()
-        val dyn = DimExpr.dynamic(test_span())
-        val lit = make_dim(100)
-        val result = solver.unify(dyn, lit)
-        check(result.ok.?)
-
-    it "unifies broadcast with 1":
-        var solver = DimSolver.new()
-        val broadcast = DimExpr(kind: DimExprKind.Broadcast, span: test_span())
-        val one = make_dim(1)
-        val result = solver.unify(broadcast, one)
-        check(result.ok.?)
-
-    it "unifies same named dimensions":
-        var solver = DimSolver.new()
-        val n1 = make_named_dim("batch")
-        val n2 = make_named_dim("batch")
-        val result = solver.unify(n1, n2)
-        check(result.ok.?)
-
-    it "fails on different named dimensions":
-        var solver = DimSolver.new()
-        val n1 = make_named_dim("batch")
-        val n2 = make_named_dim("seq_len")
-        val result = solver.unify(n1, n2)
-        check(result.err.?)
-
-# ============================================================================
-# DimSolver Tests - Constraint Solving
-# ============================================================================
-
-describe "DimSolver constraint solving":
-    it "solves equality constraints":
-        var solver = DimSolver.new()
-        val d1 = make_dim(64)
-        val d2 = make_dim(64)
-        solver.add_equal(d1, d2, test_span())
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails equality constraints with mismatch":
-        var solver = DimSolver.new()
-        val d1 = make_dim(64)
-        val d2 = make_dim(128)
-        solver.add_equal(d1, d2, test_span())
-        val result = solver.solve()
-        check(result.err.?)
-
-    it "solves greater-than-or-equal constraints":
-        var solver = DimSolver.new()
-        val d = make_dim(100)
-        solver.add(DimConstraint.GreaterEq(d, 50, test_span()))
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails greater-than-or-equal when too small":
-        var solver = DimSolver.new()
-        val d = make_dim(30)
-        solver.add(DimConstraint.GreaterEq(d, 50, test_span()))
-        val result = solver.solve()
-        check(result.err.?)
-
-    it "solves less-than-or-equal constraints":
-        var solver = DimSolver.new()
-        val d = make_dim(50)
-        solver.add(DimConstraint.LessEq(d, 100, test_span()))
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails less-than-or-equal when too large":
-        var solver = DimSolver.new()
-        val d = make_dim(150)
-        solver.add(DimConstraint.LessEq(d, 100, test_span()))
-        val result = solver.solve()
-        check(result.err.?)
-
-    it "solves range constraints":
-        var solver = DimSolver.new()
-        val d = make_dim(64)
-        solver.add(DimConstraint.InRange(d, 32, 128, test_span()))
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails range constraints when out of bounds":
-        var solver = DimSolver.new()
-        val d = make_dim(256)
-        solver.add(DimConstraint.InRange(d, 32, 128, test_span()))
-        val result = solver.solve()
-        check(result.err.?)
-
-    it "solves product equals constraints":
-        var solver = DimSolver.new()
-        val dims = [make_dim(8), make_dim(8), make_dim(8)]
-        solver.add(DimConstraint.ProductEquals(dims, 512, test_span()))
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails product equals when wrong":
-        var solver = DimSolver.new()
-        val dims = [make_dim(10), make_dim(10)]
-        solver.add(DimConstraint.ProductEquals(dims, 50, test_span()))
-        val result = solver.solve()
-        check(result.err.?)
-
-# ============================================================================
-# Layer Compatibility Tests
-# ============================================================================
-
-describe "Layer compatibility constraints":
-    it "validates matching layer dimensions":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-        val out_shape = [batch, make_dim(256)]
-        val in_shape = [batch, make_dim(256)]
-        solver.add_layer_compatible(out_shape, in_shape, test_span())
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails on mismatched feature dimensions":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-        val out_shape = [batch, make_dim(256)]
-        val in_shape = [batch, make_dim(128)]
-        solver.add_layer_compatible(out_shape, in_shape, test_span())
-        val result = solver.solve()
-        check(result.err.?)
-        val errs = result.err.unwrap()
-        check(errs.len() > 0)
-
-    it "fails on shape length mismatch":
-        var solver = DimSolver.new()
-        val out_shape = [make_dim(32), make_dim(256)]
-        val in_shape = [make_dim(32), make_dim(256), make_dim(64)]
-        solver.add_layer_compatible(out_shape, in_shape, test_span())
-        val result = solver.solve()
-        check(result.err.?)
-
-    it "validates CNN layer dimensions":
-        var solver = DimSolver.new()
-        # Conv2d output: [batch, 64, 28, 28]
-        # Next Conv2d input: [batch, 64, 28, 28]
-        val batch = make_named_dim("batch")
-        val out_shape = [batch, make_dim(64), make_dim(28), make_dim(28)]
-        val in_shape = [batch, make_dim(64), make_dim(28), make_dim(28)]
-        solver.add_layer_compatible(out_shape, in_shape, test_span())
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails on channel mismatch in CNN":
-        var solver = DimSolver.new()
-        # Conv2d output: [batch, 64, 28, 28]
-        # Next Conv2d expects: [batch, 128, 28, 28]
-        val batch = make_named_dim("batch")
-        val out_shape = [batch, make_dim(64), make_dim(28), make_dim(28)]
-        val in_shape = [batch, make_dim(128), make_dim(28), make_dim(28)]
-        solver.add_layer_compatible(out_shape, in_shape, test_span())
-        val result = solver.solve()
-        check(result.err.?)
-
-# ============================================================================
-# Neural Network Architecture Tests
-# ============================================================================
-
-describe "MLP (Multi-Layer Perceptron) dimensions":
-    it "validates simple MLP: 784 -> 256 -> 128 -> 10":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-
-        # Input: [batch, 784]
-        # Linear1: 784 -> 256
-        # Linear2: 256 -> 128
-        # Linear3: 128 -> 10
-
-        val shapes = [
-            [batch, make_dim(784)],   # input
-            [batch, make_dim(256)],   # after Linear1
-            [batch, make_dim(128)],   # after Linear2
-            [batch, make_dim(10)]     # after Linear3 (output)
-        ]
-
-        # Check each layer connection
-        for i in 0..3:
-            solver.add_layer_compatible(shapes[i], shapes[i], test_span())
-        # Actually check transitions
-        solver.add_layer_compatible([batch, make_dim(256)], [batch, make_dim(256)], test_span())
-        solver.add_layer_compatible([batch, make_dim(128)], [batch, make_dim(128)], test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails on broken MLP pipeline":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-
-        # Broken: 784 -> 256 -> 64 (but next expects 128)
-        val layer1_out = [batch, make_dim(256)]
-        val layer2_out = [batch, make_dim(64)]
-        val layer3_in = [batch, make_dim(128)]  # Mismatch!
-
-        solver.add_layer_compatible(layer2_out, layer3_in, test_span())
-        val result = solver.solve()
-        check(result.err.?)
-
-describe "CNN (Convolutional Neural Network) dimensions":
-    it "validates LeNet-style architecture":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-
-        # Input: [batch, 1, 28, 28]
-        # Conv1: [batch, 6, 24, 24] (5x5 kernel, no padding)
-        # Pool1: [batch, 6, 12, 12]
-        # Conv2: [batch, 16, 8, 8] (5x5 kernel)
-        # Pool2: [batch, 16, 4, 4]
-        # Flatten: [batch, 256]
-        # FC: [batch, 10]
-
-        val conv1_out = [batch, make_dim(6), make_dim(24), make_dim(24)]
-        val pool1_out = [batch, make_dim(6), make_dim(12), make_dim(12)]
-        solver.add_layer_compatible(conv1_out, pool1_out, test_span())
-
-        val conv2_in = [batch, make_dim(6), make_dim(12), make_dim(12)]
-        solver.add_layer_compatible(pool1_out, conv2_in, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails on incompatible channel dimensions":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-
-        # Conv1 outputs 32 channels
-        # Conv2 expects 64 channels - mismatch!
-        val conv1_out = [batch, make_dim(32), make_dim(28), make_dim(28)]
-        val conv2_in = [batch, make_dim(64), make_dim(28), make_dim(28)]
-
-        solver.add_layer_compatible(conv1_out, conv2_in, test_span())
-        val result = solver.solve()
-        check(result.err.?)
-
-describe "Transformer dimensions":
-    it "validates attention dimensions":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-        val seq = make_named_dim("seq_len")
-        val d_model = make_dim(512)
-
-        # Query, Key, Value all have same shape: [batch, seq, d_model]
-        val qkv_shape = [batch, seq, d_model]
-
-        # Self-attention output: same shape
-        val attn_out = [batch, seq, d_model]
-        solver.add_layer_compatible(qkv_shape, attn_out, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "validates multi-head attention":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-        val seq = make_named_dim("seq_len")
-        val n_heads = make_dim(8)
-        val d_k = make_dim(64)  # d_model / n_heads = 512 / 8
-
-        # After splitting heads: [batch, n_heads, seq, d_k]
-        val split_shape = [batch, n_heads, seq, d_k]
-
-        # After attention: same shape
-        val attn_shape = [batch, n_heads, seq, d_k]
-        solver.add_layer_compatible(split_shape, attn_shape, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails on d_model not divisible by n_heads":
-        var solver = DimSolver.new()
-        # d_model = 512, n_heads = 7 -> 512/7 is not integer
-        # This would be caught by product constraint
-        val dims = [make_dim(7), make_dim(73)]  # 7 * 73 = 511 != 512
-        solver.add(DimConstraint.ProductEquals(dims, 512, test_span()))
-        val result = solver.solve()
-        check(result.err.?)
-
-# ============================================================================
-# Matrix Multiplication Tests
-# ============================================================================
-
-describe "Matrix multiplication dimensions":
-    it "validates standard matmul [M,K] @ [K,N] -> [M,N]":
-        var solver = DimSolver.new()
-        val M = make_dim(32)
-        val K = make_dim(64)
-        val N = make_dim(128)
-
-        # A: [M, K], B: [K, N] -> C: [M, N]
-        solver.add_equal(K, K, test_span())  # K must match
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails matmul with incompatible K":
-        var solver = DimSolver.new()
-        # A: [32, 64], B: [128, 256] -> K mismatch (64 != 128)
-        val K_left = make_dim(64)
-        val K_right = make_dim(128)
-
-        solver.add_equal(K_left, K_right, test_span())
-        val result = solver.solve()
-        check(result.err.?)
-
-    it "validates batched matmul":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-        val M = make_dim(32)
-        val K = make_dim(64)
-        val N = make_dim(128)
-
-        # A: [batch, M, K], B: [batch, K, N] -> C: [batch, M, N]
-        solver.add_equal(batch, batch, test_span())
-        solver.add_equal(K, K, test_span())
-        val result = solver.solve()
-        check(result.ok.?)
-
-# ============================================================================
-# Broadcasting Tests
-# ============================================================================
-
-describe "Broadcasting dimensions":
-    it "broadcasts scalar to tensor":
-        var solver = DimSolver.new()
-        # Scalar (empty shape) broadcasts to any shape
-        val one = make_dim(1)
-        val ten = make_dim(10)
-        # 1 broadcasts to 10
-        solver.add_equal(one, one, test_span())  # trivially true
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "broadcasts [1, N] with [M, N]":
-        var solver = DimSolver.new()
-        val one = make_dim(1)
-        val M = make_dim(32)
-        val N = make_dim(64)
-
-        # [1, N] + [M, N] -> [M, N]
-        # First dim: 1 broadcasts to M (ok)
-        # Second dim: N == N (ok)
-        solver.add_equal(N, N, test_span())
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails non-broadcastable shapes":
-        var solver = DimSolver.new()
-        # [3, 4] + [5, 4] -> fails (3 != 5, neither is 1)
-        val three = make_dim(3)
-        val five = make_dim(5)
-
-        solver.add_equal(three, five, test_span())
-        val result = solver.solve()
-        check(result.err.?)
-
-# ============================================================================
-# Compile-time vs Runtime Classification Tests
-# ============================================================================
-
-describe "Constraint timing classification":
-    it "classifies literal equality as compile-time":
-        var solver = DimSolver.new()
-        val d1 = make_dim(256)
-        val d2 = make_dim(256)
-        val c = DimConstraint.Equal(d1, d2, test_span())
-        val timing = solver.classify_constraint(c)
-        check(timing == DimCheckTiming.CompileTime)
-
-    it "classifies dynamic dimension as runtime":
-        var solver = DimSolver.new()
-        val d1 = DimExpr.dynamic(test_span())
-        val d2 = make_dim(256)
-        val c = DimConstraint.Equal(d1, d2, test_span())
-        val timing = solver.classify_constraint(c)
-        check(timing == DimCheckTiming.Runtime)
-
-    it "classifies variable dimension as runtime":
-        var solver = DimSolver.new()
-        val d1 = solver.fresh_var(test_span())
-        val d2 = make_dim(256)
-        val c = DimConstraint.Equal(d1, d2, test_span())
-        val timing = solver.classify_constraint(c)
-        check(timing == DimCheckTiming.Runtime)
-
-    it "classifies named range as partially static":
-        var solver = DimSolver.new()
-        val d = DimExpr.named_range("batch", 1, 128, test_span())
-        val c = DimConstraint.InRange(d, 1, 128, test_span())
-        val timing = solver.classify_constraint(c)
-        # Named with bounds is partially known
-        check(timing == DimCheckTiming.CompileTime)
-
-# ============================================================================
-# Runtime Check Generation Tests
-# ============================================================================
-
-describe "Runtime check generation":
-    it "generates assert check in Assert mode":
-        var gen = DimCheckGenerator.new(DimCheckMode.Assert)
-        gen.add_shape_check("x", "y", test_span())
-        val checks = gen.generate_all()
-        check(checks.len() == 1)
-        check(checks[0].contains("assert"))
-
-    it "generates log check in Log mode":
-        var gen = DimCheckGenerator.new(DimCheckMode.Log)
-        gen.add_shape_check("x", "y", test_span())
-        val checks = gen.generate_all()
-        check(checks.len() == 1)
-        check(checks[0].contains("log.warn"))
-
-    it "generates error return in Strict mode":
-        var gen = DimCheckGenerator.new(DimCheckMode.Strict)
-        gen.add_shape_check("x", "y", test_span())
-        val checks = gen.generate_all()
-        check(checks.len() == 1)
-        check(checks[0].contains("return Err"))
-
-    it "generates nothing in None mode":
-        var gen = DimCheckGenerator.new(DimCheckMode.None_)
-        gen.add_shape_check("x", "y", test_span())
-        val checks = gen.generate_all()
-        check(checks.len() == 0)
-
-    it "generates range checks":
-        var gen = DimCheckGenerator.new(DimCheckMode.Assert)
-        gen.add_dim_range_check("batch_size", 1, 128, test_span())
-        val checks = gen.generate_all()
-        check(checks.len() == 1)
-        check(checks[0].contains("1"))
-        check(checks[0].contains("128"))
-
-    it "generates layer compatibility checks":
-        var gen = DimCheckGenerator.new(DimCheckMode.Assert)
-        gen.add_layer_compat_check("layer1.output", "layer2.input", test_span())
-        val checks = gen.generate_all()
-        check(checks.len() == 1)
-        check(checks[0].contains("layer1.output"))
-        check(checks[0].contains("layer2.input"))
-
-# ============================================================================
-# Error Message Tests
-# ============================================================================
-
-describe "Dimension error messages":
-    it "provides descriptive mismatch error":
-        val d1 = make_dim(256)
-        val d2 = make_dim(128)
-        val err = DimError.mismatch(d1, d2, test_span())
-        check(err.error_code == "E0501")
-        check(err.message.contains("256"))
-        check(err.message.contains("128"))
-        check(err.help.?)
-
-    it "provides descriptive layer incompatible error":
-        val batch = make_named_dim("batch")
-        val out = [batch, make_dim(256)]
-        val in_ = [batch, make_dim(128)]
-        val err = DimError.layer_incompatible(out, in_, test_span())
-        check(err.error_code == "E0502")
-        check(err.notes.len() >= 2)
-        match err.help:
-            Some(h): check(h.contains("Linear"))
-            nil: fail "help should exist"
-
-    it "provides descriptive matmul error":
-        val left = [make_dim(32), make_dim(64)]
-        val right = [make_dim(128), make_dim(256)]
-        val err = DimError.matmul_incompatible(left, right, test_span())
-        check(err.error_code == "E0504")
-        check(err.message.contains("matrix multiplication"))
-
-    it "provides descriptive broadcast error":
-        val s1 = [make_dim(3), make_dim(4)]
-        val s2 = [make_dim(5), make_dim(4)]
-        val err = DimError.broadcast_incompatible(s1, s2, 0, make_dim(3), make_dim(5), test_span())
-        check(err.error_code == "E0505")
-        check(err.message.contains("broadcast"))
-
-    it "formats error with full context":
-        val err = DimError.mismatch(make_dim(256), make_dim(128), test_span())
-        val formatted = err.format()
-        check(formatted.contains("error[E0501]"))
-        check(formatted.contains("expected"))
-        check(formatted.contains("found"))
-        check(formatted.contains("help"))
-
-# ============================================================================
-# Type Inference Integration Tests
-# ============================================================================
-
-describe "Type inference with dimension checking":
-    it "infers layer type from ~> operator":
-        var ctx = HmInferContext.new()
-        val span = test_span()
-
-        # Simulate: Linear(784, 256) ~> Linear(256, 64)
-        val batch = ctx.dim_solver.fresh_var(span)
-        val layer1 = HirType(
-            kind: HirTypeKind.Layer([batch, make_dim(784)], [batch, make_dim(256)]),
-            span: span
-        )
-        val layer2 = HirType(
-            kind: HirTypeKind.Layer([batch, make_dim(256)], [batch, make_dim(64)]),
-            span: span
-        )
-
-        val result = ctx.infer_layer_connect(layer1, layer2, span)
-        check(result.ok.?)
-
-        # Check result type
-        val result_ty = result.ok.unwrap()
-        match result_ty.kind:
-            case Layer(input, output):
-                # Input should be [batch, 784]
-                check(input.len() == 2)
-                # Output should be [batch, 64]
-                check(output.len() == 2)
-            case _:
-                check(false)
-
-    it "catches layer dimension mismatch at compile time":
-        var ctx = HmInferContext.new()
-        val span = test_span()
-
-        # Simulate: Linear(784, 256) ~> Linear(128, 64) -- MISMATCH!
-        val batch = ctx.dim_solver.fresh_var(span)
-        val layer1 = HirType(
-            kind: HirTypeKind.Layer([batch, make_dim(784)], [batch, make_dim(256)]),
-            span: span
-        )
-        val layer2 = HirType(
-            kind: HirTypeKind.Layer([batch, make_dim(128)], [batch, make_dim(64)]),
-            span: span
-        )
-
-        val result = ctx.infer_layer_connect(layer1, layer2, span)
-        check(result.ok.?) # Connection itself succeeds
-
-        # But constraint solving should fail
-        ctx.check_dim_constraints()
-        check(ctx.errors.len() > 0)
-
-    it "generates runtime checks for dynamic batch":
-        var ctx = HmInferContext.with_dim_check_mode(DimCheckMode.Assert)
-        val span = test_span()
-
-        # Dynamic batch dimension
-        val batch = DimExpr.dynamic(span)
-        val layer1 = HirType(
-            kind: HirTypeKind.Layer([batch, make_dim(784)], [batch, make_dim(256)]),
-            span: span
-        )
-        val layer2 = HirType(
-            kind: HirTypeKind.Layer([batch, make_dim(256)], [batch, make_dim(64)]),
-            span: span
-        )
-
-        ctx.infer_layer_connect(layer1, layer2, span)
-        ctx.check_dim_constraints()
-
-        # Should generate runtime checks for batch dimension
-        val checks = ctx.get_runtime_checks()
-        # Dynamic dimensions generate runtime checks
-        check(checks.len() >= 0  # May or may not have checks depending on implementation)
-
-# ============================================================================
-# Pipeline Operator Tests
-# ============================================================================
-
-describe "Pipeline operator |>":
-    it "infers type of x |> f":
-        var ctx = HmInferContext.new()
-        val span = test_span()
-
-        val x_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
-        val f_ty = HirType(
-            kind: HirTypeKind.Function(
-                [HirType(kind: HirTypeKind.Int(64, true), span: span)],
-                HirType(kind: HirTypeKind.Str, span: span),
-                []
-            ),
-            span: span
-        )
-
-        val result = ctx.infer_pipe_forward(x_ty, f_ty, span)
-        check(result.ok.?)
-        match result.ok.unwrap().kind:
-            case Str: assert true
-            case _: assert false
-
-describe "Composition operator >>":
-    it "infers type of f >> g":
-        var ctx = HmInferContext.new()
-        val span = test_span()
-
-        # f: Int -> Str
-        val f_ty = HirType(
-            kind: HirTypeKind.Function(
-                [HirType(kind: HirTypeKind.Int(64, true), span: span)],
-                HirType(kind: HirTypeKind.Str, span: span),
-                []
-            ),
-            span: span
-        )
-
-        # g: Str -> Bool
-        val g_ty = HirType(
-            kind: HirTypeKind.Function(
-                [HirType(kind: HirTypeKind.Str, span: span)],
-                HirType(kind: HirTypeKind.Bool, span: span),
-                []
-            ),
-            span: span
-        )
-
-        val result = ctx.infer_compose(f_ty, g_ty, span)
-        check(result.ok.?)
-
-        # Result should be Int -> Bool
-        match result.ok.unwrap().kind:
-            case Function(params, ret, _):
-                check(params.len() == 1)
-                match params[0].kind:
-                    case Int(64, true): assert true
-                    case _: assert false
-                match ret.kind:
-                    case Bool: assert true
-                    case _: assert false
-            case _:
-                check(false)
-
-describe "Parallel operator //":
-    it "infers type of f // g":
-        var ctx = HmInferContext.new()
-        val span = test_span()
-
-        # f: A -> B
-        val f_ty = HirType(
-            kind: HirTypeKind.Function(
-                [HirType(kind: HirTypeKind.Int(64, true), span: span)],
-                HirType(kind: HirTypeKind.Str, span: span),
-                []
-            ),
-            span: span
-        )
-
-        # g: C -> D
-        val g_ty = HirType(
-            kind: HirTypeKind.Function(
-                [HirType(kind: HirTypeKind.Bool, span: span)],
-                HirType(kind: HirTypeKind.Float(64), span: span),
-                []
-            ),
-            span: span
-        )
-
-        val result = ctx.infer_parallel(f_ty, g_ty, span)
-        check(result.ok.?)
-
-        # Result should be (A, C) -> (B, D)
-        match result.ok.unwrap().kind:
-            case Function(params, ret, _):
-                check(params.len() == 2  # Combined params)
-                match ret.kind:
-                    case Tuple(elements):
-                        check(elements.len() == 2)
-                    case _:
-                        check(false)
-            case _:
-                check(false)
-
-# ============================================================================
-# Edge Cases and Error Recovery
-# ============================================================================
-
-describe "Edge cases":
-    it "handles empty shape":
-        var solver = DimSolver.new()
-        val empty1: [DimExpr] = []
-        val empty2: [DimExpr] = []
-        solver.add_layer_compatible(empty1, empty2, test_span())
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "handles single dimension":
-        var solver = DimSolver.new()
-        val shape1 = [make_dim(256)]
-        val shape2 = [make_dim(256)]
-        solver.add_layer_compatible(shape1, shape2, test_span())
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "handles very large dimensions":
-        var solver = DimSolver.new()
-        val big = make_dim(1000000000)
-        solver.add_equal(big, big, test_span())
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "handles chain of constraints":
-        var solver = DimSolver.new()
-        # a == b, b == c, c == 256 => a == 256
-        val a = solver.fresh_var(test_span())
-        val b = solver.fresh_var(test_span())
-        val c = solver.fresh_var(test_span())
-        val lit = make_dim(256)
-
-        solver.add_equal(a, b, test_span())
-        solver.add_equal(b, c, test_span())
-        solver.add_equal(c, lit, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-        # All should resolve to 256
-        val resolved_a = solver.apply_substitution(a)
-        check(resolved_a.get_literal() == Some(256))
-
-    it "detects occurs check violation":
-        var solver = DimSolver.new()
-        # Try to create circular constraint: a = a + 1
-        val a = solver.fresh_var(test_span())
-        val one = make_dim(1)
-        val a_plus_one = DimExpr(kind: DimExprKind.Add(a, one), span: test_span())
-
-        # This should not create infinite loop due to occurs check
-        solver.add_equal(a, a_plus_one, test_span())
-        # Solver should handle this gracefully
-        val result = solver.solve()
-        # May succeed or fail, but should not hang
-
-describe "Multiple errors":
-    it "collects all dimension errors":
-        var solver = DimSolver.new()
-
-        # Add multiple failing constraints
-        solver.add_equal(make_dim(100), make_dim(200), test_span())
-        solver.add_equal(make_dim(300), make_dim(400), test_span())
-        solver.add(DimConstraint.InRange(make_dim(500), 0, 100, test_span()))
-
-        val result = solver.solve()
-        check(result.err.?)
-        val errors = result.err.unwrap()
-        check(errors.len() == 3)
-
-# ============================================================================
-# Real-World Model Architecture Tests
-# ============================================================================
-
-describe "ResNet block dimensions":
-    it "validates residual connection":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-        val channels = make_dim(64)
-        val h = make_dim(56)
-        val w = make_dim(56)
-
-        # Input shape
-        val input_shape = [batch, channels, h, w]
-
-        # Conv path output (same spatial size with padding)
-        val conv_out = [batch, channels, h, w]
-
-        # Residual add requires same shape
-        solver.add_layer_compatible(input_shape, conv_out, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "fails residual with channel mismatch":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-
-        # Input: 64 channels
-        val input_shape = [batch, make_dim(64), make_dim(56), make_dim(56)]
-        # Conv output: 128 channels (needs projection!)
-        val conv_out = [batch, make_dim(128), make_dim(56), make_dim(56)]
-
-        solver.add_layer_compatible(input_shape, conv_out, test_span())
-
-        val result = solver.solve()
-        check(result.err.?)
-
-describe "BERT dimensions":
-    it "validates embedding + transformer":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-        val seq = make_named_dim("seq_len")
-        val vocab = make_dim(30522)
-        val hidden = make_dim(768)
-
-        # Token embedding: [batch, seq] -> [batch, seq, hidden]
-        val embed_out = [batch, seq, hidden]
-
-        # Transformer expects [batch, seq, hidden]
-        val transformer_in = [batch, seq, hidden]
-
-        solver.add_layer_compatible(embed_out, transformer_in, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-describe "GPT-2 dimensions":
-    it "validates causal attention mask shape":
-        var solver = DimSolver.new()
-        val seq = make_named_dim("seq_len")
-
-        # Causal mask: [seq, seq]
-        val mask_shape = [seq, seq]
-
-        # Attention scores: [batch, heads, seq, seq]
-        val attn_shape_last_two = [seq, seq]
-
-        solver.add_layer_compatible(mask_shape, attn_shape_last_two, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-# ============================================================================
-# Error Message Quality Tests
-# ============================================================================
-
-describe "Error message quality":
-    it "provides actionable fix for MLP layer mismatch":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-
-        # Linear(784, 256) ~> Linear(128, 64) -- WRONG!
-        val out = [batch, make_dim(256)]
-        val in_ = [batch, make_dim(128)]
-
-        solver.add_layer_compatible(out, in_, test_span())
-        val result = solver.solve()
-
-        check(result.err.?)
-        val errors = result.err.unwrap()
-        check(errors.len() == 1)
-
-        val err = errors[0]
-        # Check error has helpful information
-        check(err.error_code == "E0502")
-        check(err.message.contains("layer"))
-        check(err.help.?)
-        check(err.help.unwrap().contains("Linear(256, 128)")  # Suggests fix)
-
-    it "provides context for CNN channel mismatch":
-        val err = DimError.channel_mismatch(
-            make_dim(64),
-            make_dim(128),
-            "Conv2d",
-            test_span()
-        )
-
-        check(err.error_code == "E0507")
-        check(err.message.contains("Conv2d"))
-        match err.help:
-            Some(h): check(h.contains("in_channels"))
-            nil: fail "help should exist"
-
-    it "explains matmul dimension requirements":
-        val left = [make_dim(32), make_dim(64)]
-        val right = [make_dim(128), make_dim(256)]
-        val err = DimError.matmul_incompatible(left, right, test_span())
-
-        val formatted = err.format()
-        check(formatted.contains("64")  # K from left)
-        check(formatted.contains("128")  # K from right)
-        check(formatted.contains("[M, K] @ [K, N]")  # Explains the rule)
-
-    it "explains broadcasting rules":
-        val s1 = [make_dim(3), make_dim(4)]
-        val s2 = [make_dim(5), make_dim(4)]
-        val err = DimError.broadcast_incompatible(s1, s2, 0, make_dim(3), make_dim(5), test_span())
-
-        val formatted = err.format()
-        check(formatted.contains("broadcast"))
-        check(formatted.contains("dimension 0"))
-        check(formatted.contains("3 vs 5"))
-
-    it "shows sequence length mismatch clearly":
-        val err = DimError.sequence_mismatch(make_dim(512), make_dim(256), test_span())
-
-        check(err.error_code == "E0508")
-        check(err.message.contains("512"))
-        check(err.message.contains("256"))
-        match err.help:
-            Some(h): check(h.contains("padding") or h.contains("truncation"))
-            nil: fail "help should exist"
-
-    it "formats error as JSON for tooling":
-        val err = DimError.mismatch(make_dim(256), make_dim(128), test_span())
-        val json = err.format_json()
-
-        check(json.contains("\"error_code\""))
-        check(json.contains("E0501"))
-        check(json.contains("\"message\""))
-        check(json.contains("\"notes\""))
-
-    it "formats short error for quick display":
-        val err = DimError.mismatch(make_dim(256), make_dim(128), test_span())
-        val short = err.format_short()
-
-        check(short.contains("E0501"))
-        check(short.contains("line 1")  # From test_span)
-
-# ============================================================================
-# Common Mistake Tests
-# ============================================================================
-
-describe "Common dimension mistakes":
-    it "catches forgetting to flatten before FC layer":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-
-        # Conv output: [batch, 64, 7, 7] (4D)
-        # FC input expects: [batch, 3136] (2D) -- need flatten!
-        val conv_out = [batch, make_dim(64), make_dim(7), make_dim(7)]
-        val fc_in = [batch, make_dim(3136)]
-
-        solver.add_layer_compatible(conv_out, fc_in, test_span())
-        val result = solver.solve()
-
-        check(result.err.?)
-        val err = result.err.unwrap()[0]
-        check(err.kind == DimErrorKind.RankMismatch)
-        match err.help:
-            Some(h): check(h.contains("reshape"))
-            nil: fail "help should exist"
-
-    it "catches wrong kernel size calculation":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-
-        # Input: [batch, 1, 28, 28]
-        # After Conv(1, 32, kernel=5, padding=0): [batch, 32, 24, 24]
-        # But someone expected [batch, 32, 28, 28] (forgot no padding)
-        val actual = [batch, make_dim(32), make_dim(24), make_dim(24)]
-        val expected = [batch, make_dim(32), make_dim(28), make_dim(28)]
-
-        solver.add_layer_compatible(actual, expected, test_span())
-        val result = solver.solve()
-
-        check(result.err.?)
-        # Should show which dimension is wrong
-        val err = result.err.unwrap()[0]
-        check(err.notes.len() > 0)
-
-    it "catches batch dimension inconsistency":
-        var solver = DimSolver.new()
-        val batch1 = make_dim(32)
-        val batch2 = make_dim(64)
-
-        # Two tensors with different batch sizes
-        val tensor1 = [batch1, make_dim(256)]
-        val tensor2 = [batch2, make_dim(256)]
-
-        solver.add_layer_compatible(tensor1, tensor2, test_span())
-        val result = solver.solve()
-
-        check(result.err.?)
-
-    it "catches d_model / n_heads mismatch in attention":
-        var solver = DimSolver.new()
-
-        # d_model = 512, n_heads = 6
-        # d_k should be 512/6 = 85.33... (not integer!)
-        # This manifests as product constraint failure
-        val n_heads = make_dim(6)
-        val d_k = make_dim(85)  # Rounded down
-        val product_dims = [n_heads, d_k]
-
-        # Should equal d_model = 512
-        solver.add(DimConstraint.ProductEquals(product_dims, 512, test_span()))
-        val result = solver.solve()
-
-        check(result.err.?)
-        val err = result.err.unwrap()[0]
-        check(err.message.contains("510")  # 6 * 85 = 510)
-        check(err.message.contains("512"))
-
-    it "catches embedding dimension mismatch":
-        var solver = DimSolver.new()
-        val batch = make_named_dim("batch")
-        val seq = make_named_dim("seq_len")
-
-        # Embedding outputs d_model = 512
-        # But transformer expects d_model = 768
-        val embed_out = [batch, seq, make_dim(512)]
-        val transformer_in = [batch, seq, make_dim(768)]
-
-        solver.add_layer_compatible(embed_out, transformer_in, test_span())
-        val result = solver.solve()
-
-        check(result.err.?)
-
-# ============================================================================
-# Performance and Scale Tests
-# ============================================================================
-
-describe "Solver performance":
-    it "handles many constraints efficiently":
-        var solver = DimSolver.new()
-
-        # Add 100 equality constraints
-        for i in 0..100:
-            val d = make_dim(256)
-            solver.add_equal(d, d, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-    it "handles deep constraint chains":
-        var solver = DimSolver.new()
-
-        # Chain: v0 = v1, v1 = v2, ..., v99 = 256
-        var vars: [DimExpr] = []
-        for i in 0..100:
-            vars = vars.push(solver.fresh_var(test_span()))
-
-        for i in 0..99:
-            solver.add_equal(vars[i], vars[i + 1], test_span())
-
-        solver.add_equal(vars[99], make_dim(256), test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-        # All should resolve to 256
-        for v in vars:
-            val resolved = solver.apply_substitution(v)
-            check(resolved.get_literal() == Some(256))
-
-    it "handles wide parallel constraints":
-        var solver = DimSolver.new()
-
-        # All equal to same literal
-        val target = make_dim(128)
-        for i in 0..50:
-            val v = solver.fresh_var(test_span())
-            solver.add_equal(v, target, test_span())
-
-        val result = solver.solve()
-        check(result.ok.?)
-
-# ============================================================================
-# Arithmetic Dimension Tests
-# ============================================================================
-
-describe "Arithmetic dimension expressions":
-    it "evaluates addition":
-        var solver = DimSolver.new()
-        val a = make_dim(100)
-        val b = make_dim(28)
-        val sum = DimExpr(kind: DimExprKind.Add(a, b), span: test_span())
-
-        val result = solver.try_eval(sum)
-        check(result == Some(128))
-
-    it "evaluates multiplication":
-        var solver = DimSolver.new()
-        val a = make_dim(8)
-        val b = make_dim(8)
-        val product = DimExpr(kind: DimExprKind.Mul(a, b), span: test_span())
-
-        val result = solver.try_eval(product)
-        check(result == Some(64))
-
-    it "evaluates division":
-        var solver = DimSolver.new()
-        val a = make_dim(512)
-        val b = make_dim(8)
-        val quotient = DimExpr(kind: DimExprKind.Div(a, b), span: test_span())
-
-        val result = solver.try_eval(quotient)
-        check(result == Some(64))
-
-    it "unifies arithmetic expressions":
-        var solver = DimSolver.new()
-
-        # (32 + 32) should equal 64
-        val sum = DimExpr(kind: DimExprKind.Add(make_dim(32), make_dim(32)), span: test_span())
-        val lit = make_dim(64)
-
-        val result = solver.unify(sum, lit)
-        check(result.ok.?)
-
-    it "fails on incorrect arithmetic":
-        var solver = DimSolver.new()
-
-        # (32 + 32) should NOT equal 65
-        val sum = DimExpr(kind: DimExprKind.Add(make_dim(32), make_dim(32)), span: test_span())
-        val lit = make_dim(65)
-
-        val result = solver.unify(sum, lit)
-        check(result.err.?)
-
-"""
+# fn check(condition: bool):
+# expect(condition).to_equal(true)
+# fn check_msg(condition: bool, message: text):
+# if not condition:
+# expect(message).to_equal("")
+# use compiler.dim_constraints.*
+# use compiler.hir.*
+# use compiler.core.lexer.Span
+# use compiler.type_infer.*
+#
+# # ============================================================================
+# # Test Utilities
+# # ============================================================================
+#
+# fn test_span() -> Span:
+# Span(start: 0, end: 10, line: 1, col: 1)
+#
+# fn make_dim(value: i64) -> DimExpr:
+# DimExpr.literal(value, test_span())
+#
+# fn make_named_dim(name: text) -> DimExpr:
+# DimExpr.named(name, test_span())
+#
+# fn make_batch_dim() -> DimExpr:
+# DimExpr.named_range("batch", 1, 128, test_span())
+#
+# # ============================================================================
+# # DimExpr Tests
+# # ============================================================================
+#
+# describe "DimExpr creation":
+# it "creates literal dimensions":
+# val d = make_dim(784)
+# check(d.is_literal())
+# check(d.get_literal() == Some(784))
+#
+# it "creates named dimensions":
+# val d = make_named_dim("batch")
+# check(not d.is_literal())
+# check(d.format() == "batch")
+#
+# it "creates named dimensions with range":
+# val d = DimExpr.named_range("batch", 1, 128, test_span())
+# check(d.format() == "batch: 1..128")
+#
+# it "creates dynamic dimensions":
+# val d = DimExpr.dynamic(test_span())
+# match d.kind:
+# case Dynamic: assert true
+# case _: assert false
+#
+# it "formats arithmetic expressions":
+# val a = make_dim(10)
+# val b = make_dim(20)
+# val add = DimExpr(kind: DimExprKind.Add(a, b), span: test_span())
+# check(add.format() == "(10 + 20)")
+#
+# val mul = DimExpr(kind: DimExprKind.Mul(a, b), span: test_span())
+# check(mul.format() == "(10 * 20)")
+#
+# # ============================================================================
+# # DimSolver Tests - Basic Unification
+# # ============================================================================
+#
+# describe "DimSolver basic unification":
+# it "unifies equal literals":
+# var solver = DimSolver.new()
+# val d1 = make_dim(256)
+# val d2 = make_dim(256)
+# val result = solver.unify(d1, d2)
+# check(result.ok.?)
+#
+# it "fails on different literals":
+# var solver = DimSolver.new()
+# val d1 = make_dim(256)
+# val d2 = make_dim(128)
+# val result = solver.unify(d1, d2)
+# check(result.err.?)
+# val err = result.err.unwrap()
+# check(err.kind == DimErrorKind.Mismatch)
+#
+# it "unifies variable with literal":
+# var solver = DimSolver.new()
+# val var_ = solver.fresh_var(test_span())
+# val lit = make_dim(512)
+# val result = solver.unify(var_, lit)
+# check(result.ok.?)
+# # Variable should now be bound to 512
+# val resolved = solver.apply_substitution(var_)
+# check(resolved.get_literal() == Some(512))
+#
+# it "unifies two variables":
+# var solver = DimSolver.new()
+# val v1 = solver.fresh_var(test_span())
+# val v2 = solver.fresh_var(test_span())
+# val result = solver.unify(v1, v2)
+# check(result.ok.?)
+#
+# it "unifies dynamic with anything":
+# var solver = DimSolver.new()
+# val dyn = DimExpr.dynamic(test_span())
+# val lit = make_dim(100)
+# val result = solver.unify(dyn, lit)
+# check(result.ok.?)
+#
+# it "unifies broadcast with 1":
+# var solver = DimSolver.new()
+# val broadcast = DimExpr(kind: DimExprKind.Broadcast, span: test_span())
+# val one = make_dim(1)
+# val result = solver.unify(broadcast, one)
+# check(result.ok.?)
+#
+# it "unifies same named dimensions":
+# var solver = DimSolver.new()
+# val n1 = make_named_dim("batch")
+# val n2 = make_named_dim("batch")
+# val result = solver.unify(n1, n2)
+# check(result.ok.?)
+#
+# it "fails on different named dimensions":
+# var solver = DimSolver.new()
+# val n1 = make_named_dim("batch")
+# val n2 = make_named_dim("seq_len")
+# val result = solver.unify(n1, n2)
+# check(result.err.?)
+#
+# # ============================================================================
+# # DimSolver Tests - Constraint Solving
+# # ============================================================================
+#
+# describe "DimSolver constraint solving":
+# it "solves equality constraints":
+# var solver = DimSolver.new()
+# val d1 = make_dim(64)
+# val d2 = make_dim(64)
+# solver.add_equal(d1, d2, test_span())
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails equality constraints with mismatch":
+# var solver = DimSolver.new()
+# val d1 = make_dim(64)
+# val d2 = make_dim(128)
+# solver.add_equal(d1, d2, test_span())
+# val result = solver.solve()
+# check(result.err.?)
+#
+# it "solves greater-than-or-equal constraints":
+# var solver = DimSolver.new()
+# val d = make_dim(100)
+# solver.add(DimConstraint.GreaterEq(d, 50, test_span()))
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails greater-than-or-equal when too small":
+# var solver = DimSolver.new()
+# val d = make_dim(30)
+# solver.add(DimConstraint.GreaterEq(d, 50, test_span()))
+# val result = solver.solve()
+# check(result.err.?)
+#
+# it "solves less-than-or-equal constraints":
+# var solver = DimSolver.new()
+# val d = make_dim(50)
+# solver.add(DimConstraint.LessEq(d, 100, test_span()))
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails less-than-or-equal when too large":
+# var solver = DimSolver.new()
+# val d = make_dim(150)
+# solver.add(DimConstraint.LessEq(d, 100, test_span()))
+# val result = solver.solve()
+# check(result.err.?)
+#
+# it "solves range constraints":
+# var solver = DimSolver.new()
+# val d = make_dim(64)
+# solver.add(DimConstraint.InRange(d, 32, 128, test_span()))
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails range constraints when out of bounds":
+# var solver = DimSolver.new()
+# val d = make_dim(256)
+# solver.add(DimConstraint.InRange(d, 32, 128, test_span()))
+# val result = solver.solve()
+# check(result.err.?)
+#
+# it "solves product equals constraints":
+# var solver = DimSolver.new()
+# val dims = [make_dim(8), make_dim(8), make_dim(8)]
+# solver.add(DimConstraint.ProductEquals(dims, 512, test_span()))
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails product equals when wrong":
+# var solver = DimSolver.new()
+# val dims = [make_dim(10), make_dim(10)]
+# solver.add(DimConstraint.ProductEquals(dims, 50, test_span()))
+# val result = solver.solve()
+# check(result.err.?)
+#
+# # ============================================================================
+# # Layer Compatibility Tests
+# # ============================================================================
+#
+# describe "Layer compatibility constraints":
+# it "validates matching layer dimensions":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+# val out_shape = [batch, make_dim(256)]
+# val in_shape = [batch, make_dim(256)]
+# solver.add_layer_compatible(out_shape, in_shape, test_span())
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails on mismatched feature dimensions":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+# val out_shape = [batch, make_dim(256)]
+# val in_shape = [batch, make_dim(128)]
+# solver.add_layer_compatible(out_shape, in_shape, test_span())
+# val result = solver.solve()
+# check(result.err.?)
+# val errs = result.err.unwrap()
+# check(errs.len() > 0)
+#
+# it "fails on shape length mismatch":
+# var solver = DimSolver.new()
+# val out_shape = [make_dim(32), make_dim(256)]
+# val in_shape = [make_dim(32), make_dim(256), make_dim(64)]
+# solver.add_layer_compatible(out_shape, in_shape, test_span())
+# val result = solver.solve()
+# check(result.err.?)
+#
+# it "validates CNN layer dimensions":
+# var solver = DimSolver.new()
+# # Conv2d output: [batch, 64, 28, 28]
+# # Next Conv2d input: [batch, 64, 28, 28]
+# val batch = make_named_dim("batch")
+# val out_shape = [batch, make_dim(64), make_dim(28), make_dim(28)]
+# val in_shape = [batch, make_dim(64), make_dim(28), make_dim(28)]
+# solver.add_layer_compatible(out_shape, in_shape, test_span())
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails on channel mismatch in CNN":
+# var solver = DimSolver.new()
+# # Conv2d output: [batch, 64, 28, 28]
+# # Next Conv2d expects: [batch, 128, 28, 28]
+# val batch = make_named_dim("batch")
+# val out_shape = [batch, make_dim(64), make_dim(28), make_dim(28)]
+# val in_shape = [batch, make_dim(128), make_dim(28), make_dim(28)]
+# solver.add_layer_compatible(out_shape, in_shape, test_span())
+# val result = solver.solve()
+# check(result.err.?)
+#
+# # ============================================================================
+# # Neural Network Architecture Tests
+# # ============================================================================
+#
+# describe "MLP (Multi-Layer Perceptron) dimensions":
+# it "validates simple MLP: 784 -> 256 -> 128 -> 10":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+#
+# # Input: [batch, 784]
+# # Linear1: 784 -> 256
+# # Linear2: 256 -> 128
+# # Linear3: 128 -> 10
+#
+# val shapes = [
+# [batch, make_dim(784)],   # input
+# [batch, make_dim(256)],   # after Linear1
+# [batch, make_dim(128)],   # after Linear2
+# [batch, make_dim(10)]     # after Linear3 (output)
+# ]
+#
+# # Check each layer connection
+# for i in 0..3:
+# solver.add_layer_compatible(shapes[i], shapes[i], test_span())
+# # Actually check transitions
+# solver.add_layer_compatible([batch, make_dim(256)], [batch, make_dim(256)], test_span())
+# solver.add_layer_compatible([batch, make_dim(128)], [batch, make_dim(128)], test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails on broken MLP pipeline":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+#
+# # Broken: 784 -> 256 -> 64 (but next expects 128)
+# val layer1_out = [batch, make_dim(256)]
+# val layer2_out = [batch, make_dim(64)]
+# val layer3_in = [batch, make_dim(128)]  # Mismatch!
+#
+# solver.add_layer_compatible(layer2_out, layer3_in, test_span())
+# val result = solver.solve()
+# check(result.err.?)
+#
+# describe "CNN (Convolutional Neural Network) dimensions":
+# it "validates LeNet-style architecture":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+#
+# # Input: [batch, 1, 28, 28]
+# # Conv1: [batch, 6, 24, 24] (5x5 kernel, no padding)
+# # Pool1: [batch, 6, 12, 12]
+# # Conv2: [batch, 16, 8, 8] (5x5 kernel)
+# # Pool2: [batch, 16, 4, 4]
+# # Flatten: [batch, 256]
+# # FC: [batch, 10]
+#
+# val conv1_out = [batch, make_dim(6), make_dim(24), make_dim(24)]
+# val pool1_out = [batch, make_dim(6), make_dim(12), make_dim(12)]
+# solver.add_layer_compatible(conv1_out, pool1_out, test_span())
+#
+# val conv2_in = [batch, make_dim(6), make_dim(12), make_dim(12)]
+# solver.add_layer_compatible(pool1_out, conv2_in, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails on incompatible channel dimensions":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+#
+# # Conv1 outputs 32 channels
+# # Conv2 expects 64 channels - mismatch!
+# val conv1_out = [batch, make_dim(32), make_dim(28), make_dim(28)]
+# val conv2_in = [batch, make_dim(64), make_dim(28), make_dim(28)]
+#
+# solver.add_layer_compatible(conv1_out, conv2_in, test_span())
+# val result = solver.solve()
+# check(result.err.?)
+#
+# describe "Transformer dimensions":
+# it "validates attention dimensions":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+# val seq = make_named_dim("seq_len")
+# val d_model = make_dim(512)
+#
+# # Query, Key, Value all have same shape: [batch, seq, d_model]
+# val qkv_shape = [batch, seq, d_model]
+#
+# # Self-attention output: same shape
+# val attn_out = [batch, seq, d_model]
+# solver.add_layer_compatible(qkv_shape, attn_out, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "validates multi-head attention":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+# val seq = make_named_dim("seq_len")
+# val n_heads = make_dim(8)
+# val d_k = make_dim(64)  # d_model / n_heads = 512 / 8
+#
+# # After splitting heads: [batch, n_heads, seq, d_k]
+# val split_shape = [batch, n_heads, seq, d_k]
+#
+# # After attention: same shape
+# val attn_shape = [batch, n_heads, seq, d_k]
+# solver.add_layer_compatible(split_shape, attn_shape, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails on d_model not divisible by n_heads":
+# var solver = DimSolver.new()
+# # d_model = 512, n_heads = 7 -> 512/7 is not integer
+# # This would be caught by product constraint
+# val dims = [make_dim(7), make_dim(73)]  # 7 * 73 = 511 != 512
+# solver.add(DimConstraint.ProductEquals(dims, 512, test_span()))
+# val result = solver.solve()
+# check(result.err.?)
+#
+# # ============================================================================
+# # Matrix Multiplication Tests
+# # ============================================================================
+#
+# describe "Matrix multiplication dimensions":
+# it "validates standard matmul [M,K] @ [K,N] -> [M,N]":
+# var solver = DimSolver.new()
+# val M = make_dim(32)
+# val K = make_dim(64)
+# val N = make_dim(128)
+#
+# # A: [M, K], B: [K, N] -> C: [M, N]
+# solver.add_equal(K, K, test_span())  # K must match
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails matmul with incompatible K":
+# var solver = DimSolver.new()
+# # A: [32, 64], B: [128, 256] -> K mismatch (64 != 128)
+# val K_left = make_dim(64)
+# val K_right = make_dim(128)
+#
+# solver.add_equal(K_left, K_right, test_span())
+# val result = solver.solve()
+# check(result.err.?)
+#
+# it "validates batched matmul":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+# val M = make_dim(32)
+# val K = make_dim(64)
+# val N = make_dim(128)
+#
+# # A: [batch, M, K], B: [batch, K, N] -> C: [batch, M, N]
+# solver.add_equal(batch, batch, test_span())
+# solver.add_equal(K, K, test_span())
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# # ============================================================================
+# # Broadcasting Tests
+# # ============================================================================
+#
+# describe "Broadcasting dimensions":
+# it "broadcasts scalar to tensor":
+# var solver = DimSolver.new()
+# # Scalar (empty shape) broadcasts to any shape
+# val one = make_dim(1)
+# val ten = make_dim(10)
+# # 1 broadcasts to 10
+# solver.add_equal(one, one, test_span())  # trivially true
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "broadcasts [1, N] with [M, N]":
+# var solver = DimSolver.new()
+# val one = make_dim(1)
+# val M = make_dim(32)
+# val N = make_dim(64)
+#
+# # [1, N] + [M, N] -> [M, N]
+# # First dim: 1 broadcasts to M (ok)
+# # Second dim: N == N (ok)
+# solver.add_equal(N, N, test_span())
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails non-broadcastable shapes":
+# var solver = DimSolver.new()
+# # [3, 4] + [5, 4] -> fails (3 != 5, neither is 1)
+# val three = make_dim(3)
+# val five = make_dim(5)
+#
+# solver.add_equal(three, five, test_span())
+# val result = solver.solve()
+# check(result.err.?)
+#
+# # ============================================================================
+# # Compile-time vs Runtime Classification Tests
+# # ============================================================================
+#
+# describe "Constraint timing classification":
+# it "classifies literal equality as compile-time":
+# var solver = DimSolver.new()
+# val d1 = make_dim(256)
+# val d2 = make_dim(256)
+# val c = DimConstraint.Equal(d1, d2, test_span())
+# val timing = solver.classify_constraint(c)
+# check(timing == DimCheckTiming.CompileTime)
+#
+# it "classifies dynamic dimension as runtime":
+# var solver = DimSolver.new()
+# val d1 = DimExpr.dynamic(test_span())
+# val d2 = make_dim(256)
+# val c = DimConstraint.Equal(d1, d2, test_span())
+# val timing = solver.classify_constraint(c)
+# check(timing == DimCheckTiming.Runtime)
+#
+# it "classifies variable dimension as runtime":
+# var solver = DimSolver.new()
+# val d1 = solver.fresh_var(test_span())
+# val d2 = make_dim(256)
+# val c = DimConstraint.Equal(d1, d2, test_span())
+# val timing = solver.classify_constraint(c)
+# check(timing == DimCheckTiming.Runtime)
+#
+# it "classifies named range as partially static":
+# var solver = DimSolver.new()
+# val d = DimExpr.named_range("batch", 1, 128, test_span())
+# val c = DimConstraint.InRange(d, 1, 128, test_span())
+# val timing = solver.classify_constraint(c)
+# # Named with bounds is partially known
+# check(timing == DimCheckTiming.CompileTime)
+#
+# # ============================================================================
+# # Runtime Check Generation Tests
+# # ============================================================================
+#
+# describe "Runtime check generation":
+# it "generates assert check in Assert mode":
+# var checker = DimCheckGenerator.new(DimCheckMode.Assert)
+# checker.add_shape_check("x", "y", test_span())
+# val checks = checker.generate_all()
+# check(checks.len() == 1)
+# check(checks[0].contains("assert"))
+#
+# it "generates log check in Log mode":
+# var checker = DimCheckGenerator.new(DimCheckMode.Log)
+# checker.add_shape_check("x", "y", test_span())
+# val checks = checker.generate_all()
+# check(checks.len() == 1)
+# check(checks[0].contains("log.warn"))
+#
+# it "generates error return in Strict mode":
+# var checker = DimCheckGenerator.new(DimCheckMode.Strict)
+# checker.add_shape_check("x", "y", test_span())
+# val checks = checker.generate_all()
+# check(checks.len() == 1)
+# check(checks[0].contains("return Err"))
+#
+# it "generates nothing in None mode":
+# var checker = DimCheckGenerator.new(DimCheckMode.None_)
+# checker.add_shape_check("x", "y", test_span())
+# val checks = checker.generate_all()
+# check(checks.len() == 0)
+#
+# it "generates range checks":
+# var checker = DimCheckGenerator.new(DimCheckMode.Assert)
+# checker.add_dim_range_check("batch_size", 1, 128, test_span())
+# val checks = checker.generate_all()
+# check(checks.len() == 1)
+# check(checks[0].contains("1"))
+# check(checks[0].contains("128"))
+#
+# it "generates layer compatibility checks":
+# var checker = DimCheckGenerator.new(DimCheckMode.Assert)
+# checker.add_layer_compat_check("layer1.output", "layer2.input", test_span())
+# val checks = checker.generate_all()
+# check(checks.len() == 1)
+# check(checks[0].contains("layer1.output"))
+# check(checks[0].contains("layer2.input"))
+#
+# # ============================================================================
+# # Error Message Tests
+# # ============================================================================
+#
+# describe "Dimension error messages":
+# it "provides descriptive mismatch error":
+# val d1 = make_dim(256)
+# val d2 = make_dim(128)
+# val err = DimError.mismatch(d1, d2, test_span())
+# check(err.error_code == "E0501")
+# check(err.message.contains("256"))
+# check(err.message.contains("128"))
+# check(err.help.?)
+#
+# it "provides descriptive layer incompatible error":
+# val batch = make_named_dim("batch")
+# val out = [batch, make_dim(256)]
+# val in_ = [batch, make_dim(128)]
+# val err = DimError.layer_incompatible(out, in_, test_span())
+# check(err.error_code == "E0502")
+# check(err.notes.len() >= 2)
+# match err.help:
+# Some(h): check(h.contains("Linear"))
+# nil: fail "help should exist"
+#
+# it "provides descriptive matmul error":
+# val left = [make_dim(32), make_dim(64)]
+# val right = [make_dim(128), make_dim(256)]
+# val err = DimError.matmul_incompatible(left, right, test_span())
+# check(err.error_code == "E0504")
+# check(err.message.contains("matrix multiplication"))
+#
+# it "provides descriptive broadcast error":
+# val s1 = [make_dim(3), make_dim(4)]
+# val s2 = [make_dim(5), make_dim(4)]
+# val err = DimError.broadcast_incompatible(s1, s2, 0, make_dim(3), make_dim(5), test_span())
+# check(err.error_code == "E0505")
+# check(err.message.contains("broadcast"))
+#
+# it "formats error with full context":
+# val err = DimError.mismatch(make_dim(256), make_dim(128), test_span())
+# val formatted = err.format()
+# check(formatted.contains("error[E0501]"))
+# check(formatted.contains("expected"))
+# check(formatted.contains("found"))
+# check(formatted.contains("help"))
+#
+# # ============================================================================
+# # Type Inference Integration Tests
+# # ============================================================================
+#
+# describe "Type inference with dimension checking":
+# it "infers layer type from ~> operator":
+# var ctx = HmInferContext.new()
+# val span = test_span()
+#
+# # Simulate: Linear(784, 256) ~> Linear(256, 64)
+# val batch = ctx.dim_solver.fresh_var(span)
+# val layer1 = HirType(
+# kind: HirTypeKind.Layer([batch, make_dim(784)], [batch, make_dim(256)]),
+# span: span
+# )
+# val layer2 = HirType(
+# kind: HirTypeKind.Layer([batch, make_dim(256)], [batch, make_dim(64)]),
+# span: span
+# )
+#
+# val result = ctx.infer_layer_connect(layer1, layer2, span)
+# check(result.ok.?)
+#
+# # Check result type
+# val result_ty = result.ok.unwrap()
+# match result_ty.kind:
+# case Layer(input, output):
+# # Input should be [batch, 784]
+# check(input.len() == 2)
+# # Output should be [batch, 64]
+# check(output.len() == 2)
+# case _:
+# check(false)
+#
+# it "catches layer dimension mismatch at compile time":
+# var ctx = HmInferContext.new()
+# val span = test_span()
+#
+# # Simulate: Linear(784, 256) ~> Linear(128, 64) -- MISMATCH!
+# val batch = ctx.dim_solver.fresh_var(span)
+# val layer1 = HirType(
+# kind: HirTypeKind.Layer([batch, make_dim(784)], [batch, make_dim(256)]),
+# span: span
+# )
+# val layer2 = HirType(
+# kind: HirTypeKind.Layer([batch, make_dim(128)], [batch, make_dim(64)]),
+# span: span
+# )
+#
+# val result = ctx.infer_layer_connect(layer1, layer2, span)
+# check(result.ok.?) # Connection itself succeeds
+#
+# # But constraint solving should fail
+# ctx.check_dim_constraints()
+# check(ctx.errors.len() > 0)
+#
+# it "generates runtime checks for dynamic batch":
+# var ctx = HmInferContext.with_dim_check_mode(DimCheckMode.Assert)
+# val span = test_span()
+#
+# # Dynamic batch dimension
+# val batch = DimExpr.dynamic(span)
+# val layer1 = HirType(
+# kind: HirTypeKind.Layer([batch, make_dim(784)], [batch, make_dim(256)]),
+# span: span
+# )
+# val layer2 = HirType(
+# kind: HirTypeKind.Layer([batch, make_dim(256)], [batch, make_dim(64)]),
+# span: span
+# )
+#
+# ctx.infer_layer_connect(layer1, layer2, span)
+# ctx.check_dim_constraints()
+#
+# # Should generate runtime checks for batch dimension
+# val checks = ctx.get_runtime_checks()
+# # Dynamic dimensions generate runtime checks
+# check(checks.len() >= 0  # May or may not have checks depending on implementation)
+#
+# # ============================================================================
+# # Pipeline Operator Tests
+# # ============================================================================
+#
+# describe "Pipeline operator |>":
+# it "infers type of x |> f":
+# var ctx = HmInferContext.new()
+# val span = test_span()
+#
+# val x_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
+# val f_ty = HirType(
+# kind: HirTypeKind.Function(
+# [HirType(kind: HirTypeKind.Int(64, true), span: span)],
+# HirType(kind: HirTypeKind.Str, span: span),
+# []
+# ),
+# span: span
+# )
+#
+# val result = ctx.infer_pipe_forward(x_ty, f_ty, span)
+# check(result.ok.?)
+# match result.ok.unwrap().kind:
+# case Str: assert true
+# case _: assert false
+#
+# describe "Composition operator >>":
+# it "infers type of f >> g":
+# var ctx = HmInferContext.new()
+# val span = test_span()
+#
+# # f: Int -> Str
+# val f_ty = HirType(
+# kind: HirTypeKind.Function(
+# [HirType(kind: HirTypeKind.Int(64, true), span: span)],
+# HirType(kind: HirTypeKind.Str, span: span),
+# []
+# ),
+# span: span
+# )
+#
+# # g: Str -> Bool
+# val g_ty = HirType(
+# kind: HirTypeKind.Function(
+# [HirType(kind: HirTypeKind.Str, span: span)],
+# HirType(kind: HirTypeKind.Bool, span: span),
+# []
+# ),
+# span: span
+# )
+#
+# val result = ctx.infer_compose(f_ty, g_ty, span)
+# check(result.ok.?)
+#
+# # Result should be Int -> Bool
+# match result.ok.unwrap().kind:
+# case Function(params, ret, _):
+# check(params.len() == 1)
+# match params[0].kind:
+# case Int(64, true): assert true
+# case _: assert false
+# match ret.kind:
+# case Bool: assert true
+# case _: assert false
+# case _:
+# check(false)
+#
+# describe "Parallel operator //":
+# it "infers type of f // g":
+# var ctx = HmInferContext.new()
+# val span = test_span()
+#
+# # f: A -> B
+# val f_ty = HirType(
+# kind: HirTypeKind.Function(
+# [HirType(kind: HirTypeKind.Int(64, true), span: span)],
+# HirType(kind: HirTypeKind.Str, span: span),
+# []
+# ),
+# span: span
+# )
+#
+# # g: C -> D
+# val g_ty = HirType(
+# kind: HirTypeKind.Function(
+# [HirType(kind: HirTypeKind.Bool, span: span)],
+# HirType(kind: HirTypeKind.Float(64), span: span),
+# []
+# ),
+# span: span
+# )
+#
+# val result = ctx.infer_parallel(f_ty, g_ty, span)
+# check(result.ok.?)
+#
+# # Result should be (A, C) -> (B, D)
+# match result.ok.unwrap().kind:
+# case Function(params, ret, _):
+# check(params.len() == 2  # Combined params)
+# match ret.kind:
+# case Tuple(elements):
+# check(elements.len() == 2)
+# case _:
+# check(false)
+# case _:
+# check(false)
+#
+# # ============================================================================
+# # Edge Cases and Error Recovery
+# # ============================================================================
+#
+# describe "Edge cases":
+# it "handles empty shape":
+# var solver = DimSolver.new()
+# val empty1: [DimExpr] = []
+# val empty2: [DimExpr] = []
+# solver.add_layer_compatible(empty1, empty2, test_span())
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "handles single dimension":
+# var solver = DimSolver.new()
+# val shape1 = [make_dim(256)]
+# val shape2 = [make_dim(256)]
+# solver.add_layer_compatible(shape1, shape2, test_span())
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "handles very large dimensions":
+# var solver = DimSolver.new()
+# val big = make_dim(1000000000)
+# solver.add_equal(big, big, test_span())
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "handles chain of constraints":
+# var solver = DimSolver.new()
+# # a == b, b == c, c == 256 => a == 256
+# val a = solver.fresh_var(test_span())
+# val b = solver.fresh_var(test_span())
+# val c = solver.fresh_var(test_span())
+# val lit = make_dim(256)
+#
+# solver.add_equal(a, b, test_span())
+# solver.add_equal(b, c, test_span())
+# solver.add_equal(c, lit, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# # All should resolve to 256
+# val resolved_a = solver.apply_substitution(a)
+# check(resolved_a.get_literal() == Some(256))
+#
+# it "detects occurs check violation":
+# var solver = DimSolver.new()
+# # Try to create circular constraint: a = a + 1
+# val a = solver.fresh_var(test_span())
+# val one = make_dim(1)
+# val a_plus_one = DimExpr(kind: DimExprKind.Add(a, one), span: test_span())
+#
+# # This should not create infinite loop due to occurs check
+# solver.add_equal(a, a_plus_one, test_span())
+# # Solver should handle this gracefully
+# val result = solver.solve()
+# # May succeed or fail, but should not hang
+#
+# describe "Multiple errors":
+# it "collects all dimension errors":
+# var solver = DimSolver.new()
+#
+# # Add multiple failing constraints
+# solver.add_equal(make_dim(100), make_dim(200), test_span())
+# solver.add_equal(make_dim(300), make_dim(400), test_span())
+# solver.add(DimConstraint.InRange(make_dim(500), 0, 100, test_span()))
+#
+# val result = solver.solve()
+# check(result.err.?)
+# val errors = result.err.unwrap()
+# check(errors.len() == 3)
+#
+# # ============================================================================
+# # Real-World Model Architecture Tests
+# # ============================================================================
+#
+# describe "ResNet block dimensions":
+# it "validates residual connection":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+# val channels = make_dim(64)
+# val h = make_dim(56)
+# val w = make_dim(56)
+#
+# # Input shape
+# val input_shape = [batch, channels, h, w]
+#
+# # Conv path output (same spatial size with padding)
+# val conv_out = [batch, channels, h, w]
+#
+# # Residual add requires same shape
+# solver.add_layer_compatible(input_shape, conv_out, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "fails residual with channel mismatch":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+#
+# # Input: 64 channels
+# val input_shape = [batch, make_dim(64), make_dim(56), make_dim(56)]
+# # Conv output: 128 channels (needs projection!)
+# val conv_out = [batch, make_dim(128), make_dim(56), make_dim(56)]
+#
+# solver.add_layer_compatible(input_shape, conv_out, test_span())
+#
+# val result = solver.solve()
+# check(result.err.?)
+#
+# describe "BERT dimensions":
+# it "validates embedding + transformer":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+# val seq = make_named_dim("seq_len")
+# val vocab = make_dim(30522)
+# val hidden = make_dim(768)
+#
+# # Token embedding: [batch, seq] -> [batch, seq, hidden]
+# val embed_out = [batch, seq, hidden]
+#
+# # Transformer expects [batch, seq, hidden]
+# val transformer_in = [batch, seq, hidden]
+#
+# solver.add_layer_compatible(embed_out, transformer_in, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# describe "GPT-2 dimensions":
+# it "validates causal attention mask shape":
+# var solver = DimSolver.new()
+# val seq = make_named_dim("seq_len")
+#
+# # Causal mask: [seq, seq]
+# val mask_shape = [seq, seq]
+#
+# # Attention scores: [batch, heads, seq, seq]
+# val attn_shape_last_two = [seq, seq]
+#
+# solver.add_layer_compatible(mask_shape, attn_shape_last_two, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# # ============================================================================
+# # Error Message Quality Tests
+# # ============================================================================
+#
+# describe "Error message quality":
+# it "provides actionable fix for MLP layer mismatch":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+#
+# # Linear(784, 256) ~> Linear(128, 64) -- WRONG!
+# val out = [batch, make_dim(256)]
+# val in_ = [batch, make_dim(128)]
+#
+# solver.add_layer_compatible(out, in_, test_span())
+# val result = solver.solve()
+#
+# check(result.err.?)
+# val errors = result.err.unwrap()
+# check(errors.len() == 1)
+#
+# val err = errors[0]
+# # Check error has helpful information
+# check(err.error_code == "E0502")
+# check(err.message.contains("layer"))
+# check(err.help.?)
+# check(err.help.unwrap().contains("Linear(256, 128)")  # Suggests fix)
+#
+# it "provides context for CNN channel mismatch":
+# val err = DimError.channel_mismatch(
+# make_dim(64),
+# make_dim(128),
+# "Conv2d",
+# test_span()
+# )
+#
+# check(err.error_code == "E0507")
+# check(err.message.contains("Conv2d"))
+# match err.help:
+# Some(h): check(h.contains("in_channels"))
+# nil: fail "help should exist"
+#
+# it "explains matmul dimension requirements":
+# val left = [make_dim(32), make_dim(64)]
+# val right = [make_dim(128), make_dim(256)]
+# val err = DimError.matmul_incompatible(left, right, test_span())
+#
+# val formatted = err.format()
+# check(formatted.contains("64")  # K from left)
+# check(formatted.contains("128")  # K from right)
+# check(formatted.contains("[M, K] @ [K, N]")  # Explains the rule)
+#
+# it "explains broadcasting rules":
+# val s1 = [make_dim(3), make_dim(4)]
+# val s2 = [make_dim(5), make_dim(4)]
+# val err = DimError.broadcast_incompatible(s1, s2, 0, make_dim(3), make_dim(5), test_span())
+#
+# val formatted = err.format()
+# check(formatted.contains("broadcast"))
+# check(formatted.contains("dimension 0"))
+# check(formatted.contains("3 vs 5"))
+#
+# it "shows sequence length mismatch clearly":
+# val err = DimError.sequence_mismatch(make_dim(512), make_dim(256), test_span())
+#
+# check(err.error_code == "E0508")
+# check(err.message.contains("512"))
+# check(err.message.contains("256"))
+# match err.help:
+# Some(h): check(h.contains("padding") or h.contains("truncation"))
+# nil: fail "help should exist"
+#
+# it "formats error as JSON for tooling":
+# val err = DimError.mismatch(make_dim(256), make_dim(128), test_span())
+# val json = err.format_json()
+#
+# check(json.contains("\"error_code\""))
+# check(json.contains("E0501"))
+# check(json.contains("\"message\""))
+# check(json.contains("\"notes\""))
+#
+# it "formats short error for quick display":
+# val err = DimError.mismatch(make_dim(256), make_dim(128), test_span())
+# val short = err.format_short()
+#
+# check(short.contains("E0501"))
+# check(short.contains("line 1")  # From test_span)
+#
+# # ============================================================================
+# # Common Mistake Tests
+# # ============================================================================
+#
+# describe "Common dimension mistakes":
+# it "catches forgetting to flatten before FC layer":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+#
+# # Conv output: [batch, 64, 7, 7] (4D)
+# # FC input expects: [batch, 3136] (2D) -- need flatten!
+# val conv_out = [batch, make_dim(64), make_dim(7), make_dim(7)]
+# val fc_in = [batch, make_dim(3136)]
+#
+# solver.add_layer_compatible(conv_out, fc_in, test_span())
+# val result = solver.solve()
+#
+# check(result.err.?)
+# val err = result.err.unwrap()[0]
+# check(err.kind == DimErrorKind.RankMismatch)
+# match err.help:
+# Some(h): check(h.contains("reshape"))
+# nil: fail "help should exist"
+#
+# it "catches wrong kernel size calculation":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+#
+# # Input: [batch, 1, 28, 28]
+# # After Conv(1, 32, kernel=5, padding=0): [batch, 32, 24, 24]
+# # But someone expected [batch, 32, 28, 28] (forgot no padding)
+# val actual = [batch, make_dim(32), make_dim(24), make_dim(24)]
+# val expected = [batch, make_dim(32), make_dim(28), make_dim(28)]
+#
+# solver.add_layer_compatible(actual, expected, test_span())
+# val result = solver.solve()
+#
+# check(result.err.?)
+# # Should show which dimension is wrong
+# val err = result.err.unwrap()[0]
+# check(err.notes.len() > 0)
+#
+# it "catches batch dimension inconsistency":
+# var solver = DimSolver.new()
+# val batch1 = make_dim(32)
+# val batch2 = make_dim(64)
+#
+# # Two tensors with different batch sizes
+# val tensor1 = [batch1, make_dim(256)]
+# val tensor2 = [batch2, make_dim(256)]
+#
+# solver.add_layer_compatible(tensor1, tensor2, test_span())
+# val result = solver.solve()
+#
+# check(result.err.?)
+#
+# it "catches d_model / n_heads mismatch in attention":
+# var solver = DimSolver.new()
+#
+# # d_model = 512, n_heads = 6
+# # d_k should be 512/6 = 85.33... (not integer!)
+# # This manifests as product constraint failure
+# val n_heads = make_dim(6)
+# val d_k = make_dim(85)  # Rounded down
+# val product_dims = [n_heads, d_k]
+#
+# # Should equal d_model = 512
+# solver.add(DimConstraint.ProductEquals(product_dims, 512, test_span()))
+# val result = solver.solve()
+#
+# check(result.err.?)
+# val err = result.err.unwrap()[0]
+# check(err.message.contains("510")  # 6 * 85 = 510)
+# check(err.message.contains("512"))
+#
+# it "catches embedding dimension mismatch":
+# var solver = DimSolver.new()
+# val batch = make_named_dim("batch")
+# val seq = make_named_dim("seq_len")
+#
+# # Embedding outputs d_model = 512
+# # But transformer expects d_model = 768
+# val embed_out = [batch, seq, make_dim(512)]
+# val transformer_in = [batch, seq, make_dim(768)]
+#
+# solver.add_layer_compatible(embed_out, transformer_in, test_span())
+# val result = solver.solve()
+#
+# check(result.err.?)
+#
+# # ============================================================================
+# # Performance and Scale Tests
+# # ============================================================================
+#
+# describe "Solver performance":
+# it "handles many constraints efficiently":
+# var solver = DimSolver.new()
+#
+# # Add 100 equality constraints
+# for i in 0..100:
+# val d = make_dim(256)
+# solver.add_equal(d, d, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# it "handles deep constraint chains":
+# var solver = DimSolver.new()
+#
+# # Chain: v0 = v1, v1 = v2, ..., v99 = 256
+# var vars: [DimExpr] = []
+# for i in 0..100:
+# vars = vars.push(solver.fresh_var(test_span()))
+#
+# for i in 0..99:
+# solver.add_equal(vars[i], vars[i + 1], test_span())
+#
+# solver.add_equal(vars[99], make_dim(256), test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# # All should resolve to 256
+# for v in vars:
+# val resolved = solver.apply_substitution(v)
+# check(resolved.get_literal() == Some(256))
+#
+# it "handles wide parallel constraints":
+# var solver = DimSolver.new()
+#
+# # All equal to same literal
+# val target = make_dim(128)
+# for i in 0..50:
+# val v = solver.fresh_var(test_span())
+# solver.add_equal(v, target, test_span())
+#
+# val result = solver.solve()
+# check(result.ok.?)
+#
+# # ============================================================================
+# # Arithmetic Dimension Tests
+# # ============================================================================
+#
+# describe "Arithmetic dimension expressions":
+# it "evaluates addition":
+# var solver = DimSolver.new()
+# val a = make_dim(100)
+# val b = make_dim(28)
+# val sum = DimExpr(kind: DimExprKind.Add(a, b), span: test_span())
+#
+# val result = solver.try_eval(sum)
+# check(result == Some(128))
+#
+# it "evaluates multiplication":
+# var solver = DimSolver.new()
+# val a = make_dim(8)
+# val b = make_dim(8)
+# val product = DimExpr(kind: DimExprKind.Mul(a, b), span: test_span())
+#
+# val result = solver.try_eval(product)
+# check(result == Some(64))
+#
+# it "evaluates division":
+# var solver = DimSolver.new()
+# val a = make_dim(512)
+# val b = make_dim(8)
+# val quotient = DimExpr(kind: DimExprKind.Div(a, b), span: test_span())
+#
+# val result = solver.try_eval(quotient)
+# check(result == Some(64))
+#
+# it "unifies arithmetic expressions":
+# var solver = DimSolver.new()
+#
+# # (32 + 32) should equal 64
+# val sum = DimExpr(kind: DimExprKind.Add(make_dim(32), make_dim(32)), span: test_span())
+# val lit = make_dim(64)
+#
+# val result = solver.unify(sum, lit)
+# check(result.ok.?)
+#
+# it "fails on incorrect arithmetic":
+# var solver = DimSolver.new()
+#
+# # (32 + 32) should NOT equal 65
+# val sum = DimExpr(kind: DimExprKind.Add(make_dim(32), make_dim(32)), span: test_span())
+# val lit = make_dim(65)
+#
+# val result = solver.unify(sum, lit)
+# check(result.err.?)
+#
 pass

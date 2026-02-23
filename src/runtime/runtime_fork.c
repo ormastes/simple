@@ -38,6 +38,7 @@ void rt_fork_child_exit(int64_t exit_code) {
 #else /* POSIX */
 
 #include "runtime_fork.h"
+#include "runtime_memtrack.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -71,8 +72,8 @@ static void set_nonblocking(int fd) {
 
 /* Free previous results */
 static void free_results(void) {
-    if (s_result_stdout) { free(s_result_stdout); s_result_stdout = NULL; }
-    if (s_result_stderr) { free(s_result_stderr); s_result_stderr = NULL; }
+    if (s_result_stdout) { SPL_FREE(s_result_stdout); s_result_stdout = NULL; }
+    if (s_result_stderr) { SPL_FREE(s_result_stderr); s_result_stderr = NULL; }
 }
 
 int64_t rt_fork_child_setup(void) {
@@ -150,13 +151,13 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     /* Allocate growing buffers */
     size_t out_cap = PIPE_BUF_INIT;
     size_t out_len = 0;
-    char* out_buf = (char*)malloc(out_cap);
-    if (!out_buf) out_buf = (char*)calloc(1, 1);
+    char* out_buf = (char*)SPL_MALLOC(out_cap, "fork_buf");
+    if (!out_buf) out_buf = (char*)SPL_CALLOC(1, 1, "fork_buf");
 
     size_t err_cap = PIPE_BUF_INIT;
     size_t err_len = 0;
-    char* err_buf = (char*)malloc(err_cap);
-    if (!err_buf) err_buf = (char*)calloc(1, 1);
+    char* err_buf = (char*)SPL_MALLOC(err_cap, "fork_buf");
+    if (!err_buf) err_buf = (char*)SPL_CALLOC(1, 1, "fork_buf");
 
     /* Set non-blocking for poll */
     set_nonblocking(stdout_fd);
@@ -243,7 +244,7 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
                     /* Grow buffer if needed */
                     if (*len_ptr + PIPE_BUF_GROW > *cap_ptr) {
                         *cap_ptr = *cap_ptr * 2;
-                        char* new_buf = (char*)realloc(*buf_ptr, *cap_ptr);
+                        char* new_buf = (char*)SPL_REALLOC(*buf_ptr, *cap_ptr, "fork_buf");
                         if (!new_buf) break;
                         *buf_ptr = new_buf;
                     }

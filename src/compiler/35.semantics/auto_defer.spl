@@ -1,0 +1,159 @@
+# Auto-Defer Insertion Pass
+#
+# Semantic analysis pass that automatically inserts `defer x.close()` when
+# a variable of `Resource` trait type is assigned and no manual `defer`
+# exists for that variable in the same scope.
+#
+# This ensures resource cleanup without requiring every callsite to remember
+# explicit `defer` statements, similar to how the C backend's `str_locals`
+# tracking + `emit_str_cleanup_all()` works at codegen level.
+#
+# Enabled by default. Opt-out with `#[no_auto_defer]` annotation on binding.
+#
+# Integration: Called after type checking, before MIR lowering.
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct AutoDeferCandidate:
+    """A binding that may need auto-defer insertion."""
+    var_name: text
+    type_name: text
+    scope_depth: i64
+    has_manual_defer: bool
+    has_no_auto_defer_annotation: bool
+
+struct AutoDeferResult:
+    """Result of the auto-defer analysis pass."""
+    inserted_count: i64
+    candidates: [AutoDeferCandidate]
+    skipped_manual: i64
+    skipped_annotation: i64
+
+# ============================================================================
+# Resource Trait Detection
+# ============================================================================
+
+fn is_resource_type(type_name: text, trait_impls: [text]) -> bool:
+    """Check if a type implements the Resource trait (has close() method).
+
+    The trait_impls list contains trait names implemented by the type.
+    """
+    for trait_name in trait_impls:
+        if trait_name == "Resource":
+            return true
+        if trait_name == "Closeable":
+            return true
+        if trait_name == "AutoCloseable":
+            return true
+    false
+
+fn has_close_method(type_name: text, methods: [text]) -> bool:
+    """Check if a type has a close() method (duck-typing fallback)."""
+    for method in methods:
+        if method == "close":
+            return true
+    false
+
+# ============================================================================
+# Scope Analysis
+# ============================================================================
+
+fn find_deferred_vars(defer_statements: [text]) -> [text]:
+    """Extract variable names from existing defer statements.
+
+    Parses patterns like:
+      defer x.close()
+      defer file.close()
+      defer conn.dispose()
+    """
+    var vars: [text] = []
+    for stmt in defer_statements:
+        val trimmed = stmt.trim()
+        if trimmed.starts_with("defer "):
+            val rest = trimmed.replace("defer ", "")
+            val dot_idx = rest.index_of(".")
+            if dot_idx > 0:
+                val var_name = rest.substring(0, dot_idx)
+                vars.push(var_name)
+    vars
+
+fn has_no_auto_defer_annotation(annotations: [text]) -> bool:
+    """Check if a binding has the #[no_auto_defer] annotation."""
+    for ann in annotations:
+        if ann == "no_auto_defer":
+            return true
+    false
+
+# ============================================================================
+# Auto-Defer Pass
+# ============================================================================
+
+fn auto_defer_analyze(
+    bindings: [AutoDeferCandidate],
+    defer_stmts: [text]
+) -> AutoDeferResult:
+    """Analyze bindings and determine which need auto-defer insertion.
+
+    For each binding of a Resource type:
+    1. Check if there's already a manual defer for that variable
+    2. Check if the binding has #[no_auto_defer] annotation
+    3. If neither, mark for auto-defer insertion
+    """
+    val deferred_vars = find_deferred_vars(defer_stmts)
+    var inserted: i64 = 0
+    var skipped_manual: i64 = 0
+    var skipped_annotation: i64 = 0
+    var result_candidates: [AutoDeferCandidate] = []
+
+    for candidate in bindings:
+        if candidate.has_no_auto_defer_annotation:
+            skipped_annotation = skipped_annotation + 1
+            result_candidates.push(candidate)
+            continue
+
+        # Check if manual defer exists
+        var found_manual = false
+        for dv in deferred_vars:
+            if dv == candidate.var_name:
+                found_manual = true
+        if found_manual:
+            skipped_manual = skipped_manual + 1
+            var updated = candidate
+            updated.has_manual_defer = true
+            result_candidates.push(updated)
+            continue
+
+        # This candidate needs auto-defer
+        inserted = inserted + 1
+        result_candidates.push(candidate)
+
+    AutoDeferResult(
+        inserted_count: inserted,
+        candidates: result_candidates,
+        skipped_manual: skipped_manual,
+        skipped_annotation: skipped_annotation
+    )
+
+fn auto_defer_generate_stmts(result: AutoDeferResult) -> [text]:
+    """Generate defer statements for candidates that need them.
+
+    Returns a list of defer statement strings like:
+      "defer var_name.close()"
+    """
+    var stmts: [text] = []
+    for candidate in result.candidates:
+        if (not candidate.has_manual_defer and
+            not candidate.has_no_auto_defer_annotation):
+            stmts.push("defer {candidate.var_name}.close()")
+    stmts
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export AutoDeferCandidate, AutoDeferResult
+export is_resource_type, has_close_method
+export find_deferred_vars, has_no_auto_defer_annotation
+export auto_defer_analyze, auto_defer_generate_stmts

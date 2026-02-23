@@ -3,30 +3,32 @@
 # Tests for VHDL-specific DimConstraint variants: WidthMatch, WidthSafe,
 # BoundedLoop, ValidRange integrated with DimSolver.
 
-"""
-# VHDL Dimension Constraints Specification
-
-**Feature IDs:** #vhdl-dim-constraints
-**Category:** Backend
-**Difficulty:** 4/5
-**Status:** In Progress
-
-## Overview
-
-Tests the four VHDL-specific DimConstraint variants added to the existing
-dimension constraint system. These integrate with DimSolver for compile-time
-width and loop verification in the VHDL backend.
-
-## Related Files
-- `src/compiler/dim_constraints_types.spl` - Constraint type definitions
-- `src/compiler/dim_constraints.spl` - Solver implementation
-"""
+# # VHDL Dimension Constraints Specification
+#
+# **Feature IDs:** #vhdl-dim-constraints
+# **Category:** Backend
+# **Difficulty:** 4/5
+# **Status:** In Progress
+#
+# ## Overview
+#
+# Tests the four VHDL-specific DimConstraint variants added to the existing
+# dimension constraint system. These integrate with DimSolver for compile-time
+# width and loop verification in the VHDL backend.
+#
+# ## Related Files
+# - `src/compiler/dim_constraints_types.spl` - Constraint type definitions
+# - `src/compiler/dim_constraints.spl` - Solver implementation
 
 use compiler.dim_constraints.*
 use compiler.dim_constraints_types.*
 use compiler.hir.{DimExpr, DimExprKind}
 use compiler.core.lexer.Span
-use std.spec.{check, check_msg}
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+fn check_msg(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
 
 # ============================================================================
 # Test Utilities
@@ -36,69 +38,67 @@ fn test_span() -> Span:
     Span(start: 0, end: 10, line: 1, col: 1)
 
 fn make_dim(value: i64) -> DimExpr:
-    DimExpr.literal(value, test_span())
+    DimExpr__literal(value, test_span())
 
 fn make_named_dim(name: text) -> DimExpr:
-    DimExpr.named(name, test_span())
+    DimExpr__named(name, test_span())
 
 # ============================================================================
 # WidthMatch Constraint Tests
 # ============================================================================
 
 describe "DimConstraint WidthMatch":
-    """
-    ## Width Match (E0700)
-
-    Ensures two signal widths match for VHDL assignment/connection.
-    Delegates to DimSolver.unify().
-    """
+    # ## Width Match (E0700)
+    #
+    # Ensures two signal widths match for VHDL assignment/connection.
+    # Delegates to DimSolver.unify().
 
     it "passes when widths are equal literals":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val w1 = make_dim(32)
         val w2 = make_dim(32)
-        solver.add(DimConstraint.WidthMatch(w1, w2, "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(w1, w2, "<=", test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "fails when widths differ":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val w1 = make_dim(8)
         val w2 = make_dim(16)
-        solver.add(DimConstraint.WidthMatch(w1, w2, "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(w1, w2, "<=", test_span()))
         val result = solver.solve()
         check(result.err.?)
 
     it "passes when widths are same named dimension":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val w = make_named_dim("WIDTH")
-        solver.add(DimConstraint.WidthMatch(w, w, "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(w, w, "<=", test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "fails when named dimensions differ":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val w1 = make_named_dim("WIDTH_A")
         val w2 = make_named_dim("WIDTH_B")
-        solver.add(DimConstraint.WidthMatch(w1, w2, "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(w1, w2, "<=", test_span()))
         val result = solver.solve()
         check(result.err.?)
 
     it "resolves variable width to match literal":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val v = solver.fresh_var(test_span())
         val w = make_dim(16)
-        solver.add(DimConstraint.WidthMatch(v, w, "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(v, w, "<=", test_span()))
         val result = solver.solve()
         check(result.ok.?)
         val resolved = solver.apply_substitution(v)
         check(resolved.get_literal() == Some(16))
 
     it "provides WidthMismatch error kind on failure":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val w1 = make_dim(32)
         val w2 = make_dim(64)
-        solver.add(DimConstraint.WidthMatch(w1, w2, "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(w1, w2, "<=", test_span()))
         val result = solver.solve()
         check(result.err.?)
         val errors = result.err.unwrap()
@@ -106,11 +106,11 @@ describe "DimConstraint WidthMatch":
         check(errors[0].error_code == "E0700")
 
     it "reports span from constraint":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val span = Span(start: 100, end: 110, line: 15, col: 20)
         val w1 = make_dim(8)
         val w2 = make_dim(32)
-        solver.add(DimConstraint.WidthMatch(w1, w2, "<=", span))
+        solver.add(DimConstraint__WidthMatch(w1, w2, "<=", span))
         val result = solver.solve()
         check(result.err.?)
         val errors = result.err.unwrap()
@@ -121,55 +121,53 @@ describe "DimConstraint WidthMatch":
 # ============================================================================
 
 describe "DimConstraint WidthSafe":
-    """
-    ## Width Safe (E0701)
-
-    Ensures arithmetic result width is sufficient to prevent overflow.
-    - Addition: needs max(operand_widths) + 1
-    - Multiplication: needs sum(operand_widths)
-    """
+    # ## Width Safe (E0701)
+    #
+    # Ensures arithmetic result width is sufficient to prevent overflow.
+    # - Addition: needs max(operand_widths) + 1
+    # - Multiplication: needs sum(operand_widths)
 
     context "addition safety":
         it "passes when result width accommodates addition":
-            var solver = DimSolver.new()
+            var solver = DimSolver__new()
             val operands = [make_dim(16), make_dim(16)]
             val result_w = make_dim(17)
-            solver.add(DimConstraint.WidthSafe(operands, "+", result_w, test_span()))
+            solver.add(DimConstraint__WidthSafe(operands, "+", result_w, test_span()))
             val result = solver.solve()
             check(result.ok.?)
 
         it "fails when result width too narrow for addition":
-            var solver = DimSolver.new()
+            var solver = DimSolver__new()
             val operands = [make_dim(16), make_dim(16)]
             val result_w = make_dim(16)
-            solver.add(DimConstraint.WidthSafe(operands, "+", result_w, test_span()))
+            solver.add(DimConstraint__WidthSafe(operands, "+", result_w, test_span()))
             val result = solver.solve()
             check(result.err.?)
             val errors = result.err.unwrap()
             check(errors[0].error_code == "E0701")
 
         it "passes when result width is much larger than needed":
-            var solver = DimSolver.new()
+            var solver = DimSolver__new()
             val operands = [make_dim(8), make_dim(8)]
             val result_w = make_dim(32)
-            solver.add(DimConstraint.WidthSafe(operands, "+", result_w, test_span()))
+            solver.add(DimConstraint__WidthSafe(operands, "+", result_w, test_span()))
             val result = solver.solve()
             check(result.ok.?)
 
     context "multiplication safety":
         it "passes when result width covers full product":
-            var solver = DimSolver.new()
+            var solver = DimSolver__new()
             val operands = [make_dim(16), make_dim(16)]
             val result_w = make_dim(32)
-            solver.add(DimConstraint.WidthSafe(operands, "*", result_w, test_span()))
+            solver.add(DimConstraint__WidthSafe(operands, "*", result_w, test_span()))
             val result = solver.solve()
             check(result.ok.?)
 
         it "fails when result width cannot hold full product":
-            var solver = DimSolver.new()
+            var solver = DimSolver__new()
             val operands = [make_dim(32), make_dim(32)]
             val result_w = make_dim(32)
-            solver.add(DimConstraint.WidthSafe(operands, "*", result_w, test_span()))
+            solver.add(DimConstraint__WidthSafe(operands, "*", result_w, test_span()))
             val result = solver.solve()
             check(result.err.?)
             val errors = result.err.unwrap()
@@ -177,19 +175,19 @@ describe "DimConstraint WidthSafe":
 
     context "subtraction safety":
         it "passes when result width accommodates subtraction":
-            var solver = DimSolver.new()
+            var solver = DimSolver__new()
             val operands = [make_dim(16), make_dim(16)]
             val result_w = make_dim(17)
-            solver.add(DimConstraint.WidthSafe(operands, "-", result_w, test_span()))
+            solver.add(DimConstraint__WidthSafe(operands, "-", result_w, test_span()))
             val result = solver.solve()
             check(result.ok.?)
 
     context "bitwise operators":
         it "passes for bitwise with matching widths":
-            var solver = DimSolver.new()
+            var solver = DimSolver__new()
             val operands = [make_dim(32), make_dim(32)]
             val result_w = make_dim(32)
-            solver.add(DimConstraint.WidthSafe(operands, "and", result_w, test_span()))
+            solver.add(DimConstraint__WidthSafe(operands, "and", result_w, test_span()))
             val result = solver.solve()
             check(result.ok.?)
 
@@ -198,47 +196,45 @@ describe "DimConstraint WidthSafe":
 # ============================================================================
 
 describe "DimConstraint BoundedLoop":
-    """
-    ## Bounded Loop (E0730)
-
-    Loops must have a statically resolvable positive bound for VHDL synthesis.
-    """
+    # ## Bounded Loop (E0730)
+    #
+    # Loops must have a statically resolvable positive bound for VHDL synthesis.
 
     it "passes when bound is within allowed maximum":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val bound = make_dim(256)
-        solver.add(DimConstraint.BoundedLoop(bound, 1024, test_span()))
+        solver.add(DimConstraint__BoundedLoop(bound, 1024, test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "passes when bound equals maximum":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val bound = make_dim(1024)
-        solver.add(DimConstraint.BoundedLoop(bound, 1024, test_span()))
+        solver.add(DimConstraint__BoundedLoop(bound, 1024, test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "fails when bound exceeds maximum":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val bound = make_dim(2048)
-        solver.add(DimConstraint.BoundedLoop(bound, 1024, test_span()))
+        solver.add(DimConstraint__BoundedLoop(bound, 1024, test_span()))
         val result = solver.solve()
         check(result.err.?)
         val errors = result.err.unwrap()
         check(errors[0].error_code == "E0730")
 
     it "passes with small loop bound":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val bound = make_dim(8)
-        solver.add(DimConstraint.BoundedLoop(bound, 65536, test_span()))
+        solver.add(DimConstraint__BoundedLoop(bound, 65536, test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "handles named dimension bound":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val bound = make_named_dim("LOOP_COUNT")
         # Named dimension without concrete value - may defer to runtime
-        solver.add(DimConstraint.BoundedLoop(bound, 1024, test_span()))
+        solver.add(DimConstraint__BoundedLoop(bound, 1024, test_span()))
         val result = solver.solve()
         # Named dims may or may not be resolvable at compile time
         check(result.ok.? or result.err.?)
@@ -248,51 +244,49 @@ describe "DimConstraint BoundedLoop":
 # ============================================================================
 
 describe "DimConstraint ValidRange":
-    """
-    ## Valid Range (E0740)
-
-    Slice ranges must satisfy hi >= lo.
-    """
+    # ## Valid Range (E0740)
+    #
+    # Slice ranges must satisfy hi >= lo.
 
     it "passes when hi > lo":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val hi = make_dim(31)
         val lo = make_dim(0)
-        solver.add(DimConstraint.ValidRange(hi, lo, test_span()))
+        solver.add(DimConstraint__ValidRange(hi, lo, test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "passes when hi == lo (single bit slice)":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val hi = make_dim(7)
         val lo = make_dim(7)
-        solver.add(DimConstraint.ValidRange(hi, lo, test_span()))
+        solver.add(DimConstraint__ValidRange(hi, lo, test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "fails when hi < lo":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val hi = make_dim(3)
         val lo = make_dim(10)
-        solver.add(DimConstraint.ValidRange(hi, lo, test_span()))
+        solver.add(DimConstraint__ValidRange(hi, lo, test_span()))
         val result = solver.solve()
         check(result.err.?)
         val errors = result.err.unwrap()
         check(errors[0].error_code == "E0740")
 
     it "passes with standard byte range":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val hi = make_dim(7)
         val lo = make_dim(0)
-        solver.add(DimConstraint.ValidRange(hi, lo, test_span()))
+        solver.add(DimConstraint__ValidRange(hi, lo, test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "passes with standard word range":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         val hi = make_dim(63)
         val lo = make_dim(0)
-        solver.add(DimConstraint.ValidRange(hi, lo, test_span()))
+        solver.add(DimConstraint__ValidRange(hi, lo, test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
@@ -301,33 +295,31 @@ describe "DimConstraint ValidRange":
 # ============================================================================
 
 describe "VHDL constraint timing classification":
-    """
-    ## Compile-time vs Runtime
-
-    VHDL constraints with literal values should classify as CompileTime.
-    """
+    # ## Compile-time vs Runtime
+    #
+    # VHDL constraints with literal values should classify as CompileTime.
 
     it "classifies WidthMatch with literals as compile-time":
-        var solver = DimSolver.new()
-        val c = DimConstraint.WidthMatch(make_dim(32), make_dim(32), "<=", test_span())
+        var solver = DimSolver__new()
+        val c = DimConstraint__WidthMatch(make_dim(32), make_dim(32), "<=", test_span())
         val timing = solver.classify_constraint(c)
         check(timing == DimCheckTiming.CompileTime)
 
     it "classifies BoundedLoop with literal as compile-time":
-        var solver = DimSolver.new()
-        val c = DimConstraint.BoundedLoop(make_dim(100), 1024, test_span())
+        var solver = DimSolver__new()
+        val c = DimConstraint__BoundedLoop(make_dim(100), 1024, test_span())
         val timing = solver.classify_constraint(c)
         check(timing == DimCheckTiming.CompileTime)
 
     it "classifies ValidRange with literals as compile-time":
-        var solver = DimSolver.new()
-        val c = DimConstraint.ValidRange(make_dim(31), make_dim(0), test_span())
+        var solver = DimSolver__new()
+        val c = DimConstraint__ValidRange(make_dim(31), make_dim(0), test_span())
         val timing = solver.classify_constraint(c)
         check(timing == DimCheckTiming.CompileTime)
 
     it "classifies WidthSafe with literals as compile-time":
-        var solver = DimSolver.new()
-        val c = DimConstraint.WidthSafe([make_dim(16), make_dim(16)], "+", make_dim(17), test_span())
+        var solver = DimSolver__new()
+        val c = DimConstraint__WidthSafe([make_dim(16), make_dim(16)], "+", make_dim(17), test_span())
         val timing = solver.classify_constraint(c)
         check(timing == DimCheckTiming.CompileTime)
 
@@ -338,22 +330,22 @@ describe "VHDL constraint timing classification":
 describe "DimConstraint span accessor for VHDL variants":
     it "returns span from WidthMatch":
         val span = Span(start: 10, end: 20, line: 5, col: 3)
-        val c = DimConstraint.WidthMatch(make_dim(8), make_dim(8), "<=", span)
+        val c = DimConstraint__WidthMatch(make_dim(8), make_dim(8), "<=", span)
         expect(c.span().line).to_equal(5)
 
     it "returns span from WidthSafe":
         val span = Span(start: 10, end: 20, line: 7, col: 1)
-        val c = DimConstraint.WidthSafe([make_dim(16)], "+", make_dim(17), span)
+        val c = DimConstraint__WidthSafe([make_dim(16)], "+", make_dim(17), span)
         expect(c.span().line).to_equal(7)
 
     it "returns span from BoundedLoop":
         val span = Span(start: 10, end: 20, line: 12, col: 8)
-        val c = DimConstraint.BoundedLoop(make_dim(10), 100, span)
+        val c = DimConstraint__BoundedLoop(make_dim(10), 100, span)
         expect(c.span().line).to_equal(12)
 
     it "returns span from ValidRange":
         val span = Span(start: 10, end: 20, line: 20, col: 15)
-        val c = DimConstraint.ValidRange(make_dim(31), make_dim(0), span)
+        val c = DimConstraint__ValidRange(make_dim(31), make_dim(0), span)
         expect(c.span().line).to_equal(20)
 
 # ============================================================================
@@ -362,38 +354,38 @@ describe "DimConstraint span accessor for VHDL variants":
 
 describe "Multiple VHDL constraints together":
     it "solves mixed VHDL constraints successfully":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         # Width match: 16-bit = 16-bit
-        solver.add(DimConstraint.WidthMatch(make_dim(16), make_dim(16), "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(make_dim(16), make_dim(16), "<=", test_span()))
         # Width safe: 16 + 16 fits in 17
-        solver.add(DimConstraint.WidthSafe([make_dim(16), make_dim(16)], "+", make_dim(17), test_span()))
+        solver.add(DimConstraint__WidthSafe([make_dim(16), make_dim(16)], "+", make_dim(17), test_span()))
         # Bounded loop: 256 <= 1024
-        solver.add(DimConstraint.BoundedLoop(make_dim(256), 1024, test_span()))
+        solver.add(DimConstraint__BoundedLoop(make_dim(256), 1024, test_span()))
         # Valid range: 31 >= 0
-        solver.add(DimConstraint.ValidRange(make_dim(31), make_dim(0), test_span()))
+        solver.add(DimConstraint__ValidRange(make_dim(31), make_dim(0), test_span()))
         val result = solver.solve()
         check(result.ok.?)
 
     it "collects multiple VHDL errors":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         # Width mismatch
-        solver.add(DimConstraint.WidthMatch(make_dim(8), make_dim(32), "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(make_dim(8), make_dim(32), "<=", test_span()))
         # Invalid range
-        solver.add(DimConstraint.ValidRange(make_dim(0), make_dim(31), test_span()))
+        solver.add(DimConstraint__ValidRange(make_dim(0), make_dim(31), test_span()))
         val result = solver.solve()
         check(result.err.?)
         val errors = result.err.unwrap()
         check(errors.len() >= 2)
 
     it "mixes VHDL and standard constraints":
-        var solver = DimSolver.new()
+        var solver = DimSolver__new()
         # Standard equality constraint
         solver.add_equal(make_dim(64), make_dim(64), test_span())
         # VHDL width match
-        solver.add(DimConstraint.WidthMatch(make_dim(32), make_dim(32), "<=", test_span()))
+        solver.add(DimConstraint__WidthMatch(make_dim(32), make_dim(32), "<=", test_span()))
         # Standard range constraint
-        solver.add(DimConstraint.InRange(make_dim(16), 1, 64, test_span()))
+        solver.add(DimConstraint__InRange(make_dim(16), 1, 64, test_span()))
         # VHDL bounded loop
-        solver.add(DimConstraint.BoundedLoop(make_dim(100), 1024, test_span()))
+        solver.add(DimConstraint__BoundedLoop(make_dim(100), 1024, test_span()))
         val result = solver.solve()
         check(result.ok.?)

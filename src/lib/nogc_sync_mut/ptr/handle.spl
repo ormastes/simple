@@ -1,0 +1,135 @@
+# Handle Pool — Slot Table with Generation Counters
+# @tag:api
+#
+# Handles provide safe, reusable references to i64 values via a slot table.
+# Each slot has a generation counter to detect stale handles.
+#
+# Usage:
+#     var pool = handle_pool_new(16)
+#     val h = handle_alloc(pool, 42)
+#     val v = handle_deref(pool, h)     # returns 42
+#     handle_free(pool, h)
+#     val v2 = handle_deref(pool, h)    # returns -1 (stale)
+
+struct Handle:
+    index: i64
+    generation: i64
+
+# =========================================================================
+# Module-level pool state (parallel arrays)
+# =========================================================================
+
+var g_pool_values: [i64] = []
+var g_pool_generations: [i64] = []
+var g_pool_occupied: [bool] = []
+var g_pool_free_indices: [i64] = []
+var g_pool_capacity: i64 = 0
+var g_pool_size: i64 = 0
+
+# =========================================================================
+# Pool lifecycle
+# =========================================================================
+
+fn handle_pool_new(capacity: i64):
+    g_pool_values = []
+    g_pool_generations = []
+    g_pool_occupied = []
+    g_pool_free_indices = []
+    g_pool_capacity = capacity
+    g_pool_size = 0
+    var i = 0
+    while i < capacity:
+        g_pool_values.push(0)
+        g_pool_generations.push(0)
+        g_pool_occupied.push(false)
+        i = i + 1
+
+fn handle_pool_reset():
+    handle_pool_new(g_pool_capacity)
+
+# =========================================================================
+# Allocation
+# =========================================================================
+
+fn handle_alloc(value: i64) -> Handle:
+    # Try free list first
+    if g_pool_free_indices.len() > 0:
+        val idx = g_pool_free_indices[g_pool_free_indices.len() - 1]
+        # Remove last element by rebuilding
+        var new_free: [i64] = []
+        var fi = 0
+        while fi < g_pool_free_indices.len() - 1:
+            new_free.push(g_pool_free_indices[fi])
+            fi = fi + 1
+        g_pool_free_indices = new_free
+        g_pool_values[idx] = value
+        g_pool_occupied[idx] = true
+        g_pool_size = g_pool_size + 1
+        return Handle(index: idx, generation: g_pool_generations[idx])
+    # Allocate new slot if under capacity
+    if g_pool_size < g_pool_capacity:
+        val idx = g_pool_size
+        if idx < g_pool_values.len():
+            g_pool_values[idx] = value
+            g_pool_generations[idx] = 0
+            g_pool_occupied[idx] = true
+        else:
+            g_pool_values.push(value)
+            g_pool_generations.push(0)
+            g_pool_occupied.push(true)
+        g_pool_size = g_pool_size + 1
+        return Handle(index: idx, generation: 0)
+    # Pool full — return invalid handle
+    Handle(index: -1, generation: -1)
+
+# =========================================================================
+# Access
+# =========================================================================
+
+fn handle_deref(h: Handle) -> i64:
+    if h.index < 0:
+        return -1
+    if h.index >= g_pool_values.len():
+        return -1
+    if g_pool_occupied[h.index] == false:
+        return -1
+    if g_pool_generations[h.index] != h.generation:
+        return -1
+    g_pool_values[h.index]
+
+fn handle_is_valid(h: Handle) -> bool:
+    if h.index < 0:
+        return false
+    if h.index >= g_pool_values.len():
+        return false
+    if g_pool_occupied[h.index] == false:
+        return false
+    g_pool_generations[h.index] == h.generation
+
+# =========================================================================
+# Deallocation
+# =========================================================================
+
+fn handle_free(h: Handle) -> bool:
+    if handle_is_valid(h) == false:
+        return false
+    g_pool_occupied[h.index] = false
+    g_pool_generations[h.index] = g_pool_generations[h.index] + 1
+    g_pool_free_indices.push(h.index)
+    g_pool_size = g_pool_size - 1
+    true
+
+# =========================================================================
+# Query
+# =========================================================================
+
+fn handle_pool_size() -> i64:
+    g_pool_size
+
+fn handle_pool_capacity() -> i64:
+    g_pool_capacity
+
+export Handle
+export handle_pool_new, handle_pool_reset
+export handle_alloc, handle_deref, handle_is_valid, handle_free
+export handle_pool_size, handle_pool_capacity

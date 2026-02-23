@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include "runtime_memtrack.h"
 #ifdef _MSC_VER
 #define strdup _strdup
 #endif
@@ -707,7 +708,7 @@ const char* rt_file_read_text(const char* path) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    char* buf = (char*)malloc(sz + 1);
+    char* buf = (char*)SPL_MALLOC(sz + 1, "cg_str");
     size_t nread = fread(buf, 1, sz, f);
     buf[nread] = 0;
     fclose(f);
@@ -745,17 +746,17 @@ static void _shim_capture_args(void) {
         if (buf[i] == 0) count++;
     }
     _shim_argc = count;
-    _shim_argv = (char**)malloc(count * sizeof(char*));
+    _shim_argv = (char**)SPL_MALLOC(count * sizeof(char*), "cg_arr");
     size_t pos = 0;
     for (int i = 0; i < count; i++) {
-        _shim_argv[i] = strdup(buf + pos);
+        _shim_argv[i] = SPL_STRDUP(buf + pos, "cg_str");
         pos += strlen(buf + pos) + 1;
     }
 }
 
 SimpleStringArray rt_cli_get_args(void) {
     SimpleStringArray arr;
-    arr.items = (const char**)malloc((_shim_argc + 1) * sizeof(const char*));
+    arr.items = (const char**)SPL_MALLOC((_shim_argc + 1) * sizeof(const char*), "cg_arr");
     arr.len = _shim_argc;
     arr.cap = _shim_argc + 1;
     for (int i = 0; i < _shim_argc; i++) {
@@ -838,13 +839,13 @@ static void register_struct_field(const char* struct_name, const char* field_nam
     }
     if (idx < 0 && g_struct_field_count < MAX_STRUCT_DEFS) {
         idx = g_struct_field_count++;
-        g_struct_fields[idx].struct_name = strdup(struct_name);
+        g_struct_fields[idx].struct_name = SPL_STRDUP(struct_name, "cg_struct");
         g_struct_fields[idx].field_count = 0;
     }
     if (idx >= 0 && g_struct_fields[idx].field_count < MAX_STRUCT_FIELDS) {
         int fi = g_struct_fields[idx].field_count++;
-        g_struct_fields[idx].fields[fi].field_name = strdup(field_name);
-        g_struct_fields[idx].fields[fi].field_type = strdup(field_type);
+        g_struct_fields[idx].fields[fi].field_name = SPL_STRDUP(field_name, "cg_struct");
+        g_struct_fields[idx].fields[fi].field_type = SPL_STRDUP(field_type, "cg_struct");
     }
 }
 
@@ -877,13 +878,13 @@ static void register_var_type(const char* var_name, const char* type_name) {
     // Update existing entry if present
     for (int i = 0; i < g_var_type_count; i++) {
         if (strcmp(g_var_types[i].var_name, var_name) == 0) {
-            g_var_types[i].type_name = strdup(type_name);
+            g_var_types[i].type_name = SPL_STRDUP(type_name, "cg_str");
             return;
         }
     }
     if (g_var_type_count < MAX_VAR_TYPES) {
-        g_var_types[g_var_type_count].var_name = strdup(var_name);
-        g_var_types[g_var_type_count].type_name = strdup(type_name);
+        g_var_types[g_var_type_count].var_name = SPL_STRDUP(var_name, "cg_str");
+        g_var_types[g_var_type_count].type_name = SPL_STRDUP(type_name, "cg_str");
         g_var_type_count++;
     }
 }
@@ -938,13 +939,13 @@ static void register_fn_ret_type(const char* fn_name, const char* c_ret_type) {
     // Update if exists
     for (int i = 0; i < g_fn_ret_type_count; i++) {
         if (strcmp(g_fn_ret_types[i].fn_name, fn_name) == 0) {
-            g_fn_ret_types[i].c_ret_type = strdup(c_ret_type);
+            g_fn_ret_types[i].c_ret_type = SPL_STRDUP(c_ret_type, "cg_str");
             return;
         }
     }
     if (g_fn_ret_type_count < MAX_FN_REGISTRY) {
-        g_fn_ret_types[g_fn_ret_type_count].fn_name = strdup(fn_name);
-        g_fn_ret_types[g_fn_ret_type_count].c_ret_type = strdup(c_ret_type);
+        g_fn_ret_types[g_fn_ret_type_count].fn_name = SPL_STRDUP(fn_name, "cg_str");
+        g_fn_ret_types[g_fn_ret_type_count].c_ret_type = SPL_STRDUP(c_ret_type, "cg_str");
         g_fn_ret_type_count++;
     }
 }
@@ -1018,11 +1019,11 @@ static const char* stype_to_c(const char* stype) {
     long long len = (long long)strlen(stype);
     /* Strip trailing ? (optional type) */
     if (len > 0 && stype[len-1] == '?') {
-        char* stripped = (char*)malloc(len);
+        char* stripped = (char*)SPL_MALLOC(len, "cg_str");
         memcpy(stripped, stype, len-1);
         stripped[len-1] = '\0';
         const char* res = stype_to_c(stripped);
-        free(stripped);
+        SPL_FREE(stripped);
         return res;
     }
     /* Primitive types */
@@ -1063,11 +1064,11 @@ static SimpleStringArray split_params_toplevel(const char* s) {
         if (c == '>') { depth--; continue; }
         if (c == '\0' || (c == ',' && depth == 0)) {
             long long plen = i - start;
-            char* part = (char*)malloc(plen + 1);
+            char* part = (char*)SPL_MALLOC(plen + 1, "cg_str");
             memcpy(part, s + start, plen);
             part[plen] = '\0';
             simple_string_push(&result, simple_trim(part));
-            free(part);
+            SPL_FREE(part);
             start = i + 1;
         }
     }
@@ -2126,7 +2127,7 @@ const char* generate_c(const char* source) {
                 // Create a method group entry for this struct
                 if (g_struct_method_count < MAX_METHOD_STRUCTS) {
                     cur_struct_method_idx = g_struct_method_count;
-                    g_struct_methods[cur_struct_method_idx].struct_name = strdup(struct_name);
+                    g_struct_methods[cur_struct_method_idx].struct_name = SPL_STRDUP(struct_name, "cg_struct");
                     g_struct_methods[cur_struct_method_idx].method_count = 0;
                     g_struct_method_count++;
                 }
@@ -2140,7 +2141,7 @@ const char* generate_c(const char* source) {
                             MethodInfo* mi = &g_struct_methods[cur_struct_method_idx].methods[cur_method_idx];
                             if (mi->body_count < MAX_METHOD_BODY_LINES) {
                                 // Store raw line with indentation for block tracking
-                                mi->body_lines[mi->body_count] = strdup(raw_line);
+                                mi->body_lines[mi->body_count] = SPL_STRDUP(raw_line, "cg_str");
                                 mi->body_count++;
                             }
                         }
@@ -2191,9 +2192,9 @@ const char* generate_c(const char* source) {
                             g_struct_methods[cur_struct_method_idx].method_count < MAX_METHODS_PER_STRUCT) {
                             int mi_idx = g_struct_methods[cur_struct_method_idx].method_count;
                             MethodInfo* mi = &g_struct_methods[cur_struct_method_idx].methods[mi_idx];
-                            mi->name = strdup(meth_name);
-                            mi->params_raw = strdup(params_raw);
-                            mi->return_type = strdup(ret_type);
+                            mi->name = SPL_STRDUP(meth_name, "cg_struct");
+                            mi->params_raw = SPL_STRDUP(params_raw, "cg_struct");
+                            mi->return_type = SPL_STRDUP(ret_type, "cg_struct");
                             mi->is_mutable = is_mutable;
                             mi->is_static = is_static;
                             mi->body_count = 0;

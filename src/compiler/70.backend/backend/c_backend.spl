@@ -885,14 +885,41 @@ impl MirToC:
             "0"
 
 # Sanitize a SPL type name containing generics to a valid C identifier.
+# Single-pass replacement: <,.- → '_', > and space → removed, :: → '_'
 fn sanitize_c_name(name: text) -> text:
-    var s = name.split("<").join("_")
-    s = s.split(">").join("")
-    s = s.split(",").join("_")
-    s = s.split(" ").join("")
-    s = s.split("::").join("_")
-    s = s.split(".").join("_")
-    s = s.split("-").join("_")
+    var parts: [text] = []
+    var seg_start = 0
+    var i = 0
+    var needs_work = false
+    while i < name.len():
+        val ch = name[i]
+        if (ch == "<" or ch == "," or ch == "." or ch == "-"):
+            if i > seg_start:
+                parts = parts.push(name[seg_start:i])
+            parts = parts.push("_")
+            seg_start = i + 1
+            needs_work = true
+        elif (ch == ">" or ch == " "):
+            if i > seg_start:
+                parts = parts.push(name[seg_start:i])
+            seg_start = i + 1
+            needs_work = true
+        elif ch == ":":
+            # Handle :: -> _
+            if i + 1 < name.len():
+                if name[i + 1] == ":":
+                    if i > seg_start:
+                        parts = parts.push(name[seg_start:i])
+                    parts = parts.push("_")
+                    i = i + 1
+                    seg_start = i + 1
+                    needs_work = true
+        i = i + 1
+    var s = name
+    if needs_work:
+        if i > seg_start:
+            parts = parts.push(name[seg_start:i])
+        s = parts.join("")
     # Handle C++ reserved words by appending underscore
     if (s == "class" or s == "new" or s == "delete" or s == "template" or
         s == "namespace" or s == "default" or s == "short" or s == "long" or

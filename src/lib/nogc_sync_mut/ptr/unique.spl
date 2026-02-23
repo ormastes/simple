@@ -1,0 +1,115 @@
+# Unique Pointer — Move-Tracking Wrapper
+# @tag:api
+#
+# UniquePtr provides exclusive ownership semantics via cooperative move tracking.
+# Since Simple copies on assignment, unique_move returns a new valid ptr and
+# the caller must invalidate the old one.
+#
+# Usage:
+#     val p = unique_new(42, "my_value")
+#     val v = unique_get(p)           # returns 42
+#     val p2 = unique_move(p)         # returns new valid ptr
+#     unique_invalidate(p.id)         # mark old as moved
+#     val v2 = unique_get(p2)         # returns 42
+
+# =========================================================================
+# Module-level state (parallel arrays)
+# =========================================================================
+
+var g_unique_ids: [i64] = []
+var g_unique_values: [i64] = []
+var g_unique_moved: [bool] = []
+var g_unique_tags: [text] = []
+var g_unique_next_id: i64 = 0
+
+struct UniquePtr:
+    id: i64
+    value: i64
+    tag: text
+
+# =========================================================================
+# Lifecycle
+# =========================================================================
+
+fn unique_new(value: i64, tag: text) -> UniquePtr:
+    val id = g_unique_next_id
+    g_unique_next_id = g_unique_next_id + 1
+    g_unique_ids.push(id)
+    g_unique_values.push(value)
+    g_unique_moved.push(false)
+    g_unique_tags.push(tag)
+    UniquePtr(id: id, value: value, tag: tag)
+
+fn unique_reset():
+    g_unique_ids = []
+    g_unique_values = []
+    g_unique_moved = []
+    g_unique_tags = []
+    g_unique_next_id = 0
+
+# =========================================================================
+# Internal lookup
+# =========================================================================
+
+fn unique_find_index(id: i64) -> i64:
+    var i = 0
+    while i < g_unique_ids.len():
+        if g_unique_ids[i] == id:
+            return i
+        i = i + 1
+    -1
+
+# =========================================================================
+# Access
+# =========================================================================
+
+fn unique_get(ptr: UniquePtr) -> i64:
+    val idx = unique_find_index(ptr.id)
+    if idx < 0:
+        return -1
+    if g_unique_moved[idx] == true:
+        return -1
+    g_unique_values[idx]
+
+fn unique_is_valid(ptr: UniquePtr) -> bool:
+    val idx = unique_find_index(ptr.id)
+    if idx < 0:
+        return false
+    g_unique_moved[idx] == false
+
+# =========================================================================
+# Move semantics
+# =========================================================================
+
+fn unique_move(ptr: UniquePtr) -> UniquePtr:
+    val idx = unique_find_index(ptr.id)
+    if idx < 0:
+        return UniquePtr(id: -1, value: 0, tag: "invalid")
+    if g_unique_moved[idx] == true:
+        return UniquePtr(id: -1, value: 0, tag: "invalid")
+    val value = g_unique_values[idx]
+    val tag = g_unique_tags[idx]
+    # Mark old as moved
+    g_unique_moved[idx] = true
+    # Create new entry
+    unique_new(value, tag)
+
+fn unique_invalidate(id: i64):
+    val idx = unique_find_index(id)
+    if idx >= 0:
+        g_unique_moved[idx] = true
+
+fn unique_into_inner(ptr: UniquePtr) -> i64:
+    val idx = unique_find_index(ptr.id)
+    if idx < 0:
+        return -1
+    if g_unique_moved[idx] == true:
+        return -1
+    val value = g_unique_values[idx]
+    g_unique_moved[idx] = true
+    value
+
+export UniquePtr
+export unique_new, unique_reset
+export unique_get, unique_is_valid
+export unique_move, unique_invalidate, unique_into_inner

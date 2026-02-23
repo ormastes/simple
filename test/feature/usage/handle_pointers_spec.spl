@@ -1,355 +1,127 @@
-"""
-# Handle Pointers Specification
+# # Handle Pointers Specification
+#
+# **Feature IDs:** #820-825
+# **Category:** Language
+# **Status:** Implemented
+#
+# ## Overview
+#
+# Handle pointers provide safe, reusable references to i64 values via a slot
+# table with generation counters. Freed slots are reused, but stale handles
+# are detected via generation mismatch.
+#
+# ## Key Concepts
+#
+# | Concept | Description |
+# |---------|-------------|
+# | Handle | Index + generation pair for safe reference |
+# | Generation | Version counter incremented on free |
+# | Pool | Pre-allocated slot table with free list |
+# | Slot reuse | Freed indices are recycled |
 
-**Feature IDs:** #820-825
-**Category:** Language
-**Difficulty:** 3/5
-**Status:** In Progress
-
-## Overview
-
-Handle pointers provide safe, reusable references to objects with automatic lifetime management.
-Unlike raw pointers, handles are tracked by the runtime and can be validated, preventing
-use-after-free and dangling reference bugs while maintaining performance.
-
-## Syntax
-
-```simple
-# Handle type declaration
-struct ObjectHandle:
-    id: i64
-    generation: i32
-
-# Handle creation and usage
-val handle = get_handle(obj)
-val obj = deref_handle(handle)
-```
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Handle | Type-safe reference with runtime validation |
-| Generation | Version counter for detecting stale handles |
-| Validation | Runtime check that handle points to live object |
-| Slot | Handle table entry containing object and metadata |
-
-## Behavior
-
-- Handles are allocated from a handle pool with automatic reuse
-- Each handle includes a generation counter to detect stale references
-- Deref operation validates handle before returning object reference
-- Handle pool manages memory without garbage collection
-- Handles can be null/invalid to represent absent values
-
-## Related Specifications
-
-- [References](../references/references_spec.spl) - Reference semantics
-- [Memory Management](../memory_management/memory_management_spec.spl) - Lifetime management
-- [Error Handling](../error_handling/error_handling_spec.spl) - Invalid handle errors
-
-## Implementation Notes
-
-Handle implementation uses:
-- Array-based handle pool with free list
-- Generation counters in upper bits
-- Index in lower bits for O(1) lookup
-- Automatic reuse of freed slots
-- Optional inline handle table for small objects
-
-## Examples
-
-```simple
-# Create and use handles
-val obj = MyObject(data: 42)
-val handle = get_handle(obj)
-val ref = deref_handle(handle)
-expect(ref.data).to_equal(42)
-```
-"""
-
+use std.ptr.handle.{handle_pool_new, handle_pool_reset, handle_alloc, handle_deref, handle_is_valid, handle_free, handle_pool_size, handle_pool_capacity}
 
 
 # ============================================================================
 # Basic Handle Operations
 # ============================================================================
 
-describe "Handle Pointers - Basic":
-    """
-    ## Basic Handle Creation and Dereferencing
+describe "Handle - create and deref":
+    it "creates handle for value":
+        handle_pool_new(16)
+        val h = handle_alloc(42)
+        expect(handle_deref(h)).to_equal(42)
+        expect(handle_is_valid(h)).to_equal(true)
+        handle_pool_reset()
 
-    Tests basic handle creation and usage.
-    """
-
-    context "with simple handle creation":
-        """
-        ### Scenario: Handle Allocation
-
-        Objects can be wrapped with handles for safe reference.
-        """
-
-        it "creates handle for object":
-            class SimpleObject:
-                value: Int
-
-            val obj = SimpleObject(value: 42)
-            # val handle = get_handle(obj)
-            # expect(handle.?).to_equal(true)
-            pass
-
-    context "with handle dereferencing":
-        """
-        ### Scenario: Retrieving Object from Handle
-
-        Handles can be dereferenced to access the underlying object.
-        """
-
-        it "dereferences handle safely":
-            class SimpleObject:
-                value: Int
-
-            val obj = SimpleObject(value: 42)
-            # val handle = get_handle(obj)
-            # val retrieved = deref_handle(handle)
-            # expect(retrieved.value).to_equal(42)
-            pass
+describe "Handle - deref safely":
+    it "dereferences handle":
+        handle_pool_new(16)
+        val h = handle_alloc(100)
+        val v = handle_deref(h)
+        expect(v).to_equal(100)
+        handle_pool_reset()
 
 
 # ============================================================================
 # Handle Validation and Generation
 # ============================================================================
 
-describe "Handle Pointers - Validation":
-    """
-    ## Handle Validation with Generation Counters
+describe "Handle - validate live":
+    it "validates live handle":
+        handle_pool_new(16)
+        val h = handle_alloc(100)
+        expect(handle_is_valid(h)).to_equal(true)
+        handle_pool_reset()
 
-    Tests handle validation and stale reference detection.
-    """
+describe "Handle - detect stale":
+    it "detects freed handle":
+        handle_pool_new(16)
+        val h = handle_alloc(100)
+        handle_free(h)
+        expect(handle_is_valid(h)).to_equal(false)
+        handle_pool_reset()
 
-    context "with valid handles":
-        """
-        ### Scenario: Valid Handle Validation
-
-        Valid handles pass validation checks.
-        """
-
-        it "validates live handle":
-            class TestObject:
-                data: Int
-
-            val obj = TestObject(data: 100)
-            # val handle = get_handle(obj)
-            # expect(is_valid_handle(handle)).to_equal(true)
-            pass
-
-    context "with stale handles":
-        """
-        ### Scenario: Stale Reference Detection
-
-        Handles to freed objects are detected as invalid.
-        """
-
-        it "detects stale handle":
-            class TestObject:
-                data: Int
-
-            # val obj = TestObject(data: 100)
-            # val handle = get_handle(obj)
-            # free_object(obj)
-            # expect(is_valid_handle(handle)).to_equal(false)
-            pass
-
-    context "with generation counters":
-        """
-        ### Scenario: Generation-Based Validation
-
-        Generation counters prevent false reuse of freed slots.
-        """
-
-        it "invalidates handle on object reuse":
-            class TestObject:
-                id: Int
-
-            # Create object and get handle
-            # val obj1 = TestObject(id: 1)
-            # val handle1 = get_handle(obj1)
-
-            # Free and reuse slot
-            # free_object(obj1)
-            # val obj2 = TestObject(id: 2)
-            # val handle2 = get_handle(obj2)
-
-            # Old handle should be invalid due to generation mismatch
-            # expect(is_valid_handle(handle1)).to_equal(false)
-            pass
+describe "Handle - generation invalidation":
+    it "old handle invalid after slot reuse":
+        handle_pool_new(16)
+        val h1 = handle_alloc(10)
+        handle_free(h1)
+        val h2 = handle_alloc(20)
+        expect(handle_is_valid(h1)).to_equal(false)
+        expect(handle_is_valid(h2)).to_equal(true)
+        expect(handle_deref(h2)).to_equal(20)
+        handle_pool_reset()
 
 
 # ============================================================================
 # Handle Pool Management
 # ============================================================================
 
-describe "Handle Pointers - Pool Management":
-    """
-    ## Handle Pool Allocation and Reuse
+describe "Handle - slot reuse":
+    it "reuses freed slot index":
+        handle_pool_new(4)
+        val h1 = handle_alloc(100)
+        val idx1 = h1.index
+        handle_free(h1)
+        val h2 = handle_alloc(200)
+        val idx2 = h2.index
+        expect(idx1).to_equal(idx2)
+        expect(handle_deref(h2)).to_equal(200)
+        handle_pool_reset()
 
-    Tests handle pool memory management.
-    """
-
-    context "with handle reuse":
-        """
-        ### Scenario: Slot Reuse
-
-        Freed handle slots are reused for new objects.
-        """
-
-        it "reuses freed slots":
-            class PoolObject:
-                value: Int
-
-            # Create objects and get handles
-            # val obj1 = PoolObject(value: 1)
-            # val handle1 = get_handle(obj1)
-            # val addr1 = handle_index(handle1)
-
-            # Free first object
-            # free_object(obj1)
-
-            # New object should reuse the slot
-            # val obj2 = PoolObject(value: 2)
-            # val handle2 = get_handle(obj2)
-            # val addr2 = handle_index(handle2)
-
-            # expect(addr1).to_equal(addr2))  # Same slot
-            pass
-
-    context "with multiple handles":
-        """
-        ### Scenario: Concurrent Handle Usage
-
-        Multiple handles can coexist in the pool.
-        """
-
-        it "manages multiple handles":
-            class PoolObject:
-                id: Int
-
-            # Create multiple objects
-            # val obj1 = PoolObject(id: 1)
-            # val obj2 = PoolObject(id: 2)
-            # val obj3 = PoolObject(id: 3)
-
-            # val h1 = get_handle(obj1)
-            # val h2 = get_handle(obj2)
-            # val h3 = get_handle(obj3)
-
-            # All handles should be valid and distinct
-            # expect(is_valid_handle(h1)).to_equal(true)
-            # expect(is_valid_handle(h2)).to_equal(true)
-            # expect(is_valid_handle(h3)).to_equal(true)
-            pass
+describe "Handle - multiple handles":
+    it "manages multiple concurrent handles":
+        handle_pool_new(16)
+        val h1 = handle_alloc(1)
+        val h2 = handle_alloc(2)
+        val h3 = handle_alloc(3)
+        expect(handle_is_valid(h1)).to_equal(true)
+        expect(handle_is_valid(h2)).to_equal(true)
+        expect(handle_is_valid(h3)).to_equal(true)
+        expect(handle_pool_size()).to_equal(3)
+        handle_pool_reset()
 
 
 # ============================================================================
 # Error Handling
 # ============================================================================
 
-describe "Handle Pointers - Error Handling":
-    """
-    ## Error Handling for Invalid Handles
+describe "Handle - invalid deref":
+    it "returns -1 for freed handle":
+        handle_pool_new(4)
+        val h = handle_alloc(42)
+        handle_free(h)
+        val v = handle_deref(h)
+        expect(v).to_equal(-1)
+        handle_pool_reset()
 
-    Tests error handling for invalid handle operations.
-    """
-
-    context "with null handle":
-        """
-        ### Scenario: Null Handle Operations
-
-        Null handles are handled gracefully.
-        """
-
-        it "handles null reference":
-            # val null_handle = null_handle()
-            # expect(is_valid_handle(null_handle)).to_equal(false)
-            pass
-
-    context "with dereferencing errors":
-        """
-        ### Scenario: Dereferencing Invalid Handle
-
-        Dereferencing an invalid handle raises an error.
-        """
-
-        it "raises error on invalid deref":
-            class TestObject:
-                data: Int
-
-            # Create and invalidate handle
-            # val obj = TestObject(data: 42)
-            # val handle = get_handle(obj)
-            # free_object(obj)
-
-            # Dereferencing should fail
-            # expect_raises InvalidHandleError:
-            #     deref_handle(handle)
-            pass
-
-
-# ============================================================================
-# Handle Collections
-# ============================================================================
-
-describe "Handle Pointers - Collections":
-    """
-    ## Collections of Handles
-
-    Tests using handles in collections.
-    """
-
-    context "with handle arrays":
-        """
-        ### Scenario: Handle Array Storage
-
-        Handles can be stored in arrays for batch operations.
-        """
-
-        it "stores handles in array":
-            class StorableObject:
-                id: Int
-
-            # Create objects and collect handles
-            # val handles = []
-            # for i in 0..3:
-            #     val obj = StorableObject(id: i)
-            #     handles.append(get_handle(obj)
-
-            # All handles should be valid
-            # for h in handles:
-            #     expect(is_valid_handle(h)).to_equal(true)
-            pass
-
-    context "with handle dictionaries":
-        """
-        ### Scenario: Handle Mapping
-
-        Handles can be used as keys or values in maps.
-        """
-
-        it "uses handles as map values":
-            class MappedObject:
-                key: text
-                data: Int
-
-            # Create objects and map by key
-            # val obj_map = {}
-            # val obj1 = MappedObject(key: "a", data: 1)
-            # obj_map["a"] = get_handle(obj1)
-
-            # expect(is_valid_handle(obj_map["a"])).to_equal(true)
-            pass
-
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-# Placeholder for handle pointer test helpers
+describe "Handle - double free":
+    it "second free returns false":
+        handle_pool_new(4)
+        val h = handle_alloc(42)
+        val ok1 = handle_free(h)
+        val ok2 = handle_free(h)
+        expect(ok1).to_equal(true)
+        expect(ok2).to_equal(false)
+        handle_pool_reset()

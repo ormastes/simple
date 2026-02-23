@@ -1,0 +1,169 @@
+# MSan — Memory State Sanitizer
+# @tag:api
+#
+# Tracks initialization state per named region (Valgrind-like).
+# Detects: uninitialized reads, use-after-free, overlapping memory operations.
+#
+# Usage:
+#     msan_enable()
+#     msan_alloc_uninit("buffer", 64)
+#     msan_check_init("buffer")          # error: uninitialized
+#     msan_init("buffer")
+#     msan_check_init("buffer")          # ok
+#     msan_free_region("buffer")
+#     msan_check_not_freed("buffer")     # error: use-after-free
+#     msan_report()
+
+use types.{SanEvent, san_event}
+
+# =========================================================================
+# Module-level state (parallel arrays)
+# =========================================================================
+
+var g_msan_var_ids: [text] = []
+var g_msan_sizes: [i64] = []
+var g_msan_initialized: [bool] = []
+var g_msan_freed: [bool] = []
+var g_msan_events: [SanEvent] = []
+var g_msan_enabled: bool = false
+
+# =========================================================================
+# Enable / Disable
+# =========================================================================
+
+fn msan_enable():
+    g_msan_enabled = true
+
+fn msan_disable():
+    g_msan_enabled = false
+
+fn msan_is_enabled() -> bool:
+    g_msan_enabled
+
+# =========================================================================
+# Internal lookup
+# =========================================================================
+
+fn msan_find_index(var_id: text) -> i64:
+    var i = 0
+    while i < g_msan_var_ids.len():
+        if g_msan_var_ids[i] == var_id:
+            return i
+        i = i + 1
+    -1
+
+# =========================================================================
+# Region management
+# =========================================================================
+
+fn msan_alloc_uninit(var_id: text, size: i64):
+    if g_msan_enabled == false:
+        return
+    g_msan_var_ids.push(var_id)
+    g_msan_sizes.push(size)
+    g_msan_initialized.push(false)
+    g_msan_freed.push(false)
+
+fn msan_alloc_init(var_id: text, size: i64):
+    if g_msan_enabled == false:
+        return
+    g_msan_var_ids.push(var_id)
+    g_msan_sizes.push(size)
+    g_msan_initialized.push(true)
+    g_msan_freed.push(false)
+
+fn msan_init(var_id: text):
+    if g_msan_enabled == false:
+        return
+    val idx = msan_find_index(var_id)
+    if idx >= 0:
+        g_msan_initialized[idx] = true
+
+fn msan_free_region(var_id: text):
+    if g_msan_enabled == false:
+        return
+    val idx = msan_find_index(var_id)
+    if idx < 0:
+        g_msan_events.push(san_event("msan", "error", "free of unknown region '{var_id}'", "msan_free_region"))
+        return
+    if g_msan_freed[idx] == true:
+        g_msan_events.push(san_event("msan", "fatal", "double-free of region '{var_id}'", "msan_free_region"))
+        return
+    g_msan_freed[idx] = true
+
+# =========================================================================
+# Checks
+# =========================================================================
+
+fn msan_check_init(var_id: text) -> bool:
+    if g_msan_enabled == false:
+        return true
+    val idx = msan_find_index(var_id)
+    if idx < 0:
+        g_msan_events.push(san_event("msan", "error", "check on unknown region '{var_id}'", "msan_check_init"))
+        return false
+    if g_msan_freed[idx] == true:
+        g_msan_events.push(san_event("msan", "fatal", "use-after-free: region '{var_id}' has been freed", "msan_check_init"))
+        return false
+    if g_msan_initialized[idx] == false:
+        g_msan_events.push(san_event("msan", "fatal", "use of uninitialized memory: region '{var_id}'", "msan_check_init"))
+        return false
+    true
+
+fn msan_check_not_freed(var_id: text) -> bool:
+    if g_msan_enabled == false:
+        return true
+    val idx = msan_find_index(var_id)
+    if idx < 0:
+        g_msan_events.push(san_event("msan", "error", "check on unknown region '{var_id}'", "msan_check_not_freed"))
+        return false
+    if g_msan_freed[idx] == true:
+        g_msan_events.push(san_event("msan", "fatal", "use-after-free: region '{var_id}' has been freed", "msan_check_not_freed"))
+        return false
+    true
+
+fn msan_check_overlap(src_id: text, src_off: i64, dst_id: text, dst_off: i64, size: i64) -> bool:
+    if g_msan_enabled == false:
+        return true
+    if src_id != dst_id:
+        return true
+    # Same region — check if [src_off, src_off+size) overlaps [dst_off, dst_off+size)
+    if src_off < dst_off + size:
+        if dst_off < src_off + size:
+            g_msan_events.push(san_event("msan", "error", "overlapping copy in region '{src_id}': src_off={src_off} dst_off={dst_off} size={size}", "msan_check_overlap"))
+            return false
+    true
+
+# =========================================================================
+# Reporting
+# =========================================================================
+
+fn msan_error_count() -> i64:
+    g_msan_events.len()
+
+fn msan_report():
+    if g_msan_events.len() == 0:
+        print "MSan: no errors detected"
+        return
+    print "MSan: {g_msan_events.len()} error(s) detected"
+    var i = 0
+    while i < g_msan_events.len():
+        val ev = g_msan_events[i]
+        print "  [{ev.severity}] {ev.message} at {ev.location}"
+        i = i + 1
+
+fn msan_get_events() -> [SanEvent]:
+    g_msan_events
+
+fn msan_reset():
+    g_msan_var_ids = []
+    g_msan_sizes = []
+    g_msan_initialized = []
+    g_msan_freed = []
+    g_msan_events = []
+    g_msan_enabled = false
+
+export msan_enable, msan_disable, msan_is_enabled
+export msan_alloc_uninit, msan_alloc_init, msan_init, msan_free_region
+export msan_check_init, msan_check_not_freed, msan_check_overlap
+export msan_error_count, msan_report, msan_get_events, msan_reset

@@ -1,0 +1,57 @@
+# Fork Buffer Allocation Tracking Tests (WI-1)
+#
+# Verifies that fork pipe buffers in runtime_fork.c use
+# SPL_MALLOC/SPL_FREE/SPL_REALLOC/SPL_CALLOC macros.
+#
+# For actual ASan verification:
+#   ASAN_OPTIONS=detect_leaks=1 build-asan/simple test test/unit/memleak/fork_alloc_tracking_spec.spl
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "WI-1: runtime_fork.c includes memtrack header":
+    it "includes runtime_memtrack.h":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        expect(content.contains("#include \"runtime_memtrack.h\"")).to_equal(true)
+
+describe "WI-1: Fork buffer allocations tracked":
+    it "stdout buffer uses SPL_MALLOC with fork_buf tag":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        expect(content.contains("SPL_MALLOC(out_cap, \"fork_buf\")")).to_equal(true)
+
+    it "stderr buffer uses SPL_MALLOC with fork_buf tag":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        expect(content.contains("SPL_MALLOC(err_cap, \"fork_buf\")")).to_equal(true)
+
+    it "buffer fallback uses SPL_CALLOC":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        expect(content.contains("SPL_CALLOC(1, 1, \"fork_buf\")")).to_equal(true)
+
+    it "buffer growth uses SPL_REALLOC":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        expect(content.contains("SPL_REALLOC(*buf_ptr, *cap_ptr, \"fork_buf\")")).to_equal(true)
+
+describe "WI-1: Fork result cleanup tracked":
+    it "free_results uses SPL_FREE for stdout":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        expect(content.contains("SPL_FREE(s_result_stdout)")).to_equal(true)
+
+    it "free_results uses SPL_FREE for stderr":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        expect(content.contains("SPL_FREE(s_result_stderr)")).to_equal(true)
+
+describe "WI-1: No raw malloc/free in fork functions":
+    it "no raw malloc in rt_fork_parent_wait":
+        val content = rt_file_read_text("src/runtime/runtime_fork.c") ?? ""
+        val lines = content.split("\n")
+        var raw_malloc_found = false
+        for line in lines:
+            val trimmed = line.trim()
+            # Skip comment lines and emitted code strings
+            if trimmed.starts_with("#") or trimmed.starts_with("//") or trimmed.starts_with("/*"):
+                continue
+            if (trimmed.contains("malloc(") and
+                not trimmed.contains("SPL_MALLOC") and
+                not trimmed.contains("SPL_CALLOC") and
+                not trimmed.contains("SPL_REALLOC")):
+                raw_malloc_found = true
+        expect(raw_malloc_found).to_equal(false)
