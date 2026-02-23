@@ -1,0 +1,119 @@
+name: Sanitizer CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/compiler_cpp/**'
+      - 'src/runtime/**'
+      - '.github/workflows/sanitizer-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/compiler_cpp/**'
+      - 'src/runtime/**'
+      - '.github/workflows/sanitizer-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  asan-ubsan:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure ASan + UBSan build
+        run: |
+          cmake -B build-asan-ubsan -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_ASAN=ON \
+            -DENABLE_UBSAN=ON \
+            -S src/compiler_cpp
+
+      - name: Build
+        run: ninja -C build-asan-ubsan -j2
+
+      - name: Smoke test
+        env:
+          SIMPLE_LIB: ${{ github.workspace }}/src
+          ASAN_OPTIONS: detect_leaks=1:suppressions=${{ github.workspace }}/src/compiler_cpp/sanitizers/asan.supp
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/src/compiler_cpp/sanitizers/lsan.supp
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          build-asan-ubsan/simple --version
+          build-asan-ubsan/simple --help
+
+  tsan:
+    name: TSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure TSan build
+        run: |
+          cmake -B build-tsan -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_TSAN=ON \
+            -S src/compiler_cpp
+
+      - name: Build
+        run: ninja -C build-tsan -j2
+
+      - name: Smoke test
+        env:
+          SIMPLE_LIB: ${{ github.workspace }}/src
+          TSAN_OPTIONS: suppressions=${{ github.workspace }}/src/compiler_cpp/sanitizers/tsan.supp:halt_on_error=1
+        run: |
+          build-tsan/simple --version
+          build-tsan/simple --help
+
+  ubsan-standalone:
+    name: UBSan standalone
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure UBSan build
+        run: |
+          cmake -B build-ubsan -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_UBSAN=ON \
+            -S src/compiler_cpp
+
+      - name: Build
+        run: ninja -C build-ubsan -j2
+
+      - name: Smoke test
+        env:
+          SIMPLE_LIB: ${{ github.workspace }}/src
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          build-ubsan/simple --version
+          build-ubsan/simple --help

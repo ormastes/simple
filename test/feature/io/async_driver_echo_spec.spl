@@ -1,0 +1,67 @@
+"""
+# Async I/O Driver Echo Test
+
+**Feature IDs:** #IO-101
+**Category:** Runtime
+**Status:** In Progress
+**Design:** doc/design/async_io_nginx_perf_optimization.md
+
+## Overview
+
+Integration test for the IoDriver: creates a TCP echo loop using
+the completion-based driver. Tests accept, recv, send flow.
+
+## Network Flow
+
+1. Create listening socket (via FFI)
+2. submit_accept on listener
+3. Connect from client socket
+4. Verify accept completion (returns new fd)
+5. submit_recv on accepted fd
+6. submit_send from client
+7. Verify recv completion with correct data
+"""
+
+use std.spec
+use std.nogc_async_mut.io.driver.{IoDriver, Completion}
+
+# Socket FFI helpers (from event_loop.spl)
+extern fn rt_epoll_create() -> i64
+extern fn rt_socket_set_nonblocking(fd: i64, enabled: bool) -> bool
+
+# Low-level socket FFI (these would need to be added to runtime)
+# For now, this test documents the intended integration flow.
+# The actual network test requires rt_socket_* FFI which is part of M1.
+
+# ============================================================================
+# Echo Integration (documented flow — requires M1 socket FFI)
+# ============================================================================
+
+describe "IoDriver Echo Integration":
+    it "driver can be created for network use":
+        # Verify the driver is usable for the network flow
+        val driver = IoDriver.with_depth(512)
+        val name = driver.backend_name()
+        expect(name.len() > 0).to_equal(true)
+        driver.close()
+
+    it "submit_accept returns valid op_id":
+        # This will fail with negative errno since fd -1 is invalid,
+        # but it verifies the submit path works
+        val driver = IoDriver.new()
+        val op_id = driver.submit_accept(-1)
+        # op_id should still be positive (it's assigned before validation)
+        expect(op_id > 0).to_equal(true)
+        driver.flush()
+        # Poll should return a completion with negative result (error)
+        val completions = driver.poll(64, 100)
+        # The completion should indicate an error for invalid fd
+        if completions.len() > 0:
+            expect(completions[0].result < 0).to_equal(true)
+        driver.close()
+
+    it "submit_connect returns valid op_id":
+        val driver = IoDriver.new()
+        val op_id = driver.submit_connect(-1, "127.0.0.1", 9999)
+        expect(op_id > 0).to_equal(true)
+        driver.close()

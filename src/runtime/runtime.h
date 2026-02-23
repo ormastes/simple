@@ -314,6 +314,43 @@ int64_t  __simple_intrinsic_prefetch(void* ptr);
 int64_t  __simple_intrinsic_memcpy(void* dst, const void* src, int64_t n);
 int64_t  __simple_intrinsic_memset(void* dst, int64_t val, int64_t n);
 
+/* ===== Async I/O Driver (FFI bridge) ===== */
+/* Handle-based API: Simple's FFI passes i64, not pointers.               */
+/* rt_driver_poll_* return completion fields by index since Simple can't   */
+/* receive C structs directly.                                            */
+
+int64_t     rt_driver_create(int64_t queue_depth);
+void        rt_driver_destroy(int64_t handle);
+int64_t     rt_driver_submit_accept(int64_t handle, int64_t listen_fd);
+int64_t     rt_driver_submit_connect(int64_t handle, int64_t fd, const char* addr, int64_t port);
+int64_t     rt_driver_submit_recv(int64_t handle, int64_t fd, int64_t buf_size);
+int64_t     rt_driver_submit_send(int64_t handle, int64_t fd, const char* data, int64_t len);
+int64_t     rt_driver_submit_sendfile(int64_t handle, int64_t sock_fd, int64_t file_fd,
+                                       int64_t offset, int64_t len);
+int64_t     rt_driver_submit_read(int64_t handle, int64_t fd, int64_t buf_size, int64_t offset);
+int64_t     rt_driver_submit_write(int64_t handle, int64_t fd, const char* data,
+                                    int64_t len, int64_t offset);
+int64_t     rt_driver_submit_open(int64_t handle, const char* path, int64_t flags, int64_t mode);
+int64_t     rt_driver_submit_close(int64_t handle, int64_t fd);
+int64_t     rt_driver_submit_fsync(int64_t handle, int64_t fd);
+int64_t     rt_driver_submit_timeout(int64_t handle, int64_t timeout_ms);
+int64_t     rt_driver_flush(int64_t handle);
+int64_t     rt_driver_poll(int64_t handle, int64_t max, int64_t timeout_ms);
+int64_t     rt_driver_poll_id(int64_t handle, int64_t index);
+int64_t     rt_driver_poll_result(int64_t handle, int64_t index);
+int64_t     rt_driver_poll_flags(int64_t handle, int64_t index);
+bool        rt_driver_cancel(int64_t handle, int64_t op_id);
+const char* rt_driver_backend_name(int64_t handle);
+bool        rt_driver_supports_sendfile(int64_t handle);
+bool        rt_driver_supports_zero_copy(int64_t handle);
+
+/* ===== Legacy epoll/socket FFI (event_loop.spl) ===== */
+
+int64_t     rt_epoll_create(void);
+int64_t     rt_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t events);
+SplArray*   rt_epoll_wait(int64_t epfd, int64_t max_events, int64_t timeout_ms);
+bool        rt_socket_set_nonblocking(int64_t fd, bool enabled);
+
 /* ===== Panic / Abort ===== */
 
 #ifdef _MSC_VER

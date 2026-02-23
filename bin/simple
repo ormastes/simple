@@ -1,30 +1,42 @@
 #!/bin/bash
 # Simple Language CLI - Multi-Platform Bootstrap Loader
-# Automatically detects platform and uses appropriate bootstrap binary
+#
+# Startup optimization: If a compiled C binary exists at build/simple,
+# route commands directly through it (3ms vs 130ms+ interpreter path).
 
 set -e
 
 # Get script directory
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Detect platform
+# ── Fast path: compiled C binary handles commands natively ──
+# build/simple is a fully compiled CLI dispatcher (~3ms startup).
+# It handles --help, --version, compile, test, lint, etc. without
+# loading .spl files through the interpreter.
+COMPILED_BIN="$DIR/../build/simple"
+if [ -x "$COMPILED_BIN" ]; then
+    export SIMPLE_LIB="$DIR/../src"
+    export SIMPLE_VERSION=$(cat "$DIR/../VERSION" 2>/dev/null || echo "unknown")
+    # Compiled binary doesn't emit [DEBUG] noise — no filtering needed.
+    exec "$COMPILED_BIN" "$@"
+fi
+
+# ── Fallback: interpreter-based execution ──
+
 detect_platform() {
     local arch=$(uname -m)
     local os=$(uname -s | tr '[:upper:]' '[:lower:]')
 
-    # Normalize architecture
     case "$arch" in
         x86_64|amd64) arch="x86_64" ;;
         aarch64|arm64) arch="arm64" ;;
         riscv64) arch="riscv64" ;;
         *)
             echo "Error: Unsupported architecture: $arch" >&2
-            echo "Supported: x86_64, arm64, riscv64" >&2
             exit 1
             ;;
     esac
 
-    # Normalize OS
     case "$os" in
         linux) os="linux" ;;
         darwin) os="macos" ;;
@@ -32,7 +44,6 @@ detect_platform() {
         mingw*|msys*|cygwin*) os="windows" ;;
         *)
             echo "Error: Unsupported OS: $os" >&2
-            echo "Supported: linux, macos, freebsd, windows" >&2
             exit 1
             ;;
     esac
@@ -40,12 +51,10 @@ detect_platform() {
     echo "${os}-${arch}"
 }
 
-# Find release binary
 find_bootstrap() {
     local platform="$1"
     local release_dir="$DIR/release"
 
-    # Try platform-specific binary first
     local release_bin="$release_dir/$platform/simple"
     case "$platform" in
         *windows*) release_bin="$release_bin.exe" ;;
@@ -56,13 +65,11 @@ find_bootstrap() {
         return 0
     fi
 
-    # Try main release binary (linux-x86_64)
     if [ -x "$release_dir/simple" ]; then
         echo "$release_dir/simple"
         return 0
     fi
 
-    # FreeBSD: fall back to linux binary (runs via Linuxulator)
     if [ "$platform" = "freebsd-x86_64" ] && [ -x "$release_dir/linux-x86_64/simple" ]; then
         echo "$release_dir/linux-x86_64/simple"
         return 0
@@ -74,11 +81,7 @@ find_bootstrap() {
     exit 1
 }
 
-# Check if first non-flag argument is a known fast-path command.
-# Each fast-path command has a lightweight entry point that only
-# imports what it needs, saving ~160ms of module loading overhead.
 detect_fast_path() {
-    # Find the first non-flag positional argument (the command)
     local first_cmd=""
     for arg in "$@"; do
         [[ "$arg" == --* ]] && continue
@@ -88,7 +91,6 @@ detect_fast_path() {
 
     case "$first_cmd" in
         test)
-            # Single .spl file with no heavy flags → lightweight entry (saves ~54s startup)
             local spl_arg="" past_test=false has_heavy=false has_mem_check=false
             for arg in "$@"; do
                 if [ "$arg" = "test" ]; then past_test=true; continue; fi
@@ -102,8 +104,6 @@ detect_fast_path() {
                     *) [ -z "$spl_arg" ] && spl_arg="$arg" ;;
                 esac
             done
-            # Mem-check path prefers lightweight runner for fast per-file checkpoints.
-            # Keep heavy feature combinations on the full runner.
             if [ "$has_heavy" = "false" ] && { [[ "$spl_arg" == *.spl ]] || { [ "$has_mem_check" = "true" ] && [ -n "$spl_arg" ]; }; }; then
                 echo "../test_runner_new/test_runner_single.spl"
             else
@@ -112,7 +112,6 @@ detect_fast_path() {
             return 0
             ;;
         compile)
-            # Check if --backend=c is specified → use dedicated C backend entry
             for arg in "$@"; do
                 case "$arg" in
                     --backend=c|--backend=cpp|--backend=ccodegen)
@@ -129,42 +128,25 @@ detect_fast_path() {
     esac
 }
 
-# Run command with noisy stderr lines filtered out.
-# The runtime emits hundreds of [DEBUG] register_definitions lines
-# per invocation that are hardcoded eprintln! calls in the binary.
-# It also emits [WARNING]/Warning about test_db.sdn parse failures
-# due to a binary-internal writer/reader incompatibility (the binary
-# writes unquoted strings with colons that its own parser rejects).
-# Filtering these reduces noise and saves I/O overhead.
+# Pipe-based stderr filtering (no temp file creation).
 run_filtered() {
-    local _err_file
-    _err_file=$(mktemp)
-    "$@" 2>"$_err_file"
-    local _rc=$?
-    grep -v -e '^\[DEBUG\]' \
-            -e '^\[WARNING\] Failed to load test database' \
-            -e '^\[WARNING\] Existing records will be preserved' \
-            -e '^\[INFO\] Backup created at:' \
-            -e '^Warning: Failed to update.*test database' \
-            "$_err_file" >&2 || true
-    rm -f "$_err_file"
-    return $_rc
-}
+    "$@" 2>&1 1>&3 | grep -v \
+        -e '^\[DEBUG\]' \
+        -e '^\[WARNING\] Failed to load test database' \
+        -e '^\[WARNING\] Existing records will be preserved' \
+        -e '^\[INFO\] Backup created at:' \
+        -e '^Warning: Failed to update.*test database' \
+        >&2 || true
+    return "${PIPESTATUS[0]}"
+} 3>&1
 
-# Main execution
 main() {
     local platform=$(detect_platform)
     local bootstrap=$(find_bootstrap "$platform")
 
-    # Set stdlib path to eliminate directory walk-up probing.
-    # Without this, module resolution tries 78+ paths per import,
-    # walking from the file directory up to / trying 6 stdlib patterns.
     export SIMPLE_LIB="$DIR/../src"
-
-    # Export version from VERSION file so Simple code can access it
     export SIMPLE_VERSION=$(cat "$DIR/../VERSION" 2>/dev/null || echo "unknown")
 
-    # Handle flags/modes that bootstrap binary supports natively
     case "$1" in
         --version)
             echo "Simple Language v${SIMPLE_VERSION}"
@@ -175,10 +157,6 @@ main() {
             exit $?
             ;;
         -c)
-            # Write code to temp file for full module support (use, etc.)
-            # Bootstrap binary's native -c only handles single expressions.
-            # Semicolons are converted to newlines for CLI convenience.
-            # File is created in project dir so module resolution works.
             if [ -z "$2" ]; then
                 echo "Error: -c requires a code argument" >&2
                 exit 1
@@ -192,23 +170,18 @@ main() {
             exit $rc
             ;;
         *.spl|*.smf)
-            # Run source/binary files directly through bootstrap
             run_filtered "$bootstrap" "$@"
             exit $?
             ;;
     esac
 
-    # Use lightweight entry point for known commands (saves ~160ms)
     local fast_entry
     if fast_entry=$(detect_fast_path "$@"); then
         local fast_rc=0
         run_filtered "$bootstrap" "$DIR/../src/app/cli/$fast_entry" "$@" || fast_rc=$?
-        # If compile_c_entry.spl fails (interpreter can't call imported functions),
-        # fall through to simple_codegen for --backend=c
         if [ $fast_rc -ne 0 ] && [ "$fast_entry" = "compile_c_entry.spl" ]; then
             local codegen_bin="$DIR/bootstrap/cpp/simple_codegen"
             if [ -x "$codegen_bin" ]; then
-                # Parse source file and output from args
                 local c_source="" c_output=""
                 local past_compile=false
                 for arg in "$@"; do
@@ -242,7 +215,6 @@ main() {
         exit $fast_rc
     fi
 
-    # Fall back to full CLI for all other commands
     run_filtered "$bootstrap" "$DIR/../src/app/cli/main.spl" "$@"
     exit $?
 }

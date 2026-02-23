@@ -95,7 +95,38 @@ set(RUNTIME_SOURCES
     ${RUNTIME_DIR}/runtime_thread.c
     ${RUNTIME_DIR}/runtime_memtrack.c
     ${RUNTIME_DIR}/runtime_fork.c
+    ${RUNTIME_DIR}/async_driver.c
 )
+
+# Platform-specific async I/O backend sources
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND RUNTIME_SOURCES
+        ${RUNTIME_DIR}/platform/async_linux_epoll.c
+    )
+    # io_uring backend (requires vendored liburing)
+    if(EXISTS "${RUNTIME_DIR}/vendor/liburing/src/setup.c")
+        list(APPEND RUNTIME_SOURCES
+            ${RUNTIME_DIR}/platform/async_linux_uring.c
+            ${RUNTIME_DIR}/vendor/liburing/src/setup.c
+            ${RUNTIME_DIR}/vendor/liburing/src/queue.c
+            ${RUNTIME_DIR}/vendor/liburing/src/register.c
+            ${RUNTIME_DIR}/vendor/liburing/src/syscall.c
+        )
+        set(SPL_HAS_IO_URING ON)
+    endif()
+elseif(APPLE)
+    list(APPEND RUNTIME_SOURCES
+        ${RUNTIME_DIR}/platform/async_macos.c
+    )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    list(APPEND RUNTIME_SOURCES
+        ${RUNTIME_DIR}/platform/async_freebsd.c
+    )
+elseif(WIN32)
+    list(APPEND RUNTIME_SOURCES
+        ${RUNTIME_DIR}/platform/async_windows.c
+    )
+endif()
 
 # Mark runtime sources as C language (they use extern "C" linkage in runtime.h)
 set_source_files_properties(${RUNTIME_SOURCES} PROPERTIES LANGUAGE C)
@@ -122,8 +153,14 @@ foreach(TGT ${ALL_TARGETS})
         ${RUNTIME_DIR}/platform
     )
 
+    # io_uring vendored headers + compile definition
+    if(SPL_HAS_IO_URING)
+        target_include_directories(${TGT} PRIVATE ${RUNTIME_DIR}/vendor/liburing/include)
+        target_compile_definitions(${TGT} PRIVATE SPL_HAS_IO_URING=1)
+    endif()
+
     if(WIN32)
-        target_link_libraries(${TGT} PRIVATE ws2_32 shell32)
+        target_link_libraries(${TGT} PRIVATE ws2_32 mswsock shell32)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR CMAKE_SYSTEM_NAME STREQUAL "OpenBSD" OR CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
         # BSD: dl is part of libc, no separate -ldl needed
         target_link_libraries(${TGT} PRIVATE pthread m)

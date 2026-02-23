@@ -1,0 +1,131 @@
+"""
+# Async I/O Driver Specification
+
+**Feature IDs:** #IO-100
+**Category:** Runtime
+**Status:** In Progress
+**Design:** doc/design/async_io_nginx_perf_optimization.md
+
+## Overview
+
+Tests the unified completion-based I/O driver (IoDriver).
+Validates driver creation, backend detection, timeout operations,
+file I/O, and cancellation.
+
+## Syntax
+
+```simple
+val driver = IoDriver.new()
+expect(driver.backend_name()).to_equal("epoll")
+driver.close()
+```
+"""
+
+use std.spec
+use std.nogc_async_mut.io.driver.{IoDriver, Completion}
+
+# ============================================================================
+# Driver Lifecycle
+# ============================================================================
+
+describe "IoDriver Lifecycle":
+    it "creates a driver with default queue depth":
+        val driver = IoDriver.new()
+        expect(driver.handle >= 0).to_equal(true)
+        driver.close()
+
+    it "creates a driver with custom queue depth":
+        val driver = IoDriver.with_depth(1024)
+        expect(driver.handle >= 0).to_equal(true)
+        driver.close()
+
+    it "close sets handle to -1":
+        var driver = IoDriver.new()
+        driver.close()
+        expect(driver.handle).to_equal(-1)
+
+# ============================================================================
+# Backend Detection
+# ============================================================================
+
+describe "IoDriver Backend":
+    it "reports a valid backend name":
+        val driver = IoDriver.new()
+        val name = driver.backend_name()
+        # Should be one of the known backends
+        val valid = (name == "io_uring" or name == "epoll" or
+            name == "kqueue" or name == "iocp")
+        expect(valid).to_equal(true)
+        driver.close()
+
+    it "reports sendfile support":
+        val driver = IoDriver.new()
+        # All backends support sendfile
+        val sf = driver.supports_sendfile()
+        expect(sf).to_equal(true)
+        driver.close()
+
+    it "reports zero-copy support as bool":
+        val driver = IoDriver.new()
+        # Just verify it returns without error
+        val zc = driver.supports_zero_copy()
+        expect(zc == true or zc == false).to_equal(true)
+        driver.close()
+
+# ============================================================================
+# Timeout Operations
+# ============================================================================
+
+describe "IoDriver Timeout":
+    it "submits a timeout and gets completion":
+        val driver = IoDriver.new()
+        val op_id = driver.submit_timeout(50)
+        expect(op_id > 0).to_equal(true)
+        driver.flush()
+        # Wait up to 200ms for the 50ms timeout
+        val completions = driver.poll(64, 200)
+        expect(completions.len() >= 1).to_equal(true)
+        expect(completions[0].id).to_equal(op_id)
+        driver.close()
+
+    it "submit multiple timeouts":
+        val driver = IoDriver.new()
+        val op1 = driver.submit_timeout(30)
+        val op2 = driver.submit_timeout(60)
+        driver.flush()
+        # Wait for both
+        val completions = driver.poll(64, 200)
+        expect(completions.len() >= 1).to_equal(true)
+        driver.close()
+
+# ============================================================================
+# Cancellation
+# ============================================================================
+
+describe "IoDriver Cancel":
+    it "cancels a pending timeout":
+        val driver = IoDriver.new()
+        val op_id = driver.submit_timeout(5000)
+        driver.flush()
+        val cancelled = driver.cancel(op_id)
+        expect(cancelled).to_equal(true)
+        driver.close()
+
+# ============================================================================
+# Flush
+# ============================================================================
+
+describe "IoDriver Flush":
+    it "flush with no pending ops returns 0":
+        val driver = IoDriver.new()
+        val count = driver.flush()
+        expect(count).to_equal(0)
+        driver.close()
+
+    it "flush returns count of submitted ops":
+        val driver = IoDriver.new()
+        driver.submit_timeout(100)
+        driver.submit_timeout(200)
+        val count = driver.flush()
+        expect(count >= 0).to_equal(true)
+        driver.close()

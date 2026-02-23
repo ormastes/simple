@@ -208,7 +208,7 @@ const char* get_version(void) {
     if (((strcmp(version, "") != 0) && (version != NULL))) {
     return version;
     }
-    return "0.5.0";
+    return "0.6.1";
 }
 
 void print_version(void) {

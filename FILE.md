@@ -1,6 +1,6 @@
 # Simple Language Compiler - Root Directory
 
-**Version:** 0.5.1
+**Version:** 0.6.1
 **Purpose:** Top-level project organization and entry points
 **Quick Start:** See [CLAUDE.md](CLAUDE.md) for development guide
 
@@ -80,8 +80,9 @@ Current version string used by:
 **Format:** Keep a Changelog standard
 
 **Version history:**
-- 0.5.1 - Current release
-- 0.5.0 - Previous releases
+- 0.6.1 - Current release
+- 0.6.0 - Previous release
+- 0.5.x - Earlier releases
 - Format: Added/Changed/Deprecated/Removed/Fixed/Security
 
 **Update on every release.**
@@ -486,7 +487,7 @@ jj git push --bookmark main
 
 ## 📊 Project Statistics
 
-**Version:** 0.5.1
+**Version:** 0.6.1
 **Language:** 100% Simple (self-hosted)
 **Source Files:** 623,000+ lines
 **Tests:** 4,067 tests (100% passing)
