@@ -2037,17 +2037,8 @@ const char* generate_c(const char* source) {
                 }
                 block_depth--;
                 prev_indent--;
-                /* If we just closed back to the match level, emit match scope closing } */
+                /* If we just closed back to the match level, the block close already emitted } */
                 if (in_match && block_depth == match_depth) {
-                    const char* match_close = "    }";
-                    for (long long bi = 0; bi < match_depth; bi++) {
-                        match_close = simple_str_concat("    ", match_close);
-                    }
-                    if (in_main) {
-                        simple_string_push(&main_lines, match_close);
-                    } else if (in_fn) {
-                        simple_string_push(&fn_body, match_close);
-                    }
                     in_match = 0;
                 }
             }
