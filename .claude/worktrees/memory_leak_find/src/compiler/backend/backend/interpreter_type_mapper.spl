@@ -1,0 +1,244 @@
+# Interpreter Type Mapper - Interpreter-Specific Type Mapping Implementation
+#
+# Maps MIR types to Interpreter runtime value type strings.
+# Implements TypeMapper trait for Interpreter backend.
+
+use compiler.mir.mir_data.*
+use compiler.backend.common.type_mapper.*
+
+# ============================================================================
+# Interpreter Type Mapper
+# ============================================================================
+
+class InterpreterTypeMapper:
+    """
+    Maps MIR types to Interpreter runtime value representations.
+
+    The interpreter uses tagged RuntimeValue variants:
+    - Int(i64)
+    - Float(f64)
+    - Bool(bool)
+    - String(text)
+    - Array([RuntimeValue])
+    - Tuple([RuntimeValue])
+    - Dict(Dict<RuntimeValue, RuntimeValue>)
+    - Nil
+
+    Type mapping is mostly for validation and error messages,
+    since the interpreter is dynamically typed at runtime.
+
+    Example mappings:
+        I64 → "Int"
+        F64 → "Float"
+        Bool → "Bool"
+        Ptr(_) → "Ptr"
+        [I64] → "Array<Int>"
+    """
+
+    static fn create() -> InterpreterTypeMapper:
+        """Create interpreter type mapper."""
+        InterpreterTypeMapper()
+
+impl TypeMapper for InterpreterTypeMapper:
+    fn map_primitive(ty: PrimitiveType) -> text:
+        """
+        Map primitive types to Interpreter runtime types.
+
+        All integers map to Int(i64).
+        All floats map to Float(f64).
+        """
+        match ty:
+            case I64 | I32 | I16 | I8:
+                "Int"  # All integers are i64 at runtime
+            case F64 | F32:
+                "Float"  # All floats are f64 at runtime
+            case Bool:
+                "Bool"
+            case Unit:
+                "Nil"  # Unit is nil at runtime
+
+    fn map_pointer(pointee: text, mutability: Mutability) -> text:
+        """
+        Map pointer types to Interpreter representation.
+
+        Pointers are opaque references in the interpreter.
+        They're rarely used since interpreter works with values.
+
+        Returns: "Ptr<pointee>"
+        """
+        "Ptr<{pointee}>"
+
+    fn backend_name() -> text:
+        "Interpreter"
+
+impl InterpreterTypeMapper:
+    # === Custom Interpreter-specific methods ===
+
+    fn map_struct(fields: [(text, MirType)]) -> text:
+        """
+        Map struct type to Interpreter representation.
+
+        Structs are Dict<text, RuntimeValue> at runtime.
+        Field names are keys.
+
+        Returns: "Struct<field_types>"
+        """
+        if fields.length == 0:
+            "Struct<>"
+        else:
+            val field_types = fields.map(\f: "{f.0}: {self.map_type(f.1)}")
+            "Struct<{field_types.join(", ")}>"
+
+    fn map_array(element: MirType, size: i64) -> text:
+        """
+        Map array type to Interpreter representation.
+
+        Arrays are Array([RuntimeValue]) at runtime.
+        Size is not enforced (dynamic).
+
+        Returns: "Array<element_type>"
+        """
+        val elem_ty = self.map_type(element)
+        "Array<{elem_ty}>"
+
+    fn map_tuple(elements: [MirType]) -> text:
+        """
+        Map tuple type to Interpreter representation.
+
+        Tuples are Tuple([RuntimeValue]) at runtime.
+
+        Returns: "Tuple<elem1, elem2, ...>"
+        """
+        if elements.length == 0:
+            "Tuple<>"
+        else:
+            val elem_types = elements.map(\e: self.map_type(e))
+            "Tuple<{elem_types.join(", ")}>"
+
+    fn map_function(params: [MirType], ret: MirType) -> text:
+        """
+        Map function type to Interpreter representation.
+
+        Functions are Function(closure) at runtime.
+
+        Returns: "Function<params -> ret>"
+        """
+        val param_types = params.map(\p: self.map_type(p))
+        val ret_type = self.map_type(ret)
+        "Function<({param_types.join(", ")}) -> {ret_type}>"
+
+    fn map_function_signature(params: [MirType], ret: MirType) -> text:
+        """
+        Map function signature (for interpreter function declarations).
+
+        Same as map_function, since interpreter doesn't distinguish.
+
+        Returns: "Function<params -> ret>"
+        """
+        self.map_function(params, ret)
+
+    fn is_primitive_value(ty: MirType) -> bool:
+        """
+        Check if type maps to primitive RuntimeValue variant.
+
+        Primitives: Int, Float, Bool, Nil, String
+        Non-primitives: Array, Tuple, Dict, Struct
+        """
+        match ty.kind:
+            case I64 | I32 | I16 | I8 | F64 | F32 | Bool | Unit:
+                true
+            case _:
+                false
+
+    fn runtime_variant_name(ty: MirType) -> text:
+        """
+        Get RuntimeValue variant name for this type.
+
+        Used for error messages and debugging.
+
+        Examples:
+            I64 → "Int"
+            [I64] → "Array"
+            (I64, F64) → "Tuple"
+        """
+        match ty.kind:
+            case I64 | I32 | I16 | I8: "Int"
+            case F64 | F32: "Float"
+            case Bool: "Bool"
+            case Unit: "Nil"
+            case Struct(_): "Dict"  # Structs are dicts at runtime
+            case Array(_, _): "Array"
+            case Tuple(_): "Tuple"
+            case Ptr(_, _): "Ptr"
+            case Function(_, _): "Function"
+            case _: "Unknown"
+
+    # === Size and alignment (not critical for interpreter) ===
+
+    fn size_of(ty: MirType) -> i64:
+        """
+        Get "logical" size of a type.
+
+        Not critical for interpreter (all values are boxed),
+        but useful for memory estimates.
+        """
+        match ty.kind:
+            case I64 | F64: 8
+            case I32 | F32: 4
+            case I16: 2
+            case I8 | Bool: 1
+            case Unit: 0
+            case Ptr(_, _): 8  # Assume 64-bit pointers
+            case Struct(fields):
+                fields.map(\f: self.size_of(f.1)).sum()
+            case Array(elem, size):
+                self.size_of(elem) * size
+            case Tuple(elements):
+                elements.map(\e: self.size_of(e)).sum()
+            case _:
+                8  # Default to pointer size
+
+    fn align_of(ty: MirType) -> i64:
+        """
+        Get "logical" alignment.
+
+        Not enforced by interpreter, but useful for estimates.
+        """
+        match ty.kind:
+            case I64 | F64 | Ptr(_, _): 8
+            case I32 | F32: 4
+            case I16: 2
+            case I8 | Bool: 1
+            case Struct(fields):
+                if fields.length == 0:
+                    1
+                else:
+                    fields.map(\f: self.align_of(f.1)).max()
+            case Array(elem, _):
+                self.align_of(elem)
+            case Tuple(elements):
+                if elements.length == 0:
+                    1
+                else:
+                    elements.map(\e: self.align_of(e)).max()
+            case _:
+                1
+
+# ============================================================================
+# Export
+# ============================================================================
+
+# Export desugared static method names
+fn InterpreterTypeMapper__create() -> InterpreterTypeMapper:
+    InterpreterTypeMapper__create()
+
+
+# Desugared static methods for bootstrap interpreter compatibility
+
+fn None__create() -> InterpreterTypeMapper:
+    """Create interpreter type mapper."""
+    InterpreterTypeMapper()
+
+
+export InterpreterTypeMapper
+export InterpreterTypeMapper__create

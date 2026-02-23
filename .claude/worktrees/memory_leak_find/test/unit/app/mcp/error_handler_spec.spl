@@ -1,0 +1,247 @@
+"""
+MCP Error Handler Tests
+Feature: MCP Error Handling and Crash Prevention
+Category: MCP, Error Handling
+Status: Complete
+"""
+
+use std.spec
+use app.mcp.{ErrorCategory, McpError, ValidationLimits, InputValidator}
+use app.mcp.{mcp_error, default_validation_limits, strict_validation_limits, input_validator}
+
+describe "ErrorCategory":
+    it "converts to string correctly":
+        expect(ErrorCategory.ParseError.to_string()).to_equal("parse_error")
+        expect(ErrorCategory.InvalidRequest.to_string()).to_equal("invalid_request")
+        expect(ErrorCategory.MethodNotFound.to_string()).to_equal("method_not_found")
+        expect(ErrorCategory.InvalidParams.to_string()).to_equal("invalid_params")
+        expect(ErrorCategory.InternalError.to_string()).to_equal("internal_error")
+        expect(ErrorCategory.Timeout.to_string()).to_equal("timeout")
+
+describe "McpError":
+    it "creates error with category and message":
+        val err = mcp_error(ErrorCategory.InvalidRequest, "Bad request")
+        expect(err.category).to_equal(ErrorCategory.InvalidRequest)
+        expect(err.message).to_equal("Bad request")
+        expect(err.recoverable).to_equal(true)
+
+    it "can be marked as unrecoverable":
+        val err = mcp_error(ErrorCategory.InternalError, "Fatal error")
+        val unrecoverable = err.as_unrecoverable()
+        expect(unrecoverable.recoverable).to_equal(false)
+
+    it "can have details attached":
+        val err = mcp_error(ErrorCategory.Validation, "Invalid input")
+        val with_details = err.with_details("Expected number, got string")
+        expect(with_details.details).to_equal("Expected number, got string")
+
+    it "converts to JSON-RPC error":
+        val err = mcp_error(ErrorCategory.MethodNotFound, "Unknown method")
+        val json = err.to_json_rpc()
+        expect(json.contains("-32601")).to_equal(true)
+        expect(json.contains("Unknown method")).to_equal(true)
+
+describe "ValidationLimits":
+    it "creates default limits":
+        val limits = default_validation_limits()
+        expect(limits.max_content_length).to_equal(1048576)
+        expect(limits.max_string_length).to_equal(65536)
+
+    it "creates strict limits":
+        val limits = strict_validation_limits()
+        expect(limits.max_content_length).to_equal(524288)
+        expect(limits.max_string_length).to_equal(32768)
+
+describe "InputValidator - content length":
+    it "accepts valid content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(1000)
+        expect(result).to_be_nil()
+
+    it "accepts zero length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(0)
+        expect(result).to_be_nil()
+
+    it "rejects negative content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(-1)
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("negative")).to_equal(true)
+
+    it "rejects excessive content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(2000000)
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - string validation":
+    it "accepts valid string":
+        val validator = input_validator()
+        val result = validator.validate_string("hello world")
+        expect(result).to_be_nil()
+
+    it "accepts empty string":
+        val validator = input_validator()
+        val result = validator.validate_string("")
+        expect(result).to_be_nil()
+
+    it "rejects excessive string length":
+        var long_string = ""
+        var i = 0
+        while i < 70000:
+            long_string = long_string + "x"
+            i = i + 1
+
+        val validator = input_validator()
+        val result = validator.validate_string(long_string)
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - URI validation":
+    it "accepts valid file URI":
+        val validator = input_validator()
+        val result = validator.validate_uri("file:///path/to/file.txt")
+        expect(result).to_be_nil()
+
+    it "accepts valid symbol URI":
+        val validator = input_validator()
+        val result = validator.validate_uri("symbol://MyClass.method")
+        expect(result).to_be_nil()
+
+    it "accepts valid project URI":
+        val validator = input_validator()
+        val result = validator.validate_uri("project://myproject")
+        expect(result).to_be_nil()
+
+    it "accepts valid http URI":
+        val validator = input_validator()
+        val result = validator.validate_uri("http://example.com")
+        expect(result).to_be_nil()
+
+    it "accepts valid https URI":
+        val validator = input_validator()
+        val result = validator.validate_uri("https://example.com/path")
+        expect(result).to_be_nil()
+
+    it "rejects empty URI":
+        val validator = input_validator()
+        val result = validator.validate_uri("")
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("empty")).to_equal(true)
+
+    it "rejects invalid URI scheme":
+        val validator = input_validator()
+        val result = validator.validate_uri("ftp://example.com")
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("scheme")).to_equal(true)
+
+    it "rejects excessive URI length":
+        var long_uri = "file://"
+        var i = 0
+        while i < 3000:
+            long_uri = long_uri + "x"
+            i = i + 1
+
+        val validator = input_validator()
+        val result = validator.validate_uri(long_uri)
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - tool name validation":
+    it "accepts valid tool name":
+        val validator = input_validator()
+        val result = validator.validate_tool_name("my_tool")
+        expect(result).to_be_nil()
+
+    it "accepts tool name with slashes":
+        val validator = input_validator()
+        val result = validator.validate_tool_name("category/tool_name")
+        expect(result).to_be_nil()
+
+    it "accepts tool name with hyphens":
+        val validator = input_validator()
+        val result = validator.validate_tool_name("my-tool-name")
+        expect(result).to_be_nil()
+
+    it "rejects empty tool name":
+        val validator = input_validator()
+        val result = validator.validate_tool_name("")
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("empty")).to_equal(true)
+
+    it "rejects tool name with invalid characters":
+        val validator = input_validator()
+        val result = validator.validate_tool_name("tool@name")
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("invalid character")).to_equal(true)
+
+    it "rejects excessive tool name length":
+        var long_name = ""
+        var i = 0
+        while i < 300:
+            long_name = long_name + "x"
+            i = i + 1
+
+        val validator = input_validator()
+        val result = validator.validate_tool_name(long_name)
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - array validation":
+    it "accepts valid array length":
+        val validator = input_validator()
+        val result = validator.validate_array_length(100)
+        expect(result).to_be_nil()
+
+    it "accepts zero array length":
+        val validator = input_validator()
+        val result = validator.validate_array_length(0)
+        expect(result).to_be_nil()
+
+    it "rejects negative array length":
+        val validator = input_validator()
+        val result = validator.validate_array_length(-1)
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("negative")).to_equal(true)
+
+    it "rejects excessive array length":
+        val validator = input_validator()
+        val result = validator.validate_array_length(2000)
+        match result:
+            case nil: check(false)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "InputValidator - parameter validation":
+    it "validates all parameters":
+        val validator = input_validator()
+        var params = {}
+        params["key1"] = "value1"
+        params["key2"] = "value2"
+        val result = validator.validate_params(params)
+        expect(result).to_be_nil()
+
+    it "rejects params with excessively long values":
+        val validator = input_validator()
+        var long_value = ""
+        var i = 0
+        while i < 70000:
+            long_value = long_value + "x"
+            i = i + 1
+
+        var params = {}
+        params["key"] = long_value
+        val result = validator.validate_params(params)
+        match result:
+            case nil: check(false)
+            case err: expect(err.category).to_equal(ErrorCategory.Validation)

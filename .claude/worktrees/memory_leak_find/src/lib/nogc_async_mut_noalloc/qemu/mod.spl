@@ -1,0 +1,453 @@
+# Unified QEMU Runner Library
+#
+# Shared QEMU instance management for:
+# - Remote debugging (GDB stub integration)
+# - Bare-metal testing (test harness integration)
+# - Embedded test runner (stdio/serial transport)
+#
+# This module consolidates QEMU logic from:
+# - src/remote/test/qemu_runner.spl
+# - src/app/test_runner/host/loader.spl
+
+use app.io.{shell, ProcessResult}
+use types.{PortNumber, Millis}
+
+# ===========================================================================
+# Architecture Support
+# ===========================================================================
+
+enum QemuArch:
+    X86              # i386
+    X86_64           # x86_64
+    ARM32            # ARM Cortex-M, Cortex-A (32-bit)
+    ARM64            # AArch64
+    RiscV32          # RISC-V 32-bit
+    RiscV64          # RISC-V 64-bit
+
+impl QemuArch:
+    fn qemu_command() -> text:
+        match self:
+            case QemuArch.X86: "qemu-system-i386"
+            case QemuArch.X86_64: "qemu-system-x86_64"
+            case QemuArch.ARM32: "qemu-system-arm"
+            case QemuArch.ARM64: "qemu-system-aarch64"
+            case QemuArch.RiscV32: "qemu-system-riscv32"
+            case QemuArch.RiscV64: "qemu-system-riscv64"
+
+    fn default_machine() -> text:
+        match self:
+            case QemuArch.X86: "pc"
+            case QemuArch.X86_64: "pc"
+            case QemuArch.ARM32: "lm3s6965evb"  # ARM Cortex-M3
+            case QemuArch.ARM64: "virt"
+            case QemuArch.RiscV32: "virt"
+            case QemuArch.RiscV64: "virt"
+
+    fn default_memory() -> text:
+        match self:
+            case QemuArch.X86: "128M"
+            case QemuArch.X86_64: "128M"
+            case QemuArch.ARM32: "16M"
+            case QemuArch.ARM64: "128M"
+            case QemuArch.RiscV32: "128M"
+            case QemuArch.RiscV64: "128M"
+
+    fn from_string(s: text) -> QemuArch:
+        if s == "x86" or s == "i386" or s == "i686":
+            QemuArch.X86
+        elif s == "x86_64" or s == "amd64":
+            QemuArch.X86_64
+        elif s == "arm" or s == "arm32" or s == "cortex-m":
+            QemuArch.ARM32
+        elif s == "arm64" or s == "aarch64":
+            QemuArch.ARM64
+        elif s == "riscv32" or s == "rv32":
+            QemuArch.RiscV32
+        elif s == "riscv64" or s == "rv64":
+            QemuArch.RiscV64
+        else:
+            QemuArch.X86  # Default fallback
+
+# ===========================================================================
+# QEMU Configuration
+# ===========================================================================
+
+class QemuConfig:
+    arch: QemuArch
+    binary_path: text        # ELF binary to load
+    machine: text            # QEMU machine type (e.g., "virt", "pc")
+    memory: text             # RAM size (e.g., "128M")
+
+    # GDB configuration (for remote debugging)
+    gdb_enabled: bool
+    gdb_port: PortNumber
+    gdb_wait: bool           # Start halted (-S flag)
+
+    # Serial/stdio configuration (for test runner)
+    serial_stdio: bool       # Redirect serial to stdio
+    serial_file: text        # Redirect serial to file
+
+    # Exit configuration
+    debug_exit: bool         # Enable isa-debug-exit device (x86)
+    no_reboot: bool          # Don't reboot on triple fault
+
+    # Display
+    no_graphic: bool         # -nographic
+    no_display: bool         # -display none
+
+    # Extra arguments
+    extra_args: [text]
+
+    # Timeout
+    timeout_ms: Millis
+
+impl QemuConfig:
+    # Create minimal config for remote debugging
+    static fn for_remote_debug(arch: QemuArch, elf_path: text, port: i32) -> QemuConfig:
+        QemuConfig(
+            arch: arch,
+            binary_path: elf_path,
+            machine: arch.default_machine(),
+            memory: arch.default_memory(),
+            gdb_enabled: true,
+            gdb_port: PortNumber(value: port),
+            gdb_wait: true,          # Start halted for debugging
+            serial_stdio: false,
+            serial_file: "",
+            debug_exit: false,
+            no_reboot: true,
+            no_graphic: true,
+            no_display: false,
+            extra_args: [],
+            timeout_ms: Millis(value: 30000)
+        )
+
+    # Create config for bare-metal testing
+    static fn for_test_runner(arch: QemuArch, elf_path: text) -> QemuConfig:
+        QemuConfig(
+            arch: arch,
+            binary_path: elf_path,
+            machine: arch.default_machine(),
+            memory: arch.default_memory(),
+            gdb_enabled: false,
+            gdb_port: PortNumber(value: 0),
+            gdb_wait: false,
+            serial_stdio: true,      # Test output via serial
+            serial_file: "",
+            debug_exit: true,        # Enable debug exit for clean shutdown
+            no_reboot: true,
+            no_graphic: false,
+            no_display: true,        # No display needed
+            extra_args: [],
+            timeout_ms: Millis(value: 30000)
+        )
+
+    # Build QEMU command-line arguments
+    fn build_args() -> [text]:
+        var args: [text] = []
+
+        # Machine type
+        args.push("-machine")
+        args.push(self.machine)
+
+        # Memory
+        args.push("-m")
+        args.push(self.memory)
+
+        # Kernel binary
+        args.push("-kernel")
+        args.push(self.binary_path)
+
+        # GDB configuration
+        if self.gdb_enabled:
+            args.push("-gdb")
+            args.push("tcp::{self.gdb_port.value}")
+            if self.gdb_wait:
+                args.push("-S")  # Start halted
+
+        # Serial configuration
+        if self.serial_stdio:
+            args.push("-serial")
+            args.push("stdio")
+        elif self.serial_file != "":
+            args.push("-serial")
+            args.push("file:{self.serial_file}")
+
+        # Display configuration
+        if self.no_graphic:
+            args.push("-nographic")
+        if self.no_display:
+            args.push("-display")
+            args.push("none")
+
+        # Debug exit device (x86 only)
+        if self.debug_exit:
+            match self.arch:
+                case QemuArch.X86 | QemuArch.X86_64:
+                    args.push("-device")
+                    args.push("isa-debug-exit,iobase=0xf4,iosize=0x04")
+                case _:
+                    pass  # Not supported on other architectures
+
+        # No reboot
+        if self.no_reboot:
+            args.push("-no-reboot")
+
+        # Extra arguments
+        for arg in self.extra_args:
+            args.push(arg)
+
+        args
+
+# ===========================================================================
+# QEMU Instance
+# ===========================================================================
+
+class QemuInstance:
+    config: QemuConfig
+    pid: text               # Process ID (as string from pgrep)
+    running: bool
+
+impl QemuInstance:
+    # Start QEMU instance
+    static fn start(config: QemuConfig) -> Result<QemuInstance, text>:
+        # Resolve QEMU binary path (project-local first, then system PATH)
+        val qemu_path = resolve_qemu_path(config.arch)
+        if qemu_path.len() == 0:
+            val cmd_name = config.arch.qemu_command()
+            return Err("{cmd_name} not found - install qemu-system-{config.arch}")
+
+        # Verify binary exists
+        val elf_check = shell("test -f '{config.binary_path}'")
+        if elf_check.exit_code != 0:
+            return Err("Binary not found: {config.binary_path}")
+
+        # Build command
+        val args = config.build_args()
+        val args_str = args.join(" ")
+        val full_cmd = "{qemu_path} {args_str} &"
+
+        # Start QEMU in background
+        val start_result = shell(full_cmd)
+        if start_result.exit_code != 0:
+            return Err("Failed to start QEMU: {start_result.stderr}")
+
+        # Give QEMU time to start
+        shell("sleep 0.5")
+
+        # Get QEMU PID (use command name for pattern matching)
+        val qemu_cmd = config.arch.qemu_command()
+        val pid_pattern = if config.gdb_enabled:
+            "{qemu_cmd}.*-gdb tcp::{config.gdb_port.value}"
+        else:
+            "{qemu_cmd}.*{config.binary_path}"
+
+        val pid_result = shell("pgrep -f '{pid_pattern}' | tail -1")
+        val pid = pid_result.stdout.trim()
+
+        if pid.len() == 0:
+            return Err("QEMU process not found - may have failed to start")
+
+        # Verify GDB port is listening (if enabled)
+        if config.gdb_enabled:
+            val port_check = shell("timeout 3 bash -c 'while ! ss -tlnp | grep -q :{config.gdb_port.value}; do sleep 0.1; done' 2>/dev/null")
+            # Continue even if port check fails (may not work in all environments)
+
+        Ok(QemuInstance(
+            config: config,
+            pid: pid,
+            running: true
+        ))
+
+    # Stop QEMU instance
+    me stop():
+        if self.running:
+            # Try graceful kill first
+            shell("kill {self.pid} 2>/dev/null")
+            shell("sleep 0.2")
+            # Force kill if still running
+            shell("kill -9 {self.pid} 2>/dev/null")
+            self.running = false
+
+    # Check if QEMU is still running
+    fn is_running() -> bool:
+        if not self.running:
+            return false
+        val check = shell("kill -0 {self.pid} 2>/dev/null")
+        check.exit_code == 0
+
+    # Wait for QEMU to exit with timeout
+    me wait_exit(timeout_ms: Millis) -> Result<i32, text>:
+        val timeout_sec = timeout_ms.value / 1000
+        val wait_cmd = "timeout {timeout_sec} tail --pid={self.pid} -f /dev/null 2>/dev/null"
+        val wait_result = shell(wait_cmd)
+
+        if wait_result.exit_code == 124:
+            return Err("QEMU did not exit within {timeout_ms.value}ms")
+
+        self.running = false
+
+        # Get actual exit code
+        val exit_result = shell("echo $?")
+        val exit_code = parse_i32(exit_result.stdout.trim())
+        Ok(exit_code)
+
+    # Get QEMU process ID
+    fn get_pid() -> text:
+        self.pid
+
+    # Get GDB port (if enabled)
+    fn get_gdb_port() -> PortNumber:
+        self.config.gdb_port
+
+# ===========================================================================
+# Exit Code Interpretation
+# ===========================================================================
+
+class ExitCodeResult:
+    success: bool
+    message: text
+
+impl ExitCodeResult:
+    static fn success(msg: text) -> ExitCodeResult:
+        ExitCodeResult(success: true, message: msg)
+
+    static fn failure(msg: text) -> ExitCodeResult:
+        ExitCodeResult(success: false, message: msg)
+
+# Interpret QEMU exit code
+fn interpret_exit_code(exit_code: i32, has_debug_exit: bool) -> ExitCodeResult:
+    # QEMU isa-debug-exit device encoding:
+    # actual_code = (exit_code << 1) | 1
+    # So: exit(0) -> QEMU exits with 1
+    #     exit(1) -> QEMU exits with 3
+    if has_debug_exit:
+        if exit_code == 1:
+            ExitCodeResult.success("Tests passed (exit 0)")
+        elif exit_code == 3:
+            ExitCodeResult.failure("Tests failed (exit 1)")
+        else:
+            ExitCodeResult.failure("Unexpected exit code: {exit_code}")
+    else:
+        # Normal exit codes
+        if exit_code == 0:
+            ExitCodeResult.success("Tests passed")
+        elif exit_code == 124:
+            ExitCodeResult.failure("Timeout")
+        elif exit_code == 137:
+            ExitCodeResult.failure("Killed (SIGKILL)")
+        else:
+            ExitCodeResult.failure("Exit code: {exit_code}")
+
+# ===========================================================================
+# Toolchain Detection
+# ===========================================================================
+
+# Resolve QEMU binary path (prioritize project binaries)
+fn resolve_qemu_path(arch: QemuArch) -> text:
+    val cmd = arch.qemu_command()
+
+    # 1. Check project-local QEMU (resources/qemu/bin/)
+    val project_path = "resources/qemu/bin/{cmd}"
+    val project_check = shell("test -x '{project_path}'")
+    if project_check.exit_code == 0:
+        return project_path
+
+    # 2. Check system PATH
+    val which_result = shell("which {cmd} 2>/dev/null")
+    if which_result.exit_code == 0:
+        return which_result.stdout.trim()
+
+    # 3. Not found
+    ""
+
+# Check if QEMU is available for an architecture
+fn is_qemu_available(arch: QemuArch) -> bool:
+    resolve_qemu_path(arch).len() > 0
+
+# Find cross-compiler for RISC-V 32
+fn find_rv32_gcc() -> text:
+    val candidates = [
+        "riscv32-unknown-elf-gcc",
+        "riscv64-unknown-elf-gcc"  # Can cross-compile to rv32
+    ]
+
+    for candidate in candidates:
+        val check = shell("which {candidate} 2>/dev/null")
+        if check.exit_code == 0:
+            return check.stdout.trim()
+
+    ""
+
+# Check if RISC-V cross-compiler is available
+fn is_rv32_gcc_available() -> bool:
+    find_rv32_gcc().len() > 0
+
+# Find GDB for architecture
+fn find_gdb(arch: QemuArch) -> text:
+    val candidates = match arch:
+        case QemuArch.RiscV32 | QemuArch.RiscV64:
+            ["riscv32-unknown-elf-gdb", "riscv64-unknown-elf-gdb", "gdb-multiarch", "gdb"]
+        case QemuArch.ARM32 | QemuArch.ARM64:
+            ["arm-none-eabi-gdb", "aarch64-linux-gnu-gdb", "gdb-multiarch", "gdb"]
+        case _:
+            ["gdb-multiarch", "gdb"]
+
+    for candidate in candidates:
+        val check = shell("which {candidate} 2>/dev/null")
+        if check.exit_code == 0:
+            return check.stdout.trim()
+
+    ""
+
+# Check if GDB is available for architecture
+fn is_gdb_available(arch: QemuArch) -> bool:
+    find_gdb(arch).len() > 0
+
+# ===========================================================================
+# Utility Functions
+# ===========================================================================
+
+fn char_to_digit(c: text) -> i32:
+    match c:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        _: -1
+
+fn parse_i32(s: text) -> i32:
+    var result: i32 = 0
+    var negative = false
+
+    var chars = s.trim()
+    if chars.starts_with("-"):
+        negative = true
+        chars = chars.substring(1)
+
+    for c in chars:
+        val digit = char_to_digit(c)
+        if digit >= 0:
+            result = result * 10 + digit
+        else:
+            break  # Stop on non-digit
+
+    if negative: -result else: result
+
+# Build a RISC-V 32 test binary from assembly
+fn build_rv32_binary(asm_path: text, output_path: text) -> Result<text, text>:
+    val gcc = find_rv32_gcc()
+    if gcc.len() == 0:
+        return Err("RISC-V cross-compiler not found. Install: apt install gcc-riscv64-unknown-elf")
+
+    val result = shell("{gcc} -nostdlib -march=rv32imac -mabi=ilp32 -o {output_path} {asm_path}")
+    if result.exit_code != 0:
+        return Err("Build failed: {result.stderr}")
+
+    Ok(output_path)

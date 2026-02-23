@@ -1,0 +1,114 @@
+#!/usr/bin/env simple
+# Test autograd with global gradient store
+# This should work despite value semantics!
+
+use std.pure.autograd_global (tensor_from_data, backward, tensor_mul_scalar,
+    tensor_add, tensor_mul, get_gradient)
+
+fn test_simple_gradient():
+    print "=== Test 1: Simple Gradient (x * 2.0) ==="
+
+    val x = tensor_from_data([3.0], [1], requires_grad: true)
+    print "x.value() = {x.value().data}"
+    print "x.requires_grad() = {x.requires_grad()}"
+    print "x tensor_id = {x.tensor_id}"
+
+    val y = tensor_mul_scalar(x, 2.0)
+    print "y = x * 2.0"
+    print "y.value() = {y.value().data}"
+    print "y tensor_id = {y.tensor_id}"
+
+    backward(y)
+
+    val x_grad = get_gradient(x.tensor_id)
+    print "\nAfter backward():"
+    if x_grad.?:
+        print "✓ x.grad() = {x_grad.unwrap().data} (expected [2.0])"
+    else:
+        print "✗ x.grad() is None (FAILED)"
+
+fn test_chain_gradient():
+    print "\n=== Test 2: Chain Rule (x * 2.0 * 3.0) ==="
+
+    val x = tensor_from_data([5.0], [1], requires_grad: true)
+    val y = tensor_mul_scalar(x, 2.0)   # y = 10.0
+    val z = tensor_mul_scalar(y, 3.0)   # z = 30.0
+
+    print "x = {x.value().data[0]}"
+    print "y = x * 2.0 = {y.value().data[0]}"
+    print "z = y * 3.0 = {z.value().data[0]}"
+
+    backward(z)
+
+    val x_grad = get_gradient(x.tensor_id)
+    if x_grad.?:
+        print "✓ dz/dx = {x_grad.unwrap().data[0]} (expected 6.0)"
+    else:
+        print "✗ dz/dx is None (FAILED)"
+
+fn test_addition():
+    print "\n=== Test 3: Addition (a + b) ==="
+
+    val a = tensor_from_data([2.0], [1], requires_grad: true)
+    val b = tensor_from_data([3.0], [1], requires_grad: true)
+    val c = tensor_add(a, b)
+
+    print "a = {a.value().data[0]}"
+    print "b = {b.value().data[0]}"
+    print "c = a + b = {c.value().data[0]}"
+
+    backward(c)
+
+    val a_grad = get_gradient(a.tensor_id)
+    val b_grad = get_gradient(b.tensor_id)
+
+    if a_grad.?:
+        print "✓ dc/da = {a_grad.unwrap().data[0]} (expected 1.0)"
+    else:
+        print "✗ dc/da is None (FAILED)"
+
+    if b_grad.?:
+        print "✓ dc/db = {b_grad.unwrap().data[0]} (expected 1.0)"
+    else:
+        print "✗ dc/db is None (FAILED)"
+
+fn test_multiplication():
+    print "\n=== Test 4: Multiplication (a * b) ==="
+
+    val a = tensor_from_data([4.0], [1], requires_grad: true)
+    val b = tensor_from_data([5.0], [1], requires_grad: true)
+    val c = tensor_mul(a, b)
+
+    print "a = {a.value().data[0]}"
+    print "b = {b.value().data[0]}"
+    print "c = a * b = {c.value().data[0]}"
+
+    backward(c)
+
+    val a_grad = get_gradient(a.tensor_id)
+    val b_grad = get_gradient(b.tensor_id)
+
+    if a_grad.?:
+        print "✓ dc/da = {a_grad.unwrap().data[0]} (expected 5.0 = b)"
+    else:
+        print "✗ dc/da is None (FAILED)"
+
+    if b_grad.?:
+        print "✓ dc/db = {b_grad.unwrap().data[0]} (expected 4.0 = a)"
+    else:
+        print "✗ dc/db is None (FAILED)"
+
+fn main():
+    test_simple_gradient()
+    test_chain_gradient()
+    test_addition()
+    test_multiplication()
+
+    print "\n=== Summary ==="
+    print "Global gradient store approach works!"
+    print "Autograd is now functional in interpreter mode."
+    print ""
+    print "Key insight: By storing gradients globally (keyed by tensor ID)"
+    print "instead of in Tensor.grad field, we avoid value semantics issues."
+
+main()

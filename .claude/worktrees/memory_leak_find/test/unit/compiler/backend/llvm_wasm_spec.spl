@@ -1,0 +1,80 @@
+# LLVM WASM Backend Specification
+#
+# Tests for the LLVM-based WASM compilation pipeline:
+# - wasm32 data layout string
+# - wasm32 target triple construction
+# - WASM tool discovery (wasm-ld, wasm-opt, wat2wasm)
+# - WASI runtime declaration generation
+# - WASI entry point IR
+
+use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend_api.*
+use compiler.backend.backend_factory.{BackendFactory}
+use compiler.backend.backend_helpers.{select_backend_with_mode}
+use compiler.mir_data.*
+
+describe "WASM Data Layout":
+
+    it "wasm32 has correct datalayout string":
+        val config = LlvmTargetConfig.for_target(CodegenTarget.Wasm32, nil)
+        val layout = config.datalayout()
+        expect(layout).to_contain("e-m:e-p:32:32")
+        expect(layout).to_contain("i64:64")
+
+    it "wasm32 has correct triple":
+        val config = LlvmTargetConfig.for_target(CodegenTarget.Wasm32, nil)
+        val triple = config.triple()
+        expect(triple).to_contain("wasm32")
+
+describe "WASM Backend Selection":
+
+    it "auto-selects Wasm backend for wasm32":
+        val kind = select_backend_with_mode(CodegenTarget.Wasm32, BuildMode.Debug, nil)
+        expect(kind).to_equal(BackendKind.Wasm)
+
+    it "auto-selects Wasm backend for wasm64":
+        val kind = select_backend_with_mode(CodegenTarget.Wasm64, BuildMode.Debug, nil)
+        expect(kind).to_equal(BackendKind.Wasm)
+
+    it "auto-selects Wasm backend for wasm32 release":
+        val kind = select_backend_with_mode(CodegenTarget.Wasm32, BuildMode.Release, nil)
+        expect(kind).to_equal(BackendKind.Wasm)
+
+describe "WASM Target Properties":
+
+    it "wasm32 is 32-bit":
+        expect(CodegenTarget.Wasm32.is_32bit()).to_equal(true)
+
+    it "wasm32 is wasm":
+        expect(CodegenTarget.Wasm32.is_wasm()).to_equal(true)
+
+    it "wasm64 is wasm":
+        expect(CodegenTarget.Wasm64.is_wasm()).to_equal(true)
+
+    it "wasm32 is not 64-bit":
+        expect(CodegenTarget.Wasm32.is_64bit()).to_equal(false)
+
+    it "x86_64 is not wasm":
+        expect(CodegenTarget.X86_64.is_wasm()).to_equal(false)
+
+describe "BackendFactory WASM support":
+
+    it "supports wasm32 target":
+        val supported = BackendFactory.supports_target(BackendKind.Wasm, CodegenTarget.Wasm32)
+        expect(supported).to_equal(true)
+
+    it "supports wasm64 target":
+        val supported = BackendFactory.supports_target(BackendKind.Wasm, CodegenTarget.Wasm64)
+        expect(supported).to_equal(true)
+
+    it "does not support x86_64 for Wasm backend":
+        val supported = BackendFactory.supports_target(BackendKind.Wasm, CodegenTarget.X86_64)
+        expect(supported).to_equal(false)
+
+    it "Cranelift does not support wasm32":
+        val supported = BackendFactory.supports_target(BackendKind.Cranelift, CodegenTarget.Wasm32)
+        expect(supported).to_equal(false)
+
+    it "LLVM supports wasm32":
+        val supported = BackendFactory.supports_target(BackendKind.Llvm, CodegenTarget.Wasm32)
+        expect(supported).to_equal(true)

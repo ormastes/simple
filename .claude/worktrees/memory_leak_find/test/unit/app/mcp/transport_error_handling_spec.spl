@@ -1,0 +1,142 @@
+"""
+MCP Transport Error Handling Tests
+Feature: MCP Transport Error Conditions
+Category: MCP, Transport, Error Handling
+Status: Complete
+
+Tests for error conditions in the transport layer using MCP helpers
+and the error handler validation system.
+"""
+
+use std.spec
+use std.text.{NL}
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, extract_json_string, extract_json_value, escape_json, make_result_response, make_error_response, log_level_to_int}
+use app.mcp.{ErrorCategory, McpError, InputValidator}
+use app.mcp.{mcp_error, input_validator}
+
+describe "Transport Error Handling - Content-Length validation":
+    it "rejects negative content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(-100)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("negative")).to_equal(true)
+
+    it "accepts zero content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(0)
+        expect(result).to_be_nil()
+
+    it "accepts valid content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(1000)
+        expect(result).to_be_nil()
+
+    it "rejects excessive content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(2000000)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "Transport Error Handling - JSON-RPC ID handling":
+    it "extracts integer ID from JSON":
+        val json = jo2(jp("id", "42"), jp("method", js("test")))
+        expect(extract_json_value(json, "id")).to_equal("42")
+
+    it "handles null ID for notifications":
+        val json = jo1(jp("method", js("notifications/initialized")))
+        val id = extract_json_value(json, "id")
+        expect(id).to_equal("null")
+
+    it "extracts method from request":
+        val json = jo2(jp("id", "1"), jp("method", js("initialize")))
+        expect(extract_json_string(json, "method")).to_equal("initialize")
+
+describe "Transport Error Handling - malformed JSON responses":
+    it "creates parse error response":
+        val response = make_error_response("null", -32700, "Parse error")
+        expect(response.contains("-32700")).to_equal(true)
+        expect(response.contains("Parse error")).to_equal(true)
+
+    it "creates invalid request response":
+        val response = make_error_response("1", -32600, "Invalid Request")
+        expect(response.contains("-32600")).to_equal(true)
+
+    it "creates method not found response":
+        val response = make_error_response("1", -32601, "Method not found")
+        expect(response.contains("-32601")).to_equal(true)
+
+    it "creates invalid params response":
+        val response = make_error_response("1", -32602, "Invalid params")
+        expect(response.contains("-32602")).to_equal(true)
+
+    it "creates internal error response":
+        val response = make_error_response("1", -32603, "Internal error")
+        expect(response.contains("-32603")).to_equal(true)
+
+describe "Transport Error Handling - error categories":
+    it "parse error category":
+        val err = mcp_error(ErrorCategory.ParseError, "Invalid JSON")
+        expect(err.category).to_equal(ErrorCategory.ParseError)
+        val json = err.to_json_rpc()
+        expect(json.contains("-32700")).to_equal(true)
+
+    it "invalid request category":
+        val err = mcp_error(ErrorCategory.InvalidRequest, "Missing method")
+        expect(err.category).to_equal(ErrorCategory.InvalidRequest)
+        val json = err.to_json_rpc()
+        expect(json.contains("-32600")).to_equal(true)
+
+    it "validation error category":
+        val err = mcp_error(ErrorCategory.Validation, "Content too large")
+        expect(err.category).to_equal(ErrorCategory.Validation)
+        val json = err.to_json_rpc()
+        expect(json.contains("-32002")).to_equal(true)
+
+    it "timeout error category":
+        val err = mcp_error(ErrorCategory.Timeout, "Request timed out")
+        expect(err.category).to_equal(ErrorCategory.Timeout)
+
+describe "Transport Error Handling - character classification":
+    it "newline character in escape":
+        val escaped = escape_json("line1{NL}line2")
+        expect(escaped.contains(NL)).to_equal(false)
+
+    it "tab character in escape":
+        val escaped = escape_json("col1\tcol2")
+        expect(escaped.contains("\t")).to_equal(false)
+
+    it "normal characters unchanged":
+        expect(escape_json("hello")).to_equal("hello")
+
+    it "empty string unchanged":
+        expect(escape_json("")).to_equal("")
+
+describe "Transport Error Handling - logging for errors":
+    it "debug level for transport trace":
+        expect(log_level_to_int("debug")).to_equal(0)
+
+    it "warning level for malformed input":
+        expect(log_level_to_int("warning")).to_equal(3)
+
+    it "error level for transport failures":
+        expect(log_level_to_int("error")).to_equal(4)
+
+    it "critical level for unrecoverable errors":
+        expect(log_level_to_int("critical")).to_equal(5)
+
+describe "Transport Error Handling - error details":
+    it "attaches details to error":
+        val err = mcp_error(ErrorCategory.ParseError, "Invalid JSON")
+        val detailed = err.with_details("Unexpected token at position 42")
+        expect(detailed.details).to_equal("Unexpected token at position 42")
+
+    it "marks error as unrecoverable":
+        val err = mcp_error(ErrorCategory.InternalError, "Fatal")
+        val fatal = err.as_unrecoverable()
+        expect(fatal.recoverable).to_equal(false)
+
+    it "default error is recoverable":
+        val err = mcp_error(ErrorCategory.ParseError, "Parse failed")
+        expect(err.recoverable).to_equal(true)

@@ -1,0 +1,202 @@
+"""
+# MCP simple_api Tool Specification
+
+**Feature IDs:** #MCP-API-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests the simple_api MCP tool: symbol extraction, visibility filtering,
+and module path resolution with numbered directory support.
+
+## Behavior
+
+- Extracts functions, classes, structs, enums, traits from source
+- Applies visibility markers: P (public), F (friend), I (internal), - (private)
+- Filters by visibility level: public, friend, package, all
+- Resolves dotted module paths through numbered directories
+"""
+
+import std.spec
+
+# ============================================================================
+# Test Group 1: Symbol Extraction
+# ============================================================================
+
+describe "Symbol Extraction Heuristic":
+    """
+    ## Heuristic Parser
+
+    Tests line-by-line symbol extraction from Simple source code.
+    Uses string matching to simulate the heuristic parser.
+    """
+
+    it "extracts public function":
+        val source = "pub fn parse(source: text) -> Result:"
+        val has_pub = source.starts_with("pub ")
+        val has_fn = source.contains("fn ")
+        expect(has_pub).to_equal(true)
+        expect(has_fn).to_equal(true)
+
+    it "extracts private function":
+        val source = "fn helper() -> text:"
+        val has_pub = source.starts_with("pub ")
+        val has_fn = source.starts_with("fn ")
+        expect(has_pub).to_equal(false)
+        expect(has_fn).to_equal(true)
+
+    it "extracts exported function as public":
+        val exports = ["parse", "Token"]
+        val name = "parse"
+        var is_exported = false
+        for e in exports:
+            if e == name:
+                is_exported = true
+        expect(is_exported).to_equal(true)
+
+    it "extracts internal_export as friend-visible":
+        val internal_exports = ["Builder"]
+        val name = "Builder"
+        var is_internal = false
+        for e in internal_exports:
+            if e == name:
+                is_internal = true
+        expect(is_internal).to_equal(true)
+
+    it "extracts pub(friend) function":
+        val source = "pub(friend) fn lower() -> MirModule:"
+        val has_friend = source.starts_with("pub(friend)")
+        expect(has_friend).to_equal(true)
+
+    it "extracts pub(package) function":
+        val source = "pub(package) fn validate() -> bool:"
+        val has_package = source.starts_with("pub(package)")
+        expect(has_package).to_equal(true)
+
+    it "extracts struct declarations":
+        val source = "pub struct Point:"
+        val has_struct = source.contains("struct ")
+        val has_pub = source.starts_with("pub ")
+        expect(has_struct).to_equal(true)
+        expect(has_pub).to_equal(true)
+
+    it "extracts enum declarations":
+        val source = "enum Color:"
+        val has_enum = source.starts_with("enum ")
+        expect(has_enum).to_equal(true)
+
+    it "extracts trait declarations":
+        val source = "pub trait Printable:"
+        val has_trait = source.contains("trait ")
+        val has_pub = source.starts_with("pub ")
+        expect(has_trait).to_equal(true)
+        expect(has_pub).to_equal(true)
+
+
+# ============================================================================
+# Test Group 2: Visibility Filtering
+# ============================================================================
+
+describe "Visibility Filtering":
+    """
+    ## Filter Modes
+
+    Tests that visibility filters correctly include/exclude symbols.
+    """
+
+    it "public filter shows only P symbols":
+        val visibilities = ["P", "-"]
+        var pub_count: i64 = 0
+        for v in visibilities:
+            if v == "P":
+                pub_count = pub_count + 1
+        expect(pub_count).to_equal(1)
+
+    it "all filter shows everything":
+        val visibilities = ["P", "-", "F", "I"]
+        expect(visibilities.len()).to_be_greater_than(1)
+
+
+# ============================================================================
+# Test Group 3: Helper Functions
+# ============================================================================
+
+describe "API Tool Helpers":
+    """
+    ## Helper Functions
+
+    Tests extract_fn_name, extract_type_name, and compute_visibility.
+    """
+
+    it "extract_fn_name from simple signature":
+        val line = "fn parse(source: text) -> Result:"
+        # Extract function name: skip "fn " and take until "("
+        val after_fn = line.substring(3)
+        val paren_idx = after_fn.index_of("(") ?? 0
+        val name = after_fn.substring(0, paren_idx)
+        expect(name).to_equal("parse")
+
+    it "extract_fn_name from method signature":
+        val line = "me move(dx: i64):"
+        # Extract method name: skip "me " and take until "("
+        val after_me = line.substring(3)
+        val paren_idx = after_me.index_of("(") ?? 0
+        val name = after_me.substring(0, paren_idx)
+        expect(name).to_equal("move")
+
+    it "extract_type_name from struct":
+        val after_kw = "Point:"
+        val colon_idx = after_kw.index_of(":") ?? 0
+        val name = after_kw.substring(0, colon_idx)
+        expect(name).to_equal("Point")
+
+    it "extract_type_name with generic":
+        val after_kw = "List<T>:"
+        val angle_idx = after_kw.index_of("<") ?? 0
+        val colon_idx = after_kw.index_of(":") ?? 0
+        var end_idx = colon_idx
+        if angle_idx > 0 and angle_idx < colon_idx:
+            end_idx = angle_idx
+        val name = after_kw.substring(0, end_idx)
+        expect(name).to_equal("List")
+
+    it "compute_visibility for exported symbol":
+        val exports = ["parse", "Token"]
+        val internal_exports: [text] = []
+        val name = "parse"
+        var vis = "-"
+        for e in exports:
+            if e == name:
+                vis = "P"
+        for e in internal_exports:
+            if e == name:
+                vis = "F"
+        expect(vis).to_equal("P")
+
+    it "compute_visibility for internal_export symbol":
+        val exports: [text] = []
+        val internal_exports = ["Builder"]
+        val name = "Builder"
+        var vis = "-"
+        for e in exports:
+            if e == name:
+                vis = "P"
+        for e in internal_exports:
+            if e == name:
+                vis = "F"
+        expect(vis).to_equal("F")
+
+    it "compute_visibility for private symbol":
+        val exports = ["parse"]
+        val internal_exports = ["Builder"]
+        val name = "helper"
+        var vis = "-"
+        for e in exports:
+            if e == name:
+                vis = "P"
+        for e in internal_exports:
+            if e == name:
+                vis = "F"
+        expect(vis).to_equal("-")

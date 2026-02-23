@@ -1,0 +1,155 @@
+# Context Parameter Desugar Unit Tests
+#
+# Tests the context_params desugar pass which transforms:
+#   context val name: Type  ->  var __ctx_name: Type = nil
+#   name.method(...)        ->  __ctx_name.method(...)
+#   with_context(name: expr): body  ->  save/set/body/restore
+
+use app.desugar.context_params (desugar_context_params)
+
+describe "desugar_context_params - basic context declaration":
+
+    it "transforms context val into module var":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "fn foo():" + "\n"
+        src = src + "    pass" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_contain("var __ctx_logger: Logger = nil")
+
+    it "removes original context val declaration":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "fn foo(): pass" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_contain("var __ctx_logger")
+        # The original line should be gone (replaced by var form)
+        val has_context_val = out.contains("context val logger")
+        expect(has_context_val).to_equal(false)
+
+    it "passes through source unchanged when no context declarations":
+        val src = "fn foo() -> i64:" + "\n" + "    42" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_equal(src)
+
+describe "desugar_context_params - reference replacement":
+
+    it "replaces context variable references with __ctx_ prefix":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "fn compile(source: text):" + "\n"
+        src = src + "    logger.log(source)" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_contain("__ctx_logger.log(source)")
+
+    it "does not replace non-context variable names":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "fn foo(mylogger: Logger):" + "\n"
+        src = src + "    mylogger.log(x)" + "\n"
+        val out = desugar_context_params(src)
+        # mylogger should NOT be touched
+        expect(out).to_contain("mylogger.log(x)")
+
+    it "replaces context var at start of line":
+        var src = "context val config: Config" + "\n"
+        src = src + "fn setup():" + "\n"
+        src = src + "    config.init()" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_contain("__ctx_config.init()")
+
+describe "desugar_context_params - with_context transformation":
+
+    it "replaces with_context with save/set/restore":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "val x = 1" + "\n"
+        src = src + "with_context(logger: file_logger):" + "\n"
+        src = src + "    compile(source)" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_contain("__saved_logger_0")
+        expect(out).to_contain("__ctx_logger = file_logger")
+        expect(out).to_contain("compile(source)")
+
+    it "saves old value before setting":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "with_context(logger: new_logger):" + "\n"
+        src = src + "    work()" + "\n"
+        val out = desugar_context_params(src)
+        # save must appear before set
+        val save_pos = _find_pos(out, "__saved_logger_0 = __ctx_logger")
+        val set_pos = _find_pos(out, "__ctx_logger = new_logger")
+        expect(save_pos >= 0).to_equal(true)
+        expect(set_pos >= 0).to_equal(true)
+        expect(save_pos < set_pos).to_equal(true)
+
+    it "restores old value after body":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "with_context(logger: new_logger):" + "\n"
+        src = src + "    work()" + "\n"
+        val out = desugar_context_params(src)
+        # restore must appear after body
+        val body_pos = _find_pos(out, "work()")
+        val restore_pos = _find_pos(out, "__ctx_logger = __saved_logger_0")
+        expect(body_pos >= 0).to_equal(true)
+        expect(restore_pos >= 0).to_equal(true)
+        expect(body_pos < restore_pos).to_equal(true)
+
+    it "body lines are de-indented when emitted":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "with_context(logger: l):" + "\n"
+        src = src + "    do_work()" + "\n"
+        val out = desugar_context_params(src)
+        # do_work() should appear without extra indentation from with_context
+        expect(out).to_contain("do_work()")
+
+describe "desugar_context_params - multiple context variables":
+
+    it "declares multiple ctx vars":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "context val config: Config" + "\n"
+        src = src + "fn foo(): pass" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_contain("var __ctx_logger: Logger = nil")
+        expect(out).to_contain("var __ctx_config: Config = nil")
+
+    it "replaces multiple context variable references":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "context val config: Config" + "\n"
+        src = src + "fn setup():" + "\n"
+        src = src + "    logger.log(x)" + "\n"
+        src = src + "    config.init()" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_contain("__ctx_logger.log(x)")
+        expect(out).to_contain("__ctx_config.init()")
+
+    it "with_context sets multiple vars":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "context val config: Config" + "\n"
+        src = src + "with_context(logger: l, config: c):" + "\n"
+        src = src + "    run()" + "\n"
+        val out = desugar_context_params(src)
+        expect(out).to_contain("__ctx_logger = l")
+        expect(out).to_contain("__ctx_config = c")
+        expect(out).to_contain("run()")
+
+describe "desugar_context_params - nested with_context counters":
+
+    it "uses distinct save var names for nested blocks":
+        var src = "context val logger: Logger" + "\n"
+        src = src + "with_context(logger: l1):" + "\n"
+        src = src + "    with_context(logger: l2):" + "\n"
+        src = src + "        work()" + "\n"
+        val out = desugar_context_params(src)
+        # Both blocks need unique counter suffixes
+        val has_0 = out.contains("__saved_logger_0")
+        val has_1 = out.contains("__saved_logger_1")
+        expect(has_0).to_equal(true)
+        expect(has_1).to_equal(true)
+
+# Helper: find position of substring in text, returns -1 if not found
+fn _find_pos(s: text, target: text) -> i64:
+    val tlen = target.len()
+    val slen = s.len()
+    var i = 0
+    while i <= slen - tlen:
+        val chunk = s[i:i + tlen]
+        if chunk == target:
+            return i
+        i = i + 1
+    -1

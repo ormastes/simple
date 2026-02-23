@@ -1,0 +1,622 @@
+# Link Pipeline - Main linker orchestration.
+#
+# This module provides the main link pipeline that:
+# 1. Loads input SMF files
+# 2. Collects deferred type hints across modules
+# 3. Resolves cross-module types using HM inference
+# 4. Generates required specializations via ObjTaker
+# 5. Outputs SMF or native binary (via mold)
+#
+# Uses:
+# - compiler.types.type_infer.HmInferContext for cross-module type unification
+# - ObjTaker for object extraction and instantiation
+# - LazyInstantiator for link-time instantiation
+# - SmfReaderImpl for reading input files
+# - MoldBackend for native binary generation
+
+use ..type_infer.*
+use ..monomorphize.note_sdn.*
+use .obj_taker.*
+use .lazy_instantiator.*
+use .smf_reader.*
+use .mold.*
+
+# ============================================================================
+# Link Configuration
+# ============================================================================
+
+struct LinkConfig:
+    """Configuration for the link pipeline."""
+    output_format: OutputFormat
+    output_path: text
+    libraries: [text]
+    library_paths: [text]
+    pie: bool
+    debug: bool
+    verbose: bool
+    allow_deferred: bool
+    optimization_level: i32
+    target_flags: [text]        # CPU/arch flags (e.g., ["-march=x86-64-v3"])
+    linker_flags: [text]        # Extra linker flags
+
+enum OutputFormat:
+    Smf      # Runtime SMF format
+    Native   # Native binary via mold
+
+impl LinkConfig:
+    static fn default() -> LinkConfig:
+        LinkConfig(
+            output_format: OutputFormat.Smf,
+            output_path: "a.out",
+            libraries: [],
+            library_paths: [],
+            pie: true,
+            debug: false,
+            verbose: false,
+            allow_deferred: false,
+            optimization_level: 0,
+            target_flags: [],
+            linker_flags: []
+        )
+
+    static fn native(output: text) -> LinkConfig:
+        """Create config for native binary output."""
+        var cfg = LinkConfig__default()
+        cfg.output_format = OutputFormat.Native
+        cfg.output_path = output
+        cfg
+
+    static fn smf(output: text) -> LinkConfig:
+        """Create config for SMF output."""
+        var cfg = LinkConfig__default()
+        cfg.output_format = OutputFormat.Smf
+        cfg.output_path = output
+        cfg
+
+# ============================================================================
+# Link Result
+# ============================================================================
+
+enum LinkResult:
+    Success(output_path: text, stats: LinkStats)
+    Error(message: text, errors: [LinkError])
+
+struct LinkStats:
+    """Statistics from linking."""
+    input_count: i32
+    symbol_count: i32
+    instantiated_count: i32
+    deferred_count: i32
+    output_size: i64
+
+struct LinkError:
+    """A link error."""
+    kind: LinkErrorKind
+    message: text
+    symbol: text?
+    location: text?
+
+enum LinkErrorKind:
+    SymbolNotFound
+    DuplicateSymbol
+    TypeMismatch
+    CircularDependency
+    InstantiationFailed
+    OutputFailed
+    InternalError
+
+# ============================================================================
+# Linker
+# ============================================================================
+
+struct Linker:
+    """Main linker that orchestrates the link pipeline."""
+    # Shared inference context for cross-module type unification
+    infer_ctx: HmInferContext
+    # ObjTaker for object extraction
+    obj_taker: ObjTaker
+    # Lazy instantiator for link-time instantiation
+    lazy_inst: LazyInstantiator
+    # Loaded SMF readers
+    readers: [SmfReaderImpl]
+    # Collected symbols (name -> (reader_index, symbol))
+    symbols: Dict<text, (i32, SmfSymbol)>
+    # Unresolved symbols
+    unresolved: Set<text>
+    # Errors accumulated during linking
+    errors: [LinkError]
+    # Configuration
+    config: LinkConfig
+
+impl Linker:
+    static fn new(config: LinkConfig) -> Linker:
+        """Create a new linker with the given configuration."""
+        val infer_ctx = HmInferContext__with_builtins()
+        val obj_taker_config = ObjTakerConfig(
+            enable_caching: true,
+            max_cache_size: 10000,
+            verbose: config.verbose,
+            allow_deferred: config.allow_deferred
+        )
+
+        Linker(
+            infer_ctx: infer_ctx,
+            obj_taker: ObjTaker__with_inference_context(infer_ctx, obj_taker_config),
+            lazy_inst: LazyInstantiator__new(LazyInstantiatorConfig__default()),
+            readers: [],
+            symbols: {},
+            unresolved: {},
+            errors: [],
+            config: config
+        )
+
+    # ========================================================================
+    # Main Link Entry Point
+    # ========================================================================
+
+    me link(input_paths: [text]) -> LinkResult:
+        """Link multiple SMF files into output.
+
+        Pipeline:
+        1. Load all input SMF files
+        2. Collect symbols and identify unresolved references
+        3. Collect deferred type hints
+        4. Resolve cross-module types
+        5. Generate required instantiations
+        6. Write output (SMF or native)
+        """
+        if self.config.verbose:
+            print "[linker] Starting link of {input_paths.len()} inputs"
+
+        # 1. Load all inputs
+        val load_result = self.load_inputs(input_paths)
+        if load_result.is_err():
+            return LinkResult.Error(
+                message: "Failed to load inputs",
+                errors: self.errors
+            )
+
+        # 2. Collect symbols
+        self.collect_symbols()
+
+        # 3. Identify unresolved symbols
+        self.find_unresolved()
+
+        if self.config.verbose:
+            print "[linker] Found {self.unresolved.len()} unresolved symbols"
+
+        # 4. Collect deferred hints from all modules
+        val all_hints = self.collect_deferred_hints()
+
+        # 5. Resolve cross-module types
+        val resolve_result = self.resolve_cross_module(all_hints)
+        if resolve_result.is_err():
+            return LinkResult.Error(
+                message: "Type resolution failed",
+                errors: self.errors
+            )
+
+        # 6. Generate instantiations for unresolved symbols
+        val inst_result = self.generate_instantiations()
+        if inst_result.is_err():
+            return LinkResult.Error(
+                message: "Instantiation failed",
+                errors: self.errors
+            )
+
+        # 7. Check for remaining unresolved
+        if not self.unresolved.is_empty() and not self.config.allow_deferred:
+            for sym in self.unresolved:
+                self.errors = self.errors.push(LinkError(
+                    kind: LinkErrorKind.SymbolNotFound,
+                    message: "Undefined symbol: {sym}",
+                    symbol: Some(sym),
+                    location: nil
+                ))
+            return LinkResult.Error(
+                message: "Unresolved symbols",
+                errors: self.errors
+            )
+
+        # 8. Write output
+        val output_result = self.write_output()
+        if output_result.is_err():
+            return LinkResult.Error(
+                message: "Output failed",
+                errors: self.errors
+            )
+
+        val stats = LinkStats(
+            input_count: self.readers.len() as i32,
+            symbol_count: self.symbols.len() as i32,
+            instantiated_count: self.lazy_inst.instantiated.len() as i32,
+            deferred_count: self.unresolved.len() as i32,
+            output_size: output_result.unwrap()
+        )
+
+        LinkResult.Success(
+            output_path: self.config.output_path,
+            stats: stats
+        )
+
+    # ========================================================================
+    # Pipeline Steps
+    # ========================================================================
+
+    me load_inputs(paths: [text]) -> Result<(), text>:
+        """Load all input SMF files."""
+        for path in paths:
+            if self.config.verbose:
+                print "[linker] Loading: {path}"
+
+            val reader_result = SmfReaderImpl__open(path)
+            if reader_result.is_err():
+                self.errors = self.errors.push(LinkError(
+                    kind: LinkErrorKind.InternalError,
+                    message: "Failed to open: {path}: {reader_result.unwrap_err()}",
+                    symbol: nil,
+                    location: Some(path)
+                ))
+                return Err("Failed to open {path}")
+
+            val reader = reader_result.unwrap()
+            self.readers = self.readers.push(reader)
+
+            # Load note.sdn metadata for lazy instantiation
+            val metadata_result = reader.read_note_sdn()
+            if metadata_result.is_ok():
+                self.lazy_inst.load_metadata(path, metadata_result.unwrap())
+
+        Ok(())
+
+    me collect_symbols():
+        """Collect all exported symbols from inputs."""
+        for (idx, reader) in self.readers.enumerate():
+            for symbol in reader.exported_symbols():
+                if self.symbols.contains_key(symbol.name):
+                    # Duplicate symbol - check binding
+                    val (existing_idx, existing) = self.symbols[symbol.name]
+                    if existing.binding == SymbolBinding.Global and symbol.binding == SymbolBinding.Global:
+                        self.errors = self.errors.push(LinkError(
+                            kind: LinkErrorKind.DuplicateSymbol,
+                            message: "Duplicate symbol: {symbol.name}",
+                            symbol: Some(symbol.name),
+                            location: nil
+                        ))
+                    # Keep first definition (or prefer Global over Weak)
+                else:
+                    self.symbols[symbol.name] = (idx as i32, symbol)
+
+    me find_unresolved():
+        """Find all unresolved symbol references."""
+        # Scan all readers for undefined symbols (referenced but not defined)
+        for reader in self.readers:
+            val symbols = reader.symbols.values()
+            for symbol in symbols:
+                if symbol.binding == SymbolBinding.Undefined:
+                    # Check if this symbol is defined in our merged table
+                    if not self.symbols.contains_key(symbol.name):
+                        self.unresolved.push(symbol.name)
+
+    fn collect_deferred_hints() -> [DeferredHints]:
+        """Collect all deferred type hints from all modules."""
+        var all_hints: [DeferredHints] = []
+
+        for reader in self.readers:
+            val metadata_result = reader.read_note_sdn()
+            if metadata_result.is_ok():
+                val metadata = metadata_result.unwrap()
+                # Convert type_inferences to DeferredHints
+                for ti in metadata.type_inferences:
+                    val hint = DeferredHints(
+                        symbol: ti.symbol,
+                        type_vars: [],
+                        constraints: [],
+                        usage_sites: [UsageSite(
+                            file: ti.from_file,
+                            loc: ti.from_loc,
+                            context_type: nil
+                        )]
+                    )
+                    all_hints = all_hints.push(hint)
+
+        all_hints
+
+    me resolve_cross_module(hints: [DeferredHints]) -> Result<(), text>:
+        """Resolve cross-module type unifications."""
+        if self.config.verbose:
+            print "[linker] Resolving {hints.len()} type hints"
+
+        # Group hints by symbol
+        var by_symbol: Dict<text, [DeferredHints]> = {}
+        for hint in hints:
+            if not by_symbol.contains_key(hint.symbol):
+                by_symbol[hint.symbol] = []
+            by_symbol[hint.symbol] = by_symbol[hint.symbol].push(hint)
+
+        # For each symbol with multiple hints, unify across modules
+        for (symbol, symbol_hints) in by_symbol:
+            if symbol_hints.len() > 1:
+                val unify_result = self.unify_hints(symbol, symbol_hints)
+                if unify_result.is_err():
+                    self.errors = self.errors.push(LinkError(
+                        kind: LinkErrorKind.TypeMismatch,
+                        message: unify_result.unwrap_err(),
+                        symbol: Some(symbol),
+                        location: nil
+                    ))
+
+        if self.errors.any(\e: e.kind == LinkErrorKind.TypeMismatch):
+            Err("Type unification failed")
+        else:
+            Ok(())
+
+    me unify_hints(symbol: text, hints: [DeferredHints]) -> Result<(), text>:
+        """Unify type hints for a single symbol across modules."""
+        # Collect all context types from hints
+        var context_types: [HirType] = []
+        for hint in hints:
+            for site in hint.usage_sites:
+                if site.context_type.?:
+                    context_types = context_types.push(site.context_type.unwrap())
+
+        # Unify all context types
+        if context_types.len() >= 2:
+            val first = context_types[0]
+            for ty in context_types[1..]:
+                self.infer_ctx.unify(first, ty)
+
+        Ok(())
+
+    me generate_instantiations() -> Result<(), text>:
+        """Generate instantiations for unresolved generic symbols."""
+        val unresolved_list = self.unresolved.to_list()
+        val results = self.lazy_inst.instantiate_all_missing(unresolved_list)
+
+        for result in results:
+            match result:
+                case Success(code, symbol, _):
+                    # Add to symbols
+                    self.symbols[symbol] = (-1, SmfSymbol(
+                        name: symbol,
+                        section_index: -1,
+                        offset: 0,
+                        size: code.len() as i64,
+                        ty: SymbolType.Function,
+                        binding: SymbolBinding.Global,
+                        is_generic_template: false,
+                        template_param_count: 0,
+                        template_offset: 0
+                    ))
+                    self.unresolved = self.unresolved.remove(symbol)
+
+                case Error(msg):
+                    self.errors = self.errors.push(LinkError(
+                        kind: LinkErrorKind.InstantiationFailed,
+                        message: msg,
+                        symbol: nil,
+                        location: nil
+                    ))
+
+                case CircularDependency(cycle):
+                    self.errors = self.errors.push(LinkError(
+                        kind: LinkErrorKind.CircularDependency,
+                        message: "Circular dependency: {cycle.join(\" -> \")}",
+                        symbol: nil,
+                        location: nil
+                    ))
+
+                case _:
+                    pass
+
+        if self.errors.any(\e: e.kind == LinkErrorKind.InstantiationFailed):
+            Err("Instantiation failed")
+        else:
+            Ok(())
+
+    me write_output() -> Result<i64, text>:
+        """Write the linked output."""
+        match self.config.output_format:
+            case Smf:
+                self.write_smf_output()
+            case Native:
+                self.write_native_output()
+
+    me write_smf_output() -> Result<i64, text>:
+        """Write SMF format output."""
+        if self.config.verbose:
+            print "[linker] Writing SMF output: {self.config.output_path}"
+
+        # Serialize symbols and sections to SMF format
+        var buf: [u8] = []
+        # SMF magic: "SMF\0"
+        buf = buf + [0x53, 0x4D, 0x46, 0x00]
+        # Version
+        buf = buf + [0x01, 0x00]
+        # Symbol count
+        val sym_count = self.symbols.len()
+        buf = buf + u32_to_bytes(sym_count)
+        # Write symbol table entries
+        for entry in self.symbols.entries():
+            val name_bytes = entry.key.to_bytes()
+            buf = buf + u32_to_bytes(name_bytes.len())
+            buf = buf + name_bytes
+
+        # Write output file
+        file_write_bytes(self.config.output_path, buf)
+        Ok(buf.len())
+
+    me write_native_output() -> Result<i64, text>:
+        """Write native binary output via mold."""
+        if self.config.verbose:
+            print "[linker] Writing native output: {self.config.output_path}"
+
+        val backend = MoldBackend__create(self.config)?
+
+        # Collect all objects to link
+        var objects: [ResolvedObject] = []
+        for (_, (reader_idx, symbol)) in self.symbols:
+            if reader_idx >= 0:
+                val reader = self.readers[reader_idx as i32]
+                val code_result = reader.read_code(symbol)
+                if code_result.is_ok():
+                    objects = objects.push(ResolvedObject(
+                        name: symbol.name,
+                        code: code_result.unwrap(),
+                        symbol_type: symbol.ty
+                    ))
+
+        # Link via mold
+        backend.link(objects, self.config.output_path)?
+
+        # Get output size
+        val size = get_file_size(self.config.output_path)
+        Ok(size)
+
+    # ========================================================================
+    # Cleanup
+    # ========================================================================
+
+    me close():
+        """Close all readers and clean up resources."""
+        for reader in self.readers:
+            reader.close()
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn link(inputs: [text], output: text) -> LinkResult:
+    """Link SMF files to SMF output."""
+    var linker = Linker__new(LinkConfig__smf(output))
+    linker.link(inputs)
+
+fn link_native(inputs: [text], output: text) -> LinkResult:
+    """Link SMF files to native binary."""
+    var linker = Linker__new(LinkConfig__native(output))
+    linker.link(inputs)
+
+fn link_with_config(inputs: [text], config: LinkConfig) -> LinkResult:
+    """Link SMF files with custom configuration."""
+    var linker = Linker__new(config)
+    linker.link(inputs)
+
+# ============================================================================
+# Helper
+# ============================================================================
+
+fn get_file_size(path: text) -> i64:
+    """Get file size in bytes using stat."""
+    linker_file_size(path)
+
+# ============================================================================
+# Linker Auto-Detection
+# ============================================================================
+
+enum SystemLinker:
+    """Supported system linkers across all platforms."""
+    Mold        # mold (Linux - fastest)
+    Lld         # lld (LLVM linker - cross-platform)
+    LldLink     # lld-link (Windows MSVC-compatible)
+    Msvc        # Microsoft link.exe (Windows)
+    Ld          # GNU ld (Linux/Unix)
+    Ld64        # Apple ld64 (macOS)
+
+impl SystemLinker:
+    fn name() -> text:
+        match self:
+            case SystemLinker.Mold: "mold"
+            case SystemLinker.Lld: "lld"
+            case SystemLinker.LldLink: "lld-link"
+            case SystemLinker.Msvc: "MSVC link.exe"
+            case SystemLinker.Ld: "ld"
+            case SystemLinker.Ld64: "ld64"
+
+    fn command() -> text:
+        match self:
+            case SystemLinker.Mold: "mold"
+            case SystemLinker.Lld: "lld"
+            case SystemLinker.LldLink: "lld-link"
+            case SystemLinker.Msvc: "link"
+            case SystemLinker.Ld: "ld"
+            case SystemLinker.Ld64: "ld"
+
+fn auto_detect_linker() -> SystemLinker:
+    """Auto-detect best available linker for current platform."""
+    use std.platform.{is_windows, is_unix}
+    use std.common.target.TargetOS
+
+    val os = TargetOS__host()
+
+    match os:
+        case TargetOS.Linux:
+            # Prefer mold > lld > ld
+            if command_exists("mold"):
+                SystemLinker.Mold
+            elif command_exists("lld"):
+                SystemLinker.Lld
+            else:
+                SystemLinker.Ld
+
+        case TargetOS.Windows:
+            # Prefer lld-link > MSVC link.exe
+            use compiler.backend.linker.msvc.{is_lld_link_available, is_msvc_available}
+            if is_lld_link_available():
+                SystemLinker.LldLink
+            elif is_msvc_available():
+                SystemLinker.Msvc
+            else:
+                SystemLinker.Lld  # Fallback (may not work)
+
+        case TargetOS.MacOS:
+            # macOS uses ld64
+            SystemLinker.Ld64
+
+        case TargetOS.FreeBSD:
+            # FreeBSD prefers lld
+            if command_exists("lld"):
+                SystemLinker.Lld
+            else:
+                SystemLinker.Ld
+
+        case _:
+            # Default to LLD for other platforms
+            SystemLinker.Lld
+
+fn command_exists(cmd: text) -> bool:
+    """Check if command exists in PATH."""
+    use app.io.shell
+
+    # Platform-specific command check
+    use std.platform.is_windows
+
+    if is_windows():
+        val result = shell("where {cmd} 2>nul")
+        result.exit_code == 0
+    else:
+        val result = shell("which {cmd} 2>/dev/null")
+        result.exit_code == 0
+
+fn get_linker_info() -> text:
+    """Get information about the detected linker."""
+    val linker = auto_detect_linker()
+    "Detected linker: {linker.name()} (command: {linker.command()})"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Linker
+export LinkConfig
+export OutputFormat
+export LinkResult
+export LinkStats
+export LinkError
+export LinkErrorKind
+export link
+export link_native
+export link_with_config
+export SystemLinker
+export auto_detect_linker
+export command_exists
+export get_linker_info

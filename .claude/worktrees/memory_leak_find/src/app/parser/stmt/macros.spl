@@ -1,0 +1,373 @@
+# Statement Parser - Macros Module
+#
+# Parsing for macro system: macro definitions, parameters, contracts,
+# intro/inject specifications, and macro body statements.
+# Extracted from statements.spl (Macro Parsing section)
+
+from token import {Span, Token, TokenKind}
+from ast import {Node, Block, Expr, Type,
+                 MacroDef, MacroParam, MacroContractItem, MacroStmt,
+                 MacroIntroSpec, MacroIntroDecl, MacroInjectSpec,
+                 MacroTarget, MacroAnchor, MacroIntroKind, MacroCodeKind,
+                 MacroDeclStub, MacroFnStub, MacroFieldStub, MacroTypeStub,
+                 MacroVarStub, MacroReturns, MacroIntro, MacroInject,
+                 MacroParamSig, MacroConstRange, EnclosingTarget,
+                 Visibility}
+from error import {ParseError}
+
+export MacroParser
+
+impl Parser:
+    # Parse macro definition: macro name(params) -> (contract): body
+    fn parse_macro_def(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Macro)
+
+        val name = self.expect_identifier()
+
+        # Parse macro parameters
+        self.expect(TokenKind.LParen)
+        var params = []
+        while not self.check(TokenKind.RParen):
+            params.append(self.parse_macro_param())
+            if not self.check(TokenKind.RParen):
+                self.expect(TokenKind.Comma)
+        self.expect(TokenKind.RParen)
+
+        # Required: -> (contract)
+        self.expect(TokenKind.Arrow)
+        self.expect(TokenKind.LParen)
+        val contract = self.parse_macro_contract_items()
+        self.expect(TokenKind.RParen)
+
+        self.expect(TokenKind.Colon)
+        val body = self.parse_macro_body()
+
+        val macro_def = MacroDef(
+            span: Span(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            name: name,
+            params: params,
+            contract: contract,
+            body: body,
+            visibility: Visibility.Private,
+        )
+
+        # Register the macro
+        self.macro_registry.register_macro(macro_def)
+
+        Ok(Node.Macro(macro_def))
+
+    # Parse single macro parameter: name: Type [const] or ...name: Type (variadic)
+    fn parse_macro_param(self) -> MacroParam:
+        val is_variadic = if self.check(TokenKind.Ellipsis):
+            self.advance()
+            true
+        else:
+            false
+
+        val name = self.expect_identifier()
+        self.expect(TokenKind.Colon)
+        val ty = self.parse_type()
+        val is_const = if self.check(TokenKind.Const):
+            self.advance()
+            true
+        else:
+            false
+
+        if is_variadic and is_const:
+            self.error("Variadic parameters cannot be const")
+
+        MacroParam(name: name, ty: ty, is_const: is_const, is_variadic: is_variadic)
+
+    # Parse macro contract items
+    fn parse_macro_contract_items(self) -> [MacroContractItem]:
+        var items = []
+        while not self.check(TokenKind.RParen) and not self.is_at_end():
+            while self.check(TokenKind.Newline):
+                self.advance()
+            if self.check(TokenKind.RParen) or self.is_at_end():
+                break
+            items.append(self.parse_macro_contract_item())
+            if self.check(TokenKind.Comma):
+                self.advance()
+        items
+
+    # Parse single macro contract item: returns, intro, or inject
+    fn parse_macro_contract_item(self) -> MacroContractItem:
+        if self.check_ident("returns"):
+            self.advance()
+            val label = if self.peek_is(TokenKind.Colon):
+                if self.is_identifier():
+                    Some(self.expect_identifier())
+                elif self.check(TokenKind.Result):
+                    val name = self.current.lexeme
+                    self.advance()
+                    Some(name)
+                else:
+                    nil
+            else:
+                nil
+            self.expect(TokenKind.Colon)
+            val ty = self.parse_type()
+            MacroContractItem.Returns(MacroReturns(label: label, ty: ty))
+
+        elif self.check_ident("intro"):
+            self.advance()
+            val label = self.expect_identifier()
+            self.expect(TokenKind.Colon)
+            while self.check(TokenKind.Newline) or self.check(TokenKind.Indent):
+                self.advance()
+            val spec = self.parse_macro_intro_spec()
+            MacroContractItem.Intro(MacroIntro(label: label, spec: spec))
+
+        elif self.check_ident("inject"):
+            self.advance()
+            val label = self.expect_identifier()
+            self.expect(TokenKind.Colon)
+            while self.check(TokenKind.Newline) or self.check(TokenKind.Indent):
+                self.advance()
+            val spec = self.parse_macro_inject_spec()
+            MacroContractItem.Inject(MacroInject(label: label, spec: spec))
+
+        else:
+            self.error("expected contract item (returns, intro, inject)")
+
+    # Parse macro intro spec: for/if/decl
+    fn parse_macro_intro_spec(self) -> MacroIntroSpec:
+        if self.check(TokenKind.For):
+            self.advance()
+            val name = self.expect_identifier()
+            self.expect(TokenKind.In)
+            val start = self.parse_primary()
+            val inclusive = if self.check(TokenKind.DoubleDotEq):
+                self.advance()
+                true
+            else:
+                self.expect(TokenKind.DoubleDot)
+                false
+            val end = self.parse_primary()
+            self.expect(TokenKind.Colon)
+            val body = self.parse_macro_intro_spec_block([TokenKind.Comma, TokenKind.RParen])
+            MacroIntroSpec.For(
+                name: name,
+                range: MacroConstRange(start: start, end: end, inclusive: inclusive),
+                body: body,
+            )
+        elif self.check(TokenKind.If):
+            self.advance()
+            val condition = self.parse_expression()
+            self.expect(TokenKind.Colon)
+            val then_body = self.parse_macro_intro_spec_block([TokenKind.Else, TokenKind.Comma, TokenKind.RParen])
+            val else_body = if self.check(TokenKind.Else):
+                self.advance()
+                self.expect(TokenKind.Colon)
+                self.parse_macro_intro_spec_block([TokenKind.Comma, TokenKind.RParen])
+            else:
+                []
+            MacroIntroSpec.If(condition: condition, then_body: then_body, else_body: else_body)
+        else:
+            val decl = self.parse_macro_intro_decl()
+            MacroIntroSpec.Decl(decl)
+
+    # Parse macro intro spec block until terminators
+    fn parse_macro_intro_spec_block(self, terminators: [TokenKind]) -> [MacroIntroSpec]:
+        var specs = []
+        loop:
+            while self.check(TokenKind.Newline):
+                self.advance()
+            if self.is_at_end() or terminators.any(\t: self.check(t)):
+                break
+            specs.append(self.parse_macro_intro_spec())
+            if self.check(TokenKind.Newline):
+                self.advance()
+        specs
+
+    # Parse macro intro declaration
+    fn parse_macro_intro_decl(self) -> MacroIntroDecl:
+        val target = self.parse_macro_target()
+        self.expect(TokenKind.Dot)
+        val kind = self.parse_macro_intro_kind()
+        val stub = match kind:
+            MacroIntroKind.Fn:
+                val name = self.parse_macro_qident()
+                val params = self.parse_macro_param_sig_list()
+                val ret = if self.check(TokenKind.Arrow):
+                    self.advance()
+                    Some(self.parse_type())
+                else:
+                    nil
+                MacroDeclStub.Fn(MacroFnStub(name: name, params: params, ret: ret))
+            MacroIntroKind.Field:
+                val name = self.parse_macro_qident()
+                self.expect(TokenKind.Colon)
+                val ty = self.parse_type()
+                MacroDeclStub.Field(MacroFieldStub(name: name, ty: ty))
+            MacroIntroKind.Type:
+                val name = self.parse_macro_qident()
+                MacroDeclStub.Type(MacroTypeStub(name: name))
+            MacroIntroKind.Let:
+                val name = self.parse_macro_qident()
+                self.expect(TokenKind.Colon)
+                val ty = self.parse_type()
+                MacroDeclStub.Var(MacroVarStub(name: name, ty: ty))
+            MacroIntroKind.Const:
+                val name = self.parse_macro_qident()
+                self.expect(TokenKind.Colon)
+                val ty = self.parse_type()
+                MacroDeclStub.Var(MacroVarStub(name: name, ty: ty))
+
+        MacroIntroDecl(target: target, kind: kind, stub: stub)
+
+    # Parse macro inject spec
+    fn parse_macro_inject_spec(self) -> MacroInjectSpec:
+        self.expect_ident_value("callsite")
+        self.expect(TokenKind.Dot)
+        self.expect_ident_value("block")
+        self.expect(TokenKind.Dot)
+        val anchor = self.parse_macro_anchor()
+        self.expect(TokenKind.Dot)
+        val code_kind = if self.check_ident("stmt"):
+            self.advance()
+            MacroCodeKind.Stmt
+        elif self.check_ident("block"):
+            self.advance()
+            MacroCodeKind.Block
+        else:
+            self.error("expected stmt or block")
+        MacroInjectSpec(anchor: anchor, code_kind: code_kind)
+
+    # Parse macro target: enclosing.X or callsite.block.anchor
+    fn parse_macro_target(self) -> MacroTarget:
+        if self.check_ident("enclosing"):
+            self.advance()
+            self.expect(TokenKind.Dot)
+            val enclosing = if self.check_ident("module"):
+                self.advance()
+                EnclosingTarget.Module
+            elif self.check(TokenKind.Class):
+                self.advance()
+                EnclosingTarget.Class
+            elif self.check(TokenKind.Struct):
+                self.advance()
+                EnclosingTarget.Struct
+            elif self.check(TokenKind.Trait):
+                self.advance()
+                EnclosingTarget.Trait
+            else:
+                self.error("expected module, class, struct, or trait")
+            MacroTarget.Enclosing(enclosing)
+        elif self.check_ident("callsite"):
+            self.advance()
+            self.expect(TokenKind.Dot)
+            self.expect_ident_value("block")
+            self.expect(TokenKind.Dot)
+            val anchor = self.parse_macro_anchor()
+            MacroTarget.CallsiteBlock(anchor)
+        else:
+            self.error("expected enclosing or callsite")
+
+    # Parse macro anchor: head, tail, or here
+    fn parse_macro_anchor(self) -> MacroAnchor:
+        if self.check_ident("head"):
+            self.advance()
+            MacroAnchor.Head
+        elif self.check_ident("tail"):
+            self.advance()
+            MacroAnchor.Tail
+        elif self.check_ident("here"):
+            self.advance()
+            MacroAnchor.Here
+        else:
+            self.error("expected head, tail, or here")
+
+    # Parse macro intro kind
+    fn parse_macro_intro_kind(self) -> MacroIntroKind:
+        if self.check(TokenKind.Fn):
+            self.advance()
+            MacroIntroKind.Fn
+        elif self.check_ident("field"):
+            self.advance()
+            MacroIntroKind.Field
+        elif self.check(TokenKind.Type):
+            self.advance()
+            MacroIntroKind.Type
+        elif self.check(TokenKind.Let):
+            self.advance()
+            MacroIntroKind.Let
+        elif self.check(TokenKind.Const):
+            self.advance()
+            MacroIntroKind.Const
+        else:
+            self.error("expected fn, field, type, let, or const")
+
+    # Parse macro qualified identifier
+    fn parse_macro_qident(self) -> String:
+        if self.is_identifier():
+            self.expect_identifier()
+        elif self.is_string():
+            val lexeme = self.current.lexeme
+            self.advance()
+            self.strip_macro_qident_quotes(lexeme)
+        else:
+            self.error("expected identifier or string literal")
+
+    # Strip quotes from macro qident
+    fn strip_macro_qident_quotes(self, input: String) -> String:
+        if input.len() >= 2:
+            val first = input[0]
+            val last = input[-1]
+            if (first == '"' and last == '"') or (first == '\'' and last == '\''):
+                return input[1:-1]
+        input
+
+    # Parse macro param signature list
+    fn parse_macro_param_sig_list(self) -> [MacroParamSig]:
+        self.expect(TokenKind.LParen)
+        var params = []
+        while not self.check(TokenKind.RParen):
+            val name = self.expect_identifier()
+            self.expect(TokenKind.Colon)
+            val ty = self.parse_type()
+            params.append(MacroParamSig(name: name, ty: ty))
+            if not self.check(TokenKind.RParen):
+                self.expect(TokenKind.Comma)
+        self.expect(TokenKind.RParen)
+        params
+
+    # Parse macro body
+    fn parse_macro_body(self) -> [MacroStmt]:
+        self.expect(TokenKind.Newline)
+        self.expect(TokenKind.Indent)
+
+        var body = []
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            while self.check(TokenKind.Newline):
+                self.advance()
+            if self.check(TokenKind.Dedent) or self.is_at_end():
+                break
+
+            if self.check_ident("const_eval"):
+                self.advance()
+                self.expect(TokenKind.Colon)
+                val block = self.parse_block()
+                body.append(MacroStmt.ConstEval(block))
+            elif self.check_ident("emit"):
+                self.advance()
+                val label = if self.check(TokenKind.Result):
+                    val name = self.current.lexeme
+                    self.advance()
+                    name
+                else:
+                    self.expect_identifier()
+                self.expect(TokenKind.Colon)
+                val block = self.parse_block()
+                body.append(MacroStmt.Emit(label: label, block: block))
+            else:
+                val stmt = self.parse_item()
+                body.append(MacroStmt.Stmt(stmt))
+
+            if self.check(TokenKind.Newline):
+                self.advance()
+
+        self.expect(TokenKind.Dedent)
+        body

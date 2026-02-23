@@ -1,0 +1,481 @@
+# TreeSitter Outline Members - Enum/Bitfield/Trait/Impl/TypeAlias/Const Parsers
+#
+# Handles parsing of:
+# - enum outlines and variants
+# - bitfield outlines and fields
+# - trait outlines
+# - impl block outlines
+# - type alias outlines
+# - constant/variable outlines
+# - static assert outlines
+# - integer literal helper
+#
+# Split from outline_decls.spl for modularity.
+
+use compiler.core.lexer.*
+use treesitter_types.*
+use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
+use compiler.frontend.treesitter.outline_types.*
+use compiler.frontend.treesitter.outline_decls.*
+
+# ============================================================================
+# Enum Parsing
+# ============================================================================
+
+fn treesitter_parse_enum_outline(self: TreeSitter, is_public: bool, doc: text?) -> EnumOutline:
+        """Parse enum outline."""
+        val start = self.current.span
+        self.advance()  # Consume 'enum'
+
+        val name = self.parse_identifier()
+        val type_params = self.parse_optional_type_params()
+
+        self.expect(TokenKind.Colon, "expected ':' after enum name")
+        self.skip_newlines()
+        self.expect(TokenKind.Indent, "expected indented enum body")
+
+        # Try to parse body docstring (triple-quoted string after indent)
+        val body_doc = self.try_parse_body_docstring()
+        val final_doc = match body_doc:
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
+            case nil: doc
+
+        var variants: [VariantOutline] = []
+
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            self.skip_newlines()
+            if self.check(TokenKind.Dedent):
+                break
+
+            if self.check(TokenKind.Ident):
+                variants = variants_push(variants, self.parse_variant_outline())
+            else:
+                self.error("expected variant in enum")
+                self.synchronize()
+        self.match_token(TokenKind.Dedent)
+
+        EnumOutline(
+            name: name,
+            type_params: type_params,
+            variants: variants,
+            is_public: is_public,
+            doc_comment: final_doc,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_variant_outline(self: TreeSitter) -> VariantOutline:
+        """Parse enum variant."""
+        val start = self.current.span
+        val name = self.parse_identifier()
+
+        var payload: VariantPayload = nil
+
+        if self.match_token(TokenKind.LParen):
+            # Tuple variant
+            var types: [TypeOutline] = []
+            if not self.check(TokenKind.RParen):
+                types = types_push(types, self.parse_type_outline())
+                while self.match_token(TokenKind.Comma):
+                    if self.check(TokenKind.RParen):
+                        break
+                    types = types_push(types, self.parse_type_outline())
+            self.expect(TokenKind.RParen, "expected ')' after variant types")
+            payload = variantpayload_Tuple(types)
+        elif self.match_token(TokenKind.LBrace):
+            # Struct variant
+            var fields: [FieldOutline] = []
+            if not self.check(TokenKind.RBrace):
+                fields = fields_push(fields, self.parse_field_outline(false))
+                while self.match_token(TokenKind.Comma):
+                    if self.check(TokenKind.RBrace):
+                        break
+                    fields = fields_push(fields, self.parse_field_outline(false))
+            self.expect(TokenKind.RBrace, "expected '}' after variant fields")
+            payload = variantpayload_Struct(fields)
+
+        self.skip_newlines()
+
+        VariantOutline(
+            name: name,
+            payload: payload,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+# ============================================================================
+# Bitfield Parsing
+# ============================================================================
+
+fn treesitter_parse_bitfield_outline(self: TreeSitter, is_public: bool, doc: text, attrs: [AttributeOutline]) -> BitfieldOutline:
+        """Parse bitfield outline.
+
+        Syntax: bitfield Name(BackingType):
+            field1: Type
+            field2: Type @bits(N)
+            _reserved: N
+        """
+        val start = self.current.span
+        self.advance()  # Consume 'bitfield'
+
+        val name = self.parse_identifier()
+
+        # Parse backing type: bitfield Name(u32):
+        self.expect(TokenKind.LParen, "expected '(' after bitfield name")
+        val backing_type = self.parse_type_outline()
+        self.expect(TokenKind.RParen, "expected ')' after backing type")
+
+        self.expect(TokenKind.Colon, "expected ':' after bitfield declaration")
+        self.skip_newlines()
+        self.expect(TokenKind.Indent, "expected indented bitfield body")
+
+        # Try to parse body docstring
+        val body_doc = self.try_parse_body_docstring()
+        val final_doc = match body_doc:
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
+            case nil: doc
+
+        var fields: [BitfieldFieldOutline] = []
+
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            self.skip_newlines()
+            if self.check(TokenKind.Dedent):
+                break
+
+            if self.check(TokenKind.Ident):
+                fields = fields_push(fields, self.parse_bitfield_field_outline())
+            else:
+                self.error("expected field in bitfield")
+                self.synchronize()
+
+        self.match_token(TokenKind.Dedent)
+
+        BitfieldOutline(
+            name: name,
+            backing_type: backing_type,
+            fields: fields,
+            is_public: is_public,
+            doc_comment: final_doc,
+            attributes: attrs,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_bitfield_field_outline(self: TreeSitter) -> BitfieldFieldOutline:
+        """Parse bitfield field.
+
+        Formats:
+        - name: Type              -> regular field (bits inferred)
+        - name: Type @bits(N)     -> field with explicit bit width
+        - _reserved: N            -> reserved bits (no type)
+        """
+        val start = self.current.span
+        val name = self.parse_identifier()
+
+        # Check for reserved field pattern: _reserved: 8
+        val is_reserved = name.starts_with("_")
+
+        self.expect(TokenKind.Colon, "expected ':' after field name")
+
+        var type_: TypeOutline = nil
+        var bits: i64 = nil
+
+        if is_reserved:
+            # Reserved field: expect just a number
+            if self.check(TokenKind.IntLit):
+                bits = self.parse_int_literal()
+            else:
+                # Allow type for reserved fields too
+                type_ = self.parse_type_outline()
+        else:
+            # Regular field: parse type
+            type_ = self.parse_type_outline()
+
+            # Check for @bits(N) attribute
+            if self.check(TokenKind.At):
+                self.advance()  # consume '@'
+                if self.check(TokenKind.Ident):
+                    if self.current.text == "bits":
+                        self.advance()  # consume 'bits'
+                        self.expect(TokenKind.LParen, "expected '(' after @bits")
+                        if self.check(TokenKind.IntLit):
+                            bits = self.parse_int_literal()
+                        self.expect(TokenKind.RParen, "expected ')' after bit count")
+
+        self.skip_newlines()
+
+        BitfieldFieldOutline(
+            name: name,
+            type_: type_,
+            bits: bits,
+            is_reserved: is_reserved,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_int_literal(self: TreeSitter) -> i64:
+        """Parse integer literal and return its value."""
+        val text = self.current.text
+        self.advance()
+        # Simple integer parsing - handle both decimal and hex
+        if text.starts_with("0x") or text.starts_with("0X"):
+            text[2:].parse_int_radix(16) ?? 0
+        else:
+            text_parse_int(text) ?? 0
+
+
+# ============================================================================
+# Trait / Impl Parsing
+# ============================================================================
+
+fn treesitter_parse_trait_outline(self: TreeSitter, is_public: bool, doc: text?) -> TraitOutline:
+        """Parse trait outline."""
+        val start = self.current.span
+        self.advance()  # Consume 'trait'
+
+        val name = self.parse_identifier()
+        val type_params = self.parse_optional_type_params()
+
+        self.expect(TokenKind.Colon, "expected ':' after trait name")
+        self.skip_newlines()
+        self.expect(TokenKind.Indent, "expected indented trait body")
+
+        # Try to parse body docstring (triple-quoted string after indent)
+        val body_doc = self.try_parse_body_docstring()
+        val final_doc = match body_doc:
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
+            case nil: doc
+
+        var methods: [FunctionOutline] = []
+
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            self.skip_newlines()
+            if self.check(TokenKind.Dedent):
+                break
+
+            val method_doc = self.take_doc_comment()
+
+            match self.peek():
+                case KwFn:
+                    methods = methods_push(methods, self.parse_function_outline(false, false, method_doc))
+                case KwMe:
+                    methods = methods_push(methods, self.parse_function_outline(false, true, method_doc))
+                case KwVar:
+                    # Check for deprecated 'var fn' syntax
+                    if self.peek_next() == TokenKind.KwFn:
+                        self.warning("Deprecated: Replace `var fn method()` with `me method()`")
+                        self.advance()  # consume 'var'
+                        methods = methods_push(methods, self.parse_function_outline(false, true, method_doc))
+                    else:
+                        self.error("expected method in trait")
+                        self.synchronize()
+                case _:
+                    self.error("expected method in trait")
+                    self.synchronize()
+
+        self.match_token(TokenKind.Dedent)
+
+        TraitOutline(
+            name: name,
+            type_params: type_params,
+            methods: methods,
+            is_public: is_public,
+            doc_comment: final_doc,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
+        """Parse impl block outline."""
+        val start = self.current.span
+        self.advance()  # Consume 'impl'
+
+        val type_ = self.parse_type_outline()
+
+        var trait_: TypeOutline = nil
+        if self.match_token(TokenKind.Colon):
+            # impl Type: Trait
+            if not self.check(TokenKind.Indent):
+                if not self.check(TokenKind.Newline):
+                    trait_ = self.parse_type_outline()
+
+        if trait__is_none(trait_):
+            self.expect(TokenKind.Colon, "expected ':' after impl type")
+        self.skip_newlines()
+        self.expect(TokenKind.Indent, "expected indented impl body")
+
+        # Skip optional body docstring (triple-quoted string after indent)
+        # Note: impl blocks don't store doc comments, so we discard it
+        self.try_parse_body_docstring()
+
+        var methods: [FunctionOutline] = []
+
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            self.skip_newlines()
+            if self.check(TokenKind.Dedent):
+                break
+
+            val method_doc = self.take_doc_comment()
+            var method_public = false
+
+            if self.match_token(TokenKind.KwPub):
+                method_public = true
+
+            match self.peek():
+                case KwFn:
+                    val m = self.parse_function_outline(method_public, false, method_doc)
+                    m.is_method = true
+                    methods = methods_push(methods, m)
+                case KwMe:
+                    val m = self.parse_function_outline(method_public, true, method_doc)
+                    m.is_method = true
+                    methods = methods_push(methods, m)
+                case KwVar:
+                    # Check for deprecated 'var fn' syntax
+                    if self.peek_next() == TokenKind.KwFn:
+                        self.warning("Deprecated: Replace `var fn method()` with `me method()`")
+                        self.advance()  # consume 'var'
+                        val m = self.parse_function_outline(method_public, true, method_doc)
+                        m.is_method = true
+                        methods = methods_push(methods, m)
+                    else:
+                        self.error("expected method in impl")
+                        self.synchronize()
+                case KwStatic:
+                    self.advance()
+                    val m = self.parse_function_outline(method_public, false, method_doc)
+                    m.is_static = true
+                    methods = methods_push(methods, m)
+                case _:
+                    self.error("expected method in impl")
+                    self.synchronize()
+
+        self.match_token(TokenKind.Dedent)
+
+        ImplOutline(
+            type_: type_,
+            trait_: trait_,
+            methods: methods,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+# ============================================================================
+# Type Alias / Const / Static Assert
+# ============================================================================
+
+fn treesitter_parse_type_alias_outline(self: TreeSitter, is_public: bool) -> TypeAliasOutline:
+        """Parse type alias."""
+        val start = self.current.span
+        self.advance()  # Consume 'type'
+
+        val name = self.parse_identifier()
+        val type_params = self.parse_optional_type_params()
+
+        self.expect(TokenKind.Assign, "expected '=' after type alias name")
+        val type_ = self.parse_type_outline()
+        self.skip_newlines()
+
+        TypeAliasOutline(
+            name: name,
+            type_params: type_params,
+            type_: type_,
+            is_public: is_public,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_const_outline(self: TreeSitter, is_public: bool, attrs: [AttributeOutline]) -> ConstOutline:
+        """Parse module-level constant.
+
+        Supports:
+        - val name: Type = value
+        - @volatile val name: Type @ 0x40020000
+        """
+        val start = self.current.span
+        val is_mutable = self.check(TokenKind.KwVar)
+        self.advance()  # Consume 'val' or 'var'
+
+        val name = self.parse_identifier()
+
+        var type_: TypeOutline = nil
+        if self.match_token(TokenKind.Colon):
+            type_ = self.parse_type_outline()
+
+        # Check for @volatile in attributes
+        var is_volatile = false
+        for attr in attrs:
+            if attr.name == "volatile":
+                is_volatile = true
+                break
+
+        # Check for @ address syntax (memory-mapped variable)
+        var address_span: Span = nil
+        if self.check(TokenKind.At):
+            self.advance()  # consume '@'
+            val addr_start = self.current.span.start
+            self.skip_expression()
+            address_span = span_new(addr_start, self.previous.span.end, 0, 0)
+            # Memory-mapped variables are implicitly volatile
+            is_volatile = true
+
+        # Value is optional for memory-mapped variables
+        var value_span = span_empty()
+        if self.match_token(TokenKind.Assign):
+            val value_start = self.current.span.start
+            self.skip_expression()
+            value_span = span_new(value_start, self.previous.span.end, 0, 0)
+
+        self.skip_newlines()
+
+        ConstOutline(
+            name: name,
+            type_: type_,
+            is_mutable: is_mutable,
+            is_public: is_public,
+            is_volatile: is_volatile,
+            address_span: address_span,
+            value_span: value_span,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+fn treesitter_parse_static_assert_outline(self: TreeSitter) -> StaticAssertOutline:
+        """Parse static assertion outline.
+
+        Syntax:
+            static assert <condition>
+            static assert <condition>  # message
+        """
+        val start = self.current.span  # Current token is 'assert'
+        self.advance()  # Consume 'assert'
+
+        # Parse condition expression
+        val condition_start = self.current.span.start
+        self.skip_expression()
+        val condition_span = span_new(condition_start, self.previous.span.end, 0, 0)
+
+        # Optional error message after comma
+        var message: text = nil
+        if self.match_token(TokenKind.Comma):
+            if self.check(TokenKind.String):
+                message = self.current.text
+                self.advance()
+
+        self.skip_newlines()
+
+        StaticAssertOutline(
+            condition_span: condition_span,
+            message: message,
+            span: merge_spans(start, self.previous.span)
+        )
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TreeSitter

@@ -1,0 +1,391 @@
+# DL Config Loader - Load Deep Learning configuration from SDN files
+#
+# Extends the DLConfig system with file-based configuration loading.
+#
+# Three-level config system (lowest → highest priority):
+#   1. local (user):         ~/.simple/dl.config.sdn       — loaded once at CLI startup
+#   2. project (shared):     ./config/dl.config.sdn        — committed to repo
+#   3. project_local:        ./dl.config.local.sdn          — not committed (gitignored)
+#
+# Each file only overrides keys it explicitly contains (partial merge).
+
+use std.src.dl.config.{DLConfig, Device, DType, Backend, dl}
+use std.io_runtime.{file_read, file_exists}
+
+# Note: Caching disabled due to runtime module closure limitation
+# User config will be reloaded on each call
+
+# ============================================================================
+# Config Loading
+# ============================================================================
+
+fn load_config_from_file(path: text) -> DLConfig?:
+    """Load DL configuration from SDN file.
+
+    Args:
+        path - Path to SDN config file
+
+    Returns:
+        Result with DLConfig or error message
+    """
+    if not file_exists(path):
+        return Err("Config file not found: {path}")
+
+    val content = file_read(path)
+    if content == "":
+        return Err("Failed to read config file: {path}")
+
+    # Parse SDN content
+    use std.sdn.{parse, SdnValue}
+
+    val parse_result = parse(content)
+    if not parse_result.is_ok():
+        return Err("Failed to parse SDN: {parse_result.unwrap_err()}")
+
+    val sdn_value = parse_result.unwrap()
+
+    # Extract config from SDN value
+    val config = extract_dl_config_from_sdn(sdn_value)
+    if not config.is_ok():
+        return Err(config.unwrap_err())
+
+    Ok(config.unwrap())
+
+fn parse_config_simple(content: text) -> DLConfig:
+    """Simple line-based config parser.
+
+    Parses config lines like:
+        device: "cuda:1"
+        dtype: "f32"
+        backend: "torch"
+    """
+    var config = DLConfig__default()
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip comments and empty lines
+        if trimmed.starts_with("#") or trimmed == "":
+            continue
+
+        # Parse key: value pairs
+        val parts = trimmed.split(":")
+        if parts.len() < 2:
+            continue
+
+        val key = parts[0].trim()
+        var value = parts[1].trim()
+
+        # Remove quotes
+        if value.starts_with("\"") and value.ends_with("\""):
+            value = value[1:value.len() - 1]
+
+        # Apply configuration
+        match key:
+            "device":
+                config.default_device = parse_device(value)
+            "dtype":
+                config.default_dtype = parse_dtype(value)
+            "backend":
+                config.default_backend = parse_backend(value)
+            "autograd":
+                config.autograd_enabled = parse_bool(value)
+            "amp":
+                config.amp_enabled = parse_bool(value)
+            "seed":
+                val seed_val = int(value)
+                config.seed = Some(seed_val)
+            _:
+                # Unknown key, skip
+                ()
+
+    config
+
+fn parse_device(s: text) -> Device:
+    """Parse device string to Device enum.
+
+    Examples:
+      "cpu" → Device.CPU
+      "gpu" → Device.CUDA(0)  (default GPU = 1st GPU)
+      "cuda:0" → Device.CUDA(0)
+      "cuda:1" → Device.CUDA(1)
+    """
+    if s == "cpu":
+        return Device.CPU
+    if s == "gpu":
+        return Device.CUDA(0)  # Default GPU = 1st GPU
+    if s.starts_with("cuda:"):
+        val id_str = s[5:s.len()]
+        val id = int(id_str)
+        return Device.CUDA(id)
+
+    # Default to CPU if unknown
+    Device.CPU
+
+fn parse_dtype(s: text) -> DType:
+    """Parse dtype string to DType enum."""
+    match s:
+        "f16": DType.F16
+        "f32": DType.F32
+        "f64": DType.F64
+        "bf16": DType.BF16
+        "i8": DType.I8
+        "i16": DType.I16
+        "i32": DType.I32
+        "i64": DType.I64
+        "u8": DType.U8
+        "u16": DType.U16
+        "u32": DType.U32
+        "u64": DType.U64
+        _: DType.F32  # Default
+
+fn parse_backend(s: text) -> Backend:
+    """Parse backend string to Backend enum."""
+    match s:
+        "native": Backend.Native
+        "torch" | "pytorch": Backend.PyTorch
+        "cuda": Backend.CUDA
+        _: Backend.PyTorch  # Default
+
+fn parse_bool(s: text) -> bool:
+    """Parse boolean string."""
+    s == "true" or s == "True" or s == "1"
+
+# ============================================================================
+# Global Config Loading
+# ============================================================================
+
+fn load_and_apply(path: text) -> bool:
+    """Load config from file and apply to global dl instance.
+
+    Args:
+        path - Path to config file
+
+    Returns:
+        true if successful, false otherwise
+    """
+    val result = load_config_from_file(path)
+
+    match result:
+        Ok(config):
+            # Apply to global instance
+            dl.default_dtype = config.default_dtype
+            dl.default_device = config.default_device
+            dl.default_backend = config.default_backend
+            dl.autograd_enabled = config.autograd_enabled
+            dl.amp_enabled = config.amp_enabled
+            dl.seed = config.seed
+            true
+        Err(msg):
+            print "Failed to load config: {msg}"
+            false
+
+fn apply_sdn_to_global(sdn_value: SdnValue):
+    """Apply SDN config values to the global dl instance (partial merge).
+
+    Only overrides keys that are explicitly present in the SDN dict.
+    Keys not present in the file are left unchanged.
+
+    Args:
+        sdn_value - Parsed SDN value (should be Dict)
+    """
+    use std.sdn.{SdnValue}
+
+    match sdn_value:
+        case SdnValue.Dict(d):
+            if d.contains_key("device"):
+                val device_value = d["device"]
+                match device_value:
+                    case SdnValue.String(s):
+                        dl.default_device = parse_device(s)
+                    case _: ()
+
+            if d.contains_key("dtype"):
+                val dtype_value = d["dtype"]
+                match dtype_value:
+                    case SdnValue.String(s):
+                        dl.default_dtype = parse_dtype(s)
+                    case _: ()
+
+            if d.contains_key("backend"):
+                val backend_value = d["backend"]
+                match backend_value:
+                    case SdnValue.String(s):
+                        dl.default_backend = parse_backend(s)
+                    case _: ()
+
+            if d.contains_key("autograd"):
+                val autograd_value = d["autograd"]
+                match autograd_value:
+                    case SdnValue.Bool(b):
+                        dl.autograd_enabled = b
+                    case SdnValue.String(s):
+                        dl.autograd_enabled = parse_bool(s)
+                    case _: ()
+
+            if d.contains_key("amp"):
+                val amp_value = d["amp"]
+                match amp_value:
+                    case SdnValue.Bool(b):
+                        dl.amp_enabled = b
+                    case SdnValue.String(s):
+                        dl.amp_enabled = parse_bool(s)
+                    case _: ()
+
+            if d.contains_key("seed"):
+                val seed_value = d["seed"]
+                match seed_value:
+                    case SdnValue.Int(n):
+                        dl.seed = Some(n)
+                    case SdnValue.String(s):
+                        dl.seed = Some(int(s))
+                    case _: ()
+
+        case _:
+            ()
+
+fn apply_file_to_global(path: text) -> bool:
+    """Load an SDN config file and apply it to global dl (partial merge).
+
+    If the file exists, parses it and applies only the keys present.
+    If the file does not exist, does nothing and returns false.
+
+    Args:
+        path - Path to SDN config file
+
+    Returns:
+        true if file was found and applied, false otherwise
+    """
+    if not file_exists(path):
+        return false
+
+    val content = file_read(path)
+    if content == "":
+        return false
+
+    use std.sdn.{parse}
+
+    val parse_result = parse(content)
+    if not parse_result.is_ok():
+        return false
+
+    val sdn_value = parse_result.unwrap()
+    apply_sdn_to_global(sdn_value)
+    true
+
+fn load_user_config():
+    """Load user-level config from ~/.simple/dl.config.sdn (cached).
+
+    This is called once at CLI startup. Subsequent calls are no-ops.
+    The user config provides personal defaults (e.g. preferred GPU device)
+    that can be overridden by project and project_local configs.
+    """
+    # Note: Caching removed due to runtime module closure limitation
+    val home = env_get("HOME") ?? "/home/user"
+    val user_config = "{home}/.simple/dl.config.sdn"
+    if apply_file_to_global(user_config):
+        pass
+
+fn load_local_config():
+    """Load config from all standard locations (3-level merge).
+
+    Priority (lowest → highest):
+    1. User config:          ~/.simple/dl.config.sdn     (cached, loaded once)
+    2. Project config:       ./config/dl.config.sdn      (shared, committed)
+    3. Project-local config: ./dl.config.local.sdn       (not shared, gitignored)
+
+    Each level only overrides keys it explicitly contains.
+    """
+    # Level 1: user config (cached - only reads disk once per process)
+    load_user_config()
+
+    # Level 2: project config (shared, committed to repo)
+    apply_file_to_global("config/dl.config.sdn")
+
+    # Level 3: project-local config (not committed, gitignored)
+    apply_file_to_global("dl.config.local.sdn")
+
+# ============================================================================
+# SDN Helper Functions
+# ============================================================================
+
+fn extract_dl_config_from_sdn(sdn_value: SdnValue) -> DLConfig?:
+    """Extract DL configuration from parsed SDN value.
+
+    Args:
+        sdn_value: Parsed SDN value (should be Dict)
+
+    Returns:
+        Ok(config) on success
+        Err(message) on invalid format
+
+    Example SDN format:
+        device: "cuda:0"
+        dtype: "f32"
+        backend: "torch"
+        autograd: true
+        amp: false
+    """
+    use std.sdn.{SdnValue}
+
+    var config = DLConfig__default()
+
+    match sdn_value:
+        case SdnValue.Dict(d):
+            # Extract device
+            if d.contains_key("device"):
+                val device_value = d["device"]
+                match device_value:
+                    case SdnValue.String(s):
+                        config.default_device = parse_device(s)
+                    case _: ()
+
+            # Extract dtype
+            if d.contains_key("dtype"):
+                val dtype_value = d["dtype"]
+                match dtype_value:
+                    case SdnValue.String(s):
+                        config.default_dtype = parse_dtype(s)
+                    case _: ()
+
+            # Extract backend
+            if d.contains_key("backend"):
+                val backend_value = d["backend"]
+                match backend_value:
+                    case SdnValue.String(s):
+                        config.default_backend = parse_backend(s)
+                    case _: ()
+
+            # Extract autograd flag
+            if d.contains_key("autograd"):
+                val autograd_value = d["autograd"]
+                match autograd_value:
+                    case SdnValue.Bool(b):
+                        config.autograd_enabled = b
+                    case SdnValue.String(s):
+                        config.autograd_enabled = parse_bool(s)
+                    case _: ()
+
+            # Extract amp flag
+            if d.contains_key("amp"):
+                val amp_value = d["amp"]
+                match amp_value:
+                    case SdnValue.Bool(b):
+                        config.amp_enabled = b
+                    case SdnValue.String(s):
+                        config.amp_enabled = parse_bool(s)
+                    case _: ()
+
+            Ok(config)
+
+        case _:
+            Err("SDN root must be a dictionary for DL config")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export load_config_from_file, load_and_apply, load_local_config, load_user_config
+export apply_sdn_to_global, apply_file_to_global
+export parse_device, parse_dtype, parse_backend

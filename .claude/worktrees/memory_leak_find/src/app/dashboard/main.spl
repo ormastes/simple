@@ -1,0 +1,719 @@
+# Dashboard CLI Application
+#
+# Core dashboard (CLI entry, utilities, collectors, commands, export, serve).
+# Phase 6 features are in dashboard_phase6.spl (re-exported below).
+
+use std.cli.cli_util (get_cli_args, parse_csv_fields)
+use std.cli.cli_parser.{cli_spec, cli_spec_program, cli_spec_flag, cli_spec_option, cli_spec_positional, parse_cli_args, parsed_flag, parsed_option, parsed_positional, parsed_positionals, generate_help}
+use app.io.mod (file_exists, file_read, file_write, dir_create_all, file_remove, file_modified_time, shell_int, shell_output_trimmed, shell_bool, shell_output, shell)
+use std.text.{to_int_or}
+use std.text.{escape_json}
+
+fn main() -> i64:
+    val args = get_cli_args()
+    run_dashboard(args)
+
+# =========================================================================
+# CLI Entry Point - Called from Rust driver
+# =========================================================================
+
+fn run_dashboard(args: [text]) -> i64:
+    """Entry point for dashboard CLI. Routes subcommands to handlers.
+
+    Args:
+        args: Command-line arguments (without 'dashboard' prefix)
+
+    Returns:
+        Exit code (0 for success)
+    """
+    if args.len() == 0:
+        run_status([])
+        return 0
+
+    val cmd = args[0]
+    val sub_args = if args.len() > 1: args.slice(1, args.len()) else: []
+
+    match cmd:
+        case "status":
+            run_status(sub_args)
+            return 0
+        case "sspec":
+            run_sspec(sub_args)
+            return 0
+        case "todos":
+            run_todos(sub_args)
+            return 0
+        case "coverage":
+            run_coverage(sub_args)
+            return 0
+        case "collect":
+            run_collect(sub_args)
+            return 0
+        case "serve":
+            run_serve(sub_args)
+            return 0
+        case "export":
+            run_export(sub_args)
+            return 0
+        case "invalidate-cache":
+            run_invalidate_cache(sub_args)
+            return 0
+        case "snapshot":
+            run_snapshot(sub_args)
+            return 0
+        case "notify-test":
+            run_notify_test(sub_args)
+            return 0
+        case "alert-add":
+            run_alert_add(sub_args)
+            return 0
+        case "alert-list":
+            run_alert_list(sub_args)
+            return 0
+        case "alert-remove":
+            run_alert_remove(sub_args)
+            return 0
+        case "compare":
+            run_compare(sub_args)
+            return 0
+        case "query":
+            run_query(sub_args)
+            return 0
+        case "help":
+            print_help()
+            return 0
+        case "--help":
+            print_help()
+            return 0
+        case "-h":
+            print_help()
+            return 0
+        case _:
+            print "Unknown command: {cmd}"
+            print "Run 'simple dashboard help' for usage."
+            return 1
+
+fn print_help():
+    """Print dashboard usage help."""
+    print "Simple Dashboard CLI"
+    print ""
+    print "USAGE:"
+    print "  simple dashboard <command> [options]"
+    print ""
+    print "COMMANDS:"
+    print "  status         Show project status overview"
+    print "  sspec          Show SSpec test summary"
+    print "  todos          Show TODO summary"
+    print "  coverage       Show coverage summary"
+    print "  collect        Collect metrics from sources"
+    print "  serve          Start web dashboard server"
+    print "  export         Export dashboard report (html/json)"
+    print "  invalidate-cache  Clear dashboard cache"
+    print "  snapshot       Save snapshot to history"
+    print "  notify-test    Test notification channels (Phase C1)"
+    print "  alert-add      Add custom alert rule (Phase C2)"
+    print "  alert-list     List active alert rules"
+    print "  alert-remove   Remove alert rule by ID"
+    print "  compare        Compare metrics between dates (Phase C3)"
+    print "  query          Query data with DSL (Phase C4)"
+    print "  help           Show this help"
+    print ""
+    print "Examples:"
+    print "  simple dashboard status"
+    print "  simple dashboard sspec"
+    print "  simple dashboard todos"
+    print "  simple dashboard coverage"
+    print "  simple dashboard collect --mode=full"
+    print "  simple dashboard export --format=html > report.html"
+    print "  simple dashboard serve --port 3000"
+    print "  simple dashboard query 'todos where priority=P0'"
+    print "  simple dashboard compare --baseline=2026-01-01"
+
+val DASHBOARD_DIR = "doc/dashboard"
+val DASHBOARD_TABLE_DIR = "doc/dashboard/tables"
+val DASHBOARD_HISTORY_DIR = "doc/dashboard/history"
+val DASHBOARD_CACHE_PATH = "doc/dashboard/dashboard_db.cache.sdn"
+val DASHBOARD_CACHE_TTL_SECS = 30
+
+val TABLE_NAMES = [
+    "features", "sspec_tests", "todos", "coverage", "duplication",
+    "test_status", "verification", "vcs_state", "build_times",
+    "dependencies", "plans"
+]
+
+val TABLE_COUNT = 11
+
+val TABLE_HEADERS = [
+    ["id", "category", "name", "status", "test_coverage", "last_updated"],
+    ["id", "file", "title", "category", "difficulty", "status", "total_tests", "passed", "failed", "duration_ms", "has_docs", "last_run"],
+    ["id", "keyword", "area", "priority", "description", "file", "line", "issue", "blocked", "status", "age_days", "assigned", "last_updated"],
+    ["id", "level", "crate", "file", "lines_total", "lines_covered", "lines_percent", "branches_covered", "branches_percent", "timestamp"],
+    ["id", "file1", "file2", "lines", "tokens", "percentage", "timestamp"],
+    ["id", "mode", "suite", "total", "passed", "failed", "skipped", "duration_ms", "timestamp"],
+    ["id", "module", "property", "status", "proof_lines", "timestamp"],
+    ["bookmark", "commit_id", "commit_message", "uncommitted_files", "untracked_files", "timestamp"],
+    ["id", "timestamp", "target", "mode", "duration_ms", "crates_compiled", "incremental", "commit_id"],
+    ["id", "crate_name", "current_version", "latest_version", "outdated", "has_security_issue", "last_checked"],
+    ["id", "file", "title", "status", "created", "last_updated", "total_steps", "completed_steps", "blocked"]
+]
+
+fn now_unix_secs() -> i64:
+    shell_int("date +%s", 0)
+
+fn today_date() -> text:
+    shell_output_trimmed("date +%Y-%m-%d", "")
+
+fn current_month() -> text:
+    shell_output_trimmed("date +%Y-%m", "")
+
+struct Table:
+    name: text
+    headers: [text]
+    rows: [[text]]
+
+fn parse_header(line: text) -> (text, [text]):
+    val pipe = line.index_of("|") ?? -1
+    val last_pipe = line.last_index_of("|") ?? -1
+    if pipe < 0 or last_pipe <= pipe:
+        return ("", [])
+    val name = line[0:pipe].trim()
+    val header_str = line[pipe + 1:last_pipe].trim()
+    val headers = parse_csv_fields(header_str)
+    (name, headers)
+
+fn load_table(path: text) -> Table:
+    if not file_exists(path):
+        return Table(name: "", headers: [], rows: [])
+
+    val content = file_read(path)
+    val lines = content.split("\n")
+    var table_name = ""
+    var headers: [text] = []
+    var rows: [[text]] = []
+    var in_table = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not in_table and trimmed.contains("|"):
+            val (name, hdrs) = parse_header(trimmed)
+            if name != "":
+                table_name = name
+                headers = hdrs
+                in_table = true
+            continue
+        if in_table:
+            if line.starts_with("    "):
+                val fields = parse_csv_fields(trimmed)
+                if fields.len() > 0:
+                    rows.push(fields)
+            elif trimmed.contains("|"):
+                break
+    Table(name: table_name, headers: headers, rows: rows)
+
+fn load_table_named(path: text, name: text) -> Table:
+    if not file_exists(path):
+        return Table(name: name, headers: [], rows: [])
+
+    val content = file_read(path)
+    val lines = content.split("\n")
+    var headers: [text] = []
+    var rows: [[text]] = []
+    var in_table = false
+    var found = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed.contains("|"):
+            val (tname, hdrs) = parse_header(trimmed)
+            if tname == name:
+                headers = hdrs
+                in_table = true
+                found = true
+                continue
+            elif in_table:
+                break
+            else:
+                continue
+        if in_table and line.starts_with("    "):
+            val fields = parse_csv_fields(trimmed)
+            if fields.len() > 0:
+                rows.push(fields)
+    if not found:
+        Table(name: name, headers: [], rows: [])
+    else:
+        Table(name: name, headers: headers, rows: rows)
+
+fn header_index(headers: [text]) -> Dict<text, i64>:
+    var idx = {}
+    var i = 0
+    for h in headers:
+        idx[h] = i
+        i = i + 1
+    idx
+
+fn get_field(row: [text], idx: Dict<text, i64>, key: text) -> text:
+    if not idx.has(key):
+        return ""
+    val pos = idx[key]
+    if pos < 0 or pos >= row.len():
+        return ""
+    row[pos]
+
+fn count_eq(rows: [[text]], idx: Dict<text, i64>, key: text, value: text) -> i64:
+    if not idx.has(key):
+        return 0
+    val pos = idx[key]
+    var count = 0
+    for row in rows:
+        if pos < row.len() and row[pos] == value:
+            count = count + 1
+    count
+
+fn sum_int(rows: [[text]], idx: Dict<text, i64>, key: text) -> i64:
+    if not idx.has(key):
+        return 0
+    val pos = idx[key]
+    var total = 0
+    for row in rows:
+        if pos < row.len():
+            total = total + to_int_or(row[pos], 0)
+    total
+
+fn count_nonempty(rows: [[text]], idx: Dict<text, i64>, key: text) -> i64:
+    if not idx.has(key):
+        return 0
+    val pos = idx[key]
+    var count = 0
+    for row in rows:
+        if pos < row.len() and row[pos].trim() != "":
+            count = count + 1
+    count
+
+fn is_numeric(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var i = 0
+    var saw_dot = false
+    if value.starts_with("-") and value.len() > 1:
+        i = 1
+    while i < value.len():
+        val ch = value[i]
+        if ch == ".":
+            if saw_dot:
+                return false
+            saw_dot = true
+        elif ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+fn itos(value: i64) -> text:
+    "{value}"
+
+fn format_field(value: text) -> text:
+    if value == "":
+        "\"\""
+    elif is_numeric(value):
+        value
+    else:
+        val escaped = value.replace("\"", "'")
+        "\"{escaped}\""
+
+fn write_table(path: text, name: text, headers: [text], rows: [[text]]) -> bool:
+    var lines: [text] = []
+    lines.push("{name} |{headers.join(', ')}|")
+    for row in rows:
+        var parts: [text] = []
+        for cell in row:
+            parts.push(format_field(cell))
+        lines.push("    {parts.join(', ')}")
+    val content = lines.join("\n") + "\n"
+    file_write(path, content)
+
+fn ensure_dirs():
+    dir_create_all(DASHBOARD_DIR)
+    dir_create_all(DASHBOARD_TABLE_DIR)
+    dir_create_all(DASHBOARD_HISTORY_DIR)
+
+fn cache_is_fresh() -> bool:
+    if not file_exists(DASHBOARD_CACHE_PATH):
+        return false
+    val now = now_unix_secs()
+    val mtime = file_modified_time(DASHBOARD_CACHE_PATH)
+    if now == 0 or mtime == 0:
+        false
+    else:
+        (now - mtime) <= DASHBOARD_CACHE_TTL_SECS
+
+fn load_cache_summary() -> Dict<text, text>:
+    if not cache_is_fresh():
+        return {}
+    val table = load_table_named(DASHBOARD_CACHE_PATH, "dashboard_cache")
+    var result = {}
+    for row in table.rows:
+        if row.len() >= 2:
+            result[row[0]] = row[1]
+    result
+
+fn write_cache(summary: Dict<text, text>):
+    var rows: [[text]] = []
+    for key in summary.keys():
+        rows.push([key, summary[key]])
+    write_table(DASHBOARD_CACHE_PATH, "dashboard_cache", ["key", "value"], rows)
+
+fn ensure_empty_tables():
+    var i = 0
+    while i < TABLE_COUNT:
+        val name = TABLE_NAMES[i]
+        val headers = TABLE_HEADERS[i]
+        val path = "{DASHBOARD_TABLE_DIR}/{name}.sdn"
+        if not file_exists(path):
+            write_table(path, name, headers, [])
+        i = i + 1
+
+fn run_status(args: [text]):
+    """Show project status overview."""
+    print "=================================="
+    print "  Project Status Overview"
+    print "==================================\n"
+
+    val cache = load_cache_summary()
+    if cache.keys().len() > 0:
+        val features_total = if cache.has("features_total"): cache["features_total"] else: "0"
+        val features_complete = if cache.has("features_complete"): cache["features_complete"] else: "0"
+        val features_in_progress = if cache.has("features_in_progress"): cache["features_in_progress"] else: "0"
+        val features_planned = if cache.has("features_planned"): cache["features_planned"] else: "0"
+        val todos_total = if cache.has("todos_total"): cache["todos_total"] else: "0"
+        val todos_open = if cache.has("todos_open"): cache["todos_open"] else: "0"
+        val todos_blocked = if cache.has("todos_blocked"): cache["todos_blocked"] else: "0"
+        val tests_total = if cache.has("tests_total"): cache["tests_total"] else: "0"
+        val tests_passed = if cache.has("tests_passed"): cache["tests_passed"] else: "0"
+        val tests_failed = if cache.has("tests_failed"): cache["tests_failed"] else: "0"
+        val tests_skipped = if cache.has("tests_skipped"): cache["tests_skipped"] else: "0"
+        val lines_total = if cache.has("lines_total"): cache["lines_total"] else: "0"
+        val lines_covered = if cache.has("lines_covered"): cache["lines_covered"] else: "0"
+        val coverage_pct = if cache.has("coverage_pct"): cache["coverage_pct"] else: "0"
+
+        print "Features: {features_total} (complete: {features_complete}, in_progress: {features_in_progress}, planned: {features_planned})"
+        print "Todos: {todos_total} (open: {todos_open}, blocked: {todos_blocked})"
+        print "Tests: {tests_total} (passed: {tests_passed}, failed: {tests_failed}, skipped: {tests_skipped})"
+        print "Coverage: {coverage_pct}% ({lines_covered}/{lines_total} lines)"
+        print ""
+        return
+
+    val feature_table = load_table("{DASHBOARD_TABLE_DIR}/features.sdn")
+    val todo_table = load_table("{DASHBOARD_TABLE_DIR}/todos.sdn")
+    val test_table = load_table("{DASHBOARD_TABLE_DIR}/test_status.sdn")
+    val coverage_table = load_table("{DASHBOARD_TABLE_DIR}/coverage.sdn")
+
+    val feature_idx = header_index(feature_table.headers)
+    val todo_idx = header_index(todo_table.headers)
+    val test_idx = header_index(test_table.headers)
+    val coverage_idx = header_index(coverage_table.headers)
+
+    val features_total = feature_table.rows.len()
+    val features_complete = count_eq(feature_table.rows, feature_idx, "status", "complete")
+    val features_in_progress = count_eq(feature_table.rows, feature_idx, "status", "in_progress")
+    val features_planned = count_eq(feature_table.rows, feature_idx, "status", "planned")
+
+    val todos_total = todo_table.rows.len()
+    val todos_open = count_eq(todo_table.rows, todo_idx, "status", "open")
+    val todos_blocked = count_nonempty(todo_table.rows, todo_idx, "blocked")
+
+    val tests_total = sum_int(test_table.rows, test_idx, "total")
+    val tests_passed = sum_int(test_table.rows, test_idx, "passed")
+    val tests_failed = sum_int(test_table.rows, test_idx, "failed")
+    val tests_skipped = sum_int(test_table.rows, test_idx, "skipped")
+
+    val lines_total = sum_int(coverage_table.rows, coverage_idx, "lines_total")
+    val lines_covered = sum_int(coverage_table.rows, coverage_idx, "lines_covered")
+    val coverage_pct = if lines_total > 0: (lines_covered * 100) / lines_total else: 0
+
+    print "Features: {features_total} (complete: {features_complete}, in_progress: {features_in_progress}, planned: {features_planned})"
+    print "Todos: {todos_total} (open: {todos_open}, blocked: {todos_blocked})"
+    print "Tests: {tests_total} (passed: {tests_passed}, failed: {tests_failed}, skipped: {tests_skipped})"
+    print "Coverage: {coverage_pct}% ({lines_covered}/{lines_total} lines)"
+    print ""
+    if features_total == 0 and todos_total == 0 and tests_total == 0 and lines_total == 0:
+        print "No dashboard data found. Run 'simple dashboard collect' to refresh data."
+
+fn run_collect(args: [text]):
+    """Collect metrics from sources."""
+    ensure_dirs()
+
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "mode", "m", "Collection mode", default: "full", choices: ["full", "quick", "incremental"])
+    val parsed = parse_cli_args(spec2, args)
+    val mode = parsed_option(parsed, "mode")
+
+    print "Collecting dashboard metrics (mode={mode})..."
+
+    ensure_empty_tables()
+
+    collect_features()
+    collect_todos()
+    collect_tests()
+    collect_plans()
+    collect_coverage()
+
+    val summary = compute_summary()
+    write_cache(summary)
+
+    print "Collection complete."
+
+# Re-export collector functions (extracted to dashboard_collectors.spl)
+use app.dashboard.dashboard_collectors.*
+fn run_sspec(args: [text]):
+    print "=================================="
+    print "  SSpec Test Summary"
+    print "==================================\n"
+
+    val table = load_table("{DASHBOARD_TABLE_DIR}/sspec_tests.sdn")
+    val idx = header_index(table.headers)
+
+    if table.rows.len() == 0:
+        print "No SSpec data found. Run 'simple dashboard collect' to refresh data."
+        return
+
+    val suites_total = table.rows.len()
+    val tests_total = sum_int(table.rows, idx, "total_tests")
+    val tests_passed = sum_int(table.rows, idx, "passed")
+    val tests_failed = sum_int(table.rows, idx, "failed")
+
+    print "Suites: {suites_total}"
+    print "Tests: {tests_total} (passed: {tests_passed}, failed: {tests_failed})"
+
+fn run_todos(args: [text]):
+    print "=================================="
+    print "  TODO Summary"
+    print "==================================\n"
+
+    val table = load_table("{DASHBOARD_TABLE_DIR}/todos.sdn")
+    val idx = header_index(table.headers)
+
+    if table.rows.len() == 0:
+        print "No TODO data found. Run 'simple dashboard collect' to refresh data."
+        return
+
+    val total = table.rows.len()
+    val open = count_eq(table.rows, idx, "status", "open")
+    val blocked = count_nonempty(table.rows, idx, "blocked")
+    val p0 = count_eq(table.rows, idx, "priority", "P0")
+    val p1 = count_eq(table.rows, idx, "priority", "P1")
+    val p2 = count_eq(table.rows, idx, "priority", "P2")
+    val p3 = count_eq(table.rows, idx, "priority", "P3")
+
+    print "Total: {total}"
+    print "Open: {open}"
+    print "Blocked: {blocked}"
+    print "By priority: P0={p0}, P1={p1}, P2={p2}, P3={p3}"
+
+fn run_coverage(args: [text]):
+    print "=================================="
+    print "  Coverage Summary"
+    print "==================================\n"
+
+    val table = load_table("{DASHBOARD_TABLE_DIR}/coverage.sdn")
+    val idx = header_index(table.headers)
+
+    if table.rows.len() == 0:
+        print "No coverage data found. Run 'simple dashboard collect' to refresh data."
+        return
+
+    val lines_total = sum_int(table.rows, idx, "lines_total")
+    val lines_covered = sum_int(table.rows, idx, "lines_covered")
+    val coverage_pct = if lines_total > 0: (lines_covered * 100) / lines_total else: 0
+
+    print "Total lines: {lines_total}"
+    print "Covered lines: {lines_covered}"
+    print "Coverage: {coverage_pct}%"
+
+fn run_export(args: [text]):
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "format", "f", "Export format", default: "html", choices: ["html", "json"])
+    val parsed = parse_cli_args(spec2, args)
+    val format = parsed_option(parsed, "format")
+
+    if format == "json":
+        print export_json()
+    else:
+        print export_html()
+
+fn run_invalidate_cache(args: [text]):
+    if file_exists(DASHBOARD_CACHE_PATH):
+        file_remove(DASHBOARD_CACHE_PATH)
+        print "Cache cleared."
+    else:
+        print "Cache not found."
+
+fn run_snapshot(args: [text]):
+    ensure_dirs()
+    val month = current_month()
+    val date = today_date()
+    if month == "" or date == "":
+        print "Error: unable to determine date."
+        return
+    val dir = "{DASHBOARD_HISTORY_DIR}/{month}"
+    dir_create_all(dir)
+    val path = "{dir}/{date}.sdn"
+
+    var content = ""
+    var i = 0
+    while i < TABLE_COUNT:
+        val name = TABLE_NAMES[i]
+        val table_path = "{DASHBOARD_TABLE_DIR}/{name}.sdn"
+        if file_exists(table_path):
+            content = content + file_read(table_path) + "\n"
+        else:
+            val headers = TABLE_HEADERS[i]
+            var lines: [text] = []
+            lines.push("{name} |{headers.join(', ')}|")
+            content = content + lines.join("\n") + "\n\n"
+        i = i + 1
+
+    file_write(path, content.trim() + "\n")
+    print "Snapshot saved to {path}"
+
+
+fn export_json() -> text:
+    val summary = compute_summary()
+    var json = "{\n"
+    json = "{json}  \"summary\": {\n"
+    var s_keys = summary.keys()
+    var i = 0
+    while i < s_keys.len():
+        val key = s_keys[i]
+        val value = summary[key]
+        val comma = if i < s_keys.len() - 1: "," else: ""
+        json = "{json}    \"{escape_json(key)}\": {value}{comma}\n"
+        i = i + 1
+    json = "{json}  },\n"
+    json = "{json}  \"tables\": {\n"
+
+    var t = 0
+    while t < TABLE_COUNT:
+        val name = TABLE_NAMES[t]
+        val table = load_table("{DASHBOARD_TABLE_DIR}/{name}.sdn")
+        val comma = if t < TABLE_COUNT - 1: "," else: ""
+        json = "{json}    \"{name}\": {\n"
+        json = "{json}      \"headers\": ["
+        var h = 0
+        while h < table.headers.len():
+            val hcomma = if h < table.headers.len() - 1: ", " else: ""
+            json = "{json}\"{escape_json(table.headers[h])}\"{hcomma}"
+            h = h + 1
+        json = "{json}],\n"
+        json = "{json}      \"rows\": [\n"
+        var r = 0
+        while r < table.rows.len():
+            val row = table.rows[r]
+            json = "{json}        ["
+            var c = 0
+            while c < row.len():
+                val ccomma = if c < row.len() - 1: ", " else: ""
+                json = "{json}\"{escape_json(row[c])}\"{ccomma}"
+                c = c + 1
+            val rcomma = if r < table.rows.len() - 1: "," else: ""
+            json = "{json}]{rcomma}\n"
+            r = r + 1
+        json = "{json}      ]\n"
+        json = "{json}    }{comma}\n"
+        t = t + 1
+    json = "{json}  }\n"
+    json = "{json}}\n"
+    json
+
+fn export_html() -> text:
+    val summary = compute_summary()
+    val features_total = if summary.has("features_total"): summary["features_total"] else: "0"
+    val features_complete = if summary.has("features_complete"): summary["features_complete"] else: "0"
+    val todos_total = if summary.has("todos_total"): summary["todos_total"] else: "0"
+    val coverage_pct = if summary.has("coverage_pct"): summary["coverage_pct"] else: "0"
+
+    var html = "<!DOCTYPE html>\n"
+    html = "{html}<html>\n"
+    html = "{html}<head>\n"
+    html = "{html}  <meta charset=\"utf-8\">\n"
+    html = "{html}  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    html = "{html}  <title>Simple Dashboard</title>\n"
+    html = "{html}  <style>\n"
+    html = "{html}    body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }\n"
+    html = "{html}    .container { max-width: 1200px; margin: 0 auto; }\n"
+    html = "{html}    .card { background: #fff; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }\n"
+    html = "{html}    .metric { display: inline-block; margin-right: 24px; }\n"
+    html = "{html}    .metric-label { color: #666; font-size: 13px; }\n"
+    html = "{html}    .metric-value { font-size: 28px; font-weight: bold; color: #1565c0; }\n"
+    html = "{html}    table { border-collapse: collapse; width: 100%; }\n"
+    html = "{html}    th, td { border: 1px solid #ddd; padding: 8px; font-size: 13px; }\n"
+    html = "{html}    th { background: #fafafa; text-align: left; }\n"
+    html = "{html}  </style>\n"
+    html = "{html}</head>\n"
+    html = "{html}<body>\n"
+    html = "{html}  <div class=\"container\">\n"
+    html = "{html}    <h1>Simple Dashboard</h1>\n"
+    html = "{html}    <div class=\"card\">\n"
+    html = "{html}      <div class=\"metric\"><div class=\"metric-label\">Features</div><div class=\"metric-value\">{features_complete}/{features_total}</div></div>\n"
+    html = "{html}      <div class=\"metric\"><div class=\"metric-label\">Coverage</div><div class=\"metric-value\">{coverage_pct}%</div></div>\n"
+    html = "{html}      <div class=\"metric\"><div class=\"metric-label\">TODOs</div><div class=\"metric-value\">{todos_total}</div></div>\n"
+    html = "{html}    </div>\n"
+
+    val todo_table = load_table("{DASHBOARD_TABLE_DIR}/todos.sdn")
+    if todo_table.rows.len() > 0:
+        html = "{html}    <div class=\"card\">\n"
+        html = "{html}      <h2>Top TODOs</h2>\n"
+        html = "{html}      <table>\n"
+        html = "{html}        <tr><th>ID</th><th>Priority</th><th>Description</th><th>File</th></tr>\n"
+        var i = 0
+        while i < todo_table.rows.len() and i < 10:
+            val row = todo_table.rows[i]
+            val id = if row.len() > 0: row[0] else: ""
+            val priority = if row.len() > 3: row[3] else: ""
+            val desc = if row.len() > 4: row[4] else: ""
+            val file = if row.len() > 5: row[5] else: ""
+            html = "{html}        <tr><td>{id}</td><td>{priority}</td><td>{desc}</td><td>{file}</td></tr>\n"
+            i = i + 1
+        html = "{html}      </table>\n"
+        html = "{html}    </div>\n"
+
+    html = "{html}  </div>\n"
+    html = "{html}</body>\n"
+    html = "{html}</html>\n"
+    html
+
+fn run_serve(args: [text]):
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "port", "p", "Server port", default: "3000", choices: [])
+    val parsed = parse_cli_args(spec2, args)
+    val port = to_int_or(parsed_option(parsed, "port"), 3000)
+
+    ensure_dirs()
+    file_write("{DASHBOARD_DIR}/index.html", export_html())
+    file_write("{DASHBOARD_DIR}/data.json", export_json())
+
+    print "Starting dashboard server on http://localhost:{port}"
+    print "Serving directory: doc/dashboard"
+    print "Press Ctrl+C to stop"
+
+    var cmd = ""
+    if shell_bool("command -v python3 >/dev/null 2>&1"):
+        cmd = "python3 -m http.server {port} --directory doc/dashboard"
+    elif shell_bool("command -v python >/dev/null 2>&1"):
+        cmd = "python -m http.server {port} --directory doc/dashboard"
+    else:
+        print "Error: python3 or python is required for serve."
+        return
+
+    val result = shell(cmd)
+    if result.exit_code != 0:
+        print "Server exited with code {result.exit_code}"
+
+
+# Re-export Phase 6 features (extracted to dashboard_phase6.spl)
+use app.dashboard.dashboard_phase6.*
+
+export load_table, load_table_named, header_index, get_field, count_eq, sum_int, count_nonempty, write_table
+export today_date, itos, DASHBOARD_TABLE_DIR

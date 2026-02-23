@@ -1,0 +1,209 @@
+# Import Graph
+#
+# Tracks module dependencies and detects circular imports.
+# Port of rust/dependency_tracker/src/graph.rs
+
+export ImportGraph, ImportEdge, ImportKind, CyclicDependencyError
+
+# Import kind
+enum ImportKind:
+    Use         # Regular use import
+    CommonUse   # common use directory prelude
+    ExportUse   # export use re-export
+    TypeUse     # Type-only import (excluded from cycle detection)
+
+# An edge in the import graph
+struct ImportEdge:
+    from: text
+    to: text
+    kind: ImportKind
+
+# Circular dependency error
+struct CyclicDependencyError:
+    cycle: [text]
+
+impl CyclicDependencyError:
+    fn message() -> text:
+        "Circular dependency detected: {self.cycle.join(" -> ")}"
+
+# Import graph tracking module dependencies
+class ImportGraph:
+    # Adjacency list: module -> set of imported modules (excludes TypeUse)
+    edges: Dict<text, [text]>
+    # All edges including TypeUse
+    detailed_edges: [ImportEdge]
+
+impl ImportGraph:
+    static fn empty() -> ImportGraph:
+        ImportGraph(edges: {}, detailed_edges: [])
+
+    # Add a module (even if it has no imports)
+    me add_module(module: text):
+        if not self.edges.has(module):
+            self.edges[module] = []
+
+    # Add an import edge
+    me add_import(from: text, to: text, kind: ImportKind):
+        # Only add to cycle detection graph if NOT TypeUse
+        match kind:
+            case ImportKind.TypeUse:
+                pass
+            case _:
+                if not self.edges.has(from):
+                    self.edges[from] = []
+                if not self.edges[from].contains(to):
+                    self.edges[from].push(to)
+                if not self.edges.has(to):
+                    self.edges[to] = []
+
+        self.detailed_edges.push(ImportEdge(from: from, to: to, kind: kind))
+
+    # Convenience: add a regular use import
+    me add_use(from: text, to: text):
+        self.add_import(from, to, ImportKind.Use)
+
+    # Convenience: add a type-only import
+    me add_type_use(from: text, to: text):
+        self.add_import(from, to, ImportKind.TypeUse)
+
+    # Get all modules that a module imports
+    fn imports_of(module: text) -> [text]:
+        self.edges.get(module) ?? []
+
+    # Get all modules in the graph
+    fn modules() -> [text]:
+        self.edges.keys()
+
+    # Check for circular dependencies using DFS
+    fn detect_cycle() -> CyclicDependencyError?:
+        var visited = {}    # module -> bool
+        var in_stack = {}   # module -> bool
+        var path = []
+
+        for module in self.modules():
+            val result = self.dfs_cycle(module, visited, in_stack, path)
+            if result.?:
+                return result
+
+        nil
+
+    # DFS cycle detection helper
+    fn dfs_cycle(module: text, visited: mut Dict<text, bool>,
+                 in_stack: mut Dict<text, bool>,
+                 path: mut [text]) -> CyclicDependencyError?:
+        if in_stack.get(module) ?? false:
+            # Found a cycle - extract it from path
+            val cycle_start = path.index_of(module) ?? 0
+            val cycle = path[cycle_start:] + [module]
+            return Some(CyclicDependencyError(cycle: cycle))
+
+        if visited.get(module) ?? false:
+            return nil
+
+        visited[module] = true
+        in_stack[module] = true
+        path.push(module)
+
+        for dep in self.imports_of(module):
+            val result = self.dfs_cycle(dep, visited, in_stack, path)
+            if result.?:
+                return result
+
+        path.pop()
+        in_stack[module] = false
+        nil
+
+    # Topological sort using Kahn's algorithm (dependencies first)
+    fn topological_order() -> Result<[text], CyclicDependencyError>:
+        # Compute in-degree: count INCOMING edges for each module
+        var in_degree: Dict<text, i64> = {}
+        for module in self.modules():
+            if not in_degree.has(module):
+                in_degree[module] = 0
+        # For each module's imports, the TARGET gets an incoming edge
+        for module in self.modules():
+            for dep in self.imports_of(module):
+                in_degree[dep] = (in_degree.get(dep) ?? 0) + 1
+
+        # Start with modules that have no incoming edges (no dependencies ON them)
+        var queue: [text] = [for m in self.modules() if (in_degree.get(m) ?? 0) == 0: m]
+        var result: [text] = []
+
+        while queue.len() > 0:
+            val module = queue.pop_front()
+            result.push(module)
+            for dep in self.imports_of(module):
+                in_degree[dep] = in_degree[dep] - 1
+                if in_degree[dep] == 0:
+                    queue.push(dep)
+
+        if result.len() != self.modules().len():
+            val cycle = self.detect_cycle()
+            if cycle.?:
+                return Err(cycle.unwrap())
+            return Err(CyclicDependencyError(cycle: ["unknown"]))
+
+        Ok(result)
+
+    # Strongly connected components using Tarjan's algorithm
+    fn strongly_connected_components() -> [[text]]:
+        var index_counter = 0
+        var stack: [text] = []
+        var on_stack: Dict<text, bool> = {}
+        var indices: Dict<text, i64> = {}
+        var lowlinks: Dict<text, i64> = {}
+        var result: [[text]] = []
+
+        for module in self.modules():
+            if not indices.has(module):
+                self.tarjan_dfs(module, index_counter, stack, on_stack,
+                               indices, lowlinks, result)
+
+        result
+
+    fn tarjan_dfs(module: text, index_counter: mut i64, stack: mut [text],
+                  on_stack: mut Dict<text, bool>,
+                  indices: mut Dict<text, i64>, lowlinks: mut Dict<text, i64>,
+                  result: mut [[text]]):
+        indices[module] = index_counter
+        lowlinks[module] = index_counter
+        index_counter = index_counter + 1
+        stack.push(module)
+        on_stack[module] = true
+
+        for dep in self.imports_of(module):
+            if not indices.has(dep):
+                self.tarjan_dfs(dep, index_counter, stack, on_stack,
+                               indices, lowlinks, result)
+                val dep_low = lowlinks[dep]
+                if dep_low < lowlinks[module]:
+                    lowlinks[module] = dep_low
+            elif on_stack.get(dep) ?? false:
+                val dep_idx = indices[dep]
+                if dep_idx < lowlinks[module]:
+                    lowlinks[module] = dep_idx
+
+        # Root of SCC
+        if lowlinks[module] == indices[module]:
+            var scc: [text] = []
+            while true:
+                val w = stack.pop()
+                on_stack[w] = false
+                scc.push(w)
+                if w == module:
+                    break
+            result.push(scc)
+
+    # Get transitive imports of a module
+    fn transitive_imports(module: text) -> [text]:
+        var visited = {}
+        var result = []
+        self.collect_transitive(module, visited, result)
+        result
+
+    fn collect_transitive(module: text, visited: mut Dict<text, bool>, result: mut [text]):
+        for dep in self.imports_of(module):
+            if not (visited.get(dep) ?? false):
+                visited[dep] = true
+                result.push(dep)
+                self.collect_transitive(dep, visited, result)

@@ -1,0 +1,488 @@
+# Block Testing Framework
+#
+# Test helpers for custom blocks.
+# Makes it easy to write tests for block parsing, validation, and evaluation.
+
+use compiler.blocks.definition.{BlockDefinition, ConstValue}
+use compiler.blocks.value.{BlockValue}
+use compiler.blocks.context.{BlockContext, BlockError}
+use compiler.blocks.registry.{register_block, unregister_block, is_block_registered, with_block}
+use compiler.blocks.modes.{Span}
+
+# ============================================================================
+# Test Helpers
+# ============================================================================
+
+fn test_parse(
+    block_kind: text,
+    payload: text,
+    expected: BlockValue
+):
+    """Test that a block parses correctly.
+
+    Args:
+        block_kind: Block keyword
+        payload: Payload to parse
+        expected: Expected BlockValue
+
+    Panics:
+        If parsing fails or result doesn't match expected
+
+    Example:
+    ```simple
+    test_parse("json", '{"key": "value"}',
+        BlockValue.Json(JsonValue.Object([("key", JsonValue.String("value"))]))
+    )
+    ```
+    """
+    # Get block definition
+    val block_def = get_block_or_panic(block_kind)
+
+    # Create test context
+    val ctx = blockcontext_test(payload)
+
+    # Parse
+    val result = block_def_parse_payload(block_def, payload, ctx)
+
+    # Check result
+    match result:
+        case Ok(value):
+            if not values_equal(value, expected):
+                panic("Parse result mismatch:\nExpected: {expected.type_name()}\nGot: {value.type_name()}")
+        case Err(error):
+            panic("Parse failed: {error.message}")
+
+fn test_parse_error(
+    block_kind: text,
+    payload: text,
+    expected_message: text
+):
+    """Test that a block fails to parse with expected error.
+
+    Args:
+        block_kind: Block keyword
+        payload: Payload to parse (should fail)
+        expected_message: Expected error message (substring match)
+
+    Panics:
+        If parsing succeeds or error message doesn't match
+
+    Example:
+    ```simple
+    test_parse_error("color", "invalid", "Expected #RRGGBB")
+    ```
+    """
+    val block_def = get_block_or_panic(block_kind)
+    val ctx = blockcontext_test(payload)
+
+    val result = block_def_parse_payload(block_def, payload, ctx)
+
+    match result:
+        case Ok(_):
+            panic("Expected parse error, but parsing succeeded")
+        case Err(error):
+            if not error.message_contains(message, expected_message):
+                panic("Error message mismatch:\nExpected substring: {expected_message}\nGot: {error.message}")
+
+fn test_validate(
+    block_kind: text,
+    value: BlockValue,
+    expected_errors: [text]
+):
+    """Test that a block validates with expected errors.
+
+    Args:
+        block_kind: Block keyword
+        value: Parsed BlockValue
+        expected_errors: Expected error messages (substrings)
+
+    Panics:
+        If validation errors don't match expected
+
+    Example:
+    ```simple
+    val bad_port = BlockValue.Custom("Port", 99999)
+    test_validate("port", bad_port, ["must be between 1 and 65535"])
+    ```
+    """
+    val block_def = get_block_or_panic(block_kind)
+    val ctx = BlockContext.test("")
+
+    val errors = block_def_validate(block_def, value, ctx)
+
+    # Check error count
+    if errors_len(errors) != expected_errors_len(expected_errors):
+        panic("Validation error count mismatch:\nExpected: {expected_errors.len()}\nGot: {errors.len()}")
+
+    # Check each error message
+    for i in 0..expected_errors_len(expected_errors):
+        val expected_substr = expected_errors[i]
+        val actual_msg = errors[i].message
+
+        if not actual_msg_contains(actual_msg, expected_substr):
+            panic("Validation error {i} mismatch:\nExpected substring: {expected_substr}\nGot: {actual_msg}")
+
+fn test_const_eval(
+    block_kind: text,
+    value: BlockValue,
+    expected: ConstValue
+):
+    """Test that a block evaluates to expected constant.
+
+    Args:
+        block_kind: Block keyword
+        value: Parsed BlockValue
+        expected: Expected ConstValue
+
+    Panics:
+        If evaluation fails or result doesn't match
+
+    Example:
+    ```simple
+    val regex = BlockValue.Regex(RegexPattern("^[a-z]+$"))
+    test_const_eval("re", regex, ConstValue.String("^[a-z]+$"))
+    ```
+    """
+    val block_def = get_block_or_panic(block_kind)
+
+    val result = block_def_eval_const(block_def, value)
+
+    match result:
+        case const_val:
+            if not const_values_equal(const_val, expected):
+                panic("Const eval mismatch:\nExpected: {const_value_to_string(expected)}\nGot: {const_value_to_string(const_val)}")
+        case nil:
+            panic("Expected const evaluation, but got None")
+
+fn test_no_const_eval(
+    block_kind: text,
+    value: BlockValue
+):
+    """Test that a block does NOT evaluate at compile time.
+
+    Args:
+        block_kind: Block keyword
+        value: Parsed BlockValue
+
+    Panics:
+        If evaluation returns a value (should be nil)
+    """
+    val block_def = get_block_or_panic(block_kind)
+
+    val result = block_def_eval_const(block_def, value)
+
+    if has_result:
+        panic("Expected no const eval, but got: {const_value_to_string(result_value)}")
+
+# ============================================================================
+# Block Mocking
+# ============================================================================
+
+fn mock_block(
+    kind: text,
+    parser: fn(text) -> text
+) -> BlockDefinition:
+    """Create a simple mock block for testing.
+
+    Args:
+        kind: Block keyword
+        parser: Simple parser function
+
+    Returns:
+        MockBlockDef that can be registered
+
+    Example:
+    ```simple
+    val mock = mock_block("test", \text:
+        Ok(blockvalue_Raw(text))
+    )
+
+    with_block(mock, \:
+        val result = test{ content }
+        assert(result == "content")
+    )
+    ```
+    """
+    MockBlockDef(kind: kind, parser: parser)
+
+struct MockBlockDef(BlockDefinition):
+    """Simple mock block for testing."""
+
+    _kind: text
+    _parser: fn(text) -> text
+
+    fn kind() -> text:
+        self._kind
+
+    fn parse_payload(payload: text, ctx: BlockContext) -> text:
+        match (self._parser)(payload):
+            case Ok(value): Ok(value)
+            case Err(msg): Err(blockerror_parse(msg))
+
+# ============================================================================
+# Assertion Helpers
+# ============================================================================
+
+fn assert_block_registered(kind: text):
+    """Assert that a block is registered.
+
+    Panics:
+        If block is not registered
+    """
+    if not is_block_registered(kind):
+        panic("Block '{kind}' is not registered")
+
+fn assert_block_not_registered(kind: text):
+    """Assert that a block is NOT registered.
+
+    Panics:
+        If block is registered
+    """
+    if is_block_registered(kind):
+        panic("Block '{kind}' should not be registered")
+
+fn assert_parse_succeeds(block_kind: text, payload: text) -> BlockValue:
+    """Assert that parsing succeeds and return the result.
+
+    Args:
+        block_kind: Block keyword
+        payload: Payload to parse
+
+    Returns:
+        Parsed BlockValue
+
+    Panics:
+        If parsing fails
+    """
+    val block_def = get_block_or_panic(block_kind)
+    val ctx = blockcontext_test(payload)
+
+    match block_def_parse_payload(block_def, payload, ctx):
+        case Ok(value): value
+        case Err(error): panic("Parse failed: {error.message}")
+
+fn assert_parse_fails(block_kind: text, payload: text) -> BlockError:
+    """Assert that parsing fails and return the error.
+
+    Args:
+        block_kind: Block keyword
+        payload: Payload to parse (should fail)
+
+    Returns:
+        BlockError from failed parse
+
+    Panics:
+        If parsing succeeds
+    """
+    val block_def = get_block_or_panic(block_kind)
+    val ctx = blockcontext_test(payload)
+
+    match block_def_parse_payload(block_def, payload, ctx):
+        case Ok(_): panic("Expected parse to fail, but it succeeded")
+        case Err(error): error
+
+fn assert_value_type(value: BlockValue, expected_type: text):
+    """Assert that a BlockValue has expected type.
+
+    Args:
+        value: BlockValue to check
+        expected_type: Expected type name
+
+    Panics:
+        If type doesn't match
+    """
+    val actual_type = value_type_name(value)
+    if actual_type != expected_type:
+        panic("Value type mismatch:\nExpected: {expected_type}\nGot: {actual_type}")
+
+fn assert_validation_passes(block_kind: text, value: BlockValue):
+    """Assert that validation produces no errors.
+
+    Args:
+        block_kind: Block keyword
+        value: Parsed BlockValue
+
+    Panics:
+        If validation produces errors
+    """
+    val block_def = get_block_or_panic(block_kind)
+    val ctx = BlockContext.test("")
+
+    val errors = block_def_validate(block_def, value, ctx)
+
+    if errors_len(errors) > 0:
+        val messages = errors.map(\e: e.message).join("\n")
+        panic("Expected validation to pass, but got errors:\n{messages}")
+
+fn assert_validation_fails(block_kind: text, value: BlockValue):
+    """Assert that validation produces at least one error.
+
+    Args:
+        block_kind: Block keyword
+        value: Parsed BlockValue
+
+    Panics:
+        If validation passes
+    """
+    val block_def = get_block_or_panic(block_kind)
+    val ctx = BlockContext.test("")
+
+    val errors = block_def_validate(block_def, value, ctx)
+
+    if errors_len(errors) == 0:
+        panic("Expected validation to fail, but it passed")
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn get_block_or_panic(kind: text) -> BlockDefinition:
+    """Get block definition or panic if not found."""
+    match get_block(kind):
+        case blk: blk
+        case nil: panic("Block '{kind}' is not registered")
+
+fn values_equal(a: BlockValue, b: BlockValue) -> bool:
+    """Check if two BlockValues are equal with deep comparison.
+
+    Phase 1B[4] - TODO #67 ✅
+    """
+    # Deep equality comparison for BlockValues
+    match (a, b):
+        case (Raw(x), Raw(y)):
+            x == y
+        case (Custom(type_a, val_a), Custom(type_b, val_b)):
+            type_a == type_b and deep_equal(val_a, val_b)
+        case _:
+            false
+
+fn deep_equal(a, b) -> bool:
+    """Deep equality comparison for arbitrary values.
+
+    Handles:
+    - Primitives (int, float, bool, str, nil)
+    - Arrays (recursive)
+    - Dicts (recursive)
+    - Objects (field-by-field)
+    """
+    # Type check first
+    val type_a = type_of(a)
+    val type_b = type_of(b)
+    if type_a != type_b:
+        return false
+
+    # Primitive types
+    if type_a == "int" or type_a == "bool" or type_a == "str":
+        return a == b
+
+    if type_a == "float":
+        # Float equality with small epsilon
+        val diff = if a > b: a - b else: b - a
+        return diff < 0[0001]
+
+    if type_a == "nil":
+        return true
+
+    # Array type
+    if type_a == "array":
+        if a_len(a) != b_len(b):
+            return false
+        for i in 0..(a_len(a)):
+            if not deep_equal(a[i], b[i]):
+                return false
+        return true
+
+    # Dict type
+    if type_a == "dict":
+        val keys_a = a_keys(a)
+        val keys_b = b_keys(b)
+        if keys_a_len(keys_a) != keys_b_len(keys_b):
+            return false
+        for key in keys_a:
+            if not b_contains_key(b, key):
+                return false
+            if not deep_equal(a[key], b[key]):
+                return false
+        return true
+
+    # Default: try direct equality
+    a == b
+
+fn type_of(value) -> text:
+    """Get type name of a value (simplified)."""
+    # This is a placeholder - actual implementation would use runtime type info
+    if value == nil:
+        "nil"
+    else:
+        "unknown"
+
+fn const_values_equal(a: ConstValue, b: ConstValue) -> bool:
+    """Check if two ConstValues are equal."""
+    match (a, b):
+        case [Nil, Nil]: true
+        case (Bool(x), Bool(y)): x == y
+        case (Int(x), Int(y)): x == y
+        case (Float(x), Float(y)): x == y  # Note: float equality is approximate
+        case (String(x), String(y)): x == y
+        case (Array(xs), Array(ys)):
+            if xs_len(xs) != ys_len(ys):
+                false
+            else:
+                var eq = true
+                var i = 0
+                while i < xs_len(xs) and eq:
+                    eq = const_values_equal(xs[i], ys[i])
+                    i = i + 1
+                eq
+        case (Tuple(xs), Tuple(ys)):
+            if xs_len(xs) != ys_len(ys):
+                false
+            else:
+                var eq = true
+                var i = 0
+                while i < xs_len(xs) and eq:
+                    eq = const_values_equal(xs[i], ys[i])
+                    i = i + 1
+                eq
+        case (Struct(name_a, fields_a), Struct(name_b, fields_b)):
+            if name_a != name_b:
+                false
+            elif fields_a_len(fields_a) != fields_b_len(fields_b):
+                false
+            else:
+                var eq = true
+                var i = 0
+                while i < fields_a_len(fields_a) and eq:
+                    val fa = fields_a[i]
+                    val fb = fields_b[i]
+                    eq = fa[0] == fb[0] and const_values_equal(fa[1], fb[1])
+                    i = i + 1
+                eq
+        case (Regex(a), Regex(b)): a == b
+        case _: false
+
+fn const_value_to_string(value: ConstValue) -> text:
+    """Convert ConstValue to string for display."""
+    match value:
+        case Nil: "nil"
+        case Bool(b): "{b}"
+        case Int(i): "{i}"
+        case Float(f): "{f}"
+        case String(s): '"{s}"'
+        case Array(_): "[array]"
+        case Tuple(_): "(tuple)"
+        case Struct(name, _): "{name}{...}"
+        case Regex(pattern): "/{pattern}/"
+
+# Import get_block from registry (needed for test helpers)
+use compiler.blocks.registry.{get_block}
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export test_parse, test_parse_error, test_validate, test_const_eval, test_no_const_eval
+export mock_block, MockBlockDef
+export assert_block_registered, assert_block_not_registered
+export assert_parse_succeeds, assert_parse_fails
+export assert_value_type, assert_validation_passes, assert_validation_fails

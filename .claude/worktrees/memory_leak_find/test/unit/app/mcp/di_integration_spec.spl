@@ -1,0 +1,103 @@
+# DI Integration Specification
+#
+# Integration tests for the DI system with the MCP server.
+# Tests profile resolution, lazy/eager behavior, and config loading.
+
+extern fn rt_file_read_text(path: text) -> text
+
+use compiler.di_runtime.{di_register, di_resolve, di_reset, di_stats, di_is_registered, di_force_count}
+use compiler.di_config.{DiServiceConfig, DiProfileConfig, DiConfig, load_di_config, should_be_lazy, di_setup_from_config_with_profile}
+
+fn _read_config() -> text:
+    rt_file_read_text("config/di.sdn") ?? ""
+
+describe "DI MCP Integration":
+
+    describe "profile-based resolution":
+        it "dev profile makes auto services eager":
+            val config = load_di_config(_read_config())
+            val dev_prof = DiProfileConfig(name: "dev", lazy_default: false)
+            var idx = 0
+            while idx < config.services.len():
+                val svc = config.services[idx]
+                if svc.lazy_mode == "auto":
+                    expect(should_be_lazy(svc, dev_prof)).to_equal(false)
+                idx = idx + 1
+
+        it "prod profile makes auto services lazy":
+            val config = load_di_config(_read_config())
+            val prod_prof = DiProfileConfig(name: "prod", lazy_default: true)
+            var idx = 0
+            while idx < config.services.len():
+                val svc = config.services[idx]
+                if svc.lazy_mode == "auto":
+                    expect(should_be_lazy(svc, prod_prof)).to_equal(true)
+                idx = idx + 1
+
+        it "test profile makes auto services eager":
+            val config = load_di_config(_read_config())
+            val test_prof = DiProfileConfig(name: "test", lazy_default: false)
+            var idx = 0
+            while idx < config.services.len():
+                val svc = config.services[idx]
+                if svc.lazy_mode == "auto":
+                    expect(should_be_lazy(svc, test_prof)).to_equal(false)
+                idx = idx + 1
+
+    describe "auto-lazy services follow profile":
+        it "debug_handler follows dev profile (eager)":
+            val config = load_di_config(_read_config())
+            val dev_prof = DiProfileConfig(name: "dev", lazy_default: false)
+            var idx = 0
+            while idx < config.services.len():
+                val svc = config.services[idx]
+                if svc.name == "debug_handler":
+                    expect(should_be_lazy(svc, dev_prof)).to_equal(false)
+                idx = idx + 1
+
+    describe "full DI lifecycle":
+        it "register, resolve, reset cycle works":
+            di_reset()
+            di_register("test_svc", fn(): "test_value", true)
+            expect(di_is_registered("test_svc")).to_equal(true)
+            val result = di_resolve("test_svc")
+            expect(result).to_equal("test_value")
+            di_reset()
+            expect(di_is_registered("test_svc")).to_equal(false)
+
+        it "stats reports correct counts":
+            di_reset()
+            di_register("lazy_1", fn(): "v1", true)
+            di_register("eager_1", fn(): "v2", false)
+            val stats = di_stats()
+            expect(stats.contains("2 registered")).to_equal(true)
+            expect(stats.contains("1 lazy")).to_equal(true)
+            expect(stats.contains("1 eager")).to_equal(true)
+
+    describe "cascade with real-world pattern":
+        it "protocol depends on json_helpers transitively":
+            di_reset()
+            # Simulate helpers.spl providing JSON functions
+            di_register("json_helpers", fn():
+                "json_service_instance"
+            , true)
+            # Simulate protocol depending on json_helpers
+            di_register("protocol", fn():
+                val json = di_resolve("json_helpers")
+                "protocol_using_{json}"
+            , true)
+            # Resolve protocol -- should cascade to json_helpers
+            val result = di_resolve("protocol")
+            expect(result).to_equal("protocol_using_json_service_instance")
+            # Both should now be instantiated
+            expect(di_force_count()).to_equal(2)
+
+    describe "config-driven setup":
+        it "loads config and registers placeholder services":
+            di_reset()
+            di_setup_from_config_with_profile(_read_config(), "dev")
+            # Services should be registered (with placeholder factories)
+            expect(di_is_registered("json_helpers")).to_equal(true)
+            expect(di_is_registered("protocol")).to_equal(true)
+            expect(di_is_registered("debug_handler")).to_equal(true)
+            di_reset()

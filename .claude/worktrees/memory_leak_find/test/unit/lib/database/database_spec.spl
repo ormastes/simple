@@ -1,0 +1,434 @@
+# Database Library Tests
+#
+# Tests for the unified database library (BugDatabase, TestDatabase, FeatureDatabase)
+
+use std.spec.{check, check_msg}
+use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
+use std.database.bug.{BugDatabase, Bug, BugSeverity, BugStatus}
+use app.io.{file_exists, file_delete, rt_timestamp_now}
+
+# ============================================================================
+# StringInterner Tests
+# ============================================================================
+
+describe "StringInterner":
+    it "creates empty interner":
+        val interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        check(interner.next_id == 0)
+        check(interner.str_to_id.len() == 0)
+
+    it "interns strings with unique IDs":
+        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        val id1 = interner.intern("hello")
+        val id2 = interner.intern("world")
+        val id3 = interner.intern("hello")  # Same string
+
+        check(id1 == 0)
+        check(id2 == 1)
+        check(id3 == 0)  # Reuses ID
+
+    it "resolves IDs to strings":
+        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        val id = interner.intern("test")
+        val resolved = interner.get(id)?
+
+        check(resolved == "test")
+
+    it "returns None for invalid ID":
+        val interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        val resolved = interner.get(999)
+
+        check(not resolved.?)
+
+    it "exports to SDN table":
+        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        interner.intern("foo")
+        interner.intern("bar")
+
+        val table = interner.to_sdn()
+        check(table.name == "strings")
+        check(table.rows.len() == 2)
+
+    it "loads from SDN table":
+        # Create table
+        val table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], index: {})
+        var row1 = SdnRow(fields: {})
+        row1.set("id", "0")
+        row1.set("value", "test1")
+        table.add_row(row1)
+
+        var row2 = SdnRow(fields: {})
+        row2.set("id", "1")
+        row2.set("value", "test2")
+        table.add_row(row2)
+
+        # Load interner
+        val interner = StringInterner__from_sdn(table)
+        check(interner.get(0)? == "test1")
+        check(interner.get(1)? == "test2")
+
+# ============================================================================
+# SdnRow Tests
+# ============================================================================
+
+describe "SdnRow":
+    it "creates empty row":
+        val row = SdnRow(fields: {})
+        check(row.fields.len() == 0)
+
+    it "sets and gets field values":
+        var row = SdnRow(fields: {})
+        row.set("name", "Alice")
+        row.set("age", "30")
+
+        check(row.get("name")? == "Alice")
+        check(row.get("age")? == "30")
+
+    it "returns None for missing field":
+        val row = SdnRow(fields: {})
+        check(not row.get("missing").?)
+
+    it "parses i64 fields":
+        var row = SdnRow(fields: {})
+        row.set("count", "42")
+
+        check(row.get_i64("count")? == 42)
+
+    it "parses bool fields":
+        var row = SdnRow(fields: {})
+        row.set("active", "true")
+        row.set("disabled", "false")
+
+        check(row.get_bool("active")? == true)
+        check(row.get_bool("disabled")? == false)
+
+    it "checks if has column":
+        var row = SdnRow(fields: {})
+        row.set("name", "Bob")
+
+        check(row.has("name"))
+        check(not row.has("age"))
+
+# ============================================================================
+# SdnTable Tests
+# ============================================================================
+
+describe "SdnTable":
+    it "creates new table":
+        val table = SdnTable(name: "users", columns: ["id", "name", "email"], rows: [], index: {})
+
+        check(table.name == "users")
+        check(table.columns.len() == 3)
+        check(table.rows.len() == 0)
+
+    it "adds rows":
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "1")
+        row.set("name", "Alice")
+
+        table.add_row(row)
+        check(table.rows.len() == 1)
+
+    it "indexes rows by primary key":
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "user_1")
+        row.set("name", "Alice")
+        table.add_row(row)
+
+        val found = table.get_row("user_1")?
+        check(found.get("name")? == "Alice")
+
+    it "updates row by key":
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+
+        var row1 = SdnRow(fields: {})
+        row1.set("id", "user_1")
+        row1.set("name", "Alice")
+        table.add_row(row1)
+
+        var row2 = SdnRow(fields: {})
+        row2.set("id", "user_1")
+        row2.set("name", "Bob")
+        table.update_row("user_1", row2)
+
+        val found = table.get_row("user_1")?
+        check(found.get("name")? == "Bob")
+
+    it "soft deletes rows":
+        var table = SdnTable(name: "users", columns: ["id", "name", "valid"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "user_1")
+        row.set("name", "Alice")
+        row.set("valid", "true")
+        table.add_row(row)
+
+        table.mark_deleted("user_1")
+
+        val all_rows = table.rows
+        val valid_rows = table.valid_rows()
+
+        check(all_rows.len() == 1)
+        check(valid_rows.len() == 0)
+
+    it "exports to SDN format":
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "1")
+        row.set("name", "Alice")
+        table.add_row(row)
+
+        val sdn = table.to_sdn()
+        check(sdn.contains("users |id, name|"))
+        check(sdn.contains("1, Alice"))
+
+# ============================================================================
+# SdnDatabase Tests
+# ============================================================================
+
+describe "SdnDatabase":
+    it "creates new database":
+        val db = SdnDatabase(path: "test_db.sdn", tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+
+        check(db.path == "test_db.sdn")
+        check(db.tables.len() == 0)
+
+    it "adds and retrieves tables":
+        var db = SdnDatabase(path: "test_db.sdn", tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+
+        val table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+        db.set_table("users", table)
+
+        val retrieved = db.get_table("users")?
+        check(retrieved.name == "users")
+
+    it "interns strings":
+        var db = SdnDatabase(path: "test_db.sdn", tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+
+        val id1 = db.intern("hello")
+        val id2 = db.intern("hello")
+
+        check(id1 == id2)
+        check(db.resolve(id1)? == "hello")
+
+# ============================================================================
+# BugDatabase Tests
+# ============================================================================
+
+describe "BugDatabase":
+    it "creates new bug database":
+        val bugdb = create_bug_database("/tmp/test_bugdb.sdn")
+
+        check(bugdb.db.tables.contains_key("bugs"))
+        check(bugdb.db.tables.contains_key("bug_descriptions"))
+        check(bugdb.db.tables.contains_key("bug_fix_strategies"))
+        check(bugdb.db.tables.contains_key("bug_investigation_logs"))
+
+    it "adds and retrieves bugs":
+        var bugdb = create_bug_database("/tmp/test_bugdb.sdn")
+
+        val bug = Bug(
+            id: "test_001",
+            severity: BugSeverity.P1,
+            status: BugStatus.Open,
+            title: "Test bug",
+            description: ["Line 1", "Line 2"],
+            file: "test.spl",
+            line: 42,
+            reproducible_by: "test_case",
+            fix_strategy: ["Fix step 1"],
+            investigation_log: [],
+            created_at: "2026-02-05T10:00:00",
+            updated_at: "2026-02-05T10:00:00",
+            valid: true
+        )
+
+        val added = bugdb.add_bug(bug)
+        check(added)
+
+        # Check we can get all bugs
+        val all_bugs = bugdb.all_bugs()
+        check(all_bugs.len() == 1)
+
+        val first_bug = all_bugs[0]
+        check(first_bug.title == "Test bug")
+        check(first_bug.severity == BugSeverity.P1)
+        check(first_bug.description.len() == 2)
+
+    it "queries bugs by status":
+        
+        var bugdb = create_bug_database("/tmp/test.sdn")
+
+        val bug1 = Bug(
+            id: "bug_001",
+            severity: BugSeverity.P1,
+            status: BugStatus.Open,
+            title: "Bug 1",
+            description: [],
+            file: "test.spl",
+            line: 1,
+            reproducible_by: "test",
+            fix_strategy: [],
+            investigation_log: [],
+            created_at: "2026-02-05",
+            updated_at: "2026-02-05",
+            valid: true
+        )
+
+        val bug2 = Bug(
+            id: "bug_002",
+            severity: BugSeverity.P2,
+            status: BugStatus.Fixed,
+            title: "Bug 2",
+            description: [],
+            file: "test.spl",
+            line: 2,
+            reproducible_by: "test",
+            fix_strategy: [],
+            investigation_log: [],
+            created_at: "2026-02-05",
+            updated_at: "2026-02-05",
+            valid: true
+        )
+
+        bugdb.add_bug(bug1)
+        bugdb.add_bug(bug2)
+
+        val open_bugs = bugdb.bugs_by_status(BugStatus.Open)
+        val fixed_bugs = bugdb.bugs_by_status(BugStatus.Fixed)
+
+        check(open_bugs.len() == 1)
+        check(fixed_bugs.len() == 1)
+
+
+    it "queries critical bugs":
+        
+        var bugdb = create_bug_database("/tmp/test.sdn")
+
+        val p0_bug = Bug(
+            id: "bug_p0",
+            severity: BugSeverity.P0,
+            status: BugStatus.Open,
+            title: "Critical",
+            description: [],
+            file: "test.spl",
+            line: 1,
+            reproducible_by: "test",
+            fix_strategy: [],
+            investigation_log: [],
+            created_at: "2026-02-05",
+            updated_at: "2026-02-05",
+            valid: true
+        )
+
+        val p2_bug = Bug(
+            id: "bug_p2",
+            severity: BugSeverity.P2,
+            status: BugStatus.Open,
+            title: "Low",
+            description: [],
+            file: "test.spl",
+            line: 2,
+            reproducible_by: "test",
+            fix_strategy: [],
+            investigation_log: [],
+            created_at: "2026-02-05",
+            updated_at: "2026-02-05",
+            valid: true
+        )
+
+        bugdb.add_bug(p0_bug)
+        bugdb.add_bug(p2_bug)
+
+        val critical = bugdb.critical_bugs()
+        check(critical.len() == 1)
+
+
+    it "generates statistics":
+        
+        var bugdb = create_bug_database("/tmp/test.sdn")
+
+        # Add various bugs
+        for i in 0..5:
+            val severity = if i < 2:
+                BugSeverity.P1
+            else:
+                BugSeverity.P2
+
+            val status = if i < 3:
+                BugStatus.Open
+            else:
+                BugStatus.Fixed
+
+            val bug = Bug(
+                id: "bug_{i}",
+                severity: severity,
+                status: status,
+                title: "Bug {i}",
+                description: [],
+                file: "test.spl",
+                line: i,
+                reproducible_by: "test",
+                fix_strategy: [],
+                investigation_log: [],
+                created_at: "2026-02-05",
+                updated_at: "2026-02-05",
+                valid: true
+            )
+            bugdb.add_bug(bug)
+
+        val stats = bugdb.stats()
+        check(stats.total == 5)
+        check(stats.open == 3)
+        check(stats.fixed == 2)
+        check(stats.p1 == 2)
+
+
+    it "validates test links":
+        
+        var bugdb = create_bug_database("/tmp/test.sdn")
+
+        val bug_with_test = Bug(
+            id: "bug_001",
+            severity: BugSeverity.P1,
+            status: BugStatus.Open,
+            title: "With test",
+            description: [],
+            file: "test.spl",
+            line: 1,
+            reproducible_by: "test_case",
+            fix_strategy: [],
+            investigation_log: [],
+            created_at: "2026-02-05",
+            updated_at: "2026-02-05",
+            valid: true
+        )
+
+        val bug_no_test = Bug(
+            id: "bug_002",
+            severity: BugSeverity.P1,
+            status: BugStatus.Open,
+            title: "No test",
+            description: [],
+            file: "test.spl",
+            line: 2,
+            reproducible_by: "",
+            fix_strategy: [],
+            investigation_log: [],
+            created_at: "2026-02-05",
+            updated_at: "2026-02-05",
+            valid: true
+        )
+
+        bugdb.add_bug(bug_with_test)
+        bugdb.add_bug(bug_no_test)
+
+        val errors = bugdb.validate_test_links()
+        check(errors.len() == 1)
+        check(errors[0].contains("bug_002"))
+

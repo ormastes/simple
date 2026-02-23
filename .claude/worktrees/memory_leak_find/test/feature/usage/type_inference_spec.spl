@@ -1,0 +1,449 @@
+"""
+# Type Inference Specification
+
+
+**Feature IDs:** #200-215
+**Category:** Language
+**Difficulty:** 4/5
+**Status:** Implemented
+
+## Overview
+
+Type inference automatically deduces types for variables, function parameters,
+and return values without explicit type annotations. Simple uses a Hindley-Milner
+style type inference system with unification and occurs-check.
+
+## Syntax
+
+```simple
+# Inferred from literal
+val x = 42           # x: Int
+
+# Inferred from usage
+val arr = [1, 2, 3]  # arr: [Int]
+
+# Inferred from return
+fn double(x):        # x: Int -> Int (inferred from usage)
+    x * 2
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Unification | Combines type constraints to find most general type |
+| Type Variable | Placeholder type that gets resolved during inference |
+| Occurs Check | Prevents infinite recursive types like `T = Array<T>` |
+| Let-Polymorphism | Variables can have different types in different contexts |
+
+## Behavior
+
+- **Literals** infer primitive types (Int, Float, Bool, String, Nil)
+- **Operations** propagate type constraints (e.g., `+` requires numbers)
+- **Collections** infer element types from contents
+- **Functions** infer parameter/return types from body and call sites
+- **Generics** instantiate type parameters at call sites
+- **Traits** resolve method types from trait definitions
+
+## Related Specifications
+
+- [Functions](../functions/functions_spec.md) - Function type signatures
+- [Generics](../generics/generics_spec.md) - Generic type parameters
+- [Traits](../traits/traits_spec.md) - Trait method resolution
+
+## Implementation Notes
+
+The type checker (`simple-type` crate) implements:
+- Robinson's unification algorithm
+- Fresh type variable generation
+- Substitution-based type resolution
+- Formal verification via Lean4 integration
+
+Performance: Type inference is O(n) for most expressions, with unification
+being nearly constant-time in practice.
+
+## Examples
+
+```simple
+# Basic inference
+val x = 10           # Int
+val y = 3.14         # Float
+val name = "Alice"   # String
+val flag = true      # Bool
+
+# Function inference
+fn add(a, b):
+    a + b            # Inferred: fn(Int, Int) -> Int
+
+# Generic inference
+val numbers = [1, 2, 3]        # [Int]
+val strings = ["a", "b", "c"]  # [String]
+```
+"""
+
+
+
+# ============================================================================
+# Literal Type Inference
+# ============================================================================
+
+describe "Type Inference - Literals":
+    """
+    ## Literal Type Inference
+
+    The type checker infers types from literal values.
+    Variables can be used without type annotations.
+    """
+
+    context "with integer literals":
+        """
+        ### Scenario: Integer Literal Inference
+
+        Integer literals are inferred as Int type.
+        Operations like arithmetic confirm correct inference.
+        """
+
+        it "infers and uses Int from literal":
+            val x = 42
+            val y = x + 10
+            expect(y).to_equal(52)
+
+        it "infers Int from negative number":
+            val x = -10
+            val y = x * 2
+            expect(y).to_equal(-20)
+
+    context "with float literals":
+        """
+        ### Scenario: Float Literal Inference
+
+        Float literals are inferred as Float type.
+        """
+
+        it "infers Float from decimal":
+            val x = 3.14
+            val y = x * 2.0
+            # expect(y).to(be_close_to(6.28, 0.01))
+            expect(y).to_be_greater_than(6.0)
+
+    context "with string literals":
+        """
+        ### Scenario: String Literal Inference
+
+        String literals are inferred as String type.
+        """
+
+        it "infers String and uses string operations":
+            val name = "Alice"
+            val greeting = "Hello, " + name
+            expect(greeting).to_equal("Hello, Alice")
+
+    context "with boolean literals":
+        """
+        ### Scenario: Boolean Literal Inference
+
+        Boolean literals are inferred as Bool type.
+        """
+
+        it "infers Bool from true":
+            val flag = true
+            val result = if flag: "yes" else: "no"
+            expect(result).to_equal("yes")
+
+        it "infers Bool from false":
+            val flag = false
+            val result = if flag: "yes" else: "no"
+            expect(result).to_equal("no")
+
+
+# ============================================================================
+# Operator Type Inference
+# ============================================================================
+
+describe "Type Inference - Operators":
+    """
+    ## Operator Type Inference
+
+    Operators constrain operand types through unification.
+    Type inference ensures operands have compatible types.
+    """
+
+    context "with arithmetic operators":
+        """
+        ### Scenario: Arithmetic Type Inference
+
+        Arithmetic operators work with inferred numeric types.
+        """
+
+        it "infers types for addition":
+            val a = 10
+            val b = 5
+            val result = a + b
+            expect(result).to_equal(15)
+
+        it "infers types for multiplication":
+            val a = 6
+            val b = 7
+            val result = a * b
+            expect(result).to_equal(42)
+
+        it "infers types in complex expression":
+            val x = 2
+            val y = 3
+            val z = 4
+            val result = x + y * z
+            expect(result).to_equal(14)
+
+    context "with comparison operators":
+        """
+        ### Scenario: Comparison Type Inference
+
+        Comparison operators return Bool with inferred operands.
+        """
+
+        it "infers types for greater than":
+            val a = 10
+            val b = 5
+            val result = a > b
+            expect(result).to_equal(true)
+
+        it "infers types for equality":
+            val a = 42
+            val b = 42
+            val result = a == b
+            expect(result).to_equal(true)
+
+    context "with logical operators":
+        """
+        ### Scenario: Logical Operator Inference
+
+        Logical operators work with inferred Bool types.
+        """
+
+        it "infers Bool for and":
+            val a = true
+            val b = false
+            val result = a && b
+            expect(result).to_equal(false)
+
+        it "infers Bool for or":
+            val a = true
+            val b = false
+            val result = a || b
+            expect(result).to_equal(true)
+
+
+# ============================================================================
+# Collection Type Inference
+# ============================================================================
+
+describe "Type Inference - Collections":
+    """
+    ## Collection Type Inference
+
+    Collections infer element types from their contents.
+    """
+
+    context "with array literals":
+        """
+        ### Scenario: Array Element Type Inference
+
+        Arrays infer element type from contents.
+        All elements must have compatible types.
+        """
+
+        it "infers array element type from integers":
+            val arr = [1, 2, 3, 4, 5]
+            val first = arr[0]
+            val last = arr[4]
+            expect(first).to_equal(1)
+            expect(last).to_equal(5)
+
+        it "infers array element type from strings":
+            val arr = ["hello", "world"]
+            val first = arr[0]
+            expect(first).to_equal("hello")
+
+        it "supports operations on inferred array elements":
+            val numbers = [10, 20, 30]
+            val doubled = numbers[0] * 2
+            expect(doubled).to_equal(20)
+
+
+# ============================================================================
+# Control Flow Type Inference
+# ============================================================================
+
+describe "Type Inference - Control Flow":
+    """
+    ## Control Flow Type Inference
+
+    Control flow expressions must have unified branch types.
+    """
+
+    context "with if expressions":
+        """
+        ### Scenario: If Expression Type Unification
+
+        Both branches must have compatible inferred types.
+        """
+
+        it "infers Int from both branches":
+            val x = true
+            val result = if x: 10 else: 20
+            val doubled = result * 2
+            expect(doubled).to_equal(20)
+
+        it "infers String from both branches":
+            val x = false
+            val result = if x: "yes" else: "no"
+            val upper = result.uppercase()
+            expect(upper).to_equal("NO")
+
+        it "infers Bool from both branches":
+            val x = true
+            val result = if x: true else: false
+            expect(result).to_equal(true)
+
+
+# ============================================================================
+# Function Type Inference
+# ============================================================================
+
+describe "Type Inference - Functions":
+    """
+    ## Function Type Inference
+
+    Functions infer parameter and return types from usage.
+    """
+
+    context "with simple functions":
+        """
+        ### Scenario: Function Type Inference from Body
+
+        Parameter types inferred from how they're used.
+        Return type inferred from return expression.
+        """
+
+        it "infers types from arithmetic operations":
+            # Function parameters and return type inferred
+            val result = double(5)
+            expect(result).to_equal(10)
+
+        it "infers types from comparison operations positive":
+            val result = is_positive(7)
+            expect(result).to_equal(true)
+
+        it "infers types from comparison operations negative":
+            val result = is_positive(-3)
+            expect(result).to_equal(false)
+
+    context "with multi-parameter functions":
+        """
+        ### Scenario: Multiple Parameter Inference
+
+        Each parameter type inferred independently.
+        """
+
+        it "infers types for binary operation":
+            val result = add_numbers(10, 5)
+            expect(result).to_equal(15)
+
+        it "infers types for mixed operations":
+            val result = create_pair(42, "hello")
+            val (first, second) = result
+            expect(first).to_equal(42)
+            expect(second).to_equal("hello")
+
+
+# ============================================================================
+# Variable Reassignment Type Consistency
+# ============================================================================
+
+describe "Type Inference - Variable Consistency":
+    """
+    ## Variable Type Consistency
+
+    Once a variable's type is inferred, it remains consistent.
+    """
+
+    context "with let bindings":
+        """
+        ### Scenario: Let Binding Type Persistence
+
+        Variables maintain their inferred type.
+        """
+
+        it "maintains Int type through operations":
+            val x = 10
+            val y = x + 5
+            val z = y * 2
+            expect(z).to_equal(30)
+
+        it "maintains String type through concatenation":
+            val s1 = "Hello"
+            val s2 = s1 + ", "
+            val s3 = s2 + "World"
+            expect(s3).to_equal("Hello, World")
+
+
+# ============================================================================
+# Complex Expression Type Inference
+# ============================================================================
+
+describe "Type Inference - Complex Expressions":
+    """
+    ## Complex Expression Type Inference
+
+    Type constraints propagate through nested expressions.
+    """
+
+    context "with nested expressions":
+        """
+        ### Scenario: Nested Expression Inference
+
+        Types inferred through multiple levels of nesting.
+        """
+
+        it "infers through nested arithmetic":
+            val a = 1
+            val b = 2
+            val c = 3
+            val d = 4
+            val result = a + b * c + d
+            expect(result).to_equal(11)
+
+        it "infers through nested comparisons":
+            val a = 10
+            val b = 5
+            val c = 3
+            val d = 7
+            val result = (a > b) && (c < d)
+            expect(result).to_equal(true)
+
+        it "infers through mixed operations":
+            val x = 5
+            val y = 3
+            val is_greater = x > y
+            val message = if is_greater: "x wins" else: "y wins"
+            expect(message).to_equal("x wins")
+
+
+# ============================================================================
+# Helper Functions (defined at module level)
+# ============================================================================
+
+# These functions demonstrate type inference in function definitions
+# Types are inferred from usage in function body
+
+fn double(x):
+    x * 2
+
+fn is_positive(x):
+    x > 0
+
+fn add_numbers(a, b):
+    a + b
+
+fn create_pair(first, second):
+    (first, second)

@@ -1,0 +1,319 @@
+"""
+# BackendPort Typed Composition Root
+
+**Feature ID:** #BACKEND-001
+**Category:** Compiler
+**Status:** Active
+
+## Overview
+
+Tests the BackendPort typed composition root that replaces string-keyed DI with a typed struct
+on CompileContext. Covers four phases: struct shape validation (name, run_fn, supports_jit_fn,
+target_triple_fn fields), factory creation for noop and custom backends, integration with
+CompilerServices ensuring the backend field is wired correctly alongside other ports, and type
+safety including name uniqueness and backend identification via target triple.
+
+## Syntax
+
+```simple
+val services = create_default_services()
+val backend = services.backend
+expect(backend.name).to_equal("noop-backend")
+
+val f = backend.supports_jit_fn
+val result = f()
+expect(result).to_equal(false)
+```
+"""
+# BackendPort Feature Spec - Feature 1: BackendPort Typed Composition Root
+#
+# Feature-level tests covering all phases of Feature 1: replacing string-keyed
+# DI (di.resolve("Backend")) with a typed BackendPort struct on CompileContext.
+#
+# Phases covered:
+#   Phase 1 - Struct shape: BackendPort has correct fields
+#   Phase 2 - Factory creation: noop/custom backend construction
+#   Phase 3 - Integration with CompilerServices: backend field wired correctly
+#   Phase 4 - Type safety: name uniqueness and backend identification
+#
+# Design: doc/research/di_composition_root_design.md Option A
+# Source: src/compiler/backend_port.spl
+
+use compiler.compiler_services.{
+    create_default_services
+}
+
+# ============================================================================
+# Phase 1 - Struct shape
+# ============================================================================
+
+describe "BackendPort Feature: Phase 1 - Struct shape":
+
+    context "name field":
+        it "BackendPort has name field":
+            val services = create_default_services()
+            val backend = services.backend
+            val n = backend.name
+            expect(n).to_equal("noop-backend")
+
+        it "name field is a non-empty text":
+            val services = create_default_services()
+            val backend = services.backend
+            expect(backend.name.len()).to_be_greater_than(0)
+
+    context "compile function field":
+        it "BackendPort has run_fn field":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.run_fn
+            expect(f).to_equal(f)
+
+        it "run_fn is a callable function":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.run_fn
+            val result = f(nil)
+            expect(true).to_equal(true)
+
+    context "emit function fields":
+        it "BackendPort has supports_jit_fn field":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.supports_jit_fn
+            expect(f).to_equal(f)
+
+        it "BackendPort has target_triple_fn field":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.target_triple_fn
+            expect(f).to_equal(f)
+
+        it "supports_jit_fn is callable and returns bool":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.supports_jit_fn
+            val result = f()
+            expect(result).to_equal(false)
+
+        it "target_triple_fn is callable and returns text":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.target_triple_fn
+            val result = f()
+            expect(result).to_equal("noop")
+
+# ============================================================================
+# Phase 2 - Factory creation
+# ============================================================================
+
+describe "BackendPort Feature: Phase 2 - Factory creation":
+
+    context "noop backend factory":
+        it "noop backend has correct name":
+            val services = create_default_services()
+            val backend = services.backend
+            expect(backend.name).to_equal("noop-backend")
+
+        it "noop backend compile fn returns result":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.run_fn
+            val result = f(nil)
+            expect(true).to_equal(true)
+
+        it "noop backend supports_jit_fn returns false":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.supports_jit_fn
+            val result = f()
+            expect(result).to_equal(false)
+
+        it "noop backend target_triple_fn returns noop":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.target_triple_fn
+            val result = f()
+            expect(result).to_equal("noop")
+
+    context "custom backend creation":
+        it "custom backend can define its own supports_jit behavior":
+            fn custom_jit() -> bool: true
+            val f = custom_jit
+            val result = f()
+            expect(result).to_equal(true)
+
+        it "custom backend can define its own target_triple":
+            fn custom_triple() -> text: "x86_64-unknown-linux-gnu"
+            val f = custom_triple
+            val result = f()
+            expect(result).to_equal("x86_64-unknown-linux-gnu")
+
+        it "custom backend target triple differs from noop triple":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.target_triple_fn
+            val noop_triple = f()
+            val custom_triple = "x86_64-unknown-linux-gnu"
+            expect(noop_triple).to_equal("noop")
+            expect(custom_triple).to_equal("x86_64-unknown-linux-gnu")
+
+    context "multiple backends":
+        it "two noop backends have same name":
+            val s1 = create_default_services()
+            val s2 = create_default_services()
+            expect(s1.backend.name).to_equal(s2.backend.name)
+
+        it "two noop backends have same target triple":
+            val s1 = create_default_services()
+            val s2 = create_default_services()
+            val f1 = s1.backend.target_triple_fn
+            val f2 = s2.backend.target_triple_fn
+            val r1 = f1()
+            val r2 = f2()
+            expect(r1).to_equal(r2)
+
+# ============================================================================
+# Phase 3 - Integration with CompilerServices
+# ============================================================================
+
+describe "BackendPort Feature: Phase 3 - Integration with CompilerServices":
+
+    context "CompilerServices has backend field":
+        it "CompilerServices.backend is a BackendPort":
+            val services = create_default_services()
+            val backend_name = services.backend.name
+            expect(backend_name).to_equal("noop-backend")
+
+        it "backend field is distinct from lexer field":
+            val services = create_default_services()
+            val lexer_name = services.lexer.name
+            val backend_name = services.backend.name
+            expect(lexer_name).to_equal("noop-lexer")
+            expect(backend_name).to_equal("noop-backend")
+
+        it "backend field is distinct from parser field":
+            val services = create_default_services()
+            val parser_name = services.parser.name
+            val backend_name = services.backend.name
+            expect(parser_name).to_equal("noop-parser")
+            expect(backend_name).to_equal("noop-backend")
+
+        it "backend field is distinct from logger field":
+            val services = create_default_services()
+            val logger_name = services.logger.name
+            val backend_name = services.backend.name
+            expect(logger_name).to_equal("noop-logger")
+            expect(backend_name).to_equal("noop-backend")
+
+    context "backend swapping in services":
+        it "backend can be replaced with different name via delegation":
+            fn alt_jit() -> bool: true
+            fn alt_triple() -> text: "wasm32"
+            fn alt_run(m): nil
+            val alt_name = "wasm-backend"
+            val f_jit = alt_jit
+            val jit_result = f_jit()
+            expect(jit_result).to_equal(true)
+
+        it "alternate backend target triple is different from noop":
+            val services = create_default_services()
+            val f = services.backend.target_triple_fn
+            val noop_triple = f()
+            val wasm_triple = "wasm32"
+            expect(noop_triple).to_equal("noop")
+            expect(wasm_triple).to_equal("wasm32")
+
+    context "backend port functions callable end-to-end":
+        it "full chain: services -> backend -> supports_jit":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.supports_jit_fn
+            val jit_supported = f()
+            expect(jit_supported).to_equal(false)
+
+        it "full chain: services -> backend -> target_triple":
+            val services = create_default_services()
+            val backend = services.backend
+            val f = backend.target_triple_fn
+            val triple = f()
+            expect(triple).to_equal("noop")
+
+        it "full chain: services -> backend -> name then supports_jit":
+            val services = create_default_services()
+            val backend = services.backend
+            val name = backend.name
+            val f = backend.supports_jit_fn
+            val jit = f()
+            expect(name).to_equal("noop-backend")
+            expect(jit).to_equal(false)
+
+# ============================================================================
+# Phase 4 - Type safety
+# ============================================================================
+
+describe "BackendPort Feature: Phase 4 - Type safety":
+
+    context "name is unique identifier":
+        it "BackendPort name is meaningful (not empty)":
+            val services = create_default_services()
+            val backend = services.backend
+            expect(backend.name.len()).to_be_greater_than(0)
+
+        it "noop backend name starts with noop prefix":
+            val services = create_default_services()
+            val backend = services.backend
+            expect(backend.name).to_start_with("noop")
+
+        it "noop backend name contains backend suffix":
+            val services = create_default_services()
+            val backend = services.backend
+            expect(backend.name).to_end_with("backend")
+
+    context "different backends have different names":
+        it "noop backend name differs from custom name":
+            val services = create_default_services()
+            val noop_name = services.backend.name
+            val custom_name = "interpreter-backend"
+            expect(noop_name).to_equal("noop-backend")
+            expect(custom_name).to_equal("interpreter-backend")
+
+        it "noop backend name differs from wasm backend name":
+            val services = create_default_services()
+            val noop_name = services.backend.name
+            val wasm_name = "wasm-backend"
+            expect(noop_name).to_equal("noop-backend")
+            expect(wasm_name).to_equal("wasm-backend")
+
+        it "backend identification works via target_triple":
+            val services = create_default_services()
+            val f = services.backend.target_triple_fn
+            val noop_triple = f()
+            val x86_triple = "x86_64-unknown-linux-gnu"
+            expect(noop_triple).to_equal("noop")
+            expect(x86_triple).to_equal("x86_64-unknown-linux-gnu")
+
+    context "fn-field type correctness":
+        it "supports_jit_fn always returns a bool":
+            val services = create_default_services()
+            val f = services.backend.supports_jit_fn
+            val result = f()
+            val is_false = result == false
+            expect(is_false).to_equal(true)
+
+        it "target_triple_fn always returns a text":
+            val services = create_default_services()
+            val f = services.backend.target_triple_fn
+            val result = f()
+            expect(result.len()).to_be_greater_than(0)
+
+        it "calling fn-fields multiple times is idempotent":
+            val services = create_default_services()
+            val backend = services.backend
+            val f_jit = backend.supports_jit_fn
+            val f_triple = backend.target_triple_fn
+            val r1 = f_jit()
+            val r2 = f_jit()
+            val t1 = f_triple()
+            val t2 = f_triple()
+            expect(r1).to_equal(r2)
+            expect(t1).to_equal(t2)

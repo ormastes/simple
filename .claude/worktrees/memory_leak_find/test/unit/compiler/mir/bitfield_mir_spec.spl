@@ -1,0 +1,264 @@
+# Bitfield MIR Lowering Tests
+#
+# Tests for lowering bitfield field access to efficient bit operations.
+
+use std.spec.{check, check_msg}
+describe "Bitfield Syntax":
+    it "recognizes bitfield definitions":
+        val code = """
+        bitfield Flags(u32):
+            enabled: bool
+            priority: u4
+        """
+        check(code.contains("bitfield"))
+        check(code.contains("Flags"))
+
+    it "supports bool fields (1 bit)":
+        val code = """
+        bitfield Status(u8):
+            ready: bool
+            error: bool
+        """
+        check(code.contains("ready: bool"))
+        check(code.contains("error: bool"))
+
+    it "supports custom bit widths":
+        val code = """
+        bitfield Control(u32):
+            mode: u2      # 2 bits
+            level: u4     # 4 bits
+            flags: u8     # 8 bits
+        """
+        check(code.contains("u2"))
+        check(code.contains("u4"))
+        check(code.contains("u8"))
+
+    it "supports reserved/padding fields":
+        val code = """
+        bitfield Register(u32):
+            data: u8
+            _: u8          # 8 bits reserved
+            status: u16
+        """
+        check(code.contains("_: u8"))
+
+describe "Bitfield Field Access":
+    it "reads bitfield fields":
+        val code = """
+        bitfield Flags(u32):
+            enabled: bool
+            priority: u4
+
+        val flags = Flags(0x06)  # 0b0110
+        val priority = flags.priority  # Should be (0x06 >> 1) & 0xF = 3
+        """
+        check(code.contains("flags.priority"))
+
+    it "writes bitfield fields":
+        val code = """
+        bitfield Flags(u32):
+            enabled: bool
+            priority: u4
+
+        var flags = Flags(0)
+        flags.priority = 3  # Set priority to 3
+        """
+        check(code.contains("flags.priority = 3"))
+
+    it "handles multiple field updates":
+        val code = """
+        bitfield Status(u8):
+            ready: bool
+            error: bool
+            mode: u2
+
+        var status = Status(0)
+        status.ready = true
+        status.error = false
+        status.mode = 2
+        """
+        check(code.contains("status.ready = true"))
+        check(code.contains("status.mode = 2"))
+
+describe "Bitfield Bit Operations":
+    it "generates correct getter mask":
+        # For field at offset 4, width 3:
+        # mask = (1 << 3) - 1 = 7
+        # getter = (value >> 4) & 7
+        val code = "val result = (value >> 4) & 7"
+        check(code.contains(">> 4"))
+        check(code.contains("& 7"))
+
+    it "generates correct setter mask":
+        # For field at offset 4, width 3:
+        # clear_mask = ~(7 << 4) = ~0x70 = 0xFFFFFF8F
+        # setter = (value & clear_mask) | ((new_val & 7) << 4)
+        val code = "val result = (value & clear_mask) | ((new_val & 7) << 4)"
+        check(code.contains("& clear_mask"))
+        check(code.contains("& 7"))
+        check(code.contains("<< 4"))
+
+describe "Bitfield Real-World Examples":
+    it "implements hardware control register":
+        val code = """
+        # ARM Cortex-M CONTROL register
+        bitfield ControlReg(u32):
+            npriv: bool      # Non-privileged mode
+            spsel: bool      # Stack pointer select
+            _: u30           # Reserved
+
+        @address(0xE000ED04)
+        @volatile
+        var CONTROL: ControlReg
+
+        fn enter_unprivileged():
+            unsafe:
+                CONTROL.npriv = true
+        """
+        check(code.contains("bitfield ControlReg"))
+        check(code.contains("@volatile"))
+        check(code.contains("CONTROL.npriv = true"))
+
+    it "implements peripheral status register":
+        val code = """
+        # UART status register
+        bitfield UartStatus(u32):
+            rxne: bool       # Receive not empty
+            txe: bool        # Transmit empty
+            tc: bool         # Transmission complete
+            idle: bool       # Idle line detected
+            ore: bool        # Overrun error
+            nf: bool         # Noise error
+            fe: bool         # Framing error
+            pe: bool         # Parity error
+            _: u24           # Reserved
+
+        @address(0x40011000)
+        @volatile
+        val UART_SR: UartStatus
+
+        fn uart_ready() -> bool:
+            unsafe:
+                UART_SR.txe
+        """
+        check(code.contains("bitfield UartStatus"))
+        check(code.contains("UART_SR.txe"))
+
+    it "implements DMA configuration":
+        val code = """
+        # DMA channel configuration
+        bitfield DmaConfig(u32):
+            en: bool         # Channel enable
+            tcie: bool       # Transfer complete interrupt
+            htie: bool       # Half transfer interrupt
+            teie: bool       # Transfer error interrupt
+            dir: bool        # Data transfer direction
+            circ: bool       # Circular mode
+            pinc: bool       # Peripheral increment
+            minc: bool       # Memory increment
+            psize: u2        # Peripheral size (00=8bit, 01=16bit, 10=32bit)
+            msize: u2        # Memory size
+            pl: u2           # Priority level
+            mem2mem: bool    # Memory to memory
+            _: u17           # Reserved
+
+        var dma_cfg = DmaConfig(0)
+        dma_cfg.en = true
+        dma_cfg.tcie = true
+        dma_cfg.dir = false
+        dma_cfg.psize = 2  # 32-bit
+        dma_cfg.pl = 3     # Very high priority
+        """
+        check(code.contains("bitfield DmaConfig"))
+        check(code.contains("psize: u2"))
+        check(code.contains("dma_cfg.pl = 3"))
+
+    it "implements x86 EFLAGS register":
+        val code = """
+        # x86/x86_64 EFLAGS register
+        bitfield EFlags(u64):
+            cf: bool         # Carry flag
+            _: u1            # Reserved (always 1)
+            pf: bool         # Parity flag
+            _: u1
+            af: bool         # Auxiliary carry flag
+            _: u1
+            zf: bool         # Zero flag
+            sf: bool         # Sign flag
+            tf: bool         # Trap flag
+            if_: bool        # Interrupt enable flag
+            df: bool         # Direction flag
+            of: bool         # Overflow flag
+            iopl: u2         # I/O privilege level
+            nt: bool         # Nested task
+            _: u1
+            rf: bool         # Resume flag
+            vm: bool         # Virtual 8086 mode
+            ac: bool         # Alignment check
+            vif: bool        # Virtual interrupt flag
+            vip: bool        # Virtual interrupt pending
+            id: bool         # ID flag
+            _: u42           # Reserved
+
+        fn read_eflags() -> EFlags:
+            var flags: u64
+            unsafe:
+                asm volatile("pushfq; pop {flags}", flags = out(reg) flags)
+            EFlags(flags)
+        """
+        check(code.contains("bitfield EFlags(u64)"))
+        check(code.contains("iopl: u2"))
+
+describe "Bitfield Error Cases":
+    it "detects overflow (too many bits)":
+        val code = """
+        bitfield BadFlags(u8):
+            field1: u4
+            field2: u4
+            field3: u4   # ERROR: 4+4+4=12 > 8 bits
+        """
+        # This should fail validation
+        check(code.contains("field3: u4"))
+
+    it "requires valid backing type":
+        val code = """
+        bitfield BadBacking(i32):  # ERROR: must be u8/u16/u32/u64
+            field: bool
+        """
+        # Should fail - signed types not allowed
+        check(code.contains("i32"))
+
+describe "Bitfield MIR Lowering":
+    it "lowers field read to shift and mask":
+        # flags.priority where priority is at offset 1, width 4
+        # Should become: (flags >> 1) & 0xF
+        val code = """
+        val priority = (flags >> 1) & 0xF
+        """
+        check(code.contains(">>"))
+        check(code.contains("&"))
+
+    it "lowers field write to clear and set":
+        # flags.priority = 3 where priority is at offset 1, width 4
+        # Should become: flags = (flags & ~(0xF << 1)) | ((3 & 0xF) << 1)
+        val code = """
+        flags = (flags & ~(0xF << 1)) | ((3 & 0xF) << 1)
+        """
+        check(code.contains("& ~"))
+        check(code.contains("<<"))
+        check(code.contains("|"))
+
+describe "Bitfield at Offset 0 (No Shift)":
+    it "optimizes away zero shifts for reads":
+        # For field at offset 0, width 1:
+        # Should be: value & 0x1 (no shift)
+        val code = "val result = value & 0x1"
+        check(code.contains("& 0x1"))
+        check(not code.contains(">>"))
+
+    it "optimizes away zero shifts for writes":
+        # For field at offset 0, width 1:
+        # Should be: (value & ~0x1) | (new_val & 0x1)
+        val code = "val result = (value & ~0x1) | (new_val & 0x1)"
+        check(code.contains("& ~0x1"))
+        check(not code.contains("<<"))

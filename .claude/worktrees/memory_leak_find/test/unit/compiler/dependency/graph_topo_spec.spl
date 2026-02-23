@@ -1,0 +1,223 @@
+# Tests for ImportGraph topological sort (Kahn's algorithm)
+# Task #17: Kahn's topological sort
+
+use compiler.dependency.graph.{ImportGraph}
+
+describe "ImportGraph topological_order":
+    context "acyclic graphs":
+        it "empty graph returns empty list":
+            val graph = ImportGraph.new()
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    expect order.len() == 0
+                case nil:
+                    fail("Expected topological order for empty graph")
+
+        it "single module":
+            var graph = ImportGraph.new()
+            graph.add_module("a")
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    expect order.len() == 1
+                case nil:
+                    fail("Expected topological order for single module")
+
+        it "linear chain - correct order":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "c")
+            graph.add_use("c", "d")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    expect order.len() == 4
+                    # d should come before c, c before b, b before a
+                    # Valid orders: [d,c,b,a]
+                    var found_d = false
+                    var found_c = false
+                    var found_b = false
+                    for module in order:
+                        if module == "d":
+                            found_d = true
+                        if module == "c":
+                            found_c = true
+                            expect found_d  # d must come before c
+                        if module == "b":
+                            found_b = true
+                            expect found_c  # c must come before b
+                        if module == "a":
+                            expect found_b  # b must come before a
+                case nil:
+                    fail("Expected topological order for linear chain")
+
+        it "tree structure - dependencies before dependents":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("a", "c")
+            graph.add_use("b", "d")
+            graph.add_use("c", "d")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    expect order.len() == 4
+                    # d must come before both b and c
+                    # b and c must come before a
+                    var d_pos = -1
+                    var b_pos = -1
+                    var c_pos = -1
+                    var a_pos = -1
+                    var i = 0
+                    for module in order:
+                        if module == "d":
+                            d_pos = i
+                        if module == "b":
+                            b_pos = i
+                        if module == "c":
+                            c_pos = i
+                        if module == "a":
+                            a_pos = i
+                        i = i + 1
+
+                    expect d_pos < b_pos
+                    expect d_pos < c_pos
+                    expect b_pos < a_pos
+                    expect c_pos < a_pos
+                case nil:
+                    fail("Expected topological order for tree")
+
+        it "diamond structure - valid topological order":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("a", "c")
+            graph.add_use("b", "d")
+            graph.add_use("c", "d")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    expect order.len() == 4
+                case nil:
+                    fail("Expected topological order for diamond")
+
+        it "complex acyclic graph":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("a", "c")
+            graph.add_use("b", "d")
+            graph.add_use("c", "d")
+            graph.add_use("c", "e")
+            graph.add_use("d", "f")
+            graph.add_use("e", "f")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    expect order.len() == 6
+                    # f is a dependency of everyone
+                    var f_pos = -1
+                    var i = 0
+                    for module in order:
+                        if module == "f":
+                            f_pos = i
+                        i = i + 1
+                    # f should be first (or early)
+                    expect f_pos < 4
+                case nil:
+                    fail("Expected topological order for complex graph")
+
+    context "cyclic graphs":
+        it "self-loop returns None":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "a")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(_):
+                    fail("Expected None for self-loop")
+                case nil:
+                    pass
+
+        it "two-node cycle returns None":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "a")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(_):
+                    fail("Expected None for two-node cycle")
+                case nil:
+                    pass
+
+        it "three-node cycle returns None":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "c")
+            graph.add_use("c", "a")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(_):
+                    fail("Expected None for three-node cycle")
+                case nil:
+                    pass
+
+        it "cycle in larger graph returns None":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("b", "c")
+            graph.add_use("c", "d")
+            graph.add_use("d", "b")  # Creates cycle b->c->d->b
+
+            val result = graph.topological_order()
+            match result:
+                case Some(_):
+                    fail("Expected None for cyclic graph")
+                case nil:
+                    pass
+
+    context "type-only imports":
+        it "type-only imports included in topological order":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_type_use("b", "c")  # Type-only
+            graph.add_use("c", "d")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    # Should succeed - type-only edges don't affect topo sort
+                    # since they're not in the cycle detection graph
+                    expect order.len() >= 3
+                case nil:
+                    # Also valid - depends on implementation
+                    pass
+
+    context "disconnected components":
+        it "handles disconnected modules":
+            var graph = ImportGraph.new()
+            graph.add_use("a", "b")
+            graph.add_use("c", "d")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    expect order.len() == 4
+                case nil:
+                    fail("Expected topological order for disconnected components")
+
+        it "isolated modules included":
+            var graph = ImportGraph.new()
+            graph.add_module("isolated")
+            graph.add_use("a", "b")
+
+            val result = graph.topological_order()
+            match result:
+                case Some(order):
+                    expect order.len() == 3
+                case nil:
+                    fail("Expected topological order with isolated module")

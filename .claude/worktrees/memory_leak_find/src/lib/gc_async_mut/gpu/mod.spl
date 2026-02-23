@@ -1,0 +1,174 @@
+"""GPU Computing Module - Unified GPU Interface
+
+@tag:stdlib
+@tag:api
+
+Provides backend-agnostic GPU computing with automatic device selection,
+memory management, and stream-based async operations. Supports CUDA (via PyTorch)
+and Vulkan compute backends with CPU fallback.
+
+## Architecture Overview
+
+The GPU module uses a three-layer architecture:
+1. **Device Layer** - Backend detection and device enumeration
+2. **Memory Layer** - Typed GPU arrays with automatic lifecycle management (RAII)
+3. **Context Layer** - Unified API for device selection, allocation, and streams
+
+## Memory Model
+
+GPU memory is managed through typed arrays (GpuArray[T]) with automatic cleanup:
+- **Host Memory**: CPU-accessible system RAM
+- **Device Memory**: GPU-only memory (faster, not directly accessible by CPU)
+- **Transfers**: Explicit upload (host→device) and download (device→host)
+- **RAII**: Memory freed automatically when arrays/context go out of scope
+
+## Execution Model
+
+Operations on GPU are asynchronous by default:
+- **Streams**: Independent execution queues for parallel work
+- **Synchronization**: Use ctx.sync() to wait for completion
+- **Kernel Launch**: Future feature for custom compute kernels
+
+## Backend Selection
+
+The module auto-detects available backends in priority order:
+1. **CUDA** - NVIDIA GPUs via PyTorch integration (fastest)
+2. **Vulkan** - Cross-platform compute API (future)
+3. **CPU Fallback** - Always available for testing
+
+SDoctest Example: Basic GPU Array Operations
+
+    use std.gpu.{Context}
+
+    # Auto-detect best available GPU backend
+    val ctx = Context.default()
+    print "Using backend: {ctx.backend_name()}"
+
+    # Allocate and upload data to GPU
+    val data = [1.0, 2.0, 3.0, 4.0]
+    val gpu_arr = ctx.alloc_upload(data)
+
+    # Download result (blocking)
+    val result = gpu_arr.download()
+    print "Result: {result}"
+
+    # Memory freed automatically when ctx/gpu_arr go out of scope
+
+SDoctest Example: Multi-GPU Device Selection
+
+    use std.gpu.{Context, GpuBackend, detect_backends}
+
+    # List available backends
+    val backends = detect_backends()
+    for backend in backends:
+        print "Available: {backend}"
+
+    # Explicit device selection (e.g., second GPU)
+    val ctx = Context.new(backend: GpuBackend.Cuda, device: 1)
+    print "Using GPU {ctx.device_id()}"
+
+    # Allocate zero-initialized array
+    val zeros = ctx.alloc_zeros[f32](1024)
+    print "Allocated {zeros.count} elements"
+
+SDoctest Example: Memory Transfer Patterns
+
+    use std.gpu.{Context}
+
+    val ctx = Context.default()
+
+    # Pattern 1: Allocate + Upload (two-step)
+    val arr1 = ctx.alloc[f32](100)
+    arr1.upload([1.0, 2.0, 3.0])
+
+    # Pattern 2: Allocate + Upload in one call (recommended)
+    val arr2 = ctx.alloc_upload([4.0, 5.0, 6.0])
+
+    # Pattern 3: Zero-initialized allocation
+    val arr3 = ctx.alloc_zeros[f32](100)
+
+    # Device-to-device copy (no host transfer)
+    arr1.copy_to(arr3)
+
+    # Download for verification (blocking)
+    val host_data = arr3.download()
+
+SDoctest Example: Async Streams for Parallel Execution
+
+    use std.gpu.{Context}
+
+    val ctx = Context.default()
+
+    # Create independent streams for parallel work
+    val stream1 = ctx.create_stream()
+    val stream2 = ctx.create_stream()
+
+    # Upload data on default stream
+    val a = ctx.alloc_upload([1.0, 2.0, 3.0])
+    val b = ctx.alloc_upload([4.0, 5.0, 6.0])
+
+    # Future: Launch kernels on different streams
+    # stream1.launch(kernel1, [a])
+    # stream2.launch(kernel2, [b])
+
+    # Wait for all operations to complete
+    ctx.sync()
+    print "All operations finished"
+
+## Error Handling
+
+GPU operations use Option/Result patterns (no exceptions):
+- **Allocation failures**: Returns nil or empty array
+- **Transfer failures**: upload() returns false, download() returns empty array
+- **Backend unavailable**: Falls back to CPU backend automatically
+
+## Performance Considerations
+
+- **Minimize transfers**: Keep data on GPU between operations
+- **Use streams**: Overlap computation and memory transfers
+- **Batch operations**: Process large arrays to amortize launch overhead
+- **Sync only when needed**: Excessive sync() calls reduce parallelism
+
+## Limitations
+
+- Generic type parameters T must be numeric (f32, f64, i32, i64)
+- Kernel launch API not yet implemented (future)
+- Vulkan backend planned but not yet available
+- sizeof[T]() not available - assumes 8 bytes per element
+
+## See Also
+
+- std.gpu.device: Backend detection and device handles
+- std.gpu.memory: GPU array types and allocation
+- std.gpu.context: Context API and stream management
+- lib.torch: PyTorch FFI bindings for CUDA support
+"""
+
+# Re-export from submodules
+# Import all GPU subsystems for unified API surface
+use std.gpu.device.{GpuBackend, Gpu, detect_backends, preferred_backend, gpu_cuda, gpu_vulkan, gpu_none}
+use std.gpu.memory.{GpuArray, gpu_alloc, gpu_alloc_upload, gpu_alloc_zeros}
+use std.gpu.context.{Context, create_context_from_config}
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+# Device types and functions - Backend selection and device handles
+export GpuBackend    # Enum: Cuda, Vulkan, None_ (backend type)
+export Gpu           # Struct: Device handle with backend, device_id, sync()
+export detect_backends     # fn() -> [GpuBackend] - List available backends
+export preferred_backend   # fn() -> GpuBackend - Best available backend
+export gpu_cuda      # fn(device_id) -> Gpu - Create CUDA device handle
+export gpu_vulkan    # fn(device_id) -> Gpu - Create Vulkan device handle (future)
+export gpu_none      # fn() -> Gpu - Create CPU fallback handle
+
+# Memory types and functions - GPU array allocation and transfer
+export GpuArray      # class[T]: Typed GPU array with upload/download/copy_to
+export gpu_alloc          # fn[T](gpu, count) -> GpuArray[T] - Allocate uninitialized
+export gpu_alloc_upload   # fn[T](gpu, data) -> GpuArray[T] - Allocate + upload
+export gpu_alloc_zeros    # fn[T](gpu, count) -> GpuArray[T] - Allocate zeros
+
+# Context API (main interface) - High-level unified GPU API
+export Context            # class: Manages device, streams, allocations
+export create_context_from_config  # fn() -> Context - Create from dl.config.sdn

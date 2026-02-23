@@ -1,0 +1,235 @@
+#!/usr/bin/env simple
+# Tree-sitter Grammar Verification Script
+# Verifies all expected tokens and grammar rules are defined
+# Migrated from scripts/verify/verify_treesitter_grammar.sh
+
+use app.io
+use app.utils.colors (success, error)
+use std.log.{info}
+
+export main, verify_treesitter_grammar
+
+fn main():
+    verify_treesitter_grammar()
+
+fn verify_treesitter_grammar():
+    """Verify tree-sitter grammar completeness"""
+    val grammar_dir = "src/lib/std/src/parser/treesitter/grammar"
+    val query_dir = "src/lib/std/src/parser/treesitter/queries"
+
+    print "═══════════════════════════════════════════════════════════"
+    print "Tree-Sitter Grammar Verification"
+    print "═══════════════════════════════════════════════════════════"
+    print ""
+
+    # Verify tokens
+    val missing_tokens = verify_tokens(grammar_dir)
+
+    # Verify grammar rules
+    val missing_rules = verify_rules(grammar_dir)
+
+    # Verify query files
+    val missing_queries = verify_query_files(query_dir)
+
+    # Verify error recovery
+    verify_error_recovery()
+
+    # Final summary
+    print_final_summary(missing_tokens, missing_rules, missing_queries)
+
+fn verify_tokens(grammar_dir: text) -> i64:
+    """Verify expected tokens"""
+    info("verify", "Verifying Tokens...")
+    print "─────────────────────────────────────────────────────────────"
+
+    val expected_tokens = [
+        "Val", "Var", "Me", "Fn",
+        "Mod", "Use", "Export", "Common",
+        "On", "Bind", "Forbid", "Allow", "Mock",
+        "Out", "Requires", "Ensures", "Invariant", "Forall", "Exists", "Calc",
+        "Feature", "Scenario", "Given", "When", "Then",
+        "Union", "Mixin", "Actor", "Unit",
+        "Iso", "Ref", "Mut",
+        "PlusAssign", "MinusAssign", "StarAssign", "SlashAssign",
+        "TildeAssign", "TildePlusAssign",
+        "DoubleDot", "DoubleDotEq"
+    ]
+
+    val tokens_file = "{grammar_dir}/tokens.spl"
+    var missing = 0
+
+    if not file_exists(tokens_file):
+        print error("✗ tokens.spl file not found")
+        return expected_tokens.len()
+
+    val content = file_read(tokens_file)
+
+    for token in expected_tokens:
+        if content.contains(token):
+            print success("✓ {token}")
+        else:
+            print error("✗ {token} - MISSING")
+            missing = missing + 1
+
+    print ""
+    val found = expected_tokens.len() - missing
+    print "Token Summary: {found}/{expected_tokens.len()} found"
+    print ""
+
+    missing
+
+fn verify_rules(grammar_dir: text) -> i64:
+    """Verify grammar rules"""
+    info("verify", "Verifying Grammar Rules...")
+    print "─────────────────────────────────────────────────────────────"
+
+    val expected_rules = [
+        "val_stmt",
+        "var_stmt",
+        "fn_lambda",
+        "backslash_lambda",
+        "pipe_lambda",
+        "mod_def",
+        "on_stmt",
+        "bind_stmt",
+        "forbid_stmt",
+        "allow_stmt",
+        "mock_def",
+        "out_stmt",
+        "out_err_stmt",
+        "requires_stmt",
+        "ensures_stmt",
+        "invariant_stmt",
+        "forall_stmt",
+        "exists_stmt",
+        "calc_block",
+        "feature_def",
+        "scenario_def",
+        "given_step",
+        "when_step",
+        "then_step",
+        "union_def",
+        "mixin_def",
+        "actor_def",
+        "unit_def",
+        "handle_pool_def",
+        "capability_type"
+    ]
+
+    var missing = 0
+
+    if not is_dir(grammar_dir):
+        print error("✗ Grammar directory not found")
+        return expected_rules.len()
+
+    for rule in expected_rules:
+        val pattern = "\"{rule}\""
+        if search_in_directory(grammar_dir, pattern):
+            print success("✓ {rule}")
+        else:
+            print error("✗ {rule} - MISSING")
+            missing = missing + 1
+
+    print ""
+    val found = expected_rules.len() - missing
+    print "Rule Summary: {found}/{expected_rules.len()} found"
+    print ""
+
+    missing
+
+fn verify_query_files(query_dir: text) -> i64:
+    """Verify LSP query files"""
+    info("verify", "Verifying LSP Query Files...")
+    print "─────────────────────────────────────────────────────────────"
+
+    val query_files = [
+        "highlights.scm",
+        "locals.scm",
+        "folds.scm",
+        "textobjects.scm",
+        "injections.scm",
+        "indents.scm"
+    ]
+
+    var missing = 0
+
+    for file in query_files:
+        val path = "{query_dir}/{file}"
+        if file_exists(path):
+            val (lines_out, _, _) = process_run("wc", ["-l", path])
+            val lines = lines_out.trim().split(" ")[0]
+            print success("✓ {file} ({lines} lines)")
+        else:
+            print error("✗ {file} - MISSING")
+            missing = missing + 1
+
+    print ""
+    val found = query_files.len() - missing
+    print "Query File Summary: {found}/{query_files.len()} found"
+    print ""
+
+    missing
+
+fn verify_error_recovery():
+    """Verify error recovery implementation"""
+    info("verify", "Verifying Error Recovery...")
+    print "─────────────────────────────────────────────────────────────"
+
+    val error_recovery_path = "src/lib/std/src/parser/treesitter/error_recovery.spl"
+
+    if file_exists(error_recovery_path):
+        val content = file_read(error_recovery_path)
+        val lines = content.split("\n")
+        var strategy_count = 0
+
+        for line in lines:
+            if line.contains("RecoveryStrategy."):
+                strategy_count = strategy_count + 1
+
+        print success("✓ error_recovery.spl exists")
+        print "  Found {strategy_count} recovery strategy references"
+    else:
+        print error("✗ error_recovery.spl - MISSING")
+
+    print ""
+
+fn print_final_summary(missing_tokens: i64, missing_rules: i64, missing_queries: i64):
+    """Print final verification summary"""
+    print "═══════════════════════════════════════════════════════════"
+    print "Verification Summary"
+    print "═══════════════════════════════════════════════════════════"
+    print ""
+
+    val total_tokens = 31
+    val total_rules = 29
+    val total_queries = 6
+
+    val found_tokens = total_tokens - missing_tokens
+    val found_rules = total_rules - missing_rules
+    val found_queries = total_queries - missing_queries
+
+    print "Tokens:      {found_tokens}/{total_tokens} ✓"
+    print "Rules:       {found_rules}/{total_rules} ✓"
+    print "Query Files: {found_queries}/{total_queries} ✓"
+    print ""
+
+    val total_expected = total_tokens + total_rules + total_queries
+    val total_missing = missing_tokens + missing_rules + missing_queries
+    val total_found = total_expected - total_missing
+
+    print "Overall: {total_found}/{total_expected} components verified"
+    print ""
+
+    if total_missing == 0:
+        print success("✅ ALL VERIFICATIONS PASSED")
+        exit(0)
+    else:
+        print error("❌ {total_missing} COMPONENTS MISSING")
+        exit(1)
+
+fn search_in_directory(directory: text, pattern: text) -> bool:
+    """Search for pattern in directory recursively"""
+    val (stdout, _, code) = process_run("grep",
+        ["-rq", pattern, directory])
+
+    code == 0

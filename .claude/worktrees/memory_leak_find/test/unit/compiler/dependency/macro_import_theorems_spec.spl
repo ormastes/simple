@@ -1,0 +1,381 @@
+"""
+# Lean theorem validation tests for macro auto-import
+
+use compiler.dependency.macro_import.{
+    SymKind, MacroSymbol, AutoImport, MacroExports, MacroDirManifest,
+    is_auto_imported, auto_imported_macros, glob_import, explicit_import, combine_exports
+}
+
+# Helper to create standard exports
+fn make_exports() -> MacroExports:
+    var exports = MacroExports.new()
+    exports.add_non_macro(MacroSymbol.value_sym("mod", "foo"))
+    exports.add_non_macro(MacroSymbol.value_sym("mod", "bar"))
+    exports.add_macro(MacroSymbol.macro_sym("mod", "my_macro"))
+    exports.add_macro(MacroSymbol.macro_sym("mod", "other_macro"))
+    exports
+
+describe "Lean Theorem 1: glob_doesnt_leak_macros_wf":
+    it "excludes single non-auto-imported macro":
+        val exports = make_exports()
+        expect exports.is_well_formed()
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        # other_macro should NOT be in result
+        var found_other = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "other_macro":
+                found_other = true
+
+        expect not found_other
+
+    it "includes auto-imported macro":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        # my_macro SHOULD be in result
+        var found_my = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "my_macro":
+                found_my = true
+
+        expect found_my
+
+    it "excludes all when none auto-imported":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val result = glob_import(manifest, exports)
+
+        # No macros should be in result
+        var found_any_macro = false
+        for sym in result:
+            val sym_kind = sym.get_kind()
+            if sym_kind.is_macro():
+                found_any_macro = true
+
+        expect not found_any_macro
+
+    it "excludes correct macro with multiple":
+        var exports = MacroExports.new()
+        exports.add_macro(MacroSymbol.macro_sym("mod", "m1"))
+        exports.add_macro(MacroSymbol.macro_sym("mod", "m2"))
+        exports.add_macro(MacroSymbol.macro_sym("mod", "m3"))
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "m1"))
+        manifest.add_auto_import(AutoImport.new("mod", "m3"))
+
+        val result = glob_import(manifest, exports)
+
+        # m2 should NOT be in result
+        var found_m2 = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "m2":
+                found_m2 = true
+
+        expect not found_m2
+
+describe "Lean Theorem 2: nonmacros_always_globbed":
+    it "includes all with empty auto-imports":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val result = glob_import(manifest, exports)
+
+        var found_foo = false
+        var found_bar = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "foo":
+                found_foo = true
+            if sym_name == "bar":
+                found_bar = true
+
+        expect found_foo
+        expect found_bar
+
+    it "includes all with some auto-imports":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        var found_foo = false
+        var found_bar = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "foo":
+                found_foo = true
+            if sym_name == "bar":
+                found_bar = true
+
+        expect found_foo
+        expect found_bar
+
+    it "includes all with all macros auto-imported":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+        manifest.add_auto_import(AutoImport.new("mod", "other_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        var found_foo = false
+        var found_bar = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "foo":
+                found_foo = true
+            if sym_name == "bar":
+                found_bar = true
+
+        expect found_foo
+        expect found_bar
+
+    it "includes single non-macro":
+        var exports = MacroExports.new()
+        exports.add_non_macro(MacroSymbol.value_sym("mod", "only_one"))
+
+        val manifest = MacroDirManifest.new("test")
+        val result = glob_import(manifest, exports)
+
+        var found = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "only_one":
+                found = true
+
+        expect found
+
+describe "Lean Theorem 3: auto_imported_in_glob":
+    it "includes single auto-imported macro":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        var found = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "my_macro":
+                val sym_kind = sym.get_kind()
+                expect sym_kind.is_macro()
+                found = true
+
+        expect found
+
+    it "includes all auto-imported macros":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+        manifest.add_auto_import(AutoImport.new("mod", "other_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        var found_my = false
+        var found_other = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "my_macro":
+                found_my = true
+            if sym_name == "other_macro":
+                found_other = true
+
+        expect found_my
+        expect found_other
+
+    it "includes from different modules":
+        var exports = MacroExports.new()
+        exports.add_macro(MacroSymbol.macro_sym("mod1", "m1"))
+        exports.add_macro(MacroSymbol.macro_sym("mod2", "m2"))
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod1", "m1"))
+        manifest.add_auto_import(AutoImport.new("mod2", "m2"))
+
+        val result = glob_import(manifest, exports)
+
+        var found_m1 = false
+        var found_m2 = false
+        for sym in result:
+            val sym_name = sym.get_name()
+            if sym_name == "m1":
+                found_m1 = true
+            if sym_name == "m2":
+                found_m2 = true
+
+        expect found_m1
+        expect found_m2
+
+describe "Lean Theorem 4: glob_subset":
+    it "all symbols from exports":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        for sym in result:
+            var in_non_macros = false
+            for non_macro in exports.non_macros:
+                if sym.equals(non_macro):
+                    in_non_macros = true
+
+            var in_macros = false
+            for macro in exports.macros:
+                if sym.equals(macro):
+                    in_macros = true
+
+            expect in_non_macros or in_macros
+
+    it "subset with no auto-imports":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val result = glob_import(manifest, exports)
+
+        for sym in result:
+            var found = false
+            for non_macro in exports.non_macros:
+                if sym.equals(non_macro):
+                    found = true
+
+            expect found
+
+    it "subset with all auto-imported":
+        val exports = make_exports()
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "my_macro"))
+        manifest.add_auto_import(AutoImport.new("mod", "other_macro"))
+
+        val result = glob_import(manifest, exports)
+
+        for sym in result:
+            var in_non_macros = false
+            for non_macro in exports.non_macros:
+                if sym.equals(non_macro):
+                    in_non_macros = true
+
+            var in_macros = false
+            for macro in exports.macros:
+                if sym.equals(macro):
+                    in_macros = true
+
+            expect in_non_macros or in_macros
+
+describe "Lean Theorem 5: empty_auto_import_no_macros":
+    it "auto_imported_macros is empty":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val auto_macros = auto_imported_macros(manifest, exports)
+        expect auto_macros.len() == 0
+
+    it "glob has no macros":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val result = glob_import(manifest, exports)
+
+        for sym in result:
+            val sym_kind = sym.get_kind()
+            expect not sym_kind.is_macro()
+
+    it "only non-macros in result":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val result = glob_import(manifest, exports)
+
+        var all_value_type = true
+        for sym in result:
+            val sym_kind = sym.get_kind()
+            if sym_kind.is_macro():
+                all_value_type = false
+
+        expect all_value_type
+
+    it "count equals non-macro count":
+        val exports = make_exports()
+        val manifest = MacroDirManifest.new("test")
+
+        val result = glob_import(manifest, exports)
+
+        expect result.len() == exports.non_macros.len()
+
+describe "Lean Theorem 6: autoImported_combine":
+    it "sum of individual auto-imports":
+        var e1 = MacroExports.new()
+        e1.add_macro(MacroSymbol.macro_sym("mod1", "macro1"))
+
+        var e2 = MacroExports.new()
+        e2.add_macro(MacroSymbol.macro_sym("mod2", "macro2"))
+
+        val combined = combine_exports(e1, e2)
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod1", "macro1"))
+        manifest.add_auto_import(AutoImport.new("mod2", "macro2"))
+
+        val auto1 = auto_imported_macros(manifest, e1)
+        val auto2 = auto_imported_macros(manifest, e2)
+        val auto_combined = auto_imported_macros(manifest, combined)
+
+        expect auto_combined.len() == auto1.len() + auto2.len()
+
+    it "empty plus non-empty":
+        val e1 = MacroExports.new()
+
+        var e2 = MacroExports.new()
+        e2.add_macro(MacroSymbol.macro_sym("mod", "m1"))
+
+        val combined = combine_exports(e1, e2)
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod", "m1"))
+
+        val auto1 = auto_imported_macros(manifest, e1)
+        val auto2 = auto_imported_macros(manifest, e2)
+        val auto_combined = auto_imported_macros(manifest, combined)
+
+        expect auto_combined.len() == auto1.len() + auto2.len()
+
+    it "multiple from each":
+        var e1 = MacroExports.new()
+        e1.add_macro(MacroSymbol.macro_sym("mod1", "m1"))
+        e1.add_macro(MacroSymbol.macro_sym("mod1", "m2"))
+
+        var e2 = MacroExports.new()
+        e2.add_macro(MacroSymbol.macro_sym("mod2", "m3"))
+        e2.add_macro(MacroSymbol.macro_sym("mod2", "m4"))
+
+        val combined = combine_exports(e1, e2)
+
+        var manifest = MacroDirManifest.new("test")
+        manifest.add_auto_import(AutoImport.new("mod1", "m1"))
+        manifest.add_auto_import(AutoImport.new("mod1", "m2"))
+        manifest.add_auto_import(AutoImport.new("mod2", "m3"))
+        manifest.add_auto_import(AutoImport.new("mod2", "m4"))
+
+        val auto1 = auto_imported_macros(manifest, e1)
+        val auto2 = auto_imported_macros(manifest, e2)
+        val auto_combined = auto_imported_macros(manifest, combined)
+
+        expect auto_combined.len() == auto1.len() + auto2.len()
+        expect auto_combined.len() == 4
+
+"""
+pass

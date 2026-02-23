@@ -1,0 +1,168 @@
+# Documentation Warnings for Build System
+#
+# Integrates documentation checking into the build pipeline.
+# Now includes MDSOC CapsuleVisibility.Public documentation validation.
+
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+use app.io.mod (cwd)
+use compiler.mdsoc.types.{VirtualCapsule, SurfaceBinding, CapsuleVisibility, LayerDef, LayerDirection}
+use compiler.mdsoc.layer_checker.{LayerChecker, check_public_documentation}
+
+# =========================================================================
+# Build Integration
+# =========================================================================
+
+fn run_doc_warnings(verbose: bool) -> i64:
+    """
+    Run documentation warnings check on all source files.
+
+    Now includes MDSOC capsule documentation validation:
+    - Scans for capsule.sdn files in src/
+    - Validates Public visibility exports have documentation
+    - Reports violations to stderr
+
+    Args:
+        verbose: Show verbose output
+
+    Returns:
+        Exit code (0 = success, >0 = warnings found)
+    """
+    if verbose:
+        print "Checking MDSOC capsule documentation..."
+
+    # Find all MDSOC capsules in src/
+    val base_dir = cwd()
+    val src_dir = base_dir + "/src"
+
+    if not rt_dir_exists(src_dir):
+        if verbose:
+            print "No src/ directory found"
+        return 0
+
+    val capsule_paths = _find_capsule_directories(src_dir)
+
+    if capsule_paths.len() == 0:
+        if verbose:
+            print "No MDSOC capsules found (no capsule.sdn files)"
+        return 0
+
+    if verbose:
+        print "Found {capsule_paths.len()} MDSOC capsule(s)"
+
+    # Check each capsule
+    var total_violations = 0
+
+    for capsule_path in capsule_paths:
+        val violations = _check_capsule(capsule_path, verbose)
+        total_violations = total_violations + violations
+
+    # Summary
+    if total_violations > 0:
+        print ""
+        print "WARNING: {total_violations} undocumented Public exports found"
+        print "Run 'simple check-capsule <path>' for details"
+        return 1
+    else:
+        if verbose:
+            print "All Public exports have documentation"
+        return 0
+
+fn _find_capsule_directories(base_dir: text) -> [text]:
+    """Recursively find directories containing capsule.sdn files."""
+    var capsules: [text] = []
+
+    # Check current directory
+    val config_path = base_dir + "/capsule.sdn"
+    if rt_file_exists(config_path):
+        capsules = capsules + [base_dir]
+
+    # Recurse into subdirectories
+    if not rt_dir_exists(base_dir):
+        return capsules
+
+    val entries = rt_dir_list(base_dir)
+
+    for entry in entries:
+        # Skip hidden directories and common non-source dirs
+        if entry.starts_with("."):
+            continue
+        if entry == "target" or entry == "build" or entry == "test":
+            continue
+
+        val full_path = base_dir + "/" + entry
+
+        if rt_dir_exists(full_path):
+            val sub_capsules = _find_capsule_directories(full_path)
+            capsules = capsules + sub_capsules
+
+    capsules
+
+fn _check_capsule(path: text, verbose: bool) -> i64:
+    """Check a single capsule and return violation count."""
+    if verbose:
+        print "  Checking: {path}"
+
+    # Create a simple capsule (without full config loading)
+    val capsule = _simple_capsule_from_path(path)
+
+    if capsule.surface.len() == 0:
+        return 0
+
+    # Create checker
+    val layer_def = LayerDef(
+        name: "build_check",
+        direction: LayerDirection.TopDown,
+        layers: [],
+        allowed_deps: []
+    )
+
+    var checker = LayerChecker.new(layer_def)
+
+    # Check documentation
+    check_public_documentation(capsule, checker)
+
+    val violations = checker.get_doc_violations()
+
+    # Report violations
+    for v in violations:
+        print "  {v.to_text()}"
+
+    violations.len()
+
+fn _simple_capsule_from_path(path: text) -> VirtualCapsule:
+    """Create a minimal capsule for checking (no full config parsing)."""
+    # For build integration, we create a dummy capsule
+    # The actual checking happens in check_public_documentation
+    # which scans the directory for export statements
+
+    VirtualCapsule(
+        name: _extract_name_from_path(path),
+        path: path,
+        surface: [
+            # Dummy Public binding to trigger checking
+            SurfaceBinding(
+                name: "*",
+                visibility: CapsuleVisibility.Public,
+                source_module: "",
+                alias: ""
+            )
+        ],
+        internal_modules: [],
+        rules: nil
+    )
+
+fn _extract_name_from_path(path: text) -> text:
+    """Extract capsule name from path."""
+    val parts = path.split("/")
+    if parts.len() > 0:
+        return parts[parts.len() - 1]
+    "unknown"
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export run_doc_warnings

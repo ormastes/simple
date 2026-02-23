@@ -1,0 +1,409 @@
+# API Documentation Generator
+#
+# Generates documentation from parsed AST with doc comments.
+# Supports Markdown and HTML output.
+#
+# Port of rust/parser/src/doc_gen.rs (685 lines)
+
+
+
+# Auto-generated desugared static method wrappers
+fn DocComment__from_raw(raw: text) -> DocComment:
+    DocComment(raw: raw)
+
+
+fn DocItem__new(kind: DocItemKind, name: text, signature: text) -> DocItem:
+    DocItem(kind: kind, name: name, doc: "", signature: signature,
+            visibility: "", parent: nil, children: [])
+
+
+fn ModuleDocs__empty() -> ModuleDocs:
+    ModuleDocs(name: nil, items: [])
+
+
+fn ModuleDocs__named(name: text) -> ModuleDocs:
+    ModuleDocs(name: Some(name), items: [])
+
+
+export DocItem, DocItemKind, ModuleDocs, ExamplesRegistry, DocComment
+export generate_docs, generate_docs_from_source
+
+# ============================================================================
+# Doc Item Types
+# ============================================================================
+
+enum DocItemKind:
+    Function
+    Struct
+    Class
+    Enum
+    Trait
+    EnumVariant
+    Method
+    StaticMethod
+    MutableMethod
+    Constant
+
+struct DocItem:
+    kind: DocItemKind
+    name: text
+    doc: text
+    signature: text
+    visibility: text        # "pub" or ""
+    parent: text?           # impl target for methods
+    children: [DocItem]     # members (fields, variants, methods)
+
+impl DocItem:
+    static fn new(kind: DocItemKind, name: text, signature: text) -> DocItem:
+        DocItem(kind: kind, name: name, doc: "", signature: signature,
+                visibility: "", parent: nil, children: [])
+
+    fn with_doc(doc: text) -> DocItem:
+        DocItem(kind: self.kind, name: self.name, doc: doc,
+                signature: self.signature, visibility: self.visibility,
+                parent: self.parent, children: self.children)
+
+    fn with_visibility(vis: text) -> DocItem:
+        DocItem(kind: self.kind, name: self.name, doc: self.doc,
+                signature: self.signature, visibility: vis,
+                parent: self.parent, children: self.children)
+
+    fn with_parent(parent: text) -> DocItem:
+        DocItem(kind: self.kind, name: self.name, doc: self.doc,
+                signature: self.signature, visibility: self.visibility,
+                parent: Some(parent), children: self.children)
+
+    fn with_children(children: [DocItem]) -> DocItem:
+        DocItem(kind: self.kind, name: self.name, doc: self.doc,
+                signature: self.signature, visibility: self.visibility,
+                parent: self.parent, children: children)
+
+# ============================================================================
+# Module Documentation
+# ============================================================================
+
+struct ModuleDocs:
+    name: text?
+    items: [DocItem]
+
+impl ModuleDocs:
+    static fn empty() -> ModuleDocs:
+        ModuleDocs(name: nil, items: [])
+
+    static fn named(name: text) -> ModuleDocs:
+        ModuleDocs(name: Some(name), items: [])
+
+    fn add_item(item: DocItem) -> ModuleDocs:
+        ModuleDocs(name: self.name, items: self.items.push(item))
+
+    fn functions() -> [DocItem]:
+        self.items.filter(\i: match i.kind: case Function: true; case _: false)
+
+    fn structs() -> [DocItem]:
+        self.items.filter(\i: match i.kind: case Struct: true; case _: false)
+
+    fn classes() -> [DocItem]:
+        self.items.filter(\i: match i.kind: case Class: true; case _: false)
+
+    fn enums() -> [DocItem]:
+        self.items.filter(\i: match i.kind: case Enum: true; case _: false)
+
+    fn traits() -> [DocItem]:
+        self.items.filter(\i: match i.kind: case Trait: true; case _: false)
+
+    fn to_markdown() -> text:
+        """Generate Markdown documentation."""
+        var out = ""
+
+        # Module header
+        if self.name.?:
+            out = out + "# Module `{self.name.unwrap()}`" + "\n" + "\n"
+        else:
+            out = out + "# API Documentation" + "\n" + "\n"
+
+        val traits = self.traits()
+        if traits.?:
+            out = out + "## Traits" + "\n" + "\n"
+            for item in traits:
+                out = out + format_item_markdown(item)
+
+        val structs = self.structs()
+        if structs.?:
+            out = out + "## Structs" + "\n" + "\n"
+            for item in structs:
+                out = out + format_item_markdown(item)
+
+        val classes = self.classes()
+        if classes.?:
+            out = out + "## Classes" + "\n" + "\n"
+            for item in classes:
+                out = out + format_item_markdown(item)
+
+        val enums = self.enums()
+        if enums.?:
+            out = out + "## Enums" + "\n" + "\n"
+            for item in enums:
+                out = out + format_item_markdown(item)
+
+        val functions = self.functions()
+        if functions.?:
+            out = out + "## Functions" + "\n" + "\n"
+            for item in functions:
+                out = out + format_item_markdown(item)
+
+        out
+
+    fn to_html() -> text:
+        """Generate HTML documentation."""
+        var out = "<!DOCTYPE html>" + "\n" + "<html>" + "\n" + "<head>" + "\n"
+        out = out + "<meta charset=\"utf-8\">" + "\n"
+        out = out + "<style>" + "\n"
+        out = out + "body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; }" + "\n"
+        out = out + "pre { background: #f5f5f5; padding: 1rem; overflow-x: auto; }" + "\n"
+        out = out + "code { font-family: monospace; }" + "\n"
+        out = out + ".item { margin-bottom: 2rem; border-bottom: 1px solid #eee; padding-bottom: 1rem; }" + "\n"
+        out = out + ".visibility { color: #666; font-size: 0.9em; }" + "\n"
+        out = out + "</style>" + "\n"
+
+        if self.name.?:
+            out = out + "<title>Module {self.name.unwrap()}</title>" + "\n"
+        else:
+            out = out + "<title>API Documentation</title>" + "\n"
+        out = out + "</head>" + "\n" + "<body>" + "\n"
+
+        if self.name.?:
+            out = out + "<h1>Module <code>{self.name.unwrap()}</code></h1>" + "\n"
+        else:
+            out = out + "<h1>API Documentation</h1>" + "\n"
+
+        val sections = [
+            ("Traits", self.traits()),
+            ("Structs", self.structs()),
+            ("Classes", self.classes()),
+            ("Enums", self.enums()),
+            ("Functions", self.functions()),
+        ]
+        for (section_name, items) in sections:
+            if items.?:
+                out = out + "<h2>{section_name}</h2>" + "\n"
+                for item in items:
+                    out = out + format_item_html(item)
+
+        out = out + "</body>" + "\n" + "</html>"
+        out
+
+fn format_item_markdown(item: DocItem) -> text:
+    val vis = if item.visibility == "pub": "pub " else: ""
+    var out = "### `{vis}{item.name}`" + "\n" + "\n"
+    out = out + "```" + "\n" + "{item.signature}" + "\n" + "```" + "\n" + "\n"
+    if item.doc.?:
+        out = out + item.doc + "\n" + "\n"
+    if item.children.?:
+        for child in item.children:
+            out = out + "- `{child.name}`: {child.signature}" + "\n"
+        out = out + "\n"
+    out
+
+fn format_item_html(item: DocItem) -> text:
+    val vis = if item.visibility == "pub": "<span class=\"visibility\">pub</span> " else: ""
+    var out = "<div class=\"item\">" + "\n"
+    out = out + "<h3>{vis}<code>{html_escape(item.name)}</code></h3>" + "\n"
+    out = out + "<pre><code>{html_escape(item.signature)}</code></pre>" + "\n"
+    if item.doc.?:
+        out = out + "<p>{html_escape(item.doc)}</p>" + "\n"
+    out = out + "</div>" + "\n"
+    out
+
+fn html_escape(s: text) -> text:
+    s.replace("&", "&amp;").replace("<", "&lt;")
+     .replace(">", "&gt;").replace("\"", "&quot;")
+
+# ============================================================================
+# Doc Comment Processing
+# ============================================================================
+
+struct DocComment:
+    """Processes doc comments with interpolation support."""
+    raw: text
+
+impl DocComment:
+    static fn from_raw(raw: text) -> DocComment:
+        DocComment(raw: raw)
+
+    fn text() -> text:
+        """Strip doc comment markers and normalize."""
+        val lines = self.raw.split("\n")
+        var result: [text] = []
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("\"\"\""):
+                val rest = trimmed[3:]
+                if rest.?:
+                    result = result.push(rest)
+            elif trimmed.ends_with("\"\"\""):
+                val rest = trimmed[:trimmed.len() - 3]
+                if rest.?:
+                    result = result.push(rest)
+            else:
+                result = result.push(trimmed)
+        result.join("\n").trim()
+
+    fn expand(lookup: fn(text) -> text?) -> text:
+        """Expand ${examples name} interpolations."""
+        var doc = self.text()
+        var start = doc.find("${examples ")
+        while start.?:
+            val idx = start.unwrap()
+            val end = doc[idx:].find("}")
+            if end.?:
+                val key_start = idx + 11
+                val key_end = idx + end.unwrap()
+                val key = doc[key_start:key_end].trim()
+                val replacement = lookup(key) ?? "(examples '{key}' not found)"
+                doc = doc[:idx] + replacement + doc[key_end + 1:]
+                start = doc.find("${examples ")
+            else:
+                break
+        doc
+
+# ============================================================================
+# Examples Registry
+# ============================================================================
+
+class ExamplesRegistry:
+    """Registry for examples tables used in doc interpolation."""
+    tables: {text: text}
+
+impl ExamplesRegistry:
+    static fn empty() -> ExamplesRegistry:
+        ExamplesRegistry(tables: {})
+
+    me register(name: text, content: text):
+        self.tables[name] = content
+
+    fn get(name: text) -> text?:
+        if self.tables.contains_key(name):
+            Some(self.tables[name])
+        else:
+            nil
+
+    fn expand(doc: text) -> text:
+        val comment = DocComment__from_raw(doc)
+        comment.expand(\name: self.get(name))
+
+# ============================================================================
+# Source-Level Doc Extraction
+# ============================================================================
+
+fn generate_docs_from_source(source: text, module_name: text?) -> ModuleDocs:
+    """Extract documentation from Simple source code.
+
+    Uses lightweight parsing (not full AST) to extract doc comments
+    and declarations. Tolerant of syntax errors.
+    """
+    var docs = if module_name.?: ModuleDocs__named(module_name.unwrap())
+               else: ModuleDocs__empty()
+
+    val lines = source.split("\n")
+    var doc_buffer: [text] = []
+    var line_num = 0
+
+    while line_num < lines.len():
+        val line = lines[line_num]
+        val trimmed = line.trim()
+
+        # Collect doc comments (""" blocks and # comments before declarations)
+        if trimmed.starts_with("\"\"\""):
+            doc_buffer = collect_doc_block(lines, line_num)
+            # Skip past the doc block
+            var skip = line_num + 1
+            while skip < lines.len() and not lines[skip].trim().ends_with("\"\"\""):
+                skip = skip + 1
+            line_num = skip + 1
+            continue
+
+        if trimmed.starts_with("#") and not trimmed.starts_with("#!"):
+            doc_buffer = doc_buffer.push(trimmed[1:].trim())
+            line_num = line_num + 1
+            continue
+
+        # Check for declaration
+        val item = try_extract_item(trimmed, doc_buffer.join("\n"))
+        if item.?:
+            docs = docs.add_item(item.unwrap())
+
+        doc_buffer = []
+        line_num = line_num + 1
+
+    docs
+
+fn collect_doc_block(lines: [text], start: i64) -> [text]:
+    """Collect a triple-quote doc block."""
+    var result: [text] = []
+    val first = lines[start].trim()
+    if first.len() > 3:
+        result = result.push(first[3:])
+    var i = start + 1
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.ends_with("\"\"\""):
+            if line.len() > 3:
+                result = result.push(line[:line.len() - 3])
+            return result
+        result = result.push(line)
+        i = i + 1
+    result
+
+fn try_extract_item(trimmed: text, doc: text) -> DocItem?:
+    """Try to extract a DocItem from a declaration line."""
+    var vis = ""
+    var rest = trimmed
+    if rest.starts_with("pub "):
+        vis = "pub"
+        rest = rest[4:]
+
+    if rest.starts_with("fn ") or rest.starts_with("me "):
+        val kind = if rest.starts_with("me "): DocItemKind.MutableMethod
+                   else: DocItemKind.Function
+        val sig = extract_signature(rest)
+        val name = extract_first_name(rest[3:])
+        return Some(DocItem__new(kind, name, sig).with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("static fn "):
+        val name = extract_first_name(rest[10:])
+        val sig = extract_signature(rest)
+        return Some(DocItem__new(DocItemKind.StaticMethod, name, sig).with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("struct "):
+        val name = extract_first_name(rest[7:])
+        return Some(DocItem__new(DocItemKind.Struct, name, rest).with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("class "):
+        val name = extract_first_name(rest[6:])
+        return Some(DocItem__new(DocItemKind.Class, name, rest).with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("enum "):
+        val name = extract_first_name(rest[5:])
+        return Some(DocItem__new(DocItemKind.Enum, name, rest).with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("trait "):
+        val name = extract_first_name(rest[6:])
+        return Some(DocItem__new(DocItemKind.Trait, name, rest).with_doc(doc).with_visibility(vis))
+
+    nil
+
+fn extract_first_name(s: text) -> text:
+    var end = 0
+    while end < s.len():
+        val ch = s[end]
+        if (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')
+           or (ch >= '0' and ch <= '9') or ch == '_':
+            end = end + 1
+        else:
+            break
+    if end == 0: "<unknown>" else: s[:end]
+
+fn extract_signature(line: text) -> text:
+    """Extract signature up to the colon."""
+    val idx = line.rfind(":")
+    if idx.?: line[:idx.unwrap()].trim() else: line.trim()

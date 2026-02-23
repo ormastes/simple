@@ -1,0 +1,153 @@
+# Simple CLI - task-gen command
+# Generates task.md from task_db.sdn
+
+use std.cli.cli_util (get_cli_args, parse_csv_fields)
+use app.io.mod (file_exists, file_read, file_write)
+
+val TASK_DB_PATH = "doc/task/task_db.sdn"
+val TASK_MD_PATH = "doc/task/task.md"
+
+fn print_help():
+    print "Usage: simple task-gen [options]"
+    print ""
+    print "Generate task documentation from task_db.sdn."
+    print ""
+    print "Options:"
+    print "  -h, --help   Show this help"
+
+struct Task:
+    id: text
+    category: text
+    name: text
+    description: text
+    priority: text
+    status: text
+    valid: bool
+
+fn load_tasks() -> [Task]:
+    if not file_exists(TASK_DB_PATH):
+        return []
+
+    val content = file_read(TASK_DB_PATH)
+    val lines = content.split("\n")
+    var tasks: [Task] = []
+    var in_table = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("tasks |"):
+            in_table = true
+            continue
+        if not in_table or trimmed == "" or trimmed.starts_with("#"):
+            if in_table and trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with(" "):
+                in_table = false
+            continue
+
+        val fields = parse_csv_fields(trimmed)
+        if fields.len() >= 7:
+            tasks.push(Task(
+                id: fields[0],
+                category: fields[1],
+                name: fields[2],
+                description: fields[3],
+                priority: fields[4],
+                status: fields[5],
+                valid: fields[6] == "true"
+            ))
+
+    tasks
+
+fn get_categories(tasks: [Task]) -> [text]:
+    var cats: [text] = []
+    var seen: Dict<text, bool> = {}
+    for t in tasks:
+        if t.valid and not seen.contains_key(t.category):
+            cats.push(t.category)
+            seen[t.category] = true
+    cats
+
+fn count_cat_status(tasks: [Task], cat: text, status: text) -> i64:
+    var count = 0
+    for t in tasks:
+        if t.valid and t.category == cat and t.status == status:
+            count = count + 1
+    count
+
+fn count_cat_total(tasks: [Task], cat: text) -> i64:
+    var count = 0
+    for t in tasks:
+        if t.valid and t.category == cat:
+            count = count + 1
+    count
+
+fn generate_task_md(tasks: [Task]) -> text:
+    var lines: [text] = []
+    lines.push("# Tasks")
+    lines.push("")
+    lines.push("**Generated:** 2026-02-03")
+    lines.push("")
+
+    val cats = get_categories(tasks)
+
+    # Category summary
+    lines.push("## Summary")
+    lines.push("")
+    lines.push("| Category | Total | Complete | Planned | In Progress |")
+    lines.push("|----------|-------|----------|---------|-------------|")
+
+    for cat in cats:
+        val total = count_cat_total(tasks, cat)
+        val complete = count_cat_status(tasks, cat, "complete")
+        val planned = count_cat_status(tasks, cat, "planned")
+        val in_progress = count_cat_status(tasks, cat, "in_progress")
+        lines.push("| {cat} | {total} | {complete} | {planned} | {in_progress} |")
+
+    # Priority breakdown
+    lines.push("")
+    lines.push("## By Priority")
+    lines.push("")
+
+    for priority in ["high", "medium", "low"]:
+        var items: [Task] = []
+        for t in tasks:
+            if t.valid and t.priority == priority:
+                items.push(t)
+        if items.len() > 0:
+            lines.push("### {priority.upper()}")
+            lines.push("")
+            for t in items:
+                val status_icon = match t.status:
+                    case "complete": "\u2705"
+                    case "in_progress": "\U0001F7E1"
+                    case _: "\u2B1C"
+                lines.push("- {status_icon} **{t.name}** ({t.category}): {t.description}")
+            lines.push("")
+
+    # Recent tasks (last 10)
+    lines.push("## Recent Tasks")
+    lines.push("")
+    var recent_count = 0
+    var i = tasks.len() - 1
+    while i >= 0 and recent_count < 10:
+        if tasks[i].valid:
+            val t = tasks[i]
+            lines.push("- [{t.status}] {t.name} ({t.category}) - {t.description}")
+            recent_count = recent_count + 1
+        i = i - 1
+
+    lines.push("")
+    lines.join("\n")
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+
+    val tasks = load_tasks()
+    val md = generate_task_md(tasks)
+    file_write(TASK_MD_PATH, md)
+    print "Generated {TASK_MD_PATH} ({tasks.len()} tasks)"
+    0

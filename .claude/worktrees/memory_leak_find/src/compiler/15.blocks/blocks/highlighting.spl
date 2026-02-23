@@ -1,0 +1,257 @@
+# Block Utilities - Syntax Highlighting Helpers
+#
+# Syntax highlighting functions for custom blocks:
+# - Keyword highlighting
+# - String literal highlighting
+# - Comment highlighting (line and block)
+# - Number literal highlighting (int, float, hex, binary, octal)
+
+use compiler.blocks.definition.{HighlightToken, HighlightKind}
+
+# ============================================================================
+# Syntax Highlighting Helpers
+# ============================================================================
+
+fn highlight_keywords(text: text, keywords: [text]) -> [HighlightToken]:
+    """Highlight keywords in text.
+
+    Args:
+        text: Text to highlight
+        keywords: List of keywords to highlight
+
+    Returns:
+        List of highlight tokens
+
+    Example:
+    ```simple
+    val sql_keywords = ["SELECT", "FROM", "WHERE", "JOIN"]
+    val tokens = highlight_keywords(query_text, sql_keywords)
+    ```
+    """
+    var tokens = []
+    var pos = 0
+
+    for keyword in keywords:
+        # Find all occurrences of keyword
+        var search_pos = 0
+        while true:
+            val index = text_index_of(text, keyword, start: search_pos)
+            if not has_index:
+                break
+
+            # Check if it's a whole word
+            if is_word_boundary(text, index, keyword_len(keyword)):
+                val token = HighlightToken(
+                    start: index,
+                    end: index + keyword_len(keyword),
+                    kind: HighlightKind.Keyword
+                )
+                tokens = tokens_push(tokens, token)
+
+            search_pos = index + 1
+
+    tokens
+
+fn highlight_strings(text: text) -> [HighlightToken]:
+    """Highlight string literals in text.
+
+    Finds quoted strings ("..." and '...') and returns highlight tokens.
+
+    Args:
+        text: Text to highlight
+
+    Returns:
+        List of highlight tokens for strings
+    """
+    var tokens = []
+    var i = 0
+
+    while i < text_len(text):
+        val ch = text[i]
+
+        if ch == '"' or ch == '\'':
+            val quote = ch
+            val start = i
+            i = i + 1
+
+            # Find closing quote
+            while i < text_len(text):
+                if text[i] == '\\':
+                    i = i + 2  # Skip escaped character
+                elif text[i] == quote:
+                    i = i + 1
+                    break
+                else:
+                    i = i + 1
+
+            val token = HighlightToken(
+                start: start,
+                end: i,
+                kind: HighlightKind.String
+            )
+            tokens = tokens_push(tokens, token)
+        else:
+            i = i + 1
+
+    tokens
+
+fn highlight_comments(
+    text: text,
+    line_comment: text,
+    block_comment: (text, text)? = nil
+) -> [HighlightToken]:
+    """Highlight comments in text.
+
+    Args:
+        text: Text to highlight
+        line_comment: Line comment start (e.g., "//", "#")
+        block_comment: Block comment (start, end) tuple (e.g., ("/*", "*/"))
+
+    Returns:
+        List of highlight tokens for comments
+
+    Example:
+    ```simple
+    val tokens = highlight_comments(code,
+        line_comment: "//",
+        val _tv_1 = ["/*", "*/"]
+        block_comment: _tv_1
+    )
+    ```
+    """
+    var tokens = []
+    var i = 0
+
+    while i < text_len(text):
+        # Check for line comment
+        if text[i:].starts_with(line_comment):
+            val start = i
+            # Find end of line
+            while i < text.len() and text[i] != '\n':
+                i = i + 1
+
+            val token = HighlightToken(
+                start: start,
+                end: i,
+                kind: HighlightKind.Comment
+            )
+            tokens = tokens_push(tokens, token)
+            continue
+
+        # Check for block comment
+        if has_block_comment:
+            val _destruct_0 = block_comment_value
+            val block_start = _destruct_0[0]
+            val block_end = _destruct_0[1]
+            if text[i:].starts_with(block_start):
+                val start = i
+                i = i + block_start_len(block_start)
+
+                # Find end of block
+                while i < text_len(text):
+                    if text[i:].starts_with(block_end):
+                        i = i + block_end_len(block_end)
+                        break
+                    i = i + 1
+
+                val token = HighlightToken(
+                    start: start,
+                    end: i,
+                    kind: HighlightKind.Comment
+                )
+                tokens = tokens_push(tokens, token)
+                continue
+
+        i = i + 1
+
+    tokens
+
+fn highlight_numbers(text: text) -> [HighlightToken]:
+    """Highlight numeric literals in text.
+
+    Finds integers, floats, hex, binary, and octal numbers.
+
+    Args:
+        text: Text to highlight
+
+    Returns:
+        List of highlight tokens for numbers
+    """
+    var tokens = []
+    var i = 0
+
+    while i < text_len(text):
+        val ch = text[i]
+
+        if ch.is_digit() or (ch == '-' and i + 1 < text.len() and text[i + 1].is_digit()):
+            val start = i
+
+            # Consume number
+            if ch == '-':
+                i = i + 1
+
+            # Check for hex (0x), binary (0b), octal (0o)
+            if i + 1 < text.len():
+                if text[i] == '0':
+                    val next = text[i + 1]
+                    if next == 'x' or next == 'X' or next == 'b' or next == 'B' or next == 'o' or next == 'O':
+                        i = i + 2
+                        while i < text.len() and (text[i].is_hex_digit() or text[i] == '_'):
+                            i = i + 1
+
+                        val token = HighlightToken(
+                            start: start,
+                            end: i,
+                            kind: HighlightKind.Number
+                        )
+                        tokens = tokens_push(tokens, token)
+                        continue
+
+            # Decimal number
+            while i < text.len() and (text[i].is_digit() or text[i] == '_'):
+                i = i + 1
+
+            # Check for decimal point
+            if i < text.len():
+                if text[i] == '.':
+                    i = i + 1
+                    while i < text.len() and (text[i].is_digit() or text[i] == '_'):
+                        i = i + 1
+
+            # Check for exponent
+            if i < text.len():
+                if (text[i] == 'e' or text[i] == 'E'):
+                    i = i + 1
+                    if i < text.len():
+                        if (text[i] == '+' or text[i] == '-'):
+                            i = i + 1
+                    while i < text.len() and (text[i].is_digit() or text[i] == '_'):
+                        i = i + 1
+
+            val token = HighlightToken(
+                start: start,
+                end: i,
+                kind: HighlightKind.Number
+            )
+            tokens = tokens_push(tokens, token)
+        else:
+            i = i + 1
+
+    tokens
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn is_word_boundary(text: text, pos: i64, length: i64) -> bool:
+    """Check if position is at word boundary."""
+    val before_ok = pos == 0 or not text[pos - 1].is_alphanumeric()
+    val after_ok = pos + length >= text_len(text) or not text[pos + length].is_alphanumeric()
+    before_ok and after_ok
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export highlight_keywords, highlight_strings, highlight_comments, highlight_numbers
+export is_word_boundary

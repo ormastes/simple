@@ -1,0 +1,316 @@
+"""
+Effect System - Phase 3B Part 2: Effect Scanner
+
+Scans function bodies to detect suspension operators and async function calls.
+This determines the base effect before fixed-point iteration.
+
+Status: Phase 3B Part 2 In Progress
+"""
+
+type Symbol = text
+
+# ============================================================================
+# Effect Type (from Phase 3A)
+# ============================================================================
+
+enum Effect:
+    Sync
+    Async
+
+    fn is_sync() -> bool:
+        match self:
+            case Effect.Sync: true
+            case Effect.Async: false
+
+    fn is_async() -> bool:
+        not self.is_sync()
+
+impl Effect:
+    static fn combine_all(effects: [Effect]) -> Effect:
+        var result = Effect.Sync
+        for eff in effects:
+            if eff.is_async():
+                result = Effect.Async
+        result
+
+# ============================================================================
+# HIR Expression (Placeholder - will use real HIR later)
+# ============================================================================
+
+enum HirExpr:
+    """Simplified HIR expression for effect scanning"""
+
+    # Literals
+    IntLit(value: i64)
+    StrLit(value: text)
+    BoolLit(value: bool)
+
+    # Variables
+    Var(name: Symbol)
+
+    # Function calls
+    Call(func: Symbol, args: [HirExpr])
+
+    # Suspension operators
+    Suspend(expr: HirExpr)           # ~expr
+    SuspendAssign(name: Symbol)      # ~=
+    SuspendIf(cond: HirExpr)         # if~
+    SuspendWhile(cond: HirExpr)      # while~
+    SuspendFor(iter: HirExpr)        # for~
+
+    # Control flow
+    If(cond: HirExpr, then_expr: HirExpr)
+    Block(exprs: [HirExpr])
+
+    # Binary operations
+    Binary(lhs: HirExpr, rhs: HirExpr)
+
+# ============================================================================
+# Effect Scanner
+# ============================================================================
+
+class EffectScanner:
+    """
+    Scans function body AST to determine effect
+
+    Detects:
+    - Suspension operators (~, ~=, if~, while~, for~)
+    - Calls to async functions
+    """
+    env: text  # EffectEnv (placeholder type)
+
+impl EffectScanner:
+    static fn new(env) -> EffectScanner:
+        EffectScanner(env: env)
+
+    fn scan_expr(expr: HirExpr) -> Effect:
+        """
+        Scan expression to determine its effect
+
+        Rules:
+        - Suspension operators → Async
+        - Call to async function → Async
+        - Control flow → combine sub-expressions
+        - Otherwise → Sync
+        """
+        match expr:
+            # Suspension operators - always Async
+            case Suspend(_): Effect.Async
+            case SuspendAssign(_): Effect.Async
+            case SuspendIf(_): Effect.Async
+            case SuspendWhile(_): Effect.Async
+            case SuspendFor(_): Effect.Async
+
+            # Function call - check callee's effect
+            case Call(func, args):
+                # Get callee effect from environment
+                val callee_effect = self.env.get_effect(func)
+
+                # If callee is async, this expression is async
+                if callee_effect.is_async():
+                    return Effect.Async
+
+                # Otherwise, scan arguments
+                val arg_effects = []
+                for arg in args:
+                    arg_effects.push(self.scan_expr(arg))
+
+                Effect__combine_all(arg_effects)
+
+            # Control flow - scan sub-expressions
+            case If(cond, then_expr):
+                val cond_eff = self.scan_expr(cond)
+                val then_eff = self.scan_expr(then_expr)
+                cond_eff.combine(then_eff)
+
+            case Block(exprs):
+                val effects = []
+                for e in exprs:
+                    effects.push(self.scan_expr(e))
+                Effect__combine_all(effects)
+
+            case Binary(lhs, rhs):
+                val lhs_eff = self.scan_expr(lhs)
+                val rhs_eff = self.scan_expr(rhs)
+                lhs_eff.combine(rhs_eff)
+
+            # Literals and variables - always Sync
+            case IntLit(_): Effect.Sync
+            case StrLit(_): Effect.Sync
+            case BoolLit(_): Effect.Sync
+            case Var(_): Effect.Sync
+
+    fn scan_function_body(body: HirExpr) -> Effect:
+        """Scan entire function body"""
+        self.scan_expr(body)
+
+# ============================================================================
+# EffectEnv (simplified for testing)
+# ============================================================================
+
+class EffectEnv:
+    data: text
+
+impl EffectEnv:
+    static fn new_for_test() -> EffectEnv:
+        val env_data = {
+            "effects": {},
+            "builtins": {
+                "http.get": Effect.Async,
+                "print": Effect.Sync,
+                "async_task": Effect.Async
+            }
+        }
+        EffectEnv(data: env_data)
+
+    fn get_effect(sym: Symbol) -> Effect:
+        val effects = self.data["effects"]
+        val builtins = self.data["builtins"]
+
+        if sym in effects:
+            return effects[sym]
+
+        if sym in builtins:
+            return builtins[sym]
+
+        Effect.Sync
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn make_int(n: i64) -> HirExpr:
+    HirExpr.IntLit(value: n)
+
+fn make_str(s: text) -> HirExpr:
+    HirExpr.StrLit(value: s)
+
+fn make_call(func: Symbol, args: [HirExpr]) -> HirExpr:
+    HirExpr.Call(func: func, args: args)
+
+fn make_suspend(expr: HirExpr) -> HirExpr:
+    HirExpr.Suspend(expr: expr)
+
+fn make_block(exprs: [HirExpr]) -> HirExpr:
+    HirExpr.Block(exprs: exprs)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+fn test_literals():
+    val env = EffectEnv__new_for_test()
+    val scanner = EffectScanner__new(env)
+
+    assert scanner.scan_expr(make_int(42)) == Effect.Sync, "Int literal sync"
+    assert scanner.scan_expr(make_str("hello")) == Effect.Sync, "Str literal sync"
+
+    print "✅ Literals are sync"
+
+fn test_suspend_operators():
+    val env = EffectEnv__new_for_test()
+    val scanner = EffectScanner__new(env)
+
+    val suspended = make_suspend(make_int(42))
+    assert scanner.scan_expr(suspended) == Effect.Async, "Suspend operator async"
+
+    val suspend_assign = HirExpr.SuspendAssign(name: "x")
+    assert scanner.scan_expr(suspend_assign) == Effect.Async, "Suspend assign async"
+
+    print "✅ Suspension operators are async"
+
+fn test_function_calls():
+    val env = EffectEnv__new_for_test()
+    val scanner = EffectScanner__new(env)
+
+    # Call to sync function
+    val sync_call = make_call("print", [make_str("hello")])
+    assert scanner.scan_expr(sync_call) == Effect.Sync, "Sync call"
+
+    # Call to async function
+    val async_call = make_call("http.get", [make_str("url")])
+    assert scanner.scan_expr(async_call) == Effect.Async, "Async call"
+
+    print "✅ Function call effects propagate"
+
+fn test_control_flow():
+    val env = EffectEnv__new_for_test()
+    val scanner = EffectScanner__new(env)
+
+    # Block with sync expressions
+    val sync_block = make_block([make_int(1), make_int(2)])
+    assert scanner.scan_expr(sync_block) == Effect.Sync, "Sync block"
+
+    # Block with async expression
+    val async_expr = make_call("http.get", [make_str("url")])
+    val async_block = make_block([make_int(1), async_expr])
+    assert scanner.scan_expr(async_block) == Effect.Async, "Async block"
+
+    print "✅ Control flow combines effects"
+
+fn test_nested():
+    val env = EffectEnv__new_for_test()
+    val scanner = EffectScanner__new(env)
+
+    # Nested: block with suspend inside
+    val suspended = make_suspend(make_int(42))
+    val nested = make_block([make_int(1), suspended, make_int(3)])
+    assert scanner.scan_expr(nested) == Effect.Async, "Nested async"
+
+    print "✅ Nested async expressions detected"
+
+fn main():
+    print ""
+    print "Effect Scanner Tests"
+    print "===================="
+
+    test_literals()
+    test_suspend_operators()
+    test_function_calls()
+    test_control_flow()
+    test_nested()
+
+    print ""
+    print "🎉 Phase 3B Part 2 Complete!"
+    print ""
+    print "EffectScanner implemented:"
+    print "  ✅ Detects suspension operators (~, ~=, if~, while~, for~)"
+    print "  ✅ Propagates async from function calls"
+    print "  ✅ Combines effects in control flow"
+    print "  ✅ Handles nested expressions"
+    print ""
+    print "Phase 3B Complete (6h total):"
+    print "  Part 1: EffectEnv class"
+    print "  Part 2: EffectScanner class"
+    print ""
+    print "Next: Phase 3C - Fixed-Point Solver (5h)"
+
+
+# Auto-generated desugared static method wrappers
+fn Effect__combine_all(effects: [Effect]) -> Effect:
+            var result = Effect.Sync
+            for eff in effects:
+                if eff.is_async():
+                    result = Effect.Async
+            result
+
+    # ============================================================================
+    # HIR Expression (Placeholder - will use real HIR later)
+    # ============================================================================
+
+
+fn EffectEnv__new_for_test() -> EffectEnv:
+    val env_data = {
+        "effects": {},
+        "builtins": {
+            "http.get": Effect.Async,
+            "print": Effect.Sync,
+            "async_task": Effect.Async
+        }
+    }
+    EffectEnv(data: env_data)
+
+
+fn EffectScanner__new(env) -> EffectScanner:
+    EffectScanner(env: env)
+

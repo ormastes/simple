@@ -1,0 +1,125 @@
+# C Backend Compile Entry Point (Minimal)
+#
+# Dedicated entry point for `simple compile --backend=c`.
+# Uses minimal imports to avoid loading the full compiler driver.
+#
+# Invoked by bin/simple when it detects `compile --backend=c`:
+#   bin/release/simple src/app/cli/compile_c_entry.spl compile --backend=c -o out.cpp source.spl
+
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.{HirLowering}
+use compiler.mir.mir_lowering.{MirLowering__new}
+use compiler.backend.backend.{compile_module_with_backend}
+use compiler.common.config.{Logger}
+use compiler.core.parser.{SymbolTable, Scope, ScopeId, ScopeKind}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn create_symbol_table_inline() -> SymbolTable:
+    var table = SymbolTable(
+        symbols: {},
+        scopes: {},
+        current_scope: ScopeId(id: 0),
+        next_symbol_id: 0,
+        next_scope_id: 1
+    )
+    table.scopes[0] = Scope(
+        id: ScopeId(id: 0),
+        parent: nil,
+        kind: ScopeKind.Module,
+        symbols: {}
+    )
+    table
+
+fn create_hir_lowering_inline() -> HirLowering:
+    HirLowering(
+        symbols: create_symbol_table_inline(),
+        errors: [],
+        current_function: nil,
+        loop_depth: 0
+    )
+
+fn main() -> i64:
+    val raw_args = sys_get_args()
+
+    # Parse CLI args
+    var source_file = ""
+    var output_file = ""
+    var verbose = false
+    var i = 2
+    while i < raw_args.len():
+        val arg = raw_args[i]
+        if arg == "compile":
+            i = i + 1
+        elif arg.starts_with("--backend="):
+            i = i + 1
+        elif arg == "-o" or arg == "--output":
+            if i + 1 < raw_args.len():
+                output_file = raw_args[i + 1]
+                i = i + 2
+            else:
+                i = i + 1
+        elif arg.starts_with("-o"):
+            output_file = arg.slice(2, arg.len())
+            i = i + 1
+        elif arg.starts_with("--output="):
+            output_file = arg.slice(9, arg.len())
+            i = i + 1
+        elif arg == "--verbose" or arg == "-v":
+            verbose = true
+            i = i + 1
+        elif arg.starts_with("-"):
+            i = i + 1
+        else:
+            source_file = arg
+            i = i + 1
+
+    if source_file == "":
+        print "Usage: simple compile --backend=c [-o output.cpp] source.spl"
+        return 1
+
+    if output_file == "":
+        output_file = source_file.replace(".spl", ".cpp")
+
+    # Read source
+    val source_opt = rt_file_read_text(source_file)
+    if source_opt == nil:
+        print "Error: Cannot read file: {source_file}"
+        return 1
+    val source_text = source_opt ?? ""
+
+    if verbose:
+        print "Compiling {source_file} to C++20..."
+
+    # Step 1: Parse
+    val logger = Logger(level: 4)
+    val ast_module = parse_full_frontend(source_text, source_file, "main", logger)
+
+    # Step 2: Lower to HIR
+    var hir_lowering = create_hir_lowering_inline()
+    val hir_module = hir_lowering.lower_module(ast_module)
+
+    # Step 3: Lower to MIR
+    var mir_lowering = MirLowering__new(create_symbol_table_inline())
+    var mir_module = mir_lowering.lower_module(hir_module)
+    mir_module.name = "main"
+
+    # Step 4: Generate C++
+    val compiled = compile_module_with_backend("c", mir_module, false)
+    if compiled.is_err():
+        print "Error: C codegen failed"
+        return 1
+
+    val module = compiled.unwrap()
+    val cpp_source = module.assembly
+
+    # Step 5: Write output
+    if not rt_file_write_text(output_file, cpp_source):
+        print "Error: Failed to write {output_file}"
+        return 1
+
+    print "Output: {output_file}"
+    print "Build with: clang++ -std=c++20 -O2 {output_file} src/runtime/runtime.c -I src/runtime -o output"
+    return 0

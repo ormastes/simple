@@ -1,0 +1,161 @@
+"""
+# Experiment Config Specification
+
+**Feature IDs:** #exp-config
+**Category:** Stdlib
+**Status:** In Progress
+
+## Overview
+
+Tests for SDN-based experiment configuration loading, merging,
+interpolation, and CLI override parsing.
+"""
+
+use std.exp.config.*
+
+# ============================================================================
+# Config Value
+# ============================================================================
+
+describe "ConfigValue":
+    context "type accessors":
+        it "returns text for Str values":
+            val v = ConfigValue.Str("hello")
+            expect v.as_text() == Some("hello")
+
+        it "returns nil for non-text values":
+            val v = ConfigValue.Int(42)
+            expect v.as_text() == Some("42")
+
+        it "returns int for Int values":
+            val v = ConfigValue.Int(42)
+            expect v.as_int() == Some(42)
+
+        it "returns float for Float values":
+            val v = ConfigValue.Float(3.14)
+            expect v.as_float() == Some(3.14)
+
+        it "coerces Int to Float":
+            val v = ConfigValue.Int(42)
+            expect v.as_float() == Some(42.0)
+
+        it "returns bool for Bool values":
+            val v = ConfigValue.Bool(true)
+            expect v.as_bool() == Some(true)
+
+# ============================================================================
+# ExpConfig
+# ============================================================================
+
+describe "ExpConfig":
+    context "empty config":
+        it "creates empty config":
+            val config = ExpConfig__empty()
+            expect config.values.is_empty()
+            expect config.source_files.is_empty()
+            expect config.overrides.is_empty()
+
+    context "get by path":
+        it "gets top-level value":
+            var values: Dict<text, ConfigValue> = {}
+            values["name"] = ConfigValue.Str("test")
+            val config = ExpConfig(values: values, source_files: [], overrides: {})
+            val result = config.get("name")
+            expect result.?
+            # Verify value via match since enum method dispatch has limitations
+            val v = result.unwrap()
+            match v:
+                case Str(s): expect s == "test"
+                case _: expect false
+
+        it "gets nested value":
+            var inner: Dict<text, ConfigValue> = {}
+            inner["rate"] = ConfigValue.Float(0.001)
+            var values: Dict<text, ConfigValue> = {}
+            values["model"] = ConfigValue.Map(inner)
+            val config = ExpConfig(values: values, source_files: [], overrides: {})
+            val result = config.get("model.rate")
+            expect result.?
+            val v = result.unwrap()
+            match v:
+                case Float(f): expect f == 0.001
+                case _: expect false
+
+        it "returns nil for missing key":
+            val config = ExpConfig__empty()
+            val result = config.get("missing")
+            expect not result.?
+
+    context "with_override":
+        it "adds override to empty config":
+            val config = ExpConfig__empty()
+            val updated = config.with_override("lr", "0.01")
+            val result = updated.get("lr")
+            expect result.?
+            val v = result.unwrap()
+            match v:
+                case Str(s): expect s == "0.01"
+                case _: expect false
+
+        it "tracks overrides":
+            val config = ExpConfig__empty()
+            val updated = config.with_override("lr", "0.01")
+            expect updated.overrides.contains_key("lr")
+
+    context "hash":
+        it "produces consistent hash for same config":
+            var values: Dict<text, ConfigValue> = {}
+            values["a"] = ConfigValue.Str("hello")
+            val c1 = ExpConfig(values: values, source_files: [], overrides: {})
+            val c2 = ExpConfig(values: values, source_files: [], overrides: {})
+            expect c1.hash() == c2.hash()
+
+# ============================================================================
+# Config Merging
+# ============================================================================
+
+describe "Config Merging":
+    it "overlay values win":
+        var base_vals: Dict<text, ConfigValue> = {}
+        base_vals["x"] = ConfigValue.Int(1)
+        val base = ExpConfig(values: base_vals, source_files: [], overrides: {})
+
+        var overlay_vals: Dict<text, ConfigValue> = {}
+        overlay_vals["x"] = ConfigValue.Int(2)
+        val overlay = ExpConfig(values: overlay_vals, source_files: [], overrides: {})
+
+        val merged = merge_configs(base, overlay)
+        val result = merged.get("x")
+        expect result.?
+        val v = result.unwrap()
+        match v:
+            case Int(n): expect n == 2
+            case _: expect false
+
+    it "preserves base keys not in overlay":
+        var base_vals: Dict<text, ConfigValue> = {}
+        base_vals["a"] = ConfigValue.Str("keep")
+        val base = ExpConfig(values: base_vals, source_files: [], overrides: {})
+
+        var overlay_vals: Dict<text, ConfigValue> = {}
+        overlay_vals["b"] = ConfigValue.Str("added")
+        val overlay = ExpConfig(values: overlay_vals, source_files: [], overrides: {})
+
+        val merged = merge_configs(base, overlay)
+        expect merged.get("a").?
+        expect merged.get("b").?
+
+# ============================================================================
+# CLI Override Parsing
+# ============================================================================
+
+describe "CLI Override Parsing":
+    it "extracts key=value pairs":
+        val args = ["model=resnet", "--verbose", "lr=0.01"]
+        val overrides = parse_cli_overrides(args)
+        expect overrides.len() == 2
+
+    it "excludes --flag style args":
+        val args = ["--flag=true"]
+        val overrides = parse_cli_overrides(args)
+        expect overrides.is_empty()

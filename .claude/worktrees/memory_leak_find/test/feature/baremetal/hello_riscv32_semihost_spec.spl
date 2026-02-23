@@ -1,0 +1,162 @@
+"""
+# RISC-V 32 Semihosting Tests
+
+**Feature ID:** #BAREMETAL-006
+**Category:** Baremetal
+**Status:** Active
+
+## Overview
+
+Tests RISC-V 32-bit semihosting functionality by running actual ELF binaries on QEMU
+with semihosting enabled. Validates hello world output, semihost test markers, exit codes,
+and an intensive C test suite of 89 hardware tests covering 32-bit arithmetic, mcycle
+counter reading, QEMU platform detection, interrupt cause bits, and stack alignment.
+
+## Syntax
+
+```simple
+fn run_qemu(elf_path: text, timeout_ms: i64) -> (text, text, i32):
+    var args: [text] = ["-M", "virt", "-bios", "none", "-kernel", elf_path,
+        "-nographic", "-semihosting-config", "enable=on,target=native"]
+    rt_process_run_timeout(QEMU_BIN, args, timeout_ms)
+
+val output = run_qemu_output(BINARY_PATH, 10000)
+expect(output).to_contain("Hello, RISC-V 32!")
+```
+"""
+# @platform: baremetal(riscv32)
+#!/usr/bin/env simple
+# SSpec Tests for RISC-V 32 Semihosting
+#
+# Tests that bare-metal programs can print output via semihosting
+# by invoking QEMU directly with semihosting enabled.
+
+# Test configuration
+val BINARY_PATH = "examples/09_embedded/baremetal/baremetal/hello_riscv32_semihost.elf"
+val INTENSIVE_PATH = "examples/09_embedded/baremetal/baremetal/riscv32_test/test_riscv32_intensive.elf"
+val QEMU_BIN = "qemu-system-riscv32"
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_print(msg: text)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_time_now_unix_micros() -> i64
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn run_qemu(elf_path: text, timeout_ms: i64) -> (text, text, i32):
+    var args: [text] = [
+        "-M", "virt",
+        "-bios", "none",
+        "-kernel", elf_path,
+        "-nographic",
+        "-semihosting-config", "enable=on,target=native",
+    ]
+    rt_process_run_timeout(QEMU_BIN, args, timeout_ms)
+
+# QEMU semihosting output goes to stderr, so we combine stdout+stderr
+fn run_qemu_output(elf_path: text, timeout_ms: i64) -> text:
+    val (stdout, stderr, exit_code) = run_qemu(elf_path, timeout_ms)
+    stdout + stderr
+
+describe "RISC-V 32 Semihosting - Hello World":
+    it "prints hello world message":
+        if not file_exists(BINARY_PATH):
+            print "SKIP: Binary not built: {BINARY_PATH}"
+            return
+
+        val output = run_qemu_output(BINARY_PATH, 10000)
+        expect(output).to_contain("Hello, RISC-V 32!")
+
+    it "outputs semihost test success marker":
+        if not file_exists(BINARY_PATH):
+            print "SKIP: Binary not built"
+            return
+
+        val output = run_qemu_output(BINARY_PATH, 10000)
+        expect(output).to_contain("SEMIHOST TEST")
+        expect(output).to_contain("Success")
+
+    it "outputs exit code 0 message":
+        if not file_exists(BINARY_PATH):
+            print "SKIP: Binary not built"
+            return
+
+        val output = run_qemu_output(BINARY_PATH, 10000)
+        expect(output).to_contain("exit code 0")
+
+    it "completes within 5 seconds":
+        if not file_exists(BINARY_PATH):
+            print "SKIP: Binary not built"
+            return
+
+        val start = rt_time_now_unix_micros()
+        val output = run_qemu_output(BINARY_PATH, 10000)
+        val end = rt_time_now_unix_micros()
+        val duration_ms = (end - start) / 1000
+        expect(duration_ms).to_be_less_than(5000)
+
+describe "RISC-V 32 Semihosting - Intensive C Test":
+    it "runs 89 hardware tests on QEMU":
+        if not file_exists(INTENSIVE_PATH):
+            print "SKIP: Intensive ELF not built: {INTENSIVE_PATH}"
+            return
+
+        val output = run_qemu_output(INTENSIVE_PATH, 15000)
+        expect(output).to_contain("89 examples, 0 failures")
+
+    it "verifies semihosting operations":
+        if not file_exists(INTENSIVE_PATH):
+            print "SKIP: Intensive ELF not built"
+            return
+
+        val output = run_qemu_output(INTENSIVE_PATH, 15000)
+        expect(output).to_contain("SYS_WRITE0 outputs string")
+        expect(output).to_contain("SYS_CLOCK returns non-negative value")
+
+    it "verifies 32-bit arithmetic on real RV32":
+        if not file_exists(INTENSIVE_PATH):
+            print "SKIP: Intensive ELF not built"
+            return
+
+        val output = run_qemu_output(INTENSIVE_PATH, 15000)
+        expect(output).to_contain("INT32_MAX is 0x7FFFFFFF")
+        expect(output).to_contain("signed right shift preserves sign")
+
+    it "verifies mcycle counter reading":
+        if not file_exists(INTENSIVE_PATH):
+            print "SKIP: Intensive ELF not built"
+            return
+
+        val output = run_qemu_output(INTENSIVE_PATH, 15000)
+        expect(output).to_contain("mcycle is readable")
+        expect(output).to_contain("mcycle advances")
+        expect(output).to_contain("mcycle difference is reasonable")
+
+    it "verifies QEMU platform (RV32, M-mode, little-endian)":
+        if not file_exists(INTENSIVE_PATH):
+            print "SKIP: Intensive ELF not built"
+            return
+
+        val output = run_qemu_output(INTENSIVE_PATH, 15000)
+        expect(output).to_contain("running on RV32 (pointer is 4 bytes)")
+        expect(output).to_contain("mhartid is 0 (boot hart)")
+        expect(output).to_contain("RISC-V is little-endian")
+
+    it "verifies interrupt cause bits are RV32 (bit 31)":
+        if not file_exists(INTENSIVE_PATH):
+            print "SKIP: Intensive ELF not built"
+            return
+
+        val output = run_qemu_output(INTENSIVE_PATH, 15000)
+        expect(output).to_contain("interrupt bit is 0x80000000 (bit 31)")
+        expect(output).to_contain("M-mode timer interrupt code is 7")
+
+    it "verifies stack alignment on real hardware":
+        if not file_exists(INTENSIVE_PATH):
+            print "SKIP: Intensive ELF not built"
+            return
+
+        val output = run_qemu_output(INTENSIVE_PATH, 15000)
+        expect(output).to_contain("stack is 16-byte aligned")
+        expect(output).to_contain("code is in expected memory region")

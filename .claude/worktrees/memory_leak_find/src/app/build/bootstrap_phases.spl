@@ -1,0 +1,271 @@
+# Bootstrap Multi-Phase - Phase Implementations
+#
+# Extracted from bootstrap_multiphase.spl. Contains:
+# - run_phase1_seed: seed_cpp transpiles compiler -> C++ -> clang++ -> native
+# - run_phase2_core: Core1 recompiles compiler
+# - run_phase3_full: Core2 compiles the full compiler
+# - run_phase4_full: Full1 recompiles itself
+# - run_interpreter_fallback: Interpreter verification fallback
+
+use app.io.mod (file_exists, file_size_raw, file_hash_sha256, shell)
+use app.build.bootstrap_multiphase.{
+    MultiphaseConfig, PhaseResult, BootstrapPhase, CompilationBackend,
+    build_ordered_file_list, fail_phase, backend_to_string, current_time_ms
+}
+
+# Phase 1: seed_cpp transpiles compiler -> C++ -> clang++ -> native binary
+fn run_phase1_seed(config: MultiphaseConfig) -> PhaseResult:
+    val start_time = current_time_ms()
+    val core1_cpp = "{config.output_dir}/core1.cpp"
+    val core1_bin = "{config.output_dir}/core1"
+
+    # Step 1: Build ordered file list
+    print "  Discovering compiler files..."
+    val ordered_files = build_ordered_file_list(config.compiler_dir)
+    print "  Found {ordered_files.len()} files"
+
+    # Step 2: Run seed_cpp to transpile to C++
+    var file_args = ""
+    for f in ordered_files:
+        file_args = file_args + " " + f
+    val seed_cmd = "{config.seed_cpp_path}{file_args} > {core1_cpp}"
+    print "  Running seed_cpp..."
+    val seed_result = shell(seed_cmd)
+
+    if seed_result.exit_code != 0:
+        print "  FAIL seed_cpp transpilation failed"
+        if seed_result.stderr != "":
+            print "  stderr: {seed_result.stderr}"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    if not file_exists(core1_cpp):
+        print "  FAIL {core1_cpp} not created"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    val cpp_size = file_size_raw(core1_cpp)
+    print "  Generated C++ ({cpp_size} bytes)"
+
+    if cpp_size < 1000:
+        print "  FAIL C++ output too small ({cpp_size} bytes) — likely empty/stub"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    # Step 3: Compile C++ with clang++
+    val compile_cmd = "{config.clang_path} -std=c++20 -O2 -o {core1_bin} {core1_cpp} -I{config.seed_include_dir} -L{config.seed_include_dir}/build -lspl_runtime -lm -lpthread"
+    print "  Compiling C++ with clang++..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL clang++ compilation failed"
+        if compile_result.stderr != "":
+            # Print first few lines of error
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 20:
+                    print "    {err_line}"
+                    shown = shown + 1
+            if err_lines.len() > 20:
+                print "    ... ({err_lines.len() - 20} more lines)"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    # Step 4: Link with startup CRT if available
+    # The CRT provides _start for freestanding binaries; skip if not needed
+    # (clang++ already provides standard C++ startup)
+
+    # Step 5: Verify binary
+    shell("chmod +x {core1_bin}")
+
+    if not file_exists(core1_bin):
+        print "  FAIL {core1_bin} not created"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    val bin_size = file_size_raw(core1_bin)
+    print "  Core1 binary: {bin_size} bytes"
+
+    if bin_size < 10000:
+        print "  WARN Binary unusually small ({bin_size} bytes)"
+
+    # Step 6: Smoke test
+    val smoke_result = shell("{core1_bin} --version 2>/dev/null")
+    if smoke_result.exit_code == 0:
+        print "  Smoke test: {smoke_result.stdout.trim()}"
+    else:
+        print "  WARN Smoke test failed (--version not supported, may be OK)"
+
+    val hash = file_hash_sha256(core1_bin)
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase1,
+        success: true,
+        binary_path: core1_bin,
+        binary_size: bin_size,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.SeedCpp
+    )
+
+# Phase 2: Core1 recompiles compiler (reproducibility)
+fn run_phase2_core(config: MultiphaseConfig, phase1: PhaseResult) -> PhaseResult:
+    val start_time = current_time_ms()
+    val core2_bin = "{config.output_dir}/core2"
+
+    # Use Core1 to compile compiler
+    val ordered_files = build_ordered_file_list(config.compiler_dir)
+    var file_args = ""
+    for f in ordered_files:
+        file_args = file_args + " " + f
+
+    val compile_cmd = "{phase1.binary_path} compile{file_args} -o {core2_bin}"
+    print "  Running Core1 to compile compiler..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Core1 compilation failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_phase(BootstrapPhase.Phase2, CompilationBackend.Native, start_time)
+
+    shell("chmod +x {core2_bin}")
+
+    if not file_exists(core2_bin):
+        print "  FAIL {core2_bin} not created"
+        return fail_phase(BootstrapPhase.Phase2, CompilationBackend.Native, start_time)
+
+    val bin_size = file_size_raw(core2_bin)
+    val hash = file_hash_sha256(core2_bin)
+    print "  Core2 binary: {bin_size} bytes"
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase2,
+        success: true,
+        binary_path: core2_bin,
+        binary_size: bin_size,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.Native
+    )
+
+# Phase 3: Core2 compiles the full compiler
+fn run_phase3_full(config: MultiphaseConfig, phase2: PhaseResult) -> PhaseResult:
+    val start_time = current_time_ms()
+    val full1_bin = "{config.output_dir}/full1"
+
+    val compile_cmd = "{phase2.binary_path} compile src/app/cli/main.spl -o {full1_bin}"
+    print "  Running Core2 to compile full compiler..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Core2 compilation of full compiler failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_phase(BootstrapPhase.Phase3, CompilationBackend.Native, start_time)
+
+    shell("chmod +x {full1_bin}")
+
+    if not file_exists(full1_bin):
+        print "  FAIL {full1_bin} not created"
+        return fail_phase(BootstrapPhase.Phase3, CompilationBackend.Native, start_time)
+
+    val bin_size = file_size_raw(full1_bin)
+    val hash = file_hash_sha256(full1_bin)
+    print "  Full1 binary: {bin_size} bytes"
+
+    # Smoke test
+    val smoke_result = shell("{full1_bin} --version 2>/dev/null")
+    if smoke_result.exit_code == 0:
+        print "  Smoke test: {smoke_result.stdout.trim()}"
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase3,
+        success: true,
+        binary_path: full1_bin,
+        binary_size: bin_size,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.Native
+    )
+
+# Phase 4: Full1 recompiles itself (reproducibility)
+fn run_phase4_full(config: MultiphaseConfig, phase3: PhaseResult) -> PhaseResult:
+    val start_time = current_time_ms()
+    val full2_bin = "{config.output_dir}/full2"
+
+    val compile_cmd = "{phase3.binary_path} compile src/app/cli/main.spl -o {full2_bin}"
+    print "  Running Full1 to recompile itself..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Full1 self-recompilation failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_phase(BootstrapPhase.Phase4, CompilationBackend.Native, start_time)
+
+    shell("chmod +x {full2_bin}")
+
+    if not file_exists(full2_bin):
+        print "  FAIL {full2_bin} not created"
+        return fail_phase(BootstrapPhase.Phase4, CompilationBackend.Native, start_time)
+
+    val bin_size = file_size_raw(full2_bin)
+    val hash = file_hash_sha256(full2_bin)
+    print "  Full2 binary: {bin_size} bytes"
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase4,
+        success: true,
+        binary_path: full2_bin,
+        binary_size: bin_size,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.Native
+    )
+
+# ============================================================================
+# Interpreter Fallback
+# ============================================================================
+
+# If the seed_cpp path fails, verify the compiler works through the interpreter
+fn run_interpreter_fallback(config: MultiphaseConfig) -> PhaseResult:
+    val start_time = current_time_ms()
+    print "  Running interpreter verification..."
+
+    # Run a small subset of tests to verify the interpreter works
+    val test_result = shell("bin/release/simple test --only-fast 2>&1 | tail -5")
+    if test_result.exit_code == 0:
+        print "  OK Interpreter tests passed"
+        print "  {test_result.stdout.trim()}"
+    else:
+        print "  WARN Some interpreter tests may have failed"
+
+    # Hash source files for integrity
+    val source_hash = shell("find src/compiler/ -name '*.spl' -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1")
+    val hash = source_hash.stdout.trim()
+    print "  Source integrity hash: {hash}"
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase1,
+        success: false,
+        binary_path: "",
+        binary_size: 0,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.Interpreter
+    )
+
+export run_phase1_seed, run_phase2_core, run_phase3_full, run_phase4_full
+export run_interpreter_fallback

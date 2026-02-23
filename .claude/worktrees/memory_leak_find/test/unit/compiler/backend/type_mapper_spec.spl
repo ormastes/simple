@@ -1,0 +1,470 @@
+# Type Mapper Specification
+#
+# Tests for the shared TypeMapper trait and backend implementations.
+# Ensures consistent type mapping across all backends (Cranelift, LLVM, Wasm).
+
+"""
+# Type Mapper Specification
+
+**Feature ID**: #backend-type-mapping
+**Category**: Backend
+**Status**: In Progress
+
+The TypeMapper trait provides a unified interface for mapping MIR types to
+backend-specific type representations. This specification validates:
+- Consistent primitive type mapping
+- Correct pointer type handling
+- Struct/array/tuple layout
+- Size and alignment calculations
+- Cross-backend compatibility
+
+## Related Files
+- `src/compiler/backend/common/type_mapper.spl` - TypeMapper trait
+- `src/compiler/backend/llvm_backend.spl` - LlvmTypeMapper
+- `src/compiler/backend/cranelift_backend.spl` - CraneliftTypeMapper
+"""
+
+use compiler.backend.common.type_mapper.*
+use compiler.backend.llvm_type_mapper.LlvmTypeMapper
+use compiler.backend.cranelift_type_mapper.CraneliftTypeMapper
+use compiler.backend.wasm_type_mapper.WasmTypeMapper
+use compiler.backend.interpreter_type_mapper.InterpreterTypeMapper
+use compiler.backend.backend_api.*
+use compiler.mir_data.*
+
+describe "TypeMapper Trait":
+    """
+    Core type mapping functionality shared across all backends.
+    """
+
+    context "primitive type mapping":
+        it "maps i64 consistently across backends":
+            val llvm = LlvmTypeMapper__create()
+            val cranelift = CraneliftTypeMapper__create()
+            val wasm = WasmTypeMapper__create()
+
+            val mir_type = MirType(kind: MirTypeKind.I64)
+
+            # Each backend has different representation
+            expect llvm.map_type(mir_type) == "i64"
+            expect cranelift.map_type(mir_type) == "I64"
+            expect wasm.map_type(mir_type) == "i64"
+
+        it "maps i32 consistently":
+            val llvm = LlvmTypeMapper__create()
+            val mir_type = MirType(kind: MirTypeKind.I32)
+
+            expect llvm.map_type(mir_type) == "i32"
+
+        it "maps f64 consistently":
+            val llvm = LlvmTypeMapper__create()
+            val mir_type = MirType(kind: MirTypeKind.F64)
+
+            expect llvm.map_type(mir_type) == "double"
+
+        it "maps bool consistently":
+            val llvm = LlvmTypeMapper__create()
+            val cranelift = CraneliftTypeMapper__create()
+            val wasm = WasmTypeMapper__create()
+
+            val mir_type = MirType(kind: MirTypeKind.Bool)
+
+            expect llvm.map_type(mir_type) == "i1"
+            expect cranelift.map_type(mir_type) == "I8"
+            expect wasm.map_type(mir_type) == "i32"
+
+        it "maps unit type consistently":
+            val llvm = LlvmTypeMapper__create()
+            val mir_type = MirType(kind: MirTypeKind.Unit)
+
+            expect llvm.map_type(mir_type) == "void"
+
+    context "pointer type mapping":
+        it "maps pointer types correctly":
+            val llvm = LlvmTypeMapper__create()
+            val i64_type = MirType(kind: MirTypeKind.I64)
+            val ptr_type = MirType(kind: MirTypeKind.Ptr(i64_type, Mutability.Mutable))
+
+            # LLVM uses opaque pointers
+            expect llvm.map_type(ptr_type) == "ptr"
+
+        it "respects pointer width for target":
+            val cranelift_64 = CraneliftTypeMapper__create_for_target(CodegenTarget.X86_64)
+            val cranelift_32 = CraneliftTypeMapper__create_for_target(CodegenTarget.X86)
+
+            val i64_type = MirType(kind: MirTypeKind.I64)
+            val ptr_type = MirType(kind: MirTypeKind.Ptr(i64_type, Mutability.Mutable))
+
+            # 64-bit target uses I64 pointers
+            expect cranelift_64.map_type(ptr_type) == "I64"
+
+            # 32-bit target uses I32 pointers
+            expect cranelift_32.map_type(ptr_type) == "I32"
+
+        it "handles pointer to pointer":
+            val llvm = LlvmTypeMapper__create()
+            val i32_type = MirType(kind: MirTypeKind.I32)
+            val ptr_type = MirType(kind: MirTypeKind.Ptr(i32_type, Mutability.Mutable))
+            val ptr_ptr_type = MirType(kind: MirTypeKind.Ptr(ptr_type, Mutability.Mutable))
+
+            # LLVM opaque pointers don't nest
+            expect llvm.map_type(ptr_ptr_type) == "ptr"
+
+    context "struct type mapping":
+        it "maps simple struct":
+            val llvm = LlvmTypeMapper__create()
+
+            val fields = [
+                ("x", MirType(kind: MirTypeKind.I64)),
+                ("y", MirType(kind: MirTypeKind.I64))
+            ]
+            val struct_type = MirType(kind: MirTypeKind.Struct(fields))
+
+            val result = llvm.map_type(struct_type)
+            expect result.contains("struct")
+            expect result.contains("i64")
+
+        it "maps nested struct":
+            val llvm = LlvmTypeMapper__create()
+
+            val inner_fields = [
+                ("a", MirType(kind: MirTypeKind.I32))
+            ]
+            val inner_struct = MirType(kind: MirTypeKind.Struct(inner_fields))
+
+            val outer_fields = [
+                ("inner", inner_struct),
+                ("x", MirType(kind: MirTypeKind.I64))
+            ]
+            val outer_struct = MirType(kind: MirTypeKind.Struct(outer_fields))
+
+            val result = llvm.map_type(outer_struct)
+            expect result.contains("struct")
+
+    context "array type mapping":
+        it "maps fixed-size array":
+            val llvm = LlvmTypeMapper__create()
+
+            val elem_type = MirType(kind: MirTypeKind.I32)
+            val array_type = MirType(kind: MirTypeKind.Array(elem_type, 10))
+
+            val result = llvm.map_type(array_type)
+            expect result == "[10 x i32]"
+
+        it "maps array of structs":
+            val llvm = LlvmTypeMapper__create()
+
+            val fields = [("x", MirType(kind: MirTypeKind.I64))]
+            val struct_type = MirType(kind: MirTypeKind.Struct(fields))
+            val array_type = MirType(kind: MirTypeKind.Array(struct_type, 5))
+
+            val result = llvm.map_type(array_type)
+            expect result.contains("[5 x")
+
+    context "tuple type mapping":
+        it "maps simple tuple":
+            val llvm = LlvmTypeMapper__create()
+
+            val elements = [
+                MirType(kind: MirTypeKind.I32),
+                MirType(kind: MirTypeKind.F64),
+                MirType(kind: MirTypeKind.Bool)
+            ]
+            val tuple_type = MirType(kind: MirTypeKind.Tuple(elements))
+
+            val result = llvm.map_type(tuple_type)
+            expect result.contains("i32")
+            expect result.contains("double")
+            expect result.contains("i1")
+
+        it "maps empty tuple (unit)":
+            val llvm = LlvmTypeMapper__create()
+
+            val tuple_type = MirType(kind: MirTypeKind.Tuple([]))
+
+            val result = llvm.map_type(tuple_type)
+            # Empty tuple should be unit/void
+            expect result == "{}"
+
+    context "function type mapping":
+        it "maps function with parameters":
+            val llvm = LlvmTypeMapper__create()
+
+            val params = [
+                MirType(kind: MirTypeKind.I32),
+                MirType(kind: MirTypeKind.I32)
+            ]
+            val ret = MirType(kind: MirTypeKind.I64)
+            val func_type = MirType(kind: MirTypeKind.Function(params, ret))
+
+            val result = llvm.map_type(func_type)
+            expect result.contains("i64")  # Return type
+            expect result.contains("i32")  # Parameter types
+
+        it "maps void function":
+            val llvm = LlvmTypeMapper__create()
+
+            val params = []
+            val ret = MirType(kind: MirTypeKind.Unit)
+            val func_type = MirType(kind: MirTypeKind.Function(params, ret))
+
+            val result = llvm.map_type(func_type)
+            expect result.contains("void")
+
+    context "size calculations":
+        it "computes size of primitives correctly":
+            val mapper = LlvmTypeMapper__create()
+
+            expect mapper.size_of(MirType(kind: MirTypeKind.I64)) == 8
+            expect mapper.size_of(MirType(kind: MirTypeKind.I32)) == 4
+            expect mapper.size_of(MirType(kind: MirTypeKind.I16)) == 2
+            expect mapper.size_of(MirType(kind: MirTypeKind.I8)) == 1
+            expect mapper.size_of(MirType(kind: MirTypeKind.F64)) == 8
+            expect mapper.size_of(MirType(kind: MirTypeKind.F32)) == 4
+            expect mapper.size_of(MirType(kind: MirTypeKind.Bool)) == 1
+            expect mapper.size_of(MirType(kind: MirTypeKind.Unit)) == 0
+
+        it "computes size of pointers based on target":
+            val mapper_64 = LlvmTypeMapper__create_for_target(CodegenTarget.X86_64)
+            val mapper_32 = LlvmTypeMapper__create_for_target(CodegenTarget.X86)
+
+            val ptr_type = MirType(kind: MirTypeKind.Ptr(
+                MirType(kind: MirTypeKind.I32),
+                Mutability.Immutable
+            ))
+
+            expect mapper_64.size_of(ptr_type) == 8
+            expect mapper_32.size_of(ptr_type) == 4
+
+        it "computes size of struct (sum of fields)":
+            val mapper = LlvmTypeMapper__create()
+
+            val fields = [
+                ("a", MirType(kind: MirTypeKind.I64)),  # 8 bytes
+                ("b", MirType(kind: MirTypeKind.I32)),  # 4 bytes
+                ("c", MirType(kind: MirTypeKind.I8))    # 1 byte
+            ]
+            val struct_type = MirType(kind: MirTypeKind.Struct(fields))
+
+            # Note: This is unpadded size, real size would include padding
+            expect mapper.size_of(struct_type) == 13
+
+        it "computes size of array":
+            val mapper = LlvmTypeMapper__create()
+
+            val elem_type = MirType(kind: MirTypeKind.I32)
+            val array_type = MirType(kind: MirTypeKind.Array(elem_type, 10))
+
+            expect mapper.size_of(array_type) == 40  # 10 * 4 bytes
+
+    context "alignment calculations":
+        it "computes alignment of primitives correctly":
+            val mapper = LlvmTypeMapper__create()
+
+            expect mapper.align_of(MirType(kind: MirTypeKind.I64)) == 8
+            expect mapper.align_of(MirType(kind: MirTypeKind.I32)) == 4
+            expect mapper.align_of(MirType(kind: MirTypeKind.I16)) == 2
+            expect mapper.align_of(MirType(kind: MirTypeKind.I8)) == 1
+            expect mapper.align_of(MirType(kind: MirTypeKind.F64)) == 8
+            expect mapper.align_of(MirType(kind: MirTypeKind.Bool)) == 1
+
+        it "computes alignment of struct (max of fields)":
+            val mapper = LlvmTypeMapper__create()
+
+            val fields = [
+                ("a", MirType(kind: MirTypeKind.I8)),   # align 1
+                ("b", MirType(kind: MirTypeKind.I64)),  # align 8
+                ("c", MirType(kind: MirTypeKind.I32))   # align 4
+            ]
+            val struct_type = MirType(kind: MirTypeKind.Struct(fields))
+
+            # Alignment of struct is max alignment of fields
+            expect mapper.align_of(struct_type) == 8
+
+        it "computes alignment of array (same as element)":
+            val mapper = LlvmTypeMapper__create()
+
+            val elem_type = MirType(kind: MirTypeKind.I32)
+            val array_type = MirType(kind: MirTypeKind.Array(elem_type, 10))
+
+            expect mapper.align_of(array_type) == 4
+
+    context "error handling":
+        it "errors on unsupported type":
+            val llvm = LlvmTypeMapper__create()
+
+            # Create a custom type not yet supported
+            val unsupported = MirType(kind: MirTypeKind.Custom("UnknownType"))
+
+            val result = llvm.map_type(unsupported)
+            expect result.is_err()
+            expect result.err().message.contains("Unsupported type")
+
+    context "cross-backend consistency":
+        it "all backends agree on primitive sizes":
+            val llvm = LlvmTypeMapper__create()
+            val cranelift = CraneliftTypeMapper__create()
+            val wasm = WasmTypeMapper__create()
+
+            val i64_type = MirType(kind: MirTypeKind.I64)
+
+            # All backends should agree on size
+            expect llvm.size_of(i64_type) == 8
+            expect cranelift.size_of(i64_type) == 8
+            expect wasm.size_of(i64_type) == 8
+
+        it "all backends produce valid output":
+            val llvm = LlvmTypeMapper__create()
+            val cranelift = CraneliftTypeMapper__create()
+            val wasm = WasmTypeMapper__create()
+
+            val types = [
+                MirType(kind: MirTypeKind.I64),
+                MirType(kind: MirTypeKind.F32),
+                MirType(kind: MirTypeKind.Bool)
+            ]
+
+            for ty in types:
+                # Each backend should produce non-empty string
+                val llvm_result = llvm.map_type(ty)
+                val cranelift_result = cranelift.map_type(ty)
+                val wasm_result = wasm.map_type(ty)
+
+                expect llvm_result.length > 0
+                expect cranelift_result.length > 0
+                expect wasm_result.length > 0
+
+describe "LLVM Type Mapper":
+    """
+    LLVM-specific type mapping tests.
+    """
+
+    context "target-specific features":
+        it "supports x86-64-v3 CPU features":
+            val config = LlvmTargetConfig__for_target(CodegenTarget.X86_64, nil)
+            val mapper = LlvmTypeMapper(target: config)
+
+            # x86-64-v3 should support AVX2
+            expect config.supports_avx2() == true
+            expect config.supports_fma() == true
+
+        it "uses opaque pointers":
+            val mapper = LlvmTypeMapper__create()
+
+            val i32_ptr = MirType(kind: MirTypeKind.Ptr(
+                MirType(kind: MirTypeKind.I32),
+                Mutability.Mutable
+            ))
+
+            # LLVM uses opaque pointers (no type information)
+            expect mapper.map_type(i32_ptr) == "ptr"
+
+describe "Cranelift Type Mapper":
+    """
+    Cranelift-specific type mapping tests.
+    """
+
+    context "target-specific behavior":
+        it "uses correct pointer size for 64-bit":
+            val mapper = CraneliftTypeMapper__create_for_target(CodegenTarget.X86_64)
+
+            val ptr_type = MirType(kind: MirTypeKind.Ptr(
+                MirType(kind: MirTypeKind.I32),
+                Mutability.Immutable
+            ))
+
+            expect mapper.map_type(ptr_type) == "I64"
+
+        it "uses correct pointer size for 32-bit":
+            val mapper = CraneliftTypeMapper__create_for_target(CodegenTarget.X86)
+
+            val ptr_type = MirType(kind: MirTypeKind.Ptr(
+                MirType(kind: MirTypeKind.I32),
+                Mutability.Immutable
+            ))
+
+            expect mapper.map_type(ptr_type) == "I32"
+
+        it "represents bool as i8":
+            val mapper = CraneliftTypeMapper__create()
+
+            val bool_type = MirType(kind: MirTypeKind.Bool)
+
+            # Cranelift represents bool as I8
+            expect mapper.map_type(bool_type) == "I8"
+
+describe "WebAssembly Type Mapper":
+    """
+    WebAssembly-specific type mapping tests.
+    """
+
+    context "wasm type restrictions":
+        it "promotes i8 to i32":
+            val mapper = WasmTypeMapper__create()
+
+            val i8_type = MirType(kind: MirTypeKind.I8)
+
+            # Wasm doesn't have i8, promotes to i32
+            expect mapper.map_type(i8_type) == "i32"
+
+        it "promotes i16 to i32":
+            val mapper = WasmTypeMapper__create()
+
+            val i16_type = MirType(kind: MirTypeKind.I16)
+
+            # Wasm doesn't have i16, promotes to i32
+            expect mapper.map_type(i16_type) == "i32"
+
+        it "uses i32 for pointers":
+            val mapper = WasmTypeMapper__create()
+
+            val ptr_type = MirType(kind: MirTypeKind.Ptr(
+                MirType(kind: MirTypeKind.I64),
+                Mutability.Mutable
+            ))
+
+            # Wasm uses i32 for all memory addresses
+            expect mapper.map_type(ptr_type) == "i32"
+
+describe "Type Mapper Performance":
+    """
+    Performance characteristics of type mapping.
+    """
+
+    slow_it "maps 10000 types efficiently":
+        val mapper = LlvmTypeMapper__create()
+        val i64_type = MirType(kind: MirTypeKind.I64)
+
+        val start = time_now()
+        for _ in 0..10000:
+            val _ = mapper.map_type(i64_type)
+        val elapsed = time_elapsed(start)
+
+        # Should be fast (< 100ms for 10k mappings)
+        expect elapsed < 100
+
+    slow_it "caches type mappings":
+        val mapper = LlvmTypeMapper__create_with_cache()
+
+        val complex_type = MirType(kind: MirTypeKind.Struct([
+            ("a", MirType(kind: MirTypeKind.I64)),
+            ("b", MirType(kind: MirTypeKind.Array(
+                MirType(kind: MirTypeKind.I32), 100
+            )))
+        ]))
+
+        # First mapping (cache miss)
+        val start1 = time_now()
+        val result1 = mapper.map_type(complex_type)
+        val time1 = time_elapsed(start1)
+
+        # Second mapping (cache hit)
+        val start2 = time_now()
+        val result2 = mapper.map_type(complex_type)
+        val time2 = time_elapsed(start2)
+
+        # Results should be identical
+        expect result1 == result2
+
+        # Cached version should be faster (at least 2x)
+        expect time2 < time1 / 2

@@ -1,0 +1,333 @@
+"""
+# Pipeline Multi Specification
+
+**Feature IDs:** #TBD
+**Category:** Compiler
+**Status:** In Progress
+
+## Overview
+
+Tests the full compilation pipeline with multiple program variants,
+covering arithmetic, control flow, recursion, string output, arrays,
+and mutable variables.
+"""
+
+use std.spec
+use compiler.core.parser.*
+use compiler.parser_types.*
+use compiler.core.lexer.*
+use compiler.blocks.*
+use compiler.treesitter.*
+use compiler.hir_lowering.*
+use compiler.mir_lowering.*
+use compiler.mir_data.*
+use compiler.backend.native.mod.{compile_native}
+use compiler.core.backend_types.{CodegenTarget}
+
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+fn byte_to_hex(b: i64) -> text:
+    val digits = "0123456789abcdef"
+    "{digits[b / 16]}{digits[b % 16]}"
+
+fn compile_and_run(source: text) -> (i64, text):
+    var parser = Parser.new(source)
+    val ast_module = parser.parse()
+    if parser.errors.len() > 0:
+        return (-1, "parse error")
+    var hir_lowering = HirLowering.new()
+    val hir_module = hir_lowering.lower_module(ast_module)
+    var mir_ctx = MirLowering.new(hir_lowering.symbols)
+    val mir_module = mir_ctx.lower_module(hir_module)
+    val elf_bytes = compile_native(mir_module, CodegenTarget.X86_64)
+    var off = 0
+    while off < elf_bytes.len():
+        var chunk = ""
+        var end_ = off + 800
+        if end_ > elf_bytes.len():
+            end_ = elf_bytes.len()
+        var j = off
+        while j < end_:
+            chunk = chunk + byte_to_hex(elf_bytes[j])
+            j = j + 1
+        if off == 0:
+            shell("echo -n '{chunk}' > /tmp/pm_spec.hex")
+        else:
+            shell("echo -n '{chunk}' >> /tmp/pm_spec.hex")
+        off = end_
+    shell("xxd -r -p /tmp/pm_spec.hex /tmp/pm_spec.o")
+    shell("rm -f /tmp/pm_spec.hex")
+    val link_r = rt_process_run("cc", ["-o", "/tmp/pm_spec", "/tmp/pm_spec.o", "-no-pie"])
+    if link_r[2] != 0:
+        return (-1, link_r[1])
+    val run_r = rt_process_run("/tmp/pm_spec", [])
+    (run_r[2], run_r[0])
+
+
+describe "Pipeline Multi - Return Values":
+    it "return 0":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    0\n")
+            expect(code).to_equal(0)
+
+    it "return 42":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    42\n")
+            expect(code).to_equal(42)
+
+    it "explicit return statement":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    return 0\n")
+            expect(code).to_equal(0)
+
+    it "simple arithmetic":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    1 + 2\n")
+            expect(code).to_equal(3)
+
+    it "nested arithmetic":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    (10 + 20) * 2\n")
+            expect(code).to_equal(60)
+
+    it "variable declaration":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 5\n    x + 3\n")
+            expect(code).to_equal(8)
+
+    it "if-else expression":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 10\n    if x > 5:\n        1\n    else:\n        0\n")
+            expect(code).to_equal(1)
+
+    it "while loop":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var x = 0\n    while x < 10:\n        x = x + 1\n    x\n")
+            expect(code).to_equal(10)
+
+    it "multiple variables":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val a = 10\n    val b = 20\n    val c = a + b\n    c\n")
+            expect(code).to_equal(30)
+
+    it "nested if-else":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 15\n    if x > 20:\n        3\n    else:\n        if x > 10:\n            2\n        else:\n            1\n")
+            expect(code).to_equal(2)
+
+    it "factorial 5":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var n = 5\n    var result = 1\n    while n > 0:\n        result = result * n\n        n = n - 1\n    result\n")
+            expect(code).to_equal(120)
+
+    it "subtraction":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 100\n    val y = 58\n    x - y\n")
+            expect(code).to_equal(42)
+
+    it "var decrement in while":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var x = 50\n    while x > 10:\n        x = x - 5\n    x\n")
+            expect(code).to_equal(10)
+
+    it "sum 1..5":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var sum = 0\n    var i = 1\n    while i <= 5:\n        sum = sum + i\n        i = i + 1\n    sum\n")
+            expect(code).to_equal(15)
+
+    it "greater-than-or-equal operator":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 10\n    if x >= 10:\n        1\n    else:\n        0\n")
+            expect(code).to_equal(1)
+
+    it "equality operator":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 5\n    if x == 5:\n        42\n    else:\n        0\n")
+            expect(code).to_equal(42)
+
+    it "inequality operator":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 5\n    if x != 3:\n        1\n    else:\n        0\n")
+            expect(code).to_equal(1)
+
+
+describe "Pipeline Multi - Functions":
+    it "function call":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn main():\n    add(10, 20)\n")
+            expect(code).to_equal(30)
+
+    it "nested function calls":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn double(x: i64) -> i64:\n    x * 2\n\nfn main():\n    double(double(5))\n")
+            expect(code).to_equal(20)
+
+    it "recursion fibonacci(6)=8":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn fib(n: i64) -> i64:\n    if n <= 1:\n        n\n    else:\n        fib(n - 1) + fib(n - 2)\n\nfn main():\n    fib(6)\n")
+            expect(code).to_equal(8)
+
+    it "multiple functions":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn square(x: i64) -> i64:\n    x * x\n\nfn add_squares(a: i64, b: i64) -> i64:\n    square(a) + square(b)\n\nfn main():\n    add_squares(3, 4)\n")
+            expect(code).to_equal(25)
+
+    it "division":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 100\n    val y = 4\n    x / y\n")
+            expect(code).to_equal(25)
+
+    it "modulo":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val x = 17\n    val y = 5\n    x % y\n")
+            expect(code).to_equal(2)
+
+    it "deep recursion fibonacci(10)=55":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn fib(n: i64) -> i64:\n    if n <= 1:\n        n\n    else:\n        fib(n - 1) + fib(n - 2)\n\nfn main():\n    fib(10)\n")
+            expect(code).to_equal(55)
+
+    it "3-argument function":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn add3(a: i64, b: i64, c: i64) -> i64:\n    a + b + c\n\nfn main():\n    add3(10, 20, 30)\n")
+            expect(code).to_equal(60)
+
+    it "call chain":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn inc(x: i64) -> i64:\n    x + 1\n\nfn main():\n    inc(inc(inc(inc(0))))\n")
+            expect(code).to_equal(4)
+
+    it "GCD algorithm":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn gcd(a: i64, b: i64) -> i64:\n    if b == 0:\n        a\n    else:\n        gcd(b, a % b)\n\nfn main():\n    gcd(48, 18)\n")
+            expect(code).to_equal(6)
+
+    it "power of 2 via loop":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var result = 1\n    var i = 0\n    while i < 7:\n        result = result * 2\n        i = i + 1\n    result\n")
+            expect(code).to_equal(128)
+
+    it "register pressure test":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn identity(x: i64) -> i64:\n    x\n\nfn main():\n    val a = 1\n    val b = 2\n    val c = 3\n    val d = 4\n    val e = 5\n    val f = identity(10)\n    val g = identity(20)\n    a + b + c + d + e + f + g\n")
+            expect(code).to_equal(45)
+
+    it "4-argument function":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn sum4(a: i64, b: i64, c: i64, d: i64) -> i64:\n    a + b + c + d\n\nfn main():\n    sum4(10, 20, 30, 40)\n")
+            expect(code).to_equal(100)
+
+    it "spill across calls":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn id(x: i64) -> i64:\n    x\n\nfn main():\n    val a = 1\n    val b = 2\n    val c = 3\n    val d = 4\n    val e = 5\n    val f = 6\n    val g = 7\n    val h = id(a + b)\n    a + b + c + d + e + f + g + h\n")
+            expect(code).to_equal(31)
+
+    it "mutual recursion is_even(10)=1":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn is_even(n: i64) -> i64:\n    if n == 0:\n        1\n    else:\n        is_odd(n - 1)\n\nfn is_odd(n: i64) -> i64:\n    if n == 0:\n        0\n    else:\n        is_even(n - 1)\n\nfn main():\n    is_even(10)\n")
+            expect(code).to_equal(1)
+
+    it "Collatz steps for 6":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn collatz_steps(n: i64) -> i64:\n    var steps = 0\n    var x = n\n    while x != 1:\n        if x % 2 == 0:\n            x = x / 2\n        else:\n            x = x * 3 + 1\n        steps = steps + 1\n    steps\n\nfn main():\n    collatz_steps(6)\n")
+            expect(code).to_equal(8)
+
+    it "5-argument function":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn sum5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64:\n    a + b + c + d + e\n\nfn main():\n    sum5(1, 2, 3, 4, 5)\n")
+            expect(code).to_equal(15)
+
+    it "nested while loops (3x4=12)":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var total = 0\n    var i = 0\n    while i < 3:\n        var j = 0\n        while j < 4:\n            total = total + 1\n            j = j + 1\n        i = i + 1\n    total\n")
+            expect(code).to_equal(12)
+
+    it "boolean range check":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn in_range(x: i64, lo: i64, hi: i64) -> i64:\n    if x >= lo:\n        if x <= hi:\n            1\n        else:\n            0\n    else:\n        0\n\nfn main():\n    in_range(5, 3, 10) + in_range(15, 3, 10) + in_range(3, 3, 10)\n")
+            expect(code).to_equal(2)
+
+    it "Ackermann(2,3)=9":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn ack(m: i64, n: i64) -> i64:\n    if m == 0:\n        n + 1\n    else:\n        if n == 0:\n            ack(m - 1, 1)\n        else:\n            ack(m - 1, ack(m, n - 1))\n\nfn main():\n    ack(2, 3)\n")
+            expect(code).to_equal(9)
+
+
+describe "Pipeline Multi - String Output":
+    it "puts Hello":
+        skip_on_interpreter "requires native backend":
+            val (code, out) = compile_and_run("extern fn puts(s: text) -> i64\n\nfn main():\n    puts(\"Hello\")\n    0\n")
+            expect(out).to_equal("Hello\n")
+
+    it "multiple puts calls":
+        skip_on_interpreter "requires native backend":
+            val (code, out) = compile_and_run("extern fn puts(s: text) -> i64\n\nfn main():\n    puts(\"foo\")\n    puts(\"bar\")\n    0\n")
+            expect(out).to_equal("foo\nbar\n")
+
+    it "puts and return value":
+        skip_on_interpreter "requires native backend":
+            val (code, out) = compile_and_run("extern fn puts(s: text) -> i64\n\nfn main():\n    puts(\"done\")\n    42\n")
+            expect(code).to_equal(42)
+
+    it "printf with int arg":
+        skip_on_interpreter "requires native backend":
+            val (code, out) = compile_and_run("extern fn printf(fmt: text, n: i64) -> i64\nextern fn puts(s: text) -> i64\n\nfn main():\n    printf(\"%d\", 42)\n    puts(\"\")\n    0\n")
+            expect(out).to_equal("42\n")
+
+    it "printf with 2 int args":
+        skip_on_interpreter "requires native backend":
+            val (code, out) = compile_and_run("extern fn printf(fmt: text, a: i64, b: i64) -> i64\nextern fn puts(s: text) -> i64\n\nfn main():\n    printf(\"%d+%d\", 10, 20)\n    puts(\"\")\n    0\n")
+            expect(out).to_equal("10+20\n")
+
+    it "puts then compute":
+        skip_on_interpreter "requires native backend":
+            val (code, out) = compile_and_run("extern fn puts(s: text) -> i64\n\nfn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn main():\n    puts(\"calc\")\n    add(3, 4)\n")
+            expect(out).to_equal("calc\n")
+
+
+describe "Pipeline Multi - Arrays":
+    it "array index [1]":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val arr = [10, 20, 30]\n    arr[1]\n")
+            expect(code).to_equal(20)
+
+    it "array index [0]+[2]":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val arr = [5, 10, 15]\n    arr[0] + arr[2]\n")
+            expect(code).to_equal(20)
+
+    it "array with computed index":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    val arr = [3, 7, 11, 13]\n    val i = 1 + 1\n    arr[i]\n")
+            expect(code).to_equal(11)
+
+
+describe "Pipeline Multi - Mutable Variables":
+    it "mutable variable reassignment":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var x = 5\n    x = x + 3\n    x\n")
+            expect(code).to_equal(8)
+
+    it "multiple reassignments double":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var x = 1\n    x = x + x\n    x = x + x\n    x = x + x\n    x\n")
+            expect(code).to_equal(8)
+
+    it "compound variable operations":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn main():\n    var x = 10\n    x = x - 3\n    x = x * 2\n    x\n")
+            expect(code).to_equal(14)
+
+    it "malloc heap allocation":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("extern fn malloc(size: i64) -> i64\nextern fn free(ptr: i64) -> i64\n\nfn main():\n    val ptr = malloc(8)\n    0\n")
+            expect(code).to_equal(0)
+
+    it "array element sum via function":
+        skip_on_interpreter "requires native backend":
+            val (code, _) = compile_and_run("fn sum3(a: i64, b: i64, c: i64) -> i64:\n    a + b + c\n\nfn main():\n    val arr = [10, 20, 30]\n    sum3(arr[0], arr[1], arr[2])\n")
+            expect(code).to_equal(60)

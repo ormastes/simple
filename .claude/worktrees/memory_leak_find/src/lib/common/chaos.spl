@@ -1,0 +1,640 @@
+# Chaos Engineering and Fault Injection Library
+#
+# Provides deterministic fault injection, chaos testing, and resilience
+# verification for Simple applications.
+#
+# Features:
+# - Configurable fault injection (latency, errors, corruption, timeouts)
+# - Deterministic fault schedules for reproducible testing
+# - Chaos test runner with multi-trial execution
+# - Resource constraint helpers (memory limits, timeouts, slow I/O)
+# - Resilience pattern testing (retry, circuit breaker)
+#
+# All randomness uses pure LCG from random_utils - fully deterministic
+# when seeded. No cryptographic guarantees.
+#
+# Functions:
+# - Config: fault_config_default, fault_config
+# - Injection: should_fault, inject_latency, inject_error, inject_corruption, inject_timeout
+# - Schedules: schedule_create, schedule_get_fault, schedule_serialize, schedule_deserialize
+# - Runner: chaos_run, chaos_run_default, chaos_config, chaos_config_default
+# - Resources: chaos_with_memory_limit, chaos_with_timeout, chaos_slow_write, chaos_slow_read
+# - Reporting: chaos_report, chaos_report_failures, chaos_save_report
+# - Resilience: chaos_test_retry, chaos_test_circuit_breaker
+
+# ============================================================================
+# Extern Declarations
+# ============================================================================
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+
+
+# Local shell helpers to avoid circular imports
+fn _chaos_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn _chaos_file_write(path: text, content: text) -> bool:
+    val (out, err, code) = _chaos_shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    code == 0
+
+fn _chaos_file_read(path: text) -> text:
+    val result = rt_file_read_text(path)
+    result ?? ""
+
+fn _chaos_time_ms() -> i64:
+    rt_time_now_unix_micros() / 1000
+
+fn _chaos_sleep_ms(ms: i64):
+    val seconds = ms / 1000
+    val remainder = ms % 1000
+    if seconds > 0:
+        rt_process_run("/bin/sh", ["-c", "sleep {seconds}"])
+    if remainder > 0:
+        rt_process_run("/bin/sh", ["-c", "sleep 0.{remainder}"])
+
+# ============================================================================
+# RNG (inline LCG to avoid import issues)
+# ============================================================================
+
+fn _rng_create(seed: i64):
+    val multiplier = 1103515245
+    val increment = 12345
+    val modulus = 2147483648
+    (seed % modulus, multiplier, increment, modulus)
+
+fn _rng_next(rng):
+    val (state, a, c, m) = rng
+    val new_state = (a * state + c) % m
+    ((new_state, a, c, m), new_state)
+
+fn _rng_next_range(rng, min_v: i64, max_v: i64):
+    val (new_rng, raw) = _rng_next(rng)
+    val range = max_v - min_v
+    if range <= 0:
+        return (new_rng, min_v)
+    val result = min_v + (raw % range)
+    (new_rng, result)
+
+# ============================================================================
+# FaultConfig
+# ============================================================================
+
+struct FaultConfig:
+    seed: i64
+    fault_rate: i64
+    latency_min_ms: i64
+    latency_max_ms: i64
+    error_messages: [text]
+    max_faults: i64
+
+fn fault_config_default() -> FaultConfig:
+    """Create default fault configuration (10% rate, seed 42)."""
+    FaultConfig(
+        seed: 42,
+        fault_rate: 10,
+        latency_min_ms: 10,
+        latency_max_ms: 500,
+        error_messages: ["timeout", "connection refused", "internal error", "resource unavailable"],
+        max_faults: 0
+    )
+
+fn fault_config(s: i64, rate: i64) -> FaultConfig:
+    """Create fault configuration with custom seed and rate."""
+    FaultConfig(
+        seed: s,
+        fault_rate: rate,
+        latency_min_ms: 10,
+        latency_max_ms: 500,
+        error_messages: ["timeout", "connection refused", "internal error"],
+        max_faults: 0
+    )
+
+# ============================================================================
+# Fault Injection Functions
+# ============================================================================
+
+fn should_fault(rng, rate: i64):
+    """Determine if a fault should be injected based on rate (0-100).
+
+    Returns (new_rng, should_inject: bool).
+
+    Example:
+        val rng = _rng_create(42)
+        val (rng2, inject) = should_fault(rng, 50)
+    """
+    val (new_rng, roll) = _rng_next_range(rng, 0, 100)
+    (new_rng, roll < rate)
+
+fn inject_latency(rng, config: FaultConfig):
+    """Inject latency fault based on config.
+
+    Returns (new_rng, latency_ms: i64). Returns 0 if no fault triggered.
+
+    Example:
+        val rng = _rng_create(42)
+        val cfg = fault_config_default()
+        val (rng2, delay) = inject_latency(rng, cfg)
+    """
+    val (rng2, do_inject) = should_fault(rng, config.fault_rate)
+    if not do_inject:
+        return (rng2, 0)
+    val (rng3, latency) = _rng_next_range(rng2, config.latency_min_ms, config.latency_max_ms + 1)
+    (rng3, latency)
+
+fn inject_error(rng, config: FaultConfig):
+    """Inject error fault based on config.
+
+    Returns (new_rng, error_msg: text). Returns empty string if no fault.
+
+    Example:
+        val rng = _rng_create(42)
+        val cfg = fault_config_default()
+        val (rng2, err) = inject_error(rng, cfg)
+    """
+    val (rng2, do_inject) = should_fault(rng, config.fault_rate)
+    if not do_inject:
+        return (rng2, "")
+    val msgs = config.error_messages
+    if msgs.len() == 0:
+        return (rng2, "unknown error")
+    val (rng3, idx) = _rng_next_range(rng2, 0, msgs.len())
+    (rng3, msgs[idx])
+
+fn inject_corruption(rng, data: text, rate: i64):
+    """Corrupt text data by replacing characters at given rate (0-100).
+
+    Returns (new_rng, corrupted_data: text).
+
+    Example:
+        val rng = _rng_create(42)
+        val (rng2, corrupted) = inject_corruption(rng, "hello world", 50)
+    """
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%"
+    var result = ""
+    var current_rng = rng
+    var i = 0
+    while i < data.len():
+        val (rng2, roll) = _rng_next_range(current_rng, 0, 100)
+        if roll < rate:
+            val (rng3, char_idx) = _rng_next_range(rng2, 0, chars.len())
+            current_rng = rng3
+            result = result + chars[char_idx]
+        else:
+            current_rng = rng2
+            result = result + data[i]
+        i = i + 1
+    (current_rng, result)
+
+fn inject_timeout(rng, rate: i64):
+    """Determine if a timeout fault should occur.
+
+    Returns (new_rng, should_timeout: bool).
+
+    Example:
+        val rng = _rng_create(42)
+        val (rng2, timed_out) = inject_timeout(rng, 20)
+    """
+    should_fault(rng, rate)
+
+# ============================================================================
+# Fault Schedule (deterministic replay)
+# ============================================================================
+
+struct FaultSchedule:
+    seed: i64
+    events: [text]
+    total_steps: i64
+
+fn schedule_create(seed: i64, total_steps: i64, config: FaultConfig) -> FaultSchedule:
+    """Create a deterministic fault schedule.
+
+    Pre-generates fault events for each step so they can be replayed.
+    Event format: "step|type|details"
+    """
+    var events: [text] = []
+    var rng = _rng_create(seed)
+    var fault_count = 0
+    var step = 0
+    while step < total_steps:
+        val at_limit = config.max_faults > 0 and fault_count >= config.max_faults
+        if at_limit:
+            step = step + 1
+            continue
+        val (rng2, do_fault) = should_fault(rng, config.fault_rate)
+        rng = rng2
+        if do_fault:
+            # Decide fault type: 0=latency, 1=error, 2=timeout
+            val (rng3, fault_type) = _rng_next_range(rng, 0, 3)
+            rng = rng3
+            match fault_type:
+                case 0:
+                    val (rng4, latency) = _rng_next_range(rng, config.latency_min_ms, config.latency_max_ms + 1)
+                    rng = rng4
+                    events.push("{step}|latency|{latency}ms")
+                    fault_count = fault_count + 1
+                case 1:
+                    val msgs = config.error_messages
+                    if msgs.len() > 0:
+                        val (rng4, idx) = _rng_next_range(rng, 0, msgs.len())
+                        rng = rng4
+                        events.push("{step}|error|{msgs[idx]}")
+                    else:
+                        events.push("{step}|error|unknown")
+                    fault_count = fault_count + 1
+                case 2:
+                    events.push("{step}|timeout|triggered")
+                    fault_count = fault_count + 1
+                case _:
+                    pass_dn
+        step = step + 1
+    FaultSchedule(seed: seed, events: events, total_steps: total_steps)
+
+fn schedule_get_fault(schedule: FaultSchedule, step: i64) -> text:
+    """Get fault for a given step. Returns empty string if no fault at that step."""
+    val prefix = "{step}|"
+    for event in schedule.events:
+        if event.starts_with(prefix):
+            return event
+    ""
+
+fn schedule_serialize(schedule: FaultSchedule) -> text:
+    """Serialize a fault schedule to text for storage/replay."""
+    var lines: [text] = []
+    lines.push("seed:{schedule.seed}")
+    lines.push("total_steps:{schedule.total_steps}")
+    lines.push("event_count:{schedule.events.len()}")
+    for event in schedule.events:
+        lines.push("event:{event}")
+    var result = ""
+    var i = 0
+    while i < lines.len():
+        if i > 0:
+            result = result + "\n"
+        result = result + lines[i]
+        i = i + 1
+    result
+
+fn schedule_deserialize(data: text) -> FaultSchedule:
+    """Deserialize a fault schedule from text."""
+    var seed = 0
+    var total_steps = 0
+    var events: [text] = []
+    val lines = data.split("\n")
+    for line in lines:
+        if line.starts_with("seed:"):
+            val rest = line[5:line.len()]
+            seed = int(rest.trim())
+        if line.starts_with("total_steps:"):
+            val rest = line[12:line.len()]
+            total_steps = int(rest.trim())
+        if line.starts_with("event:"):
+            val rest = line[6:line.len()]
+            events.push(rest)
+    FaultSchedule(seed: seed, events: events, total_steps: total_steps)
+
+fn schedule_save(schedule: FaultSchedule, path: text):
+    """Save a fault schedule to a file."""
+    val data = schedule_serialize(schedule)
+    _chaos_file_write(path, data)
+
+fn schedule_load(path: text) -> FaultSchedule:
+    """Load a fault schedule from a file."""
+    val data = _chaos_file_read(path)
+    schedule_deserialize(data)
+
+# ============================================================================
+# Chaos Test Runner
+# ============================================================================
+
+struct ChaosConfig:
+    name: text
+    trials: i64
+    seed: i64
+    fault_config: FaultConfig
+    time_limit_ms: i64
+
+struct ChaosResult:
+    name: text
+    total_trials: i64
+    passed_trials: i64
+    failed_trials: i64
+    failures: [text]
+    seed: i64
+    elapsed_ms: i64
+
+fn chaos_config_default(name: text) -> ChaosConfig:
+    """Create default chaos config (100 trials, seed 42, 10% fault rate)."""
+    ChaosConfig(
+        name: name,
+        trials: 100,
+        seed: 42,
+        fault_config: fault_config_default(),
+        time_limit_ms: 30000
+    )
+
+fn chaos_config(name: text, trial_count: i64, s: i64) -> ChaosConfig:
+    """Create chaos config with custom trial count and seed."""
+    ChaosConfig(
+        name: name,
+        trials: trial_count,
+        seed: s,
+        fault_config: fault_config(s, 10),
+        time_limit_ms: 30000
+    )
+
+fn chaos_run(config: ChaosConfig, scenario_fn) -> ChaosResult:
+    """Run a chaos test scenario across multiple trials.
+
+    scenario_fn takes (trial_seed: i64) -> text
+    Returns empty string for success, error message for failure.
+
+    Each trial gets a unique seed derived from config.seed + trial number.
+    """
+    val start_ms = _chaos_time_ms()
+    var passed = 0
+    var failed = 0
+    var failures: [text] = []
+    var trial = 0
+    while trial < config.trials:
+        # Check time limit
+        val now_ms = _chaos_time_ms()
+        val elapsed = now_ms - start_ms
+        if config.time_limit_ms > 0 and elapsed > config.time_limit_ms:
+            failures.push("{trial}|time_limit_exceeded|seed={config.seed}")
+            failed = failed + 1
+            break
+        # Derive trial seed
+        val trial_seed = config.seed + trial
+        # Run scenario
+        val result = scenario_fn(trial_seed)
+        if result == "" or result == nil:
+            passed = passed + 1
+        else:
+            failed = failed + 1
+            failures.push("{trial}|{result}|seed={trial_seed}")
+        trial = trial + 1
+    val end_ms = _chaos_time_ms()
+    val total_elapsed = end_ms - start_ms
+    ChaosResult(
+        name: config.name,
+        total_trials: trial,
+        passed_trials: passed,
+        failed_trials: failed,
+        failures: failures,
+        seed: config.seed,
+        elapsed_ms: total_elapsed
+    )
+
+fn chaos_run_default(name: text, scenario_fn) -> ChaosResult:
+    """Run a chaos test with default configuration (100 trials, seed 42)."""
+    val config = chaos_config_default(name)
+    chaos_run(config, scenario_fn)
+
+# ============================================================================
+# Resource Constraint Helpers
+# ============================================================================
+
+fn chaos_with_memory_limit(cmd: text, args: [text], mem_mb: i64) -> text:
+    """Run command with memory limit (ulimit -v).
+
+    Returns stdout on success, error message on failure.
+    """
+    var args_str = ""
+    for arg in args:
+        if args_str == "":
+            args_str = arg
+        else:
+            args_str = args_str + " " + arg
+    val mem_kb = mem_mb * 1024
+    val shell_cmd = "ulimit -v {mem_kb} 2>/dev/null; {cmd} {args_str}"
+    val (out, err, code) = _chaos_shell(shell_cmd)
+    if code == 0:
+        out
+    else:
+        "error: exit_code={code}, stderr={err}"
+
+fn chaos_with_timeout(cmd: text, args: [text], timeout_ms: i64) -> text:
+    """Run command with timeout.
+
+    Returns stdout on success, error/timeout message on failure.
+    """
+    var args_str = ""
+    for arg in args:
+        if args_str == "":
+            args_str = arg
+        else:
+            args_str = args_str + " " + arg
+    val timeout_secs = timeout_ms / 1000
+    val effective_secs = if timeout_secs < 1: 1 else: timeout_secs
+    val shell_cmd = "timeout {effective_secs} {cmd} {args_str}"
+    val (out, err, code) = _chaos_shell(shell_cmd)
+    if code == 124:
+        "error: timeout after {effective_secs}s"
+    else:
+        if code == 0:
+            out
+        else:
+            "error: exit_code={code}, stderr={err}"
+
+fn chaos_slow_write(path: text, content: text, delay_ms: i64):
+    """Simulate slow I/O by writing with an artificial delay."""
+    _chaos_sleep_ms(delay_ms)
+    _chaos_file_write(path, content)
+
+fn chaos_slow_read(path: text, delay_ms: i64) -> text:
+    """Simulate slow I/O by reading with an artificial delay."""
+    _chaos_sleep_ms(delay_ms)
+    _chaos_file_read(path)
+
+# ============================================================================
+# Reporting
+# ============================================================================
+
+fn chaos_report(result: ChaosResult) -> text:
+    """Generate a human-readable chaos test report."""
+    var lines: [text] = []
+    lines.push("=== Chaos Test Report ===")
+    lines.push("Name: {result.name}")
+    lines.push("Seed: {result.seed}")
+    lines.push("Trials: {result.total_trials}")
+    lines.push("Passed: {result.passed_trials}")
+    lines.push("Failed: {result.failed_trials}")
+    val rate = if result.total_trials > 0: (result.passed_trials * 100) / result.total_trials else: 0
+    lines.push("Pass rate: {rate}%")
+    lines.push("Elapsed: {result.elapsed_ms}ms")
+    if result.failed_trials > 0:
+        lines.push("")
+        lines.push("Failures:")
+        for failure in result.failures:
+            lines.push("  - {failure}")
+    lines.push("=========================")
+    var out = ""
+    var i = 0
+    while i < lines.len():
+        if i > 0:
+            out = out + "\n"
+        out = out + lines[i]
+        i = i + 1
+    out
+
+fn chaos_report_failures(result: ChaosResult) -> text:
+    """Generate a report of only the failures."""
+    if result.failed_trials == 0:
+        return "No failures in '{result.name}' ({result.total_trials} trials)"
+    var lines: [text] = []
+    lines.push("Failures for '{result.name}' ({result.failed_trials}/{result.total_trials}):")
+    for failure in result.failures:
+        val parts = failure.split("|")
+        var trial_num = "?"
+        var error_msg = failure
+        var sched_seed = ""
+        if parts.len() >= 1:
+            trial_num = parts[0]
+        if parts.len() >= 2:
+            error_msg = parts[1]
+        if parts.len() >= 3:
+            sched_seed = parts[2]
+        lines.push("  Trial {trial_num}: {error_msg} ({sched_seed})")
+    var out = ""
+    var i = 0
+    while i < lines.len():
+        if i > 0:
+            out = out + "\n"
+        out = out + lines[i]
+        i = i + 1
+    out
+
+fn chaos_save_report(result: ChaosResult, path: text):
+    """Save a chaos test report to a file."""
+    val report = chaos_report(result)
+    _chaos_file_write(path, report)
+
+# ============================================================================
+# Resilience Test Helpers
+# ============================================================================
+
+fn chaos_test_retry(name: text, action_fn, max_retries: i64, config: FaultConfig) -> ChaosResult:
+    """Test retry logic under fault injection.
+
+    action_fn takes (attempt: i64, rng_state) -> text
+    Returns empty string for success, error message for failure.
+
+    Runs multiple trials. Each trial attempts the action up to max_retries
+    times, injecting faults via the RNG. A trial passes if any attempt succeeds.
+    """
+    val trial_count = 50
+    val start_ms = _chaos_time_ms()
+    var passed = 0
+    var failed = 0
+    var failures: [text] = []
+    var trial = 0
+    while trial < trial_count:
+        val trial_seed = config.seed + trial
+        var rng = _rng_create(trial_seed)
+        var attempt = 0
+        var trial_passed = false
+        var last_error = ""
+        while attempt <= max_retries:
+            val result = action_fn(attempt, rng)
+            val (rng2, _discard) = _rng_next(rng)
+            rng = rng2
+            if result == "" or result == nil:
+                trial_passed = true
+                break
+            last_error = result
+            attempt = attempt + 1
+        if trial_passed:
+            passed = passed + 1
+        else:
+            failed = failed + 1
+            failures.push("{trial}|exhausted_retries:{last_error}|seed={trial_seed}")
+        trial = trial + 1
+    val end_ms = _chaos_time_ms()
+    ChaosResult(
+        name: name,
+        total_trials: trial_count,
+        passed_trials: passed,
+        failed_trials: failed,
+        failures: failures,
+        seed: config.seed,
+        elapsed_ms: end_ms - start_ms
+    )
+
+fn chaos_test_circuit_breaker(name: text, action_fn, threshold: i64, config: FaultConfig) -> ChaosResult:
+    """Test circuit breaker logic under fault injection.
+
+    action_fn takes (rng_state) -> text
+    Returns empty string for success, error message for failure.
+
+    Simulates a circuit breaker: after 'threshold' consecutive failures,
+    the circuit opens and subsequent calls fail fast. A trial passes if
+    the circuit breaker correctly trips after enough failures.
+    """
+    val trial_count = 50
+    val start_ms = _chaos_time_ms()
+    var passed = 0
+    var failed = 0
+    var failures: [text] = []
+    var trial = 0
+    while trial < trial_count:
+        val trial_seed = config.seed + trial
+        var rng = _rng_create(trial_seed)
+        var consecutive_failures = 0
+        var circuit_open = false
+        var total_calls = 0
+        var total_successes = 0
+        # Simulate a burst of calls
+        val call_count = threshold * 3
+        var call_idx = 0
+        while call_idx < call_count:
+            if circuit_open:
+                # Circuit is open, skip
+                call_idx = call_idx + 1
+                continue
+            val result = action_fn(rng)
+            val (rng2, _discard) = _rng_next(rng)
+            rng = rng2
+            total_calls = total_calls + 1
+            if result == "" or result == nil:
+                consecutive_failures = 0
+                total_successes = total_successes + 1
+            else:
+                consecutive_failures = consecutive_failures + 1
+                if consecutive_failures >= threshold:
+                    circuit_open = true
+            call_idx = call_idx + 1
+        # Trial passes if circuit breaker behavior is consistent:
+        # either no failures triggered the breaker, or it correctly opened
+        val breaker_correct = not circuit_open or consecutive_failures >= threshold
+        if breaker_correct:
+            passed = passed + 1
+        else:
+            failed = failed + 1
+            failures.push("{trial}|circuit_breaker_inconsistent|seed={trial_seed}")
+        trial = trial + 1
+    val end_ms = _chaos_time_ms()
+    ChaosResult(
+        name: name,
+        total_trials: trial_count,
+        passed_trials: passed,
+        failed_trials: failed,
+        failures: failures,
+        seed: config.seed,
+        elapsed_ms: end_ms - start_ms
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export FaultConfig, FaultSchedule, ChaosConfig, ChaosResult
+export fault_config_default, fault_config
+export should_fault, inject_latency, inject_error, inject_corruption, inject_timeout
+export schedule_create, schedule_get_fault, schedule_serialize, schedule_deserialize
+export schedule_save, schedule_load
+export chaos_config_default, chaos_config, chaos_run, chaos_run_default
+export chaos_with_memory_limit, chaos_with_timeout, chaos_slow_write, chaos_slow_read
+export chaos_report, chaos_report_failures, chaos_save_report
+export chaos_test_retry, chaos_test_circuit_breaker

@@ -1,0 +1,226 @@
+"""
+Circuit Breaker Tests
+Feature: Circuit Breaker Pattern
+Category: FailSafe, Circuit Breaker
+Status: In Progress
+
+Tests for circuit breaker state management and transitions.
+"""
+
+use std.failsafe.core.*
+use std.failsafe.circuit.*
+
+describe "CircuitState":
+    it "converts to string":
+        expect(CircuitState.Closed__to_string() == "closed")
+        expect(CircuitState.Open__to_string() == "open")
+        expect(CircuitState.HalfOpen__to_string() == "half_open")
+
+describe "CircuitBreakerConfig":
+    it "creates default config":
+        val config = CircuitBreakerConfig__default()
+        expect(config.failure_threshold == 5)
+        expect(config.success_threshold == 3)
+        expect(config.half_open_max_requests == 3)
+
+    it "creates strict config":
+        val config = CircuitBreakerConfig__strict()
+        expect(config.failure_threshold == 3)
+        expect(config.success_threshold == 5)
+        expect(config.half_open_max_requests == 1)
+
+    it "creates permissive config":
+        val config = CircuitBreakerConfig__permissive()
+        expect(config.failure_threshold == 10)
+        expect(config.success_threshold == 2)
+        expect(config.half_open_max_requests == 5)
+
+describe "CircuitBreaker":
+    it "creates new breaker":
+        val breaker = CircuitBreaker__new("test", CircuitBreakerConfig__default())
+        expect(breaker.name == "test")
+        expect(breaker.state == CircuitState.Closed)
+        expect(breaker.failure_count == 0)
+        expect(breaker.success_count == 0)
+
+    it "creates default breaker":
+        val breaker = CircuitBreaker__default("test")
+        expect(breaker.name == "test")
+        expect(breaker.config.failure_threshold == 5)
+
+    it "allows requests when closed":
+        var breaker = CircuitBreaker__default("test")
+        expect(breaker.allow_request())
+
+    it "opens after failures":
+        var breaker = CircuitBreaker__new("test", CircuitBreakerConfig(3, 2, 1))
+
+        # Record failures up to threshold
+        breaker.record_failure()
+        expect(breaker.state == CircuitState.Closed)
+
+        breaker.record_failure()
+        expect(breaker.state == CircuitState.Closed)
+
+        breaker.record_failure()
+        expect(breaker.state == CircuitState.Open)
+
+    it "resets failure count on success":
+        var breaker = CircuitBreaker__new("test", CircuitBreakerConfig(3, 1, 1))
+
+        breaker.record_failure()
+        breaker.record_failure()
+        expect(breaker.failure_count == 2)
+
+        breaker.record_success()
+        expect(breaker.failure_count == 0)
+
+    it "closes after successes in half-open":
+        var breaker = CircuitBreaker__new("test", CircuitBreakerConfig(1, 2, 5))
+
+        breaker.record_failure()
+        expect(breaker.state == CircuitState.Open)
+
+        # Should transition to half-open on next request
+        breaker.allow_request()
+        expect(breaker.state == CircuitState.HalfOpen)
+
+        breaker.record_success()
+        breaker.record_success()
+        expect(breaker.state == CircuitState.Closed)
+
+    it "reopens on failure in half-open":
+        var breaker = CircuitBreaker__new("test", CircuitBreakerConfig(1, 3, 5))
+
+        breaker.record_failure()
+        breaker.allow_request()  # Transition to half-open
+        expect(breaker.state == CircuitState.HalfOpen)
+
+        breaker.record_failure()
+        expect(breaker.state == CircuitState.Open)
+
+    it "tracks statistics":
+        var breaker = CircuitBreaker__default("test")
+
+        breaker.record_success()
+        breaker.record_success()
+        breaker.record_failure()
+
+        expect(breaker.stats.success_count == 2)
+        expect(breaker.stats.failure_count == 1)
+        expect(breaker.stats.total_requests() == 3)
+
+    it "calculates failure rate":
+        var breaker = CircuitBreaker__default("test")
+
+        breaker.record_success()
+        breaker.record_failure()
+        breaker.record_failure()
+        breaker.record_failure()
+
+        expect(breaker.stats.failure_rate() == 0.75)
+
+    it "force resets":
+        var breaker = CircuitBreaker__new("test", CircuitBreakerConfig(1, 1, 1))
+
+        breaker.record_failure()
+        expect(breaker.state == CircuitState.Open)
+
+        breaker.reset()
+        expect(breaker.state == CircuitState.Closed)
+        expect(breaker.failure_count == 0)
+
+    it "force opens":
+        var breaker = CircuitBreaker__default("test")
+        expect(breaker.state == CircuitState.Closed)
+
+        breaker.force_open()
+        expect(breaker.state == CircuitState.Open)
+
+    it "reports open state":
+        var breaker = CircuitBreaker__default("test")
+        expect(not breaker.is_open())
+
+        breaker.force_open()
+        expect(breaker.is_open())
+
+describe "CircuitBreakerStats":
+    it "creates new stats":
+        val stats = CircuitBreakerStats__new()
+        expect(stats.success_count == 0)
+        expect(stats.failure_count == 0)
+        expect(stats.rejected_count == 0)
+        expect(stats.open_count == 0)
+
+    it "calculates success rate":
+        var stats = CircuitBreakerStats__new()
+
+        stats.success_count = 3
+        stats.failure_count = 1
+
+        expect(stats.success_rate() == 0.75)
+
+describe "execute_with_circuit_breaker":
+    it "executes when closed":
+        var breaker = CircuitBreaker__default("test")
+
+        val result = execute_with_circuit_breaker(breaker, \: FailSafeResult.Ok(42))
+
+        match result:
+            case FailSafeResult.Ok(v):
+                expect(v == 42)
+            case FailSafeResult.Err(_):
+                expect(false)
+
+    it "records success":
+        var breaker = CircuitBreaker__default("test")
+
+        execute_with_circuit_breaker(breaker, \: FailSafeResult.Ok(42))
+
+        expect(breaker.stats.success_count == 1)
+
+    it "records failure":
+        var breaker = CircuitBreaker__default("test")
+
+        execute_with_circuit_breaker(
+            breaker,
+            \: FailSafeResult.Err(FailSafeError__new(ErrorCategory.Network, "Failed"))
+        )
+
+        expect(breaker.stats.failure_count == 1)
+
+describe "execute_with_fallback":
+    it "returns primary on success":
+        var breaker = CircuitBreaker__default("test")
+
+        val result = execute_with_fallback(
+            breaker,
+            \: FailSafeResult.Ok(42),
+            \: FailSafeResult.Ok(99)
+        )
+
+        match result:
+            case FailSafeResult.Ok(v):
+                expect(v == 42)
+            case FailSafeResult.Err(_):
+                expect(false)
+
+    it "returns fallback on failure":
+        var breaker = CircuitBreaker__default("test")
+
+        val result = execute_with_fallback(
+            breaker,
+            \: FailSafeResult.Err(FailSafeError__new(ErrorCategory.Network, "Failed")),
+            \: FailSafeResult.Ok(99)
+        )
+
+        match result:
+            case FailSafeResult.Ok(v):
+                expect(v == 99)
+            case FailSafeResult.Err(_):
+                expect(false)
+
+describe "CircuitBreakerRegistry":
+    it "creates registry":
+        val registry = CircuitBreakerRegistry__new()
+        expect(registry.breakers.len() == 0)

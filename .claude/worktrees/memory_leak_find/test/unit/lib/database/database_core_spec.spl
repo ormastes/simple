@@ -1,0 +1,407 @@
+# Database Core Components Tests
+#
+# Tests low-level database components: StringInterner, SdnRow, SdnTable, SdnDatabase
+
+use std.spec.{check, check_msg}
+use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
+use app.io.file_ops.{file_exists, file_delete, file_write, file_read, rt_file_rename}
+
+describe "StringInterner":
+    it "interns same string to same ID":
+        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        val id1 = interner.intern("test")
+        val id2 = interner.intern("test")
+
+        expect(id1).to_equal(id2)
+
+    it "interns different strings to different IDs":
+        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        val id1 = interner.intern("first")
+        val id2 = interner.intern("second")
+
+        expect(id1).to_not_equal(id2)
+
+    it "lookups strings by ID":
+        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        val id = interner.intern("lookup_test")
+        val result = interner.lookup(id)
+
+        expect(result.?).to_equal(true)
+        expect(result?).to_equal("lookup_test")
+
+    it "lookups IDs by string":
+        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        val id = interner.intern("reverse_lookup")
+        val result = interner.get_id("reverse_lookup")
+
+        expect(result.?).to_equal(true)
+        expect(result?).to_equal(id)
+
+    it "returns None for unknown ID":
+        val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        val result = interner.lookup(999)
+        expect(result.?).to_equal(false)
+
+    it "returns None for unknown string":
+        val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        val result = interner.get_id("nonexistent")
+        expect(result.?).to_equal(false)
+
+    it "handles empty strings":
+        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        val id = interner.intern("")
+        val result = interner.lookup(id)
+
+        expect(result.?).to_equal(true)
+        expect(result?).to_equal("")
+
+    it "handles unicode strings":
+        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        val id = interner.intern("Hello 世界 🌍")
+        val result = interner.lookup(id)
+
+        expect(result.?).to_equal(true)
+        val value = result ?? ""
+        expect(value.contains("世界")).to_equal(true)
+
+    it "increments ID counter":
+        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        expect(interner.next_id).to_equal(0)
+
+        interner.intern("first")
+        expect(interner.next_id).to_equal(1)
+
+        interner.intern("second")
+        expect(interner.next_id).to_equal(2)
+
+        # Interning same string doesn't increment
+        interner.intern("first")
+        expect(interner.next_id).to_equal(2)
+
+describe "SdnRow":
+    it "creates empty row":
+        val row = SdnRow(fields: {})
+        expect(row.fields.len()).to_equal(0)
+
+    it "sets and gets field values":
+        var row = SdnRow(fields: {})
+
+        row.set("name", "Alice")
+        row.set("age", "30")
+
+        expect(row.get("name")?).to_equal("Alice")
+        expect(row.get("age")?).to_equal("30")
+
+    it "returns None for missing field":
+        val row = SdnRow(fields: {})
+        val result = row.get("nonexistent")
+
+        expect(result.?).to_equal(false)
+
+    it "gets field as i64":
+        var row = SdnRow(fields: {})
+        row.set("count", "42")
+
+        val result = row.get_i64("count")
+        expect(result.?).to_equal(true)
+        expect(result?).to_equal(42)
+
+    it "gets field as bool":
+        var row = SdnRow(fields: {})
+        row.set("flag", "true")
+        row.set("other", "false")
+
+        expect(row.get_bool("flag")?).to_equal(true)
+        expect(row.get_bool("other")?).to_equal(false)
+
+    it "handles large field values":
+        var row = SdnRow(fields: {})
+
+        val large_text = "x".repeat(10000)
+        row.set("large", large_text)
+
+        val result = row.get("large")?
+        expect(result.len()).to_equal(10000)
+
+    it "overwrites existing field":
+        var row = SdnRow(fields: {})
+
+        row.set("key", "old_value")
+        row.set("key", "new_value")
+
+        expect(row.get("key")?).to_equal("new_value")
+
+describe "SdnTable":
+    it "creates table with schema":
+        val table = SdnTable(name: "users", columns: ["id", "name", "email"], rows: [], index: {})
+
+        expect(table.name).to_equal("users")
+        expect(table.columns.len()).to_equal(3)
+        expect(table.rows.len()).to_equal(0)
+
+    it "adds row to table":
+        var table = SdnTable(name: "items", columns: ["id", "value"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "1")
+        row.set("value", "test")
+
+        table.add_row(row)
+        expect(table.rows.len()).to_equal(1)
+
+    it "adds multiple rows":
+        var table = SdnTable(name: "data", columns: ["key", "value"], rows: [], index: {})
+
+        for i in 0..5:
+            var row = SdnRow(fields: {})
+            row.set("key", "key_{i}")
+            row.set("value", "value_{i}")
+            table.add_row(row)
+
+        expect(table.rows.len()).to_equal(5)
+
+    it "gets row by ID":
+        var table = SdnTable(name: "records", columns: ["id", "data"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "record_123")
+        row.set("data", "test_data")
+        table.add_row(row)
+
+        val result = table.get_row("record_123")
+        expect(result.?).to_equal(true)
+        val r1 = result ?? SdnRow(fields: {})
+        val data = r1.get("data") ?? ""
+        expect(data).to_equal("test_data")
+
+    it "returns None for missing row ID":
+        val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
+        val result = table.get_row("nonexistent")
+
+        expect(result.?).to_equal(false)
+
+    it "marks row as deleted":
+        var table = SdnTable(name: "soft_delete", columns: ["id", "value", "valid"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "delete_me")
+        row.set("value", "data")
+        row.set("valid", "true")
+        table.add_row(row)
+
+        # Mark as deleted
+        table.mark_deleted("delete_me")
+
+        # Row still exists but marked invalid
+        val result = table.get_row("delete_me")
+        expect(result.?).to_equal(true)
+        val r2 = result ?? SdnRow(fields: {})
+        val valid = r2.get("valid") ?? ""
+        expect(valid).to_equal("false")
+
+    it "filters valid rows only":
+        var table = SdnTable(name: "mixed", columns: ["id", "valid"], rows: [], index: {})
+
+        # Add some valid and invalid rows
+        for i in 0..5:
+            var row = SdnRow(fields: {})
+            row.set("id", "row_{i}")
+            val valid_str = if i % 2 == 0: "true" else: "false"
+            row.set("valid", valid_str)
+            table.add_row(row)
+
+        val valid_rows = table.valid_rows()
+        expect(valid_rows.len()).to_equal(3)  # Rows 0, 2, 4
+
+    it "handles empty table":
+        val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
+
+        expect(table.rows.len()).to_equal(0)
+        expect(table.valid_rows().len()).to_equal(0)
+
+        val result = table.get_row("any_id")
+        expect(result.?).to_equal(false)
+
+describe "SdnDatabase":
+    it "creates new database":
+        val db = SdnDatabase(path: "/tmp/test_new_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+
+        expect(db.tables.len()).to_equal(0)
+
+    it "adds table to database":
+        var db = SdnDatabase(path: "/tmp/test_add_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+
+        val table = SdnTable(name: "test_table", columns: ["id", "value"], rows: [], index: {})
+        db.set_table("test_table", table)
+
+        expect(db.tables.len()).to_equal(1)
+        expect(db.tables.contains_key("test_table")).to_equal(true)
+
+    it "gets table from database":
+        var db = SdnDatabase(path: "/tmp/test_get_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+
+        val table = SdnTable(name: "my_table", columns: ["col1", "col2"], rows: [], index: {})
+        db.set_table("my_table", table)
+
+        val result = db.get_table("my_table")
+        expect(result.?).to_equal(true)
+        val tbl = result ?? SdnTable(name: "", columns: [], rows: [], index: {})
+        expect(tbl.name).to_equal("my_table")
+
+    it "gets mutable table":
+        var db = SdnDatabase(path: "/tmp/test_mut_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+
+        val table = SdnTable(name: "mut_table", columns: ["id"], rows: [], index: {})
+        db.set_table("mut_table", table)
+
+        var table_opt = db.get_table_mut("mut_table")
+        expect(table_opt.?).to_equal(true)
+
+        var mut_table = table_opt?
+        var row = SdnRow(fields: {})
+        row.set("id", "test")
+        mut_table.add_row(row)
+
+        # Must put back for changes to persist
+        db.set_table("mut_table", mut_table)
+
+        # Verify change persisted
+        val final_table = db.get_table("mut_table")?
+        expect(final_table.rows.len()).to_equal(1)
+
+    it "returns None for missing table":
+        val db = SdnDatabase(path: "/tmp/test_missing.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+
+        val result = db.get_table("nonexistent")
+        expect(result.?).to_equal(false)
+
+    it "replaces existing table":
+        var db = SdnDatabase(path: "/tmp/test_replace.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+
+        # Add initial table
+        val table1 = SdnTable(name: "replaceable", columns: ["old_col"], rows: [], index: {})
+        db.set_table("replaceable", table1)
+
+        # Replace with new table
+        val table2 = SdnTable(name: "replaceable", columns: ["new_col"], rows: [], index: {})
+        db.set_table("replaceable", table2)
+
+        # Verify replacement
+        val result = db.get_table("replaceable")?
+        expect(result.columns.len()).to_equal(1)
+        expect(result.columns[0]).to_equal("new_col")
+
+    it "saves and loads database":
+        val db_path = "/tmp/test_save_load.sdn"
+
+        # Clean up if exists
+        if file_exists(db_path):
+            file_delete(db_path)
+
+        # Create and populate database
+        var db1 = SdnDatabase(path: db_path, tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        var table = SdnTable(name: "test", columns: ["id", "value"], rows: [], index: {})
+
+        var row = SdnRow(fields: {})
+        row.set("id", "save_001")
+        row.set("value", "test_value")
+        table.add_row(row)
+
+        db1.set_table("test", table)
+        db1.save()
+
+        # Load database
+        val db2_opt = SdnDatabase.load(db_path)
+        expect(db2_opt.?).to_equal(true)
+
+        val db2 = db2_opt?
+        val loaded_table = db2.get_table("test")?
+        expect(loaded_table.rows.len()).to_equal(1)
+
+        val loaded_row = loaded_table.get_row("save_001")?
+        expect(loaded_row.get("value")?).to_equal("test_value")
+
+        # Cleanup
+        file_delete(db_path)
+
+    it "handles multiple tables":
+        var db = SdnDatabase(path: "/tmp/test_multi_tables.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+
+        # Add multiple tables
+        for i in 0..5:
+            val table = SdnTable(name: "table_{i}", columns: ["col_{i}"], rows: [], index: {})
+            db.set_table("table_{i}", table)
+
+        expect(db.tables.len()).to_equal(5)
+
+        # Verify all tables accessible
+        for i in 0..5:
+            val table_opt = db.get_table("table_{i}")
+            expect(table_opt.?).to_equal(true)
+
+    it "preserves table order":
+        var db = SdnDatabase(path: "/tmp/test_table_order.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+
+        val names = ["first", "second", "third"]
+        for name in names:
+            val table = SdnTable(name: name, columns: ["id"], rows: [], index: {})
+            db.set_table(name, table)
+
+        # Tables should be accessible in any order
+        expect(db.get_table("first").?).to_equal(true)
+        expect(db.get_table("second").?).to_equal(true)
+        expect(db.get_table("third").?).to_equal(true)
+
+describe "Database Integration":
+    it "combines interner with database":
+        var db = SdnDatabase(path: "/tmp/test_interner_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+
+        # Intern column names
+        val col_id = interner.intern("id")
+        val col_name = interner.intern("name")
+
+        # Create table with interned names
+        var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
+
+        # Add row
+        var row = SdnRow(fields: {})
+        row.set(interner.lookup(col_id)?, "user_1")
+        row.set(interner.lookup(col_name)?, "Alice")
+        table.add_row(row)
+
+        db.set_table("users", table)
+
+        # Verify
+        val saved_table = db.get_table("users")?
+        expect(saved_table.rows.len()).to_equal(1)
+
+    it "handles large number of rows efficiently":
+        var db = SdnDatabase(path: "/tmp/test_large_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        var table = SdnTable(name: "large", columns: ["id", "data"], rows: [], index: {})
+
+        # Add 1000 rows
+        for i in 0..1000:
+            var row = SdnRow(fields: {})
+            row.set("id", "row_{i}")
+            row.set("data", "data_{i}")
+            table.add_row(row)
+
+        db.set_table("large", table)
+
+        # Verify
+        val result = db.get_table("large")?
+        expect(result.rows.len()).to_equal(1000)
+
+        # Spot check
+        val row_500 = result.get_row("row_500")?
+        expect(row_500.get("data")?).to_equal("data_500")

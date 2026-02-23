@@ -1,0 +1,173 @@
+# LSP Parser Adapter
+#
+# Abstracts over tree-sitter (FFI, native-only) vs core Simple parser.
+# In WASM builds, tree-sitter FFI is unavailable, so we fall back to
+# the core lexer/parser from src/compiler/10.frontend/core/.
+#
+# Usage:
+#   val adapter = ParserAdapter__create()
+#   val result = adapter.parse(source_text)
+#   val diagnostics = result.diagnostics
+
+
+# ============================================================================
+# Parser Backend Selection
+# ============================================================================
+
+enum ParserBackend:
+    """Which parser implementation to use."""
+    TreeSitter    # Native tree-sitter FFI (default for desktop)
+    CoreParser    # Built-in Simple parser (fallback for WASM)
+
+# ============================================================================
+# Parse Result
+# ============================================================================
+
+struct ParseDiagnostic:
+    """A diagnostic from parsing."""
+    line: i64
+    column: i64
+    end_line: i64
+    end_column: i64
+    message: text
+    severity: i64    # 1=Error, 2=Warning, 3=Info, 4=Hint
+
+struct ParseResult:
+    """Result of parsing a document."""
+    success: bool
+    diagnostics: [ParseDiagnostic]
+    # Token data for semantic highlighting (encoded as delta array)
+    semantic_tokens: [i64]
+
+# ============================================================================
+# Parser Adapter
+# ============================================================================
+
+extern fn rt_env_get(name: text) -> text
+
+class ParserAdapter:
+    """Adapts between tree-sitter and core parser for LSP use.
+
+    Automatically selects the best available parser:
+    - Desktop: tree-sitter (full incremental parsing, fast)
+    - WASM: core parser (no FFI required, slower but works)
+    """
+    backend: ParserBackend
+
+    static fn create() -> ParserAdapter:
+        """Create adapter, auto-detecting available backend."""
+        val runtime_mode = rt_env_get("SIMPLE_RUNTIME_MODE") ?? ""
+        var backend = ParserBackend.TreeSitter
+
+        # In WASM mode, tree-sitter FFI is unavailable
+        if runtime_mode == "wasm" or runtime_mode == "wasi":
+            backend = ParserBackend.CoreParser
+
+        # Also check if explicitly requested
+        val parser_env = rt_env_get("SIMPLE_LSP_PARSER") ?? ""
+        if parser_env == "core":
+            backend = ParserBackend.CoreParser
+        elif parser_env == "treesitter":
+            backend = ParserBackend.TreeSitter
+
+        ParserAdapter(backend: backend)
+
+    static fn create_core() -> ParserAdapter:
+        """Create adapter using core parser (for WASM builds)."""
+        ParserAdapter(backend: ParserBackend.CoreParser)
+
+    static fn create_treesitter() -> ParserAdapter:
+        """Create adapter using tree-sitter (for native builds)."""
+        ParserAdapter(backend: ParserBackend.TreeSitter)
+
+    fn parse(source: text) -> ParseResult:
+        """Parse source text and return diagnostics."""
+        match self.backend:
+            case TreeSitter:
+                # Delegate to tree-sitter (handled by existing LspServer code)
+                # This path is not used directly; the adapter is for the core path
+                ParseResult(success: true, diagnostics: [], semantic_tokens: [])
+            case CoreParser:
+                self.parse_with_core(source)
+
+    fn parse_with_core(source: text) -> ParseResult:
+        """Parse using the core Simple lexer/parser.
+
+        Performs lexing and parsing, collecting any syntax errors
+        as diagnostics. Does not require FFI.
+        """
+        var diagnostics: [ParseDiagnostic] = []
+
+        # Simple line-based error detection
+        # The full core parser (src/compiler/10.frontend/core/parser.spl) would be used in
+        # a compiled build; here we do basic syntax checking
+        var line_num = 0
+        val lines = source.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+
+            # Check for common syntax errors
+            if trimmed.len() > 0 and not trimmed.starts_with("#"):
+                # Unmatched parentheses (simple check)
+                var paren_depth = 0
+                var bracket_depth = 0
+                for i in 0..trimmed.len():
+                    val ch = trimmed[i:i + 1]
+                    if ch == "(":
+                        paren_depth = paren_depth + 1
+                    elif ch == ")":
+                        paren_depth = paren_depth - 1
+                    elif ch == "[":
+                        bracket_depth = bracket_depth + 1
+                    elif ch == "]":
+                        bracket_depth = bracket_depth - 1
+
+                if paren_depth < 0:
+                    val diag = ParseDiagnostic(
+                        line: line_num, column: 0,
+                        end_line: line_num, end_column: trimmed.len(),
+                        message: "Unmatched closing parenthesis",
+                        severity: 1
+                    )
+                    diagnostics = diagnostics.push(diag)
+
+                if bracket_depth < 0:
+                    val diag = ParseDiagnostic(
+                        line: line_num, column: 0,
+                        end_line: line_num, end_column: trimmed.len(),
+                        message: "Unmatched closing bracket",
+                        severity: 1
+                    )
+                    diagnostics = diagnostics.push(diag)
+
+            line_num = line_num + 1
+
+        ParseResult(
+            success: diagnostics.len() == 0,
+            diagnostics: diagnostics,
+            semantic_tokens: []
+        )
+
+    fn is_wasm_mode() -> bool:
+        """Check if running in WASM mode (core parser)."""
+        self.backend == ParserBackend.CoreParser
+
+# ============================================================================
+# Desugared Static Methods
+# ============================================================================
+
+fn ParserAdapter__create() -> ParserAdapter:
+    ParserAdapter.create()
+
+fn ParserAdapter__create_core() -> ParserAdapter:
+    ParserAdapter.create_core()
+
+fn ParserAdapter__create_treesitter() -> ParserAdapter:
+    ParserAdapter.create_treesitter()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ParserBackend, ParseDiagnostic, ParseResult
+export ParserAdapter, ParserAdapter__create, ParserAdapter__create_core, ParserAdapter__create_treesitter

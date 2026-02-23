@@ -1,0 +1,94 @@
+name: Bootstrap Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/bootstrap/**'
+      - '.github/workflows/bootstrap-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/bootstrap/**'
+      - '.github/workflows/bootstrap-build.yml'
+  workflow_dispatch:
+
+jobs:
+  bootstrap-linux-full2:
+    name: Linux bootstrap full2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+
+      - name: Run bootstrap-from-scratch.sh
+        run: |
+          chmod +x scripts/bootstrap/bootstrap-from-scratch.sh
+          scripts/bootstrap/bootstrap-from-scratch.sh \
+            --step=full2 \
+            --deploy \
+            --keep-artifacts \
+            --jobs=2
+
+      - name: Verify deployed runtime
+        run: |
+          test -f bin/release/simple
+          chmod +x bin/release/simple
+          bin/release/simple --version
+
+      - name: Upload Linux bootstrap artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-linux-full2
+          path: |
+            bin/release/simple
+            build/bootstrap/
+          retention-days: 7
+          if-no-files-found: error
+
+  bootstrap-windows-stages:
+    name: Windows bootstrap ${{ matrix.step }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        step: [seed, core1, core2, full1, full2]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Run bootstrap-from-scratch.bat
+        shell: cmd
+        run: |
+          scripts\bootstrap\bootstrap-from-scratch.bat --cc=clang-cl --step=${{ matrix.step }} --deploy --keep-artifacts --jobs=2
+
+      - name: Verify deployment output exists
+        shell: cmd
+        run: |
+          if not exist bin\release\simple (
+            echo ERROR: Missing deployment output bin\release\simple
+            exit /b 1
+          )
+
+      - name: Upload Windows bootstrap artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-windows-${{ matrix.step }}
+          path: |
+            bin/release/simple
+            bin/release/simple.exe
+            build/bootstrap/
+          retention-days: 7
+          if-no-files-found: ignore

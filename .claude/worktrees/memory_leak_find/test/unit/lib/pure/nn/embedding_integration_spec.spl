@@ -1,0 +1,159 @@
+# Integration Tests for Embedding Layer
+# Tests real-world usage patterns with other layers
+
+use std.pure.tensor (PureTensor, tensor_from_data, tensor_zeros)
+use std.pure.nn (Embedding, Linear, Sequential, ReLU, count_parameters)
+
+describe "Embedding Integration":
+    describe "With Linear Layer":
+        it "chains embedding with linear layer":
+            # Create a simple word embedding + classifier
+            val emb = Embedding.create(num_embeddings: 100, embedding_dim: 10)
+            val linear = Linear.create(in_features: 10, out_features: 5, bias: true)
+
+            # Lookup word index 5
+            val word_idx = tensor_from_data([5.0], [1])
+            val embedded = emb.forward(word_idx)
+
+            # Pass through linear layer
+            val output = linear.forward(embedded)
+
+            assert output.shape == [1, 5]
+
+        it "processes batch of words through embedding + linear":
+            val emb = Embedding.create(num_embeddings: 50, embedding_dim: 8)
+            val linear = Linear.create(in_features: 8, out_features: 3, bias: true)
+
+            # Batch of 4 word indices
+            val indices = tensor_from_data([0.0, 10.0, 20.0, 5.0], [4])
+            val embedded = emb.forward(indices)
+
+            # Shape should be [4, 8]
+            assert embedded.shape == [4, 8]
+
+            # Process each embedding through linear (simulate batch)
+            var i = 0
+            while i < 4:
+                var word_emb_data: [f64] = []
+                var j = 0
+                while j < 8:
+                    word_emb_data.push(embedded.data[i * 8 + j])
+                    j = j + 1
+
+                val word_emb = tensor_from_data(word_emb_data, [1, 8])
+                val word_out = linear.forward(word_emb)
+
+                assert word_out.shape == [1, 3]
+                i = i + 1
+
+    describe "With Sequential Container":
+        it "creates sequential model with embedding":
+            val emb = Embedding.create(num_embeddings: 1000, embedding_dim: 128)
+            val linear1 = Linear.create(in_features: 128, out_features: 64, bias: true)
+            val relu = ReLU.create()
+            val linear2 = Linear.create(in_features: 64, out_features: 10, bias: true)
+
+            # Note: Sequential expects layers with compatible forward() signatures
+            # This is a conceptual test showing layer compatibility
+
+            assert emb.embedding_dim == 128
+            assert linear1.in_features == 128
+            assert linear1.out_features == 64
+
+    describe "Parameter Management":
+        it "counts parameters in embedding layer":
+            val emb = Embedding.create(num_embeddings: 100, embedding_dim: 50)
+            val param_count = count_parameters(emb)
+
+            # Should be 100 * 50 = 5000 parameters
+            assert param_count == 5000
+
+        it "counts parameters in embedding + linear model":
+            val emb = Embedding.create(num_embeddings: 100, embedding_dim: 10)
+            val linear = Linear.create(in_features: 10, out_features: 5, bias: true)
+
+            val emb_params = count_parameters(emb)
+            val linear_params = count_parameters(linear)
+
+            # Embedding: 100 * 10 = 1000
+            assert emb_params == 1000
+
+            # Linear: (10 * 5) + 5 = 55
+            assert linear_params == 55
+
+    describe "Sequence Processing":
+        it "processes sequences of word indices":
+            val emb = Embedding.create(num_embeddings: 1000, embedding_dim: 64)
+
+            # Sequence: "hello world" as indices [42, 87]
+            # Shape: [1, 2] (batch_size=1, seq_len=2)
+            val sequence = tensor_from_data([42.0, 87.0], [1, 2])
+            val embedded = emb.forward(sequence)
+
+            # Output: [1, 2, 64] (batch_size=1, seq_len=2, embedding_dim=64)
+            assert embedded.shape == [1, 2, 64]
+
+        it "processes batch of sequences":
+            val emb = Embedding.create(num_embeddings: 500, embedding_dim: 32)
+
+            # Batch of 3 sequences, each length 4
+            # [[1,2,3,4], [5,6,7,8], [9,10,11,12]]
+            val sequences = tensor_from_data(
+                [1.0, 2.0, 3.0, 4.0,
+                 5.0, 6.0, 7.0, 8.0,
+                 9.0, 10.0, 11.0, 12.0],
+                [3, 4]
+            )
+            val embedded = emb.forward(sequences)
+
+            # Output: [3, 4, 32]
+            assert embedded.shape == [3, 4, 32]
+
+    describe "Training Mode":
+        it "respects training mode in embedding layer":
+            val emb = Embedding.create(num_embeddings: 100, embedding_dim: 10)
+
+            assert emb.training == true
+
+            emb.eval()
+            assert emb.training == false
+
+            # Forward pass should still work in eval mode
+            val indices = tensor_from_data([5.0, 10.0], [2])
+            val output = emb.forward(indices)
+
+            assert output.shape == [2, 10]
+
+    describe "Edge Cases in Real Usage":
+        it "handles padding indices gracefully":
+            val emb = Embedding.create(num_embeddings: 100, embedding_dim: 10)
+
+            # Common pattern: use index 0 as padding
+            # Sequence with padding: [5, 10, 0, 0]
+            val sequence = tensor_from_data([5.0, 10.0, 0.0, 0.0], [1, 4])
+            val embedded = emb.forward(sequence)
+
+            assert embedded.shape == [1, 4, 10]
+
+            # Padding positions (indices 2 and 3) should have embedding from index 0
+            # All should be valid (no special padding handling)
+
+        it "handles unknown tokens at vocabulary boundary":
+            val emb = Embedding.create(num_embeddings: 100, embedding_dim: 10)
+
+            # Token at boundary (index 99, last valid)
+            val valid_boundary = tensor_from_data([99.0], [1])
+            val output1 = emb.forward(valid_boundary)
+            assert output1.shape == [1, 10]
+
+            # Token beyond vocabulary (index 100, out of bounds)
+            val invalid = tensor_from_data([100.0], [1])
+            val output2 = emb.forward(invalid)
+            assert output2.shape == [1, 10]
+
+            # Out of bounds should return zeros
+            var all_zeros = true
+            for val in output2.data:
+                if val != 0.0:
+                    all_zeros = false
+            assert all_zeros

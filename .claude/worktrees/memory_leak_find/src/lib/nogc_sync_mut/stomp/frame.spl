@@ -1,0 +1,466 @@
+# STOMP Frame Module
+
+# ============================================================================
+# Frame Parsing
+# ============================================================================
+
+# Parse complete STOMP frame from text
+# Returns: (command, headers, body) tuple or nil on error
+# headers is list of (name, value) tuples
+fn parse_stomp_frame(text: text):
+    val lines = text.split("\n")
+
+    if lines.len() < 1:
+        return nil
+
+    # First line is command
+    val command = lines[0].trim()
+
+    # Find empty line separating headers from body
+    var header_end = 1
+    var i = 1
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed == "":
+            header_end = i
+            break
+        i = i + 1
+
+    # Parse headers
+    var headers = []
+    var j = 1
+    while j < header_end:
+        val header_line = lines[j]
+        val header_tuple = parse_stomp_header_line(header_line)
+        if header_tuple != nil:
+            headers.push(header_tuple)
+        j = j + 1
+
+    # Parse body (everything after empty line until null byte)
+    var body = ""
+    var k = header_end + 1
+    while k < lines.len():
+        val line = lines[k]
+        # Check for null byte terminator
+        if line.contains("\0"):
+            val before_null = line.split("\0")[0]
+            body = body + before_null
+            break
+        body = body + line
+        if k < lines.len() - 1:
+            body = body + "\n"
+        k = k + 1
+
+    return (command, headers, body)
+
+# Parse single header line
+# Example: "destination:/queue/test" -> ("destination", "/queue/test")
+fn parse_stomp_header_line(line: text):
+    val sep_idx = line.index_of(":")
+    if sep_idx < 0:
+        return nil
+
+    val name = line.substring(0, sep_idx)
+    var value = ""
+    val value_start = sep_idx + 1
+    if value_start < line.len():
+        value = line.substring(value_start, line.len())
+
+    # Decode header value
+    val decoded_name = decode_stomp_header_value(name)
+    val decoded_value = decode_stomp_header_value(value)
+
+    return (decoded_name, decoded_value)
+
+# ============================================================================
+# Frame Building
+# ============================================================================
+
+# Build complete STOMP frame from components
+# headers: list of (name, value) tuples
+fn build_stomp_frame(command: text, headers: list, body: text) -> text:
+    var result = command
+    result = result + "\n"
+
+    # Add headers
+    var i = 0
+    while i < headers.len():
+        val header = headers[i]
+        val name = header[0]
+        val value = header[1]
+        val encoded_name = encode_stomp_header_value(name)
+        val encoded_value = encode_stomp_header_value(value)
+        result = result + encoded_name
+        result = result + ":"
+        result = result + encoded_value
+        result = result + "\n"
+        i = i + 1
+
+    # Empty line before body
+    result = result + "\n"
+
+    # Add body
+    result = result + body
+
+    # Null byte terminator
+    result = result + "\0"
+
+    return result
+
+# Create CONNECT frame
+fn create_connect_frame(host: text, login: text, passcode: text, heartbeat: text) -> text:
+    var headers = []
+    headers.push((stomp_header_accept_version(), "1.2"))
+    headers.push((stomp_header_host(), host))
+
+    if login != "":
+        headers.push((stomp_header_login(), login))
+
+    if passcode != "":
+        headers.push((stomp_header_passcode(), passcode))
+
+    if heartbeat != "":
+        headers.push((stomp_header_heart_beat(), heartbeat))
+
+    return build_stomp_frame(stomp_cmd_connect(), headers, "")
+
+# Create STOMP frame (alternative to CONNECT)
+fn create_stomp_frame(host: text, login: text, passcode: text) -> text:
+    var headers = []
+    headers.push((stomp_header_accept_version(), "1.2"))
+    headers.push((stomp_header_host(), host))
+
+    if login != "":
+        headers.push((stomp_header_login(), login))
+
+    if passcode != "":
+        headers.push((stomp_header_passcode(), passcode))
+
+    return build_stomp_frame(stomp_cmd_stomp(), headers, "")
+
+# Create SEND frame
+fn create_send_frame(destination: text, body: text) -> text:
+    var headers = []
+    headers.push((stomp_header_destination(), destination))
+    return build_stomp_frame(stomp_cmd_send(), headers, body)
+
+# Create SEND frame with transaction
+fn create_send_frame_with_tx(destination: text, body: text, transaction: text) -> text:
+    var headers = []
+    headers.push((stomp_header_destination(), destination))
+    headers.push((stomp_header_transaction(), transaction))
+    return build_stomp_frame(stomp_cmd_send(), headers, body)
+
+# Create SEND frame with content type
+fn create_send_frame_with_content_type(destination: text, body: text, content_type: text) -> text:
+    var headers = []
+    headers.push((stomp_header_destination(), destination))
+    headers.push((stomp_header_content_type(), content_type))
+
+    val body_len = body.len().to_text()
+    headers.push((stomp_header_content_length(), body_len))
+
+    return build_stomp_frame(stomp_cmd_send(), headers, body)
+
+# Create SUBSCRIBE frame
+fn create_subscribe_frame(destination: text, id: text, ack: text) -> text:
+    var headers = []
+    headers.push((stomp_header_destination(), destination))
+    headers.push((stomp_header_id(), id))
+    headers.push((stomp_header_ack(), ack))
+    return build_stomp_frame(stomp_cmd_subscribe(), headers, "")
+
+# Create UNSUBSCRIBE frame
+fn create_unsubscribe_frame(id: text) -> text:
+    var headers = []
+    headers.push((stomp_header_id(), id))
+    return build_stomp_frame(stomp_cmd_unsubscribe(), headers, "")
+
+# Create BEGIN frame (start transaction)
+fn create_begin_frame(transaction: text) -> text:
+    var headers = []
+    headers.push((stomp_header_transaction(), transaction))
+    return build_stomp_frame(stomp_cmd_begin(), headers, "")
+
+# Create COMMIT frame (commit transaction)
+fn create_commit_frame(transaction: text) -> text:
+    var headers = []
+    headers.push((stomp_header_transaction(), transaction))
+    return build_stomp_frame(stomp_cmd_commit(), headers, "")
+
+# Create ABORT frame (abort transaction)
+fn create_abort_frame(transaction: text) -> text:
+    var headers = []
+    headers.push((stomp_header_transaction(), transaction))
+    return build_stomp_frame(stomp_cmd_abort(), headers, "")
+
+# Create ACK frame (acknowledge message)
+fn create_ack_frame(message_id: text) -> text:
+    var headers = []
+    headers.push((stomp_header_id(), message_id))
+    return build_stomp_frame(stomp_cmd_ack(), headers, "")
+
+# Create ACK frame with transaction
+fn create_ack_frame_with_tx(message_id: text, transaction: text) -> text:
+    var headers = []
+    headers.push((stomp_header_id(), message_id))
+    headers.push((stomp_header_transaction(), transaction))
+    return build_stomp_frame(stomp_cmd_ack(), headers, "")
+
+# Create NACK frame (negative acknowledge)
+fn create_nack_frame(message_id: text) -> text:
+    var headers = []
+    headers.push((stomp_header_id(), message_id))
+    return build_stomp_frame(stomp_cmd_nack(), headers, "")
+
+# Create NACK frame with transaction
+fn create_nack_frame_with_tx(message_id: text, transaction: text) -> text:
+    var headers = []
+    headers.push((stomp_header_id(), message_id))
+    headers.push((stomp_header_transaction(), transaction))
+    return build_stomp_frame(stomp_cmd_nack(), headers, "")
+
+# Create DISCONNECT frame
+fn create_disconnect_frame() -> text:
+    var headers = []
+    return build_stomp_frame(stomp_cmd_disconnect(), headers, "")
+
+# Create DISCONNECT frame with receipt
+fn create_disconnect_frame_with_receipt(receipt_id: text) -> text:
+    var headers = []
+    headers.push((stomp_header_receipt(), receipt_id))
+    return build_stomp_frame(stomp_cmd_disconnect(), headers, "")
+
+# Create CONNECTED frame (server response)
+fn create_connected_frame(version: text, session: text, server: text, heartbeat: text) -> text:
+    var headers = []
+    headers.push((stomp_header_version(), version))
+
+    if session != "":
+        headers.push((stomp_header_session(), session))
+
+    if server != "":
+        headers.push((stomp_header_server(), server))
+
+    if heartbeat != "":
+        headers.push((stomp_header_heart_beat(), heartbeat))
+
+    return build_stomp_frame(stomp_cmd_connected(), headers, "")
+
+# Create MESSAGE frame (server to client)
+fn create_message_frame(destination: text, message_id: text, subscription: text, body: text) -> text:
+    var headers = []
+    headers.push((stomp_header_destination(), destination))
+    headers.push((stomp_header_message_id(), message_id))
+    headers.push((stomp_header_subscription(), subscription))
+
+    val body_len = body.len().to_text()
+    headers.push((stomp_header_content_length(), body_len))
+
+    return build_stomp_frame(stomp_cmd_message(), headers, body)
+
+# Create RECEIPT frame (server acknowledgment)
+fn create_receipt_frame(receipt_id: text) -> text:
+    var headers = []
+    headers.push((stomp_header_receipt_id(), receipt_id))
+    return build_stomp_frame(stomp_cmd_receipt(), headers, "")
+
+# Create ERROR frame (server error)
+fn create_error_frame(message: text, details: text) -> text:
+    var headers = []
+    headers.push(("message", message))
+    return build_stomp_frame(stomp_cmd_error(), headers, details)
+
+# ============================================================================
+# Frame Inspection
+# ============================================================================
+
+# Get command from frame tuple
+fn get_frame_command(frame: tuple) -> text:
+    return frame[0]
+
+# Get headers from frame tuple
+fn get_frame_headers(frame: tuple) -> list:
+    return frame[1]
+
+# Get body from frame tuple
+fn get_frame_body(frame: tuple) -> text:
+    return frame[2]
+
+# Check if frame is a client command
+fn is_client_frame(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+
+    if cmd == stomp_cmd_connect():
+        return true
+    if cmd == stomp_cmd_stomp():
+        return true
+    if cmd == stomp_cmd_send():
+        return true
+    if cmd == stomp_cmd_subscribe():
+        return true
+    if cmd == stomp_cmd_unsubscribe():
+        return true
+    if cmd == stomp_cmd_begin():
+        return true
+    if cmd == stomp_cmd_commit():
+        return true
+    if cmd == stomp_cmd_abort():
+        return true
+    if cmd == stomp_cmd_ack():
+        return true
+    if cmd == stomp_cmd_nack():
+        return true
+    if cmd == stomp_cmd_disconnect():
+        return true
+
+    return false
+
+# Check if frame is a server command
+fn is_server_frame(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+
+    if cmd == stomp_cmd_connected():
+        return true
+    if cmd == stomp_cmd_message():
+        return true
+    if cmd == stomp_cmd_receipt():
+        return true
+    if cmd == stomp_cmd_error():
+        return true
+
+    return false
+
+# Check if frame is an error
+fn is_error_frame(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+    return cmd == stomp_cmd_error()
+
+# Check if frame requires acknowledgment
+fn requires_ack(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+    if cmd != stomp_cmd_message():
+        return false
+
+    # Check if ack header is present and not "auto"
+    val headers = get_frame_headers(frame)
+    val ack_value = get_header_value(headers, stomp_header_ack())
+
+    if ack_value == nil:
+        return false
+
+    if ack_value == stomp_ack_auto():
+        return false
+
+    return true
+
+# ============================================================================
+# Frame Validation
+# ============================================================================
+
+# Validate STOMP frame structure
+fn validate_frame(frame: tuple) -> bool:
+    if frame == nil:
+        return false
+
+    val command = get_frame_command(frame)
+    if command == "":
+        return false
+
+    val headers = get_frame_headers(frame)
+    if headers == nil:
+        return false
+
+    return true
+
+# Validate CONNECT frame
+fn validate_connect_frame(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+    var is_connect = false
+    if cmd == stomp_cmd_connect():
+        is_connect = true
+    if cmd == stomp_cmd_stomp():
+        is_connect = true
+
+    if not is_connect:
+        return false
+
+    val headers = get_frame_headers(frame)
+
+    # Must have host header
+    if not has_header(headers, stomp_header_host()):
+        return false
+
+    # Must have accept-version header
+    if not has_header(headers, stomp_header_accept_version()):
+        return false
+
+    return true
+
+# Validate SEND frame
+fn validate_send_frame(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+    if cmd != stomp_cmd_send():
+        return false
+
+    val headers = get_frame_headers(frame)
+
+    # Must have destination header
+    if not has_header(headers, stomp_header_destination()):
+        return false
+
+    return true
+
+# Validate SUBSCRIBE frame
+fn validate_subscribe_frame(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+    if cmd != stomp_cmd_subscribe():
+        return false
+
+    val headers = get_frame_headers(frame)
+
+    # Must have destination header
+    if not has_header(headers, stomp_header_destination()):
+        return false
+
+    # Must have id header
+    if not has_header(headers, stomp_header_id()):
+        return false
+
+    # Must have ack header
+    if not has_header(headers, stomp_header_ack()):
+        return false
+
+    return true
+
+# Validate ACK frame
+fn validate_ack_frame(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+    if cmd != stomp_cmd_ack():
+        return false
+
+    val headers = get_frame_headers(frame)
+
+    # Must have id header
+    if not has_header(headers, stomp_header_id()):
+        return false
+
+    return true
+
+# Validate NACK frame
+fn validate_nack_frame(frame: tuple) -> bool:
+    val cmd = get_frame_command(frame)
+    if cmd != stomp_cmd_nack():
+        return false
+
+    val headers = get_frame_headers(frame)
+
+    # Must have id header
+    if not has_header(headers, stomp_header_id()):
+        return false
+
+    return true
+
+
+# Export all public functions

@@ -1,0 +1,96 @@
+# Simple (.spl) replacement for src/app/ffi_gen.templates/build.sh
+# Build script for simple-ffi-wrapper package
+#
+# Usage: bin/simple src/app/ffi_gen.templates/build.spl [--release]
+
+use app.io.mod.{shell, shell_output, cwd, file_exists, file_write, dir_create_all, get_args}
+use std.text.{contains, trim}
+use std.path.{join}
+
+fn copy_src(script_dir: text, build_dir: text, src_name: text, dst_name: text):
+    val src_path = join(script_dir, join("src", src_name))
+    val dst_path = join(build_dir, join("src", dst_name))
+    if file_exists(src_path):
+        shell("cp '" + src_path + "' '" + dst_path + "'")
+        print "  Copied " + dst_name
+
+fn main():
+    val script_dir = cwd() + "/src/app/ffi_gen.templates"
+    val build_dir = join(script_dir, "build")
+    var profile = "debug"
+
+    val args = get_args()
+    for i in 0..args.len():
+        if args[i] == "--release":
+            profile = "release"
+
+    print "Building simple-ffi-wrapper (" + profile + ")..."
+    print ""
+
+    # Create build directory
+    dir_create_all(build_dir)
+
+    # Create Cargo.toml
+    val nl = "\n"
+    var cargo = "[package]" + nl
+    cargo = cargo + "name = \"simple-ffi-wrapper\"" + nl
+    cargo = cargo + "version = \"0.1.0\"" + nl
+    cargo = cargo + "edition = \"2021\"" + nl
+    cargo = cargo + nl
+    cargo = cargo + "[lib]" + nl
+    cargo = cargo + "crate-type = [\"cdylib\", \"rlib\"]" + nl
+    cargo = cargo + nl
+    cargo = cargo + "[dependencies]" + nl
+    cargo = cargo + "bdwgc-alloc = \"0.6\"" + nl
+    cargo = cargo + "glob = \"0.3\"" + nl
+    cargo = cargo + "hostname = \"0.4\"" + nl
+    cargo = cargo + "libc = \"0.2\"" + nl
+    file_write(join(build_dir, "Cargo.toml"), cargo)
+
+    # Create src directory
+    dir_create_all(join(build_dir, "src"))
+
+    # Copy source files (rename .txt to .rs)
+    print "Copying source files..."
+    copy_src(script_dir, build_dir, "lib.txt", "lib.rs")
+    copy_src(script_dir, build_dir, "gc.txt", "gc.rs")
+    copy_src(script_dir, build_dir, "env.txt", "env.rs")
+    copy_src(script_dir, build_dir, "file_io.txt", "file_io.rs")
+    copy_src(script_dir, build_dir, "runtime_value.txt", "runtime_value.rs")
+    copy_src(script_dir, build_dir, "bootstrap_ffi.txt", "bootstrap_ffi.rs")
+
+    # Build
+    var lib_dir = ""
+    if profile == "release":
+        print "Running cargo build --release..."
+        shell("cd '" + build_dir + "' && cargo build --release")
+        lib_dir = join(build_dir, "target/release")
+    else:
+        print "Running cargo build..."
+        shell("cd '" + build_dir + "' && cargo build")
+        lib_dir = join(build_dir, "target/debug")
+
+    # Copy output to lib/
+    val lib_out = join(script_dir, "lib")
+    dir_create_all(lib_out)
+
+    val so_path = join(lib_dir, "libsimple_ffi_wrapper.so")
+    if file_exists(so_path):
+        shell("cp '" + so_path + "' '" + lib_out + "/'")
+        print "Built: lib/libsimple_ffi_wrapper.so"
+
+    val dylib_path = join(lib_dir, "libsimple_ffi_wrapper.dylib")
+    if file_exists(dylib_path):
+        shell("cp '" + dylib_path + "' '" + lib_out + "/'")
+        print "Built: lib/libsimple_ffi_wrapper.dylib"
+
+    val a_path = join(lib_dir, "libsimple_ffi_wrapper.a")
+    if file_exists(a_path):
+        shell("cp '" + a_path + "' '" + lib_out + "/'")
+        print "Built: lib/libsimple_ffi_wrapper.a"
+
+    print ""
+    print "Build complete!"
+    print "Library files are in: " + lib_out
+
+main()

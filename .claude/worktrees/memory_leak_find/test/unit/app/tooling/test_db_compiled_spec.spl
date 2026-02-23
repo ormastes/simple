@@ -1,0 +1,241 @@
+"""
+# Test DB Compiled-Only Specification
+
+**Feature IDs:** #DB-COMPILED
+**Category:** Tooling
+**Status:** Implemented
+
+## Overview
+
+Tests requiring compiled mode (JIT/SMF) due to interpreter limitations:
+- StringInterner__intern() uses `fn` but mutates self (needs `me`)
+- str/text type resolution for to_int_or/to_float_or/replace methods
+
+These tests are marked skip_it in interpreter mode (block not executed).
+Run via compiled mode (JIT/SMF) where StringInterner mutation works.
+"""
+
+use app.test_runner_new.test_db_types.*
+use app.test_runner_new.test_db_core.{TestDatabase, micros_to_rfc3339, parse_rfc3339_to_micros}
+use app.test_runner_new.test_db_parser.{parse_stable_db, parse_volatile_db}
+use app.test_runner_new.test_db_serializer.{serialize_stable_db, serialize_volatile_db}
+use app.test_runner_new.test_db_validation.*
+use app.test_runner_new.string_interner.StringInterner
+
+# ============================================================================
+# Test Group 1: RFC3339 Roundtrip (str/text limitation)
+# ============================================================================
+
+describe "parse_rfc3339_to_micros roundtrip [compiled]":
+    it "roundtrips a known timestamp":
+        val ts = micros_to_rfc3339(1000000)
+        val back = parse_rfc3339_to_micros(ts)
+        expect(back > 0).to_equal(true)
+
+    it "parses a valid RFC3339 string":
+        val micros = parse_rfc3339_to_micros("2026-01-15T10:30:00Z")
+        expect(micros > 0).to_equal(true)
+
+# ============================================================================
+# Test Group 2: Serialize/Parse Roundtrip (str/text + StringInterner)
+# ============================================================================
+
+describe "serialize/parse roundtrip [compiled]":
+    it "roundtrips volatile db with counters":
+        val counters = [CounterRecord(
+            test_id: 0, total_runs: 10, passed: 8, failed: 2,
+            flaky_count: 1, last_change: "no_change",
+            last_10_runs: "pass,fail,pass", failure_rate_pct: 20.0
+        )]
+        val output = serialize_volatile_db(counters, [], [], [], [])
+        val parsed = parse_volatile_db(output)
+        expect(parsed.counters.len()).to_equal(1)
+        expect(parsed.counters[0].total_runs).to_equal(10)
+        expect(parsed.counters[0].passed).to_equal(8)
+        expect(parsed.counters[0].failed).to_equal(2)
+        expect(parsed.counters[0].failure_rate_pct).to_equal(20.0)
+
+    it "roundtrips volatile db with timing":
+        val timing = [TimingSummary(
+            test_id: 0, last_ms: 100.0, p50: 95.0, p90: 110.0,
+            p95: 120.0, baseline_median: 90.0,
+            p99: 130.0, min_time: 80.0, max_time: 140.0, iqr: 15.0,
+            mean: 98.0, std_dev: 12.0, cv_pct: 12.2,
+            baseline_mean: 95.0, baseline_std_dev: 10.0, baseline_cv_pct: 10.5,
+            baseline_last_updated: "",
+            baseline_run_count: 10, baseline_update_reason: ""
+        )]
+        val output = serialize_volatile_db([], timing, [], [], [])
+        val parsed = parse_volatile_db(output)
+        expect(parsed.timing.len()).to_equal(1)
+        expect(parsed.timing[0].p99).to_equal(130.0)
+        expect(parsed.timing[0].mean).to_equal(98.0)
+
+    it "roundtrips stable db with interner":
+        var interner = StringInterner.empty()
+        val id0 = interner.intern("test/file.spl")
+        val id1 = interner.intern("my_suite")
+        val id2 = interner.intern("my_test")
+        val id3 = interner.intern("passed")
+        val id4 = interner.intern("unit")
+        val files = [FileRecord(file_id: 0, path_str: id0)]
+        val suites = [SuiteRecord(suite_id: 0, file_id: 0, name_str: id1)]
+        val tests = [TestRecord(
+            suite_id: 0, name_str: id2, category_str: id4,
+            status_str: id3, tags_str: "", description_str: "",
+            valid: true, qualified_by: "", qualified_at: "", qualified_reason: ""
+        )]
+        val output = serialize_stable_db(interner, files, suites, tests)
+        val parsed = parse_stable_db(output)
+        expect(parsed.interner.len()).to_equal(5)
+        expect(parsed.files.len()).to_equal(1)
+        expect(parsed.suites.len()).to_equal(1)
+        expect(parsed.tests.len()).to_equal(1)
+
+    it "uses safe defaults for malformed data":
+        val content = "# version: 3.0\ncounters |test_id, total_runs, passed, failed, flaky_count, last_change, last_10_runs, failure_rate_pct|\n    bad, bad, bad, bad, bad, bad, bad, bad"
+        val parsed = parse_volatile_db(content)
+        expect(parsed.counters.len()).to_equal(1)
+        expect(parsed.counters[0].total_runs).to_equal(0)
+        expect(parsed.counters[0].failure_rate_pct).to_equal(0.0)
+
+# ============================================================================
+# Test Group 3: Parse Functions (str/text limitation)
+# ============================================================================
+
+describe "parse_stable_db [compiled]":
+    it "parses empty content":
+        val parsed = parse_stable_db("")
+        expect(parsed.interner.len()).to_equal(0)
+        expect(parsed.files.len()).to_equal(0)
+
+    it "skips version header comment":
+        val content = "# version: 3.0\nstrings |id, value|\n    0, \"hello\""
+        val parsed = parse_stable_db(content)
+        expect(parsed.interner.len()).to_equal(1)
+        expect(parsed.interner.get(0)).to_equal("hello")
+
+    it "parses files table":
+        val content = "# version: 3.0\nstrings |id, value|\n    0, \"test.spl\"\nfiles |file_id, path_str|\n    0, 0"
+        val parsed = parse_stable_db(content)
+        expect(parsed.files.len()).to_equal(1)
+        expect(parsed.files[0].path_str).to_equal(0)
+
+describe "parse_volatile_db [compiled]":
+    it "parses empty content":
+        val parsed = parse_volatile_db("")
+        expect(parsed.counters.len()).to_equal(0)
+        expect(parsed.timing.len()).to_equal(0)
+
+    it "parses counters with extended fields":
+        val counters = [CounterRecord(
+            test_id: 0, total_runs: 10, passed: 8, failed: 2,
+            flaky_count: 1, last_change: "no_change",
+            last_10_runs: "pass,fail,pass", failure_rate_pct: 20.0
+        )]
+        val sdn = serialize_volatile_db(counters, [], [], [], [])
+        val parsed = parse_volatile_db(sdn)
+        expect(parsed.counters.len()).to_equal(1)
+        expect(parsed.counters[0].last_10_runs).to_equal("pass,fail,pass")
+        expect(parsed.counters[0].failure_rate_pct).to_equal(20.0)
+
+# ============================================================================
+# Test Group 4: Interner Bounds Validation (StringInterner mutation)
+# ============================================================================
+
+describe "validate_interner_bounds [compiled]":
+    it "returns no issues for valid interner refs":
+        var db = TestDatabase.empty()
+        val id0 = db.interner.intern("test_name")
+        val id1 = db.interner.intern("unit")
+        val id2 = db.interner.intern("passed")
+        db.tests.push(TestRecord(
+            suite_id: 0, name_str: id0, category_str: id1,
+            status_str: id2, tags_str: "", description_str: "",
+            valid: true, qualified_by: "", qualified_at: "", qualified_reason: ""
+        ))
+        val issues = validate_interner_bounds(db)
+        expect(issues.len()).to_equal(0)
+
+    it "detects out-of-bounds name_str":
+        var db = TestDatabase.empty()
+        db.tests.push(TestRecord(
+            suite_id: 0, name_str: 999, category_str: 0,
+            status_str: 0, tags_str: "", description_str: "",
+            valid: true, qualified_by: "", qualified_at: "", qualified_reason: ""
+        ))
+        val issues = validate_interner_bounds(db)
+        expect(issues.len() > 0).to_equal(true)
+        expect(issues[0].severity).to_equal("error")
+
+    it "detects out-of-bounds suite name_str":
+        var db = TestDatabase.empty()
+        db.suites.push(SuiteRecord(suite_id: 0, file_id: 0, name_str: 999))
+        val issues = validate_interner_bounds(db)
+        expect(issues.len() > 0).to_equal(true)
+        expect(issues[0].severity).to_equal("error")
+
+# ============================================================================
+# Test Group 5: Qualification Checks (StringInterner mutation)
+# ============================================================================
+
+describe "needs_qualification [compiled]":
+    it "returns true for ignored test without qualification":
+        var db = TestDatabase.empty()
+        val name_id = db.interner.intern("test1")
+        val cat_id = db.interner.intern("unit")
+        val status_id = db.interner.intern("ignored")
+        val test = TestRecord(
+            suite_id: 0, name_str: name_id, category_str: cat_id,
+            status_str: status_id, tags_str: "", description_str: "",
+            valid: true, qualified_by: "", qualified_at: "", qualified_reason: ""
+        )
+        expect(needs_qualification(test, db.interner)).to_equal(true)
+
+    it "returns false for non-ignored test":
+        var db = TestDatabase.empty()
+        val name_id = db.interner.intern("test1")
+        val cat_id = db.interner.intern("unit")
+        val status_id = db.interner.intern("passed")
+        val test = TestRecord(
+            suite_id: 0, name_str: name_id, category_str: cat_id,
+            status_str: status_id, tags_str: "", description_str: "",
+            valid: true, qualified_by: "", qualified_at: "", qualified_reason: ""
+        )
+        expect(needs_qualification(test, db.interner)).to_equal(false)
+
+    it "returns false for ignored test with qualification":
+        var db = TestDatabase.empty()
+        val name_id = db.interner.intern("test1")
+        val cat_id = db.interner.intern("unit")
+        val status_id = db.interner.intern("ignored")
+        val test = TestRecord(
+            suite_id: 0, name_str: name_id, category_str: cat_id,
+            status_str: status_id, tags_str: "", description_str: "",
+            valid: true, qualified_by: "known_issue_42", qualified_at: "", qualified_reason: ""
+        )
+        expect(needs_qualification(test, db.interner)).to_equal(false)
+
+describe "count_unqualified_ignores [compiled]":
+    it "returns 0 for empty database":
+        var db = TestDatabase.empty()
+        expect(count_unqualified_ignores(db)).to_equal(0)
+
+    it "counts ignored tests without qualification":
+        var db = TestDatabase.empty()
+        val n1 = db.interner.intern("test1")
+        val n2 = db.interner.intern("test2")
+        val cat = db.interner.intern("unit")
+        val ignored = db.interner.intern("ignored")
+        val passed = db.interner.intern("passed")
+        db.tests.push(TestRecord(
+            suite_id: 0, name_str: n1, category_str: cat,
+            status_str: ignored, tags_str: "", description_str: "",
+            valid: true, qualified_by: "", qualified_at: "", qualified_reason: ""
+        ))
+        db.tests.push(TestRecord(
+            suite_id: 0, name_str: n2, category_str: cat,
+            status_str: passed, tags_str: "", description_str: "",
+            valid: true, qualified_by: "", qualified_at: "", qualified_reason: ""
+        ))
+        expect(count_unqualified_ignores(db)).to_equal(1)

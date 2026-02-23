@@ -1,0 +1,288 @@
+#!/usr/bin/env simple
+# Prepare Release Script
+# Automates the release preparation process
+# Migrated from scripts/prepare-release.sh
+
+use app.io
+use app.utils.colors (success, error, warning, info)
+
+export main, prepare_release
+
+fn main():
+    val args = get_args()
+
+    if args.len() == 0:
+        print error("Error: Version not specified")
+        print "Usage: prepare <version>"
+        print "Example: prepare 0.3.0"
+        exit(1)
+
+    val new_version = args[0]
+    prepare_release(new_version)
+
+fn prepare_release(new_version: text):
+    """Prepare a new release"""
+
+    print_header()
+
+    print info("Preparing release v{new_version}")
+    print ""
+
+    # Get current version
+    val current_version = get_current_version()
+    if current_version.len() == 0:
+        print error("Could not determine current version")
+        exit(1)
+
+    print warning("Current version: {current_version}")
+    print warning("New version:     {new_version}")
+    print ""
+
+    # Confirm
+    print "Continue with version update? (y/N) "
+    # Note: Interactive input not fully supported in bootstrap runtime
+    # For now, proceeding automatically
+    print ""
+
+    # Step 1: Update version numbers
+    print success("Step 1/8: Updating version numbers...")
+    update_versions(current_version, new_version)
+    print success("✓ Version numbers updated")
+    print ""
+
+    # Step 2: Run tests
+    print success("Step 2/8: Running tests...")
+    if not run_tests():
+        print error("✗ Tests failed")
+        exit(1)
+    print success("✓ All tests passed")
+    print ""
+
+    # Step 3: Run linter
+    print success("Step 3/8: Running linter...")
+    if not run_linter():
+        print error("✗ Lint warnings found")
+        exit(1)
+    print success("✓ No lint warnings")
+    print ""
+
+    # Step 4: Check formatting
+    print success("Step 4/8: Checking formatting...")
+    if not check_formatting():
+        print error("✗ Code needs formatting")
+        print "Run: cargo fmt"
+        exit(1)
+    print success("✓ Code is formatted")
+    print ""
+
+    # Step 5: Build optimized runtime
+    print success("Step 5/8: Building optimized runtime...")
+    if not build_runtime():
+        print error("✗ Build failed")
+        exit(1)
+    print success("✓ Runtime built")
+    print ""
+
+    # Step 6: Build bootstrap package
+    print success("Step 6/8: Building bootstrap package...")
+    if not build_bootstrap():
+        print error("✗ Package build failed")
+        exit(1)
+    print success("✓ Bootstrap package built")
+    print ""
+
+    # Step 7: Update changelog
+    print success("Step 7/8: Updating CHANGELOG...")
+    update_changelog(new_version)
+    print success("✓ CHANGELOG updated")
+    print ""
+
+    # Step 8: Show git commands
+    print success("Step 8/8: Creating git tag...")
+    print ""
+    show_git_commands(new_version)
+
+    # Final summary
+    print_footer()
+    show_next_steps()
+
+fn print_header():
+    """Print release header"""
+    print "╔════════════════════════════════════════╗"
+    print "║    Simple Language Release Helper    ║"
+    print "╚════════════════════════════════════════╝"
+    print ""
+
+fn print_footer():
+    """Print completion message"""
+    print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print success("✓ Release preparation complete!")
+    print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    print ""
+
+fn get_current_version() -> text:
+    """Get current version from Cargo.toml"""
+    val cargo_path = "rust/driver/Cargo.toml"
+    if not file_exists(cargo_path):
+        return ""
+
+    val content = file_read(cargo_path)
+    val lines = content.split("\n")
+
+    for line in lines:
+        if line.starts_with("version = "):
+            # Extract version from: version = "0.3.0"
+            val start = line.find("\"")
+            val end = line.rfind("\"")
+            if start >= 0 and end > start:
+                return line.substring(start + 1, end)
+
+    ""
+
+fn update_versions(old_version: text, new_version: text):
+    """Update version in all files"""
+    val files = [
+        "rust/driver/Cargo.toml",
+        "rust/compiler/Cargo.toml",
+        "rust/runtime/Cargo.toml",
+        "VERSION",
+        "packaging/debian/control",
+        "packaging/rpm/simple-lang.spec",
+        "packaging/homebrew/simple.rb",
+        "packaging/windows/simple.wxs"
+    ]
+
+    for file in files:
+        if file == "VERSION":
+            # Just write the new version
+            file_write(file, new_version)
+            print "  ✓ Updated {file}"
+        elif file_exists(file):
+            val content = file_read(file)
+            val updated = content.replace(old_version, new_version)
+            file_write(file, updated)
+            print "  ✓ Updated {file}"
+
+fn run_tests() -> bool:
+    """Run test suite"""
+    val (_, _, code) = process_run("cargo",
+        ["test", "--workspace", "--quiet", "--manifest-path", "rust/Cargo.toml"])
+    code == 0
+
+fn run_linter() -> bool:
+    """Run clippy linter"""
+    val (_, _, code) = process_run("cargo",
+        ["clippy", "--workspace", "--quiet", "--manifest-path", "rust/Cargo.toml",
+         "--", "-D", "warnings"])
+    code == 0
+
+fn check_formatting() -> bool:
+    """Check code formatting"""
+    val (_, _, code) = process_run("cargo",
+        ["fmt", "--check", "--manifest-path", "rust/Cargo.toml"])
+    code == 0
+
+fn build_runtime() -> bool:
+    """Build optimized runtime"""
+    val (_, _, code) = process_run("cargo",
+        ["build", "--profile", "release-opt", "--quiet",
+         "--manifest-path", "rust/Cargo.toml"])
+
+    if code == 0:
+        val binary_path = "rust/target/release-opt/simple_runtime"
+        if file_exists(binary_path):
+            val size = file_size(binary_path)
+            print "  Binary size: {format_size(size)}"
+    code == 0
+
+fn build_bootstrap() -> bool:
+    """Build bootstrap package"""
+    val (_, _, code) = process_run("./scripts/build-bootstrap.sh", [])
+
+    if code == 0:
+        # Find package file
+        val (stdout, _, _) = process_run("ls", ["simple-bootstrap-*.spk"])
+        val pkg_files = stdout.split("\n")
+        for pkg_file in pkg_files:
+            if pkg_file.len() > 0 and file_exists(pkg_file):
+                val size = file_size(pkg_file)
+                print "  Package: {pkg_file} ({format_size(size)})"
+                break
+
+    code == 0
+
+fn update_changelog(new_version: text):
+    """Update CHANGELOG.md with new version"""
+    val changelog_path = "CHANGELOG.md"
+    if not file_exists(changelog_path):
+        print warning("⚠  CHANGELOG.md not found")
+        return
+
+    val content = file_read(changelog_path)
+
+    if content.contains("## [Unreleased]"):
+        val today = current_date()
+        val updated = content.replace(
+            "## [Unreleased]",
+            "## [Unreleased]\n\n## [{new_version}] - {today}"
+        )
+        file_write(changelog_path, updated)
+    else:
+        print warning("⚠  Please manually update CHANGELOG.md")
+
+fn show_git_commands(new_version: text):
+    """Show git commands for tagging"""
+    print "Commands to execute (manual):"
+    print ""
+    print info("  # Commit changes")
+    print "  jj commit -m 'chore: Prepare release v{new_version}'"
+    print ""
+    print info("  # Create and push tag")
+    print "  git tag -a v{new_version} -m 'Release v{new_version}'"
+    print "  git push origin v{new_version}"
+    print ""
+    print info("  # Or with jj")
+    print "  jj bookmark set v{new_version} -r @"
+    print "  jj git push --bookmark v{new_version}"
+    print ""
+
+fn show_next_steps():
+    """Show next steps for release"""
+    print "Next steps:"
+    print "  1. Review the changes"
+    print "  2. Commit and tag (see commands above)"
+    print "  3. Push the tag to trigger GitHub Actions release workflow"
+    print "  4. Wait for packages to build"
+    print "  5. Announce the release"
+    print ""
+    print "Files ready for distribution:"
+
+    val (stdout, _, _) = process_run("ls", ["-lh", "simple-bootstrap-*.spk"])
+    if stdout.len() > 0:
+        print stdout
+    else:
+        print "  (No packages found - run build-bootstrap.sh)"
+    print ""
+
+fn current_date() -> text:
+    """Get current date in YYYY-MM-DD format"""
+    val year = timestamp_year()
+    val month = timestamp_month()
+    val day = timestamp_day()
+    "{year}-{month:02}-{day:02}"
+
+fn format_size(bytes: i64) -> text:
+    """Format byte size as human readable"""
+    if bytes < 1024:
+        return "{bytes}B"
+
+    val kb = bytes / 1024
+    if kb < 1024:
+        return "{kb}KB"
+
+    val mb = kb / 1024
+    if mb < 1024:
+        return "{mb}MB"
+
+    val gb = mb / 1024
+    "{gb}GB"

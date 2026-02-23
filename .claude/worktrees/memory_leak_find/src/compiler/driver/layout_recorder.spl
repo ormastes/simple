@@ -1,0 +1,207 @@
+# Layout Recorder
+#
+# Runtime instrumentation for 4KB page locality optimization.
+# Records function execution patterns during test runs to guide
+# optimal code placement for cache-efficient startup.
+#
+# Port of rust/compiler/src/layout_recorder.rs (450 lines)
+
+
+# Auto-generated desugared static method wrappers
+fn FunctionRecord__create(name: text) -> FunctionRecord:
+    FunctionRecord(name: name, module: nil, call_count: 0,
+                   first_call_us: 0, last_call_us: 0,
+                   estimated_size: 0, callees: [], is_startup_path: false)
+
+
+fn RecordingSession__create() -> RecordingSession:
+    extern fn rt_time_millis() -> i64
+    RecordingSession(functions: {}, call_stack: [],
+                     start_millis: rt_time_millis(),
+                     first_frame_us: nil, event_loop_us: nil)
+
+
+export FunctionRecord, RecordingSession, LayoutPhase
+export start_recording, stop_recording, export_layout_sdn
+
+
+# ============================================================================
+# Types
+# ============================================================================
+
+enum LayoutPhase:
+    Startup         # Called once during startup
+    FirstFrame      # Called early and frequently
+    Steady          # Called frequently after startup
+    Cold            # Rarely called
+
+struct FunctionRecord:
+    name: text
+    module: text?
+    call_count: i64
+    first_call_us: i64
+    last_call_us: i64
+    estimated_size: i64
+    callees: [text]
+    is_startup_path: bool
+
+impl FunctionRecord:
+    static fn create(name: text) -> FunctionRecord:
+        FunctionRecord(name: name, module: nil, call_count: 0,
+                       first_call_us: 0, last_call_us: 0,
+                       estimated_size: 0, callees: [], is_startup_path: false)
+
+    fn inferred_phase(first_frame_threshold_us: i64) -> LayoutPhase:
+        """Infer layout phase from call timing."""
+        if self.call_count == 0:
+            return LayoutPhase.Cold
+
+        if self.first_call_us < first_frame_threshold_us:
+            if self.call_count == 1:
+                LayoutPhase.Startup
+            elif self.first_call_us < first_frame_threshold_us / 2:
+                LayoutPhase.FirstFrame
+            else:
+                LayoutPhase.Steady
+        elif self.call_count < 10:
+            LayoutPhase.Cold
+        else:
+            LayoutPhase.Steady
+
+# ============================================================================
+# Recording Session
+# ============================================================================
+
+class RecordingSession:
+    """Records function execution patterns for layout optimization."""
+    functions: {text: FunctionRecord}
+    call_stack: [text]
+    start_millis: i64
+    first_frame_us: i64?
+    event_loop_us: i64?
+
+impl RecordingSession:
+    static fn create() -> RecordingSession:
+        extern fn rt_time_millis() -> i64
+        RecordingSession(functions: {}, call_stack: [],
+                         start_millis: rt_time_millis(),
+                         first_frame_us: nil, event_loop_us: nil)
+
+    me record_call(name: text):
+        """Record a function call entry."""
+        val now_us = self.elapsed_us()
+
+        if not self.functions.contains_key(name):
+            var rec = FunctionRecord__create(name)
+            rec = FunctionRecord(name: rec.name, module: rec.module,
+                call_count: 1, first_call_us: now_us, last_call_us: now_us,
+                estimated_size: rec.estimated_size, callees: rec.callees,
+                is_startup_path: rec.is_startup_path)
+            self.functions[name] = rec
+        else:
+            val rec = self.functions[name]
+            self.functions[name] = FunctionRecord(
+                name: rec.name, module: rec.module,
+                call_count: rec.call_count + 1,
+                first_call_us: rec.first_call_us, last_call_us: now_us,
+                estimated_size: rec.estimated_size, callees: rec.callees,
+                is_startup_path: rec.is_startup_path)
+
+        # Track call graph
+        if self.call_stack.?:
+            val caller = self.call_stack[-1]
+            if self.functions.contains_key(caller):
+                val caller_rec = self.functions[caller]
+                if not caller_rec.callees.contains(name):
+                    self.functions[caller] = FunctionRecord(
+                        name: caller_rec.name, module: caller_rec.module,
+                        call_count: caller_rec.call_count,
+                        first_call_us: caller_rec.first_call_us,
+                        last_call_us: caller_rec.last_call_us,
+                        estimated_size: caller_rec.estimated_size,
+                        callees: caller_rec.callees.push(name),
+                        is_startup_path: caller_rec.is_startup_path)
+
+        self.call_stack = self.call_stack.push(name)
+
+    me record_return():
+        if self.call_stack.?:
+            self.call_stack = self.call_stack[:self.call_stack.len() - 1]
+
+    me record_marker(marker: text):
+        val now_us = self.elapsed_us()
+        match marker:
+            case "first_frame": self.first_frame_us = Some(now_us)
+            case "ui.ready": self.first_frame_us = self.first_frame_us ?? Some(now_us)
+            case "startup.complete": self.first_frame_us = self.first_frame_us ?? Some(now_us)
+            case "event_loop.enter": self.event_loop_us = self.event_loop_us ?? Some(now_us)
+            case "main_loop": self.event_loop_us = self.event_loop_us ?? Some(now_us)
+            case _:
+                self.record_call("marker:{marker}")
+                self.record_return()
+
+    me set_function_size(name: text, size: i64):
+        if self.functions.contains_key(name):
+            val rec = self.functions[name]
+            self.functions[name] = FunctionRecord(
+                name: rec.name, module: rec.module,
+                call_count: rec.call_count,
+                first_call_us: rec.first_call_us, last_call_us: rec.last_call_us,
+                estimated_size: size, callees: rec.callees,
+                is_startup_path: rec.is_startup_path)
+
+    fn elapsed_us() -> i64:
+        extern fn rt_time_millis() -> i64
+        (rt_time_millis() - self.start_millis) * 1000
+
+    fn first_frame_threshold() -> i64:
+        self.first_frame_us ?? 100000    # Default 100ms
+
+    fn to_layout_records() -> [FunctionRecord]:
+        """Get all records with inferred phases."""
+        val threshold = self.first_frame_threshold()
+        var records: [FunctionRecord] = []
+        for (_, rec) in self.functions:
+            records = records.push(rec)
+        records
+
+    fn export_sdn() -> text:
+        """Export recorded data to SDN format."""
+        val threshold = self.first_frame_threshold()
+        var lines: [text] = [
+            "layout_recording:",
+            "  first_frame_us: {self.first_frame_us ?? 0}",
+            "  event_loop_us: {self.event_loop_us ?? 0}",
+            "",
+            "functions |name, phase, calls, first_us, size, callees|"
+        ]
+
+        for (name, rec) in self.functions:
+            val phase = match rec.inferred_phase(threshold):
+                case Startup: "startup"
+                case FirstFrame: "first_frame"
+                case Steady: "steady"
+                case Cold: "cold"
+            val callee_str = rec.callees.join(";")
+            lines = lines.push(
+                "    {name}, {phase}, {rec.call_count}, {rec.first_call_us}, {rec.estimated_size}, \"{callee_str}\"")
+
+        lines.join("\n")
+
+# ============================================================================
+# Global Recording API
+# ============================================================================
+
+var _global_session: RecordingSession? = nil
+
+fn start_recording():
+    _global_session = Some(RecordingSession__create())
+
+fn stop_recording():
+    _global_session = nil
+
+fn export_layout_sdn() -> text:
+    if _global_session.?:
+        _global_session.unwrap().export_sdn()
+    else:
+        ""

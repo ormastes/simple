@@ -1,0 +1,241 @@
+# HIR Lowering - Types and Error Handling
+#
+# This module contains type definitions and error handling for HIR lowering.
+
+use hir_types.*
+use hir_definitions.*
+use parser.*
+use lexer.Span
+use compiler.blocks.blocks.{BlockValue, BlockRegistry, block_registry}
+use compiler.common.config.{TypeInferenceConfig, TypeDefault}
+use compiler.common.visibility.{effective_visibility}
+
+# HIR Lowering Context
+# ============================================================================
+
+class HirLowering:
+    """Lowers AST to HIR."""
+    symbols: SymbolTable
+    errors: [LoweringError]
+    current_function: SymbolId?
+    loop_depth: i64
+    type_inference_config: TypeInferenceConfig?
+    module_filename: text    # Filename for visibility matching (e.g., "test_case.spl")
+
+struct LoweringError:
+    """Error during lowering."""
+    message: text
+    span: Span
+    kind: LoweringErrorKind
+
+"""Lowering error kind."""
+enum LoweringErrorKind:
+    UnresolvedName
+    DuplicateDefinition
+    TypeMismatch
+    InvalidPattern
+    InvalidExpression
+    Other
+
+impl HirLowering:
+    static fn new() -> HirLowering:
+        HirLowering(
+            symbols: SymbolTable__new(),
+            errors: [],
+            current_function: nil,
+            loop_depth: 0,
+            type_inference_config: nil,
+            module_filename: ""
+        )
+
+    static fn with_filename(filename: text) -> HirLowering:
+        """Create HIR lowering with filename for visibility matching."""
+        HirLowering(
+            symbols: SymbolTable__new(),
+            errors: [],
+            current_function: nil,
+            loop_depth: 0,
+            type_inference_config: nil,
+            module_filename: filename
+        )
+
+    static fn with_config(config: TypeInferenceConfig) -> HirLowering:
+        HirLowering(
+            symbols: SymbolTable__new(),
+            errors: [],
+            current_function: nil,
+            loop_depth: 0,
+            type_inference_config: Some(config),
+            module_filename: ""
+        )
+
+    me set_type_inference_config(config: TypeInferenceConfig):
+        """Set the type inference configuration."""
+        self.type_inference_config = Some(config)
+
+    fn get_empty_array_default() -> HirType:
+        """Get the default element type for empty arrays."""
+        val default_type = if self.type_inference_config.?:
+            self.type_inference_config.unwrap().empty_array_default
+        else:
+            TypeDefault.I32
+
+        # Convert TypeDefault to HirType
+        val span = Span__empty()
+        match default_type:
+            case TypeDefault.Void: HirType(kind: HirTypeKind.Unit, span: span)
+            case TypeDefault.Bool: HirType(kind: HirTypeKind.Bool, span: span)
+            case TypeDefault.I8: HirType(kind: HirTypeKind.Int(8, true), span: span)
+            case TypeDefault.I16: HirType(kind: HirTypeKind.Int(16, true), span: span)
+            case TypeDefault.I32: HirType(kind: HirTypeKind.Int(32, true), span: span)
+            case TypeDefault.I64: HirType(kind: HirTypeKind.Int(64, true), span: span)
+            case TypeDefault.U8: HirType(kind: HirTypeKind.Int(8, false), span: span)
+            case TypeDefault.U16: HirType(kind: HirTypeKind.Int(16, false), span: span)
+            case TypeDefault.U32: HirType(kind: HirTypeKind.Int(32, false), span: span)
+            case TypeDefault.U64: HirType(kind: HirTypeKind.Int(64, false), span: span)
+            case TypeDefault.F32: HirType(kind: HirTypeKind.Float(32), span: span)
+            case TypeDefault.F64: HirType(kind: HirTypeKind.Float(64), span: span)
+            case TypeDefault.String: HirType(kind: HirTypeKind.Str, span: span)
+            case TypeDefault.Nil: HirType(kind: HirTypeKind.Unit, span: span)
+            case TypeDefault.Any: HirType(kind: HirTypeKind.Any, span: span)
+            case _: HirType(kind: HirTypeKind.Int(32, true), span: span)  # Default to i32
+
+    fn is_strict_empty_collections() -> bool:
+        """Check if strict mode is enabled for empty collections."""
+        if self.type_inference_config.?:
+            self.type_inference_config.unwrap().strict_empty_collections
+        else:
+            false
+
+    me error(message: text, span: Span):
+        """Record a lowering error."""
+        self.errors = self.errors.push(LoweringError(
+            message: message,
+            span: span,
+            kind: LoweringErrorKind.Other
+        ))
+
+    fn compute_visibility(type_name: text, is_explicitly_public: bool) -> bool:
+        """Compute effective visibility for a declaration.
+
+        Uses filename matching rule:
+        - If explicitly marked `pub` -> always public
+        - If type name matches filename -> auto-public
+        - Otherwise -> private
+        """
+        effective_visibility(type_name, self.module_filename, is_explicitly_public)
+
+    me lower_type(t: Type) -> HirType:
+        """Lower type expression."""
+        val kind = match t.kind:
+            case Named(name, args):
+                val hir_args = self.lower_type_list(args)
+
+                # Check for builtin types
+                match name:
+                    case "i8": HirTypeKind.Int(8, true)
+                    case "i16": HirTypeKind.Int(16, true)
+                    case "i32": HirTypeKind.Int(32, true)
+                    case "i64": HirTypeKind.Int(64, true)
+                    case "u8": HirTypeKind.Int(8, false)
+                    case "u16": HirTypeKind.Int(16, false)
+                    case "u32": HirTypeKind.Int(32, false)
+                    case "u64": HirTypeKind.Int(64, false)
+                    case "f32": HirTypeKind.Float(32)
+                    case "f64": HirTypeKind.Float(64)
+                    case "bool": HirTypeKind.Bool
+                    case "char": HirTypeKind.Char
+                    case "text" | "str" | "String": HirTypeKind.Str
+                    case _:
+                        val symbol = self.symbols.lookup(name)
+                        if symbol.?:
+                            HirTypeKind.Named(symbol.unwrap(), hir_args)
+                        else:
+                            self.error("unresolved type: {name}", t.span)
+                            HirTypeKind.Error
+
+            case Tuple(elements):
+                if elements.is_empty():
+                    HirTypeKind.Unit
+                else:
+                    HirTypeKind.Tuple(self.lower_type_list(elements))
+
+            case Array(element, size):
+                val hir_element = self.lower_type(element)
+                HirTypeKind.Array(hir_element, nil)
+
+            case Function(params, ret):
+                val hir_params = self.lower_type_list(params)
+                val hir_ret = self.lower_type(ret)
+                HirTypeKind.Function(hir_params, hir_ret, [])
+
+            case Optional(inner):
+                HirTypeKind.Optional(self.lower_type(inner))
+
+            case Reference(inner, mutable):
+                HirTypeKind.Ref(self.lower_type(inner), mutable)
+
+            case Infer:
+                HirTypeKind.Infer(0, 0)
+
+            case Error:
+                HirTypeKind.Error
+
+        HirType(kind: kind, span: t.span)
+
+    me lower_type_list(types: [Type]) -> [HirType]:
+        """Lower a list of types to HIR."""
+        var result: [HirType] = []
+        for t in types:
+            result = result.push(self.lower_type(t))
+        result
+
+    me lower_type_param(tp: TypeParam) -> HirTypeParam:
+        """Lower type parameter."""
+        # Workaround: Store symbols in local var to avoid interpreter bug
+        var symbols_table = self.symbols
+        val symbol = symbols_table.define(tp.name, SymbolKind.TypeParam, nil, tp.span, false, false, nil)
+        self.symbols = symbols_table
+
+        var bounds: [HirType] = []
+        for b in tp.bounds:
+            bounds = bounds.push(self.lower_type(b))
+
+        HirTypeParam(
+            symbol: symbol,
+            name: tp.name,
+            bounds: bounds,
+            default: tp.default.map(\t: self.lower_type(t)),
+            span: tp.span
+        )
+
+    me lower_trait_bound(bound: TraitBound) -> HirTraitBound:
+        """Lower trait bound to HIR.
+
+        Converts AST trait bound (T: Trait) to HIR representation.
+        """
+        # Lookup the type parameter symbol
+        val type_param_symbol = self.symbols.lookup(bound.type_param).unwrap()
+
+        # Lower the trait type
+        val trait_type = self.lower_type(bound.trait_)
+
+        HirTraitBound(
+            type_param: type_param_symbol,
+            trait_: trait_type,
+            span: bound.span
+        )
+
+    me lower_trait_bounds(bounds: [TraitBound]) -> [HirTraitBound]:
+        """Lower a list of trait bounds to HIR."""
+        var result: [HirTraitBound] = []
+        for b in bounds:
+            result = result.push(self.lower_trait_bound(b))
+        result
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export HirLowering, LoweringError, LoweringErrorKind

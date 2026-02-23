@@ -1,0 +1,430 @@
+# Gilrs Gamepad/Controller SFFI Bindings
+#
+# SFFI pattern for Gilrs cross-platform gamepad support.
+# Provides controller input, rumble, and multi-controller management.
+#
+# Documentation: https://docs.rs/gilrs/
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+# --- Gamepad Context ---
+extern fn rt_gamepad_init() -> i64
+extern fn rt_gamepad_shutdown(context: i64) -> bool
+extern fn rt_gamepad_update(context: i64) -> bool
+
+# --- Controller Management ---
+extern fn rt_gamepad_count(context: i64) -> i64
+extern fn rt_gamepad_is_connected(context: i64, gamepad_id: i64) -> bool
+extern fn rt_gamepad_get_name(context: i64, gamepad_id: i64) -> text
+extern fn rt_gamepad_get_power_info(context: i64, gamepad_id: i64) -> (i64, i64)
+
+# --- Event Polling ---
+extern fn rt_gamepad_poll_event(context: i64) -> i64
+extern fn rt_gamepad_event_free(event: i64) -> bool
+extern fn rt_gamepad_event_get_type(event: i64) -> i64
+extern fn rt_gamepad_event_get_gamepad_id(event: i64) -> i64
+extern fn rt_gamepad_event_get_button(event: i64) -> i64
+extern fn rt_gamepad_event_get_axis(event: i64) -> i64
+extern fn rt_gamepad_event_get_value(event: i64) -> f64
+
+# --- Button State ---
+extern fn rt_gamepad_button_is_pressed(context: i64, gamepad_id: i64, button: i64) -> bool
+extern fn rt_gamepad_button_data(context: i64, gamepad_id: i64, button: i64) -> (bool, f64)
+
+# --- Axis State ---
+extern fn rt_gamepad_axis_data(context: i64, gamepad_id: i64, axis: i64) -> f64
+
+# --- Rumble/Force Feedback ---
+extern fn rt_gamepad_set_rumble(context: i64, gamepad_id: i64, strong: f64, weak: f64, duration_ms: i64) -> bool
+extern fn rt_gamepad_stop_rumble(context: i64, gamepad_id: i64) -> bool
+
+# --- Utilities ---
+extern fn rt_gamepad_get_last_error() -> text
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+# --- Core Types ---
+
+struct GamepadContext:
+    handle: i64
+    is_valid: bool
+
+fn gamepad_init() -> GamepadContext:
+    val handle = rt_gamepad_init()
+    GamepadContext(handle: handle, is_valid: handle != 0)
+
+fn gamepad_shutdown(context: GamepadContext) -> bool:
+    if context.is_valid:
+        rt_gamepad_shutdown(context.handle)
+    else:
+        true
+
+fn gamepad_update(context: GamepadContext) -> bool:
+    if not context.is_valid:
+        false
+    else:
+        rt_gamepad_update(context.handle)
+
+# --- Controller Management ---
+
+fn gamepad_count(context: GamepadContext) -> i64:
+    if not context.is_valid:
+        0
+    else:
+        rt_gamepad_count(context.handle)
+
+fn gamepad_is_connected(context: GamepadContext, gamepad_id: i64) -> bool:
+    if not context.is_valid:
+        false
+    else:
+        rt_gamepad_is_connected(context.handle, gamepad_id)
+
+fn gamepad_get_name(context: GamepadContext, gamepad_id: i64) -> text:
+    if not context.is_valid:
+        ""
+    else:
+        rt_gamepad_get_name(context.handle, gamepad_id)
+
+enum BatteryStatus:
+    Unknown
+    Charging
+    Discharging
+    Full
+    Empty
+    Wired
+
+struct PowerInfo:
+    status: BatteryStatus
+    percentage: i64  # 0-100, or -1 if unknown
+
+fn parse_battery_status(code: i64) -> BatteryStatus:
+    if code == 0: BatteryStatus.Unknown
+    elif code == 1: BatteryStatus.Charging
+    elif code == 2: BatteryStatus.Discharging
+    elif code == 3: BatteryStatus.Full
+    elif code == 4: BatteryStatus.Empty
+    elif code == 5: BatteryStatus.Wired
+    else: BatteryStatus.Unknown
+
+fn gamepad_get_power_info(context: GamepadContext, gamepad_id: i64) -> PowerInfo:
+    if not context.is_valid:
+        PowerInfo(status: BatteryStatus.Unknown, percentage: -1)
+    else:
+        val result = rt_gamepad_get_power_info(context.handle, gamepad_id)
+        PowerInfo(status: parse_battery_status(result.0), percentage: result.1)
+
+# --- Button Definitions ---
+
+enum GamepadButton:
+    # Face buttons (Xbox layout)
+    South          # A (Xbox), Cross (PlayStation), B (Nintendo)
+    East           # B (Xbox), Circle (PlayStation), A (Nintendo)
+    North          # Y (Xbox), Triangle (PlayStation), X (Nintendo)
+    West           # X (Xbox), Square (PlayStation), Y (Nintendo)
+
+    # Triggers
+    LeftTrigger    # LT (Xbox), L2 (PlayStation)
+    RightTrigger   # RT (Xbox), R2 (PlayStation)
+
+    # Bumpers
+    LeftBumper     # LB (Xbox), L1 (PlayStation)
+    RightBumper    # RB (Xbox), R1 (PlayStation)
+
+    # D-Pad
+    DPadUp
+    DPadDown
+    DPadLeft
+    DPadRight
+
+    # Stick clicks
+    LeftStick      # L3 (PlayStation)
+    RightStick     # R3 (PlayStation)
+
+    # System buttons
+    Select         # Back/View (Xbox), Share (PlayStation)
+    Start          # Menu (Xbox), Options (PlayStation)
+    Mode           # Xbox button, PS button
+
+    Unknown
+
+fn button_to_code(button: GamepadButton) -> i64:
+    if button == GamepadButton.South: 0
+    elif button == GamepadButton.East: 1
+    elif button == GamepadButton.North: 2
+    elif button == GamepadButton.West: 3
+    elif button == GamepadButton.LeftTrigger: 4
+    elif button == GamepadButton.RightTrigger: 5
+    elif button == GamepadButton.LeftBumper: 6
+    elif button == GamepadButton.RightBumper: 7
+    elif button == GamepadButton.DPadUp: 8
+    elif button == GamepadButton.DPadDown: 9
+    elif button == GamepadButton.DPadLeft: 10
+    elif button == GamepadButton.DPadRight: 11
+    elif button == GamepadButton.LeftStick: 12
+    elif button == GamepadButton.RightStick: 13
+    elif button == GamepadButton.Select: 14
+    elif button == GamepadButton.Start: 15
+    elif button == GamepadButton.Mode: 16
+    else: 255
+
+fn code_to_button(code: i64) -> GamepadButton:
+    if code == 0: GamepadButton.South
+    elif code == 1: GamepadButton.East
+    elif code == 2: GamepadButton.North
+    elif code == 3: GamepadButton.West
+    elif code == 4: GamepadButton.LeftTrigger
+    elif code == 5: GamepadButton.RightTrigger
+    elif code == 6: GamepadButton.LeftBumper
+    elif code == 7: GamepadButton.RightBumper
+    elif code == 8: GamepadButton.DPadUp
+    elif code == 9: GamepadButton.DPadDown
+    elif code == 10: GamepadButton.DPadLeft
+    elif code == 11: GamepadButton.DPadRight
+    elif code == 12: GamepadButton.LeftStick
+    elif code == 13: GamepadButton.RightStick
+    elif code == 14: GamepadButton.Select
+    elif code == 15: GamepadButton.Start
+    elif code == 16: GamepadButton.Mode
+    else: GamepadButton.Unknown
+
+# --- Axis Definitions ---
+
+enum GamepadAxis:
+    LeftStickX
+    LeftStickY
+    RightStickX
+    RightStickY
+    LeftTrigger
+    RightTrigger
+    DPadX
+    DPadY
+    Unknown
+
+fn axis_to_code(axis: GamepadAxis) -> i64:
+    if axis == GamepadAxis.LeftStickX: 0
+    elif axis == GamepadAxis.LeftStickY: 1
+    elif axis == GamepadAxis.RightStickX: 2
+    elif axis == GamepadAxis.RightStickY: 3
+    elif axis == GamepadAxis.LeftTrigger: 4
+    elif axis == GamepadAxis.RightTrigger: 5
+    elif axis == GamepadAxis.DPadX: 6
+    elif axis == GamepadAxis.DPadY: 7
+    else: 255
+
+fn code_to_axis(code: i64) -> GamepadAxis:
+    if code == 0: GamepadAxis.LeftStickX
+    elif code == 1: GamepadAxis.LeftStickY
+    elif code == 2: GamepadAxis.RightStickX
+    elif code == 3: GamepadAxis.RightStickY
+    elif code == 4: GamepadAxis.LeftTrigger
+    elif code == 5: GamepadAxis.RightTrigger
+    elif code == 6: GamepadAxis.DPadX
+    elif code == 7: GamepadAxis.DPadY
+    else: GamepadAxis.Unknown
+
+# --- Event System ---
+
+enum GamepadEventType:
+    ButtonPressed
+    ButtonReleased
+    ButtonChanged
+    AxisChanged
+    Connected
+    Disconnected
+    Dropped
+    Unknown
+
+fn parse_event_type(code: i64) -> GamepadEventType:
+    if code == 1: GamepadEventType.ButtonPressed
+    elif code == 2: GamepadEventType.ButtonReleased
+    elif code == 3: GamepadEventType.ButtonChanged
+    elif code == 4: GamepadEventType.AxisChanged
+    elif code == 10: GamepadEventType.Connected
+    elif code == 11: GamepadEventType.Disconnected
+    elif code == 12: GamepadEventType.Dropped
+    else: GamepadEventType.Unknown
+
+struct GamepadEvent:
+    handle: i64
+    event_type: GamepadEventType
+    gamepad_id: i64
+    button: GamepadButton
+    axis: GamepadAxis
+    value: f64
+    is_valid: bool
+
+fn gamepad_poll_event(context: GamepadContext) -> GamepadEvent:
+    if not context.is_valid:
+        GamepadEvent(handle: 0, event_type: GamepadEventType.Unknown, gamepad_id: 0, button: GamepadButton.Unknown, axis: GamepadAxis.Unknown, value: 0.0, is_valid: false)
+    else:
+        val handle = rt_gamepad_poll_event(context.handle)
+        if handle == 0:
+            GamepadEvent(handle: 0, event_type: GamepadEventType.Unknown, gamepad_id: 0, button: GamepadButton.Unknown, axis: GamepadAxis.Unknown, value: 0.0, is_valid: false)
+        else:
+            val event_type = parse_event_type(rt_gamepad_event_get_type(handle))
+            val gamepad_id = rt_gamepad_event_get_gamepad_id(handle)
+            val button = code_to_button(rt_gamepad_event_get_button(handle))
+            val axis = code_to_axis(rt_gamepad_event_get_axis(handle))
+            val value = rt_gamepad_event_get_value(handle)
+
+            GamepadEvent(
+                handle: handle,
+                event_type: event_type,
+                gamepad_id: gamepad_id,
+                button: button,
+                axis: axis,
+                value: value,
+                is_valid: true
+            )
+
+fn gamepad_event_free(event: GamepadEvent) -> bool:
+    if event.is_valid:
+        rt_gamepad_event_free(event.handle)
+    else:
+        true
+
+# --- Button State ---
+
+fn gamepad_button_is_pressed(context: GamepadContext, gamepad_id: i64, button: GamepadButton) -> bool:
+    if not context.is_valid:
+        false
+    else:
+        val button_code = button_to_code(button)
+        rt_gamepad_button_is_pressed(context.handle, gamepad_id, button_code)
+
+struct ButtonData:
+    is_pressed: bool
+    value: f64  # 0.0 - 1.0 (for analog buttons/triggers)
+
+fn gamepad_button_data(context: GamepadContext, gamepad_id: i64, button: GamepadButton) -> ButtonData:
+    if not context.is_valid:
+        ButtonData(is_pressed: false, value: 0.0)
+    else:
+        val button_code = button_to_code(button)
+        val result = rt_gamepad_button_data(context.handle, gamepad_id, button_code)
+        ButtonData(is_pressed: result.0, value: result.1)
+
+# --- Axis State ---
+
+fn gamepad_axis_data(context: GamepadContext, gamepad_id: i64, axis: GamepadAxis) -> f64:
+    if not context.is_valid:
+        0.0
+    else:
+        val axis_code = axis_to_code(axis)
+        rt_gamepad_axis_data(context.handle, gamepad_id, axis_code)
+
+struct StickState:
+    x: f64  # -1.0 to 1.0
+    y: f64  # -1.0 to 1.0
+
+impl StickState:
+    fn magnitude() -> f64:
+        (self.x * self.x + self.y * self.y).sqrt()
+
+    fn normalize() -> StickState:
+        val mag = self.magnitude()
+        if mag > 0.0:
+            StickState(x: self.x / mag, y: self.y / mag)
+        else:
+            StickState(x: 0.0, y: 0.0)
+
+    fn angle() -> f64:
+        # Returns angle in radians (0 = right, π/2 = up)
+        self.y.atan2(self.x)
+
+fn gamepad_left_stick(context: GamepadContext, gamepad_id: i64) -> StickState:
+    val x = gamepad_axis_data(context, gamepad_id, GamepadAxis.LeftStickX)
+    val y = gamepad_axis_data(context, gamepad_id, GamepadAxis.LeftStickY)
+    StickState(x: x, y: y)
+
+fn gamepad_right_stick(context: GamepadContext, gamepad_id: i64) -> StickState:
+    val x = gamepad_axis_data(context, gamepad_id, GamepadAxis.RightStickX)
+    val y = gamepad_axis_data(context, gamepad_id, GamepadAxis.RightStickY)
+    StickState(x: x, y: y)
+
+struct TriggerState:
+    left: f64   # 0.0 to 1.0
+    right: f64  # 0.0 to 1.0
+
+fn gamepad_triggers(context: GamepadContext, gamepad_id: i64) -> TriggerState:
+    val left = gamepad_axis_data(context, gamepad_id, GamepadAxis.LeftTrigger)
+    val right = gamepad_axis_data(context, gamepad_id, GamepadAxis.RightTrigger)
+    TriggerState(left: left, right: right)
+
+# --- Rumble/Force Feedback ---
+
+struct RumbleEffect:
+    strong_motor: f64  # 0.0 - 1.0
+    weak_motor: f64    # 0.0 - 1.0
+    duration_ms: i64
+
+fn gamepad_rumble(context: GamepadContext, gamepad_id: i64, effect: RumbleEffect) -> bool:
+    if not context.is_valid:
+        false
+    else:
+        rt_gamepad_set_rumble(
+            context.handle,
+            gamepad_id,
+            effect.strong_motor,
+            effect.weak_motor,
+            effect.duration_ms
+        )
+
+fn gamepad_rumble_simple(context: GamepadContext, gamepad_id: i64, intensity: f64, duration_ms: i64) -> bool:
+    val effect = RumbleEffect(strong_motor: intensity, weak_motor: intensity, duration_ms: duration_ms)
+    gamepad_rumble(context, gamepad_id, effect)
+
+fn gamepad_stop_rumble(context: GamepadContext, gamepad_id: i64) -> bool:
+    if not context.is_valid:
+        false
+    else:
+        rt_gamepad_stop_rumble(context.handle, gamepad_id)
+
+# --- Utilities ---
+
+fn gamepad_last_error() -> text:
+    rt_gamepad_get_last_error()
+
+# --- Helper Functions ---
+
+fn gamepad_apply_deadzone(value: f64, deadzone: f64) -> f64:
+    """Apply circular deadzone to axis value."""
+    if value.abs() < deadzone:
+        0.0
+    else:
+        # Rescale to 0-1 range after deadzone
+        val sign = if value > 0.0: 1.0 else: -1.0
+        val rescaled = (value.abs() - deadzone) / (1.0 - deadzone)
+        sign * rescaled
+
+fn gamepad_stick_with_deadzone(stick: StickState, deadzone: f64) -> StickState:
+    """Apply circular deadzone to stick input."""
+    val magnitude = stick.magnitude()
+
+    if magnitude < deadzone:
+        StickState(x: 0.0, y: 0.0)
+    else:
+        # Rescale based on deadzone
+        val scale = (magnitude - deadzone) / (1.0 - deadzone) / magnitude
+        StickState(x: stick.x * scale, y: stick.y * scale)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GamepadContext, gamepad_init, gamepad_shutdown, gamepad_update
+export gamepad_count, gamepad_is_connected, gamepad_get_name
+export BatteryStatus, PowerInfo, gamepad_get_power_info
+export GamepadButton, GamepadAxis
+export GamepadEventType, GamepadEvent, gamepad_poll_event, gamepad_event_free
+export gamepad_button_is_pressed, ButtonData, gamepad_button_data
+export gamepad_axis_data
+export StickState, gamepad_left_stick, gamepad_right_stick
+export TriggerState, gamepad_triggers
+export RumbleEffect, gamepad_rumble, gamepad_rumble_simple, gamepad_stop_rumble
+export gamepad_last_error
+export gamepad_apply_deadzone, gamepad_stick_with_deadzone

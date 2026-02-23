@@ -1,0 +1,294 @@
+#!/usr/bin/env simple
+# FFI Call Analyzer
+# Adds TODO comments for direct FFI calls and creates missing wrappers report
+# Migrated from scripts/fix_ffi_calls.py
+
+use app.io
+use app.utils.colors (success, error, warning, info)
+use app.utils.text_replace (find_all_patterns, extract_function_name)
+use app.utils.markdown (MarkdownBuilder)
+
+export main, analyze_ffi_calls, find_missing_wrappers
+
+# Directories to exclude (core/internal code that should use direct FFI)
+val EXCLUDE_PATTERNS = [
+    "/core/",
+    "/collections/",
+    ".disabled",
+    "/ffi_gen/specs/",
+    "/test/"
+]
+
+# Files that are FFI wrapper modules themselves
+val WRAPPER_MODULES = [
+    "src/lib/ffi/mod.spl",
+    "src/app/io/mod.spl",
+    "src/compiler/ffi.spl",
+    "src/compiler/ffi_minimal.spl"
+]
+
+# Common FFI functions that should have wrappers
+val COMMON_FFI_WRAPPERS = {
+    "rt_file_exists": "file_exists",
+    "rt_file_read_text": "file_read_text",
+    "rt_file_write_text": "file_write_text",
+    "rt_file_delete": "file_delete",
+    "rt_dir_create": "dir_create",
+    "rt_env_get": "env_get",
+    "rt_process_run": "process_run"
+}
+
+fn main():
+    val result = analyze_ffi_calls()
+    if not result:
+        exit(1)
+
+fn analyze_ffi_calls() -> bool:
+    """Main analysis function"""
+    print info("=== FFI Call Analyzer ===")
+    print ""
+
+    # Step 1: Add TODO comments
+    print "Step 1: Adding TODO comments to direct FFI calls..."
+    val files_modified = scan_and_add_todos("src")
+    print "  Modified {files_modified} files"
+    print ""
+
+    # Step 2: Create missing wrapper report
+    print "Step 2: Generating missing wrapper report..."
+    val report = create_missing_wrapper_report()
+
+    if not is_dir("doc/report"):
+        dir_create("doc/report", recursive: true)
+
+    file_write("doc/report/missing_ffi_wrappers.md", report)
+    print "  Report saved to: doc/report/missing_ffi_wrappers.md"
+    print ""
+
+    print success("Done!")
+    print ""
+    print "Next steps:"
+    print "  1. Review modified files for TODO comments"
+    print "  2. Check doc/report/missing_ffi_wrappers.md for wrappers to add"
+    print "  3. Create wrappers in src/lib/ffi/ or src/compiler/ffi.spl"
+    print "  4. Replace direct FFI calls with wrapper calls"
+
+    true
+
+fn scan_and_add_todos(directory: text) -> i64:
+    """Scan directory and add TODO comments to FFI calls"""
+    var files_modified = 0
+    val files = dir_walk_recursive(directory)
+
+    for file_path in files:
+        if file_path.ends_with(".spl"):
+            if add_todo_comment(file_path):
+                files_modified = files_modified + 1
+
+    files_modified
+
+fn dir_walk_recursive(path: text) -> [text]:
+    """Recursively walk directory and return all files"""
+    # Simple implementation using find command
+    val (stdout, stderr, code) = process_run("find",
+        [path, "-type", "f", "-name", "*.spl"])
+
+    if code != 0:
+        return []
+
+    val lines = stdout.split("\n")
+    var files = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() > 0:
+            files = files + [trimmed]
+    files
+
+fn should_skip_file(filepath: text) -> bool:
+    """Check if file should be skipped"""
+    for pattern in EXCLUDE_PATTERNS:
+        if filepath.contains(pattern):
+            return true
+
+    for wrapper_module in WRAPPER_MODULES:
+        if filepath == wrapper_module:
+            return true
+
+    false
+
+fn find_rt_calls_in_line(line: text) -> [text]:
+    """Find all rt_* function calls in a line"""
+    var calls = []
+    var i = 0
+
+    while i < line.len():
+        # Look for 'rt_'
+        if i + 3 < line.len() and
+           line[i] == 'r' and line[i+1] == 't' and line[i+2] == '_':
+            # Extract function name
+            var name = "rt_"
+            var j = i + 3
+
+            while j < line.len():
+                val ch = line[j]
+                if (ch >= 'a' and ch <= 'z') or ch == '_':
+                    name = name + "{ch}"
+                    j = j + 1
+                else:
+                    break
+
+            # Check if followed by '('
+            if j < line.len() and line[j] == '(':
+                calls = calls + [name]
+                i = j
+            else:
+                i = i + 1
+        else:
+            i = i + 1
+
+    calls
+
+fn is_wrapper_definition(line: text, prev_lines: [text]) -> bool:
+    """Check if this line is inside a wrapper function definition"""
+    # Look back to see if we're in a function that's a wrapper
+    val check_count = if prev_lines.len() < 10: prev_lines.len() else: 10
+    val start_idx = prev_lines.len() - check_count
+
+    for i in start_idx..prev_lines.len():
+        val prev = prev_lines[i].trim()
+        if prev.starts_with("fn ") and not prev.contains(":"):
+            return true
+        if prev.starts_with("extern fn"):
+            return false
+
+    false
+
+fn add_todo_comment(filepath: text) -> bool:
+    """Add TODO comments to direct FFI calls, returns true if modified"""
+    if should_skip_file(filepath):
+        return false
+
+    val content = file_read(filepath)
+    if content.len() == 0:
+        return false
+
+    val lines = content.split("\n")
+    var modified = false
+    var new_lines = []
+    var prev_lines = []
+
+    for i in 0..lines.len():
+        val line = lines[i]
+        val rt_calls = find_rt_calls_in_line(line)
+
+        if rt_calls.len() > 0 and not line.trim().starts_with("extern fn"):
+            # Check if already has TODO comment
+            val has_todo = (i > 0 and lines[i-1].contains("TODO"))
+
+            if not has_todo and not is_wrapper_definition(line, prev_lines):
+                # Calculate indentation
+                var indent = 0
+                for j in 0..line.len():
+                    if line[j] == ' ':
+                        indent = indent + 1
+                    else:
+                        break
+
+                # Generate wrapper names
+                var wrapper_names = []
+                for call in rt_calls:
+                    val wrapper = if COMMON_FFI_WRAPPERS.contains(call):
+                        COMMON_FFI_WRAPPERS[call]
+                    else:
+                        call.replace("rt_", "")
+                    wrapper_names = wrapper_names + [wrapper]
+
+                # Create TODO comment
+                var spaces = ""
+                for j in 0..indent:
+                    spaces = spaces + " "
+
+                val todo_comment = if rt_calls.len() == 1:
+                else:
+                    "{spaces}# TODO: Replace direct FFI calls with wrapper functions from app.io or compiler.ffi"
+
+                new_lines = new_lines + [todo_comment]
+                modified = true
+
+        new_lines = new_lines + [line]
+        prev_lines = prev_lines + [line]
+
+    if modified:
+        val new_content = new_lines.join("\n")
+        file_write(filepath, new_content)
+
+    modified
+
+fn find_missing_wrappers() -> [(text, text)]:
+    """Find FFI functions that don't have wrappers"""
+    val io_module = "src/app/io/mod.spl"
+    if not file_exists(io_module):
+        return []
+
+    val content = file_read(io_module)
+    val lines = content.split("\n")
+
+    # Find all extern fn declarations
+    var externs = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("extern fn rt_"):
+            val func_name = extract_function_name(trimmed)
+            if func_name.len() > 0:
+                externs = externs + [func_name]
+
+    # Find all wrapper functions (simple heuristic: fn that calls rt_*)
+    var wrappers = {}
+    for i in 0..lines.len():
+        val line = lines[i]
+        if line.trim().starts_with("fn "):
+            val wrapper_name = extract_function_name(line)
+
+            # Check next few lines for rt_ call
+            for j in i..(i + 10):
+                if j < lines.len():
+                    val rt_calls = find_rt_calls_in_line(lines[j])
+                    if rt_calls.len() > 0:
+                        # Assume this wrapper wraps the first rt_ call
+                        wrappers[rt_calls[0]] = wrapper_name
+                        break
+
+    # Find missing wrappers
+    var missing = []
+    for extern in externs:
+        if not wrappers.contains(extern):
+            val wrapper = extern.replace("rt_", "")
+            missing = missing + [(extern, wrapper)]
+
+    missing
+
+fn create_missing_wrapper_report() -> text:
+    """Create a report of missing wrappers with code to add"""
+    val missing = find_missing_wrappers()
+
+    if missing.len() == 0:
+        return "# Missing FFI Wrappers\n\nAll FFI functions have wrappers!\n"
+
+    var md = MarkdownBuilder(content: "")
+    md.h1("Missing FFI Wrappers")
+    md.paragraph("Found {missing.len()} FFI functions without wrappers.")
+
+    md.h2("Wrappers to Add")
+    md.paragraph("Add these to `src/app/io/mod.spl`:")
+
+    var code = ""
+    for pair in missing:
+        val rt_name = pair.0
+        val wrapper_name = pair.1
+        code = code + "# TODO: Add wrapper for {rt_name}\n"
+        code = code + "fn {wrapper_name}(...) -> ...:\n"
+        code = code + "    {rt_name}(...)\n\n"
+
+    md.code_block(code, "simple")
+
+    md.to_string()

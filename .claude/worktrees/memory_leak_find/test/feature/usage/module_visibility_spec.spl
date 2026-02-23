@@ -1,0 +1,444 @@
+# @partial
+"""
+# Module Visibility Specification
+
+**Feature ID:** #LANG-042 (Feature DB ID: 300)
+**Category:** Language
+**Difficulty:** 3/5
+**Status:** In Progress (Core Complete, Integration Pending)
+
+## Overview
+
+Module visibility system with filename-based auto-public rule. Types matching
+the filename are automatically public; all other declarations are private by
+default unless explicitly marked with `public`.
+
+This enables top-level `val` declarations (private by default) and provides
+clear visibility control for APIs.
+
+## Syntax
+
+```simple
+# file: test_case.spl
+
+# Auto-public: name matches filename (snake_case -> PascalCase)
+class TestCase:
+    id: i32
+
+# Private by default (name doesn't match)
+class Helper:
+    data: i32
+
+# Explicit public
+public class PublicHelper:
+    data: i32
+
+# Top-level val (private by default)
+val CONSTANT: i32 = 42
+
+# Explicit public constant
+public val PUBLIC_CONSTANT: i32 = 100
+
+# Private function (default)
+fn helper_fn(): pass
+
+# Public function (explicit)
+public fn public_fn(): pass
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Filename Match | Type name matching filename is auto-public |
+| Private Default | All other declarations are private by default |
+| `public` Keyword | Explicitly marks declaration as public |
+| `private` Keyword | Explicitly marks declaration as private (optional) |
+| Top-level `val` | Module-level constants, private by default |
+| Name Conversion | snake_case filename -> PascalCase type |
+
+## Behavior
+
+- `test_case.spl` -> `class TestCase` is auto-public
+- Other classes/structs in file are private by default
+- Functions are private by default
+- Top-level `val`/`var` are private by default
+- Use `public` keyword to export additional items
+- `mod.spl` files are for re-exports only (no auto-public type)
+
+## Related Specifications
+
+- Module System - Import/export mechanics
+- Type System - Type visibility in type checking
+- Code Quality Tools - Visibility linting
+"""
+
+use compiler.visibility.{filename_to_type_name, type_matches_filename, effective_visibility}
+use compiler.visibility_checker.{VisibilityChecker, VisibilityWarning}
+use compiler.hir_types.{Symbol, SymbolId, SymbolKind, ScopeId}
+use compiler.core.lexer.Span
+
+# ============================================================================
+# Test Group 1: Filename-Based Auto-Public
+# ============================================================================
+
+describe "Module Visibility Filename Match":
+    """
+    ## Filename-Based Auto-Public Rule
+
+    Verifies that types matching the filename (after snake_case to PascalCase
+    conversion) are automatically public.
+    """
+
+    it "auto-publics class matching filename":
+        # TestCase in test_case.spl is auto-public via filename match
+        val is_public = effective_visibility("TestCase", "test_case.spl", false)
+        expect is_public
+
+    it "converts snake_case filename to PascalCase":
+        expect filename_to_type_name("string_interner.spl") == "StringInterner"
+        expect filename_to_type_name("http_client.spl") == "HttpClient"
+        expect filename_to_type_name("io.spl") == "Io"
+
+    it "makes non-matching types private by default":
+        val is_public = effective_visibility("Helper", "test_case.spl", false)
+        expect not is_public
+
+
+# ============================================================================
+# Test Group 2: Explicit Visibility Keywords
+# ============================================================================
+
+describe "Module Visibility Keywords":
+    """
+    ## Public/Private Keywords
+
+    Tests explicit visibility modifiers for declarations.
+    """
+
+    it "supports public keyword for classes":
+        # Explicitly public class, even if name doesn't match filename
+        val is_public = effective_visibility("ExplicitPublic", "test_case.spl", true)
+        expect is_public
+
+    it "supports public keyword for functions":
+        val is_public = effective_visibility("exported_function", "test_case.spl", true)
+        expect is_public
+
+    it "supports private keyword (explicit)":
+        # private keyword => is_explicitly_public=false, name doesn't match
+        val is_public = effective_visibility("ExplicitPrivate", "test_case.spl", false)
+        expect not is_public
+
+    it "allows redundant private on non-matching types":
+        # private class Helper is same as default (private)
+        val is_public = effective_visibility("Helper", "test_case.spl", false)
+        expect not is_public
+
+
+# ============================================================================
+# Test Group 3: Top-Level Val Declarations
+# ============================================================================
+
+describe "Module Visibility Top-Level Val":
+    """
+    ## Top-Level Constants
+
+    With visibility system, top-level `val` becomes possible.
+    Private by default, can be made public explicitly.
+    """
+
+    it "allows private top-level val":
+        # val PRIVATE_CONST without pub => private
+        val is_public = effective_visibility("PRIVATE_CONST", "test_case.spl", false)
+        expect not is_public
+
+    it "allows public top-level val":
+        # public val PUBLIC_CONST => public
+        val is_public = effective_visibility("PUBLIC_CONST", "test_case.spl", true)
+        expect is_public
+
+    it "allows top-level val in expressions":
+        # Two vals where second references first — both have valid visibility
+        val a_public = effective_visibility("A", "test_case.spl", false)
+        val b_public = effective_visibility("B", "test_case.spl", false)
+        # Neither matches filename, both private by default
+        expect not a_public
+        expect not b_public
+
+    it "rejects mutable top-level var without explicit public":
+        # var counter without pub => private
+        val is_public = effective_visibility("counter", "test_case.spl", false)
+        expect not is_public
+
+
+# ============================================================================
+# Test Group 4: Impl Block Visibility
+# ============================================================================
+
+describe "Module Visibility Impl Blocks":
+    """
+    ## Impl Block Method Visibility
+
+    Methods inherit visibility context from their target type.
+    Uses VisibilityChecker to verify cross-module access.
+    """
+
+    it "methods on public type are public by default":
+        # Accessing a public symbol from another module should produce no warning
+        val checker = VisibilityChecker.new("other.spl")
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "get_id",
+            kind: SymbolKind.Function,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+        val warning = checker.check_symbol_access(sym, "test_case.spl", Span.empty())
+        expect not warning.?
+
+    it "methods on private type are private":
+        # Accessing a private symbol from another module should produce a warning
+        val checker = VisibilityChecker.new("other.spl")
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "process",
+            kind: SymbolKind.Function,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+        val warning = checker.check_symbol_access(sym, "test_case.spl", Span.empty())
+        expect warning.?
+
+    it "allows private methods on public type":
+        # Private method: warning from other module, no warning from same module
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "internal_validate",
+            kind: SymbolKind.Function,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+        # Cross-module access: warning
+        val cross_checker = VisibilityChecker.new("other.spl")
+        val cross_warning = cross_checker.check_symbol_access(sym, "test_case.spl", Span.empty())
+        expect cross_warning.?
+        # Same-module access: no warning
+        val same_checker = VisibilityChecker.new("test_case.spl")
+        val same_warning = same_checker.check_symbol_access(sym, "test_case.spl", Span.empty())
+        expect not same_warning.?
+
+
+# ============================================================================
+# Test Group 5: Warnings and Errors
+# ============================================================================
+
+describe "Module Visibility Diagnostics":
+    """
+    ## Warning and Error Messages
+
+    Tests compiler diagnostics for visibility issues.
+    """
+
+    it "warns on implicitly public non-matching type (phase 1)":
+        # W0401 for private symbol accessed cross-module
+        val checker = VisibilityChecker.new("other.spl")
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "Helper",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+        val warning = checker.check_symbol_access(sym, "test_case.spl", Span.empty())
+        expect warning.?
+        expect warning.unwrap().code == "W0401"
+
+    it "warns on implicitly public function (phase 1)":
+        val checker = VisibilityChecker.new("other.spl")
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "helper_fn",
+            kind: SymbolKind.Function,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+        val warning = checker.check_symbol_access(sym, "test_case.spl", Span.empty())
+        expect warning.?
+        expect warning.unwrap().code == "W0401"
+
+    it "errors on accessing private type (phase 2)":
+        # Phase 1 = warning; future phase 2 will be E0403 error
+        val checker = VisibilityChecker.new("other.spl")
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "Helper",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("test_case.spl")
+        )
+        val warning = checker.check_symbol_access(sym, "test_case.spl", Span.empty())
+        # Currently a warning (W0401), will become error (E0403) in phase 2
+        expect warning.?
+
+    it "suggests adding public modifier in warning":
+        val w = VisibilityWarning.new("Helper", "other.spl", "test_case.spl", Span.empty())
+        val formatted = w.format()
+        expect formatted.contains("pub")
+
+
+# ============================================================================
+# Test Group 6: Module Re-exports (mod.spl)
+# ============================================================================
+
+describe "Module Visibility Re-exports":
+    """
+    ## Module Re-exports
+
+    Special handling for mod.spl files which are for re-exporting only.
+    """
+
+    it "mod.spl has no auto-public type":
+        # No type named "Mod" should get auto-public in mod.spl
+        expect not type_matches_filename("Mod", "mod.spl")
+        expect not effective_visibility("Mod", "mod.spl", false)
+
+
+# ============================================================================
+# Test Group 7: Integration with Import System
+# ============================================================================
+
+describe "Module Visibility Import Integration":
+    """
+    ## Import System Integration
+
+    Tests that visibility correctly interacts with the import system.
+    Uses VisibilityChecker to verify cross-module access patterns.
+    """
+
+    it "allows importing public items":
+        val checker = VisibilityChecker.new("consumer.spl")
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "PublicType",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("provider.spl")
+        )
+        val warning = checker.check_symbol_access(sym, "provider.spl", Span.empty())
+        expect not warning.?
+
+    it "rejects importing private items":
+        val checker = VisibilityChecker.new("consumer.spl")
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "PrivateHelper",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: false,
+            is_mutable: false,
+            defining_module: Some("provider.spl")
+        )
+        val warning = checker.check_symbol_access(sym, "provider.spl", Span.empty())
+        expect warning.?
+        expect warning.unwrap().code == "W0401"
+
+    it "allows qualified access to public items":
+        val checker = VisibilityChecker.new("consumer.spl")
+        val sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "PublicAPI",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("provider.spl")
+        )
+        val warning = checker.check_symbol_access(sym, "provider.spl", Span.empty())
+        expect not warning.?
+
+
+# ============================================================================
+# Test Group 8: Edge Cases
+# ============================================================================
+
+describe "Module Visibility Edge Cases":
+    """
+    ## Edge Cases and Special Scenarios
+
+    Tests unusual but valid visibility scenarios.
+    """
+
+    it "handles multiple types with same prefix":
+        # TestCase matches test_case.spl, TestCaseBuilder does not
+        expect type_matches_filename("TestCase", "test_case.spl")
+        expect not type_matches_filename("TestCaseBuilder", "test_case.spl")
+
+    it "handles single-word filenames":
+        expect type_matches_filename("Io", "io.spl")
+
+    it "handles acronyms in filenames":
+        expect filename_to_type_name("http_api.spl") == "HttpApi"
+
+    it "handles nested types visibility":
+        # Nested type inherits parent's is_public flag
+        val parent_sym = Symbol(
+            id: SymbolId(id: 1),
+            name: "Outer",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("outer.spl")
+        )
+        val inner_sym = Symbol(
+            id: SymbolId(id: 2),
+            name: "Inner",
+            kind: SymbolKind.Class,
+            type_: nil,
+            scope: ScopeId(id: 0),
+            span: Span.empty(),
+            is_public: true,
+            is_mutable: false,
+            defining_module: Some("outer.spl")
+        )
+        val checker = VisibilityChecker.new("other.spl")
+        # Public parent => public nested type (both accessible)
+        val parent_warning = checker.check_symbol_access(parent_sym, "outer.spl", Span.empty())
+        val inner_warning = checker.check_symbol_access(inner_sym, "outer.spl", Span.empty())
+        expect not parent_warning.?
+        expect not inner_warning.?

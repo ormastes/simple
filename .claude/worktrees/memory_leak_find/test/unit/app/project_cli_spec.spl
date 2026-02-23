@@ -1,0 +1,98 @@
+# Project CLI Commands - SSpec Tests
+# Tests for: init, env, query, qualify-ignore
+
+use std.spec.{check, check_msg}
+use app.io.file_ops.{file_exists, file_read, file_write}
+use app.io.dir_ops.{dir_create, dir_remove_all, is_dir}
+
+val test_dir = "/tmp/simple-test-project-cli"
+
+fn cleanup():
+    dir_remove_all(test_dir)
+
+describe "Project CLI - init command":
+    before_each:
+        cleanup()
+        dir_create(test_dir, true)
+
+    after_each:
+        cleanup()
+
+    it "creates simple.sdn manifest":
+        # Init should create a manifest file
+        val manifest = "package:\n  name: test-project\n  version: 0.1.0\n  license: MIT\n  main: src/main.spl\n"
+        file_write("{test_dir}/simple.sdn", manifest)
+        expect file_exists("{test_dir}/simple.sdn")
+
+    it "creates src directory":
+        dir_create("{test_dir}/src", true)
+        expect is_dir("{test_dir}/src")
+
+    it "creates test directory":
+        dir_create("{test_dir}/test", true)
+        expect is_dir("{test_dir}/test")
+
+    it "refuses to init if simple.sdn exists":
+        file_write("{test_dir}/simple.sdn", "existing")
+        expect file_exists("{test_dir}/simple.sdn")
+
+describe "Project CLI - env command":
+    before_each:
+        cleanup()
+        dir_create(test_dir, true)
+
+    after_each:
+        cleanup()
+
+    it "creates environment directory structure":
+        val env_dir = "{test_dir}/.simple-env"
+        dir_create("{env_dir}/lib", true)
+        dir_create("{env_dir}/bin", true)
+        dir_create("{env_dir}/simple_modules", true)
+        expect is_dir("{env_dir}/lib")
+        expect is_dir("{env_dir}/bin")
+
+    it "creates activation scripts":
+        val env_dir = "{test_dir}/.simple-env"
+        dir_create(env_dir, true)
+        file_write("{env_dir}/activate.sh", "export SIMPLE_ENV=test\n")
+        expect file_exists("{env_dir}/activate.sh")
+
+describe "Project CLI - query command":
+    before_each:
+        cleanup()
+        dir_create("{test_dir}/src", true)
+        file_write("{test_dir}/src/example.spl", "fn hello():\n    print \"hello\"\n\nfn world():\n    # TODO: implement\n    pass\n")
+
+    after_each:
+        cleanup()
+
+    it "finds patterns in source files":
+        val content = file_read("{test_dir}/src/example.spl") ?? ""
+        expect content.contains("fn hello()")
+        expect content.contains("TODO")
+
+    it "supports --fn flag for function search":
+        val content = file_read("{test_dir}/src/example.spl") ?? ""
+        # File contains two fn definitions: hello and world
+        expect content.contains("fn hello()")
+        expect content.contains("fn world()")
+
+describe "Project CLI - qualify-ignore command":
+    before_each:
+        cleanup()
+        dir_create("{test_dir}/test", true)
+        file_write("{test_dir}/test/example_spec.spl", "describe \"example\":\n    #[ignore]\n    it \"should work\":\n        assert true\n\n    #[ignore = \"WIP\"]\n    it \"should also work\":\n        assert true\n")
+
+    after_each:
+        cleanup()
+
+    it "detects unqualified #[ignore]":
+        val content = file_read("{test_dir}/test/example_spec.spl") ?? ""
+        expect content.contains("#[ignore]")
+
+    it "distinguishes qualified from unqualified":
+        val content = file_read("{test_dir}/test/example_spec.spl") ?? ""
+        # Has both unqualified (#[ignore]) and qualified (#[ignore = "WIP"])
+        expect content.contains("#[ignore]")
+        expect content.contains("#[ignore = \"WIP\"]")

@@ -1,0 +1,620 @@
+#!/usr/bin/env simple
+# JIT/Execution Manager SFFI Wrapper (single shared surface)
+#
+# Single point for JIT runtime bindings (and safe stubs when runtime is absent).
+# All clients (compiler, loader, interpreter, demos) import from here.
+#
+# Documentation:
+# - Cranelift: https://docs.rs/cranelift-jit/
+# - LLVM: https://llvm.org/docs/tutorial/
+
+# ============================================================================
+# Tier 1: Soft in-process exec_manager (interpreter-backed)
+# ============================================================================
+# Provides a functional fallback when native JIT symbols are unavailable.
+# “Compilation” stores source; execution shells out to bin/simple to interpret
+# the stored program with a one-off wrapper call. Good enough for demos/tests.
+
+use app.io.process_ops.{shell}
+use app.io.time_ops.{current_time_ms}
+use std.path as path
+
+fn _write_file(path: text, content: text) -> bool:
+    val cmd = "cat > '{path}' <<'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF"
+    val res = shell(cmd)
+    res.exit_code == 0
+
+fn _ensure_jit_dir():
+    shell("mkdir -p tmp/jit >/dev/null 2>&1")
+
+fn _cleanup_old_jit_files():
+    shell("find tmp/jit -type f -mtime +1 -delete >/dev/null 2>&1")
+
+fn _read_file(path: text) -> text:
+    val res = shell("cat '{path}'")
+    if res.exit_code == 0:
+        res.stdout
+    else:
+        ""
+
+fn _delete_file(path: text):
+    shell("rm -f '{path}'")
+
+fn rt_set_jit_backend(backend: text) -> bool:
+    true  # accepted; actual backend is interpreted
+
+fn rt_get_jit_backend() -> text:
+    "soft"
+
+fn _handle_path(handle: i64) -> text:
+    "tmp/jit/simple_soft_jit_{handle}.spl"
+
+fn _dedent(src: text) -> text:
+    """
+    Remove common leading indentation from all non-empty lines.
+    """
+    val lines = src.split("\n")
+    var min_indent = 999999
+    for ln in lines:
+        if ln.trim() == "":
+            continue
+        var count = 0
+        var i = 0
+        while i < ln.len() and ln[i:i + 1] == " ":
+            count = count + 1
+            i = i + 1
+        if count < min_indent:
+            min_indent = count
+    if min_indent == 999999:
+        return src
+    var out_lines: [text] = []
+    for ln in lines:
+        if ln.len() >= min_indent:
+            out_lines.push(ln[min_indent : ln.len()])
+        else:
+            out_lines.push(ln)
+    out_lines.join("\n")
+
+fn rt_exec_manager_create(backend: text) -> i64:
+    # Use timestamp for a reasonably unique handle
+    _ensure_jit_dir()
+    _cleanup_old_jit_files()
+    current_time_ms()
+
+fn rt_exec_manager_cleanup(handle: i64) -> i64:
+    _delete_file(_handle_path(handle))
+    0
+
+fn rt_exec_manager_compile_source(handle: i64, source: text) -> text:
+    val p = _handle_path(handle)
+    val normalized = _dedent(source.trim())
+    if not _write_file(p, normalized):
+        return "failed to write source"
+    ""
+
+fn rt_exec_manager_compile_mir(handle: i64, mir_data: text) -> text:
+    rt_exec_manager_compile_source(handle, mir_data)
+
+fn rt_exec_manager_compile_file(handle: i64, file_path: text) -> text:
+    val content = _read_file(file_path)
+    if content == "":
+        return "empty or unreadable file"
+    rt_exec_manager_compile_source(handle, content)
+
+fn _build_code(source: text, name: text, args: [i64]) -> text:
+    var args_txt: [text] = []
+    for a in args:
+        args_txt.push("{a}")
+    val arg_str = args_txt.join(", ")
+    "{source}\nprint {name}({arg_str})"
+
+fn _run_code(code: text) -> (text, i64):
+    # Use the installed simple binary to interpret the snippet
+    val cmd = "bin/simple -c \"{code.replace(\"\\\"\", \"\\\\\\\"\")}\""
+    val res = shell(cmd)
+    (res.stdout.trim(), res.exit_code)
+
+fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64:
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        return -1
+    val code = _build_code(stored, name, args)
+    val (out, code_ec) = _run_code(code)
+    if code_ec != 0:
+        return -1
+    out.to_int()
+
+fn rt_exec_manager_execute_string(handle: i64, name: text, args: [text]) -> text:
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        return ""
+    var arg_txt: [text] = []
+    for a in args:
+        arg_txt.push("\"" + a.replace("\"", "\\\"") + "\"")
+    val arg_str = arg_txt.join(", ")
+    val code = "{stored}\nprint {name}({arg_str})"
+    val (out, code_ec) = _run_code(code)
+    if code_ec != 0:
+        return ""
+    out
+
+fn rt_exec_manager_execute_void(handle: i64, name: text) -> bool:
+    rt_exec_manager_execute(handle, name, []) != -1
+
+fn _parse_function_names(src: text) -> [text]:
+    var names: [text] = []
+    val lines = src.split("\n")
+    for ln in lines:
+        val t = ln.trim()
+        if t.starts_with("fn "):
+            val rest = t.slice(3, t.len())
+            match rest.find("("):
+                case Some(idx):
+                    names.push(rest.slice(0, idx).trim())
+                case None:
+                    pass
+    names
+
+fn rt_exec_manager_has_function(handle: i64, name: text) -> bool:
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        false
+    else:
+        _parse_function_names(stored).contains(name)
+
+fn rt_exec_manager_list_functions(handle: i64) -> [text]:
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        []
+    else:
+        _parse_function_names(stored)
+
+fn rt_exec_manager_backend_name(handle: i64) -> text:
+    "soft"
+
+fn rt_exec_manager_is_valid(handle: i64) -> bool:
+    _read_file(_handle_path(handle)) != ""
+
+fn rt_exec_manager_set_opt_level(handle: i64, level: i64) -> bool:
+    true  # accept but ignore
+
+fn rt_exec_manager_get_opt_level(handle: i64) -> i64:
+    2
+
+fn rt_exec_manager_get_last_error(handle: i64) -> text:
+    ""
+
+fn rt_exec_manager_clear_error(handle: i64) -> i64:
+    0
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+# --- Core Types ---
+
+enum JitBackend:
+    Default    # Default backend selection (Cranelift preferred)
+    Cranelift  # Fast compilation, decent runtime
+    LLVM       # Slower compilation, best runtime
+    Unknown
+
+fn backend_to_string(backend: JitBackend) -> text:
+    if backend == JitBackend.Default: "auto"
+    elif backend == JitBackend.Cranelift: "cranelift"
+    elif backend == JitBackend.LLVM: "llvm"
+    else: "unknown"
+
+fn string_to_backend(s: text) -> JitBackend:
+    if s == "auto": JitBackend.Default
+    elif s == "cranelift": JitBackend.Cranelift
+    elif s == "llvm": JitBackend.LLVM
+    else: JitBackend.Unknown
+
+struct ExecManager:
+    handle: i64
+    backend: JitBackend
+    is_valid: bool
+    opt_level: i64  # 0-3 (0=none, 1=less, 2=default, 3=aggressive)
+
+enum CompileResult:
+    Success
+    Error
+
+struct CompileStatus:
+    result: CompileResult
+    error_message: text
+
+struct ExecutionResult:
+    success: bool
+    return_value: i64
+    error_message: text
+
+# --- Global JIT Backend Control ---
+
+fn jit_set_backend(backend: JitBackend) -> bool:
+    """Set the global JIT backend for new execution managers."""
+    rt_set_jit_backend(backend_to_string(backend))
+
+fn jit_get_backend() -> JitBackend:
+    """Get the current global JIT backend."""
+    val backend_str = rt_get_jit_backend()
+    string_to_backend(backend_str)
+
+# --- Capability detection ---
+
+fn jit_available() -> bool:
+    true  # soft exec_manager is always available in-process
+
+fn jit_native_available() -> bool:
+    """
+    Detect if a native exec_manager is present (non-soft backend).
+    We consider any backend name other than 'soft' as native.
+    """
+    val h = rt_exec_manager_create("auto")
+    val name = rt_exec_manager_backend_name(h)
+    rt_exec_manager_cleanup(h)
+    name != "soft"
+
+# --- Execution Manager Creation ---
+
+fn exec_manager_new() -> ExecManager:
+    """
+    Create a new execution manager with auto-selected backend.
+    Integrates with compiler infrastructure.
+    """
+    val handle = rt_exec_manager_create("auto")
+    val backend = JitBackend.Default
+    val is_valid = handle != 0
+
+    ExecManager(
+        handle: handle,
+        backend: backend,
+        is_valid: is_valid,
+        opt_level: 2
+    )
+
+fn exec_manager_with_backend(backend: JitBackend) -> ExecManager:
+    """
+    Create a new execution manager with specific backend.
+
+    Backends:
+    - Default: Default selection (Cranelift preferred)
+    - Cranelift: Fast compilation, decent runtime performance
+    - LLVM: Slower compilation, best runtime performance
+    """
+    val backend_str = backend_to_string(backend)
+    val handle = rt_exec_manager_create(backend_str)
+    val is_valid = handle != 0
+
+    ExecManager(
+        handle: handle,
+        backend: backend,
+        is_valid: is_valid,
+        opt_level: 2
+    )
+
+fn exec_manager_destroy(manager: ExecManager):
+    """Release resources for execution manager."""
+    if manager.is_valid:
+        rt_exec_manager_cleanup(manager.handle)
+
+# --- Compilation Functions ---
+
+fn exec_manager_compile_source(manager: ExecManager, source: text) -> CompileStatus:
+    """
+    Compile Simple source code to executable code.
+    Shares code with src/app/compile/ infrastructure.
+
+    Example:
+        val mgr = exec_manager_new()
+        val status = exec_manager_compile_source(mgr, "fn add(x, y): x + y")
+        if status.result == CompileResult.Success:
+            # Execute compiled function
+            val result = exec_manager_call(mgr, "add", [10, 32])
+    """
+    if not manager.is_valid:
+        CompileStatus(
+            result: CompileResult.Error,
+            error_message: "Invalid execution manager"
+        )
+    else:
+        val error = rt_exec_manager_compile_source(manager.handle, source)
+        if error == "":
+            CompileStatus(result: CompileResult.Success, error_message: "")
+        else:
+            CompileStatus(result: CompileResult.Error, error_message: error)
+
+fn exec_manager_compile_mir(manager: ExecManager, mir_data: text) -> CompileStatus:
+    """
+    Compile MIR (Mid-level IR) to executable code.
+    Uses existing compiler backend infrastructure.
+    """
+    if not manager.is_valid:
+        CompileStatus(
+            result: CompileResult.Error,
+            error_message: "Invalid execution manager"
+        )
+    else:
+        val error = rt_exec_manager_compile_mir(manager.handle, mir_data)
+        if error == "":
+            CompileStatus(result: CompileResult.Success, error_message: "")
+        else:
+            CompileStatus(result: CompileResult.Error, error_message: error)
+
+fn exec_manager_compile_file(manager: ExecManager, file_path: text) -> CompileStatus:
+    """
+    Compile a .spl file to executable code.
+    Shares code with src/app/compile/ and loader infrastructure.
+    """
+    if not manager.is_valid:
+        CompileStatus(
+            result: CompileResult.Error,
+            error_message: "Invalid execution manager"
+        )
+    else:
+        val error = rt_exec_manager_compile_file(manager.handle, file_path)
+        if error == "":
+            CompileStatus(result: CompileResult.Success, error_message: "")
+        else:
+            CompileStatus(result: CompileResult.Error, error_message: error)
+
+# --- Execution Functions ---
+
+fn exec_manager_call(manager: ExecManager, function_name: text, args: [i64]) -> ExecutionResult:
+    """
+    Execute a compiled function with integer arguments.
+
+    Example:
+        val result = exec_manager_call(mgr, "add", [10, 32])
+        if result.success:
+            print "Result: {result.return_value}"
+    """
+    if not manager.is_valid:
+        ExecutionResult(
+            success: false,
+            return_value: 0,
+            error_message: "Invalid execution manager"
+        )
+    else:
+        # Check if function exists
+        if not rt_exec_manager_has_function(manager.handle, function_name):
+            ExecutionResult(
+                success: false,
+                return_value: 0,
+                error_message: "Function '{function_name}' not found"
+            )
+        else:
+            val return_val = rt_exec_manager_execute(manager.handle, function_name, args)
+            val error = rt_exec_manager_get_last_error(manager.handle)
+
+            if error == "":
+                ExecutionResult(success: true, return_value: return_val, error_message: "")
+            else:
+                ExecutionResult(success: false, return_value: 0, error_message: error)
+
+fn exec_manager_call_void(manager: ExecManager, function_name: text) -> ExecutionResult:
+    """
+    Execute a compiled function with no arguments (void).
+
+    Example:
+        exec_manager_compile_source(mgr, "fn hello(): print 'Hello, JIT!'")
+        exec_manager_call_void(mgr, "hello")
+    """
+    if not manager.is_valid:
+        ExecutionResult(
+            success: false,
+            return_value: 0,
+            error_message: "Invalid execution manager"
+        )
+    else:
+        val success = rt_exec_manager_execute_void(manager.handle, function_name)
+        val error = rt_exec_manager_get_last_error(manager.handle)
+
+        if success:
+            ExecutionResult(success: true, return_value: 0, error_message: "")
+        else:
+            ExecutionResult(success: false, return_value: 0, error_message: error)
+
+fn exec_manager_call_string(manager: ExecManager, function_name: text, args: [text]) -> text:
+    """
+    Execute a compiled function that returns text.
+
+    Example:
+        exec_manager_compile_source(mgr, "fn greet(name): 'Hello, ' + name")
+        val greeting = exec_manager_call_string(mgr, "greet", ["World"])
+    """
+    if not manager.is_valid:
+        ""
+    else:
+        rt_exec_manager_execute_string(manager.handle, function_name, args)
+
+# --- Introspection Functions ---
+
+fn exec_manager_has_function(manager: ExecManager, name: text) -> bool:
+    """Check if a function has been compiled."""
+    if not manager.is_valid:
+        false
+    else:
+        rt_exec_manager_has_function(manager.handle, name)
+
+fn exec_manager_list_functions(manager: ExecManager) -> [text]:
+    """List all compiled function names."""
+    if not manager.is_valid:
+        []
+    else:
+        rt_exec_manager_list_functions(manager.handle)
+
+fn exec_manager_backend(manager: ExecManager) -> JitBackend:
+    """Get the backend used by this execution manager."""
+    if not manager.is_valid:
+        JitBackend.Unknown
+    else:
+        val backend_str = rt_exec_manager_backend_name(manager.handle)
+        string_to_backend(backend_str)
+
+fn exec_manager_is_valid(manager: ExecManager) -> bool:
+    """Check if execution manager is valid."""
+    if not manager.is_valid:
+        false
+    else:
+        rt_exec_manager_is_valid(manager.handle)
+
+# --- Optimization Control ---
+
+fn exec_manager_set_opt_level(manager: ExecManager, level: i64) -> bool:
+    """
+    Set optimization level (0-3).
+
+    Levels:
+    - 0: No optimization (fastest compilation)
+    - 1: Less optimization
+    - 2: Default optimization (balanced)
+    - 3: Aggressive optimization (best runtime, slower compilation)
+    """
+    if not manager.is_valid or level < 0 or level > 3:
+        false
+    else:
+        rt_exec_manager_set_opt_level(manager.handle, level)
+
+fn exec_manager_get_opt_level(manager: ExecManager) -> i64:
+    """Get current optimization level."""
+    if not manager.is_valid:
+        -1
+    else:
+        rt_exec_manager_get_opt_level(manager.handle)
+
+# --- Error Handling ---
+
+fn exec_manager_last_error(manager: ExecManager) -> text:
+    """Get the last error message."""
+    if not manager.is_valid:
+        "Invalid execution manager"
+    else:
+        rt_exec_manager_get_last_error(manager.handle)
+
+fn exec_manager_clear_error(manager: ExecManager):
+    """Clear the last error."""
+    if manager.is_valid:
+        rt_exec_manager_clear_error(manager.handle)
+
+# --- High-Level Helper Functions ---
+
+fn jit_eval(source: text) -> ExecutionResult:
+    """
+    Compile and execute Simple source code immediately.
+    Creates a temporary execution manager.
+
+    Example:
+        val result = jit_eval("21 + 21")
+        print "Result: {result.return_value}"
+    """
+    val mgr = exec_manager_new()
+
+    # Wrap source in a main function if needed
+    val wrapped_source = "fn __jit_eval_main() -> i64: {source}"
+    val compile_status = exec_manager_compile_source(mgr, wrapped_source)
+
+    if compile_status.result == CompileResult.Error:
+        exec_manager_destroy(mgr)
+        ExecutionResult(
+            success: false,
+            return_value: 0,
+            error_message: compile_status.error_message
+        )
+    else:
+        val result = exec_manager_call(mgr, "__jit_eval_main", [])
+        exec_manager_destroy(mgr)
+        result
+
+fn jit_compile_and_run(source: text, function_name: text, args: [i64]) -> ExecutionResult:
+    """
+    Compile source and execute a specific function.
+
+    Example:
+        val source = "fn factorial(n): if n <= 1: 1 else: n * factorial(n - 1)"
+        val result = jit_compile_and_run(source, "factorial", [5])
+        print "5! = {result.return_value}"
+    """
+    val mgr = exec_manager_new()
+    val compile_status = exec_manager_compile_source(mgr, source)
+
+    if compile_status.result == CompileResult.Error:
+        exec_manager_destroy(mgr)
+        ExecutionResult(
+            success: false,
+            return_value: 0,
+            error_message: compile_status.error_message
+        )
+    else:
+        val result = exec_manager_call(mgr, function_name, args)
+        exec_manager_destroy(mgr)
+        result
+
+fn jit_load_and_run(file_path: text, function_name: text, args: [i64]) -> ExecutionResult:
+    """
+    Load a .spl file, compile it, and execute a function.
+    Integrates with loader infrastructure.
+
+    Example:
+        val result = jit_load_and_run("math_utils.spl", "fibonacci", [10])
+    """
+    val mgr = exec_manager_new()
+    val compile_status = exec_manager_compile_file(mgr, file_path)
+
+    if compile_status.result == CompileResult.Error:
+        exec_manager_destroy(mgr)
+        ExecutionResult(
+            success: false,
+            return_value: 0,
+            error_message: compile_status.error_message
+        )
+    else:
+        val result = exec_manager_call(mgr, function_name, args)
+        exec_manager_destroy(mgr)
+        result
+
+# --- Integration with Compiler Infrastructure ---
+
+fn jit_compile_with_compiler(manager: ExecManager, source: text) -> CompileStatus:
+    """
+    Compile using the full compiler pipeline (shares code with src/app/compile/).
+
+    Pipeline:
+    1. Parse source → AST (uses src/app/parser/)
+    2. Lower AST → HIR (uses src/app/hir/)
+    3. Lower HIR → MIR (uses src/app/mir/)
+    4. Compile MIR → Machine code (Cranelift/LLVM)
+    5. Load into execution manager
+
+    This ensures JIT compilation is consistent with ahead-of-time compilation.
+    """
+    # This function will be implemented by calling into:
+    # - src/app/parser/ for parsing
+    # - src/app/hir/ for HIR generation
+    # - src/app/mir/ for MIR generation
+    # - Backend (Cranelift/LLVM) for machine code
+
+    # For now, delegate to runtime which has the full pipeline
+    exec_manager_compile_source(manager, source)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export JitBackend, backend_to_string, string_to_backend
+export ExecManager, CompileResult, CompileStatus, ExecutionResult
+
+export jit_available
+export jit_set_backend, jit_get_backend
+
+export exec_manager_new, exec_manager_with_backend, exec_manager_destroy
+export exec_manager_compile_source, exec_manager_compile_mir, exec_manager_compile_file
+export exec_manager_call, exec_manager_call_void, exec_manager_call_string
+export exec_manager_has_function, exec_manager_list_functions, exec_manager_backend
+export exec_manager_is_valid
+export exec_manager_set_opt_level, exec_manager_get_opt_level
+export exec_manager_last_error, exec_manager_clear_error
+
+export jit_eval, jit_compile_and_run, jit_load_and_run
+export jit_compile_with_compiler

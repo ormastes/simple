@@ -1,0 +1,91 @@
+# Timer - Timer-Based Wakeup for Noalloc Async
+#
+# Provides timer primitives for deadline-based polling.
+# Platform-specific: ARM SysTick, RISC-V mcycle/mtime, x86 PIT/HPET.
+# In interpreter mode, uses a monotonic counter stub.
+#
+# Usage:
+#   val start = timer_now()
+#   val future = timer_after(1000)
+#   # ... poll future until ready ...
+#   val elapsed = timer_elapsed(start)
+
+export timer_now, timer_elapsed, timer_delay_ticks
+export TimerFuture, timer_after
+
+# ============================================================================
+# Timer Counter (Platform-Abstracted)
+# ============================================================================
+
+# In interpreter mode, use a simple counter.
+# In compiled mode, @cfg selects the hardware timer.
+var g_timer_counter: i64 = 0
+
+fn timer_now() -> i64:
+    """Read current tick count.
+
+    Platform mapping:
+    - ARM: SysTick->VAL or DWT->CYCCNT
+    - RISC-V: CSR mcycle or mtime
+    - x86: RDTSC or PIT counter
+    - Interpreter: monotonic counter (incremented per call)
+    """
+    g_timer_counter = g_timer_counter + 1
+    g_timer_counter
+
+fn timer_elapsed(start: i64) -> i64:
+    """Calculate elapsed ticks since start.
+
+    Handles counter wraparound for 64-bit counters.
+    """
+    val now = timer_now()
+    now - start
+
+fn timer_delay_ticks(ticks: i64):
+    """Busy-wait for the given number of ticks.
+
+    Blocks the CPU — use sparingly. Prefer timer_after()
+    with cooperative polling for async contexts.
+    """
+    val start = timer_now()
+    while timer_elapsed(start) < ticks:
+        # Spin
+        0
+
+# ============================================================================
+# TimerFuture - Deadline-Based Async Timer
+# ============================================================================
+
+class TimerFuture:
+    """A future that becomes ready after a deadline.
+
+    Poll this future to check if the deadline has passed.
+    Uses timer_now() for the current tick count.
+    """
+    deadline: i64
+
+    fn poll_timer() -> i32:
+        """Poll the timer future.
+
+        Returns POLL_READY (1) if deadline passed, POLL_PENDING (0) otherwise.
+        """
+        if timer_now() >= self.deadline:
+            1    # POLL_READY
+        else:
+            0    # POLL_PENDING
+
+    fn is_expired() -> bool:
+        """Check if the deadline has passed."""
+        timer_now() >= self.deadline
+
+    fn remaining() -> i64:
+        """Return ticks remaining until deadline. 0 if expired."""
+        val now = timer_now()
+        if now >= self.deadline:
+            return 0
+        self.deadline - now
+
+fn timer_after(ticks: i64) -> TimerFuture:
+    """Create a timer future that fires after the given number of ticks."""
+    val deadline = timer_now() + ticks
+    TimerFuture(deadline: deadline)

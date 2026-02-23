@@ -1,0 +1,643 @@
+# HTTP Client and URL Parsing
+#
+# HTTP/HTTPS client implementation and URL parsing utilities.
+# Provides high-level HTTP operations and URL manipulation.
+#
+# Components:
+# - HttpMethod: HTTP request methods (GET, POST, etc.)
+# - HttpRequest: HTTP request builder
+# - HttpResponse: HTTP response with status and body
+# - HttpClient: HTTP/HTTPS client
+# - Url: URL parser and accessor
+# - UrlBuilder: Programmatic URL construction
+#
+# Features:
+# - GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
+# - Request/response headers
+# - Timeout support
+# - Redirect following
+# - URL parsing and encoding
+# - Query parameter handling
+
+use std.error.*
+use std.net.ffi.*
+
+# ============================================================================
+# HttpMethod - HTTP Request Methods
+# ============================================================================
+
+enum HttpMethod:
+    """HTTP request method."""
+    GET
+    POST
+    PUT
+    DELETE
+    HEAD
+    OPTIONS
+    PATCH
+
+impl HttpMethod:
+    fn to_string() -> text:
+        """Convert to string."""
+        match self:
+            case HttpMethod.GET: "GET"
+            case HttpMethod.POST: "POST"
+            case HttpMethod.PUT: "PUT"
+            case HttpMethod.DELETE: "DELETE"
+            case HttpMethod.HEAD: "HEAD"
+            case HttpMethod.OPTIONS: "OPTIONS"
+            case HttpMethod.PATCH: "PATCH"
+
+# ============================================================================
+# HttpRequest - HTTP Request Builder
+# ============================================================================
+
+class HttpRequest:
+    """HTTP request.
+
+    Example:
+        val req = HttpRequest__new(HttpMethod.GET, "/api/users")
+            .header("Accept", "application/json")
+            .header("User-Agent", "SimpleHTTP/1.0")
+    """
+    method: HttpMethod
+    path: text
+    headers: {text: text}
+    body: [u8]?
+
+    static fn new(method: HttpMethod, path: text) -> HttpRequest:
+        """Create HTTP request.
+
+        Args:
+            method: HTTP method
+            path: Request path
+
+        Returns:
+            HttpRequest
+        """
+        HttpRequest(
+            method: method,
+            path: path,
+            headers: {},
+            body: nil
+        )
+
+    me header(name: text, value: text) -> HttpRequest:
+        """Add header.
+
+        Args:
+            name: Header name
+            value: Header value
+
+        Returns:
+            Self (for chaining)
+        """
+        self.headers[name] = value
+        self
+
+    me body_text(text: text) -> HttpRequest:
+        """Set text body.
+
+        Args:
+            text: Body text
+
+        Returns:
+            Self (for chaining)
+        """
+        self.body = Some(text.as_bytes())
+        self
+
+    me body_bytes(bytes: [u8]) -> HttpRequest:
+        """Set binary body.
+
+        Args:
+            bytes: Body bytes
+
+        Returns:
+            Self (for chaining)
+        """
+        self.body = Some(bytes)
+        self
+
+# ============================================================================
+# HttpResponse - HTTP Response
+# ============================================================================
+
+class HttpResponse:
+    """HTTP response.
+
+    Example:
+        val resp = client.get("https://api.example.com/users")?
+        print "Status: {resp.status}"
+        print "Body: {resp.body_text()}"
+    """
+    status: i64
+    reason: text
+    headers: {text: text}
+    body: [u8]
+
+    fn is_success() -> bool:
+        """Check if response is successful (2xx).
+
+        Returns:
+            true if status 200-299
+        """
+        self.status >= 200 and self.status < 300
+
+    fn is_redirect() -> bool:
+        """Check if response is redirect (3xx).
+
+        Returns:
+            true if status 300-399
+        """
+        self.status >= 300 and self.status < 400
+
+    fn is_client_error() -> bool:
+        """Check if response is client error (4xx).
+
+        Returns:
+            true if status 400-499
+        """
+        self.status >= 400 and self.status < 500
+
+    fn is_server_error() -> bool:
+        """Check if response is server error (5xx).
+
+        Returns:
+            true if status 500-599
+        """
+        self.status >= 500 and self.status < 600
+
+    fn body_text() -> text:
+        """Get body as text.
+
+        Returns:
+            Body decoded as UTF-8
+        """
+        bytes_to_string(self.body)
+
+    fn header(name: text) -> text?:
+        """Get header value.
+
+        Args:
+            name: Header name (case-insensitive)
+
+        Returns:
+            Some(value) or nil
+        """
+        self.headers.get(name.to_lower())
+
+# ============================================================================
+# HttpClient - HTTP/HTTPS Client
+# ============================================================================
+
+class HttpClient:
+    """HTTP/HTTPS client.
+
+    Supports GET, POST, PUT, DELETE, etc.
+
+    Example:
+        val client = HttpClient__new()
+        val resp = client.get("https://api.example.com/users")?
+        if resp.is_success():
+            print resp.body_text()
+    """
+    timeout_ms: i64?
+    follow_redirects: bool
+    max_redirects: i64
+
+    static fn new() -> HttpClient:
+        """Create HTTP client with defaults.
+
+        Returns:
+            HttpClient
+        """
+        HttpClient(
+            timeout_ms: Some(30000),  # 30 second default
+            follow_redirects: true,
+            max_redirects: 10
+        )
+
+    me set_timeout(timeout_ms: i64?) -> HttpClient:
+        """Set request timeout.
+
+        Args:
+            timeout_ms: Timeout in ms or nil for no timeout
+
+        Returns:
+            Self (for chaining)
+        """
+        self.timeout_ms = timeout_ms
+        self
+
+    me set_follow_redirects(follow: bool) -> HttpClient:
+        """Set redirect following.
+
+        Args:
+            follow: true to follow redirects
+
+        Returns:
+            Self (for chaining)
+        """
+        self.follow_redirects = follow
+        self
+
+    fn get(url: text) -> Result<HttpResponse, SimpleError>:
+        """Send GET request.
+
+        Args:
+            url: Full URL
+
+        Returns:
+            Result with HttpResponse or error
+
+        Example:
+            val resp = client.get("https://example.com")?
+        """
+        val req = HttpRequest__new(HttpMethod.GET, "/")
+        self.request(url, req)
+
+    fn post(url: text, body: [u8]) -> Result<HttpResponse, SimpleError>:
+        """Send POST request.
+
+        Args:
+            url: Full URL
+            body: Request body
+
+        Returns:
+            Result with HttpResponse or error
+        """
+        val req = HttpRequest__new(HttpMethod.POST, "/")
+            .body_bytes(body)
+        self.request(url, req)
+
+    fn put(url: text, body: [u8]) -> Result<HttpResponse, SimpleError>:
+        """Send PUT request.
+
+        Args:
+            url: Full URL
+            body: Request body
+
+        Returns:
+            Result with HttpResponse or error
+        """
+        val req = HttpRequest__new(HttpMethod.PUT, "/")
+            .body_bytes(body)
+        self.request(url, req)
+
+    fn delete(url: text) -> Result<HttpResponse, SimpleError>:
+        """Send DELETE request.
+
+        Args:
+            url: Full URL
+
+        Returns:
+            Result with HttpResponse or error
+        """
+        val req = HttpRequest__new(HttpMethod.DELETE, "/")
+        self.request(url, req)
+
+    fn request(url: text, request: HttpRequest) -> Result<HttpResponse, SimpleError>:
+        """Send custom request.
+
+        Args:
+            url: Full URL
+            request: HttpRequest
+
+        Returns:
+            Result with HttpResponse or error
+        """
+        http_request(self, url, request)
+
+# ============================================================================
+# Url - URL Parsing and Manipulation
+# ============================================================================
+
+class Url:
+    """URL parser and builder.
+
+    Parses and manipulates URLs.
+
+    Example:
+        val url = Url__parse("https://example.com:8080/path?key=value")?
+        print url.host()      # "example.com"
+        print url.port()      # Some(8080)
+        print url.path()      # "/path"
+    """
+    scheme: text
+    host: text
+    port: i64?
+    path: text
+    query: text?
+    fragment: text?
+
+    static fn parse(url: text) -> Result<Url, SimpleError>:
+        """Parse URL from string.
+
+        Args:
+            url: URL string
+
+        Returns:
+            Result with Url or error
+
+        Example:
+            val url = Url__parse("https://example.com/path")?
+        """
+        url_parse(url)
+
+    fn scheme() -> text:
+        """Get URL scheme.
+
+        Returns:
+            Scheme (e.g., "http", "https")
+        """
+        self.scheme
+
+    fn host() -> text:
+        """Get host.
+
+        Returns:
+            Host (domain or IP)
+        """
+        self.host
+
+    fn port() -> i64?:
+        """Get port.
+
+        Returns:
+            Some(port) or nil if default
+        """
+        self.port
+
+    fn path() -> text:
+        """Get path.
+
+        Returns:
+            Path (e.g., "/api/users")
+        """
+        self.path
+
+    fn query() -> text?:
+        """Get query string.
+
+        Returns:
+            Some(query) or nil
+        """
+        self.query
+
+    fn fragment() -> text?:
+        """Get fragment.
+
+        Returns:
+            Some(fragment) or nil
+        """
+        self.fragment
+
+    fn query_params() -> {text: text}:
+        """Parse query parameters.
+
+        Returns:
+            Dict of key-value pairs
+
+        Example:
+            val params = url.query_params()
+            val value = params.get("key")?
+        """
+        if not self.query.?:
+            return {}
+
+        val query = self.query.unwrap()
+        var params: {text: text} = {}
+
+        for pair in query.split("&"):
+            val parts = pair.split("=")
+            if parts.len() == 2:
+                val key = url_decode(parts[0])
+                val value = url_decode(parts[1])
+                params[key] = value
+
+        params
+
+    fn to_string() -> text:
+        """Convert to string.
+
+        Returns:
+            Full URL string
+        """
+        var result = "{self.scheme}://{self.host}"
+
+        if val Some(p) = self.port:
+            result = result + ":{p}"
+
+        result = result + self.path
+
+        if val Some(q) = self.query:
+            result = result + "?{q}"
+
+        if val Some(f) = self.fragment:
+            result = result + "#{f}"
+
+        result
+
+# ============================================================================
+# UrlBuilder - URL Construction
+# ============================================================================
+
+class UrlBuilder:
+    """URL builder.
+
+    Construct URLs programmatically.
+
+    Example:
+        val url = UrlBuilder__new()
+            .scheme("https")
+            .host("example.com")
+            .path("/api/users")
+            .query_param("page", "1")
+            .build()
+    """
+    scheme: text
+    host: text
+    port: i64?
+    path: text
+    query_params: [(text, text)]
+    fragment: text?
+
+    static fn new() -> UrlBuilder:
+        """Create URL builder.
+
+        Returns:
+            UrlBuilder
+        """
+        UrlBuilder(
+            scheme: "http",
+            host: "",
+            port: nil,
+            path: "/",
+            query_params: [],
+            fragment: nil
+        )
+
+    me scheme(scheme: text) -> UrlBuilder:
+        """Set scheme.
+
+        Args:
+            scheme: URL scheme (e.g., "https")
+
+        Returns:
+            Self (for chaining)
+        """
+        self.scheme = scheme
+        self
+
+    me host(host: text) -> UrlBuilder:
+        """Set host.
+
+        Args:
+            host: Host (domain or IP)
+
+        Returns:
+            Self (for chaining)
+        """
+        self.host = host
+        self
+
+    me port(port: i64) -> UrlBuilder:
+        """Set port.
+
+        Args:
+            port: Port number
+
+        Returns:
+            Self (for chaining)
+        """
+        self.port = Some(port)
+        self
+
+    me path(path: text) -> UrlBuilder:
+        """Set path.
+
+        Args:
+            path: URL path
+
+        Returns:
+            Self (for chaining)
+        """
+        self.path = path
+        self
+
+    me query_param(key: text, value: text) -> UrlBuilder:
+        """Add query parameter.
+
+        Args:
+            key: Parameter name
+            value: Parameter value
+
+        Returns:
+            Self (for chaining)
+        """
+        self.query_params = self.query_params.push((key, value))
+        self
+
+    me fragment(fragment: text) -> UrlBuilder:
+        """Set fragment.
+
+        Args:
+            fragment: URL fragment
+
+        Returns:
+            Self (for chaining)
+        """
+        self.fragment = Some(fragment)
+        self
+
+    fn build() -> text:
+        """Build URL string.
+
+        Returns:
+            Complete URL
+        """
+        var result = "{self.scheme}://{self.host}"
+
+        if val Some(p) = self.port:
+            result = result + ":{p}"
+
+        result = result + self.path
+
+        if self.query_params.len() > 0:
+            var query_parts: [text] = []
+            for (key, value) in self.query_params:
+                val encoded_key = url_encode(key)
+                val encoded_value = url_encode(value)
+                query_parts = query_parts.push("{encoded_key}={encoded_value}")
+            result = result + "?" + query_parts.join("&")
+
+        if val Some(f) = self.fragment:
+            result = result + "#{f}"
+
+        result
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn get(url: text) -> Result<HttpResponse, SimpleError>:
+    """Send GET request.
+
+    Args:
+        url: Full URL
+
+    Returns:
+        Result with HttpResponse or error
+
+    Example:
+        val resp = get("https://example.com")?
+        print resp.body_text()
+    """
+    HttpClient__new().get(url)
+
+fn post(url: text, body: [u8]) -> Result<HttpResponse, SimpleError>:
+    """Send POST request.
+
+    Args:
+        url: Full URL
+        body: Request body
+
+    Returns:
+        Result with HttpResponse or error
+    """
+    HttpClient__new().post(url, body)
+
+fn download(url: text, path: text) -> Result<(), SimpleError>:
+    """Download file from URL.
+
+    Args:
+        url: File URL
+        path: Destination path
+
+    Returns:
+        Result or error
+
+    Example:
+        download("https://example.com/file.zip", "file.zip")?
+    """
+    val resp = get(url)?
+    if not resp.is_success():
+        return Err(error("HTTP {resp.status}: {resp.reason}"))
+
+    file_write_bytes(path, resp.body)
+    Ok(())
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export HttpMethod
+export HttpRequest
+export HttpResponse
+export HttpClient
+export Url
+export UrlBuilder
+export get
+export post
+export download

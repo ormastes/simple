@@ -1,0 +1,410 @@
+# Core Interpreter — Evaluator Tests
+#
+# Tests eval.spl through the AST arena API.
+# Migrated concepts from:
+#   - test/system/interpreter/interpreter_basics_spec.spl (arithmetic, strings)
+#   - test/feature/interpreter_interface_spec.spl (bindings, functions, scoping)
+#   - src/compiler/backend/interpreter.spl (eval_expr, exec_stmt, call_function)
+
+use compiler.core.ast.{ast_reset, expr_int_lit, expr_float_lit, expr_string_lit, expr_bool_lit}
+use compiler.core.ast.{expr_nil_lit, expr_ident, expr_binary, expr_unary, expr_call}
+use compiler.core.ast.{expr_if_expr, expr_block, expr_array_lit, expr_assign, expr_compound_assign}
+use compiler.core.ast.{expr_for_expr, expr_while_expr, expr_range, expr_return_expr}
+use compiler.core.ast.{expr_field_access, expr_index, expr_method_call, expr_struct_lit}
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str}
+use compiler.core.ast.{expr_interpolated_string, expr_null_coalesce, expr_unit, expr_pass}
+use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_var_decl, stmt_assign_stmt}
+use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt}
+use compiler.core.ast.{stmt_compound_assign_stmt, stmt_break_stmt, stmt_continue_stmt}
+use compiler.core.ast.{decl_fn, decl_struct_def, decl_val_binding, decl_var_binding}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_BINARY}
+use compiler.core.ast.{STMT_VAL_DECL, STMT_VAR_DECL}
+use compiler.core.ast.{module_add_decl, module_get_decls}
+use compiler.core.interpreter.value.{val_reset, val_make_nil, val_make_int, val_make_text, val_make_bool}
+use compiler.core.interpreter.value.{val_get_kind, val_get_int, val_get_bool, val_get_text, val_is_nil}
+use compiler.core.interpreter.value.{VAL_INT, VAL_TEXT, VAL_BOOL, VAL_NIL, VAL_ARRAY, VAL_STRUCT}
+use compiler.core.interpreter.value.{val_get_array, val_get_struct_name, val_struct_get_field}
+use compiler.core.interpreter.env.{env_init, env_define, env_lookup}
+use compiler.core.interpreter.eval.{eval_init, eval_reset, eval_expr, eval_stmt, eval_decl}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error, eval_module}
+use compiler.core.interpreter.eval.{func_table_register, func_table_lookup, eval_function_call}
+
+describe "Core Interpreter Evaluator":
+    before_each:
+        eval_init()
+
+    # Migrated from interpreter_basics_spec: "handles arithmetic operations"
+    describe "literal expressions":
+        it "evaluates int literal":
+            val eid = expr_int_lit(42, 0)
+            val vid = eval_expr(eid)
+            expect(val_get_int(vid)).to_equal(42)
+
+        it "evaluates negative int literal":
+            val eid = expr_int_lit(-7, 0)
+            val vid = eval_expr(eid)
+            expect(val_get_int(vid)).to_equal(-7)
+
+        it "evaluates bool literal true":
+            val eid = expr_bool_lit(1, 0)
+            val vid = eval_expr(eid)
+            expect(val_get_bool(vid)).to_equal(true)
+
+        it "evaluates bool literal false":
+            val eid = expr_bool_lit(0, 0)
+            val vid = eval_expr(eid)
+            expect(val_get_bool(vid)).to_equal(false)
+
+        it "evaluates string literal":
+            val eid = expr_string_lit("hello", 0)
+            val vid = eval_expr(eid)
+            expect(val_get_text(vid)).to_equal("hello")
+
+        it "evaluates nil literal":
+            val eid = expr_nil_lit(0)
+            val vid = eval_expr(eid)
+            expect(val_is_nil(vid)).to_equal(true)
+
+        it "evaluates unit":
+            val eid = expr_unit(0)
+            val vid = eval_expr(eid)
+            expect(val_is_nil(vid)).to_equal(true)
+
+    # Migrated from interpreter_basics_spec: arithmetic + comparison + boolean
+    describe "binary expressions":
+        it "adds two integers":
+            val left = expr_int_lit(1, 0)
+            val right = expr_int_lit(1, 0)
+            val eid = expr_binary(60, left, right, 0)
+            val vid = eval_expr(eid)
+            expect(val_get_int(vid)).to_equal(2)
+
+        it "subtracts integers":
+            val left = expr_int_lit(10, 0)
+            val right = expr_int_lit(3, 0)
+            val eid = expr_binary(61, left, right, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(7)
+
+        it "multiplies integers":
+            val left = expr_int_lit(4, 0)
+            val right = expr_int_lit(5, 0)
+            val eid = expr_binary(62, left, right, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(20)
+
+        it "divides integers":
+            val left = expr_int_lit(15, 0)
+            val right = expr_int_lit(3, 0)
+            val eid = expr_binary(63, left, right, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(5)
+
+        it "compares with greater than":
+            val left = expr_int_lit(5, 0)
+            val right = expr_int_lit(3, 0)
+            val eid = expr_binary(83, left, right, 0)
+            expect(val_get_bool(eval_expr(eid))).to_equal(true)
+
+        it "compares with less than":
+            val left = expr_int_lit(2, 0)
+            val right = expr_int_lit(10, 0)
+            val eid = expr_binary(82, left, right, 0)
+            expect(val_get_bool(eval_expr(eid))).to_equal(true)
+
+        it "compares equality":
+            val left = expr_int_lit(5, 0)
+            val right = expr_int_lit(5, 0)
+            val eid = expr_binary(80, left, right, 0)
+            expect(val_get_bool(eval_expr(eid))).to_equal(true)
+
+        it "compares inequality":
+            val left = expr_int_lit(3, 0)
+            val right = expr_int_lit(4, 0)
+            val eid = expr_binary(81, left, right, 0)
+            expect(val_get_bool(eval_expr(eid))).to_equal(true)
+
+        it "logical and":
+            val left = expr_bool_lit(1, 0)
+            val right = expr_bool_lit(0, 0)
+            val eid = expr_binary(55, left, right, 0)
+            expect(val_get_bool(eval_expr(eid))).to_equal(false)
+
+        it "logical or":
+            val left = expr_bool_lit(1, 0)
+            val right = expr_bool_lit(0, 0)
+            val eid = expr_binary(56, left, right, 0)
+            expect(val_get_bool(eval_expr(eid))).to_equal(true)
+
+    describe "unary expressions":
+        it "negates integer":
+            val operand = expr_int_lit(42, 0)
+            val eid = expr_unary(61, operand, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(-42)
+
+        it "logical not":
+            val operand = expr_bool_lit(0, 0)
+            val eid = expr_unary(57, operand, 0)
+            expect(val_get_bool(eval_expr(eid))).to_equal(true)
+
+    # Migrated from interpreter_interface_spec: "maintains variable bindings"
+    describe "identifier expressions":
+        it "looks up defined variable":
+            env_define("x", val_make_int(42))
+            val eid = expr_ident("x", 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(42)
+
+        it "errors on undefined variable":
+            val eid = expr_ident("undefined_var", 0)
+            eval_expr(eid)
+            expect(eval_has_error()).to_equal(true)
+            expect(eval_get_error()).to_contain("undefined")
+
+    # Migrated from interpreter_interface_spec: variable bindings
+    describe "val/var declaration statements":
+        it "val declaration binds value":
+            val init = expr_int_lit(10, 0)
+            val sid = stmt_val_decl("x", 0, init, 0)
+            eval_stmt(sid)
+            val eid = expr_ident("x", 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(10)
+
+        it "var declaration binds value":
+            val init = expr_int_lit(20, 0)
+            val sid = stmt_var_decl("y", 0, init, 0)
+            eval_stmt(sid)
+            val eid = expr_ident("y", 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(20)
+
+        it "var can be reassigned":
+            val init = expr_int_lit(1, 0)
+            val s1 = stmt_var_decl("x", 0, init, 0)
+            eval_stmt(s1)
+
+            val target = expr_ident("x", 0)
+            val new_val = expr_int_lit(2, 0)
+            val s2 = stmt_assign_stmt(target, new_val, 0)
+            eval_stmt(s2)
+
+            val check = expr_ident("x", 0)
+            expect(val_get_int(eval_expr(check))).to_equal(2)
+
+    # Migrated from compiler/backend/interpreter.spl: compound assign
+    describe "compound assignment":
+        it "adds and assigns":
+            val init = expr_int_lit(10, 0)
+            val s1 = stmt_var_decl("x", 0, init, 0)
+            eval_stmt(s1)
+
+            val target = expr_ident("x", 0)
+            val rhs = expr_int_lit(5, 0)
+            val s2 = stmt_compound_assign_stmt(101, target, rhs, 0)
+            eval_stmt(s2)
+
+            val check = expr_ident("x", 0)
+            expect(val_get_int(eval_expr(check))).to_equal(15)
+
+    # Migrated from interpreter_basics_spec: "supports string concatenation"
+    describe "string operations":
+        it "concatenates strings via binary add":
+            val left = expr_string_lit("Hello", 0)
+            val right = expr_string_lit(" World", 0)
+            val eid = expr_binary(60, left, right, 0)
+            expect(val_get_text(eval_expr(eid))).to_equal("Hello World")
+
+    describe "if expressions":
+        it "takes then branch when true":
+            val cond = expr_bool_lit(1, 0)
+            val then_e = expr_int_lit(10, 0)
+            val else_e = expr_int_lit(20, 0)
+            val eid = expr_if_expr(cond, then_e, else_e, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(10)
+
+        it "takes else branch when false":
+            val cond = expr_bool_lit(0, 0)
+            val then_e = expr_int_lit(10, 0)
+            val else_e = expr_int_lit(20, 0)
+            val eid = expr_if_expr(cond, then_e, else_e, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(20)
+
+        it "returns nil when no else and false":
+            val cond = expr_bool_lit(0, 0)
+            val then_e = expr_int_lit(10, 0)
+            val eid = expr_if_expr(cond, then_e, -1, 0)
+            expect(val_is_nil(eval_expr(eid))).to_equal(true)
+
+    describe "array expressions":
+        it "creates array literal":
+            var elems: [i64] = []
+            elems.push(expr_int_lit(1, 0))
+            elems.push(expr_int_lit(2, 0))
+            elems.push(expr_int_lit(3, 0))
+            val eid = expr_array_lit(elems, 0)
+            val vid = eval_expr(eid)
+            expect(val_get_kind(vid)).to_equal(VAL_ARRAY)
+            val arr = val_get_array(vid)
+            expect(arr.len()).to_equal(3)
+            expect(val_get_int(arr[0])).to_equal(1)
+            expect(val_get_int(arr[2])).to_equal(3)
+
+    describe "index expressions":
+        it "indexes into array":
+            var elems: [i64] = []
+            elems.push(expr_int_lit(10, 0))
+            elems.push(expr_int_lit(20, 0))
+            val arr = expr_array_lit(elems, 0)
+            val idx = expr_int_lit(1, 0)
+            val eid = expr_index(arr, idx, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(20)
+
+    # Migrated from interpreter_interface_spec: "executes defined functions"
+    describe "function calls":
+        it "calls a simple function":
+            # fn add(a, b): return a + b
+            var params: [text] = []
+            params.push("a")
+            params.push("b")
+            var ptypes: [i64] = []
+            ptypes.push(0)
+            ptypes.push(0)
+            val body_expr = expr_binary(60, expr_ident("a", 0), expr_ident("b", 0), 0)
+            val body_return = stmt_return_stmt(body_expr, 0)
+            var body: [i64] = []
+            body.push(body_return)
+            val fn_decl = decl_fn("add_fn", params, ptypes, 0, body, 0)
+            func_table_register("add_fn", fn_decl)
+
+            # Call add_fn(5, 3)
+            val callee = expr_ident("add_fn", 0)
+            var call_args: [i64] = []
+            call_args.push(expr_int_lit(5, 0))
+            call_args.push(expr_int_lit(3, 0))
+            val call_expr = expr_call(callee, call_args, 0)
+            val result = eval_expr(call_expr)
+            expect(val_get_int(result)).to_equal(8)
+
+        it "calls builtin print":
+            val callee = expr_ident("print", 0)
+            var call_args: [i64] = []
+            call_args.push(expr_string_lit("test output", 0))
+            val eid = expr_call(callee, call_args, 0)
+            val vid = eval_expr(eid)
+            expect(eval_has_error()).to_equal(false)
+
+        it "calls builtin type_of":
+            val callee = expr_ident("type_of", 0)
+            var call_args: [i64] = []
+            call_args.push(expr_int_lit(42, 0))
+            val eid = expr_call(callee, call_args, 0)
+            val vid = eval_expr(eid)
+            expect(val_get_text(vid)).to_equal("i64")
+
+        it "calls builtin len on array":
+            val callee = expr_ident("len", 0)
+            var arr_elems: [i64] = []
+            arr_elems.push(expr_int_lit(1, 0))
+            arr_elems.push(expr_int_lit(2, 0))
+            var call_args: [i64] = []
+            call_args.push(expr_array_lit(arr_elems, 0))
+            val eid = expr_call(callee, call_args, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(2)
+
+    # Migrated from interpreter_interface_spec: "supports recursion"
+    describe "recursive functions":
+        it "computes factorial":
+            # fn factorial(n):
+            #   if n <= 1: return 1
+            #   return n * factorial(n - 1)
+            var params: [text] = []
+            params.push("n")
+            var ptypes: [i64] = []
+            ptypes.push(0)
+
+            # if n <= 1: return 1
+            val n_id = expr_ident("n", 0)
+            val one = expr_int_lit(1, 0)
+            val cond = expr_binary(84, n_id, one, 0)
+            val ret1 = stmt_return_stmt(expr_int_lit(1, 0), 0)
+
+            # return n * factorial(n - 1)
+            val n_id2 = expr_ident("n", 0)
+            val n_minus_1 = expr_binary(61, expr_ident("n", 0), expr_int_lit(1, 0), 0)
+            val callee = expr_ident("factorial", 0)
+            var rec_args: [i64] = []
+            rec_args.push(n_minus_1)
+            val rec_call = expr_call(callee, rec_args, 0)
+            val mul_expr = expr_binary(62, n_id2, rec_call, 0)
+            val ret2 = stmt_return_stmt(mul_expr, 0)
+
+            # if stmt
+            var then_body: [i64] = []
+            then_body.push(ret1)
+            var else_body: [i64] = []
+            else_body.push(ret2)
+            val if_stmt_id = stmt_if_stmt(cond, then_body, else_body, 0)
+
+            var body: [i64] = []
+            body.push(if_stmt_id)
+            val fn_decl = decl_fn("factorial", params, ptypes, 0, body, 0)
+            func_table_register("factorial", fn_decl)
+
+            # Call factorial(5) → 120
+            var call_args: [i64] = []
+            call_args.push(expr_int_lit(5, 0))
+            val call_e = expr_call(expr_ident("factorial", 0), call_args, 0)
+            expect(val_get_int(eval_expr(call_e))).to_equal(120)
+
+    describe "null coalesce":
+        it "returns left when not nil":
+            val left = expr_int_lit(42, 0)
+            val right = expr_int_lit(0, 0)
+            val eid = expr_null_coalesce(left, right, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(42)
+
+        it "returns right when left is nil":
+            val left = expr_nil_lit(0)
+            val right = expr_int_lit(99, 0)
+            val eid = expr_null_coalesce(left, right, 0)
+            expect(val_get_int(eval_expr(eid))).to_equal(99)
+
+    describe "struct operations":
+        it "constructs and accesses struct fields":
+            # Define struct Point with fields x, y
+            var fields: [text] = []
+            fields.push("x")
+            fields.push("y")
+            var ftypes: [i64] = []
+            ftypes.push(0)
+            ftypes.push(0)
+            var fdefs: [i64] = []
+            val sd = decl_struct_def("PointA", fields, ftypes, fdefs, 0)
+
+            # Register struct in eval tables
+            eval_init()
+            use compiler.core.interpreter.eval.{struct_table_register}
+            struct_table_register("PointA", sd)
+
+            # Construct PointA(10, 20) via call
+            val callee = expr_ident("PointA", 0)
+            var call_args: [i64] = []
+            call_args.push(expr_int_lit(10, 0))
+            call_args.push(expr_int_lit(20, 0))
+            val call_e = expr_call(callee, call_args, 0)
+            val vid = eval_expr(call_e)
+            expect(val_get_kind(vid)).to_equal(VAL_STRUCT)
+            expect(val_get_struct_name(vid)).to_equal("PointA")
+            val xv = val_struct_get_field(vid, "x")
+            expect(val_get_int(xv)).to_equal(10)
+
+    describe "error handling":
+        it "sets error on undefined function call":
+            val callee = expr_ident("nonexistent_fn", 0)
+            var call_args: [i64] = []
+            val eid = expr_call(callee, call_args, 0)
+            eval_expr(eid)
+            expect(eval_has_error()).to_equal(true)
+            expect(eval_get_error()).to_contain("undefined")
+
+        it "clears error on reset":
+            val eid = expr_ident("nope", 0)
+            eval_expr(eid)
+            expect(eval_has_error()).to_equal(true)
+            eval_init()
+            expect(eval_has_error()).to_equal(false)

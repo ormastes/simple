@@ -1,0 +1,200 @@
+# Noalloc Scheduler - Fixed-Slot Cooperative Task Scheduler
+#
+# Fixed array of MAX_TASKS task slots with bitmask completion tracking.
+# No heap allocation — all state is inline. Cooperative polling model.
+#
+# Usage:
+#   val sched = NoallocScheduler.new()
+#   val id = sched.spawn(task_fn_handle, 0)
+#   sched.run_until_complete()
+
+export MAX_TASKS, TaskSlot, NoallocScheduler
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val MAX_TASKS: i32 = 16
+
+# ============================================================================
+# TaskSlot - Per-Task State
+# ============================================================================
+
+class TaskSlot:
+    """State for a single scheduled task.
+
+    task_fn: Function handle (i64) to poll. In interpreter mode,
+             this is used as an identifier; actual dispatch is
+             handled by the scheduler's poll callback.
+    result: Task result value (set when complete).
+    is_active: True if slot is occupied by a live task.
+    is_complete: True if task has finished.
+    priority: 0=highest, 3=lowest. Higher priority tasks polled first.
+    """
+    task_fn: i64
+    result: i64
+    is_active: bool
+    is_complete: bool
+    priority: i32
+
+# ============================================================================
+# NoallocScheduler - Cooperative Scheduler
+# ============================================================================
+
+class NoallocScheduler:
+    """Fixed-slot cooperative scheduler.
+
+    Maintains up to MAX_TASKS tasks. Each tick polls all active,
+    incomplete tasks in priority order. Tasks signal completion
+    by returning PollResult.ready().
+    """
+    tasks: [TaskSlot]
+    active_count: i32
+    completed_mask: i64     # Bitmask: bit i set = task i complete
+
+    static fn new() -> NoallocScheduler:
+        """Create a scheduler with empty task slots."""
+        var tasks: [TaskSlot] = []
+        var i = 0
+        while i < MAX_TASKS:
+            tasks.push(TaskSlot(
+                task_fn: 0,
+                result: 0,
+                is_active: false,
+                is_complete: false,
+                priority: 3
+            ))
+            i = i + 1
+        NoallocScheduler(
+            tasks: tasks,
+            active_count: 0,
+            completed_mask: 0
+        )
+
+    me spawn(task_fn: i64, priority: i32) -> i32:
+        """Register a new task. Returns task ID (slot index), or -1 if full."""
+        var i = 0
+        while i < MAX_TASKS:
+            if not self.tasks[i].is_active:
+                self.tasks[i].task_fn = task_fn
+                self.tasks[i].result = 0
+                self.tasks[i].is_active = true
+                self.tasks[i].is_complete = false
+                self.tasks[i].priority = priority
+                self.active_count = self.active_count + 1
+                return i
+            i = i + 1
+        -1
+
+    me complete_task(task_id: i32, value: i64):
+        """Mark a task as complete with the given result value."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return
+        if not self.tasks[task_id].is_active:
+            return
+        self.tasks[task_id].result = value
+        self.tasks[task_id].is_complete = true
+        # Set bit in completion mask
+        val bit: i64 = 1
+        self.completed_mask = self.completed_mask | (bit << task_id)
+
+    me cancel(task_id: i32):
+        """Cancel a task, freeing its slot."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return
+        if not self.tasks[task_id].is_active:
+            return
+        self.tasks[task_id].is_active = false
+        self.tasks[task_id].is_complete = false
+        self.tasks[task_id].task_fn = 0
+        self.active_count = self.active_count - 1
+
+    fn is_task_complete(task_id: i32) -> bool:
+        """Check if a specific task is complete."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return false
+        self.tasks[task_id].is_complete
+
+    fn task_result(task_id: i32) -> i64:
+        """Get the result of a completed task. Returns 0 if not complete."""
+        if task_id < 0 or task_id >= MAX_TASKS:
+            return 0
+        if not self.tasks[task_id].is_complete:
+            return 0
+        self.tasks[task_id].result
+
+    me run_one_tick() -> bool:
+        """Poll all active, incomplete tasks once.
+
+        Returns true if any task made progress (completed this tick).
+        Tasks are polled in priority order (lower number = higher priority).
+        """
+        var any_completed = false
+        var prio = 0
+        while prio <= 3:
+            var i = 0
+            while i < MAX_TASKS:
+                if (self.tasks[i].is_active and
+                    not self.tasks[i].is_complete and
+                    self.tasks[i].priority == prio):
+                    # In a real embedded system, this would call the poll function.
+                    # In interpreter mode, tasks must be completed externally
+                    # via complete_task() since we can't invoke function handles.
+                    #
+                    # The scheduler's role is tracking and prioritization.
+                    # Actual polling is done by the application loop.
+                    0
+                i = i + 1
+            prio = prio + 1
+        any_completed
+
+    me run_until_complete() -> i32:
+        """Run scheduler until all tasks complete.
+
+        Returns number of completed tasks.
+        Note: In interpreter mode, tasks must be externally completed
+        via complete_task(). This method polls until no active tasks remain.
+        """
+        var iterations = 0
+        val max_iterations = 10000    # Safety limit
+        while self.has_active_incomplete() and iterations < max_iterations:
+            self.run_one_tick()
+            iterations = iterations + 1
+        self.count_completed()
+
+    fn has_active_incomplete() -> bool:
+        """Check if any tasks are active but not yet complete."""
+        var i = 0
+        while i < MAX_TASKS:
+            if self.tasks[i].is_active and not self.tasks[i].is_complete:
+                return true
+            i = i + 1
+        false
+
+    fn is_idle() -> bool:
+        """Check if scheduler has no active tasks."""
+        self.active_count == 0
+
+    fn task_count() -> i32:
+        """Return number of active tasks (including completed)."""
+        self.active_count
+
+    fn count_completed() -> i32:
+        """Count number of completed tasks."""
+        var count = 0
+        var i = 0
+        while i < MAX_TASKS:
+            if self.tasks[i].is_active and self.tasks[i].is_complete:
+                count = count + 1
+            i = i + 1
+        count
+
+    me cleanup_completed():
+        """Free slots of all completed tasks."""
+        var i = 0
+        while i < MAX_TASKS:
+            if self.tasks[i].is_active and self.tasks[i].is_complete:
+                self.tasks[i].is_active = false
+                self.tasks[i].task_fn = 0
+                self.active_count = self.active_count - 1
+            i = i + 1

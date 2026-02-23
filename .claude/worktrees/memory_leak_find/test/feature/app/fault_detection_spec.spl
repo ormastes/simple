@@ -1,0 +1,365 @@
+"""
+# Fault Detection Specification
+
+**Feature IDs:** #FAULT-001 to #FAULT-020
+**Category:** Runtime | Safety
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+The Simple runtime includes fault detection for stack overflow, timeout,
+and execution limits. All features are toggleable via CLI flags, FFI calls,
+or the `sys.fault_detection` stdlib module.
+
+## Syntax
+
+```simple
+use std.sys.fault_detection.*
+
+# High-level API
+enable_stack_overflow_detection()
+set_recursion_limit(500)
+set_timeout(30)
+set_execution_limit(5000000)
+reset_defaults()
+
+# Config-based API
+val config = FaultConfig__strict()
+config.apply()
+```
+
+## Key Concepts
+
+| Feature | Default | Purpose |
+|---------|---------|---------|
+| Stack overflow detection | debug=on | Recursion depth check |
+| Max recursion depth | 1000 | Max call depth before error |
+| Timeout | 0 (off) | Wall-clock timeout in seconds |
+| Execution limit | 10000000 | Instruction count limit |
+
+## Behavior
+
+- Stack overflow detection tracks call depth with atomic counters
+- Timeout uses a watchdog thread that checks every 100ms
+- Execution limit counts instructions at loop back-edges
+- All features have zero or near-zero overhead when disabled
+"""
+
+use std.sys.fault_detection.*
+
+# ============================================================================
+# Helper functions
+# ============================================================================
+
+fn shallow_recurse(n: i64) -> i64:
+    """Very shallow recursion for safe testing."""
+    if n <= 0:
+        return 0
+    shallow_recurse(n - 1) + 1
+
+fn iterative_sum(n: i64) -> i64:
+    """Iterative computation (no recursion)."""
+    var total = 0
+    for i in 0..n:
+        total = total + 1
+    total
+
+fn fibonacci(n: i64) -> i64:
+    """Simple recursive fibonacci (double recursion)."""
+    if n <= 1:
+        return n
+    fibonacci(n - 1) + fibonacci(n - 2)
+
+# ============================================================================
+# Test Group 1: FFI Direct API
+# ============================================================================
+
+describe "Fault Detection - FFI API":
+    """
+    ## Direct FFI Functions
+
+    Tests that the extern FFI functions work correctly for
+    configuring fault detection at the lowest level.
+    """
+
+    context "stack overflow detection":
+        it "enables detection and allows shallow recursion":
+            rt_fault_set_stack_overflow_detection(true)
+            rt_fault_set_max_recursion_depth(1000)
+            val result = shallow_recurse(5)
+            expect(result).to_equal(5)
+
+        it "allows zero-depth call":
+            rt_fault_set_stack_overflow_detection(true)
+            val result = shallow_recurse(0)
+            expect(result).to_equal(0)
+
+        it "allows single recursion step":
+            rt_fault_set_stack_overflow_detection(true)
+            val result = shallow_recurse(1)
+            expect(result).to_equal(1)
+
+        it "works when disabled":
+            rt_fault_set_stack_overflow_detection(false)
+            val result = shallow_recurse(5)
+            expect(result).to_equal(5)
+            rt_fault_set_stack_overflow_detection(true)
+
+    context "depth limit configuration":
+        it "accepts small depth limit":
+            rt_fault_set_max_recursion_depth(100)
+            val result = shallow_recurse(3)
+            expect(result).to_equal(3)
+            rt_fault_set_max_recursion_depth(1000)
+
+        it "accepts large depth limit":
+            rt_fault_set_max_recursion_depth(50000)
+            val result = iterative_sum(10)
+            expect(result).to_equal(10)
+            rt_fault_set_max_recursion_depth(1000)
+
+    context "timeout configuration":
+        it "disables timeout with zero":
+            rt_fault_set_timeout(0)
+            val result = iterative_sum(10)
+            expect(result).to_equal(10)
+
+        it "sets large timeout without affecting fast code":
+            rt_fault_set_timeout(60)
+            val result = iterative_sum(10)
+            expect(result).to_equal(10)
+            rt_fault_set_timeout(0)
+
+    context "execution limit configuration":
+        it "sets execution limit":
+            rt_fault_set_execution_limit(1000000)
+            val result = iterative_sum(10)
+            expect(result).to_equal(10)
+
+        it "disables execution limit with zero":
+            rt_fault_set_execution_limit(0)
+            val result = iterative_sum(10)
+            expect(result).to_equal(10)
+
+# ============================================================================
+# Test Group 2: Simple High-Level API
+# ============================================================================
+
+describe "Fault Detection - Simple API":
+    """
+    ## High-Level Simple Functions
+
+    Tests the convenience functions from sys.fault_detection module.
+    """
+
+    context "enable/disable stack overflow":
+        it "enables detection":
+            enable_stack_overflow_detection()
+            val result = shallow_recurse(3)
+            expect(result).to_equal(3)
+
+        it "disables detection":
+            disable_stack_overflow_detection()
+            val result = shallow_recurse(3)
+            expect(result).to_equal(3)
+            enable_stack_overflow_detection()
+
+    context "set_recursion_limit":
+        it "sets a custom limit":
+            set_recursion_limit(200)
+            val result = shallow_recurse(3)
+            expect(result).to_equal(3)
+            reset_defaults()
+
+    context "set_timeout":
+        it "sets and clears timeout":
+            set_timeout(60)
+            val result = iterative_sum(5)
+            expect(result).to_equal(5)
+            set_timeout(0)
+
+    context "set_execution_limit":
+        it "sets a custom limit":
+            set_execution_limit(5000000)
+            val result = iterative_sum(5)
+            expect(result).to_equal(5)
+            reset_defaults()
+
+    context "reset_defaults":
+        it "restores default configuration":
+            set_recursion_limit(50)
+            set_timeout(10)
+            set_execution_limit(100)
+            reset_defaults()
+            # After reset, normal operations should work
+            val result = shallow_recurse(3)
+            expect(result).to_equal(3)
+
+# ============================================================================
+# Test Group 3: FaultConfig Struct
+# ============================================================================
+
+describe "Fault Detection - FaultConfig":
+    """
+    ## Config-Based API
+
+    Tests the FaultConfig struct for declarative configuration.
+    """
+
+    context "preset configurations":
+        it "creates default config":
+            val config = FaultConfig__defaults()
+            expect(config.stack_overflow_enabled).to_equal(true)
+            expect(config.max_recursion_depth).to_equal(1000)
+            expect(config.timeout_secs).to_equal(0)
+            expect(config.execution_limit).to_equal(10000000)
+
+        it "creates strict config":
+            val config = FaultConfig__strict()
+            expect(config.stack_overflow_enabled).to_equal(true)
+            expect(config.max_recursion_depth).to_equal(500)
+            expect(config.timeout_secs).to_equal(30)
+            expect(config.execution_limit).to_equal(5000000)
+
+        it "creates permissive config":
+            val config = FaultConfig__permissive()
+            expect(config.stack_overflow_enabled).to_equal(true)
+            expect(config.max_recursion_depth).to_equal(10000)
+            expect(config.timeout_secs).to_equal(0)
+            expect(config.execution_limit).to_equal(100000000)
+
+        it "creates disabled config":
+            val config = FaultConfig__disabled()
+            expect(config.stack_overflow_enabled).to_equal(false)
+            expect(config.max_recursion_depth).to_equal(0)
+            expect(config.timeout_secs).to_equal(0)
+            expect(config.execution_limit).to_equal(0)
+
+    context "config application":
+        it "applies default config":
+            val config = FaultConfig__defaults()
+            config.apply()
+            val result = shallow_recurse(3)
+            expect(result).to_equal(3)
+
+        it "applies strict config":
+            val config = FaultConfig__strict()
+            config.apply()
+            val result = shallow_recurse(3)
+            expect(result).to_equal(3)
+            # Clean up timeout
+            set_timeout(0)
+            reset_defaults()
+
+        it "applies permissive config":
+            val config = FaultConfig__permissive()
+            config.apply()
+            val result = shallow_recurse(5)
+            expect(result).to_equal(5)
+            reset_defaults()
+
+        it "applies disabled config and re-enables":
+            val config = FaultConfig__disabled()
+            config.apply()
+            val result = shallow_recurse(3)
+            expect(result).to_equal(3)
+            reset_defaults()
+
+    context "config builders":
+        it "creates config with custom timeout":
+            val config = FaultConfig__defaults().with_timeout(45)
+            expect(config.timeout_secs).to_equal(45)
+            expect(config.max_recursion_depth).to_equal(1000)
+
+        it "creates config with custom depth":
+            val config = FaultConfig__defaults().with_max_depth(2000)
+            expect(config.max_recursion_depth).to_equal(2000)
+            expect(config.timeout_secs).to_equal(0)
+
+        it "creates config with custom execution limit":
+            val config = FaultConfig__defaults().with_execution_limit(999)
+            expect(config.execution_limit).to_equal(999)
+            expect(config.max_recursion_depth).to_equal(1000)
+
+        it "chains multiple builders":
+            val config = FaultConfig__defaults().with_timeout(10).with_max_depth(200).with_execution_limit(500)
+            expect(config.timeout_secs).to_equal(10)
+            expect(config.max_recursion_depth).to_equal(200)
+            expect(config.execution_limit).to_equal(500)
+
+# ============================================================================
+# Test Group 4: Constants
+# ============================================================================
+
+describe "Fault Detection - Constants":
+    """
+    ## Default Constants
+
+    Tests that default constants have expected values.
+    """
+
+    it "has correct default max recursion depth":
+        expect(DEFAULT_MAX_RECURSION_DEPTH).to_equal(1000)
+
+    it "has correct default execution limit":
+        expect(DEFAULT_EXECUTION_LIMIT).to_equal(10000000)
+
+    it "has correct default timeout":
+        expect(DEFAULT_TIMEOUT).to_equal(0)
+
+# ============================================================================
+# Test Group 5: Functional Tests
+# ============================================================================
+
+describe "Fault Detection - Functional":
+    """
+    ## Functional Behavior
+
+    Tests that fault detection works correctly during actual computation.
+    """
+
+    context "recursion with detection enabled":
+        it "handles fibonacci computation":
+            enable_stack_overflow_detection()
+            set_recursion_limit(1000)
+            val result = fibonacci(8)
+            expect(result).to_equal(21)
+
+        it "handles multiple sequential recursive calls":
+            enable_stack_overflow_detection()
+            val r1 = shallow_recurse(3)
+            val r2 = shallow_recurse(5)
+            val r3 = shallow_recurse(2)
+            expect(r1 + r2 + r3).to_equal(10)
+
+    context "iterative with detection enabled":
+        it "handles iterative loops":
+            enable_stack_overflow_detection()
+            val result = iterative_sum(100)
+            expect(result).to_equal(100)
+
+    context "toggling detection during computation":
+        it "toggle on-off-on preserves correctness":
+            enable_stack_overflow_detection()
+            val r1 = shallow_recurse(2)
+            disable_stack_overflow_detection()
+            val r2 = shallow_recurse(2)
+            enable_stack_overflow_detection()
+            val r3 = shallow_recurse(2)
+            expect(r1).to_equal(2)
+            expect(r2).to_equal(2)
+            expect(r3).to_equal(2)
+
+    context "combined features":
+        it "all features active with fast code":
+            val config = FaultConfig(
+                stack_overflow_enabled: true,
+                max_recursion_depth: 500,
+                timeout_secs: 60,
+                execution_limit: 5000000)
+            config.apply()
+            val result = fibonacci(8)
+            expect(result).to_equal(21)
+            set_timeout(0)
+            reset_defaults()

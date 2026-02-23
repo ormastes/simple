@@ -1,0 +1,215 @@
+# Core Interpreter — Local Variable Resolution (LOAD_FAST)
+#
+# Assigns compile-time slot indices to local variables within function bodies.
+# This enables O(1) array access via frame_locals[] instead of O(scope_chain)
+# hash map lookups for non-shadowed variables.
+#
+# Algorithm:
+# 1. For each DECL_FN, prescan body to register all local names (params, val, var, for-iterators)
+# 2. Names declared more than once are marked "shadowed" and fall back to slow path
+# 3. Walk expression tree, set expr_i_val[eid] = slot for non-shadowed EXPR_IDENT nodes
+# 4. Per-function slot mappings are cached for use at call time
+
+# ===== Resolution State =====
+# Current function being resolved
+var rl_keys: [text] = []
+var rl_vals: [i64] = []
+var rl_buckets: [i64] = []
+var rl_nexts: [i64] = []
+var rl_count: i64 = 0
+var rl_shadowed: [bool] = []
+
+val RL_HM_SIZE: i64 = 64
+
+fn rl_make_buckets() -> [i64]:
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < RL_HM_SIZE:
+        b.push(-1)
+        i = i + 1
+    b
+
+fn rl_reset():
+    rl_keys = []
+    rl_vals = []
+    rl_buckets = rl_make_buckets()
+    rl_nexts = []
+    rl_count = 0
+    rl_shadowed = []
+
+fn rl_register(name: text) -> i64:
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = rl_buckets[bucket]
+    while idx != -1:
+        if rl_keys[idx] == name:
+            # Already registered — mark as shadowed
+            rl_shadowed[idx] = true
+            return rl_vals[idx]
+        idx = rl_nexts[idx]
+    # New name
+    val slot = rl_count
+    val new_idx = rl_keys.len()
+    rl_keys.push(name)
+    rl_vals.push(slot)
+    rl_nexts.push(rl_buckets[bucket])
+    rl_buckets[bucket] = new_idx
+    rl_shadowed.push(false)
+    rl_count = rl_count + 1
+    slot
+
+fn rl_lookup(name: text) -> i64:
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = rl_buckets[bucket]
+    while idx != -1:
+        if rl_keys[idx] == name:
+            return rl_vals[idx]
+        idx = rl_nexts[idx]
+    -1
+
+fn rl_is_shadowed(slot: i64) -> bool:
+    if slot < 0: return true
+    if slot >= rl_shadowed.len(): return true
+    rl_shadowed[slot]
+
+# ===== Per-Function Slot Cache =====
+# Indexed by decl_id for O(1) lookup at call time
+var fn_slot_keys: [[text]] = []
+var fn_slot_vals: [[i64]] = []
+var fn_slot_buckets: [[i64]] = []
+var fn_slot_nexts: [[i64]] = []
+var fn_slot_counts: [i64] = []
+var fn_slot_shadowed: [[bool]] = []
+
+fn fn_slot_ensure(decl_id: i64):
+    while fn_slot_keys.len() <= decl_id:
+        fn_slot_keys.push([])
+        fn_slot_vals.push([])
+        fn_slot_buckets.push([])
+        fn_slot_nexts.push([])
+        fn_slot_counts.push(0)
+        fn_slot_shadowed.push([])
+
+fn fn_slot_cache_current(decl_id: i64):
+    fn_slot_ensure(decl_id)
+    fn_slot_keys[decl_id] = rl_keys
+    fn_slot_vals[decl_id] = rl_vals
+    fn_slot_buckets[decl_id] = rl_buckets
+    fn_slot_nexts[decl_id] = rl_nexts
+    fn_slot_counts[decl_id] = rl_count
+    fn_slot_shadowed[decl_id] = rl_shadowed
+
+# ===== Public API =====
+
+fn resolve_cached_local_count(decl_id: i64) -> i64:
+    if decl_id < 0: return 0
+    if decl_id >= fn_slot_counts.len(): return 0
+    fn_slot_counts[decl_id]
+
+fn resolve_is_fast_local(decl_id: i64, name: text) -> i64:
+    if decl_id < 0: return -1
+    if decl_id >= fn_slot_keys.len(): return -1
+    val keys = fn_slot_keys[decl_id]
+    val vals = fn_slot_vals[decl_id]
+    val buckets = fn_slot_buckets[decl_id]
+    val nexts = fn_slot_nexts[decl_id]
+    val shadowed = fn_slot_shadowed[decl_id]
+    if buckets.len() == 0: return -1
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = buckets[bucket]
+    while idx != -1:
+        if keys[idx] == name:
+            if shadowed[idx]: return -1
+            return vals[idx]
+        idx = nexts[idx]
+    -1
+
+fn resolve_is_slot_shadowed(decl_id: i64, slot: i64) -> bool:
+    if decl_id < 0: return true
+    if decl_id >= fn_slot_shadowed.len(): return true
+    val shadowed = fn_slot_shadowed[decl_id]
+    if slot >= shadowed.len(): return true
+    shadowed[slot]
+
+# ===== Resolution Pass =====
+
+fn resolve_prescan_stmts(stmts: [i64]):
+    for sid in stmts:
+        val s_node = stmt_get(sid)
+        val tag = s_node.tag
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val name = s_node.name
+            if name != "":
+                rl_register(name)
+        elif tag == STMT_FOR:
+            val iter_name = s_node.name
+            if iter_name != "":
+                rl_register(iter_name)
+            # Prescan for body
+            resolve_prescan_stmts(s_node.body)
+        elif tag == STMT_IF:
+            resolve_prescan_stmts(s_node.body)
+            resolve_prescan_stmts(s_node.else_body)
+        elif tag == STMT_WHILE:
+            resolve_prescan_stmts(s_node.body)
+        elif tag == STMT_BLOCK:
+            resolve_prescan_stmts(s_node.body)
+
+fn resolve_expr(eid: i64):
+    if eid < 0: return
+    val tag = expr_get(eid).tag
+    if tag == EXPR_IDENT:
+        val name = expr_get(eid).s_val
+        val slot = rl_lookup(name)
+        if slot >= 0:
+            val shadowed = rl_is_shadowed(slot)
+            if shadowed == false:
+                expr_i_val[eid] = slot
+        return
+    # Recurse into sub-expressions
+    val e = expr_get(eid)
+    if e.left >= 0: resolve_expr(e.left)
+    if e.right >= 0: resolve_expr(e.right)
+    for arg_eid in e.args:
+        resolve_expr(arg_eid)
+    for stmt_eid in e.stmts:
+        resolve_expr(stmt_eid)
+
+fn resolve_stmt(sid: i64):
+    if sid < 0: return
+    val s_node = stmt_get(sid)
+    val tag = s_node.tag
+    # Resolve expressions in statement
+    if s_node.expr_idx >= 0:
+        resolve_expr(s_node.expr_idx)
+    # Recurse into body
+    for child_sid in s_node.body:
+        resolve_stmt(child_sid)
+    for child_sid in s_node.else_body:
+        resolve_stmt(child_sid)
+
+fn resolve_function(decl_id: i64):
+    val d_node = decl_get(decl_id)
+    rl_reset()
+    # Register parameters first (slots 0..N-1)
+    for pname in d_node.param_names:
+        rl_register(pname)
+    # Prescan body for all local names (detects shadowing)
+    resolve_prescan_stmts(d_node.body_stmts)
+    # Walk expressions to set slot indices
+    for sid in d_node.body_stmts:
+        resolve_stmt(sid)
+    # Cache for use at call time
+    fn_slot_cache_current(decl_id)
+
+fn resolve_module_locals():
+    # Walk all declarations, resolve functions
+    var did: i64 = 0
+    val total = decl_count()
+    while did < total:
+        val d = decl_get(did)
+        if d.tag == DECL_FN:
+            resolve_function(did)
+        did = did + 1
+
+export resolve_module_locals, resolve_cached_local_count
+export resolve_is_fast_local, resolve_is_slot_shadowed

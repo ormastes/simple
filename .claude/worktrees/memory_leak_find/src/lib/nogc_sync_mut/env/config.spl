@@ -1,0 +1,247 @@
+# Environment Configuration and Dotenv Support
+#
+# Functions for parsing dotenv files, exporting in various formats, and shell integration.
+
+import std.env.types
+import std.env.variables
+import std.env.validation
+
+# ============================================================================
+# Export Formats
+# ============================================================================
+
+fn export_bash(vars: [(text, text)]) -> text:
+    """Export environment variables in bash format.
+
+    Example:
+        export_bash([("FOO", "bar")])  # "export FOO=\"bar\""
+    """
+    var lines = []
+
+    for pair in vars:
+        val (name, value) = pair
+        val escaped = escape_shell_value(value)
+        val line = "export " + name + "=\"" + escaped + "\""
+        lines.push(line)
+
+    lines.join("\n")
+
+fn export_fish(vars: [(text, text)]) -> text:
+    """Export environment variables in fish format.
+
+    Example:
+        export_fish([("FOO", "bar")])  # "set -gx FOO \"bar\""
+    """
+    var lines = []
+
+    for pair in vars:
+        val (name, value) = pair
+        val escaped = escape_shell_value(value)
+        val line = "set -gx " + name + " \"" + escaped + "\""
+        lines.push(line)
+
+    lines.join("\n")
+
+fn export_powershell(vars: [(text, text)]) -> text:
+    """Export environment variables in PowerShell format.
+
+    Example:
+        export_powershell([("FOO", "bar")])  # "$env:FOO = \"bar\""
+    """
+    var lines = []
+
+    for pair in vars:
+        val (name, value) = pair
+        val escaped = escape_shell_value(value)
+        val line = "$" + "env:" + name + " = \"" + escaped + "\""
+        lines.push(line)
+
+    lines.join("\n")
+
+fn export_dotenv(vars: [(text, text)]) -> text:
+    """Export environment variables in dotenv format.
+
+    Example:
+        export_dotenv([("FOO", "bar")])  # "FOO=bar"
+    """
+    var lines = []
+
+    for pair in vars:
+        val (name, value) = pair
+        val escaped = escape_dotenv_value(value)
+        val line = name + "=" + escaped
+        lines.push(line)
+
+    lines.join("\n")
+
+# ============================================================================
+# Dotenv Parsing
+# ============================================================================
+
+fn parse_dotenv(content: text) -> [(text, text)]:
+    """Parse dotenv file content into list of (name, value) tuples.
+
+    Supports:
+    - Simple: KEY=value
+    - Quoted: KEY="value with spaces"
+    - Comments: # comment
+    - Empty lines
+
+    Example:
+        parse_dotenv("FOO=bar\nBAZ=qux")  # [("FOO", "bar"), ("BAZ", "qux")]
+    """
+    val lines = content.split("\n")
+    var result = []
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip empty lines and comments
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        # Parse KEY=VALUE
+        val eq_pos = trimmed.find("=")
+        if eq_pos.?:
+            val eq_idx = eq_pos.unwrap()
+            val name = trimmed.substring(0, eq_idx).trim()
+            val value_raw = trimmed.substring(eq_idx + 1).trim()
+            val value = unquote_dotenv_value(value_raw)
+
+            if validation.validate_var_name(name):
+                result.push((name, value))
+
+    result
+
+fn load_dotenv(path: text):
+    """Load dotenv file and set environment variables.
+
+    Example:
+        load_dotenv(".env")  # loads variables from .env file
+    """
+    val content = file_read_text(path)
+    val vars = parse_dotenv(content)
+
+    for pair in vars:
+        val (name, value) = pair
+        variables.env_set(name, value)
+
+fn unquote_dotenv_value(value: text) -> text:
+    """Remove quotes from dotenv value if present.
+
+    Internal helper.
+    """
+    if value.starts_with("\"") and value.ends_with("\"") and value.len() >= 2:
+        return value.substring(1, value.len() - 1)
+
+    if value.starts_with("'") and value.ends_with("'") and value.len() >= 2:
+        return value.substring(1, value.len() - 1)
+
+    value
+
+# ============================================================================
+# Shell Integration
+# ============================================================================
+
+fn shell_eval(shell: text, command: text) -> text:
+    """Evaluate command in specific shell.
+
+    Example:
+        shell_eval("bash", "echo $HOME")  # "/home/user"
+    """
+    val (stdout, stderr, code) = types.rt_process_run(shell, ["-c", command])
+    if code == 0:
+        stdout.trim()
+    else:
+        ""
+
+fn source_file(path: text) -> [(text, text)]:
+    """Source shell file and return exported variables.
+
+    Example:
+        source_file(".env")  # loads and returns variables
+    """
+    # Simple implementation: read and parse as dotenv
+    val content = file_read_text(path)
+    parse_dotenv(content)
+
+fn write_dotenv(path: text, vars: [(text, text)]):
+    """Write environment variables to dotenv file.
+
+    Example:
+        write_dotenv(".env", [("FOO", "bar")])
+    """
+    val content = export_dotenv(vars)
+    file_write_text(path, content)
+
+# ============================================================================
+# Escape/Unescape Utilities
+# ============================================================================
+
+fn escape_shell_value(value: text) -> text:
+    """Escape value for safe shell usage.
+
+    Example:
+        escape_shell_value("hello \"world\"")  # "hello \\\"world\\\""
+    """
+    var result = value
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("$", "\\$")
+    result = result.replace("`", "\\`")
+    result
+
+fn escape_dotenv_value(value: text) -> text:
+    """Escape value for dotenv format.
+
+    Example:
+        escape_dotenv_value("hello world")  # "\"hello world\""
+    """
+    # Quote if contains spaces or special chars
+    if value.contains(" ") or value.contains("\"") or value.contains("'"):
+        return "\"" + value.replace("\"", "\\\"") + "\""
+
+    value
+
+fn unescape_shell_value(value: text) -> text:
+    """Unescape shell value.
+
+    Example:
+        unescape_shell_value("hello \\\"world\\\"")  # "hello \"world\""
+    """
+    var result = value
+    result = result.replace("\\\"", "\"")
+    result = result.replace("\\$", "$")
+    result = result.replace("\\`", "`")
+    result = result.replace("\\\\", "\\")
+    result
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn file_read_text(path: text) -> text:
+    """Read text file (simple implementation).
+
+    Internal helper.
+    """
+    # Try to run cat command
+    val (stdout, stderr, code) = types.rt_process_run("/bin/sh", ["-c", "cat " + path])
+    if code == 0:
+        stdout
+    else:
+        ""
+
+fn file_write_text(path: text, content: text):
+    """Write text file (simple implementation).
+
+    Internal helper.
+    """
+    # Use echo to write file
+    val escaped = content.replace("'", "'\\''")
+    types.rt_process_run("/bin/sh", ["-c", "echo '" + escaped + "' > " + path])
+
+export export_bash, export_fish, export_powershell, export_dotenv
+export parse_dotenv, load_dotenv, unquote_dotenv_value
+export escape_shell_value, escape_dotenv_value, unescape_shell_value
+export shell_eval, source_file, write_dotenv

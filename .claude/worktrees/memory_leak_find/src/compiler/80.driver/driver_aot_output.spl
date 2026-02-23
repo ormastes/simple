@@ -1,0 +1,230 @@
+# Driver — AOT Output Methods
+#
+# Extracted from driver.spl. Contains CompilerDriver methods for:
+# - compile_to_native: Native ELF compilation via backend + linker
+# - compile_to_c: C++20 source generation (single-file and directory modes)
+# - compile_to_smf: SMF module format compilation
+# - compile_to_self_contained: Self-contained binary compilation
+# - collect_smf_bytes: Shared helper for SMF byte collection
+# - link_objects: Legacy linker helper
+
+use compiler.backend.backend.{compile_module_with_backend, get_effective_backend_name}
+use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default, write_elf_bytes_to_file}
+use compiler.driver.smf_writer.{generate_smf_with_templates, Target}
+use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
+use driver_types.{CompileResult, CompileOptions, OutputFormat}
+use compiler.driver.driver.{CompilerDriver}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_path_join(a: text, b: text) -> text
+extern fn rt_path_parent(path: text) -> text
+
+impl CompilerDriver:
+    me compile_to_native(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT native: compiling to {output} (backend: {effective_backend})")
+
+        # Compile all modules and collect object files
+        var object_files: [text] = []
+
+        for name in self.ctx.mir_modules.keys():
+            log.trace("compiling module: {name}")
+            val mir_module = self.ctx.mir_modules[name]
+            val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("AOT compile error in {name}: {err.to_text()}")
+
+            val module = compiled.unwrap()
+            if module.object_code.?:
+                # Write object bytes to file for linking (Phase 2.1: Direct ELF writing)
+                val obj_path = "{output}.{name}.o"
+                match write_elf_bytes_to_file(obj_path, module.object_code.unwrap()):
+                    case Ok(_):
+                        object_files = object_files.push(obj_path)
+                    case Err(e):
+                        return CompileResult.CodegenError("Failed to write object file {obj_path}: {e}")
+            else:
+                return CompileResult.CodegenError("Backend produced no object code for {name}")
+
+        # Link object files into final executable using linker wrapper
+        var link_config = NativeLinkConfig__default()
+        link_config.debug = self.ctx.options.debug_info
+        link_config.verbose = self.ctx.options.verbose
+
+        match link_to_native(object_files, output, link_config):
+            case Ok(_):
+                log.info("Native executable written to {output} (backend: {effective_backend})")
+                CompileResult.Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Linking failed: {e}")
+
+    me compile_to_c(output: text) -> CompileResult:
+        """Compile all MIR modules to C++20 source. Routes to single-file or directory mode."""
+        if output.ends_with(".cpp") or output.ends_with(".c") or output.ends_with(".cxx"):
+            return self.compile_to_c_single_file(output)
+        else:
+            return self.compile_to_c_directory(output)
+
+    me compile_to_c_single_file(output: text) -> CompileResult:
+        """Compile all MIR modules to a single C++20 source file."""
+        val log = self.ctx.logger
+        val is_release = self.ctx.options.release
+        log.debug("AOT C: generating C++20 to {output}")
+
+        var all_c_source = ""
+        for name in self.ctx.mir_modules.keys():
+            log.trace("translating module: {name}")
+            val mir_module = self.ctx.mir_modules[name]
+            val compiled = compile_module_with_backend("c", mir_module, is_release)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("C codegen error in {name}: {err.to_text()}")
+            val module = compiled.unwrap()
+            all_c_source = all_c_source + module.assembly
+
+        # Write C++ source to output file
+        if not rt_file_write_text(output, all_c_source):
+            return CompileResult.CodegenError("Failed to write C++ source to {output}")
+        log.info("C++20 source written to {output}")
+        CompileResult.Success(output)
+
+    me compile_to_c_directory(output_dir: text) -> CompileResult:
+        """Compile MIR modules to per-module C++20 files with CMake infrastructure."""
+        val log = self.ctx.logger
+        val is_release = self.ctx.options.release
+        log.debug("AOT C (multi-file): generating C++20 to {output_dir}/")
+
+        # Create root output directory
+        if not rt_dir_create(output_dir, true):
+            return CompileResult.CodegenError("Failed to create output directory {output_dir}")
+
+        var module_files: [(text, text)] = []
+
+        for name in self.ctx.mir_modules.keys():
+            log.trace("translating module: {name}")
+            val mir_module = self.ctx.mir_modules[name]
+            val compiled = compile_module_with_backend("c", mir_module, is_release)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("C codegen error in {name}: {err.to_text()}")
+            val module = compiled.unwrap()
+
+            # Convert module name to relative file path: "compiler.core.parser" -> "compiler/core/parser.cpp"
+            val rel_path = name.replace(".", "/") + ".cpp"
+            val full_path = rt_path_join(output_dir, rel_path)
+
+            # Create parent directories
+            val parent_dir = rt_path_parent(full_path)
+            if not rt_dir_create(parent_dir, true):
+                return CompileResult.CodegenError("Failed to create directory {parent_dir}")
+
+            # Write per-module .cpp file
+            if not rt_file_write_text(full_path, module.assembly):
+                return CompileResult.CodegenError("Failed to write {full_path}")
+
+            # Write per-module .h file if header content present
+            if module.has_llvm_ir and module.llvm_ir != "":
+                val h_rel_path = name.replace(".", "/") + ".h"
+                val h_full_path = rt_path_join(output_dir, h_rel_path)
+                if not rt_file_write_text(h_full_path, module.llvm_ir):
+                    return CompileResult.CodegenError("Failed to write {h_full_path}")
+                log.trace("wrote {h_rel_path}")
+
+            module_files.push((name, rel_path))
+            log.trace("wrote {rel_path}")
+
+        # Generate CMake infrastructure
+        val cmake_err = generate_cmake_for_modules(output_dir, module_files, log)
+        if cmake_err != nil:
+            return CompileResult.CodegenError(cmake_err)
+
+        log.info("C++20 multi-file output written to {output_dir}/ ({module_files.len()} modules)")
+        CompileResult.Success(output_dir)
+
+    me compile_to_smf(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT SMF: compiling to {output} (backend: {effective_backend})")
+
+        val smf_result = self.collect_smf_bytes()
+        if not smf_result.is_success():
+            return smf_result
+
+        val smf_bytes = smf_result.get_value()
+
+        # Write SMF file using linker wrapper
+        match link_to_smf(smf_bytes, output, self.ctx.options.verbose):
+            case Ok(_):
+                log.info("SMF module written to {output} (backend: {effective_backend})")
+                CompileResult.Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Failed to write SMF file: {e}")
+
+    me compile_to_self_contained(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT self-contained: compiling to {output} (backend: {effective_backend})")
+
+        val smf_result = self.collect_smf_bytes()
+        if not smf_result.is_success():
+            return smf_result
+
+        val smf_bytes = smf_result.get_value()
+
+        # Build self-contained binary using linker wrapper
+        var sc_config = SelfContainedConfig__default()
+        sc_config.verbose = self.ctx.options.verbose
+
+        match link_to_self_contained(smf_bytes, output, sc_config):
+            case Ok(_):
+                log.info("Self-contained binary written to {output} (backend: {effective_backend})")
+                CompileResult.Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Self-contained build failed: {e}")
+
+    me collect_smf_bytes() -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+
+        var all_object_bytes: [u8] = []
+
+        for name in self.ctx.mir_modules.keys():
+            log.trace("compiling module for SMF: {name}")
+            val mir_module = self.ctx.mir_modules[name]
+            val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("AOT compile error in {name}: {err.to_text()}")
+
+            val module = compiled.unwrap()
+            if module.object_code.?:
+                all_object_bytes = all_object_bytes.concat(module.object_code.unwrap())
+
+        # Wrap object code into SMF format
+        val target = Target__host()
+        val smf_bytes = generate_smf_with_templates(all_object_bytes, nil, nil, target)
+        CompileResult.Success(smf_bytes)
+
+    # --------------------------------------------------------------------------
+    # Linker Helper (legacy - kept for compatibility, delegates to linker_wrapper)
+    # --------------------------------------------------------------------------
+
+    fn link_objects(objects: [text], output: text) -> Result<text, text>:
+        if objects.is_empty():
+            return Err("No object files to link")
+
+        var config = NativeLinkConfig__default()
+        link_to_native(objects, output, config)
+
+export compile_to_native, compile_to_c, compile_to_c_single_file, compile_to_c_directory
+export compile_to_smf, compile_to_self_contained, collect_smf_bytes, link_objects

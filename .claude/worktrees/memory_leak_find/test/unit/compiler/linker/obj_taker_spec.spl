@@ -1,0 +1,604 @@
+"""
+# ObjTaker Specification
+
+**Feature IDs:** #1011-1020
+**Category:** Tooling
+**Difficulty:** 5/5
+**Status:** In Progress
+
+## Overview
+
+ObjTaker provides unified object extraction from SMF files with type inference
+for generic templates. It bridges the linker and loader, handling:
+- Concrete object extraction
+- Generic template loading and instantiation
+- Type inference using Hindley-Milner
+- Caching for efficiency
+
+## Key Features
+
+- Template loading from TemplateCode sections
+- Type inference using HmInferContext
+- Deferred type resolution with usage hints
+- Multi-level caching (templates, instances, metadata)
+- Cross-module type unification
+
+## Implementation
+
+File: `/home/ormastes/dev/pub/simple/src/compiler/linker/obj_taker.spl`
+"""
+
+use compiler.linker.obj_taker.*
+use compiler.loader.compiler_ffi.*
+use compiler.core.lexer_types.Span
+
+
+# ============================================================================
+# Test Group 1: Configuration
+# ============================================================================
+
+describe "ObjTaker Configuration":
+    """
+    ## Configuration Management
+
+    Validates ObjTakerConfig creation and default values.
+    """
+
+    it "creates default configuration":
+        val config = ObjTakerConfig__default()
+
+        expect(config.enable_caching).to_equal(true)
+        expect(config.max_cache_size).to_equal(10000)
+        expect(config.verbose).to_equal(false)
+        expect(config.allow_deferred).to_equal(true)
+
+    it "allows custom configuration":
+        val config = ObjTakerConfig(
+            enable_caching: false,
+            max_cache_size: 5000,
+            verbose: true,
+            allow_deferred: false
+        )
+
+        expect(config.enable_caching).to_equal(false)
+        expect(config.max_cache_size).to_equal(5000)
+        expect(config.verbose).to_equal(true)
+        expect(config.allow_deferred).to_equal(false)
+
+
+# ============================================================================
+# Test Group 2: ObjTakeResult
+# ============================================================================
+
+describe "ObjTakeResult Variants":
+    """
+    ## Result Type Handling
+
+    Validates ObjTakeResult enum variants and helper methods.
+    """
+
+    context "when checking success results":
+        """
+        ### Scenario: Success Detection
+
+        Tests is_success() for Code and Template variants.
+        """
+
+        it "identifies Code as success":
+            val symbol = create_test_symbol("test_fn", false)
+            val result = ObjTakeResult.Code(
+                bytes: [1, 2, 3],
+                symbol: symbol,
+                ty: nil
+            )
+
+            expect(result.is_success()).to_equal(true)
+            expect(result.is_error()).to_equal(false)
+
+        it "identifies Template as success":
+            val symbol = create_test_symbol("generic_fn", true)
+            val tmpl = create_test_template("generic_fn", 1)
+            # Use positional arguments to avoid 'template' keyword issue
+            val result = ObjTakeResult.Template(tmpl, symbol)
+
+            expect(result.is_success()).to_equal(true)
+            expect(result.is_error()).to_equal(false)
+
+    context "when checking error results":
+        """
+        ### Scenario: Error Detection
+
+        Tests is_error() for Error and NotFound variants.
+        """
+
+        it "identifies Error as error":
+            val result = ObjTakeResult.Error("Something went wrong")
+
+            expect(result.is_success()).to_equal(false)
+            expect(result.is_error()).to_equal(true)
+
+        it "identifies NotFound as error":
+            val result = ObjTakeResult.NotFound("missing_symbol")
+
+            expect(result.is_success()).to_equal(false)
+            expect(result.is_error()).to_equal(true)
+
+    context "when handling deferred results":
+        """
+        ### Scenario: Deferred Type Handling
+
+        Tests Deferred variant (neither success nor error).
+        """
+
+        it "identifies Deferred as not success or error":
+            val hints = DeferredHints(
+                symbol: "deferred_fn",
+                type_vars: [],
+                constraints: [],
+                usage_sites: []
+            )
+            val result = ObjTakeResult.Deferred(
+                symbol: "deferred_fn",
+                hints: hints
+            )
+
+            expect(result.is_success()).to_equal(false)
+            expect(result.is_error()).to_equal(false)
+
+
+# ============================================================================
+# Test Group 3: Template Operations
+# ============================================================================
+
+describe "Template Operations":
+    """
+    ## Template Management
+
+    Validates Template struct operations including:
+    - Arity calculation
+    - Type parameter substitution
+    - Name mangling
+    """
+
+    context "when calculating template arity":
+        """
+        ### Scenario: Template Arity
+
+        Tests arity() method for templates with different parameter counts.
+        """
+
+        it "calculates arity for single parameter":
+            val template = create_test_template("Option", 1)
+            expect(template.arity()).to_equal(1)
+
+        it "calculates arity for multiple parameters":
+            val template = create_test_template("Result", 2)
+            expect(template.arity()).to_equal(2)
+
+        it "calculates arity for no parameters":
+            val template = Template(
+                name: "Unit",
+                type_params: [],
+                kind: TemplateKind.Struct,
+                body: [],
+                constraints: []
+            )
+            expect(template.arity()).to_equal(0)
+
+    context "when substituting type parameters":
+        """
+        ### Scenario: Type Substitution
+
+        Tests template.substitute() for type parameter replacement.
+        """
+
+        it "substitutes single type parameter":
+            val template = create_test_template("Option", 1)
+            val type_args = [create_int_type()]
+
+            val substituted = template.substitute(type_args)
+
+            expect(substituted.template.name).to_equal("Option")
+            expect(substituted.type_args.len()).to_equal(1)
+            expect(substituted.mangled_name).to_contain("Option")
+            expect(substituted.mangled_name).to_contain("i64")
+
+        it "substitutes multiple type parameters":
+            val template = create_test_template("Result", 2)
+            val type_args = [create_int_type(), create_string_type()]
+
+            val substituted = template.substitute(type_args)
+
+            expect(substituted.type_args.len()).to_equal(2)
+            expect(substituted.mangled_name).to_contain("Result")
+
+    context "when mangling names":
+        """
+        ### Scenario: Name Mangling
+
+        Tests mangle_name() helper function.
+        """
+
+        it "returns base name for no type args":
+            val mangled = mangle_name("Vec", [])
+            expect(mangled).to_equal("Vec")
+
+        it "mangles with single type arg":
+            val type_args = [create_int_type()]
+            val mangled = mangle_name("Vec", type_args)
+            expect(mangled).to_contain("Vec$")
+            expect(mangled).to_contain("i64")
+
+        it "mangles with multiple type args":
+            val type_args = [create_int_type(), create_string_type()]
+            val mangled = mangle_name("Result", type_args)
+            expect(mangled).to_contain("Result$")
+
+
+# ============================================================================
+# Test Group 4: Deferred Hints
+# ============================================================================
+
+describe "Deferred Hints Management":
+    """
+    ## Deferred Type Hints
+
+    Validates DeferredHints, DeferredTypeVar, and DeferredConstraint structures.
+    """
+
+    context "when creating deferred type variables":
+        """
+        ### Scenario: Type Variable Creation
+
+        Tests DeferredTypeVar construction.
+        """
+
+        it "creates type variable without fallback":
+            val type_var = DeferredTypeVar(
+                id: 1,
+                name: "T",
+                fallback: None
+            )
+
+            expect(type_var.id).to_equal(1)
+            expect(type_var.name).to_equal("T")
+            expect(type_var.fallback.?).to_equal(false)
+
+        it "creates type variable with fallback":
+            val type_var = DeferredTypeVar(
+                id: 2,
+                name: "U",
+                fallback: Some(create_int_type())
+            )
+
+            expect(type_var.id).to_equal(2)
+            expect(type_var.fallback.?).to_equal(true)
+
+    context "when creating constraints":
+        """
+        ### Scenario: Constraint Creation
+
+        Tests DeferredConstraint for different constraint kinds.
+        """
+
+        it "creates equality constraint":
+            val constraint = DeferredConstraint(
+                kind: ConstraintKind.Equals,
+                lhs: 1,
+                rhs: 2,
+                source_loc: "test.spl:10:5"
+            )
+
+            expect(constraint.kind).to_equal(ConstraintKind.Equals)
+            expect(constraint.source_loc).to_equal("test.spl:10:5")
+
+        it "creates subtype constraint":
+            val constraint = DeferredConstraint(
+                kind: ConstraintKind.Subtype,
+                lhs: 3,
+                rhs: 4,
+                source_loc: "test.spl:15:10"
+            )
+
+            expect(constraint.kind).to_equal(ConstraintKind.Subtype)
+
+        it "creates implements constraint":
+            val constraint = DeferredConstraint(
+                kind: ConstraintKind.Implements,
+                lhs: 5,
+                rhs: 6,
+                source_loc: "test.spl:20:8"
+            )
+
+            expect(constraint.kind).to_equal(ConstraintKind.Implements)
+
+    context "when building deferred hints":
+        """
+        ### Scenario: Hints Aggregation
+
+        Tests DeferredHints construction with multiple components.
+        """
+
+        it "creates hints with all components":
+            val type_vars = [
+                DeferredTypeVar(id: 1, name: "T", fallback: None)
+            ]
+            val constraints = [
+                DeferredConstraint(
+                    kind: ConstraintKind.Equals,
+                    lhs: 1,
+                    rhs: 2,
+                    source_loc: "test.spl:5:1"
+                )
+            ]
+            val usage_sites = [
+                UsageSite(
+                    file: "main.spl",
+                    loc: "10:5",
+                    context_type: Some(create_int_type())
+                )
+            ]
+
+            val hints = DeferredHints(
+                symbol: "test_fn",
+                type_vars: type_vars,
+                constraints: constraints,
+                usage_sites: usage_sites
+            )
+
+            expect(hints.symbol).to_equal("test_fn")
+            expect(hints.type_vars.len()).to_equal(1)
+            expect(hints.constraints.len()).to_equal(1)
+            expect(hints.usage_sites.len()).to_equal(1)
+
+
+# ============================================================================
+# Test Group 5: Cache Management
+# ============================================================================
+
+describe "ObjTaker Cache Management":
+    """
+    ## Caching System
+
+    Validates cache operations including:
+    - Cache statistics
+    - Cache clearing
+    - Cache hit/miss behavior
+    """
+
+    context "when tracking cache statistics":
+        """
+        ### Scenario: Cache Stats
+
+        Tests cache_stats() method for tracking cached items.
+        """
+
+        it "reports empty caches initially":
+            val obj_taker = ObjTaker__with_defaults()
+            val stats = obj_taker.cache_stats()
+
+            expect(stats.template_count).to_equal(0)
+            expect(stats.instance_count).to_equal(0)
+            expect(stats.metadata_count).to_equal(0)
+
+    context "when clearing caches":
+        """
+        ### Scenario: Cache Clearing
+
+        Tests clear_cache() method.
+        """
+
+        it "clears all caches":
+            val obj_taker = ObjTaker__with_defaults()
+
+            # TODO: Add items to caches first
+            # Then verify clear_cache() removes them
+
+            obj_taker.clear_cache()
+
+            val stats = obj_taker.cache_stats()
+            expect(stats.template_count).to_equal(0)
+            expect(stats.instance_count).to_equal(0)
+            expect(stats.metadata_count).to_equal(0)
+
+
+# ============================================================================
+# Test Group 6: Type Mangling Helpers
+# ============================================================================
+
+describe "Type Mangling Helpers":
+    """
+    ## Type Mangling
+
+    Validates type_to_mangled_str() for various type kinds.
+    """
+
+    context "when mangling primitive types":
+        """
+        ### Scenario: Primitive Type Mangling
+
+        Tests mangling for Int, Float, Bool, String, Void.
+        """
+
+        it "mangles signed integer types":
+            val ty = create_int_type()  # i64
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_equal("i64")
+
+        it "mangles unsigned integer types":
+            val ty = create_uint_type(32)
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_equal("u32")
+
+        it "mangles float types":
+            val ty = create_float_type()  # f64
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_equal("f64")
+
+        it "mangles bool type":
+            val ty = create_bool_type()
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_equal("bool")
+
+        it "mangles string type":
+            val ty = create_string_type()
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_equal("str")
+
+        it "mangles void type":
+            val ty = create_void_type()
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_equal("void")
+
+    context "when mangling complex types":
+        """
+        ### Scenario: Complex Type Mangling
+
+        Tests mangling for Named, Array, and other complex types.
+        """
+
+        it "mangles named types":
+            val ty = create_named_type("MyStruct")
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_equal("MyStruct")
+
+        it "mangles array types":
+            val ty = create_array_type(create_int_type())
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_contain("arr_i64")
+
+        it "handles unknown types":
+            val ty = create_unknown_type()
+            val mangled = type_to_mangled_str(ty)
+            expect(mangled).to_equal("unknown")
+
+
+# ============================================================================
+# Test Group 7: Template Parameter Generation
+# ============================================================================
+
+describe "Template Parameter Generation":
+    """
+    ## Type Parameter Names
+
+    Validates generate_type_params() for creating T, U, V, etc.
+    """
+
+    it "generates single parameter":
+        val params = generate_type_params(1)
+        expect(params.len()).to_equal(1)
+        expect(params[0]).to_equal("T")
+
+    it "generates multiple parameters":
+        val params = generate_type_params(3)
+        expect(params.len()).to_equal(3)
+        expect(params[0]).to_equal("T")
+        expect(params[1]).to_equal("U")
+        expect(params[2]).to_equal("V")
+
+    it "generates all alphabet names":
+        val params = generate_type_params(7)
+        expect(params).to_equal(["T", "U", "V", "W", "X", "Y", "Z"])
+
+    it "generates numbered names after alphabet":
+        val params = generate_type_params(9)
+        expect(params[7]).to_equal("T7")
+        expect(params[8]).to_equal("T8")
+
+    it "handles zero parameters":
+        val params = generate_type_params(0)
+        expect(params.len()).to_equal(0)
+
+
+# ============================================================================
+# Helper Code
+# ============================================================================
+
+fn create_test_symbol(name: text, is_generic: bool) -> SmfSymbol:
+    """Create a test SmfSymbol."""
+    SmfSymbol(
+        name: name,
+        section_index: 0,
+        offset: 0,
+        size: 100,
+        ty: SymbolType.Function,
+        binding: SymbolBinding.Global,
+        is_generic_template: is_generic,
+        template_param_count: if is_generic: 1 else: 0,
+        template_offset: 0
+    )
+
+fn create_test_template(name: text, param_count: i32) -> Template:
+    """Create a test Template."""
+    Template(
+        name: name,
+        type_params: generate_type_params(param_count),
+        kind: TemplateKind.Function,
+        body: [],
+        constraints: []
+    )
+
+fn create_int_type() -> HirType:
+    """Create an i64 type for testing."""
+    # TODO: Use actual HirType construction from compiler.type_infer
+    # For now, placeholder - will need integration with type system
+    HirType(
+        kind: HirTypeKind.Int(bits: 64, signed: true),
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )
+
+fn create_float_type() -> HirType:
+    """Create an f64 type for testing."""
+    HirType(
+        kind: HirTypeKind.Float(bits: 64),
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )
+
+fn create_bool_type() -> HirType:
+    """Create a bool type for testing."""
+    HirType(
+        kind: HirTypeKind.Bool,
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )
+
+fn create_string_type() -> HirType:
+    """Create a string type for testing."""
+    HirType(
+        kind: HirTypeKind.String,
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )
+
+fn create_uint_type(bits: i32) -> HirType:
+    """Create an unsigned integer type for testing."""
+    HirType(
+        kind: HirTypeKind.Int(bits: bits, signed: false),
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )
+
+fn create_void_type() -> HirType:
+    """Create a void/unit type for testing."""
+    HirType(
+        kind: HirTypeKind.Unit,
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )
+
+fn create_named_type(name: text) -> HirType:
+    """Create a named type for testing."""
+    HirType(
+        kind: HirTypeKind.Named(name: name, type_args: []),
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )
+
+fn create_array_type(element_type: HirType) -> HirType:
+    """Create an array type for testing."""
+    HirType(
+        kind: HirTypeKind.Array(element_type: element_type),
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )
+
+fn create_unknown_type() -> HirType:
+    """Create an unknown type for testing."""
+    HirType(
+        kind: HirTypeKind.Unknown,
+        span: Span(start: 0, end: 0, line: 0, col: 0)
+    )

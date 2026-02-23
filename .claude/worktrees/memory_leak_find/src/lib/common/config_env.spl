@@ -1,0 +1,124 @@
+# ConfigEnv
+#
+# Unified dictionary-like interface for configuration, environment variables, and arguments.
+# Port of rust/common/src/config_env.rs
+
+use app.io.{env_vars}
+
+export ConfigEnv
+
+# Unified config from env vars, args, and key-value pairs
+class ConfigEnv:
+    data: Dict<text, text>
+
+impl ConfigEnv:
+    static fn empty() -> ConfigEnv:
+        ConfigEnv(data: {})
+
+    # Parse command-line arguments
+    # Supports: --key=value, --key value, -k value, positional as _0, _1, etc.
+    static fn from_args(args: [text]) -> ConfigEnv:
+        var config = ConfigEnv.empty()
+        var positional_idx = 0
+        var i = 0
+        while i < args.len():
+            val arg = args[i]
+            if arg.starts_with("--"):
+                val key_value = arg[2:]
+                val eq_pos = key_value.index_of("=")
+                if eq_pos.?:
+                    val key = key_value[0:eq_pos.unwrap()]
+                    val value = key_value[eq_pos.unwrap() + 1:]
+                    config.set(key, value)
+                elif i + 1 < args.len() and not args[i + 1].starts_with("-"):
+                    config.set(key_value, args[i + 1])
+                    i = i + 1
+                else:
+                    config.set(key_value, "true")
+            elif arg.starts_with("-") and arg.len() == 2:
+                val key = arg[1:]
+                if i + 1 < args.len() and not args[i + 1].starts_with("-"):
+                    config.set(key, args[i + 1])
+                    i = i + 1
+                else:
+                    config.set(key, "true")
+            else:
+                config.set("_{positional_idx}", arg)
+                positional_idx = positional_idx + 1
+            i = i + 1
+        config
+
+    # Create from environment variables
+    static fn from_env() -> ConfigEnv:
+        var config = ConfigEnv.empty()
+        val vars = env_vars()
+        for key in vars.keys():
+            config.set(key, vars[key])
+        config
+
+    # Create from env vars with a prefix (prefix is stripped)
+    static fn from_env_with_prefix(prefix: text) -> ConfigEnv:
+        var config = ConfigEnv.empty()
+        val vars = env_vars()
+        for key in vars.keys():
+            if key.starts_with(prefix):
+                config.set(key[prefix.len():], vars[key])
+        config
+
+    fn get(key: text) -> text?:
+        if self.data.has(key):
+            Some(self.data[key])
+        else:
+            nil
+
+    fn get_or(key: text, default: text) -> text:
+        self.data.get(key) ?? default
+
+    me set(key: text, value: text):
+        self.data[key] = value
+
+    fn contains(key: text) -> bool:
+        self.data.has(key)
+
+    me remove(key: text) -> text?:
+        if self.data.has(key):
+            val value = self.data[key]
+            self.data.remove(key)
+            Some(value)
+        else:
+            nil
+
+    fn get_int(key: text) -> i64?:
+        val v = self.get(key)
+        if not v.?:
+            return nil
+        v.unwrap().parse_int()
+
+    fn get_int_or(key: text, default: i64) -> i64:
+        self.get_int(key) ?? default
+
+    fn get_bool(key: text) -> bool?:
+        val v = self.get(key)
+        if not v.?:
+            return nil
+        val lower = v.unwrap().lower()
+        if lower == "true" or lower == "1" or lower == "yes" or lower == "on":
+            Some(true)
+        elif lower == "false" or lower == "0" or lower == "no" or lower == "off":
+            Some(false)
+        else:
+            nil
+
+    fn get_bool_or(key: text, default: bool) -> bool:
+        self.get_bool(key) ?? default
+
+    fn keys() -> [text]:
+        self.data.keys()
+
+    fn len() -> i64:
+        self.data.len()
+
+    # Merge another config (other values override)
+    me merge(other: ConfigEnv):
+        for key in other.data.keys():
+            self.data[key] = other.data[key]

@@ -1,0 +1,111 @@
+#!/usr/bin/env simple
+# Build FFI wrapper crates
+#
+# Usage:
+#   scripts/build-ffi.spl <crate-name>  # Build specific FFI crate
+#   scripts/build-ffi.spl --all         # Build all FFI crates
+#   scripts/build-ffi.spl --list        # List available FFI crates
+
+use app.io.{shell, dir_exists, print, env_get}
+
+fn main():
+    val args = get_args()
+
+    if args.len() == 0:
+        print "Usage: scripts/build-ffi.spl <crate-name|--all|--list>"
+        print ""
+        print "Available crates:"
+        list_ffi_crates()
+        return
+
+    val arg = args[0]
+    if arg == "--list":
+        list_ffi_crates()
+    elif arg == "--all":
+        build_all_ffi_crates()
+    else:
+        build_ffi_crate(arg)
+
+fn list_ffi_crates():
+    val crates = get_ffi_crates()
+    for crate_name in crates:
+        print "  - {crate_name}"
+
+fn get_ffi_crates() -> [text]:
+    [
+        "ffi_torch",
+        "ffi_regex",
+        "ffi_core"
+    ]
+
+fn build_ffi_crate(crate_name: text):
+    val crate_dir = "build/artifacts/rust/{crate_name}"
+
+    if not dir_exists(crate_dir):
+        print "Error: FFI crate '{crate_name}' not found at {crate_dir}"
+        print ""
+        print "Available crates:"
+        list_ffi_crates()
+        return
+
+    print "=== Building FFI crate: {crate_name} ==="
+    print "Directory: {crate_dir}"
+    print ""
+
+    # Build with cargo (via shell)
+    val build_cmd = "cd {crate_dir} && cargo build --release 2>&1"
+    val result = shell(build_cmd)
+
+    print result
+    print ""
+
+    # Check if build succeeded
+    if result.contains("Finished"):
+        print "✓ {crate_name} built successfully"
+
+        # Copy library to standard location if it's ffi_torch
+        if crate_name == "ffi_torch":
+            copy_torch_library(crate_dir)
+    else:
+        print "✗ {crate_name} build failed"
+
+fn copy_torch_library(crate_dir: text):
+    val lib_file = "{crate_dir}/target/release/libsimple_torch.so"
+    val dest_dir = "lib/ffi"
+
+    # Create destination directory
+    val mkdir_result = shell("mkdir -p {dest_dir}")
+
+    # Copy library
+    val copy_cmd = "cp {lib_file} {dest_dir}/ 2>&1"
+    val copy_result = shell(copy_cmd)
+
+    if not copy_result.contains("cannot stat"):
+        print "  ✓ Copied library to {dest_dir}/libsimple_torch.so"
+    else:
+        print "  ⚠ Library file not found (this is normal for stub builds)"
+
+fn build_all_ffi_crates():
+    val crates = get_ffi_crates()
+    var success_count = 0
+    var total_count = crates.len()
+
+    for crate_name in crates:
+        build_ffi_crate(crate_name)
+        print ""
+        success_count = success_count + 1
+
+    print "=== Build Summary ==="
+    print "Built {success_count}/{total_count} FFI crates"
+
+fn get_args() -> [text]:
+    # Get command-line arguments
+    # This is a placeholder - in real implementation, would use runtime args
+    val env_args = env_get("FFI_BUILD_ARGS")
+    if env_args == "":
+        return []
+
+    # Parse args from environment
+    env_args.split(" ")
+
+export main

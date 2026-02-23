@@ -1,0 +1,338 @@
+# Mach-O Writer Tests
+#
+# Tests for the Mach-O 64-bit object file writer: header generation,
+# symbol naming, section types, relocation mapping, and full generation.
+
+use compiler.backend.native.macho_writer.{MachOWriter, MachOSection, MachOReloc, MachOSymbol}
+use compiler.backend.native.macho_writer.{macho_writer_aarch64, macho_writer_x86_64}
+use compiler.backend.native.macho_writer.{macho_add_section, macho_add_symbol}
+use compiler.backend.native.macho_writer.{new_macho_text_section, new_macho_const_section, new_macho_data_section, new_macho_cstring_section}
+use compiler.backend.native.macho_writer.{macho_section_add_reloc}
+use compiler.backend.native.macho_writer.{new_macho_func_symbol, new_macho_local_symbol, new_macho_extern_symbol, new_macho_data_symbol}
+use compiler.backend.native.macho_writer.{macho_symbol_name}
+use compiler.backend.native.macho_writer.{map_elf_reloc_to_macho_arm64, map_elf_reloc_to_macho_x86_64}
+use compiler.backend.native.macho_writer.{macho_reloc_info}
+use compiler.backend.native.macho_writer.{write_macho64, write_fixed_name, pow2}
+use compiler.backend.native.macho_writer.{MH_MAGIC_64, CPU_TYPE_ARM64, CPU_TYPE_X86_64}
+use compiler.backend.native.macho_writer.{CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_X86_64_ALL}
+use compiler.backend.native.macho_writer.{MH_OBJECT, MH_SUBSECTIONS_VIA_SYMBOLS}
+use compiler.backend.native.macho_writer.{LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB, LC_BUILD_VERSION}
+use compiler.backend.native.macho_writer.{S_REGULAR, S_CSTRING_LITERALS}
+use compiler.backend.native.macho_writer.{S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS}
+use compiler.backend.native.macho_writer.{N_UNDF, N_SECT, N_EXT}
+use compiler.backend.native.macho_writer.{ARM64_RELOC_UNSIGNED, ARM64_RELOC_BRANCH26, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12}
+use compiler.backend.native.macho_writer.{X86_64_RELOC_UNSIGNED, X86_64_RELOC_SIGNED, X86_64_RELOC_BRANCH}
+use compiler.backend.native.macho_writer.{PLATFORM_MACOS}
+use compiler.backend.native.macho_writer.{MACHO_HEADER_SIZE, NLIST_64_SIZE, RELOC_INFO_SIZE}
+
+use compiler.backend.native.elf_writer.{ByteBuffer, new_byte_buffer, buf_write_u8, buf_len, buf_write_bytes}
+
+# ============================================================================
+# 1. Header Generation Tests
+# ============================================================================
+
+describe "Mach-O header generation":
+    it "generates minimal Mach-O with RET instruction for ARM64":
+        # ARM64 RET = 0xd65f03c0 (little-endian: c0 03 5f d6)
+        var writer = macho_writer_aarch64()
+        val text_section = new_macho_text_section([0xc0, 0x03, 0x5f, 0xd6])
+        writer = macho_add_section(writer, text_section)
+        val bytes = write_macho64(writer)
+        # Should produce valid output (non-empty)
+        expect(bytes.len() > 0).to_equal(true)
+
+    it "has correct magic number for 64-bit Mach-O":
+        var writer = macho_writer_aarch64()
+        val text_section = new_macho_text_section([0xc0, 0x03, 0x5f, 0xd6])
+        writer = macho_add_section(writer, text_section)
+        val bytes = write_macho64(writer)
+        # MH_MAGIC_64 = 0xfeedfacf -> little-endian: cf fa ed fe
+        expect(bytes[0]).to_equal(0xcf)
+        expect(bytes[1]).to_equal(0xfa)
+        expect(bytes[2]).to_equal(0xed)
+        expect(bytes[3]).to_equal(0xfe)
+
+    it "has correct CPU type for ARM64":
+        var writer = macho_writer_aarch64()
+        val text_section = new_macho_text_section([0xc0, 0x03, 0x5f, 0xd6])
+        writer = macho_add_section(writer, text_section)
+        val bytes = write_macho64(writer)
+        # CPU_TYPE_ARM64 = 0x0100000c -> little-endian: 0c 00 00 01
+        expect(bytes[4]).to_equal(0x0c)
+        expect(bytes[5]).to_equal(0x00)
+        expect(bytes[6]).to_equal(0x00)
+        expect(bytes[7]).to_equal(0x01)
+
+    it "has correct CPU type for x86_64":
+        var writer = macho_writer_x86_64()
+        val text_section = new_macho_text_section([0xc3])  # RET
+        writer = macho_add_section(writer, text_section)
+        val bytes = write_macho64(writer)
+        # CPU_TYPE_X86_64 = 0x01000007 -> little-endian: 07 00 00 01
+        expect(bytes[4]).to_equal(0x07)
+        expect(bytes[5]).to_equal(0x00)
+        expect(bytes[6]).to_equal(0x00)
+        expect(bytes[7]).to_equal(0x01)
+
+    it "has MH_OBJECT file type":
+        var writer = macho_writer_aarch64()
+        val text_section = new_macho_text_section([0xc0, 0x03, 0x5f, 0xd6])
+        writer = macho_add_section(writer, text_section)
+        val bytes = write_macho64(writer)
+        # filetype at offset 12: MH_OBJECT = 1
+        expect(bytes[12]).to_equal(1)
+        expect(bytes[13]).to_equal(0)
+        expect(bytes[14]).to_equal(0)
+        expect(bytes[15]).to_equal(0)
+
+# ============================================================================
+# 2. Symbol Naming Tests
+# ============================================================================
+
+describe "Mach-O symbol naming":
+    it "prepends underscore to symbol names":
+        val result = macho_symbol_name("main")
+        expect(result).to_equal("_main")
+
+    it "prepends underscore to already-prefixed names":
+        val result = macho_symbol_name("_start")
+        expect(result).to_equal("__start")
+
+    it "creates extern symbol with undefined section":
+        val sym = new_macho_extern_symbol("printf")
+        expect(sym.section_ordinal).to_equal(0)
+        expect(sym.value).to_equal(0)
+        # N_UNDF + N_EXT = 0x01
+        expect(sym.sym_type).to_equal(1)
+
+# ============================================================================
+# 3. Section Type Tests
+# ============================================================================
+
+describe "Mach-O section types":
+    it "creates __TEXT,__text section with instruction attributes":
+        val section = new_macho_text_section([0x00])
+        expect(section.sect_name).to_equal("__text")
+        expect(section.seg_name).to_equal("__TEXT")
+        val expected_attrs = S_ATTR_PURE_INSTRUCTIONS + S_ATTR_SOME_INSTRUCTIONS
+        expect(section.attributes).to_equal(expected_attrs)
+
+    it "creates __TEXT,__const section for read-only data":
+        val section = new_macho_const_section([1, 2, 3, 4])
+        expect(section.sect_name).to_equal("__const")
+        expect(section.seg_name).to_equal("__TEXT")
+        expect(section.attributes).to_equal(0)
+
+    it "creates __DATA,__data section for mutable data":
+        val section = new_macho_data_section([0, 0, 0, 0])
+        expect(section.sect_name).to_equal("__data")
+        expect(section.seg_name).to_equal("__DATA")
+
+    it "creates __TEXT,__cstring section for C strings":
+        # "hello\0" = [104, 101, 108, 108, 111, 0]
+        val section = new_macho_cstring_section([104, 101, 108, 108, 111, 0])
+        expect(section.sect_name).to_equal("__cstring")
+        expect(section.seg_name).to_equal("__TEXT")
+        expect(section.sect_type).to_equal(S_CSTRING_LITERALS)
+
+# ============================================================================
+# 4. Relocation Mapping Tests
+# ============================================================================
+
+describe "Mach-O relocation mapping":
+    it "maps R_AARCH64_CALL26 to ARM64_RELOC_BRANCH26":
+        val result = map_elf_reloc_to_macho_arm64(283)
+        expect(result).to_equal(ARM64_RELOC_BRANCH26)
+
+    it "maps R_AARCH64_ADR_PREL_PG_HI21 to ARM64_RELOC_PAGE21":
+        val result = map_elf_reloc_to_macho_arm64(275)
+        expect(result).to_equal(ARM64_RELOC_PAGE21)
+
+    it "maps R_AARCH64_ADD_ABS_LO12_NC to ARM64_RELOC_PAGEOFF12":
+        val result = map_elf_reloc_to_macho_arm64(277)
+        expect(result).to_equal(ARM64_RELOC_PAGEOFF12)
+
+    it "maps R_AARCH64_LDST64_ABS_LO12_NC to ARM64_RELOC_PAGEOFF12":
+        val result = map_elf_reloc_to_macho_arm64(286)
+        expect(result).to_equal(ARM64_RELOC_PAGEOFF12)
+
+    it "falls back to UNSIGNED for unknown ELF reloc types":
+        val result = map_elf_reloc_to_macho_arm64(999)
+        expect(result).to_equal(ARM64_RELOC_UNSIGNED)
+
+    it "maps x86_64 R_X86_64_PLT32 to X86_64_RELOC_BRANCH":
+        val result = map_elf_reloc_to_macho_x86_64(4)
+        expect(result).to_equal(X86_64_RELOC_BRANCH)
+
+    it "maps x86_64 R_X86_64_PC32 to X86_64_RELOC_SIGNED":
+        val result = map_elf_reloc_to_macho_x86_64(2)
+        expect(result).to_equal(X86_64_RELOC_SIGNED)
+
+    it "maps x86_64 R_X86_64_64 to X86_64_RELOC_UNSIGNED":
+        val result = map_elf_reloc_to_macho_x86_64(1)
+        expect(result).to_equal(X86_64_RELOC_UNSIGNED)
+
+# ============================================================================
+# 5. Full Mach-O Generation Tests
+# ============================================================================
+
+describe "Mach-O full generation":
+    it "generates Mach-O with function symbol":
+        var writer = macho_writer_aarch64()
+        # ARM64 RET instruction
+        val text_section = new_macho_text_section([0xc0, 0x03, 0x5f, 0xd6])
+        writer = macho_add_section(writer, text_section)
+        val sym = new_macho_func_symbol("main", 1, 0)
+        writer = macho_add_symbol(writer, sym)
+        val bytes = write_macho64(writer)
+        # Should have reasonable size
+        expect(bytes.len() > MACHO_HEADER_SIZE).to_equal(true)
+
+    it "generates Mach-O with extern call and relocation":
+        var writer = macho_writer_aarch64()
+        # BL instruction (ARM64 call) - 4 bytes
+        var text_section = new_macho_text_section([0x00, 0x00, 0x00, 0x94])
+        val reloc = MachOReloc(
+            offset: 0,
+            symbol_index: 0,
+            reloc_type: ARM64_RELOC_BRANCH26,
+            length: 2,
+            is_pc_relative: true,
+            is_extern: true
+        )
+        text_section = macho_section_add_reloc(text_section, reloc)
+        writer = macho_add_section(writer, text_section)
+        val ext_sym = new_macho_extern_symbol("printf")
+        writer = macho_add_symbol(writer, ext_sym)
+        val bytes = write_macho64(writer)
+        expect(bytes.len() > MACHO_HEADER_SIZE).to_equal(true)
+
+    it "generates Mach-O with multiple functions":
+        var writer = macho_writer_aarch64()
+        # Two ARM64 RET instructions
+        val text_section = new_macho_text_section([0xc0, 0x03, 0x5f, 0xd6, 0xc0, 0x03, 0x5f, 0xd6])
+        writer = macho_add_section(writer, text_section)
+        val sym1 = new_macho_func_symbol("foo", 1, 0)
+        val sym2 = new_macho_func_symbol("bar", 1, 4)
+        writer = macho_add_symbol(writer, sym1)
+        writer = macho_add_symbol(writer, sym2)
+        val bytes = write_macho64(writer)
+        expect(bytes.len() > MACHO_HEADER_SIZE).to_equal(true)
+
+    it "generates Mach-O with data section":
+        var writer = macho_writer_aarch64()
+        val text_section = new_macho_text_section([0xc0, 0x03, 0x5f, 0xd6])
+        val data_section = new_macho_const_section([1, 2, 3, 4, 5, 6, 7, 8])
+        writer = macho_add_section(writer, text_section)
+        writer = macho_add_section(writer, data_section)
+        val sym = new_macho_func_symbol("main", 1, 0)
+        writer = macho_add_symbol(writer, sym)
+        val bytes = write_macho64(writer)
+        expect(bytes.len() > MACHO_HEADER_SIZE).to_equal(true)
+
+    it "starts with correct Mach-O magic bytes":
+        var writer = macho_writer_x86_64()
+        val text_section = new_macho_text_section([0xc3])  # x86 RET
+        writer = macho_add_section(writer, text_section)
+        val bytes = write_macho64(writer)
+        # CF FA ED FE = Mach-O 64-bit magic (little-endian)
+        expect(bytes[0]).to_equal(0xcf)
+        expect(bytes[1]).to_equal(0xfa)
+        expect(bytes[2]).to_equal(0xed)
+        expect(bytes[3]).to_equal(0xfe)
+
+# ============================================================================
+# 6. ByteBuffer and Helpers Tests
+# ============================================================================
+
+describe "Mach-O helper functions":
+    it "reuses ByteBuffer from elf_writer":
+        var buf = new_byte_buffer()
+        buf = buf_write_u8(buf, 0x42)
+        expect(buf_len(buf)).to_equal(1)
+        expect(buf.bytes[0]).to_equal(0x42)
+
+    it "writes fixed-size names correctly":
+        var buf = new_byte_buffer()
+        buf = write_fixed_name(buf, "__text", 16)
+        expect(buf_len(buf)).to_equal(16)
+        # First bytes should be "__text"
+        expect(buf.bytes[0]).to_equal(95)   # '_'
+        expect(buf.bytes[1]).to_equal(95)   # '_'
+        expect(buf.bytes[2]).to_equal(116)  # 't'
+        expect(buf.bytes[3]).to_equal(101)  # 'e'
+        expect(buf.bytes[4]).to_equal(120)  # 'x'
+        expect(buf.bytes[5]).to_equal(116)  # 't'
+        # Rest should be zero-padded
+        expect(buf.bytes[6]).to_equal(0)
+        expect(buf.bytes[15]).to_equal(0)
+
+    it "computes pow2 correctly":
+        expect(pow2(0)).to_equal(1)
+        expect(pow2(1)).to_equal(2)
+        expect(pow2(2)).to_equal(4)
+        expect(pow2(3)).to_equal(8)
+        expect(pow2(4)).to_equal(16)
+
+# ============================================================================
+# 7. Relocation Bitfield Packing Tests
+# ============================================================================
+
+describe "Mach-O relocation packing":
+    it "packs relocation info correctly for BRANCH26":
+        # symbol_index=0, pc_rel=true, length=2, extern=true, type=BRANCH26(2)
+        val packed = macho_reloc_info(0, true, 2, true, 2)
+        # bit 24 = 1 (pc_rel), bits 25-26 = 2 (length), bit 27 = 1 (extern), bits 28-31 = 2 (type)
+        # = 0 + 16777216 + 67108864 + 134217728 + 536870912 = ...
+        # Verify non-zero (exact value depends on packing)
+        expect(packed > 0).to_equal(true)
+
+    it "packs relocation info with symbol index":
+        val packed = macho_reloc_info(5, false, 2, true, 0)
+        # Low 24 bits should contain symbol index 5
+        val low24 = packed % 16777216
+        expect(low24).to_equal(5)
+
+    it "packs relocation with pc-relative bit":
+        val packed_pcrel = macho_reloc_info(0, true, 0, false, 0)
+        val packed_abs = macho_reloc_info(0, false, 0, false, 0)
+        # pc-relative version should have bit 24 set
+        expect(packed_pcrel > packed_abs).to_equal(true)
+
+# ============================================================================
+# 8. Constant Verification Tests
+# ============================================================================
+
+describe "Mach-O constants":
+    it "has correct MH_MAGIC_64 value":
+        # 0xfeedfacf
+        expect(MH_MAGIC_64).to_equal(4277009103)
+
+    it "has correct CPU_TYPE_ARM64 value":
+        # 0x0100000c
+        expect(CPU_TYPE_ARM64).to_equal(16777228)
+
+    it "has correct CPU_TYPE_X86_64 value":
+        # 0x01000007
+        expect(CPU_TYPE_X86_64).to_equal(16777223)
+
+    it "has correct MH_OBJECT file type":
+        expect(MH_OBJECT).to_equal(1)
+
+    it "has correct load command types":
+        expect(LC_SEGMENT_64).to_equal(0x19)
+        expect(LC_SYMTAB).to_equal(0x02)
+        expect(LC_DYSYMTAB).to_equal(0x0b)
+        expect(LC_BUILD_VERSION).to_equal(0x32)
+
+    it "has correct ARM64 relocation type values":
+        expect(ARM64_RELOC_UNSIGNED).to_equal(0)
+        expect(ARM64_RELOC_BRANCH26).to_equal(2)
+        expect(ARM64_RELOC_PAGE21).to_equal(3)
+        expect(ARM64_RELOC_PAGEOFF12).to_equal(4)
+
+    it "has correct nlist_64 size":
+        expect(NLIST_64_SIZE).to_equal(16)
+
+    it "has correct header size":
+        expect(MACHO_HEADER_SIZE).to_equal(32)

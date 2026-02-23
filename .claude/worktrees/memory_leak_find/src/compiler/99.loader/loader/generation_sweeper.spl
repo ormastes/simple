@@ -1,0 +1,141 @@
+# Generation Sweeper — epoch-based LRU eviction for JIT symbols.
+#
+# Tracks last-used epoch per symbol. Symbols not used within `max_age`
+# epochs are candidates for eviction via SharedExecMapper.unmap_symbol.
+#
+# Primary use: reclaim stale JIT-compiled code pages in long-running
+# processes (REPL, server) where modules are loaded/unloaded over time.
+#
+# Integration:
+#   - sweeper_mark_used(symbol) called on each symbol resolution
+#   - sweeper_advance_epoch() called periodically (e.g., every N calls)
+#   - sweeper_sweep() finds and unmaps stale symbols
+
+use .object_mapper.{SharedExecMapper}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct SweeperConfig:
+    max_age: i64        # epochs before a symbol is stale (default: 100)
+    jit_only: bool      # only sweep __jit__ symbols (default: true)
+    verbose: bool
+
+fn sweeperconfig_default() -> SweeperConfig:
+    SweeperConfig(max_age: 100, jit_only: true, verbose: false)
+
+# ============================================================================
+# Stats
+# ============================================================================
+
+struct SweeperStats:
+    epoch: i64
+    tracked_count: i64
+    stale_count: i64
+
+# ============================================================================
+# GenerationSweeper
+# ============================================================================
+
+struct GenerationSweeper:
+    current_epoch: i64
+    symbol_last_used: Dict<text, i64>
+    config: SweeperConfig
+
+fn sweeper_new(config: SweeperConfig) -> GenerationSweeper:
+    GenerationSweeper(
+        current_epoch: 0,
+        symbol_last_used: {},
+        config: config
+    )
+
+fn sweeper_with_defaults() -> GenerationSweeper:
+    sweeper_new(sweeperconfig_default())
+
+# ============================================================================
+# Epoch Management
+# ============================================================================
+
+fn sweeper_advance_epoch(self: GenerationSweeper) -> i64:
+    self.current_epoch = self.current_epoch + 1
+    self.current_epoch
+
+fn sweeper_mark_used(self: GenerationSweeper, symbol: text):
+    self.symbol_last_used[symbol] = self.current_epoch
+
+# ============================================================================
+# Sweep — find and unmap stale symbols
+# ============================================================================
+
+fn sweeper_sweep(self: GenerationSweeper, exec_mapper: SharedExecMapper, jit_origin: Dict<text, text>) -> i64:
+    """Find symbols older than max_age and unmap them. Returns count freed."""
+    val threshold = self.current_epoch - self.config.max_age
+    var freed: i64 = 0
+
+    # Collect stale symbols first (cannot modify dict during iteration).
+    var stale: [text] = []
+    for (symbol, last_used) in self.symbol_last_used:
+        if last_used < threshold:
+            # When jit_only is set, only sweep symbols owned by "__jit__".
+            if self.config.jit_only:
+                val rec = exec_mapper.get_record(symbol)
+                if rec.?:
+                    val record = rec.unwrap()
+                    if record.owner_id == "__jit__":
+                        stale = stale.push(symbol)
+                else:
+                    # Symbol not in exec_mapper — remove from tracking.
+                    stale = stale.push(symbol)
+            else:
+                stale = stale.push(symbol)
+
+    # Unmap and remove stale symbols.
+    for symbol in stale:
+        val rec = exec_mapper.get_record(symbol)
+        if rec.?:
+            _ = exec_mapper.unmap_symbol(symbol)
+            freed = freed + 1
+            if self.config.verbose:
+                print "[sweeper] evicted stale symbol: {symbol} (age > {self.config.max_age})"
+        self.symbol_last_used = self.symbol_last_used.remove(symbol)
+
+    freed
+
+# ============================================================================
+# Query
+# ============================================================================
+
+fn sweeper_stale_count(self: GenerationSweeper) -> i64:
+    val threshold = self.current_epoch - self.config.max_age
+    var count: i64 = 0
+    for (_, last_used) in self.symbol_last_used:
+        if last_used < threshold:
+            count = count + 1
+    count
+
+fn sweeper_tracked_count(self: GenerationSweeper) -> i64:
+    self.symbol_last_used.len()
+
+fn sweeper_stats(self: GenerationSweeper) -> SweeperStats:
+    SweeperStats(
+        epoch: self.current_epoch,
+        tracked_count: sweeper_tracked_count(self),
+        stale_count: sweeper_stale_count(self)
+    )
+
+fn sweeper_reset(self: GenerationSweeper):
+    self.current_epoch = 0
+    self.symbol_last_used = {}
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SweeperConfig, SweeperStats, GenerationSweeper
+export sweeperconfig_default
+export sweeper_new, sweeper_with_defaults
+export sweeper_advance_epoch, sweeper_mark_used
+export sweeper_sweep
+export sweeper_stale_count, sweeper_tracked_count, sweeper_stats
+export sweeper_reset

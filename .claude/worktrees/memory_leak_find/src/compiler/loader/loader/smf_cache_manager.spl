@@ -1,0 +1,85 @@
+# SmfCacheManager — ref-counted wrapper over SmfCache.
+#
+# Tracks how many modules reference each SMF file-backed mmap.
+# When the last module referencing a path is unloaded, the mmap
+# is evicted via SmfCache.evict(path), freeing the read-only pages.
+#
+# Without this, SmfCache entries are leaked until full clear().
+
+use compiler.loader.loader.smf_cache.{SmfCache}
+# ============================================================================
+# SmfCacheManager
+# ============================================================================
+
+struct SmfCacheManager:
+    """Ref-counted wrapper over SmfCache for per-module eviction."""
+    cache: SmfCache
+    ref_counts: Dict<text, i32>
+
+fn smfcachemanager_new(cache: SmfCache) -> SmfCacheManager:
+    SmfCacheManager(
+        cache: cache,
+        ref_counts: {}
+    )
+
+fn smfcachemanager_with_new_cache() -> SmfCacheManager:
+    SmfCacheManager(
+        cache: SmfCache__new(),
+        ref_counts: {}
+    )
+
+# ============================================================================
+# Ref-Count Operations
+# ============================================================================
+
+fn smfcachemanager_ref_count_inc(self: SmfCacheManager, path: text):
+    """Increment reference count for a path."""
+    if self.ref_counts.contains_key(path):
+        self.ref_counts[path] = self.ref_counts[path] + 1
+    else:
+        self.ref_counts[path] = 1
+
+fn smfcachemanager_ref_count_dec(self: SmfCacheManager, path: text):
+    """Decrement reference count. Evicts from cache when it reaches zero."""
+    if not self.ref_counts.contains_key(path):
+        return
+
+    val new_count = self.ref_counts[path] - 1
+    if new_count <= 0:
+        # Last reference gone — evict the mmap.
+        _ = self.cache.evict(path)
+        self.ref_counts = self.ref_counts.remove(path)
+    else:
+        self.ref_counts[path] = new_count
+
+fn smfcachemanager_get_ref_count(self: SmfCacheManager, path: text) -> i32:
+    """Get current reference count for a path."""
+    if self.ref_counts.contains_key(path):
+        return self.ref_counts[path]
+    0
+
+fn smfcachemanager_force_clear(self: SmfCacheManager):
+    """Force-close all mmaps and reset all ref counts."""
+    self.cache.clear()
+    self.ref_counts = {}
+
+fn smfcachemanager_tracked_count(self: SmfCacheManager) -> i32:
+    """Number of paths with active references."""
+    self.ref_counts.len()
+
+# ============================================================================
+# Delegate to underlying SmfCache for read access
+# ============================================================================
+
+# Callers that need to read SMF files should access self.cache directly.
+# The manager only handles the ref-count lifecycle.
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SmfCacheManager
+export smfcachemanager_new, smfcachemanager_with_new_cache
+export smfcachemanager_ref_count_inc, smfcachemanager_ref_count_dec
+export smfcachemanager_get_ref_count
+export smfcachemanager_force_clear, smfcachemanager_tracked_count

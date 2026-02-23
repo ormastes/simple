@@ -1,0 +1,149 @@
+"""
+MCP JSON-RPC Protocol Integration Tests
+Feature: MCP JSON-RPC Request Routing
+Category: MCP, Protocol, Integration
+Status: Complete
+"""
+
+use std.spec
+use std.text.{NL}
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, extract_nested_string, escape_json, make_result_response, make_error_response, make_tool_result}
+
+# ----------- Mock protocol handler -----------
+
+fn make_initialize_response(id: String) -> String:
+    val server_info = jo2(jp("name", js("simple-mcp")), jp("version", js("1.0.0")))
+    val caps = jo1(jp("tools", jo1("")))
+    val result = jo3(jp("protocolVersion", js("2024-11-05")), jp("capabilities", caps), jp("serverInfo", server_info))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_tools_list_response(id: String) -> String:
+    val t1 = jo2(jp("name", js("read_code")), jp("description", js("Read a Simple language source file")))
+    val t2 = jo2(jp("name", js("list_files")), jp("description", js("List Simple language files")))
+    val t3 = jo2(jp("name", js("search_code")), jp("description", js("Search for code patterns")))
+    val t4 = jo2(jp("name", js("file_info")), jp("description", js("Get file information")))
+    val tools = "[" + t1 + "," + t2 + "," + t3 + "," + t4 + "]"
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", jo1(jp("tools", tools))))
+
+# Simulate handle_jsonrpc
+fn handle_jsonrpc(body: String) -> String:
+    val method = extract_json_string(body, "method")
+    val id = extract_json_value(body, "id")
+
+    if method == "initialize":
+        return make_initialize_response(id)
+    elif method == "initialized":
+        return ""
+    elif method == "shutdown":
+        return make_result_response(id, "null")
+    elif method == "ping":
+        return make_result_response(id, LB() + RB())
+    elif method == "tools/list":
+        return make_tools_list_response(id)
+    elif method == "tools/call":
+        val tool_name = extract_nested_string(body, "params", "name")
+        if tool_name == "read_code":
+            val path = extract_nested_string(body, "arguments", "path")
+            return make_tool_result(id, "(mock content of " + path + ")")
+        elif tool_name == "file_info":
+            return make_tool_result(id, "File: test.spl")
+        elif tool_name == "list_files":
+            return make_tool_result(id, "file1.spl{NL}file2.spl")
+        elif tool_name == "search_code":
+            val query = extract_nested_string(body, "arguments", "query")
+            return make_tool_result(id, "Results for: " + query)
+        else:
+            return make_error_response(id, -32602, "Unknown tool: " + tool_name)
+    else:
+        return make_error_response(id, -32601, "Method not found: " + method)
+
+# Helper to build JSON-RPC request strings
+fn make_req(id: String, method: String) -> String:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("method", js(method)))
+
+fn make_req_params(id: String, method: String, params: String) -> String:
+    var r = LB()
+    r = r + jp("jsonrpc", js("2.0"))
+    r = r + "," + jp("id", id)
+    r = r + "," + jp("method", js(method))
+    r = r + "," + jp("params", params)
+    r = r + RB()
+    r
+
+fn make_tool_call_req(id: String, tool: String, args: String) -> String:
+    val params = jo2(jp("name", js(tool)), jp("arguments", args))
+    make_req_params(id, "tools/call", params)
+
+# ----------- Tests -----------
+
+describe "JSON-RPC Protocol":
+    context "initialize handshake":
+        it "responds to initialize request":
+            val req = make_req_params("1", "initialize", jo1(""))
+            val resp = handle_jsonrpc(req)
+            expect(resp.contains("\"jsonrpc\"")).to_equal(true)
+            expect(resp.contains("\"protocolVersion\"")).to_equal(true)
+
+        it "returns empty for initialized notification":
+            val req = jo3(jp("jsonrpc", js("2.0")), jp("method", js("initialized")), jp("id", "null"))
+            val resp = handle_jsonrpc(req)
+            expect(resp).to_equal("")
+
+    context "shutdown":
+        it "responds to shutdown with null result":
+            val req = make_req("5", "shutdown")
+            val resp = handle_jsonrpc(req)
+            expect(resp.contains("\"result\":null")).to_equal(true)
+
+    context "ping":
+        it "responds to ping with empty result":
+            val req = make_req("42", "ping")
+            val resp = handle_jsonrpc(req)
+            expect(resp.contains("\"result\"")).to_equal(true)
+
+    context "tools/list":
+        it "returns list of available tools":
+            val req = make_req("2", "tools/list")
+            val resp = handle_jsonrpc(req)
+            expect(resp.contains("\"read_code\"")).to_equal(true)
+            expect(resp.contains("\"list_files\"")).to_equal(true)
+            expect(resp.contains("\"search_code\"")).to_equal(true)
+            expect(resp.contains("\"file_info\"")).to_equal(true)
+
+    context "tools/call":
+        it "calls read_code tool":
+            val req = make_tool_call_req("3", "read_code", jo1(jp("path", js("test.spl"))))
+            val resp = handle_jsonrpc(req)
+            expect(resp.contains("\"content\"")).to_equal(true)
+
+        it "calls file_info tool":
+            val req = make_tool_call_req("4", "file_info", jo1(jp("path", js("test.spl"))))
+            val resp = handle_jsonrpc(req)
+            expect(resp.contains("\"content\"")).to_equal(true)
+
+        it "returns error for unknown tool":
+            val req = make_tool_call_req("7", "nonexistent", jo1(""))
+            val resp = handle_jsonrpc(req)
+            expect(resp.contains("\"error\"")).to_equal(true)
+            expect(resp.contains("-32602")).to_equal(true)
+
+    context "error handling":
+        it "returns method not found for unknown method":
+            val req = make_req("10", "unknown/method")
+            val resp = handle_jsonrpc(req)
+            expect(resp.contains("\"error\"")).to_equal(true)
+            expect(resp.contains("-32601")).to_equal(true)
+
+    context "response format":
+        it "all responses contain jsonrpc version":
+            val init_resp = handle_jsonrpc(make_req("1", "initialize"))
+            val tools_resp = handle_jsonrpc(make_req("2", "tools/list"))
+            val shutdown_resp = handle_jsonrpc(make_req("3", "shutdown"))
+            expect(init_resp.contains("\"jsonrpc\"")).to_equal(true)
+            expect(tools_resp.contains("\"jsonrpc\"")).to_equal(true)
+            expect(shutdown_resp.contains("\"jsonrpc\"")).to_equal(true)
+
+        it "error responses have code and message":
+            val resp = handle_jsonrpc(make_req("1", "bad"))
+            expect(resp.contains("\"code\":")).to_equal(true)
+            expect(resp.contains("\"message\":")).to_equal(true)

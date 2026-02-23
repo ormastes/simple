@@ -1,0 +1,170 @@
+# Statement Parser - Contracts Module
+#
+# Parsing for contract system: entry contracts (in, requires, invariant, decreases),
+# exit contracts (out, out_err, ensures), and verification statements (assert, assume, admit).
+# Extracted from statements.spl (Contract System and Assert Statements sections)
+
+from token import {Span, Token, TokenKind}
+from ast import {Node, Block,
+                 ContractBlock, ContractKind,
+                 AssertStmt, AssumeStmt, AdmitStmt}
+from error import {ParseError}
+
+export ContractParser
+
+impl Parser:
+    # Parse entry contract: in: block or requires: block
+    fn parse_entry_contract(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+
+        val kind = match self.current.kind:
+            TokenKind.In: ContractKind.In
+            TokenKind.Requires: ContractKind.Requires
+            TokenKind.Invariant: ContractKind.Invariant
+            _:
+                if self.check_ident("decreases"):
+                    ContractKind.Decreases
+                elif self.check_ident("proof"):
+                    ContractKind.ProofUses
+                else:
+                    return Err(ParseError.unexpected_token(
+                        "in, requires, invariant, decreases, or proof",
+                        "{self.current.kind}", self.current.span))
+        self.advance()
+
+        # For "proof uses:" pattern
+        if kind == ContractKind.ProofUses:
+            self.expect_ident_value("uses")
+
+        self.expect(TokenKind.Colon)
+        val body = self.parse_block()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Contract(ContractBlock(
+            span: span,
+            kind: kind,
+            body: body,
+            binding: nil,
+        )))
+
+    # Parse exit contract: out(ret): block or out_err(err): block or ensures: block
+    fn parse_exit_contract(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+
+        val kind = nil
+        val binding = nil
+
+        if self.check(TokenKind.Out):
+            self.advance()
+            self.expect(TokenKind.LParen)
+            binding = Some(self.expect_identifier())
+            self.expect(TokenKind.RParen)
+            kind = Some(ContractKind.Out)
+        elif self.check(TokenKind.OutErr):
+            self.advance()
+            self.expect(TokenKind.LParen)
+            binding = Some(self.expect_identifier())
+            self.expect(TokenKind.RParen)
+            kind = Some(ContractKind.OutErr)
+        elif self.check(TokenKind.Ensures):
+            self.advance()
+            kind = Some(ContractKind.Ensures)
+        else:
+            return Err(ParseError.unexpected_token(
+                "out, out_err, or ensures",
+                "{self.current.kind}", self.current.span))
+
+        self.expect(TokenKind.Colon)
+        val body = self.parse_block()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Contract(ContractBlock(
+            span: span,
+            kind: kind.unwrap(),
+            body: body,
+            binding: binding,
+        )))
+
+    # Parse loop invariant: invariant: block
+    fn parse_loop_invariant(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Invariant)
+        self.expect(TokenKind.Colon)
+        val body = self.parse_block()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Contract(ContractBlock(
+            span: span,
+            kind: ContractKind.Invariant,
+            body: body,
+            binding: nil,
+        )))
+
+    # Parse assert statement: assert expr or assert expr, "message"
+    fn parse_assert_statement(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Assert)
+
+        val condition = self.parse_expression()
+
+        val message = nil
+        if self.check(TokenKind.Comma):
+            self.advance()
+            message = Some(self.parse_expression())
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Assert(AssertStmt(
+            span: span,
+            condition: condition,
+            message: message,
+        )))
+
+    # Parse assume statement: assume expr or assume expr, "message"
+    fn parse_assume_statement(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Assume)
+
+        val condition = self.parse_expression()
+
+        val message = nil
+        if self.check(TokenKind.Comma):
+            self.advance()
+            message = Some(self.parse_expression())
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Assume(AssumeStmt(
+            span: span,
+            condition: condition,
+            message: message,
+        )))
+
+    # Parse admit statement: admit expr or admit expr, "message"
+    fn parse_admit_statement(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Admit)
+
+        val condition = self.parse_expression()
+
+        val message = nil
+        if self.check(TokenKind.Comma):
+            self.advance()
+            message = Some(self.parse_expression())
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Admit(AdmitStmt(
+            span: span,
+            condition: condition,
+            message: message,
+        )))

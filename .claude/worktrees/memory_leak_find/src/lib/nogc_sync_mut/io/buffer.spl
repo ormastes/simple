@@ -1,0 +1,397 @@
+"""
+# Buffered I/O - Sync
+
+BufferedReader and BufferedWriter wrapping any Read/Write implementor.
+Reduces syscall overhead by batching reads/writes through an in-memory buffer.
+
+## Components
+
+| Type | Traits | Description |
+|------|--------|-------------|
+| BufferedReader | Read, Close | Buffered read wrapper (default 8KB) |
+| BufferedWriter | Write, Close | Buffered write wrapper (default 8KB) |
+
+## Buffered Reading
+
+```simple
+val raw = FileHandle.read_file("/tmp/io_test_bufread.txt")?
+val reader = BufferedReader.new(raw)
+val line = reader.read_line()?
+reader.close()?
+```
+
+## Buffered Writing
+
+```simple
+val raw = FileHandle.create("/tmp/io_test_bufwrite.txt")?
+val writer = BufferedWriter.new(raw)
+writer.write_text("line 1\\n")?
+writer.write_text("line 2\\n")?
+writer.flush()?
+writer.close()?
+
+val content = File.read("/tmp/io_test_bufwrite.txt")?
+expect content == "line 1\\nline 2\\n"
+```
+
+## Custom Buffer Size
+
+```simple
+val raw = FileHandle.read_file("/tmp/io_test_bufcap.txt")?
+val reader = BufferedReader.with_capacity(raw, 4096)
+val data = reader.read_all()?
+reader.close()?
+```
+
+## Wrapping a TcpStream
+
+```simple
+# BufferedReader works with any Read implementor:
+# val stream = TcpStream.connect("127.0.0.1:8080")?
+# val reader = BufferedReader.new(stream)
+# val line = reader.read_line()?
+```
+"""
+
+use std.common.io.traits.{Read, Write, Close}
+use std.common.io.types.{IoError, IoErrorKind}
+
+val DEFAULT_BUF_SIZE: i64 = 8192
+
+# ============================================================================
+# BufferedReader - Buffered Read Wrapper
+# ============================================================================
+
+class BufferedReader with Read, Close:
+    """Buffered wrapper around any Read implementor.
+
+    Reduces read syscalls by maintaining an in-memory buffer.
+
+    Example:
+        val raw = FileHandle.read_file("data.csv")?
+        val reader = BufferedReader.new(raw)
+        while true:
+            val line = reader.read_line()?
+            if line.is_empty():
+                break
+            process(line)
+    """
+    inner: Read
+    buf: [u8]
+    buf_size: i64
+    pos: i64
+    filled: i64
+
+    static fn new(inner: Read) -> BufferedReader:
+        """Create buffered reader with default 8KB buffer.
+
+        Args:
+            inner: Underlying Read source
+
+        Returns:
+            BufferedReader
+        """
+        BufferedReader(
+            inner: inner,
+            buf: [],
+            buf_size: DEFAULT_BUF_SIZE,
+            pos: 0,
+            filled: 0
+        )
+
+    static fn with_capacity(inner: Read, cap: i64) -> BufferedReader:
+        """Create buffered reader with custom capacity.
+
+        Args:
+            inner: Underlying Read source
+            cap: Buffer capacity in bytes
+
+        Returns:
+            BufferedReader
+        """
+        BufferedReader(
+            inner: inner,
+            buf: [],
+            buf_size: cap,
+            pos: 0,
+            filled: 0
+        )
+
+    # --- Internal ---
+
+    me fill_buf() -> Result<(), IoError>:
+        """Refill buffer from inner reader."""
+        if self.pos >= self.filled:
+            val data = self.inner.read(self.buf_size)?
+            self.buf = data
+            self.pos = 0
+            self.filled = data.len()
+        Ok(())
+
+    fn buffered_bytes() -> i64:
+        """Number of bytes available in buffer."""
+        self.filled - self.pos
+
+    # --- Read trait ---
+
+    fn read(size: i64) -> Result<[u8], IoError>:
+        """Read up to size bytes (from buffer, then inner).
+
+        Args:
+            size: Maximum bytes to read
+
+        Returns:
+            Result with bytes
+        """
+        self.fill_buf()?
+        if self.buffered_bytes() == 0:
+            return self.inner.read(size)
+        val avail = self.buffered_bytes()
+        val take = if size < avail: size else: avail
+        val data = self.buf.slice(self.pos, self.pos + take)
+        self.pos = self.pos + take
+        Ok(data)
+
+    fn read_exact(size: i64) -> Result<[u8], IoError>:
+        """Read exactly size bytes.
+
+        Args:
+            size: Exact bytes to read
+
+        Returns:
+            Result with bytes, or error if insufficient
+        """
+        var result: [u8] = []
+        var remaining = size
+        while remaining > 0:
+            val chunk = self.read(remaining)?
+            if chunk.len() == 0:
+                return Err(IoError.new(IoErrorKind.UnexpectedEof, "buffered read_exact: got {result.len()} of {size} bytes"))
+            result = result + chunk
+            remaining = remaining - chunk.len()
+        Ok(result)
+
+    fn read_all() -> Result<[u8], IoError>:
+        """Read all remaining bytes.
+
+        Returns:
+            Result with all bytes
+        """
+        var result: [u8] = []
+        # Drain buffer first
+        if self.buffered_bytes() > 0:
+            val remaining = self.buf.slice(self.pos, self.filled)
+            result = result + remaining
+            self.pos = self.filled
+        # Then read rest from inner
+        val rest = self.inner.read_all()?
+        result = result + rest
+        Ok(result)
+
+    fn read_text() -> Result<text, IoError>:
+        """Read all remaining content as text.
+
+        Returns:
+            Result with text
+        """
+        val bytes = self.read_all()?
+        val s = rt_bytes_to_text(bytes)
+        Ok(s)
+
+    fn read_line() -> Result<text, IoError>:
+        """Read a single line from buffered stream.
+
+        Returns:
+            Result with line including newline
+        """
+        var line: [u8] = []
+        while true:
+            self.fill_buf()?
+            if self.buffered_bytes() == 0:
+                # EOF
+                if line.len() == 0:
+                    return Err(IoError.new(IoErrorKind.UnexpectedEof, "end of stream"))
+                break
+            # Scan buffer for newline
+            var i = self.pos
+            while i < self.filled:
+                if self.buf[i] == 10:  # '\n'
+                    val segment = self.buf.slice(self.pos, i + 1)
+                    line = line + segment
+                    self.pos = i + 1
+                    return Ok(rt_bytes_to_text(line))
+                i = i + 1
+            # No newline found, consume entire buffer
+            val segment = self.buf.slice(self.pos, self.filled)
+            line = line + segment
+            self.pos = self.filled
+        Ok(rt_bytes_to_text(line))
+
+    # --- Close trait ---
+
+    me close() -> Result<(), IoError>:
+        """Close underlying reader."""
+        if val close_inner = self.inner as Close:
+            close_inner.close()
+        else:
+            Ok(())
+
+    fn is_open() -> bool:
+        """Check if underlying reader is open."""
+        if val close_inner = self.inner as Close:
+            close_inner.is_open()
+        else:
+            true
+
+# ============================================================================
+# BufferedWriter - Buffered Write Wrapper
+# ============================================================================
+
+class BufferedWriter with Write, Close:
+    """Buffered wrapper around any Write implementor.
+
+    Reduces write syscalls by batching writes in an in-memory buffer.
+    Flush on close or when buffer is full.
+
+    Example:
+        val raw = FileHandle.create("output.log")?
+        val writer = BufferedWriter.new(raw)
+        writer.write_text("line 1\\n")?
+        writer.write_text("line 2\\n")?
+        writer.flush()?
+        writer.close()?
+    """
+    inner: Write
+    buf: [u8]
+    buf_size: i64
+    pos: i64
+
+    static fn new(inner: Write) -> BufferedWriter:
+        """Create buffered writer with default 8KB buffer.
+
+        Args:
+            inner: Underlying Write destination
+
+        Returns:
+            BufferedWriter
+        """
+        BufferedWriter(
+            inner: inner,
+            buf: [],
+            buf_size: DEFAULT_BUF_SIZE,
+            pos: 0
+        )
+
+    static fn with_capacity(inner: Write, cap: i64) -> BufferedWriter:
+        """Create buffered writer with custom capacity.
+
+        Args:
+            inner: Underlying Write destination
+            cap: Buffer capacity in bytes
+
+        Returns:
+            BufferedWriter
+        """
+        BufferedWriter(
+            inner: inner,
+            buf: [],
+            buf_size: cap,
+            pos: 0
+        )
+
+    # --- Internal ---
+
+    me flush_buf() -> Result<(), IoError>:
+        """Flush internal buffer to inner writer."""
+        if self.pos > 0:
+            val data = self.buf.slice(0, self.pos)
+            self.inner.write_all(data)?
+            self.buf = []
+            self.pos = 0
+        Ok(())
+
+    # --- Write trait ---
+
+    fn write(data: [u8]) -> Result<i64, IoError>:
+        """Write bytes (buffers, may not flush immediately).
+
+        Args:
+            data: Bytes to write
+
+        Returns:
+            Result with bytes accepted
+        """
+        # If data is larger than buffer, flush and write directly
+        if data.len() >= self.buf_size:
+            self.flush_buf()?
+            return self.inner.write(data)
+        # If data won't fit, flush first
+        if self.pos + data.len() > self.buf_size:
+            self.flush_buf()?
+        self.buf = self.buf + data
+        self.pos = self.pos + data.len()
+        Ok(data.len())
+
+    fn write_all(data: [u8]) -> Result<(), IoError>:
+        """Write all bytes.
+
+        Args:
+            data: Bytes to write
+
+        Returns:
+            Result or error
+        """
+        self.write(data)?
+        Ok(())
+
+    fn write_text(s: text) -> Result<(), IoError>:
+        """Write text string.
+
+        Args:
+            s: Text to write
+
+        Returns:
+            Result or error
+        """
+        val bytes = rt_text_to_bytes(s)
+        self.write_all(bytes)
+
+    fn flush() -> Result<(), IoError>:
+        """Flush buffer and inner writer.
+
+        Returns:
+            Result or error
+        """
+        self.flush_buf()?
+        self.inner.flush()
+
+    # --- Close trait ---
+
+    me close() -> Result<(), IoError>:
+        """Flush buffer, then close underlying writer."""
+        self.flush_buf()?
+        if val close_inner = self.inner as Close:
+            close_inner.close()
+        else:
+            Ok(())
+
+    fn is_open() -> bool:
+        """Check if underlying writer is open."""
+        if val close_inner = self.inner as Close:
+            close_inner.is_open()
+        else:
+            true
+
+# ============================================================================
+# FFI Functions
+# ============================================================================
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export BufferedReader
+export BufferedWriter

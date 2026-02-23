@@ -1,0 +1,191 @@
+# Bare-Metal Path - Fixed-Buffer Path Operations
+#
+# Minimal path handling for semihosting file I/O.
+# Uses forward slashes exclusively. The host debugger resolves
+# OS-specific paths (Windows backslash, drive letters, etc.).
+#
+# Usage:
+#   val norm = bm_path_normalize("foo/../bar/./baz")
+#   val joined = bm_path_join("/tmp", "device.log")
+#   val name = bm_path_basename("/tmp/device.log")
+
+export PATH_SEP, MAX_PATH_LEN
+export bm_path_normalize, bm_path_join, bm_path_basename
+export bm_path_dirname, bm_path_extension
+export bm_file_open, bm_file_write, bm_file_close
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val PATH_SEP: text = "/"
+val MAX_PATH_LEN: i32 = 256
+
+# ============================================================================
+# Path Component Extraction
+# ============================================================================
+
+fn bm_path_basename(path: text) -> text:
+    """Extract the last component of a path.
+
+    bm_path_basename("/tmp/device.log") => "device.log"
+    """
+    if path == "":
+        return ""
+    # Convert backslashes to forward slashes
+    var clean = bm_replace_backslash(path)
+    # Remove trailing slashes
+    while clean.ends_with("/") and clean.len() > 1:
+        clean = clean.substring(0, clean.len() - 1)
+    val parts = clean.split("/")
+    parts.last ?? ""
+
+fn bm_path_dirname(path: text) -> text:
+    """Extract the directory part of a path.
+
+    bm_path_dirname("/tmp/device.log") => "/tmp"
+    """
+    if path == "":
+        return "."
+    if path == "/":
+        return "/"
+    var clean = bm_replace_backslash(path)
+    while clean.ends_with("/") and clean.len() > 1:
+        clean = clean.substring(0, clean.len() - 1)
+    val last_sep = clean.rfind("/")
+    if not last_sep.?:
+        return "."
+    val sep_idx = last_sep.unwrap()
+    if sep_idx == 0:
+        return "/"
+    clean.substring(0, sep_idx)
+
+fn bm_path_extension(path: text) -> text:
+    """Extract the file extension (without dot).
+
+    bm_path_extension("device.log") => "log"
+    """
+    val name = bm_path_basename(path)
+    if name == "":
+        return ""
+    val last_dot = name.rfind(".")
+    if not last_dot.?:
+        return ""
+    val dot_idx = last_dot.unwrap()
+    if dot_idx == 0:
+        return ""
+    if dot_idx == name.len() - 1:
+        return ""
+    name.substring(dot_idx + 1)
+
+# ============================================================================
+# Path Construction
+# ============================================================================
+
+fn bm_path_join(base: text, child: text) -> text:
+    """Join two path components with forward slash.
+
+    bm_path_join("/tmp", "device.log") => "/tmp/device.log"
+    """
+    if base == "":
+        return child
+    if child == "":
+        return base
+    var result = bm_replace_backslash(base)
+    val clean_child = bm_replace_backslash(child)
+    if not result.ends_with("/"):
+        result = result + "/"
+    if clean_child.starts_with("/"):
+        result = result + clean_child.substring(1)
+    else:
+        result = result + clean_child
+    result
+
+fn bm_path_normalize(path: text) -> text:
+    """Normalize a path: backslash to forward slash, resolve . and ..
+
+    bm_path_normalize("foo/../bar/./baz") => "bar/baz"
+    """
+    if path == "":
+        return "."
+    var clean = bm_replace_backslash(path)
+    val is_abs = clean.starts_with("/")
+    val parts = clean.split("/")
+    var result_parts: [text] = []
+    for part in parts:
+        if part == "" or part == ".":
+            continue
+        elif part == "..":
+            if result_parts.len() > 0 and result_parts.last != Some(".."):
+                result_parts.pop()
+            elif not is_abs:
+                result_parts.push("..")
+        else:
+            result_parts.push(part)
+    if result_parts.len() == 0:
+        if is_abs:
+            return "/"
+        return "."
+    var result = ""
+    if is_abs:
+        result = "/"
+    var i = 0
+    for part in result_parts:
+        if i > 0:
+            result = result + "/"
+        result = result + part
+        i = i + 1
+    result
+
+# ============================================================================
+# Backslash Replacement Helper
+# ============================================================================
+
+fn bm_replace_backslash(path: text) -> text:
+    """Replace all backslashes with forward slashes."""
+    var result = ""
+    var i = 0
+    while i < path.len():
+        val ch = path.substring(i, i + 1)
+        if ch == "\\":
+            result = result + "/"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+# ============================================================================
+# Semihosting File Operations (Stubs for Interpreter Mode)
+# ============================================================================
+
+fn bm_file_open(path: text, mode: i32) -> i32:
+    """Open a file via semihosting SYS_OPEN.
+
+    Path is normalized to forward slashes before passing to host.
+    mode: 0=read, 1=write, 2=append
+    Returns file handle, or -1 on failure.
+
+    In interpreter mode, returns a stub handle.
+    In compiled baremetal mode, uses semi_host_call(SYS_OPEN, ...).
+    """
+    val norm_path = bm_path_normalize(path)
+    # Stub — in compiled mode, would call semi_host_call(0x01, ...)
+    1
+
+fn bm_file_write(handle: i32, data: text) -> i32:
+    """Write data to file via semihosting SYS_WRITE.
+
+    Returns number of bytes NOT written (0 = success).
+    In interpreter mode, prints the data.
+    """
+    if handle < 0:
+        return -1
+    print data
+    0
+
+fn bm_file_close(handle: i32):
+    """Close file via semihosting SYS_CLOSE.
+
+    In interpreter mode, this is a no-op.
+    """
+    0

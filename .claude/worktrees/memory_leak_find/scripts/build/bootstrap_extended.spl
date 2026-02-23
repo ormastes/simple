@@ -1,0 +1,269 @@
+# Extended Bootstrap Test with Bug Detection
+# Builds multiple compiler generations and tracks crashes/bugs
+#
+# Usage: simple_old scripts/bootstrap_extended.spl [--generations=N]
+
+# FFI declarations
+extern fn sys_get_args() -> [text]
+extern fn sys_exit(code: i32)
+extern fn rt_shell(cmd: text) -> ShellResult
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_hash(path: text) -> text
+extern fn rt_read_file(path: text) -> Result<text, text>
+extern fn rt_write_file(path: text, content: text) -> Result<(), text>
+
+struct ShellResult:
+    exit_code: i32
+    stdout: text
+    stderr: text
+
+struct BootstrapResult:
+    generation: i32
+    success: bool
+    hash: text
+    error: text
+    compile_time: f64
+
+fn main():
+    val args = sys_get_args()
+    var max_generations = 5
+
+    # Parse arguments
+    for arg in args:
+        if arg.starts_with("--generations="):
+            val gen_str = arg.replace("--generations=", "")
+            match gen_str.parse_int():
+                case Some(n):
+                    max_generations = n
+                case None:
+                    print "Error: Invalid generation count: {gen_str}"
+                    sys_exit(1)
+
+    print "=== Extended Bootstrap Test ==="
+    print "Testing {max_generations} generations"
+    print ""
+
+    # Ensure simple_old exists
+    if not rt_file_exists("./target/debug/simple_old"):
+        print "Error: simple_old not found. Run 'cargo build' first."
+        sys_exit(1)
+
+    # Create bootstrap directory
+    val result = rt_shell("mkdir -p target/bootstrap")
+    if result.exit_code != 0:
+        print "Error creating bootstrap directory"
+        sys_exit(1)
+
+    var results: [BootstrapResult] = []
+    var all_success = true
+
+    # Generation 0: simple_old (baseline)
+    print "=== Generation 0: simple_old (baseline) ==="
+    val gen0_hash = get_binary_hash("./target/debug/simple_old")
+    print "  Hash: {gen0_hash}"
+    print ""
+    results.push(BootstrapResult(
+        generation: 0,
+        success: true,
+        hash: gen0_hash,
+        error: "",
+        compile_time: 0.0
+    ))
+
+    # Generation 1: simple_old -> simple_new1
+    print "=== Generation 1: simple_old -> simple_new1 ==="
+    val gen1_result = compile_generation(
+        "./target/debug/simple_old",
+        "simple/compiler/main.spl",
+        "target/bootstrap/simple_new1",
+        1
+    )
+    results.push(gen1_result)
+    if not gen1_result.success:
+        all_success = false
+        print_error_report(results)
+        sys_exit(1)
+
+    # Generations 2-N: simple_newX -> simple_newX+1
+    var gen = 2
+    while gen <= max_generations:
+        print "=== Generation {gen}: simple_new{gen - 1} -> simple_new{gen} ==="
+        val prev_binary = "target/bootstrap/simple_new{gen - 1}"
+        val next_binary = "target/bootstrap/simple_new{gen}"
+
+        val gen_result = compile_generation(
+            prev_binary,
+            "simple/compiler/main.spl",
+            next_binary,
+            gen
+        )
+        results.push(gen_result)
+
+        if not gen_result.success:
+            all_success = false
+            print ""
+            print "!!! CRASH/BUG FOUND at generation {gen} !!!"
+            print "Error: {gen_result.error}"
+            break
+
+        # Check if this generation matches the previous one
+        if gen >= 3:
+            val prev_hash = results[gen - 1].hash
+            val curr_hash = gen_result.hash
+
+            if prev_hash == curr_hash:
+                print ""
+                print "=== FIXPOINT REACHED ==="
+                print "Generation {gen - 1} and {gen} are identical!"
+                print "Hash: {curr_hash}"
+                break
+
+        gen = gen + 1
+
+    print ""
+    print_summary(results, all_success)
+
+    # Save results to file
+    save_results(results)
+
+    if all_success:
+        sys_exit(0)
+    else:
+        sys_exit(1)
+
+fn compile_generation(compiler: text, source: text, output: text, gen: i32) -> BootstrapResult:
+    print "  Compiler: {compiler}"
+    print "  Source: {source}"
+    print "  Output: {output}"
+
+    val start_time = get_time()
+
+    # Run compilation
+    val cmd = "{compiler} -c -o {output} {source}"
+    print "  Command: {cmd}"
+    val result = rt_shell(cmd)
+
+    val compile_time = get_time() - start_time
+
+    if result.exit_code != 0:
+        print "  FAILED (exit code: {result.exit_code})"
+        print "  stderr: {result.stderr}"
+        return BootstrapResult(
+            generation: gen,
+            success: false,
+            hash: "",
+            error: result.stderr,
+            compile_time: compile_time
+        )
+
+    # Make executable
+    rt_shell("chmod +x {output}")
+
+    # Get hash
+    val hash = get_binary_hash(output)
+
+    print "  SUCCESS"
+    print "  Hash: {hash}"
+    print "  Time: {compile_time:.2f}s"
+    print ""
+
+    BootstrapResult(
+        generation: gen,
+        success: true,
+        hash: hash,
+        error: "",
+        compile_time: compile_time
+    )
+
+fn get_binary_hash(path: text) -> text:
+    if rt_file_exists(path):
+        rt_file_hash(path)
+    else:
+        ""
+
+fn get_time() -> f64:
+    # Placeholder - would need FFI for actual timing
+    0.0
+
+fn print_summary(results: [BootstrapResult], all_success: bool):
+    print "=== Bootstrap Summary ==="
+    print ""
+    print "Generation | Success | Hash (first 16 chars)"
+    print "-----------|---------|---------------------"
+
+    for result in results:
+        val status = if result.success: "OK" else: "FAIL"
+        val hash_short = if result.hash.len() >= 16:
+            result.hash.substring(0, 16)
+        else:
+            result.hash
+        print "    {result.generation}      | {status:7} | {hash_short}"
+
+    print ""
+
+    if all_success:
+        print "=== ALL GENERATIONS SUCCESSFUL ==="
+
+        # Check for determinism
+        if results.len() >= 4:
+            val gen2_hash = results[3].hash
+            val gen3_hash = results[4].hash
+
+            if gen2_hash == gen3_hash:
+                print "=== DETERMINISM VERIFIED ==="
+                print "Generations 2 and 3 are identical!"
+            else:
+                print "=== DETERMINISM FAILED ==="
+                print "Generations 2 and 3 differ!"
+                print "This indicates non-deterministic compilation."
+    else:
+        print "=== BUGS/CRASHES FOUND ==="
+
+        # Find first failure
+        for result in results:
+            if not result.success:
+                print ""
+                print "First failure at generation {result.generation}:"
+                print "{result.error}"
+                break
+
+fn print_error_report(results: [BootstrapResult]):
+    print ""
+    print "=== ERROR REPORT ==="
+    print ""
+
+    for result in results:
+        if not result.success:
+            print "Generation {result.generation} FAILED:"
+            print "  Error: {result.error}"
+            print ""
+
+fn save_results(results: [BootstrapResult]):
+    var report = "# Bootstrap Test Report\n\n"
+    report = report + "Generated: " + get_timestamp() + "\n\n"
+    report = report + "## Results\n\n"
+    report = report + "| Generation | Success | Hash | Error |\n"
+    report = report + "|------------|---------|------|-------|\n"
+
+    for result in results:
+        val status = if result.success: "✓" else: "✗"
+        val hash_short = if result.hash.len() >= 16:
+            result.hash.substring(0, 16) + "..."
+        else:
+            result.hash
+        val error = if result.error == "": "-" else: result.error.substring(0, 50)
+
+        report = report + "| {result.generation} | {status} | {hash_short} | {error} |\n"
+
+    report = report + "\n"
+
+    # Save to file
+    match rt_write_file("target/bootstrap/report.md", report):
+        case Ok(_):
+            print "Report saved to: target/bootstrap/report.md"
+        case Err(e):
+            print "Warning: Could not save report: {e}"
+
+fn get_timestamp() -> text:
+    # Placeholder
+    "2026-01-29"

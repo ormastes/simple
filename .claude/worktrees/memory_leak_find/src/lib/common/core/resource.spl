@@ -1,0 +1,184 @@
+# Resource Cleanup Framework - Minimal Stub
+#
+# Provides basic resource management infrastructure:
+# - Resource trait interface
+# - ResourceRegistry for leak tracking
+# - LeakTracked mixin for automatic tracking
+#
+# NOTE: Uses desugared function naming (Type__method) for runtime compatibility
+# Static method calls like ResourceRegistry.clear() would need desugaring.
+#
+# WORKAROUND: Module-level vars don't work with imported functions (MEMORY.md).
+# Solution: Use explicit state passing pattern.
+
+# ============================================================================
+# Resource Trait (interface pattern using struct)
+# ============================================================================
+
+
+struct Resource:
+    name: text
+    is_open: bool
+
+fn resource_create(resource_name: text) -> Resource:
+    """Create a new resource."""
+    Resource(name: resource_name, is_open: true)
+
+fn resource_close(res: Resource) -> Resource:
+    """Release the resource (returns updated resource)."""
+    Resource(name: res.name, is_open: false)
+
+fn resource_is_open(res: Resource) -> bool:
+    """Check if resource is usable."""
+    res.is_open
+
+fn resource_name(res: Resource) -> text:
+    """Human-readable name for errors."""
+    res.name
+
+# ============================================================================
+# ResourceRegistry - Explicit state passing
+# ============================================================================
+
+struct RegistryState:
+    resources: Dict<text, text>
+    next_id: i64
+
+fn registry_create() -> RegistryState:
+    """Create empty registry."""
+    RegistryState(resources: {}, next_id: 0)
+
+fn registry_clear(state: RegistryState) -> RegistryState:
+    """Clear all entries."""
+    RegistryState(resources: {}, next_id: 0)
+
+fn registry_register(state: RegistryState, res_name: text) -> (RegistryState, i64):
+    """Register a resource, return (new_state, id)."""
+    val id = state.next_id
+    var new_resources = state.resources
+    new_resources["{id}"] = res_name
+    val new_state = RegistryState(resources: new_resources, next_id: id + 1)
+    (new_state, id)
+
+fn registry_unregister(state: RegistryState, id: i64) -> RegistryState:
+    """Unregister a resource by ID."""
+    val key = "{id}"
+    var new_resources = {}
+    for (k, v) in state.resources:
+        if k != key:
+            new_resources[k] = v
+    RegistryState(resources: new_resources, next_id: state.next_id)
+
+fn registry_check_leaks(state: RegistryState) -> [text]:
+    """Return list of unclosed resource names."""
+    var leaks = []
+    for (id, name) in state.resources:
+        leaks.push(name)
+    leaks
+
+fn registry_leak_report(state: RegistryState) -> text:
+    """Generate human-readable leak report."""
+    val leaks = registry_check_leaks(state)
+    if leaks.len() == 0:
+        return "No resource leaks detected."
+
+    var report = "Resource leaks detected:\n"
+    for name in leaks:
+        report = report + "  - {name}\n"
+    report
+
+fn registry_count(state: RegistryState) -> i64:
+    """Return number of registered resources."""
+    state.resources.len()
+
+# ============================================================================
+# LeakTracked Mixin
+# ============================================================================
+
+struct LeakTrackedState:
+    tracked: bool
+    tracking_id: i64
+
+fn leaktracked_create() -> LeakTrackedState:
+    """Create new untracked state."""
+    LeakTrackedState(tracked: false, tracking_id: -1)
+
+fn leaktracked_start(state: LeakTrackedState, registry: RegistryState, res_name: text) -> (LeakTrackedState, RegistryState):
+    """Auto-register resource. Returns (new_leak_state, new_registry)."""
+    if not state.tracked:
+        val result = registry_register(registry, res_name)
+        val new_registry = result.0
+        val id = result.1
+        val new_state = LeakTrackedState(tracked: true, tracking_id: id)
+        (new_state, new_registry)
+    else:
+        (state, registry)
+
+fn leaktracked_stop(state: LeakTrackedState, registry: RegistryState) -> RegistryState:
+    """Auto-unregister resource. Returns new_registry."""
+    if state.tracked:
+        registry_unregister(registry, state.tracking_id)
+    else:
+        registry
+
+fn leaktracked_is_tracked(state: LeakTrackedState) -> bool:
+    """Check if currently tracked."""
+    state.tracked
+
+fn leaktracked_tracking_id(state: LeakTrackedState) -> i64:
+    """Get tracking ID (returns -1 if not tracked)."""
+    if state.tracked:
+        state.tracking_id
+    else:
+        -1
+
+# ============================================================================
+# MockResource for Testing (includes registry state)
+# ============================================================================
+
+struct MockResource:
+    resource: Resource
+    leak_state: LeakTrackedState
+    registry: RegistryState
+
+fn mockresource_create(name: text, registry: RegistryState) -> MockResource:
+    """Create and track a mock resource."""
+    val res = resource_create(name)
+    val leak_state = leaktracked_create()
+    val result = leaktracked_start(leak_state, registry, name)
+    val new_leak = result.0
+    val new_registry = result.1
+    MockResource(resource: res, leak_state: new_leak, registry: new_registry)
+
+fn mockresource_close(mock: MockResource) -> RegistryState:
+    """Close and untrack mock resource. Returns updated registry."""
+    val closed_res = resource_close(mock.resource)
+    leaktracked_stop(mock.leak_state, mock.registry)
+
+fn mockresource_is_open(mock: MockResource) -> bool:
+    """Check if mock resource is open."""
+    resource_is_open(mock.resource)
+
+fn mockresource_name(mock: MockResource) -> text:
+    """Get mock resource name."""
+    resource_name(mock.resource)
+
+fn mockresource_is_tracked(mock: MockResource) -> bool:
+    """Check if being tracked."""
+    leaktracked_is_tracked(mock.leak_state)
+
+fn mockresource_registry(mock: MockResource) -> RegistryState:
+    """Get current registry state."""
+    mock.registry
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Resource, resource_create, resource_close, resource_is_open, resource_name
+export RegistryState, registry_create, registry_clear, registry_register, registry_unregister
+export registry_check_leaks, registry_leak_report, registry_count
+export LeakTrackedState, leaktracked_create
+export leaktracked_start, leaktracked_stop, leaktracked_is_tracked, leaktracked_tracking_id
+export MockResource, mockresource_create, mockresource_close, mockresource_is_open
+export mockresource_name, mockresource_is_tracked, mockresource_registry

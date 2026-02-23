@@ -1,0 +1,412 @@
+# Helper Functions
+#
+# Utility functions for expression parsing including argument parsing,
+# no-paren calls, placeholder lambdas, and various helper methods.
+
+from token import {Span, TokenKind}
+from ast import {Expr, Argument, MacroArg, Pattern, Node, MoveMode, LambdaParam}
+from error import {ParseError}
+
+impl Parser:
+
+    # =========================================================================
+    # Core helpers
+    # =========================================================================
+
+    fn make_call_expr(expr: Expr, args: [Argument]) -> Expr:
+        match expr:
+            Expr.FieldAccess(receiver, field):
+                Expr.MethodCall(receiver: receiver, method: field, args: args)
+            _:
+                Expr.Call(callee: expr, args: args)
+
+    fn make_slice_expr(receiver: Expr, start: Expr?, end: Expr?, step: Expr?) -> Expr:
+        Expr.Slice(receiver: receiver, start: start, end: end, step: step)
+
+    fn parse_optional_step() -> Expr?:
+        if self.check(TokenKind.Colon):
+            self.advance()
+            if self.check(TokenKind.RBracket):
+                nil
+            else:
+                self.parse_expression()
+        else:
+            nil
+
+    fn parse_optional_expr_before_bracket() -> Expr?:
+        if self.check(TokenKind.RBracket):
+            nil
+        else:
+            self.parse_expression()
+
+    # =========================================================================
+    # Arguments
+    # =========================================================================
+
+    fn parse_arguments() -> [Argument]:
+        self.expect(TokenKind.LParen)
+        var args = []
+
+        while self.check(TokenKind.Newline) or self.check(TokenKind.Indent):
+            self.advance()
+
+        while not self.check(TokenKind.RParen) and not self.check(TokenKind.Eof):
+            self.skip_whitespace_tokens()
+            if self.check(TokenKind.RParen): break
+
+            val arg_start = self.current.span
+            var name = nil
+
+            # Check for named argument: name= or name:
+            val maybe_name = match self.current.kind:
+                TokenKind.Identifier(id, _): id
+                TokenKind.Type: "type"
+                TokenKind.Default: "default"
+                TokenKind.Result: "result"
+                TokenKind.From: "from"
+                TokenKind.To: "to"
+                TokenKind.In: "in"
+                TokenKind.Is: "is"
+                TokenKind.As: "as"
+                TokenKind.Match: "match"
+                TokenKind.Use: "use"
+                TokenKind.Alias: "alias"
+                TokenKind.Bounds: "bounds"
+                TokenKind.Outline: "outline"
+                TokenKind.By: "by"
+                TokenKind.Into: "into"
+                TokenKind.Onto: "onto"
+                TokenKind.With: "with"
+                _: nil
+
+            if maybe_name.?:
+                val next = self.peek_token()
+                if next.kind == TokenKind.Assign:
+                    name = maybe_name
+                    self.advance()
+                    self.expect(TokenKind.Assign)
+                elif next.kind == TokenKind.Colon:
+                    name = maybe_name
+                    self.advance()
+                    self.expect(TokenKind.Colon)
+
+            var value = self.parse_expression()
+
+            # Spread: args...
+            if self.check(TokenKind.Ellipsis):
+                self.advance()
+                value = Expr.Spread(value)
+
+            # Placeholder lambda transform: _ * 2 -> \__p0: __p0 * 2
+            value = transform_placeholder_lambda(value)
+
+            val arg_end = self.previous.span
+            val arg_span = Span(start: arg_start.start, end: arg_end.end, line: arg_start.line, column: arg_start.column)
+
+            # Call-site label keywords
+            val label = match self.current.kind:
+                TokenKind.To:
+                    self.advance()
+                    "to"
+                TokenKind.From:
+                    self.advance()
+                    "from"
+                TokenKind.By:
+                    self.advance()
+                    "by"
+                TokenKind.Into:
+                    self.advance()
+                    "into"
+                TokenKind.Onto:
+                    self.advance()
+                    "onto"
+                TokenKind.With:
+                    self.advance()
+                    "with"
+                _: nil
+
+            args.push(Argument(name: name, value: value, span: arg_span, label: label))
+
+            while self.check(TokenKind.Newline) or self.check(TokenKind.Indent) or self.check(TokenKind.Dedent):
+                self.advance()
+
+            if not self.check(TokenKind.RParen):
+                self.expect(TokenKind.Comma)
+                while self.check(TokenKind.Newline) or self.check(TokenKind.Indent) or self.check(TokenKind.Dedent):
+                    self.advance()
+
+        self.expect(TokenKind.RParen)
+        args
+
+    fn parse_macro_args() -> [MacroArg]:
+        val close = match self.current.kind:
+            TokenKind.LParen: TokenKind.RParen
+            TokenKind.LBrace: TokenKind.RBrace
+            TokenKind.LBracket: TokenKind.RBracket
+            _:
+                raise ParseError.unexpected_token("'(', '{', or '['",
+                    "{self.current.kind}", self.current.span)
+
+        self.advance()
+        var args = []
+        while not self.check(close):
+            val expr = self.parse_expression()
+            args.push(MacroArg.Expr(expr))
+            if not self.check(close):
+                if self.check(TokenKind.Comma) or self.check(TokenKind.Semicolon):
+                    self.advance()
+        self.expect(close)
+        args
+
+    fn try_parse_colon_block() -> Expr?:
+        if not self.check(TokenKind.Colon):
+            return nil
+
+        self.advance()  # consume ':'
+        while self.check(TokenKind.Newline): self.advance()
+
+        if not self.check(TokenKind.Indent):
+            raise ParseError.unexpected_token("indented block after ':'",
+                "{self.current.kind}", self.current.span)
+
+        self.advance()  # consume Indent
+        var statements = []
+        while not self.check(TokenKind.Dedent) and not self.check(TokenKind.Eof):
+            while self.check(TokenKind.Newline): self.advance()
+            if self.check(TokenKind.Dedent) or self.check(TokenKind.Eof): break
+            statements.push(self.parse_item())
+            while self.check(TokenKind.Newline): self.advance()
+        if self.check(TokenKind.Dedent): self.advance()
+
+        val block_expr = Expr.DoBlock(statements)
+        Expr.Lambda(params: [], body: block_expr, move_mode: MoveMode.Copy, capture_all: false)
+
+    # =========================================================================
+    # No-paren calls
+    # =========================================================================
+
+    fn parse_with_no_paren_calls(expr: Expr) -> Expr:
+        if self.is_callable_expr(expr) and self.is_at_colon_block():
+            if val Some(block_lambda) = self.try_parse_colon_block():
+                val args = [Argument(name: nil, value: block_lambda)]
+                return self.make_call_expr(expr, args)
+        elif self.is_callable_expr(expr) and self.can_start_argument():
+            if self.mode == ParserMode.Strict and self.no_paren_depth > 0:
+                return expr
+
+            self.no_paren_depth = self.no_paren_depth + 1
+            var args = self.parse_no_paren_arguments()
+            self.no_paren_depth = self.no_paren_depth - 1
+
+            if self.check(TokenKind.Backslash):
+                val trailing = self.parse_trailing_lambda()
+                args.push(Argument(name: nil, value: trailing))
+            elif self.check(TokenKind.Colon):
+                if val Some(block_lambda) = self.try_parse_colon_block():
+                    args.push(Argument(name: nil, value: block_lambda))
+
+            if args.?:
+                return self.make_call_expr(expr, args)
+        expr
+
+    fn parse_infix_keywords(expr: Expr) -> Expr:
+        var result = expr
+        loop:
+            val method_name = match self.current.kind:
+                TokenKind.To: "to"
+                TokenKind.NotTo: "not_to"
+                _: break
+            self.advance()
+            val arg_expr = self.parse_expression()
+            val arg_expr2 = self.parse_with_no_paren_calls(arg_expr)
+            result = Expr.MethodCall(receiver: result, method: method_name,
+                                     args: [Argument(name: nil, value: arg_expr2)])
+        result
+
+    fn is_callable_expr(expr: Expr) -> bool:
+        match expr:
+            Expr.Identifier(_): true
+            Expr.FieldAccess(_, _): true
+            Expr.Path(_): true
+            _: false
+
+    fn is_at_colon_block() -> bool:
+        if not self.check(TokenKind.Colon):
+            return false
+        self.peek_is(TokenKind.Newline)
+
+    fn can_start_argument() -> bool:
+        match self.current.kind:
+            TokenKind.Integer(_) | TokenKind.TypedInteger(_, _) |
+            TokenKind.Float(_) | TokenKind.TypedFloat(_, _) |
+            TokenKind.String(_) | TokenKind.RawString(_) |
+            TokenKind.TypedString(_, _) | TokenKind.TypedRawString(_, _) |
+            TokenKind.FString(_) | TokenKind.Bool(_) | TokenKind.Nil |
+            TokenKind.Symbol(_) | TokenKind.Identifier(_, _) |
+            TokenKind.Result | TokenKind.Type | TokenKind.Out | TokenKind.OutErr |
+            TokenKind.Context | TokenKind.Feature | TokenKind.Scenario |
+            TokenKind.Given | TokenKind.When | TokenKind.Then | TokenKind.Common |
+            TokenKind.LParen | TokenKind.LBracket | TokenKind.LBrace |
+            TokenKind.Backslash | TokenKind.Colon |
+            TokenKind.Await | TokenKind.Yield |
+            TokenKind.Not | TokenKind.Minus | TokenKind.Plus |
+            TokenKind.Tilde | TokenKind.Ampersand | TokenKind.Star |
+            TokenKind.New | TokenKind.Old | TokenKind.From | TokenKind.To:
+                true
+            _: false
+
+    fn parse_no_paren_arguments() -> [Argument]:
+        var args = []
+        match self.parse_single_argument():
+            Ok(arg): args.push(arg)
+            Err(_): return args
+
+        loop:
+            val has_comma = self.check(TokenKind.Comma)
+            if has_comma: self.advance()
+
+            if self.mode == ParserMode.Strict:
+                if not self.can_start_argument() or match self.current.kind:
+                    TokenKind.To: true
+                    TokenKind.NotTo: true
+                    _: false:
+                    break
+            else:
+                if not has_comma: break
+
+            match self.parse_single_argument():
+                Ok(arg): args.push(arg)
+                Err(_): break
+        args
+
+    fn parse_single_argument() -> Argument:
+        match self.current.kind:
+            TokenKind.Identifier(name, _):
+                if self.peek_is(TokenKind.Colon) or self.peek_is(TokenKind.Assign):
+                    val name_clone = name
+                    self.advance()
+                    self.advance()  # consume ':' or '='
+                    val prev_depth = self.no_paren_depth
+                    if self.mode == ParserMode.Strict:
+                        self.no_paren_depth = self.no_paren_depth + 1
+                    val value = self.parse_expression()
+                    self.no_paren_depth = prev_depth
+                    return Argument(name: name_clone, value: value)
+            _: ()
+
+        val prev_depth = self.no_paren_depth
+        if self.mode == ParserMode.Strict:
+            self.no_paren_depth = self.no_paren_depth + 1
+        val value = self.parse_expression()
+        self.no_paren_depth = prev_depth
+        Argument(name: nil, value: value)
+
+    # =========================================================================
+    # Whitespace helpers
+    # =========================================================================
+
+    fn skip_whitespace_tokens():
+        while match self.current.kind:
+            TokenKind.Newline: true
+            TokenKind.Indent: true
+            TokenKind.Dedent: true
+            _: false:
+            self.advance()
+
+
+# =========================================================================
+# Placeholder lambda transformation (standalone functions)
+# =========================================================================
+
+static fn transform_placeholder_lambda(expr: Expr) -> Expr:
+    val count = count_placeholders(expr)
+    if count == 0:
+        return expr
+    var counter = 0
+    val body = replace_placeholders(expr, counter)
+    val params = [for i in 0..count: LambdaParam(name: "__p{i}", ty: nil)]
+    Expr.Lambda(params: params, body: body, move_mode: MoveMode.Copy, capture_all: false)
+
+fn count_placeholders(expr: Expr) -> i64:
+    match expr:
+        Expr.Identifier(name):
+            if name == "_": 1 else: 0
+        Expr.Binary(_, left, right):
+            count_placeholders(left) + count_placeholders(right)
+        Expr.Unary(_, operand):
+            count_placeholders(operand)
+        Expr.Call(callee, args):
+            count_placeholders(callee) + args.map(\a: count_placeholders(a.value)).sum()
+        Expr.MethodCall(receiver, _, args):
+            count_placeholders(receiver) + args.map(\a: count_placeholders(a.value)).sum()
+        Expr.FieldAccess(receiver, _):
+            count_placeholders(receiver)
+        Expr.Index(receiver, index):
+            count_placeholders(receiver) + count_placeholders(index)
+        Expr.If(_, condition, then_branch, else_branch):
+            count_placeholders(condition) + count_placeholders(then_branch) + (if else_branch.?: count_placeholders(else_branch) else: 0)
+        Expr.Tuple(items) | Expr.Array(items):
+            items.map(\i: count_placeholders(i)).sum()
+        Expr.Dict(entries):
+            entries.map(\e: count_placeholders(e.0) + count_placeholders(e.1)).sum()
+        Expr.OptionalChain(e, _):
+            count_placeholders(e)
+        Expr.Coalesce(e, default):
+            count_placeholders(e) + count_placeholders(default)
+        Expr.Cast(e, _):
+            count_placeholders(e)
+        Expr.Spread(inner):
+            count_placeholders(inner)
+        _: 0
+
+fn replace_placeholders(expr: Expr, counter: i64) -> Expr:
+    match expr:
+        Expr.Identifier(name):
+            if name == "_":
+                val new_name = "__p{counter}"
+                counter = counter + 1
+                Expr.Identifier(new_name)
+            else:
+                expr
+        Expr.Binary(op, left, right):
+            Expr.Binary(op: op, left: replace_placeholders(left, counter), right: replace_placeholders(right, counter))
+        Expr.Unary(op, operand):
+            Expr.Unary(op: op, operand: replace_placeholders(operand, counter))
+        Expr.Call(callee, args):
+            Expr.Call(callee: replace_placeholders(callee, counter),
+                     args: args.map(\a: Argument(name: a.name, value: replace_placeholders(a.value, counter))))
+        Expr.MethodCall(receiver, method, args):
+            Expr.MethodCall(receiver: replace_placeholders(receiver, counter), method: method,
+                           args: args.map(\a: Argument(name: a.name, value: replace_placeholders(a.value, counter))))
+        Expr.FieldAccess(receiver, field):
+            Expr.FieldAccess(receiver: replace_placeholders(receiver, counter), field: field)
+        Expr.Index(receiver, index):
+            Expr.Index(receiver: replace_placeholders(receiver, counter), index: replace_placeholders(index, counter))
+        Expr.If(let_pattern, condition, then_branch, else_branch):
+            Expr.If(let_pattern: let_pattern, condition: replace_placeholders(condition, counter),
+                   then_branch: replace_placeholders(then_branch, counter),
+                   else_branch: if else_branch.?: replace_placeholders(else_branch, counter) else: nil)
+        Expr.Tuple(items):
+            Expr.Tuple(items.map(\i: replace_placeholders(i, counter)))
+        Expr.Array(items):
+            Expr.Array(items.map(\i: replace_placeholders(i, counter)))
+        Expr.Dict(entries):
+            Expr.Dict(entries.map(\e: (replace_placeholders(e.0, counter), replace_placeholders(e.1, counter))))
+        Expr.OptionalChain(e, field):
+            Expr.OptionalChain(expr: replace_placeholders(e, counter), field: field)
+        Expr.Coalesce(e, default):
+            Expr.Coalesce(expr: replace_placeholders(e, counter), default: replace_placeholders(default, counter))
+        Expr.Cast(e, target_type):
+            Expr.Cast(expr: replace_placeholders(e, counter), target_type: target_type)
+        Expr.Spread(inner):
+            Expr.Spread(replace_placeholders(inner, counter))
+        _: expr
+
+fn extract_fstring_keys(parts: [FStringPart]) -> [text]:
+    var keys = []
+    for part in parts:
+        match part:
+            FStringPart.Expr(Expr.Identifier(name)):
+                keys.push(name)
+            _: ()
+    keys

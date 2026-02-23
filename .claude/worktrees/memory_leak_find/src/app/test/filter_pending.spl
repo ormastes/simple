@@ -1,0 +1,128 @@
+# Filter Pending Tests
+#
+# Identifies tests marked @pending or @skip and excludes them from test runs.
+# Simple (.spl) replacement for scripts/filter_pending_tests.sh
+
+use app.io.mod.{file_read, file_write, file_exists, dir_create_all, dir_list, is_dir, get_args}
+use std.text.{starts_with, trim, ends_with}
+use std.path.{join}
+
+fn find_spec_files(dir: text) -> [text]:
+    """Recursively find all *_spec.spl files in directory"""
+    var results: [text] = []
+    find_spec_files_recursive(dir, results)
+    results
+
+fn find_spec_files_recursive(dir: text, results: [text]):
+    """Helper for recursive file finding"""
+    val entries = dir_list(dir)
+    for entry in entries:
+        val path = join(dir, entry)
+        if is_dir(path):
+            find_spec_files_recursive(path, results)
+        else if ends_with(entry, "_spec.spl"):
+            results.push(path)
+
+fn is_pending_file(path: text) -> bool:
+    """Check if file contains @pending or @skip markers"""
+    if not file_exists(path):
+        return false
+
+    val content = file_read(path)
+    val lines = content.split("\n")
+
+    for line in lines:
+        val trimmed = trim(line)
+        if starts_with(trimmed, "# @pending"):
+            return true
+        if starts_with(trimmed, "# @skip"):
+            return true
+
+    false
+
+fn filter_pending_tests(target_dir: text):
+    """Main function: filter pending tests and create lists"""
+
+    print "=== Pending Test Filter ==="
+    print "Scanning: {target_dir}"
+    print ""
+
+    # Find all spec files
+    val all_specs = find_spec_files(target_dir)
+    val total_count = all_specs.len()
+
+    # Find pending/skip files
+    var pending_files: [text] = []
+    for spec in all_specs:
+        if is_pending_file(spec):
+            pending_files.push(spec)
+
+    val pending_count = pending_files.len()
+    val active_count = total_count - pending_count
+
+    # Calculate percentages
+    val pending_pct = if total_count > 0:
+        (pending_count * 100) / total_count
+    else:
+        0
+
+    val active_pct = if total_count > 0:
+        (active_count * 100) / total_count
+    else:
+        0
+
+    # Print summary
+    print "Summary:"
+    print "  Total spec files: {total_count}"
+    print "  Pending/Skip: {pending_count} ({pending_pct}%)"
+    print "  Active (non-pending): {active_count} ({active_pct}%)"
+    print ""
+
+    # List pending files (first 20)
+    print "Pending/Skip files:"
+    var shown = 0
+    for file in pending_files:
+        if shown < 20:
+            print file
+            shown = shown + 1
+
+    if pending_count > 20:
+        print "..."
+    print ""
+
+    # Create build directory
+    dir_create_all("build")
+
+    # Save exclusion list
+    val exclude_file = "build/pending_tests.txt"
+    var exclude_content = ""
+    for file in pending_files:
+        exclude_content = exclude_content + file + "\n"
+    file_write(exclude_file, exclude_content)
+    print "Exclusion list saved to: {exclude_file}"
+    print ""
+
+    # Create active test list
+    var active_files: [text] = []
+    for spec in all_specs:
+        if not is_pending_file(spec):
+            active_files.push(spec)
+
+    val active_file = "build/active_tests.txt"
+    var active_content = ""
+    for file in active_files:
+        active_content = active_content + file + "\n"
+    file_write(active_file, active_content)
+    print "Active test list saved to: {active_file} ({active_count} files)"
+
+fn main():
+    """Entry point"""
+    val args = get_args()
+    val target_dir = if args.len() > 1:
+        args[1]
+    else:
+        "test/lib"
+
+    filter_pending_tests(target_dir)
+
+export main, filter_pending_tests

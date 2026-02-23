@@ -1,0 +1,170 @@
+# GOT/PLT Builder for Dynamic Linking
+# Generates Global Offset Table and Procedure Linkage Table
+
+struct GotEntry:
+    symbol: text
+    offset: i64
+    section_index: i64
+
+struct PltEntry:
+    symbol: text
+    index: i64
+    got_offset: i64
+    code: [i64]  # PLT stub bytecode
+
+struct GotPltBuilder:
+    got_entries: [GotEntry]
+    plt_entries: [PltEntry]
+    got_size: i64
+    plt_size: i64
+    next_got_offset: i64
+    next_plt_index: i64
+
+fn encode_i32_le(value: i64) -> [i64]:
+    """Encode 32-bit integer as little-endian bytes."""
+    val b0 = value % 256
+    val b1 = (value / 256) % 256
+    val b2 = (value / 65536) % 256
+    val b3 = (value / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn generate_plt_stub_x86_64(index: i64, got_offset: i64) -> [i64]:
+    """Generate x86_64 PLT stub (16 bytes).
+
+    PLT stub format:
+      jmpq *GOT[offset](%rip)     # 6 bytes: ff 25 [disp32]
+      pushq $index                # 5 bytes: 68 [imm32]
+      jmpq PLT[0]                 # 5 bytes: e9 [disp32]
+    """
+    var code = []
+
+    # jmpq *GOT[offset](%rip) - indirect jump through GOT
+    code.push(0xFF)  # JMP opcode
+    code.push(0x25)  # ModRM: indirect through RIP-relative
+
+    # Displacement to GOT entry (4 bytes, little-endian)
+    # Will be fixed up during relocation
+    code = code + encode_i32_le(got_offset)
+
+    # pushq $index - push PLT index for lazy binding
+    code.push(0x68)  # PUSH opcode
+    code = code + encode_i32_le(index)
+
+    # jmpq PLT[0] - jump to resolver
+    code.push(0xE9)  # JMP opcode
+    # Displacement to PLT[0] (will be fixed up)
+    code = code + encode_i32_le(0)  # Placeholder
+
+    code
+
+impl GotPltBuilder:
+    static fn new() -> GotPltBuilder:
+        GotPltBuilder(
+            got_entries: [],
+            plt_entries: [],
+            got_size: 0,
+            plt_size: 0,
+            next_got_offset: 0,
+            next_plt_index: 0
+        )
+
+    me add_symbol(symbol: text) -> i64:
+        """Add symbol to GOT/PLT, return PLT entry index."""
+        # Check if already exists
+        for entry in self.plt_entries:
+            if entry.symbol == symbol:
+                return entry.index
+
+        # Allocate GOT entry (8 bytes)
+        val got_offset = self.next_got_offset
+        self.next_got_offset = self.next_got_offset + 8
+
+        val got_entry = GotEntry(
+            symbol: symbol,
+            offset: got_offset,
+            section_index: 0  # Will be set during section creation
+        )
+        self.got_entries.push(got_entry)
+
+        # Generate PLT stub
+        val plt_index = self.next_plt_index
+        self.next_plt_index = self.next_plt_index + 1
+
+        val plt_code = generate_plt_stub_x86_64(plt_index, got_offset)
+
+        val plt_entry = PltEntry(
+            symbol: symbol,
+            index: plt_index,
+            got_offset: got_offset,
+            code: plt_code
+        )
+        self.plt_entries.push(plt_entry)
+
+        plt_index
+
+    fn get_got_size() -> i64:
+        self.next_got_offset
+
+    fn get_plt_size() -> i64:
+        self.next_plt_index * 16  # Each PLT entry is 16 bytes
+
+    fn get_got_entries() -> [GotEntry]:
+        """Return all GOT entries."""
+        self.got_entries
+
+    fn get_plt_entries() -> [PltEntry]:
+        """Return all PLT entries."""
+        self.plt_entries
+
+    fn find_symbol_index(symbol: text) -> i64:
+        """Find PLT index for a symbol, or -1 if not found."""
+        for entry in self.plt_entries:
+            if entry.symbol == symbol:
+                return entry.index
+        -1
+
+fn create_got_section_data(builder: GotPltBuilder) -> [i64]:
+    """Create GOT section data (all zeros initially, filled by dynamic linker)."""
+    var data: [i64] = []
+    val got_size = builder.get_got_size()
+    for i in 0..got_size:
+        data = data + [0]
+    data
+
+fn create_plt_section_data(builder: GotPltBuilder) -> [i64]:
+    """Create PLT section data from PLT entries."""
+    var data: [i64] = []
+
+    # PLT[0] is special resolver entry (16 bytes)
+    data = data + create_plt0_entry()
+
+    # Add all PLT entries
+    for entry in builder.get_plt_entries():
+        data = data + entry.code
+
+    data
+
+fn create_plt0_entry() -> [i64]:
+    """Create PLT[0] resolver entry (16 bytes).
+
+    PLT[0] format:
+      pushq GOT[1]      # 6 bytes: ff 35 [disp32]
+      jmpq *GOT[2]      # 6 bytes: ff 25 [disp32]
+      nop padding       # 4 bytes: 0f 1f 40 00
+    """
+    [
+        # pushq GOT[1]      # 6 bytes
+        0xFF, 0x35, 0x00, 0x00, 0x00, 0x00,
+        # jmpq *GOT[2]      # 6 bytes
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+        # nop padding       # 4 bytes
+        0x0F, 0x1F, 0x40, 0x00
+    ]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GotEntry, PltEntry, GotPltBuilder
+export encode_i32_le, generate_plt_stub_x86_64
+export create_got_section_data, create_plt_section_data, create_plt0_entry

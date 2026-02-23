@@ -1,0 +1,180 @@
+# Loop-Invariant Code Motion (LICM)
+#
+# Moves loop-invariant code out of loops.
+#
+# An instruction is loop-invariant if:
+# 1. All operands are defined outside loop, OR
+# 2. All operands are themselves loop-invariant
+#
+# Algorithm:
+# 1. Identify loop-invariant instructions
+# 2. Hoist to loop preheader (block before loop)
+# 3. Update uses
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector}
+
+# ============================================================================
+# Loop-Invariant Code Motion (LICM)
+# ============================================================================
+
+class LoopInvariantMotion:
+    """
+    Moves loop-invariant code out of loops.
+
+    An instruction is loop-invariant if:
+    1. All operands are defined outside loop, OR
+    2. All operands are themselves loop-invariant
+
+    Algorithm:
+    1. Identify loop-invariant instructions
+    2. Hoist to loop preheader (block before loop)
+    3. Update uses
+    """
+    detector: LoopDetector
+    hoisted_count: i64
+
+impl LoopInvariantMotion:
+    static fn new() -> LoopInvariantMotion:
+        LoopInvariantMotion(
+            detector: LoopDetector.new(),
+            hoisted_count: 0
+        )
+
+    me optimize_function(func: MirFunction) -> MirFunction:
+        """Run LICM on function."""
+        # Detect loops
+        self.detector.detect_loops(func)
+
+        if self.detector.loops.len() == 0:
+            # No loops to optimize
+            return func
+
+        # For each loop, identify and hoist invariant code
+        var optimized_blocks = func.blocks
+
+        for loop in self.detector.loops:
+            optimized_blocks = self.hoist_invariants(optimized_blocks, loop)
+
+        copy_mir_function_with_blocks(func, optimized_blocks)
+
+    me hoist_invariants(blocks: [MirBlock], loop: LoopInfo) -> [MirBlock]:
+        """Hoist loop-invariant instructions out of loop."""
+        # Pre-compute loop block membership set for O(1) lookup
+        var loop_block_set = {}
+        loop_block_set["{loop.header.id}"] = true
+        for bid in loop.body:
+            loop_block_set["{bid.id}"] = true
+
+        # Build set of locals defined inside the loop
+        var loop_defs: Dict<i64, bool> = {}
+        for block in blocks:
+            if loop_block_set.contains_key("{block.id.id}"):
+                for inst in block.instructions:
+                    val dest = self.inst_dest(inst)
+                    if dest.?:
+                        loop_defs[dest.unwrap().id] = true
+
+        # Find invariant instructions (all operands defined outside loop)
+        var invariant_insts: [MirInst] = []
+        var hoisted_ids: Dict<i64, bool> = {}
+
+        for block in blocks:
+            if loop_block_set.contains_key("{block.id.id}"):
+                for inst in block.instructions:
+                    if self.is_loop_invariant(inst, loop_defs, hoisted_ids):
+                        invariant_insts = invariant_insts.push(inst)
+                        val dest = self.inst_dest(inst)
+                        if dest.?:
+                            hoisted_ids[dest.unwrap().id] = true
+
+        if invariant_insts.len() == 0:
+            return blocks
+
+        self.hoisted_count = self.hoisted_count + invariant_insts.len()
+
+        # Build new blocks: add hoisted insts before header, remove from body
+        var new_blocks: [MirBlock] = []
+        var hoisted_to_preheader = false
+
+        for block in blocks:
+            if block.id.id == loop.header.id and not hoisted_to_preheader:
+                # Insert hoisted instructions at start of header block
+                var new_insts: [MirInst] = []
+                for hinst in invariant_insts:
+                    new_insts = new_insts.push(hinst)
+                for inst in block.instructions:
+                    if not self.is_in_list(inst, invariant_insts):
+                        new_insts = new_insts.push(inst)
+                new_blocks = new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: new_insts, terminator: block.terminator
+                ))
+                hoisted_to_preheader = true
+            elif loop_block_set.contains_key("{block.id.id}"):
+                # Remove hoisted instructions from loop body
+                var kept: [MirInst] = []
+                for inst in block.instructions:
+                    if not self.is_in_list(inst, invariant_insts):
+                        kept = kept.push(inst)
+                new_blocks = new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: kept, terminator: block.terminator
+                ))
+            else:
+                new_blocks = new_blocks.push(block)
+
+        new_blocks
+
+    fn is_loop_invariant(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
+        """Check if instruction is loop-invariant (operands defined outside loop or already hoisted)."""
+        match inst.kind:
+            case Const(_, _, _): true  # Constants are always invariant
+            case BinOp(_, _, left, right):
+                self.operand_invariant(left, loop_defs, hoisted) and self.operand_invariant(right, loop_defs, hoisted)
+            case UnaryOp(_, _, operand):
+                self.operand_invariant(operand, loop_defs, hoisted)
+            case Copy(_, src):
+                self.operand_invariant(mir_operand_copy(src), loop_defs, hoisted)
+            case _: false  # Conservatively, don't hoist loads/stores/calls
+
+    fn operand_invariant(op: MirOperand, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
+        """Check if operand is defined outside loop or already hoisted."""
+        match op.kind:
+            case Copy(local):
+                val in_loop = loop_defs.has(local.id)
+                val was_hoisted = hoisted.has(local.id)
+                (not in_loop) or was_hoisted
+            case Move(local):
+                val in_loop = loop_defs.has(local.id)
+                val was_hoisted = hoisted.has(local.id)
+                (not in_loop) or was_hoisted
+            case Const(_, _): true  # Constants are always invariant
+
+    fn inst_dest(inst: MirInst) -> LocalId?:
+        """Get destination local of instruction, if any."""
+        match inst.kind:
+            case Const(dest, _, _): dest
+            case BinOp(dest, _, _, _): dest
+            case UnaryOp(dest, _, _): dest
+            case Copy(dest, _): dest
+            case _: nil
+
+    fn is_in_list(inst: MirInst, insts: [MirInst]) -> bool:
+        """Check if instruction is in list (by span comparison)."""
+        for other in insts:
+            if inst.span.start == other.span.start and inst.span.end == other.span.end:
+                val same_kind = self.inst_dest(inst).? and self.inst_dest(other).?
+                if same_kind:
+                    val d1 = self.inst_dest(inst).unwrap()
+                    val d2 = self.inst_dest(other).unwrap()
+                    if d1.id == d2.id:
+                        return true
+        false
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export LoopInvariantMotion

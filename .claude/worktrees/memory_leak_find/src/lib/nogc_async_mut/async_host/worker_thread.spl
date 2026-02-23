@@ -1,0 +1,115 @@
+# WorkerThread - OS Thread for Async Task Execution
+#
+# Worker thread that polls tasks from thread-safe queue.
+# Part of multi-threaded async runtime.
+
+use std.async_core.*
+use std.thread_sffi.{thread_sleep, thread_yield}
+use std.async_host.thread_safe_queue.{ThreadSafeQueue}
+
+class WorkerThread:
+    """OS thread that executes async tasks.
+
+    Part of multi-threaded executor. Each worker:
+    - Polls tasks from local queue
+    - Steals work from other workers when idle
+    - Executes tasks to completion
+    - Handles task suspension/wakeup
+
+    Example:
+        val worker = WorkerThread.new(0, local_queue, global_queue, {})
+        worker.run()  # runs in separate OS thread
+    """
+    worker_id: usize
+    local_queue: ThreadSafeQueue
+    global_queue: ThreadSafeQueue
+    is_running: bool
+    shutdown_requested: bool
+    task_registry: Dict<usize, fn() -> Poll<()>>
+
+    static fn new(
+        worker_id: usize,
+        local_queue: ThreadSafeQueue,
+        global_queue: ThreadSafeQueue,
+        task_registry: Dict<usize, fn() -> Poll<()>>
+    ) -> WorkerThread:
+        """Create new worker thread.
+
+        Args:
+            worker_id: Worker index
+            local_queue: Thread-local task queue
+            global_queue: Shared global task queue
+            task_registry: Registry of task poll functions
+
+        Returns:
+            Worker thread instance
+        """
+        WorkerThread(
+            worker_id: worker_id,
+            local_queue: local_queue,
+            global_queue: global_queue,
+            is_running: false,
+            shutdown_requested: false,
+            task_registry: task_registry
+        )
+
+    me run():
+        """Main worker loop (runs in OS thread).
+
+        Executes tasks until shutdown requested.
+        """
+        self.is_running = true
+
+        while not self.shutdown_requested:
+            if not self.run_one_task():
+                # No work available - sleep briefly
+                thread_sleep(1)
+
+        self.is_running = false
+
+    me run_one_task() -> bool:
+        """Run one task from queue.
+
+        Returns:
+            true if task executed, false if no work available
+        """
+        # Try local queue first (LIFO for cache locality)
+        var task_id = self.local_queue.try_pop()
+
+        # Try global queue
+        if not task_id.?:
+            task_id = self.global_queue.try_pop()
+
+        # Execute task if found
+        match task_id:
+            case Some(id):
+                match self.task_registry.get(id):
+                    case Some(poll_fn):
+                        val result = poll_fn()
+                        match result:
+                            case Poll.Ready(_):
+                                # Task complete, remove from registry
+                                self.task_registry.remove(id)
+                            case Poll.Pending:
+                                # Re-queue task for later
+                                self.local_queue.push(id)
+                        return true
+                    case nil:
+                        # Task not found in registry, skip
+                        return true
+            case nil:
+                return false
+
+    me shutdown():
+        """Request shutdown (thread-safe)."""
+        self.shutdown_requested = true
+
+    fn is_idle() -> bool:
+        """Check if worker is idle (no work).
+
+        Returns:
+            true if no work available, false otherwise
+        """
+        self.local_queue.is_empty() and self.global_queue.is_empty()
+
+export WorkerThread

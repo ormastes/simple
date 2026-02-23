@@ -1,0 +1,245 @@
+# PATH Environment Variable Operations
+#
+# Functions for working with the PATH environment variable and searching for executables.
+
+import std.path
+import std.env.variables
+import std.env.platform
+
+# ============================================================================
+# PATH Operations
+# ============================================================================
+
+fn path_separator() -> text:
+    """Get platform-specific PATH separator (: or ;).
+
+    Example:
+        path_separator()  # ":" on Unix, ";" on Windows
+    """
+    val os = platform.detect_os()
+    if os == "windows":
+        ";"
+    else:
+        ":"
+
+fn split_path(path: text) -> [text]:
+    """Split PATH environment variable into list of directories.
+
+    Example:
+        split_path("/usr/bin:/usr/local/bin")  # ["/usr/bin", "/usr/local/bin"]
+    """
+    val sep = path_separator()
+    path.split(sep)
+
+fn join_path(paths: [text]) -> text:
+    """Join list of directories into PATH string.
+
+    Example:
+        join_path(["/usr/bin", "/usr/local/bin"])  # "/usr/bin:/usr/local/bin"
+    """
+    val sep = path_separator()
+    paths.join(sep)
+
+fn path_add(path: text, dir: text) -> text:
+    """Add directory to end of PATH.
+
+    Example:
+        path_add("/usr/bin:/usr/local/bin", "/opt/bin")  # "/usr/bin:/usr/local/bin:/opt/bin"
+    """
+    if path == "":
+        return dir
+
+    val sep = path_separator()
+    path + sep + dir
+
+fn path_prepend(path: text, dir: text) -> text:
+    """Add directory to beginning of PATH.
+
+    Example:
+        path_prepend("/usr/bin:/usr/local/bin", "/opt/bin")  # "/opt/bin:/usr/bin:/usr/local/bin"
+    """
+    if path == "":
+        return dir
+
+    val sep = path_separator()
+    dir + sep + path
+
+fn path_remove(path: text, dir: text) -> text:
+    """Remove directory from PATH.
+
+    Example:
+        path_remove("/usr/bin:/opt/bin:/usr/local/bin", "/opt/bin")  # "/usr/bin:/usr/local/bin"
+    """
+    val parts = split_path(path)
+    var result = []
+
+    for part in parts:
+        if part != dir:
+            result.push(part)
+
+    join_path(result)
+
+fn path_contains(path: text, dir: text) -> bool:
+    """Check if PATH contains directory.
+
+    Example:
+        path_contains("/usr/bin:/usr/local/bin", "/usr/bin")  # true
+    """
+    val parts = split_path(path)
+
+    for part in parts:
+        if part == dir:
+            return true
+
+    false
+
+fn search_path(executable: text) -> text:
+    """Search for executable in PATH. Returns full path or empty string.
+
+    Example:
+        search_path("ls")  # "/usr/bin/ls"
+        search_path("nonexistent")  # ""
+    """
+    val path_env = variables.env_get("PATH")
+    val dirs = split_path(path_env)
+
+    for dir in dirs:
+        val full_path = path.join2(dir, executable)
+        if file_exists(full_path):
+            return full_path
+
+    ""
+
+fn which(executable: text) -> text:
+    """Alias for search_path. Find executable in PATH.
+
+    Example:
+        which("python3")  # "/usr/bin/python3"
+    """
+    search_path(executable)
+
+fn path_deduplicate(path: text) -> text:
+    """Remove duplicate directories from PATH.
+
+    Example:
+        path_deduplicate("/usr/bin:/usr/bin:/opt/bin")  # "/usr/bin:/opt/bin"
+    """
+    val parts = split_path(path)
+    var seen = []
+    var result = []
+
+    for part in parts:
+        var is_duplicate = false
+        for seen_part in seen:
+            if seen_part == part:
+                is_duplicate = true
+                break
+
+        if not is_duplicate:
+            seen.push(part)
+            result.push(part)
+
+    join_path(result)
+
+fn path_normalize(path: text) -> text:
+    """Normalize PATH by removing duplicates and non-existent dirs.
+
+    Example:
+        path_normalize("/usr/bin:/nonexistent:/opt/bin")  # removes /nonexistent
+    """
+    val parts = split_path(path)
+    var result = []
+
+    for part in parts:
+        if part != "" and dir_exists(part):
+            var is_duplicate = false
+            for seen in result:
+                if seen == part:
+                    is_duplicate = true
+                    break
+
+            if not is_duplicate:
+                result.push(part)
+
+    join_path(result)
+
+fn path_find_all(executable: text) -> [text]:
+    """Find all occurrences of executable in PATH.
+
+    Example:
+        path_find_all("python")  # ["/usr/bin/python", "/usr/local/bin/python"]
+    """
+    val path_env = variables.env_get("PATH")
+    val dirs = split_path(path_env)
+    var results = []
+
+    for dir in dirs:
+        val full_path = path.join2(dir, executable)
+        if file_exists(full_path):
+            results.push(full_path)
+
+    results
+
+fn path_get_index(path: text, dir: text) -> i64:
+    """Get index of directory in PATH, or -1 if not found.
+
+    Example:
+        path_get_index("/usr/bin:/opt/bin", "/opt/bin")  # 1
+    """
+    val parts = split_path(path)
+    var i = 0
+
+    for part in parts:
+        if part == dir:
+            return i
+        i = i + 1
+
+    -1
+
+fn path_insert(path: text, dir: text, index: i64) -> text:
+    """Insert directory at specific position in PATH.
+
+    Example:
+        path_insert("/usr/bin:/usr/local/bin", "/opt/bin", 1)  # "/usr/bin:/opt/bin:/usr/local/bin"
+    """
+    val parts = split_path(path)
+    var result = []
+    var i = 0
+
+    for part in parts:
+        if i == index:
+            result.push(dir)
+        result.push(part)
+        i = i + 1
+
+    if index >= parts.len():
+        result.push(dir)
+
+    join_path(result)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn file_exists(path: text) -> bool:
+    """Check if file exists (simple implementation).
+
+    Internal helper.
+    """
+    # Try to run test command
+    val (stdout, stderr, code) = variables.types.rt_process_run("/bin/sh", ["-c", "test -f " + path])
+    code == 0
+
+fn dir_exists(path: text) -> bool:
+    """Check if directory exists (simple implementation).
+
+    Internal helper.
+    """
+    # Try to run test command
+    val (stdout, stderr, code) = variables.types.rt_process_run("/bin/sh", ["-c", "test -d " + path])
+    code == 0
+
+export path_separator, split_path, join_path
+export path_add, path_prepend, path_remove, path_contains
+export path_deduplicate, path_normalize, path_find_all, path_get_index, path_insert
+export search_path, which

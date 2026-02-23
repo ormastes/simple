@@ -1,0 +1,248 @@
+# tools_git_core.spl - Core git compatibility tools (9 tools)
+#
+# Tools: status, init, clone, add, commit, log, diff, show, blame
+
+use app.mcp_jj.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, make_tool_result, make_error_response, make_tool_schema_multi, make_tool_schema, make_no_param_tool, make_prop, make_prop_bool, make_prop_int, extract_nested_string, extract_arguments_dict}
+use app.mcp_jj.jj_runner.{JjResult, jj_run, jj_run_with_args, shell_quote}
+use app.mcp_jj.warning.{git_compat_warning, git_compat_warning_no_equiv, show_warnings, handle_git_result_simple}
+use std.text.{NL}
+
+# =============================================================================
+# Tool 1: git_status -> jj status
+# =============================================================================
+
+fn schema_git_status() -> String:
+    make_no_param_tool("git_status", "[Git compat] Show repository status (translates to jj status)", true, false, true)
+
+fn handle_git_status(id: String, body: String, repo_path: String) -> String:
+    handle_git_result_simple(id, jj_run("status", repo_path), "git_status", "jj status", "jj_status")
+
+# =============================================================================
+# Tool 2: git_init -> jj git init
+# =============================================================================
+
+fn schema_git_init() -> String:
+    make_tool_schema("git_init", "[Git compat] Initialize a new repository (translates to jj git init)", "path", "Directory to initialize (default: current directory)", false, false, false, false)
+
+fn handle_git_init(id: String, body: String, repo_path: String) -> String:
+    val path = extract_nested_string(body, "arguments", "path")
+    var cmd = "git init"
+    if path != "":
+        cmd = cmd + " " + shell_quote(path)
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_init", "jj git init", "jj_init")
+        var msg = warning
+        msg = msg + result.stdout
+        msg = msg + "{NL}Note: jj does not support bare repositories. A colocated git+jj repo was created."
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 3: git_clone -> jj git clone
+# =============================================================================
+
+fn schema_git_clone() -> String:
+    var props = LB()
+    props = props + make_prop("url", "Repository URL to clone")
+    props = props + "," + make_prop("destination", "Local directory name")
+    props = props + "," + make_prop_bool("colocate", "Create colocated git+jj repo (default: true)")
+    props = props + RB()
+    val required = "[" + js("url") + "]"
+    make_tool_schema_multi("git_clone", "[Git compat] Clone a repository (translates to jj git clone)", props, required, false, false, false)
+
+fn handle_git_clone(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val url = args.get("url") ?? ""
+    if url == "":
+        return make_error_response(id, -32602, "Missing required parameter: url")
+    val destination = args.get("destination") ?? ""
+    val colocate = args.get("colocate") ?? ""
+    var cmd = "git clone"
+    if colocate != "false":
+        cmd = cmd + " --colocate"
+    cmd = cmd + " " + shell_quote(url)
+    if destination != "":
+        cmd = cmd + " " + shell_quote(destination)
+    handle_git_result_simple(id, jj_run(cmd, repo_path), "git_clone", "jj git clone", "jj_clone")
+
+# =============================================================================
+# Tool 4: git_add -> jj file track
+# =============================================================================
+
+fn schema_git_add() -> String:
+    make_tool_schema("git_add", "[Git compat] Stage files (translates to jj file track). Note: jj auto-tracks all changes in working copy.", "paths", "File paths to add (space-separated)", false, false, false, true)
+
+fn handle_git_add(id: String, body: String, repo_path: String) -> String:
+    val paths = extract_nested_string(body, "arguments", "paths")
+    var cmd = "file track"
+    if paths != "":
+        cmd = cmd + " " + paths
+    val result = jj_run(cmd, repo_path)
+    val warning = git_compat_warning("git_add", "jj file track", "jj_track")
+    var msg = warning
+    msg = msg + "Note: In jj, all file changes in the working copy are automatically included in the current change. "
+    msg = msg + "'jj file track' is only needed for newly created files that match .gitignore patterns.{NL}"
+    if result.success:
+        msg = msg + result.stdout
+    else:
+        msg = msg + "Command output: " + result.stderr
+    make_tool_result(id, msg)
+
+# =============================================================================
+# Tool 5: git_commit -> jj commit / jj describe
+# =============================================================================
+
+fn schema_git_commit() -> String:
+    var props = LB()
+    props = props + make_prop("message", "Commit message")
+    props = props + "," + make_prop_bool("amend", "Amend previous commit (translates to jj describe)")
+    props = props + RB()
+    make_tool_schema_multi("git_commit", "[Git compat] Commit changes (translates to jj commit/describe)", props, "[]", false, false, false)
+
+fn handle_git_commit(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val message = args.get("message") ?? ""
+    val amend = args.get("amend") ?? ""
+    if amend == "true":
+        # amend translates to jj describe
+        var cmd = "describe"
+        if message != "":
+            cmd = cmd + " -m " + shell_quote(message)
+        val result = jj_run(cmd, repo_path)
+        if result.success:
+            val warning = git_compat_warning("git_commit --amend", "jj describe", "jj_describe")
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    else:
+        var cmd = "commit"
+        if message != "":
+            cmd = cmd + " -m " + shell_quote(message)
+        val result = jj_run(cmd, repo_path)
+        if result.success:
+            val warning = git_compat_warning("git_commit", "jj commit", "jj_commit")
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 6: git_log -> jj log
+# =============================================================================
+
+fn schema_git_log() -> String:
+    var props = LB()
+    props = props + make_prop("count", "Number of commits to show")
+    props = props + "," + make_prop("author", "Filter by author name or email")
+    props = props + "," + make_prop("since", "Show commits after date (e.g. 2024-01-01)")
+    props = props + "," + make_prop("until", "Show commits before date")
+    props = props + "," + make_prop_bool("oneline", "One line per commit")
+    props = props + RB()
+    make_tool_schema_multi("git_log", "[Git compat] Show commit log (translates to jj log)", props, "[]", true, false, true)
+
+fn handle_git_log(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val count = args.get("count") ?? ""
+    val author = args.get("author") ?? ""
+    val since = args.get("since") ?? ""
+    val until_val = args.get("until") ?? ""
+    val oneline = args.get("oneline") ?? ""
+    var cmd = "log"
+    if count != "":
+        cmd = cmd + " -n " + count
+    if author != "":
+        cmd = cmd + " --revisions " + shell_quote("author(" + author + ")")
+    if oneline == "true":
+        cmd = cmd + " --template builtin_log_oneline"
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_log", "jj log", "jj_log")
+        var msg = warning
+        if since != "" or until_val != "":
+            msg = msg + "Note: Date-based filtering in jj uses revset expressions. Use 'jj log --revisions' with date filters.{NL}"
+        msg = msg + result.stdout
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 7: git_diff -> jj diff
+# =============================================================================
+
+fn schema_git_diff() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Revision to diff (default: working copy)")
+    props = props + "," + make_prop_bool("staged", "Show staged changes only (ignored in jj - all changes are in working copy)")
+    props = props + "," + make_prop("paths", "Restrict diff to specific paths (space-separated)")
+    props = props + RB()
+    make_tool_schema_multi("git_diff", "[Git compat] Show changes (translates to jj diff)", props, "[]", true, false, true)
+
+fn handle_git_diff(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val revision = args.get("revision") ?? ""
+    val staged = args.get("staged") ?? ""
+    val paths = args.get("paths") ?? ""
+    var cmd = "diff"
+    if revision != "":
+        cmd = cmd + " -r " + shell_quote(revision)
+    if paths != "":
+        cmd = cmd + " " + paths
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_diff", "jj diff", "jj_diff")
+        var msg = warning
+        if staged == "true":
+            msg = msg + "Note: jj has no staging area. All working copy changes are part of the current change. The --staged flag was ignored.{NL}"
+        msg = msg + result.stdout
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 8: git_show -> jj show
+# =============================================================================
+
+fn schema_git_show() -> String:
+    make_tool_schema("git_show", "[Git compat] Show commit details (translates to jj show)", "revision", "Commit hash or ref", false, true, false, true)
+
+fn handle_git_show(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    var cmd = "show"
+    if revision != "":
+        cmd = cmd + " " + shell_quote(revision)
+    handle_git_result_simple(id, jj_run(cmd, repo_path), "git_show", "jj show", "jj_show")
+
+# =============================================================================
+# Tool 9: git_blame -> jj file annotate
+# =============================================================================
+
+fn schema_git_blame() -> String:
+    var props = LB()
+    props = props + make_prop("path", "File path to annotate (required)")
+    props = props + "," + make_prop("revision", "Revision to annotate from")
+    props = props + RB()
+    val required = "[" + js("path") + "]"
+    make_tool_schema_multi("git_blame", "[Git compat] Show file annotation (translates to jj file annotate)", props, required, true, false, true)
+
+fn handle_git_blame(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val path = args.get("path") ?? ""
+    val revision = args.get("revision") ?? ""
+    if path == "":
+        return make_error_response(id, -32602, "Missing required parameter: path")
+    var cmd = "file annotate"
+    if revision != "":
+        cmd = cmd + " -r " + shell_quote(revision)
+    cmd = cmd + " " + shell_quote(path)
+    handle_git_result_simple(id, jj_run(cmd, repo_path), "git_blame", "jj file annotate", "jj_annotate")
+
+export schema_git_status, handle_git_status
+export schema_git_init, handle_git_init
+export schema_git_clone, handle_git_clone
+export schema_git_add, handle_git_add
+export schema_git_commit, handle_git_commit
+export schema_git_log, handle_git_log
+export schema_git_diff, handle_git_diff
+export schema_git_show, handle_git_show
+export schema_git_blame, handle_git_blame

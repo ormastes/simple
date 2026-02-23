@@ -1,0 +1,230 @@
+#!/usr/bin/env simple
+# Phase 4: Korean Text Training (Note.md Phase 3)
+#
+# Goal: Train on Korean text while preserving English knowledge
+#
+# Progressive training:
+#   1. Freeze base model
+#   2. Add LoRA_3 to layers 1 and 2
+#   3. Train embeddings + LoRA on Korean text data
+#   4. Per-layer CE loss monitoring
+#   5. English retention check each epoch (>= 97%)
+#   6. If retention drops: run English recovery sub-loop
+#   7. Merge LoRA_3 into base
+#
+# Run:
+#   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase4.spl
+
+use model.{TextModel, compute_mse_loss, check_gpu}
+use shared_logic.{
+    TrainConfig, TrainState, EMBEDDING_SEQ_LEN,
+    make_randn_batch_on_cuda, compute_ce_loss,
+    report_gpu_memory, report_training_step, report_epoch_end,
+    lr_linear_warmup
+}
+use validation.{
+    validate_model, check_english_retention,
+    validate_extended_model, validate_per_layer_retention
+}
+use embedding_utils.{
+    KorEngEmbedding, RoPECache,
+    make_embedding_batch, embed_with_routing, apply_rope, mean_pool_seq,
+    embedding_sgd_step, embedding_zero_grads
+}
+use layer_utils.{
+    ExtendedModel,
+    extended_lora_forward, forward_with_intermediates,
+    extended_sgd_step, extended_zero_grads
+}
+use lora_utils.{
+    LoRAConfig, LoRAAdapter,
+    create_lora_adapter, lora_forward,
+    lora_sgd_step, lora_zero_grads, lora_clip_and_step,
+    merge_lora_into_model
+}
+use train_phase0.{run_phase0}
+use train_phase1.{run_phase1}
+use train_phase2.{run_phase2}
+use train_phase3.{run_phase3}
+
+use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
+use std.torch.ffi.{
+    rt_torch_torchtensor_free,
+    rt_torch_torchtensor_mean,
+    rt_torch_autograd_backward,
+    rt_torch_cuda_empty_cache
+}
+
+export run_phase4
+
+
+# ============================================================================
+# Phase 4 Configuration
+# ============================================================================
+
+val ENGLISH_RETENTION_THRESHOLD = 0.97
+val RECOVERY_BATCHES = 10
+
+
+# ============================================================================
+# English Recovery Sub-Loop
+# ============================================================================
+
+# When English retention drops below threshold, run recovery training
+# on English-like data to restore knowledge.
+fn run_english_recovery(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig):
+    print("  Running English recovery sub-loop ({RECOVERY_BATCHES} batches)...")
+    val lr = config.learning_rate * 0.5
+
+    for i in 0..RECOVERY_BATCHES:
+        # Use standard randn batch (English-like synthetic data)
+        val batch = make_randn_batch_on_cuda(config.batch_size, config.input_dim, config.output_dim)
+        val x = batch[0]
+        val target = batch[1]
+
+        val logits = lora_forward(ext.base, x, lora_l1, lora_l2)
+        val loss_h = compute_mse_loss(logits, target)
+        rt_torch_autograd_backward(loss_h)
+
+        lora_clip_and_step(lora_l1, lora_l2, lr, config.max_grad_norm)
+        lora_zero_grads(lora_l1, lora_l2)
+        embedding_zero_grads(ext.emb)
+
+        rt_torch_torchtensor_free(x)
+        rt_torch_torchtensor_free(target)
+        rt_torch_torchtensor_free(logits)
+        rt_torch_torchtensor_free(loss_h)
+
+    print("  English recovery complete.")
+
+
+# ============================================================================
+# Training
+# ============================================================================
+
+fn run_phase4(ext_model: ExtendedModel) -> ExtendedModel:
+    print("")
+    print("=" * 70)
+    print("  PHASE 4: KOREAN TEXT TRAINING (Note.md Phase 3)")
+    print("=" * 70)
+    print("")
+
+    check_gpu()
+    print("")
+
+    val config = TrainConfig.phase4()
+    config.print_config("Phase 4 - Korean Text Training")
+
+    # Freeze base model
+    ext_model.base.freeze()
+    print("Base model weights: FROZEN")
+    print("")
+
+    # Add LoRA_3 to layers 1 and 2
+    val lora_config = LoRAConfig(rank: config.lora_rank, alpha: config.lora_alpha, dropout: 0.0)
+    print("Adding LoRA_3 adapters (Progressive LoRA):")
+    var lora_l1 = create_lora_adapter(config.input_dim, config.hidden_dim, lora_config)
+    var lora_l2 = create_lora_adapter(config.hidden_dim, config.hidden_dim, lora_config)
+    print("")
+
+    # Training loop — embeddings + LoRA trainable
+    print("Training: embeddings + LoRA_3")
+    print("")
+
+    var state = TrainState.create()
+    for epoch in 0..config.num_epochs:
+        state.reset_epoch()
+        print("--- Epoch {epoch + 1}/{config.num_epochs} ---")
+
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
+
+            # Create Korean text training batch
+            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext_model.emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+
+            # Forward with LoRA through extended model
+            val logits = extended_lora_forward(ext_model, kor_ids, eng_ids, mask, lora_l1, lora_l2)
+
+            # MSE loss
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+            # Backward
+            rt_torch_autograd_backward(loss_h)
+
+            # SGD step on LoRA + embeddings
+            extended_sgd_step(ext_model, lora_l1, lora_l2, lr)
+            extended_zero_grads(ext_model, lora_l1, lora_l2)
+
+            # Cleanup
+            rt_torch_torchtensor_free(kor_ids)
+            rt_torch_torchtensor_free(eng_ids)
+            rt_torch_torchtensor_free(mask)
+            rt_torch_torchtensor_free(target)
+            rt_torch_torchtensor_free(logits)
+            rt_torch_torchtensor_free(loss_h)
+
+            state.add_loss(loss_val)
+            report_training_step(state, config)
+
+        state.update_best()
+        report_epoch_end(epoch, config.num_epochs, state)
+
+        # Per-layer English retention check
+        val retained = validate_per_layer_retention(ext_model, config)
+        if not retained:
+            print("  WARNING: English retention below {ENGLISH_RETENTION_THRESHOLD}!")
+            run_english_recovery(ext_model, lora_l1, lora_l2, config)
+        print("")
+
+    print("=" * 70)
+    print("PHASE 4 TRAINING COMPLETE")
+    print("  Base: Phase 0-2 knowledge (FROZEN)")
+    print("  LoRA_3: Korean text (TRAINED)")
+    print("  Embeddings: Updated")
+    print("  Best loss: {state.best_loss}")
+    print("=" * 70)
+
+    # Merge LoRA_3 into base weights
+    merge_lora_into_model(ext_model.base, lora_l1, lora_l2)
+
+    report_gpu_memory()
+    ext_model
+
+
+# ============================================================================
+# Standalone entry point
+# ============================================================================
+
+fn main():
+    if not torch_available():
+        print("ERROR: libtorch not loaded. Run with:")
+        print("  LD_PRELOAD=build/libspl_torch.so bin/simple <this_file>")
+        return
+
+    # Run all prerequisite phases
+    print("Running Phase 0 (prerequisite)...")
+    var model = run_phase0()
+    print("")
+    print("Running Phase 1 (prerequisite)...")
+    model = run_phase1(model)
+    print("")
+    print("Running Phase 2 (prerequisite)...")
+    model = run_phase2(model)
+    print("")
+    print("Running Phase 3 (prerequisite)...")
+    var ext_model = run_phase3(model)
+    print("")
+
+    ext_model = run_phase4(ext_model)
+    ext_model.print_summary()
+    print("")
+    print("Phase 4 complete. Korean text knowledge added.")
+    rt_torch_cuda_empty_cache()
+
+
+main()

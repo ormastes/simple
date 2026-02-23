@@ -1,0 +1,429 @@
+# Pure Simple I/O Implementation - Hub Module
+#
+# This is the PRIMARY interface for ALL I/O operations in the Simple language.
+# All implementations are written in Pure Simple with SFFI wrappers - no Rust dependencies.
+#
+# The hub re-exports functions from specialized sub-modules for backward compatibility:
+# - file_ops: File reading, writing, copying, deletion, locking
+# - dir_ops: Directory creation, traversal, removal
+# - process_ops: Process execution, shell commands, environment variables
+# - env_ops: Environment variables, working directory, platform detection
+# - time_ops: Timestamps, time formatting, sleep
+# - sysinfo_ops: System information (PID, hostname, CPU count)
+# - thread: Thread management, atomics, parallelism
+# - math: Mathematical functions via bc shell calculator
+# - jit_ffi: JIT backend control (Cranelift/LLVM)
+# - debug_stubs: Debugger hooks, fault detection, breakpoints
+# - string_helpers: String utilities (hex conversion, char codes)
+# - cli_ops: CLI command handlers
+#
+# @tag:api
+
+
+# ============================================================================
+# Sub-module imports
+# ============================================================================
+
+# File operations: Reading, writing, copying, deletion, locking, hashing
+# Supports text and binary modes, memory-mapped I/O, atomic writes
+use app.io.file_ops.{file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write}
+use app.io.file_ops.{file_append, file_modified_time, file_stat, file_remove, file_hash_sha256, file_read_lines}
+use app.io.file_ops.{file_lock, file_unlock, file_size, file_size_raw}
+use app.io.file_ops.{file_read_text, file_read_bytes, file_mmap_read_text, file_mmap_read_bytes}
+use app.io.file_ops.{rt_file_rename}
+
+# Directory operations: Creation, traversal, removal, existence checks
+use app.io.dir_ops.{dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir}
+use app.io.dir_ops.{dir_list, dir_remove}
+
+# Process execution: Running commands, shell integration, output capture
+# ProcessResult struct: {exit_code: i64, stdout: text, stderr: text}
+use app.io.process_ops.{ProcessResult}
+use app.io.process_ops.{process_run, process_run_timeout, process_run_with_limits}
+use app.io.process_ops.{process_output, shell}
+use app.io.process_ops.{shell_bool, shell_output, shell_output_trimmed, shell_lines, shell_int}
+use app.io.process_ops.{eprint}
+
+# Process resource limits: Memory, CPU time, timeout enforcement
+# Used by test runner to prevent runaway tests
+use app.io.process_limit_enforcer.{build_ulimit_command, build_timeout_wrapper}
+use app.io.process_limit_enforcer.{detect_violation, detect_violation_from_profile, format_violation_message}
+use app.io.process_limit_enforcer.{supports_ulimit, get_ulimit_flags}
+use app.io.process_limit_enforcer.{bytes_to_kb, ms_to_seconds, profile_to_ulimit_params}
+
+# Environment variables and platform detection
+# env_get returns nil if variable not set (use ?? for defaults)
+use app.io.env_ops.{env_get, env_set, cwd, home, env_vars}
+use app.io.env_ops.{host_arch, host_os}
+
+# Time operations: Unix timestamps, date/time extraction, sleep
+# Timestamps are seconds since Unix epoch (1970-01-01 00:00:00 UTC)
+use app.io.time_ops.{time_now_unix_micros, current_time_unix, current_time_ms}
+use app.io.time_ops.{timestamp_year, timestamp_month, timestamp_day}
+use app.io.time_ops.{timestamp_hour, timestamp_minute, timestamp_second}
+use app.io.time_ops.{rt_timestamp_now, rt_sleep_ms}
+
+# System information: Process ID, hostname, CPU count, path utilities
+use app.io.sysinfo_ops.{getpid, hostname, cpu_count, path_basename}
+
+# Volatile memory operations: MMIO read/write, memory barriers
+use app.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64}
+use app.io.volatile_ops.{volatile_write_u8, volatile_write_u16, volatile_write_u32, volatile_write_u64}
+use app.io.volatile_ops.{memory_barrier, load_barrier, store_barrier}
+use app.io.volatile_ops.{volatile_read_modify_write_u32}
+
+# Debug stubs: Debugger hooks, breakpoints, stack traces, fault detection
+# These are stubs for future debugger integration - most return placeholder values
+use app.io.debug_stubs.{rt_debug_set_active, rt_hook_enable_debugging}
+use app.io.debug_stubs.{rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at}
+use app.io.debug_stubs.{rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val}
+use app.io.debug_stubs.{rt_debug_stack_trace_lines, rt_debug_local_vars}
+use app.io.debug_stubs.{rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_run_file_debug}
+use app.io.debug_stubs.{rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint}
+use app.io.debug_stubs.{rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info}
+use app.io.debug_stubs.{rt_debug_list_breakpoints, rt_debug_get_pending_condition, rt_debug_report_condition_result}
+use app.io.debug_stubs.{rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals}
+use app.io.debug_stubs.{rt_debug_get_source_lines}
+use app.io.debug_stubs.{rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches}
+use app.io.debug_stubs.{rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate}
+use app.io.debug_stubs.{rt_fault_set_stack_overflow_detection, rt_fault_set_max_recursion_depth}
+use app.io.debug_stubs.{rt_fault_set_timeout, rt_fault_set_execution_limit}
+use app.io.debug_stubs.{atomic_i64_new, atomic_bool_new}
+use app.io.debug_stubs.{rt_vulkan_is_available, upx_is_available}
+
+# String utilities: Character conversion, hex encoding, hashing
+use app.io.string_helpers.{hex_to_char, byte_to_char, char_code}
+use app.io.string_helpers.{text_hash_native}
+
+# CLI operations: Command-line argument parsing, program exit, CLI command handlers
+# These are internal CLI implementation functions - most users should use app.cli instead
+use app.io.cli_ops.{get_args, exit, cli_get_args, cli_exit, cli_file_exists}
+use app.io.cli_ops.{cli_replay, cli_constr, cli_check, cli_compile, cli_todo_scan, cli_gen_lean, cli_info}
+use app.io.cli_ops.{cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests}
+use app.io.cli_ops.{cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify, cli_run_migrate}
+use app.io.cli_ops.{cli_run_mcp, cli_run_diff, cli_run_query, cli_run_spec_coverage}
+use app.io.cli_ops.{cli_run_feature_gen, cli_run_task_gen, cli_run_spec_gen, cli_run_sspec_docgen}
+use app.io.cli_ops.{cli_run_todo_gen, cli_run_lex, cli_run_brief, cli_run_ffi_gen, cli_run_i18n}
+use app.io.cli_ops.{cli_handle_web, cli_handle_diagram, cli_handle_run, cli_handle_compile, cli_handle_linkers}
+use app.io.cli_ops.{cli_read_file, context_generate, context_stats, settlement_main}
+use app.io.cli_ops.{fault_set_stack_overflow_detection, fault_set_max_recursion_depth}
+use app.io.cli_ops.{fault_set_timeout, fault_set_execution_limit}
+
+# ============================================================================
+# Platform detection - kept in hub (used by other hub functions)
+# ============================================================================
+
+# SFFI wrapper for environment variable access
+extern fn rt_env_get(key: text) -> text
+
+# @tag:internal
+# Helper function to detect Windows platform
+# Checks OS environment variable for "windows" string (case-insensitive)
+# Returns: true if running on Windows, false otherwise
+fn is_windows_platform() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+# ============================================================================
+# Random Number Generation (SFFI wrappers) - kept in hub
+# ============================================================================
+
+# SFFI wrappers for C runtime random number generators
+extern fn rt_random_uniform(min: f64, max: f64) -> f64
+extern fn rt_random_randint(min: i64, max: i64) -> i64
+
+# @tag:api
+# Generate random float in range [min, max)
+# Uses C rand() internally - not cryptographically secure
+fn random_uniform(min: f64, max: f64) -> f64:
+    rt_random_uniform(min, max)
+
+# @tag:api
+# Generate random integer in range [min, max)
+# Uses C rand() internally - not cryptographically secure
+fn random_randint(min: i64, max: i64) -> i64:
+    rt_random_randint(min, max)
+
+# ============================================================================
+# Logging (SFFI wrappers) - kept in hub
+# ============================================================================
+
+# SFFI wrappers for structured logging system
+# Levels: 0=TRACE, 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR, 5=FATAL
+# Scope-based filtering allows per-module log levels
+extern fn rt_log_emit(level: i64, scope_ptr: i64, scope_len: i64, msg_ptr: i64, msg_len: i64)
+extern fn rt_log_get_global_level() -> i64
+extern fn rt_log_set_global_level(level: i64)
+extern fn rt_log_get_scope_level(scope_ptr: i64, scope_len: i64) -> i64
+extern fn rt_log_set_scope_level(scope_ptr: i64, scope_len: i64, level: i64)
+extern fn rt_log_is_enabled(level: i64, scope_ptr: i64, scope_len: i64) -> i64
+extern fn rt_log_clear_scope_levels()
+
+# @tag:api
+# Emit a log message at the specified level
+# level: 0=TRACE, 1=DEBUG, 2=INFO, 3=WARN, 4=ERROR, 5=FATAL
+fn log_emit(level: i64, scope_ptr: i64, scope_len: i64, msg_ptr: i64, msg_len: i64):
+    rt_log_emit(level, scope_ptr, scope_len, msg_ptr, msg_len)
+
+# @tag:api
+# Get the global log level (filters all scopes)
+fn log_get_global_level() -> i64:
+    rt_log_get_global_level()
+
+# @tag:api
+# Set the global log level (applies to all scopes)
+fn log_set_global_level(level: i64):
+    rt_log_set_global_level(level)
+
+# @tag:api
+# Get log level for a specific scope (e.g., "compiler", "parser")
+fn log_get_scope_level(scope_ptr: i64, scope_len: i64) -> i64:
+    rt_log_get_scope_level(scope_ptr, scope_len)
+
+# @tag:api
+# Set log level for a specific scope (allows fine-grained control)
+fn log_set_scope_level(scope_ptr: i64, scope_len: i64, level: i64):
+    rt_log_set_scope_level(scope_ptr, scope_len, level)
+
+# @tag:api
+# Check if logging is enabled for a level/scope combination
+fn log_is_enabled(level: i64, scope_ptr: i64, scope_len: i64) -> i64:
+    rt_log_is_enabled(level, scope_ptr, scope_len)
+
+# @tag:api
+# Clear all scope-specific log levels (revert to global level)
+fn log_clear_scope_levels():
+    rt_log_clear_scope_levels()
+
+# ============================================================================
+# Thread Sleep alias (for modules expecting millis-based sleep)
+# ============================================================================
+
+# Thread management and atomic operations
+# thread_available_parallelism: returns CPU core count for parallel workloads
+# atomic_*: thread-safe operations on shared i64 values
+use app.io.thread.{thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id}
+use app.io.thread.{atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange}
+
+# @tag:api
+# Sleep for specified milliseconds (alias for thread_sleep_ms)
+# Backward compatibility wrapper for legacy code
+fn thread_sleep(millis: i64):
+    thread_sleep_ms(millis)
+
+# ============================================================================
+# Math Functions - Using shell bc for computation (kept in hub)
+# ============================================================================
+
+# @tag:internal
+# Helper to evaluate bc expressions via shell
+# Falls back to default value on error (bc not installed, syntax error, etc.)
+# Note: This is SLOW - calls shell for each calculation
+fn shell_bc_calc(bc_expr: text, default: f64) -> f64:
+    val result = shell("echo '{bc_expr}' | bc -l")
+    if result.exit_code == 0:
+        result.stdout.trim().to_float_or(default)
+    else:
+        default
+
+# @tag:api
+# Exponential function: e^x
+# Uses bc shell calculator (slower than native but works everywhere)
+fn math_exp(x: f64) -> f64:
+    shell_bc_calc("e({x})", 0.0)
+
+# @tag:api
+# Natural logarithm: ln(x)
+# Returns -999999.0 for x <= 0 (mathematically undefined)
+fn math_ln(x: f64) -> f64:
+    if x <= 0.0:
+        return -999999.0
+    shell_bc_calc("l({x})", 0.0)
+
+# @tag:api
+# Square root: sqrt(x)
+# Returns 0.0 for x < 0 (no complex number support)
+fn math_sqrt(x: f64) -> f64:
+    if x < 0.0:
+        return 0.0
+    shell_bc_calc("sqrt({x})", 0.0)
+
+# @tag:api
+# Cosine: cos(x) in radians
+fn math_cos(x: f64) -> f64:
+    shell_bc_calc("c({x})", 0.0)
+
+# @tag:api
+# Sine: sin(x) in radians
+fn math_sin(x: f64) -> f64:
+    shell_bc_calc("s({x})", 0.0)
+
+# @tag:api
+# Random number in [0, 1) using /dev/urandom
+# Cryptographically secure (unlike random_uniform which uses C rand())
+# Falls back to 0.5 if /dev/urandom unavailable (unlikely on Unix)
+fn math_random() -> f64:
+    val result = shell("od -An -N4 -tu4 /dev/urandom | awk '{print $1}'")
+    if result.exit_code == 0:
+        val trimmed_rand = result.stdout.trim()
+        var rand_int = 0
+        if trimmed_rand.len() > 0:
+            rand_int = int(trimmed_rand)
+        # Divide by 2^32 to get [0, 1)
+        rand_int / 4294967296.0
+    else:
+        0.5
+
+# ============================================================================
+# Advanced Math Functions - Imported from app.io.math
+# ============================================================================
+# Logarithms: log(x,base), log10(x), log2(x)
+# Inverse trig: asin, acos, atan, atan2(y,x)
+# Hyperbolic: sinh, cosh, tanh
+# Rounding: ceil, floor, round
+use app.io.math.{math_log, math_log10, math_log2}
+use app.io.math.{math_asin, math_acos, math_atan, math_atan2}
+use app.io.math.{math_sinh, math_cosh, math_tanh}
+use app.io.math.{math_ceil, math_floor, math_round}
+
+# ============================================================================
+# JIT Backend Control - Imported from unified app.io.jit_ffi
+# ============================================================================
+# JIT compilation infrastructure for dynamic code execution
+# Supports Cranelift and LLVM backends for native code generation
+# exec_manager: API for compiling and executing JIT-compiled functions
+use app.io.jit_ffi.{jit_available, set_jit_backend, get_jit_backend}
+use app.io.jit_ffi.{exec_manager_create, exec_manager_compile, exec_manager_execute}
+use app.io.jit_ffi.{exec_manager_has_function, exec_manager_backend_name, exec_manager_cleanup}
+
+# ============================================================================
+# Re-exports: Volatile memory operations
+# ============================================================================
+export volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64
+export volatile_write_u8, volatile_write_u16, volatile_write_u32, volatile_write_u64
+export memory_barrier, load_barrier, store_barrier
+export volatile_read_modify_write_u32
+
+# ============================================================================
+# Re-exports: Debug stubs
+# ============================================================================
+# Debugger integration stubs - placeholders for future debugger support
+# Most functions return dummy values or no-op
+
+export rt_debug_set_active, rt_hook_enable_debugging
+export rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at
+export rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val
+export rt_debug_stack_trace_lines, rt_debug_local_vars
+export rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_run_file_debug
+export rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint
+export rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info
+export rt_debug_list_breakpoints, rt_debug_get_pending_condition, rt_debug_report_condition_result
+export rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals
+export rt_debug_get_source_lines
+export rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches
+export rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate
+export rt_fault_set_stack_overflow_detection, rt_fault_set_max_recursion_depth
+export rt_fault_set_timeout, rt_fault_set_execution_limit
+export atomic_i64_new, atomic_bool_new
+export rt_vulkan_is_available, upx_is_available
+
+# Re-exports: String helpers (character/hex conversion)
+export hex_to_char, byte_to_char, char_code
+
+# Re-exports: File operations (read, write, copy, delete, lock, hash, mmap)
+export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write
+export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines
+export file_lock, file_unlock, file_size, file_size_raw
+export rt_file_rename
+export file_read_text, file_read_bytes, file_mmap_read_text, file_mmap_read_bytes
+
+# Re-exports: Time operations (timestamps, date/time extraction, sleep)
+export rt_sleep_ms
+export rt_timestamp_now
+export time_now_unix_micros, current_time_unix, current_time_ms
+export timestamp_year, timestamp_month, timestamp_day
+export timestamp_hour, timestamp_minute, timestamp_second
+
+# Re-exports: Directory operations (create, list, walk, remove)
+export dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir
+export dir_list, dir_remove
+
+# Re-exports: Environment operations (cwd, home, env vars, platform detection)
+export cwd, home, env_get, env_set
+export host_arch, host_os
+export env_vars
+
+# Re-exports: Process operations (run, shell, output capture)
+export ProcessResult
+export process_run, process_run_timeout, process_run_with_limits
+export process_output, shell
+export shell_bool, shell_output, shell_output_trimmed, shell_lines, shell_int
+export eprint
+
+# Re-exports: Process limit enforcer (memory, CPU time, timeout)
+export build_ulimit_command, build_timeout_wrapper
+export detect_violation, detect_violation_from_profile, format_violation_message
+export supports_ulimit, get_ulimit_flags
+export bytes_to_kb, ms_to_seconds, profile_to_ulimit_params
+
+# Re-exports: System info (PID, hostname, CPU count)
+export getpid, hostname, cpu_count, path_basename
+
+# Re-exports: CLI operations (args, exit, command handlers - mostly internal)
+export get_args, exit, cli_get_args, cli_exit, cli_file_exists
+export cli_replay, cli_constr, cli_check, cli_compile, cli_todo_scan, cli_gen_lean, cli_info
+export cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests
+export cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify, cli_run_migrate
+export cli_run_mcp, cli_run_diff, cli_run_query, cli_run_spec_coverage
+export cli_run_feature_gen, cli_run_task_gen, cli_run_spec_gen, cli_run_sspec_docgen
+export cli_run_todo_gen, cli_run_lex, cli_run_brief, cli_run_ffi_gen, cli_run_i18n
+export cli_handle_web, cli_handle_diagram, cli_handle_run, cli_handle_compile, cli_handle_linkers
+export cli_read_file, context_generate, context_stats, settlement_main
+export fault_set_stack_overflow_detection, fault_set_max_recursion_depth
+export fault_set_timeout, fault_set_execution_limit
+
+# Hub-local exports: Math (bc-based shell calculations - SLOW but portable)
+export math_exp, math_ln, math_sqrt, math_cos, math_sin, math_random
+
+# Re-exports: Advanced math (from app.io.math - also bc-based)
+export math_log, math_log10, math_log2
+export math_asin, math_acos, math_atan, math_atan2
+export math_sinh, math_cosh, math_tanh
+export math_ceil, math_floor, math_round
+
+# Hub-local exports: Random (SFFI wrappers - not cryptographically secure)
+export random_uniform, random_randint
+
+# Hub-local exports: Logging (structured logging with scope-based filtering)
+export log_emit, log_get_global_level, log_set_global_level
+export log_get_scope_level, log_set_scope_level
+export log_is_enabled, log_clear_scope_levels
+
+# Re-exports: Thread & concurrency (parallelism, atomics, sleep)
+export thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id
+export atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange
+export thread_sleep
+
+# Re-exports: JIT backend control (Cranelift/LLVM code generation)
+export jit_available
+
+# Hub-local export: Platform detection helper (internal)
+export is_windows_platform
+
+# Volatile memory access (for MMIO in baremetal builds)
+# rt_read_volatile_i64 and rt_write_volatile_i64 may not be in the prebuilt
+# runtime binary — these are no-ops if not implemented
+extern fn rt_read_volatile_i64(addr: i64) -> i64
+extern fn rt_write_volatile_i64(addr: i64, value: i64)
+
+fn read_volatile(addr: i64) -> i64:
+    rt_read_volatile_i64(addr)
+
+fn write_volatile(addr: i64, value: i64):
+    rt_write_volatile_i64(addr, value)
+
+export read_volatile
+export write_volatile

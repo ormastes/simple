@@ -1,0 +1,177 @@
+# MCP SDK - Server Protocol State
+#
+# Tracks MCP protocol state: progress tokens, subscriptions,
+# log level, cancellation, and request IDs.
+
+use std.mcp_sdk.core.json.{LB, RB, jp, js, escape_json}
+use std.mcp_sdk.core.jsonrpc.{jsonrpc_notification}
+
+# Module-level state (avoids nested closure issues)
+var STATE_PROGRESS_TOKENS: [text] = []
+var STATE_PROGRESS_REQUEST_IDS: [text] = []
+var STATE_CANCELLED: [text] = []
+var STATE_CANCELLED_REASONS: [text] = []
+var STATE_SUBSCRIPTIONS: [text] = []
+var STATE_LOG_LEVEL = -1
+var STATE_NEXT_REQUEST_ID = 1
+
+# --- Progress token management ---
+
+fn state_register_progress(token: text, request_id: text):
+    STATE_PROGRESS_TOKENS = STATE_PROGRESS_TOKENS + [token]
+    STATE_PROGRESS_REQUEST_IDS = STATE_PROGRESS_REQUEST_IDS + [request_id]
+
+fn state_has_progress(token: text) -> bool:
+    for t in STATE_PROGRESS_TOKENS:
+        if t == token:
+            return true
+    false
+
+fn state_remove_progress(token: text):
+    var new_tokens: [text] = []
+    var new_ids: [text] = []
+    var i = 0
+    for t in STATE_PROGRESS_TOKENS:
+        if t != token:
+            new_tokens = new_tokens + [t]
+            if i < STATE_PROGRESS_REQUEST_IDS.len():
+                new_ids = new_ids + [STATE_PROGRESS_REQUEST_IDS[i]]
+        i = i + 1
+    STATE_PROGRESS_TOKENS = new_tokens
+    STATE_PROGRESS_REQUEST_IDS = new_ids
+
+# --- Cancellation ---
+
+fn state_cancel_request(request_id: text, reason: text):
+    STATE_CANCELLED = STATE_CANCELLED + [request_id]
+    STATE_CANCELLED_REASONS = STATE_CANCELLED_REASONS + [reason]
+
+fn state_is_cancelled(request_id: text) -> bool:
+    for rid in STATE_CANCELLED:
+        if rid == request_id:
+            return true
+    false
+
+fn state_clear_cancelled(request_id: text):
+    var new_cancelled: [text] = []
+    var new_reasons: [text] = []
+    var i = 0
+    for rid in STATE_CANCELLED:
+        if rid != request_id:
+            new_cancelled = new_cancelled + [rid]
+            if i < STATE_CANCELLED_REASONS.len():
+                new_reasons = new_reasons + [STATE_CANCELLED_REASONS[i]]
+        i = i + 1
+    STATE_CANCELLED = new_cancelled
+    STATE_CANCELLED_REASONS = new_reasons
+
+# --- Resource subscriptions ---
+
+fn state_subscribe(uri: text):
+    # Check if already subscribed
+    for u in STATE_SUBSCRIPTIONS:
+        if u == uri:
+            return
+    STATE_SUBSCRIPTIONS = STATE_SUBSCRIPTIONS + [uri]
+
+fn state_unsubscribe(uri: text):
+    var new_subs: [text] = []
+    for u in STATE_SUBSCRIPTIONS:
+        if u != uri:
+            new_subs = new_subs + [u]
+    STATE_SUBSCRIPTIONS = new_subs
+
+fn state_is_subscribed(uri: text) -> bool:
+    for u in STATE_SUBSCRIPTIONS:
+        if u == uri:
+            return true
+    false
+
+fn state_get_subscriptions() -> [text]:
+    STATE_SUBSCRIPTIONS
+
+# --- Log level ---
+
+fn state_set_log_level(level: i64):
+    STATE_LOG_LEVEL = level
+
+fn state_get_log_level() -> i64:
+    STATE_LOG_LEVEL
+
+fn state_should_emit_log(msg_level: i64) -> bool:
+    if STATE_LOG_LEVEL < 0:
+        return false
+    msg_level >= STATE_LOG_LEVEL
+
+# Log level name to numeric priority
+fn log_level_to_int(level: text) -> i64:
+    if level == "debug":
+        return 0
+    elif level == "info":
+        return 1
+    elif level == "notice":
+        return 2
+    elif level == "warning":
+        return 3
+    elif level == "error":
+        return 4
+    elif level == "critical":
+        return 5
+    elif level == "alert":
+        return 6
+    elif level == "emergency":
+        return 7
+    -1
+
+# --- Server request ID generation ---
+
+fn state_next_request_id() -> text:
+    val id_num = STATE_NEXT_REQUEST_ID
+    STATE_NEXT_REQUEST_ID = STATE_NEXT_REQUEST_ID + 1
+    "srv-" + id_num.to_string()
+
+# --- Notification builders ---
+
+fn make_progress_notification(token: text, progress: i64, total: i64, message: text) -> text:
+    var params = LB()
+    params = params + jp("progressToken", js(token))
+    params = params + "," + jp("progress", progress.to_string())
+    if total > 0:
+        params = params + "," + jp("total", total.to_string())
+    if message != "":
+        params = params + "," + jp("message", js(escape_json(message)))
+    params = params + RB()
+    jsonrpc_notification("notifications/progress", params)
+
+fn make_log_notification(level: text, data: text, logger: text) -> text:
+    var params = LB()
+    params = params + jp("level", js(level))
+    params = params + "," + jp("data", js(escape_json(data)))
+    if logger != "":
+        params = params + "," + jp("logger", js(escape_json(logger)))
+    params = params + RB()
+    jsonrpc_notification("notifications/message", params)
+
+fn make_resource_updated_notification(uri: text) -> text:
+    val params = LB() + jp("uri", js(escape_json(uri))) + RB()
+    jsonrpc_notification("notifications/resources/updated", params)
+
+# Reset all state (for testing)
+fn state_reset():
+    STATE_PROGRESS_TOKENS = []
+    STATE_PROGRESS_REQUEST_IDS = []
+    STATE_CANCELLED = []
+    STATE_CANCELLED_REASONS = []
+    STATE_SUBSCRIPTIONS = []
+    STATE_LOG_LEVEL = -1
+    STATE_NEXT_REQUEST_ID = 1
+
+# --- Exports ---
+
+export state_register_progress, state_has_progress, state_remove_progress
+export state_cancel_request, state_is_cancelled, state_clear_cancelled
+export state_subscribe, state_unsubscribe, state_is_subscribed, state_get_subscriptions
+export state_set_log_level, state_get_log_level, state_should_emit_log, log_level_to_int
+export state_next_request_id
+export make_progress_notification, make_log_notification, make_resource_updated_notification
+export state_reset

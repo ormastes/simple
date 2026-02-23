@@ -1,0 +1,387 @@
+# Representation Functions
+#
+# Multiple text representations for values: debug, pretty (Unicode), LaTeX.
+# Pure Simple implementation.
+#
+# Functions:
+# - to_debug_text: Debug representation with type annotation
+# - pretty_fraction: Unicode stacked fraction
+# - pretty_power: Base with superscript exponent
+# - pretty_sub: Base with subscript index
+# - pretty_sqrt: Square root notation
+# - pretty_sum: Summation with bounds
+# - pretty_integral: Integral with bounds
+# - pretty_matrix: Matrix with bracket characters
+# - pretty_piecewise: Piecewise function with brace characters
+# - latex_fraction: LaTeX fraction
+# - latex_power: LaTeX superscript
+# - latex_sub: LaTeX subscript
+# - latex_sqrt: LaTeX square root
+# - latex_sum: LaTeX summation
+# - latex_integral: LaTeX integral
+# - latex_matrix: LaTeX bmatrix
+# - latex_piecewise: LaTeX cases
+
+use std.text.{text_pad_right}
+use std.unicode_math.{superscript, subscript, math_sym, math_op, greek, greek_upper, hline, bracket_left_top, bracket_left_mid, bracket_left_bot, bracket_right_top, bracket_right_mid, bracket_right_bot, brace_left_top, brace_left_mid, brace_left_bot, brace_ext}
+
+# ============================================================================
+# Helper: Pad Center
+# ============================================================================
+
+fn text_pad_center(s: text, width: i64) -> text:
+    """Center a string within the given width using spaces.
+
+    Example:
+        text_pad_center("ab", 6)  # "  ab  "
+        text_pad_center("abc", 5)  # " abc "
+    """
+    if s.len() >= width:
+        return s
+    val left_pad_count = (width - s.len()) / 2
+    var pad = ""
+    for _ in 0..left_pad_count:
+        pad = pad + " "
+    pad + s
+
+fn make_spaces(count: i64) -> text:
+    """Create a string of spaces with the given count.
+
+    Example:
+        make_spaces(3)  # "   "
+    """
+    var result = ""
+    for _ in 0..count:
+        result = result + " "
+    result
+
+# ============================================================================
+# Debug Representation
+# ============================================================================
+
+fn to_debug_text(value: text) -> text:
+    """Wrap a text value in a debug representation with type annotation.
+
+    Example:
+        to_debug_text("hello")  # "text(\"hello\")"
+    """
+    var q = "\""
+    "text(" + q + value + q + ")"
+
+# ============================================================================
+# Pretty Builders (Unicode 2D)
+# ============================================================================
+
+fn pretty_fraction(num: text, den: text) -> text:
+    """Build a Unicode stacked fraction.
+
+    The numerator and denominator are centered above and below a
+    horizontal line. The line width is the max of both widths.
+
+    Example:
+        pretty_fraction("1", "2")
+        # "1" centered above "─" above "2"
+    """
+    var width = num.len()
+    if den.len() > width:
+        width = den.len()
+    val num_centered = text_pad_center(num, width)
+    val den_centered = text_pad_center(den, width)
+    val bar = hline(width)
+    num_centered + "\n" + bar + "\n" + den_centered
+
+fn pretty_power(base: text, exp: text) -> text:
+    """Build a Unicode base with superscript exponent.
+
+    Example:
+        pretty_power("x", "2")  # "x²"
+    """
+    base + superscript(exp)
+
+fn pretty_sub(base: text, idx: text) -> text:
+    """Build a Unicode base with subscript index.
+
+    Example:
+        pretty_sub("x", "1")  # "x₁"
+    """
+    base + subscript(idx)
+
+fn pretty_sqrt(expr: text) -> text:
+    """Build a Unicode square root expression (inline form).
+
+    Example:
+        pretty_sqrt("x+1")  # "√(x+1)"
+    """
+    math_sym("sqrt") + "(" + expr + ")"
+
+fn pretty_sum(expr: text, var_name: text, from_val: text, to_val: text) -> text:
+    """Build a Unicode summation with bounds (3 lines).
+
+    Format:
+       to_val
+        ∑  expr
+      var=from
+
+    Example:
+        pretty_sum("i", "i", "1", "n")
+    """
+    val sigma = math_sym("sum")
+    val bottom = var_name + "=" + from_val
+    # Compute widths for centering
+    val body = " " + sigma + "  " + expr
+    var max_width = body.len()
+    if to_val.len() > max_width:
+        max_width = to_val.len()
+    if bottom.len() > max_width:
+        max_width = bottom.len()
+    val top_line = text_pad_center(to_val, max_width)
+    val mid_line = text_pad_center(body, max_width)
+    val bot_line = text_pad_center(bottom, max_width)
+    top_line + "\n" + mid_line + "\n" + bot_line
+
+fn pretty_integral(expr: text, var_name: text, from_val: text, to_val: text) -> text:
+    """Build a Unicode integral with bounds (3 lines).
+
+    Format:
+       to_val
+        ∫  expr dvar
+       from
+
+    Example:
+        pretty_integral("x", "x", "0", "1")
+    """
+    val integral_sym = math_sym("integral")
+    val body = " " + integral_sym + "  " + expr + " d" + var_name
+    var max_width = body.len()
+    if to_val.len() > max_width:
+        max_width = to_val.len()
+    if from_val.len() > max_width:
+        max_width = from_val.len()
+    val top_line = text_pad_center(to_val, max_width)
+    val mid_line = text_pad_center(body, max_width)
+    val bot_line = text_pad_center(from_val, max_width)
+    top_line + "\n" + mid_line + "\n" + bot_line
+
+fn pretty_matrix(rows: [[text]]) -> text:
+    """Build a Unicode matrix with bracket characters.
+
+    Uses ⎡⎢⎣ and ⎤⎥⎦ bracket pieces. Cells are right-padded to
+    column width. Handles 1-row, 2-row, and 3+ row cases.
+
+    Example:
+        pretty_matrix([["1", "2"], ["3", "4"]])
+    """
+    val nrows = rows.len()
+    if nrows == 0:
+        return "⎡⎤"
+
+    # Compute column widths
+    val first_row = rows[0]
+    val ncols = first_row.len()
+    var col_widths: [i64] = []
+    for _ in 0..ncols:
+        col_widths = col_widths + [0]
+
+    for row in rows:
+        var ci = 0
+        for cell in row:
+            if ci < ncols:
+                if cell.len() > col_widths[ci]:
+                    col_widths[ci] = cell.len()
+            ci = ci + 1
+
+    # Build each row string (cells padded, joined by space)
+    var row_strs: [text] = []
+    for row in rows:
+        var line = ""
+        var ci = 0
+        for cell in row:
+            if ci > 0:
+                line = line + " "
+            if ci < ncols:
+                line = line + text_pad_right(cell, col_widths[ci], " ")
+            ci = ci + 1
+        row_strs = row_strs + [line]
+
+    # Add bracket characters per row
+    var result = ""
+    var ri = 0
+    for row_str in row_strs:
+        if ri > 0:
+            result = result + "\n"
+        var left = bracket_left_mid()
+        var right = bracket_right_mid()
+        if nrows == 1:
+            left = bracket_left_top()
+            right = bracket_right_top()
+        else:
+            if ri == 0:
+                left = bracket_left_top()
+                right = bracket_right_top()
+            if ri == nrows - 1:
+                left = bracket_left_bot()
+                right = bracket_right_bot()
+        result = result + left + " " + row_str + " " + right
+        ri = ri + 1
+    result
+
+fn pretty_piecewise(cases: [[text]]) -> text:
+    """Build a Unicode piecewise function with brace characters.
+
+    Each case is [expr, condition]. Uses brace pieces for the left side.
+    First line gets top brace, last gets bottom brace, middle gets
+    the mid brace point (for 3+ cases) or extension.
+
+    Format:
+        ⎧ expr   if cond
+        ⎨ expr   if cond
+        ⎩ expr   if cond
+
+    Example:
+        pretty_piecewise([["x", "x > 0"], ["-x", "x <= 0"]])
+    """
+    val ncases = cases.len()
+    if ncases == 0:
+        return ""
+
+    var result = ""
+    var ci = 0
+    for cas in cases:
+        if ci > 0:
+            result = result + "\n"
+        val expr = cas[0]
+        val cond = cas[1]
+        var brace = brace_ext()
+        if ncases == 1:
+            brace = brace_left_top()
+        else:
+            if ci == 0:
+                brace = brace_left_top()
+            if ci == ncases - 1:
+                brace = brace_left_bot()
+            # Middle point for 3+ cases
+            if ncases >= 3:
+                val mid_idx = ncases / 2
+                if ci == mid_idx:
+                    brace = brace_left_mid()
+        result = result + brace + " " + expr + "   if " + cond
+        ci = ci + 1
+    result
+
+# ============================================================================
+# LaTeX Builders
+# ============================================================================
+
+fn latex_fraction(num: text, den: text) -> text:
+    """Build a LaTeX fraction command.
+
+    Example:
+        latex_fraction("1", "2")  # "\\frac{1}{2}"
+    """
+    "\\frac{" + num + "}{" + den + "}"
+
+fn latex_power(base: text, exp: text) -> text:
+    """Build a LaTeX superscript expression.
+
+    Single-character exponents omit braces.
+
+    Example:
+        latex_power("x", "2")    # "x^2"
+        latex_power("x", "n+1")  # "x^{n+1}"
+    """
+    if exp.len() == 1:
+        return base + "^" + exp
+    base + "^{" + exp + "}"
+
+fn latex_sub(base: text, idx: text) -> text:
+    """Build a LaTeX subscript expression.
+
+    Single-character indices omit braces.
+
+    Example:
+        latex_sub("x", "1")    # "x_1"
+        latex_sub("x", "10")   # "x_{10}"
+    """
+    if idx.len() == 1:
+        return base + "_" + idx
+    base + "_{" + idx + "}"
+
+fn latex_sqrt(expr: text) -> text:
+    """Build a LaTeX square root command.
+
+    Example:
+        latex_sqrt("x+1")  # "\\sqrt{x+1}"
+    """
+    "\\sqrt{" + expr + "}"
+
+fn latex_sum(expr: text, var_name: text, from_val: text, to_val: text) -> text:
+    """Build a LaTeX summation command with bounds.
+
+    Example:
+        latex_sum("i", "i", "1", "n")  # "\\sum_{i=1}^{n} i"
+    """
+    "\\sum_{" + var_name + "=" + from_val + "}^{" + to_val + "} " + expr
+
+fn latex_integral(expr: text, var_name: text, from_val: text, to_val: text) -> text:
+    """Build a LaTeX integral command with bounds.
+
+    Example:
+        latex_integral("x", "x", "0", "1")  # "\\int_{0}^{1} x \\, dx"
+    """
+    "\\int_{" + from_val + "}^{" + to_val + "} " + expr + " \\, d" + var_name
+
+fn latex_matrix(rows: [[text]]) -> text:
+    """Build a LaTeX bmatrix environment.
+
+    Rows are separated by \\\\ and cells within a row by &.
+
+    Example:
+        latex_matrix([["1", "2"], ["3", "4"]])
+        # "\\begin{bmatrix} 1 & 2 \\\\ 3 & 4 \\end{bmatrix}"
+    """
+    var row_strs: [text] = []
+    for row in rows:
+        var line = ""
+        var ci = 0
+        for cell in row:
+            if ci > 0:
+                line = line + " & "
+            line = line + cell
+            ci = ci + 1
+        row_strs = row_strs + [line]
+
+    var joined = ""
+    var ri = 0
+    for row_str in row_strs:
+        if ri > 0:
+            joined = joined + " \\\\ "
+        joined = joined + row_str
+        ri = ri + 1
+
+    "\\begin{bmatrix} " + joined + " \\end{bmatrix}"
+
+fn latex_piecewise(cases: [[text]]) -> text:
+    """Build a LaTeX cases environment.
+
+    Each case is [expr, condition].
+
+    Example:
+        latex_piecewise([["x", "x > 0"], ["-x", "x <= 0"]])
+        # "\\begin{cases} x & \\text{if } x > 0 \\\\ -x & \\text{if } x <= 0 \\end{cases}"
+    """
+    var case_strs: [text] = []
+    for cas in cases:
+        val expr = cas[0]
+        val cond = cas[1]
+        val entry = expr + " & \\text{if } " + cond
+        case_strs = case_strs + [entry]
+
+    var joined = ""
+    var ci = 0
+    for case_str in case_strs:
+        if ci > 0:
+            joined = joined + " \\\\ "
+        joined = joined + case_str
+        ci = ci + 1
+
+    "\\begin{cases} " + joined + " \\end{cases}"

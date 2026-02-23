@@ -1,0 +1,352 @@
+# Skip/Ignore Condition Evaluation
+# Comprehensive condition matching for test skip/ignore decorators
+
+use std.spec.env_detect.{
+    get_platform_os, is_windows, is_linux, is_macos, is_unix, is_bsd,
+    get_runtime_mode, is_interpreter, is_compiled, is_jit,
+    get_build_profile, is_debug, is_release, is_bootstrap,
+    get_architecture, is_x86_64, is_aarch64, is_64bit, is_32bit,
+    has_feature, has_generics, has_async, has_macros,
+    has_gpu, has_cuda, has_simd, has_avx2, has_neon, is_multi_core,
+    has_module, has_library,
+    has_env, get_env, is_ci,
+    has_symlinks, has_permissions, is_case_sensitive, has_xattr,
+    has_network, can_reach,
+    check_version_constraint
+}
+
+# ================================================================
+# SKIP CONDITION STRUCT
+# ================================================================
+
+struct SkipCondition:
+    # Platform & Runtime
+    platforms: [text]
+    runtimes: [text]
+    profiles: [text]
+    architectures: [text]
+
+    # Compiler Features
+    features: [text]
+    version: text
+
+    # Hardware & Dependencies
+    hardware: [text]
+    dependencies: [text]
+
+    # Environment & File System
+    env_vars: {text: text}
+    fs_features: [text]
+    network: bool
+
+    # Metadata
+    tags: [text]
+    reason: text
+    ignore: bool
+
+    fn matches() -> bool:
+        """
+        Evaluate if current environment matches ANY skip condition (OR logic).
+
+        Returns true if test should be skipped/ignored.
+        """
+
+        # Check each condition dimension
+        if matches_platforms(self.platforms):
+            return true
+
+        if matches_runtimes(self.runtimes):
+            return true
+
+        if matches_profiles(self.profiles):
+            return true
+
+        if matches_architectures(self.architectures):
+            return true
+
+        if matches_features(self.features):
+            return true
+
+        if matches_version(self.version):
+            return true
+
+        if matches_hardware(self.hardware):
+            return true
+
+        if matches_requires(self.dependencies):
+            return true
+
+        if matches_env_vars(self.env_vars):
+            return true
+
+        if matches_fs_features(self.fs_features):
+            return true
+
+        if matches_network(self.network):
+            return true
+
+        # Tags are metadata, checked separately by test runner
+
+        false
+
+# ================================================================
+# CONDITION MATCHERS
+# ================================================================
+
+fn matches_platforms(platforms: [text]) -> bool:
+    """Check if current platform matches any in list."""
+    if platforms.len() == 0:
+        return false
+
+    val current_os = get_platform_os()
+
+    for platform in platforms:
+        val p = platform.lower()
+
+        # Direct match
+        if p == current_os:
+            return true
+
+        # Special cases
+        if p == "unix" and is_unix():
+            return true
+
+        if p == "bsd" and is_bsd():
+            return true
+
+    false
+
+fn matches_runtimes(runtimes: [text]) -> bool:
+    """Check if current runtime matches any in list."""
+    if runtimes.len() == 0:
+        return false
+
+    val current_mode = get_runtime_mode()
+
+    for runtime in runtimes:
+        val r = runtime.lower()
+        if r == current_mode:
+            return true
+
+        # Aliases
+        if r == "interpreter" and is_interpreter():
+            return true
+
+        if r == "compiled" and is_compiled():
+            return true
+
+        if r == "jit" and is_jit():
+            return true
+
+    false
+
+fn matches_profiles(profiles: [text]) -> bool:
+    """Check if current build profile matches any in list."""
+    if profiles.len() == 0:
+        return false
+
+    val current_profile = get_build_profile()
+
+    for profile in profiles:
+        val p = profile.lower()
+        if p == current_profile:
+            return true
+
+    false
+
+fn matches_architectures(architectures: [text]) -> bool:
+    """Check if current architecture matches any in list."""
+    if architectures.len() == 0:
+        return false
+
+    val current_arch = get_architecture()
+
+    for arch in architectures:
+        val a = arch.lower()
+
+        # Direct match
+        if a == current_arch:
+            return true
+
+        # Aliases
+        if a == "arm64" and is_aarch64():
+            return true
+
+        if a == "x86_64" and is_x86_64():
+            return true
+
+        if a == "64bit" and is_64bit():
+            return true
+
+        if a == "32bit" and is_32bit():
+            return true
+
+    false
+
+fn matches_features(features: [text]) -> bool:
+    """Check if ANY specified feature is present."""
+    if features.len() == 0:
+        return false
+
+    # Match if ANY feature is present
+    for feature in features:
+        val f = feature.lower()
+
+        if f == "generics" and has_generics():
+            return true
+
+        if f == "async" and has_async():
+            return true
+
+        if f == "macros" and has_macros():
+            return true
+
+        if has_feature(f):
+            return true
+
+    false
+
+fn matches_version(version: text) -> bool:
+    """Check if version constraint IS satisfied."""
+    if version == "":
+        return false
+
+    # Match if version constraint is met
+    check_version_constraint(version)
+
+fn matches_hardware(hardware: [text]) -> bool:
+    """Check if ANY specified hardware is present."""
+    if hardware.len() == 0:
+        return false
+
+    # Match if ANY hardware is present
+    for hw in hardware:
+        val h = hw.lower()
+
+        if h == "gpu" and has_gpu():
+            return true
+
+        if h == "cuda" and has_cuda():
+            return true
+
+        if h == "simd" and has_simd():
+            return true
+
+        if h == "avx2" and has_avx2():
+            return true
+
+        if h == "neon" and has_neon():
+            return true
+
+        if h == "multi_core" and is_multi_core():
+            return true
+
+    false
+
+fn matches_requires(deps: [text]) -> bool:
+    """Check if ANY specified dependency is present."""
+    if deps.len() == 0:
+        return false
+
+    # Match if ANY dependency is present
+    for req in deps:
+        # Check both as module and library
+        if has_module(req) or has_library(req):
+            return true
+
+    false
+
+fn matches_env_vars(env_vars: {text: text}) -> bool:
+    """Check if environment variables match expected values."""
+    if env_vars.len() == 0:
+        return false
+
+    for key in env_vars.keys():
+        val expected = env_vars[key]
+        val actual = get_env(key)
+
+        # If expected is nil, check that var is NOT set
+        if expected == nil:
+            if has_env(key):
+                return true
+        else:
+            # Check that var IS set and matches
+            if actual != expected:
+                return true
+
+    false
+
+fn matches_fs_features(fs_features: [text]) -> bool:
+    """Check if ANY specified file system feature is present."""
+    if fs_features.len() == 0:
+        return false
+
+    # Match if ANY FS feature is present
+    for feature in fs_features:
+        val f = feature.lower()
+
+        if f == "symlinks" and has_symlinks():
+            return true
+
+        if f == "permissions" and has_permissions():
+            return true
+
+        if f == "case_sensitive" and is_case_sensitive():
+            return true
+
+        if f == "xattr" and has_xattr():
+            return true
+
+    false
+
+fn matches_network(network: bool) -> bool:
+    """Check if network is available when required."""
+    if not network:
+        return false
+
+    # If network is required, match if available
+    has_network()
+
+# ================================================================
+# HELPER: CREATE SKIP CONDITION
+# ================================================================
+
+fn create_skip_condition(
+    platforms: [text],
+    runtimes: [text],
+    profiles: [text],
+    architectures: [text],
+    features: [text],
+    version: text,
+    hardware: [text],
+    dependencies: [text],
+    env_vars: {text: text},
+    fs_features: [text],
+    network: bool,
+    tags: [text],
+    reason: text,
+    ignore: bool
+) -> SkipCondition:
+    """Create a SkipCondition struct with all parameters."""
+    SkipCondition(
+        platforms: platforms,
+        runtimes: runtimes,
+        profiles: profiles,
+        architectures: architectures,
+        features: features,
+        version: version,
+        hardware: hardware,
+        dependencies: dependencies,
+        env_vars: env_vars,
+        fs_features: fs_features,
+        network: network,
+        tags: tags,
+        reason: reason,
+        ignore: ignore
+    )
+
+# Export
+export SkipCondition, create_skip_condition
+export matches_platforms, matches_runtimes, matches_profiles, matches_architectures
+export matches_features, matches_version, matches_hardware, matches_requires
+export matches_env_vars, matches_fs_features, matches_network

@@ -1,0 +1,370 @@
+# SMF Reader - Simple Module Format file reading.
+#
+# This module provides SMF file reading capabilities using:
+# - Rust FFI for binary parsing (performance-critical)
+# - Simple for high-level logic and metadata interpretation
+#
+# The SmfReader implements the SmfReader trait from obj_taker.spl.
+
+# note_sdn import removed - causes parse errors in runtime due to generics/multi-line fns
+# Stub NoteSdnMetadata locally for type compatibility
+use .obj_taker (SmfSymbol, SymbolType, SymbolBinding)
+use .smf_enums (Platform, Arch, CompressionType)
+
+# Stub for NoteSdnMetadata (real impl in monomorphize.note_sdn, compiled-only)
+struct NoteSdnMetadata:
+    empty: bool
+
+fn stub_new_note_sdn() -> NoteSdnMetadata:
+    NoteSdnMetadata(empty: true)
+
+# ============================================================================
+# Rust FFI Declarations
+# ============================================================================
+#
+# These extern functions are implemented in src/rust/loader/src/smf/ffi.rs
+# They handle low-level binary parsing for performance.
+
+# SmfReaderFfi - Rust FFI handle for SMF file reading.
+# extern class not parseable by runtime (generics in signatures).
+# Stubs provided for runtime compatibility.
+extern fn rt_smf_reader_open(path: text) -> i64
+extern fn rt_smf_reader_read_header(handle: i64) -> i64
+extern fn rt_smf_reader_read_section(handle: i64, index: i32) -> i64
+extern fn rt_smf_reader_read_symbol_table(handle: i64) -> i64
+extern fn rt_smf_reader_read_string_table(handle: i64) -> i64
+extern fn rt_smf_reader_close(handle: i64) -> i64
+
+# ============================================================================
+# Raw Structures (from FFI)
+# ============================================================================
+
+struct SmfHeaderRaw:
+    # Raw SMF header as returned from Rust FFI.
+    magic: [u8]           # "SMF\0"
+    version_major: u8
+    version_minor: u8
+    platform: u8
+    arch: u8
+    flags: u32
+    compression: u8
+    section_count: u32
+    section_table_offset: u64
+    symbol_table_offset: u64
+    symbol_count: u32
+    exported_count: u32
+    entry_point: u64
+    stub_size: u32
+    smf_data_offset: u32
+    module_hash: u64
+    source_hash: u64
+    app_type: u8
+
+struct SmfSymbolRaw:
+    # Raw symbol as returned from Rust FFI.
+    name_offset: u32
+    name_hash: u32
+    sym_type: u8
+    binding: u8
+    visibility: u8
+    flags: u8
+    value: u64
+    size: u64
+    type_id: u32
+    version: u32
+    template_param_count: u8
+    template_offset: u64
+
+struct SmfSectionRaw:
+    # Raw section as returned from Rust FFI.
+    section_type: u8
+    flags: u8
+    offset: u64
+    size: u64
+    name: [u8]
+
+# ============================================================================
+# High-Level Structures
+# ============================================================================
+
+struct SmfHeader:
+    # Parsed SMF header.
+    version: (u8, u8)     # (major, minor)
+    platform: Platform
+    arch: Arch
+    flags: SmfFlags
+    section_count: i32
+    symbol_count: i32
+    entry_point: i64
+    has_templates: bool
+    has_note_sdn: bool
+    compression: CompressionType
+
+struct SmfFlags:
+    executable: bool
+    reloadable: bool
+    debug_info: bool
+    pic: bool
+    has_stub: bool
+
+impl SmfHeader:
+    static fn from_raw(raw: SmfHeaderRaw) -> SmfHeader:
+        # Convert raw header to parsed header.
+        val has_tpl = (raw.flags and 0x10) != 0
+        val has_sdn = (raw.flags and 0x20) != 0
+        SmfHeader(
+            version: (raw.version_major, raw.version_minor),
+            platform: parse_platform(raw.platform),
+            arch: parse_arch(raw.arch),
+            flags: parse_flags(raw.flags),
+            section_count: raw.section_count as i32,
+            symbol_count: raw.symbol_count as i32,
+            entry_point: raw.entry_point as i64,
+            has_templates: has_tpl,
+            has_note_sdn: has_sdn,
+            compression: parse_compression(raw.compression)
+        )
+
+    fn is_v1_1() -> bool:
+        # Check if this is v1.1 format (trailer-based header).
+        val (major, minor) = self.version
+        major >= 1 and minor >= 1
+
+# ============================================================================
+# SMF Reader Implementation
+# ============================================================================
+
+struct SmfReaderImpl:
+    # High-level SMF reader that implements SmfReader trait.
+    ffi: SmfReaderFfi
+    file_path: text
+    header: SmfHeader
+    symbols: Dict<text, SmfSymbol>
+    string_table: [u8]
+    sections: [SmfSectionRaw]
+    note_sdn_cache: NoteSdnMetadata?
+
+impl SmfReaderImpl:
+    static fn open(path: text) -> Result<SmfReaderImpl, text>:
+        # Open an SMF file and parse headers.
+        # Open via Rust FFI
+        val ffi = SmfReaderFfi.open(path)?
+
+        # Read header
+        val raw_header = ffi.read_header()
+        val header = SmfHeader.from_raw(raw_header)
+
+        # Read string table for symbol name resolution
+        val string_table = ffi.read_string_table()
+
+        # Read and parse symbol table
+        val raw_symbols = ffi.read_symbol_table()
+        var symbols: Dict<text, SmfSymbol> = {}
+
+        for raw in raw_symbols:
+            val name = read_string_from_table(string_table, raw.name_offset)
+            val is_gen = (raw.flags and 0x10) != 0
+            val symbol = SmfSymbol(
+                name: name,
+                section_index: derive_section_index(raw.sym_type),
+                offset: raw.value as i64,
+                size: raw.size as i64,
+                ty: parse_symbol_type(raw.sym_type),
+                binding: parse_symbol_binding(raw.binding),
+                is_generic_template: is_gen,
+                template_param_count: raw.template_param_count as i32,
+                template_offset: raw.template_offset as i64
+            )
+            symbols[name] = symbol
+
+        Ok(SmfReaderImpl(
+            ffi: ffi,
+            file_path: path,
+            header: header,
+            symbols: symbols,
+            string_table: string_table,
+            sections: [],
+            note_sdn_cache: nil
+        ))
+
+    fn path() -> text:
+        # Get the file path.
+        self.file_path
+
+    fn lookup_symbol(name: text) -> Result<SmfSymbol, text>:
+        # Look up a symbol by name.
+        if self.symbols.contains_key(name):
+            Ok(self.symbols[name])
+        else:
+            Err("Symbol not found: {name}")
+
+    fn read_code(symbol: SmfSymbol) -> Result<[u8], text>:
+        # Read code bytes for a symbol.
+        # Find the code section
+        val section_data = self.ffi.read_section(symbol.section_index)
+
+        # Extract symbol's code
+        val start = symbol.offset as i32
+        val end = start + symbol.size as i32
+
+        if end > section_data.len():
+            return Err("Symbol {symbol.name} extends beyond section")
+
+        Ok(section_data[start..end])
+
+    fn read_template_section(symbol: SmfSymbol) -> Result<[u8], text>:
+        # Read template code section for a generic symbol.
+        if not symbol.is_generic_template:
+            return Err("Symbol {symbol.name} is not a generic template")
+
+        # Find TemplateCode section (type 12)
+        val template_section_index = self.find_section_by_type(12)
+        if template_section_index < 0:
+            return Err("No TemplateCode section found")
+
+        val section_data = self.ffi.read_section(template_section_index)
+
+        # Extract template at offset
+        val start = symbol.template_offset as i32
+        if start >= section_data.len():
+            return Err("Template offset out of bounds")
+
+        # Template format: length prefix + data
+        # Proper template parsing not yet implemented; returning raw bytes from offset
+        eprint("Warning: proper template parsing not yet implemented; returning raw section data for {symbol.name}")
+        Ok(section_data[start..])
+
+    fn read_note_sdn() -> NoteSdnMetadata:
+        # Read note.sdn metadata section (stub for runtime).
+        if self.note_sdn_cache != nil:
+            return self.note_sdn_cache
+        val metadata = stub_new_note_sdn()
+        self.note_sdn_cache = metadata
+        metadata
+
+    fn find_section_by_type(section_type: i32) -> i32:
+        # Find section index by type.
+        # Section table reading not yet implemented; using convention-based index mapping
+        # Real implementation would iterate self.sections and match on section_type field
+        eprint("Warning: section table reading not yet implemented; using default index mapping for type {section_type}")
+        match section_type:
+            case 1: 0   # Code
+            case 2: 1   # Data
+            case 12: 2  # TemplateCode
+            case 13: 3  # TemplateMeta/note.sdn
+            case _: -1
+
+    fn find_note_sdn_section() -> i32:
+        # Find the note.sdn section index.
+        self.find_section_by_type(13)
+
+    fn exported_symbols() -> [SmfSymbol]:
+        # Get all exported (global/weak) symbols.
+        self.symbols.values().filter(\s: s.is_exported())
+
+    fn template_symbols() -> [SmfSymbol]:
+        # Get all generic template symbols.
+        self.symbols.values().filter(\s: s.is_generic_template)
+
+    fn close():
+        # Close the reader and release resources.
+        self.ffi.close()
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn parse_platform(p: u8) -> Platform:
+    Platform.from_u8(p)
+
+fn parse_arch(a: u8) -> Arch:
+    Arch.from_u8(a)
+
+fn parse_compression(c: u8) -> CompressionType:
+    CompressionType.from_u8(c)
+
+fn parse_flags(f: u32) -> SmfFlags:
+    val is_exec = (f and 0x01) != 0
+    val is_reload = (f and 0x02) != 0
+    val is_debug = (f and 0x04) != 0
+    val is_pic = (f and 0x08) != 0
+    val is_stub = (f and 0x10) != 0
+    SmfFlags(
+        executable: is_exec,
+        reloadable: is_reload,
+        debug_info: is_debug,
+        pic: is_pic,
+        has_stub: is_stub
+    )
+
+fn derive_section_index(sym_type: u8) -> i32:
+    # Derive section index from symbol type.
+    # Functions go in code section (0), data/constants in data section (1).
+    match sym_type:
+        case 0: 0  # Function -> code section
+        case 1: 1  # Data -> data section
+        case 5: 1  # Constant -> data section
+        case _: 0  # Default to code section
+
+fn parse_symbol_type(t: u8) -> SymbolType:
+    match t:
+        case 0: SymbolType.Function
+        case 1: SymbolType.Data
+        case 2: SymbolType.Type
+        case 3: SymbolType.Trait
+        case 4: SymbolType.ActorSymbol
+        case 5: SymbolType.Constant
+        case _: SymbolType.Unknown
+
+fn parse_symbol_binding(b: u8) -> SymbolBinding:
+    match b:
+        case 0: SymbolBinding.Local
+        case 1: SymbolBinding.Global
+        case 2: SymbolBinding.Weak
+        case _: SymbolBinding.Local
+
+fn read_string_from_table(table: [u8], offset: u32) -> text:
+    # Read null-terminated string from string table.
+    var chars = []
+    for i in (offset as i32)..table.len():
+        if table[i] == 0:
+            return chars.join("")
+        chars.push(char_from_byte(table[i]))
+    chars.join("")
+
+fn char_from_byte(b: u8) -> text:
+    # Convert byte to single-character string using ASCII mapping
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = (b as i32) - 32
+    if idx >= 0 and idx < ascii_table.len():
+        ascii_table[idx:idx + 1]
+    else:
+        "?"  # Non-printable character
+
+fn bytes_to_string(bytes: [u8]) -> text:
+    # Convert byte array to string.
+    var chars = []
+    for b in bytes:
+        if b == 0:
+            return chars.join("")
+        chars.push(char_from_byte(b))
+    chars.join("")
+
+fn parse_note_sdn(sdn_text: text) -> NoteSdnMetadata:
+    # Stub: returns empty metadata (real impl in compiled mode)
+    stub_new_note_sdn()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SmfReaderImpl
+export SmfReaderFfi
+export SmfHeader
+export SmfHeaderRaw
+export SmfSymbolRaw
+export SmfSectionRaw
+export Platform
+export Arch
+export CompressionType
+export SmfFlags

@@ -1,0 +1,163 @@
+# Stop Hook Orchestration
+# Coordinates all detectors and provides interactive prompts
+
+use std.hooks.mod (HookResult, register_hook, run_hooks, hooks_enabled, interactive_mode)
+use std.hooks.detectors.todo (detect_todos, format_summary as format_todo_summary)
+use std.hooks.detectors.feature (detect_features, format_summary as format_feature_summary)
+use std.hooks.detectors.task (detect_tasks, format_summary as format_task_summary)
+use std.hooks.detectors.build (detect_build_issues, format_summary as format_build_summary)
+
+export register_stop_hooks, maybe_run_stop_hooks, run_stop_hooks
+
+# Summary of all incomplete work
+struct IncompleteSummary:
+    todo_summary: TodoSummary
+    feature_summary: FeatureSummary
+    task_summary: TaskSummary
+    build_summary: BuildSummary
+    has_incomplete: bool
+
+# Detect all incomplete work
+fn detect_incomplete_work() -> IncompleteSummary:
+    val todo_summary = detect_todos("doc/todo/todo_db.sdn", 1)  # P0/P1 only
+    val feature_summary = detect_features("doc/feature/feature_db.sdn")
+    val task_summary = detect_tasks("doc/task/task_db.sdn")
+    val build_summary = detect_build_issues("doc/build/build_db.sdn")
+
+    # Check if any incomplete work exists
+    val has_incomplete =
+        todo_summary.high_priority_items.len() > 0 or
+        feature_summary.incomplete_features.len() > 0 or
+        task_summary.incomplete_tasks.len() > 0 or
+        build_summary.total_errors > 0
+
+    IncompleteSummary(
+        todo_summary: todo_summary,
+        feature_summary: feature_summary,
+        task_summary: task_summary,
+        build_summary: build_summary,
+        has_incomplete: has_incomplete
+    )
+
+# Show incomplete work summary
+fn show_incomplete_summary(summary: IncompleteSummary):
+    if not summary.has_incomplete:
+        return
+
+    print "\n🔍 Incomplete Work Detected\n"
+
+    # Show counts
+    val todo_count = summary.todo_summary.high_priority_items.len()
+    val feature_count = summary.feature_summary.incomplete_features.len()
+    val task_count = summary.task_summary.incomplete_tasks.len()
+    val error_count = summary.build_summary.total_errors
+
+    if todo_count > 0:
+        print "TODOs:        {todo_count} high-priority items (P0/P1)"
+
+    if feature_count > 0:
+        print "Features:     {feature_count} incomplete"
+
+    if task_count > 0:
+        print "Tasks:        {task_count} pending/in-progress"
+
+    if error_count > 0:
+        print "Build Issues: {error_count} errors"
+
+    print ""
+
+# Interactive prompt for incomplete work
+fn interactive_prompt(summary: IncompleteSummary) -> HookResult:
+    print "What would you like to do?"
+    print "  1. Show TODO list"
+    print "  2. Show incomplete features"
+    print "  3. Show pending tasks"
+    print "  4. Show build errors"
+    print "  5. Continue anyway"
+    print "  6. Exit and fix later"
+    print ""
+    print "Choice [1-6]: "
+
+    # Read user choice
+    val choice = read_line()
+
+    match choice.trim():
+        "1":
+            print "\n"
+            print format_todo_summary(summary.todo_summary)
+            HookResult.Action("show_todos")
+
+        "2":
+            print "\n"
+            print format_feature_summary(summary.feature_summary)
+            HookResult.Action("show_features")
+
+        "3":
+            print "\n"
+            print format_task_summary(summary.task_summary)
+            HookResult.Action("show_tasks")
+
+        "4":
+            print "\n"
+            print format_build_summary(summary.build_summary)
+            HookResult.Action("show_build")
+
+        "5":
+            HookResult.Continue
+
+        "6":
+            HookResult.Stop
+
+        _:
+            print "Invalid choice, continuing anyway"
+            HookResult.Continue
+
+# Stop hook callback
+fn stop_hook_callback() -> HookResult:
+    # Check if hooks are enabled
+    if not hooks_enabled():
+        return HookResult.Continue
+
+    # Detect incomplete work
+    val summary = detect_incomplete_work()
+
+    # If no incomplete work, continue
+    if not summary.has_incomplete:
+        return HookResult.Continue
+
+    # Show summary
+    show_incomplete_summary(summary)
+
+    # Interactive mode: prompt user
+    if interactive_mode():
+        return interactive_prompt(summary)
+
+    # Non-interactive mode: just list and continue
+    HookResult.Continue
+
+# Register stop hooks
+fn register_stop_hooks():
+    # Register stop hook with priority 10 (runs early)
+    register_hook("stop_incomplete_work", 10, stop_hook_callback)
+
+# Maybe run stop hooks (checks environment variables)
+fn maybe_run_stop_hooks():
+    if hooks_enabled():
+        run_stop_hooks()
+
+# Run stop hooks unconditionally
+fn run_stop_hooks():
+    run_hooks()
+
+# Helper functions for printing
+extern fn rt_print(msg: text)
+
+fn print_msg(msg: text):
+    # Use runtime print via extern fn for stdout output
+    rt_print(msg)
+
+fn read_line() -> text:
+    # Stdin reading requires SFFI support (Phase 3.4) which is not yet available.
+    # Would need: extern fn rt_stdin_read_line() -> text
+    eprint("Warning: read_line() stubbed - stdin SFFI support not yet available, returning empty string")
+    ""

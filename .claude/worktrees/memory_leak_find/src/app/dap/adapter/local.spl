@@ -1,0 +1,211 @@
+# Local Debug Adapter
+# Wraps InterpreterHookContext for local (interpreter-based) debugging
+# Provides context clearing and reloading for test isolation
+
+use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use app.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
+use app.dap.hooks.{InterpreterHookContext, StackFrame, Variable, VariableScope}
+
+# Local interpreter debug adapter
+class LocalAdapter:
+    hook_context: InterpreterHookContext
+    config: AdapterConfig
+    attached: bool
+    capabilities: AdapterCapabilities
+    program_path: text
+
+impl LocalAdapter:
+    # Create local adapter
+    static fn create(config: AdapterConfig) -> LocalAdapter:
+        LocalAdapter(
+            hook_context: InterpreterHookContext.create(),
+            config: config,
+            attached: false,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()  # Can reset interpreter state
+                .with_reload() # Can reload program
+                .with_clear_context(), # Can clear context for test isolation
+            program_path: config.program
+        )
+
+    # Create from existing hook context
+    static fn from_context(ctx: InterpreterHookContext, config: AdapterConfig) -> LocalAdapter:
+        LocalAdapter(
+            hook_context: ctx,
+            config: config,
+            attached: false,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_reload()
+                .with_clear_context(),
+            program_path: config.program
+        )
+
+    # Get capabilities
+    fn get_capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- DebugAdapter trait implementation ---
+
+    fn name() -> text:
+        "local-interpreter"
+
+    fn is_attached() -> bool:
+        self.attached
+
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        self.program_path = program
+        self.hook_context.enable()
+        self.attached = true
+        Ok("attached to local interpreter")
+
+    fn detach() -> Result<text, text>:
+        self.hook_context.disable()
+        self.attached = false
+        Ok("detached from local interpreter")
+
+    # --- Execution Control ---
+
+    fn halt() -> Result<text, text>:
+        self.hook_context.pause()
+        Ok("halted")
+
+    fn resume() -> Result<text, text>:
+        self.hook_context.continue()
+        Ok("running")
+
+    fn single_step() -> Result<text, text>:
+        self.hook_context.step_into()
+        Ok("stepped")
+
+    fn step_over() -> Result<text, text>:
+        self.hook_context.step_over()
+        Ok("stepped over")
+
+    fn step_out() -> Result<text, text>:
+        self.hook_context.step_out()
+        Ok("stepped out")
+
+    fn reset() -> Result<text, text>:
+        # Reset interpreter state
+        self.hook_context.reset()
+        Ok("interpreter reset")
+
+    # --- Breakpoints ---
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        val bp_id = self.hook_context.add_breakpoint(file, line)
+        Ok(bp_id.id)
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        # Address-based breakpoints not supported in interpreter
+        Err("address breakpoints not supported in local interpreter")
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        self.hook_context.remove_breakpoint(id)
+        Ok("breakpoint {id} removed")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        # Watchpoints not yet implemented in interpreter
+        Err("watchpoints not yet implemented in local interpreter")
+
+    # --- Variable Inspection ---
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        # Get local variables from current frame (frame 0)
+        val vars = self.hook_context.variables_in_scope(0, VariableScope.Local)
+        var result: [VarInfo] = []
+        for v in vars:
+            result.push(VarInfo.of(v.name, v.value, v.type))
+        Ok(result)
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        # Get arguments from current frame
+        val vars = self.hook_context.variables_in_scope(0, VariableScope.Arguments)
+        var result: [VarInfo] = []
+        for v in vars:
+            result.push(VarInfo.of(v.name, v.value, v.type))
+        Ok(result)
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        # Get global variables
+        val vars = self.hook_context.variables_in_scope(0, VariableScope.Global)
+        var result: [VarInfo] = []
+        for v in vars:
+            result.push(VarInfo.of(v.name, v.value, v.type))
+        Ok(result)
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        # Evaluate expression in current context
+        val result = self.hook_context.evaluate(expr)
+        match result:
+            Ok(value): Ok(value.to_string())
+            Err(e): Err(e)
+
+    # --- Stack Inspection ---
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        val frames = self.hook_context.stack_frames()
+        var result: [FrameInfo] = []
+        var level = 0
+        for frame in frames:
+            result.push(FrameInfo.of(level, frame.name, frame.file, frame.line))
+            level = level + 1
+        Ok(result)
+
+    fn stack_depth() -> Result<i32, text>:
+        val frames = self.hook_context.stack_frames()
+        Ok(frames.len())
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        # Set current frame for variable inspection
+        self.hook_context.set_current_frame(level)
+        Ok("selected frame {level}")
+
+    fn current_location() -> Result<LocationInfo, text>:
+        val frames = self.hook_context.stack_frames()
+        if frames.len() > 0:
+            val f = frames[0]
+            Ok(LocationInfo.at(f.file, f.line, f.name))
+        else:
+            Err("no frames available")
+
+    # --- Memory Access ---
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        # Memory access not supported in interpreter
+        Err("memory access not supported in local interpreter")
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        # Memory access not supported in interpreter
+        Err("memory access not supported in local interpreter")
+
+    # --- Register Access ---
+
+    fn read_register(name: text) -> Result<i64, text>:
+        # Register access not supported in interpreter
+        Err("register access not supported in local interpreter")
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        # Register access not supported in interpreter
+        Err("register access not supported in local interpreter")
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        # Register access not supported in interpreter
+        Err("register access not supported in local interpreter")
+
+    # --- Context Management ---
+
+    fn clear_context() -> Result<text, text>:
+        # Clear interpreter state for test isolation
+        self.hook_context.clear_state()
+        Ok("context cleared")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        # Reload program in interpreter
+        # NOTE: Interpreter reload requires rt_hook_reload_program() FFI support
+        # which is not yet implemented in the runtime binary.
+        # For now, DAP clients should restart the debug session to reload.
+        self.program_path = program
+        self.hook_context.clear_state()
+        Err("Interpreter reload not yet supported - please restart debug session")

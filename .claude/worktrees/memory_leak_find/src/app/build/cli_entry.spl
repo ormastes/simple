@@ -1,0 +1,178 @@
+# Build System CLI Entry Point
+#
+# Simple wrapper to avoid module import issues in the main CLI
+
+use app.build.main (print_help, handle_baremetal_build, handle_bootstrap_rebuild)
+use app.build.rust_subcommand (handle_rust_subcommand)
+use app.build.config (parse_build_args)
+use app.build.orchestrator (orchestrate_build, orchestrate_test, orchestrate_clean)
+use app.build.test (TestOrchestrator, default_test_config)
+use app.build.coverage (Coverage, default_coverage_config)
+use app.build.quality (Lint, Format, Check, default_lint_config, default_format_config, default_check_config)
+use app.build.duplication (run_duplication_check, print_duplication_summary, default_duplication_config)
+use app.build.bootstrap_simple (Bootstrap, default_simple_bootstrap_config)
+use app.build.bootstrap_multiphase (MultiphaseBootstrap, default_multiphase_config,
+                                    Pipeline, parse_pipeline_args)
+use app.build.bootstrap_safe (run_safe_bootstrap, default_timeout_config)
+use app.build.package (Package)
+use app.build.watch (WatchOrchestrator, default_watch_config, print_watch_result)
+use app.build.incremental (IncrementalBuild, default_incremental_config, print_incremental_result)
+
+fn has_help_flag(args: [text]) -> bool:
+    if args.len() > 0:
+        args[0] == "--help" or args[0] == "-h"
+    else:
+        false
+
+fn print_test_help():
+    print "Simple Build System - Test Command"
+    print ""
+    print "Usage: simple build test [options]"
+    print ""
+    print "Run all tests: Rust tests, doc-tests, and Simple/SSpec tests"
+    print ""
+    print "Options:"
+    print "  --parallel              Run tests in parallel"
+    print "  --serial                Run tests serially (default)"
+    print "  --filter=<pattern>      Filter tests by pattern"
+    print "  --level=<level>         Test level: unit, integration, system, all"
+    print "  --fail-fast             Stop on first failure"
+    print "  --verbose, -v           Verbose output"
+    print ""
+    print "Examples:"
+    print "  simple build test                  # Run all tests"
+    print "  simple build test --parallel       # Run tests in parallel"
+    print "  simple build test --filter=math    # Run tests matching 'math'"
+    print "  simple build test --level=unit     # Run only unit tests"
+
+fn handle_build(args: [text]) -> i64:
+    # Check for subcommands
+    if args.len() > 0:
+        val cmd = args[0]
+        match cmd:
+            case "--help" | "-h":
+                print_help()
+                return 0
+            case "rust":
+                return handle_rust_subcommand(args[1:])
+            case "test":
+                if has_help_flag(args[1:]):
+                    print_test_help()
+                    return 0
+                val test_config = default_test_config()
+                val result = TestOrchestrator.run(test_config)
+                if result.all_passed():
+                    return 0
+                else:
+                    return 1
+            case "clean":
+                val config = parse_build_args(args[1:])
+                return orchestrate_clean(config.verbose)
+            case "coverage":
+                val cov_config = default_coverage_config()
+                val result = Coverage.run(cov_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "lint":
+                val lint_config = default_lint_config()
+                val result = Lint.run(lint_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "fmt":
+                val fmt_config = default_format_config()
+                val result = Format.run(fmt_config)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "check":
+                val check_config = default_check_config()
+                val result = Check.run(check_config)
+                if result.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "duplication":
+                val dup_config = default_duplication_config()
+                val result = run_duplication_check(dup_config)
+                print_duplication_summary(result)
+                return result.exit_code
+            case "bootstrap":
+                val bootstrap_config = default_simple_bootstrap_config()
+                val result = Bootstrap.run(bootstrap_config)
+                if result.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "bootstrap-multiphase":
+                val multiphase_config = default_multiphase_config()
+                val result = MultiphaseBootstrap.run(multiphase_config)
+                if result.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "bootstrap-safe":
+                val timeout_config = default_timeout_config()
+                val result = run_safe_bootstrap(timeout_config)
+                if result.inner.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "pipeline":
+                val pipeline_config = parse_pipeline_args(args[1:])
+                val result = Pipeline.run(pipeline_config)
+                if result.overall_success:
+                    return 0
+                else:
+                    return 1
+            case "package" | "package-bootstrap":
+                val result = Package.bootstrap()
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "package-full":
+                val result = Package.full()
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "watch":
+                val watch_config = default_watch_config()
+                val result = WatchOrchestrator.start(watch_config)
+                print_watch_result(result)
+                return 0
+            case "incremental":
+                val incremental_config = default_incremental_config()
+                val result = IncrementalBuild.quick()
+                print_incremental_result(result)
+                if result.success:
+                    return 0
+                else:
+                    return 1
+            case "metrics":
+                print "Build metrics:"
+                print "(Note: Metrics tracking not yet fully implemented)"
+                return 0
+            case "baremetal":
+                return handle_baremetal_build(args[1:])
+            case "bootstrap-rebuild":
+                return handle_bootstrap_rebuild(args[1:])
+            case _:
+                # Treat as build options
+                ()
+
+    # Parse configuration
+    val config = parse_build_args(args)
+
+    # Execute build
+    val result = orchestrate_build(config)
+
+    if result.success:
+        return 0
+    else:
+        return result.exit_code

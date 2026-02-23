@@ -1,0 +1,289 @@
+# Phase 1: Enhanced Error Messages - Quick Reference
+# Simple Language Implementation Guide
+
+## What Phase 1 Delivers
+
+Enhanced error messages for parser errors with:
+- Context (WHERE the error occurred)
+- Specific message (WHAT went wrong)
+- Suggestion (HOW to fix it)
+- Help text (Examples of correct syntax)
+
+## Error Message Format
+
+Before Phase 1:
+  error: Unexpected token: expected Comma, found Identifier { name: "b", pattern: Immutable }
+
+After Phase 1:
+  error: function arguments: expected comma before argument 'b', found identifier
+  Suggestion: Insert comma before 'b'
+  Help: Missing comma between function arguments. Use: func(a: 1, b: 2)
+
+## Usage in Parser Code (Rust)
+
+# 1. Using expect_with_context
+fn parse_function_call(parser: &mut Parser) -> Result<Expr, ParseError>:
+    parser.expect(TokenKind.LParen)
+    val args = parse_args(parser)
+
+    # Use contextual error instead of plain expect
+    parser.expect_with_context(
+        TokenKind.Comma,
+        "function arguments",
+        Some("Insert comma between arguments")
+    )
+
+    parser.expect(TokenKind.RParen)
+    Ok(Expr.Call(args))
+
+
+# 2. Detecting Common Mistakes
+fn parse_arguments(parser: &mut Parser) -> Result<Vec<Argument>, ParseError>:
+    val args = []
+
+    while not parser.check(TokenKind.RParen):
+        # Parse argument
+        val arg = parse_argument(parser)
+        args.push(arg)
+
+        # Smart comma detection
+        if not parser.check(TokenKind.RParen):
+            # Check if next token looks like a named argument
+            if parser.is_identifier():
+                val next = parser.peek()
+                if next.kind == TokenKind.Colon:
+                    # Missing comma before named argument!
+                    return Err(ParseError.contextual_error_with_help(
+                        "function arguments",
+                        "expected comma before argument '{parser.current.lexeme}'",
+                        parser.current.span,
+                        Some("Insert comma before '{parser.current.lexeme}'"),
+                        "Missing comma between function arguments. Use: func(a: 1, b: 2)"
+                    ))
+
+            parser.expect_with_context(TokenKind.Comma, "function arguments")
+
+    Ok(args)
+
+
+# 3. Creating Custom Contextual Errors
+fn validate_syntax(parser: &mut Parser) -> Result<(), ParseError>:
+    if some_condition:
+        # Simple contextual error
+        return Err(ParseError.contextual_error(
+            "dict literal",
+            "expected colon after key",
+            parser.current.span
+        ))
+
+    if another_condition:
+        # With suggestion
+        return Err(ParseError.contextual_error_with_suggestion(
+            "struct initialization",
+            "missing comma between fields",
+            parser.current.span,
+            "Insert comma after this field"
+        ))
+
+    if complex_case:
+        # With full help
+        return Err(ParseError.contextual_error_with_help(
+            "function definition",
+            "expected colon before body",
+            parser.current.span,
+            Some("Add ':' at end of line"),
+            "Function definitions require a colon: fn name():"
+        ))
+
+    Ok(())
+
+
+## Common Patterns
+
+# Pattern 1: Lookahead for Named Arguments
+fn detect_missing_comma(parser: &Parser) -> bool:
+    """Check if current token is identifier followed by colon/equals."""
+    if parser.is_identifier():
+        val next = parser.peek()
+        return next.kind == TokenKind.Colon or next.kind == TokenKind.Assign
+    false
+
+
+# Pattern 2: Context-Aware Token Expectation
+fn expect_token(parser: &mut Parser, kind: TokenKind, context: text) -> Result<(), ParseError>:
+    """Expect a token with contextual error message."""
+    if parser.check(kind):
+        parser.advance()
+        Ok(())
+    else:
+        Err(ParseError.contextual_error_with_help(
+            context,
+            "expected {kind:?}, found {parser.current.kind:?}",
+            parser.current.span,
+            None,
+            "In {context}: {kind:?} is required here"
+        ))
+
+
+# Pattern 3: Error Message Builder
+class ErrorBuilder:
+    """Builder pattern for constructing detailed error messages."""
+
+    context_: text
+    message_: text
+    span_: Span
+    suggestion_: Option<text> = None
+    help_: Option<text> = None
+
+    fn context(ctx: text) -> Self:
+        self.context_ = ctx
+        self
+
+    fn message(msg: text) -> Self:
+        self.message_ = msg
+        self
+
+    fn at(span: Span) -> Self:
+        self.span_ = span
+        self
+
+    fn suggest(sugg: text) -> Self:
+        self.suggestion_ = Some(sugg)
+        self
+
+    fn help(help_text: text) -> Self:
+        self.help_ = Some(help_text)
+        self
+
+    fn build() -> ParseError:
+        ParseError.ContextualSyntaxError(
+            context: self.context_,
+            message: self.message_,
+            span: self.span_,
+            suggestion: self.suggestion_,
+            help: self.help_,
+            parse_context: None
+        )
+
+
+# Usage:
+fn example_builder_usage(parser: &Parser) -> ParseError:
+    ErrorBuilder()
+        .context("function arguments")
+        .message("expected comma before argument 'b'")
+        .at(parser.current.span)
+        .suggest("Insert comma before 'b'")
+        .help("Use: func(a: 1, b: 2)")
+        .build()
+
+
+## Testing Error Messages
+
+feature "Contextual Error Messages":
+    scenario "detects missing comma in function call":
+        given:
+            val source = "func(a: 1 b: 2)"
+            val parser = Parser(source)
+
+        when:
+            val result = parser.parse()
+
+        then:
+            result.is_err().should_be_true()
+
+            val err = result.err()
+            match err:
+                ParseError.ContextualSyntaxError(context, message, suggestion, help, ..):
+                    context.should_equal("function arguments")
+                    message.should_contain("comma")
+                    message.should_contain("b")
+                    suggestion.should_be_some()
+                    help.should_be_some()
+                _:
+                    fail("Expected ContextualSyntaxError")
+
+
+## Best Practices
+
+# 1. Always provide context
+parser.expect_with_context(TokenKind.Comma, "dict literal")  # ✅ Good
+parser.expect(TokenKind.Comma)                                # ❌ Less helpful
+
+# 2. Use specific context strings
+"function arguments"      # ✅ Good - specific
+"dict literal"            # ✅ Good - specific
+"struct initialization"   # ✅ Good - specific
+"parsing"                 # ❌ Bad - too vague
+
+# 3. Mention the actual token/identifier
+"expected comma before argument 'volume'"  # ✅ Good - specific
+"expected comma"                            # ❌ Less helpful
+
+# 4. Provide actionable suggestions
+"Insert comma before 'volume'"             # ✅ Good - specific action
+"Add comma"                                 # 🟡 OK - less specific
+"Fix syntax"                                # ❌ Bad - not actionable
+
+# 5. Include examples in help text
+"Use: func(a: 1, b: 2)"                    # ✅ Good - shows correct syntax
+"Commas are required"                       # 🟡 OK - explains rule
+"Syntax error"                              # ❌ Bad - not helpful
+
+
+## Extending Phase 1 to New Contexts
+
+# Example: Adding contextual errors to dict literals
+fn parse_dict_literal(parser: &mut Parser) -> Result<Expr, ParseError>:
+    parser.expect(TokenKind.LBrace)
+    val pairs = []
+
+    while not parser.check(TokenKind.RBrace):
+        val key = parser.parse_expression()
+
+        # Contextual error for missing colon
+        parser.expect_with_context(
+            TokenKind.Colon,
+            "dict literal",
+            Some("Insert colon after key")
+        )
+
+        val value = parser.parse_expression()
+        pairs.push((key, value))
+
+        if not parser.check(TokenKind.RBrace):
+            # Check for missing comma (similar to function args)
+            if parser.is_identifier():
+                val next = parser.peek()
+                if next.kind == TokenKind.Colon:
+                    return Err(ParseError.contextual_error_with_help(
+                        "dict literal",
+                        "expected comma between entries, found '{parser.current.lexeme}'",
+                        parser.current.span,
+                        Some("Insert comma after the value"),
+                        "Dict entries must be separated by commas: {a: 1, b: 2}"
+                    ))
+
+            parser.expect_with_context(
+                TokenKind.Comma,
+                "dict literal",
+                Some("Insert comma between entries")
+            )
+
+    parser.expect(TokenKind.RBrace)
+    Ok(Expr.Dict(pairs))
+
+
+## Summary
+
+Phase 1 provides:
+✅ Context-aware error messages
+✅ Helpful suggestions
+✅ Examples of correct syntax
+✅ Reusable infrastructure (expect_with_context)
+✅ Zero breaking changes
+
+Next steps:
+→ Extend to dict literals
+→ Extend to struct initialization
+→ Extend to array literals
+→ Phase 2: Automatic fix generation

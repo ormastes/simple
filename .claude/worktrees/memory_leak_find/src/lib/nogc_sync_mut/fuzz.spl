@@ -1,0 +1,651 @@
+# Property-Based Testing and Fuzzing Library
+#
+# Provides generators, shrinking, and property checking for Simple.
+# Uses the LCG PRNG from random_utils for deterministic, reproducible tests.
+#
+# Functions:
+# - Config: fuzz_default_config, fuzz_config
+# - Generators: gen_int, gen_bool, gen_text, gen_ascii, gen_alpha,
+#   gen_identifier, gen_list_int, gen_one_of, gen_simple_expr,
+#   gen_simple_literal, gen_sdn_value, gen_semver, gen_path
+# - Shrinking: shrink_int, shrink_text, shrink_list_text
+# - Engine: fuzz_check, fuzz_check_default, fuzz_differential
+# - Corpus: corpus_load, corpus_save, corpus_add
+# - Reporting: fuzz_report, fuzz_report_all
+
+use std.random_utils.{rng_create, rng_next, rng_next_range, random_choice}
+
+# ============================================================================
+# Extern Declarations
+# ============================================================================
+
+extern fn rt_time_ms() -> i64
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write(path: text, content: text)
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+struct FuzzConfig:
+    iterations: i64
+    seed: i64
+    shrink_enabled: bool
+    max_shrink_attempts: i64
+    time_limit_ms: i64
+    verbose: bool
+
+struct FuzzResult:
+    passed: bool
+    iterations_run: i64
+    failure_input: text
+    failure_message: text
+    shrunk_input: text
+    seed_used: i64
+    elapsed_ms: i64
+
+# ============================================================================
+# Config Constructors
+# ============================================================================
+
+fn fuzz_default_config() -> FuzzConfig:
+    """Create a FuzzConfig with sensible defaults (1000 iters, seed 42)."""
+    FuzzConfig(
+        iterations: 1000,
+        seed: 42,
+        shrink_enabled: true,
+        max_shrink_attempts: 100,
+        time_limit_ms: 60000,
+        verbose: false
+    )
+
+fn fuzz_config(iters: i64, s: i64) -> FuzzConfig:
+    """Create a FuzzConfig with custom iteration count and seed."""
+    FuzzConfig(
+        iterations: iters,
+        seed: s,
+        shrink_enabled: true,
+        max_shrink_attempts: 100,
+        time_limit_ms: 60000,
+        verbose: false
+    )
+
+# ============================================================================
+# Generators
+# ============================================================================
+# All generators take rng as first param, return (new_rng, generated_value).
+
+fn gen_int(rng, min_v: i64, max_v: i64):
+    """Generate a random integer in [min_v, max_v)."""
+    rng_next_range(rng, min_v, max_v)
+
+fn gen_bool(rng):
+    """Generate a random boolean."""
+    val (r2, n) = rng_next(rng)
+    (r2, n % 2 == 0)
+
+fn gen_text(rng, min_len: i64, max_len: i64):
+    """Generate a random text string of printable ASCII chars (space through ~)."""
+    val printable = " !#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_abcdefghijklmnopqrstuvwxyz{|}~"
+    val (r2, length) = rng_next_range(rng, min_len, max_len + 1)
+    var current_rng = r2
+    var result = ""
+    var i = 0
+    while i < length:
+        val (r3, idx) = rng_next_range(current_rng, 0, printable.len())
+        current_rng = r3
+        result = result + printable[idx]
+        i = i + 1
+    (current_rng, result)
+
+fn gen_ascii(rng, min_len: i64, max_len: i64):
+    """Generate a random ASCII string (letters, digits, common symbols)."""
+    val chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-."
+    val (r2, length) = rng_next_range(rng, min_len, max_len + 1)
+    var current_rng = r2
+    var result = ""
+    var i = 0
+    while i < length:
+        val (r3, idx) = rng_next_range(current_rng, 0, chars.len())
+        current_rng = r3
+        result = result + chars[idx]
+        i = i + 1
+    (current_rng, result)
+
+fn gen_alpha(rng, min_len: i64, max_len: i64):
+    """Generate a random alphabetic string (a-z, A-Z)."""
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    val (r2, length) = rng_next_range(rng, min_len, max_len + 1)
+    var current_rng = r2
+    var result = ""
+    var i = 0
+    while i < length:
+        val (r3, idx) = rng_next_range(current_rng, 0, chars.len())
+        current_rng = r3
+        result = result + chars[idx]
+        i = i + 1
+    (current_rng, result)
+
+fn gen_identifier(rng, min_len: i64, max_len: i64):
+    """Generate a valid Simple identifier (starts with letter, then alnum/_)."""
+    val first_chars = "abcdefghijklmnopqrstuvwxyz"
+    val rest_chars = "abcdefghijklmnopqrstuvwxyz0123456789_"
+    val (r2, length) = rng_next_range(rng, min_len, max_len + 1)
+    var actual_len = length
+    if actual_len < 1:
+        actual_len = 1
+    val (r3, fc_idx) = rng_next_range(r2, 0, first_chars.len())
+    var result = first_chars[fc_idx]
+    var current_rng = r3
+    var i = 1
+    while i < actual_len:
+        val (r4, rc_idx) = rng_next_range(current_rng, 0, rest_chars.len())
+        current_rng = r4
+        result = result + rest_chars[rc_idx]
+        i = i + 1
+    (current_rng, result)
+
+fn gen_list_int(rng, min_len: i64, max_len: i64, min_v: i64, max_v: i64):
+    """Generate a list of random integers."""
+    val (r2, length) = rng_next_range(rng, min_len, max_len + 1)
+    var current_rng = r2
+    var result = []
+    var i = 0
+    while i < length:
+        val (r3, item) = rng_next_range(current_rng, min_v, max_v)
+        current_rng = r3
+        result.push(item)
+        i = i + 1
+    (current_rng, result)
+
+fn gen_one_of(rng, options: [text]):
+    """Pick one random text from a list of options."""
+    val (r2, idx) = rng_next_range(rng, 0, options.len())
+    (r2, options[idx])
+
+fn gen_simple_literal(rng):
+    """Generate a random Simple language literal (int, text, bool, nil)."""
+    val (r2, kind) = rng_next_range(rng, 0, 4)
+    if kind == 0:
+        # Integer literal
+        val (r3, n) = rng_next_range(r2, -100, 101)
+        (r3, "{n}")
+    elif kind == 1:
+        # Text literal - simple word inside quotes
+        val (r3, word) = gen_alpha(r2, 1, 6)
+        val quoted = "\"" + word + "\""
+        (r3, quoted)
+    elif kind == 2:
+        # Boolean literal
+        val (r3, b) = gen_bool(r2)
+        if b:
+            (r3, "true")
+        else:
+            (r3, "false")
+    else:
+        # Nil literal
+        (r2, "nil")
+
+fn gen_simple_expr(rng, max_depth: i64):
+    """Generate a random Simple language expression.
+
+    At depth 0: literals only.
+    At depth > 0: literals, binary ops, function calls, parenthesized exprs.
+    """
+    if max_depth <= 0:
+        return gen_simple_literal(rng)
+
+    val (r2, kind) = rng_next_range(rng, 0, 5)
+    if kind == 0:
+        # Literal
+        gen_simple_literal(r2)
+    elif kind == 1:
+        # Binary operation: left op right
+        val ops = ["+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "and", "or"]
+        val (r3, left) = gen_simple_expr(r2, max_depth - 1)
+        val (r4, right) = gen_simple_expr(r3, max_depth - 1)
+        val (r5, op) = random_choice(r4, ops)
+        (r5, left + " " + op + " " + right)
+    elif kind == 2:
+        # Parenthesized expression
+        val (r3, inner) = gen_simple_expr(r2, max_depth - 1)
+        (r3, "(" + inner + ")")
+    elif kind == 3:
+        # Function call with one arg
+        val fn_names = ["print", "int", "str", "abs_i64"]
+        val (r3, fname) = random_choice(r2, fn_names)
+        val (r4, arg) = gen_simple_expr(r3, max_depth - 1)
+        (r4, fname + "(" + arg + ")")
+    else:
+        # Identifier
+        gen_identifier(r2, 2, 6)
+
+fn gen_sdn_value(rng, max_depth: i64):
+    """Generate a random SDN (Simple Data Notation) value.
+
+    At depth 0: primitives (text, int, bool).
+    At depth > 0: also objects and arrays.
+    """
+    if max_depth <= 0:
+        val (r2, kind) = rng_next_range(rng, 0, 3)
+        if kind == 0:
+            val (r3, n) = rng_next_range(r2, -99, 100)
+            return (r3, "{n}")
+        elif kind == 1:
+            val (r3, word) = gen_alpha(r2, 1, 8)
+            val quoted = "\"" + word + "\""
+            return (r3, quoted)
+        else:
+            val (r3, b) = gen_bool(r2)
+            if b:
+                return (r3, "true")
+            else:
+                return (r3, "false")
+
+    val (r2, kind) = rng_next_range(rng, 0, 5)
+    if kind == 0:
+        # Integer
+        val (r3, n) = rng_next_range(r2, -99, 100)
+        (r3, "{n}")
+    elif kind == 1:
+        # Text
+        val (r3, word) = gen_alpha(r2, 1, 8)
+        val quoted = "\"" + word + "\""
+        (r3, quoted)
+    elif kind == 2:
+        # Boolean
+        val (r3, b) = gen_bool(r2)
+        if b:
+            (r3, "true")
+        else:
+            (r3, "false")
+    elif kind == 3:
+        # SDN object: { key = value, ... }
+        val (r3, num_fields) = rng_next_range(r2, 1, 4)
+        var current_rng = r3
+        var fields = ""
+        var fi = 0
+        while fi < num_fields:
+            val (r4, key) = gen_identifier(current_rng, 2, 6)
+            val (r5, sub_val) = gen_sdn_value(r4, max_depth - 1)
+            current_rng = r5
+            if fi > 0:
+                fields = fields + ", "
+            fields = fields + key + " = " + sub_val
+            fi = fi + 1
+        (current_rng, "{ " + fields + " }")
+    else:
+        # SDN array: [val, val, ...]
+        val (r3, num_items) = rng_next_range(r2, 0, 4)
+        var current_rng = r3
+        var items = ""
+        var ai = 0
+        while ai < num_items:
+            val (r4, sub_val) = gen_sdn_value(current_rng, max_depth - 1)
+            current_rng = r4
+            if ai > 0:
+                items = items + ", "
+            items = items + sub_val
+            ai = ai + 1
+        (current_rng, "[" + items + "]")
+
+fn gen_semver(rng):
+    """Generate a random semver string (e.g. '1.2.3')."""
+    val (r2, major) = rng_next_range(rng, 0, 10)
+    val (r3, minor) = rng_next_range(r2, 0, 20)
+    val (r4, patch) = rng_next_range(r3, 0, 50)
+    (r4, "{major}.{minor}.{patch}")
+
+fn gen_path(rng, max_depth: i64):
+    """Generate a random file path (e.g. 'foo/bar/baz.spl')."""
+    val extensions = [".spl", ".sdn", ".md", ".txt", ""]
+    val (r2, depth) = rng_next_range(rng, 1, max_depth + 1)
+    var current_rng = r2
+    var segments = ""
+    var di = 0
+    while di < depth:
+        val (r3, seg) = gen_identifier(current_rng, 2, 8)
+        current_rng = r3
+        if di > 0:
+            segments = segments + "/"
+        segments = segments + seg
+        di = di + 1
+    val (r4, ext) = random_choice(current_rng, extensions)
+    (r4, segments + ext)
+
+# ============================================================================
+# Shrinking
+# ============================================================================
+
+fn shrink_int(n: i64) -> [i64]:
+    """Generate smaller candidate integers for shrinking.
+
+    Produces candidates closer to 0: [0, n/2, n-1, -n, ...].
+    """
+    var candidates = []
+    if n != 0:
+        candidates.push(0)
+    if n > 1:
+        candidates.push(n / 2)
+        candidates.push(n - 1)
+    if n < -1:
+        candidates.push(n / 2)
+        candidates.push(n + 1)
+    if n < 0:
+        candidates.push(-n)
+    candidates
+
+fn shrink_text(s: text) -> [text]:
+    """Generate shorter candidate strings for shrinking.
+
+    Strategies: empty string, first half, second half, remove each char.
+    """
+    var candidates = []
+    if s.len() == 0:
+        return candidates
+    candidates.push("")
+    if s.len() > 1:
+        val half = s.len() / 2
+        candidates.push(s[0:half])
+        candidates.push(s[half:s.len()])
+    # Remove each character one at a time
+    var i = 0
+    while i < s.len():
+        val before = s[0:i]
+        val end_idx = i + 1
+        val after = s[end_idx:s.len()]
+        candidates.push(before + after)
+        i = i + 1
+    candidates
+
+fn shrink_list_text(items: [text]) -> [[text]]:
+    """Generate smaller candidate lists for shrinking.
+
+    Strategies: empty list, single elements, remove each element.
+    """
+    var candidates = []
+    if items.len() == 0:
+        return candidates
+    candidates.push([])
+    # Each single element
+    var i = 0
+    while i < items.len():
+        candidates.push([items[i]])
+        i = i + 1
+    # Remove one element at a time
+    i = 0
+    while i < items.len():
+        var reduced = []
+        var j = 0
+        while j < items.len():
+            if j != i:
+                reduced.push(items[j])
+            j = j + 1
+        candidates.push(reduced)
+        i = i + 1
+    candidates
+
+# ============================================================================
+# Core Property Testing Engine
+# ============================================================================
+
+fn fuzz_try_shrink(failing_input: text, prop_fn, max_attempts: i64) -> text:
+    """Try to shrink a failing input to a smaller counterexample.
+
+    Repeatedly applies shrink_text and keeps the smallest failing input.
+    """
+    var current = failing_input
+    var attempt = 0
+    while attempt < max_attempts:
+        val candidates = shrink_text(current)
+        var found_smaller = false
+        var ci = 0
+        while ci < candidates.len():
+            val candidate = candidates[ci]
+            val holds = prop_fn(candidate)
+            if not holds:
+                current = candidate
+                found_smaller = true
+                break
+            ci = ci + 1
+        if not found_smaller:
+            return current
+        attempt = attempt + 1
+    current
+
+fn fuzz_check(name: text, gen_fn, prop_fn, config: FuzzConfig) -> FuzzResult:
+    """Run a property-based test.
+
+    gen_fn: takes rng, returns (new_rng, text) - generates test input
+    prop_fn: takes text, returns bool - true means property holds
+
+    Runs config.iterations tests. If prop_fn returns false for any generated
+    input, attempts to shrink the counterexample. Returns FuzzResult.
+    """
+    val start_ms = rt_time_ms()
+    var current_rng = rng_create(config.seed)
+    var iteration = 0
+
+    while iteration < config.iterations:
+        # Check time limit
+        val now_ms = rt_time_ms()
+        val elapsed = now_ms - start_ms
+        if elapsed > config.time_limit_ms:
+            val end_ms = rt_time_ms()
+            return FuzzResult(
+                passed: true,
+                iterations_run: iteration,
+                failure_input: "",
+                failure_message: "time limit reached after {iteration} iterations",
+                shrunk_input: "",
+                seed_used: config.seed,
+                elapsed_ms: end_ms - start_ms
+            )
+
+        # Generate input
+        val (next_rng, input) = gen_fn(current_rng)
+        current_rng = next_rng
+
+        # Check property
+        val holds = prop_fn(input)
+        if not holds:
+            # Found a counterexample
+            var shrunk = input
+            if config.shrink_enabled:
+                shrunk = fuzz_try_shrink(input, prop_fn, config.max_shrink_attempts)
+            val end_ms = rt_time_ms()
+            return FuzzResult(
+                passed: false,
+                iterations_run: iteration + 1,
+                failure_input: input,
+                failure_message: "property '{name}' failed on iteration {iteration + 1}",
+                shrunk_input: shrunk,
+                seed_used: config.seed,
+                elapsed_ms: end_ms - start_ms
+            )
+
+        iteration = iteration + 1
+
+    val end_ms = rt_time_ms()
+    FuzzResult(
+        passed: true,
+        iterations_run: iteration,
+        failure_input: "",
+        failure_message: "",
+        shrunk_input: "",
+        seed_used: config.seed,
+        elapsed_ms: end_ms - start_ms
+    )
+
+fn fuzz_check_default(name: text, gen_fn, prop_fn) -> FuzzResult:
+    """Run a property-based test with default config."""
+    fuzz_check(name, gen_fn, prop_fn, fuzz_default_config())
+
+fn fuzz_differential(name: text, gen_fn, fn_a, fn_b, config: FuzzConfig) -> FuzzResult:
+    """Differential testing: check that fn_a and fn_b produce the same output.
+
+    gen_fn: takes rng, returns (new_rng, text) - generates test input
+    fn_a, fn_b: each takes text, returns text
+
+    Fails if fn_a(input) != fn_b(input) for any generated input.
+    """
+    val start_ms = rt_time_ms()
+    var current_rng = rng_create(config.seed)
+    var iteration = 0
+
+    while iteration < config.iterations:
+        val now_ms = rt_time_ms()
+        val elapsed = now_ms - start_ms
+        if elapsed > config.time_limit_ms:
+            val end_ms = rt_time_ms()
+            return FuzzResult(
+                passed: true,
+                iterations_run: iteration,
+                failure_input: "",
+                failure_message: "time limit reached after {iteration} iterations",
+                shrunk_input: "",
+                seed_used: config.seed,
+                elapsed_ms: end_ms - start_ms
+            )
+
+        val (next_rng, input) = gen_fn(current_rng)
+        current_rng = next_rng
+
+        val result_a = fn_a(input)
+        val result_b = fn_b(input)
+
+        if result_a != result_b:
+            var shrunk = input
+            if config.shrink_enabled:
+                # Shrink: find smallest input where outputs differ
+                val diff_prop = fn(inp): fn_a(inp) == fn_b(inp)
+                shrunk = fuzz_try_shrink(input, diff_prop, config.max_shrink_attempts)
+            val end_ms = rt_time_ms()
+            val msg = "differential '{name}' failed: fn_a returned '{result_a}', fn_b returned '{result_b}'"
+            return FuzzResult(
+                passed: false,
+                iterations_run: iteration + 1,
+                failure_input: input,
+                failure_message: msg,
+                shrunk_input: shrunk,
+                seed_used: config.seed,
+                elapsed_ms: end_ms - start_ms
+            )
+
+        iteration = iteration + 1
+
+    val end_ms = rt_time_ms()
+    FuzzResult(
+        passed: true,
+        iterations_run: iteration,
+        failure_input: "",
+        failure_message: "",
+        shrunk_input: "",
+        seed_used: config.seed,
+        elapsed_ms: end_ms - start_ms
+    )
+
+# ============================================================================
+# Corpus Management
+# ============================================================================
+
+fn corpus_load(dir: text) -> [text]:
+    """Load all corpus entries from a directory.
+
+    Reads a manifest file at dir/corpus.txt, one entry per line.
+    Returns empty array if file does not exist.
+    """
+    val manifest_path = dir + "/corpus.txt"
+    val content = rt_file_read_text(manifest_path) ?? ""
+    if content == "":
+        return []
+    var entries = []
+    var current = ""
+    var i = 0
+    while i < content.len():
+        val ch = content[i]
+        if ch == "\n":
+            if current.len() > 0:
+                entries.push(current)
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.len() > 0:
+        entries.push(current)
+    entries
+
+fn corpus_save(dir: text, inputs: [text]):
+    """Save corpus entries to a manifest file at dir/corpus.txt.
+
+    One entry per line. Overwrites existing manifest.
+    """
+    var content = ""
+    for input_val in inputs:
+        content = content + input_val + "\n"
+    val manifest_path = dir + "/corpus.txt"
+    rt_file_write(manifest_path, content)
+
+fn corpus_add(dir: text, input_val: text):
+    """Add a single entry to the corpus manifest."""
+    var entries = corpus_load(dir)
+    entries.push(input_val)
+    corpus_save(dir, entries)
+
+# ============================================================================
+# Reporting
+# ============================================================================
+
+fn fuzz_report(result: FuzzResult) -> text:
+    """Generate a human-readable report for a single fuzz result."""
+    if result.passed:
+        var msg = "PASS: {result.iterations_run} iterations"
+        msg = msg + " (seed={result.seed_used}, {result.elapsed_ms}ms)"
+        if result.failure_message.len() > 0:
+            msg = msg + " - " + result.failure_message
+        return msg
+    var msg = "FAIL: " + result.failure_message
+    msg = msg + "\n  Input:  " + result.failure_input
+    if result.shrunk_input != result.failure_input:
+        msg = msg + "\n  Shrunk: " + result.shrunk_input
+    msg = msg + "\n  Seed: {result.seed_used}, Iterations: {result.iterations_run}, Time: {result.elapsed_ms}ms"
+    msg
+
+fn fuzz_report_all(results: [FuzzResult]) -> text:
+    """Generate a summary report for multiple fuzz results."""
+    var total = results.len()
+    var passed = 0
+    var failed = 0
+    var lines = []
+    var i = 0
+    while i < results.len():
+        val r = results[i]
+        if r.passed:
+            passed = passed + 1
+        else:
+            failed = failed + 1
+        lines.push(fuzz_report(r))
+        i = i + 1
+    var header = "Fuzz Results: {passed}/{total} passed"
+    if failed > 0:
+        header = header + ", {failed} failed"
+    var report = header + "\n"
+    report = report + "=" * 60 + "\n"
+    for line in lines:
+        report = report + line + "\n"
+    report
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export FuzzConfig, FuzzResult
+export fuzz_default_config, fuzz_config
+export gen_int, gen_bool, gen_text, gen_ascii, gen_alpha
+export gen_identifier, gen_list_int, gen_one_of
+export gen_simple_expr, gen_simple_literal
+export gen_sdn_value, gen_semver, gen_path
+export shrink_int, shrink_text, shrink_list_text
+export fuzz_check, fuzz_check_default, fuzz_differential
+export corpus_load, corpus_save, corpus_add
+export fuzz_report, fuzz_report_all

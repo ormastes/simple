@@ -1,0 +1,264 @@
+# YAML Parse Module
+# YAML parsing from text
+
+import yaml.types
+import yaml.utilities
+
+# ============================================================================
+# Scalar Parsing
+# ============================================================================
+
+fn yaml_parse_scalar(value: text) -> (text, (text, text)):
+    """Parse a scalar value from text."""
+    val trimmed = value.trim()
+    var result = yaml_string(trimmed)
+    var is_null = trimmed == "null"
+    is_null = is_null or trimmed == "~"
+    is_null = is_null or trimmed == ""
+    if is_null:
+        result = yaml_null()
+    var is_true = trimmed == "true"
+    is_true = is_true or trimmed == "True"
+    is_true = is_true or trimmed == "TRUE"
+    is_true = is_true or trimmed == "yes"
+    is_true = is_true or trimmed == "Yes"
+    is_true = is_true or trimmed == "YES"
+    var is_false = trimmed == "false"
+    is_false = is_false or trimmed == "False"
+    is_false = is_false or trimmed == "FALSE"
+    is_false = is_false or trimmed == "no"
+    is_false = is_false or trimmed == "No"
+    is_false = is_false or trimmed == "NO"
+    if is_true:
+        result = yaml_boolean(true)
+    if is_false:
+        result = yaml_boolean(false)
+    var looks_like_number = false
+    var has_digit = false
+    var j = 0
+    while j < trimmed.length():
+        val ch = trimmed.substring(j, j + 1)
+        var is_num_char = ch >= "0"
+        is_num_char = is_num_char and ch <= "9"
+        var is_sign = ch == "-"
+        is_sign = is_sign or ch == "+"
+        var is_dot = ch == "."
+        var is_valid_num_char = is_num_char
+        is_valid_num_char = is_valid_num_char or is_sign
+        is_valid_num_char = is_valid_num_char or is_dot
+        if is_num_char:
+            has_digit = true
+        if not is_valid_num_char:
+            looks_like_number = false
+            j = trimmed.length()
+        else:
+            looks_like_number = true
+        j = j + 1
+    looks_like_number = looks_like_number and has_digit
+    if looks_like_number:
+        result = yaml_number(trimmed)
+    if trimmed.starts_with("\"") and trimmed.ends_with("\""):
+        val unquoted = trimmed.substring(1, trimmed.length() - 1)
+        val unescaped = yaml_unescape_string(unquoted)
+        result = yaml_string(unescaped)
+    if trimmed.starts_with("'") and trimmed.ends_with("'"):
+        val unquoted = trimmed.substring(1, trimmed.length() - 1)
+        val cleaned = unquoted.replace("''", "'")
+        result = yaml_string(cleaned)
+    result
+
+fn yaml_parse_type_tag(tag: text) -> text:
+    """Parse YAML type tag and return the type."""
+    var result = "string"
+    if tag == "!!str":
+        result = "string"
+    else if tag == "!!int":
+        result = "number"
+    else if tag == "!!float":
+        result = "number"
+    else if tag == "!!bool":
+        result = "boolean"
+    else if tag == "!!null":
+        result = "null"
+    result
+
+# ============================================================================
+# Flow Style Parsing
+# ============================================================================
+
+fn yaml_parse_flow_sequence(text: text) -> (text, list):
+    """Parse flow sequence [item1, item2, ...]."""
+    var items = []
+    val content_start = text.index_of("[")
+    val content_end = text.last_index_of("]")
+    var has_brackets = content_start >= 0
+    has_brackets = has_brackets and content_end >= 0
+    if has_brackets:
+        val start_idx = content_start + 1
+        val content = text.substring(start_idx, content_end)
+        val parts = content.split(",")
+        var i = 0
+        while i < parts.length():
+            val part = parts.get(i)
+            val trimmed = part.trim()
+            if trimmed.length() > 0:
+                val item = yaml_parse_scalar(trimmed)
+                items = items.append(item)
+            i = i + 1
+    yaml_sequence(items)
+
+fn yaml_parse_flow_mapping(text: text) -> (text, list):
+    """Parse flow mapping {key1: value1, key2: value2, ...}."""
+    var pairs = []
+    val content_start = text.index_of("{")
+    val content_end = text.last_index_of("}")
+    var has_braces = content_start >= 0
+    has_braces = has_braces and content_end >= 0
+    if has_braces:
+        val start_idx = content_start + 1
+        val content = text.substring(start_idx, content_end)
+        val parts = content.split(",")
+        var i = 0
+        while i < parts.length():
+            val part = parts.get(i)
+            val colon_idx = part.index_of(":")
+            if colon_idx >= 0:
+                val key = part.substring(0, colon_idx)
+                val key_trimmed = key.trim()
+                val value_start = colon_idx + 1
+                val value = part.substring(value_start, part.length())
+                val value_trimmed = value.trim()
+                val value_obj = yaml_parse_scalar(value_trimmed)
+                pairs = pairs.append((key_trimmed, value_obj))
+            i = i + 1
+    yaml_mapping(pairs)
+
+# ============================================================================
+# Block Style Parsing
+# ============================================================================
+
+fn yaml_parse_block_lines(lines: list, start_idx: i64) -> ((text, any), i64):
+    """Parse block style YAML from lines starting at start_idx. Returns (value, next_idx)."""
+    var result = yaml_null()
+    var next_idx = start_idx + 1
+    if start_idx >= lines.length():
+        return (result, next_idx)
+    val line = lines.get(start_idx)
+    val trimmed = line.trim()
+    if trimmed.length() == 0:
+        return (result, next_idx)
+    if trimmed.starts_with("#"):
+        return (result, next_idx)
+    var base_indent = 0
+    var j = 0
+    var counting = true
+    while j < line.length() and counting:
+        val ch = line.substring(j, j + 1)
+        if ch == " ":
+            base_indent = base_indent + 1
+        else:
+            counting = false
+        j = j + 1
+    if trimmed.starts_with("-"):
+        var items = []
+        var current_idx = start_idx
+        var parsing = true
+        while current_idx < lines.length() and parsing:
+            val seq_line = lines.get(current_idx)
+            val seq_trimmed = seq_line.trim()
+            var seq_indent = 0
+            var k = 0
+            var seq_counting = true
+            while k < seq_line.length() and seq_counting:
+                val ch = seq_line.substring(k, k + 1)
+                if ch == " ":
+                    seq_indent = seq_indent + 1
+                else:
+                    seq_counting = false
+                k = k + 1
+            var is_same_level = seq_indent == base_indent
+            is_same_level = is_same_level and seq_trimmed.starts_with("-")
+            if is_same_level:
+                val item_content = seq_trimmed.substring(1, seq_trimmed.length())
+                val item_trimmed = item_content.trim()
+                val item = yaml_parse_scalar(item_trimmed)
+                items = items.append(item)
+                current_idx = current_idx + 1
+            else if seq_indent > base_indent:
+                current_idx = current_idx + 1
+            else:
+                parsing = false
+        result = yaml_sequence(items)
+        next_idx = current_idx
+    val colon_idx = trimmed.index_of(":")
+    if colon_idx >= 0:
+        var pairs = []
+        var current_idx = start_idx
+        var parsing = true
+        while current_idx < lines.length() and parsing:
+            val map_line = lines.get(current_idx)
+            val map_trimmed = map_line.trim()
+            var map_indent = 0
+            var k = 0
+            var map_counting = true
+            while k < map_line.length() and map_counting:
+                val ch = map_line.substring(k, k + 1)
+                if ch == " ":
+                    map_indent = map_indent + 1
+                else:
+                    map_counting = false
+                k = k + 1
+            val map_colon = map_trimmed.index_of(":")
+            var is_same_level = map_indent == base_indent
+            is_same_level = is_same_level and map_colon >= 0
+            if is_same_level:
+                val key = map_trimmed.substring(0, map_colon)
+                val key_trimmed = key.trim()
+                val value_start = map_colon + 1
+                val value = map_trimmed.substring(value_start, map_trimmed.length())
+                val value_trimmed = value.trim()
+                val value_obj = yaml_parse_scalar(value_trimmed)
+                pairs = pairs.append((key_trimmed, value_obj))
+                current_idx = current_idx + 1
+            else if map_indent > base_indent:
+                current_idx = current_idx + 1
+            else:
+                parsing = false
+        result = yaml_mapping(pairs)
+        next_idx = current_idx
+    (result, next_idx)
+
+fn yaml_parse_block(yaml_text: text) -> (text, any):
+    """Parse block style YAML text."""
+    val lines = yaml_text.split("\n")
+    val parse_result = yaml_parse_block_lines(lines, 0)
+    parse_result.0
+
+# ============================================================================
+# Main Parser
+# ============================================================================
+
+fn yaml_parse(yaml_text: text) -> (text, any):
+    """Parse YAML text into a value structure."""
+    val trimmed = yaml_text.trim()
+    var result = yaml_null()
+    if trimmed.starts_with("["):
+        result = yaml_parse_flow_sequence(trimmed)
+    if trimmed.starts_with("{"):
+        result = yaml_parse_flow_mapping(trimmed)
+    var has_newline = trimmed.contains("\n")
+    if not trimmed.starts_with("[") and not trimmed.starts_with("{"):
+        if has_newline:
+            result = yaml_parse_block(trimmed)
+        else:
+            result = yaml_parse_scalar(trimmed)
+    result
+
+
+# ============================================================================
+# EXPORTS
+# ============================================================================
+
+export yaml_parse_scalar, yaml_parse_type_tag
+export yaml_parse_flow_sequence, yaml_parse_flow_mapping
+export yaml_parse_block_lines, yaml_parse_block, yaml_parse

@@ -1,0 +1,200 @@
+# Generation Sweeper Specification
+#
+# Tests epoch-based LRU eviction logic using mock implementations.
+# The actual compiler modules depend on FFI/loader internals not available
+# in interpreter mode, so we mock the core abstractions here.
+#
+# **Feature IDs:** #2011-2015
+# **Category:** Infrastructure
+# **Design:** doc/design/resource_lifecycle_manager_design.md
+
+# ============================================================================
+# Mock GenerationSweeper — epoch-based LRU tracking
+# ============================================================================
+
+var sw_epoch = 0
+var sw_symbol_names: [text] = []
+var sw_symbol_last_used: [i64] = []
+var sw_max_age = 5
+
+fn sw_reset():
+    sw_epoch = 0
+    sw_symbol_names = []
+    sw_symbol_last_used = []
+    sw_max_age = 5
+
+fn sw_reset_with_age(max_age: i64):
+    sw_reset()
+    sw_max_age = max_age
+
+fn sw_advance_epoch() -> i64:
+    sw_epoch = sw_epoch + 1
+    sw_epoch
+
+fn sw_get_epoch() -> i64:
+    sw_epoch
+
+fn sw_mark_used(symbol: text):
+    val idx = sw_symbol_names.index_of(symbol)
+    if idx >= 0:
+        # Update last_used epoch — rebuild array
+        fn set_i64(arr: [i64], at: i64, val_: i64) -> [i64]:
+            var result: [i64] = []
+            var i = 0
+            while i < arr.len():
+                if i == at:
+                    result = result + [val_]
+                else:
+                    result = result + [arr[i]]
+                i = i + 1
+            result
+        sw_symbol_last_used = set_i64(sw_symbol_last_used, idx, sw_epoch)
+    else:
+        sw_symbol_names = sw_symbol_names + [symbol]
+        sw_symbol_last_used = sw_symbol_last_used + [sw_epoch]
+
+fn sw_tracked_count() -> i64:
+    sw_symbol_names.len()
+
+fn sw_stale_count() -> i64:
+    var count = 0
+    var i = 0
+    while i < sw_symbol_names.len():
+        val age = sw_epoch - sw_symbol_last_used[i]
+        if age > sw_max_age:
+            count = count + 1
+        i = i + 1
+    count
+
+# ============================================================================
+# Test Group 1: Sweeper Epoch Advancement
+# ============================================================================
+
+describe "GenerationSweeper":
+
+    describe "epoch management":
+        it "starts at epoch 0":
+            sw_reset()
+            expect(sw_get_epoch()).to_equal(0)
+
+        it "advances epoch":
+            sw_reset()
+            val e1 = sw_advance_epoch()
+            expect(e1).to_equal(1)
+            val e2 = sw_advance_epoch()
+            expect(e2).to_equal(2)
+
+        it "tracks marked symbols":
+            sw_reset()
+            sw_mark_used("fn_a")
+            sw_mark_used("fn_b")
+            expect(sw_tracked_count()).to_equal(2)
+
+    describe "stale detection":
+        it "reports zero stale when all symbols are fresh":
+            sw_reset_with_age(5)
+            sw_mark_used("fn_a")
+            sw_advance_epoch()
+            expect(sw_stale_count()).to_equal(0)
+
+        it "detects stale symbols after max_age epochs":
+            sw_reset_with_age(3)
+            sw_mark_used("fn_old")
+            sw_advance_epoch()
+            sw_advance_epoch()
+            sw_advance_epoch()
+            sw_advance_epoch()
+            expect(sw_stale_count()).to_equal(1)
+
+        it "does not count recently used symbols as stale":
+            sw_reset_with_age(3)
+            sw_mark_used("fn_fresh")
+            sw_advance_epoch()
+            sw_advance_epoch()
+            # Re-mark as used — resets last-used epoch
+            sw_mark_used("fn_fresh")
+            sw_advance_epoch()
+            sw_advance_epoch()
+            expect(sw_stale_count()).to_equal(0)
+
+    describe "stats":
+        it "reports correct stats":
+            sw_reset_with_age(2)
+            sw_mark_used("fn_a")
+            sw_mark_used("fn_b")
+            sw_advance_epoch()
+            sw_advance_epoch()
+            sw_advance_epoch()
+            expect(sw_get_epoch()).to_equal(3)
+            expect(sw_tracked_count()).to_equal(2)
+            expect(sw_stale_count()).to_equal(2)
+
+    describe "reset":
+        it "clears all state on reset":
+            sw_reset()
+            sw_mark_used("fn_a")
+            sw_advance_epoch()
+            sw_reset()
+            expect(sw_get_epoch()).to_equal(0)
+            expect(sw_tracked_count()).to_equal(0)
+
+# ============================================================================
+# Test Group 2: Lifecycle Integration (mock)
+# ============================================================================
+
+var lm_sweep_epoch = 0
+var lm_sweep_symbols: [text] = []
+var lm_sweep_last_used: [i64] = []
+
+fn lm_sweep_reset():
+    lm_sweep_epoch = 0
+    lm_sweep_symbols = []
+    lm_sweep_last_used = []
+
+fn lm_mark_used(symbol: text):
+    val idx = lm_sweep_symbols.index_of(symbol)
+    if idx >= 0:
+        fn set_i64_lm(arr: [i64], at: i64, val_: i64) -> [i64]:
+            var result: [i64] = []
+            var i = 0
+            while i < arr.len():
+                if i == at:
+                    result = result + [val_]
+                else:
+                    result = result + [arr[i]]
+                i = i + 1
+            result
+        lm_sweep_last_used = set_i64_lm(lm_sweep_last_used, idx, lm_sweep_epoch)
+    else:
+        lm_sweep_symbols = lm_sweep_symbols + [symbol]
+        lm_sweep_last_used = lm_sweep_last_used + [lm_sweep_epoch]
+
+fn lm_advance_epoch() -> i64:
+    lm_sweep_epoch = lm_sweep_epoch + 1
+    lm_sweep_epoch
+
+fn lm_get_sweep_tracked() -> i64:
+    lm_sweep_symbols.len()
+
+fn lm_get_sweep_epoch() -> i64:
+    lm_sweep_epoch
+
+describe "ResourceLifecycleManager sweep integration":
+
+    describe "sweep delegation":
+        it "delegates mark_used to sweeper":
+            lm_sweep_reset()
+            lm_mark_used("test_fn")
+            expect(lm_get_sweep_tracked()).to_equal(1)
+
+        it "delegates advance_epoch to sweeper":
+            lm_sweep_reset()
+            val e = lm_advance_epoch()
+            expect(e).to_equal(1)
+
+        it "reports stats including sweep data":
+            lm_sweep_reset()
+            lm_mark_used("fn_x")
+            lm_advance_epoch()
+            expect(lm_get_sweep_epoch()).to_equal(1)
+            expect(lm_get_sweep_tracked()).to_equal(1)

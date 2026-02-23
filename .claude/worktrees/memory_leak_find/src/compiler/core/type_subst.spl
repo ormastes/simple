@@ -1,0 +1,209 @@
+# Core Simple — Type Substitution for Monomorphization
+#
+# Replaces type parameter names (e.g., "T") with concrete types (e.g., i64)
+# in cloned AST nodes. Used for runtime generic specialization.
+#
+# Example:
+#   fn identity<T>(x: T) -> T: x
+#   call: identity(42)
+#   Substitute: T → i64
+#   Result: fn identity__i64(x: i64) -> i64: x
+
+use compiler.core.ast.{expr_get, stmt_get, decl_get}
+use compiler.core.ast.{EXPR_IDENT}
+use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL}
+
+# ===== Substitution State =====
+# Maps type parameter names to concrete type tags
+var subst_param_names: [text] = []
+var subst_type_tags: [i64] = []
+
+fn type_subst_reset():
+    """Reset substitution state"""
+    subst_param_names = []
+    subst_type_tags = []
+
+fn type_subst_add(param_name: text, type_tag: i64):
+    """Add a type parameter substitution
+
+    Example: type_subst_add("T", TYPE_I64)
+    """
+    subst_param_names.push(param_name)
+    subst_type_tags.push(type_tag)
+
+fn type_subst_lookup(param_name: text) -> i64:
+    """Look up concrete type for a type parameter
+
+    Returns type tag if found, -1 otherwise.
+    """
+    var i: i64 = 0
+    for name in subst_param_names:
+        if name == param_name:
+            return subst_type_tags[i]
+        i = i + 1
+    -1
+
+# ===== Expression Substitution =====
+
+fn subst_type_in_expr(eid: i64):
+    """Substitute types in an expression tree (in-place)
+
+    Recursively walks the expression tree and replaces type parameter
+    references with concrete types.
+    """
+    if eid < 0:
+        return
+
+    val e = expr_get(eid)
+
+    # For identifiers, check if it's a type parameter
+    if e.tag == EXPR_IDENT:
+        val concrete_type = type_subst_lookup(e.s_val)
+        if concrete_type >= 0:
+            # Found a type param - this should be rare in expressions
+            # Most type substitution happens in type annotations
+            pass_do_nothing
+
+    # Recurse into children
+    subst_type_in_expr(e.left)
+    subst_type_in_expr(e.right)
+    subst_type_in_expr(e.extra)
+
+    # Recurse into argument lists
+    for arg_eid in e.args:
+        subst_type_in_expr(arg_eid)
+
+    # Recurse into statement lists (for blocks, lambdas)
+    for stmt_id in e.stmts:
+        subst_type_in_stmt(stmt_id)
+
+# ===== Statement Substitution =====
+
+fn subst_type_in_stmt(sid: i64):
+    """Substitute types in a statement tree (in-place)"""
+    if sid < 0:
+        return
+
+    val s = stmt_get(sid)
+
+    # Substitute in type annotations (s.type_tag)
+    val concrete_type = type_subst_lookup_by_tag(s.type_tag)
+    if concrete_type >= 0:
+        s.type_tag = concrete_type
+
+    # Recurse into child expressions
+    subst_type_in_expr(s.target)
+    subst_type_in_expr(s.value)
+    subst_type_in_expr(s.condition)
+    subst_type_in_expr(s.iterator)
+    subst_type_in_expr(s.iterable)
+
+    # Recurse into statement bodies
+    for stmt_id in s.body:
+        subst_type_in_stmt(stmt_id)
+
+    for stmt_id in s.else_body:
+        subst_type_in_stmt(stmt_id)
+
+    # Recurse into elif branches
+    for cond_eid in s.elif_conds:
+        subst_type_in_expr(cond_eid)
+
+    for branch_stmts in s.elif_bodies:
+        for stmt_id in branch_stmts:
+            subst_type_in_stmt(stmt_id)
+
+fn type_subst_lookup_by_tag(type_tag: i64) -> i64:
+    """Look up substitution for a type tag
+
+    This is a simplified version - in a full implementation,
+    we'd need to handle named types and resolve them.
+    For now, just return -1 (no substitution).
+    """
+    -1
+
+# ===== Declaration Substitution =====
+
+fn subst_type_in_decl(did: i64):
+    """Substitute types in a declaration (in-place)
+
+    Replaces type parameters in:
+    - Parameter types
+    - Return type
+    - Field types (for structs)
+    - Function body
+    """
+    if did < 0:
+        return
+
+    val d = decl_get(did)
+
+    # Substitute parameter types
+    var i: i64 = 0
+    for ptype in d.param_types:
+        val concrete = type_subst_lookup_by_tag(ptype)
+        if concrete >= 0:
+            d.param_types[i] = concrete
+        i = i + 1
+
+    # Substitute return type
+    val concrete_ret = type_subst_lookup_by_tag(d.ret_type)
+    if concrete_ret >= 0:
+        d.ret_type = concrete_ret
+
+    # Substitute field types
+    i = 0
+    for ftype in d.field_types:
+        val concrete = type_subst_lookup_by_tag(ftype)
+        if concrete >= 0:
+            d.field_types[i] = concrete
+        i = i + 1
+
+    # Substitute in function body
+    for stmt_id in d.body_stmts:
+        subst_type_in_stmt(stmt_id)
+
+# ===== High-Level API =====
+
+fn type_subst_specialize_decl(generic_did: i64, param_names: [text], type_tags: [i64]) -> i64:
+    """Create a specialized version of a generic declaration
+
+    Steps:
+    1. Reset substitution state
+    2. Register type parameter mappings
+    3. Clone the declaration
+    4. Apply substitutions to the clone
+    5. Return specialized declaration ID
+
+    Example:
+        fn identity<T>(x: T) -> T: x
+        specialized = type_subst_specialize_decl(
+            identity_did,
+            ["T"],
+            [TYPE_I64]
+        )
+    """
+    # Reset state
+    type_subst_reset()
+
+    # Register substitutions
+    var i: i64 = 0
+    for param_name in param_names:
+        if i < type_tags.len():
+            type_subst_add(param_name, type_tags[i])
+        i = i + 1
+
+    # Clone the declaration
+    # Note: Import ast_clone_decl from ast_clone module
+    # For now, this assumes ast_clone is available at runtime
+    # Full integration requires updating imports
+    val cloned_did = generic_did  # Will be replaced with actual clone
+
+    # Apply substitutions
+    subst_type_in_decl(cloned_did)
+
+    cloned_did
+
+export type_subst_reset, type_subst_add, type_subst_lookup
+export subst_type_in_expr, subst_type_in_stmt, subst_type_in_decl
+export type_subst_specialize_decl

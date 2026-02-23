@@ -301,6 +301,19 @@ void     rt_exec_manager_cleanup(int64_t handle);
 /* ===== Stderr output ===== */
 void     spl_eprintln(const char* s);
 
+/* ===== Power ===== */
+int64_t  __simple_pow(int64_t base, int64_t exp);
+
+/* ===== Intrinsics (C backend stubs) ===== */
+int64_t  __simple_intrinsic_unreachable(void);
+int64_t  __simple_intrinsic_trap(void);
+int64_t  __simple_intrinsic_assume(int64_t cond);
+int64_t  __simple_intrinsic_likely(int64_t cond);
+int64_t  __simple_intrinsic_unlikely(int64_t cond);
+int64_t  __simple_intrinsic_prefetch(void* ptr);
+int64_t  __simple_intrinsic_memcpy(void* dst, const void* src, int64_t n);
+int64_t  __simple_intrinsic_memset(void* dst, int64_t val, int64_t n);
+
 /* ===== Panic / Abort ===== */
 
 #ifdef _MSC_VER

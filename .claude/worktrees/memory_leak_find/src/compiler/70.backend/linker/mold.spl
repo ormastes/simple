@@ -1,0 +1,518 @@
+# Mold Backend - Native binary generation via mold linker.
+#
+# This module provides integration with the mold linker for generating
+# native ELF binaries from SMF files.
+#
+# Mold is a high-performance linker (~4x faster than GNU ld).
+# https://github.com/rui314/mold
+#
+# Fallback chain: mold -> lld -> ld
+#
+# Pure Simple implementation - no Rust FFI required.
+# Uses bin/mold/mold (locally bundled) or system linkers.
+
+use std.io_runtime.{ShellResult, shell, shell_output, shell_bool, process_run, file_exists, file_write, file_delete, file_size_raw, cwd, host_os, host_arch}
+
+use .obj_taker (SymbolType)
+
+# ============================================================================
+# Linker Detection (Pure Simple)
+# ============================================================================
+
+fn find_mold_path() -> text?:
+    """Find mold executable. Checks local bin/mold/mold first, then PATH."""
+    val local_mold = cwd() + "/bin/mold/mold"
+    if file_exists(local_mold):
+        return Some(local_mold)
+    # Check PATH
+    val which_result = shell_output("which mold 2>/dev/null")
+    if which_result.len() > 0:
+        Some(which_result)
+    else:
+        nil
+
+fn find_lld_path() -> text?:
+    """Find lld executable in PATH."""
+    val which_result = shell_output("which lld 2>/dev/null")
+    if which_result.len() > 0:
+        Some(which_result)
+    else:
+        nil
+
+fn find_ld_path() -> text?:
+    """Find system ld executable in PATH."""
+    val which_result = shell_output("which ld 2>/dev/null")
+    if which_result.len() > 0:
+        Some(which_result)
+    else:
+        nil
+
+fn execute_linker(linker_path: text, args: [text]) -> Result<i64, text>:
+    """Execute linker with arguments. Returns exit code."""
+    val (stdout, stderr, code) = process_run(linker_path, args)
+    if code != 0:
+        var msg = "Linker failed (exit {code})"
+        if stderr.len() > 0:
+            msg = msg + ": " + stderr
+        return Err(msg)
+    Ok(code)
+
+fn write_elf_object(code: [i64], name: text, output_path: text) -> Result<(), text>:
+    """Write code bytes as ELF object file using GNU assembler.
+
+    Generates a .s assembly file with .byte directives for the code bytes,
+    then assembles it with `as --64 -o output.o input.s`.
+    """
+    # Generate assembly source with .byte directives
+    var asm_lines = ".section .text" + "\n"
+    asm_lines = asm_lines + ".globl " + name + "\n"
+    asm_lines = asm_lines + ".type " + name + ", @function" + "\n"
+    asm_lines = asm_lines + name + ":" + "\n"
+
+    # Emit .byte directives (one per line for clarity, batched for efficiency)
+    var i = 0
+    var batch_size = 16
+    var code_len = code.len()
+    for idx in range(0, code_len):
+        if i % batch_size == 0:
+            if i > 0:
+                asm_lines = asm_lines + "\n"
+            asm_lines = asm_lines + "    .byte "
+        else:
+            asm_lines = asm_lines + ", "
+        # Mask to 0-255 range (code values are i64 representing bytes)
+        val byte_val = code[idx] % 256
+        asm_lines = asm_lines + "{byte_val}"
+        i = i + 1
+
+    asm_lines = asm_lines + "\n"
+    asm_lines = asm_lines + ".size " + name + ", .-" + name + "\n"
+
+    # Write assembly to temp file
+    val asm_path = output_path + ".s"
+    val wrote = file_write(asm_path, asm_lines)
+    if not wrote:
+        return Err("Failed to write assembly file: {asm_path}")
+
+    # Assemble with GNU as
+    val (stdout, stderr, exit_code) = process_run("as", ["--64", "-o", output_path, asm_path])
+    # Cleanup temp assembly file
+    file_delete(asm_path)
+
+    if exit_code != 0:
+        var msg = "Assembler failed (exit {exit_code})"
+        if stderr.len() > 0:
+            msg = msg + ": " + stderr
+        return Err(msg)
+
+    Ok(())
+
+fn linker_file_size(path: text) -> i64:
+    """Get file size in bytes using stat."""
+    file_size_raw(path)
+
+# ============================================================================
+# Resolved Object
+# ============================================================================
+
+struct ResolvedObject:
+    """An object ready for linking."""
+    name: text
+    code: [i64]
+    symbol_type: SymbolType
+
+# ============================================================================
+# CRT File Discovery (for direct linker invocation)
+# ============================================================================
+
+struct MoldCrtFiles:
+    crt1: text
+    crti: text
+    crtn: text
+    crtbegin: text
+    crtend: text
+    dynamic_linker: text
+    lib_dirs: [text]
+    found: bool
+
+fn mold_find_crt_files(pie: bool, verbose: bool) -> MoldCrtFiles:
+    # Use cc -print-file-name=X to locate CRT files
+    var crt1_name = "crt1.o"
+    var crtbegin_name = "crtbegin.o"
+    var crtend_name = "crtend.o"
+    if pie:
+        crt1_name = "Scrt1.o"
+        crtbegin_name = "crtbeginS.o"
+        crtend_name = "crtendS.o"
+
+    val crt1 = mold_cc_print_file(crt1_name)
+    val crti = mold_cc_print_file("crti.o")
+    val crtn = mold_cc_print_file("crtn.o")
+    val crtbegin = mold_cc_print_file(crtbegin_name)
+    val crtend = mold_cc_print_file(crtend_name)
+
+    val all_found = crt1.contains("/") and crti.contains("/") and crtn.contains("/") and crtbegin.contains("/") and crtend.contains("/")
+
+    if verbose and all_found:
+        print "[mold] CRT files found: crt1={crt1} crtbegin={crtbegin}"
+
+    var lib_dirs: [text] = []
+    if crt1.contains("/"):
+        val dir = mold_path_dirname(crt1)
+        if dir != "":
+            lib_dirs = lib_dirs.push(dir)
+    if crtbegin.contains("/"):
+        val dir = mold_path_dirname(crtbegin)
+        if dir != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs.push(dir)
+
+    MoldCrtFiles(
+        crt1: crt1, crti: crti, crtn: crtn,
+        crtbegin: crtbegin, crtend: crtend,
+        dynamic_linker: mold_find_dynamic_linker(),
+        lib_dirs: lib_dirs,
+        found: all_found
+    )
+
+fn mold_cc_print_file(name: text) -> text:
+    val result = shell_output("cc -print-file-name={name} 2>/dev/null")
+    val trimmed = result.trim()
+    if trimmed.len() > 0:
+        trimmed
+    else:
+        name
+
+fn mold_find_dynamic_linker() -> text:
+    val os = host_os()
+    val arch = host_arch()
+    if os == "linux":
+        if arch == "x86_64":
+            if file_exists("/lib64/ld-linux-x86-64.so.2"):
+                return "/lib64/ld-linux-x86-64.so.2"
+            if file_exists("/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"):
+                return "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+        elif arch == "aarch64":
+            if file_exists("/lib/ld-linux-aarch64.so.1"):
+                return "/lib/ld-linux-aarch64.so.1"
+            if file_exists("/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"):
+                return "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+        elif arch == "i686" or arch == "i386":
+            if file_exists("/lib/ld-linux.so.2"):
+                return "/lib/ld-linux.so.2"
+            if file_exists("/lib/i386-linux-gnu/ld-linux.so.2"):
+                return "/lib/i386-linux-gnu/ld-linux.so.2"
+        elif arch == "armv7" or arch == "arm":
+            if file_exists("/lib/ld-linux-armhf.so.3"):
+                return "/lib/ld-linux-armhf.so.3"
+            if file_exists("/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"):
+                return "/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"
+        elif arch == "riscv64":
+            if file_exists("/lib/ld-linux-riscv64-lp64d.so.1"):
+                return "/lib/ld-linux-riscv64-lp64d.so.1"
+            if file_exists("/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1"):
+                return "/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1"
+        elif arch == "riscv32":
+            if file_exists("/lib/ld-linux-riscv32-ilp32d.so.1"):
+                return "/lib/ld-linux-riscv32-ilp32d.so.1"
+            if file_exists("/lib/riscv32-linux-gnu/ld-linux-riscv32-ilp32d.so.1"):
+                return "/lib/riscv32-linux-gnu/ld-linux-riscv32-ilp32d.so.1"
+    elif os == "freebsd":
+        return "/libexec/ld-elf.so.1"
+    ""
+
+fn mold_path_dirname(path: text) -> text:
+    val last_slash = path.rfind("/")
+    if last_slash >= 0:
+        path[0:last_slash]
+    else:
+        ""
+
+# ============================================================================
+# Mold Backend
+# ============================================================================
+
+enum LinkerType:
+    Mold
+    Lld
+    Ld
+
+impl LinkerType:
+    fn to_string() -> text:
+        match self:
+            case Mold: "mold"
+            case Lld: "lld"
+            case Ld: "ld"
+
+struct MoldBackend:
+    """Backend for native binary generation via mold/lld/ld."""
+    linker_path: text
+    linker_type: LinkerType
+    config: MoldConfig
+
+struct MoldConfig:
+    """Configuration for mold backend."""
+    pie: bool
+    debug: bool
+    verbose: bool
+    libraries: [text]
+    library_paths: [text]
+    extra_args: [text]
+
+impl MoldConfig:
+    static fn default() -> MoldConfig:
+        MoldConfig(
+            pie: true,
+            debug: false,
+            verbose: false,
+            libraries: [],
+            library_paths: [],
+            extra_args: []
+        )
+
+    static fn from_link_config(config: any) -> MoldConfig:
+        """Create MoldConfig from LinkConfig."""
+        # Access fields via dynamic lookup
+        var extra_args: [text] = []
+
+        # Add target flags (CPU/architecture)
+        val target_flags = config.target_flags ?? []
+        for flag in target_flags:
+            extra_args.push(flag)
+
+        # Add custom linker flags
+        val linker_flags = config.linker_flags ?? []
+        for flag in linker_flags:
+            extra_args.push(flag)
+
+        MoldConfig(
+            pie: config.pie ?? true,
+            debug: config.debug ?? false,
+            verbose: config.verbose ?? false,
+            libraries: config.libraries ?? [],
+            library_paths: config.library_paths ?? [],
+            extra_args: extra_args
+        )
+
+impl MoldBackend:
+    static fn create(link_config: any) -> Result<MoldBackend, text>:
+        """Create a mold backend, falling back to lld or ld if needed."""
+        val config = MoldConfig__from_link_config(link_config)
+
+        # Try to find a linker in order of preference
+        val (linker_path, linker_type) = find_linker()?
+
+        if config.verbose:
+            print "[mold] Using linker: {linker_type.to_string()} at {linker_path}"
+
+        Ok(MoldBackend(
+            linker_path: linker_path,
+            linker_type: linker_type,
+            config: config
+        ))
+
+    static fn with_config(config: MoldConfig) -> Result<MoldBackend, text>:
+        """Create backend with explicit config."""
+        val (linker_path, linker_type) = find_linker()?
+
+        Ok(MoldBackend(
+            linker_path: linker_path,
+            linker_type: linker_type,
+            config: config
+        ))
+
+    fn link(objects: [ResolvedObject], output: text) -> Result<(), text>:
+        """Link objects to native binary."""
+        if self.config.verbose:
+            print "[mold] Linking {objects.len()} objects to {output}"
+
+        # Discover CRT files
+        val crt = mold_find_crt_files(self.config.pie, self.config.verbose)
+
+        # Create temporary directory for object files
+        val temp_dir = create_temp_dir()?
+
+        # Write each object as ELF .o file
+        var obj_paths: [text] = []
+        for (idx, obj) in objects.enumerate():
+            val obj_path = "{temp_dir}/obj_{idx}.o"
+            write_elf_object(obj.code, obj.name, obj_path)?
+            obj_paths = obj_paths.push(obj_path)
+
+        # Build linker arguments in correct order
+        var args: [text] = []
+
+        # Output file
+        args = args.push("-o")
+        args = args.push(output)
+
+        # Emulation mode and dynamic linker (if CRT found)
+        val os = host_os()
+        val arch = host_arch()
+        if crt.found:
+            if os == "linux":
+                if arch == "x86_64":
+                    args = args.push("-m")
+                    args = args.push("elf_x86_64")
+                elif arch == "aarch64":
+                    args = args.push("-m")
+                    args = args.push("aarch64linux")
+                elif arch == "i686" or arch == "i386":
+                    args = args.push("-m")
+                    args = args.push("elf_i386")
+                elif arch == "armv7" or arch == "arm":
+                    args = args.push("-m")
+                    args = args.push("armelf_linux_eabi")
+                elif arch == "riscv64":
+                    args = args.push("-m")
+                    args = args.push("elf64lriscv")
+                elif arch == "riscv32":
+                    args = args.push("-m")
+                    args = args.push("elf32lriscv")
+
+            if crt.dynamic_linker != "":
+                args = args.push("-dynamic-linker")
+                args = args.push(crt.dynamic_linker)
+
+            # Hardening flags
+            args = args.push("--eh-frame-hdr")
+            args = args.push("--build-id")
+            args = args.push("--hash-style=gnu")
+            args = args.push("-z")
+            args = args.push("relro")
+            args = args.push("-z")
+            args = args.push("now")
+
+        # PIE
+        if self.config.pie:
+            args = args.push("-pie")
+
+        # CRT prologue (before user objects)
+        if crt.found:
+            args = args.push(crt.crt1)
+            args = args.push(crt.crti)
+            args = args.push(crt.crtbegin)
+
+        # User object files
+        for path in obj_paths:
+            args = args.push(path)
+
+        # Library search paths from CRT discovery
+        if crt.found:
+            for dir in crt.lib_dirs:
+                args = args.push("-L")
+                args = args.push(dir)
+
+        # Library paths from config
+        for path in self.config.library_paths:
+            args = args.push("-L")
+            args = args.push(path)
+
+        # Libraries
+        for lib in self.config.libraries:
+            args = args.push("-l")
+            args = args.push(lib)
+
+        # Standard libraries (when CRT found, we need these)
+        # No -lgcc/-lgcc_s — clang provides compiler-rt builtins
+        if crt.found and os == "linux":
+            args = args.push("-lc")
+            args = args.push("-lpthread")
+            args = args.push("-ldl")
+            args = args.push("-lm")
+
+        # Debug info
+        if self.config.debug:
+            args = args.push("-g")
+
+        # Extra args (use -rpath instead of -Wl,-rpath)
+        for arg in self.config.extra_args:
+            if arg.starts_with("-Wl,-rpath,"):
+                args = args.push("-rpath")
+                args = args.push(arg[11:])
+            else:
+                args = args.push(arg)
+
+        # CRT epilogue (after libs)
+        if crt.found:
+            args = args.push(crt.crtend)
+            args = args.push(crt.crtn)
+
+        # Execute linker
+        execute_linker(self.linker_path, args)?
+
+        # Cleanup temp directory
+        cleanup_temp_dir(temp_dir)
+
+        if self.config.verbose:
+            val size = linker_file_size(output)
+            print "[mold] Output size: {size} bytes"
+
+        Ok(())
+
+    fn link_with_runtime(
+        objects: [ResolvedObject],
+        output: text,
+        runtime_path: text?
+    ) -> Result<(), text>:
+        """Link objects with Simple runtime library."""
+        var all_objects = objects
+
+        # Add runtime if specified
+        if runtime_path.?:
+            # Add runtime library to the link list
+            all_objects = all_objects + [runtime_path.unwrap()]
+
+        self.link(all_objects, output)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn find_linker() -> Result<(text, LinkerType), text>:
+    """Find an available linker in order of preference."""
+    # Try mold first
+    val mold_path = find_mold_path()
+    if mold_path.?:
+        return Ok((mold_path.unwrap(), LinkerType.Mold))
+
+    # Try lld
+    val lld_path = find_lld_path()
+    if lld_path.?:
+        return Ok((lld_path.unwrap(), LinkerType.Lld))
+
+    # Try system ld
+    val ld_path = find_ld_path()
+    if ld_path.?:
+        return Ok((ld_path.unwrap(), LinkerType.Ld))
+
+    Err("No linker found. Please install mold, lld, or ensure ld is in PATH.")
+
+fn create_temp_dir() -> Result<text, text>:
+    """Create a temporary directory for object files."""
+    val result = shell_output("mktemp -d /tmp/simple_link_XXXXXX")
+    if result.len() > 0:
+        Ok(result)
+    else:
+        Err("Failed to create temporary directory")
+
+fn cleanup_temp_dir(path: text):
+    """Remove temporary directory (with safety check)."""
+    if path.starts_with("/tmp/simple_link_"):
+        shell("rm -rf '{path}'")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MoldBackend
+export MoldConfig
+export LinkerType
+export ResolvedObject
+export find_linker
+export find_mold_path, find_lld_path, find_ld_path
+export execute_linker, write_elf_object, linker_file_size

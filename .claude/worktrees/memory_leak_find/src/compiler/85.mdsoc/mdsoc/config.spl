@@ -1,0 +1,522 @@
+# MDSOC Config Parser
+#
+# Parses capsule.sdn config file using simple line-based parsing.
+# Returns MdsocManifest with all carets, dimensions, layering, and rules.
+#
+# Note: Uses manual line-based parsing instead of std.sdn.parser due to
+#       runtime limitations (std.sdn.parser uses is_alnum() which doesn't exist).
+# Note: All array pushes are inline (not in helper functions) due to BUG-15
+#       (arrays passed to functions are copied, push inside function doesn't
+#       modify caller's array).
+
+use compiler.mdsoc.types.*
+
+export load_mdsoc_config
+export parse_mdsoc_sdn
+
+extern fn rt_file_read_text(path: text) -> text
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+fn load_mdsoc_config(path: text) -> MdsocManifest?:
+    """Load MDSOC manifest from a capsule.sdn file path.
+
+    Returns nil if file cannot be read or is empty.
+    """
+    val source = rt_file_read_text(path) ?? ""
+    if source == "":
+        return nil
+    parse_mdsoc_sdn(source)
+
+fn parse_mdsoc_sdn(source: text) -> MdsocManifest?:
+    """Parse MDSOC manifest from SDN text content.
+
+    Returns nil if source is empty.
+    Handles sections: capsule, roots, dimension, dimension_construct, rules.
+    Multiple dimensions are accumulated (not overwritten).
+    """
+    if source == "":
+        return nil
+
+    val lines = sdn_split(source, "\n")
+
+    # Top-level capsule fields
+    var capsule_name = ""
+    var capsule_version = "0.1.0"
+
+    # Roots (carets)
+    var carets: [CaretId] = []
+
+    # Current root being parsed
+    var cur_root_name = ""
+    var cur_root_caret = ""
+    var cur_root_path = ""
+
+    # Dimension fields (shared for both dimension and dimension_construct sections)
+    var dim_name = ""
+    var dim_key_template = ""
+    var dim_surface = "__init__.spl"
+    var dim_participation = "explicit_bind_only"
+    var dim_intra_access = "via_surface_only"
+    var dim_symbol_merge = "forbid_implicit"
+    var dim_dep_cycles = "reject"
+    var dim_kind = "horizontal"
+
+    # Dimension mappings
+    var dim_mappings: [CaretMapping] = []
+    var cur_map_caret = ""
+    var cur_map_match = ""
+
+    # Dimension layering
+    var layer_order: [text] = []
+    var layer_direction = "upper_to_lower"
+    var layer_allow_same = true
+    var layer_adjacent_only = false
+
+    # Accumulated dimensions list
+    var dimensions: [DimensionDef] = []
+
+    # Rules
+    var rule_enforce_layering = true
+    var rule_reject_cycles = true
+    var rule_forbid_implicit_merge = true
+    var rule_require_explicit_bind = true
+
+    # Parser state
+    var section = ""
+    var subsection = ""
+
+    var i = 0
+    for line in lines:
+        val trimmed = sdn_trim(line)
+
+        # Skip empty lines and comments
+        if trimmed == "" or trimmed.starts_with("#"):
+            i = i + 1
+            continue
+
+        val indent = line_indent(line)
+
+        # ---- Top-level sections (indent 0) ----
+        if indent == 0 and trimmed.ends_with(":"):
+            # Flush current root if pending
+            if cur_root_name != "":
+                carets.push(CaretId.new(cur_root_name, cur_root_path))
+                cur_root_name = ""
+                cur_root_caret = ""
+                cur_root_path = ""
+
+            # Flush current mapping if pending
+            if cur_map_caret != "":
+                val target = derive_target_key(dim_key_template, cur_map_match)
+                dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
+                cur_map_caret = ""
+                cur_map_match = ""
+
+            # Flush previous dimension section if switching to a new top-level section
+            val prev_sec = section
+            val sec_str = trimmed[0:trimmed.len() - 1]
+            section = sdn_trim(sec_str)
+            subsection = ""
+
+            # When leaving a dimension section, flush accumulated dimension
+            if (prev_sec == "dimension" or prev_sec == "dimension_construct") and dim_name != "":
+                val flushed = _build_dimension(
+                    dim_name, dim_key_template, dim_surface,
+                    dim_participation, dim_intra_access, dim_symbol_merge,
+                    dim_dep_cycles, dim_kind, dim_mappings,
+                    layer_order, layer_direction, layer_allow_same, layer_adjacent_only
+                )
+                dimensions.push(flushed)
+                # Reset dimension fields for next section
+                dim_name = ""
+                dim_key_template = ""
+                dim_surface = "__init__.spl"
+                dim_participation = "explicit_bind_only"
+                dim_intra_access = "via_surface_only"
+                dim_symbol_merge = "forbid_implicit"
+                dim_dep_cycles = "reject"
+                dim_kind = "horizontal"
+                dim_mappings = []
+                layer_order = []
+                layer_direction = "upper_to_lower"
+                layer_allow_same = true
+                layer_adjacent_only = false
+
+            i = i + 1
+            continue
+
+        # ---- capsule section ----
+        if section == "capsule":
+            val kv = parse_kv(trimmed)
+            if kv.0 == "name":
+                capsule_name = kv.1
+            elif kv.0 == "version":
+                capsule_version = kv.1
+
+        # ---- roots section (list of caret entries) ----
+        elif section == "roots":
+            if trimmed.starts_with("- "):
+                # Flush previous root (inline due to BUG-15)
+                if cur_root_name != "":
+                    carets.push(CaretId.new(cur_root_name, cur_root_path))
+                cur_root_name = ""
+                cur_root_caret = ""
+                cur_root_path = ""
+
+                val entry_substr = trimmed[2:]
+                val entry_str = sdn_trim(entry_substr)
+                val kv = parse_kv(entry_str)
+                if kv.0 == "name":
+                    cur_root_name = kv.1
+                elif kv.0 == "caret":
+                    cur_root_caret = kv.1
+                    # caret field also serves as the caret identifier name
+                    if cur_root_name == "":
+                        cur_root_name = kv.1
+                elif kv.0 == "path":
+                    cur_root_path = kv.1
+            else:
+                # Continuation fields of current root
+                val kv = parse_kv(trimmed)
+                if kv.0 == "name":
+                    cur_root_name = kv.1
+                elif kv.0 == "caret":
+                    cur_root_caret = kv.1
+                    if cur_root_name == "":
+                        cur_root_name = kv.1
+                elif kv.0 == "path":
+                    cur_root_path = kv.1
+
+        # ---- dimension section (horizontal, first axis) ----
+        elif section == "dimension":
+            # Handle subsection transitions at indent 2
+            if indent == 2 and trimmed.ends_with(":"):
+                if subsection == "map" and cur_map_caret != "":
+                    val target = derive_target_key(dim_key_template, cur_map_match)
+                    dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
+                    cur_map_caret = ""
+                    cur_map_match = ""
+                val sub_str = trimmed[0:trimmed.len() - 1]
+                subsection = sdn_trim(sub_str)
+                i = i + 1
+                continue
+
+            if subsection == "":
+                val kv = parse_kv(trimmed)
+                if kv.0 == "name":
+                    dim_name = kv.1
+                elif kv.0 == "key_template":
+                    dim_key_template = kv.1
+                elif kv.0 == "surface":
+                    dim_surface = kv.1
+                elif kv.0 == "participation":
+                    dim_participation = kv.1
+                elif kv.0 == "intra_capsule_access":
+                    dim_intra_access = kv.1
+                elif kv.0 == "symbol_merge":
+                    dim_symbol_merge = kv.1
+                elif kv.0 == "dependency_cycles":
+                    dim_dep_cycles = kv.1
+                elif kv.0 == "dimension_kind":
+                    dim_kind = kv.1
+
+            elif subsection == "map":
+                if trimmed.starts_with("- "):
+                    if cur_map_caret != "":
+                        val target = derive_target_key(dim_key_template, cur_map_match)
+                        dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
+                    cur_map_caret = ""
+                    cur_map_match = ""
+
+                    val entry_substr = trimmed[2:]
+                    val entry_str = sdn_trim(entry_substr)
+                    val kv = parse_kv(entry_str)
+                    if kv.0 == "caret":
+                        cur_map_caret = kv.1
+                    elif kv.0 == "match":
+                        cur_map_match = kv.1
+                else:
+                    val kv = parse_kv(trimmed)
+                    if kv.0 == "caret":
+                        cur_map_caret = kv.1
+                    elif kv.0 == "match":
+                        cur_map_match = kv.1
+
+            elif subsection == "layering":
+                val kv = parse_kv(trimmed)
+                if kv.0 == "order":
+                    layer_order = parse_inline_array(kv.1)
+                elif kv.0 == "direction":
+                    layer_direction = kv.1
+                elif kv.0 == "allow_same_layer":
+                    layer_allow_same = parse_bool(kv.1)
+                elif kv.0 == "allow_adjacent_only":
+                    layer_adjacent_only = parse_bool(kv.1)
+
+        # ---- dimension_construct section (vertical, second axis) ----
+        elif section == "dimension_construct":
+            # Handle subsection transitions at indent 2
+            if indent == 2 and trimmed.ends_with(":"):
+                if subsection == "map" and cur_map_caret != "":
+                    val target = derive_target_key(dim_key_template, cur_map_match)
+                    dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
+                    cur_map_caret = ""
+                    cur_map_match = ""
+                val sub_str = trimmed[0:trimmed.len() - 1]
+                subsection = sdn_trim(sub_str)
+                i = i + 1
+                continue
+
+            if subsection == "":
+                val kv = parse_kv(trimmed)
+                if kv.0 == "name":
+                    dim_name = kv.1
+                elif kv.0 == "key_template":
+                    dim_key_template = kv.1
+                elif kv.0 == "surface":
+                    dim_surface = kv.1
+                elif kv.0 == "participation":
+                    dim_participation = kv.1
+                elif kv.0 == "intra_capsule_access":
+                    dim_intra_access = kv.1
+                elif kv.0 == "symbol_merge":
+                    dim_symbol_merge = kv.1
+                elif kv.0 == "dependency_cycles":
+                    dim_dep_cycles = kv.1
+                elif kv.0 == "dimension_kind":
+                    dim_kind = kv.1
+
+            elif subsection == "tiers":
+                # tiers subsection: order: [core, flow, decl, advanced, meta]
+                # direction: lower_to_upper
+                val kv = parse_kv(trimmed)
+                if kv.0 == "order":
+                    layer_order = parse_inline_array(kv.1)
+                elif kv.0 == "direction":
+                    layer_direction = kv.1
+                elif kv.0 == "allow_same_layer":
+                    layer_allow_same = parse_bool(kv.1)
+                elif kv.0 == "allow_adjacent_only":
+                    layer_adjacent_only = parse_bool(kv.1)
+
+            elif subsection == "layering":
+                val kv = parse_kv(trimmed)
+                if kv.0 == "order":
+                    layer_order = parse_inline_array(kv.1)
+                elif kv.0 == "direction":
+                    layer_direction = kv.1
+                elif kv.0 == "allow_same_layer":
+                    layer_allow_same = parse_bool(kv.1)
+                elif kv.0 == "allow_adjacent_only":
+                    layer_adjacent_only = parse_bool(kv.1)
+
+        # ---- rules section ----
+        elif section == "rules":
+            val kv = parse_kv(trimmed)
+            if kv.0 == "enforce_layering":
+                rule_enforce_layering = parse_bool(kv.1)
+            elif kv.0 == "reject_cycles":
+                rule_reject_cycles = parse_bool(kv.1)
+            elif kv.0 == "forbid_implicit_merge":
+                rule_forbid_implicit_merge = parse_bool(kv.1)
+            elif kv.0 == "require_explicit_bind":
+                rule_require_explicit_bind = parse_bool(kv.1)
+
+        i = i + 1
+
+    # ---- Flush remaining pending entries ----
+
+    # Flush last root
+    if cur_root_name != "":
+        carets.push(CaretId.new(cur_root_name, cur_root_path))
+
+    # Flush last mapping
+    if cur_map_caret != "":
+        val target = derive_target_key(dim_key_template, cur_map_match)
+        dim_mappings.push(CaretMapping.new(cur_map_caret, cur_map_match, target))
+
+    # Flush last dimension section
+    if dim_name != "":
+        val last_dim = _build_dimension(
+            dim_name, dim_key_template, dim_surface,
+            dim_participation, dim_intra_access, dim_symbol_merge,
+            dim_dep_cycles, dim_kind, dim_mappings,
+            layer_order, layer_direction, layer_allow_same, layer_adjacent_only
+        )
+        dimensions.push(last_dim)
+
+    # ---- Build CapsuleRules ----
+    val rules = CapsuleRules.new(rule_enforce_layering, rule_reject_cycles, rule_forbid_implicit_merge, rule_require_explicit_bind)
+
+    # ---- Build MdsocManifest ----
+    var manifest = MdsocManifest.new(capsule_name)
+    manifest.version = capsule_version
+    manifest.carets = carets
+    manifest.dimensions = dimensions
+    manifest.rules = rules
+
+    manifest
+
+# Helper: build a DimensionDef from accumulated fields
+fn _build_dimension(
+    name: text, key_template: text, surface: text,
+    participation: text, intra_access: text, symbol_merge: text,
+    dep_cycles: text, kind: text, mappings: [CaretMapping],
+    layer_order: [text], layer_direction: text,
+    layer_allow_same: bool, layer_adjacent_only: bool
+) -> DimensionDef:
+    var layer_dir = LayerDirection.UpperToLower
+    if layer_direction == "lower_to_upper":
+        layer_dir = LayerDirection.LowerToUpper
+
+    var layer_def = LayerDef.new(layer_order, layer_dir)
+    layer_def.allow_same_layer = layer_allow_same
+    layer_def.allow_adjacent_only = layer_adjacent_only
+
+    var dim = DimensionDef.new(name, key_template)
+    dim.surface_file = surface
+    dim.participation = participation
+    dim.intra_access = intra_access
+    dim.symbol_merge = symbol_merge
+    dim.dep_cycles = dep_cycles
+    dim.dimension_kind = kind
+    dim.mappings = mappings
+    dim.layer = layer_def
+    dim
+
+# =========================================================================
+# Parsing Helpers
+# =========================================================================
+
+fn line_indent(line: text) -> i64:
+    """Count leading spaces (tabs count as 4 spaces)."""
+    var count = 0
+    var idx = 0
+    for ch in line:
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            return count
+        idx = idx + 1
+    count
+
+fn parse_kv(s: text) -> (text, text):
+    """Parse a 'key: value' string into (key, value) tuple.
+
+    Returns ("", s) if no colon found.
+    """
+    val idx = s.index_of(":") ?? -1
+    if idx < 0:
+        return ("", s)
+    val key_str = s[0:idx]
+    val key = sdn_trim(key_str)
+    val rest = s[idx + 1:]
+    val item = sdn_trim(rest)
+    (key, item)
+
+fn parse_bool(s: text) -> bool:
+    """Parse a boolean value from text.
+
+    Accepts: true, yes, 1 -> true. Everything else -> false.
+    """
+    val lower = s.to_lowercase()
+    if lower == "true":
+        return true
+    if lower == "yes":
+        return true
+    if lower == "1":
+        return true
+    false
+
+fn parse_inline_array(s: text) -> [text]:
+    """Parse an inline array like [a, b, c] or [api, app, domain, infra].
+
+    Handles both quoted and unquoted values.
+    """
+    var items: [text] = []
+    var inner = sdn_trim(s)
+    if inner.starts_with("["):
+        inner = inner[1:]
+    if inner.ends_with("]"):
+        inner = inner[0:inner.len() - 1]
+
+    val parts = sdn_split(inner, ",")
+    for part in parts:
+        val trimmed = sdn_trim(part)
+        if trimmed != "":
+            items.push(strip_quotes(trimmed))
+    items
+
+fn strip_quotes(s: text) -> text:
+    """Remove surrounding single or double quotes if present."""
+    if s.len() >= 2:
+        val sd = s.starts_with("\"")
+        val ed = s.ends_with("\"")
+        val ss = s.starts_with("'")
+        val es = s.ends_with("'")
+        if (sd and ed) or (ss and es):
+            return s[1:s.len() - 1]
+    s
+
+fn derive_target_key(key_template: text, match_pattern: text) -> text:
+    """Derive target key from the key template.
+
+    The target key is the key_template itself (e.g., 'feature/{name}').
+    The match_pattern maps caret-local paths to this canonical key.
+    At parse time we store the template as the target; actual name
+    expansion happens at resolution time via DimensionDef.expand_key().
+    """
+    key_template
+
+# =========================================================================
+# String Helpers (local, avoids import issues)
+# =========================================================================
+
+fn sdn_trim(s: text) -> text:
+    """Trim leading and trailing whitespace from a string."""
+    var start = 0
+    var end_idx = s.len()
+
+    for idx in 0..s.len():
+        val ch = s[idx:idx + 1]
+        if ch != " " and ch != "\t" and ch != "\r":
+            start = idx
+            break
+        if idx == s.len() - 1:
+            # Entire string is whitespace
+            return ""
+
+    var j = end_idx - 1
+    for idx in 0..s.len():
+        if j < start:
+            break
+        val ch = s[j:j + 1]
+        if ch != " " and ch != "\t" and ch != "\r":
+            end_idx = j + 1
+            break
+        j = j - 1
+
+    s[start:end_idx]
+
+fn sdn_split(s: text, delimiter: text) -> [text]:
+    """Split a string by a single-character delimiter.
+
+    Returns list of parts. Empty string returns [""].
+    """
+    var parts: [text] = []
+    var current = ""
+    var idx = 0
+    for ch in s:
+        if ch == delimiter:
+            parts.push(current)
+            current = ""
+        else:
+            current = current + ch
+        idx = idx + 1
+    parts.push(current)
+    parts

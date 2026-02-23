@@ -1,0 +1,542 @@
+# RISC-V 32-bit Inline Assembly Backend
+#
+# Generates RISC-V 32-bit assembly from inline asm blocks.
+# Adapted from riscv_asm.spl for 32-bit RV32IM targets.
+#
+# Key differences from 64-bit:
+#   - Uses lw/sw instead of ld/sd for word-sized loads/stores
+#   - ILP32 calling convention (32-bit pointers, 32-bit long)
+#   - 32-bit address calculations
+#   - No RV64-only instructions (lwu, ld, sd, addiw, etc.)
+#   - Generates .attribute directives for RV32IM
+
+use compiler.backend.inline_asm.{InlineAsm, AsmOperand, AsmRegister, AsmOption}
+
+# ===========================================================================
+# RV32 Constants
+# ===========================================================================
+
+val RV32_XLEN: i64 = 32
+val RV32_REG_SIZE: i64 = 4    # 4 bytes per register
+val RV32_STACK_ALIGN: i64 = 16  # Stack alignment (ABI requirement)
+
+# ===========================================================================
+# RV32 Register Allocator
+# ===========================================================================
+
+class RiscV32RegisterAllocator:
+    """Allocates RISC-V 32-bit registers for inline assembly."""
+    used_regs: Dict<text, bool>
+
+impl RiscV32RegisterAllocator:
+    static fn create() -> RiscV32RegisterAllocator:
+        RiscV32RegisterAllocator(
+            used_regs: {}
+        )
+
+    fn allocate_reg(reg: AsmRegister) -> text:
+        match reg:
+            # RISC-V integer registers (32-bit width on RV32)
+            case AsmRegister.X0: "x0"    # zero
+            case AsmRegister.X1: "x1"    # ra (return address)
+            case AsmRegister.X2: "x2"    # sp (stack pointer)
+            case AsmRegister.X3: "x3"    # gp (global pointer)
+            case AsmRegister.X4: "x4"    # tp (thread pointer)
+            case AsmRegister.X5: "x5"    # t0 (temporary)
+            case AsmRegister.X6: "x6"    # t1
+            case AsmRegister.X7: "x7"    # t2
+            case AsmRegister.X8: "x8"    # s0/fp (frame pointer)
+            case AsmRegister.X9: "x9"    # s1
+            case AsmRegister.X10: "x10"  # a0 (argument/return)
+            case AsmRegister.X11: "x11"  # a1
+            case AsmRegister.X12: "x12"  # a2
+            case AsmRegister.X13: "x13"  # a3
+            case AsmRegister.X14: "x14"  # a4
+            case AsmRegister.X15: "x15"  # a5
+            case AsmRegister.X16: "x16"  # a6
+            case AsmRegister.X17: "x17"  # a7
+
+            # Any - allocate automatically
+            case AsmRegister.Any:
+                self.allocate_any()
+
+            case _:
+                "x0"  # Default (zero register)
+
+    fn allocate_any() -> text:
+        # Prefer temporary registers (t0-t6)
+        val candidates = ["t0", "t1", "t2", "t3", "t4", "t5", "t6"]
+
+        for candidate in candidates:
+            if not self.used_regs.contains(candidate):
+                self.used_regs[candidate] = true
+                return candidate
+
+        "t0"  # Fallback
+
+    fn abi_name(reg: text) -> text:
+        """Convert register number to ABI name."""
+        match reg:
+            case "x0": "zero"
+            case "x1": "ra"
+            case "x2": "sp"
+            case "x3": "gp"
+            case "x4": "tp"
+            case "x5": "t0"
+            case "x6": "t1"
+            case "x7": "t2"
+            case "x8": "s0"
+            case "x9": "s1"
+            case "x10": "a0"
+            case "x11": "a1"
+            case "x12": "a2"
+            case "x13": "a3"
+            case "x14": "a4"
+            case "x15": "a5"
+            case "x16": "a6"
+            case "x17": "a7"
+            case _: reg
+
+# ===========================================================================
+# RV32 Assembly Generator
+# ===========================================================================
+
+class RiscV32AsmGenerator:
+    """Generates RISC-V 32-bit assembly with RV32IM directives."""
+    allocator: RiscV32RegisterAllocator
+
+impl RiscV32AsmGenerator:
+    static fn create() -> RiscV32AsmGenerator:
+        RiscV32AsmGenerator(
+            allocator: RiscV32RegisterAllocator.create()
+        )
+
+    fn generate(asm: InlineAsm) -> text:
+        var code = ""
+
+        # Process operands
+        var regs: [text] = []
+        for operand in asm.operands:
+            val reg = operand.register()
+            val reg_name = self.allocator.allocate_reg(reg)
+            regs.push(reg_name)
+
+        # Generate instructions
+        for inst in asm.template:
+            var line = inst
+            for i in 0..regs.len():
+                line = line.replace("{{i}}", regs[i])
+
+            code = code + "  {line}\n"
+
+        code
+
+    fn emit_attribute_directives() -> text:
+        """Emit RISC-V ELF attribute directives for RV32IM."""
+        var directives = ""
+        directives = directives + "  .attribute arch, \"rv32im\"\n"
+        directives = directives + "  .attribute unaligned_access, 0\n"
+        directives = directives + "  .attribute stack_align, 16\n"
+        directives
+
+    fn emit_prologue(frame_size: i64) -> text:
+        """Emit RV32 function prologue.
+        Uses lw/sw (word load/store) for 32-bit registers."""
+        var code = ""
+        # Align frame size to stack alignment
+        val aligned_size = ((frame_size + RV32_STACK_ALIGN - 1) / RV32_STACK_ALIGN) * RV32_STACK_ALIGN
+
+        code = code + "  addi sp, sp, -{aligned_size}\n"
+        code = code + "  sw ra, {aligned_size - 4}(sp)\n"
+        code = code + "  sw s0, {aligned_size - 8}(sp)\n"
+        code = code + "  addi s0, sp, {aligned_size}\n"
+        code
+
+    fn emit_epilogue(frame_size: i64) -> text:
+        """Emit RV32 function epilogue.
+        Uses lw/sw (word load/store) for 32-bit registers."""
+        var code = ""
+        val aligned_size = ((frame_size + RV32_STACK_ALIGN - 1) / RV32_STACK_ALIGN) * RV32_STACK_ALIGN
+
+        code = code + "  lw ra, {aligned_size - 4}(sp)\n"
+        code = code + "  lw s0, {aligned_size - 8}(sp)\n"
+        code = code + "  addi sp, sp, {aligned_size}\n"
+        code = code + "  ret\n"
+        code
+
+# ===========================================================================
+# RV32-Specific Instructions
+# ===========================================================================
+
+# Memory operations (32-bit word size)
+fn rv32_lw(rd: text, offset: i64, rs: text) -> InlineAsm:
+    """Load word (32-bit) - native width on RV32."""
+    InlineAsm.new(["lw {rd}, {offset}({rs})"], Span.empty())
+
+fn rv32_sw(rs2: text, offset: i64, rs1: text) -> InlineAsm:
+    """Store word (32-bit) - native width on RV32."""
+    InlineAsm.new(["sw {rs2}, {offset}({rs1})"], Span.empty())
+
+fn rv32_lb(rd: text, offset: i64, rs: text) -> InlineAsm:
+    """Load byte (sign-extended)."""
+    InlineAsm.new(["lb {rd}, {offset}({rs})"], Span.empty())
+
+fn rv32_lbu(rd: text, offset: i64, rs: text) -> InlineAsm:
+    """Load byte unsigned."""
+    InlineAsm.new(["lbu {rd}, {offset}({rs})"], Span.empty())
+
+fn rv32_sb(rs2: text, offset: i64, rs1: text) -> InlineAsm:
+    """Store byte."""
+    InlineAsm.new(["sb {rs2}, {offset}({rs1})"], Span.empty())
+
+fn rv32_lh(rd: text, offset: i64, rs: text) -> InlineAsm:
+    """Load halfword (sign-extended)."""
+    InlineAsm.new(["lh {rd}, {offset}({rs})"], Span.empty())
+
+fn rv32_lhu(rd: text, offset: i64, rs: text) -> InlineAsm:
+    """Load halfword unsigned."""
+    InlineAsm.new(["lhu {rd}, {offset}({rs})"], Span.empty())
+
+fn rv32_sh(rs2: text, offset: i64, rs1: text) -> InlineAsm:
+    """Store halfword."""
+    InlineAsm.new(["sh {rs2}, {offset}({rs1})"], Span.empty())
+
+# Arithmetic (RV32I base)
+fn rv32_add(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Add registers."""
+    InlineAsm.new(["add {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_addi(rd: text, rs1: text, imm: i64) -> InlineAsm:
+    """Add immediate."""
+    InlineAsm.new(["addi {rd}, {rs1}, {imm}"], Span.empty())
+
+fn rv32_sub(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Subtract registers."""
+    InlineAsm.new(["sub {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_lui(rd: text, imm: i64) -> InlineAsm:
+    """Load upper immediate (bits 31:12)."""
+    InlineAsm.new(["lui {rd}, {imm}"], Span.empty())
+
+fn rv32_auipc(rd: text, imm: i64) -> InlineAsm:
+    """Add upper immediate to PC."""
+    InlineAsm.new(["auipc {rd}, {imm}"], Span.empty())
+
+# RV32M extension (multiply/divide)
+fn rv32_mul(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Multiply (low 32 bits)."""
+    InlineAsm.new(["mul {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_mulh(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Multiply high (signed x signed, upper 32 bits)."""
+    InlineAsm.new(["mulh {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_mulhu(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Multiply high unsigned."""
+    InlineAsm.new(["mulhu {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_mulhsu(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Multiply high signed x unsigned."""
+    InlineAsm.new(["mulhsu {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_div(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Divide signed."""
+    InlineAsm.new(["div {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_divu(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Divide unsigned."""
+    InlineAsm.new(["divu {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_rem(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Remainder signed."""
+    InlineAsm.new(["rem {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_remu(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Remainder unsigned."""
+    InlineAsm.new(["remu {rd}, {rs1}, {rs2}"], Span.empty())
+
+# Bitwise operations
+fn rv32_and(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Bitwise AND."""
+    InlineAsm.new(["and {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_andi(rd: text, rs1: text, imm: i64) -> InlineAsm:
+    """Bitwise AND immediate."""
+    InlineAsm.new(["andi {rd}, {rs1}, {imm}"], Span.empty())
+
+fn rv32_or(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Bitwise OR."""
+    InlineAsm.new(["or {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_ori(rd: text, rs1: text, imm: i64) -> InlineAsm:
+    """Bitwise OR immediate."""
+    InlineAsm.new(["ori {rd}, {rs1}, {imm}"], Span.empty())
+
+fn rv32_xor(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Bitwise XOR."""
+    InlineAsm.new(["xor {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_xori(rd: text, rs1: text, imm: i64) -> InlineAsm:
+    """Bitwise XOR immediate."""
+    InlineAsm.new(["xori {rd}, {rs1}, {imm}"], Span.empty())
+
+# Shift operations (RV32: shift amount is 5 bits, 0-31)
+fn rv32_sll(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Shift left logical."""
+    InlineAsm.new(["sll {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_slli(rd: text, rs1: text, shamt: i64) -> InlineAsm:
+    """Shift left logical immediate."""
+    InlineAsm.new(["slli {rd}, {rs1}, {shamt}"], Span.empty())
+
+fn rv32_srl(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Shift right logical."""
+    InlineAsm.new(["srl {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_srli(rd: text, rs1: text, shamt: i64) -> InlineAsm:
+    """Shift right logical immediate."""
+    InlineAsm.new(["srli {rd}, {rs1}, {shamt}"], Span.empty())
+
+fn rv32_sra(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Shift right arithmetic."""
+    InlineAsm.new(["sra {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_srai(rd: text, rs1: text, shamt: i64) -> InlineAsm:
+    """Shift right arithmetic immediate."""
+    InlineAsm.new(["srai {rd}, {rs1}, {shamt}"], Span.empty())
+
+# Branch instructions
+fn rv32_beq(rs1: text, rs2: text, label: text) -> InlineAsm:
+    """Branch if equal."""
+    InlineAsm.new(["beq {rs1}, {rs2}, {label}"], Span.empty())
+
+fn rv32_bne(rs1: text, rs2: text, label: text) -> InlineAsm:
+    """Branch if not equal."""
+    InlineAsm.new(["bne {rs1}, {rs2}, {label}"], Span.empty())
+
+fn rv32_blt(rs1: text, rs2: text, label: text) -> InlineAsm:
+    """Branch if less than (signed)."""
+    InlineAsm.new(["blt {rs1}, {rs2}, {label}"], Span.empty())
+
+fn rv32_bge(rs1: text, rs2: text, label: text) -> InlineAsm:
+    """Branch if greater or equal (signed)."""
+    InlineAsm.new(["bge {rs1}, {rs2}, {label}"], Span.empty())
+
+fn rv32_bltu(rs1: text, rs2: text, label: text) -> InlineAsm:
+    """Branch if less than (unsigned)."""
+    InlineAsm.new(["bltu {rs1}, {rs2}, {label}"], Span.empty())
+
+fn rv32_bgeu(rs1: text, rs2: text, label: text) -> InlineAsm:
+    """Branch if greater or equal (unsigned)."""
+    InlineAsm.new(["bgeu {rs1}, {rs2}, {label}"], Span.empty())
+
+# Jump instructions
+fn rv32_jal(rd: text, label: text) -> InlineAsm:
+    """Jump and link."""
+    InlineAsm.new(["jal {rd}, {label}"], Span.empty())
+
+fn rv32_jalr(rd: text, rs1: text, offset: i64) -> InlineAsm:
+    """Jump and link register."""
+    InlineAsm.new(["jalr {rd}, {offset}({rs1})"], Span.empty())
+
+# Compare and set
+fn rv32_slt(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Set if less than (signed)."""
+    InlineAsm.new(["slt {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_sltu(rd: text, rs1: text, rs2: text) -> InlineAsm:
+    """Set if less than (unsigned)."""
+    InlineAsm.new(["sltu {rd}, {rs1}, {rs2}"], Span.empty())
+
+fn rv32_slti(rd: text, rs1: text, imm: i64) -> InlineAsm:
+    """Set if less than immediate (signed)."""
+    InlineAsm.new(["slti {rd}, {rs1}, {imm}"], Span.empty())
+
+fn rv32_sltiu(rd: text, rs1: text, imm: i64) -> InlineAsm:
+    """Set if less than immediate (unsigned)."""
+    InlineAsm.new(["sltiu {rd}, {rs1}, {imm}"], Span.empty())
+
+# System/privileged instructions (reused from riscv_asm.spl, same for RV32/RV64)
+fn rv32_ecall() -> InlineAsm:
+    """Environment call (syscall)."""
+    var asm = InlineAsm.new(["ecall"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_ebreak() -> InlineAsm:
+    """Breakpoint."""
+    var asm = InlineAsm.new(["ebreak"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_mret() -> InlineAsm:
+    """Machine-mode return."""
+    var asm = InlineAsm.new(["mret"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm.add_option(AsmOption.NoReturn)
+    asm
+
+fn rv32_wfi() -> InlineAsm:
+    """Wait for interrupt."""
+    var asm = InlineAsm.new(["wfi"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_fence() -> InlineAsm:
+    """Memory fence."""
+    InlineAsm.new(["fence"], Span.empty())
+
+fn rv32_fence_i() -> InlineAsm:
+    """Instruction fence."""
+    InlineAsm.new(["fence.i"], Span.empty())
+
+fn rv32_nop() -> InlineAsm:
+    """No operation."""
+    InlineAsm.new(["nop"], Span.empty())
+
+# CSR operations (same encoding for RV32/RV64)
+fn rv32_csrr(rd: text, csr: text) -> InlineAsm:
+    """Read CSR."""
+    var asm = InlineAsm.new(["csrr {rd}, {csr}"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_csrw(csr: text, rs: text) -> InlineAsm:
+    """Write CSR."""
+    var asm = InlineAsm.new(["csrw {csr}, {rs}"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_csrs(csr: text, rs: text) -> InlineAsm:
+    """Set bits in CSR."""
+    var asm = InlineAsm.new(["csrs {csr}, {rs}"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_csrc(csr: text, rs: text) -> InlineAsm:
+    """Clear bits in CSR."""
+    var asm = InlineAsm.new(["csrc {csr}, {rs}"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+# Atomic operations (RV32A extension)
+fn rv32_lr_w(rd: text, rs1: text) -> InlineAsm:
+    """Load-reserved word."""
+    var asm = InlineAsm.new(["lr.w {rd}, ({rs1})"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_sc_w(rd: text, rs2: text, rs1: text) -> InlineAsm:
+    """Store-conditional word."""
+    var asm = InlineAsm.new(["sc.w {rd}, {rs2}, ({rs1})"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_amoswap_w(rd: text, rs2: text, rs1: text) -> InlineAsm:
+    """Atomic swap word."""
+    var asm = InlineAsm.new(["amoswap.w {rd}, {rs2}, ({rs1})"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_amoadd_w(rd: text, rs2: text, rs1: text) -> InlineAsm:
+    """Atomic add word."""
+    var asm = InlineAsm.new(["amoadd.w {rd}, {rs2}, ({rs1})"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_amoand_w(rd: text, rs2: text, rs1: text) -> InlineAsm:
+    """Atomic AND word."""
+    var asm = InlineAsm.new(["amoand.w {rd}, {rs2}, ({rs1})"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+fn rv32_amoor_w(rd: text, rs2: text, rs1: text) -> InlineAsm:
+    """Atomic OR word."""
+    var asm = InlineAsm.new(["amoor.w {rd}, {rs2}, ({rs1})"], Span.empty())
+    asm.add_option(AsmOption.Volatile)
+    asm
+
+# ===========================================================================
+# 32-bit Address Calculation Helpers
+# ===========================================================================
+
+fn rv32_load_address(rd: text, symbol: text) -> text:
+    """Generate instruction sequence to load a 32-bit address into a register.
+    Uses lui + addi pair for full 32-bit address."""
+    var code = ""
+    code = code + "  lui {rd}, %hi({symbol})\n"
+    code = code + "  addi {rd}, {rd}, %lo({symbol})\n"
+    code
+
+fn rv32_load_immediate(rd: text, imm: i64) -> text:
+    """Generate instruction sequence to load a 32-bit immediate.
+    Small values use addi alone; larger values use lui + addi."""
+    var code = ""
+    if imm >= -2048 and imm <= 2047:
+        # Fits in 12-bit immediate
+        code = code + "  addi {rd}, zero, {imm}\n"
+    else:
+        # Need lui + addi pair
+        val upper = (imm + 0x800) >> 12
+        val lower = imm - (upper << 12)
+        code = code + "  lui {rd}, {upper}\n"
+        if lower != 0:
+            code = code + "  addi {rd}, {rd}, {lower}\n"
+    code
+
+# ===========================================================================
+# ILP32 Calling Convention Helpers
+# ===========================================================================
+
+# ILP32 ABI:
+#   - Arguments: a0-a7 (x10-x17)
+#   - Return: a0, a1 (for 64-bit return values on 32-bit)
+#   - Caller-saved: t0-t6 (x5-x7, x28-x31), a0-a7
+#   - Callee-saved: s0-s11 (x8-x9, x18-x27), ra (x1)
+#   - Stack pointer: sp (x2), 16-byte aligned
+#   - Frame pointer: s0/fp (x8)
+
+val RV32_ARG_REGS: [text] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
+val RV32_RET_REGS: [text] = ["a0", "a1"]
+val RV32_CALLEE_SAVED: [text] = ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11"]
+val RV32_CALLER_SAVED: [text] = ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
+
+fn rv32_arg_register(index: i64) -> text:
+    """Get argument register for ILP32 calling convention.
+    Returns empty string if argument goes on stack."""
+    if index >= 0 and index < 8:
+        RV32_ARG_REGS[index]
+    else:
+        ""  # On stack
+
+fn rv32_is_callee_saved(reg: text) -> bool:
+    """Check if register is callee-saved in ILP32 ABI."""
+    for r in RV32_CALLEE_SAVED:
+        if r == reg:
+            return true
+    false
+
+# ===========================================================================
+# Exports
+# ===========================================================================
+
+export RiscV32RegisterAllocator, RiscV32AsmGenerator
+export RV32_XLEN, RV32_REG_SIZE, RV32_STACK_ALIGN
+export rv32_lw, rv32_sw, rv32_lb, rv32_lbu, rv32_sb
+export rv32_lh, rv32_lhu, rv32_sh
+export rv32_add, rv32_addi, rv32_sub, rv32_lui, rv32_auipc
+export rv32_mul, rv32_mulh, rv32_mulhu, rv32_mulhsu
+export rv32_div, rv32_divu, rv32_rem, rv32_remu
+export rv32_and, rv32_andi, rv32_or, rv32_ori, rv32_xor, rv32_xori
+export rv32_sll, rv32_slli, rv32_srl, rv32_srli, rv32_sra, rv32_srai
+export rv32_beq, rv32_bne, rv32_blt, rv32_bge, rv32_bltu, rv32_bgeu
+export rv32_jal, rv32_jalr
+export rv32_slt, rv32_sltu, rv32_slti, rv32_sltiu
+export rv32_ecall, rv32_ebreak, rv32_mret, rv32_wfi
+export rv32_fence, rv32_fence_i, rv32_nop
+export rv32_csrr, rv32_csrw, rv32_csrs, rv32_csrc
+export rv32_lr_w, rv32_sc_w, rv32_amoswap_w, rv32_amoadd_w
+export rv32_amoand_w, rv32_amoor_w
+export rv32_load_address, rv32_load_immediate
+export RV32_ARG_REGS, RV32_RET_REGS, RV32_CALLEE_SAVED, RV32_CALLER_SAVED
+export rv32_arg_register, rv32_is_callee_saved

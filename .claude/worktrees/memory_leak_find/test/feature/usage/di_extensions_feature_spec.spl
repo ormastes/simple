@@ -1,0 +1,262 @@
+"""
+# DI Extension Container
+
+**Feature ID:** #DI-002
+**Category:** Compiler
+**Status:** Active
+
+## Overview
+
+Tests the DiContainer as a dynamic plugin/extension registration point separate
+from typed core services. Covers all five phases: basic plugin registration and
+retrieval, multiple independent plugins, separation from core services,
+integration with CompileContext, and plugin lifecycle with lock/unlock semantics.
+
+## Syntax
+
+```simple
+val ext = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+ext.bind_instance("Profiler", "profiler-v1")
+val result = ext.resolve_or("MissingPlugin", "default-value")
+```
+"""
+# DI Extensions Feature Spec
+#
+# Feature 5: DI Extension Container
+#
+# CompileContext.extensions: DiContainer provides a dynamic plugin/extension
+# registration point separate from the typed core services.
+#
+# This feature-level spec covers ALL phases of the extension container feature.
+
+use compiler.di.{DiContainer}
+
+fn make_ext() -> DiContainer:
+    DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+
+# ============================================================================
+# Phase 1 - Basic plugin registration
+# ============================================================================
+
+describe "DI Extensions Feature: Phase 1 - Basic plugin registration":
+
+    it "can register a plugin by name":
+        val ext = make_ext()
+        ext.bind_instance("Profiler", "profiler-v1")
+        expect(ext.has("Profiler")).to_equal(true)
+
+    it "can retrieve a registered plugin":
+        val ext = make_ext()
+        ext.bind_instance("Formatter", "fmt-plugin")
+        val result = ext.resolve("Formatter")
+        expect(result).to_equal("fmt-plugin")
+
+    it "unregistered plugin returns nil via resolve_or":
+        val ext = make_ext()
+        val result = ext.resolve_or("MissingPlugin", nil)
+        expect(result).to_be_nil()
+
+    it "unregistered plugin returns default via resolve_or":
+        val ext = make_ext()
+        val result = ext.resolve_or("MissingPlugin", "default-value")
+        expect(result).to_equal("default-value")
+
+    it "has returns false for unregistered plugin":
+        val ext = make_ext()
+        expect(ext.has("NotHere")).to_equal(false)
+
+    it "has returns true after registration":
+        val ext = make_ext()
+        ext.bind_instance("MyPlugin", "v1")
+        expect(ext.has("MyPlugin")).to_equal(true)
+
+    it "can register integer plugin value":
+        val ext = make_ext()
+        ext.bind_instance("MaxWorkers", 8)
+        val result = ext.resolve("MaxWorkers")
+        expect(result).to_equal(8)
+
+    it "can register boolean plugin value":
+        val ext = make_ext()
+        ext.bind_instance("DebugMode", true)
+        val result = ext.resolve("DebugMode")
+        expect(result).to_equal(true)
+
+# ============================================================================
+# Phase 2 - Multiple plugins
+# ============================================================================
+
+describe "DI Extensions Feature: Phase 2 - Multiple plugins":
+
+    it "can register multiple independent plugins":
+        val ext = make_ext()
+        ext.bind_instance("PluginA", "alpha")
+        ext.bind_instance("PluginB", "beta")
+        expect(ext.has("PluginA")).to_equal(true)
+        expect(ext.has("PluginB")).to_equal(true)
+
+    it "plugins do not interfere with each other":
+        val ext = make_ext()
+        ext.bind_instance("PluginX", "x-value")
+        val other = ext.resolve_or("PluginY", nil)
+        expect(other).to_be_nil()
+        val x = ext.resolve("PluginX")
+        expect(x).to_equal("x-value")
+
+    it "can overwrite an existing plugin registration":
+        val ext = make_ext()
+        ext.bind_instance("Plugin", "v1")
+        ext.bind_instance("Plugin", "v2")
+        val result = ext.resolve("Plugin")
+        expect(result).to_equal("v2")
+
+    it "resolves three plugins independently":
+        val ext = make_ext()
+        ext.bind_instance("A", "alpha")
+        ext.bind_instance("B", "beta")
+        ext.bind_instance("C", "gamma")
+        expect(ext.resolve("A")).to_equal("alpha")
+        expect(ext.resolve("B")).to_equal("beta")
+        expect(ext.resolve("C")).to_equal("gamma")
+
+    it "factory and instance bindings coexist":
+        val ext = make_ext()
+        ext.bind("LazyPlugin", fn(): "lazy-value")
+        ext.bind_instance("EagerPlugin", "eager-value")
+        expect(ext.resolve("LazyPlugin")).to_equal("lazy-value")
+        expect(ext.resolve("EagerPlugin")).to_equal("eager-value")
+
+    it "resolves two plugins after separate registration":
+        val ext = make_ext()
+        ext.bind_instance("PluginA", "value-a")
+        ext.bind_instance("PluginB", "value-b")
+        val a = ext.resolve("PluginA")
+        val b = ext.resolve("PluginB")
+        expect(a).to_equal("value-a")
+        expect(b).to_equal("value-b")
+
+# ============================================================================
+# Phase 3 - Separation from core services
+# ============================================================================
+
+describe "DI Extensions Feature: Phase 3 - Separation from core services":
+
+    it "extensions container starts empty":
+        val ext = make_ext()
+        expect(ext.has("Backend")).to_equal(false)
+        expect(ext.has("Logger")).to_equal(false)
+        expect(ext.has("AnyPlugin")).to_equal(false)
+
+    it "extensions container is independent of typed backend port":
+        # Extensions is a separate DiContainer — typed backend is in CompileContext.backend
+        # not in extensions. Verify extensions has no Backend by default.
+        val ext = make_ext()
+        val backend_in_ext = ext.resolve_or("Backend", nil)
+        expect(backend_in_ext).to_be_nil()
+
+    it "core services not accessible via extensions":
+        val ext = make_ext()
+        val logger = ext.resolve_or("Logger", nil)
+        val parser = ext.resolve_or("Parser", nil)
+        val lexer = ext.resolve_or("Lexer", nil)
+        expect(logger).to_be_nil()
+        expect(parser).to_be_nil()
+        expect(lexer).to_be_nil()
+
+    it "factory-bound extension resolves lazily":
+        val ext = make_ext()
+        ext.bind("LazyPlugin", fn(): "lazy-created")
+        expect(ext.has("LazyPlugin")).to_equal(true)
+        val result = ext.resolve("LazyPlugin")
+        expect(result).to_equal("lazy-created")
+
+    it "profile is preserved on extensions container":
+        val ext = DiContainer(bindings: {}, singletons: {}, profile: "prod", all_bindings: [], locked: false)
+        expect(ext.profile).to_equal("prod")
+
+# ============================================================================
+# Phase 4 - Integration with CompileContext
+# ============================================================================
+
+describe "DI Extensions Feature: Phase 4 - Integration with CompileContext":
+
+    it "extensions container starts with empty bindings":
+        # Simulates CompileContext.extensions starting empty
+        val extensions = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+        expect(extensions.has("AnyPlugin")).to_equal(false)
+
+    it "register_extension adds to extensions (via bind_instance)":
+        # CompileContext.register_extension delegates to extensions.bind_instance
+        val extensions = make_ext()
+        extensions.bind_instance("MyPlugin", "plugin-value")
+        expect(extensions.has("MyPlugin")).to_equal(true)
+
+    it "get_extension retrieves registered value (via resolve_or)":
+        # CompileContext.get_extension delegates to extensions.resolve_or
+        val extensions = make_ext()
+        extensions.bind_instance("MyPlugin", "plugin-value")
+        val result = extensions.resolve_or("MyPlugin", nil)
+        expect(result).to_equal("plugin-value")
+
+    it "get_extension returns nil for unregistered (resolve_or nil default)":
+        val extensions = make_ext()
+        val result = extensions.resolve_or("UnregisteredPlugin", nil)
+        expect(result).to_be_nil()
+
+    it "extensions uses profile from options":
+        val extensions = DiContainer(bindings: {}, singletons: {}, profile: "test", all_bindings: [], locked: false)
+        expect(extensions.profile).to_equal("test")
+
+    it "extensions starts unlocked":
+        val extensions = make_ext()
+        expect(extensions.is_locked()).to_equal(false)
+
+# ============================================================================
+# Phase 5 - Plugin lifecycle
+# ============================================================================
+
+describe "DI Extensions Feature: Phase 5 - Plugin lifecycle":
+
+    it "plugin registration before lock succeeds":
+        val ext = make_ext()
+        ext.bind_instance("LifecyclePlugin", "before-lock")
+        expect(ext.has("LifecyclePlugin")).to_equal(true)
+
+    it "plugin retrieval after lock works":
+        val ext = make_ext()
+        ext.bind_instance("LifecyclePlugin", "before-lock")
+        ext.lock()
+        val result = ext.resolve("LifecyclePlugin")
+        expect(result).to_equal("before-lock")
+
+    it "plugin registration after lock fails or is ignored":
+        val ext = make_ext()
+        ext.lock()
+        ext.bind_instance("PostLockPlugin", "should-not-register")
+        expect(ext.has("PostLockPlugin")).to_equal(false)
+
+    it "unlock allows plugin registration again":
+        val ext = make_ext()
+        ext.lock()
+        ext.bind_instance("TempPlugin", "v1")
+        expect(ext.has("TempPlugin")).to_equal(false)
+        ext.unlock()
+        ext.bind_instance("TempPlugin", "v1")
+        expect(ext.has("TempPlugin")).to_equal(true)
+
+    it "full plugin lifecycle: register, lock, resolve, unlock, re-register":
+        val ext = make_ext()
+        ext.bind_instance("CorePlugin", "core-v1")
+        ext.lock()
+        expect(ext.has("CorePlugin")).to_equal(true)
+        val result = ext.resolve("CorePlugin")
+        expect(result).to_equal("core-v1")
+        ext.unlock()
+        ext.bind_instance("NewPlugin", "new-v1")
+        expect(ext.has("NewPlugin")).to_equal(true)
+
+    it "locked container uses resolve_or for missing plugins":
+        val ext = make_ext()
+        ext.lock()
+        val result = ext.resolve_or("MissingPlugin", "default-plugin")
+        expect(result).to_equal("default-plugin")

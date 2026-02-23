@@ -1,0 +1,145 @@
+# Simple CLI - brief command
+# Generate LLM-friendly project overview
+
+use std.cli.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, cwd, dir_walk, file_size)
+use std.log.{error, warn, info, debug}
+
+fn print_help():
+    print "Usage: simple brief [path] [options]"
+    print ""
+    print "Generate a concise project overview for LLM context."
+    print ""
+    print "Arguments:"
+    print "  [path]           Directory to scan (default: current directory)"
+    print ""
+    print "Options:"
+    print "  --max-depth=N    Max directory depth (default: 3)"
+    print "  --include-code   Include function signatures"
+    print "  --json           Output as JSON"
+    print "  -h, --help       Show this help"
+
+fn count_lines(content: text) -> i64:
+    if content.len() == 0:
+        return 0
+    var lines = 1
+    for ch in content:
+        if ch == "\n":
+            lines = lines + 1
+    lines
+
+fn extract_signatures(content: text) -> [text]:
+    val lines = content.split("\n")
+    var sigs = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
+            sigs.push(trimmed)
+        elif trimmed.starts_with("class ") or trimmed.starts_with("struct ") or trimmed.starts_with("enum "):
+            sigs.push(trimmed)
+    sigs
+
+fn format_size(bytes: i64) -> text:
+    if bytes < 1024:
+        return "{bytes} B"
+    elif bytes < 1024 * 1024:
+        val kb = bytes / 1024
+        return "{kb} KB"
+    else:
+        val mb = bytes / (1024 * 1024)
+        return "{mb} MB"
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var scan_path = ""
+    var include_code = false
+    var as_json = false
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--include-code":
+            include_code = true
+        elif arg == "--json":
+            as_json = true
+        elif not arg.starts_with("-"):
+            scan_path = arg
+
+    val cwd_path = cwd()
+    if scan_path == "":
+        scan_path = cwd_path
+
+    if not file_exists(scan_path):
+        error("brief", "path not found: {scan_path}")
+        return 1
+
+    # Read manifest if exists
+    var project_name = "unknown"
+    var project_version = "0.0.0"
+    val manifest_path = "{cwd_path}/simple.sdn"
+    if file_exists(manifest_path):
+        val manifest = file_read(manifest_path)
+        val lines = manifest.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("name:"):
+                project_name = trimmed[5:].trim()
+            elif trimmed.starts_with("version:"):
+                project_version = trimmed[8:].trim()
+
+    # Scan files
+    var spl_files = []
+    var total_lines = 0
+    var total_size = 0
+
+    for file in dir_walk(scan_path):
+        if file.ends_with(".spl"):
+            spl_files.push(file)
+            val size = file_size(file)
+            total_size = total_size + size
+            val content = file_read(file)
+            total_lines = total_lines + count_lines(content)
+
+    # Output
+    print "# {project_name} v{project_version}"
+    print ""
+    print "## Overview"
+    print "- Files: {spl_files.len()} .spl files"
+    print "- Lines: {total_lines}"
+    print "- Size: {format_size(total_size)}"
+    print ""
+
+    # Group by directory
+    print "## Structure"
+    var prev_dir = ""
+    for file in spl_files:
+        var display = file
+        if file.starts_with(cwd_path) and file.len() > cwd_path.len() + 1:
+            display = file[cwd_path.len() + 1:]
+        val parts = display.split("/")
+        var dir = "."
+        var filename = display
+        if parts.len() > 1:
+            filename = parts[parts.len() - 1]
+            dir = ""
+            var pi = 0
+            while pi < parts.len() - 1:
+                if pi > 0:
+                    dir = dir + "/"
+                dir = dir + parts[pi]
+                pi = pi + 1
+        if dir != prev_dir:
+            print ""
+            print "### {dir}/"
+            prev_dir = dir
+        val size = file_size(file)
+        print "- {filename} ({format_size(size)})"
+
+        if include_code:
+            val content = file_read(file)
+            for sig in extract_signatures(content):
+                print "  - {sig}"
+
+    0

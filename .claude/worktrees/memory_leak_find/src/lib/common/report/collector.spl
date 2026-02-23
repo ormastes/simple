@@ -1,0 +1,346 @@
+# Report Collector
+#
+# Manages collections of reports with aggregation, filtering, and formatting.
+
+import .level
+import .location
+import .report
+import .config
+use ansi.{ansi_reset, ansi_bold}
+use std.text.{escape_json}
+
+export ReportCollector, SourceRegistry
+
+# =============================================================================
+# SourceRegistry: Maps file paths to source content
+# =============================================================================
+
+class SourceRegistry:
+    files: Dict<text, text>
+
+impl SourceRegistry:
+    static fn empty() -> SourceRegistry:
+        SourceRegistry(files: {})
+
+    me add(path: text, source: text):
+        self.files[path] = source
+
+    fn get(path: text) -> text?:
+        if self.files.has(path):
+            Some(self.files[path])
+        else:
+            nil
+
+    fn contains(path: text) -> bool:
+        self.files.has(path)
+
+    fn len() -> i64:
+        self.files.len()
+
+    fn paths() -> [text]:
+        self.files.keys()
+
+# =============================================================================
+# ReportCollector: Collects and manages reports
+# =============================================================================
+
+class ReportCollector:
+    reports: [Report]
+    config: ReportConfig
+    sources: SourceRegistry
+    error_limit_reached: bool
+
+impl ReportCollector:
+    # Create a new collector with default config
+    static fn default_collector() -> ReportCollector:
+        ReportCollector(
+            reports: [],
+            config: ReportConfig__default_config(),
+            sources: SourceRegistry__empty(),
+            error_limit_reached: false
+        )
+
+    # Create a collector with custom config
+    static fn with_config(config: ReportConfig) -> ReportCollector:
+        ReportCollector(
+            reports: [],
+            config: config,
+            sources: SourceRegistry__empty(),
+            error_limit_reached: false
+        )
+
+    # ==========================================================================
+    # Adding reports
+    # ==========================================================================
+
+    me add(report: Report):
+        # Check error limit
+        if self.config.max_errors > 0 and self.error_count() >= self.config.max_errors:
+            self.error_limit_reached = true
+            return
+
+        self.reports.push(report)
+
+    me add_error(message: text):
+        self.add(Report__error(message))
+
+    me add_warning(message: text):
+        self.add(Report__warning(message))
+
+    me add_info(message: text):
+        self.add(Report__info(message))
+
+    me add_debug(message: text):
+        self.add(Report__debug(message))
+
+    # ==========================================================================
+    # Source management
+    # ==========================================================================
+
+    me add_source(path: text, content: text):
+        self.sources.add(path, content)
+
+    fn get_source(path: text) -> text:
+        match self.sources.get(path):
+            case Some(content): content
+            case nil: ""
+
+    # ==========================================================================
+    # Queries
+    # ==========================================================================
+
+    fn has_errors() -> bool:
+        self.reports.any(\r: r.level.is_error())
+
+    fn has_warnings() -> bool:
+        self.reports.any(\r: r.level == ReportLevel.Warning)
+
+    fn has_fatal() -> bool:
+        self.reports.any(\r: r.level == ReportLevel.Fatal)
+
+    fn error_count() -> i64:
+        self.reports.filter(\r: r.level.is_error()).len()
+
+    fn warning_count() -> i64:
+        self.reports.filter(\r: r.level == ReportLevel.Warning).len()
+
+    fn len() -> i64:
+        self.reports.len()
+
+    fn is_empty() -> bool:
+        self.reports.is_empty()
+
+    # Check if compilation should fail
+    fn should_fail() -> bool:
+        if self.has_errors():
+            return true
+        if self.config.fail_on_warning and self.has_warnings():
+            return true
+        false
+
+    # ==========================================================================
+    # Filtering
+    # ==========================================================================
+
+    fn filter_by_level(min_level: ReportLevel) -> [Report]:
+        self.reports.filter(\r: r.level.is_at_least(min_level))
+
+    fn filter_by_kind(kind: ReportKind) -> [Report]:
+        self.reports.filter(\r: r.kind == kind)
+
+    fn filter_by_file(file: text) -> [Report]:
+        self.reports.filter(\r:
+            if r.location.?:
+                r.location.unwrap().file == file
+            else:
+                false
+        )
+
+    fn filter_displayable() -> [Report]:
+        self.reports.filter(\r: self.config.should_display(r))
+
+    fn errors() -> [Report]:
+        self.reports.filter(\r: r.level.is_error())
+
+    fn warnings() -> [Report]:
+        self.reports.filter(\r: r.level == ReportLevel.Warning)
+
+    # ==========================================================================
+    # Formatting
+    # ==========================================================================
+
+    fn format(is_tty: bool) -> text:
+        val use_color = self.config.use_color(is_tty)
+        val displayable = self.filter_displayable()
+
+        var reports_to_show = displayable
+        if self.config.max_reports > 0 and displayable.len() > self.config.max_reports:
+            reports_to_show = displayable.slice(0, self.config.max_reports)
+
+        match self.config.output_format:
+            case OutputFormat.Human:
+                self.format_human(reports_to_show, use_color)
+            case OutputFormat.Compact:
+                self.format_compact(reports_to_show)
+            case OutputFormat.Json:
+                self.format_json(reports_to_show)
+            case OutputFormat.Sarif:
+                self.format_sarif(reports_to_show)
+
+    fn format_human(reports: [Report], use_color: bool) -> text:
+        var output = ""
+
+        for report in reports:
+            val source = if report.location.?:
+                self.get_source(report.location.unwrap().file)
+            else:
+                ""
+            output = output + report.format(source, use_color) + "\n"
+
+        # Summary
+        if not reports.is_empty():
+            val reset = if use_color: ansi_reset() else: ""
+            val bold = if use_color: ansi_bold() else: ""
+
+            val err_count = self.error_count()
+            val warn_count = self.warning_count()
+
+            if err_count > 0 or warn_count > 0:
+                output = output + "\n" + "{bold}Summary:{reset} "
+                if err_count > 0:
+                    val err_color = if use_color: ReportLevel.Error__color() else: ""
+                    output = output + "{err_color}{err_count} error(s){reset}"
+                    if warn_count > 0:
+                        output = output + ", "
+                if warn_count > 0:
+                    val warn_color = if use_color: ReportLevel.Warning__color() else: ""
+                    output = output + "{warn_color}{warn_count} warning(s){reset}"
+                output = output + "\n"
+
+        # Error limit message
+        if self.error_limit_reached:
+            output = output + "\n" + "... error limit reached ({self.config.max_errors} errors)" + "\n"
+
+        output
+
+    fn format_compact(reports: [Report]) -> text:
+        var lines: [text] = []
+        for report in reports:
+            lines.push(report.format_short())
+        lines.join("\n")
+
+    fn format_json(reports: [Report]) -> text:
+        var items: [text] = []
+
+        for report in reports:
+            var obj = "{"
+            obj = obj + "\"level\":\"{report.level.name()}\","
+            obj = obj + "\"kind\":\"{report.kind.name()}\","
+            obj = obj + "\"message\":\"{self.escape_json(report.message)}\""
+
+            if report.code.?:
+                obj = obj + ",\"code\":\"{report.code.unwrap()}\""
+
+            if report.location.?:
+                val loc = report.location.unwrap()
+                obj = obj + ",\"location\":{"
+                obj = obj + "\"file\":\"{self.escape_json(loc.file)}\","
+                obj = obj + "\"line\":{loc.line},"
+                obj = obj + "\"column\":{loc.column}"
+                obj = obj + "}"
+
+            if not report.suggestions.is_empty():
+                var sugg_items: [text] = []
+                for s in report.suggestions:
+                    var sugg_obj = "{"
+                    sugg_obj = sugg_obj + "\"message\":\"{self.escape_json(s.message)}\","
+                    sugg_obj = sugg_obj + "\"new_text\":\"{self.escape_json(s.new_text)}\","
+                    sugg_obj = sugg_obj + "\"confidence\":\"{s.confidence.name()}\""
+                    sugg_obj = sugg_obj + "}"
+                    sugg_items.push(sugg_obj)
+                obj = obj + ",\"suggestions\":[" + sugg_items.join(",") + "]"
+
+            obj = obj + "}"
+            items.push(obj)
+
+        "{\"reports\":[" + items.join(",") + "]}"
+
+    fn format_sarif(reports: [Report]) -> text:
+        # SARIF 2.1.0 format
+        var results: [text] = []
+
+        for report in reports:
+            var result = "{"
+            result = result + "\"ruleId\":\"{report.code ?? \"unknown\"}\","
+
+            val sarif_level = match report.level:
+                case ReportLevel.Error: "error"
+                case ReportLevel.Fatal: "error"
+                case ReportLevel.Warning: "warning"
+                case ReportLevel.Info: "note"
+                case ReportLevel.Debug: "none"
+
+            result = result + "\"level\":\"{sarif_level}\","
+            result = result + "\"message\":{\"text\":\"{self.escape_json(report.message)}\"}"
+
+            if report.location.?:
+                val loc = report.location.unwrap()
+                result = result + ",\"locations\":[{"
+                result = result + "\"physicalLocation\":{"
+                result = result + "\"artifactLocation\":{\"uri\":\"{self.escape_json(loc.file)}\"},"
+                result = result + "\"region\":{"
+                result = result + "\"startLine\":{loc.line},"
+                result = result + "\"startColumn\":{loc.column}"
+                if loc.end_line > 0:
+                    result = result + ",\"endLine\":{loc.end_line}"
+                if loc.end_column > 0:
+                    result = result + ",\"endColumn\":{loc.end_column}"
+                result = result + "}"
+                result = result + "}"
+                result = result + "}]"
+
+            result = result + "}"
+            results.push(result)
+
+        var sarif = "{"
+        sarif = sarif + "\"$schema\":\"https://json.schemastore.org/sarif-2.1.0.json\","
+        sarif = sarif + "\"version\":\"2.1.0\","
+        sarif = sarif + "\"runs\":[{"
+        sarif = sarif + "\"tool\":{\"driver\":{\"name\":\"simple\",\"version\":\"0.4.0\"}},"
+        sarif = sarif + "\"results\":[" + results.join(",") + "]"
+        sarif = sarif + "}]"
+        sarif = sarif + "}"
+        sarif
+
+
+    # ==========================================================================
+    # Merge and clear
+    # ==========================================================================
+
+    me merge(other: ReportCollector):
+        for report in other.reports:
+            self.add(report)
+        for path in other.sources.paths():
+            if not self.sources.contains(path):
+                match other.sources.get(path):
+                    case Some(content):
+                        self.sources.add(path, content)
+                    case nil:
+                        pass
+
+    me clear():
+        self.reports = []
+        self.error_limit_reached = false
+
+    # ==========================================================================
+    # Iteration
+    # ==========================================================================
+
+    fn iter() -> [Report]:
+        self.reports
+
+    fn iter_errors() -> [Report]:
+        self.errors()
+
+    fn iter_warnings() -> [Report]:
+        self.warnings()

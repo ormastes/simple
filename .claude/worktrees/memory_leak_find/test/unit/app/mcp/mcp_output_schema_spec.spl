@@ -1,0 +1,95 @@
+"""
+MCP Output Schema Validation Specification
+Feature: MCP Output Schema
+Category: MCP, Protocol
+Status: Complete
+"""
+
+use std.spec
+use app.mcp.helpers.{LB, RB, jp, js, jo1, jo2, jo3, make_tool_result_with_structured, make_tool_schema_with_output, make_image_content, make_audio_content, make_resource_link_content, make_resource_link_content_full, make_embedded_resource_content, make_content_annotations, register_tool}
+
+describe "MCP Output Schema in Tool Definition":
+    context "when tool declares outputSchema":
+        it "includes outputSchema field":
+            val props = jo1(jp("path", jo1(jp("type", js("string")))))
+            val required = "[" + js("path") + "]"
+            val output_schema = jo2(jp("type", js("object")), jp("properties", jo1(jp("lines", jo1(jp("type", js("integer")))))))
+            val schema = make_tool_schema_with_output("file_info", "Get file info", props, required, output_schema, true, false, true)
+            expect(schema.contains("outputSchema")).to_equal(true)
+
+        it "outputSchema contains type object":
+            val output_schema = jo1(jp("type", js("object")))
+            val schema = make_tool_schema_with_output("tool", "desc", LB() + RB(), "[]", output_schema, true, false, true)
+            expect(schema.contains("\"type\":\"object\"")).to_equal(true)
+
+    context "when tool has no outputSchema":
+        it "regular register_tool omits outputSchema":
+            val schema = register_tool("simple_tool", "A tool", ["x"], ["Param"], ["x"], true, false, true)
+            expect(schema.contains("outputSchema")).to_equal(false)
+
+describe "MCP Structured Content in Tool Result":
+    context "when tool returns structured content":
+        it "includes content and structuredContent":
+            val content = "[" + jo2(jp("type", js("text")), jp("text", js("File has 120 lines"))) + "]"
+            val structured = jo2(jp("path", js("test.spl")), jp("lines", "120"))
+            val result = make_tool_result_with_structured("1", content, structured)
+            expect(result.contains("content")).to_equal(true)
+            expect(result.contains("structuredContent")).to_equal(true)
+
+        it "structured content includes data fields":
+            val structured = jo2(jp("path", js("test.spl")), jp("lines", "120"))
+            val content = "[" + jo2(jp("type", js("text")), jp("text", js("info"))) + "]"
+            val result = make_tool_result_with_structured("1", content, structured)
+            expect(result.contains("test.spl")).to_equal(true)
+            expect(result.contains("120")).to_equal(true)
+
+describe "MCP Rich Content Types":
+    context "when returning image content":
+        it "builds image content":
+            val img = make_image_content("iVBOR...base64", "image/png")
+            expect(img.contains("image")).to_equal(true)
+            expect(img.contains("image/png")).to_equal(true)
+            expect(img.contains("iVBOR")).to_equal(true)
+
+    context "when returning audio content":
+        it "builds audio content":
+            val audio = make_audio_content("UklGR...base64", "audio/wav")
+            expect(audio.contains("audio")).to_equal(true)
+            expect(audio.contains("audio/wav")).to_equal(true)
+
+    context "when returning resource link":
+        it "builds basic resource link":
+            val link = make_resource_link_content("file:///test.spl", "test.spl")
+            expect(link.contains("resource_link")).to_equal(true)
+            expect(link.contains("file:///test.spl")).to_equal(true)
+            expect(link.contains("test.spl")).to_equal(true)
+
+        it "builds full resource link with optional fields":
+            val link = make_resource_link_content_full("file:///test.spl", "test.spl", "Test File", "A test file", "text/x-simple", 1024)
+            expect(link.contains("Test File")).to_equal(true)
+            expect(link.contains("A test file")).to_equal(true)
+            expect(link.contains("text/x-simple")).to_equal(true)
+
+    context "when returning embedded resource":
+        it "builds embedded resource content":
+            val embedded = make_embedded_resource_content("file:///test.spl", "fn main(): pass", "text/x-simple")
+            expect(embedded.contains("resource")).to_equal(true)
+            expect(embedded.contains("fn main")).to_equal(true)
+            expect(embedded.contains("text/x-simple")).to_equal(true)
+
+describe "MCP Content Annotations":
+    context "when adding annotations":
+        it "supports audience annotation":
+            val ann = make_content_annotations(["user", "assistant"], "0.8", "2026-02-09T12:00:00Z")
+            expect(ann.contains("audience")).to_equal(true)
+            expect(ann.contains("user")).to_equal(true)
+            expect(ann.contains("assistant")).to_equal(true)
+
+        it "supports priority annotation":
+            val ann = make_content_annotations(["user"], "0.9", "")
+            expect(ann.contains("priority")).to_equal(true)
+
+        it "supports lastModified annotation":
+            val ann = make_content_annotations([], "", "2026-02-09T12:00:00Z")
+            expect(ann.contains("lastModified")).to_equal(true)
+            expect(ann.contains("2026-02-09")).to_equal(true)

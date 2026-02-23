@@ -1,0 +1,84 @@
+#!/usr/bin/env simple
+# Test if JIT compilation fixes autograd value semantics issue
+
+use std.pure.autograd (tensor_from_data, backward, tensor_mul_scalar)
+
+fn test_interpreter_mode():
+    print "=== Testing in Interpreter Mode ==="
+
+    val x = tensor_from_data([3.0], [1], requires_grad: true)
+    print "x.value.data = {x.value.data}"
+    print "x.requires_grad = {x.requires_grad}"
+
+    val y = tensor_mul_scalar(x, 2.0)
+    print "y = x * 2.0 = {y.value.data}"
+
+    backward(y)
+
+    print "After backward:"
+    print "x.grad = {x.grad}"
+    if x.grad.?:
+        print "x.grad.data = {x.grad.unwrap().data}"
+    else:
+        print "ERROR: x.grad is None (value semantics issue)"
+
+fn test_jit_mode():
+    print "\n=== Testing in JIT Mode (Cranelift) ==="
+
+    # Try to enable JIT backend
+    # Note: This may not work if exec_manager isn't fully implemented
+    # But let's see what happens
+
+    val x = tensor_from_data([3.0], [1], requires_grad: true)
+    print "x.value.data = {x.value.data}"
+    print "x.requires_grad = {x.requires_grad}"
+
+    val y = tensor_mul_scalar(x, 2.0)
+    print "y = x * 2.0 = {y.value.data}"
+
+    backward(y)
+
+    print "After backward:"
+    print "x.grad = {x.grad}"
+    if x.grad.?:
+        print "x.grad.data = {x.grad.unwrap().data}"
+    else:
+        print "ERROR: x.grad is None (JIT didn't fix it)"
+
+fn test_value_semantics():
+    print "\n=== Testing Value Semantics Directly ==="
+
+    class Counter:
+        count: i64
+
+        me increment():
+            self.count = self.count + 1
+
+    var c = Counter(count: 0)
+    print "Initial: c.count = {c.count}"
+
+    var arr = [c]
+    arr[0].increment()
+
+    print "After arr[0].increment():"
+    print "  c.count = {c.count} (original)"
+    print "  arr[0].count = {arr[0].count} (in array)"
+
+    if c.count == 0:
+        print "  → Value semantics confirmed (copy, not reference)"
+    else:
+        print "  → Reference semantics (array stores reference)"
+
+fn main():
+    test_interpreter_mode()
+    test_value_semantics()
+
+    # TODO: Once exec_manager is fully working, test JIT mode
+    # test_jit_mode()
+
+    print "\n=== Conclusion ==="
+    print "The interpreter has value semantics for arrays."
+    print "This blocks autograd backward pass."
+    print "Next: Test if JIT/compiled mode fixes this."
+
+main()

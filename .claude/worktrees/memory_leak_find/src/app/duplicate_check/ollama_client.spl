@@ -1,0 +1,234 @@
+# Ollama embedding API client
+
+extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
+
+# JSON helpers (avoid }} escape bug)
+fn _LB() -> text:
+    (123 as char).to_text()
+
+fn _RB() -> text:
+    (125 as char).to_text()
+
+fn _Q() -> text:
+    "\""
+
+fn _escape_json(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\"":
+            result = result + "\\\""
+        elif ch == "\n":
+            result = result + "\\n"
+        elif ch == "\r":
+            result = result + "\\r"
+        elif ch == "\t":
+            result = result + "\\t"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+struct EmbeddingResult:
+    vector: [f64]
+    error: text
+
+fn check_ollama_available(base_url: text) -> bool:
+    val url = base_url + "/api/tags"
+    val result = rt_http_request("GET", url, "", "")
+    val (status, body, err) = result
+    status == 200
+
+fn get_embedding(base_url: text, model: text, input_text: text) -> EmbeddingResult:
+    val url = base_url + "/api/embed"
+    val escaped = _escape_json(input_text)
+    val body = _LB() + _Q() + "model" + _Q() + ":" + _Q() + model + _Q() + "," + _Q() + "input" + _Q() + ":" + _Q() + escaped + _Q() + _RB()
+    val headers = "Content-Type: application/json"
+
+    val result = rt_http_request("POST", url, headers, body)
+    val (status, response_body, err) = result
+
+    if status != 200:
+        var error_msg = "Ollama request failed with status {status}"
+        if err.len() > 0:
+            error_msg = error_msg + ": " + err
+        return EmbeddingResult(vector: [], error: error_msg)
+
+    val vec = parse_embedding_response(response_body)
+    if vec.len() == 0:
+        return EmbeddingResult(vector: [], error: "Failed to parse embedding from response")
+
+    EmbeddingResult(vector: vec, error: "")
+
+fn get_embeddings_batch(base_url: text, model: text, texts: [text], batch_size: i64) -> [EmbeddingResult]:
+    var results: [EmbeddingResult] = []
+    var i = 0
+    while i < texts.len():
+        val result = get_embedding(base_url, model, texts[i])
+        results = results + [result]
+        i = i + 1
+    results
+
+fn parse_embedding_response(json: text) -> [f64]:
+    # Response format: {"embeddings":[[0.1, 0.2, ...]]}
+    # Find the inner array
+    val embed_key = _Q() + "embeddings" + _Q()
+    val key_idx = find_in_text(json, embed_key)
+    if key_idx < 0:
+        # Try alternate key "embedding" (singular)
+        val alt_key = _Q() + "embedding" + _Q()
+        val alt_idx = find_in_text(json, alt_key)
+        if alt_idx < 0:
+            return []
+        return parse_first_float_array(json, alt_idx)
+
+    parse_first_float_array(json, key_idx)
+
+fn parse_first_float_array(json: text, start_from: i64) -> [f64]:
+    # Find first '[' after start_from, then find matching inner '['
+    var i = start_from
+    var bracket_count = 0
+    var array_start = -1
+
+    while i < json.len():
+        val ch = json[i:i+1]
+        if ch == "[":
+            bracket_count = bracket_count + 1
+            if bracket_count == 2:
+                array_start = i + 1
+                break
+            if bracket_count == 1:
+                # Check if next non-space char is not '[' (flat array)
+                var j = i + 1
+                while j < json.len():
+                    val jch = json[j:j+1]
+                    if jch != " " and jch != "\n" and jch != "\r" and jch != "\t":
+                        break
+                    j = j + 1
+                if j < json.len() and json[j:j+1] != "[":
+                    array_start = i + 1
+                    break
+        i = i + 1
+
+    if array_start < 0:
+        return []
+
+    parse_float_array_from(json, array_start)
+
+fn parse_float_array_from(json: text, start: i64) -> [f64]:
+    var result: [f64] = []
+    var current_num = ""
+    var i = start
+
+    while i < json.len():
+        val ch = json[i:i+1]
+        if ch == "]":
+            if current_num.len() > 0:
+                val num_trimmed = current_num.trim()
+                if num_trimmed.len() > 0:
+                    val f = parse_float_safe(num_trimmed)
+                    result = result + [f]
+            break
+        elif ch == ",":
+            if current_num.len() > 0:
+                val num_trimmed = current_num.trim()
+                if num_trimmed.len() > 0:
+                    val f = parse_float_safe(num_trimmed)
+                    result = result + [f]
+            current_num = ""
+        else:
+            current_num = current_num + ch
+        i = i + 1
+
+    result
+
+fn parse_float_safe(s: text) -> f64:
+    # Simple float parser
+    var result = 0.0
+    var negative = false
+    var decimal_place = 0
+    var decimal_divisor = 1.0
+    var i = 0
+
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0.0
+
+    if trimmed[0:1] == "-":
+        negative = true
+        i = 1
+
+    while i < trimmed.len():
+        val ch = trimmed[i:i+1]
+        val byte = trimmed.bytes()[i]
+        if byte >= 48 and byte <= 57:
+            val digit = (byte - 48) * 1.0
+            if decimal_place > 0:
+                decimal_divisor = decimal_divisor * 10.0
+                result = result + digit / decimal_divisor
+            else:
+                result = result * 10.0 + digit
+        elif ch == ".":
+            decimal_place = 1
+        elif ch == "e" or ch == "E":
+            # Handle scientific notation
+            val exp_str = trimmed[i+1:]
+            val exp_val = parse_exponent(exp_str)
+            var multiplier = 1.0
+            var e = 0
+            if exp_val >= 0:
+                while e < exp_val:
+                    multiplier = multiplier * 10.0
+                    e = e + 1
+                result = result * multiplier
+            else:
+                val abs_exp = -exp_val
+                while e < abs_exp:
+                    multiplier = multiplier * 10.0
+                    e = e + 1
+                result = result / multiplier
+            break
+        i = i + 1
+
+    if negative:
+        result = -result
+
+    result
+
+fn parse_exponent(s: text) -> i64:
+    var result = 0
+    var negative = false
+    var i = 0
+    if s.len() == 0:
+        return 0
+    if s[0:1] == "-":
+        negative = true
+        i = 1
+    elif s[0:1] == "+":
+        i = 1
+    while i < s.len():
+        val byte = s.bytes()[i]
+        if byte >= 48 and byte <= 57:
+            result = result * 10 + (byte - 48)
+        else:
+            break
+        i = i + 1
+    if negative:
+        return -result
+    result
+
+fn find_in_text(haystack: text, needle: text) -> i64:
+    var i = 0
+    val max_i = haystack.len() - needle.len()
+    while i <= max_i:
+        if haystack[i:i+needle.len()] == needle:
+            return i
+        i = i + 1
+    -1
+
+export EmbeddingResult
+export check_ollama_available, get_embedding, get_embeddings_batch
+export parse_embedding_response, parse_float_safe

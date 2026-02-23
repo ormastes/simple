@@ -1,0 +1,202 @@
+# Docker Compose configuration for test isolation
+# Provides consistent test environment with resource limits and isolation
+#
+# Usage:
+#   docker-compose -f docker-compose.test.yml build      # Build images
+#   docker-compose -f docker-compose.test.yml run test-isolation  # Run isolated tests
+#   docker-compose -f docker-compose.test.yml run test-full       # Run full tests
+
+version: '3.8'
+
+services:
+  # Minimal test isolation container
+  # Use for: Fast unit tests, standard test suite
+  test-isolation:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test-isolation
+    image: simple-test-isolation:latest
+    container_name: simple-test-isolation
+
+    # Resource limits (standard profile)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'         # 2 CPU cores max
+          memory: 1G          # 1GB RAM max
+        reservations:
+          cpus: '0.5'         # Minimum 0.5 cores
+          memory: 256M        # Minimum 256MB
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true    # Prevent privilege escalation
+      - seccomp:unconfined        # Allow all syscalls (needed for JIT)
+
+    # Network isolation
+    # Options: none (no network), bridge (default), host (use host network)
+    network_mode: none
+
+    # Volume mounts
+    volumes:
+      # Source code (read-only)
+      - ./src:/workspace/src:ro
+      - ./test:/workspace/test:ro
+      - ./doc:/workspace/doc:ro
+
+      # Test results (writable)
+      - ./test-results:/workspace/test-results:rw
+
+      # Temp directory (tmpfs for performance + auto-cleanup)
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 100M          # 100MB tmpfs
+          mode: 1777          # rwxrwxrwt (sticky bit)
+
+    # Environment variables
+    environment:
+      - SIMPLE_TEST_MODE=isolated
+      - SIMPLE_TEST_TEMP_DIR=/tmp
+      - SIMPLE_RUNTIME_MODE=compiled
+
+    # Working directory
+    working_dir: /workspace
+
+    # User context (non-root)
+    user: "1001:1001"
+
+    # No stdin/tty (non-interactive)
+    stdin_open: false
+    tty: false
+
+    # Restart policy (never restart in test context)
+    restart: "no"
+
+  # Full-featured test container
+  # Use for: Integration tests, debugging, QEMU tests
+  test-full:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test-full
+    image: simple-test-full:latest
+    container_name: simple-test-full
+
+    # Higher resource limits (slow profile)
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'         # 4 CPU cores max
+          memory: 4G          # 4GB RAM max
+        reservations:
+          cpus: '1.0'         # Minimum 1 core
+          memory: 512M        # Minimum 512MB
+
+    # Security options (more permissive for debugging)
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE          # Allow gdb/strace
+
+    # Bridge network (allow outbound connections for integration tests)
+    network_mode: bridge
+
+    # Volume mounts (same as isolation + additional tools)
+    volumes:
+      # Source code (read-only)
+      - ./src:/workspace/src:ro
+      - ./test:/workspace/test:ro
+      - ./doc:/workspace/doc:ro
+      - ./script:/workspace/script:ro
+
+      # Test results (writable)
+      - ./test-results:/workspace/test-results:rw
+
+      # Temp directory (larger tmpfs)
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 500M          # 500MB tmpfs
+          mode: 1777
+
+      # Docker socket (if needed for Docker-in-Docker tests)
+      # - /var/run/docker.sock:/var/run/docker.sock
+
+    # Environment variables
+    environment:
+      - SIMPLE_TEST_MODE=full
+      - SIMPLE_TEST_TEMP_DIR=/tmp
+      - SIMPLE_RUNTIME_MODE=compiled
+      - SIMPLE_DEBUG=1
+
+    # Working directory
+    working_dir: /workspace
+
+    # User context (non-root)
+    user: "1001:1001"
+
+    # Interactive mode (for debugging)
+    stdin_open: true
+    tty: true
+
+    # Restart policy
+    restart: "no"
+
+  # Parallel test runner (multiple workers)
+  # Use for: CI/CD, full test suite execution
+  test-parallel:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test-isolation
+    image: simple-test-isolation:latest
+
+    # Scale: docker-compose -f docker-compose.test.yml up --scale test-parallel=4
+    # Each worker gets same resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'         # 1 CPU per worker
+          memory: 512M        # 512MB per worker
+      replicas: 1             # Default 1, override with --scale
+
+    # Network isolation
+    network_mode: none
+
+    # Volumes (read-only source, shared results)
+    volumes:
+      - ./src:/workspace/src:ro
+      - ./test:/workspace/test:ro
+      - ./test-results:/workspace/test-results:rw
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 50M
+          mode: 1777
+
+    # Environment variables
+    environment:
+      - SIMPLE_TEST_MODE=isolated
+      - SIMPLE_TEST_PARALLEL=1
+
+    # Working directory
+    working_dir: /workspace
+
+    # User context
+    user: "1001:1001"
+
+    # No interaction
+    stdin_open: false
+    tty: false
+
+    restart: "no"
+
+# Shared volume for test results
+volumes:
+  test-results:
+    driver: local
+
+# Networks (if needed)
+networks:
+  default:
+    driver: bridge

@@ -1,0 +1,327 @@
+# SHA-512 Hash Implementation
+#
+# Secure Hash Algorithm 512-bit
+# Pure Simple implementation following FIPS 180-4 specification
+#
+# Recommended for applications requiring larger hash sizes
+
+mod crypto.types
+
+# =============================================================================
+# SHA-512 Constants and Initial Values
+# =============================================================================
+
+# SHA-512 constants (first 64 bits of fractional parts of cube roots of first 80 primes)
+fn sha512_k_constants() -> list:
+    [
+        0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
+        0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
+        0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
+        0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
+        0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
+        0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
+        0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
+        0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
+        0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
+        0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
+        0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
+        0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
+        0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
+        0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
+        0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
+        0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
+        0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
+        0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
+        0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
+        0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817
+    ]
+
+# SHA-512 initial hash values
+fn sha512_initial_hash() -> list:
+    [
+        0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+        0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179
+    ]
+
+# =============================================================================
+# SHA-512 Functions
+# =============================================================================
+
+# SHA-512 choice function
+fn sha512_ch(x: i64, y: i64, z: i64) -> i64:
+    (x & y) ^ ((~x) & z)
+
+# SHA-512 majority function
+fn sha512_maj(x: i64, y: i64, z: i64) -> i64:
+    (x & y) ^ (x & z) ^ (y & z)
+
+# SHA-512 Sigma0 function
+fn sha512_sigma0(x: i64) -> i64:
+    val r28 = rotr64(x, 28)
+    val r34 = rotr64(x, 34)
+    val r39 = rotr64(x, 39)
+    r28 ^ r34 ^ r39
+
+# SHA-512 Sigma1 function
+fn sha512_sigma1(x: i64) -> i64:
+    val r14 = rotr64(x, 14)
+    val r18 = rotr64(x, 18)
+    val r41 = rotr64(x, 41)
+    r14 ^ r18 ^ r41
+
+# SHA-512 sigma0 function (lowercase)
+fn sha512_little_sigma0(x: i64) -> i64:
+    val r1 = rotr64(x, 1)
+    val r8 = rotr64(x, 8)
+    val s7 = shr64(x, 7)
+    r1 ^ r8 ^ s7
+
+# SHA-512 sigma1 function (lowercase)
+fn sha512_little_sigma1(x: i64) -> i64:
+    val r19 = rotr64(x, 19)
+    val r61 = rotr64(x, 61)
+    val s6 = shr64(x, 6)
+    r19 ^ r61 ^ s6
+
+# =============================================================================
+# SHA-512 Core Operations
+# =============================================================================
+
+# Create SHA-512 context
+fn create_sha512_context() -> tuple:
+    val h = sha512_initial_hash()
+    val data = []
+    (h, data, 0, 0)
+
+# Pad message for SHA-512 (1024-bit blocks)
+fn sha512_pad_message(bytes: list) -> list:
+    var padded = []
+    var i = 0
+
+    # Copy original bytes
+    while i < bytes.len():
+        padded.push(bytes.get(i))
+        i = i + 1
+
+    val original_len = bytes.len()
+    val original_bit_len = original_len * 8
+
+    # Append 1 bit (0x80)
+    padded.push(0x80)
+
+    # Append 0 bits until length ≡ 896 (mod 1024)
+    val target_len = ((original_len + 16) / 128 + 1) * 128
+    while padded.len() < target_len - 16:
+        padded.push(0)
+
+    # Append length as 128-bit big-endian (we only use lower 64 bits)
+    i = 0
+    while i < 8:
+        padded.push(0)
+        i = i + 1
+
+    # Append actual length
+    padded.push((original_bit_len >> 56) & 0xFF)
+    padded.push((original_bit_len >> 48) & 0xFF)
+    padded.push((original_bit_len >> 40) & 0xFF)
+    padded.push((original_bit_len >> 32) & 0xFF)
+    padded.push((original_bit_len >> 24) & 0xFF)
+    padded.push((original_bit_len >> 16) & 0xFF)
+    padded.push((original_bit_len >> 8) & 0xFF)
+    padded.push(original_bit_len & 0xFF)
+
+    padded
+
+# Process one 1024-bit block for SHA-512
+fn sha512_process_block(h: list, block: list) -> list:
+    # Prepare message schedule (80 entries)
+    var w = []
+    var i = 0
+
+    # First 16 words from block (big-endian, 64-bit words)
+    while i < 16:
+        val idx = i * 8
+        val b0 = block.get(idx)
+        val b1 = block.get(idx + 1)
+        val b2 = block.get(idx + 2)
+        val b3 = block.get(idx + 3)
+        val b4 = block.get(idx + 4)
+        val b5 = block.get(idx + 5)
+        val b6 = block.get(idx + 6)
+        val b7 = block.get(idx + 7)
+
+        val word_high = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        val word_low = (b4 << 24) | (b5 << 16) | (b6 << 8) | b7
+        val word = (word_high << 32) | word_low
+
+        w.push(word)
+        i = i + 1
+
+    # Extend to 80 words
+    while i < 80:
+        val w15 = w.get(i - 15)
+        val w2 = w.get(i - 2)
+        val w16 = w.get(i - 16)
+        val w7 = w.get(i - 7)
+
+        val s0 = sha512_little_sigma0(w15)
+        val s1 = sha512_little_sigma1(w2)
+
+        val word = add_mod64(add_mod64(add_mod64(s1, w7), s0), w16)
+        w.push(word)
+        i = i + 1
+
+    # Initialize working variables
+    var a = h.get(0)
+    var b = h.get(1)
+    var c = h.get(2)
+    var d = h.get(3)
+    var e = h.get(4)
+    var f = h.get(5)
+    var g = h.get(6)
+    var h_var = h.get(7)
+
+    val k = sha512_k_constants()
+
+    # 80 rounds
+    i = 0
+    while i < 80:
+        val S1 = sha512_sigma1(e)
+        val ch = sha512_ch(e, f, g)
+        val temp1_part1 = add_mod64(h_var, S1)
+        val temp1_part2 = add_mod64(ch, k.get(i))
+        val temp1_part3 = add_mod64(temp1_part2, w.get(i))
+        val temp1 = add_mod64(temp1_part1, temp1_part3)
+
+        val S0 = sha512_sigma0(a)
+        val maj = sha512_maj(a, b, c)
+        val temp2 = add_mod64(S0, maj)
+
+        h_var = g
+        g = f
+        f = e
+        e = add_mod64(d, temp1)
+        d = c
+        c = b
+        b = a
+        a = add_mod64(temp1, temp2)
+
+        i = i + 1
+
+    # Add compressed chunk to current hash value
+    var new_h = []
+    new_h.push(add_mod64(h.get(0), a))
+    new_h.push(add_mod64(h.get(1), b))
+    new_h.push(add_mod64(h.get(2), c))
+    new_h.push(add_mod64(h.get(3), d))
+    new_h.push(add_mod64(h.get(4), e))
+    new_h.push(add_mod64(h.get(5), f))
+    new_h.push(add_mod64(h.get(6), g))
+    new_h.push(add_mod64(h.get(7), h_var))
+
+    new_h
+
+# Update SHA-512 context
+fn sha512_update(ctx: tuple, data: list) -> tuple:
+    val h = ctx.get(0)
+    val existing_data = ctx.get(1)
+    val datalen = ctx.get(2)
+    val bitlen = ctx.get(3)
+
+    # Append new data
+    var updated_data = []
+    var i = 0
+    while i < existing_data.len():
+        updated_data.push(existing_data.get(i))
+        i = i + 1
+
+    i = 0
+    while i < data.len():
+        updated_data.push(data.get(i))
+        i = i + 1
+
+    val new_datalen = datalen + data.len()
+    val new_bitlen = bitlen + (data.len() * 8)
+
+    (h, updated_data, new_datalen, new_bitlen)
+
+# Finalize SHA-512 hash
+fn sha512_finalize(ctx: tuple) -> list:
+    val h = ctx.get(0)
+    val data = ctx.get(1)
+
+    # Pad the data
+    val padded = sha512_pad_message(data)
+
+    # Process all blocks
+    var current_h = h
+    var i = 0
+    while i < padded.len():
+        var block = []
+        var j = 0
+        while j < 128:
+            block.push(padded.get(i + j))
+            j = j + 1
+
+        current_h = sha512_process_block(current_h, block)
+        i = i + 128
+
+    # Convert hash values to bytes (big-endian, 64-bit words)
+    var result = []
+    i = 0
+    while i < 8:
+        val h_val = current_h.get(i)
+        result.push((h_val >> 56) & 0xFF)
+        result.push((h_val >> 48) & 0xFF)
+        result.push((h_val >> 40) & 0xFF)
+        result.push((h_val >> 32) & 0xFF)
+        result.push((h_val >> 24) & 0xFF)
+        result.push((h_val >> 16) & 0xFF)
+        result.push((h_val >> 8) & 0xFF)
+        result.push(h_val & 0xFF)
+        i = i + 1
+
+    result
+
+# Reset SHA-512 context
+fn sha512_reset(ctx: tuple) -> tuple:
+    create_sha512_context()
+
+# =============================================================================
+# Public API
+# =============================================================================
+
+# SHA-512 hash of byte list
+fn sha512_bytes(bytes: list) -> list:
+    val ctx = create_sha512_context()
+    val updated_ctx = sha512_update(ctx, bytes)
+    sha512_finalize(updated_ctx)
+
+# SHA-512 hash of text (returns byte list)
+fn sha512(text: text) -> list:
+    val bytes = text_to_bytes(text)
+    sha512_bytes(bytes)
+
+# SHA-512 hash of text (returns hex string)
+fn sha512_hex(text: text) -> text:
+    val hash = sha512(text)
+    bytes_to_hex(hash)
+
+# SHA-512 hash with uppercase hex output
+fn sha512_hex_upper(text: text) -> text:
+    val hash = sha512(text)
+    hash_to_upper_hex(hash)
+
+# Hash streaming data SHA-512
+fn hash_stream_sha512(chunks: list) -> text:
+    var ctx = create_sha512_context()
+    var i = 0
+
+    while i < chunks.len():
+        val chunk = chunks.get(i)
+        val chunk_bytes = text_to_bytes(chunk)
+        ctx = sha512_update(ctx, chunk_bytes)
+        i = i + 1
+
+    val hash = sha512_finalize(ctx)
+    bytes_to_hex(hash)

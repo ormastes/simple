@@ -1,0 +1,189 @@
+# Certificate Validation Functions
+#
+# This module provides certificate validation including expiry checks
+# and signature verification (structural).
+
+fn check_expiry(cert: text) -> bool:
+    # Check if certificate is currently valid
+    val validity = cert[4]
+    val not_before = validity[0]
+    val not_after = validity[1]
+
+    if not_before == nil or not_after == nil:
+        return false
+
+    val current_time = get_current_timestamp()
+    val before_ts = time_to_timestamp(not_before)
+    val after_ts = time_to_timestamp(not_after)
+
+    val is_after_start = current_time >= before_ts
+    val is_before_end = current_time <= after_ts
+    is_after_start and is_before_end
+
+fn is_expired(cert: text) -> bool:
+    # Check if certificate is expired
+    val is_valid = check_expiry(cert)
+    not is_valid
+
+fn is_not_yet_valid(cert: text) -> bool:
+    # Check if certificate is not yet valid
+    val validity = cert[4]
+    val not_before = validity[0]
+
+    if not_before == nil:
+        return false
+
+    val current_time = get_current_timestamp()
+    val before_ts = time_to_timestamp(not_before)
+    current_time < before_ts
+
+fn verify_signature(cert: text, issuer: text) -> bool:
+    # Verify certificate signature by checking that the issuer's public key
+    # can validate the certificate's signature. Since we don't have full
+    # RSA/ECDSA crypto primitives, we perform structural validation:
+    # 1. Check issuer subject matches cert issuer
+    # 2. Check key algorithm compatibility
+    # 3. Check certificate dates overlap
+    val cert_issuer = get_issuer(cert)
+    val issuer_subject = get_subject(issuer)
+
+    # Verify issuer DN matches
+    val cert_issuer_str = dn_to_string(cert_issuer)
+    val issuer_subject_str = dn_to_string(issuer_subject)
+    if cert_issuer_str != issuer_subject_str:
+        return false
+
+    # Verify issuer has CA capability
+    val issuer_is_ca = is_ca_certificate(issuer)
+    if not issuer_is_ca:
+        return false
+
+    # Verify algorithm compatibility
+    val cert_sig_alg = get_signature_algorithm(cert)
+    val issuer_key = get_public_key(issuer)
+    var issuer_key_type = ""
+    if issuer_key.length() > 0:
+        issuer_key_type = issuer_key[0]
+
+    # RSA signatures need RSA key, ECDSA needs EC key
+    var alg_matches = false
+    var cert_sig_lower = cert_sig_alg.lower()
+    var has_rsa = cert_sig_lower.contains("rsa")
+    var has_ecdsa = cert_sig_lower.contains("ecdsa")
+    if has_rsa:
+        alg_matches = issuer_key_type == "RSA"
+    if has_ecdsa:
+        alg_matches = issuer_key_type == "EC"
+    # If we can't determine, allow it (permissive for unsupported algorithms)
+    var is_neither = (not has_rsa) and (not has_ecdsa)
+    if is_neither:
+        alg_matches = true
+
+    alg_matches
+
+fn verify_chain(chain: text) -> bool:
+    # Verify certificate chain (simplified - doesn't verify signatures)
+    if chain.length() == 0:
+        return false
+
+    var i = 0
+    while i < chain.length():
+        val cert = chain[i]
+
+        # Check expiry
+        val is_valid = check_expiry(cert)
+        if not is_valid:
+            return false
+
+        # Check if CA (except for leaf)
+        if i > 0:
+            val is_ca = is_ca_certificate(cert)
+            if not is_ca:
+                return false
+
+        i = i + 1
+
+    true
+
+fn validate_certificate(cert: text, roots: text) -> bool:
+    # Validate certificate against trusted roots (simplified)
+    # This is a basic validation without signature verification
+
+    # Check expiry
+    val is_valid = check_expiry(cert)
+    if not is_valid:
+        return false
+
+    # Build chain
+    val chain = build_certificate_chain(cert, [], roots)
+
+    # Verify chain
+    verify_chain(chain)
+
+fn is_valid_for_domain(cert: text, domain: text) -> bool:
+    # Check if certificate is valid for given domain
+    val subject = get_subject(cert)
+    val cn = get_common_name(subject)
+
+    # Check CN
+    if cn == domain:
+        return true
+
+    # Check wildcard CN
+    if cn.starts_with("*."):
+        val wildcard_domain = cn.substring(2, cn.length())
+        if domain.ends_with(wildcard_domain):
+            return true
+
+    # Check Subject Alternative Names
+    val dns_names = get_dns_names(cert)
+    var i = 0
+    while i < dns_names.length():
+        val name = dns_names[i]
+        if name == domain:
+            return true
+
+        # Check wildcard
+        if name.starts_with("*."):
+            val wildcard_domain = name.substring(2, name.length())
+            if domain.ends_with(wildcard_domain):
+                return true
+
+        i = i + 1
+
+    false
+
+fn get_certificate_age_days(cert: text) -> i64:
+    # Get certificate age in days
+    val validity = get_validity(cert)
+    val not_before = validity[0]
+
+    if not_before == nil:
+        return 0
+
+    val current_time = get_current_timestamp()
+    val before_ts = time_to_timestamp(not_before)
+
+    val age_seconds = current_time - before_ts
+    val age_days = age_seconds / 86400
+    age_days
+
+fn get_certificate_remaining_days(cert: text) -> i64:
+    # Get days remaining until certificate expires
+    val validity = get_validity(cert)
+    val not_after = validity[1]
+
+    if not_after == nil:
+        return 0
+
+    val current_time = get_current_timestamp()
+    val after_ts = time_to_timestamp(not_after)
+
+    val remaining_seconds = after_ts - current_time
+    val remaining_days = remaining_seconds / 86400
+    remaining_days
+
+fn will_expire_soon(cert: text, days: i64) -> bool:
+    # Check if certificate will expire within given days
+    val remaining = get_certificate_remaining_days(cert)
+    remaining <= days

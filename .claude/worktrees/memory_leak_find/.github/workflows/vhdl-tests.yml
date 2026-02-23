@@ -1,0 +1,76 @@
+name: VHDL Backend Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/compiler/backend/vhdl/**'
+      - 'src/compiler/backend/vhdl_*.spl'
+      - 'src/compiler/vhdl_constraints.spl'
+      - 'src/app/io/vhdl_ffi.spl'
+      - 'examples/vhdl/**'
+      - 'test/**/vhdl*'
+      - '.github/workflows/vhdl-tests.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'src/compiler/backend/vhdl/**'
+      - 'src/compiler/backend/vhdl_*.spl'
+      - 'src/compiler/vhdl_constraints.spl'
+  workflow_dispatch:
+
+jobs:
+  ghdl-smoke:
+    name: GHDL Analysis & Elaboration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GHDL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghdl
+
+      - name: Verify GHDL installation
+        run: ghdl --version
+
+      - name: Analyze golden VHDL files
+        run: |
+          cd examples/vhdl/golden
+          for f in *.vhd; do
+            echo "=== Analyzing $f ==="
+            ghdl -a --std=08 "$f"
+          done
+
+      - name: Elaborate golden entities
+        run: |
+          cd examples/vhdl/golden
+          ghdl -e --std=08 counter
+          ghdl -e --std=08 alu
+          ghdl -e --std=08 traffic_light
+
+      - name: Run counter simulation (100ns)
+        run: |
+          cd examples/vhdl/golden
+          ghdl -r --std=08 counter --stop-time=100ns || true
+
+  yosys-synth:
+    name: Yosys Synthesis Smoke
+    runs-on: ubuntu-latest
+    if: false  # Enable when ghdl-yosys-plugin is available in CI
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GHDL and Yosys
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghdl yosys
+
+      - name: Synthesize golden files via Yosys
+        run: |
+          cd examples/vhdl/golden
+          for f in *.vhd; do
+            entity=$(basename "$f" .vhd)
+            echo "=== Synthesizing $entity ==="
+            yosys -m ghdl -p "ghdl --std=08 -a $f; ghdl --std=08 $entity; synth -top $entity" || true
+          done

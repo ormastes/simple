@@ -1,0 +1,135 @@
+# tools_jj_viewing.spl - Viewing & querying tools (7 tools)
+#
+# Tools: status, log, diff, show, revset, interdiff, evolog
+
+use app.mcp_jj.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, make_tool_result, make_error_response, make_tool_schema_multi, make_tool_schema, make_no_param_tool, make_prop, make_prop_bool, make_prop_int, extract_nested_string, extract_arguments_dict, handle_jj_result, handle_jj_result_stdout}
+use app.mcp_jj.jj_runner.{JjResult, jj_run, jj_run_with_args, shell_quote}
+
+# --- 15. jj_status ---
+
+fn schema_jj_status() -> String:
+    make_no_param_tool("jj_status", "Show working copy status and tracked file changes", true, false, true)
+
+fn handle_jj_status(id: String, body: String, repo_path: String) -> String:
+    handle_jj_result_stdout(id, jj_run("status", repo_path))
+
+# --- 16. jj_log ---
+
+fn schema_jj_log() -> String:
+    var props = LB()
+    props = props + make_prop("revisions", "Revset expression to filter commits")
+    props = props + "," + make_prop("limit", "Max number of commits to show")
+    props = props + "," + make_prop("template", "Output template")
+    props = props + RB()
+    make_tool_schema_multi("jj_log", "Show commit history log", props, "[]", true, false, true)
+
+fn handle_jj_log(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    val limit = extract_nested_string(body, "arguments", "limit")
+    val tmpl = extract_nested_string(body, "arguments", "template")
+    var cmd = "log"
+    if revisions != "":
+        cmd = cmd + " -r " + revisions
+    if limit != "":
+        cmd = cmd + " -n " + limit
+    if tmpl != "":
+        cmd = cmd + " -T " + tmpl
+    handle_jj_result_stdout(id, jj_run(cmd, repo_path))
+
+# --- 17. jj_diff ---
+
+fn schema_jj_diff() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Revision to show diff for (default: @)")
+    props = props + "," + make_prop("from", "Show diff from this revision")
+    props = props + "," + make_prop("to", "Show diff to this revision")
+    props = props + "," + make_prop("paths", "Restrict diff to specific paths")
+    props = props + "," + make_prop_bool("summary", "Show only list of changed files (--summary), avoids large output")
+    props = props + RB()
+    make_tool_schema_multi("jj_diff", "Show changes in a revision or between revisions", props, "[]", true, false, true)
+
+fn handle_jj_diff(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    val from = extract_nested_string(body, "arguments", "from")
+    val to = extract_nested_string(body, "arguments", "to")
+    val paths = extract_nested_string(body, "arguments", "paths")
+    val summary = extract_nested_string(body, "arguments", "summary")
+    var cmd = "diff"
+    if summary == "true":
+        cmd = cmd + " --summary"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    if from != "":
+        cmd = cmd + " --from " + from
+    if to != "":
+        cmd = cmd + " --to " + to
+    if paths != "":
+        cmd = cmd + " " + paths
+    handle_jj_result_stdout(id, jj_run(cmd, repo_path))
+
+# --- 18. jj_show ---
+
+fn schema_jj_show() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Revision to show (default: @)")
+    props = props + "," + make_prop_bool("summary", "Show only list of changed files (--summary), avoids large output")
+    props = props + RB()
+    make_tool_schema_multi("jj_show", "Show commit details and diff for a revision", props, "[]", false, true, false, true)
+
+fn handle_jj_show(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    val summary = extract_nested_string(body, "arguments", "summary")
+    var cmd = "show"
+    if summary == "true":
+        cmd = cmd + " --summary"
+    if revision != "":
+        cmd = cmd + " " + revision
+    handle_jj_result_stdout(id, jj_run(cmd, repo_path))
+
+# --- 19. jj_revset ---
+
+fn schema_jj_revset() -> String:
+    make_tool_schema("jj_revset", "Evaluate a revset expression and list matching revisions", "expression", "Revset expression to evaluate", true, true, false, true)
+
+fn handle_jj_revset(id: String, body: String, repo_path: String) -> String:
+    val expression = extract_nested_string(body, "arguments", "expression")
+    if expression == "":
+        return make_error_response(id, -32602, "Missing required parameter: expression")
+    var cmd = "log -r " + expression
+    handle_jj_result_stdout(id, jj_run(cmd, repo_path))
+
+# --- 20. jj_interdiff ---
+
+fn schema_jj_interdiff() -> String:
+    var props = LB()
+    props = props + make_prop("from", "First revision to compare")
+    props = props + "," + make_prop("to", "Second revision to compare")
+    props = props + RB()
+    make_tool_schema_multi("jj_interdiff", "Compare the diffs of two changes", props, "[]", true, false, true)
+
+fn handle_jj_interdiff(id: String, body: String, repo_path: String) -> String:
+    val from = extract_nested_string(body, "arguments", "from")
+    val to = extract_nested_string(body, "arguments", "to")
+    var cmd = "interdiff"
+    if from != "":
+        cmd = cmd + " --from " + from
+    if to != "":
+        cmd = cmd + " --to " + to
+    handle_jj_result_stdout(id, jj_run(cmd, repo_path))
+
+# --- 21. jj_evolog ---
+
+fn schema_jj_evolog() -> String:
+    make_tool_schema("jj_evolog", "Show how a change has evolved over time", "revision", "Revision to show evolution for (default: @)", false, true, false, true)
+
+fn handle_jj_evolog(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    var cmd = "evolog"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    handle_jj_result_stdout(id, jj_run(cmd, repo_path))
+
+export schema_jj_status, schema_jj_log, schema_jj_diff, schema_jj_show
+export schema_jj_revset, schema_jj_interdiff, schema_jj_evolog
+export handle_jj_status, handle_jj_log, handle_jj_diff, handle_jj_show
+export handle_jj_revset, handle_jj_interdiff, handle_jj_evolog

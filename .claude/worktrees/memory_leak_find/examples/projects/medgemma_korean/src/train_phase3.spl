@@ -1,0 +1,198 @@
+#!/usr/bin/env simple
+# Phase 3: Create Embeddings (Note.md Phase 2)
+#
+# Goal: Train Korean/English dual embeddings with RoPE
+#
+# Progressive training:
+#   1. Start with model containing Phase 0-2 knowledge (merged)
+#   2. Freeze base model entirely
+#   3. Create Korean/English dual embeddings + RoPE cache
+#   4. Train ONLY embedding weights (no LoRA this phase)
+#   5. Return ExtendedModel wrapping base + embeddings + RoPE
+#
+# Token routing: Korean tokens -> kor_embedding, English -> eng_embedding
+# Combined via mask multiplication for differentiable routing.
+#
+# Run:
+#   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase3.spl
+
+use model.{TextModel, compute_mse_loss, check_gpu}
+use shared_logic.{
+    TrainConfig, TrainState, EMBEDDING_SEQ_LEN,
+    make_randn_batch_on_cuda, compute_ce_loss,
+    report_gpu_memory, report_training_step, report_epoch_end,
+    lr_linear_warmup
+}
+use validation.{validate_model, check_english_retention}
+use embedding_utils.{
+    KorEngEmbedding, RoPECache,
+    create_kor_eng_embedding, create_rope_cache,
+    embed_with_routing, apply_rope, mean_pool_seq,
+    make_embedding_batch,
+    embedding_sgd_step, embedding_zero_grads
+}
+use layer_utils.{ExtendedModel, create_extended_model}
+use train_phase0.{run_phase0}
+use train_phase1.{run_phase1}
+use train_phase2.{run_phase2}
+
+use std.gc_async_mut.torch.mod.{torch_available, cuda_available}
+use std.torch.ffi.{
+    rt_torch_torchtensor_free,
+    rt_torch_torchtensor_mean,
+    rt_torch_autograd_backward,
+    rt_torch_cuda_empty_cache
+}
+
+export run_phase3
+
+
+# ============================================================================
+# Phase 3 Embedding Configuration
+# ============================================================================
+
+val KOR_VOCAB = 8000
+val ENG_VOCAB = 32000
+val EMBED_DIM = 64
+val KOR_START = 50000
+val KOR_END = 58000
+val MAX_SEQ_LEN = 512
+
+
+# ============================================================================
+# Training
+# ============================================================================
+
+fn run_phase3(model: TextModel) -> ExtendedModel:
+    print("")
+    print("=" * 70)
+    print("  PHASE 3: CREATE EMBEDDINGS (Note.md Phase 2)")
+    print("=" * 70)
+    print("")
+
+    check_gpu()
+    print("")
+
+    val config = TrainConfig.phase3()
+    config.print_config("Phase 3 - Embedding Training")
+
+    # Freeze base model entirely (Phase 0-2 knowledge preserved)
+    model.freeze()
+    print("Base model weights: FROZEN")
+    print("  Phase 0-2 knowledge preserved in base weights")
+    print("")
+
+    # Create Korean/English dual embeddings
+    val emb = create_kor_eng_embedding(KOR_VOCAB, ENG_VOCAB, EMBED_DIM, KOR_START, KOR_END)
+    emb.print_summary()
+    print("")
+
+    # Create RoPE cache
+    val rope = create_rope_cache(MAX_SEQ_LEN, EMBED_DIM)
+    rope.print_summary()
+    print("")
+
+    # Training loop — only embedding weights are trainable
+    print("Training: ONLY embedding weights (no LoRA)")
+    print("  Seq len: {EMBEDDING_SEQ_LEN}")
+    print("")
+
+    var state = TrainState.create()
+    for epoch in 0..config.num_epochs:
+        state.reset_epoch()
+        print("--- Epoch {epoch + 1}/{config.num_epochs} ---")
+
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
+
+            # Create synthetic token batch with routing data
+            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+
+            # Forward: embed -> RoPE -> pool -> model
+            val embedded = embed_with_routing(emb, kor_ids, eng_ids, mask)
+            val rotated = apply_rope(embedded, rope, EMBEDDING_SEQ_LEN)
+            rt_torch_torchtensor_free(embedded)
+            val pooled = mean_pool_seq(rotated)
+            rt_torch_torchtensor_free(rotated)
+
+            val logits = model.forward(pooled)
+            rt_torch_torchtensor_free(pooled)
+
+            # MSE loss
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = rt_torch_torchtensor_mean(loss_h)
+
+            # Backward (gradients flow to embedding weights only)
+            rt_torch_autograd_backward(loss_h)
+
+            # SGD step on embeddings only
+            embedding_sgd_step(emb, lr)
+            embedding_zero_grads(emb)
+
+            # Cleanup
+            rt_torch_torchtensor_free(kor_ids)
+            rt_torch_torchtensor_free(eng_ids)
+            rt_torch_torchtensor_free(mask)
+            rt_torch_torchtensor_free(target)
+            rt_torch_torchtensor_free(logits)
+            rt_torch_torchtensor_free(loss_h)
+
+            state.add_loss(loss_val)
+            report_training_step(state, config)
+
+        state.update_best()
+        report_epoch_end(epoch, config.num_epochs, state)
+
+        # English retention check
+        val retained = check_english_retention(model, config)
+        if not retained:
+            print("  WARNING: English retention dropping.")
+        print("")
+
+    print("=" * 70)
+    print("PHASE 3 TRAINING COMPLETE")
+    print("  Base model: FROZEN (Phase 0-2 knowledge)")
+    print("  Embeddings: TRAINED (Korean + English)")
+    print("  RoPE: INITIALIZED")
+    print("  Best loss: {state.best_loss}")
+    print("=" * 70)
+
+    # Create ExtendedModel
+    val ext_model = create_extended_model(model, emb, rope, EMBEDDING_SEQ_LEN)
+    report_gpu_memory()
+    ext_model
+
+
+# ============================================================================
+# Standalone entry point
+# ============================================================================
+
+fn main():
+    if not torch_available():
+        print("ERROR: libtorch not loaded. Run with:")
+        print("  LD_PRELOAD=build/libspl_torch.so bin/simple <this_file>")
+        return
+
+    # Run prerequisite phases
+    print("Running Phase 0 (prerequisite)...")
+    var model = run_phase0()
+    print("")
+    print("Running Phase 1 (prerequisite)...")
+    model = run_phase1(model)
+    print("")
+    print("Running Phase 2 (prerequisite)...")
+    model = run_phase2(model)
+    print("")
+
+    val ext_model = run_phase3(model)
+    ext_model.print_summary()
+    print("")
+    print("Phase 3 complete. Model now has embeddings + RoPE.")
+    rt_torch_cuda_empty_cache()
+
+
+main()

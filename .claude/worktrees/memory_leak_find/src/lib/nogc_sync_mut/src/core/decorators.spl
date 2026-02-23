@@ -1,0 +1,332 @@
+# Core Decorators Module - Pure Simple Implementation
+#
+# Provides function wrappers for caching, logging, and deprecation warnings.
+# Uses __call__ method to wrap function invocation.
+#
+# NOTE: Runtime limitations - variadic args not supported, using fixed-arity approach
+
+export CachedFunction, LoggedFunction, DeprecatedFunction, TimeoutFunction, TimeoutResult
+export cached, logged, deprecated
+
+# ============================================================================
+# CachedFunction - Memoization Decorator
+# ============================================================================
+
+class CachedFunction:
+    """Function wrapper that caches results to avoid redundant computation."""
+    wrapped_fn: Any
+    cache: Dict<text, Any>
+    hits: i64
+    misses: i64
+
+impl CachedFunction:
+    static fn create(func: Any) -> CachedFunction:
+        """Create a new cached function wrapper."""
+        CachedFunction(
+            wrapped_fn: func,
+            cache: {},
+            hits: 0,
+            misses: 0
+        )
+
+    me __call__(arg1: Any = nil, arg2: Any = nil, arg3: Any = nil, arg4: Any = nil, arg5: Any = nil) -> Any:
+        """Call the wrapped function with caching (up to 5 args)."""
+        # Determine actual argument count by checking for nil
+        var argc = 0
+        var args: [Any] = []
+        if arg1 != nil:
+            argc = argc + 1
+            args.push(arg1)
+        if arg2 != nil:
+            argc = argc + 1
+            args.push(arg2)
+        if arg3 != nil:
+            argc = argc + 1
+            args.push(arg3)
+        if arg4 != nil:
+            argc = argc + 1
+            args.push(arg4)
+        if arg5 != nil:
+            argc = argc + 1
+            args.push(arg5)
+
+        # Create cache key
+        val key = self._make_cache_key(args)
+
+        # Check cache
+        if self.cache.contains_key(key):
+            self.hits = self.hits + 1
+            return self.cache[key]
+
+        # Cache miss - call wrapped function
+        self.misses = self.misses + 1
+        val result = self._call_wrapped(arg1, arg2, arg3, arg4, arg5)
+        self.cache[key] = result
+        result
+
+    fn _make_cache_key(args: [Any]) -> text:
+        """Create a cache key from arguments."""
+        var key = ""
+        for i in 0..args.len():
+            if i > 0:
+                key = key + ","
+            key = key + "{args[i]}"
+        key
+
+    me _call_wrapped(arg1 = nil, arg2 = nil, arg3 = nil, arg4 = nil, arg5 = nil) -> Any:
+        """Call the wrapped function with arguments."""
+        # Use two-step pattern: get function reference first, then call
+        # (runtime bug: self.field() treated as method call)
+        val fn_ref = self.wrapped_fn
+
+        # Call based on which args are non-nil
+        if arg1 == nil:
+            return fn_ref()
+        elif arg2 == nil:
+            return fn_ref(arg1)
+        elif arg3 == nil:
+            return fn_ref(arg1, arg2)
+        elif arg4 == nil:
+            return fn_ref(arg1, arg2, arg3)
+        elif arg5 == nil:
+            return fn_ref(arg1, arg2, arg3, arg4)
+        else:
+            return fn_ref(arg1, arg2, arg3, arg4, arg5)
+
+    fn cache_info() -> Dict<text, i64>:
+        """Get cache statistics."""
+        {
+            "hits": self.hits,
+            "misses": self.misses,
+            "size": self.cache.len()
+        }
+
+    me clear_cache():
+        """Clear all cached values and reset statistics."""
+        self.cache = {}
+        self.hits = 0
+        self.misses = 0
+
+# ============================================================================
+# LoggedFunction - Logging Decorator
+# ============================================================================
+
+class LoggedFunction:
+    """Function wrapper that logs all calls and returns."""
+    wrapped_fn: Any
+    name: text
+    call_count: i64
+
+impl LoggedFunction:
+    static fn create(func: Any) -> LoggedFunction:
+        """Create a new logged function wrapper."""
+        LoggedFunction(
+            wrapped_fn: func,
+            name: "function",
+            call_count: 0
+        )
+
+    me __call__(arg1: Any = nil, arg2: Any = nil, arg3: Any = nil, arg4: Any = nil, arg5: Any = nil) -> Any:
+        """Call the wrapped function with logging (up to 5 args)."""
+        self.call_count = self.call_count + 1
+
+        # Build args string for logging
+        var args_str = ""
+        var args: [Any] = []
+        if arg1 != nil:
+            args.push(arg1)
+            args_str = "{arg1}"
+        if arg2 != nil:
+            args.push(arg2)
+            if args_str.len() > 0:
+                args_str = args_str + ", "
+            args_str = args_str + "{arg2}"
+        if arg3 != nil:
+            args.push(arg3)
+            if args_str.len() > 0:
+                args_str = args_str + ", "
+            args_str = args_str + "{arg3}"
+        if arg4 != nil:
+            args.push(arg4)
+            if args_str.len() > 0:
+                args_str = args_str + ", "
+            args_str = args_str + "{arg4}"
+        if arg5 != nil:
+            args.push(arg5)
+            if args_str.len() > 0:
+                args_str = args_str + ", "
+            args_str = args_str + "{arg5}"
+
+        print "[CALL {self.call_count}] {self.name}({args_str})"
+
+        # Call wrapped function
+        val result = self._call_wrapped(arg1, arg2, arg3, arg4, arg5)
+
+        # Log return
+        print "[RETURN] {self.name} -> {result}"
+
+        result
+
+    me _call_wrapped(arg1 = nil, arg2 = nil, arg3 = nil, arg4 = nil, arg5 = nil) -> Any:
+        """Call the wrapped function with arguments."""
+        # Use two-step pattern: get function reference first, then call
+        val fn_ref = self.wrapped_fn
+
+        if arg1 == nil:
+            return fn_ref()
+        elif arg2 == nil:
+            return fn_ref(arg1)
+        elif arg3 == nil:
+            return fn_ref(arg1, arg2)
+        elif arg4 == nil:
+            return fn_ref(arg1, arg2, arg3)
+        elif arg5 == nil:
+            return fn_ref(arg1, arg2, arg3, arg4)
+        else:
+            return fn_ref(arg1, arg2, arg3, arg4, arg5)
+
+# ============================================================================
+# DeprecatedFunction - Deprecation Warning Decorator
+# ============================================================================
+
+class DeprecatedFunction:
+    """Function wrapper that shows deprecation warnings."""
+    wrapped_fn: Any
+    name: text
+    message: text
+    warned: bool
+
+impl DeprecatedFunction:
+    static fn create(func: Any, msg: text = "") -> DeprecatedFunction:
+        """Create a new deprecated function wrapper."""
+        DeprecatedFunction(
+            wrapped_fn: func,
+            name: "function",
+            message: msg,
+            warned: false
+        )
+
+    me __call__(arg1: Any = nil, arg2: Any = nil, arg3: Any = nil, arg4: Any = nil, arg5: Any = nil) -> Any:
+        """Call the wrapped function with deprecation warning (up to 5 args)."""
+        # Show warning on first call
+        if not self.warned:
+            # Check if message is provided and not nil
+            if self.message != nil and self.message.len() > 0:
+                print "DeprecationWarning: {self.name} is deprecated. {self.message}"
+            else:
+                print "DeprecationWarning: {self.name} is deprecated"
+            self.warned = true
+
+        # Call wrapped function
+        self._call_wrapped(arg1, arg2, arg3, arg4, arg5)
+
+    me _call_wrapped(arg1 = nil, arg2 = nil, arg3 = nil, arg4 = nil, arg5 = nil) -> Any:
+        """Call the wrapped function with arguments."""
+        # Use two-step pattern: get function reference first, then call
+        val fn_ref = self.wrapped_fn
+
+        if arg1 == nil:
+            return fn_ref()
+        elif arg2 == nil:
+            return fn_ref(arg1)
+        elif arg3 == nil:
+            return fn_ref(arg1, arg2)
+        elif arg4 == nil:
+            return fn_ref(arg1, arg2, arg3)
+        elif arg5 == nil:
+            return fn_ref(arg1, arg2, arg3, arg4)
+        else:
+            return fn_ref(arg1, arg2, arg3, arg4, arg5)
+
+# ============================================================================
+# Module-level factory functions (runtime doesn't support static method calls)
+# ============================================================================
+
+fn cached(func: Any) -> CachedFunction:
+    """Create a cached function wrapper."""
+    CachedFunction(
+        wrapped_fn: func,
+        cache: {},
+        hits: 0,
+        misses: 0
+    )
+
+fn logged(func: Any) -> LoggedFunction:
+    """Create a logged function wrapper."""
+    LoggedFunction(
+        wrapped_fn: func,
+        name: "function",
+        call_count: 0
+    )
+
+fn deprecated(func: Any, msg: text = "") -> DeprecatedFunction:
+    """Create a deprecated function wrapper."""
+    DeprecatedFunction(
+        wrapped_fn: func,
+        name: "function",
+        message: msg,
+        warned: false
+    )
+
+# ============================================================================
+# TimeoutFunction - Timeout Decorator (Stub Implementation)
+# ============================================================================
+
+class TimeoutResult:
+    """Result wrapper for timeout operations."""
+    value: Any
+    success: bool
+
+    fn is_success() -> bool:
+        """Check if operation succeeded."""
+        self.success
+
+    fn unwrap() -> Any:
+        """Get the wrapped value."""
+        self.value
+
+class TimeoutFunction:
+    """Function wrapper with timeout (stub - no actual timeout enforcement).
+    
+    NOTE: This is a placeholder until threading support is available.
+    Currently just calls the function without timeout.
+    """
+    wrapped_fn: Any
+    timeout_seconds: i64
+
+    me __call__(arg1: Any = nil, arg2: Any = nil, arg3: Any = nil, arg4: Any = nil, arg5: Any = nil) -> Any:
+        """Call the wrapped function (no timeout enforcement)."""
+        # Use two-step pattern
+        val fn_ref = self.wrapped_fn
+        
+        if arg1 == nil:
+            return fn_ref()
+        elif arg2 == nil:
+            return fn_ref(arg1)
+        elif arg3 == nil:
+            return fn_ref(arg1, arg2)
+        elif arg4 == nil:
+            return fn_ref(arg1, arg2, arg3)
+        elif arg5 == nil:
+            return fn_ref(arg1, arg2, arg3, arg4)
+        else:
+            return fn_ref(arg1, arg2, arg3, arg4, arg5)
+
+    me call_with_result(arg1: Any = nil, arg2: Any = nil, arg3: Any = nil) -> TimeoutResult:
+        """Call function and return TimeoutResult."""
+        # Use two-step pattern
+        val fn_ref = self.wrapped_fn
+        
+        val result = if arg1 == nil:
+            fn_ref()
+        elif arg2 == nil:
+            fn_ref(arg1)
+        else:
+            fn_ref(arg1, arg2)
+        
+        TimeoutResult(value: result, success: true)
+
+impl TimeoutFunction:
+    static fn create(func: Any, timeout: i64) -> TimeoutFunction:
+        """Create a timeout function wrapper."""
+        TimeoutFunction(wrapped_fn: func, timeout_seconds: timeout)

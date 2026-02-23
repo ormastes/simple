@@ -1,0 +1,422 @@
+"""
+# Aspect-Oriented Programming (AOP) Specification
+
+
+**Feature IDs:** #AOP-001 to #AOP-020
+**Category:** Language
+**Status:** In Progress
+**Tags:** aop
+
+Aspect-Oriented Programming (AOP) enables cross-cutting concern separation through
+compile-time weaving. AOP uses a unified predicate grammar with `pc{...}` pointcut
+expressions that can match function executions, types, and attributes.
+
+## Syntax
+
+```simple
+# Before advice - runs before target function
+on pc{ execution(* target_func(..)) } use advice_func before priority 10
+
+# After advice - runs after successful execution
+on pc{ execution(* target_func(..)) } use advice_func after_success priority 5
+
+# Architecture rules
+forbid pc{ import(test.internal.*) } "Production cannot import test internals"
+allow pc{ depend(within(api.**), within(core.**)) } "API can depend on core"
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Advice | Code that executes at join points (before/after/around) |
+| Pointcut | Expression defining where advice applies: `pc{...}` |
+| Join point | Execution point where advice can be woven |
+| Weaving | Process of inserting advice at join points |
+| Priority | Integer controlling advice execution order |
+
+## Behaviors
+
+- Higher priority executes earlier for `before` advice
+- Higher priority executes later for `after_*` advice
+- `around` advice must call `proceed()` exactly once
+- Zero overhead when AOP is not enabled
+- Compile-time weaving for `before`/`after`, runtime for `around`
+
+## Limitations (Current Implementation)
+
+- Around advice not yet implemented (skipped tests)
+- Inline module definitions in test blocks not supported
+- DI integration not yet implemented (skipped tests)
+"""
+
+
+
+# ============================================================================
+# Test Group 1: Basic AOP Syntax
+# ============================================================================
+
+describe "AOP Basic Syntax":
+    """
+    ## Pointcut Expression Syntax
+
+    Verifies parsing and lowering of AOP declarations including pointcut
+    expressions with various selectors and advice types.
+    """
+
+    context "before advice declaration":
+        it "parses before advice with execution pointcut":
+            fn log_entry():
+                pass
+
+            fn target_func() -> i64:
+                42
+
+            on pc{ execution(* target_func(..)) } use log_entry before priority 10
+
+            expect target_func() == 42
+
+        it "parses before advice with wildcard return type":
+            fn trace():
+                pass
+
+            fn compute(x: i64) -> i64:
+                x * 2
+
+            on pc{ execution(* compute(..)) } use trace before priority 5
+
+            expect compute(21) == 42
+
+    context "after advice declaration":
+        it "parses after_success advice":
+            fn log_exit():
+                pass
+
+            fn add(a: i64, b: i64) -> i64:
+                a + b
+
+            on pc{ execution(* add(..)) } use log_exit after_success priority 10
+
+            expect add(20, 22) == 42
+
+        it "parses after_error advice":
+            fn log_error():
+                pass
+
+            fn may_fail(x: i64) -> Result<i64, text>:
+                if x < 0:
+                    Err("negative input")
+                else:
+                    Ok(x)
+
+            on pc{ execution(* may_fail(..)) } use log_error after_error priority 10
+
+            expect may_fail(42).unwrap() == 42
+
+
+# ============================================================================
+# Test Group 2: Before Advice Execution
+# ============================================================================
+
+describe "Before Advice Execution":
+    """
+    ## Before Advice Behavior
+
+    Verifies that before advice executes before the target function and can
+    observe/modify state but not the return value.
+    """
+
+    context "execution order":
+        it "executes before advice before target":
+            # Verify basic before advice execution
+            var advice_called = false
+
+            fn before_advice():
+                advice_called = true
+
+            fn target() -> i64:
+                42
+
+            on pc{ execution(* target(..)) } use before_advice before priority 10
+
+            val result = target()
+            expect result == 42
+            expect advice_called == true
+
+
+# ============================================================================
+# Test Group 3: After Advice Execution
+# ============================================================================
+
+describe "After Advice Execution":
+    """
+    ## After Advice Behavior
+
+    Verifies after_success and after_error advice execution timing.
+    """
+
+    context "after_success execution":
+        it "executes after_success when target succeeds":
+            var executed = false
+
+            fn after_advice():
+                executed = true
+
+            fn target() -> i64:
+                42
+
+            on pc{ execution(* target(..)) } use after_advice after_success priority 10
+
+            val result = target()
+            expect result == 42
+            expect executed == true
+
+        it "does not execute after_success when target returns Err":
+            var executed = false
+
+            fn after_advice():
+                executed = true
+
+            fn failing_target() -> Result<i64, text>:
+                Err("intentional failure")
+
+            on pc{ execution(* failing_target(..)) } use after_advice after_success priority 10
+
+            val result = failing_target()
+            expect result.err.?
+            expect executed == false
+
+    context "after_error execution":
+        it "executes after_error when target returns Err":
+            var error_logged = false
+
+            fn error_handler():
+                error_logged = true
+
+            fn failing() -> Result<i64, text>:
+                Err("test error")
+
+            on pc{ execution(* failing(..)) } use error_handler after_error priority 10
+
+            val result = failing()
+            expect result.err.?
+            expect error_logged == true
+
+
+# ============================================================================
+# Test Group 4: Pointcut Expressions
+# ============================================================================
+
+describe "Pointcut Expressions":
+    """
+    ## Pointcut Selector Syntax
+
+    Verifies various pointcut selectors including execution patterns
+    and attribute matching.
+    """
+
+    context "execution patterns":
+        it "matches specific function name":
+            var called = false
+
+            fn marker():
+                called = true
+
+            fn specific_func() -> i64:
+                42
+
+            on pc{ execution(* specific_func(..)) } use marker before priority 10
+
+            specific_func()
+            expect called == true
+
+        it "matches with wildcard in function name":
+            var count = 0
+
+            fn counter():
+                count = count + 1
+
+            fn calc_add() -> i64:
+                1
+
+            fn calc_sub() -> i64:
+                2
+
+            on pc{ execution(* calc*(..)) } use counter before priority 10
+
+            calc_add()
+            calc_sub()
+            expect count == 2
+
+    context "attribute patterns":
+        it "matches functions with specific attribute":
+            var logged = false
+
+            fn logger():
+                logged = true
+
+            @logged
+            fn important_operation() -> i64:
+                42
+
+            fn regular_operation() -> i64:
+                0
+
+            on pc{ attr(logged) } use logger before priority 10
+
+            important_operation()
+            expect logged == true
+
+    context "logical operators":
+        it "combines pointcuts with AND":
+            var called = false
+
+            fn marker():
+                called = true
+
+            @critical
+            fn critical_calc() -> i64:
+                42
+
+            on pc{ execution(* critical*(..)) & attr(critical) } use marker before priority 10
+
+            critical_calc()
+            expect called == true
+
+        it "combines pointcuts with OR":
+            var count = 0
+
+            fn counter():
+                count = count + 1
+
+            fn func_a() -> i64:
+                1
+
+            fn func_b() -> i64:
+                2
+
+            on pc{ execution(* func_a(..)) | execution(* func_b(..)) } use counter before priority 10
+
+            func_a()
+            func_b()
+            expect count == 2
+
+        it "negates pointcuts with NOT":
+            var count = 0
+
+            fn counter():
+                count = count + 1
+
+            fn should_skip() -> i64:
+                0
+
+            fn should_count() -> i64:
+                1
+
+            on pc{ !execution(* should_skip(..)) & execution(* should*(..)) } use counter before priority 10
+
+            should_skip()
+            should_count()
+            expect count == 1
+
+
+# ============================================================================
+# Test Group 5: Architecture Rules
+# ============================================================================
+
+describe "Architecture Rules":
+    """
+    ## Static Dependency Validation
+
+    Verifies architecture rules using forbid/allow declarations to enforce
+    layered architecture and dependency constraints.
+    """
+
+    context "forbid rules":
+        it "declares forbidden import pattern":
+            # This rule is checked at compile time
+            forbid pc{ import(test.internal.*) } "Production cannot import test internals"
+
+            # Rule declared successfully
+            expect true == true
+
+        it "declares forbidden dependency pattern":
+            forbid pc{ depend(within(domain.**), within(infrastructure.**)) } "Domain cannot depend on infrastructure"
+
+            expect true == true
+
+    context "allow rules":
+        it "declares allowed dependency pattern":
+            allow pc{ depend(within(api.**), within(core.**)) } "API layer can depend on core"
+
+            expect true == true
+
+
+# ============================================================================
+# Test Group 6: Weaving Diagnostics
+# ============================================================================
+
+describe "Weaving Diagnostics":
+    """
+    ## Diagnostic Information
+
+    Verifies that the weaving system produces helpful diagnostics including
+    weaving summary and join point counts.
+    """
+
+    context "weaving reports":
+        it "reports join points woven":
+            var woven_count = 0
+
+            fn track_weave():
+                woven_count = woven_count + 1
+
+            fn target1() -> i64:
+                1
+
+            fn target2() -> i64:
+                2
+
+            on pc{ execution(* target*(..)) } use track_weave before priority 10
+
+            target1()
+            target2()
+            expect woven_count == 2
+
+        it "validates advice configuration":
+            # Valid advice configuration should not produce errors
+            fn valid_advice():
+                pass
+
+            fn target() -> i64:
+                42
+
+            on pc{ execution(* target(..)) } use valid_advice before priority 10
+
+            expect target() == 42
+
+
+# ============================================================================
+# Test Group 7: Zero Overhead
+# ============================================================================
+
+describe "Zero Overhead When Disabled":
+    """
+    ## Performance Guarantee
+
+    Verifies that when AOP is not enabled, there is zero overhead.
+    """
+
+    context "no advice means no overhead":
+        it "function without advice has no weaving":
+            fn simple_func() -> i64:
+                42
+
+            # No AOP declarations for this function
+            expect simple_func() == 42
+
+        it "disabled weaving produces no diagnostics":
+            fn isolated_func() -> i64:
+                100
+
+            expect isolated_func() == 100

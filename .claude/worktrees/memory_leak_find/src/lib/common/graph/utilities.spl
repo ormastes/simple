@@ -1,0 +1,638 @@
+# Graph Utility Functions
+#
+# Purpose: Common graph operations, metrics, properties, and transformations
+# Advanced algorithms extracted to graph_advanced.spl.
+#
+# Contains:
+# - Degree operations
+# - Cycle detection
+# - Graph properties (tree, DAG, regular, simple)
+# - Graph metrics (diameter, radius, density, eccentricity)
+# - Graph generators (complete, cycle, path, star, wheel)
+# - Graph transformations (complement, subgraph, union)
+# - Bridges and articulation points
+# - Path algorithms
+# - Clustering and triangles
+# - Eulerian properties
+# - Utility functions (print, clone, filtering)
+
+# Import modules
+mod graph.types
+mod graph.traversal
+mod graph.strongly_connected
+
+# ============================================================================
+# Degree Operations
+# ============================================================================
+
+# Get degree of a vertex (out-degree for directed graphs)
+fn graph_degree(graph: tuple, vertex: i64) -> i64:
+    var neighbors = graph_neighbors(graph, vertex)
+    neighbors.len()
+
+# Get in-degree of a vertex (for directed graphs)
+fn graph_in_degree(graph: tuple, vertex: i64) -> i64:
+    var count = 0
+    var adj_list = graph.4
+    var num_vertices = graph.2
+    var i = 0
+    while i < num_vertices:
+        var neighbors = adj_list.get(i)
+        if neighbors != nil:
+            var j = 0
+            while j < neighbors.len():
+                var neighbor = neighbors.get(j)
+                if neighbor.0 == vertex:
+                    count = count + 1
+                j = j + 1
+        i = i + 1
+    count
+
+# Get out-degree of a vertex (for directed graphs)
+fn graph_out_degree(graph: tuple, vertex: i64) -> i64:
+    graph_degree(graph, vertex)
+
+# ============================================================================
+# Cycle Detection
+# ============================================================================
+
+# Detect cycle in undirected graph
+fn graph_has_cycle_undirected(graph: tuple) -> bool:
+    var visited = {}
+    var num_vertices = graph.2
+
+    fn dfs_cycle(vertex: i64, parent: i64) -> bool:
+        visited = visited.set(vertex, true)
+
+        var neighbors = graph_neighbors(graph, vertex)
+        var i = 0
+        while i < neighbors.len():
+            var neighbor = neighbors.get(i)
+            var neighbor_id = neighbor.0
+            var is_visited = visited.get(neighbor_id)
+
+            if is_visited == nil:
+                if dfs_cycle(neighbor_id, vertex):
+                    return true
+            else:
+                if neighbor_id != parent:
+                    return true
+
+            i = i + 1
+
+        false
+
+    var j = 0
+    while j < num_vertices:
+        var is_visited = visited.get(j)
+        if is_visited == nil:
+            if dfs_cycle(j, -1):
+                return true
+        j = j + 1
+
+    false
+
+# Detect cycle in directed graph using DFS with colors
+fn graph_has_cycle_directed(graph: tuple) -> bool:
+    var white = 0
+    var gray = 1
+    var black = 2
+    var color = {}
+    var num_vertices = graph.2
+
+    var i = 0
+    while i < num_vertices:
+        color = color.set(i, white)
+        i = i + 1
+
+    fn dfs_cycle_directed(vertex: i64) -> bool:
+        color = color.set(vertex, gray)
+
+        var neighbors = graph_neighbors(graph, vertex)
+        var j = 0
+        while j < neighbors.len():
+            var neighbor = neighbors.get(j)
+            var neighbor_id = neighbor.0
+            var neighbor_color = color.get(neighbor_id)
+
+            if neighbor_color == gray:
+                return true
+
+            if neighbor_color == white:
+                if dfs_cycle_directed(neighbor_id):
+                    return true
+
+            j = j + 1
+
+        color = color.set(vertex, black)
+        false
+
+    var k = 0
+    while k < num_vertices:
+        var vertex_color = color.get(k)
+        if vertex_color == white:
+            if dfs_cycle_directed(k):
+                return true
+        k = k + 1
+
+    false
+
+# Check if graph is cyclic (works for both directed and undirected)
+fn graph_is_cyclic(graph: tuple) -> bool:
+    var directed = graph.0
+    if directed:
+        graph_has_cycle_directed(graph)
+    else:
+        graph_has_cycle_undirected(graph)
+
+# ============================================================================
+# Graph Properties
+# ============================================================================
+
+# Check if graph is a tree (connected acyclic undirected graph)
+fn graph_is_tree(graph: tuple) -> bool:
+    var num_vertices = graph.2
+    var num_edges = graph.3.len()
+
+    if graph.0:
+        return false
+
+    if num_edges != num_vertices - 1:
+        return false
+
+    graph_is_connected(graph) && !graph_has_cycle_undirected(graph)
+
+# Check if graph is a DAG (Directed Acyclic Graph)
+fn graph_is_dag(graph: tuple) -> bool:
+    graph.0 && !graph_has_cycle_directed(graph)
+
+# Get all vertices with no incoming edges (sources)
+fn graph_sources(graph: tuple) -> list:
+    var sources = []
+    var num_vertices = graph.2
+
+    var i = 0
+    while i < num_vertices:
+        if graph_in_degree(graph, i) == 0:
+            sources = sources.append(i)
+        i = i + 1
+
+    sources
+
+# Get all vertices with no outgoing edges (sinks)
+fn graph_sinks(graph: tuple) -> list:
+    var sinks = []
+    var num_vertices = graph.2
+
+    var i = 0
+    while i < num_vertices:
+        if graph_out_degree(graph, i) == 0:
+            sinks = sinks.append(i)
+        i = i + 1
+
+    sinks
+
+# Calculate graph density (ratio of actual edges to maximum possible edges)
+fn graph_density(graph: tuple) -> f64:
+    var num_vertices = graph.2
+    var num_edges = graph.3.len()
+
+    if num_vertices <= 1:
+        return 0.0
+
+    var max_edges = 0.0
+    if graph.0:
+        max_edges = (num_vertices * (num_vertices - 1)) as f64
+    else:
+        max_edges = (num_vertices * (num_vertices - 1) / 2) as f64
+
+    (num_edges as f64) / max_edges
+
+# Check if graph is regular (all vertices have same degree)
+fn graph_is_regular(graph: tuple) -> bool:
+    var num_vertices = graph.2
+    if num_vertices == 0:
+        return true
+
+    var first_degree = graph_degree(graph, 0)
+    var i = 1
+    while i < num_vertices:
+        if graph_degree(graph, i) != first_degree:
+            return false
+        i = i + 1
+
+    true
+
+# Get regularity degree (if regular, return common degree; else -1)
+fn graph_regularity(graph: tuple) -> i64:
+    if graph_is_regular(graph):
+        var num_vertices = graph.2
+        if num_vertices > 0:
+            return graph_degree(graph, 0)
+    -1
+
+# Check if graph is simple (no self-loops or multiple edges)
+fn graph_is_simple(graph: tuple) -> bool:
+    # Check for self-loops
+    if graph_self_loops(graph) > 0:
+        return false
+
+    # Check for multiple edges (same pair appears twice)
+    var edges = graph.3
+    var seen = {}
+
+    var i = 0
+    while i < edges.len():
+        var edge = edges.get(i)
+        var from = edge.0
+        var to = edge.1
+        var key = "{from}_{to}"
+        var already_seen = seen.get(key)
+        if already_seen != nil:
+            return false
+        seen = seen.set(key, true)
+        i = i + 1
+
+    true
+
+# Get number of self-loops
+fn graph_self_loops(graph: tuple) -> i64:
+    var edges = graph.3
+    var count = 0
+    var i = 0
+    while i < edges.len():
+        var edge = edges.get(i)
+        if edge.0 == edge.1:
+            count = count + 1
+        i = i + 1
+    count
+
+# Get all isolated vertices (vertices with degree 0)
+fn graph_isolated_vertices(graph: tuple) -> list:
+    var isolated = []
+    var num_vertices = graph.2
+
+    var i = 0
+    while i < num_vertices:
+        if graph_degree(graph, i) == 0:
+            isolated = isolated.append(i)
+        i = i + 1
+
+    isolated
+
+# ============================================================================
+# Graph Metrics and Analysis
+# ============================================================================
+
+# Calculate average degree
+fn graph_avg_degree(graph: tuple) -> f64:
+    var num_vertices = graph.2
+    if num_vertices == 0:
+        return 0.0
+
+    var total_degree = 0
+    var i = 0
+    while i < num_vertices:
+        total_degree = total_degree + graph_degree(graph, i)
+        i = i + 1
+
+    (total_degree as f64) / (num_vertices as f64)
+
+# Find vertex with maximum degree
+fn graph_max_degree_vertex(graph: tuple) -> i64:
+    var num_vertices = graph.2
+    var max_degree = -1
+    var max_vertex = -1
+
+    var i = 0
+    while i < num_vertices:
+        var degree = graph_degree(graph, i)
+        if degree > max_degree:
+            max_degree = degree
+            max_vertex = i
+        i = i + 1
+
+    max_vertex
+
+# Find vertex with minimum degree
+fn graph_min_degree_vertex(graph: tuple) -> i64:
+    var num_vertices = graph.2
+    var min_degree = 999999999
+    var min_vertex = -1
+
+    var i = 0
+    while i < num_vertices:
+        var degree = graph_degree(graph, i)
+        if degree < min_degree:
+            min_degree = degree
+            min_vertex = i
+        i = i + 1
+
+    min_vertex
+
+# Calculate diameter of graph (longest shortest path)
+fn graph_diameter(graph: tuple) -> i64:
+    var num_vertices = graph.2
+    var max_distance = 0
+
+    var i = 0
+    while i < num_vertices:
+        var distances = graph_bfs_distances(graph, i)
+        var j = 0
+        while j < num_vertices:
+            var dist = distances.get(j)
+            if dist != nil:
+                if dist > max_distance:
+                    max_distance = dist
+            j = j + 1
+        i = i + 1
+
+    max_distance
+
+# Calculate radius of graph (minimum eccentricity)
+fn graph_radius(graph: tuple) -> i64:
+    var num_vertices = graph.2
+    var min_eccentricity = 999999999
+
+    var i = 0
+    while i < num_vertices:
+        var distances = graph_bfs_distances(graph, i)
+        var max_dist = 0
+        var j = 0
+        while j < num_vertices:
+            var dist = distances.get(j)
+            if dist != nil:
+                if dist > max_dist:
+                    max_dist = dist
+            j = j + 1
+
+        if max_dist < min_eccentricity:
+            min_eccentricity = max_dist
+
+        i = i + 1
+
+    min_eccentricity
+
+# Calculate eccentricity of a vertex
+fn graph_eccentricity(graph: tuple, vertex: i64) -> i64:
+    var distances = graph_bfs_distances(graph, vertex)
+    var num_vertices = graph.2
+    var max_dist = 0
+
+    var i = 0
+    while i < num_vertices:
+        var dist = distances.get(i)
+        if dist != nil:
+            if dist > max_dist:
+                max_dist = dist
+        i = i + 1
+
+    max_dist
+
+# Find center vertices (vertices with minimum eccentricity)
+fn graph_center(graph: tuple) -> list:
+    var num_vertices = graph.2
+    var radius = graph_radius(graph)
+    var center = []
+
+    var i = 0
+    while i < num_vertices:
+        var ecc = graph_eccentricity(graph, i)
+        if ecc == radius:
+            center = center.append(i)
+        i = i + 1
+
+    center
+
+# Find periphery vertices (vertices with maximum eccentricity)
+fn graph_periphery(graph: tuple) -> list:
+    var num_vertices = graph.2
+    var diameter = graph_diameter(graph)
+    var periphery = []
+
+    var i = 0
+    while i < num_vertices:
+        var ecc = graph_eccentricity(graph, i)
+        if ecc == diameter:
+            periphery = periphery.append(i)
+        i = i + 1
+
+    periphery
+
+# Get total weight of all edges in graph
+fn graph_total_weight(graph: tuple) -> f64:
+    var edges = graph.3
+    var total = 0.0
+    var i = 0
+    while i < edges.len():
+        var edge = edges.get(i)
+        total = total + edge.2
+        i = i + 1
+    total
+
+# ============================================================================
+# Special Graph Structures
+# ============================================================================
+
+# Create complete graph with n vertices
+fn graph_complete(n: i64, directed: bool) -> tuple:
+    var graph = graph_with_vertices(directed, false, n)
+
+    var i = 0
+    while i < n:
+        var j = 0
+        while j < n:
+            if i != j:
+                graph = graph_add_edge_unweighted(graph, i, j)
+            j = j + 1
+        i = i + 1
+
+    graph
+
+# Create cycle graph with n vertices
+fn graph_cycle(n: i64, directed: bool) -> tuple:
+    var graph = graph_with_vertices(directed, false, n)
+
+    var i = 0
+    while i < n:
+        var next = (i + 1) % n
+        graph = graph_add_edge_unweighted(graph, i, next)
+        i = i + 1
+
+    graph
+
+# Create path graph with n vertices
+fn graph_path(n: i64, directed: bool) -> tuple:
+    var graph = graph_with_vertices(directed, false, n)
+
+    var i = 0
+    while i < n - 1:
+        graph = graph_add_edge_unweighted(graph, i, i + 1)
+        i = i + 1
+
+    graph
+
+# Create star graph with n vertices (1 center + n-1 leaves)
+fn graph_star(n: i64, directed: bool) -> tuple:
+    var graph = graph_with_vertices(directed, false, n)
+
+    var i = 1
+    while i < n:
+        graph = graph_add_edge_unweighted(graph, 0, i)
+        i = i + 1
+
+    graph
+
+# Create wheel graph (cycle + center connected to all)
+fn graph_wheel(n: i64, directed: bool) -> tuple:
+    var graph = graph_with_vertices(directed, false, n + 1)
+
+    # Create cycle
+    var i = 1
+    while i <= n:
+        var next = (i % n) + 1
+        graph = graph_add_edge_unweighted(graph, i, next)
+        i = i + 1
+
+    # Connect center to all
+    var j = 1
+    while j <= n:
+        graph = graph_add_edge_unweighted(graph, 0, j)
+        j = j + 1
+
+    graph
+
+# ============================================================================
+# Graph Transformation and Complement
+# ============================================================================
+
+# Get complement graph (edges that don't exist in original)
+fn graph_complement(graph: tuple) -> tuple:
+    var directed = graph.0
+    var weighted = graph.1
+    var num_vertices = graph.2
+
+    var complement = graph_with_vertices(directed, weighted, num_vertices)
+
+    var i = 0
+    while i < num_vertices:
+        var j = 0
+        while j < num_vertices:
+            if i != j:
+                if !graph_has_edge(graph, i, j):
+                    complement = graph_add_edge_unweighted(complement, i, j)
+            j = j + 1
+        i = i + 1
+
+    complement
+
+# Create induced subgraph from vertex set
+fn graph_induced_subgraph(graph: tuple, vertices: list) -> tuple:
+    var directed = graph.0
+    var weighted = graph.1
+    var n = vertices.len()
+
+    var vertex_map = {}
+    var i = 0
+    while i < n:
+        vertex_map = vertex_map.set(vertices.get(i), i)
+        i = i + 1
+
+    var subgraph = graph_with_vertices(directed, weighted, n)
+
+    var j = 0
+    while j < n:
+        var v = vertices.get(j)
+        var neighbors = graph_neighbors(graph, v)
+        var k = 0
+        while k < neighbors.len():
+            var neighbor = neighbors.get(k)
+            var neighbor_id = neighbor.0
+            var weight = neighbor.1
+            var neighbor_index = vertex_map.get(neighbor_id)
+            if neighbor_index != nil:
+                subgraph = graph_add_edge(subgraph, j, neighbor_index, weight)
+            k = k + 1
+        j = j + 1
+
+    subgraph
+
+# Union of two graphs (combine vertices and edges)
+fn graph_union(g1: tuple, g2: tuple) -> tuple:
+    var directed = g1.0
+    var weighted = g1.1
+    var n1 = graph_num_vertices(g1)
+    var n2 = graph_num_vertices(g2)
+
+    var union_graph = graph_with_vertices(directed, weighted, n1 + n2)
+
+    # Add edges from g1
+    var edges1 = graph_edges(g1)
+    var i = 0
+    while i < edges1.len():
+        var edge = edges1.get(i)
+        union_graph = graph_add_edge(union_graph, edge.0, edge.1, edge.2)
+        i = i + 1
+
+    # Add edges from g2 (offset vertex IDs by n1)
+    var edges2 = graph_edges(g2)
+    var j = 0
+    while j < edges2.len():
+        var edge = edges2.get(j)
+        union_graph = graph_add_edge(union_graph, edge.0 + n1, edge.1 + n1, edge.2)
+        j = j + 1
+
+    union_graph
+
+# ============================================================================
+# Bridges and Articulation Points
+# ============================================================================
+
+# Find bridges (edges whose removal increases number of components)
+fn graph_find_bridges(graph: tuple) -> list:
+    var bridges = []
+    var edges = graph.3
+
+    var original_components = graph_connected_components(graph)
+    var original_count = original_components.len()
+
+    var i = 0
+    while i < edges.len():
+        var edge = edges.get(i)
+        var temp_graph = graph_remove_edge(graph, edge.0, edge.1)
+        var new_components = graph_connected_components(temp_graph)
+        var new_count = new_components.len()
+
+        if new_count > original_count:
+            bridges = bridges.append(edge)
+
+        i = i + 1
+
+    bridges
+
+# Find articulation points (vertices whose removal increases components)
+fn graph_find_articulation_points(graph: tuple) -> list:
+    var articulation_points = []
+    var num_vertices = graph.2
+
+    var original_components = graph_connected_components(graph)
+    var original_count = original_components.len()
+
+    var i = 0
+    while i < num_vertices:
+        var temp_graph = graph_remove_vertex(graph, i)
+        var new_components = graph_connected_components(temp_graph)
+        var new_count = new_components.len()
+
+        if new_count > original_count:
+            articulation_points = articulation_points.append(i)
+
+        i = i + 1
+
+    articulation_points
+
+
+# Re-export advanced graph algorithms (extracted to graph_advanced.spl)
+use lib.common.graph.graph_advanced.*
+
+export *

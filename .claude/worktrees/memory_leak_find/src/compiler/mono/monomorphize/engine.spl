@@ -1,0 +1,230 @@
+# Monomorphization Engine
+#
+# Creates specialized versions of generic functions, structs, and classes
+# by substituting concrete type arguments. Iteratively processes pending
+# specializations until all are resolved.
+#
+# Port of rust/compiler/src/monomorphize/engine.rs (300+ lines)
+
+use hir_types.*
+use hir_definitions.*
+use monomorphize.type_subst.*
+
+export ConcreteType, SpecializationKey, MonomorphizationTable, Monomorphizer
+export specialize_function_with_types
+
+# ============================================================================
+# Concrete Types
+# ============================================================================
+
+enum ConcreteType:
+    Int
+    Float
+    Bool
+    String
+    Nil
+    Named(text)
+    Array(ConcreteType)
+    Tuple([ConcreteType])
+    Dict(ConcreteType, ConcreteType)
+    Function([ConcreteType], ConcreteType)
+    Optional(ConcreteType)
+    Specialized(text, [ConcreteType])
+
+fn concrete_type_to_text(ty: ConcreteType) -> text:
+    match ty:
+        case Int: "Int"
+        case Float: "Float"
+        case Bool: "Bool"
+        case String: "String"
+        case Nil: "Nil"
+        case Named(n): n
+        case Array(elem): "Array_{concrete_type_to_text(elem)}"
+        case Tuple(elems): "Tuple_{elems.map(\e: concrete_type_to_text(e)).join(\"_\")}"
+        case Dict(k, v): "Dict_{concrete_type_to_text(k)}_{concrete_type_to_text(v)}"
+        case Function(params, ret):
+            "Fn_{params.map(\p: concrete_type_to_text(p)).join(\"_\")}_{concrete_type_to_text(ret)}"
+        case Optional(inner): "Opt_{concrete_type_to_text(inner)}"
+        case Specialized(name, args): "{name}_{args.map(\a: concrete_type_to_text(a)).join(\"_\")}"
+
+# ============================================================================
+# Specialization Key
+# ============================================================================
+
+struct SpecializationKey:
+    name: text
+    type_args: [ConcreteType]
+
+
+# ============================================================================
+# SpecializationKey Helpers
+# ============================================================================
+
+fn key_mangled_name(key: SpecializationKey) -> text:
+    """Generate mangled name from specialization key."""
+    if key.type_args.len() == 0:
+        return key.name
+    val args_str = key.type_args.map(\t: concrete_type_to_text(t)).join("_")
+    "{key.name}${args_str}"
+
+# ============================================================================
+# Monomorphization Table
+# ============================================================================
+
+class MonomorphizationTable:
+    """Tracks pending and completed specializations."""
+    pending_functions: [(SpecializationKey, Any)]
+    pending_structs: [(SpecializationKey, Any)]
+    pending_classes: [(SpecializationKey, Any)]
+    specialized_functions: {text: Any}
+    specialized_structs: {text: Any}
+    specialized_classes: {text: Any}
+    processed: [text]
+
+    me request_function(name: text, type_args: [ConcreteType], func: Any) -> text:
+        val key = SpecializationKey(name: name, type_args: type_args)
+        val mangled = key_mangled_name(key)
+        if not self.processed.contains(mangled):
+            self.pending_functions = self.pending_functions + [(key, func)]
+        mangled
+
+
+# ============================================================================
+# MonomorphizationTable Standalone Helpers
+# ============================================================================
+
+fn monomorphizationtable_create() -> MonomorphizationTable:
+        MonomorphizationTable(
+            pending_functions: [], pending_structs: [], pending_classes: [],
+            specialized_functions: {}, specialized_structs: {}, specialized_classes: {},
+            processed: [])
+
+
+# ============================================================================
+# Monomorphizer
+# ============================================================================
+
+class Monomorphizer:
+    """Monomorphization engine that creates specialized versions of generics."""
+    generic_functions: {text: Any}
+    generic_structs: {text: Any}
+    generic_classes: {text: Any}
+    table: MonomorphizationTable
+
+    me register_generic_function(name: text, func: Any):
+        self.generic_functions[name] = func
+
+    me register_generic_struct(name: text, s: Any):
+        self.generic_structs[name] = s
+
+    me register_generic_class(name: text, c: Any):
+        self.generic_classes[name] = c
+
+    fn specialize_function_call(func_name: text, concrete_args: [ConcreteType]) -> text?:
+        if self.generic_functions.contains_key(func_name):
+            val func = self.generic_functions[func_name]
+            val mangled = self.table.request_function(func_name, concrete_args, func)
+            return Some(mangled)
+        nil
+
+    me process_pending():
+        # Process all pending specializations
+        while self.table.pending_functions.len() > 0:
+            val pending = self.table.pending_functions
+            self.table.pending_functions = []
+            for item in pending:
+                val key = item[0]
+                val func = item[1]
+                val mangled = key_mangled_name(key)
+                val specialized = monomorphizer_specialize_function_internal(self, key, func)
+                self.table.specialized_functions[mangled] = specialized
+                self.table.processed = self.table.processed + [mangled]
+
+    fn get_specialized_functions() -> {text: Any}:
+        self.table.specialized_functions
+
+
+# ============================================================================
+# Monomorphizer Standalone Helpers
+# ============================================================================
+
+fn monomorphizer_create() -> Monomorphizer:
+        Monomorphizer(generic_functions: {}, generic_structs: {},
+                      generic_classes: {}, table: monomorphizationtable_create())
+
+
+fn monomorphizer_specialize_function_internal(self: Monomorphizer, key: SpecializationKey, func: Any) -> Any:
+        """Specialize a single function with concrete type arguments.
+
+        This creates a new function with:
+        - Type parameters substituted with concrete types
+        - Mangled name for uniqueness
+        - All type references in body updated
+        """
+        # The func is stored as Any but should be HirFunction
+        # For now, return as-is since we need proper type casting
+        # The actual specialization will be done when we have proper HirFunction
+        func
+
+
+# ============================================================================
+# Function Specialization with HirFunction
+# ============================================================================
+
+fn specialize_function_with_types(func: HirFunction, type_args: [HirType]) -> HirFunction:
+    """Create a specialized version of a generic function.
+
+    Args:
+        func: The generic function to specialize
+        type_args: Concrete type arguments to substitute
+
+    Returns:
+        A new HirFunction with type parameters replaced by concrete types
+    """
+    # Create substitution map from type parameters to concrete types
+    val subst = typesubstitution_from_params(func.type_params, type_args)
+
+    # Generate mangled name
+    val mangled = generate_mangled_name(func.name, type_args)
+
+    # Apply substitution to create specialized function
+    substitute_function(func, subst, mangled)
+
+fn generate_mangled_name(base_name: text, type_args: [HirType]) -> text:
+    """Generate a unique mangled name for a specialization."""
+    if not has_type_args:
+        base_name
+    else:
+        val args_str = type_args.map(\t: mangle_type(t)).join("_")
+        "{base_name}${args_str}"
+
+fn mangle_type(ty: HirType) -> text:
+    """Generate a mangling string for a type."""
+    match ty.kind:
+        case Int(bits, signed):
+            if signed: "i{bits}" else: "u{bits}"
+        case Float(bits): "f{bits}"
+        case Bool: "bool"
+        case Char: "char"
+        case Str: "str"
+        case Unit: "unit"
+        case Never: "never"
+        case Tuple(elems):
+            val inner = elems.map(\e: mangle_type(e)).join("_")
+            "tup_{inner}"
+        case Array(elem, _):
+            "arr_{mangle_type(elem)}"
+        case Dict(k, v):
+            "dict_{mangle_type(k)}_{mangle_type(v)}"
+        case Optional(inner):
+            "opt_{mangle_type(inner)}"
+        case Named(symbol, args):
+            if has_args:
+                val inner = args.map(\a: mangle_type(a)).join("_")
+                "T{symbol.id}_{inner}"
+            else:
+                "T{symbol.id}"
+        case TypeParam(name, _):
+            # Type params should be substituted before mangling
+            "param_{name}"
+        case _: "unknown"

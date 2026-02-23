@@ -1,0 +1,736 @@
+# Spawn Boundedness Analysis — Pass B
+#
+# Statically proves all task spawns occur in the init phase and counts
+# them exactly. Required for baremetal strict mode where task pools
+# are fixed-size.
+#
+# Pipeline position:
+#   Pass A (frame sizing) -> Pass B (spawn bounds) -> Pass C (reservation sums)
+#
+# The analysis:
+# 1. Identifies init-phase functions (@entry, @boot)
+# 2. Builds a call graph to compute init-reachable functions
+# 3. Finds all spawn sites in the module
+# 4. Verifies every spawn is init-reachable (no runtime spawning)
+# 5. Counts boot-phase spawns per task type
+# 6. Checks instance limits and group capacities
+#
+# Design decisions:
+# - Parallel arrays for boot_spawn names/counts (avoids Dict generics)
+# - ScanResult struct returns both spawn sites and await-found flag
+# - Groups provided externally via analyze_spawns_with_groups()
+# - AST walking functions are included but tested via integration tests
+
+use compiler.frontend.parser_types.{
+    Module, Function, Stmt, StmtKind,
+    Expr, ExprKind, Block, Attribute
+}
+use compiler.common.attributes.{
+    FunctionAttr, parse_function_attrs,
+    TaskAttr, parse_task_attr
+}
+use lexer.Span
+
+# ================================================================
+# Constants
+# ================================================================
+
+# Diagnostic severity levels
+val LEVEL_ERROR = "error"
+val LEVEL_WARNING = "warning"
+val LEVEL_INFO = "info"
+
+# ================================================================
+# Data Structures
+# ================================================================
+
+struct SpawnSite:
+    """A location where a task is spawned.
+
+    Fields:
+        task_name: Name of the task type being spawned
+        caller_name: Name of the function containing the spawn
+        is_after_await: True if spawn occurs after an await in the same function
+        span: Source location of the spawn expression
+    """
+    task_name: text
+    caller_name: text
+    is_after_await: bool
+    span: Span
+
+struct TaskInfo:
+    """Information about a declared task type.
+
+    Fields:
+        name: Task type name
+        instances: Maximum concurrent instances from @task attribute
+        group: Optional group name
+    """
+    name: text
+    instances: i64
+    group: text?
+
+struct TaskGroupInfo:
+    """Information about a task group.
+
+    Fields:
+        name: Group name
+        cap: Maximum total instances across all members
+        members: Names of tasks in this group
+    """
+    name: text
+    cap: i64
+    members: [text]
+
+struct SpawnAnalysis:
+    """Complete spawn boundedness analysis for a module.
+
+    Fields:
+        init_functions: Names of @entry and @boot functions
+        init_reachable: Names of all functions reachable from init functions
+        spawn_sites: All spawn expressions found in the module
+        task_infos: All declared task types with their attributes
+        group_infos: Task group definitions
+        boot_spawn_names: Parallel array — task names spawned during init
+        boot_spawn_counts: Parallel array — spawn count per task name
+    """
+    init_functions: [text]
+    init_reachable: [text]
+    spawn_sites: [SpawnSite]
+    task_infos: [TaskInfo]
+    group_infos: [TaskGroupInfo]
+    boot_spawn_names: [text]
+    boot_spawn_counts: [i64]
+
+struct SpawnDiagnostic:
+    """A single diagnostic from spawn verification.
+
+    Fields:
+        level: "error", "warning", or "info"
+        message: Human-readable message
+        span: Source location (if available)
+    """
+    level: text
+    message: text
+    span: Span?
+
+struct SpawnVerifyResult:
+    """Complete verification result for spawn analysis.
+
+    Fields:
+        diagnostics: All errors and warnings
+        has_errors: True if any errors were found
+        total_spawns: Total number of spawn sites found
+    """
+    diagnostics: [SpawnDiagnostic]
+    has_errors: bool
+    total_spawns: i64
+
+struct ScanResult:
+    """Result of scanning a function body for spawns and awaits.
+
+    Fields:
+        sites: Spawn sites found in the expression/block
+        found_await: True if an await expression was found
+    """
+    sites: [SpawnSite]
+    found_await: bool
+
+# ================================================================
+# Utility: Parallel Array Helpers
+# ================================================================
+
+fn is_in_list(name: text, names: [text]) -> bool:
+    """Check if a name exists in a list."""
+    for n in names:
+        if n == name:
+            return true
+    false
+
+fn get_boot_spawn_count(task_name: text, names: [text], counts: [i64]) -> i64:
+    """Look up the spawn count for a task name in parallel arrays."""
+    for i in 0..names.len():
+        if names[i] == task_name:
+            return counts[i]
+    0
+
+fn add_boot_spawn(task_name: text, names: [text], counts: [i64]) -> [text]:
+    """Add or increment a spawn count in parallel arrays.
+
+    Returns the updated names array. Caller must also update counts.
+    This is a workaround for not being able to return tuples.
+    Use add_boot_spawn_names and add_boot_spawn_counts together.
+    """
+    for i in 0..names.len():
+        if names[i] == task_name:
+            return names
+    names + [task_name]
+
+fn add_boot_spawn_counts(task_name: text, names: [text], counts: [i64]) -> [i64]:
+    """Update counts array for a spawn. Must be called after add_boot_spawn."""
+    for i in 0..names.len():
+        if names[i] == task_name:
+            # Increment existing count — rebuild array with updated value
+            var new_counts = []
+            for j in 0..counts.len():
+                if j == i:
+                    new_counts = new_counts + [counts[j] + 1]
+                else:
+                    new_counts = new_counts + [counts[j]]
+            return new_counts
+    # New entry
+    counts + [1]
+
+# ================================================================
+# Step 1: Find Init Functions
+# ================================================================
+
+fn find_init_functions(module: Module) -> [text]:
+    """Scan module for @entry and @boot functions.
+
+    Returns names of all functions that are part of the init phase.
+    These are the roots for init-reachable computation.
+    """
+    var init_fns = []
+    for func in module.functions:
+        val attrs = parse_function_attrs(func.attributes)
+        if attrs.is_entry or attrs.is_boot:
+            init_fns = init_fns + [func.name]
+    init_fns
+
+# ================================================================
+# Step 2: Build Call Graph (parallel arrays)
+# ================================================================
+
+fn build_call_graph_callers(module: Module) -> [text]:
+    """Build caller side of call graph edges.
+
+    Returns parallel array with build_call_graph_callees.
+    Each entry is a (caller, callee) pair.
+    """
+    var callers = []
+    for func in module.functions:
+        val callees = extract_callees_from_block(func.body)
+        for callee in callees:
+            callers = callers + [func.name]
+    callers
+
+fn build_call_graph_callees(module: Module) -> [text]:
+    """Build callee side of call graph edges.
+
+    Returns parallel array with build_call_graph_callers.
+    """
+    var callees_out = []
+    for func in module.functions:
+        val callees = extract_callees_from_block(func.body)
+        for callee in callees:
+            callees_out = callees_out + [callee]
+    callees_out
+
+fn extract_callees_from_block(block: Block) -> [text]:
+    """Extract all function names called in a block."""
+    var callees = []
+    for stmt in block.stmts:
+        val stmt_callees = extract_callees_from_stmt(stmt)
+        callees = callees + stmt_callees
+    callees
+
+fn extract_callees_from_stmt(stmt: Stmt) -> [text]:
+    """Extract callees from a statement."""
+    var callees = []
+    match stmt.kind:
+        case StmtKind.Expr(expr):
+            callees = callees + extract_callees_from_expr(expr)
+        case StmtKind.Val(_, _, value):
+            if value != nil:
+                callees = callees + extract_callees_from_expr(value)
+        case StmtKind.Var(_, _, value):
+            if value != nil:
+                callees = callees + extract_callees_from_expr(value)
+        case StmtKind.Assign(_, _, value):
+            callees = callees + extract_callees_from_expr(value)
+        case StmtKind.Return(value):
+            if value != nil:
+                callees = callees + extract_callees_from_expr(value)
+        case StmtKind.While(cond, body):
+            callees = callees + extract_callees_from_expr(cond)
+            callees = callees + extract_callees_from_block(body)
+        case StmtKind.For(_, iter, body):
+            callees = callees + extract_callees_from_expr(iter)
+            callees = callees + extract_callees_from_block(body)
+        case _: ()
+    callees
+
+fn extract_callees_from_expr(expr: Expr) -> [text]:
+    """Extract function names from call expressions."""
+    var callees = []
+    match expr.kind:
+        case ExprKind.Call(func_expr, args):
+            match func_expr.kind:
+                case ExprKind.Ident(name):
+                    callees = callees + [name]
+                case _: ()
+            callees = callees + extract_callees_from_expr(func_expr)
+            for arg in args:
+                callees = callees + extract_callees_from_expr(arg.value)
+        case ExprKind.Binary(left, _, right):
+            callees = callees + extract_callees_from_expr(left)
+            callees = callees + extract_callees_from_expr(right)
+        case ExprKind.Unary(_, operand):
+            callees = callees + extract_callees_from_expr(operand)
+        case ExprKind.If(cond, then_e, else_e):
+            callees = callees + extract_callees_from_expr(cond)
+            callees = callees + extract_callees_from_expr(then_e)
+            if else_e != nil:
+                callees = callees + extract_callees_from_expr(else_e)
+        case ExprKind.Block(block):
+            callees = callees + extract_callees_from_block(block)
+        case _: ()
+    callees
+
+# ================================================================
+# Step 3: Compute Init-Reachable (BFS)
+# ================================================================
+
+fn compute_init_reachable(
+    init_fns: [text],
+    callers: [text],
+    callees: [text]
+) -> [text]:
+    """Compute transitive closure of functions reachable from init.
+
+    Uses BFS starting from init_fns, following call graph edges.
+    Returns all function names reachable from any init function.
+    """
+    var reachable = []
+    # Seed with init functions
+    for fn_name in init_fns:
+        if not is_in_list(fn_name, reachable):
+            reachable = reachable + [fn_name]
+
+    # BFS: process queue
+    var queue_idx = 0
+    # Loop until queue is exhausted
+    for _iter in 0..10000:
+        if queue_idx >= reachable.len():
+            break
+        val current = reachable[queue_idx]
+        queue_idx = queue_idx + 1
+
+        # Find all callees of current
+        for i in 0..callers.len():
+            if callers[i] == current:
+                val callee = callees[i]
+                if not is_in_list(callee, reachable):
+                    reachable = reachable + [callee]
+
+    reachable
+
+# ================================================================
+# Step 4: Find Spawn Sites
+# ================================================================
+
+fn find_spawn_sites(module: Module) -> [SpawnSite]:
+    """Walk all function bodies to find spawn expressions.
+
+    For each function, scans for ExprKind.Spawn or spawn() calls,
+    tracking whether an await has been seen before the spawn.
+    """
+    var sites = []
+    for func in module.functions:
+        val result = scan_block_for_spawns(func.body, func.name)
+        sites = sites + result.sites
+    sites
+
+fn scan_block_for_spawns(block: Block, caller: text) -> ScanResult:
+    """Scan a block for spawn sites and await expressions."""
+    var sites = []
+    var found_await = false
+
+    for stmt in block.stmts:
+        val result = scan_stmt_for_spawns(stmt, caller, found_await)
+        sites = sites + result.sites
+        if result.found_await:
+            found_await = true
+
+    ScanResult(sites: sites, found_await: found_await)
+
+fn scan_stmt_for_spawns(stmt: Stmt, caller: text, seen_await: bool) -> ScanResult:
+    """Scan a statement for spawn sites."""
+    var sites = []
+    var found_await = seen_await
+
+    match stmt.kind:
+        case StmtKind.Expr(expr):
+            val result = scan_expr_for_spawns(expr, caller, found_await)
+            sites = sites + result.sites
+            if result.found_await:
+                found_await = true
+        case StmtKind.Val(_, _, value):
+            if value != nil:
+                val result = scan_expr_for_spawns(value, caller, found_await)
+                sites = sites + result.sites
+                if result.found_await:
+                    found_await = true
+        case StmtKind.Var(_, _, value):
+            if value != nil:
+                val result = scan_expr_for_spawns(value, caller, found_await)
+                sites = sites + result.sites
+                if result.found_await:
+                    found_await = true
+        case _: ()
+
+    ScanResult(sites: sites, found_await: found_await)
+
+fn scan_expr_for_spawns(expr: Expr, caller: text, seen_await: bool) -> ScanResult:
+    """Scan an expression for spawn and await nodes."""
+    var sites = []
+    var found_await = seen_await
+
+    match expr.kind:
+        case ExprKind.Await(_):
+            found_await = true
+
+        case ExprKind.Spawn(task_expr):
+            # Extract task name from spawn expression
+            var task_name = "<unknown>"
+            match task_expr.kind:
+                case ExprKind.Ident(name):
+                    task_name = name
+                case ExprKind.Call(func_expr, _):
+                    match func_expr.kind:
+                        case ExprKind.Ident(name):
+                            task_name = name
+                        case _: ()
+                case _: ()
+            val site = SpawnSite(
+                task_name: task_name,
+                caller_name: caller,
+                is_after_await: found_await,
+                span: expr.span
+            )
+            sites = sites + [site]
+
+        case ExprKind.Call(func_expr, args):
+            # Check for spawn() as a function call
+            match func_expr.kind:
+                case ExprKind.Ident(name):
+                    if name == "spawn":
+                        var task_name = "<unknown>"
+                        if args.len() > 0:
+                            match args[0].value.kind:
+                                case ExprKind.Ident(n):
+                                    task_name = n
+                                case ExprKind.Call(inner_fn, _):
+                                    match inner_fn.kind:
+                                        case ExprKind.Ident(n):
+                                            task_name = n
+                                        case _: ()
+                                case _: ()
+                        val site = SpawnSite(
+                            task_name: task_name,
+                            caller_name: caller,
+                            is_after_await: found_await,
+                            span: expr.span
+                        )
+                        sites = sites + [site]
+                case _: ()
+
+            # Recurse into call arguments
+            for arg in args:
+                val result = scan_expr_for_spawns(arg.value, caller, found_await)
+                sites = sites + result.sites
+                if result.found_await:
+                    found_await = true
+
+        case ExprKind.Binary(left, _, right):
+            val lr = scan_expr_for_spawns(left, caller, found_await)
+            sites = sites + lr.sites
+            if lr.found_await:
+                found_await = true
+            val rr = scan_expr_for_spawns(right, caller, found_await)
+            sites = sites + rr.sites
+            if rr.found_await:
+                found_await = true
+
+        case ExprKind.Block(block):
+            val br = scan_block_for_spawns(block, caller)
+            sites = sites + br.sites
+            if br.found_await:
+                found_await = true
+
+        case _: ()
+
+    ScanResult(sites: sites, found_await: found_await)
+
+# ================================================================
+# Step 5: Collect Task Infos
+# ================================================================
+
+fn collect_task_infos(module: Module) -> [TaskInfo]:
+    """Find all @task-annotated functions in the module."""
+    var infos = []
+    for func in module.functions:
+        val task_attr = parse_task_attr(func.attributes)
+        if task_attr != nil:
+            val ta = task_attr ?? TaskAttr(instances: 1, group: nil, frame: nil, wait_nodes: 0)
+            val info = TaskInfo(
+                name: func.name,
+                instances: ta.instances,
+                group: ta.group
+            )
+            infos = infos + [info]
+    infos
+
+# ================================================================
+# Step 6: Count Boot-Phase Spawns
+# ================================================================
+
+fn count_boot_spawns(
+    sites: [SpawnSite],
+    reachable: [text]
+) -> SpawnAnalysis:
+    """Count spawn sites that are in init-reachable functions.
+
+    Returns a SpawnAnalysis with boot_spawn_names/counts populated.
+    Other fields are left empty — caller fills them in.
+    """
+    var names = []
+    var counts = []
+
+    for site in sites:
+        if is_in_list(site.caller_name, reachable):
+            names = add_boot_spawn(site.task_name, names, counts)
+            counts = add_boot_spawn_counts(site.task_name, names, counts)
+
+    SpawnAnalysis(
+        init_functions: [],
+        init_reachable: [],
+        spawn_sites: [],
+        task_infos: [],
+        group_infos: [],
+        boot_spawn_names: names,
+        boot_spawn_counts: counts
+    )
+
+# ================================================================
+# Step 7: Verification
+# ================================================================
+
+fn verify_spawn_bounds(analysis: SpawnAnalysis) -> SpawnVerifyResult:
+    """Check all spawn boundedness constraints.
+
+    Checks:
+    1. Every spawn site is in an init-reachable function
+    2. No spawn occurs after an await in an init function
+    3. Boot-phase spawn count does not exceed @task instances
+    4. Group totals do not exceed group caps
+    """
+    var diagnostics = []
+    var has_errors = false
+
+    # Check 1: Spawns outside init-reachable
+    for site in analysis.spawn_sites:
+        if not is_in_list(site.caller_name, analysis.init_reachable):
+            val diag = SpawnDiagnostic(
+                level: LEVEL_ERROR,
+                message: "spawn of '{site.task_name}' in '{site.caller_name}' is outside init phase — all spawns must be reachable from @entry/@boot",
+                span: Some(site.span)
+            )
+            diagnostics = diagnostics + [diag]
+            has_errors = true
+
+    # Check 2: Spawn after await in init function
+    for site in analysis.spawn_sites:
+        val in_init = is_in_list(site.caller_name, analysis.init_functions)
+        if in_init and site.is_after_await:
+            val diag = SpawnDiagnostic(
+                level: LEVEL_ERROR,
+                message: "spawn of '{site.task_name}' in '{site.caller_name}' occurs after await — spawns must precede all awaits in init",
+                span: Some(site.span)
+            )
+            diagnostics = diagnostics + [diag]
+            has_errors = true
+
+    # Check 3: Instance limits (ungrouped tasks)
+    for info in analysis.task_infos:
+        if info.group == nil:
+            val count = get_boot_spawn_count(
+                info.name,
+                analysis.boot_spawn_names,
+                analysis.boot_spawn_counts
+            )
+            if count > info.instances:
+                val diag = SpawnDiagnostic(
+                    level: LEVEL_ERROR,
+                    message: "task '{info.name}' spawned {count} times but @task(instances={info.instances})",
+                    span: nil
+                )
+                diagnostics = diagnostics + [diag]
+                has_errors = true
+
+    # Check 4: Group capacity limits
+    for group in analysis.group_infos:
+        var group_total = 0
+        for member in group.members:
+            val count = get_boot_spawn_count(
+                member,
+                analysis.boot_spawn_names,
+                analysis.boot_spawn_counts
+            )
+            group_total = group_total + count
+        if group_total > group.cap:
+            val diag = SpawnDiagnostic(
+                level: LEVEL_ERROR,
+                message: "task group '{group.name}' has {group_total} spawns but cap={group.cap}",
+                span: nil
+            )
+            diagnostics = diagnostics + [diag]
+            has_errors = true
+
+    SpawnVerifyResult(
+        diagnostics: diagnostics,
+        has_errors: has_errors,
+        total_spawns: analysis.spawn_sites.len()
+    )
+
+# ================================================================
+# Entry Points
+# ================================================================
+
+fn analyze_spawns(module: Module) -> SpawnAnalysis:
+    """Analyze spawn boundedness for a module.
+
+    This is the main entry point. It:
+    1. Finds init functions (@entry/@boot)
+    2. Builds call graph and computes init-reachable set
+    3. Finds all spawn sites
+    4. Collects task info from @task attributes
+    5. Counts boot-phase spawns per task
+
+    Args:
+        module: The module to analyze
+
+    Returns:
+        SpawnAnalysis with complete spawn information
+    """
+    val init_fns = find_init_functions(module)
+    val callers = build_call_graph_callers(module)
+    val callees = build_call_graph_callees(module)
+    val reachable = compute_init_reachable(init_fns, callers, callees)
+    val sites = find_spawn_sites(module)
+    val task_infos = collect_task_infos(module)
+    val boot = count_boot_spawns(sites, reachable)
+
+    SpawnAnalysis(
+        init_functions: init_fns,
+        init_reachable: reachable,
+        spawn_sites: sites,
+        task_infos: task_infos,
+        group_infos: [],
+        boot_spawn_names: boot.boot_spawn_names,
+        boot_spawn_counts: boot.boot_spawn_counts
+    )
+
+fn analyze_spawns_with_groups(
+    module: Module,
+    groups: [TaskGroupInfo]
+) -> SpawnAnalysis:
+    """Analyze spawn boundedness with externally-provided group definitions.
+
+    Same as analyze_spawns but includes group information for capacity checks.
+
+    Args:
+        module: The module to analyze
+        groups: Task group definitions
+
+    Returns:
+        SpawnAnalysis with group information included
+    """
+    var result = analyze_spawns(module)
+    SpawnAnalysis(
+        init_functions: result.init_functions,
+        init_reachable: result.init_reachable,
+        spawn_sites: result.spawn_sites,
+        task_infos: result.task_infos,
+        group_infos: groups,
+        boot_spawn_names: result.boot_spawn_names,
+        boot_spawn_counts: result.boot_spawn_counts
+    )
+
+# ================================================================
+# Formatting / Reporting
+# ================================================================
+
+fn format_spawn_analysis(sa: SpawnAnalysis) -> text:
+    """Format spawn analysis for debugging output."""
+    var lines = []
+    lines = lines + ["Spawn Analysis:"]
+    lines = lines + ["  Init functions: {sa.init_functions.len()}"]
+    for fn_name in sa.init_functions:
+        lines = lines + ["    {fn_name}"]
+    lines = lines + ["  Init-reachable: {sa.init_reachable.len()}"]
+    for fn_name in sa.init_reachable:
+        lines = lines + ["    {fn_name}"]
+    lines = lines + ["  Spawn sites: {sa.spawn_sites.len()}"]
+    for site in sa.spawn_sites:
+        var after_str = ""
+        if site.is_after_await:
+            after_str = " (AFTER AWAIT)"
+        lines = lines + ["    spawn {site.task_name} in {site.caller_name}{after_str}"]
+    lines = lines + ["  Task infos: {sa.task_infos.len()}"]
+    for info in sa.task_infos:
+        var group_str = ""
+        if info.group != nil:
+            group_str = " group={info.group ?? \"\"}"
+        lines = lines + ["    {info.name}: instances={info.instances}{group_str}"]
+    if sa.boot_spawn_names.len() > 0:
+        lines = lines + ["  Boot spawns:"]
+        for i in 0..sa.boot_spawn_names.len():
+            lines = lines + ["    {sa.boot_spawn_names[i]}: {sa.boot_spawn_counts[i]}"]
+    lines.join("\n")
+
+fn format_spawn_verify_result(result: SpawnVerifyResult) -> text:
+    """Format verification result for display."""
+    var lines = []
+    val status = "pass"
+    var status_str = status
+    if result.has_errors:
+        status_str = "FAIL"
+    lines = lines + ["Spawn Verification: {status_str} ({result.total_spawns} spawn sites)"]
+    if result.diagnostics.len() == 0:
+        lines = lines + ["  All spawn checks passed."]
+        return lines.join("\n")
+    for diag in result.diagnostics:
+        lines = lines + ["  [{diag.level}] {diag.message}"]
+    lines.join("\n")
+
+# ================================================================
+# Exports
+# ================================================================
+
+export SpawnSite
+export TaskInfo
+export TaskGroupInfo
+export SpawnAnalysis
+export SpawnDiagnostic
+export SpawnVerifyResult
+export ScanResult
+export LEVEL_ERROR, LEVEL_WARNING, LEVEL_INFO
+
+export is_in_list
+export get_boot_spawn_count
+export add_boot_spawn, add_boot_spawn_counts
+
+export find_init_functions
+export build_call_graph_callers, build_call_graph_callees
+export compute_init_reachable
+export find_spawn_sites
+export collect_task_infos
+export count_boot_spawns
+
+export analyze_spawns
+export analyze_spawns_with_groups
+export verify_spawn_bounds
+export format_spawn_analysis
+export format_spawn_verify_result

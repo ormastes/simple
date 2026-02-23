@@ -1,0 +1,365 @@
+# LSP Emitter
+#
+# Language Server Protocol diagnostic output.
+# Provides LSP-compatible diagnostic format for IDE integration.
+# See: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/
+
+import ..level
+import ..location
+import ..report
+import ..collector
+
+export LspEmitter, LspDiagnostic, LspDiagnosticSeverity, LspDiagnosticTag, LspCodeAction, LspTextEdit
+
+# =============================================================================
+# LspDiagnosticSeverity: LSP severity levels (1-4)
+# =============================================================================
+
+enum LspDiagnosticSeverity:
+    Error           # 1
+    Warning         # 2
+    Information     # 3
+    Hint            # 4
+
+impl LspDiagnosticSeverity:
+    fn value() -> i64:
+        match self:
+            case LspDiagnosticSeverity.Error: 1
+            case LspDiagnosticSeverity.Warning: 2
+            case LspDiagnosticSeverity.Information: 3
+            case LspDiagnosticSeverity.Hint: 4
+
+    fn name() -> text:
+        match self:
+            case LspDiagnosticSeverity.Error: "Error"
+            case LspDiagnosticSeverity.Warning: "Warning"
+            case LspDiagnosticSeverity.Information: "Information"
+            case LspDiagnosticSeverity.Hint: "Hint"
+
+    static fn from_report_level(level: ReportLevel) -> LspDiagnosticSeverity:
+        match level:
+            case ReportLevel.Error: LspDiagnosticSeverity.Error
+            case ReportLevel.Fatal: LspDiagnosticSeverity.Error
+            case ReportLevel.Warning: LspDiagnosticSeverity.Warning
+            case ReportLevel.Info: LspDiagnosticSeverity.Information
+            case ReportLevel.Debug: LspDiagnosticSeverity.Hint
+
+# =============================================================================
+# LspDiagnosticTag: LSP diagnostic tags
+# =============================================================================
+
+enum LspDiagnosticTag:
+    Unnecessary     # 1 - Rendered faded out
+    Deprecated      # 2 - Rendered with strikethrough
+
+impl LspDiagnosticTag:
+    fn value() -> i64:
+        match self:
+            case LspDiagnosticTag.Unnecessary: 1
+            case LspDiagnosticTag.Deprecated: 2
+
+# =============================================================================
+# LspTextEdit: A text edit for code actions
+# =============================================================================
+
+struct LspTextEdit:
+    start_line: i64             # 0-based line
+    start_character: i64        # 0-based character
+    end_line: i64               # 0-based line
+    end_character: i64          # 0-based character
+    new_text: text
+
+impl LspTextEdit:
+    static fn from_suggestion(suggestion: Suggestion) -> LspTextEdit:
+        LspTextEdit(
+            start_line: suggestion.location.line - 1,          # Convert to 0-based
+            start_character: suggestion.location.column - 1,
+            end_line: suggestion.location.get_end_line() - 1,
+            end_character: suggestion.location.get_end_column() - 1,
+            new_text: suggestion.new_text
+        )
+
+# =============================================================================
+# LspCodeAction: A code action (quick fix)
+# =============================================================================
+
+struct LspCodeAction:
+    title: text
+    kind: text                  # "quickfix", "refactor", etc.
+    edits: [LspTextEdit]
+    is_preferred: bool
+
+impl LspCodeAction:
+    static fn quick_fix(title: text, edits: [LspTextEdit]) -> LspCodeAction:
+        LspCodeAction(
+            title: title,
+            kind: "quickfix",
+            edits: edits,
+            is_preferred: false
+        )
+
+    static fn preferred_fix(title: text, edits: [LspTextEdit]) -> LspCodeAction:
+        LspCodeAction(
+            title: title,
+            kind: "quickfix",
+            edits: edits,
+            is_preferred: true
+        )
+
+# =============================================================================
+# LspDiagnostic: LSP-formatted diagnostic
+# =============================================================================
+
+class LspDiagnostic:
+    uri: text                           # Document URI
+    start_line: i64                     # 0-based line
+    start_character: i64                # 0-based character
+    end_line: i64                       # 0-based line
+    end_character: i64                  # 0-based character
+    severity: LspDiagnosticSeverity
+    code: text?
+    code_description_href: text?        # URI for error code docs
+    source: text?
+    message: text
+    tags: [LspDiagnosticTag]
+    related_information: [(text, i64, i64, text)]  # (uri, line, char, message)
+    code_actions: [LspCodeAction]
+
+impl LspDiagnostic:
+    static fn from_report(report: Report, uri: text) -> LspDiagnostic:
+        var start_line = 0
+        var start_char = 0
+        var end_line = 0
+        var end_char = 0
+
+        if report.location.?:
+            val loc = report.location.unwrap()
+            start_line = loc.line - 1           # Convert to 0-based
+            start_char = loc.column - 1
+            end_line = loc.get_end_line() - 1
+            end_char = loc.get_end_column() - 1
+
+        var diag = LspDiagnostic(
+            uri: uri,
+            start_line: start_line,
+            start_character: start_char,
+            end_line: end_line,
+            end_character: end_char,
+            severity: LspDiagnosticSeverity.from_report_level(report.level),
+            code: report.code,
+            code_description_href: nil,
+            source: report.source_name,
+            message: report.message,
+            tags: [],
+            related_information: [],
+            code_actions: []
+        )
+
+        # Add tags based on report kind
+        match report.kind:
+            case ReportKind.DeprecationWarning:
+                diag.tags.push(LspDiagnosticTag.Deprecated)
+            case _:
+                pass
+
+        # Add related information from labels
+        for label in report.labels:
+            val loc = label.location
+            diag.related_information.push((
+                loc.file,
+                loc.line - 1,
+                loc.column - 1,
+                label.message
+            ))
+
+        # Add code actions from suggestions
+        for suggestion in report.suggestions:
+            val edit = LspTextEdit.from_suggestion(suggestion)
+            val action = if suggestion.confidence.is_safe_to_auto_apply():
+                LspCodeAction.preferred_fix(suggestion.message, [edit])
+            else:
+                LspCodeAction.quick_fix(suggestion.message, [edit])
+            diag.code_actions.push(action)
+
+        diag
+
+# =============================================================================
+# LspEmitter: Emits LSP-formatted diagnostics
+# =============================================================================
+
+class LspEmitter:
+    source_name: text
+
+impl LspEmitter:
+    static fn default_emitter() -> LspEmitter:
+        LspEmitter(source_name: "simple")
+
+    static fn with_source(source: text) -> LspEmitter:
+        LspEmitter(source_name: source)
+
+    # ==========================================================================
+    # JSON encoding helpers
+    # ==========================================================================
+
+    fn escape_string(s: text) -> text:
+        s.replace("\\", "\\\\")
+         .replace("\"", "\\\"")
+         .replace("\n", "\\n")
+         .replace("\r", "\\r")
+         .replace("\t", "\\t")
+
+    fn encode_string(s: text) -> text:
+        "\"{self.escape_string(s)}\""
+
+    # ==========================================================================
+    # Emit methods
+    # ==========================================================================
+
+    fn emit_diagnostic(report: Report, uri: text) -> text:
+        val diag = LspDiagnostic.from_report(report, uri)
+        self.emit_lsp_diagnostic(diag)
+
+    fn emit_lsp_diagnostic(diag: LspDiagnostic) -> text:
+        var output = "{"
+
+        # Range
+        output = output + "\"range\":{"
+        output = output + "\"start\":{\"line\":{diag.start_line},\"character\":{diag.start_character}},"
+        output = output + "\"end\":{\"line\":{diag.end_line},\"character\":{diag.end_character}}"
+        output = output + "},"
+
+        # Severity
+        output = output + "\"severity\":{diag.severity.value()},"
+
+        # Code
+        if diag.code.?:
+            output = output + "\"code\":{self.encode_string(diag.code.unwrap())},"
+            if diag.code_description_href.?:
+                output = output + "\"codeDescription\":{\"href\":{self.encode_string(diag.code_description_href.unwrap())}},"
+
+        # Source
+        if diag.source.?:
+            output = output + "\"source\":{self.encode_string(diag.source.unwrap())},"
+        else:
+            output = output + "\"source\":{self.encode_string(self.source_name)},"
+
+        # Message
+        output = output + "\"message\":{self.encode_string(diag.message)}"
+
+        # Tags
+        if not diag.tags.is_empty():
+            output = output + ",\"tags\":["
+            var first = true
+            for tag in diag.tags:
+                if not first:
+                    output = output + ","
+                output = output + "{tag.value()}"
+                first = false
+            output = output + "]"
+
+        # Related information
+        if not diag.related_information.is_empty():
+            output = output + ",\"relatedInformation\":["
+            var first = true
+            for info in diag.related_information:
+                if not first:
+                    output = output + ","
+                output = output + "{"
+                output = output + "\"location\":{\"uri\":{self.encode_string(info.0)},\"range\":{\"start\":{\"line\":{info.1},\"character\":{info.2}},\"end\":{\"line\":{info.1},\"character\":{info.2 + 1}}}},"
+                output = output + "\"message\":{self.encode_string(info.3)}"
+                output = output + "}"
+                first = false
+            output = output + "]"
+
+        output = output + "}"
+        output
+
+    fn emit_diagnostics(reports: [Report], uri: text) -> text:
+        var output = "["
+        var first = true
+        for report in reports:
+            if not first:
+                output = output + ","
+            output = output + self.emit_diagnostic(report, uri)
+            first = false
+        output = output + "]"
+        output
+
+    fn emit_publish_diagnostics(uri: text, reports: [Report]) -> text:
+        var output = "{"
+        output = output + "\"jsonrpc\":\"2.0\","
+        output = output + "\"method\":\"textDocument/publishDiagnostics\","
+        output = output + "\"params\":{"
+        output = output + "\"uri\":{self.encode_string(uri)},"
+        output = output + "\"diagnostics\":" + self.emit_diagnostics(reports, uri)
+        output = output + "}}"
+        output
+
+    # ==========================================================================
+    # Code actions
+    # ==========================================================================
+
+    fn emit_code_action(action: LspCodeAction, uri: text) -> text:
+        var output = "{"
+        output = output + "\"title\":{self.encode_string(action.title)},"
+        output = output + "\"kind\":{self.encode_string(action.kind)}"
+
+        if action.is_preferred:
+            output = output + ",\"isPreferred\":true"
+
+        if not action.edits.is_empty():
+            output = output + ",\"edit\":{\"changes\":{\"{uri}\":["
+            var first = true
+            for edit in action.edits:
+                if not first:
+                    output = output + ","
+                output = output + self.emit_text_edit(edit)
+                first = false
+            output = output + "]}}"
+
+        output = output + "}"
+        output
+
+    fn emit_text_edit(edit: LspTextEdit) -> text:
+        var output = "{"
+        output = output + "\"range\":{"
+        output = output + "\"start\":{\"line\":{edit.start_line},\"character\":{edit.start_character}},"
+        output = output + "\"end\":{\"line\":{edit.end_line},\"character\":{edit.end_character}}"
+        output = output + "},"
+        output = output + "\"newText\":{self.encode_string(edit.new_text)}"
+        output = output + "}"
+        output
+
+    fn emit_code_actions_for_diagnostic(diag: LspDiagnostic, uri: text) -> text:
+        var output = "["
+        var first = true
+        for action in diag.code_actions:
+            if not first:
+                output = output + ","
+            output = output + self.emit_code_action(action, uri)
+            first = false
+        output = output + "]"
+        output
+
+    # ==========================================================================
+    # Grouped by file
+    # ==========================================================================
+
+    fn emit_by_file(collector: ReportCollector) -> Dict<text, text>:
+        var by_file: Dict<text, [Report]> = {}
+
+        for report in collector.filter_displayable():
+            val file = if report.location.?:
+                report.location.unwrap().file
+            else:
+                "<unknown>"
+
+            if not by_file.has(file):
+                by_file[file] = []
+            by_file[file].push(report)
+
+        var results: Dict<text, text> = {}
+        for file in by_file.keys():
+            results[file] = self.emit_diagnostics(by_file[file], file)
+
+        results

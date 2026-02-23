@@ -1,0 +1,516 @@
+"""
+# Sync File I/O
+
+Handle-based file operations implementing Read, Write, Seek, Close traits.
+Plus static convenience class File for one-shot operations.
+
+## Components
+
+| Type | Traits | Description |
+|------|--------|-------------|
+| FileHandle | Read, Write, Seek, Close | fd-based file handle |
+| File | (static) | One-shot convenience methods |
+
+FileMode and FileMetadata are defined in `std.common.io.types`.
+
+## Handle-Based Usage
+
+```simple
+val fh = FileHandle.open("/tmp/io_test_handle.txt", FileMode.WriteOnly)?
+fh.write_text("hello from handle")?
+fh.flush()?
+fh.close()?
+
+val fh2 = FileHandle.read_file("/tmp/io_test_handle.txt")?
+val content = fh2.read_text()?
+expect content == "hello from handle"
+fh2.close()?
+```
+
+## Static Convenience
+
+```simple
+File.write("/tmp/io_test_static.txt", "hello from File")?
+val text = File.read("/tmp/io_test_static.txt")?
+expect text == "hello from File"
+expect File.exists("/tmp/io_test_static.txt") == true
+File.delete("/tmp/io_test_static.txt")?
+```
+
+## Seek and Rewind
+
+```simple
+val fh = FileHandle.open("/tmp/io_test_seek.txt", FileMode.ReadWrite)?
+fh.write_text("abcdef")?
+fh.rewind()?
+val content = fh.read_text()?
+expect content == "abcdef"
+fh.close()?
+```
+
+## File Copy
+
+```simple
+File.write("/tmp/io_test_copy_src.txt", "copy me")?
+File.copy("/tmp/io_test_copy_src.txt", "/tmp/io_test_copy_dst.txt")?
+val copied = File.read("/tmp/io_test_copy_dst.txt")?
+expect copied == "copy me"
+```
+"""
+
+use std.common.io.traits.{Read, Write, Seek, Close}
+use std.common.io.types.{IoError, IoErrorKind, SeekFrom, FileMode, FileMetadata}
+
+# ============================================================================
+# FileHandle - Trait-Based File Handle
+# ============================================================================
+
+class FileHandle with Read, Write, Seek, Close:
+    """File handle implementing Read, Write, Seek, Close.
+
+    Wraps a file descriptor for fine-grained I/O control.
+
+    Example:
+        val fh = FileHandle.open("data.bin", FileMode.ReadWrite)?
+        fh.write_text("hello")?
+        fh.rewind()?
+        val content = fh.read_text()?
+        fh.close()?
+    """
+    fd: i64
+    mode: FileMode
+    open: bool
+
+    # --- Factory ---
+
+    static fn open(path: text, mode: FileMode) -> Result<FileHandle, IoError>:
+        """Open file with specified mode.
+
+        Args:
+            path: File path
+            mode: Open mode
+
+        Returns:
+            Result with FileHandle or IoError
+        """
+        val mode_int = match mode:
+            case FileMode.ReadOnly: 0
+            case FileMode.WriteOnly: 1
+            case FileMode.ReadWrite: 2
+            case FileMode.Append: 3
+        val fd = rt_io_file_open(path, mode_int)
+        if fd < 0:
+            return Err(IoError.new(IoErrorKind.NotFound, "failed to open: {path}"))
+        Ok(FileHandle(fd: fd, mode: mode, open: true))
+
+    static fn read_file(path: text) -> Result<FileHandle, IoError>:
+        """Open file for reading.
+
+        Args:
+            path: File path
+
+        Returns:
+            Result with FileHandle in ReadOnly mode
+        """
+        FileHandle.open(path, FileMode.ReadOnly)
+
+    static fn create(path: text) -> Result<FileHandle, IoError>:
+        """Create file for writing (truncates if exists).
+
+        Args:
+            path: File path
+
+        Returns:
+            Result with FileHandle in WriteOnly mode
+        """
+        FileHandle.open(path, FileMode.WriteOnly)
+
+    static fn append(path: text) -> Result<FileHandle, IoError>:
+        """Open file for appending.
+
+        Args:
+            path: File path
+
+        Returns:
+            Result with FileHandle in Append mode
+        """
+        FileHandle.open(path, FileMode.Append)
+
+    # --- Read trait ---
+
+    fn read(size: i64) -> Result<[u8], IoError>:
+        """Read up to size bytes.
+
+        Args:
+            size: Maximum bytes to read
+
+        Returns:
+            Result with bytes read
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val data = rt_io_file_read(self.fd, size)
+        if data.len() < 0:
+            return Err(IoError.new(IoErrorKind.Other, "read failed"))
+        Ok(data)
+
+    fn read_exact(size: i64) -> Result<[u8], IoError>:
+        """Read exactly size bytes (blocks until filled or EOF).
+
+        Args:
+            size: Exact number of bytes
+
+        Returns:
+            Result with bytes, or UnexpectedEof if short
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val data = rt_io_file_read(self.fd, size)
+        if data.len() != size:
+            return Err(IoError.new(IoErrorKind.UnexpectedEof, "read_exact: got {data.len()} of {size} bytes"))
+        Ok(data)
+
+    fn read_all() -> Result<[u8], IoError>:
+        """Read all remaining bytes.
+
+        Returns:
+            Result with all bytes
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val data = rt_io_file_read_all(self.fd)
+        Ok(data)
+
+    fn read_text() -> Result<text, IoError>:
+        """Read all remaining content as text.
+
+        Returns:
+            Result with text content
+        """
+        val bytes = self.read_all()?
+        val s = rt_bytes_to_text(bytes)
+        Ok(s)
+
+    fn read_line() -> Result<text, IoError>:
+        """Read a single line (up to newline).
+
+        Returns:
+            Result with line including newline
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val line = rt_io_file_read_line(self.fd)
+        if line == nil:
+            return Err(IoError.new(IoErrorKind.UnexpectedEof, "end of file"))
+        Ok(line)
+
+    # --- Write trait ---
+
+    fn write(data: [u8]) -> Result<i64, IoError>:
+        """Write bytes, returning number written.
+
+        Args:
+            data: Bytes to write
+
+        Returns:
+            Result with bytes written count
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val written = rt_io_file_write(self.fd, data)
+        if written < 0:
+            return Err(IoError.new(IoErrorKind.Other, "write failed"))
+        Ok(written)
+
+    fn write_all(data: [u8]) -> Result<(), IoError>:
+        """Write all bytes (blocks until done).
+
+        Args:
+            data: Bytes to write
+
+        Returns:
+            Result or error
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val ok = rt_io_file_write_all(self.fd, data)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "write_all failed"))
+        Ok(())
+
+    fn write_text(s: text) -> Result<(), IoError>:
+        """Write text string.
+
+        Args:
+            s: Text to write
+
+        Returns:
+            Result or error
+        """
+        val bytes = rt_text_to_bytes(s)
+        self.write_all(bytes)
+
+    fn flush() -> Result<(), IoError>:
+        """Flush write buffer to disk.
+
+        Returns:
+            Result or error
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val ok = rt_io_file_flush(self.fd)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "flush failed"))
+        Ok(())
+
+    # --- Seek trait ---
+
+    fn seek(pos: SeekFrom) -> Result<i64, IoError>:
+        """Seek to position.
+
+        Args:
+            pos: Seek target (Start, Current, or End with offset)
+
+        Returns:
+            Result with new absolute position
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val (offset, whence) = match pos:
+            case SeekFrom.Start(o): (o, 0)
+            case SeekFrom.Current(o): (o, 1)
+            case SeekFrom.End(o): (o, 2)
+        val new_pos = rt_io_file_seek(self.fd, offset, whence)
+        if new_pos < 0:
+            return Err(IoError.new(IoErrorKind.Other, "seek failed"))
+        Ok(new_pos)
+
+    fn position() -> Result<i64, IoError>:
+        """Get current position in file.
+
+        Returns:
+            Result with current byte offset
+        """
+        self.seek(SeekFrom.Current(0))
+
+    fn rewind() -> Result<(), IoError>:
+        """Seek back to beginning of file.
+
+        Returns:
+            Result or error
+        """
+        self.seek(SeekFrom.Start(0))?
+        Ok(())
+
+    # --- Close trait ---
+
+    me close() -> Result<(), IoError>:
+        """Close file handle and release fd.
+
+        Returns:
+            Result or error
+        """
+        if not self.open:
+            return Ok(())
+        val ok = rt_io_file_close(self.fd)
+        self.open = false
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "close failed"))
+        Ok(())
+
+    fn is_open() -> bool:
+        """Check if file handle is still open."""
+        self.open
+
+    # --- File-specific ---
+
+    fn metadata() -> Result<FileMetadata, IoError>:
+        """Get file metadata.
+
+        Returns:
+            Result with FileMetadata
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val meta = rt_io_file_metadata(self.fd)
+        if meta == nil:
+            return Err(IoError.new(IoErrorKind.Other, "metadata failed"))
+        Ok(meta)
+
+    fn size() -> Result<i64, IoError>:
+        """Get file size in bytes.
+
+        Returns:
+            Result with size
+        """
+        val meta = self.metadata()?
+        Ok(meta.size)
+
+    fn set_permissions(readonly: bool) -> Result<(), IoError>:
+        """Set file permissions.
+
+        Args:
+            readonly: true to make read-only
+
+        Returns:
+            Result or error
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "file handle is closed"))
+        val ok = rt_io_file_set_permissions(self.fd, readonly)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "set_permissions failed"))
+        Ok(())
+
+# ============================================================================
+# File - Static Convenience
+# ============================================================================
+
+class File:
+    """One-shot file operations (no handle management needed).
+
+    Example:
+        val content = File.read("config.sdn")?
+        File.write("output.txt", content)?
+    """
+
+    static fn read(path: text) -> Result<text, IoError>:
+        """Read entire file as text.
+
+        Args:
+            path: File path
+
+        Returns:
+            Result with text content
+        """
+        val fh = FileHandle.read_file(path)?
+        val content = fh.read_text()?
+        fh.close()?
+        Ok(content)
+
+    static fn read_bytes(path: text) -> Result<[u8], IoError>:
+        """Read entire file as bytes.
+
+        Args:
+            path: File path
+
+        Returns:
+            Result with byte array
+        """
+        val fh = FileHandle.read_file(path)?
+        val data = fh.read_all()?
+        fh.close()?
+        Ok(data)
+
+    static fn write(path: text, content: text) -> Result<(), IoError>:
+        """Write text to file (creates/truncates).
+
+        Args:
+            path: File path
+            content: Text to write
+
+        Returns:
+            Result or error
+        """
+        val fh = FileHandle.create(path)?
+        fh.write_text(content)?
+        fh.close()?
+        Ok(())
+
+    static fn write_bytes(path: text, data: [u8]) -> Result<(), IoError>:
+        """Write bytes to file (creates/truncates).
+
+        Args:
+            path: File path
+            data: Bytes to write
+
+        Returns:
+            Result or error
+        """
+        val fh = FileHandle.create(path)?
+        fh.write_all(data)?
+        fh.close()?
+        Ok(())
+
+    static fn append(path: text, content: text) -> Result<(), IoError>:
+        """Append text to file.
+
+        Args:
+            path: File path
+            content: Text to append
+
+        Returns:
+            Result or error
+        """
+        val fh = FileHandle.append(path)?
+        fh.write_text(content)?
+        fh.close()?
+        Ok(())
+
+    static fn copy(src: text, dst: text) -> Result<(), IoError>:
+        """Copy file from src to dst.
+
+        Args:
+            src: Source path
+            dst: Destination path
+
+        Returns:
+            Result or error
+        """
+        val data = File.read_bytes(src)?
+        File.write_bytes(dst, data)
+
+    static fn exists(path: text) -> bool:
+        """Check if file exists.
+
+        Args:
+            path: File path
+
+        Returns:
+            true if exists
+        """
+        rt_io_file_exists(path)
+
+    static fn delete(path: text) -> Result<(), IoError>:
+        """Delete a file.
+
+        Args:
+            path: File path
+
+        Returns:
+            Result or error
+        """
+        val ok = rt_io_file_delete(path)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.NotFound, "delete failed: {path}"))
+        Ok(())
+
+# ============================================================================
+# FFI Functions
+# ============================================================================
+
+# File handle operations
+extern fn rt_io_file_open(path: text, mode: i64) -> i64
+extern fn rt_io_file_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_file_read_all(fd: i64) -> [u8]
+extern fn rt_io_file_read_line(fd: i64) -> text?
+extern fn rt_io_file_write(fd: i64, data: [u8]) -> i64
+extern fn rt_io_file_write_all(fd: i64, data: [u8]) -> bool
+extern fn rt_io_file_seek(fd: i64, offset: i64, whence: i64) -> i64
+extern fn rt_io_file_flush(fd: i64) -> bool
+extern fn rt_io_file_close(fd: i64) -> bool
+extern fn rt_io_file_metadata(fd: i64) -> FileMetadata?
+extern fn rt_io_file_set_permissions(fd: i64, readonly: bool) -> bool
+extern fn rt_io_file_exists(path: text) -> bool
+extern fn rt_io_file_delete(path: text) -> bool
+
+# Text/bytes conversion
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export FileHandle
+export File

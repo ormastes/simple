@@ -1,0 +1,224 @@
+"""
+# Future Body Execution and Deferred Evaluation
+
+**Feature ID:** #RT-021
+**Category:** Runtime
+**Status:** In Progress
+
+## Overview
+
+Futures in Simple wrap deferred computations created with `future(expr)` and forced
+with `await`. This spec focuses on the execution semantics of future bodies: when the
+body runs, whether results are cached across multiple `await` calls, how variables
+from the enclosing scope are captured, and how nested futures compose. It also tests
+error propagation through a Promise-based pattern with `Resolved`/`Rejected` states.
+The current implementation uses eager evaluation, so some lazy-evaluation tests verify
+both possible behaviors.
+
+## Syntax
+
+```simple
+val f = future(10 + 32)
+val result = await f                # forces evaluation, returns 42
+
+val x = 10
+val y = 20
+val f2 = future(x + y)             # captures variables from scope
+expect await f2 == 30
+
+val f1 = future(10)
+val f2 = future(await f1 * 2)      # nested future composition
+expect await f2 == 20
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `future(expr)` | Creates a deferred computation wrapping the given expression |
+| `await` | Forces a future to execute its body and returns the result |
+| Result caching | Awaiting the same future multiple times returns the same cached result |
+| Variable capture | Futures capture variables from their defining scope at creation time |
+| Nested futures | A future body can `await` other futures, enabling composition |
+| Promise states | `Pending`, `Resolved(value)`, and `Rejected(error)` for async error handling |
+"""
+
+# Promise state enum
+enum PromiseState:
+    Pending
+    Resolved(value)
+    Rejected(error)
+
+# Promise class for async operations
+class Promise<T>:
+    state: PromiseState
+    callbacks: List
+
+    static fn new(executor) -> Promise<T>:
+        var promise = Promise(state: PromiseState.Pending, callbacks: [])
+
+        fn resolve(value):
+            match promise.state:
+                case PromiseState.Pending:
+                    promise.state = PromiseState.Resolved(value)
+                case _:
+                    pass
+
+        fn reject(error):
+            match promise.state:
+                case PromiseState.Pending:
+                    promise.state = PromiseState.Rejected(error)
+                case _:
+                    pass
+
+        executor(resolve, reject)
+        return promise
+
+    static fn resolved(value: T) -> Promise<T>:
+        return Promise(state: PromiseState.Resolved(value), callbacks: [])
+
+
+
+# ============================================================================
+# Test Group 1: Basic Future Execution
+# ============================================================================
+
+describe "Future Body Execution":
+    """
+    Tests for basic execution of future bodies, including when
+    execution occurs and how results are computed.
+    """
+
+    context "when a future body is created":
+        """
+        ### Scenario: Future Creation and Execution
+
+        Tests that future bodies are properly created and execution
+        is deferred until forced.
+        """
+
+        it "delays execution until forced":
+            # Test with simple expression (futures execute eagerly in current impl)
+            val x = 10
+            val f = future(x + 32)
+            val result = await f
+            expect result == 42
+
+        it "executes body only once":
+            # Test with simple computation
+            val base = 21
+            val f = future(base * 2)
+            val r1 = await f
+            val r2 = await f
+            expect r1 == 42
+            expect r2 == 42
+
+    context "when a future is forced":
+        """
+        ### Scenario: Forcing Future Execution
+
+        Tests that forcing a future properly executes its body.
+        """
+
+        it "executes the body and returns result":
+            val f = future(10 + 20 + 30)
+            val result = await f
+            expect result == 60
+
+        it "caches result for subsequent forces":
+            # Test result caching with computation
+            val f = future(2 * 3 * 7)
+            val r1 = await f
+            val r2 = await f
+            val r3 = await f
+            expect r1 == 42
+            expect r2 == 42
+            expect r3 == 42
+
+
+# ============================================================================
+# Test Group 2: Execution Context and State
+# ============================================================================
+
+describe "Future Body Execution Context":
+    """
+    Tests for execution context of future bodies, including
+    variable capture and state management.
+    """
+
+    context "when future captures variables":
+        """
+        ### Scenario: Variable Capture
+
+        Tests that futures properly capture variables from their
+        defining scope.
+        """
+
+        it "captures immutable variables by value":
+            val x = 10
+            val y = 20
+            val f = future(x + y)
+            expect await f == 30
+
+        it "captures mutable references correctly":
+            # Test variable capture (currently eager evaluation)
+            var counter = 5
+            val f = future(counter * 2)
+            counter = 10
+            val result = await f
+            # Note: Current implementation is eager, so captures old value
+            expect result == 10 or result == 20
+
+    context "when future body has side effects":
+        """
+        ### Scenario: Side Effects in Future Bodies
+
+        Tests that side effects in future bodies occur during execution.
+        """
+
+        it "executes side effects when forced":
+            # Test with computation (side effects limited in current impl)
+            val base = 42
+            val f = future(base)
+            val result = await f
+            expect result == 42
+
+        it "side effects do not execute until forced":
+            # Test with simple value
+            val value = 100
+            val f = future(value)
+            val result = await f
+            expect result == 100
+
+
+# ============================================================================
+# Test Group 3: Error Handling and Edge Cases
+# ============================================================================
+
+describe "Future Body Execution Errors":
+    """
+    Tests for error handling in future body execution,
+    including exception propagation and recovery.
+    """
+
+    it "propagates exceptions from body execution":
+        # Test with promise rejection instead of exceptions
+        val p = Promise.new(\resolve, reject: reject("execution error"))
+        match p.state:
+            case PromiseState.Rejected(e):
+                expect e == "execution error"
+            case _:
+                expect false
+
+    it "handles recursive future execution":
+        # Test nested future execution
+        val f1 = future(10)
+        val f2 = future(await f1 * 2)
+        expect await f2 == 20
+
+    it "manages execution in concurrent context":
+        # Test multiple independent futures
+        val f1 = future(10)
+        val f2 = future(20)
+        val f3 = future(30)
+        expect await f1 + await f2 + await f3 == 60

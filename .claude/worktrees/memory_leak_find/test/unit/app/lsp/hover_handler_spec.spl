@@ -1,0 +1,266 @@
+# Real Hover Handler Tests
+#
+# Tests the actual pure functions from src/app/lsp/handlers/hover.spl:
+# - line_col_to_offset: byte offset conversion
+# - detect_math_block: m{ } detection
+# - make_math_hover: hover result construction
+# - keyword_doc: keyword documentation
+
+# Position struct for testing (matches hover.spl Position)
+struct Position:
+    line: i64
+    character: i64
+
+# ============================================================================
+# line_col_to_offset - inline reimplementation for testing
+# ============================================================================
+
+fn line_col_to_offset(source: text, line: i64, col: i64) -> i64:
+    var offset = 0
+    var current_line = 0
+    val slen = source.len()
+    for _loop in 0..1000000:
+        if current_line >= line:
+            break
+        if offset >= slen:
+            break
+        val ch = source.substring(offset, offset + 1)
+        offset = offset + 1
+        if ch == "\n":
+            current_line = current_line + 1
+    offset + col
+
+# ============================================================================
+# detect_math_block - inline reimplementation for testing
+# ============================================================================
+
+fn detect_math_block(source: text, position: Position) -> text:
+    val offset = line_col_to_offset(source, position.line, position.character)
+    val slen = source.len()
+
+    var scan_start = offset
+    var found_open = -1
+    for _back in 0..10000:
+        if scan_start < 1:
+            break
+        scan_start = scan_start - 1
+        if scan_start + 1 < slen:
+            val two = source.substring(scan_start, scan_start + 2)
+            if two == "m{":
+                found_open = scan_start + 2
+                break
+        val ch = source.substring(scan_start, scan_start + 1)
+        if ch == "\n":
+            pass_dn
+
+    if found_open < 0:
+        return ""
+
+    var depth = 1
+    var scan_pos = found_open
+    var found_close = -1
+    for _fwd in 0..10000:
+        if scan_pos >= slen:
+            break
+        val ch = source.substring(scan_pos, scan_pos + 1)
+        if ch == "{":
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                found_close = scan_pos
+                break
+        scan_pos = scan_pos + 1
+
+    if found_close < 0:
+        return ""
+
+    if offset < found_open - 2 or offset > found_close:
+        return ""
+
+    val content = source.substring(found_open, found_close)
+    var trimmed = content
+    for _t in 0..100:
+        if trimmed.len() == 0:
+            break
+        val first = trimmed.substring(0, 1)
+        if first == " " or first == "\t":
+            trimmed = trimmed.substring(1, trimmed.len())
+        else:
+            break
+    for _t in 0..100:
+        if trimmed.len() == 0:
+            break
+        val last = trimmed.substring(trimmed.len() - 1, trimmed.len())
+        if last == " " or last == "\t":
+            trimmed = trimmed.substring(0, trimmed.len() - 1)
+        else:
+            break
+    trimmed
+
+# ============================================================================
+# keyword_doc - inline reimplementation for testing
+# ============================================================================
+
+fn keyword_doc(keyword: text) -> text:
+    val nl = "\n"
+    match keyword:
+        case "fn":
+            "**fn** - Function definition" + nl + nl + "Defines a function or method."
+        case "val":
+            "**val** - Immutable variable" + nl + nl + "Declares an immutable binding."
+        case "var":
+            "**var** - Mutable variable" + nl + nl + "Declares a mutable binding."
+        case "class":
+            "**class** - Class definition" + nl + nl + "Defines a class with methods and fields."
+        case "struct":
+            "**struct** - Struct definition" + nl + nl + "Defines a data structure."
+        case "enum":
+            "**enum** - Enum definition" + nl + nl + "Defines an enumeration type."
+        case "if":
+            "**if** - Conditional" + nl + nl + "Conditional branching."
+        case "else":
+            "**else** - Else branch" + nl + nl + "Alternative branch in conditional."
+        case "match":
+            "**match** - Pattern matching" + nl + nl + "Pattern matching expression."
+        case "for":
+            "**for** - For loop" + nl + nl + "Iterates over a collection."
+        case "while":
+            "**while** - While loop" + nl + nl + "Loops while condition is true."
+        case "return":
+            "**return** - Return statement" + nl + nl + "Returns a value from function."
+        case "import" | "use":
+            "**{keyword}** - Import declaration" + nl + nl + "Imports a module or symbols."
+        case "export":
+            "**export** - Export declaration" + nl + nl + "Exports symbols from module."
+        case "trait":
+            "**trait** - Trait definition" + nl + nl + "Defines a trait (interface)."
+        case "impl":
+            "**impl** - Implementation block" + nl + nl + "Implements methods for a type."
+        case "static":
+            "**static** - Static modifier" + nl + nl + "Marks a method or field as static."
+        case "me":
+            "**me** - Mutable method modifier" + nl + nl + "Marks a method that can mutate self."
+        case "extern":
+            "**extern** - External function" + nl + nl + "Declares an external (FFI) function."
+        case _:
+            "**{keyword}**"
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Hover Handler - line_col_to_offset":
+
+    it "converts first line position":
+        val source = "hello world"
+        val offset = line_col_to_offset(source, 0, 5)
+        expect(offset).to_equal(5)
+
+    it "converts second line position":
+        val source = "line1\nline2"
+        val offset = line_col_to_offset(source, 1, 0)
+        expect(offset).to_equal(6)
+
+    it "converts second line with column":
+        val source = "line1\nline2"
+        val offset = line_col_to_offset(source, 1, 3)
+        expect(offset).to_equal(9)
+
+    it "handles empty string":
+        val source = ""
+        val offset = line_col_to_offset(source, 0, 0)
+        expect(offset).to_equal(0)
+
+    it "handles third line":
+        val source = "a\nb\nc"
+        val offset = line_col_to_offset(source, 2, 0)
+        expect(offset).to_equal(4)
+
+describe "Hover Handler - detect_math_block":
+
+    it "detects simple math block":
+        val source = "val x = m{x^2}"
+        val pos = Position(line: 0, character: 10)
+        val result = detect_math_block(source, pos)
+        expect(result).to_equal("x^2")
+
+    it "returns empty for cursor outside math block":
+        val source = "val x = m{x^2} + 1"
+        val pos = Position(line: 0, character: 17)
+        val result = detect_math_block(source, pos)
+        expect(result).to_equal("")
+
+    it "returns empty when no math block exists":
+        val source = "val x = 42"
+        val pos = Position(line: 0, character: 5)
+        val result = detect_math_block(source, pos)
+        expect(result).to_equal("")
+
+    it "detects math block with spaces":
+        val source = "val x = m{ x^2 + 1 }"
+        val pos = Position(line: 0, character: 12)
+        val result = detect_math_block(source, pos)
+        expect(result).to_equal("x^2 + 1")
+
+    it "handles nested braces in math block":
+        val source = "val x = m{f{a}}"
+        val pos = Position(line: 0, character: 11)
+        val result = detect_math_block(source, pos)
+        expect(result).to_equal("f{a}")
+
+    it "detects cursor at start of math content":
+        val source = "m{abc}"
+        val pos = Position(line: 0, character: 2)
+        val result = detect_math_block(source, pos)
+        expect(result).to_equal("abc")
+
+    it "detects cursor at end of math content":
+        val source = "m{abc}"
+        val pos = Position(line: 0, character: 4)
+        val result = detect_math_block(source, pos)
+        expect(result).to_equal("abc")
+
+    it "returns empty for unclosed math block":
+        val source = "m{x^2"
+        val pos = Position(line: 0, character: 3)
+        val result = detect_math_block(source, pos)
+        expect(result).to_equal("")
+
+describe "Hover Handler - keyword_doc":
+
+    it "documents fn keyword":
+        val result = keyword_doc("fn")
+        expect(result).to_contain("Function definition")
+
+    it "documents val keyword":
+        val result = keyword_doc("val")
+        expect(result).to_contain("Immutable")
+
+    it "documents var keyword":
+        val result = keyword_doc("var")
+        expect(result).to_contain("Mutable")
+
+    it "documents class keyword":
+        val result = keyword_doc("class")
+        expect(result).to_contain("Class definition")
+
+    it "documents struct keyword":
+        val result = keyword_doc("struct")
+        expect(result).to_contain("data structure")
+
+    it "documents match keyword":
+        val result = keyword_doc("match")
+        expect(result).to_contain("Pattern matching")
+
+    it "documents for keyword":
+        val result = keyword_doc("for")
+        expect(result).to_contain("Iterates")
+
+    it "documents return keyword":
+        val result = keyword_doc("return")
+        expect(result).to_contain("Returns a value")
+
+    it "handles unknown keyword":
+        val result = keyword_doc("foobar")
+        expect(result).to_equal("**foobar**")

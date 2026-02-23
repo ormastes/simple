@@ -1,0 +1,101 @@
+"""
+# MCP Library Integration Tests
+
+**Feature ID:** #MCP-LIB-004
+**Category:** Standard Library
+**Status:** Active
+
+## Overview
+
+End-to-end integration tests for the MCP library verifying complete request-response
+cycles. Tests building MCP initialize responses, tools/list responses with pre-computed
+schemas, JSON-RPC method extraction, error response creation, session lifecycle management,
+tool handler registration and lookup, and full request-response simulation including
+argument extraction and tool result building.
+
+## Syntax
+
+```simple
+val request = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"""
+val method = extract_json_string_v2(request, "method")
+expect(method).to_equal("initialize")
+
+init_core_schemas()
+val tools = get_all_tool_schemas()
+expect(tools).to_contain("read_code")
+```
+"""
+# MCP Library Integration Test
+# End-to-end test of library functionality
+
+use std.mcp.{create_mcp_state, create_tool_handler, register_tool_handler, find_tool_handler, jp, js, jo3, make_result_response, make_error_response, extract_json_string_v2, get_all_tool_schemas, init_core_schemas}
+use std.sspec
+
+describe("MCP Library - Integration"):
+    it("builds complete MCP initialize response"):
+        val init_result = """{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}"""
+        val response = jo3(
+            jp("jsonrpc", js("2.0")),
+            jp("id", "1"),
+            jp("result", init_result)
+        )
+        expect(response).to_contain("\"jsonrpc\":\"2.0\"")
+        expect(response).to_contain("\"id\":1")
+        expect(response).to_contain("protocolVersion")
+
+    it("builds tools/list response with pre-computed schemas"):
+        init_core_schemas()
+        val tools = get_all_tool_schemas()
+        expect(tools).to_start_with("[")
+        expect(tools).to_contain("read_code")
+
+    it("extracts method from JSON-RPC request"):
+        val request = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"""
+        val method = extract_json_string_v2(request, "method")
+        expect(method).to_equal("initialize")
+
+    it("creates error response"):
+        val error = make_error_response("42", -32600, "Invalid request")
+        expect(error).to_contain("\"id\":42")
+        expect(error).to_contain("\"error\"")
+        expect(error).to_contain("-32600")
+        expect(error).to_contain("Invalid request")
+
+    it("manages session lifecycle"):
+        var state = create_mcp_state()
+        expect(state.initialized).to_equal(false)
+
+        state.initialized = true
+        expect(state.initialized).to_equal(true)
+
+    it("registers and finds tool handlers"):
+        val handler = create_tool_handler(
+            "test_tool",
+            "Test tool",
+            """{"name":"test_tool"}""",
+            "app.handlers.test",
+            "handle_test"
+        )
+        register_tool_handler(handler)
+
+        val found = find_tool_handler("test_tool")
+        expect(found.name).to_equal("test_tool")
+        expect(found.handler_module).to_equal("app.handlers.test")
+
+    it("handles full request-response cycle"):
+        # Simulate receiving a request
+        val request = """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_code","arguments":{"path":"test.spl"}}}"""
+
+        # Extract components
+        val method = extract_json_string_v2(request, "method")
+        expect(method).to_equal("tools/call")
+
+        # Extract argument
+        val path = extract_arg(request, "path")
+        expect(path).to_equal("test.spl")
+
+        # Build tool result response
+        val tool_result = make_tool_result("3", "File content here")
+        expect(tool_result).to_contain("\"id\":3")
+        expect(tool_result).to_contain("\"result\"")
+        expect(tool_result).to_contain("File content here")

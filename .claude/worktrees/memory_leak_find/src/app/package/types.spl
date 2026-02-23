@@ -1,0 +1,165 @@
+# Package Manager - Type Definitions
+# Shared types used across the package management system
+
+# ============================================================================
+# Version Types
+# ============================================================================
+
+struct Version:
+    """Semantic version (MAJOR.MINOR.PATCH)"""
+    major: i64
+    minor: i64
+    patch: i64
+    prerelease: text?    # Optional: "alpha.1", "beta.2"
+    build: text?         # Optional: build metadata
+
+    fn to_string() -> text:
+        val base = "{self.major}.{self.minor}.{self.patch}"
+        var pre = ""
+        if self.prerelease.is_some():
+            pre = "-" + self.prerelease.unwrap()
+        var bld = ""
+        if self.build.is_some():
+            bld = "+" + self.build.unwrap()
+        base + pre + bld
+
+enum VersionConstraint:
+    """Version constraint for dependencies"""
+    Any                                    # * - any version
+    Exact(version: Version)               # 1.2.3 - exact match
+    Caret(version: Version)               # ^1.2.3 - >=1.2.3, <2.0.0
+    Tilde(version: Version)               # ~1.2.3 - >=1.2.3, <1.3.0
+    Greater(version: Version)             # >1.2.3
+    GreaterEqual(version: Version)        # >=1.2.3
+    Less(version: Version)                # <2.0.0
+    LessEqual(version: Version)           # <=2.0.0
+
+# ============================================================================
+# Dependency Types
+# ============================================================================
+
+enum DependencySource:
+    """Where a dependency comes from"""
+    Registry                              # Published package (future)
+    Git(url: text, ref: GitRef)
+    Path(path: text)                      # Relative or absolute path
+
+enum GitRef:
+    """Git reference type"""
+    Tag(name: text)                       # Specific tag (v1.2.3)
+    Branch(name: text)                    # Branch name (main, develop)
+    Commit(hash: text)                    # Commit SHA
+
+struct Dependency:
+    """A package dependency"""
+    name: text
+    constraint: VersionConstraint
+    source: DependencySource
+    optional: bool                        # Optional dependency
+
+    static fn registry(name: text, constraint: VersionConstraint) -> Dependency:
+        Dependency(
+            name: name,
+            constraint: constraint,
+            source: DependencySource.Registry,
+            optional: false
+        )
+
+    static fn path(name: text, path: text) -> Dependency:
+        Dependency(
+            name: name,
+            constraint: VersionConstraint.Any,
+            source: DependencySource.Path(path: path),
+            optional: false
+        )
+
+    static fn git(name: text, url: text, ref: GitRef) -> Dependency:
+        Dependency(
+            name: name,
+            constraint: VersionConstraint.Any,
+            source: DependencySource.Git(url: url, ref: ref),
+            optional: false
+        )
+
+# ============================================================================
+# Manifest Types
+# ============================================================================
+
+struct PackageInfo:
+    """Package metadata from simple.sdn"""
+    name: text
+    version: Version
+    description: text?
+    authors: [text]
+    license: text?
+    repository: text?
+    homepage: text?
+
+struct Manifest:
+    """Parsed simple.sdn file"""
+    package: PackageInfo
+    dependencies: [Dependency]
+    dev_dependencies: [Dependency]
+
+    fn all_dependencies() -> [Dependency]:
+        """Get all dependencies (regular + dev)"""
+        self.dependencies.merge(self.dev_dependencies)
+
+    fn has_dependency(name: text) -> bool:
+        """Check if package has a dependency"""
+        self.all_dependencies().any(\dep: dep.name == name)
+
+# ============================================================================
+# Lockfile Types
+# ============================================================================
+
+struct LockedPackage:
+    """A resolved package in the lockfile"""
+    name: text
+    version: Version
+    source: text              # "registry", "git+url#commit", "path+path"
+    checksum: text            # "sha256:abc123..."
+    dependencies: [text]      # Names of direct dependencies
+
+struct Lockfile:
+    """Parsed simple.lock file"""
+    version: i64              # Lockfile format version
+    generated: text           # ISO 8601 timestamp
+    packages: [LockedPackage]
+
+    fn find_package(name: text) -> LockedPackage?:
+        """Find a locked package by name"""
+        for pkg in self.packages:
+            if pkg.name == name:
+                return Some(pkg)
+        nil
+
+    fn has_package(name: text) -> bool:
+        """Check if lockfile contains a package"""
+        self.find_package(name).is_some()
+
+# ============================================================================
+# Resolution Types
+# ============================================================================
+
+struct ResolvedDependency:
+    """A resolved dependency with concrete version"""
+    name: text
+    version: Version
+    source: DependencySource
+    checksum: text?
+
+struct ResolutionResult:
+    """Result of dependency resolution"""
+    packages: [ResolvedDependency]
+    conflicts: [text]         # List of conflicts (if any)
+
+    fn is_success() -> bool:
+        self.conflicts.is_empty()
+
+    fn has_conflicts() -> bool:
+        not self.conflicts.is_empty()
+
+export Version, VersionConstraint, DependencySource, GitRef, Dependency
+export PackageInfo, Manifest, LockedPackage, Lockfile
+export ResolvedDependency, ResolutionResult

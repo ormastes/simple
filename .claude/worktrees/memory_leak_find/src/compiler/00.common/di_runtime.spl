@@ -1,0 +1,161 @@
+# DI Runtime - Lazy Dependency Injection Engine
+#
+# Core engine for lazy service resolution with singleton caching,
+# cascade forcing, and cycle detection. Uses module-level parallel
+# arrays (interpreter mode does not support Dict<> generics).
+#
+# Usage:
+#   di_register("json_helpers", fn(): init_json_helpers(), true)
+#   val svc = di_resolve("json_helpers")
+#   di_reset()  # Clear all (for tests)
+#
+# Cascade: When factory A calls di_resolve("B"), B is forced transitively.
+# Cycle detection: Re-entrant factory call panics with clear error.
+#
+# See Also:
+#   - src/compiler/di_config.spl - SDN config loader
+#   - src/lib/nogc_sync_mut/lazy_val.spl - LazyStatus pattern reference
+#   - doc/design/di_auto_lazy_proxy.md - Design document
+
+export di_register, di_resolve, di_reset, di_stats, di_is_registered
+export di_force_count, di_service_names
+
+# ============================================================================
+# Module-level state (parallel arrays, no Dict<> generics)
+# ============================================================================
+
+var _di_names: [text] = []
+var _di_factories = []
+var _di_instances = []
+var _di_has_instance: [bool] = []
+var _di_initializing: [bool] = []
+var _di_lazy_flags: [bool] = []
+var _di_force_count: i64 = 0
+
+# ============================================================================
+# Internal lookup
+# ============================================================================
+
+fn _di_find(name: text) -> i64:
+    var idx = 0
+    while idx < _di_names.len():
+        if _di_names[idx] == name:
+            return idx
+        idx = idx + 1
+    -1
+
+# ============================================================================
+# Registration
+# ============================================================================
+
+# Register a service factory with lazy/eager flag.
+#
+# Parameters:
+#   name: Service identifier (e.g., "json_helpers")
+#   factory: Factory function that creates the service instance
+#   lazy: If true, defer creation to first resolve; if false, create immediately
+fn di_register(name: text, factory: fn(), lazy: bool):
+    val existing = _di_find(name)
+    if existing >= 0:
+        # Re-register: update in place
+        _di_factories[existing] = factory
+        _di_lazy_flags[existing] = lazy
+        _di_initializing[existing] = false
+        _di_has_instance[existing] = false
+        if not lazy:
+            val instance = factory()
+            _di_instances[existing] = instance
+            _di_has_instance[existing] = true
+        return
+    # New registration
+    _di_names.push(name)
+    _di_factories.push(factory)
+    _di_instances.push(nil)
+    _di_has_instance.push(false)
+    _di_initializing.push(false)
+    _di_lazy_flags.push(lazy)
+    if not lazy:
+        val last = _di_names.len() - 1
+        val instance = factory()
+        _di_instances[last] = instance
+        _di_has_instance[last] = true
+
+# ============================================================================
+# Resolution
+# ============================================================================
+
+# Resolve a service by name.
+#
+# If already instantiated, returns cached instance.
+# If lazy and not yet instantiated, forces creation (with cascade + cycle detection).
+# If not registered, prints error and returns nil.
+fn di_resolve(name: text):
+    val idx = _di_find(name)
+    if idx < 0:
+        print "DI ERROR: No service registered: {name}"
+        return nil
+    if _di_has_instance[idx]:
+        return _di_instances[idx]
+    return _di_force_at(idx, name)
+
+# Force a lazy service at a given index, with cascade and cycle detection.
+fn _di_force_at(idx: i64, name: text):
+    if _di_initializing[idx]:
+        print "DI PANIC: Circular dependency detected: {name}"
+        return nil
+    _di_initializing[idx] = true
+    val factory = _di_factories[idx]
+    val instance = factory()
+    _di_instances[idx] = instance
+    _di_has_instance[idx] = true
+    _di_initializing[idx] = false
+    _di_force_count = _di_force_count + 1
+    instance
+
+# ============================================================================
+# Utilities
+# ============================================================================
+
+# Check if a service is registered.
+fn di_is_registered(name: text) -> bool:
+    _di_find(name) >= 0
+
+# Reset all DI state (for tests).
+fn di_reset():
+    _di_names = []
+    _di_factories = []
+    _di_instances = []
+    _di_has_instance = []
+    _di_initializing = []
+    _di_lazy_flags = []
+    _di_force_count = 0
+
+# Return diagnostic stats as text.
+fn di_stats() -> text:
+    var registered = _di_names.len()
+    var instantiated = 0
+    var lazy_count = 0
+    var eager_count = 0
+    var idx = 0
+    while idx < registered:
+        if _di_has_instance[idx]:
+            instantiated = instantiated + 1
+        if _di_lazy_flags[idx]:
+            lazy_count = lazy_count + 1
+        else:
+            eager_count = eager_count + 1
+        idx = idx + 1
+    "DI: {registered} registered, {instantiated} instantiated, {lazy_count} lazy, {eager_count} eager, {_di_force_count} forced"
+
+# Return number of forced (lazy-resolved) services.
+fn di_force_count() -> i64:
+    _di_force_count
+
+# Return list of registered service names.
+fn di_service_names() -> [text]:
+    var names: [text] = []
+    var idx = 0
+    while idx < _di_names.len():
+        names.push(_di_names[idx])
+        idx = idx + 1
+    names

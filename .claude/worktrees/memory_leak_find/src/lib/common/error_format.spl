@@ -1,0 +1,255 @@
+# Error Formatting - Consistent Error Display
+#
+# Formatting utilities for error messages and error context display.
+# Provides consistent error output across all modules.
+#
+# Design:
+# - Pure formatting functions
+# - No allocation when not formatting
+# - Supports color output (controlled by caller)
+# - Consistent format: "error[KIND]: file:line:col: message"
+#
+# Usage:
+#   val formatted = format_error_message(error)
+#   print formatted
+#
+# Architecture:
+# - Functions take ErrorBase and return formatted text
+# - No global state
+# - Caller controls output destination
+
+use std.error_core.{ErrorBase, error_message, error_location, error_file, error_kind, error_has_cause, error_get_cause}
+
+# Local helper to avoid core.types import issues at runtime
+fn int_to_str(n: i64) -> text:
+    if n == 0:
+        return "0"
+    var result = ""
+    var num = n
+    var negative = false
+    if num < 0:
+        negative = true
+        num = -num
+    while num > 0:
+        val digit = num % 10
+        val char_code = 48 + digit
+        result = char_from_digit(digit) + result
+        num = num / 10
+    if negative:
+        result = "-" + result
+    result
+
+fn char_from_digit(d: i64) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    if d == 9: return "9"
+    return ""
+
+# ============================================================================
+# Error Message Formatting
+# ============================================================================
+
+fn format_error_message(error: ErrorBase) -> text:
+    """Format error with standard format.
+
+    Format: "error[KIND]: file:line:col: message"
+
+    Args:
+        error: Error to format
+
+    Returns:
+        Formatted error message
+
+    Example:
+        val msg = format_error_message(error)
+        # "error[parse]: main.spl:42:15: unexpected token"
+    """
+    val kind = error_kind(error)
+    val message = error_message(error)
+    val (line, col) = error_location(error)
+    val file = error_file(error)
+
+    var result = "error[" + kind + "]"
+
+    # Add location if available
+    if file != "":
+        result = result + ": " + file
+    if line > 0:
+        result = result + ":" + int_to_str(line)
+        if col > 0:
+            result = result + ":" + int_to_str(col)
+
+    # Add message
+    if file != "" or line > 0:
+        result = result + ": " + message
+    else:
+        result = result + ": " + message
+
+    # Add cause if present
+    if error_has_cause(error):
+        val cause = error_get_cause(error)
+        result = result + "\n" + "  Caused by: " + cause
+
+    result
+
+fn format_error_compact(error: ErrorBase) -> text:
+    """Format error without location details.
+
+    Args:
+        error: Error to format
+
+    Returns:
+        Compact message
+
+    Example:
+        val msg = format_error_compact(error)
+        # "parse error: unexpected token"
+    """
+    val kind = error_kind(error)
+    val message = error_message(error)
+    kind + " error: " + message
+
+fn format_error_with_context(error: ErrorBase, context: text) -> text:
+    """Format error with additional context.
+
+    Args:
+        error: Error to format
+        context: Additional context string
+
+    Returns:
+        Error with context
+
+    Example:
+        val msg = format_error_with_context(error, "in function 'calculate'")
+    """
+    val base = format_error_message(error)
+    base + "\n" + "  " + context
+
+# ============================================================================
+# Source Location Formatting
+# ============================================================================
+
+fn format_source_location(file: text, line: i64, column: i64) -> text:
+    """Format source location as "file:line:col".
+
+    Args:
+        file: Source file path
+        line: Line number
+        column: Column number
+
+    Returns:
+        Formatted location
+
+    Example:
+        val loc = format_source_location("main.spl", 42, 15)
+        # "main.spl:42:15"
+    """
+    var result = file
+    if line > 0:
+        result = result + ":" + int_to_str(line)
+        if column > 0:
+            result = result + ":" + int_to_str(column)
+    result
+
+fn format_location_line_only(file: text, line: i64) -> text:
+    """Format source location as "file:line".
+
+    Args:
+        file: Source file path
+        line: Line number
+
+    Returns:
+        Formatted location without column
+    """
+    file + ":" + int_to_str(line)
+
+# ============================================================================
+# Error List Formatting
+# ============================================================================
+
+fn format_error_list(errors: [ErrorBase]) -> text:
+    """Format multiple errors.
+
+    Args:
+        errors: List of errors
+
+    Returns:
+        Multi-line formatted error list
+
+    Example:
+        val summary = format_error_list(errors)
+    """
+    if errors.len() == 0:
+        return "No errors"
+
+    var result = int_to_str(errors.len()) + " error(s):" + "\n"
+    var i = 0
+    while i < errors.len():
+        val error = errors[i]
+        result = result + "  " + format_error_message(error) + "\n"
+        i = i + 1
+    result
+
+fn format_error_summary(error_count: i64, warning_count: i64) -> text:
+    """Format error/warning summary.
+
+    Args:
+        error_count: Number of errors
+        warning_count: Number of warnings
+
+    Returns:
+        Summary text
+
+    Example:
+        val summary = format_error_summary(3, 5)
+        # "3 error(s), 5 warning(s)"
+    """
+    int_to_str(error_count) + " error(s), " + int_to_str(warning_count) + " warning(s)"
+
+# ============================================================================
+# Error Context Helpers
+# ============================================================================
+
+fn format_function_context(function_name: text, error: ErrorBase) -> text:
+    """Format error in function context.
+
+    Args:
+        function_name: Function name
+        error: Error
+
+    Returns:
+        Error with function context
+
+    Example:
+        val msg = format_function_context("calculate", error)
+        # "error in 'calculate': division by zero"
+    """
+    "error in '" + function_name + "': " + error_message(error)
+
+fn format_stage_context(stage: text, error: ErrorBase) -> text:
+    """Format error in pipeline stage context.
+
+    Args:
+        stage: Stage name (e.g., "parsing", "type checking")
+        error: Error
+
+    Returns:
+        Error with stage context
+    """
+    "error during " + stage + ": " + error_message(error)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export format_error_message, format_error_compact, format_error_with_context
+export format_source_location, format_location_line_only
+export format_error_list, format_error_summary
+export format_function_context, format_stage_context

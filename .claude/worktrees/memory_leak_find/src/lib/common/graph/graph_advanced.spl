@@ -1,0 +1,359 @@
+# Graph Utility Functions — Advanced Algorithms
+#
+# Extracted from utilities.spl. Contains:
+# - Advanced path algorithms (all paths, longest path DAG)
+# - Graph isomorphism and comparison
+# - Eulerian and Hamiltonian properties
+# - Clustering and triangles
+# - Utility functions (print, clone, filtering)
+
+mod graph.types
+mod graph.traversal
+mod graph.strongly_connected
+
+# ============================================================================
+# Advanced Path Algorithms
+# ============================================================================
+
+# Find all simple paths between two vertices using DFS
+fn graph_all_paths(graph: tuple, start: i64, end: i64) -> list:
+    var all_paths = []
+
+    fn dfs_paths(current: i64, target: i64, path: list, visited: map) -> bool:
+        var new_path = path.append(current)
+        var new_visited = visited.set(current, true)
+
+        if current == target:
+            all_paths = all_paths.append(new_path)
+            return true
+
+        var neighbors = graph_neighbors(graph, current)
+        var i = 0
+        while i < neighbors.len():
+            var neighbor = neighbors.get(i)
+            var neighbor_id = neighbor.0
+            var is_visited = new_visited.get(neighbor_id)
+            if is_visited == nil:
+                dfs_paths(neighbor_id, target, new_path, new_visited)
+            i = i + 1
+
+        true
+
+    dfs_paths(start, end, [], {})
+    all_paths
+
+# Count all paths between two vertices
+fn graph_count_paths(graph: tuple, start: i64, end: i64) -> i64:
+    var paths = graph_all_paths(graph, start, end)
+    paths.len()
+
+# Find longest path in DAG
+fn graph_longest_path_dag(graph: tuple) -> i64:
+    var topo = graph_topological_sort(graph)
+    if topo.len() == 0:
+        return 0
+
+    var distances = {}
+    var num_vertices = graph.2
+
+    var i = 0
+    while i < num_vertices:
+        distances = distances.set(i, 0)
+        i = i + 1
+
+    var j = 0
+    while j < topo.len():
+        var vertex = topo.get(j)
+        var current_dist = distances.get(vertex)
+        var neighbors = graph_neighbors(graph, vertex)
+        var k = 0
+        while k < neighbors.len():
+            var neighbor = neighbors.get(k)
+            var neighbor_id = neighbor.0
+            var neighbor_dist = distances.get(neighbor_id)
+            var new_dist = current_dist + 1
+            if new_dist > neighbor_dist:
+                distances = distances.set(neighbor_id, new_dist)
+            k = k + 1
+        j = j + 1
+
+    # Find maximum distance
+    var max_dist = 0
+    var m = 0
+    while m < num_vertices:
+        var dist = distances.get(m)
+        if dist > max_dist:
+            max_dist = dist
+        m = m + 1
+
+    max_dist
+
+# ============================================================================
+# Graph Isomorphism and Comparison
+# ============================================================================
+
+# Check if two graphs have same number of vertices and edges
+fn graph_same_size(g1: tuple, g2: tuple) -> bool:
+    var v1 = graph_num_vertices(g1)
+    var v2 = graph_num_vertices(g2)
+    var e1 = graph_num_edges(g1)
+    var e2 = graph_num_edges(g2)
+
+    v1 == v2 && e1 == e2
+
+# Get degree sequence (sorted list of all vertex degrees)
+fn graph_degree_sequence(graph: tuple) -> list:
+    var num_vertices = graph.2
+    var degrees = []
+
+    var i = 0
+    while i < num_vertices:
+        var degree = graph_degree(graph, i)
+        degrees = degrees.append(degree)
+        i = i + 1
+
+    # Sort degrees (bubble sort)
+    var n = degrees.len()
+    var swapped = true
+    while swapped:
+        swapped = false
+        var j = 1
+        while j < n:
+            var d1 = degrees.get(j - 1)
+            var d2 = degrees.get(j)
+            if d1 > d2:
+                degrees = degrees.set(j - 1, d2)
+                degrees = degrees.set(j, d1)
+                swapped = true
+            j = j + 1
+        n = n - 1
+
+    degrees
+
+# ============================================================================
+# Eulerian and Hamiltonian Properties
+# ============================================================================
+
+# Check if graph has Eulerian path (path visiting every edge once)
+fn graph_has_eulerian_path(graph: tuple) -> bool:
+    if graph.0:
+        # Directed graph
+        var num_vertices = graph.2
+        var in_degree_diff = 0
+        var out_degree_diff = 0
+
+        var i = 0
+        while i < num_vertices:
+            var in_deg = graph_in_degree(graph, i)
+            var out_deg = graph_out_degree(graph, i)
+            if in_deg != out_deg:
+                if in_deg == out_deg + 1:
+                    in_degree_diff = in_degree_diff + 1
+                else:
+                    if out_deg == in_deg + 1:
+                        out_degree_diff = out_degree_diff + 1
+                    else:
+                        return false
+            i = i + 1
+
+        in_degree_diff <= 1 && out_degree_diff <= 1
+    else:
+        # Undirected graph
+        var num_vertices = graph.2
+        var odd_degree_count = 0
+
+        var j = 0
+        while j < num_vertices:
+            var degree = graph_degree(graph, j)
+            if degree % 2 == 1:
+                odd_degree_count = odd_degree_count + 1
+            j = j + 1
+
+        odd_degree_count == 0 || odd_degree_count == 2
+
+# Check if graph has Eulerian circuit (cycle visiting every edge once)
+fn graph_has_eulerian_circuit(graph: tuple) -> bool:
+    if !graph_is_connected(graph):
+        return false
+
+    if graph.0:
+        # Directed graph: all vertices must have equal in and out degree
+        var num_vertices = graph.2
+        var i = 0
+        while i < num_vertices:
+            if graph_in_degree(graph, i) != graph_out_degree(graph, i):
+                return false
+            i = i + 1
+        true
+    else:
+        # Undirected graph: all vertices must have even degree
+        var num_vertices = graph.2
+        var j = 0
+        while j < num_vertices:
+            var degree = graph_degree(graph, j)
+            if degree % 2 == 1:
+                return false
+            j = j + 1
+        true
+
+# ============================================================================
+# Clustering and Triangles
+# ============================================================================
+
+# Count triangles in undirected graph
+fn graph_count_triangles(graph: tuple) -> i64:
+    var num_vertices = graph.2
+    var count = 0
+
+    var i = 0
+    while i < num_vertices:
+        var neighbors_i = graph_neighbors(graph, i)
+        var j = 0
+        while j < neighbors_i.len():
+            var neighbor_j = neighbors_i.get(j)
+            var vertex_j = neighbor_j.0
+
+            if vertex_j > i:
+                var neighbors_j = graph_neighbors(graph, vertex_j)
+                var k = 0
+                while k < neighbors_j.len():
+                    var neighbor_k = neighbors_j.get(k)
+                    var vertex_k = neighbor_k.0
+
+                    if vertex_k > vertex_j:
+                        if graph_has_edge(graph, i, vertex_k):
+                            count = count + 1
+                    k = k + 1
+            j = j + 1
+        i = i + 1
+
+    count
+
+# Calculate clustering coefficient for a vertex
+fn graph_clustering_coefficient(graph: tuple, vertex: i64) -> f64:
+    var neighbors = graph_neighbors(graph, vertex)
+    var k = neighbors.len()
+
+    if k < 2:
+        return 0.0
+
+    var edges_between = 0
+    var i = 0
+    while i < k:
+        var neighbor_i = neighbors.get(i)
+        var vertex_i = neighbor_i.0
+        var j = i + 1
+        while j < k:
+            var neighbor_j = neighbors.get(j)
+            var vertex_j = neighbor_j.0
+            if graph_has_edge(graph, vertex_i, vertex_j):
+                edges_between = edges_between + 1
+            j = j + 1
+        i = i + 1
+
+    var max_edges = (k * (k - 1)) / 2
+    (edges_between as f64) / (max_edges as f64)
+
+# Calculate average clustering coefficient
+fn graph_avg_clustering_coefficient(graph: tuple) -> f64:
+    var num_vertices = graph.2
+    if num_vertices == 0:
+        return 0.0
+
+    var total = 0.0
+    var i = 0
+    while i < num_vertices:
+        total = total + graph_clustering_coefficient(graph, i)
+        i = i + 1
+
+    total / (num_vertices as f64)
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+# Print graph structure (for debugging)
+fn graph_print(graph: tuple) -> text:
+    var directed = graph.0
+    var weighted = graph.1
+    var num_vertices = graph.2
+    var edges = graph.3
+
+    var result = "Graph("
+    if directed:
+        result = result + "directed"
+    else:
+        result = result + "undirected"
+
+    if weighted:
+        result = result + ", weighted"
+    else:
+        result = result + ", unweighted"
+
+    result = result + ", vertices: {num_vertices}, edges: {edges.len()})\n"
+
+    var i = 0
+    while i < num_vertices:
+        result = result + "  {i}: "
+        var neighbors = graph_neighbors(graph, i)
+        var j = 0
+        while j < neighbors.len():
+            var neighbor = neighbors.get(j)
+            result = result + "{neighbor.0}"
+            if weighted:
+                result = result + "({neighbor.1})"
+            if j < neighbors.len() - 1:
+                result = result + ", "
+            j = j + 1
+        result = result + "\n"
+        i = i + 1
+
+    result
+
+# Clone a graph
+fn graph_clone(graph: tuple) -> tuple:
+    var directed = graph.0
+    var weighted = graph.1
+    var num_vertices = graph.2
+    var edges = graph.3
+
+    var new_graph = graph_with_vertices(directed, weighted, num_vertices)
+
+    var i = 0
+    while i < edges.len():
+        var edge = edges.get(i)
+        new_graph = graph_add_edge(new_graph, edge.0, edge.1, edge.2)
+        i = i + 1
+
+    new_graph
+
+# Check if edge exists
+fn graph_has_edge(graph: tuple, from: i64, to: i64) -> bool:
+    var neighbors = graph_neighbors(graph, from)
+    var i = 0
+    while i < neighbors.len():
+        var neighbor = neighbors.get(i)
+        if neighbor.0 == to:
+            return true
+        i = i + 1
+    false
+
+# Get subgraph containing only edges with weight >= threshold
+fn graph_filter_by_weight(graph: tuple, threshold: f64) -> tuple:
+    var directed = graph.0
+    var weighted = graph.1
+    var num_vertices = graph.2
+    var edges = graph.3
+
+    var filtered = graph_with_vertices(directed, weighted, num_vertices)
+
+    var i = 0
+    while i < edges.len():
+        var edge = edges.get(i)
+        if edge.2 >= threshold:
+            filtered = graph_add_edge(filtered, edge.0, edge.1, edge.2)
+        i = i + 1
+
+    filtered
+
+export *

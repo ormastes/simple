@@ -1,0 +1,242 @@
+# Protocol Buffers Decoding Functions
+
+from "std/protobuf/types" import bytes_to_string
+
+# ==============================================================================
+# Varint Decoding
+# ==============================================================================
+
+# Decode varint from byte list starting at offset
+# Returns (value, bytes_consumed) or nil on error
+fn decode_varint(bytes: list, offset: i64) -> any:
+    var result = 0
+    var shift = 0
+    var pos = offset
+    var byte_count = bytes.length()
+
+    loop:
+        if pos >= byte_count:
+            return nil
+        if shift >= 64:
+            return nil
+
+        var byte_val = bytes[pos]
+        var has_more = (byte_val & 128) != 0
+        var value_bits = byte_val & 127
+
+        result = result | (value_bits << shift)
+        pos = pos + 1
+        shift = shift + 7
+
+        if not has_more:
+            break
+
+    (result, pos - offset)
+
+# ==============================================================================
+# ZigZag Decoding (for signed integers)
+# ==============================================================================
+
+# Decode ZigZag encoded 32-bit integer
+fn zigzag_decode_32(value: i64) -> i64:
+    var unsigned = value & 0xFFFFFFFF
+    var result = (unsigned >> 1) ^ (-(unsigned & 1))
+
+    # Sign extend if negative
+    if result & 0x80000000:
+        result = result | 0xFFFFFFFF00000000
+    result
+
+# Decode ZigZag encoded 64-bit integer
+fn zigzag_decode_64(value: i64) -> i64:
+    (value >> 1) ^ (-(value & 1))
+
+# ==============================================================================
+# Tag Decoding
+# ==============================================================================
+
+# Decode tag into (field_number, wire_type)
+fn decode_tag(tag: i64) -> any:
+    var field_number = tag >> 3
+    var wire_type = tag & 7
+    (field_number, wire_type)
+
+# Get field number from tag
+fn tag_field_number(tag: i64) -> i64:
+    tag >> 3
+
+# Get wire type from tag
+fn tag_wire_type(tag: i64) -> i64:
+    tag & 7
+
+# ==============================================================================
+# Fixed-Width Decoding
+# ==============================================================================
+
+# Decode 32-bit fixed value from little-endian bytes
+fn decode_fixed32(bytes: list, offset: i64) -> any:
+    var byte_count = bytes.length()
+    if offset + 4 > byte_count:
+        return nil
+
+    var b0 = bytes[offset]
+    var b1 = bytes[offset + 1]
+    var b2 = bytes[offset + 2]
+    var b3 = bytes[offset + 3]
+
+    var result = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    (result, 4)
+
+# Decode 64-bit fixed value from little-endian bytes
+fn decode_fixed64(bytes: list, offset: i64) -> any:
+    var byte_count = bytes.length()
+    if offset + 8 > byte_count:
+        return nil
+
+    var b0 = bytes[offset]
+    var b1 = bytes[offset + 1]
+    var b2 = bytes[offset + 2]
+    var b3 = bytes[offset + 3]
+    var b4 = bytes[offset + 4]
+    var b5 = bytes[offset + 5]
+    var b6 = bytes[offset + 6]
+    var b7 = bytes[offset + 7]
+
+    var low = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    var high = b4 | (b5 << 8) | (b6 << 16) | (b7 << 24)
+    var result = low | (high << 32)
+    (result, 8)
+
+# Decode float from fixed32 bytes
+fn decode_float(bytes: list, offset: i64) -> any:
+    decode_fixed32(bytes, offset)
+
+# Decode double from fixed64 bytes
+fn decode_double(bytes: list, offset: i64) -> any:
+    decode_fixed64(bytes, offset)
+
+# ==============================================================================
+# String/Bytes Decoding (Length-Delimited)
+# ==============================================================================
+
+# Decode length-delimited string
+fn decode_string(bytes: list, offset: i64) -> any:
+    var len_result = decode_varint(bytes, offset)
+    if len_result == nil:
+        return nil
+
+    var length = len_result[0]
+    var len_size = len_result[1]
+    var start = offset + len_size
+    var byte_count = bytes.length()
+
+    if start + length > byte_count:
+        return nil
+
+    var str_bytes = bytes[start:start + length]
+    var text_value = bytes_to_string(str_bytes)
+    (text_value, len_size + length)
+
+# Decode length-delimited bytes
+fn decode_bytes(bytes: list, offset: i64) -> any:
+    var len_result = decode_varint(bytes, offset)
+    if len_result == nil:
+        return nil
+
+    var length = len_result[0]
+    var len_size = len_result[1]
+    var start = offset + len_size
+    var byte_count = bytes.length()
+
+    if start + length > byte_count:
+        return nil
+
+    var data = bytes[start:start + length]
+    (data, len_size + length)
+
+# ==============================================================================
+# Field Value Decoding
+# ==============================================================================
+
+# Decode int32 field value
+fn decode_int32_value(value: i64) -> i64:
+    var masked = value & 0xFFFFFFFF
+    # Sign extend if negative
+    if masked & 0x80000000:
+        masked = masked | 0xFFFFFFFF00000000
+    masked
+
+# Decode uint32 field value
+fn decode_uint32_value(value: i64) -> i64:
+    value & 0xFFFFFFFF
+
+# Decode sint32 field value (ZigZag)
+fn decode_sint32_value(value: i64) -> i64:
+    zigzag_decode_32(value)
+
+# Decode sint64 field value (ZigZag)
+fn decode_sint64_value(value: i64) -> i64:
+    zigzag_decode_64(value)
+
+# Decode bool field value
+fn decode_bool_value(value: i64) -> bool:
+    value != 0
+
+# ==============================================================================
+# Repeated Fields (Packed)
+# ==============================================================================
+
+# Decode packed repeated varint field
+fn decode_packed_varint(bytes: list) -> list:
+    var result = []
+    var offset = 0
+    var len = bytes.length()
+
+    loop:
+        if offset >= len:
+            break
+        var value_result = decode_varint(bytes, offset)
+        if value_result == nil:
+            break
+        var value = value_result[0]
+        var size = value_result[1]
+        result = result + [value]
+        offset = offset + size
+
+    result
+
+# Decode packed repeated fixed32 field
+fn decode_packed_fixed32(bytes: list) -> list:
+    var result = []
+    var offset = 0
+    var len = bytes.length()
+
+    loop:
+        if offset + 4 > len:
+            break
+        var value_result = decode_fixed32(bytes, offset)
+        if value_result == nil:
+            break
+        var value = value_result[0]
+        result = result + [value]
+        offset = offset + 4
+
+    result
+
+# Decode packed repeated fixed64 field
+fn decode_packed_fixed64(bytes: list) -> list:
+    var result = []
+    var offset = 0
+    var len = bytes.length()
+
+    loop:
+        if offset + 8 > len:
+            break
+        var value_result = decode_fixed64(bytes, offset)
+        if value_result == nil:
+            break
+        var value = value_result[0]
+        result = result + [value]
+        offset = offset + 8
+
+    result

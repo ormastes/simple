@@ -1,0 +1,311 @@
+"""
+# Symbol Hash Specification
+
+**Feature IDs:** #SYMBOL-HASH
+**Category:** Compiler
+**Status:** Implemented
+
+## Overview
+
+Tests polynomial hashing with symbol type tagging for compiler use.
+Validates hash determinism, collision detection, and distribution analysis.
+
+The module uses polynomial rolling hash (Horner's method) with base 31
+and applies bit 62 tagging to distinguish symbol hashes from other integers.
+
+## Interpreter Limitations
+
+Most tests use `skip_on_interpreter` because the module depends on:
+- `c.to_byte()` method which requires compiled mode (str/text issue)
+- HashMap/HashSet which aren't fully supported in interpreter
+
+These tests are skipped in interpreter mode but run in compiled/SMF/native modes.
+"""
+
+use std.tooling.compiler.symbol_hash.*
+
+# ============================================================================
+# Test Group 1: Core Hashing (poly_hash)
+# ============================================================================
+
+describe "poly_hash [compiled-only]":
+    skip_on_interpreter "produces deterministic output":
+        val h1 = poly_hash("hello")
+        val h2 = poly_hash("hello")
+        expect(h1).to_equal(h2)
+
+    skip_on_interpreter "handles empty string":
+        val h = poly_hash("")
+        expect(h).to_equal(0)
+
+    skip_on_interpreter "handles single character":
+        val h = poly_hash("a")
+        expect(h != 0).to_equal(true)
+
+    skip_on_interpreter "handles long strings":
+        val long = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        val h = poly_hash(long)
+        expect(h != 0).to_equal(true)
+
+    skip_on_interpreter "different strings produce different hashes":
+        val h1 = poly_hash("abc")
+        val h2 = poly_hash("def")
+        expect(h1 != h2).to_equal(true)
+
+    skip_on_interpreter "hash value changes with character order":
+        val h1 = poly_hash("abc")
+        val h2 = poly_hash("bac")
+        expect(h1 != h2).to_equal(true)
+
+# ============================================================================
+# Test Group 2: Raw Hash Retrieval
+# ============================================================================
+
+describe "get_raw_hash":
+    skip_on_interpreter "matches poly_hash output":
+        val raw = get_raw_hash("test")
+        val poly = poly_hash("test")
+        expect(raw).to_equal(poly)
+
+    skip_on_interpreter "produces consistent results":
+        val r1 = get_raw_hash("symbol")
+        val r2 = get_raw_hash("symbol")
+        expect(r1).to_equal(r2)
+
+# ============================================================================
+# Test Group 3: Symbol Tagging
+# ============================================================================
+
+describe "hash_symbol":
+    skip_on_interpreter "applies type bit tag":
+        val tagged = hash_symbol("my_symbol")
+        val raw = poly_hash("my_symbol")
+        expect(tagged != raw).to_equal(true)
+
+    skip_on_interpreter "tagged hash is different from raw":
+        val tagged = hash_symbol("test")
+        val raw = get_raw_hash("test")
+        expect(tagged != raw).to_equal(true)
+
+    skip_on_interpreter "produces deterministic tagged hashes":
+        val h1 = hash_symbol("foo")
+        val h2 = hash_symbol("foo")
+        expect(h1).to_equal(h2)
+
+describe "is_symbol_hash":
+    skip_on_interpreter "detects tagged hashes":
+        val tagged = hash_symbol("foo")
+        expect(is_symbol_hash(tagged)).to_equal(true)
+
+    skip_on_interpreter "rejects untagged hashes":
+        val raw = poly_hash("foo")
+        expect(is_symbol_hash(raw)).to_equal(false)
+
+    skip_on_interpreter "rejects zero":
+        expect(is_symbol_hash(0)).to_equal(false)
+
+    skip_on_interpreter "detects manually tagged hash":
+        val raw = poly_hash("test")
+        val type_bit = 1 << 62
+        val manually_tagged = raw | type_bit
+        expect(is_symbol_hash(manually_tagged)).to_equal(true)
+
+describe "untag_symbol_hash":
+    skip_on_interpreter "performs round-trip correctly":
+        val original = poly_hash("symbol")
+        val tagged = hash_symbol("symbol")
+        val untagged = untag_symbol_hash(tagged)
+        expect(untagged).to_equal(original)
+
+    skip_on_interpreter "preserves hash value":
+        val tagged = hash_symbol("test")
+        val untagged = untag_symbol_hash(tagged)
+        val expected = poly_hash("test")
+        expect(untagged).to_equal(expected)
+
+    skip_on_interpreter "untagging raw hash is idempotent":
+        val raw = poly_hash("data")
+        val untagged = untag_symbol_hash(raw)
+        expect(untagged).to_equal(raw)
+
+# ============================================================================
+# Test Group 4: Batch Operations
+# ============================================================================
+
+describe "hash_symbols":
+    skip_on_interpreter "preserves array length":
+        val symbols = ["a", "b", "c"]
+        val hashes = hash_symbols(symbols)
+        expect(hashes.len()).to_equal(3)
+
+    skip_on_interpreter "handles empty array":
+        val hashes = hash_symbols([])
+        expect(hashes.len()).to_equal(0)
+
+    skip_on_interpreter "handles single element":
+        val hashes = hash_symbols(["single"])
+        expect(hashes.len()).to_equal(1)
+
+    skip_on_interpreter "all results are tagged":
+        val hashes = hash_symbols(["x", "y", "z"])
+        expect(is_symbol_hash(hashes[0])).to_equal(true)
+        expect(is_symbol_hash(hashes[1])).to_equal(true)
+        expect(is_symbol_hash(hashes[2])).to_equal(true)
+
+# ============================================================================
+# Test Group 5: Collision Detection
+# ============================================================================
+
+describe "has_collision":
+    skip_on_interpreter "returns false for different strings":
+        expect(has_collision("abc", "def")).to_equal(false)
+
+    skip_on_interpreter "returns false for same string":
+        # Same string = same hash, but not a collision
+        expect(has_collision("test", "test")).to_equal(false)
+
+    skip_on_interpreter "returns false for similar strings":
+        expect(has_collision("symbol1", "symbol2")).to_equal(false)
+
+    skip_on_interpreter "handles empty strings":
+        expect(has_collision("", "")).to_equal(false)
+
+# ============================================================================
+# Test Group 6: Hash Distribution Analysis
+# ============================================================================
+
+describe "hash_distribution":
+    skip_on_interpreter "counts hash frequencies":
+        val symbols = ["a", "b", "c", "a"]
+        val dist = hash_distribution(symbols)
+        # Should have at most 3 unique hashes (a, b, c)
+        val size = dist.size()
+        expect(size <= 3).to_equal(true)
+
+    skip_on_interpreter "handles empty list":
+        val dist = hash_distribution([])
+        expect(dist.size()).to_equal(0)
+
+    skip_on_interpreter "handles all unique symbols":
+        val symbols = ["x", "y", "z"]
+        val dist = hash_distribution(symbols)
+        expect(dist.size()).to_equal(3)
+
+    skip_on_interpreter "handles all duplicate symbols":
+        val symbols = ["same", "same", "same"]
+        val dist = hash_distribution(symbols)
+        expect(dist.size()).to_equal(1)
+
+# ============================================================================
+# Test Group 7: Uniqueness Checking
+# ============================================================================
+
+describe "all_unique_hashes":
+    skip_on_interpreter "returns true for unique symbols":
+        expect(all_unique_hashes(["x", "y", "z"])).to_equal(true)
+
+    skip_on_interpreter "returns false for duplicates":
+        expect(all_unique_hashes(["a", "b", "a"])).to_equal(false)
+
+    skip_on_interpreter "handles empty list":
+        expect(all_unique_hashes([])).to_equal(true)
+
+    skip_on_interpreter "handles single element":
+        expect(all_unique_hashes(["single"])).to_equal(true)
+
+    skip_on_interpreter "detects duplicates at different positions":
+        expect(all_unique_hashes(["first", "second", "third", "first"])).to_equal(false)
+
+# ============================================================================
+# Test Group 8: Collision Probability
+# ============================================================================
+
+describe "collision_probability [interpreter-safe]":
+    it "returns 0 for n=0":
+        val prob = collision_probability(0)
+        expect(prob).to_equal(0.0)
+
+    it "returns very low probability for small n":
+        val prob = collision_probability(10)
+        expect(prob < 0.0001).to_equal(true)
+
+    it "returns low probability for moderate n":
+        val prob = collision_probability(1000)
+        expect(prob < 0.01).to_equal(true)
+
+    it "probability increases with n":
+        val prob_10 = collision_probability(10)
+        val prob_100 = collision_probability(100)
+        expect(prob_100 > prob_10).to_equal(true)
+
+# ============================================================================
+# Test Group 9: Edge Cases
+# ============================================================================
+
+describe "edge cases":
+    skip_on_interpreter "handles numbers in strings":
+        val h = poly_hash("symbol123")
+        expect(h != 0).to_equal(true)
+
+    skip_on_interpreter "handles underscores":
+        val h = poly_hash("my_symbol_name")
+        expect(h != 0).to_equal(true)
+
+    skip_on_interpreter "handles special characters":
+        val h = poly_hash("symbol!@#")
+        expect(h != 0).to_equal(true)
+
+    skip_on_interpreter "handles very long symbol names":
+        val long = "very_long_symbol_name_with_many_characters_that_goes_on_and_on"
+        val h = poly_hash(long)
+        expect(h != 0).to_equal(true)
+
+    skip_on_interpreter "tagging is idempotent for same input":
+        val h1 = hash_symbol("test")
+        val h2 = hash_symbol("test")
+        expect(h1).to_equal(h2)
+
+    skip_on_interpreter "handles whitespace in symbols":
+        val h = poly_hash("symbol with spaces")
+        expect(h != 0).to_equal(true)
+
+# ============================================================================
+# Test Group 10: Integration Tests
+# ============================================================================
+
+describe "integration scenarios":
+    skip_on_interpreter "typical compiler symbol workflow":
+        # Hash a symbol
+        val sym = "my_function"
+        val tagged = hash_symbol(sym)
+
+        # Verify it's tagged
+        expect(is_symbol_hash(tagged)).to_equal(true)
+
+        # Extract raw hash
+        val raw = untag_symbol_hash(tagged)
+
+        # Verify raw matches original
+        expect(raw).to_equal(poly_hash(sym))
+
+    skip_on_interpreter "batch processing workflow":
+        val symbols = ["func1", "func2", "func3"]
+        val hashes = hash_symbols(symbols)
+
+        # All should be tagged
+        expect(is_symbol_hash(hashes[0])).to_equal(true)
+        expect(is_symbol_hash(hashes[1])).to_equal(true)
+        expect(is_symbol_hash(hashes[2])).to_equal(true)
+
+        # All should be unique
+        expect(all_unique_hashes(symbols)).to_equal(true)
+
+    skip_on_interpreter "collision detection workflow":
+        val symbols = ["sym1", "sym2", "sym3"]
+
+        # Check for collisions between pairs
+        expect(has_collision("sym1", "sym2")).to_equal(false)
+        expect(has_collision("sym2", "sym3")).to_equal(false)
+
+        # Verify all unique
+        expect(all_unique_hashes(symbols)).to_equal(true)

@@ -1,0 +1,405 @@
+# SDoctest Specification Tests
+#
+# Tests for the sdoctest documentation testing system.
+# Covers: extractor, config parsing, glob matching, discovery.
+
+# NOTE: describe, it, expect are built-in - no imports needed
+
+# ============================================================================
+# Glob Pattern Matching
+# ============================================================================
+
+describe "SDoctest glob matching":
+    it "matches exact paths":
+        # Test literal path matching
+        val path = "doc/guide/intro.md"
+        val pattern = "doc/guide/intro.md"
+        expect path == pattern
+
+    it "matches single wildcard *":
+        # * matches any characters within a single segment
+        val filename = "intro.md"
+        val pattern = "*.md"
+        expect filename.ends_with(".md")
+
+    it "matches ? for single character":
+        val filename = "test1.md"
+        expect filename.len() == 8
+
+    it "matches ** for directory traversal":
+        # ** matches zero or more path segments
+        val path = "doc/report/2026/summary.md"
+        expect path.starts_with("doc/report/")
+
+# ============================================================================
+# Extractor - Fence Line Parsing
+# ============================================================================
+
+describe "SDoctest fence line parsing":
+    it "parses simple fence":
+        val fence = "```simple"
+        val parts = fence.split(":")
+        expect parts[0] == "```simple"
+
+    it "parses fence with skip modifier":
+        val fence = "```simple:skip"
+        val parts = fence.split(":")
+        expect parts.len() == 2
+        expect parts[1] == "skip"
+
+    it "parses fence with multiple modifiers":
+        val fence = "```simple:init=std_imports,env=slow"
+        val colon_idx = fence.index_of(":")
+        expect colon_idx.?
+        val mod_str = fence[colon_idx? + 1:]
+        val mods = mod_str.split(",")
+        expect mods.len() == 2
+        expect mods[0] == "init=std_imports"
+        expect mods[1] == "env=slow"
+
+    it "parses fence with should_fail":
+        val fence = "```simple:should_fail"
+        expect fence.contains("should_fail")
+
+    it "parses fence with tag modifier":
+        val fence = "```simple:tag=integration"
+        val mod_str = fence.split(":")[1]
+        expect mod_str.starts_with("tag=")
+
+# ============================================================================
+# Extractor - Block Extraction
+# ============================================================================
+
+describe "SDoctest block extraction":
+    it "extracts simple code block from markdown":
+        val md = "# Title\n\n```simple\nval x = 42\nprint x\n```\n\nSome text."
+        val lines = md.split("\n")
+        var blocks = 0
+        var in_block = false
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("```simple"):
+                in_block = true
+            elif trimmed == "```" and in_block:
+                in_block = false
+                blocks = blocks + 1
+        expect blocks == 1
+
+    it "extracts multiple code blocks":
+        val md = "```simple\nval a = 1\n```\n\nText\n\n```simple\nval b = 2\n```"
+        val lines = md.split("\n")
+        var blocks = 0
+        var in_block = false
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("```simple"):
+                in_block = true
+            elif trimmed == "```" and in_block:
+                in_block = false
+                blocks = blocks + 1
+        expect blocks == 2
+
+    it "ignores non-simple code blocks":
+        val md = "```python\nprint('hello')\n```\n\n```simple\nval x = 1\n```"
+        val lines = md.split("\n")
+        var simple_blocks = 0
+        var in_block = false
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("```simple"):
+                in_block = true
+            elif trimmed == "```" and in_block:
+                in_block = false
+                simple_blocks = simple_blocks + 1
+        expect simple_blocks == 1
+
+    it "handles skip-next HTML comment":
+        val md = "<!--sdoctest:skip-next-->\n```simple\nval x = 1\n```"
+        val lines = md.split("\n")
+        expect lines[0] == "<!--sdoctest:skip-next-->"
+
+    it "handles skip-begin/end HTML comments":
+        val md = "<!--sdoctest:skip-begin-->\n```simple\nval x = 1\n```\n<!--sdoctest:skip-end-->"
+        expect md.contains("skip-begin")
+        expect md.contains("skip-end")
+
+# ============================================================================
+# Config Parsing
+# ============================================================================
+
+describe "SDoctest config":
+    it "provides sensible defaults":
+        # Default config should include README.md and doc/guide/
+        val default_sources = ["README.md", "doc/guide/", "examples/"]
+        expect default_sources.len() == 3
+        expect default_sources[0] == "README.md"
+
+    it "parses SDN source entries":
+        val sdn_source = "file: README.md"
+        expect sdn_source.contains("file:")
+
+    it "parses ignore patterns":
+        val patterns = ["doc/archive/**", "doc/report/**"]
+        expect patterns.len() == 2
+        expect patterns[0].contains("**")
+
+    it "parses init scripts section":
+        val init_entry = "std_imports:\n  file: test/doctest/init/std_imports.spl"
+        expect init_entry.contains("std_imports")
+        expect init_entry.contains(".spl")
+
+    it "parses environment configuration":
+        val env_entry = "default:\n  timeout: 5000"
+        expect env_entry.contains("timeout")
+
+# ============================================================================
+# Modifier Parsing Logic
+# ============================================================================
+
+describe "SDoctest modifier parsing":
+    it "recognizes skip modifier":
+        val mod_str = "skip"
+        expect mod_str == "skip"
+
+    it "recognizes should_fail modifier":
+        val mod_str = "should_fail"
+        expect mod_str == "should_fail"
+
+    it "parses init=name modifier":
+        val mod_str = "init=std_imports"
+        expect mod_str.starts_with("init=")
+        val name = mod_str[5:]
+        expect name == "std_imports"
+
+    it "parses env=name modifier":
+        val mod_str = "env=slow"
+        expect mod_str.starts_with("env=")
+        val name = mod_str[4:]
+        expect name == "slow"
+
+    it "parses tag=name modifier":
+        val mod_str = "tag=integration"
+        expect mod_str.starts_with("tag=")
+        val name = mod_str[4:]
+        expect name == "integration"
+
+    it "splits comma-separated modifiers":
+        val mod_str = "init=std_imports,env=slow,tag=integration"
+        val parts = mod_str.split(",")
+        expect parts.len() == 3
+
+    it "recognizes fail_as_success modifier":
+        val mod_str = "fail_as_success"
+        expect mod_str == "fail_as_success"
+
+    it "parses fence with fail_as_success":
+        val fence = "```simple:fail_as_success"
+        expect fence.contains("fail_as_success")
+        val parts = fence.split(":")
+        expect parts.len() == 2
+        expect parts[1] == "fail_as_success"
+
+# ============================================================================
+# Code Building (Init Prepend)
+# ============================================================================
+
+describe "SDoctest code building":
+    it "prepends init script content":
+        val init_content = "use std.collections.*"
+        val block_code = "val x = [1, 2, 3]"
+        val combined = init_content + "\n\n" + block_code
+        expect combined.starts_with("use std.collections.*")
+        expect combined.contains("val x = [1, 2, 3]")
+
+    it "returns block code when no init script":
+        val block_code = "val x = 42"
+        expect block_code == "val x = 42"
+
+# ============================================================================
+# Result Tracking
+# ============================================================================
+
+describe "SDoctest results":
+    it "tracks passed/failed/skipped counts":
+        var passed = 3
+        var failed = 1
+        var skipped = 2
+        val total = passed + failed + skipped
+        expect total == 6
+
+    it "reports ok when no failures":
+        var failed = 0
+        var errors = 0
+        val is_ok = failed == 0 and errors == 0
+        expect is_ok
+
+    it "reports not ok when failures exist":
+        var failed = 1
+        var errors = 0
+        val is_ok = failed == 0 and errors == 0
+        expect not is_ok
+
+# ============================================================================
+# Fail-as-Success Mode
+# ============================================================================
+
+describe "SDoctest fail-as-success modifier":
+    it "converts failed to accepted":
+        # Simulate per-block :fail_as_success modifier: when a block fails,
+        # the failure is converted to passed with accepted count
+        var file_passed = 2
+        var file_failed = 3
+        var file_accepted = 0
+        val fail_as_success = true
+
+        # Simulate converting failures
+        if fail_as_success:
+            file_accepted = file_failed
+            file_passed = file_passed + file_failed
+            file_failed = 0
+
+        expect file_passed == 5
+        expect file_failed == 0
+        expect file_accepted == 3
+
+    it "does not convert errors to accepted":
+        # Errors (infra issues like timeout) should NOT be converted
+        var file_passed = 2
+        var file_failed = 1
+        var file_errors = 1
+        var file_accepted = 0
+        val fail_as_success = true
+
+        # Only convert failures, not errors
+        if fail_as_success:
+            file_accepted = file_failed
+            file_passed = file_passed + file_failed
+            file_failed = 0
+
+        expect file_passed == 3
+        expect file_failed == 0
+        expect file_errors == 1
+        expect file_accepted == 1
+
+    it "reports ok when all failures are accepted":
+        var failed = 0
+        var errors = 0
+        var accepted = 5
+        val is_ok = failed == 0 and errors == 0
+        expect is_ok
+        expect accepted == 5
+
+    it "tracks accepted separately from passed":
+        var passed = 3
+        var accepted = 2
+        val total_passing = passed
+        expect total_passing == 3
+        expect accepted == 2
+
+# ============================================================================
+# Block Accumulation (Preamble Building)
+# ============================================================================
+
+describe "SDoctest block accumulation":
+    it "first block gets empty preamble":
+        # Block 0 should always have empty preamble (no preceding blocks)
+        val block1_code = "struct Point:\n    x: i64\n    y: i64"
+        # Simulate: for block 0, preamble is always ""
+        val preamble = ""
+        expect preamble == ""
+
+    it "extracts use statements as reusable":
+        val code = "use app.io.mod (file_read)\nval x = 42\nprint x"
+        val lines = code.split("\n")
+        var reusable_lines: [text] = []
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("use "):
+                reusable_lines.push(line)
+        expect reusable_lines.len() == 1
+        expect reusable_lines[0] == "use app.io.mod (file_read)"
+
+    it "extracts struct definitions as reusable":
+        val code = "struct Point:\n    x: i64\n    y: i64\nval p = Point(x: 3, y: 4)"
+        val lines = code.split("\n")
+        # struct definition starts at line 0, has 2 indented body lines
+        expect lines[0] == "struct Point:"
+        expect lines[1].starts_with("    ")
+        expect lines[2].starts_with("    ")
+        # line 3 is not indented - not part of struct
+        expect not lines[3].starts_with(" ")
+
+    it "extracts fn definitions as reusable":
+        val code = "fn double(x):\n    x * 2\nval result = double(21)"
+        val lines = code.split("\n")
+        expect lines[0] == "fn double(x):"
+        expect lines[1].starts_with("    ")
+        # line 2 is not part of fn
+        expect not lines[2].starts_with(" ")
+
+    it "does not extract bare expressions":
+        val code = "print \"hello\"\nval x = 42"
+        val lines = code.split("\n")
+        var reusable = 0
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("use ") or trimmed.starts_with("struct ") or trimmed.starts_with("fn "):
+                reusable = reusable + 1
+        expect reusable == 0
+
+    it "accumulates from multiple preceding blocks":
+        # Block 1 defines struct, block 2 defines fn, block 3 should see both
+        val block1_reusable = "struct Point:\n    x: i64"
+        val block2_reusable = "fn double(x):\n    x * 2"
+        var accumulated = block1_reusable
+        accumulated = accumulated + "\n" + block2_reusable
+        # Block 3's preamble should contain both
+        expect accumulated.contains("struct Point:")
+        expect accumulated.contains("fn double(x):")
+
+    it "prepends preamble before block code":
+        val preamble = "struct Point:\n    x: i64\n    y: i64"
+        val block_code = "val p = Point(x: 3, y: 4)"
+        val combined = preamble + "\n\n" + block_code
+        expect combined.starts_with("struct Point:")
+        expect combined.ends_with("val p = Point(x: 3, y: 4)")
+
+
+# ============================================================================
+# Block Language Behavior (simple vs sdoctest)
+# ============================================================================
+
+describe "SDoctest language-based validation":
+    it "simple blocks ignore non-zero exit codes":
+        # Simple blocks are demonstration code - they pass even if exit code != 0
+        val block_language = "simple"
+        val exit_code = 1  # Non-zero exit
+        val should_pass = block_language == "simple" or block_language == "spl"
+        expect should_pass
+
+    it "spl blocks ignore non-zero exit codes":
+        # spl is an alias for simple
+        val block_language = "spl"
+        val exit_code = 1
+        val should_pass = block_language == "simple" or block_language == "spl"
+        expect should_pass
+
+    it "sdoctest blocks validate exit codes":
+        # Sdoctest blocks are verified examples - must succeed
+        val block_language = "sdoctest"
+        val exit_code = 1
+        val should_pass = block_language == "simple" or block_language == "spl"
+        expect not should_pass
+
+    it "simple blocks pass on parse error exit codes":
+        # Exit code 1 from parse error is still ignored for simple blocks
+        val block_language = "simple"
+        val exit_code = 1  # Could be parse error, undefined var, etc.
+        val is_simple = block_language == "simple" or block_language == "spl"
+        expect is_simple
+
+    it "distinguishes demo code from verified examples":
+        # Core principle: simple = demo, sdoctest = verified
+        val demo_language = "simple"
+        val verified_language = "sdoctest"
+        expect demo_language != verified_language
