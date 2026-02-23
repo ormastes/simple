@@ -774,6 +774,7 @@ const char* replace_str(const char* s, const char* old, const char* new_val);
 int is_digit(const char* ch);
 int is_alpha(const char* ch);
 int is_alnum(const char* ch);
+static int expr_is_string(const char* expr);
 SimpleStringArray parse_fn_sig(const char* line);
 const char* translate_print(const char* line);
 const char* translate_expr(const char* expr);
@@ -805,6 +806,55 @@ typedef struct {
 
 static StructMethodGroup g_struct_methods[MAX_METHOD_STRUCTS];
 static int g_struct_method_count = 0;
+
+// === Struct Field Type Tracking ===
+#define MAX_STRUCT_FIELDS 64
+#define MAX_STRUCT_DEFS 64
+
+typedef struct {
+    const char* field_name;
+    const char* field_type;   // Simple type: "i64", "text", etc.
+} StructFieldInfo;
+
+typedef struct {
+    const char* struct_name;
+    StructFieldInfo fields[MAX_STRUCT_FIELDS];
+    int field_count;
+} StructFieldGroup;
+
+static StructFieldGroup g_struct_fields[MAX_STRUCT_DEFS];
+static int g_struct_field_count = 0;
+
+static void register_struct_field(const char* struct_name, const char* field_name, const char* field_type) {
+    // Find or create struct entry
+    int idx = -1;
+    for (int i = 0; i < g_struct_field_count; i++) {
+        if (strcmp(g_struct_fields[i].struct_name, struct_name) == 0) { idx = i; break; }
+    }
+    if (idx < 0 && g_struct_field_count < MAX_STRUCT_DEFS) {
+        idx = g_struct_field_count++;
+        g_struct_fields[idx].struct_name = strdup(struct_name);
+        g_struct_fields[idx].field_count = 0;
+    }
+    if (idx >= 0 && g_struct_fields[idx].field_count < MAX_STRUCT_FIELDS) {
+        int fi = g_struct_fields[idx].field_count++;
+        g_struct_fields[idx].fields[fi].field_name = strdup(field_name);
+        g_struct_fields[idx].fields[fi].field_type = strdup(field_type);
+    }
+}
+
+static const char* lookup_struct_field_type(const char* struct_name, const char* field_name) {
+    for (int i = 0; i < g_struct_field_count; i++) {
+        if (strcmp(g_struct_fields[i].struct_name, struct_name) == 0) {
+            for (int j = 0; j < g_struct_fields[i].field_count; j++) {
+                if (strcmp(g_struct_fields[i].fields[j].field_name, field_name) == 0) {
+                    return g_struct_fields[i].fields[j].field_type;
+                }
+            }
+        }
+    }
+    return NULL;
+}
 
 // === Variable Type Tracking ===
 
@@ -863,6 +913,41 @@ static const char* find_struct_for_method(const char* method_name) {
             if (strcmp(g_struct_methods[i].methods[j].name, method_name) == 0) {
                 return g_struct_methods[i].struct_name;
             }
+        }
+    }
+    return NULL;
+}
+
+// === Function Return Type Registry ===
+#define MAX_FN_REGISTRY 512
+
+typedef struct {
+    const char* fn_name;      // mangled function name
+    const char* c_ret_type;   // C return type ("const char*", "long long", etc.)
+} FnRetTypeEntry;
+
+static FnRetTypeEntry g_fn_ret_types[MAX_FN_REGISTRY];
+static int g_fn_ret_type_count = 0;
+
+static void register_fn_ret_type(const char* fn_name, const char* c_ret_type) {
+    // Update if exists
+    for (int i = 0; i < g_fn_ret_type_count; i++) {
+        if (strcmp(g_fn_ret_types[i].fn_name, fn_name) == 0) {
+            g_fn_ret_types[i].c_ret_type = strdup(c_ret_type);
+            return;
+        }
+    }
+    if (g_fn_ret_type_count < MAX_FN_REGISTRY) {
+        g_fn_ret_types[g_fn_ret_type_count].fn_name = strdup(fn_name);
+        g_fn_ret_types[g_fn_ret_type_count].c_ret_type = strdup(c_ret_type);
+        g_fn_ret_type_count++;
+    }
+}
+
+static const char* lookup_fn_ret_type(const char* fn_name) {
+    for (int i = 0; i < g_fn_ret_type_count; i++) {
+        if (strcmp(g_fn_ret_types[i].fn_name, fn_name) == 0) {
+            return g_fn_ret_types[i].c_ret_type;
         }
     }
     return NULL;
@@ -1078,6 +1163,8 @@ SimpleStringArray parse_fn_sig(const char* line) {
                 const char* ptype = trim(substr_from(pt, colon + 1));
                 const char* ctype = stype_to_c(ptype);
                 simple_string_push(&params_out, simple_str_concat(ctype, simple_str_concat(" ", pname)));
+                // Register parameter type for string detection
+                if (strcmp(ctype, "const char*") == 0) register_var_type(pname, "text");
             } else {
                 simple_string_push(&params_out, simple_str_concat("long long ", mangle_name(pt)));
             }
@@ -1096,7 +1183,7 @@ const char* translate_print(const char* line) {
     if (starts_with(rest, "\"") && ends_with(rest, "\"")) {
         const char* inner = substr(rest, 1, str_len(rest) - 1);
         if (contains(inner, "{")) {
-            // String interpolation: build printf with %s for string vars, %lld for ints
+            // String interpolation: build printf with type-aware format specifiers
             const char* fmt = "";
             const char* args_str = "";
             long long i = 0;
@@ -1112,10 +1199,16 @@ const char* translate_print(const char* line) {
                         end_brace = end_brace + 1;
                     }
                     const char* var_expr = substr(inner, i + 1, end_brace);
-                    // Use %s with SPL_TO_STR() for type-safe string interpolation
-                    fmt = simple_str_concat(fmt, "%s");
-                    // Wrap in SPL_TO_STR() to auto-convert int/float/string to const char*
-                    args_str = simple_str_concat(args_str, simple_str_concat(", SPL_TO_STR(", simple_str_concat(translate_expr(var_expr), ")")));
+                    const char* translated = translate_expr(var_expr);
+                    // Detect if expression is string or integer
+                    if (expr_is_string(var_expr) || starts_with(translated, "\"") ||
+                        starts_with(translated, "simple_str_concat(") || starts_with(translated, "simple_format_")) {
+                        fmt = simple_str_concat(fmt, "%s");
+                        args_str = simple_str_concat(args_str, simple_str_concat(", ", translated));
+                    } else {
+                        fmt = simple_str_concat(fmt, "%lld");
+                        args_str = simple_str_concat(args_str, simple_str_concat(", (long long)(", simple_str_concat(translated, ")")));
+                    }
                     i = end_brace + 1;
                 } else if (strcmp(ch, "%") == 0) {
                     // Escape % in printf format
@@ -1130,8 +1223,13 @@ const char* translate_print(const char* line) {
         }
         return simple_str_concat("printf(\"%s\\n\", ", simple_str_concat(rest, ");"));
     }
-    // Variable or expression
-    return simple_str_concat("printf(\"%lld\\n\", (long long)(", simple_str_concat(rest, "));"));
+    // Variable or expression — detect type
+    const char* translated = translate_expr(rest);
+    if (expr_is_string(rest) || starts_with(translated, "\"") ||
+        starts_with(translated, "simple_str_concat(")) {
+        return simple_str_concat("printf(\"%s\\n\", ", simple_str_concat(translated, ");"));
+    }
+    return simple_str_concat("printf(\"%lld\\n\", (long long)(", simple_str_concat(translated, "));"));
 }
 
 // --- Helper: check if expression looks like a string type ---
@@ -1144,6 +1242,36 @@ static int expr_is_string(const char* expr) {
     if (contains(expr, "simple_str_concat(")) return 1;
     if (contains(expr, "simple_substring(")) return 1;
     if (contains(expr, "simple_format_")) return 1;
+    // Check function return type registry
+    {
+        long long paren = find_str(expr, "(");
+        if (paren > 0) {
+            const char* call_name = trim(substr(expr, 0, paren));
+            // Check for obj.method() pattern
+            long long dot = find_str(call_name, ".");
+            if (dot >= 0) {
+                const char* obj = trim(substr(call_name, 0, dot));
+                const char* method = trim(substr_from(call_name, dot + 1));
+                const char* obj_type = lookup_var_type(obj);
+                if (obj_type) {
+                    MethodInfo* mi = lookup_struct_method(obj_type, method);
+                    if (mi && str_len(mi->return_type) > 0) {
+                        const char* c_ret = stype_to_c(mi->return_type);
+                        if (strcmp(c_ret, "const char*") == 0) return 1;
+                    }
+                }
+            } else {
+                const char* mangled = mangle_name(call_name);
+                const char* ret = lookup_fn_ret_type(mangled);
+                if (ret && (strcmp(ret, "const char*") == 0)) return 1;
+            }
+        }
+    }
+    // Check variable type (if it's a known string variable)
+    {
+        const char* var_type = lookup_var_type(expr);
+        if (var_type && (strcmp(var_type, "text") == 0 || strcmp(var_type, "str") == 0)) return 1;
+    }
     return 0;
 }
 
@@ -1157,6 +1285,54 @@ const char* translate_expr(const char* expr) {
     if (strcmp(e, "pass_do_nothing") == 0 || strcmp(e, "pass_dn") == 0 ||
         strcmp(e, "pass_todo") == 0 || strcmp(e, "pass") == 0) return "((void)0)";
     if (strcmp(e, "self") == 0) return "self";  /* will be handled by struct context */
+    if (starts_with(e, "\"") && ends_with(e, "\"")) {
+        const char* inner = substr(e, 1, str_len(e) - 1);
+        if (contains(inner, "{")) {
+            // String interpolation: build simple_str_concat chain
+            const char* result = "\"\"";
+            long long i = 0;
+            long long ilen = str_len(inner);
+            const char* text_buf = "";
+            while (i < ilen) {
+                const char* ch = substr(inner, i, i + 1);
+                if (strcmp(ch, "{") == 0) {
+                    // Flush text buffer
+                    if (str_len(text_buf) > 0) {
+                        const char* seg = simple_str_concat("\"", simple_str_concat(text_buf, "\""));
+                        result = simple_str_concat("simple_str_concat(", simple_str_concat(result, simple_str_concat(", ", simple_str_concat(seg, ")"))));
+                        text_buf = "";
+                    }
+                    long long end_brace = i + 1;
+                    while (end_brace < ilen && strcmp(substr(inner, end_brace, end_brace + 1), "}") != 0) {
+                        end_brace++;
+                    }
+                    const char* var_expr = substr(inner, i + 1, end_brace);
+                    const char* translated = translate_expr(var_expr);
+                    // Use simple_int_to_str for known integer expressions, direct for strings
+                    const char* converted = translated;
+                    if (expr_is_string(var_expr) || starts_with(translated, "\"") ||
+                        starts_with(translated, "simple_str_concat(") || starts_with(translated, "simple_format_")) {
+                        // Already a string, use directly
+                    } else {
+                        // Assume integer, convert to string
+                        converted = simple_str_concat("simple_int_to_str(", simple_str_concat(translated, ")"));
+                    }
+                    result = simple_str_concat("simple_str_concat(", simple_str_concat(result, simple_str_concat(", ", simple_str_concat(converted, ")"))));
+                    i = end_brace + 1;
+                } else {
+                    text_buf = simple_str_concat(text_buf, ch);
+                    i++;
+                }
+            }
+            // Flush remaining text
+            if (str_len(text_buf) > 0) {
+                const char* seg = simple_str_concat("\"", simple_str_concat(text_buf, "\""));
+                result = simple_str_concat("simple_str_concat(", simple_str_concat(result, simple_str_concat(", ", simple_str_concat(seg, ")"))));
+            }
+            return result;
+        }
+        return e;
+    }
     if (starts_with(e, "\"")) return e;
 
     /* Strip numeric separators: 1_000_000 → 1000000 */
@@ -1623,8 +1799,11 @@ const char* translate_var_decl(const char* line) {
         return simple_str_concat("/* unsupported: ", simple_str_concat(line, " */"));
     }
     const char* raw_name = trim(substr(rest, 0, eq));
+    const char* explicit_type = NULL;
     long long name_colon = find_str(raw_name, ":");
     if (name_colon >= 0) {
+        const char* type_ann = trim(substr_from(raw_name, name_colon + 1));
+        if (type_ann && *type_ann) explicit_type = stype_to_c(type_ann);
         raw_name = trim(substr(raw_name, 0, name_colon));
     }
     const char* name = mangle_name(raw_name);
@@ -1637,8 +1816,15 @@ const char* translate_var_decl(const char* line) {
     const char* c_val = translate_expr(value);
     const char* qualifier = is_val ? "const " : "";
 
+    // If explicit type annotation was provided, use it directly
+    if (explicit_type) {
+        if (strcmp(explicit_type, "const char*") == 0) register_var_type(name, "text");
+        return simple_str_concat(explicit_type, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";")))));
+    }
+
     // Detect type from value
     if (starts_with(value, "\"")) {
+        register_var_type(name, "text");
         return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
     }
     if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0) {
@@ -1740,6 +1926,35 @@ const char* translate_var_decl(const char* line) {
     // Subscript access on arrays → string
     if (contains(value, "[") && contains(value, "]") && !starts_with(value, "[")) {
         return simple_str_concat("const char* ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
+    }
+    // Look up return type from function call registry
+    {
+        long long paren = find_str(value, "(");
+        if (paren > 0) {
+            const char* call_name = trim(substr(value, 0, paren));
+            // Handle obj.method() calls
+            long long dot = find_str(call_name, ".");
+            if (dot >= 0) {
+                const char* obj = trim(substr(call_name, 0, dot));
+                const char* method = trim(substr_from(call_name, dot + 1));
+                const char* obj_type = lookup_var_type(obj);
+                if (obj_type) {
+                    MethodInfo* mi = lookup_struct_method(obj_type, method);
+                    if (mi && str_len(mi->return_type) > 0) {
+                        const char* c_ret = stype_to_c(mi->return_type);
+                        register_var_type(name, obj_type);
+                        return simple_str_concat(c_ret, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";")))));
+                    }
+                }
+            } else {
+                const char* mangled = mangle_name(call_name);
+                const char* ret = lookup_fn_ret_type(mangled);
+                if (ret && strcmp(ret, "void") != 0) {
+                    if (strcmp(ret, "const char*") == 0) register_var_type(name, "text");
+                    return simple_str_concat(ret, simple_str_concat(" ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";")))));
+                }
+            }
+        }
     }
     return simple_str_concat("long long ", simple_str_concat(name, simple_str_concat(" = ", simple_str_concat(c_val, ";"))));
 }
@@ -1903,7 +2118,8 @@ const char* generate_c(const char* source) {
                         if (cur_struct_method_idx >= 0 && cur_method_idx >= 0) {
                             MethodInfo* mi = &g_struct_methods[cur_struct_method_idx].methods[cur_method_idx];
                             if (mi->body_count < MAX_METHOD_BODY_LINES) {
-                                mi->body_lines[mi->body_count] = strdup(sl);
+                                // Store raw line with indentation for block tracking
+                                mi->body_lines[mi->body_count] = strdup(raw_line);
                                 mi->body_count++;
                             }
                         }
@@ -2207,6 +2423,19 @@ const char* generate_c(const char* source) {
             fn_name = parsed.items[0];
             fn_sig = parsed.items[1];
             simple_string_push(&fwd_decls, parsed.items[2]);
+            // Register function return type for variable type inference
+            {
+                long long arrow = find_str(trimmed, " -> ");
+                if (arrow >= 0) {
+                    const char* ret_raw = trim(substr(trimmed, arrow + 4, str_len(trimmed)));
+                    // Remove trailing ':'
+                    long long colon = find_str(ret_raw, ":");
+                    if (colon >= 0) ret_raw = trim(substr(ret_raw, 0, colon));
+                    register_fn_ret_type(fn_name, stype_to_c(ret_raw));
+                } else {
+                    register_fn_ret_type(fn_name, "void");
+                }
+            }
             in_fn = 1;
             in_main = 0;
             continue;
@@ -2248,8 +2477,11 @@ const char* generate_c(const char* source) {
           cur_indent = si / 4;
         }
         /* Close blocks when indent decreases — but NOT for elif/else/case which manage their own braces */
+        int is_bare_match_arm = (in_match && contains(trimmed, ": ") &&
+                                (starts_with(trimmed, "\"") || starts_with(trimmed, "_")));
         int is_continuation = (starts_with(trimmed, "elif ") || strcmp(trimmed, "else:") == 0 ||
-                               (starts_with(trimmed, "case ") && ends_with(trimmed, ":") && in_match));
+                               (starts_with(trimmed, "case ") && ends_with(trimmed, ":") && in_match) ||
+                               is_bare_match_arm);
         if (!is_continuation) {
             while (block_depth > 0 && cur_indent <= prev_indent - 1) {
                 const char* close_brace = "    }";
@@ -2272,7 +2504,8 @@ const char* generate_c(const char* source) {
         } else {
             // For elif/else/case, just adjust depth tracking without emitting braces
             // The elif/else handler emits "} else if" which closes previous block
-            if (block_depth > 0) {
+            // BUT: bare match arms are self-closing, don't adjust block_depth
+            if (!is_bare_match_arm && block_depth > 0) {
                 block_depth--;
                 prev_indent = cur_indent;
             }
@@ -2313,6 +2546,41 @@ const char* generate_c(const char* source) {
                 const char* arr_expr = trim(substr_from(for_body, in_pos + 4));
                 const char* tarr = translate_expr(arr_expr);
                 const char* iter_var = simple_str_concat("_i_", var_name);
+                // range(start, end) or range(end) → C for loop
+                if (starts_with(arr_expr, "range(") && ends_with(arr_expr, ")")) {
+                    const char* range_inner = trim(substr(arr_expr, 6, str_len(arr_expr) - 1));
+                    long long comma = find_str(range_inner, ",");
+                    const char* range_start = "0";
+                    const char* range_end = NULL;
+                    const char* range_step = NULL;
+                    if (comma >= 0) {
+                        range_start = translate_expr(trim(substr(range_inner, 0, comma)));
+                        const char* rest_range = trim(substr_from(range_inner, comma + 1));
+                        long long comma2 = find_str(rest_range, ",");
+                        if (comma2 >= 0) {
+                            range_end = translate_expr(trim(substr(rest_range, 0, comma2)));
+                            range_step = translate_expr(trim(substr_from(rest_range, comma2 + 1)));
+                        } else {
+                            range_end = translate_expr(rest_range);
+                        }
+                    } else {
+                        range_end = translate_expr(range_inner);
+                    }
+                    if (!range_step) range_step = "1";
+                    c_line = simple_str_concat("for (long long ", simple_str_concat(var_name,
+                        simple_str_concat(" = ", simple_str_concat(range_start,
+                        simple_str_concat("; ", simple_str_concat(var_name,
+                        simple_str_concat(" < ", simple_str_concat(range_end,
+                        simple_str_concat("; ", simple_str_concat(var_name,
+                        simple_str_concat(" += ", simple_str_concat(range_step, ") {"))))))))))));
+                    block_depth++;
+                    if (in_main) {
+                        simple_string_push(&main_lines, simple_str_concat("    ", c_line));
+                    } else {
+                        simple_string_push(&fn_body, simple_str_concat("    ", c_line));
+                    }
+                    continue;
+                }
                 long long arr_like = 0;
                 if (contains(arr_expr, ".split(") || contains(arr_expr, "dir_list(") || contains(arr_expr, "dir_walk(") ||
                     contains(arr_expr, "extract_signatures(") ||
@@ -2396,6 +2664,48 @@ const char* generate_c(const char* source) {
                 }
             }
             block_depth++;
+        } else if (in_match && contains(trimmed, ": ") &&
+                   (starts_with(trimmed, "\"") || starts_with(trimmed, "_"))) {
+            // Bare match arm: "value": action  OR  _: action
+            long long colon_pos = find_str(trimmed, ": ");
+            const char* pattern = trim(substr(trimmed, 0, colon_pos));
+            const char* action = trim(substr_from(trimmed, colon_pos + 2));
+            // Translate the action
+            const char* c_action = "";
+            if (starts_with(action, "print ")) {
+                c_action = translate_print(action);
+            } else if (starts_with(action, "return ")) {
+                c_action = translate_return(action);
+            } else if (starts_with(action, "val ") || starts_with(action, "var ")) {
+                c_action = translate_var_decl(action);
+            } else {
+                // Check for assignment
+                long long eq_pos = find_str(action, " = ");
+                if (eq_pos >= 0) {
+                    const char* lhs = trim(substr(action, 0, eq_pos));
+                    const char* rhs = trim(substr_from(action, eq_pos + 3));
+                    c_action = simple_str_concat(lhs, simple_str_concat(" = ", simple_str_concat(translate_expr(rhs), ";")));
+                } else {
+                    c_action = simple_str_concat(translate_expr(action), ";");
+                }
+            }
+            if (strcmp(pattern, "_") == 0) {
+                if (match_first_case) {
+                    c_line = c_action;
+                    match_first_case = 0;
+                } else {
+                    c_line = simple_str_concat("else { ", simple_str_concat(c_action, " }"));
+                }
+            } else {
+                const char* cond = simple_str_concat("strcmp(_match_val, ", simple_str_concat(translate_expr(pattern), ") == 0"));
+                if (match_first_case) {
+                    c_line = simple_str_concat("if (", simple_str_concat(cond, simple_str_concat(") { ", simple_str_concat(c_action, " }"))));
+                    match_first_case = 0;
+                } else {
+                    c_line = simple_str_concat("else if (", simple_str_concat(cond, simple_str_concat(") { ", simple_str_concat(c_action, " }"))));
+                }
+            }
+            // Don't increment block_depth — these are single-line arms
         } else if (strcmp(trimmed, "continue") == 0) {
             c_line = "continue;";
         } else if (strcmp(trimmed, "break") == 0) {
@@ -2534,21 +2844,39 @@ const char* generate_c(const char* source) {
             const char* func_name = simple_str_concat(sg->struct_name, simple_str_concat("_", mi->name));
             const char* func_sig = simple_str_concat("static ", simple_str_concat(c_ret, simple_str_concat(" ", simple_str_concat(func_name, simple_str_concat("(", simple_str_concat(c_params, ")"))))));
 
-            // Build function body
+            // Build function body with block depth tracking
             const char* func_code = simple_str_concat(func_sig, " {\n");
+            int m_block_depth = 0;
+            int m_prev_indent = 0;
             for (int bi = 0; bi < mi->body_count; bi++) {
-                const char* bline = mi->body_lines[bi];
-                // Translate the method body line: replace self.field with self->field
-                // First, translate as a regular statement
+                const char* raw_bline = mi->body_lines[bi];
+                // Compute indent of this body line (relative to method body base)
+                int m_indent = 0;
+                { int si = 0; while (raw_bline[si] == ' ') si++; m_indent = si / 4; }
+                const char* bline = trim(raw_bline);
+                if (str_len(bline) == 0) continue;
+
+                // Close blocks when indent decreases
+                int m_is_cont = (starts_with(bline, "elif ") || strcmp(bline, "else:") == 0);
+                if (!m_is_cont) {
+                    while (m_block_depth > 0 && m_indent <= m_prev_indent - 1) {
+                        func_code = simple_str_concat(func_code, "    }\n");
+                        m_block_depth--;
+                        m_prev_indent--;
+                    }
+                } else {
+                    if (m_block_depth > 0) { m_block_depth--; m_prev_indent = m_indent; }
+                }
+                m_prev_indent = m_indent;
+
+                // Translate the method body line
                 const char* c_stmt = "";
                 if (starts_with(bline, "return ")) {
                     const char* ret_expr = trim(substr_from(bline, 7));
-                    // Replace self.X with self->X in the expression
                     const char* translated = translate_expr(ret_expr);
                     translated = simple_replace(translated, "self.", "self->");
                     c_stmt = simple_str_concat("return ", simple_str_concat(translated, ";"));
                 } else if (starts_with(bline, "print ")) {
-                    // Translate print, then fix self references
                     c_stmt = translate_print(bline);
                     c_stmt = simple_replace(c_stmt, "self.", "self->");
                 } else if (starts_with(bline, "val ") || starts_with(bline, "var ")) {
@@ -2558,16 +2886,50 @@ const char* generate_c(const char* source) {
                     const char* cond = trim(substr(bline, 3, str_len(bline) - 1));
                     c_stmt = simple_str_concat("if (", simple_str_concat(translate_expr(cond), ") {"));
                     c_stmt = simple_replace(c_stmt, "self.", "self->");
+                    m_block_depth++;
                 } else if (strcmp(bline, "else:") == 0) {
                     c_stmt = "} else {";
+                    m_block_depth++;
                 } else if (starts_with(bline, "elif ") && ends_with(bline, ":")) {
                     const char* cond = trim(substr(bline, 5, str_len(bline) - 1));
                     c_stmt = simple_str_concat("} else if (", simple_str_concat(translate_expr(cond), ") {"));
                     c_stmt = simple_replace(c_stmt, "self.", "self->");
+                    m_block_depth++;
                 } else if (starts_with(bline, "while ") && ends_with(bline, ":")) {
                     const char* cond = trim(substr(bline, 6, str_len(bline) - 1));
                     c_stmt = simple_str_concat("while (", simple_str_concat(translate_expr(cond), ") {"));
                     c_stmt = simple_replace(c_stmt, "self.", "self->");
+                    m_block_depth++;
+                } else if (starts_with(bline, "for ") && ends_with(bline, ":")) {
+                    // Handle for loops in method bodies
+                    const char* for_body = trim(substr(bline, 4, str_len(bline) - 1));
+                    long long in_pos = find_str(for_body, " in ");
+                    if (in_pos >= 0) {
+                        const char* var_name = trim(substr(for_body, 0, in_pos));
+                        const char* arr_expr = trim(substr_from(for_body, in_pos + 4));
+                        if (starts_with(arr_expr, "range(") && ends_with(arr_expr, ")")) {
+                            const char* range_inner = trim(substr(arr_expr, 6, str_len(arr_expr) - 1));
+                            long long comma = find_str(range_inner, ",");
+                            const char* rs = "0"; const char* re = NULL; const char* rstep = "1";
+                            if (comma >= 0) {
+                                rs = translate_expr(trim(substr(range_inner, 0, comma)));
+                                re = translate_expr(trim(substr_from(range_inner, comma + 1)));
+                            } else {
+                                re = translate_expr(range_inner);
+                            }
+                            c_stmt = simple_str_concat("for (long long ", simple_str_concat(var_name,
+                                simple_str_concat(" = ", simple_str_concat(rs,
+                                simple_str_concat("; ", simple_str_concat(var_name,
+                                simple_str_concat(" < ", simple_str_concat(re,
+                                simple_str_concat("; ", simple_str_concat(var_name, "++) {"))))))))));
+                        } else {
+                            c_stmt = simple_str_concat("/* TODO: for ", simple_str_concat(bline, " */"));
+                        }
+                    } else {
+                        c_stmt = simple_str_concat("/* TODO: for ", simple_str_concat(bline, " */"));
+                    }
+                    c_stmt = simple_replace(c_stmt, "self.", "self->");
+                    m_block_depth++;
                 } else {
                     // Assignment or expression
                     long long eq_pos = find_str(bline, " = ");
@@ -2583,7 +2945,6 @@ const char* generate_c(const char* source) {
                         const char* translated = translate_expr(bline);
                         translated = simple_replace(translated, "self.", "self->");
                         if (bi == mi->body_count - 1 && str_len(mi->return_type) > 0) {
-                            // Last line of a non-void method → implicit return
                             c_stmt = simple_str_concat("return ", simple_str_concat(translated, ";"));
                         } else {
                             c_stmt = simple_str_concat(translated, ";");
@@ -2591,6 +2952,11 @@ const char* generate_c(const char* source) {
                     }
                 }
                 func_code = simple_str_concat(func_code, simple_str_concat("    ", simple_str_concat(c_stmt, "\n")));
+            }
+            // Close any remaining open blocks
+            while (m_block_depth > 0) {
+                func_code = simple_str_concat(func_code, "    }\n");
+                m_block_depth--;
             }
             // If method has a return type but body is empty, add a default return
             if (mi->body_count == 0 && str_len(mi->return_type) > 0) {
