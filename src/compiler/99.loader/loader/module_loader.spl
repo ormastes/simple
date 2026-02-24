@@ -11,6 +11,7 @@
 # - Template instantiation (compiler_ctx.instantiate)
 # Benefits: No circular dependency, clean separation
 
+use std.log.{debug, info}
 use ..loader.compiler_ffi.*
 use ..linker.obj_taker.*
 use ..linker.smf_reader.*
@@ -127,6 +128,7 @@ struct ModuleLoader:
 
 fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
         """Create a new module loader."""
+        debug("loader", "Creating module loader (jit={config.enable_jit}, cache={config.enable_cache}, hot_reload={config.hot_reload})")
         val compiler_ctx = CompilerContext__create()  # FFI handle
         val obj_taker_config = ObjTakerConfig(
             enable_caching: config.enable_cache,
@@ -184,8 +186,7 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
                 # Unload for reload
                 moduleloader_unload(self, path)
 
-        if self.config.verbose:
-            print "[loader] Loading: {path}"
+        debug("loader", "Loading module: {path}")
 
         # Register with lifecycle manager for resource tracking.
         lifecycle_on_module_load(self.lifecycle, path, self.jit.exec_mapper.generation, current_time())
@@ -237,8 +238,7 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
 
         self.modules[path] = module
 
-        if self.config.verbose:
-            print "[loader] Loaded {symbols.len()} symbols from {path}"
+        debug("loader", "Loaded {symbols.len()} symbols from {path}")
 
         loadresult_Success(module: module)
 
@@ -251,6 +251,7 @@ fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
 
 fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
         """Resolve a symbol, JIT-compiling if necessary."""
+        debug("loader", "Resolving symbol: {name}")
         # Mark symbol as used for generation sweep (LRU tracking).
         lifecycle_mark_used(self.lifecycle, name)
 
@@ -259,14 +260,17 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
             val _destruct_0 = self.global_symbols[name]
             val symbol = _destruct_0[1]
 
+            debug("loader", "Symbol found in global table: {name}")
             # Return already-installed executable symbol
             return symbolresult_Found(symbol: symbol, code: [])
 
         # Try JIT instantiation
+        debug("loader", "Symbol not in table, trying JIT instantiation: {name}")
         if self.config.enable_jit:
             val jit_result = self.jit.try_jit_instantiate(name)
             match jit_result:
                 case Success(code, sym_name, address):
+                    debug("loader", "JIT instantiation success: {sym_name}")
                     var owner_id = "__jit__"
                     val mapped_rec = self.jit.exec_mapper.get_record(sym_name)
                     if mapped_rec.?:
@@ -395,6 +399,7 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
     6. Template metadata (loaded_metadata) for this module path
     7. Module cache entry
     """
+    debug("loader", "Unloading module: {path}")
     if not self.modules.contains_key(path):
         return
 

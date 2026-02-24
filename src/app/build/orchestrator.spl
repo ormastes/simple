@@ -15,7 +15,7 @@ use app.build.types (BuildConfig, BuildResult, BuildProfile, profile_to_string)
 use app.build.cargo (Cargo, print_build_result)
 use app.build.doc_warnings (run_doc_warnings)
 use app.io.mod (file_exists, process_run)
-use std.log.{info}
+use std.log.{info, debug, error}
 
 # Run FFI generator to create Rust workspace
 fn run_ffi_generator(verbose: bool) -> bool:
@@ -120,17 +120,74 @@ fn orchestrate_build(config: BuildConfig) -> BuildResult:
         if doc_exit != 0 and config.verbose:
             info("build", "Documentation warnings found (build continues)")
 
-    # PURE SIMPLE: Skip Rust FFI generation and cargo build
-    # Using pre-built runtime instead of compiling Rust code
-    if config.verbose:
-        print "✓ Skipping Rust FFI generation (Pure Simple mode)"
-        print "✓ Skipping cargo build (using pre-built runtime)"
+    # Native compilation via C backend -> clang++ -> mold
+    debug("build", "Starting native compilation pipeline")
 
-    # Return success - no Rust compilation needed
+    val source_file = "src/app/cli/main.spl"
+    val is_release = config.profile == BuildProfile.Release
+
+    # Output to build/ for debug, bin/release/ for release (avoid overwriting running binary)
+    var output_path = "build/simple"
+    var final_path = "build/simple"
+    if is_release:
+        output_path = "build/simple-release"
+        final_path = "bin/release/simple-new"
+
+    debug("build", "Profile: {profile_to_string(config.profile)}, output: {output_path}")
+
+    # Ensure output directory exists
+    val (_, _, mkdir_exit) = process_run("mkdir", ["-p", "build"])
+    if mkdir_exit != 0:
+        error("build", "Failed to create build/ directory")
+        return BuildResult(
+            success: false,
+            exit_code: 1,
+            stdout: "",
+            stderr: "Failed to create build/ directory",
+            duration_ms: 0
+        )
+
+    # Build args for native compile pipeline
+    var args: [text] = ["src/app/compile/native.spl", source_file, output_path]
+    if config.verbose:
+        args.push("--verbose")
+
+    debug("build", "Running: ./bin/release/simple {args.join(' ')}")
+    info("build", "Compiling {source_file} -> {output_path}")
+
+    val (stdout, stderr, exit_code) = process_run("./bin/release/simple", args)
+
+    if exit_code != 0:
+        error("build", "Native compilation failed (exit code {exit_code})")
+        if stderr != "":
+            error("build", stderr)
+        if stdout != "":
+            print stdout
+
+        return BuildResult(
+            success: false,
+            exit_code: exit_code,
+            stdout: stdout,
+            stderr: stderr,
+            duration_ms: 0
+        )
+
+    # For release builds, copy to final location
+    if is_release and output_path != final_path:
+        debug("build", "Copying {output_path} -> {final_path}")
+        val (_, cp_err, cp_exit) = process_run("cp", [output_path, final_path])
+        if cp_exit != 0:
+            error("build", "Failed to copy to {final_path}: {cp_err}")
+
+    if config.verbose and stdout != "":
+        print stdout
+
+    info("build", "Build complete: {final_path}")
+
     val result = BuildResult(
         success: true,
         exit_code: 0,
-        stdout: "Pure Simple build - using pre-built runtime",
+        stdout: stdout,
         stderr: "",
         duration_ms: 0
     )

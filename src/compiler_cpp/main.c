@@ -375,7 +375,7 @@ static long long cli_compile(SimpleStringArray a) {
 #ifdef _WIN32
     snprintf(cmd, sizeof(cmd), "\"%s\" compile \"%s\" \"%s\"", codegen_path, source_file, output_file);
 #else
-    snprintf(cmd, sizeof(cmd), "'%s' compile '%s' '%s'", codegen_path, source_file, output_file);
+    snprintf(cmd, sizeof(cmd), "'%s' '%s' '%s'", codegen_path, source_file, output_file);
 #endif
     int rc = system(cmd);
     if (rc == 0) {
@@ -392,7 +392,86 @@ static void fault_set_max_recursion_depth(long long v) { (void)v; }
 static void fault_set_timeout(long long v) { (void)v; }
 static void fault_set_execution_limit(long long v) { (void)v; }
 static int jit_available(void) { return 0; }
-static long long handle_build(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
+static long long handle_build(SimpleStringArray a) {
+    /* Parse build args */
+    int release = 0;
+    int verbose = 0;
+    int do_clean = 0;
+    const char* subcommand = NULL;
+    for (long long i = 0; i < a.len; i++) {
+        const char* arg = a.items[i];
+        if (strcmp(arg, "--release") == 0) { release = 1; continue; }
+        if (strcmp(arg, "--verbose") == 0 || strcmp(arg, "-v") == 0) { verbose = 1; continue; }
+        if (strcmp(arg, "--clean") == 0) { do_clean = 1; continue; }
+        if (arg[0] == '-') continue;
+        if (!subcommand) subcommand = arg;
+    }
+    /* Subcommands that need the interpreter (lint, fmt, check, test, etc.) */
+    if (subcommand) {
+        return delegate_to_interpreter("main.spl");
+    }
+
+    /* Native build using cmake + ninja */
+    char self_path[4096] = {0};
+    if (get_exe_dir(self_path, sizeof(self_path)) != 0) {
+        fprintf(stderr, "Error: cannot determine binary location\n");
+        return 1;
+    }
+    /* Project root is parent of build/ dir */
+    char project_root[4096];
+    snprintf(project_root, sizeof(project_root), "%s..", self_path);
+    char build_dir[4096], src_dir[4096];
+    snprintf(build_dir, sizeof(build_dir), "%s/build", project_root);
+    snprintf(src_dir, sizeof(src_dir), "%s/src/compiler_cpp", project_root);
+
+    int rc;
+    char cmd[8192];
+    const char* build_type = release ? "Release" : "Debug";
+
+    /* Step 1: cmake configure (if needed or --clean) */
+    char ninja_file[4096];
+    snprintf(ninja_file, sizeof(ninja_file), "%s/build.ninja", build_dir);
+    if (!cli_file_exists(ninja_file) || do_clean) {
+        if (verbose) { printf("[build] Configuring cmake (type: %s)...\n", build_type); fflush(stdout); }
+        snprintf(cmd, sizeof(cmd),
+            "cmake -B '%s' -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang "
+            "-DCMAKE_BUILD_TYPE=%s -S '%s'",
+            build_dir, build_type, src_dir);
+        rc = system(cmd);
+        if (get_exit_status(rc) != 0) {
+            fprintf(stderr, "Error: cmake configure failed\n");
+            return 1;
+        }
+    }
+
+    /* Step 2: ninja build */
+    if (verbose) { printf("[build] Building with ninja...\n"); fflush(stdout); }
+    snprintf(cmd, sizeof(cmd), "ninja -C '%s' -j$(nproc)", build_dir);
+    rc = system(cmd);
+    if (get_exit_status(rc) != 0) {
+        fprintf(stderr, "Error: ninja build failed\n");
+        return 1;
+    }
+
+    /* Step 3: For release, copy to bin/release/ */
+    char binary_path[4096];
+    snprintf(binary_path, sizeof(binary_path), "%s/simple", build_dir);
+    if (release) {
+        char release_dir[4096], release_path[4096];
+        snprintf(release_dir, sizeof(release_dir), "%s/bin/release", project_root);
+        snprintf(release_path, sizeof(release_path), "%s/simple-new", release_dir);
+        if (verbose) { printf("[build] Copying to %s...\n", release_path); fflush(stdout); }
+        snprintf(cmd, sizeof(cmd), "cp '%s' '%s'", binary_path, release_path);
+        rc = system(cmd);
+        if (get_exit_status(rc) != 0) {
+            fprintf(stderr, "Warning: failed to copy to release path\n");
+        } else {
+            printf("Release binary: %s\n", release_path);
+        }
+    }
+    printf("Build successful: %s\n", binary_path);
+    return 0;
+}
 static long long run_check(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
 static long long run_arch_check(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
 static long long run_check_dbs(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
