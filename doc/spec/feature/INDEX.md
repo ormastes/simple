@@ -628,5 +628,3 @@
 | Feature | Status | Tests | Coverage | Details |
 |---------|--------|-------|----------|----------|
 | [Linker Script Generator Specification](linker_gen_spec.md) | Minimal | 57 | 20% | 32 lines |
-
-

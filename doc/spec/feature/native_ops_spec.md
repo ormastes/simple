@@ -2,7 +2,13 @@
 
 **Feature ID:** #IO-001 | **Category:** I/O | **Status:** Active
 
-_Source: `test/feature/io/native_ops_spec.spl`_
+_Sources:_
+- `test/integration/io/native_ops_file_read_write_spec.spl`
+- `test/integration/io/native_ops_file_copy_spec.spl`
+- `test/integration/io/native_ops_file_size_spec.spl`
+- `test/integration/io/native_ops_dir_create_spec.spl`
+- `test/integration/io/native_ops_dir_recursive_spec.spl`
+- `test/integration/io/native_ops_dir_create_all_spec.spl`
 
 ---
 
@@ -40,9 +46,9 @@ check(is_dir(test_dir))
 - ✅ creates and reads files
 - ✅ copies files
 - ✅ gets file size
+
 ### Native Directory Operations
 
 - ✅ creates directories
 - ✅ creates nested directories recursively
 - ✅ creates directory tree with dir_create_all
-
