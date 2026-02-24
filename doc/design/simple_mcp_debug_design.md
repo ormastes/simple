@@ -4,6 +4,32 @@
 
 Unified MCP server with integrated debugger supporting 3 targets: interpreter, SMF bytecode, and native binaries. The server exposes debug, session, edit, and code view tools via MCP JSON-RPC.
 
+## 2026-02-24 Current State Update
+
+This document originally captured the full debug architecture vision. The active deployment path for `simple-mcp` now has two practical modes:
+
+1. `main_lazy` (active via `bin/simple_mcp_server`) - fast startup, inline handlers, currently used in tools.
+2. `main.spl` (full DI-based routing) - richer architecture, heavier startup path.
+
+Current operational status:
+
+- `debug_*` and `debug_log_*` tools are callable in active `main_lazy`.
+- Cross-client probes (Python/TypeScript/Rust) verify debug round-trip behavior.
+- Protocol completeness gaps remain in active `main_lazy`:
+  - Missing `resources/templates/list`, `resources/read`, `prompts/get`, completion endpoints, logging/roots methods.
+  - Response-shape gaps (id-type preservation, minimal capability/schema declarations).
+
+Canonical gap inventory and closure phases are tracked in:
+
+- Plan: `doc/plan/mcp_protocol_gap_closure_plan_2026-02-24.md`
+- Research: `doc/research/mcp_command_and_response_gap_analysis_2026-02-24.md`
+- Feature/Spec: `doc/feature/app/mcp_protocol_compliance.md`, `doc/spec/feature/app/mcp_protocol_compliance_spec.md`
+
+Implementation note:
+
+- Treat sections below as architectural intent/history unless explicitly marked as current.
+- For current wire behavior, rely on the plan/research/spec artifacts above.
+
 ## Architecture
 
 ```

@@ -279,11 +279,11 @@ Main module: `src/lib/ffi/mod.spl`. See `/sffi` skill.
 
 ## Runtime Limitations (CRITICAL)
 
-See MEMORY.md and code agent for full list. Key issues:
-- **NO try/catch/throw** - use Option pattern (`var error = nil`)
-- **NO generics at runtime** - `<>` syntax fails in interpreter
+See code agent for full list. Key issues:
+- **Error handling:** Use `Result<T, E>` + `?` operator (no try/catch/throw keywords — by design)
 - **Multi-line booleans** - wrap in parentheses: `if (a and\n   b):` works
 - **Nested closure capture** - can READ outer vars, CANNOT MODIFY (module closures work fine)
 - **Chained methods broken** - use intermediate `var`
+- **NO inheritance** - `class Child(Parent)` is NOT supported (by design — use composition, alias forwarding, traits, mixins)
 - **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`
 

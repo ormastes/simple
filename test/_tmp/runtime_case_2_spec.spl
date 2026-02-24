@@ -1,0 +1,42 @@
+# # MCP Protocol Runtime Spec
+#
+# Wire-level protocol checks for active simple-mcp server wrapper.
+
+use std.spec
+use app.io.mod.{shell}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn mcp_msg(body: text) -> text:
+    "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
+
+fn init_request(id: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+    mcp_msg(body)
+
+fn initialized_notification() -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}")
+
+fn shutdown_request(id: text) -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"shutdown\",\"params\":{}}")
+
+fn generic_request(id: text, method: text, params_json: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"" + method + "\",\"params\":" + params_json + "}"
+    mcp_msg(body)
+
+fn send_mcp(messages: text) -> text:
+    val tmp = "/tmp/mcp_protocol_runtime_input.txt"
+    rt_file_write_text(tmp, messages)
+    val result = shell("cat " + tmp + " | bin/simple_mcp_server 2>/dev/null")
+    result.stdout ?? ""
+
+describe "MCP Protocol Runtime":
+    it "supports resources templates and read":
+        val req1 = generic_request("2", "resources/templates/list", "{}")
+        val req2 = generic_request("3", "resources/read", "{\"uri\":\"project:///info\"}")
+        val input = init_request("1") + initialized_notification() + req1 + req2 + shutdown_request("4")
+        val output = send_mcp(input)
+        expect(output.contains("resourceTemplates")).to_equal(true)
+        expect(output.contains("project:///info")).to_equal(true)
+        expect(output.contains("Working Dir")).to_equal(true)
+

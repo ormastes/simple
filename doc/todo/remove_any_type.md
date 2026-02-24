@@ -1,18 +1,25 @@
-# TODO: Remove `Any` Type from Compiler
+# Internal Refactoring: Replace `Any` with Typed Alternatives
 
-**Priority:** P2 (Medium)
+**Priority:** P3 (Low — internal code quality only)
 **Status:** Planned
 **Effort:** Large (8-12 weeks)
 **Created:** 2026-02-08
+**Updated:** 2026-02-24
+
+## Note
+
+`Any` is **already hidden from users** — no public definition exists, it cannot be imported
+or used in user code. This TODO is purely about improving internal compiler/stdlib code quality
+by replacing `Any` with more specific types (generics, `RuntimeValue`, typed enums).
 
 ## Background
 
-The `Any` type is currently used throughout the compiler and standard library as a type-erased container. While convenient, it has several drawbacks:
+The `Any` type is currently used in compiler internals and stdlib FFI as a type-erased container. While convenient, it has several drawbacks for internal code quality:
 
-1. **Type Safety Loss:** Defeats the purpose of static typing
+1. **Type Safety Loss:** Defeats the purpose of static typing within compiler code
 2. **Runtime Overhead:** Requires boxing/unboxing and type checking
 3. **Error Prone:** Type errors caught at runtime instead of compile time
-4. **API Clarity:** Unclear what types are actually expected
+4. **API Clarity:** Unclear what types are actually expected internally
 
 ## Current Usage
 
