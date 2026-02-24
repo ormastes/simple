@@ -7,6 +7,28 @@ fn check(condition: bool):
 fn check_msg(condition: bool, message: text):
     if not condition:
         expect(message).to_equal("")
+
+# Helper: parse text to i64 (v0.4.0 has no text.to_i64())
+fn char_digit(ch: text) -> i64:
+    if ch == "0": 0
+    else if ch == "1": 1
+    else if ch == "2": 2
+    else if ch == "3": 3
+    else if ch == "4": 4
+    else if ch == "5": 5
+    else if ch == "6": 6
+    else if ch == "7": 7
+    else if ch == "8": 8
+    else if ch == "9": 9
+    else: -1
+
+fn text_to_i64(s: text) -> i64:
+    var result = 0
+    for i in 0..s.len():
+        val d = char_digit(s[i:i+1])
+        if d >= 0:
+            result = result * 10 + d
+    result
 # use std.database.core.{StringInterner, SdnTable, SdnRow, SdnDatabase}
 # use app.io.file_ops.{file_exists, file_delete, file_write, file_read, rt_file_rename}
 
@@ -27,8 +49,8 @@ fn file_read(path: text) -> text:
 
 # Stub: StringInterner (uses strings/reverse fields)
 class StringInterner:
-    strings: {}
-    reverse: {}
+    strings: {text: i64}
+    reverse: {text: text}
     next_id: i64
     me intern(s: text) -> i64:
         if self.strings.contains_key(s):
@@ -50,7 +72,7 @@ class StringInterner:
 
 # Stub: SdnRow
 class SdnRow:
-    fields: {}
+    fields: {text: text}
     me set(key: text, value: text):
         self.fields[key] = value
     fn get(key: text):
@@ -60,7 +82,7 @@ class SdnRow:
     fn get_i64(key: text):
         val v = self.get(key)
         if v.?:
-            return Some(v?.to_i64())
+            return Some(text_to_i64(v?))
         nil
     fn get_bool(key: text):
         val v = self.get(key)
@@ -77,8 +99,8 @@ class SdnRow:
 class SdnTable:
     name: text
     columns: [text]
-    rows: []
-    index: {}
+    rows: [SdnRow]
+    index: {text: i64}
     me add_row(row: SdnRow):
         val id_opt = row.get("id")
         if id_opt.?:
@@ -95,9 +117,14 @@ class SdnTable:
     me mark_deleted(id: text):
         if self.index.contains_key(id):
             val idx = self.index[id]
-            var row = self.rows[idx]
-            row.set("valid", "false")
-    fn valid_rows() -> []:
+            var new_rows = []
+            for i in 0..self.rows.len():
+                var r = self.rows[i]
+                if i == idx:
+                    r.set("valid", "false")
+                new_rows = new_rows + [r]
+            self.rows = new_rows
+    fn valid_rows() -> [SdnRow]:
         var result = []
         for row in self.rows:
             val valid = row.get("valid")
@@ -118,7 +145,7 @@ class SdnTable:
 # Stub: SdnDatabase
 class SdnDatabase:
     path: text
-    tables: {}
+    tables: {text: SdnTable}
     interner: StringInterner
     modified: bool
     me set_table(name: text, table: SdnTable):
@@ -131,9 +158,15 @@ class SdnDatabase:
     fn get_table_mut(name: text):
         self.get_table(name)
     me save() -> bool:
+        _db_store[self.path] = self
         true
     static fn load(path: text):
+        if _db_store.contains_key(path):
+            return Some(_db_store[path])
         nil
+
+# Module-level persistence store for SdnDatabase.save/load stub
+var _db_store = {}
 
 describe "StringInterner":
     it "interns same string to same ID":

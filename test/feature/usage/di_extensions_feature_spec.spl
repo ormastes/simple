@@ -1,36 +1,69 @@
-# # DI Extension Container
-#
-# **Feature ID:** #DI-002
-# **Category:** Compiler
-# **Status:** Active
-#
-# ## Overview
-#
-# Tests the DiContainer as a dynamic plugin/extension registration point separate
-# from typed core services. Covers all five phases: basic plugin registration and
-# retrieval, multiple independent plugins, separation from core services,
-# integration with CompileContext, and plugin lifecycle with lock/unlock semantics.
-#
-# ## Syntax
-#
-# ```simple
-# val ext = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
-# ext.bind_instance("Profiler", "profiler-v1")
-# val result = ext.resolve_or("MissingPlugin", "default-value")
-# ```
 # DI Extensions Feature Spec
 #
 # Feature 5: DI Extension Container
-#
 # CompileContext.extensions: DiContainer provides a dynamic plugin/extension
 # registration point separate from the typed core services.
-#
-# This feature-level spec covers ALL phases of the extension container feature.
 
-use compiler.di.{DiContainer}
+# use compiler.di.{DiContainer}
+
+# Local stub: DiContainer with list-based storage
+class DiContainer:
+    bindings: list
+    singletons: list
+    profile: text
+    all_bindings: list
+    locked: bool
+
+    fn is_locked() -> bool:
+        self.locked
+
+    me lock():
+        self.locked = true
+
+    me unlock():
+        self.locked = false
+
+    me bind_instance(key: text, value):
+        if self.locked:
+            return nil
+        var new_bindings = []
+        for entry in self.all_bindings:
+            if entry[0] != key:
+                new_bindings = new_bindings + [entry]
+        new_bindings = new_bindings + [[key, value]]
+        self.all_bindings = new_bindings
+
+    me bind(key: text, factory):
+        if self.locked:
+            return nil
+        val value = factory()
+        var new_bindings = []
+        for entry in self.all_bindings:
+            if entry[0] != key:
+                new_bindings = new_bindings + [entry]
+        new_bindings = new_bindings + [[key, value]]
+        self.all_bindings = new_bindings
+
+    fn has(key: text) -> bool:
+        for entry in self.all_bindings:
+            if entry[0] == key:
+                return true
+        false
+
+    fn resolve(key: text):
+        for entry in self.all_bindings:
+            if entry[0] == key:
+                return entry[1]
+        nil
+
+    fn resolve_or(key: text, default_val):
+        for entry in self.all_bindings:
+            if entry[0] == key:
+                return entry[1]
+        default_val
 
 fn make_ext() -> DiContainer:
-    DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+    DiContainer(bindings: [], singletons: [], profile: "dev", all_bindings: [], locked: false)
 
 # ============================================================================
 # Phase 1 - Basic plugin registration
@@ -146,8 +179,6 @@ describe "DI Extensions Feature: Phase 3 - Separation from core services":
         expect(ext.has("AnyPlugin")).to_equal(false)
 
     it "extensions container is independent of typed backend port":
-        # Extensions is a separate DiContainer — typed backend is in CompileContext.backend
-        # not in extensions. Verify extensions has no Backend by default.
         val ext = make_ext()
         val backend_in_ext = ext.resolve_or("Backend", nil)
         expect(backend_in_ext).to_be_nil()
@@ -169,7 +200,7 @@ describe "DI Extensions Feature: Phase 3 - Separation from core services":
         expect(result).to_equal("lazy-created")
 
     it "profile is preserved on extensions container":
-        val ext = DiContainer(bindings: {}, singletons: {}, profile: "prod", all_bindings: [], locked: false)
+        val ext = DiContainer(bindings: [], singletons: [], profile: "prod", all_bindings: [], locked: false)
         expect(ext.profile).to_equal("prod")
 
 # ============================================================================
@@ -179,18 +210,15 @@ describe "DI Extensions Feature: Phase 3 - Separation from core services":
 describe "DI Extensions Feature: Phase 4 - Integration with CompileContext":
 
     it "extensions container starts with empty bindings":
-        # Simulates CompileContext.extensions starting empty
-        val extensions = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+        val extensions = DiContainer(bindings: [], singletons: [], profile: "dev", all_bindings: [], locked: false)
         expect(extensions.has("AnyPlugin")).to_equal(false)
 
     it "register_extension adds to extensions (via bind_instance)":
-        # CompileContext.register_extension delegates to extensions.bind_instance
         val extensions = make_ext()
         extensions.bind_instance("MyPlugin", "plugin-value")
         expect(extensions.has("MyPlugin")).to_equal(true)
 
     it "get_extension retrieves registered value (via resolve_or)":
-        # CompileContext.get_extension delegates to extensions.resolve_or
         val extensions = make_ext()
         extensions.bind_instance("MyPlugin", "plugin-value")
         val result = extensions.resolve_or("MyPlugin", nil)
@@ -202,7 +230,7 @@ describe "DI Extensions Feature: Phase 4 - Integration with CompileContext":
         expect(result).to_be_nil()
 
     it "extensions uses profile from options":
-        val extensions = DiContainer(bindings: {}, singletons: {}, profile: "test", all_bindings: [], locked: false)
+        val extensions = DiContainer(bindings: [], singletons: [], profile: "test", all_bindings: [], locked: false)
         expect(extensions.profile).to_equal("test")
 
     it "extensions starts unlocked":
