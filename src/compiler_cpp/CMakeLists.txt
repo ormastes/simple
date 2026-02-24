@@ -1,21 +1,21 @@
-# CMakeLists.txt - Bootstrap Build for Generated C++20 Code
+# CMakeLists.txt - Temporal Bootstrap Build (Generated C from Simple Source)
 #
-# Generated C++20 files from Simple source via:
-#   bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
+# Generated C files from Simple source via:
+#   build/simple_codegen src/app/cli/main.spl src/compiler_cpp/main.c
 #
-# Each .cpp file is a standalone self-contained program (MIR C backend).
-# The main bootstrap binary is built from main.cpp (CLI entry point).
-# Other .cpp files are standalone tools (codegen, compile, etc.).
+# This produces a TEMPORAL (bootstrap) binary that provides fast CLI dispatch
+# but delegates real work to bin/release/simple (the REAL binary).
 #
 # The generated code links against runtime.c/runtime.h from src/runtime/.
-# Runtime files are compiled as C (extern "C" linkage via runtime.h).
+# Runtime files are compiled as C.
 #
-# Build (clang++/clang-cl auto-detected; override with -DCMAKE_CXX_COMPILER=...):
-#   cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -S src/compiler_cpp
+# Build:
+#   cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
 #   ninja -C build -j7
+#   cp build/simple build/bootstrap/c_simple/simple
 #
-# The bootstrap approach follows Go/Zig: generated C++ is committed to repo,
-# so anyone can bootstrap from scratch with just CMake + a C++ compiler.
+# The bootstrap approach follows Go/Zig: generated C is committed to repo,
+# so anyone can bootstrap from scratch with just CMake + a C compiler.
 
 cmake_minimum_required(VERSION 3.20)
 

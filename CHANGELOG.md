@@ -2,6 +2,30 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.7.0] - 2026-02-24
+
+### Added
+- Type system Wave 2: flow narrowing (M2), associated types (M3), effect system (M4)
+- Bitfield feature — hardware register definitions with zero-overhead bit manipulation
+- Pass keyword variants: `pass_do_nothing`, `pass_dn` (intentional no-ops with semantic meaning)
+- Binary architecture documentation (temporal C bootstrap vs real Simple binary)
+- C bootstrap preprocessing for pass keywords and bitfield syntax compatibility
+
+### Changed
+- `build/bootstrap/c_simple/` established as canonical bootstrap location
+- `src/compiler_cpp/` documented as temporal bootstrap (generated C from Simple source)
+- Bootstrap pipeline docs updated with temporal vs real binary distinction
+
+### Fixed
+- Corrupted pass_variants_spec.spl test file (keywords replaced with `0`)
+- Module loader crash bugs + memory efficiency improvements
+- Heap-allocation leaks in MIR C codegen
+- C backend `simple_int_to_str` type mismatch for string backend field
+
+### Infrastructure
+- Bootstrap binary updated to v0.7.0 with pass keyword and bitfield support
+- `bin/release/simple` updated as current release binary
+
 ## [0.6.1] - 2026-02-23
 
 ### Added
