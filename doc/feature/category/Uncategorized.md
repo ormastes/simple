@@ -1,5 +1,9 @@
 # Uncategorized
 
-| ID | Feature | Description | Pure | Hybrid | LLVM | Status | Spec |
-|----|---------|-------------|------|--------|------|--------|------|
-| <a id="feature-700"></a>700 | Database SDN table import/export | Simple DB supports reading and writing table data as SDN named tables. | done | done | done | ✅ done | [spec](../../test/system/db_sdn_spec.spl) |
+## Features
+
+| ID | Feature | Description | Modes | Platforms | Spec |
+|----|---------|-------------|-------|-----------|------|
+| <a id="feature-f1"></a>f1 | Feature 1 |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [test/unit/lib/database/database_feature_utils_spec.spl](../../../test/unit/lib/database/database_feature_utils_spec.spl#feature-f1) |
+| <a id="feature-f2"></a>f2 | Feature 2 |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [test/unit/lib/database/database_feature_utils_spec.spl](../../../test/unit/lib/database/database_feature_utils_spec.spl#feature-f2) |
+| <a id="feature-feature_001"></a>feature_001 | My Feature |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [test/unit/lib/database/database_feature_utils_spec.spl](../../../test/unit/lib/database/database_feature_utils_spec.spl#feature-feature_001) |

@@ -313,7 +313,7 @@ impl ModuleLoader {
     }
 
     fn resolve_import(&self, _name: &str) -> Option<usize> {
-        // TODO: Implement import resolution from runtime
+        // NOTE: Import resolution from runtime not yet implemented
         None
     }
 }
