@@ -1,7 +1,7 @@
 # Performance Benchmarking Utilities (Facade)
 #
 # Comprehensive benchmarking framework for the Simple language.
-# Pure Simple implementation with optional timing FFI integration.
+# Pure Simple implementation with real nanosecond timing via FFI.
 
 # Import all submodules
 import types
@@ -10,6 +10,8 @@ import stats
 import compare
 import report
 import utilities
+import benchmark_config
+import benchmark_stats
 
 # Re-export from types.spl
 export create_benchmark_suite, add_benchmark, configure_suite
@@ -18,9 +20,6 @@ export BENCHMARK_DEFAULT_OUTLIER_THRESHOLD, BENCHMARK_REGRESSION_THRESHOLD
 
 # Re-export from measure.spl
 export get_timestamp, time_function, time_iterations
-export run_benchmark, run_with_warmup, run_benchmark_full, run_suite
-export benchmark_convergence, benchmark_adaptive
-export profile_function, profile_with_breakdown
 
 # Re-export from stats.spl
 export calculate_mean, calculate_median, calculate_variance, calculate_stddev
@@ -53,3 +52,43 @@ export benchmark_count, get_benchmark_names
 export find_fastest_result, find_slowest_result
 export create_suite_summary
 export estimate_memory_usage, track_allocations, memory_overhead
+
+# Re-export from benchmark_config.spl
+export BenchmarkConfig
+
+# Re-export from benchmark_stats.spl
+export BenchmarkStats
+
+# =============================================================================
+# Top-level benchmark function
+# =============================================================================
+
+use benchmark_config.{BenchmarkConfig, benchmark_config_default}
+use benchmark_stats.{BenchmarkStats, calculate_stats as calc_bstats}
+use measure.{get_timestamp, time_function}
+
+fn benchmark(name: text, fn_to_bench: fn(), config: BenchmarkConfig?) -> BenchmarkStats:
+    val cfg = config ?? benchmark_config_default()
+
+    # Warmup
+    var w = 0
+    while w < cfg.warmup_iterations:
+        fn_to_bench()
+        w = w + 1
+
+    # Collect samples (each sample = average of measurement_iterations runs)
+    var samples: [f64] = []
+    var s = 0
+    while s < cfg.sample_size:
+        var total_ns: i64 = 0
+        var m = 0
+        while m < cfg.measurement_iterations:
+            total_ns = total_ns + time_function(fn_to_bench)
+            m = m + 1
+        val avg_ns = total_ns.to_f64() / cfg.measurement_iterations.to_f64()
+        samples.push(avg_ns)
+        s = s + 1
+
+    calc_bstats(samples, cfg.outlier_threshold)
+
+export benchmark

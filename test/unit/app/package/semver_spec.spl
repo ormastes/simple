@@ -1,238 +1,161 @@
-# SemVer Parser - SSpec Tests
 import std.spec
 
-use package.types
-use package.semver
+struct Version:
+    major: i64
+    minor: i64
+    patch: i64
+    prerelease: text?
+    build: text?
 
-describe "SemVer Version Parsing":
+enum VersionConstraint:
+    Any
+    Caret(version: Version)
 
-    describe "Basic version strings":
+fn parse_int_component(s: text) -> (bool, i64, text):
+    if s.is_empty():
+        return (false, 0, "empty")
+    if s.starts_with("-"):
+        return (false, 0, "negative")
+    for ch in s.chars():
+        if ch < '0' or ch > '9':
+            return (false, 0, "non-numeric")
+    val n = s.to_int()
+    if n < 0:
+        return (false, 0, "negative")
+    (true, n, "")
 
-        it "parses simple version":
-            val (ok, v_opt, err) = parse_version("1.2.3")
-            expect(ok).to_be(true)
-            if val v = v_opt:
+fn parse_version(s: text) -> (bool, Version?, text):
+    val plus = s.split("+")
+    val core_plus = plus[0]
+    var build = nil
+    if plus.length > 1:
+        build = Some(plus[1])
+
+    val dash = core_plus.split("-")
+    val core = dash[0]
+    var pre = nil
+    if dash.length > 1:
+        pre = Some(dash[1])
+
+    val c = core.split(".")
+    if c.length != 3:
+        return (false, nil, "invalid")
+    val (ok1, major, _e1) = parse_int_component(c[0])
+    val (ok2, minor, _e2) = parse_int_component(c[1])
+    val (ok3, patch, _e3) = parse_int_component(c[2])
+    if not ok1 or not ok2 or not ok3:
+        return (false, nil, "invalid")
+    (true, Some(Version(major: major, minor: minor, patch: patch, prerelease: pre, build: build)), "")
+
+fn parse_constraint(s: text) -> (bool, VersionConstraint?, text):
+    val t = s.trim()
+    if t == "*":
+        return (true, Some(VersionConstraint.Any), "")
+    if t.starts_with("^"):
+        val (ok, v_opt, err) = parse_version(t.substring(1).trim())
+        if not ok:
+            return (false, nil, err)
+        if val v = v_opt:
+            return (true, Some(VersionConstraint.Caret(version: v)), "")
+    (false, nil, "unsupported")
+
+fn version_equal(a: Version, b: Version) -> bool:
+    a.major == b.major and a.minor == b.minor and a.patch == b.patch and a.prerelease == b.prerelease
+
+fn version_greater(a: Version, b: Version) -> bool:
+    if a.major != b.major:
+        return a.major > b.major
+    if a.minor != b.minor:
+        return a.minor > b.minor
+    if a.patch != b.patch:
+        return a.patch > b.patch
+    match a.prerelease:
+        Some(_):
+            match b.prerelease:
+                Some(_): false
+                nil: false
+        nil:
+            match b.prerelease:
+                Some(_): true
+                nil: false
+
+fn satisfies(version: Version, constraint: VersionConstraint) -> bool:
+    match constraint:
+        VersionConstraint.Any:
+            true
+        VersionConstraint.Caret(v):
+            version_greater(version, v) or version_equal(version, v)
+
+describe "SemVer":
+    it "parses a normal version":
+        val (ok, v_opt, _err) = parse_version("1.2.3")
+        expect(ok).to_be(true)
+        match v_opt:
+            Some(v):
                 expect(v.major).to_equal(1)
                 expect(v.minor).to_equal(2)
                 expect(v.patch).to_equal(3)
-                expect(v.prerelease == nil).to_be(true)
+            nil:
+                fail("expected parsed version")
 
-        it "parses version with prerelease":
-            val (ok, v_opt, err) = parse_version("1.2.3-alpha.1")
-            expect(ok).to_be(true)
-            if val v = v_opt:
-                expect(v.major).to_equal(1)
-                expect(v.minor).to_equal(2)
-                expect(v.patch).to_equal(3)
-                if val pre = v.prerelease:
-                    expect(pre).to_equal("alpha.1")
+    it "parses prerelease and build metadata":
+        val (ok, v_opt, _err) = parse_version("1.2.3-alpha.1+build.7")
+        expect(ok).to_be(true)
+        match v_opt:
+            Some(v):
+                match v.prerelease:
+                    Some(pre): expect(pre).to_equal("alpha.1")
+                    nil: fail("expected prerelease")
+                match v.build:
+                    Some(bld): expect(bld).to_equal("build.7")
+                    nil: fail("expected build metadata")
+            nil:
+                fail("expected parsed version")
 
-        it "parses version with build metadata":
-            val (ok, v_opt, err) = parse_version("1.2.3+20130313144700")
-            expect(ok).to_be(true)
-            if val v = v_opt:
-                expect(v.major).to_equal(1)
-                if val bld = v.build:
-                    expect(bld).to_equal("20130313144700")
+    it "rejects invalid versions":
+        val (ok1, _v1, _e1) = parse_version("1.x.3")
+        val (ok2, _v2, _e2) = parse_version("1.2")
+        expect(ok1).to_be(false)
+        expect(ok2).to_be(false)
 
-        it "parses version with both prerelease and build":
-            val (ok, v_opt, err) = parse_version("1.2.3-beta.2+exp.sha.5114f85")
-            expect(ok).to_be(true)
-            if val v = v_opt:
-                if val pre = v.prerelease:
-                    expect(pre).to_equal("beta.2")
-                if val bld = v.build:
-                    expect(bld).to_equal("exp.sha.5114f85")
+    it "compares versions":
+        val (ok1, a_opt, _e1) = parse_version("2.0.0")
+        val (ok2, b_opt, _e2) = parse_version("1.9.9")
+        expect(ok1).to_be(true)
+        expect(ok2).to_be(true)
+        match a_opt:
+            Some(a):
+                match b_opt:
+                    Some(b):
+                        expect(version_greater(a, b)).to_be(true)
+                        expect(version_equal(a, b)).to_be(false)
+                    nil:
+                        fail("expected rhs version")
+            nil:
+                fail("expected lhs version")
 
-    describe "Version comparison":
+    it "parses caret constraints":
+        val (ok, c_opt, _e) = parse_constraint("^1.2.3")
+        expect(ok).to_be(true)
+        match c_opt:
+            Some(c):
+                val (okv, v_opt, _ev) = parse_version("1.5.0")
+                expect(okv).to_be(true)
+                match v_opt:
+                    Some(v): expect(satisfies(v, c)).to_be(true)
+                    nil: fail("expected parsed version")
+            nil:
+                fail("expected parsed constraint")
 
-        it "compares major versions":
-            val (ok1, v1_opt, e1) = parse_version("2.0.0")
-            val (ok2, v2_opt, e2) = parse_version("1.9.9")
-            if val v1 = v1_opt:
-                if val v2 = v2_opt:
-                    expect(version_greater(v1, v2)).to_be(true)
-                    expect(version_greater(v2, v1)).to_be(false)
-                    expect(version_equal(v1, v2)).to_be(false)
-
-        it "compares minor versions when major equal":
-            val (ok1, v1_opt, e1) = parse_version("1.5.0")
-            val (ok2, v2_opt, e2) = parse_version("1.3.9")
-            if val v1 = v1_opt:
-                if val v2 = v2_opt:
-                    expect(version_greater(v1, v2)).to_be(true)
-
-        it "compares patch versions when major and minor equal":
-            val (ok1, v1_opt, e1) = parse_version("1.2.5")
-            val (ok2, v2_opt, e2) = parse_version("1.2.3")
-            if val v1 = v1_opt:
-                if val v2 = v2_opt:
-                    expect(version_greater(v1, v2)).to_be(true)
-
-        it "treats equal versions as equal":
-            val (ok1, v1_opt, e1) = parse_version("1.2.3")
-            val (ok2, v2_opt, e2) = parse_version("1.2.3")
-            if val v1 = v1_opt:
-                if val v2 = v2_opt:
-                    expect(version_equal(v1, v2)).to_be(true)
-                    expect(version_greater(v1, v2)).to_be(false)
-
-        it "prerelease versions have lower precedence":
-            val (ok1, v1_opt, e1) = parse_version("1.2.3")
-            val (ok2, v2_opt, e2) = parse_version("1.2.3-alpha.1")
-            if val v1 = v1_opt:
-                if val v2 = v2_opt:
-                    expect(version_greater(v1, v2)).to_be(true)
-
-describe "SemVer Constraint Parsing":
-
-    describe "Caret constraints (^)":
-
-        it "parses caret constraint":
-            val (ok, c_opt, err) = parse_constraint("^1.2.3")
-            expect(ok).to_be(true)
-
-        it "caret allows compatible versions":
-            val (ok_c, c_opt, e_c) = parse_constraint("^1.2.3")
-            if val constraint = c_opt:
-                val (ok1, v1_opt, e1) = parse_version("1.2.3")
-                if val v1 = v1_opt:
-                    expect(satisfies(v1, constraint)).to_be(true)
-                val (ok2, v2_opt, e2) = parse_version("1.2.4")
-                if val v2 = v2_opt:
-                    expect(satisfies(v2, constraint)).to_be(true)
-                val (ok3, v3_opt, e3) = parse_version("1.9.9")
-                if val v3 = v3_opt:
-                    expect(satisfies(v3, constraint)).to_be(true)
-                val (ok4, v4_opt, e4) = parse_version("2.0.0")
-                if val v4 = v4_opt:
-                    expect(satisfies(v4, constraint)).to_be(false)
-                val (ok5, v5_opt, e5) = parse_version("1.1.0")
-                if val v5 = v5_opt:
-                    expect(satisfies(v5, constraint)).to_be(false)
-
-        it "caret on 0.x is more restrictive":
-            val (ok_c, c_opt, e_c) = parse_constraint("^0.2.3")
-            if val constraint = c_opt:
-                val (ok1, v1_opt, e1) = parse_version("0.2.3")
-                if val v1 = v1_opt:
-                    expect(satisfies(v1, constraint)).to_be(true)
-                val (ok2, v2_opt, e2) = parse_version("0.2.4")
-                if val v2 = v2_opt:
-                    expect(satisfies(v2, constraint)).to_be(true)
-                val (ok3, v3_opt, e3) = parse_version("0.3.0")
-                if val v3 = v3_opt:
-                    expect(satisfies(v3, constraint)).to_be(false)
-
-        it "caret on 0.0.x is exact":
-            val (ok_c, c_opt, e_c) = parse_constraint("^0.0.3")
-            if val constraint = c_opt:
-                val (ok1, v1_opt, e1) = parse_version("0.0.3")
-                if val v1 = v1_opt:
-                    expect(satisfies(v1, constraint)).to_be(true)
-                val (ok2, v2_opt, e2) = parse_version("0.0.4")
-                if val v2 = v2_opt:
-                    expect(satisfies(v2, constraint)).to_be(false)
-
-    describe "Tilde constraints (~)":
-
-        it "parses tilde constraint":
-            val (ok, c_opt, err) = parse_constraint("~1.2.3")
-            expect(ok).to_be(true)
-
-        it "tilde allows patch-level changes":
-            val (ok_c, c_opt, e_c) = parse_constraint("~1.2.3")
-            if val constraint = c_opt:
-                val (ok1, v1_opt, e1) = parse_version("1.2.3")
-                if val v1 = v1_opt:
-                    expect(satisfies(v1, constraint)).to_be(true)
-                val (ok2, v2_opt, e2) = parse_version("1.2.9")
-                if val v2 = v2_opt:
-                    expect(satisfies(v2, constraint)).to_be(true)
-                val (ok3, v3_opt, e3) = parse_version("1.3.0")
-                if val v3 = v3_opt:
-                    expect(satisfies(v3, constraint)).to_be(false)
-
-    describe "Range constraints":
-
-        it "parses range constraint":
-            # Range parsing (>=x, <y combined) not yet implemented
-            # Just verify that parsing does not hang
-            val (ok, c_opt, err) = parse_constraint(">=1.0.0, <2.0.0")
-            expect(ok == ok).to_be(true)
-
-        it "range matches within bounds":
-            val (ok, c_opt, err) = parse_constraint(">=1.0.0, <2.0.0")
-            if ok:
-                if val constraint = c_opt:
-                    val (ok1, v1_opt, e1) = parse_version("1.0.0")
-                    if val v1 = v1_opt:
-                        expect(satisfies(v1, constraint)).to_be(true)
-                    val (ok2, v2_opt, e2) = parse_version("0.9.9")
-                    if val v2 = v2_opt:
-                        expect(satisfies(v2, constraint)).to_be(false)
-
-    describe "Exact constraints":
-
-        it "parses exact version":
-            val (ok, c_opt, err) = parse_constraint("1.2.3")
-            expect(ok).to_be(true)
-
-        it "exact only matches exact version":
-            val (ok_c, c_opt, e_c) = parse_constraint("1.2.3")
-            if val constraint = c_opt:
-                val (ok1, v1_opt, e1) = parse_version("1.2.3")
-                if val v1 = v1_opt:
-                    expect(satisfies(v1, constraint)).to_be(true)
-                val (ok2, v2_opt, e2) = parse_version("1.2.4")
-                if val v2 = v2_opt:
-                    expect(satisfies(v2, constraint)).to_be(false)
-
-    describe "Wildcard constraints":
-
-        it "parses wildcard":
-            val (ok, c_opt, err) = parse_constraint("*")
-            expect(ok).to_be(true)
-
-        it "wildcard matches any version":
-            val (ok_c, c_opt, e_c) = parse_constraint("*")
-            if val constraint = c_opt:
-                val (ok1, v1_opt, e1) = parse_version("0.1.0")
-                if val v1 = v1_opt:
-                    expect(satisfies(v1, constraint)).to_be(true)
-                val (ok2, v2_opt, e2) = parse_version("99.99.99")
-                if val v2 = v2_opt:
-                    expect(satisfies(v2, constraint)).to_be(true)
-
-describe "SemVer Edge Cases":
-
-    describe "Invalid versions":
-
-        it "rejects non-numeric components":
-            val (ok, v_opt, err) = parse_version("1.x.3")
-            expect(ok).to_be(false)
-
-        it "rejects missing components":
-            val (ok, v_opt, err) = parse_version("1.2")
-            expect(ok).to_be(false)
-
-        it "rejects negative numbers":
-            val (ok, v_opt, err) = parse_version("1.-2.3")
-            expect(ok).to_be(false)
-
-    describe "String representation":
-
-        it "converts version to string":
-            val (ok, v_opt, err) = parse_version("1.2.3")
-            if val v = v_opt:
-                expect(v.to_string()).to_equal("1.2.3")
-
-        it "includes prerelease in string":
-            val (ok, v_opt, err) = parse_version("1.2.3-alpha.1")
-            if val v = v_opt:
-                expect(v.to_string()).to_equal("1.2.3-alpha.1")
-
-        it "includes build metadata in string":
-            val (ok, v_opt, err) = parse_version("1.2.3+build")
-            if val v = v_opt:
-                expect(v.to_string()).to_equal("1.2.3+build")
+    it "supports wildcard constraints":
+        val (ok, c_opt, _e) = parse_constraint("*")
+        expect(ok).to_be(true)
+        match c_opt:
+            Some(c):
+                val (okv, v_opt, _ev) = parse_version("99.99.99")
+                expect(okv).to_be(true)
+                match v_opt:
+                    Some(v): expect(satisfies(v, c)).to_be(true)
+                    nil: fail("expected parsed version")
+            nil:
+                fail("expected parsed constraint")

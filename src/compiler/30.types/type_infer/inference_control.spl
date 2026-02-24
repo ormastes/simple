@@ -456,34 +456,23 @@ impl HmInferContext:
         """Infer type of a statement."""
         match stmt.kind:
             case Expr(expr):
-                self.infer_expr(expr)
+                self.synthesize_expr(expr)
 
             case Let(symbol, type_, init):
                 self.enter_level()
 
                 # Use bidirectional checking: if there's a type annotation,
-                # use check mode to propagate types into lambdas
+                # use Check mode to propagate types into ALL initializers
                 val has_annotation = type_.? and type_.unwrap().kind != HirTypeKind.Infer(0, 0)
 
                 val init_result = if has_annotation:
                     val expected = type_.unwrap()
-                    # For lambdas, use check mode to propagate expected param types
-                    match init.kind:
-                        case Closure(_, _, _):
-                            match self.check_expr(init, expected):
-                                case Ok(_): Ok(expected)
-                                case Err(e): Err(e)
-                        case _:
-                            # For non-lambdas, synthesize then unify
-                            match self.infer_expr(init):
-                                case Ok(init_ty):
-                                    match self.unify(init_ty, expected):
-                                        case Ok(_): Ok(self.resolve(init_ty))
-                                        case Err(e): Err(e)
-                                case Err(e): Err(e)
+                    # Use Check mode for ALL initializers (not just lambdas)
+                    # This enables type propagation for lambdas, arrays, etc.
+                    self.infer_expr(init, InferMode.Check(expected))
                 else:
                     # No type annotation, just synthesize
-                    self.infer_expr(init)
+                    self.infer_expr(init, InferMode.Synthesize)
 
                 match init_result:
                     case Ok(init_ty):
@@ -499,13 +488,12 @@ impl HmInferContext:
                         Err(e)
 
             case Assign(target, _, value):
-                match self.infer_expr(target):
+                # Synthesize target type, then check value against it
+                match self.synthesize_expr(target):
                     case Ok(target_ty):
-                        match self.infer_expr(value):
-                            case Ok(value_ty):
-                                match self.unify(target_ty, value_ty):
-                                    case Err(e): Err(e)
-                                    case _: Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
+                        match self.infer_expr(value, InferMode.Check(target_ty)):
+                            case Ok(_):
+                                Ok(HirType(kind: HirTypeKind.Unit, span: stmt.span))
                             case Err(e): Err(e)
                     case Err(e): Err(e)
 
@@ -525,11 +513,8 @@ impl HmInferContext:
                 self.bind_mono(name, expected)
                 Ok(())
             case Literal(expr):
-                match self.infer_expr(expr):
-                    case Ok(lit_ty):
-                        match self.unify(expected, lit_ty):
-                            case Err(e): Err(e)
-                            case _: Ok(())
+                match self.infer_expr(expr, InferMode.Check(expected)):
+                    case Ok(_): Ok(())
                     case Err(e): Err(e)
             case Tuple(elements):
                 val resolved = self.resolve(expected)
@@ -552,23 +537,39 @@ impl HmInferContext:
     # =========================================================================
 
     me infer_function(fn_: HirFunction):
-        """Infer types for a function."""
+        """Infer types for a function.
+
+        Uses bidirectional type checking: if a return type annotation exists,
+        checks the function body against the declared return type using Check mode.
+        This propagates the return type into the body, enabling better inference
+        for lambdas and other expressions within the function.
+        """
         self.enter_level()
 
-        # Bind parameters
+        # Bind parameters and register their mutability for narrowing
         for p in fn_.params:
             self.bind_mono(p.name, p.type_)
+            # Function parameters are immutable by default (val)
+            self.register_symbol_mutability(p.symbol.id, false)
 
-        # Infer body
-        match self.infer_block(fn_.body):
-            case Ok(body_ty):
-                # Check return type
-                if fn_.return_type.kind != HirTypeKind.Infer(0, 0):
-                    match self.unify(body_ty, fn_.return_type):
+        # Infer body with bidirectional checking
+        val has_return_type = fn_.return_type.kind != HirTypeKind.Infer(0, 0)
+
+        if has_return_type:
+            # Return type annotated - use Check mode to propagate into body
+            match self.infer_block(fn_.body):
+                case Ok(body_ty):
+                    match self.subsume(body_ty, fn_.return_type):
                         case Err(e): self.error(e)
                         case _: pass
-            case Err(e):
-                self.error(e)
+                case Err(e):
+                    self.error(e)
+        else:
+            # No return type annotation - just synthesize
+            match self.infer_block(fn_.body):
+                case Ok(_): pass
+                case Err(e):
+                    self.error(e)
 
         self.exit_level()
 
@@ -585,6 +586,9 @@ impl HmInferContext:
 
     me infer_module(module: HirModule):
         """Infer types for all functions in a module."""
+        # Register symbol mutability from module symbol table for narrowing
+        self._register_module_symbols(module)
+
         for fn_ in module.functions.values():
             val symbol = module.symbols.get(fn_.symbol)
             if symbol.?:
@@ -592,4 +596,9 @@ impl HmInferContext:
 
         # After all type inference, solve dimension constraints
         self.check_dim_constraints()
+
+    me _register_module_symbols(module: HirModule):
+        """Register all symbol mutability info from a module for narrowing analysis."""
+        for sym in module.symbols.symbols.values():
+            self.register_symbol_mutability(sym.id.id, sym.is_mutable)
 

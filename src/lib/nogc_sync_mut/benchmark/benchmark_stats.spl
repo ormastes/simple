@@ -1,0 +1,125 @@
+# Benchmark Statistics
+#
+# Statistical result type from benchmark runs with formatting helpers.
+
+export BenchmarkStats, calculate_stats, format_time
+
+struct BenchmarkStats:
+    mean_ns: f64
+    median_ns: f64
+    std_dev_ns: f64
+    samples: [f64]
+    outliers_low: i64
+    outliers_high: i64
+
+impl BenchmarkStats:
+    fn summary() -> text:
+        val mean_str = format_time(self.mean_ns)
+        val median_str = format_time(self.median_ns)
+        val min_val = self.min_sample()
+        val max_val = self.max_sample()
+        val min_str = format_time(min_val)
+        val max_str = format_time(max_val)
+        "Mean: {mean_str}, Median: {median_str}, Range: [{min_str}, {max_str}]"
+
+    fn min_sample() -> f64:
+        if self.samples.len() == 0:
+            return 0.0
+        var m = self.samples[0]
+        for s in self.samples:
+            if s < m:
+                m = s
+        m
+
+    fn max_sample() -> f64:
+        if self.samples.len() == 0:
+            return 0.0
+        var m = self.samples[0]
+        for s in self.samples:
+            if s > m:
+                m = s
+        m
+
+    static fn format_time(ns: f64) -> text:
+        if ns < 1000.0:
+            "{ns:.2} ns"
+        elif ns < 1000000.0:
+            val us = ns / 1000.0
+            "{us:.2} us"
+        elif ns < 1000000000.0:
+            val ms = ns / 1000000.0
+            "{ms:.2} ms"
+        else:
+            val s = ns / 1000000000.0
+            "{s:.2} s"
+
+fn format_time(ns: f64) -> text:
+    if ns < 1000.0:
+        "{ns:.2} ns"
+    elif ns < 1000000.0:
+        val us = ns / 1000.0
+        "{us:.2} us"
+    elif ns < 1000000000.0:
+        val ms = ns / 1000000.0
+        "{ms:.2} ms"
+    else:
+        val s = ns / 1000000000.0
+        "{s:.2} s"
+
+fn calculate_stats(samples: [f64], outlier_threshold: f64) -> BenchmarkStats:
+    if samples.len() == 0:
+        return BenchmarkStats(
+            mean_ns: 0.0, median_ns: 0.0, std_dev_ns: 0.0,
+            samples: [], outliers_low: 0, outliers_high: 0
+        )
+
+    # Sort for median
+    var sorted = samples.clone()
+    sorted.sort()
+
+    # Mean
+    var sum = 0.0
+    for s in sorted:
+        sum = sum + s
+    val mean = sum / sorted.len().to_f64()
+
+    # Median
+    val mid = sorted.len() / 2
+    val median = if sorted.len() % 2 == 1:
+        sorted[mid]
+    else:
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+
+    # Std dev
+    var sq_sum = 0.0
+    for s in sorted:
+        val diff = s - mean
+        sq_sum = sq_sum + diff * diff
+    val variance = sq_sum / sorted.len().to_f64()
+    val std_dev = variance.sqrt()
+
+    # Outlier detection (IQR method)
+    val q1_idx = sorted.len() / 4
+    val q3_idx = sorted.len() * 3 / 4
+    val q1 = sorted[q1_idx]
+    val q3 = sorted[q3_idx]
+    val iqr = q3 - q1
+    val low_fence = q1 - outlier_threshold * iqr
+    val high_fence = q3 + outlier_threshold * iqr
+
+    var outliers_low = 0
+    var outliers_high = 0
+    for s in sorted:
+        if s < low_fence:
+            outliers_low = outliers_low + 1
+        elif s > high_fence:
+            outliers_high = outliers_high + 1
+
+    BenchmarkStats(
+        mean_ns: mean,
+        median_ns: median,
+        std_dev_ns: std_dev,
+        samples: samples,
+        outliers_low: outliers_low,
+        outliers_high: outliers_high
+    )

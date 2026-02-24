@@ -26,6 +26,7 @@ use compiler.core.tokens.{TOK_KW_ASYNC}
 use compiler.core.tokens.{TOK_KW_CONST, TOK_KW_WHERE}
 use compiler.core.tokens.{TOK_KW_LAZY, TOK_KW_EXTEND, TOK_KW_NEWTYPE}
 use compiler.core.tokens.{TOK_KW_CE}
+use compiler.core.tokens.{TOK_KW_BITFIELD}
 use compiler.core.tokens.{TOK_UNDERSCORE, TOK_TILDE}
 use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
@@ -40,7 +41,7 @@ use compiler.core.ast.{module_set_path, module_add_decl}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
 use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_ANY}
-use compiler.core.types.{int_to_str}
+use compiler.core.types.{int_to_str, type_tag_name}
 use compiler.core.types.{named_type_register, named_type_find}
 use compiler.core.parser.{par_kind, par_text, par_line, par_col, par_errors, par_had_error, par_struct_names}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error}
@@ -48,7 +49,7 @@ use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicol
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 
 # Import from sibling split modules
-use compiler.core.parser_expr.{parse_expr}
+use compiler.core.parser_expr.{parse_expr, parse_int_text}
 use compiler.core.parser_stmts.{parse_block, parse_if_expr, parse_for_expr, parse_while_expr}
 
 # Re-export use/export/binding/impl declarations (extracted to parser_decls_use.spl)
@@ -111,6 +112,41 @@ fn parse_type_params() -> [text]:
     parser_expect(TOK_GT)
 
     type_params
+
+fn bitfield_backing_bits_from_name(type_name: text) -> i64:
+    if type_name == "u8":
+        return 8
+    if type_name == "u16":
+        return 16
+    if type_name == "u32":
+        return 32
+    if type_name == "u64":
+        return 64
+    0
+
+fn bitfield_field_bits_from_name(type_name: text) -> i64:
+    if type_name == "bool":
+        return 1
+    val has_u_prefix: bool = type_name.starts_with("u")
+    val has_i_prefix: bool = type_name.starts_with("i")
+    if not (has_u_prefix or has_i_prefix):
+        return 0
+    if type_name.len() <= 1:
+        return 0
+    for bi in 1..type_name.len():
+        val ch = type_name[bi]
+        if ch < "0" or ch > "9":
+            return 0
+    val bits = parse_int_text(type_name[1:type_name.len()])
+    if bits <= 0 or bits > 64:
+        return 0
+    bits
+
+fn has_seen_name(names: [text], target: text) -> bool:
+    for nm in names:
+        if nm == target:
+            return true
+    false
 
 # ===== Function Declarations =====
 
@@ -485,6 +521,9 @@ fn parse_module_body():
             # extend TypeName: adds methods to an existing type
             val d = parse_impl_decl()
             module_add_decl(d)
+        elif par_kind == TOK_KW_BITFIELD:
+            val d = parse_bitfield_decl()
+            module_add_decl(d)
         elif par_kind == TOK_KW_CE:
             # ce NAME: computation expression block at module level
             parser_advance()
@@ -633,9 +672,89 @@ fn parse_module_body():
 
 # ===== Exports =====
 
+# ===== Bitfield Declaration =====
+
+fn parse_bitfield_decl() -> i64:
+    # Consume 'bitfield' keyword
+    parser_advance()
+    val bf_name = par_text
+    parser_expect(TOK_IDENT)
+    par_struct_names.push(bf_name)
+
+    # Pre-register type name
+    named_type_register(bf_name, [], [])
+
+    # Parse backing type: bitfield Name(u32):
+    parser_expect(TOK_LPAREN)
+    val backing_type = parser_parse_type()
+    parser_expect(TOK_RPAREN)
+    val backing_name = type_tag_name(backing_type)
+    val backing_bits = bitfield_backing_bits_from_name(backing_name)
+    if backing_bits == 0:
+        parser_error("bitfield backing type must be u8, u16, u32, or u64")
+
+    parser_expect(TOK_COLON)
+    parser_skip_newlines()
+    parser_expect(TOK_INDENT)
+
+    # Parse fields as struct fields with bit-width types
+    # The struct gets a single __raw field of the backing type.
+    # Additional named fields are also recorded for semantic analysis.
+    var field_names: [text] = ["__raw"]
+    var field_types: [i64] = [backing_type]
+    var field_defaults: [i64] = [-1]
+    var seen_names: [text] = []
+    var used_bits: i64 = 0
+
+    for bf_i in 0..200:
+        parser_skip_newlines()
+        if par_kind == TOK_DEDENT:
+            parser_advance()
+            break
+        if par_kind == TOK_EOF:
+            break
+
+        # Skip comments/docstrings
+        if par_kind == TOK_STRING_LIT:
+            parser_advance()
+            parser_skip_newlines_and_semicolons()
+            continue
+
+        # Field: name: type  OR  _: uN (reserved)
+        val field_name = par_text
+        val is_underscore: bool = par_kind == TOK_UNDERSCORE
+        if is_underscore:
+            parser_advance()
+        else:
+            parser_expect(TOK_IDENT)
+        parser_expect(TOK_COLON)
+        val field_type = parser_parse_type()
+        val field_type_name = type_tag_name(field_type)
+        val field_bits = bitfield_field_bits_from_name(field_type_name)
+        if field_bits == 0:
+            parser_error("bitfield field type must be bool, uN, or iN")
+        used_bits = used_bits + field_bits
+
+        # Skip reserved fields (don't add to struct)
+        if not is_underscore:
+            if has_seen_name(seen_names, field_name):
+                parser_error("duplicate bitfield field name: " + field_name)
+            seen_names.push(field_name)
+            field_names.push(field_name)
+            field_types.push(field_type)
+            field_defaults.push(-1)
+
+        parser_skip_newlines_and_semicolons()
+
+    if backing_bits > 0 and used_bits > backing_bits:
+        parser_error("bitfield '" + bf_name + "' uses " + int_to_str(used_bits) + " bits but backing type allows only " + int_to_str(backing_bits))
+
+    decl_struct_def(bf_name, field_names, field_types, field_defaults, 0)
+
 export parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl
 export parse_impl_decl, parse_class_body_method
 export parse_use_decl, parse_export_decl, parse_val_decl, parse_lazy_val_decl, parse_var_decl
 export parse_ce_decl
+export parse_bitfield_decl
 export parse_module_body
 export parse_type_params

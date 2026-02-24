@@ -481,11 +481,11 @@ val map_twice: fn(fn(i64) -> i64, [i64]) -> [i64] = \f, xs:
 
 | Phase | Hours | Status |
 |-------|-------|--------|
-| Phase 1: Core Infrastructure | 4 | 🟡 Planned |
-| Phase 2: Check Mode | 4 | 🟡 Planned |
-| Phase 3: Return Checking | 2 | 🟡 Planned |
-| Phase 4: Testing | 2 | 🟡 Planned |
-| **Total** | **12** | 🟡 Planned |
+| Phase 1: Core Infrastructure | 4 | Done |
+| Phase 2: Check Mode | 4 | Done |
+| Phase 3: Return Checking | 2 | Done |
+| Phase 4: Testing | 2 | Planned |
+| **Total** | **12** | Phases 1-3 Done |
 
 ### File Changes
 
@@ -549,12 +549,12 @@ Bidirectional type checking is a **critical** upgrade that:
 - ✅ Provides better error messages
 - ✅ Paves way for variance-aware subtyping
 
-**Status:** Ready to implement (12 hours)
+**Status:** Phases 1-3 implemented (2026-02-24)
 
 **Priority:** P0 - Blocks lambda usability improvements
 
 ---
 
 **Plan Created:** 2026-02-03
-**Implementation:** Not started
-**Next:** Begin Phase 1 implementation
+**Implementation:** Phases 1-3 completed 2026-02-24
+**Next:** Phase 4 - Testing

@@ -1,0 +1,421 @@
+# Flow-Sensitive Type Narrowing Tests
+#
+# Tests the narrowing data structures and algorithms.
+# All types defined locally for interpreter mode compatibility.
+
+# ============================================================================
+# Local Type Definitions (mirror src/compiler/35.semantics/narrowing.spl)
+# ============================================================================
+
+enum NarrowingConditionKind:
+    NilCheckPos       # x != nil -> narrow T? to T (then-branch)
+    NilCheckNeg       # x == nil -> narrow in else-branch via negation
+    ExistsCheck       # x.? -> narrow T? to T
+    IsCheck           # x is Type
+    IsNotCheck        # x is not Type
+    Truthiness        # bare if x: -> narrow T? to T
+
+struct NarrowingFact:
+    symbol_id: i64
+    original_type: text      # type name for testing (e.g. "i64?", "text?")
+    narrowed_type: text      # narrowed type name (e.g. "i64", "text")
+    condition: NarrowingConditionKind
+
+struct NarrowingScope:
+    facts: [NarrowingFact]
+
+class NarrowingContext:
+    scopes: [NarrowingScope]
+
+    static fn new() -> NarrowingContext:
+        NarrowingContext(scopes: [NarrowingScope(facts: [])])
+
+    me push_scope():
+        self.scopes = self.scopes.push(NarrowingScope(facts: []))
+
+    me pop_scope():
+        if self.scopes.len() > 1:
+            self.scopes = self.scopes[0:self.scopes.len() - 1]
+
+    me add_fact(fact: NarrowingFact):
+        val idx = self.scopes.len() - 1
+        var scope = self.scopes[idx]
+        scope.facts = scope.facts.push(fact)
+        self.scopes[idx] = scope
+
+    fn lookup(sym_id: i64) -> text?:
+        var i = self.scopes.len() - 1
+        while i >= 0:
+            val scope = self.scopes[i]
+            var j = 0
+            while j < scope.facts.len():
+                if scope.facts[j].symbol_id == sym_id:
+                    return Some(scope.facts[j].narrowed_type)
+                j = j + 1
+            i = i - 1
+        nil
+
+    me add_facts(facts: [NarrowingFact]):
+        var i = 0
+        while i < facts.len():
+            self.add_fact(facts[i])
+            i = i + 1
+
+# ============================================================================
+# Condition Analysis (simplified for testing)
+# ============================================================================
+
+fn analyze_nil_check(sym_id: i64, original_type: text, is_negated: bool) -> [NarrowingFact]:
+    """Analyze x != nil or x == nil conditions."""
+    if original_type.ends_with("?"):
+        val inner = original_type[0:original_type.len() - 1]
+        if is_negated:
+            # x == nil: store for later negation
+            return [NarrowingFact(
+                symbol_id: sym_id,
+                original_type: original_type,
+                narrowed_type: original_type,
+                condition: NarrowingConditionKind.NilCheckNeg
+            )]
+        else:
+            # x != nil: narrow to inner type
+            return [NarrowingFact(
+                symbol_id: sym_id,
+                original_type: original_type,
+                narrowed_type: inner,
+                condition: NarrowingConditionKind.NilCheckPos
+            )]
+    []
+
+fn analyze_exists_check(sym_id: i64, original_type: text) -> [NarrowingFact]:
+    """Analyze x.? condition."""
+    if original_type.ends_with("?"):
+        val inner = original_type[0:original_type.len() - 1]
+        return [NarrowingFact(
+            symbol_id: sym_id,
+            original_type: original_type,
+            narrowed_type: inner,
+            condition: NarrowingConditionKind.ExistsCheck
+        )]
+    []
+
+fn analyze_truthiness(sym_id: i64, original_type: text) -> [NarrowingFact]:
+    """Analyze bare variable truthiness."""
+    if original_type.ends_with("?"):
+        val inner = original_type[0:original_type.len() - 1]
+        return [NarrowingFact(
+            symbol_id: sym_id,
+            original_type: original_type,
+            narrowed_type: inner,
+            condition: NarrowingConditionKind.Truthiness
+        )]
+    []
+
+# ============================================================================
+# Fact Negation
+# ============================================================================
+
+fn negate_facts(facts: [NarrowingFact]) -> [NarrowingFact]:
+    var result: [NarrowingFact] = []
+    var i = 0
+    while i < facts.len():
+        val fact = facts[i]
+        match fact.condition:
+            case NilCheckPos:
+                # x != nil -> else: x is nil -> no useful narrowing
+                pass
+            case NilCheckNeg:
+                # x == nil -> else: x != nil -> narrow to inner
+                if fact.original_type.ends_with("?"):
+                    val inner = fact.original_type[0:fact.original_type.len() - 1]
+                    result = result.push(NarrowingFact(
+                        symbol_id: fact.symbol_id,
+                        original_type: fact.original_type,
+                        narrowed_type: inner,
+                        condition: NarrowingConditionKind.NilCheckPos
+                    ))
+            case ExistsCheck:
+                # x.? -> else: no useful narrowing
+                pass
+            case IsNotCheck:
+                # x is not T -> else: x is T
+                result = result.push(NarrowingFact(
+                    symbol_id: fact.symbol_id,
+                    original_type: fact.original_type,
+                    narrowed_type: fact.narrowed_type,
+                    condition: NarrowingConditionKind.IsCheck
+                ))
+            case Truthiness:
+                # if x -> else: no useful narrowing
+                pass
+            case _:
+                pass
+        i = i + 1
+    result
+
+# ============================================================================
+# Definite Termination (simplified)
+# ============================================================================
+
+enum StmtKind:
+    ReturnStmt
+    BreakStmt
+    ContinueStmt
+    ExprStmt
+    EmptyStmt
+
+struct SimpleBlock:
+    stmts: [StmtKind]
+
+fn definitely_terminates(block: SimpleBlock) -> bool:
+    if block.stmts.is_empty():
+        return false
+    val last = block.stmts[block.stmts.len() - 1]
+    match last:
+        case ReturnStmt: true
+        case BreakStmt: true
+        case ContinueStmt: true
+        case _: false
+
+# ============================================================================
+# Test Group 1: NarrowingContext basic operations
+# ============================================================================
+
+describe "NarrowingContext basic operations":
+    it "pushes scope, adds fact, and looks it up":
+        var ctx = NarrowingContext.new()
+        ctx.push_scope()
+        val fact = NarrowingFact(
+            symbol_id: 1,
+            original_type: "i64?",
+            narrowed_type: "i64",
+            condition: NarrowingConditionKind.NilCheckPos
+        )
+        ctx.add_fact(fact)
+        val result = ctx.lookup(1)
+        expect(result.?).to_equal(true)
+        expect(result.unwrap()).to_equal("i64")
+
+    it "facts do not leak across scope boundaries":
+        var ctx = NarrowingContext.new()
+        ctx.push_scope()
+        val fact = NarrowingFact(
+            symbol_id: 2,
+            original_type: "text?",
+            narrowed_type: "text",
+            condition: NarrowingConditionKind.ExistsCheck
+        )
+        ctx.add_fact(fact)
+        expect(ctx.lookup(2).?).to_equal(true)
+        ctx.pop_scope()
+        val after_pop = ctx.lookup(2)
+        expect(after_pop.?).to_equal(false)
+
+    it "innermost scope takes priority":
+        var ctx = NarrowingContext.new()
+        val outer_fact = NarrowingFact(
+            symbol_id: 3,
+            original_type: "i64?",
+            narrowed_type: "i64",
+            condition: NarrowingConditionKind.Truthiness
+        )
+        ctx.add_fact(outer_fact)
+        ctx.push_scope()
+        val inner_fact = NarrowingFact(
+            symbol_id: 3,
+            original_type: "i64?",
+            narrowed_type: "text",
+            condition: NarrowingConditionKind.NilCheckPos
+        )
+        ctx.add_fact(inner_fact)
+        val result = ctx.lookup(3)
+        expect(result.?).to_equal(true)
+        expect(result.unwrap()).to_equal("text")
+
+    it "add_facts adds multiple facts at once":
+        var ctx = NarrowingContext.new()
+        val facts = [
+            NarrowingFact(symbol_id: 10, original_type: "i64?", narrowed_type: "i64", condition: NarrowingConditionKind.NilCheckPos),
+            NarrowingFact(symbol_id: 11, original_type: "text?", narrowed_type: "text", condition: NarrowingConditionKind.ExistsCheck)
+        ]
+        ctx.add_facts(facts)
+        expect(ctx.lookup(10).?).to_equal(true)
+        expect(ctx.lookup(11).?).to_equal(true)
+        expect(ctx.lookup(99).?).to_equal(false)
+
+# ============================================================================
+# Test Group 2: Condition analysis - nil checks
+# ============================================================================
+
+describe "Condition analysis - nil checks":
+    it "x != nil narrows Optional(i64) to i64":
+        val facts = analyze_nil_check(10, "i64?", false)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(10)
+        expect(facts[0].narrowed_type).to_equal("i64")
+
+    it "x == nil produces NilCheckNeg fact":
+        val facts = analyze_nil_check(12, "i64?", true)
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(12)
+        expect(facts[0].narrowed_type).to_equal("i64?")
+
+    it "non-optional type produces no facts":
+        val facts = analyze_nil_check(13, "i64", false)
+        expect(facts.is_empty()).to_equal(true)
+
+# ============================================================================
+# Test Group 3: Condition analysis - exists checks
+# ============================================================================
+
+describe "Condition analysis - exists checks":
+    it "x.? where x has Optional(text) narrows to text":
+        val facts = analyze_exists_check(20, "text?")
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(20)
+        expect(facts[0].narrowed_type).to_equal("text")
+
+    it "x.? where x has non-optional type returns empty":
+        val facts = analyze_exists_check(21, "i64")
+        expect(facts.is_empty()).to_equal(true)
+
+# ============================================================================
+# Test Group 4: Condition analysis - truthiness
+# ============================================================================
+
+describe "Condition analysis - truthiness":
+    it "bare Var with Optional type narrows to inner":
+        val facts = analyze_truthiness(30, "text?")
+        expect(facts.len()).to_equal(1)
+        expect(facts[0].symbol_id).to_equal(30)
+        expect(facts[0].narrowed_type).to_equal("text")
+
+    it "bare Var with non-optional produces no narrowing":
+        val facts = analyze_truthiness(31, "bool")
+        expect(facts.is_empty()).to_equal(true)
+
+# ============================================================================
+# Test Group 5: Fact negation
+# ============================================================================
+
+describe "Fact negation":
+    it "NilCheckPos negated returns empty":
+        val fact = NarrowingFact(
+            symbol_id: 40,
+            original_type: "i64?",
+            narrowed_type: "i64",
+            condition: NarrowingConditionKind.NilCheckPos
+        )
+        val negated = negate_facts([fact])
+        expect(negated.is_empty()).to_equal(true)
+
+    it "NilCheckNeg negated returns fact with inner type":
+        val fact = NarrowingFact(
+            symbol_id: 41,
+            original_type: "i64?",
+            narrowed_type: "i64?",
+            condition: NarrowingConditionKind.NilCheckNeg
+        )
+        val negated = negate_facts([fact])
+        expect(negated.len()).to_equal(1)
+        expect(negated[0].symbol_id).to_equal(41)
+        expect(negated[0].narrowed_type).to_equal("i64")
+
+    it "IsNotCheck negated returns IsCheck fact":
+        val fact = NarrowingFact(
+            symbol_id: 42,
+            original_type: "i64|text",
+            narrowed_type: "text",
+            condition: NarrowingConditionKind.IsNotCheck
+        )
+        val negated = negate_facts([fact])
+        expect(negated.len()).to_equal(1)
+        expect(negated[0].symbol_id).to_equal(42)
+
+    it "ExistsCheck negated returns empty":
+        val fact = NarrowingFact(
+            symbol_id: 43,
+            original_type: "i64?",
+            narrowed_type: "i64",
+            condition: NarrowingConditionKind.ExistsCheck
+        )
+        val negated = negate_facts([fact])
+        expect(negated.is_empty()).to_equal(true)
+
+    it "Truthiness negated returns empty":
+        val fact = NarrowingFact(
+            symbol_id: 44,
+            original_type: "text?",
+            narrowed_type: "text",
+            condition: NarrowingConditionKind.Truthiness
+        )
+        val negated = negate_facts([fact])
+        expect(negated.is_empty()).to_equal(true)
+
+# ============================================================================
+# Test Group 6: Definite termination
+# ============================================================================
+
+describe "Definite termination":
+    it "block ending in Return definitely terminates":
+        val block = SimpleBlock(stmts: [StmtKind.ExprStmt, StmtKind.ReturnStmt])
+        expect(definitely_terminates(block)).to_equal(true)
+
+    it "empty block does not definitely terminate":
+        val block = SimpleBlock(stmts: [])
+        expect(definitely_terminates(block)).to_equal(false)
+
+    it "block ending in regular expression does not terminate":
+        val block = SimpleBlock(stmts: [StmtKind.ExprStmt])
+        expect(definitely_terminates(block)).to_equal(false)
+
+    it "block ending in Break definitely terminates":
+        val block = SimpleBlock(stmts: [StmtKind.BreakStmt])
+        expect(definitely_terminates(block)).to_equal(true)
+
+    it "block ending in Continue definitely terminates":
+        val block = SimpleBlock(stmts: [StmtKind.ContinueStmt])
+        expect(definitely_terminates(block)).to_equal(true)
+
+# ============================================================================
+# Test Group 7: Integration - narrowing + negation + scope
+# ============================================================================
+
+describe "Narrowing integration":
+    it "simulates if-else narrowing flow":
+        # Simulate: if x != nil: <then> else: <else>
+        var ctx = NarrowingContext.new()
+        val then_facts = analyze_nil_check(50, "i64?", false)
+
+        # Then branch
+        ctx.push_scope()
+        ctx.add_facts(then_facts)
+        expect(ctx.lookup(50).unwrap()).to_equal("i64")
+        ctx.pop_scope()
+
+        # Else branch uses negated facts
+        val else_facts = negate_facts(then_facts)
+        ctx.push_scope()
+        ctx.add_facts(else_facts)
+        # NilCheckPos negated -> no fact in else
+        expect(ctx.lookup(50).?).to_equal(false)
+        ctx.pop_scope()
+
+    it "simulates early-return narrowing promotion":
+        # Simulate: if x == nil: return
+        # After early return, x is narrowed in remaining code
+        var ctx = NarrowingContext.new()
+        val guard_facts = analyze_nil_check(60, "text?", true)
+
+        # Then branch (return) -> terminates
+        ctx.push_scope()
+        ctx.add_facts(guard_facts)
+        ctx.pop_scope()
+
+        # Promote negated facts to parent scope (early return promotion)
+        val promoted = negate_facts(guard_facts)
+        ctx.add_facts(promoted)
+
+        # Now x is narrowed in the remaining code
+        expect(ctx.lookup(60).?).to_equal(true)
+        expect(ctx.lookup(60).unwrap()).to_equal("text")

@@ -1,0 +1,469 @@
+# Flow-Sensitive Type Narrowing (Smart Casts)
+#
+# Implements flow-sensitive type narrowing for the Simple compiler.
+# After a type-checking condition (e.g., `x != nil`, `x is Type`),
+# the type of the checked variable is automatically narrowed within
+# the branches where the condition holds.
+#
+# Key design decisions:
+# - Only narrows immutable (`val`) bindings for soundness
+# - Scope-based context mirrors the existing SymbolTable scope stack
+# - Integrated directly into type inference (HmInferContext)
+# - Supports nil checks, exists checks, is/is-not checks, and truthiness
+#
+# See doc/design/flow_sensitive_narrowing_design.md for full design.
+
+use compiler.hir.hir.*
+use compiler.core.lexer.*
+
+# ============================================================================
+# Narrowing Condition
+# ============================================================================
+
+"""What condition triggered the narrowing."""
+enum NarrowingCondition:
+    NilCheck(negated: bool)
+    ExistsCheck
+    IsCheck(target_type: HirType)
+    IsNotCheck(target_type: HirType)
+    Truthiness
+
+# ============================================================================
+# Narrowing Fact
+# ============================================================================
+
+struct NarrowingFact:
+    """A type narrowing fact: variable has a more specific type."""
+    symbol_id: i64
+    original_type: HirType
+    narrowed_type: HirType
+    condition: NarrowingCondition
+    span: Span
+
+# ============================================================================
+# Narrowing Scope
+# ============================================================================
+
+struct NarrowingScope:
+    """A single scope level of narrowing facts."""
+    facts: [NarrowingFact]
+
+fn _new_narrowing_scope() -> NarrowingScope:
+    NarrowingScope(facts: [])
+
+# ============================================================================
+# Narrowing Context
+# ============================================================================
+
+class NarrowingContext:
+    """Tracks type narrowing facts through control flow.
+
+    Maintains a stack of scopes. Facts are added to the current (innermost)
+    scope and looked up from innermost to outermost.
+    """
+    scopes: [NarrowingScope]
+
+impl NarrowingContext:
+    static fn new() -> NarrowingContext:
+        """Create a new narrowing context with one empty root scope."""
+        NarrowingContext(scopes: [_new_narrowing_scope()])
+
+    me push_scope():
+        """Push a new narrowing scope (entering if/match branch)."""
+        self.scopes = self.scopes.push(_new_narrowing_scope())
+
+    me pop_scope():
+        """Pop the current narrowing scope (leaving branch)."""
+        if self.scopes.len() > 1:
+            self.scopes = self.scopes[0:self.scopes.len() - 1]
+
+    me add_fact(fact: NarrowingFact):
+        """Add a narrowing fact to the current scope."""
+        val idx = self.scopes.len() - 1
+        var scope = self.scopes[idx]
+        scope.facts = scope.facts.push(fact)
+        self.scopes[idx] = scope
+
+    fn lookup(sym_id: i64) -> HirType?:
+        """Look up the narrowed type for a symbol.
+
+        Searches from innermost scope outward, returns the most specific
+        narrowing fact found (first match wins).
+        """
+        var i = self.scopes.len() - 1
+        while i >= 0:
+            val scope = self.scopes[i]
+            var j = 0
+            while j < scope.facts.len():
+                val fact = scope.facts[j]
+                if fact.symbol_id == sym_id:
+                    return Some(fact.narrowed_type)
+                j = j + 1
+            i = i - 1
+        nil
+
+    me add_facts(facts: [NarrowingFact]):
+        """Add multiple narrowing facts to the current scope."""
+        var i = 0
+        while i < facts.len():
+            self.add_fact(facts[i])
+            i = i + 1
+
+# ============================================================================
+# Condition Analysis
+# ============================================================================
+
+fn analyze_condition(cond: HirExpr, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Analyze a condition expression to extract narrowing facts.
+
+    Returns facts that are true when the condition evaluates to true.
+    For else-branches, use negate_facts() on the result.
+
+    Args:
+        cond: The condition expression to analyze
+        type_lookup: Function to look up the type of a symbol by its ID
+    """
+    match cond.kind:
+        # x != nil  =>  x is narrowed from T? to T
+        case Binary(op, left, right):
+            _analyze_binary_condition(op, left, right, cond.span, type_lookup)
+
+        # x.?  =>  x is non-nil
+        case ExistsCheck(base):
+            _analyze_exists_check(base, cond.span, type_lookup)
+
+        # not expr  =>  negate the inner facts
+        case Unary(op, operand):
+            match op:
+                case Not:
+                    negate_facts(analyze_condition(operand, type_lookup))
+                case _: []
+
+        # Bare variable (truthiness check)
+        case Var(symbol):
+            _analyze_truthiness(symbol.id, cond.span, type_lookup)
+
+        case _: []
+
+fn _analyze_binary_condition(op: HirBinOp, left: HirExpr, right: HirExpr, span: Span, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Analyze a binary condition for narrowing facts."""
+    match op:
+        # x != nil  or  nil != x
+        case NotEq:
+            _analyze_neq(left, right, span, type_lookup)
+
+        # x == nil  or  nil == x
+        case Eq:
+            _analyze_eq(left, right, span, type_lookup)
+
+        # x is Type
+        case Is:
+            _analyze_is(left, right, span, type_lookup)
+
+        # x is not Type
+        case IsNot:
+            _analyze_is_not(left, right, span, type_lookup)
+
+        # a and b  =>  combine facts from both
+        case And:
+            val left_facts = analyze_condition(left, type_lookup)
+            val right_facts = analyze_condition(right, type_lookup)
+            _combine_facts(left_facts, right_facts)
+
+        case _: []
+
+fn _analyze_neq(left: HirExpr, right: HirExpr, span: Span, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Analyze x != nil or nil != x for narrowing."""
+    # x != nil
+    match (left.kind, right.kind):
+        case (Var(symbol), NilLit):
+            _make_nil_check_fact(symbol.id, span, false, type_lookup)
+        case (NilLit, Var(symbol)):
+            _make_nil_check_fact(symbol.id, span, false, type_lookup)
+        case _: []
+
+fn _analyze_eq(left: HirExpr, right: HirExpr, span: Span, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Analyze x == nil or nil == x for narrowing.
+
+    When x == nil is true, x is known to be nil in the then-branch.
+    The interesting narrowing happens in the else-branch (via negation).
+    We store a NilCheck(negated: true) fact which negate_facts will flip.
+    """
+    match (left.kind, right.kind):
+        case (Var(symbol), NilLit):
+            _make_nil_check_fact(symbol.id, span, true, type_lookup)
+        case (NilLit, Var(symbol)):
+            _make_nil_check_fact(symbol.id, span, true, type_lookup)
+        case _: []
+
+fn _analyze_is(left: HirExpr, right: HirExpr, span: Span, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Analyze x is Type for narrowing."""
+    match left.kind:
+        case Var(symbol):
+            val sym_type = type_lookup(symbol.id)
+            if sym_type.?:
+                # The right side of `is` represents the target type.
+                # Extract the type from the right expression.
+                val target_type = _extract_type_from_expr(right)
+                if target_type.?:
+                    return [NarrowingFact(
+                        symbol_id: symbol.id,
+                        original_type: sym_type.unwrap(),
+                        narrowed_type: target_type.unwrap(),
+                        condition: NarrowingCondition.IsCheck(target_type.unwrap()),
+                        span: span
+                    )]
+            []
+        case _: []
+
+fn _analyze_is_not(left: HirExpr, right: HirExpr, span: Span, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Analyze x is not Type for narrowing."""
+    match left.kind:
+        case Var(symbol):
+            val sym_type = type_lookup(symbol.id)
+            if sym_type.?:
+                val target_type = _extract_type_from_expr(right)
+                if target_type.?:
+                    return [NarrowingFact(
+                        symbol_id: symbol.id,
+                        original_type: sym_type.unwrap(),
+                        narrowed_type: sym_type.unwrap(),
+                        condition: NarrowingCondition.IsNotCheck(target_type.unwrap()),
+                        span: span
+                    )]
+            []
+        case _: []
+
+fn _analyze_exists_check(base: HirExpr, span: Span, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Analyze x.? for narrowing -- narrows Optional(T) to T."""
+    match base.kind:
+        case Var(symbol):
+            val sym_type = type_lookup(symbol.id)
+            if sym_type.?:
+                val ty = sym_type.unwrap()
+                match ty.kind:
+                    case Optional(inner):
+                        return [NarrowingFact(
+                            symbol_id: symbol.id,
+                            original_type: ty,
+                            narrowed_type: inner,
+                            condition: NarrowingCondition.ExistsCheck,
+                            span: span
+                        )]
+                    case _: pass
+            []
+        case _: []
+
+fn _analyze_truthiness(sym_id: i64, span: Span, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Analyze bare variable truthiness -- narrows Optional(T) to T."""
+    val sym_type = type_lookup(sym_id)
+    if sym_type.?:
+        val ty = sym_type.unwrap()
+        match ty.kind:
+            case Optional(inner):
+                return [NarrowingFact(
+                    symbol_id: sym_id,
+                    original_type: ty,
+                    narrowed_type: inner,
+                    condition: NarrowingCondition.Truthiness,
+                    span: span
+                )]
+            case _: pass
+    []
+
+fn _make_nil_check_fact(sym_id: i64, span: Span, negated: bool, type_lookup: fn(i64) -> HirType?) -> [NarrowingFact]:
+    """Create a nil-check narrowing fact.
+
+    If negated is false (x != nil): narrows Optional(T) to T in then-branch.
+    If negated is true (x == nil): the fact represents 'x is nil' in then-branch.
+    The else-branch uses negate_facts to flip the fact.
+    """
+    val sym_type = type_lookup(sym_id)
+    if sym_type.?:
+        val ty = sym_type.unwrap()
+        match ty.kind:
+            case Optional(inner):
+                if negated:
+                    # x == nil: in then-branch x is nil; store fact for negation
+                    # The narrowed_type is the inner type, but marked as negated
+                    # so negate_facts knows to use inner for else-branch
+                    return [NarrowingFact(
+                        symbol_id: sym_id,
+                        original_type: ty,
+                        narrowed_type: ty,
+                        condition: NarrowingCondition.NilCheck(negated: true),
+                        span: span
+                    )]
+                else:
+                    # x != nil: in then-branch x is T (not optional)
+                    return [NarrowingFact(
+                        symbol_id: sym_id,
+                        original_type: ty,
+                        narrowed_type: inner,
+                        condition: NarrowingCondition.NilCheck(negated: false),
+                        span: span
+                    )]
+            case _: pass
+    []
+
+fn _extract_type_from_expr(expr: HirExpr) -> HirType?:
+    """Extract a type from a type expression used in `is` checks.
+
+    In `x is SomeType`, the right-hand side is a type expression.
+    This extracts the HirType from that expression if possible.
+    """
+    # If the expression has a type annotation, use that
+    if expr.has_type_:
+        return Some(expr.type_)
+    # If it's a variable that refers to a type, use the Var's type
+    match expr.kind:
+        case Var(_):
+            if expr.has_type_:
+                return Some(expr.type_)
+        case _: pass
+    nil
+
+fn _combine_facts(left: [NarrowingFact], right: [NarrowingFact]) -> [NarrowingFact]:
+    """Combine facts from two conditions joined by `and`."""
+    var result: [NarrowingFact] = []
+    var i = 0
+    while i < left.len():
+        result = result.push(left[i])
+        i = i + 1
+    var j = 0
+    while j < right.len():
+        result = result.push(right[j])
+        j = j + 1
+    result
+
+# ============================================================================
+# Fact Negation
+# ============================================================================
+
+fn negate_facts(facts: [NarrowingFact]) -> [NarrowingFact]:
+    """Negate narrowing facts for else-branch.
+
+    Each fact kind negates differently:
+    - NilCheck(negated: false) (x != nil -> T): negates to no narrowing (still Optional)
+    - NilCheck(negated: true) (x == nil -> nil): negates to T (non-nil in else)
+    - ExistsCheck (x.? -> T): negates to no narrowing
+    - IsCheck(T): negates to original type minus T
+    - IsNotCheck(T): negates to T
+    - Truthiness (if x -> T): negates to no narrowing
+    """
+    var result: [NarrowingFact] = []
+    var i = 0
+    while i < facts.len():
+        val fact = facts[i]
+        val negated = _negate_single_fact(fact)
+        if negated.?:
+            result = result.push(negated.unwrap())
+        i = i + 1
+    result
+
+fn _negate_single_fact(fact: NarrowingFact) -> NarrowingFact?:
+    """Negate a single narrowing fact. Returns nil if no useful negation exists."""
+    match fact.condition:
+        case NilCheck(negated):
+            if negated:
+                # Original: x == nil (then-branch: x is nil)
+                # Negated (else-branch): x != nil, so x is T
+                val inner = _unwrap_optional(fact.original_type)
+                if inner.?:
+                    return Some(NarrowingFact(
+                        symbol_id: fact.symbol_id,
+                        original_type: fact.original_type,
+                        narrowed_type: inner.unwrap(),
+                        condition: NarrowingCondition.NilCheck(negated: false),
+                        span: fact.span
+                    ))
+                nil
+            else:
+                # Original: x != nil (then-branch: x is T)
+                # Negated (else-branch): x == nil, no useful narrowing
+                nil
+
+        case ExistsCheck:
+            # Original: x.? (then-branch: x is T)
+            # Negated (else-branch): x is nil, no useful narrowing
+            nil
+
+        case IsCheck(target_type):
+            # Original: x is Type (then-branch: x is Type)
+            # Negated (else-branch): x is not Type
+            # For union types, could narrow to remaining members.
+            # For now, no narrowing in else-branch of is-check.
+            nil
+
+        case IsNotCheck(target_type):
+            # Original: x is not Type (then-branch: x is not Type)
+            # Negated (else-branch): x is Type
+            Some(NarrowingFact(
+                symbol_id: fact.symbol_id,
+                original_type: fact.original_type,
+                narrowed_type: target_type,
+                condition: NarrowingCondition.IsCheck(target_type),
+                span: fact.span
+            ))
+
+        case Truthiness:
+            # Original: if x (then-branch: x is T)
+            # Negated (else-branch): x is nil/falsy, no useful narrowing
+            nil
+
+fn _unwrap_optional(ty: HirType) -> HirType?:
+    """Extract the inner type from an Optional type."""
+    match ty.kind:
+        case Optional(inner): Some(inner)
+        case _: nil
+
+# ============================================================================
+# Definite Termination Analysis
+# ============================================================================
+
+fn definitely_terminates(block: HirBlock) -> bool:
+    """Check if a block definitely does not fall through.
+
+    A block definitely terminates if its last statement is:
+    - return
+    - break (in a loop context)
+    - continue
+    - an if/match where ALL branches definitely terminate
+    """
+    if block.stmts.is_empty():
+        return false
+
+    val last = block.stmts[block.stmts.len() - 1]
+    _stmt_definitely_terminates(last)
+
+fn _stmt_definitely_terminates(stmt: HirStmt) -> bool:
+    """Check if a statement definitely terminates."""
+    match stmt.kind:
+        case Expr(expr):
+            _expr_definitely_terminates(expr)
+        case Block(inner_block):
+            definitely_terminates(inner_block)
+        case _: false
+
+fn _expr_definitely_terminates(expr: HirExpr) -> bool:
+    """Check if an expression definitely terminates (does not fall through)."""
+    match expr.kind:
+        case Return(_): true
+        case Break(_, _): true
+        case Continue(_): true
+        case Throw(_): true
+        case If(_, then_block, else_block):
+            if else_block.?:
+                val then_term = definitely_terminates(then_block)
+                val else_term = definitely_terminates(else_block.unwrap())
+                then_term and else_term
+            else:
+                false
+        case _: false
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export NarrowingCondition, NarrowingFact, NarrowingScope, NarrowingContext
+export analyze_condition, negate_facts, definitely_terminates

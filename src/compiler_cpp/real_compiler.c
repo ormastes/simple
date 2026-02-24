@@ -2107,7 +2107,7 @@ const char* generate_c(const char* source) {
             // Skip empty lines inside struct bodies (don't let them terminate the struct)
             if (in_struct && str_len(sl) == 0) continue;
 
-            if ((starts_with(sl, "struct ") || starts_with(sl, "class ")) && ends_with(sl, ":")) {
+            if ((starts_with(sl, "struct ") || starts_with(sl, "class ") || starts_with(sl, "bitfield ")) && ends_with(sl, ":")) {
                 // Finish collecting previous method body if any
                 in_method = 0;
                 if (in_struct && str_len(struct_name) > 0) {
@@ -2116,9 +2116,17 @@ const char* generate_c(const char* source) {
                     simple_string_push(&struct_defs, td);
                     simple_string_push(&struct_names, struct_name);
                 }
-                /* Handle both "struct Name:" and "class Name:" */
+                /* Handle "struct Name:", "class Name:", and "bitfield Name(uN):" */
                 if (starts_with(sl, "class ")) {
                     struct_name = trim(substr(sl, 6, str_len(sl) - 1));
+                } else if (starts_with(sl, "bitfield ")) {
+                    const char* bf_decl = trim(substr(sl, 9, str_len(sl) - 1));
+                    long long lparen = find_str(bf_decl, "(");
+                    if (lparen >= 0) {
+                        struct_name = trim(substr(bf_decl, 0, lparen));
+                    } else {
+                        struct_name = bf_decl;
+                    }
                 } else {
                     struct_name = trim(substr(sl, 7, str_len(sl) - 1));
                 }
@@ -2220,6 +2228,10 @@ const char* generate_c(const char* source) {
                     long long colon = find_str(sl_nc, ":");
                     if (colon > 0 && !starts_with(sl_nc, "#")) {
                         const char* fname = trim(substr(sl_nc, 0, colon));
+                        /* bitfield reserved segment: "_: uN" */
+                        if (strcmp(fname, "_") == 0) {
+                            continue;
+                        }
                         const char* ftype = trim(substr_from(sl_nc, colon + 1));
                         const char* ctype = stype_to_c(ftype);
                         struct_body = simple_str_concat(struct_body, simple_str_concat("    ", simple_str_concat(ctype, simple_str_concat(" ", simple_str_concat(fname, ";\n")))));
@@ -2309,7 +2321,7 @@ const char* generate_c(const char* source) {
                 !starts_with(jt, "match ") && !starts_with(jt, "case ") &&
                 !starts_with(jt, "return ") && !starts_with(jt, "val ") &&
                 !starts_with(jt, "var ") && !starts_with(jt, "print ") &&
-                !starts_with(jt, "struct ") && !starts_with(jt, "use ") &&
+                !starts_with(jt, "struct ") && !starts_with(jt, "bitfield ") && !starts_with(jt, "use ") &&
                 !starts_with(jt, "import ") && !starts_with(jt, "extern ") &&
                 !starts_with(jt, "break") && !starts_with(jt, "continue") &&
                 strcmp(jt, "print") != 0) {
@@ -2377,7 +2389,7 @@ const char* generate_c(const char* source) {
             continue;
         }
         // Skip struct/class definitions (handled in first pass)
-        if ((starts_with(trimmed, "struct ") || starts_with(trimmed, "class ")) && ends_with(trimmed, ":")) {
+        if ((starts_with(trimmed, "struct ") || starts_with(trimmed, "class ") || starts_with(trimmed, "bitfield ")) && ends_with(trimmed, ":")) {
             in_struct_skip = 1;
             continue;
         }

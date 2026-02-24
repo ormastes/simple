@@ -1,8 +1,54 @@
-# Compatibility jit instantiator surface for interpreter/test runner.
+# Compatibility JIT instantiator surface for interpreter/test runner.
+
+class JitInstantiatorConfig:
+    update_smf: bool
+    max_depth: i64
+    enabled: bool
+    verbose: bool
 
 class JitStats:
     cached_count: i64
     compile_count: i64
+    loaded_smf_count: i64
+
+enum JitInstantiationResult:
+    Success(code: [u8], symbol: text, address: i64?)
+    NotFound(symbol: text)
+    CircularDependency(cycle: [text])
+    CompilationError(message: text)
+    UpdateFailed(symbol: text, error: text)
+
+impl JitInstantiationResult:
+    fn is_success() -> bool:
+        match self:
+            case Success(_, _, _): true
+            case _: false
+
+    fn is_error() -> bool:
+        match self:
+            case CompilationError(_): true
+            case CircularDependency(_): true
+            case UpdateFailed(_, _): true
+            case _: false
+
+class PossibleInstantiation:
+    template_name: text
+    type_args: text
+    mangled_name: text
+
+class InstantiationRecord:
+    id: i32
+    template_name: text
+    type_args: text
+    mangled_name: text
+    from_file: text
+    from_loc: text
+    to_obj: text
+    status: text
+
+class LoadedMetadata:
+    possible: [PossibleInstantiation]
+    instantiations: [InstantiationRecord]
 
 class MappedRecord:
     owner_id: text
@@ -86,10 +132,52 @@ class JitMapper:
         Ok(1)
 
 class JitInstantiator:
+    config: JitInstantiatorConfig
     jit_cache: Dict
     exec_mapper: JitExecMapper
     jit_mapper: JitMapper
-    loaded_metadata: Dict
+    loaded_metadata: Dict<text, LoadedMetadata>
+    in_progress: Set<text>
+    depth: i64
+
+    static fn new(config: JitInstantiatorConfig) -> JitInstantiator:
+        JitInstantiator(
+            config: config,
+            jit_cache: {},
+            exec_mapper: JitExecMapper(records: {}, symbols: [], owners: [], addresses: []),
+            jit_mapper: JitMapper(),
+            loaded_metadata: {},
+            in_progress: {},
+            depth: 0
+        )
+
+    fn stats() -> JitStats:
+        JitStats(
+            cached_count: self.jit_cache.len() as i64,
+            compile_count: 0,
+            loaded_smf_count: self.loaded_metadata.len() as i64
+        )
+
+    me load_smf_metadata(path: text) -> Result<(), text>:
+        self.loaded_metadata[path] = LoadedMetadata(possible: [], instantiations: [])
+        Ok(())
+
+    me set_metadata_for_test(path: text, metadata: LoadedMetadata):
+        self.loaded_metadata[path] = metadata
+
+    fn can_jit_instantiate(symbol: text) -> bool:
+        if not self.config.enabled:
+            return false
+        self.find_possible(symbol).?
+
+    fn find_possible(symbol: text):
+        for item in self.loaded_metadata:
+            val path = item[0]
+            val metadata = item[1]
+            for entry in metadata.possible:
+                if entry.mangled_name == symbol:
+                    return Some((path, entry))
+        nil
 
     me set_cache_for_test(name: text, code: [u8], addr: i64):
         var owner = "__jit__"
@@ -116,27 +204,118 @@ class JitInstantiator:
         self.exec_mapper.owners = kept_owners
         self.exec_mapper.addresses = kept_addrs
 
-    fn try_jit_instantiate(name: text):
+    me try_jit_instantiate(name: text) -> JitInstantiationResult:
+        if not self.config.enabled:
+            return JitInstantiationResult.NotFound(symbol: name)
+        if self.depth >= self.config.max_depth:
+            return JitInstantiationResult.CompilationError(message: "Maximum JIT depth exceeded: {self.config.max_depth}")
         if self.jit_cache.contains_key(name):
             val rec = self.jit_cache[name]
             val code = rec["code"]
             val addr = rec["address"]
-            return Success(code, name, Some(addr))
-        NotFound(name)
+            return JitInstantiationResult.Success(code: code, symbol: name, address: Some(addr))
+        if self.in_progress.contains(name):
+            return JitInstantiationResult.CircularDependency(cycle: [name])
+
+        val found = self.find_possible(name)
+        if not found.?:
+            return JitInstantiationResult.NotFound(symbol: name)
+
+        self.depth = self.depth + 1
+        self.in_progress = self.in_progress.insert(name)
+        self.in_progress = self.in_progress.remove(name)
+        self.depth = self.depth - 1
+        JitInstantiationResult.CompilationError(message: "JIT compilation not yet implemented")
+
+    me update_smf_note_sdn(path: text, entry: PossibleInstantiation) -> Result<(), text>:
+        var metadata = LoadedMetadata(possible: [], instantiations: [])
+        if self.loaded_metadata.contains_key(path):
+            metadata = self.loaded_metadata[path]
+
+        var remaining: [PossibleInstantiation] = []
+        for possible_entry in metadata.possible:
+            if possible_entry.mangled_name != entry.mangled_name:
+                remaining = remaining + [possible_entry]
+
+        val next_id = metadata.instantiations.len() as i32
+        val inst = InstantiationRecord(
+            id: next_id,
+            template_name: entry.template_name,
+            type_args: entry.type_args,
+            mangled_name: entry.mangled_name,
+            from_file: path,
+            from_loc: path + ":0:0",
+            to_obj: "jit_obj",
+            status: "jit_compiled"
+        )
+        metadata.possible = remaining
+        metadata.instantiations = metadata.instantiations + [inst]
+        self.loaded_metadata[path] = metadata
+        Ok(())
+
+class JitSymbolResolver:
+    symbols: Dict<text, i64>
+    jit: JitInstantiator
+
+    static fn new(config: JitInstantiatorConfig) -> JitSymbolResolver:
+        JitSymbolResolver(symbols: {}, jit: JitInstantiator.new(config))
+
+    me register(symbol: text, address: i64):
+        self.symbols[symbol] = address
+
+    me set_jit_cache_for_test(symbol: text, code: [u8], address: i64):
+        self.jit.set_cache_for_test(symbol, code, address)
+
+    me resolve(symbol: text):
+        if self.symbols.contains_key(symbol):
+            return Some(self.symbols[symbol])
+        if self.jit.jit_cache.contains_key(symbol):
+            val rec = self.jit.jit_cache[symbol]
+            val addr = rec["address"]
+            self.symbols[symbol] = addr
+            return Some(addr)
+
+        val result = self.jit.try_jit_instantiate(symbol)
+        match result:
+            case Success(_, resolved_symbol, address):
+                if address.?:
+                    self.symbols[resolved_symbol] = address.unwrap()
+                    return address
+                nil
+            case _:
+                nil
+
+    me load_smf(path: text) -> Result<(), text>:
+        self.jit.load_smf_metadata(path)
+
+fn _default_config() -> JitInstantiatorConfig:
+    JitInstantiatorConfig(
+        update_smf: true,
+        max_depth: 50,
+        enabled: true,
+        verbose: false
+    )
 
 fn JitInstantiator__new(config: Dict) -> JitInstantiator:
-    JitInstantiator(
-        jit_cache: {},
-        exec_mapper: JitExecMapper(records: {}, symbols: [], owners: [], addresses: []),
-        jit_mapper: JitMapper(),
-        loaded_metadata: {}
-    )
+    JitInstantiator.new(_default_config())
 
 fn jitinstantiator_new(config: Dict) -> JitInstantiator:
     JitInstantiator__new(config)
 
 fn jitinstantiator_stats(self: JitInstantiator) -> JitStats:
-    JitStats(cached_count: self.jit_cache.len() as i64, compile_count: 0)
+    self.stats()
 
-export JitStats, MappedRecord, JitExecMapper, JitMapper, JitInstantiator
-export JitInstantiator__new, jitinstantiator_new, jitinstantiator_stats
+export JitInstantiatorConfig
+export JitStats
+export JitInstantiationResult
+export PossibleInstantiation
+export InstantiationRecord
+export LoadedMetadata
+export MappedRecord
+export JitExecMapper
+export JitMapper
+export JitInstantiator
+export JitSymbolResolver
+export JitInstantiator__new
+export jitinstantiator_new
+export jitinstantiator_stats

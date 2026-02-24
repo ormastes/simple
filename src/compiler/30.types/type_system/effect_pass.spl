@@ -1,0 +1,374 @@
+# Effect Pass - Coordinator for effect inference
+#
+# Bridges between HIR types (Effect/EffectKind from hir_types.spl) and
+# the standalone effect infrastructure (EffectTag from 00.common/effects.spl).
+#
+# This pass runs after HIR lowering and method resolution (Step 2d in the
+# pipeline), before type checking. It:
+# 1. Collects all HirFunction definitions from HIR modules
+# 2. Scans function bodies for suspension operators and async calls
+# 3. Builds FunctionEffectInfo descriptors
+# 4. Runs the fixed-point solver to propagate effects
+# 5. Writes inferred effects back to HirFunction.effects
+# 6. Validates constraints (sync calling async = warning)
+
+use compiler.hir.hir.*
+use compiler.common.effects.{EffectTag, EffectEnv, EffectError, EffectStats, FunctionEffectInfo}
+use compiler.common.effects_solver.{EffectSolver}
+
+# ============================================================================
+# Effect Pass Entry Point
+# ============================================================================
+
+fn run_effect_pass(modules: Dict<text, HirModule>) -> (Dict<text, HirModule>, [text]):
+    """Run effect inference across all HIR modules.
+
+    Returns: (updated_modules, warnings)
+
+    Steps:
+    1. Collect function info from all modules
+    2. Build effect environment with builtins
+    3. Run fixed-point propagation
+    4. Write effects back to HirFunction.effects
+    5. Validate constraints and collect warnings
+    """
+    var warnings: [text] = []
+
+    # Step 1: Collect function effect info from all modules
+    var all_func_infos: [FunctionEffectInfo] = []
+    var func_module_map: Dict<text, text> = {}  # func_name -> module_name
+
+    for mod_name in modules.keys():
+        val module = modules[mod_name]
+        for sym_id in module.functions.keys():
+            val func = module.functions[sym_id]
+            val info = build_function_effect_info(func, mod_name)
+            all_func_infos = all_func_infos.push(info)
+            func_module_map[func.name] = mod_name
+
+    # Step 2: Create environment and solver
+    val env = EffectEnv.new()
+    var solver = EffectSolver.create(env)
+
+    # Step 3: Run fixed-point inference
+    val iterations = solver.solve(all_func_infos)
+
+    # Step 4: Write inferred effects back to HirFunction.effects
+    var updated_modules = modules
+    for mod_name in updated_modules.keys():
+        var module = updated_modules[mod_name]
+        var updated_functions: Dict<SymbolId, HirFunction> = {}
+
+        for sym_id in module.functions.keys():
+            var func = module.functions[sym_id]
+            val tag = env.get_effect(func.name)
+
+            # Convert EffectTag to HIR Effect list
+            var effects: [Effect] = []
+            if tag.is_async():
+                effects = effects.push(Effect(kind: EffectKind.Async, span: func.span))
+
+            # Build updated function with inferred effects
+            val updated_func = HirFunction(
+                symbol: func.symbol,
+                name: func.name,
+                type_params: func.type_params,
+                params: func.params,
+                return_type: func.return_type,
+                body: func.body,
+                effects: effects,
+                is_async: func.is_async,
+                is_static: func.is_static,
+                is_public: func.is_public,
+                is_method: func.is_method,
+                is_mutable: func.is_mutable,
+                is_const: func.is_const,
+                is_extern: func.is_extern,
+                func_attr: func.func_attr,
+                has_doc_comment: func.has_doc_comment,
+                doc_comment: func.doc_comment,
+                span: func.span
+            )
+            updated_functions[sym_id] = updated_func
+
+        # Rebuild module with updated functions
+        val updated_module = HirModule(
+            name: module.name,
+            path: module.path,
+            imports: module.imports,
+            exports: module.exports,
+            symbols: module.symbols,
+            functions: updated_functions,
+            classes: module.classes,
+            structs: module.structs,
+            enums: module.enums,
+            bitfields: module.bitfields,
+            traits: module.traits,
+            impls: module.impls,
+            constants: module.constants,
+            static_asserts: module.static_asserts,
+            aop_advices: module.aop_advices,
+            di_bindings: module.di_bindings,
+            arch_rules: module.arch_rules,
+            mock_decls: module.mock_decls
+        )
+        updated_modules[mod_name] = updated_module
+
+    # Step 5: Validate constraints - check async-from-sync violations
+    for info in all_func_infos:
+        val caller_tag = env.get_effect(info.name)
+        if caller_tag.is_sync():
+            for callee_name in info.called_functions:
+                val callee_tag = env.get_effect(callee_name)
+                if callee_tag.is_async():
+                    warnings = warnings.push(
+                        "calling async function '{callee_name}' from sync context in '{info.name}'"
+                    )
+
+    (updated_modules, warnings)
+
+# ============================================================================
+# HIR Body Scanning
+# ============================================================================
+
+fn build_function_effect_info(func: HirFunction, module_name: text) -> FunctionEffectInfo:
+    """Build a FunctionEffectInfo from a real HirFunction.
+
+    Walks the function body to detect:
+    - Suspension operators (Await expressions)
+    - Called function names
+    """
+    var contains_suspension = false
+    var called_functions: [text] = []
+
+    # Seed from is_async annotation
+    val is_async = func.is_async
+
+    # Scan function body for suspension operators and calls
+    val scan = scan_block(func.body)
+    contains_suspension = scan.has_suspension
+    called_functions = scan.called_functions
+
+    FunctionEffectInfo(
+        name: func.name,
+        is_async: is_async,
+        contains_suspension: contains_suspension,
+        called_functions: called_functions
+    )
+
+# ============================================================================
+# Body Scan Result (internal)
+# ============================================================================
+
+struct BodyScanResult:
+    """Internal result of scanning an HIR body."""
+    has_suspension: bool
+    called_functions: [text]
+
+fn empty_scan() -> BodyScanResult:
+    BodyScanResult(has_suspension: false, called_functions: [])
+
+fn merge_scans(a: BodyScanResult, b: BodyScanResult) -> BodyScanResult:
+    BodyScanResult(
+        has_suspension: a.has_suspension or b.has_suspension,
+        called_functions: a.called_functions.concat(b.called_functions)
+    )
+
+# ============================================================================
+# Expression Scanning
+# ============================================================================
+
+fn scan_expr(expr: HirExpr) -> BodyScanResult:
+    """Scan an HIR expression for suspension operators and function calls."""
+    match expr.kind:
+        # Suspension operators -> Async
+        case Await(_):
+            BodyScanResult(has_suspension: true, called_functions: [])
+
+        # Function calls -> record callee name
+        case Call(callee, args, _):
+            var result = scan_expr(callee)
+
+            # Try to extract function name from callee
+            match callee.kind:
+                case Var(symbol):
+                    # Use symbol name. In practice this is the function name.
+                    # We store the symbol id as text for lookup.
+                    result = BodyScanResult(
+                        has_suspension: result.has_suspension,
+                        called_functions: result.called_functions.push(symbol.id.to_text())
+                    )
+                case _: pass
+
+            for arg in args:
+                result = merge_scans(result, scan_expr(arg.value))
+            result
+
+        # Method calls -> record method name
+        case MethodCall(receiver, method, args, _):
+            var result = scan_expr(receiver)
+            for arg in args:
+                result = merge_scans(result, scan_expr(arg.value))
+            # Record the method name as a called function
+            result = BodyScanResult(
+                has_suspension: result.has_suspension,
+                called_functions: result.called_functions.push(method)
+            )
+            result
+
+        # Control flow -> scan sub-expressions
+        case If(cond, then_, else_):
+            var result = scan_expr(cond)
+            result = merge_scans(result, scan_block(then_))
+            if else_.?:
+                result = merge_scans(result, scan_block(else_.unwrap()))
+            result
+
+        case MatchCase(scrutinee, arms):
+            var result = scan_expr(scrutinee)
+            for arm in arms:
+                result = merge_scans(result, scan_block(arm.body))
+                if arm.has_guard:
+                    result = merge_scans(result, scan_expr(arm.guard))
+            result
+
+        case Loop(body, _):
+            scan_block(body)
+
+        case While(cond, body, _):
+            merge_scans(scan_expr(cond), scan_block(body))
+
+        case For(_, iter, body, _):
+            merge_scans(scan_expr(iter), scan_block(body))
+
+        # Binary/unary -> scan operands
+        case Binary(_, left, right):
+            merge_scans(scan_expr(left), scan_expr(right))
+
+        case Unary(_, operand):
+            scan_expr(operand)
+
+        # Closures -> scan body
+        case Lambda(_, body, _):
+            scan_expr(body)
+
+        case Block(block):
+            scan_block(block)
+
+        # Field, index -> scan base
+        case Field(base, _, _):
+            scan_expr(base)
+
+        case Index(base, index):
+            merge_scans(scan_expr(base), scan_expr(index))
+
+        # Return/Throw/Try -> scan inner
+        case Return(value):
+            if value.?:
+                scan_expr(value.unwrap())
+            else:
+                empty_scan()
+
+        case Throw(value):
+            scan_expr(value)
+
+        case Try(inner):
+            scan_expr(inner)
+
+        case Yield(value):
+            # Yield is also a suspension point
+            var result = BodyScanResult(has_suspension: true, called_functions: [])
+            if value.?:
+                result = merge_scans(result, scan_expr(value.unwrap()))
+            result
+
+        # Struct/enum construction -> scan field exprs
+        case StructLit(_, fields):
+            var result = empty_scan()
+            for (_, field_expr) in fields:
+                result = merge_scans(result, scan_expr(field_expr))
+            result
+
+        # Collections -> scan elements
+        case ArrayLit(elements, _):
+            var result = empty_scan()
+            for elem in elements:
+                result = merge_scans(result, scan_expr(elem))
+            result
+
+        case TupleLit(elements):
+            var result = empty_scan()
+            for elem in elements:
+                result = merge_scans(result, scan_expr(elem))
+            result
+
+        case DictLit(entries, _, _):
+            var result = empty_scan()
+            for (k, v) in entries:
+                result = merge_scans(result, scan_expr(k))
+                result = merge_scans(result, scan_expr(v))
+            result
+
+        # Range
+        case Range(start, end, _, _):
+            merge_scans(scan_expr(start), scan_expr(end))
+
+        # Cast
+        case Cast(inner, _):
+            scan_expr(inner)
+
+        case As(inner, _):
+            scan_expr(inner)
+
+        # Null coalesce / optional
+        case NullCoalesce(left, right):
+            merge_scans(scan_expr(left), scan_expr(right))
+
+        case OptionalChain(base, _):
+            scan_expr(base)
+
+        case ExistsCheck(base):
+            scan_expr(base)
+
+        case Unwrap(base):
+            scan_expr(base)
+
+        # Literals and variables -> pure, no effects
+        case _:
+            empty_scan()
+
+fn scan_block(block: HirBlock) -> BodyScanResult:
+    """Scan a block of statements."""
+    var result = empty_scan()
+
+    for stmt in block.stmts:
+        result = merge_scans(result, scan_stmt(stmt))
+
+    if block.has:
+        result = merge_scans(result, scan_expr(block.value))
+
+    result
+
+fn scan_stmt(stmt: HirStmt) -> BodyScanResult:
+    """Scan a statement."""
+    match stmt.kind:
+        case Expr(expr):
+            scan_expr(expr)
+
+        case Let(_, _, init):
+            scan_expr(init)
+
+        case Assign(target, _, value):
+            merge_scans(scan_expr(target), scan_expr(value))
+
+        case Block(block):
+            scan_block(block)
+
+        case _:
+            empty_scan()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export run_effect_pass
