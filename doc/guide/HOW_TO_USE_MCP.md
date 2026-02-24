@@ -102,10 +102,12 @@ Recommended local regression path:
 
 ```bash
 SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
+SIMPLE_LIB=src bin/simple test test/integration/app/mcp_debug_log_tree_stdio_spec.spl --mode=interpreter
 ```
 
-This integration spec validates initialize, tools/resources listing, error handling, and
-`debug_log_tree(format=json)` over real stdio transport.
+These stdio regressions validate:
+- `mcp_stdio_integration_spec.spl`: tool-level MCP error contract (`isError`) for unknown tools.
+- `mcp_debug_log_tree_stdio_spec.spl`: `debug_log_tree(format=json)` response path remains stable.
 
 ## Configuration Details
 
