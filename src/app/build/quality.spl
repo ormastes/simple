@@ -83,6 +83,8 @@ impl CheckResult:
             parts.join(", ")
 
 use app.io.mod (process_run)
+use app.build.test (TestOrchestrator)
+use app.build.types (TestConfig)
 
 # Lint class - cargo clippy integration
 class Lint:
@@ -152,10 +154,17 @@ fn run_clippy_fix(config: LintConfig) -> i64:
 
     val (stdout, stderr, exit_code) = process_run("cargo", args)
 
-    # Parse number of fixes from output
-    # TODO: Implement proper parsing
+    # Parse number of fixes from stderr (cargo outputs "fixed <path>" lines)
     if exit_code == 0:
-        1  # Placeholder - return 1 to indicate fixes were applied
+        var fix_count = 0
+        val lines = stderr.split("\n")
+        for line in lines:
+            if line.contains("fixed"):
+                fix_count = fix_count + 1
+        if fix_count > 0:
+            fix_count
+        else:
+            1  # At least 1 fix was applied if exit_code == 0
     else:
         0
 
@@ -247,12 +256,25 @@ class Check:
                     overall_success: false
                 )
 
-        # Run tests (basic - just check via cargo check)
+        # Run tests via TestOrchestrator
         if config.run_tests:
             print "\n=== Running Tests ==="
-            # TODO: Integrate with test orchestrator
-            # For now, use simple cargo check
-            test_passed = run_quick_test()
+            val test_config = TestConfig(
+                filter: "",
+                level: "all",
+                tag: "",
+                fail_fast: false,
+                timeout: 0,
+                parallel: false,
+                rust_only: false,
+                doc_only: false,
+                simple_only: true,
+                baremetal: false,
+                baremetal_board: "qemu_x86",
+                baremetal_timeout: 30000
+            )
+            val test_results = TestOrchestrator.run(test_config)
+            test_passed = test_results.all_passed()
 
         val overall_success = lint_result.success and format_result.success and test_passed
 
@@ -314,11 +336,6 @@ fn count_format_issues(stdout: text, stderr: text) -> i64:
         if line.contains("Diff in"):
             count = count + 1
     count
-
-# Quick test run (cargo check)
-fn run_quick_test() -> bool:
-    val (stdout, stderr, exit_code) = process_run("cargo", ["check", "--workspace"])
-    exit_code == 0
 
 # Print quality result - OPTIMIZED VERSION
 fn print_quality_result(name: text, result: QualityResult):

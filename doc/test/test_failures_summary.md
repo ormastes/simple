@@ -161,6 +161,7 @@ grep "runtime_error\|semantic_error\|parse_error" doc/test/test_failures_grouped
 - Static method support is in progress (desugaring approach)
 - 122 stale test runs were cleaned up
 - Current test database may have parsing issues (separate from test failures)
+- For categorized root cause analysis of unfixable failures, see `doc/test/TEST_STATUS_AUDIT.md` (2026-02-24)
 
 ---
 

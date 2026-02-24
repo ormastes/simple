@@ -16,6 +16,7 @@
 # Interpreter-safe: no generics (<>) used.
 
 use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
+use std.log.{debug, info}
 
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
@@ -87,12 +88,14 @@ val SMFE_VERSION: i64 = 1
 # ============================================================================
 
 fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    debug("linker", "link_to_native: {object_files_len(object_files)} input files, output={output}")
     if object_files_len(object_files) == 0:
         return Err("No object files to link")
 
     # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
     val smf_inputs = filter_smf_inputs(object_files)
     if smf_inputs.len() > 0:
+        debug("linker", "Detected {smf_inputs.len()} SMF inputs, using SMF bundle mode")
         val mixed = smf_inputs.len() != object_files_len(object_files)
         if mixed:
             return Err("Cannot mix SMF and object inputs; convert all to SMF or all to objects")
@@ -110,20 +113,24 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
 fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     val os = host_os()
     val arch = host_arch()
+    debug("linker", "link_native_unix: os={os}, arch={arch}")
 
     # Try to find platform linker (mold > lld > ld)
     val linker_result = find_linker()
     if linker_result_is_err(linker_result):
+        debug("linker", "No direct linker found, falling back to cc")
         # Fall back to cc (always available on Unix)
         return link_native_cc(object_files, output, config)
 
     val linker_info = linker_result_value
     val linker_path = linker_info[0]
     val linker_type = linker_info[1]
+    debug("linker", "Found linker: type={linker_type}, path={linker_path}")
 
     # Discover CRT files needed for direct linker invocation
     val crt = find_crt_files(config.pie, config.verbose)
     if not crt.found:
+        debug("linker", "CRT files not found, falling back to cc")
         if config.verbose:
             print "[linker-wrapper] CRT files not found, falling back to cc"
         return link_native_cc(object_files, output, config)
@@ -380,6 +387,7 @@ fn filter_smf_inputs(files: [text]) -> [text]:
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # Fallback: use cc (gcc/clang) for linking
+    debug("linker", "link_native_cc: fallback linking with cc")
     var cmd = "cc"
     for obj in object_files:
         cmd = cmd + " " + obj
@@ -483,6 +491,7 @@ fn link_to_smf(smf_bytes: [u8], output: text, verbose: bool) -> Result:
 # ============================================================================
 
 fn link_to_self_contained(smf_data: [u8], output: text, config: SelfContainedConfig) -> Result:
+    debug("linker", "link_to_self_contained: output={output}, smf_data_size={smf_data_len(smf_data)}")
     if smf_data_len(smf_data) == 0:
         return Err("No SMF data for self-contained binary")
 
@@ -493,6 +502,7 @@ fn link_to_self_contained(smf_data: [u8], output: text, config: SelfContainedCon
         if found_is_err(found):
             return Err(found_unwrap_err(found))
         runtime_path = found_value
+    debug("linker", "Runtime binary: {runtime_path}")
 
     if config.verbose:
         print "[linker-wrapper] Runtime binary: {runtime_path}"

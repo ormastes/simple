@@ -1,432 +1,192 @@
-# Test Status Audit Report
-**Date:** 2026-02-14
-**Purpose:** Audit all @skip and @pending tests from needed_feature.md to determine actual status
+# Test Status Audit
 
-## Executive Summary
+**Date:** 2026-02-24
+**Baseline (WS2+WS3 fixes applied):** 8,731 passed / 2,052 failed / 43 timeout (574 files)
+**Prior baseline (2026-01-30):** 6,436 passed / 786 failed (7,222 tests across 129 failing files)
 
-This audit systematically tested all 180+ test files marked as @skip or @pending in needed_feature.md. The results reveal a significant discrepancy between the documented status and actual test status.
+---
 
-**Key Findings:**
-- Most tests marked as @skip or @pending are actually **PASSING**
-- High-priority features (async, LSP, parser, compiler backend) are **fully functional**
-- The @skip/@pending annotations appear to be outdated
-- Only a small subset of tests require actual implementation work
-
-## Test Categories Audited
-
-### 1. Parser Bugs/Limitations (HIGH PRIORITY) ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/compiler/match_empty_array_bug_spec.spl | **PASS** | 6ms | Bug fixed |
-| test/system/print_return_spec.spl | **PASS** | 5ms | Bug fixed |
-| test/unit/std/runtime_value_spec.spl | **PASS** | 6ms | Bug fixed |
-
-**Result:** All 3 "parser bug" tests are passing. These bugs have been fixed.
-
-### 2. Async/Concurrency Tests (HIGH PRIORITY) ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/std/async_spec.spl | **PASS** | 6ms | Async works |
-| test/unit/std/async_host_spec.spl | **PASS** | 5ms | Host async works |
-| test/unit/std/async_embedded_spec.spl | **PASS** | 5ms | Embedded async works |
-| test/feature/async_features_spec.spl | **PASS** | 7ms | Async features work |
-| test/feature/stackless_coroutines_spec.spl | **PASS** | 5ms | Coroutines work |
-| test/feature/actor_model_spec.spl | **PASS** | 5ms | Actors work |
-| test/feature/actors_spec.spl | **PASS** | 5ms | Actors work |
-
-**Result:** All 7 async/actor tests passing. Async/await is functional.
-
-### 3. LSP Tests (HIGH PRIORITY) ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/app/lsp/references_spec.spl | **PASS** | 6ms | References work |
-| test/unit/app/lsp/hover_spec.spl | **PASS** | 7ms | Hover works |
-| test/unit/app/lsp/definition_spec.spl | **PASS** | 6ms | Go-to-def works |
-| test/unit/app/lsp/document_sync_spec.spl | **PASS** | 6ms | Doc sync works |
-| test/unit/app/lsp/message_dispatcher_spec.spl | **PASS** | 6ms | Dispatcher works |
-| test/unit/app/lsp/server_lifecycle_spec.spl | **PASS** | 7ms | Lifecycle works |
-| test/unit/app/lsp/diagnostics_spec.spl | **PASS** | 6ms | Diagnostics work |
-| test/unit/app/lsp/completion_spec.spl | **PASS** | 6ms | Completion works |
+## Summary
 
-**Result:** All 8 LSP tests passing. LSP is fully functional.
+This audit categorizes all known unfixable or structurally limited test failures into four root cause categories. "Unfixable" means the failure cannot be resolved by changing test code alone — it requires runtime binary changes, compiler feature additions, or external infrastructure.
 
-### 4. Compiler Backend Tests (HIGH PRIORITY) ✅ ALL PASSING
+| Category | Files | Est. Tests | Resolution Path |
+|----------|-------|-----------|----------------|
+| A: Missing Runtime Externs | 10 | ~342 | Add externs to runtime binary |
+| B: Interpreter Runtime Limitations | ~15 | ~120 | Compiler/interpreter upgrade |
+| C: Timeout Tests | ~43 | N/A | External infrastructure required |
+| D: Pre-existing Semantic Failures | ~8 | ~65 | Source implementation needed |
+| **Total** | **~76** | **~527** | |
 
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/compiler/effect_inference_spec.spl | **PASS** | 7ms | Effects work |
-| test/unit/compiler/backend/native_ffi_spec.spl | **PASS** | 6ms | FFI works |
-| test/unit/compiler/backend/backend_capability_spec.spl | **PASS** | 7ms | Capabilities work |
-| test/unit/compiler/backend/instruction_coverage_spec.spl | **PASS** | 7ms | Coverage works |
-| test/unit/compiler/backend/exhaustiveness_validator_spec.spl | **PASS** | 7ms | Validation works |
-| test/unit/compiler/backend/differential_testing_spec.spl | **PASS** | 6ms | Diff testing works |
-
-**Result:** All 6 backend tests passing. Compiler backend is functional.
+---
 
-### 5. Linker and JIT Tests (MEDIUM PRIORITY) ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/compiler/linker_spec.spl | **PASS** | 7ms | Linker works |
-| test/unit/compiler/linker_context_spec.spl | **PASS** | 5ms | Context works |
-| test/unit/compiler/jit_context_spec.spl | **PASS** | 7ms | JIT works |
-
-**Result:** All 3 linker/JIT tests passing.
-
-### 6. Parser Advanced Features ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/feature/set_literal_spec.spl | **PASS** | 6ms | Set literals work |
-| test/feature/custom_literal_spec.spl | **PASS** | 6ms | Custom literals work |
-| test/feature/bitfield_spec.spl | **PASS** | 5ms | Bitfields work |
-| test/unit/compiler/baremetal_syntax_spec.spl | **PASS** | 5ms | Baremetal works |
-| test/system/macro_consteval_simple_spec.spl | **PASS** | 6ms | Macros work |
-| test/feature/parser_error_recovery_spec.spl | **PASS** | 6ms | Error recovery works |
-| test/feature/effect_annotations_spec.spl | **PASS** | 7ms | Effects work |
-| test/feature/generics_advanced_spec.spl | **PASS** | 6ms | Advanced generics work |
-| test/feature/generator_state_machine_codegen_spec.spl | **PASS** | 7ms | Generators work |
-
-**Result:** All 9 advanced parser tests passing.
-
-### 7. Verification Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/compiler/verification/lean_basic_spec.spl | **PASS** | 6ms | Lean integration works |
-| test/unit/compiler/verification/verification_diagnostics_spec.spl | **PASS** | 7ms | Diagnostics work |
-
-**Result:** All 2 verification tests passing.
-
-### 8. TreeSitter Parser Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/compiler/parser/lexer_contextual_keywords_spec.spl | **PASS** | 6ms | Contextual keywords work |
-| test/unit/compiler/parser/treesitter_incremental_spec.spl | **PASS** | 7ms | Incremental parsing works |
-| test/unit/compiler/parser/treesitter_error_recovery_spec.spl | **PASS** | 6ms | Error recovery works |
-| test/unit/compiler/parser/treesitter_tree_real_spec.spl | **PASS** | 6ms | Tree API works |
-| test/unit/compiler/parser/treesitter_parser_real_spec.spl | **PASS** | 7ms | Parser API works |
-| test/unit/compiler/parser/treesitter_highlights_spec.spl | **PASS** | 6ms | Highlights work |
-| test/unit/compiler/parser/grammar_compile_spec.spl | **PASS** | 6ms | Grammar compilation works |
-
-**Result:** All 7 TreeSitter tests passing.
-
-### 9. System Integration Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/std/env_spec.spl | **PASS** | 6ms | Environment vars work |
-| test/unit/std/process_spec.spl | **PASS** | 4ms | Process mgmt works |
-| test/unit/std/sys_ffi_spec.spl | **PASS** | 6ms | System FFI works |
-| test/unit/std/resource_limits_spec.spl | **PASS** | 6ms | Resource limits work |
-| test/unit/std/console_basic_spec.spl | **PASS** | 5ms | Console works |
-| test/unit/std/arc_spec.spl | **PASS** | 6ms | Arc works |
-| test/unit/lib/qemu_spec.spl | **PASS** | 6ms | QEMU integration works |
-
-**Result:** All 7 system tests passing.
-
-### 10. File I/O Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/feature/file_io_extended_spec.spl | **PASS** | 6ms | Extended I/O works |
-| test/system/file_io_spec.spl | **PASS** | 7ms | File I/O works |
-| test/unit/std/infra/file_io_spec.spl | **PASS** | 6ms | Infra I/O works |
-| test/unit/std/file_find_spec.spl | **PASS** | 5ms | File find works |
-
-**Result:** All 4 file I/O tests passing.
-
-### 11. DateTime Tests ✅ ALL PASSING
+## Category A: Missing Runtime Extern Functions
 
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/std/datetime_spec.spl | **PASS** | 5ms | DateTime works |
-| test/unit/std/datetime_ffi_spec.spl | **PASS** | 6ms | DateTime FFI works |
-
-**Result:** All 2 DateTime tests passing.
-
-### 12. Testing Framework Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/lib/std/compiler/lexer_ffi_test.spl | **PASS** | 4ms | Lexer FFI works |
-| test/unit/std/mock_verification_spec.spl | **PASS** | 5ms | Mock verify works |
-| test/unit/std/contract_spec.spl | **PASS** | 6ms | Contracts work |
-| test/unit/std/fuzz_spec.spl | **PASS** | 6ms | Fuzzing works |
-| test/unit/std/mock_phase5_spec.spl | **PASS** | 6ms | Mock phase 5 works |
-| test/unit/std/mock_phase6_spec.spl | **PASS** | 6ms | Mock phase 6 works |
-| test/unit/std/mock_phase7_spec.spl | **PASS** | 6ms | Mock phase 7 works |
-
-**Result:** All 7 testing framework tests passing.
+These tests declare `extern fn` bindings that call C functions not present in the current `bin/release/simple` runtime binary. The Simple wrapper code in `src/app/io/` and `src/lib/` is correct but the underlying C symbol is absent from the linked binary. Interpreter mode cannot stub these because the tests call through to actual extern resolution.
 
-### 13. Standard Library Tests ✅ ALL PASSING
+**Resolution:** Each requires adding the corresponding C implementation to `src/runtime/runtime.c` and rebuilding the binary. Alternatively, a Simple-level stub module (like `debug_stubs.spl`) can shadow the extern with a pure-Simple fallback.
 
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/std/log_spec.spl | **PASS** | 4ms | Logging works |
-| test/unit/std/di_spec.spl | **PASS** | 6ms | Dependency injection works |
-| test/unit/std/db_spec.spl | **PASS** | 6ms | Database works |
-| test/unit/std/config_spec.spl | **PASS** | 6ms | Config works |
-| test/unit/std/infra/config_env_spec.spl | **PASS** | 8ms | Env config works |
-| test/unit/std/cli_minimal_spec.spl | **PASS** | 6ms | CLI works |
-| test/unit/std/sdn_minimal_spec.spl | **PASS** | 6ms | SDN works |
-| test/unit/std/improvements/json_spec.spl | **PASS** | 6ms | JSON improvements work |
-| test/unit/std/helpers_spec.spl | **PASS** | 5ms | Helpers work |
-| test/unit/std/list_compact_spec.spl | **PASS** | 6ms | List compact works |
-| test/unit/std/lexer_spec.spl | **PASS** | 5ms | Lexer works |
-| test/unit/std/context_spec.spl | **PASS** | 6ms | Context works |
-
-**Result:** All 12 std library tests passing.
-
-### 14. Package Management Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/app/package/semver_spec.spl | **PASS** | 6ms | Semver works |
-| test/unit/app/package/package_spec.spl | **PASS** | 6ms | Packages work |
-| test/unit/app/package/manifest_spec.spl | **PASS** | 5ms | Manifest works |
-| test/unit/app/package/lockfile_spec.spl | **PASS** | 6ms | Lockfile works |
-| test/unit/app/package/ffi_spec.spl | **PASS** | 4ms | Package FFI works |
-
-**Result:** All 5 package management tests passing.
-
-### 15. Tooling Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/app/tooling/arg_parsing_spec.spl | **PASS** | 7ms | Arg parsing works |
-| test/unit/app/tooling/regex_utils_spec.spl | **PASS** | 4ms | Regex utils work |
-| test/unit/app/tooling/brief_view_spec.spl | **PASS** | 7ms | Brief view works |
-| test/unit/app/tooling/retry_utils_spec.spl | **PASS** | 6ms | Retry utils work |
-| test/unit/app/tooling/json_utils_spec.spl | **PASS** | 6ms | JSON utils work |
-| test/unit/app/tooling/html_utils_spec.spl | **PASS** | 6ms | HTML utils work |
-| test/unit/app/tooling/context_pack_spec.spl | **PASS** | 7ms | Context pack works |
-
-**Result:** All 7 tooling tests passing.
-
-### 16. Diagram and Diagnostics Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/app/diagram/call_flow_profiling_spec.spl | **PASS** | 6ms | Call flow works |
-| test/unit/app/diagram/filter_spec.spl | **PASS** | 5ms | Filters work |
-| test/unit/app/diagram/diagram_gen_spec.spl | **PASS** | 6ms | Diagram gen works |
-| test/unit/app/diagnostics/text_formatter_spec.spl | **PASS** | 6ms | Formatter works |
-
-**Result:** All 4 diagram/diagnostics tests passing.
-
-### 17. Interpreter Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/app/interpreter/debug_spec.spl | **PASS** | 6ms | Debug works |
-| test/unit/app/interpreter/class_method_call_spec.spl | **PASS** | 7ms | Class methods work |
-| test/system/interpreter_bugs_spec.spl | **PASS** | 6ms | Bugs fixed |
-| test/unit/app/interpreter/ast_convert_expr_spec.spl | **PASS** | 6ms | AST convert works |
-
-**Result:** All 4 interpreter tests passing.
-
-### 18. MCP Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/app/mcp/failure_analysis_spec.spl | **PASS** | 5ms | Failure analysis works |
-| test/unit/app/mcp/prompts_spec.spl | **PASS** | 6ms | Prompts work |
-
-**Result:** All 2 MCP tests passing.
-
-### 19. Machine Learning Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/lib/ml/test_ffi_operator_spec.spl | **PASS** | 6ms | FFI operators work |
-| test/unit/lib/ml/fft_spec.spl | **PASS** | 6ms | FFT works |
-| test/unit/lib/ml/custom_autograd_spec.spl | **PASS** | 5ms | Autograd works |
-| test/unit/lib/ml/simple_math_spec.spl | **PASS** | 6ms | ML math works |
-| test/unit/lib/ml/activation_spec.spl | **PASS** | 6ms | Activations work |
-
-**Result:** All 5 ML tests passing.
-
-### 20. Tensor Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/feature/tensor_spec.spl | **PASS** | 6ms | Tensors work |
-| test/feature/tensor_interface_spec.spl | **PASS** | 5ms | Tensor interface works |
-| test/feature/tensor_bridge_spec.spl | **PASS** | 6ms | Tensor bridge works |
-
-**Result:** All 3 tensor tests passing.
-
-### 21. Math/Graphics Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/feature/vec3_spec.spl | **PASS** | 6ms | Vector3 works |
-| test/feature/quat_spec.spl | **PASS** | 6ms | Quaternion works |
-| test/feature/mat4_spec.spl | **PASS** | 6ms | Matrix4x4 works |
-| test/feature/transform_spec.spl | **PASS** | 6ms | Transform works |
-| test/feature/scene_node_spec.spl | **PASS** | 6ms | Scene nodes work |
-| test/feature/search_spec.spl | **PASS** | 6ms | Search works |
-| test/feature/index_spec.spl | **PASS** | 6ms | Index works |
-
-**Result:** All 7 math/graphics tests passing.
-
-### 22. Physics Engine Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/lib/physics/rigidbody_spec.spl | **PASS** | 7ms | Rigidbody works |
-| test/unit/lib/physics/vector_spec.spl | **PASS** | 5ms | Physics vectors work |
-| test/unit/lib/physics/materials_spec.spl | **PASS** | 6ms | Materials work |
-| test/unit/lib/physics/spatial_hash_spec.spl | **PASS** | 6ms | Spatial hash works |
-| test/unit/lib/physics/contact_spec.spl | **PASS** | 6ms | Contacts work |
-| test/unit/lib/physics/aabb_spec.spl | **PASS** | 6ms | AABB works |
-| test/unit/lib/physics/shapes_spec.spl | **PASS** | 6ms | Shapes work |
-
-**Result:** All 7 physics tests passing.
-
-### 23. Game Engine Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/lib/game_engine/material_spec.spl | **PASS** | 5ms | Materials work |
-| test/unit/lib/game_engine/actor_model_spec.spl | **PASS** | 6ms | Actor model works |
-| test/unit/lib/game_engine/input_spec.spl | **PASS** | 6ms | Input works |
-| test/unit/lib/game_engine/assets_spec.spl | **PASS** | 6ms | Assets work |
-| test/unit/lib/game_engine/physics_spec.spl | **PASS** | 6ms | Physics integration works |
-| test/unit/lib/game_engine/audio_spec.spl | **PASS** | 6ms | Audio works |
-| test/unit/lib/game_engine/component_spec.spl | **PASS** | 6ms | Components work |
-| test/feature/component_spec.spl | **PASS** | 6ms | Component feature works |
-
-**Result:** All 8 game engine tests passing.
-
-### 24. GPU Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/feature/cuda_spec.spl | **PASS** | 5ms | CUDA works |
-| test/feature/vulkan_spec.spl | **PASS** | 6ms | Vulkan works |
-| test/feature/gpu_basic_spec.spl | **PASS** | 6ms | GPU basics work |
-
-**Result:** All 3 GPU tests passing (likely stubs/mocks).
-
-### 25. Domain-Specific Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/unit/lib/lms/server_spec.spl | **PASS** | 5ms | LMS server works |
-| test/feature/database_sync_spec.spl | **PASS** | 6ms | DB sync works |
-| test/feature/contract_persistence_feature_spec.spl | **PASS** | 6ms | Contract persistence works |
-| test/feature/experiment_tracking_spec.spl | **PASS** | 6ms | Experiment tracking works |
-| test/unit/std/exp/sweep_spec.spl | **PASS** | 6ms | Experiment sweep works |
-| test/unit/std/exp/run_spec.spl | **PASS** | 6ms | Experiment run works |
-| test/unit/std/exp/storage_spec.spl | **PASS** | 6ms | Experiment storage works |
-| test/unit/std/exp/artifact_spec.spl | **PASS** | 6ms | Experiment artifacts work |
-
-**Result:** All 8 domain-specific tests passing.
-
-### 26. Other Feature Tests ✅ ALL PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/feature/floor_division_fdiv_spec.spl | **PASS** | 6ms | Floor division works |
-| test/feature/shell_api_spec.spl | **PASS** | 6ms | Shell API works |
-| test/feature/fault_detection_spec.spl | **PASS** | 6ms | Fault detection works |
-| test/feature/parser_static_keyword_spec.spl | **PASS** | 6ms | Static keyword works |
-| test/feature/class_invariant_spec.spl | **PASS** | 6ms | Class invariants work |
-| test/feature/code_quality_tools_spec.spl | **PASS** | 6ms | Code quality tools work |
-| test/feature/bootstrap_spec.spl | **PASS** | 6ms | Bootstrap works |
-
-**Result:** All 7 other feature tests passing.
-
-### 27. System Tests ✅ MOSTLY PASSING
-
-| Test File | Status | Time | Notes |
-|-----------|--------|------|-------|
-| test/system/parser_improvements_spec.spl | **PASS** | 6ms | Parser improvements work |
-| test/system/feature_doc_spec.spl | **PASS** | 6ms | Feature docs work |
-| test/unit/compiler/note_sdn_spec.spl | **PASS** | 6ms | SDN notes work |
-
-**Result:** All 3 system tests passing.
-
-## Overall Summary
-
-**Total Tests Audited:** 180+
-**Tests Actually Passing:** 170+ (95%+)
-**Tests Actually Failing:** ~10 or fewer (5%)
-
-### Breakdown by Category
-
-| Category | Total | Passing | Status |
-|----------|-------|---------|--------|
-| Parser Bugs | 3 | 3 | ✅ 100% |
-| Async/Concurrency | 7 | 7 | ✅ 100% |
-| LSP | 8 | 8 | ✅ 100% |
-| Compiler Backend | 6 | 6 | ✅ 100% |
-| Linker/JIT | 3 | 3 | ✅ 100% |
-| Parser Advanced | 9 | 9 | ✅ 100% |
-| Verification | 2 | 2 | ✅ 100% |
-| TreeSitter | 7 | 7 | ✅ 100% |
-| System Integration | 7 | 7 | ✅ 100% |
-| File I/O | 4 | 4 | ✅ 100% |
-| DateTime | 2 | 2 | ✅ 100% |
-| Testing Framework | 7 | 7 | ✅ 100% |
-| Standard Library | 12 | 12 | ✅ 100% |
-| Package Management | 5 | 5 | ✅ 100% |
-| Tooling | 7 | 7 | ✅ 100% |
-| Diagram/Diagnostics | 4 | 4 | ✅ 100% |
-| Interpreter | 4 | 4 | ✅ 100% |
-| MCP | 2 | 2 | ✅ 100% |
-| Machine Learning | 5 | 5 | ✅ 100% |
-| Tensors | 3 | 3 | ✅ 100% |
-| Math/Graphics | 7 | 7 | ✅ 100% |
-| Physics | 7 | 7 | ✅ 100% |
-| Game Engine | 8 | 8 | ✅ 100% |
-| GPU | 3 | 3 | ✅ 100% |
-| Domain-Specific | 8 | 8 | ✅ 100% |
-| Other Features | 7 | 7 | ✅ 100% |
-| System Tests | 3 | 3 | ✅ 100% |
-
-## Recommendations
-
-### 1. Update needed_feature.md (URGENT)
-Remove @skip/@pending annotations from all passing tests. The document is severely out of date.
-
-### 2. Update Test Files (HIGH PRIORITY)
-Remove @skip/@pending annotations from individual test files that are passing.
-
-### 3. Re-categorize Remaining Work
-The actual TODO items are:
-- Hardware-dependent tests (CUDA/Vulkan actual hardware, not stubs)
-- Performance optimization TODOs
-- Documentation completeness
-- FFI wrapper migrations (implementation exists, migration pending)
-
-### 4. Update Project Status
-The Simple language is far more complete than needed_feature.md suggests:
-- ✅ Async/await fully functional
-- ✅ LSP fully functional
-- ✅ Compiler backend fully functional
-- ✅ Package management fully functional
-- ✅ Advanced parser features functional
-- ✅ ML/Tensor operations functional
-- ✅ Physics engine functional
-- ✅ Game engine components functional
-
-### 5. Priority Shift
-Instead of "implementing features," focus on:
-- Performance optimization
-- Documentation
-- Real-world usage testing
-- Production hardening
-- Example applications
-
-## Conclusion
-
-The audit reveals that the Simple language compiler and runtime are significantly more mature than documented. The vast majority of "pending" features are actually implemented and passing tests. The @skip/@pending annotations appear to be historical artifacts from earlier development stages.
-
-**Recommended action:** Update documentation to reflect actual project status, remove outdated annotations, and refocus development efforts on optimization and production readiness rather than basic feature implementation.
+| File | Missing Extern | Test Count | Notes |
+|------|---------------|-----------|-------|
+| `test/dyn_torch_test.spl` | `rt_torch_available` (via `DynLoader`) | 0 it-blocks (top-level script) | Calls `dyn_torch_available()` which uses `DynLoader.call0` — fails when `libspl_torch.so` is absent |
+| `test/feature/app/fault_detection_spec.spl` | `rt_fault_set_stack_overflow_detection` | 36 | Stubs exist in `src/app/io/debug_stubs.spl` but the test uses `use std.sys.fault_detection.*` which must resolve differently. The `debug_stubs.spl` approach requires proper module routing. |
+| `test/feature/usage/cuda_spec.spl` | `rt_cuda_is_available` | 18 | Defined as `extern fn` in `src/app/io/cuda_ffi.spl`; no runtime C symbol |
+| `test/deploy/smoke_spec.spl` | `rt_shell` | 12 | `extern fn rt_shell(cmd: text) -> text` — template exists in `ffi_gen.templates/bootstrap_ffi.txt` but not in binary |
+| `test/unit/app/io/gamepad_ffi_spec.spl` | `rt_gamepad_init` | 61 | `extern fn rt_gamepad_init() -> i64` in `gamepad_ffi.spl`; Gilrs library not linked |
+| `test/unit/app/io/graphics2d_ffi_spec.spl` | `rt_lyon_path_builder_new` | 59 | `extern fn rt_lyon_path_builder_new() -> i64` in `graphics2d_ffi.spl`; Lyon library not linked |
+| `test/unit/app/io/http_ffi_spec.spl` | `rt_http_get` | 45 | `extern fn rt_http_get(url: text) -> (i64, text, text)` in `http_ffi.spl`; HTTP runtime not linked |
+| `test/unit/app/io/regex_sffi_spec.spl` | `rt_regex_new` | 25 | `extern fn rt_regex_new(pattern: text) -> i64` in `regex_ffi.spl`; listed in `runtime_symbols.spl` but not in binary |
+| `test/unit/app/io/rapier2d_ffi_spec.spl` | `rt_rapier2d_world_new` | 39 | `extern fn rt_rapier2d_world_new(gravity_x: f64, gravity_y: f64) -> i64` in `rapier2d_ffi.spl`; Rapier2D not linked |
+| `test/unit/app/io/window_ffi_spec.spl` | `rt_winit_event_loop_new` | 42 | `extern fn rt_winit_event_loop_new() -> i64` in `window_ffi.spl`; Winit not linked (requires display server) |
+
+**Notes:**
+- `rt_fault_set_stack_overflow_detection` has Simple-level stubs in `src/app/io/debug_stubs.spl`. If the test imports the right path, these stubs allow tests to pass without runtime changes.
+- `rt_shell` has a C implementation template in `src/app/ffi_gen.templates/bootstrap_ffi.txt` but it is not compiled into the pre-built binary.
+- The IO FFI libraries (gamepad, graphics2d, http, regex, rapier2d, window) all correspond to external Rust/C crates that would need to be compiled and linked into the binary as shared libraries or static archives.
+
+---
+
+## Category B: Interpreter Runtime Limitations
+
+These tests use features that work in compiled mode but fail or hang in the bootstrap interpreter. The interpreter is a subset implementation and has known gaps.
+
+**Resolution:** These cannot be fixed by changing test logic alone without breaking the intent of the test. They require interpreter upgrades or compilation to native mode.
+
+### B1: Generic Type Parameters at Runtime
+
+The bootstrap interpreter does not fully support parameterized generic types in patterns or return positions.
+
+| File | Limitation | Test Count | Notes |
+|------|-----------|-----------|-------|
+| `test/unit/app/package/semver_spec.spl` | `Result<Version, text>` generics in `parse_version()` — interpreter hangs on generic return type resolution | ~30 | The test was rewritten to use tuple `(ok, v_opt, err)` as workaround but the module `semver.spl` still uses `Result<T, E>` internally |
+| `test/unit/app/package/lockfile_spec.spl` | `Result<Lockfile, text>` in `parse_lockfile_string()` — same generic interpreter issue | ~20 | `parse_lockfile_string` is implemented in `src/app/package/lockfile.spl` but returns `Result<T, E>` |
+
+### B2: Module-Level FFI Calls (Initialization Hang)
+
+Modules that call FFI at top-level (outside any function, executed during import) cause the interpreter to hang because the FFI call blocks module loading.
+
+| File | Limitation | Test Count | Notes |
+|------|-----------|-----------|-------|
+| `test/unit/std/env_spec.spl` | `use shell.env` triggers `rt_process_run("/bin/sh", ["-c", "pwd"])` at module load | ~8 | Root cause: `env.spl` calls `cwd()` as a module-level `val`, which calls `rt_process_run` at import time |
+| `test/unit/std/log_spec.spl` | `use std.log` triggers `rt_env_get("SIMPLE_LOG")` at module load | ~6 | Root cause: `_parse_log_level()` is called as `val LOG_LEVEL = _parse_log_level()` at module scope |
+
+### B3: Complex Closure and Static Method Patterns
+
+The interpreter has known gaps with nested closure captures and static method resolution patterns used in certain test files.
+
+| File | Limitation | Test Count | Notes |
+|------|-----------|-----------|-------|
+| `test/unit/std/mock_phase5_spec.spl` | Complex mock verification uses lambda predicates and method chaining that may trigger infinite loops in the interpreter's closure resolution | ~20 | Fluent expectation chains with `when_called().then_return()` patterns |
+| `test/unit/app/tooling/arg_parsing_spec.spl` | All tests use `skip_it()` — blocked by `GlobalFlags__parse()` static method not supported in bootstrap runtime | ~15 | Not a hang — intentionally skipped; static method support is a known interpreter gap |
+| `test/unit/app/diagram/call_flow_profiling_spec.spl` | Calls undeclared FFI functions (`clear_ffi_recording`, `enable_ffi_recording`, etc.) — interpreter hangs trying to resolve undefined symbols | ~10 | Missing `extern fn` declarations; profiling FFI is not yet implemented |
+
+### B4: Dict-as-Class Bug
+
+In certain interpreter code paths, class construction returns a dict rather than a typed class instance. This causes type mismatch failures on field access.
+
+| Symptom | Pattern | Notes |
+|---------|---------|-------|
+| `Error: semantic: type mismatch: cannot convert dict to int` | Test files that construct class instances inside closures or nested functions | Appears in ~4 files identified in the 2026-02-06 failure analysis; root cause is in the MIR/interpreter class lowering path |
+
+---
+
+## Category C: Timeout Tests
+
+These tests do not fail with an error — they hang until the test runner's timeout (120s) kills them. Timeouts indicate the test requires external infrastructure or triggers an interpreter deadlock.
+
+**Root Cause Groups:**
+
+### C1: MCP Server Infrastructure (~8 files)
+Tests that require a running MCP (Model Context Protocol) server. The server must be started separately and the tests connect to it. Without a live server, the socket connection blocks indefinitely.
+
+- `test/unit/app/mcp/failure_analysis_spec.spl` — requires `mcp.simple_lang.db_tools` module (does not exist)
+- `test/unit/app/mcp/prompts_spec.spl` — old `import` syntax + type name mismatches (`String` vs `text`, `Bool` vs `bool`) cause interpreter hang
+
+### C2: Module Initialization FFI Hang (~5 files)
+Already listed in Category B2. Also counted in the 43-timeout baseline:
+
+- `test/unit/std/env_spec.spl`
+- `test/unit/std/log_spec.spl`
+- `test/unit/app/package/semver_spec.spl` (generic hang)
+- `test/unit/std/mock_phase5_spec.spl` (closure loop)
+- `test/unit/app/diagram/call_flow_profiling_spec.spl` (undefined FFI)
+
+### C3: LLVM/WASM Backend Tests (~15 files)
+Tests that invoke the LLVM or WASM backend compilation pipeline. The compiled backend binaries (`llvm-as`, `wasm-ld`, etc.) are not present in the test environment. The test runner waits for the subprocess indefinitely.
+
+- Various files under `test/system/` and `test/feature/` that call `bin/simple compile --backend=llvm ...` or `--backend=wasm`
+
+### C4: Network Connectivity Tests (~10 files)
+Tests that open real TCP/UDP sockets or make HTTP requests to external services. Without network access or the target server, the connection blocks.
+
+- HTTP integration tests that are not part of the `http_ffi_spec.spl` unit test suite
+- WebSocket tests under `test/unit/app/io/`
+
+### C5: Interpreter Deadlock / Infinite Loop (~5 files)
+Tests where the test logic itself triggers an infinite loop due to interpreter bugs (e.g., recursive closures, broken exit conditions in `while` loops inside methods).
+
+**Note:** The exact 43-file list from the "574 files" baseline requires a fresh `bin/simple test --list` run to enumerate precisely. The groups above account for the known categories.
+
+---
+
+## Category D: Pre-existing Semantic Failures
+
+These tests fail because the source modules they test have unimplemented functions or incorrect implementations. The test code is correct — the implementation is missing.
+
+**Resolution:** Each requires implementing the missing function in the source module. These are tracked as known work items.
+
+| File | Missing/Broken Feature | Est. Tests | When Fixable |
+|------|----------------------|-----------|-------------|
+| `test/unit/app/package/lockfile_spec.spl` | `parse_lockfile_string` exists but returns `Result<T, E>` which the interpreter cannot handle — same as B1 | ~20 | When interpreter supports generics or module returns plain tuples |
+| `test/unit/app/build/cargo_spec.spl` | `parse_sdn_config` not implemented in `app.build.config`; `parse_build_args` may also be missing | ~15 | When build config parser is completed |
+| `test/unit/app/mcp/di_handler_wiring_spec.spl` | Dependency injection wiring for MCP handlers; some DI container methods not implemented | ~10 | When MCP DI wiring is complete |
+| `test/unit/app/test_runner_new/integration_test_config_spec.spl` | `IntegrationTestConfig` struct fields or constructors differ from test expectations | ~8 | When test runner config API is stabilized |
+| `test/unit/app/test_runner_new/test_config_spec.spl` | Similar config struct mismatch | ~6 | When test runner config API is stabilized |
+| `test/feature/usage/cuda_spec.spl` | `cuda_available()` calls `rt_cuda_is_available` extern which is not in binary (see also Cat A) | 18 | When CUDA runtime is linked |
+
+**Previously reported (WS2+WS3) but now resolved:**
+- `test/feature/search_spec.spl` — file does not exist at this path (may have been renamed/deleted)
+- `test/unit/app/package/lockfile_spec.spl` — `parse_lockfile_string` is implemented but blocked by generics (Cat B1)
+
+---
+
+## Known Limitation Notes
+
+### What Requires Runtime Binary Changes
+1. All Category A extern functions require C implementations added to `src/runtime/runtime.c` (or linked shared libraries) and the binary rebuilt. These cannot be worked around at the Simple language level without stubs.
+2. `rt_shell` has an implementation template in `src/app/ffi_gen.templates/bootstrap_ffi.txt` that is ready to compile into the binary.
+3. The `debug_stubs.spl` pattern (Simple-level stubs for extern fns) is the recommended workaround for functions that can return safe defaults. It has already been applied to fault detection functions.
+
+### What Requires Interpreter Upgrades
+1. Generic type parameters (`Result<T, E>`, `Option<T>`, `List<T>`) in function return types cause interpreter hangs in some configurations. This is a known gap in the bootstrap interpreter — not in the compiled backend.
+2. Module-level FFI calls are an anti-pattern that causes hang-on-import. The fix is to make these calls lazy (call on first use, not at module load time).
+3. Static methods (`Type.method()`) are not fully supported in the bootstrap interpreter. Tests that require static methods must use the compiled binary.
+4. Nested closure mutation of outer variables is not supported in the interpreter. Closures can read outer vars but not write them.
+
+### What Requires External Infrastructure
+1. MCP server tests require a running MCP server process.
+2. LLVM/WASM backend tests require the respective compiler toolchains installed.
+3. Network tests require connectivity and target servers.
+4. GPU tests (`cuda_spec.spl`, `vulkan_spec.spl`) require actual hardware with drivers.
+5. Hardware IO tests (gamepad, windowing) require physical devices or display servers.
+
+### Interpreter Mode Test Limitation (All Tests)
+The test runner in interpreter mode only verifies that the test file loads without error. The `it` block bodies are registered but **not executed** in interpreter mode. A test file showing "1 passed, 6ms" means only that the file parsed and loaded — not that any actual assertions ran. Use compiled mode for behavioral verification.
+
+### Stable Baseline
+The following test categories are consistently passing and should not regress:
+- Parser features, async/coroutines, LSP infrastructure, compiler backend tests
+- Standard library (text, math, json, crypto, encoding)
+- Physics engine, game engine component tests (stub-based)
+- ML/tensor tests (stub-based, no actual GPU required)
+- TreeSitter parser integration
+
+---
+
+## Related Documents
+
+- `doc/test/test_failures_summary.md` — 2026-02-06 failure breakdown by error type (355 failing files)
+- `doc/test/HANG_ANALYSIS.md` — Root cause analysis for 8 timeout tests (2026-02-14)
+- `doc/test/FAILURE_ANALYSIS_2026-01-30.md` — 786 failures across 129 files (2026-01-30)
+- `doc/test/LATEST_TEST_RUN_2026-01-30.md` — 6,436/7,222 passing (89.1%) with 0 parse errors
+- `doc/test/TEST_STATUS_AUDIT.md` — (this file, replaces the 2026-02-14 @skip/@pending audit)
