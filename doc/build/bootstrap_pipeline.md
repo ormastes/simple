@@ -14,19 +14,26 @@ seed (C++)  -->  core (Simple)  -->  full (Simple)
 | **core** | Core Simple | `src/compiler_core/` (20,053 lines, 31 files) | Native compiler binary | Compile Full Simple |
 | **full** | Full Simple | `src/compiler/` (127,284 lines, 409 files) | Self-hosting compiler | The production compiler |
 
-### C Backend Bootstrap (Recommended)
+### C Backend Bootstrap (Temporal)
 
-The C backend generates C++20 directly from the full compiler, bypassing the seed/core layers:
+The C backend generates C from Simple source. This produces a **temporal** (bootstrap) binary
+that provides fast CLI dispatch but delegates real work to the **real** binary (`bin/release/simple`).
 
-```
-bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
-cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+```bash
+# Regenerate C from Simple source:
+build/simple_codegen src/app/cli/main.spl src/compiler_cpp/main.c
+# Build temporal bootstrap binary:
+cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
 ninja -C build -j7
-mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
-bin/bootstrap/cpp/simple build   # Self-host verification
+# Copy to canonical bootstrap location:
+cp build/simple build/bootstrap/c_simple/simple
 ```
 
-Output: `bin/bootstrap/cpp/simple` — a bootstrap binary built from generated C++20.
+Output: `build/bootstrap/c_simple/simple` — temporal bootstrap binary.
+
+**Key distinction:**
+- `build/simple` / `build/bootstrap/c_simple/simple` = **temporal** (C bootstrap, fast CLI dispatcher)
+- `bin/release/simple` = **real** (self-hosted Simple compiler/interpreter, production binary)
 
 ### Bootstrap Chain (Seed/Core/Full)
 

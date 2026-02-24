@@ -122,6 +122,47 @@ static int line_indent_width(const char* line, size_t len) {
     return n;
 }
 
+/* Compatibility shim: rewrite pass_todo/pass_do_nothing/pass_dn → pass
+ * so stale interpreter runtimes that only know 'pass' can parse them. */
+static char* preprocess_pass_keywords(const char* src) {
+    if (!src) return NULL;
+    size_t in_len = strlen(src);
+    size_t cap = in_len + 256;
+    char* out = (char*)malloc(cap);
+    if (!out) return NULL;
+    size_t w = 0;
+    size_t i = 0;
+    int changed = 0;
+    while (i < in_len) {
+        /* Check for pass_do_nothing (16 chars), pass_todo (9), pass_dn (7) */
+        if (i + 16 <= in_len && strncmp(src + i, "pass_do_nothing", 15) == 0
+            && (i + 15 >= in_len || !isalnum((unsigned char)src[i+15]))) {
+            if (w + 4 >= cap) { cap = cap * 2; out = (char*)realloc(out, cap); }
+            memcpy(out + w, "pass", 4); w += 4;
+            i += 15;
+            changed = 1;
+        } else if (i + 9 <= in_len && strncmp(src + i, "pass_todo", 9) == 0
+            && (i + 9 >= in_len || !isalnum((unsigned char)src[i+9]))) {
+            if (w + 4 >= cap) { cap = cap * 2; out = (char*)realloc(out, cap); }
+            memcpy(out + w, "pass", 4); w += 4;
+            i += 9;
+            changed = 1;
+        } else if (i + 7 <= in_len && strncmp(src + i, "pass_dn", 7) == 0
+            && (i + 7 >= in_len || !isalnum((unsigned char)src[i+7]))) {
+            if (w + 4 >= cap) { cap = cap * 2; out = (char*)realloc(out, cap); }
+            memcpy(out + w, "pass", 4); w += 4;
+            i += 7;
+            changed = 1;
+        } else {
+            if (w + 1 >= cap) { cap = cap * 2; out = (char*)realloc(out, cap); }
+            out[w++] = src[i++];
+        }
+    }
+    out[w] = '\0';
+    if (!changed) { free(out); return NULL; }
+    return out;
+}
+
 /* Compatibility shim for stale interpreter runtimes:
  * transform bitfield declarations into parser-safe struct forms. */
 static char* preprocess_bitfield_source(const char* src) {
@@ -232,7 +273,13 @@ static char* maybe_preprocess_bitfield_file(const char* input_path) {
     if (!input_path) return NULL;
     char* src = read_text_file_alloc(input_path);
     if (!src) return NULL;
-    char* transformed = preprocess_bitfield_source(src);
+    /* Apply pass keyword rewriting first, then bitfield rewriting. */
+    char* pass_rewritten = preprocess_pass_keywords(src);
+    char* base = pass_rewritten ? pass_rewritten : src;
+    char* transformed = preprocess_bitfield_source(base);
+    /* If bitfield transform returned NULL but pass rewriting happened, use pass result. */
+    if (!transformed && pass_rewritten) transformed = pass_rewritten;
+    else if (pass_rewritten && transformed) free(pass_rewritten);
     free(src);
     if (!transformed) return NULL;
 
@@ -834,7 +881,7 @@ const char* get_version(void) {
     if (((strcmp(version, "") != 0) && (version != NULL))) {
     return version;
     }
-    return "0.6.1";
+    return "0.7.0";
 }
 
 void print_version(void) {

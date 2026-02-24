@@ -4,7 +4,20 @@
 
 Impl in simple unless it has big performance differences.
 
-**100% Pure Simple** - No Rust source. Pre-built runtime at `bin/release/simple` (33MB).
+**100% Pure Simple** - No Rust source. Self-hosted compiler written entirely in Simple.
+
+### Binary Architecture
+
+| Binary | Path | Role | Source |
+|--------|------|------|--------|
+| **Real binary** | `bin/release/simple` | Full interpreter/compiler (production) | Compiled from Simple source by Simple compiler |
+| **C bootstrap** (temporal) | `build/simple` | Fast CLI dispatcher (~3ms startup), delegates to real binary | Generated C from Simple source (`src/compiler_cpp/`) via CMake+Ninja |
+| **C bootstrap copy** | `build/bootstrap/c_simple/simple` | Same as `build/simple`, canonical bootstrap location | Same generated C source |
+| **Codegen tool** | `build/simple_codegen` | Compiles single `.spl` → `.c` | From `src/compiler_cpp/real_compiler.c` |
+
+- **C bootstrap is temporal** — it provides fast CLI dispatch but delegates all real work (test running, .spl interpretation, compilation) to `bin/release/simple`
+- **`bin/release/simple` is the real binary** — the self-hosted Simple compiler/interpreter
+- The C bootstrap preprocesses newer syntax (bitfield, pass_do_nothing, pass_dn) for compatibility with older interpreter versions
 
 ---
 
@@ -135,11 +148,14 @@ bin/simple todo-scan                # Update TODO tracking
 bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
 
-# C Backend Bootstrap (CMake + Ninja)
-bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
-cmake -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
+# C Backend Bootstrap (temporal — CMake + Ninja)
+# Regenerate C from Simple source:
+build/simple_codegen src/app/cli/main.spl src/compiler_cpp/main.c
+# Build temporal bootstrap binary:
+cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -S src/compiler_cpp
 ninja -C build -j7
-mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
+# Copy to canonical bootstrap location:
+cp build/simple build/bootstrap/c_simple/simple
 
 # LLM Integration Testing (requires claude CLI + auth, ~$1-2 per run)
 CLAUDECODE= bin/simple test test/system/llm_caret_live_comprehensive_spec.spl
@@ -217,7 +233,7 @@ src/
     nogc_async_mut/ # Async mutable, no GC (actors, async, threads, generators, etc.)
     gc_async_mut/   # GC + async (gpu, cuda, torch, pure ML library)
     nogc_async_mut_noalloc/  # Baremetal, execution, memory, qemu
-  compiler_cpp/     # Generated C++20 output only (CMakeLists.txt + *.cpp — bootstrap via CMake+Ninja)
+  compiler_cpp/     # Generated C from Simple source (temporal bootstrap — CMakeLists.txt + *.c via CMake+Ninja)
   runtime/          # C runtime (runtime.c/runtime.h — linked by generated C++)
   compiler/         # Unified compiler — numbered layers (NN.name/ prefix stripped for imports)
     00.common/      # Error types, config, effects, visibility, diagnostics, registry
@@ -240,7 +256,8 @@ src/
   i18n/             # Internationalization
 test/               # Test files (lib, app, compiler, benchmarks)
 doc/                # Documentation (report, design, guide, research, feature, test, bug)
-bin/                # Binaries (simple, release/simple)
+bin/                # Binaries (simple wrapper, release/simple = real binary)
+build/bootstrap/    # Temporal bootstrap binaries (c_simple/simple, cpp/simple)
 tools/              # Development tools (docker containers, windows/ build helpers)
 scripts/            # Bootstrap bash scripts (3 only)
 .claude/            # Agents, skills, templates
