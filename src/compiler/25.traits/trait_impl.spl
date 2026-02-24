@@ -5,7 +5,33 @@
 
 use compiler.hir.hir.*
 use compiler.core.lexer.*
-use compiler.traits.trait_def.{TraitBound}
+use compiler.traits.trait_def.{TraitBound, TraitDef, AssocTypeDef}
+
+# ============================================================================
+# Associated Type Implementation
+# ============================================================================
+
+struct AssocTypeImpl:
+    """Implementation of an associated type in an impl block.
+
+    Example:
+        impl Iterator for Range:
+            type Item = i64  # AssocTypeImpl(name: "Item", concrete_type: i64)
+    """
+    name: text                      # Associated type name (e.g., "Item")
+    concrete_type: HirType          # The concrete type assigned (e.g., i64)
+
+impl AssocTypeImpl:
+    static fn create(name: text, concrete_type: HirType) -> AssocTypeImpl:
+        """Create a new associated type implementation."""
+        AssocTypeImpl(
+            name: name,
+            concrete_type: concrete_type
+        )
+
+    fn to_string() -> text:
+        """Get string representation."""
+        "type {self.name} = <type>"
 
 # ============================================================================
 # Impl Block
@@ -15,15 +41,17 @@ struct ImplBlock:
     """Implementation of a trait for a specific type.
 
     Example:
-        impl Display for Point:
-            fn to_string() -> text:
-                "Point({self.x}, {self.y})"
+        impl Iterator for Range:
+            type Item = i64
+            fn next() -> i64?:
+                ...
     """
     trait_name: Symbol              # Which trait is being implemented
     for_type: HirType               # Which type is implementing the trait
     type_params: [Symbol]           # Generic parameters (impl<T> Trait for Vec<T>)
     where_clause: [TraitBound]      # Where T: Trait constraints
     methods: [HirFunction]          # Method implementations
+    assoc_type_impls: Dict<text, AssocTypeImpl>  # Associated type implementations
     span: Span
 
 impl ImplBlock:
@@ -35,6 +63,7 @@ impl ImplBlock:
             type_params: [],
             where_clause: [],
             methods: [],
+            assoc_type_impls: {},
             span: span
         )
 
@@ -62,6 +91,58 @@ impl ImplBlock:
         Returns true if the impl can be instantiated to match ty.
         """
         match_types(self.for_type, ty)
+
+    me add_assoc_type_impl(name: text, concrete_type: HirType):
+        """Add an associated type implementation.
+
+        Example:
+            impl_block.add_assoc_type_impl("Item", int_type)
+        """
+        val assoc_impl = AssocTypeImpl.create(name, concrete_type)
+        self.assoc_type_impls[name] = assoc_impl
+
+    fn get_assoc_type_impl(name: text) -> HirType?:
+        """Get the concrete type for an associated type implementation.
+
+        Returns the concrete type if this impl specifies the associated type,
+        nil otherwise.
+        """
+        if self.assoc_type_impls.contains_key(name):
+            Some(self.assoc_type_impls[name].concrete_type)
+        else:
+            nil
+
+    fn has_assoc_type_impl(name: text) -> bool:
+        """Check if this impl specifies an associated type."""
+        self.assoc_type_impls.contains_key(name)
+
+    fn validate_assoc_types(trait_def: TraitDef) -> [text]:
+        """Validate that all required associated types are implemented.
+
+        Returns a list of error messages. Empty list means validation passed.
+
+        Checks:
+        1. All non-default associated types in the trait must be specified
+        2. No associated types that don't exist in the trait
+        """
+        var errors: [text] = []
+
+        # Check that all required associated types are implemented
+        val required = trait_def.required_assoc_types()
+        for assoc in required:
+            if not self.has_assoc_type_impl(assoc.name):
+                errors = errors.push(
+                    "missing associated type '{assoc.name}' in impl of '{trait_def.name.name}' for type"
+                )
+
+        # Check that no extra associated types are specified
+        for (name, _) in self.assoc_type_impls:
+            if not trait_def.has_assoc_type(name):
+                errors = errors.push(
+                    "associated type '{name}' does not exist in trait '{trait_def.name.name}'"
+                )
+
+        errors
 
 # ============================================================================
 # Generic Type Matching (Phase B.3.1)
@@ -151,8 +232,17 @@ fn match_types(pattern: HirType, concrete: HirType) -> bool:
                 case _:
                     false
 
+        case Projection(pattern_base, pattern_assoc):
+            match concrete.kind:
+                case Projection(concrete_base, concrete_assoc):
+                    if pattern_assoc != concrete_assoc:
+                        return false
+                    match_types(pattern_base, concrete_base)
+                case _:
+                    false
+
         case _:
             # For other types, use structural equality
             pattern.kind == concrete.kind
 
-export ImplBlock, match_types
+export AssocTypeImpl, ImplBlock, match_types

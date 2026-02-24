@@ -1,10 +1,72 @@
 # Trait Definitions
 #
-# Core trait definition types: TraitDef, MethodSignature, TraitBound.
+# Core trait definition types: TraitDef, MethodSignature, TraitBound, AssocTypeDef.
 # Split from traits.spl for modularity.
 
 use compiler.hir.hir.*
 use compiler.core.lexer.*
+
+# ============================================================================
+# Associated Type Definition
+# ============================================================================
+
+struct AssocTypeDef:
+    """Definition of an associated type in a trait.
+
+    Example:
+        trait Iterator:
+            type Item               # No bounds, no default
+            type Output: Display    # With bound
+            type Index = i64        # With default
+    """
+    name: text                      # Associated type name (e.g., "Item")
+    bounds: [Symbol]                # Trait bounds the assoc type must satisfy
+    default: HirType?               # Optional default type
+
+impl AssocTypeDef:
+    static fn create(name: text) -> AssocTypeDef:
+        """Create an associated type definition with no bounds or default."""
+        AssocTypeDef(
+            name: name,
+            bounds: [],
+            default: nil
+        )
+
+    static fn with_bounds(name: text, bounds: [Symbol]) -> AssocTypeDef:
+        """Create an associated type definition with trait bounds."""
+        AssocTypeDef(
+            name: name,
+            bounds: bounds,
+            default: nil
+        )
+
+    static fn with_default(name: text, default: HirType) -> AssocTypeDef:
+        """Create an associated type definition with a default type."""
+        AssocTypeDef(
+            name: name,
+            bounds: [],
+            default: Some(default)
+        )
+
+    fn has_bounds() -> bool:
+        """Check if this associated type has trait bounds."""
+        not self.bounds.is_empty()
+
+    fn has_default() -> bool:
+        """Check if this associated type has a default type."""
+        self.default.?
+
+    fn to_string() -> text:
+        """Get string representation."""
+        var result = "type {self.name}"
+        if not self.bounds.is_empty():
+            var bound_names: [text] = []
+            for b in self.bounds:
+                bound_names = bound_names.push(b.name)
+            result = "{result}: {bound_names.join(" + ")}"
+        if self.default.?:
+            result = "{result} = <default>"
+        result
 
 # ============================================================================
 # Trait Definition
@@ -13,17 +75,20 @@ use compiler.core.lexer.*
 struct TraitDef:
     """Definition of a trait.
 
-    A trait declares method signatures that types can implement.
+    A trait declares method signatures that types can implement,
+    and optionally associated types that impls must specify.
 
     Example:
-        trait Display:
-            fn to_string() -> text
+        trait Iterator:
+            type Item
+            fn next() -> Item?
     """
     name: Symbol                    # Trait name
     methods: [MethodSignature]      # Required method signatures
     defaults: [HirFunction]         # Default implementations
     supertraits: [Symbol]           # Supertrait bounds (Trait: Supertrait)
     type_params: [Symbol]           # Generic parameters on trait
+    assoc_types: Dict<text, AssocTypeDef>  # Associated type definitions
     span: Span
 
 impl TraitDef:
@@ -35,6 +100,7 @@ impl TraitDef:
             defaults: [],
             supertraits: [],
             type_params: [],
+            assoc_types: {},
             span: span
         )
 
@@ -51,6 +117,33 @@ impl TraitDef:
             if method.name == method_name:
                 return Some(method)
         nil
+
+    me add_assoc_type(assoc_type: AssocTypeDef):
+        """Add an associated type definition to this trait."""
+        self.assoc_types[assoc_type.name] = assoc_type
+
+    fn has_assoc_type(name: text) -> bool:
+        """Check if trait has an associated type with given name."""
+        self.assoc_types.contains_key(name)
+
+    fn get_assoc_type(name: text) -> AssocTypeDef?:
+        """Get associated type definition by name."""
+        if self.assoc_types.contains_key(name):
+            Some(self.assoc_types[name])
+        else:
+            nil
+
+    fn assoc_type_count() -> i64:
+        """Get number of associated types in this trait."""
+        self.assoc_types.len()
+
+    fn required_assoc_types() -> [AssocTypeDef]:
+        """Get associated types that have no default (must be specified in impl)."""
+        var required: [AssocTypeDef] = []
+        for (name, assoc) in self.assoc_types:
+            if not assoc.has_default():
+                required = required.push(assoc)
+        required
 
 struct MethodSignature:
     """Method signature in a trait definition."""
@@ -109,4 +202,4 @@ impl TraitBoundKind:
             case Multiple(ts): ts
             case Supertrait(sub, sup): [sub, sup]
 
-export TraitDef, MethodSignature, TraitBound, TraitBoundKind
+export AssocTypeDef, TraitDef, MethodSignature, TraitBound, TraitBoundKind

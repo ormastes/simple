@@ -1,14 +1,15 @@
 # Trait Solver
 #
-# Obligation-based trait constraint solving.
+# Obligation-based trait constraint solving with associated type support.
 # Split from traits.spl for modularity.
 
 use compiler.hir.hir.*
 use compiler.core.lexer.*
-use compiler.traits.trait_def.{TraitDef, TraitBound}
+use compiler.traits.trait_def.{TraitDef, TraitBound, AssocTypeDef}
 use compiler.traits.trait_impl.{ImplBlock}
 use compiler.traits.trait_coherence.{impls_overlap}
 use compiler.traits.trait_validation.{TraitError}
+use compiler.traits.associated_types.{AssocTypeProjection, AssocTypeResolver}
 
 # ============================================================================
 # Obligation
@@ -23,25 +24,52 @@ struct Obligation:
     - Satisfying a where clause
 
     Must be satisfied by finding an impl block.
+    Optionally includes associated type constraints (e.g., Iterator<Item=i64>).
     """
     type_: HirType                  # The type that must implement the trait
     trait_: Symbol                  # The trait that must be implemented
     cause: ObligationCause          # Why this obligation was created
     span: Span                      # Source location
+    assoc_type_constraints: Dict<text, HirType>  # Associated type constraints
 
 impl Obligation:
     static fn create(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span) -> Obligation:
-        """Create a new obligation."""
+        """Create a new obligation without associated type constraints."""
         Obligation(
             type_: ty,
             trait_: trait_,
             cause: cause,
-            span: span
+            span: span,
+            assoc_type_constraints: {}
         )
+
+    static fn with_assoc_constraints(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span, constraints: Dict<text, HirType>) -> Obligation:
+        """Create an obligation with associated type constraints.
+
+        Example: I: Iterator<Item=i64> creates an obligation with
+        assoc_type_constraints = {"Item": i64}.
+        """
+        Obligation(
+            type_: ty,
+            trait_: trait_,
+            cause: cause,
+            span: span,
+            assoc_type_constraints: constraints
+        )
+
+    fn has_assoc_constraints() -> bool:
+        """Check if this obligation has associated type constraints."""
+        not self.assoc_type_constraints.is_empty()
 
     fn description() -> text:
         """Get human-readable description."""
-        "require {self.type_} : {self.trait_}"
+        var desc = "require {self.type_} : {self.trait_}"
+        if self.has_assoc_constraints():
+            var constraints: [text] = []
+            for (name, _) in self.assoc_type_constraints:
+                constraints = constraints.push("{name}=<type>")
+            desc = "{desc}<{constraints.join(", ")}>"
+        desc
 
 enum ObligationCause:
     """Why an obligation was created (for error messages)."""
@@ -77,7 +105,8 @@ class TraitSolver:
     2. For each obligation T: Trait:
        a. Search for impl Trait for T
        b. Check where clauses recursively
-       c. Report error if no impl found
+       c. Check associated type constraints if present
+       d. Report error if no impl found
     3. Cache results to avoid duplicate work
     """
     # All known trait definitions
@@ -98,6 +127,9 @@ class TraitSolver:
     # Errors encountered during solving
     errors: [TraitError]
 
+    # Associated type resolver
+    assoc_resolver: AssocTypeResolver
+
 impl TraitSolver:
     static fn create() -> TraitSolver:
         """Create a new trait solver."""
@@ -107,17 +139,20 @@ impl TraitSolver:
             impls_by_type: {},
             cache: {},
             obligations: [],
-            errors: []
+            errors: [],
+            assoc_resolver: AssocTypeResolver.create()
         )
 
     me add_trait(trait_def: TraitDef):
         """Register a trait definition."""
         self.traits[trait_def.name] = trait_def
+        self.assoc_resolver.add_trait(trait_def)
 
     me add_impl(impl_block: ImplBlock):
         """Register an impl block.
 
         Indexes by both trait name and target type for efficient lookup.
+        Also registers with the associated type resolver.
         """
         val trait_name = impl_block.trait_name
 
@@ -139,6 +174,9 @@ impl TraitSolver:
                 impl_list_by_type = impl_list_by_type.push(impl_block)
                 self.impls_by_type[type_symbol] = impl_list_by_type
             case _: pass  # Skip non-named types for now
+
+        # Register with associated type resolver
+        self.assoc_resolver.add_impl(impl_block)
 
     me add_obligation(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span):
         """Add an obligation to solve."""
@@ -175,13 +213,14 @@ impl TraitSolver:
         val ty = obligation.type_
         val trait_ = obligation.trait_
 
-        # Check cache
+        # Check cache (only for obligations without assoc constraints)
         val cache_key = (ty, trait_)
-        if self.cache[cache_key].?:
-            if self.cache[cache_key]:
-                return Ok(())
-            else:
-                return Err(TraitError.Unsatisfied(obligation))
+        if not obligation.has_assoc_constraints():
+            if self.cache[cache_key].?:
+                if self.cache[cache_key]:
+                    return Ok(())
+                else:
+                    return Err(TraitError.Unsatisfied(obligation))
 
         # Search for impl
         match self.find_impl(ty, trait_):
@@ -200,6 +239,14 @@ impl TraitSolver:
                         self.cache[cache_key] = false
                         return Err(e)
                     case _: pass
+
+                # Check associated type constraints
+                if obligation.has_assoc_constraints():
+                    match self.check_assoc_type_constraints(obligation, impl_block):
+                        case Err(e):
+                            self.cache[cache_key] = false
+                            return Err(e)
+                        case _: pass
 
                 # Success - cache it
                 self.cache[cache_key] = true
@@ -252,6 +299,49 @@ impl TraitSolver:
 
         Ok(())
 
+    me check_assoc_type_constraints(obligation: Obligation, impl_block: ImplBlock) -> Result<(), TraitError>:
+        """Check that an impl block satisfies associated type constraints.
+
+        For an obligation like T: Iterator<Item=i64>, verifies that
+        the impl's associated type for 'Item' matches i64.
+        """
+        for (assoc_name, expected_type) in obligation.assoc_type_constraints:
+            val actual_type = impl_block.get_assoc_type_impl(assoc_name)
+            if not actual_type.?:
+                # Associated type not specified in impl - check for default
+                return Err(TraitError.Unsatisfied(obligation))
+
+            # Compare the actual type with the expected type
+            val actual = actual_type.unwrap()
+            if actual.kind != expected_type.kind:
+                return Err(TraitError.Unsatisfied(obligation))
+
+        Ok(())
+
+    me add_obligation_with_assoc(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span, constraints: Dict<text, HirType>):
+        """Add an obligation with associated type constraints."""
+        val obligation = Obligation.with_assoc_constraints(ty, trait_, cause, span, constraints)
+        self.obligations = self.obligations.push(obligation)
+
+    fn resolve_assoc_type(ty: HirType, trait_: Symbol, assoc_name: text) -> HirType?:
+        """Resolve an associated type for a concrete type and trait.
+
+        Example: resolve_assoc_type(Range, Iterator, "Item") -> i64
+        """
+        match self.find_impl(ty, trait_):
+            case Some(impl_block):
+                impl_block.get_assoc_type_impl(assoc_name)
+            case nil:
+                nil
+
+    fn get_assoc_resolver() -> AssocTypeResolver:
+        """Get the associated type resolver for external use."""
+        self.assoc_resolver
+
+    fn normalize_type(ty: HirType) -> HirType:
+        """Normalize a type by resolving all associated type projections."""
+        self.assoc_resolver.normalize(ty)
+
     fn get_trait(name: Symbol) -> TraitDef?:
         """Get trait definition by name."""
         self.traits[name]
@@ -295,3 +385,4 @@ impl TraitSolver:
                         self.errors = self.errors.push(error)
 
 export Obligation, ObligationCause, TraitSolver
+

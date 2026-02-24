@@ -1,0 +1,256 @@
+# Associated Type Projection & Resolution
+#
+# Resolves associated type projections (T.Item) to concrete types.
+# Handles normalization of types containing projections.
+#
+# Phase 4C of Associated Types implementation.
+
+use compiler.hir.hir.*
+use compiler.core.lexer.*
+use compiler.traits.trait_def.{TraitDef, AssocTypeDef}
+use compiler.traits.trait_impl.{ImplBlock}
+
+# ============================================================================
+# Associated Type Projection
+# ============================================================================
+
+class AssocTypeProjection:
+    """Type projection: T.Item where T: Iterator.
+
+    Represents a reference to an associated type through a base type.
+    For example, in `fn sum<I: Iterator>(iter: I) -> I.Item`,
+    `I.Item` is a projection with base_type=I, assoc_name="Item".
+
+    The `resolved` field caches the concrete type once resolved,
+    to avoid re-resolving the same projection multiple times.
+    """
+    base_type: HirType              # The base type (e.g., I, Range)
+    assoc_name: text                # The associated type name (e.g., "Item")
+    resolved: HirType?              # Cached resolution result
+
+impl AssocTypeProjection:
+    static fn create(base_type: HirType, assoc_name: text) -> AssocTypeProjection:
+        """Create a new unresolved projection."""
+        AssocTypeProjection(
+            base_type: base_type,
+            assoc_name: assoc_name,
+            resolved: nil
+        )
+
+    fn is_resolved() -> bool:
+        """Check if this projection has been resolved."""
+        self.resolved.?
+
+    me set_resolved(ty: HirType):
+        """Cache the resolved type."""
+        self.resolved = Some(ty)
+
+    fn to_string() -> text:
+        """Get string representation."""
+        "{self.assoc_name}"
+
+# ============================================================================
+# Associated Type Resolver
+# ============================================================================
+
+class AssocTypeResolver:
+    """Resolves associated type projections to concrete types.
+
+    Uses the trait and impl registries to find the concrete type
+    that an associated type projection resolves to.
+
+    Algorithm:
+    1. Find an impl block matching the base type and trait
+    2. Look up the associated type implementation in that impl
+    3. Fall back to the default type if defined in the trait
+    4. Return Error type if no resolution found
+    """
+    # All known trait definitions (indexed by trait name)
+    traits: Dict<text, TraitDef>
+
+    # All known impl blocks (indexed by trait name)
+    impls: Dict<text, [ImplBlock]>
+
+impl AssocTypeResolver:
+    static fn create() -> AssocTypeResolver:
+        """Create a new resolver with empty registries."""
+        AssocTypeResolver(
+            traits: {},
+            impls: {}
+        )
+
+    me add_trait(trait_def: TraitDef):
+        """Register a trait definition."""
+        self.traits[trait_def.name.name] = trait_def
+
+    me add_impl(impl_block: ImplBlock):
+        """Register an impl block."""
+        val trait_name = impl_block.trait_name.name
+        if not self.impls.contains_key(trait_name):
+            self.impls[trait_name] = []
+        self.impls[trait_name] = self.impls[trait_name].push(impl_block)
+
+    fn resolve_projection(projection: AssocTypeProjection) -> HirType:
+        """Resolve an associated type projection to a concrete type.
+
+        Searches all traits to find which trait defines the associated type,
+        then finds the impl for the base type and looks up the concrete type.
+
+        Returns HirType with Error kind if resolution fails.
+        """
+        # If already resolved via cache, return it
+        if projection.is_resolved():
+            return projection.resolved.unwrap()
+
+        val assoc_name = projection.assoc_name
+        val base_type = projection.base_type
+
+        # Search all traits for one that defines this associated type
+        for (trait_name, trait_def) in self.traits:
+            if trait_def.has_assoc_type(assoc_name):
+                # Found the trait - now find impl for the base type
+                val impl_block = self.find_impl_for_type(trait_name, base_type)
+                if impl_block.?:
+                    val concrete = impl_block.unwrap().get_assoc_type_impl(assoc_name)
+                    if concrete.?:
+                        return concrete.unwrap()
+
+                # Check for default type in trait definition
+                val assoc_def = trait_def.get_assoc_type(assoc_name)
+                if assoc_def.?:
+                    if assoc_def.unwrap().has_default():
+                        return assoc_def.unwrap().default.unwrap()
+
+        # Unresolved - return error type
+        val dummy_span = Span(start: 0, end: 0, line: 0, col: 0)
+        HirType(kind: HirTypeKind.Error, span: dummy_span)
+
+    fn normalize(ty: HirType) -> HirType:
+        """Normalize a type by resolving all projection types to concrete types.
+
+        Recursively walks the type structure and replaces Projection variants
+        with their resolved concrete types.
+        """
+        match ty.kind:
+            case Projection(base, assoc_name):
+                # Resolve the base type first
+                val normalized_base = self.normalize(base)
+                val projection = AssocTypeProjection.create(normalized_base, assoc_name)
+                val resolved = self.resolve_projection(projection)
+                # Recursively normalize the result (handles nested projections)
+                self.normalize(resolved)
+
+            case Named(symbol, args):
+                # Normalize each type argument
+                var normalized_args: [HirType] = []
+                for arg in args:
+                    normalized_args = normalized_args.push(self.normalize(arg))
+                HirType(
+                    kind: HirTypeKind.Named(symbol: symbol, args: normalized_args),
+                    span: ty.span
+                )
+
+            case Tuple(elements):
+                var normalized_elems: [HirType] = []
+                for elem in elements:
+                    normalized_elems = normalized_elems.push(self.normalize(elem))
+                HirType(
+                    kind: HirTypeKind.Tuple(elements: normalized_elems),
+                    span: ty.span
+                )
+
+            case Array(element, size):
+                HirType(
+                    kind: HirTypeKind.Array(
+                        element: self.normalize(element),
+                        size: size
+                    ),
+                    span: ty.span
+                )
+
+            case Optional(inner):
+                HirType(
+                    kind: HirTypeKind.Optional(inner: self.normalize(inner)),
+                    span: ty.span
+                )
+
+            case Result(ok, err):
+                HirType(
+                    kind: HirTypeKind.Result(
+                        ok: self.normalize(ok),
+                        err: self.normalize(err)
+                    ),
+                    span: ty.span
+                )
+
+            case Function(params, ret, effects):
+                var normalized_params: [HirType] = []
+                for param in params:
+                    normalized_params = normalized_params.push(self.normalize(param))
+                HirType(
+                    kind: HirTypeKind.Function(
+                        params: normalized_params,
+                        ret: self.normalize(ret),
+                        effects: effects
+                    ),
+                    span: ty.span
+                )
+
+            case _:
+                # All other types pass through unchanged
+                ty
+
+    fn find_impl_for_type(trait_name: text, ty: HirType) -> ImplBlock?:
+        """Find an impl block for the given trait and type."""
+        if not self.impls.contains_key(trait_name):
+            return nil
+
+        val impl_list = self.impls[trait_name]
+        for impl_block in impl_list:
+            if impl_block.matches_type(ty):
+                return Some(impl_block)
+
+        nil
+
+    fn find_impl_for_projection(projection: AssocTypeProjection) -> ImplBlock?:
+        """Find the impl block that provides the associated type for a projection.
+
+        Searches all traits to find which one defines the associated type,
+        then looks for an impl of that trait for the projection's base type.
+        """
+        val assoc_name = projection.assoc_name
+        val base_type = projection.base_type
+
+        for (trait_name, trait_def) in self.traits:
+            if trait_def.has_assoc_type(assoc_name):
+                val impl_block = self.find_impl_for_type(trait_name, base_type)
+                if impl_block.?:
+                    return impl_block
+
+        nil
+
+# ============================================================================
+# Associated Type Error
+# ============================================================================
+
+enum AssocTypeError:
+    """Errors related to associated types."""
+    MissingAssocType(trait_name: text, assoc_name: text)
+    UnresolvedProjection(assoc_name: text)
+    BoundUnsatisfied(assoc_name: text, expected_trait: text)
+    DuplicateAssocType(name: text)
+
+impl AssocTypeError:
+    fn message() -> text:
+        """Get human-readable error message."""
+        match self:
+            case MissingAssocType(trait_name, assoc_name):
+                "missing associated type '{assoc_name}' in impl of '{trait_name}'"
+            case UnresolvedProjection(assoc_name):
+                "cannot resolve associated type '{assoc_name}'"
+            case BoundUnsatisfied(assoc_name, expected_trait):
+                "associated type '{assoc_name}' does not satisfy bound '{expected_trait}'"
+            case DuplicateAssocType(name):
+                "duplicate associated type '{name}'"
+
+export AssocTypeProjection, AssocTypeResolver, AssocTypeError

@@ -21,6 +21,7 @@ use compiler.borrow.borrow_check.*
 use compiler.common.visibility_integration.{check_module_visibility}
 use compiler.semantics.const_eval.{eval_static_assert, ConstEvalError}
 use compiler.common.config.*
+use compiler.types.type_system.effect_pass.{run_effect_pass}
 use driver_types.*
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default, write_elf_bytes_to_file}
 use compiler.driver.smf_writer.{generate_smf_with_templates, Target}
@@ -240,6 +241,14 @@ class CompilerDriver:
             # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.hir_modules[name] = resolved_module
             log.trace("stored HIR module '{name}', total={self.ctx.hir_modules.keys().len()}")
+
+        # Step 2d: Effect inference pass (infer async effects across all modules)
+        log.debug("running effect inference pass...")
+        val (effect_modules, effect_warnings) = run_effect_pass(self.ctx.hir_modules)
+        self.ctx.hir_modules = effect_modules
+        for warning in effect_warnings:
+            log.warn("effect: {warning}")
+        log.debug("effect inference done, {effect_warnings.len()} warnings")
 
         log.debug("HIR lowering complete: {self.ctx.hir_modules.keys().len()} modules")
         not self.ctx.has_errors()

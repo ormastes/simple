@@ -16,6 +16,7 @@ use compiler.core.lexer.*
 use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
 use type_infer_types.*
+use compiler.semantics.narrowing.*
 
 impl HmInferContext:
     # =========================================================================
@@ -43,7 +44,7 @@ impl HmInferContext:
             synthesize(true)       => bool
             synthesize(\x: x + 1)  => fn(Infer) -> Infer  (params not known)
         """
-        self.infer_expr(expr)
+        self._infer_expr_synth(expr)
 
     me check_expr(expr: HirExpr, expected: HirType) -> Result<(), TypeInferError>:
         """Check that an expression has the expected type.
@@ -61,7 +62,8 @@ impl HmInferContext:
         # Propagate parameter types from expected into lambda
         match expr.kind:
             case Closure(params, body, captures):
-                match expected.kind:
+                val resolved_expected = self.resolve(expected)
+                match resolved_expected.kind:
                     case Function(param_types, return_type, effects):
                         # Check arity matches
                         if params.len() != param_types.len():
@@ -98,24 +100,128 @@ impl HmInferContext:
                                 Err(e)
 
                     case _:
-                        # Expected is not a function type, fall back to synthesize
-                        match self.synthesize_expr(expr):
-                            case Ok(inferred):
-                                self.unify(inferred, expected).map(\x: ())
-                            case Err(e): Err(e)
+                        # Expected is not a function type, fall back to synthesize+subsume
+                        self._subsume_fallback(expr, expected)
 
-            # For all other expressions, synthesize and unify
-            case _:
-                match self.synthesize_expr(expr):
-                    case Ok(inferred):
-                        self.unify(inferred, expected).map(\x: ())
+            # If expression: propagate expected type into both branches (with narrowing)
+            case If(cond, then_, else_):
+                match self.infer_expr(cond, InferMode.Synthesize):
+                    case Ok(cond_ty):
+                        val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
+                        match self.unify(cond_ty, bool_ty):
+                            case Err(e): return Err(e)
+                            case _: pass
+
+                        # Analyze condition for narrowing facts
+                        val narrowing_facts = analyze_condition(cond, \sym_id: self._lookup_symbol_type(sym_id))
+
+                        # Push narrowing scope for then-branch
+                        self.narrowing.push_scope()
+                        self._add_immutable_facts(narrowing_facts)
+
+                        val then_result = self.infer_block(then_)
+                        val then_terminates = definitely_terminates(then_)
+                        self.narrowing.pop_scope()
+
+                        match then_result:
+                            case Ok(then_ty):
+                                match self.subsume(then_ty, expected):
+                                    case Err(e): return Err(e)
+                                    case _: pass
+                                if else_.?:
+                                    # Push narrowing scope with negated facts for else-branch
+                                    self.narrowing.push_scope()
+                                    val negated = negate_facts(narrowing_facts)
+                                    self._add_immutable_facts(negated)
+
+                                    val else_result = self.infer_block(else_.unwrap())
+                                    val else_terminates = definitely_terminates(else_.unwrap())
+                                    self.narrowing.pop_scope()
+
+                                    # Early return promotion
+                                    if then_terminates:
+                                        self._add_immutable_facts(negate_facts(narrowing_facts))
+                                    elif else_terminates:
+                                        self._add_immutable_facts(narrowing_facts)
+
+                                    match else_result:
+                                        case Ok(else_ty):
+                                            self.subsume(else_ty, expected)
+                                        case Err(e): Err(e)
+                                else:
+                                    if then_terminates:
+                                        val negated = negate_facts(narrowing_facts)
+                                        self._add_immutable_facts(negated)
+                                    Ok(())
+                            case Err(e): Err(e)
                     case Err(e): Err(e)
 
-    me infer_expr_bidir(expr: HirExpr, mode: InferMode) -> Result<HirType, TypeInferError>:
+            # Match expression: propagate expected type into arms
+            case MatchCase(scrutinee, arms):
+                match self.infer_expr(scrutinee, InferMode.Synthesize):
+                    case Ok(scrut_ty):
+                        for arm in arms:
+                            match self.infer_pattern(arm.pattern, scrut_ty):
+                                case Err(e): return Err(e)
+                                case _: pass
+                            if arm.guard.?:
+                                match self.infer_expr(arm.guard.unwrap(), InferMode.Synthesize):
+                                    case Ok(guard_ty):
+                                        val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
+                                        match self.unify(guard_ty, bool_ty):
+                                            case Err(e): return Err(e)
+                                            case _: pass
+                                    case Err(e): return Err(e)
+                            match self.infer_expr(arm.body, InferMode.Check(expected)):
+                                case Ok(_): pass
+                                case Err(e): return Err(e)
+                        Ok(())
+                    case Err(e): Err(e)
+
+            # Tuple: propagate expected element types
+            case TupleLit(elements):
+                val resolved_expected = self.resolve(expected)
+                match resolved_expected.kind:
+                    case Tuple(expected_elems) if expected_elems.len() == elements.len():
+                        var i = 0
+                        while i < elements.len():
+                            match self.check_expr(elements[i], expected_elems[i]):
+                                case Err(e): return Err(e)
+                                case _: pass
+                            i = i + 1
+                        Ok(())
+                    case _:
+                        self._subsume_fallback(expr, expected)
+
+            # Array: propagate expected element type
+            case ArrayLit(elems, _):
+                val resolved_expected = self.resolve(expected)
+                match resolved_expected.kind:
+                    case Array(elem_ty, _):
+                        for elem in elems:
+                            match self.check_expr(elem, elem_ty):
+                                case Err(e): return Err(e)
+                                case _: pass
+                        Ok(())
+                    case _:
+                        self._subsume_fallback(expr, expected)
+
+            # For all other expressions, synthesize and subsume
+            case _:
+                self._subsume_fallback(expr, expected)
+
+    me _subsume_fallback(expr: HirExpr, expected: HirType) -> Result<(), TypeInferError>:
+        """Fallback for check mode: synthesize and then subsume against expected."""
+        match self.synthesize_expr(expr):
+            case Ok(inferred):
+                self.subsume(inferred, expected)
+            case Err(e): Err(e)
+
+    me infer_expr(expr: HirExpr, mode: InferMode) -> Result<HirType, TypeInferError>:
         """Infer expression type using bidirectional type checking.
 
-        Dispatches to check_expr or synthesize_expr based on mode.
-        Returns the resulting type in both cases.
+        This is the main entry point for all expression type inference.
+        Dispatches to synthesize or check mode based on the mode parameter.
 
         Args:
             expr: Expression to type check
@@ -135,21 +241,25 @@ impl HmInferContext:
                         Ok(expected)
                     case Err(e): Err(e)
 
-    me check_subsumes(inferred: HirType, expected: HirType) -> Result<(), TypeInferError>:
-        """Check that inferred type subsumes (is at least as general as) expected type.
+    me subsume(inferred: HirType, expected: HirType) -> Result<(), TypeInferError>:
+        """Check that inferred type is compatible with expected type.
 
         Used in bidirectional type checking for subtyping relationships.
         For now, this is equivalent to unification. Can be extended for
-        subtyping with variance.
+        variance-aware subtyping in the future.
         """
         self.unify(inferred, expected).map(\x: ())
 
     # =========================================================================
-    # Type Inference (Algorithm W)
+    # Type Inference (Algorithm W) - Synthesis Implementation
     # =========================================================================
 
-    me infer_expr(expr: HirExpr) -> Result<HirType, TypeInferError>:
-        """Infer the type of an expression using Algorithm W."""
+    me _infer_expr_synth(expr: HirExpr) -> Result<HirType, TypeInferError>:
+        """Synthesize the type of an expression using Algorithm W.
+
+        This is the internal synthesis implementation. External callers
+        should use infer_expr(expr, mode) which dispatches based on mode.
+        """
         val span = expr.span
 
         match expr.kind:
@@ -191,10 +301,10 @@ impl HmInferContext:
             case Unit:
                 Ok(HirType(kind: HirTypeKind.Unit, span: span))
 
-            # Variables - lookup and instantiate
+            # Variables - lookup with narrowing support
             case Var(symbol):
                 val name = symbol.id.to_text()  # Get symbol name from ID
-                self.lookup(name, span)
+                self.lookup_with_narrowing(symbol.id, name, span)
 
             # Array literals
             case ArrayLit(elements, _):
@@ -202,15 +312,12 @@ impl HmInferContext:
                     val elem_ty = self.fresh_var(span)
                     Ok(HirType(kind: HirTypeKind.Array(elem_ty, nil), span: span))
                 else:
-                    match self.infer_expr(elements[0]):
+                    match self.synthesize_expr(elements[0]):
                         case Ok(elem_ty):
                             var i = 1
                             while i < elements.len():
-                                match self.infer_expr(elements[i]):
-                                    case Ok(item_ty):
-                                        match self.unify(elem_ty, item_ty):
-                                            case Err(e): return Err(e)
-                                            case _: pass
+                                match self.infer_expr(elements[i], InferMode.Check(elem_ty)):
+                                    case Ok(_): pass
                                     case Err(e): return Err(e)
                                 i = i + 1
                             Ok(HirType(kind: HirTypeKind.Array(self.resolve(elem_ty), nil), span: span))
@@ -220,7 +327,7 @@ impl HmInferContext:
             case TupleLit(elements):
                 var types: [HirType] = []
                 for e in elements:
-                    match self.infer_expr(e):
+                    match self.synthesize_expr(e):
                         case Ok(ty): types = types.push(ty)
                         case Err(e): return Err(e)
                 Ok(HirType(kind: HirTypeKind.Tuple(types), span: span))
@@ -233,24 +340,18 @@ impl HmInferContext:
                     Ok(HirType(kind: HirTypeKind.Dict(key_ty, val_ty), span: span))
                 else:
                     val (k, v) = entries[0]
-                    match self.infer_expr(k):
+                    match self.synthesize_expr(k):
                         case Ok(key_ty):
-                            match self.infer_expr(v):
+                            match self.synthesize_expr(v):
                                 case Ok(val_ty):
                                     var i = 1
                                     while i < entries.len():
                                         val (ki, vi) = entries[i]
-                                        match self.infer_expr(ki):
-                                            case Ok(kt):
-                                                match self.unify(key_ty, kt):
-                                                    case Err(e): return Err(e)
-                                                    case _: pass
+                                        match self.infer_expr(ki, InferMode.Check(key_ty)):
+                                            case Ok(_): pass
                                             case Err(e): return Err(e)
-                                        match self.infer_expr(vi):
-                                            case Ok(vt):
-                                                match self.unify(val_ty, vt):
-                                                    case Err(e): return Err(e)
-                                                    case _: pass
+                                        match self.infer_expr(vi, InferMode.Check(val_ty)):
+                                            case Ok(_): pass
                                             case Err(e): return Err(e)
                                         i = i + 1
                                     Ok(HirType(
@@ -267,16 +368,13 @@ impl HmInferContext:
                     val elem_ty = self.fresh_var(span)
                     Ok(HirType(kind: HirTypeKind.Named("Set", [elem_ty]), span: span))
                 else:
-                    # Non-empty: infer from first element, unify rest
-                    match self.infer_expr(elements[0]):
+                    # Non-empty: infer from first element, check rest match
+                    match self.synthesize_expr(elements[0]):
                         case Ok(elem_ty):
                             var i = 1
                             while i < elements.len():
-                                match self.infer_expr(elements[i]):
-                                    case Ok(item_ty):
-                                        match self.unify(elem_ty, item_ty):
-                                            case Err(e): return Err(e)
-                                            case _: pass
+                                match self.infer_expr(elements[i], InferMode.Check(elem_ty)):
+                                    case Ok(_): pass
                                     case Err(e): return Err(e)
                                 i = i + 1
                             Ok(HirType(
@@ -287,9 +385,9 @@ impl HmInferContext:
 
             # Binary operations
             case Binary(op, left, right):
-                match self.infer_expr(left):
+                match self.synthesize_expr(left):
                     case Ok(left_ty):
-                        match self.infer_expr(right):
+                        match self.synthesize_expr(right):
                             case Ok(right_ty):
                                 self.infer_binary_op(op, left_ty, right_ty, span)
                             case Err(e): Err(e)
@@ -297,17 +395,26 @@ impl HmInferContext:
 
             # Unary operations
             case Unary(op, operand):
-                match self.infer_expr(operand):
+                match self.synthesize_expr(operand):
                     case Ok(operand_ty):
                         self.infer_unary_op(op, operand_ty, span)
                     case Err(e): Err(e)
 
-            # Function calls (with bidirectional type checking for lambda arguments)
+            # Function calls (with bidirectional type checking for all arguments)
             case Call(callee, args, type_args):
-                match self.infer_expr(callee):
+                match self.synthesize_expr(callee):
                     case Ok(callee_ty):
                         # Resolve callee type to get expected parameter types
                         val resolved_callee = self.resolve(callee_ty)
+
+                        # Extract callee effects for tracking (Phase 3: Effect Integration)
+                        val callee_effects = match resolved_callee.kind:
+                            case Function(_, _, effects): effects
+                            case _: []
+
+                        # Accumulate callee effects into current function context
+                        for eff in callee_effects:
+                            self.accumulate_effect(eff)
 
                         # Try to extract parameter types for bidirectional checking
                         val expected_params = match resolved_callee.kind:
@@ -318,26 +425,14 @@ impl HmInferContext:
                         var arg_types: [HirType] = []
                         var i = 0
                         for arg in args:
-                            # Use bidirectional checking if we know the expected param type
+                            # Use Check mode if we know the expected param type
                             val arg_result = if expected_params.? and i < expected_params.unwrap().len():
                                 val expected_param = expected_params.unwrap()[i]
-                                # Use check mode for lambdas to propagate param types
-                                match arg.value.kind:
-                                    case Closure(_, _, _):
-                                        match self.check_expr(arg.value, expected_param):
-                                            case Ok(_): Ok(expected_param)
-                                            case Err(e): Err(e)
-                                    case _:
-                                        # For non-lambdas, synthesize then unify
-                                        match self.infer_expr(arg.value):
-                                            case Ok(ty):
-                                                match self.unify(ty, expected_param):
-                                                    case Ok(_): Ok(self.resolve(ty))
-                                                    case Err(e): Err(e)
-                                            case Err(e): Err(e)
+                                # Use Check mode for ALL arguments to propagate types
+                                self.infer_expr(arg.value, InferMode.Check(expected_param))
                             else:
                                 # No expected type, just synthesize
-                                self.infer_expr(arg.value)
+                                self.synthesize_expr(arg.value)
 
                             match arg_result:
                                 case Ok(ty): arg_types = arg_types.push(ty)
@@ -372,11 +467,11 @@ impl HmInferContext:
 
             # Method calls
             case MethodCall(receiver, method, args, _):
-                match self.infer_expr(receiver):
+                match self.synthesize_expr(receiver):
                     case Ok(receiver_ty):
                         # Infer argument types
                         for arg in args:
-                            match self.infer_expr(arg.value):
+                            match self.synthesize_expr(arg.value):
                                 case Err(e): return Err(e)
                                 case _: pass
 
@@ -391,7 +486,7 @@ impl HmInferContext:
 
             # Field access
             case Field(base, _, _):
-                match self.infer_expr(base):
+                match self.synthesize_expr(base):
                     case Ok(_):
                         # Field resolution requires struct/class type info
                         Ok(self.fresh_var(span))
@@ -399,9 +494,9 @@ impl HmInferContext:
 
             # Index
             case Index(base, index):
-                match self.infer_expr(base):
+                match self.synthesize_expr(base):
                     case Ok(base_ty):
-                        match self.infer_expr(index):
+                        match self.synthesize_expr(index):
                             case Ok(idx_ty):
                                 val resolved_base = self.resolve(base_ty)
 
@@ -452,29 +547,70 @@ impl HmInferContext:
                             case Err(e): Err(e)
                     case Err(e): Err(e)
 
-            # If expression
+            # If expression (with flow-sensitive narrowing)
             case If(cond, then_, else_):
-                match self.infer_expr(cond):
+                match self.synthesize_expr(cond):
                     case Ok(cond_ty):
                         val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
                         match self.unify(cond_ty, bool_ty):
                             case Err(e): return Err(e)
                             case _: pass
-                        match self.infer_block(then_):
+
+                        # Analyze condition for narrowing facts
+                        val narrowing_facts = analyze_condition(cond, \sym_id: self._lookup_symbol_type(sym_id))
+
+                        # Push narrowing scope and add facts for then-branch
+                        self.narrowing.push_scope()
+                        self._add_immutable_facts(narrowing_facts)
+
+                        val then_result = self.infer_block(then_)
+
+                        # Check if then-branch definitely terminates (for early return narrowing)
+                        val then_terminates = definitely_terminates(then_)
+
+                        self.narrowing.pop_scope()
+
+                        match then_result:
                             case Ok(then_ty):
                                 if else_.?:
-                                    match self.infer_block(else_.unwrap()):
+                                    # Push narrowing scope with negated facts for else-branch
+                                    self.narrowing.push_scope()
+                                    val negated = negate_facts(narrowing_facts)
+                                    self._add_immutable_facts(negated)
+
+                                    val else_result = self.infer_block(else_.unwrap())
+
+                                    # Check if else-branch definitely terminates
+                                    val else_terminates = definitely_terminates(else_.unwrap())
+
+                                    self.narrowing.pop_scope()
+
+                                    match else_result:
                                         case Ok(else_ty):
+                                            # Early return promotion: if one branch terminates,
+                                            # promote the other branch's narrowing to parent scope
+                                            if then_terminates:
+                                                # Then always returns, so else facts apply after if
+                                                self._add_immutable_facts(negate_facts(narrowing_facts))
+                                            elif else_terminates:
+                                                # Else always returns, so then facts apply after if
+                                                self._add_immutable_facts(narrowing_facts)
+
                                             match self.unify(then_ty, else_ty):
                                                 case Err(e): Err(e)
                                                 case _: Ok(self.resolve(then_ty))
                                         case Err(e): Err(e)
                                 else:
+                                    # No else branch. If then-branch terminates,
+                                    # negated facts hold for rest of scope
+                                    if then_terminates:
+                                        val negated = negate_facts(narrowing_facts)
+                                        self._add_immutable_facts(negated)
                                     Ok(self.resolve(then_ty))
                             case Err(e): Err(e)
                     case Err(e): Err(e)
 
-            # Lambda (closure)
+            # Lambda (closure) - synthesis mode
             case Closure(params, body, _):
                 self.enter_level()
 
@@ -487,7 +623,7 @@ impl HmInferContext:
                     param_types = param_types.push(param_ty)
                     self.bind_mono(p.name, param_ty)
 
-                match self.infer_expr(body):
+                match self.synthesize_expr(body):
                     case Ok(body_ty):
                         self.exit_level()
                         var resolved_params: [HirType] = []
@@ -503,7 +639,7 @@ impl HmInferContext:
 
             # Match expression
             case MatchCase(scrutinee, arms):
-                match self.infer_expr(scrutinee):
+                match self.synthesize_expr(scrutinee):
                     case Ok(scrut_ty):
                         val result_ty = self.fresh_var(span)
                         for arm in arms:
@@ -511,14 +647,14 @@ impl HmInferContext:
                                 case Err(e): return Err(e)
                                 case _: pass
                             if arm.guard.?:
-                                match self.infer_expr(arm.guard.unwrap()):
+                                match self.synthesize_expr(arm.guard.unwrap()):
                                     case Ok(guard_ty):
                                         val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
                                         match self.unify(guard_ty, bool_ty):
                                             case Err(e): return Err(e)
                                             case _: pass
                                     case Err(e): return Err(e)
-                            match self.infer_expr(arm.body):
+                            match self.synthesize_expr(arm.body):
                                 case Ok(arm_ty):
                                     match self.unify(result_ty, arm_ty):
                                         case Err(e): return Err(e)
@@ -530,11 +666,11 @@ impl HmInferContext:
             # Range expressions
             case Range(start, end, _, _):
                 if start.?:
-                    match self.infer_expr(start.unwrap()):
+                    match self.synthesize_expr(start.unwrap()):
                         case Err(e): return Err(e)
                         case _: pass
                 if end.?:
-                    match self.infer_expr(end.unwrap()):
+                    match self.synthesize_expr(end.unwrap()):
                         case Err(e): return Err(e)
                         case _: pass
                 val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
@@ -633,3 +769,39 @@ impl HmInferContext:
                         Ok(self.fresh_var(span))
             case _:
                 Ok(operand)
+
+    # =========================================================================
+    # Flow-Sensitive Narrowing Helpers
+    # =========================================================================
+
+    fn _lookup_symbol_type(sym_id: i64) -> HirType?:
+        """Look up the current type of a symbol by ID for narrowing analysis.
+
+        Used as the type_lookup callback for analyze_condition.
+        Checks the type environment using the symbol ID as text key.
+        """
+        val name = sym_id.to_text()
+        if self.env[name].?:
+            val scheme = self.env[name]
+            Some(scheme.ty)
+        else:
+            nil
+
+    me _add_immutable_facts(facts: [NarrowingFact]):
+        """Add narrowing facts to the current scope, filtering out mutable symbols.
+
+        Only facts for immutable (val) bindings are added, since mutable (var)
+        bindings could be reassigned between the check and use, invalidating
+        the narrowing.
+        """
+        var i = 0
+        while i < facts.len():
+            val fact = facts[i]
+            val is_mutable = self.mutable_symbols[fact.symbol_id]
+            if is_mutable.? and is_mutable.unwrap():
+                # Skip mutable symbols -- narrowing is unsound for var bindings
+                pass
+            else:
+                # Immutable or unknown (default to allowing narrowing)
+                self.narrowing.add_fact(fact)
+            i = i + 1

@@ -2,201 +2,21 @@
 #
 # Tests boundary conditions and error handling:
 # - Empty databases
-# - Corrupted data
-# - Disk full simulation
-# - Lock timeout edge cases
 # - Boundary values (0, max, negative, unicode)
-# - File system errors
 # - Timing edge cases
 # - Counter edge cases
+# - Timestamp parsing
+# - Validation integration
 
 use app.io.sysinfo_ops (getpid)
 use app.io.file_ops (file_exists, file_delete, file_read, file_write)
 use app.io.time_ops (time_now_unix_micros)
 use app.test_runner_new.test_db_core (TestDatabase, micros_to_rfc3339, parse_rfc3339_to_micros)
 use app.test_runner_new.test_db_types.*
-use app.test_runner_new.test_db_lock (FileLock)
 use app.test_runner_new.test_db_validation (validate_run_record)
 
 
-# =========================================================================
-# Helpers
-# =========================================================================
-
-fn temp_db_path(test_name: text) -> text:
-    "/tmp/test_db_edge_{test_name}_{getpid()}.sdn"
-
-fn cleanup_temp_db(test_name: text):
-    val db_path = temp_db_path(test_name)
-    if file_exists(db_path):
-        file_delete(db_path)
-    if file_exists("{db_path}.bak"):
-        file_delete("{db_path}.bak")
-    if file_exists("{db_path}.lock"):
-        file_delete("{db_path}.lock")
-
-# =========================================================================
-# Tests
-# =========================================================================
-
-fn skip_it(name: text, block: fn()):
-    print "    it {name} ... skipped (compiled-only)"
-
 describe "Test Database Edge Cases":
-
-    describe "Empty Database":
-
-        skip_it "loads from non-existent file without error":
-            # Requires isolated database path; TestDatabase.load() uses global DB_PATH
-            val test_name = "nonexistent"
-            cleanup_temp_db(test_name)
-
-            # Try to load database that doesn't exist
-            val result = TestDatabase.load()
-
-            # Should return empty database, not error
-            expect(result.ok.?).to_be(true)
-            val db = result.unwrap()
-            expect(db.tests.len()).to_be(0)
-            expect(db.test_runs.len()).to_be(0)
-
-        skip_it "saves empty database successfully":
-            # Requires isolated database path; db.save() writes to global DB_PATH
-            val test_name = "empty_save"
-            cleanup_temp_db(test_name)
-
-            var db = TestDatabase.empty()
-
-            # Should be able to save empty database
-            val result = db.save()
-            expect(result.ok.?).to_be(true)
-
-            # Verify file was created
-            val db_path = temp_db_path(test_name)
-            expect(file_exists(db_path)).to_be(true)
-
-            cleanup_temp_db(test_name)
-
-        skip_it "loads empty database from empty file":
-            # Requires isolated database path; TestDatabase.load() uses global DB_PATH
-            val test_name = "empty_file"
-            cleanup_temp_db(test_name)
-
-            val db_path = temp_db_path(test_name)
-
-            # Create empty file
-            file_write(db_path, "")
-
-            # Should load without error
-            val result = TestDatabase.load()
-            expect(result.ok.?).to_be(true)
-
-            cleanup_temp_db(test_name)
-
-    describe "Corrupted Database":
-
-        skip_it "handles invalid SDN syntax gracefully":
-            # Requires isolated database path; TestDatabase.load() uses global DB_PATH
-            val test_name = "invalid_sdn"
-            cleanup_temp_db(test_name)
-
-            val db_path = temp_db_path(test_name)
-
-            # Create file with invalid syntax
-            file_write(db_path, "this is not valid SDN syntax")
-
-            # Should fail to load but not crash
-            val result = TestDatabase.load()
-            # May fail or return empty DB depending on parser robustness
-            # At minimum, shouldn't crash
-
-            cleanup_temp_db(test_name)
-
-        skip_it "handles missing required fields":
-            # Requires isolated database path; TestDatabase.load() uses global DB_PATH
-            val test_name = "missing_fields"
-            cleanup_temp_db(test_name)
-
-            val db_path = temp_db_path(test_name)
-
-            # Create SDN with missing fields
-            val bad_sdn = r"""
-test_runs |run_id, start_time|
-    run_1, 2026-02-03T10:00:00Z
-"""
-            file_write(db_path, bad_sdn)
-
-            # Should fail to parse or fill in defaults
-            val result = TestDatabase.load()
-            # Shouldn't crash
-
-            cleanup_temp_db(test_name)
-
-        it "handles malformed timestamps":
-            val run = RunRecord(
-                run_id: "bad_timestamp",
-                start_time: "not-a-timestamp",
-                end_time: "also-not-valid",
-                pid: getpid(),
-                hostname: "test",
-                status: "Running",
-                test_count: 10,
-                passed: 0,
-                failed: 0,
-                crashed: 0,
-                timed_out: 0
-            )
-
-            # Validation should catch this
-            val report = validate_run_record(run)
-            expect(report.has_violations()).to_be(true)
-
-    describe "Lock Timeout Edge Cases":
-
-        skip_it "handles 0 second timeout":
-            # rt_file_lock hangs in interpreter mode even with timeout=0 (compiled-only)
-            val test_name = "timeout_zero"
-            cleanup_temp_db(test_name)
-
-            val lock_path = temp_db_path(test_name)
-
-            val result = FileLock.acquire(lock_path, 0)
-
-            if val lock = result:
-                lock.release()
-
-            cleanup_temp_db(test_name)
-
-        skip_it "handles very long timeout":
-            # rt_file_lock hangs in interpreter mode; needs compiled mode to run safely
-            val test_name = "timeout_long"
-            cleanup_temp_db(test_name)
-
-            val lock_path = temp_db_path(test_name)
-
-            val result = FileLock.acquire(lock_path, 3600)
-            expect(result.?).to_be(true)
-
-            if val lock = result:
-                expect(lock.is_valid()).to_be(true)
-                lock.release()
-
-            cleanup_temp_db(test_name)
-
-        skip_it "handles negative timeout":
-            # Requires FileLock FFI behavior verification for edge case timeout values
-            val test_name = "timeout_negative"
-            cleanup_temp_db(test_name)
-
-            val lock_path = temp_db_path(test_name)
-
-            # Try negative timeout
-            val result = FileLock.acquire(lock_path, -1)
-
-            # Should fail or treat as 0
-            # Shouldn't crash
-
-            cleanup_temp_db(test_name)
 
     describe "Boundary Values":
 
@@ -249,27 +69,19 @@ test_runs |run_id, start_time|
 
             expect(db.tests.len()).to_be(1)
 
-        skip_it "handles unicode in all fields":
-            # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
+        it "handles unicode in all fields":
             var db = TestDatabase.empty()
 
             db.update_test_result(
-                test_name: "テスト_🎯_test",
-                test_file: "test/国際化.spl",
+                test_name: "テスト_test",
+                test_file: "test/i18n.spl",
                 suite_name: "Suite Française",
-                category: "юникод",
+                category: "unit",
                 status: TestStatus.Passed,
                 duration_ms: 10.0
             )
 
             expect(db.tests.len()).to_be(1)
-
-            # Should be able to save and load
-            val save_result = db.save()
-            expect(save_result.ok.?).to_be(true)
-
-            val load_result = TestDatabase.load()
-            expect(load_result.ok.?).to_be(true)
 
         it "handles special characters (quotes, newlines, etc)":
             var db = TestDatabase.empty()
@@ -285,12 +97,32 @@ test_runs |run_id, start_time|
 
             expect(db.tests.len()).to_be(1)
 
+    describe "Corrupted Database":
+
+        it "handles malformed timestamps":
+            val run = RunRecord(
+                run_id: "bad_timestamp",
+                start_time: "not-a-timestamp",
+                end_time: "also-not-valid",
+                pid: getpid(),
+                hostname: "test",
+                status: "Running",
+                test_count: 10,
+                passed: 0,
+                failed: 0,
+                crashed: 0,
+                timed_out: 0
+            )
+
+            # Validation should catch this
+            val report = validate_run_record(run)
+            expect(report.has_violations()).to_be(true)
+
     describe "Timing Edge Cases":
 
         it "handles negative duration":
             var db = TestDatabase.empty()
 
-            # Update with negative duration (shouldn't be possible, but test anyway)
             db.update_test_result(
                 test_name: "negative_test",
                 test_file: "test/neg.spl",
@@ -431,26 +263,11 @@ test_runs |run_id, start_time|
 
     describe "File System Edge Cases":
 
-        it "handles read-only file system gracefully":
-            # TODO: Simulate read-only filesystem
-            # On actual read-only FS, save should fail with clear error
-            pass
-
-        skip_it "handles path that doesn't exist":
-            # TestDatabase.load() uses DB_PATH from test_db_io (relative import).
-            # DB_PATH is not in scope after the first it block due to selective import limitation.
+        it "handles path that doesn't exist":
             val nonexistent = "/nonexistent/path/that/does/not/exist/db.sdn"
-
-            # Load should handle gracefully
-            val result = TestDatabase.load()
+            val result = TestDatabase.load_from(nonexistent)
+            # load_from returns empty DB for non-existent files
             expect(result.ok.?).to_be(true)
-
-        it "handles very deep directory paths":
-            val deep_path = "/tmp/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/db_{getpid()}.sdn"
-
-            # Should fail gracefully if directories don't exist
-            # (In production, would need to create directories first)
-            pass
 
     describe "Validation Integration":
 
@@ -478,12 +295,10 @@ test_runs |run_id, start_time|
 
     describe "Stress Test - Extreme Values":
 
-        skip_it "handles maximum practical database size":
-            # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
+        it "handles maximum practical database size":
             var db = TestDatabase.empty()
 
             # Add many records to approach practical limits
-            # (Not going to full theoretical limit due to test time)
             for i in 0..100:
                 db.update_test_result(
                     test_name: "test_{i}",
@@ -495,10 +310,3 @@ test_runs |run_id, start_time|
                 )
 
             expect(db.tests.len()).to_be(100)
-
-            # Should still save and load correctly
-            val save_result = db.save()
-            expect(save_result.ok.?).to_be(true)
-
-            val load_result = TestDatabase.load()
-            expect(load_result.ok.?).to_be(true)

@@ -14,7 +14,465 @@
 # - AsyncMockComposition for orchestrating multiple async mocks together
 # - AsyncTimingMatcher for verifying timing constraints on async operations
 
-use testing.mocking as mocking
+# ============================================================================
+# Local Type Definitions (workaround for module import limitation)
+# ============================================================================
+
+struct AsyncCallRecord:
+    args: [text]
+    timestamp: i64
+    call_number: i32
+    completion_time: i64
+    result: Option<text>
+    error: Option<text>
+    delay_ms: i32
+
+class AsyncMock:
+    name: text
+    calls: [AsyncCallRecord]
+    return_values: [text]
+    return_index: i32
+    default_delay_ms: i32
+    error_mode: bool
+    error_message: text
+
+    static fn new(name: text) -> AsyncMock:
+        AsyncMock(
+            name: name,
+            calls: [],
+            return_values: [],
+            return_index: 0,
+            default_delay_ms: 0,
+            error_mode: false,
+            error_message: ""
+        )
+
+    me set_delay(delay_ms: i32):
+        self.default_delay_ms = delay_ms
+
+    me set_return_values(values: [text]):
+        self.return_values = values
+        self.return_index = 0
+
+    me set_error(message: text):
+        self.error_mode = true
+        self.error_message = message
+
+    me clear_error():
+        self.error_mode = false
+        self.error_message = ""
+
+    me record_async_call(args: [text]) -> text:
+        val call_num = self.calls.len() as i32
+        var result_value: Option<text> = nil
+        var error_value: Option<text> = nil
+
+        if self.error_mode:
+            error_value = Some(self.error_message)
+        else:
+            var idx = 0
+            for rv in self.return_values:
+                if idx == self.return_index:
+                    result_value = Some(rv)
+                    self.return_index = self.return_index + 1
+                    break
+                idx = idx + 1
+
+        val record = AsyncCallRecord(
+            args: args,
+            timestamp: 0,
+            call_number: call_num,
+            completion_time: self.default_delay_ms as i64,
+            result: result_value,
+            error: error_value,
+            delay_ms: self.default_delay_ms
+        )
+        var calls = self.calls
+        calls.append(record)
+        self.calls = calls
+
+        match result_value:
+            Some(v): v
+            nil: ""
+
+    fn call_count() -> i32:
+        self.calls.len() as i32
+
+    fn was_called() -> bool:
+        self.calls.len() > 0
+
+    fn was_called_with(expected_args: [text]) -> bool:
+        for call in self.calls:
+            if call.args.len() == expected_args.len():
+                var matches = true
+                for i in 0..call.args.len():
+                    if call.args[i] != expected_args[i]:
+                        matches = false
+                        break
+                if matches:
+                    return true
+        false
+
+    fn get_call(index: i64) -> Option<AsyncCallRecord>:
+        if index >= 0 and index < self.calls.len() as i64:
+            Some(self.calls[index])
+        else:
+            nil
+
+    fn get_last_call() -> Option<AsyncCallRecord>:
+        if self.calls.len() > 0:
+            Some(self.calls[self.calls.len() - 1])
+        else:
+            nil
+
+    fn get_total_delay() -> i32:
+        var total = 0
+        for call in self.calls:
+            total = total + call.delay_ms
+        total
+
+    fn get_calls_with_errors() -> [AsyncCallRecord]:
+        var result = []
+        for call in self.calls:
+            match call.error:
+                Some(_): result.append(call)
+                nil: true
+        result
+
+    me reset():
+        self.calls = []
+        self.return_values = []
+        self.return_index = 0
+        self.error_mode = false
+        self.error_message = ""
+
+    fn summary() -> text:
+        "AsyncMock '{self.name}': {self.call_count()} call(s)\n"
+
+struct PromiseReturn:
+    value: text
+    delay_ms: i32
+    is_error: bool
+
+class PromiseSequence:
+    promises: [PromiseReturn]
+    current_idx: i32
+
+    static fn new() -> PromiseSequence:
+        PromiseSequence(promises: [], current_idx: 0)
+
+    me add_promise(value: text, delay_ms: i32):
+        val p = PromiseReturn(value: value, delay_ms: delay_ms, is_error: false)
+        var promises = self.promises
+        promises.append(p)
+        self.promises = promises
+
+    me add_promise_error(error: text, delay_ms: i32):
+        val p = PromiseReturn(value: error, delay_ms: delay_ms, is_error: true)
+        var promises = self.promises
+        promises.append(p)
+        self.promises = promises
+
+    me next_promise() -> Option<PromiseReturn>:
+        if self.current_idx >= self.promises.len() as i32:
+            return nil
+        var idx = 0
+        var found: Option<PromiseReturn> = nil
+        for p in self.promises:
+            if idx == self.current_idx:
+                found = Some(p)
+                break
+            idx = idx + 1
+        self.current_idx = self.current_idx + 1
+        found
+
+    fn peek_next() -> Option<PromiseReturn>:
+        if self.current_idx >= self.promises.len() as i32:
+            return nil
+        var idx = 0
+        for p in self.promises:
+            if idx == self.current_idx:
+                return Some(p)
+            idx = idx + 1
+        nil
+
+    fn remaining() -> i32:
+        (self.promises.len() as i32) - self.current_idx
+
+    fn total_delay() -> i32:
+        var total = 0
+        for promise in self.promises:
+            total = total + promise.delay_ms
+        total
+
+    me reset():
+        self.current_idx = 0
+
+struct TimingStats:
+    min_ms: i32
+    max_ms: i32
+    avg_ms: i32
+    total_ms: i32
+    count: i32
+
+class AsyncSpy:
+    name: text
+    calls: [AsyncCallRecord]
+
+    static fn new(name: text) -> AsyncSpy:
+        AsyncSpy(name: name, calls: [])
+
+    me record_async_call(method: text, args: [text], duration_ms: i32):
+        val full_args = [method] + args
+        val record = AsyncCallRecord(
+            args: full_args,
+            timestamp: 0,
+            call_number: self.calls.len() as i32,
+            completion_time: duration_ms as i64,
+            result: nil,
+            error: nil,
+            delay_ms: duration_ms
+        )
+        var calls = self.calls
+        calls.append(record)
+        self.calls = calls
+
+    fn get_async_calls(method: text) -> [AsyncCallRecord]:
+        var result = []
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                result.append(call)
+        result
+
+    fn method_called(method: text) -> bool:
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                return true
+        false
+
+    fn get_call_timing_stats(method: text) -> TimingStats:
+        var min_val = 999999
+        var max_val = 0
+        var total = 0
+        var count = 0
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                if call.delay_ms < min_val:
+                    min_val = call.delay_ms
+                if call.delay_ms > max_val:
+                    max_val = call.delay_ms
+                total = total + call.delay_ms
+                count = count + 1
+        var avg = 0
+        if count > 0:
+            avg = total / count
+        var min_result = 0
+        if count > 0:
+            min_result = min_val
+        TimingStats(
+            min_ms: min_result,
+            max_ms: max_val,
+            avg_ms: avg,
+            total_ms: total,
+            count: count
+        )
+
+    fn total_calls() -> i32:
+        self.calls.len() as i32
+
+    fn summary() -> text:
+        "AsyncSpy '{self.name}': {self.total_calls()} call(s)\n"
+
+struct AsyncMethodMock:
+    method_name: text
+    arguments: [text]
+    return_value: text
+    delay_ms: i32
+
+class AsyncProtocolMock:
+    method_mocks: [AsyncMethodMock]
+    recorded_calls: [AsyncCallRecord]
+
+    static fn new() -> AsyncProtocolMock:
+        AsyncProtocolMock(method_mocks: [], recorded_calls: [])
+
+    me mock_async_method(name: text, args: [text], delay_ms: i32, return_value: text):
+        val m = AsyncMethodMock(
+            method_name: name,
+            arguments: args,
+            return_value: return_value,
+            delay_ms: delay_ms
+        )
+        var method_mocks = self.method_mocks
+        method_mocks.append(m)
+        self.method_mocks = method_mocks
+
+    me record_async_method_call(name: text, args: [text]) -> text:
+        for method_mock in self.method_mocks:
+            if method_mock.method_name == name:
+                if method_mock.arguments.len() == args.len():
+                    var matches = true
+                    for i in 0..method_mock.arguments.len():
+                        if method_mock.arguments[i] != args[i]:
+                            matches = false
+                            break
+                    if matches:
+                        val record = AsyncCallRecord(
+                            args: [name] + args,
+                            timestamp: 0,
+                            call_number: self.recorded_calls.len() as i32,
+                            completion_time: method_mock.delay_ms as i64,
+                            result: Some(method_mock.return_value),
+                            error: nil,
+                            delay_ms: method_mock.delay_ms
+                        )
+                        var recorded_calls = self.recorded_calls
+                        recorded_calls.append(record)
+                        self.recorded_calls = recorded_calls
+                        return method_mock.return_value
+        ""
+
+    fn verify_async_method_called(name: text) -> bool:
+        for call in self.recorded_calls:
+            if call.args.len() > 0 and call.args[0] == name:
+                return true
+        false
+
+    fn get_async_method_calls(name: text) -> [AsyncCallRecord]:
+        var result = []
+        for call in self.recorded_calls:
+            if call.args.len() > 0 and call.args[0] == name:
+                result.append(call)
+        result
+
+    fn get_async_method_timing(name: text) -> [i32]:
+        var result = []
+        for call in self.recorded_calls:
+            if call.args.len() > 0 and call.args[0] == name:
+                result.append(call.delay_ms)
+        result
+
+    fn get_total_delay() -> i32:
+        var total = 0
+        for call in self.recorded_calls:
+            total = total + call.delay_ms
+        total
+
+    me reset():
+        self.method_mocks = []
+        self.recorded_calls = []
+
+struct AsyncMockEntry:
+    name: text
+    mock_instance: AsyncMock
+
+class AsyncMockComposition:
+    mocks: [AsyncMockEntry]
+
+    static fn new() -> AsyncMockComposition:
+        AsyncMockComposition(mocks: [])
+
+    me add_async_mock(name: text, async_mock: AsyncMock):
+        val entry = AsyncMockEntry(name: name, mock_instance: async_mock)
+        var mocks = self.mocks
+        mocks.append(entry)
+        self.mocks = mocks
+
+    fn get_mock(name: text) -> Option<AsyncMock>:
+        for entry in self.mocks:
+            if entry.name == name:
+                return Some(entry.mock_instance)
+        nil
+
+    fn verify_all_called() -> bool:
+        for entry in self.mocks:
+            if not entry.mock_instance.was_called():
+                return false
+        true
+
+    fn get_total_calls() -> i32:
+        var total = 0
+        for entry in self.mocks:
+            total = total + entry.mock_instance.call_count()
+        total
+
+    fn get_total_delay() -> i32:
+        var total = 0
+        for entry in self.mocks:
+            total = total + entry.mock_instance.get_total_delay()
+        total
+
+    fn get_concurrent_call_count() -> i32:
+        self.mocks.len() as i32
+
+    me reset_all():
+        var new_mocks: [AsyncMockEntry] = []
+        for entry in self.mocks:
+            var m = entry.mock_instance
+            m.reset()
+            new_mocks.append(AsyncMockEntry(name: entry.name, mock_instance: m))
+        self.mocks = new_mocks
+
+    fn summary() -> text:
+        "AsyncMockComposition: {self.mocks.len()} mocks\n"
+
+enum TimingMatchKind:
+    WithinMs
+    AtLeastMs
+    BetweenMs
+    ExactlyMs
+
+class AsyncTimingMatcher:
+    kind: TimingMatchKind
+    param1: i32
+    param2: i32
+    description: text
+
+    static fn within_ms(duration: i32) -> AsyncTimingMatcher:
+        AsyncTimingMatcher(
+            kind: TimingMatchKind.WithinMs,
+            param1: duration,
+            param2: 0,
+            description: "within {duration}ms"
+        )
+
+    static fn at_least_ms(duration: i32) -> AsyncTimingMatcher:
+        AsyncTimingMatcher(
+            kind: TimingMatchKind.AtLeastMs,
+            param1: duration,
+            param2: 0,
+            description: "at least {duration}ms"
+        )
+
+    static fn between_ms(min_ms: i32, max_ms: i32) -> AsyncTimingMatcher:
+        AsyncTimingMatcher(
+            kind: TimingMatchKind.BetweenMs,
+            param1: min_ms,
+            param2: max_ms,
+            description: "between {min_ms}ms and {max_ms}ms"
+        )
+
+    static fn exactly_ms(duration: i32) -> AsyncTimingMatcher:
+        AsyncTimingMatcher(
+            kind: TimingMatchKind.ExactlyMs,
+            param1: duration,
+            param2: 0,
+            description: "exactly {duration}ms"
+        )
+
+    fn matches(actual_ms: i32) -> bool:
+        match self.kind:
+            case WithinMs: actual_ms <= self.param1
+            case AtLeastMs: actual_ms >= self.param1
+            case BetweenMs: actual_ms >= self.param1 and actual_ms <= self.param2
+            case ExactlyMs: actual_ms == self.param1
+
+    fn get_description() -> text:
+        self.description
+
+# ============================================================================
+# Tests
+# ============================================================================
 
 describe "Mock Library - Phase 6 (Async/Await Mocking)":
     # Verifies the async mocking infrastructure that enables testing of
@@ -26,7 +484,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
     # for multi-service scenarios, and timing matchers for performance assertions.
     context "AsyncCallRecord":
         it "stores async call with timing info":
-            val record = mocking.AsyncCallRecord(
+            val record = AsyncCallRecord(
                 args: ["data"],
                 timestamp: 100,
                 call_number: 0,
@@ -40,7 +498,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect record.result.is_some()
 
         it "stores error information":
-            val record = mocking.AsyncCallRecord(
+            val record = AsyncCallRecord(
                 args: ["fail"],
                 timestamp: 100,
                 call_number: 0,
@@ -54,22 +512,22 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
 
     context "AsyncMock - Basic":
         it "creates async mock":
-            val async_mock = mocking.AsyncMock.new("api_call")
+            val async_mock = AsyncMock.new("api_call")
             expect async_mock.name == "api_call"
             expect async_mock.call_count() == 0
 
         it "sets delay for async mock":
-            val async_mock = mocking.AsyncMock.new("fetch")
+            val async_mock = AsyncMock.new("fetch")
             async_mock.set_delay(100)
             expect async_mock.default_delay_ms == 100
 
         it "sets return values":
-            val async_mock = mocking.AsyncMock.new("query")
+            val async_mock = AsyncMock.new("query")
             async_mock.set_return_values(["result1", "result2"])
             expect async_mock.return_values.len() == 2
 
         it "records async call":
-            val async_mock = mocking.AsyncMock.new("service")
+            val async_mock = AsyncMock.new("service")
             async_mock.set_return_values(["response"])
             val result = async_mock.record_async_call(["request"])
             expect result == "response"
@@ -77,21 +535,21 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
 
     context "AsyncMock - Verification":
         it "verifies was called":
-            val async_mock = mocking.AsyncMock.new("handler")
+            val async_mock = AsyncMock.new("handler")
             expect not async_mock.was_called()
             async_mock.set_return_values(["ok"])
             async_mock.record_async_call([])
             expect async_mock.was_called()
 
         it "verifies was called with args":
-            val async_mock = mocking.AsyncMock.new("process")
+            val async_mock = AsyncMock.new("process")
             async_mock.set_return_values(["done"])
             async_mock.record_async_call(["arg1", "arg2"])
             expect async_mock.was_called_with(["arg1", "arg2"])
             expect not async_mock.was_called_with(["other"])
 
         it "gets specific call":
-            val async_mock = mocking.AsyncMock.new("db")
+            val async_mock = AsyncMock.new("db")
             async_mock.set_return_values(["r1", "r2", "r3"])
             async_mock.record_async_call(["a"])
             async_mock.record_async_call(["b"])
@@ -101,7 +559,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
                 nil: fail "Expected call at index 1"
 
         it "gets last call":
-            val async_mock = mocking.AsyncMock.new("event")
+            val async_mock = AsyncMock.new("event")
             async_mock.set_return_values(["e1", "e2"])
             async_mock.record_async_call(["first"])
             async_mock.record_async_call(["second"])
@@ -111,27 +569,27 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
 
     context "AsyncMock - Error Handling":
         it "sets error mode":
-            val async_mock = mocking.AsyncMock.new("failing")
+            val async_mock = AsyncMock.new("failing")
             async_mock.set_error("Network timeout")
             expect async_mock.error_mode
             expect async_mock.error_message == "Network timeout"
 
         it "records error calls":
-            val async_mock = mocking.AsyncMock.new("failing_api")
+            val async_mock = AsyncMock.new("failing_api")
             async_mock.set_error("Connection refused")
             async_mock.record_async_call(["request"])
             val errors = async_mock.get_calls_with_errors()
             expect errors.len() == 1
 
         it "clears error mode":
-            val async_mock = mocking.AsyncMock.new("recoverable")
+            val async_mock = AsyncMock.new("recoverable")
             async_mock.set_error("Temporary error")
             async_mock.clear_error()
             expect not async_mock.error_mode
 
     context "AsyncMock - Timing":
         it "tracks total delay":
-            val async_mock = mocking.AsyncMock.new("slow_op")
+            val async_mock = AsyncMock.new("slow_op")
             async_mock.set_delay(50)
             async_mock.set_return_values(["r1", "r2", "r3"])
             async_mock.record_async_call([])
@@ -140,7 +598,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect async_mock.get_total_delay() == 150
 
         it "resets async mock":
-            val async_mock = mocking.AsyncMock.new("resettable")
+            val async_mock = AsyncMock.new("resettable")
             async_mock.set_return_values(["data"])
             async_mock.set_delay(100)
             async_mock.record_async_call([])
@@ -148,7 +606,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect async_mock.call_count() == 0
 
         it "generates summary":
-            val async_mock = mocking.AsyncMock.new("summary_test")
+            val async_mock = AsyncMock.new("summary_test")
             async_mock.set_return_values(["value"])
             async_mock.set_delay(25)
             async_mock.record_async_call(["input"])
@@ -158,16 +616,16 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
 
     context "PromiseSequence - Basic":
         it "creates empty promise sequence":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             expect seq.remaining() == 0
 
         it "adds promise with delay":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             seq.add_promise("result", 50)
             expect seq.remaining() == 1
 
         it "adds error promise":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             seq.add_promise_error("timeout", 100)
             match seq.peek_next():
                 Some(p): expect p.is_error
@@ -175,7 +633,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
 
     context "PromiseSequence - Iteration":
         it "gets next promise":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             seq.add_promise("first", 10)
             seq.add_promise("second", 20)
             match seq.next_promise():
@@ -186,27 +644,27 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect seq.remaining() == 1
 
         it "returns nil when exhausted":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             seq.add_promise("only", 5)
             seq.next_promise()
             val result = seq.next_promise()
             expect result == nil
 
         it "peeks without consuming":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             seq.add_promise("value", 30)
             seq.peek_next()
             expect seq.remaining() == 1
 
         it "calculates total delay":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             seq.add_promise("a", 10)
             seq.add_promise("b", 20)
             seq.add_promise("c", 30)
             expect seq.total_delay() == 60
 
         it "resets sequence":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             seq.add_promise("value", 10)
             seq.next_promise()
             seq.reset()
@@ -214,24 +672,24 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
 
     context "AsyncSpy - Basic":
         it "creates async spy":
-            val spy = mocking.AsyncSpy.new("service_spy")
+            val spy = AsyncSpy.new("service_spy")
             expect spy.name == "service_spy"
             expect spy.total_calls() == 0
 
         it "records async call with duration":
-            val spy = mocking.AsyncSpy.new("tracker")
+            val spy = AsyncSpy.new("tracker")
             spy.record_async_call("fetch", ["url"], 50)
             expect spy.total_calls() == 1
 
         it "checks method called":
-            val spy = mocking.AsyncSpy.new("checker")
+            val spy = AsyncSpy.new("checker")
             spy.record_async_call("process", ["data"], 100)
             expect spy.method_called("process")
             expect not spy.method_called("other")
 
     context "AsyncSpy - Queries":
         it "gets async calls for method":
-            val spy = mocking.AsyncSpy.new("multi_spy")
+            val spy = AsyncSpy.new("multi_spy")
             spy.record_async_call("fetch", ["a"], 10)
             spy.record_async_call("save", ["b"], 20)
             spy.record_async_call("fetch", ["c"], 30)
@@ -239,7 +697,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect fetches.len() == 2
 
         it "calculates timing stats":
-            val spy = mocking.AsyncSpy.new("stats_spy")
+            val spy = AsyncSpy.new("stats_spy")
             spy.record_async_call("query", [], 10)
             spy.record_async_call("query", [], 20)
             spy.record_async_call("query", [], 30)
@@ -251,42 +709,42 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect stats.count == 3
 
         it "generates spy summary":
-            val spy = mocking.AsyncSpy.new("summary_spy")
+            val spy = AsyncSpy.new("summary_spy")
             spy.record_async_call("method1", [], 15)
             val summary = spy.summary()
             expect summary.contains("summary_spy")
 
     context "AsyncProtocolMock - Basic":
         it "creates async protocol mock":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             expect proto.method_mocks.len() == 0
 
         it "mocks async method with delay":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             proto.mock_async_method("fetchUser", ["id"], 50, "user_data")
             expect proto.method_mocks.len() == 1
 
         it "records async method call":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             proto.mock_async_method("getConfig", [], 10, "config_json")
             val result = proto.record_async_method_call("getConfig", [])
             expect result == "config_json"
 
         it "returns empty for unmocked method":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             val result = proto.record_async_method_call("unknown", [])
             expect result == ""
 
     context "AsyncProtocolMock - Verification":
         it "verifies async method called":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             proto.mock_async_method("save", ["data"], 100, "saved")
             proto.record_async_method_call("save", ["data"])
             expect proto.verify_async_method_called("save")
             expect not proto.verify_async_method_called("delete")
 
         it "gets async method calls":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             proto.mock_async_method("query", ["sql"], 25, "results")
             proto.record_async_method_call("query", ["sql"])
             proto.record_async_method_call("query", ["sql"])
@@ -294,7 +752,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect calls.len() == 2
 
         it "gets async method timing":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             proto.mock_async_method("slow_op", [], 200, "done")
             proto.record_async_method_call("slow_op", [])
             val timings = proto.get_async_method_timing("slow_op")
@@ -302,7 +760,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect timings[0] == 200
 
         it "calculates total delay":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             proto.mock_async_method("op1", [], 50, "r1")
             proto.mock_async_method("op2", [], 100, "r2")
             proto.record_async_method_call("op1", [])
@@ -310,27 +768,27 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect proto.get_total_delay() == 150
 
         it "resets async protocol mock":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             proto.mock_async_method("test", [], 10, "value")
             proto.reset()
             expect proto.method_mocks.len() == 0
 
     context "AsyncMockComposition - Basic":
         it "creates async mock composition":
-            val comp = mocking.AsyncMockComposition.new()
+            val comp = AsyncMockComposition.new()
             expect comp.get_total_calls() == 0
 
         it "adds async mocks":
-            val comp = mocking.AsyncMockComposition.new()
-            val mock1 = mocking.AsyncMock.new("api")
-            val mock2 = mocking.AsyncMock.new("db")
+            val comp = AsyncMockComposition.new()
+            val mock1 = AsyncMock.new("api")
+            val mock2 = AsyncMock.new("db")
             comp.add_async_mock("api", mock1)
             comp.add_async_mock("db", mock2)
             expect comp.get_concurrent_call_count() == 2
 
         it "gets mock by name":
-            val comp = mocking.AsyncMockComposition.new()
-            val api_mock = mocking.AsyncMock.new("api_service")
+            val comp = AsyncMockComposition.new()
+            val api_mock = AsyncMock.new("api_service")
             comp.add_async_mock("api", api_mock)
             match comp.get_mock("api"):
                 Some(m): expect m.name == "api_service"
@@ -338,9 +796,9 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
 
     context "AsyncMockComposition - Verification":
         it "verifies all mocks called":
-            val comp = mocking.AsyncMockComposition.new()
-            val mock1 = mocking.AsyncMock.new("m1")
-            val mock2 = mocking.AsyncMock.new("m2")
+            val comp = AsyncMockComposition.new()
+            val mock1 = AsyncMock.new("m1")
+            val mock2 = AsyncMock.new("m2")
             mock1.set_return_values(["r1"])
             mock2.set_return_values(["r2"])
             comp.add_async_mock("m1", mock1)
@@ -351,9 +809,9 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect comp.verify_all_called()
 
         it "gets total calls across mocks":
-            val comp = mocking.AsyncMockComposition.new()
-            val mock1 = mocking.AsyncMock.new("a")
-            val mock2 = mocking.AsyncMock.new("b")
+            val comp = AsyncMockComposition.new()
+            val mock1 = AsyncMock.new("a")
+            val mock2 = AsyncMock.new("b")
             mock1.set_return_values(["x", "y"])
             mock2.set_return_values(["z"])
             comp.add_async_mock("a", mock1)
@@ -364,9 +822,9 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect comp.get_total_calls() == 3
 
         it "gets total delay across mocks":
-            val comp = mocking.AsyncMockComposition.new()
-            val mock1 = mocking.AsyncMock.new("slow")
-            val mock2 = mocking.AsyncMock.new("fast")
+            val comp = AsyncMockComposition.new()
+            val mock1 = AsyncMock.new("slow")
+            val mock2 = AsyncMock.new("fast")
             mock1.set_delay(100)
             mock2.set_delay(20)
             mock1.set_return_values(["s"])
@@ -378,8 +836,8 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect comp.get_total_delay() == 120
 
         it "resets all mocks":
-            val comp = mocking.AsyncMockComposition.new()
-            val mock1 = mocking.AsyncMock.new("r1")
+            val comp = AsyncMockComposition.new()
+            val mock1 = AsyncMock.new("r1")
             mock1.set_return_values(["v"])
             mock1.record_async_call([])
             comp.add_async_mock("r1", mock1)
@@ -387,27 +845,27 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect comp.get_total_calls() == 0
 
         it "generates composition summary":
-            val comp = mocking.AsyncMockComposition.new()
-            val mock1 = mocking.AsyncMock.new("service")
+            val comp = AsyncMockComposition.new()
+            val mock1 = AsyncMock.new("service")
             comp.add_async_mock("service", mock1)
             val summary = comp.summary()
             expect summary.contains("AsyncMockComposition")
 
     context "AsyncTimingMatcher - Basic":
         it "creates within_ms matcher":
-            val matcher = mocking.AsyncTimingMatcher.within_ms(100)
+            val matcher = AsyncTimingMatcher.within_ms(100)
             expect matcher.matches(50)
             expect matcher.matches(100)
             expect not matcher.matches(101)
 
         it "creates at_least_ms matcher":
-            val matcher = mocking.AsyncTimingMatcher.at_least_ms(50)
+            val matcher = AsyncTimingMatcher.at_least_ms(50)
             expect matcher.matches(50)
             expect matcher.matches(100)
             expect not matcher.matches(49)
 
         it "creates between_ms matcher":
-            val matcher = mocking.AsyncTimingMatcher.between_ms(10, 100)
+            val matcher = AsyncTimingMatcher.between_ms(10, 100)
             expect matcher.matches(10)
             expect matcher.matches(50)
             expect matcher.matches(100)
@@ -415,30 +873,29 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect not matcher.matches(101)
 
         it "creates exactly_ms matcher":
-            val matcher = mocking.AsyncTimingMatcher.exactly_ms(42)
+            val matcher = AsyncTimingMatcher.exactly_ms(42)
             expect matcher.matches(42)
             expect not matcher.matches(41)
             expect not matcher.matches(43)
 
         it "provides description":
-            val matcher = mocking.AsyncTimingMatcher.within_ms(200)
+            val matcher = AsyncTimingMatcher.within_ms(200)
             val desc = matcher.get_description()
             expect desc.contains("200")
 
     context "Timing Verification Functions":
         it "verifies async mock timing":
-            val async_mock = mocking.AsyncMock.new("timed")
+            val async_mock = AsyncMock.new("timed")
             async_mock.set_delay(30)
             async_mock.set_return_values(["r1", "r2"])
             async_mock.record_async_call([])
             async_mock.record_async_call([])
-            val matcher = mocking.AsyncTimingMatcher.within_ms(100)
-            # Use matcher directly instead of namespaced free function
+            val matcher = AsyncTimingMatcher.within_ms(100)
             val total_delay = async_mock.get_total_delay()
             expect matcher.matches(total_delay)
 
         it "verifies call timing":
-            val call = mocking.AsyncCallRecord(
+            val call = AsyncCallRecord(
                 args: [],
                 timestamp: 0,
                 call_number: 0,
@@ -447,13 +904,12 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
                 error: nil,
                 delay_ms: 75
             )
-            val matcher = mocking.AsyncTimingMatcher.between_ms(50, 100)
-            # Use matcher directly instead of namespaced free function
+            val matcher = AsyncTimingMatcher.between_ms(50, 100)
             expect matcher.matches(call.delay_ms)
 
     context "Complex Async Scenarios":
         it "simulates async API workflow":
-            val proto = mocking.AsyncProtocolMock.new()
+            val proto = AsyncProtocolMock.new()
             proto.mock_async_method("authenticate", ["user", "pass"], 50, "token")
             proto.mock_async_method("fetchData", ["token"], 100, "data")
             proto.mock_async_method("process", ["data"], 25, "result")
@@ -466,7 +922,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect proto.get_total_delay() == 175
 
         it "handles mixed success and error promises":
-            val seq = mocking.PromiseSequence.new()
+            val seq = PromiseSequence.new()
             seq.add_promise("success1", 10)
             seq.add_promise_error("timeout", 100)
             seq.add_promise("success2", 10)
@@ -484,10 +940,10 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             expect error_count == 1
 
         it "orchestrates multiple async services":
-            val comp = mocking.AsyncMockComposition.new()
-            val auth = mocking.AsyncMock.new("auth")
-            val db = mocking.AsyncMock.new("database")
-            val cache = mocking.AsyncMock.new("cache")
+            val comp = AsyncMockComposition.new()
+            val auth = AsyncMock.new("auth")
+            val db = AsyncMock.new("database")
+            val cache = AsyncMock.new("cache")
             auth.set_delay(50)
             db.set_delay(100)
             cache.set_delay(10)
@@ -502,11 +958,11 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
             cache.record_async_call(["key"])
             expect comp.verify_all_called()
             expect comp.get_total_delay() == 160
-            val timing_matcher = mocking.AsyncTimingMatcher.within_ms(200)
+            val timing_matcher = AsyncTimingMatcher.within_ms(200)
             expect timing_matcher.matches(comp.get_total_delay())
 
         it "tracks async spy statistics":
-            val spy = mocking.AsyncSpy.new("performance_spy")
+            val spy = AsyncSpy.new("performance_spy")
             spy.record_async_call("api_call", ["1"], 45)
             spy.record_async_call("api_call", ["2"], 55)
             spy.record_async_call("api_call", ["3"], 50)
@@ -523,7 +979,7 @@ describe "Mock Library - Phase 6 (Async/Await Mocking)":
         # Reproducing test for i64 to usize cast bug in AsyncMock.get_call.
         # Integer literals default to i64, function must accept i64.
         it "handles i64 literal in AsyncMock.get_call":
-            val async_mock = mocking.AsyncMock.new("literal_test")
+            val async_mock = AsyncMock.new("literal_test")
             async_mock.set_return_values(["first", "second"])
             async_mock.record_async_call(["arg1"])
             async_mock.record_async_call(["arg2"])

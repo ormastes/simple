@@ -1,0 +1,96 @@
+# Configuration System
+#
+# Loads and accesses application configuration from SDN-style files.
+# Uses free functions for construction (interpreter mode compatible).
+
+struct Conf:
+    entries: Dict<text, text>
+
+fn conf_from_sdn(content: text) -> Result<Conf, text>:
+    var entries: Dict<text, text> = {}
+    var section_prefix = ""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0 or trimmed.starts_with("#"):
+            continue
+
+        val is_indented = line.starts_with("    ") or line.starts_with("\t")
+
+        if not is_indented and trimmed.ends_with(":"):
+            section_prefix = trimmed[0:trimmed.len() - 1].trim() + "."
+            continue
+
+        if is_indented and section_prefix != "":
+            val pair = conf_parse_kv_line(trimmed)
+            if pair.?:
+                val (k, v) = pair.unwrap()
+                entries[section_prefix + k] = v
+        else:
+            section_prefix = ""
+            val pair = conf_parse_kv_line(trimmed)
+            if pair.?:
+                val (k, v) = pair.unwrap()
+                entries[k] = v
+
+    Ok(Conf(entries: entries))
+
+fn conf_from_file(path: text) -> Result<Conf, text>:
+    extern fn rt_file_read_text(p: text) -> text
+    val content = rt_file_read_text(path)
+    conf_from_sdn(content)
+
+fn conf_empty() -> Conf:
+    Conf(entries: {})
+
+fn conf_get(c: Conf, key: text) -> text?:
+    c.entries.get(key)
+
+fn conf_get_or(c: Conf, key: text, default: text) -> text:
+    c.entries.get(key) ?? default
+
+fn conf_get_int(c: Conf, key: text) -> i64?:
+    val v = c.entries.get(key)
+    if not v.?:
+        return nil
+    v.unwrap().parse_int()
+
+fn conf_get_bool(c: Conf, key: text) -> bool?:
+    val v = c.entries.get(key)
+    if not v.?:
+        return nil
+    val s = v.unwrap()
+    if s == "true":
+        Some(true)
+    elif s == "false":
+        Some(false)
+    else:
+        nil
+
+fn conf_has(c: Conf, key: text) -> bool:
+    c.entries.get(key).?
+
+fn conf_parse_kv_line(line: text) -> (text, text)?:
+    var sep_idx = -1
+    var i = 0
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if ch == "=" or ch == ":":
+            sep_idx = i
+            break
+        i = i + 1
+
+    if sep_idx < 0:
+        return nil
+
+    val key = line[0:sep_idx].trim()
+    var value = line[sep_idx + 1:].trim()
+
+    if value.len() >= 2:
+        if (value.starts_with("'") and value.ends_with("'")) or (value.starts_with("\"") and value.ends_with("\"")):
+            value = value[1:value.len() - 1]
+
+    Some((key, value))
+
+export Conf, conf_from_sdn, conf_from_file, conf_empty
+export conf_get, conf_get_or, conf_get_int, conf_get_bool, conf_has

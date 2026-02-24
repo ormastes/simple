@@ -1,0 +1,769 @@
+# Bidirectional Type Checking - HmInferContext Test Suite
+#
+# Tests the bidirectional type checking implementation in:
+# - src/compiler/30.types/type_infer/inference_expr.spl (infer_expr, check_expr, synthesize_expr, subsume)
+# - src/compiler/30.types/type_infer/inference_control.spl (infer_stmt, infer_function)
+# - src/compiler/30.types/type_infer_types.spl (InferMode enum)
+#
+# Covers: lambda parameter inference, subsumption, let bindings, function return type,
+# array/tuple/dict element propagation, match arm and if-expression Check mode.
+
+use compiler.type_infer.*
+use compiler.type_infer_types.*
+use compiler.hir.*
+use compiler.core.lexer.*
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn dummy_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1)
+
+fn make_int_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: dummy_span())
+
+fn make_bool_type() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: dummy_span())
+
+fn make_str_type() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: dummy_span())
+
+fn make_float_type() -> HirType:
+    HirType(kind: HirTypeKind.Float(64), span: dummy_span())
+
+fn make_unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: dummy_span())
+
+fn make_fn_type(params: [HirType], ret: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Function(params, ret, []), span: dummy_span())
+
+fn make_array_type(elem: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Array(elem, nil), span: dummy_span())
+
+fn make_tuple_type(elems: [HirType]) -> HirType:
+    HirType(kind: HirTypeKind.Tuple(elems), span: dummy_span())
+
+fn make_int_lit(value: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), type_: nil, span: dummy_span())
+
+fn make_bool_lit(value: bool) -> HirExpr:
+    HirExpr(kind: HirExprKind.BoolLit(value), type_: nil, span: dummy_span())
+
+fn make_str_lit(value: text) -> HirExpr:
+    HirExpr(kind: HirExprKind.StringLit(value, nil), type_: nil, span: dummy_span())
+
+fn make_float_lit(value: f64) -> HirExpr:
+    HirExpr(kind: HirExprKind.FloatLit(value, nil), type_: nil, span: dummy_span())
+
+fn make_var(name: text) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: name.hash())), type_: nil, span: dummy_span())
+
+fn make_lambda(params: [HirParam], body: HirExpr) -> HirExpr:
+    HirExpr(kind: HirExprKind.Lambda(params, body, []), type_: nil, span: dummy_span())
+
+fn make_param(name: text, type_: HirType) -> HirParam:
+    HirParam(
+        symbol: SymbolId(id: name.hash()),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: make_int_lit(0),
+        span: dummy_span()
+    )
+
+fn make_infer_param(name: text) -> HirParam:
+    """Create a parameter with Infer type (no annotation)."""
+    HirParam(
+        symbol: SymbolId(id: name.hash()),
+        name: name,
+        type_: HirType(kind: HirTypeKind.Infer(0, 0), span: dummy_span()),
+        has_default: false,
+        default: make_int_lit(0),
+        span: dummy_span()
+    )
+
+fn make_call_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: dummy_span())
+
+fn make_block(stmts: [HirStmt], value: HirExpr) -> HirBlock:
+    HirBlock(stmts: stmts, has: true, value: value, span: dummy_span())
+
+fn make_empty_block(value: HirExpr) -> HirBlock:
+    HirBlock(stmts: [], has: true, value: value, span: dummy_span())
+
+fn make_expr_stmt(expr: HirExpr) -> HirStmt:
+    HirStmt(kind: HirStmtKind.Expr(expr), span: dummy_span())
+
+
+# ============================================================================
+# Test Group 1: InferMode Enum
+# ============================================================================
+
+describe "InferMode enum":
+    it "Synthesize mode is not check":
+        val mode = InferMode.Synthesize
+        expect(mode.is_check()).to_equal(false)
+        expect(mode.is_synthesize()).to_equal(true)
+
+    it "Check mode carries expected type":
+        val expected = make_int_type()
+        val mode = InferMode.Check(expected)
+        expect(mode.is_check()).to_equal(true)
+        expect(mode.is_synthesize()).to_equal(false)
+
+    it "expected returns type for Check mode":
+        val ty = make_int_type()
+        val mode = InferMode.Check(ty)
+        val result = mode.expected()
+        expect(result.?).to_equal(true)
+
+    it "expected returns nil for Synthesize mode":
+        val mode = InferMode.Synthesize
+        val result = mode.expected()
+        expect(result.?).to_equal(false)
+
+
+# ============================================================================
+# Test Group 2: Synthesize Mode - Literals
+# ============================================================================
+
+describe "Synthesize mode - literal inference":
+    it "synthesizes i64 from integer literal":
+        var ctx = HmInferContext__new()
+        val expr = make_int_lit(42)
+        val result = ctx.synthesize_expr(expr)
+        expect(result.ok.?).to_equal(true)
+
+    it "synthesizes bool from boolean literal":
+        var ctx = HmInferContext__new()
+        val expr = make_bool_lit(true)
+        val result = ctx.synthesize_expr(expr)
+        expect(result.ok.?).to_equal(true)
+
+    it "synthesizes text from string literal":
+        var ctx = HmInferContext__new()
+        val expr = make_str_lit("hello")
+        val result = ctx.synthesize_expr(expr)
+        expect(result.ok.?).to_equal(true)
+
+    it "synthesizes f64 from float literal":
+        var ctx = HmInferContext__new()
+        val expr = make_float_lit(3.14)
+        val result = ctx.synthesize_expr(expr)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 3: Check Mode - Literals
+# ============================================================================
+
+describe "Check mode - literal checking":
+    it "checks int literal against i64 type":
+        var ctx = HmInferContext__new()
+        val expr = make_int_lit(42)
+        val expected = make_int_type()
+        val result = ctx.infer_expr(expr, InferMode.Check(expected))
+        expect(result.ok.?).to_equal(true)
+
+    it "checks bool literal against bool type":
+        var ctx = HmInferContext__new()
+        val expr = make_bool_lit(true)
+        val expected = make_bool_type()
+        val result = ctx.infer_expr(expr, InferMode.Check(expected))
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 4: Lambda Parameter Inference from Type Annotation
+# ============================================================================
+
+describe "Lambda parameter inference from type annotation context":
+    it "infers lambda param type from expected function type":
+        """
+        val f: fn(i64) -> i64 = \\x: x + 1
+        The expected fn(i64)->i64 should propagate i64 to x.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        # Create lambda with Infer-typed parameter: \x: x
+        val x_param = make_infer_param("x")
+        val x_var = make_var("x")
+        val lambda = make_lambda([x_param], x_var)
+
+        # Expected type: fn(i64) -> i64
+        val expected = make_fn_type([make_int_type()], make_int_type())
+
+        # Check lambda against expected function type
+        val result = ctx.check_expr(lambda, expected)
+        expect(result.ok.?).to_equal(true)
+
+    it "rejects lambda with wrong arity against expected function type":
+        """
+        Checking \\x: x against fn(i64, i64) -> i64 should fail
+        because arity (1 vs 2) does not match.
+        """
+        var ctx = HmInferContext__new()
+
+        val x_param = make_infer_param("x")
+        val x_var = make_var("x")
+        val lambda = make_lambda([x_param], x_var)
+
+        # Expected: fn(i64, i64) -> i64 (two params, but lambda has one)
+        val expected = make_fn_type([make_int_type(), make_int_type()], make_int_type())
+
+        val result = ctx.check_expr(lambda, expected)
+        expect(result.err.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 5: Lambda Parameter Inference from Function Argument Context
+# ============================================================================
+
+describe "Lambda parameter inference from function argument context":
+    it "propagates param types when lambda is function argument":
+        """
+        Given apply: fn(fn(i64) -> i64) -> i64
+        apply(\\x: x) should infer x as i64.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        # Register apply: fn(fn(i64) -> i64) -> i64
+        val callback_type = make_fn_type([make_int_type()], make_int_type())
+        val apply_type = make_fn_type([callback_type], make_int_type())
+        val apply_scheme = TypeScheme(vars: [], ty: apply_type)
+        ctx.bind_poly("apply", apply_scheme)
+
+        # Synthesize the lambda alone to verify it gets Infer params
+        val x_param = make_infer_param("x")
+        val x_var = make_var("x")
+        val lambda = make_lambda([x_param], x_var)
+
+        # Check lambda against fn(i64) -> i64 (the parameter type of apply)
+        val result = ctx.check_expr(lambda, callback_type)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 6: Nested Lambda Parameter Inference
+# ============================================================================
+
+describe "Nested lambda parameter inference":
+    it "propagates types through nested lambdas":
+        """
+        val f: fn(i64) -> fn(i64) -> i64 = \\x: \\y: x
+        Inner and outer lambda params should both get i64.
+        """
+        var ctx = HmInferContext__new()
+
+        # \y: x_var (inner lambda uses outer x)
+        val y_param = make_infer_param("y")
+        val x_var = make_var("x")
+        val inner_lambda = make_lambda([y_param], x_var)
+
+        # \x: inner_lambda
+        val x_param = make_infer_param("x")
+        val outer_lambda = make_lambda([x_param], inner_lambda)
+
+        # Expected: fn(i64) -> fn(i64) -> i64
+        val inner_fn_type = make_fn_type([make_int_type()], make_int_type())
+        val outer_fn_type = make_fn_type([make_int_type()], inner_fn_type)
+
+        val result = ctx.check_expr(outer_lambda, outer_fn_type)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 7: Subsumption (Synthesize + Unify Fallback)
+# ============================================================================
+
+describe "Subsumption (synthesize + unify fallback)":
+    it "subsumes identical types":
+        var ctx = HmInferContext__new()
+        val int_ty = make_int_type()
+        val result = ctx.subsume(int_ty, int_ty)
+        expect(result.ok.?).to_equal(true)
+
+    it "fails to subsume incompatible types":
+        var ctx = HmInferContext__new()
+        val int_ty = make_int_type()
+        val bool_ty = make_bool_type()
+        val result = ctx.subsume(int_ty, bool_ty)
+        expect(result.err.?).to_equal(true)
+
+    it "subsumes type variable against concrete type":
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+        val var_ty = ctx.fresh_var(span)
+        val int_ty = make_int_type()
+        val result = ctx.subsume(var_ty, int_ty)
+        expect(result.ok.?).to_equal(true)
+
+    it "falls back to synthesize+subsume for non-lambda in check mode":
+        """
+        check_expr on a literal falls through to _subsume_fallback,
+        which synthesizes the type and then unifies with expected.
+        """
+        var ctx = HmInferContext__new()
+        val expr = make_int_lit(42)
+        val expected = make_int_type()
+        val result = ctx.check_expr(expr, expected)
+        expect(result.ok.?).to_equal(true)
+
+    it "subsume fallback rejects type mismatch":
+        var ctx = HmInferContext__new()
+        val expr = make_int_lit(42)
+        val expected = make_bool_type()
+        val result = ctx.check_expr(expr, expected)
+        expect(result.err.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 8: Let Binding with Type Annotation Propagation
+# ============================================================================
+
+describe "Let binding with type annotation propagation":
+    it "uses Check mode when type annotation is present":
+        """
+        val x: i64 = 42
+        The type annotation i64 should cause Check mode for the initializer.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        val init_expr = make_int_lit(42)
+        val int_ty = make_int_type()
+
+        # Create a Let statement with type annotation
+        val sym = SymbolId(id: 100)
+        val let_stmt = HirStmt(
+            kind: HirStmtKind.Let(sym, int_ty, init_expr),
+            span: span
+        )
+
+        val result = ctx.infer_stmt(let_stmt)
+        expect(result.ok.?).to_equal(true)
+
+    it "uses Synthesize mode when no annotation":
+        """
+        val x = 42
+        Without annotation, synthesize mode is used.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        val init_expr = make_int_lit(42)
+        val infer_ty = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+
+        val sym = SymbolId(id: 101)
+        val let_stmt = HirStmt(
+            kind: HirStmtKind.Let(sym, infer_ty, init_expr),
+            span: span
+        )
+
+        val result = ctx.infer_stmt(let_stmt)
+        expect(result.ok.?).to_equal(true)
+
+    it "propagates annotation type into lambda initializer":
+        """
+        val f: fn(i64) -> i64 = \\x: x
+        The fn type annotation should propagate into the lambda via Check mode.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        val x_param = make_infer_param("x")
+        val x_var = make_var("x")
+        val lambda = make_lambda([x_param], x_var)
+
+        val fn_ty = make_fn_type([make_int_type()], make_int_type())
+
+        val sym = SymbolId(id: 102)
+        val let_stmt = HirStmt(
+            kind: HirStmtKind.Let(sym, fn_ty, lambda),
+            span: span
+        )
+
+        val result = ctx.infer_stmt(let_stmt)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 9: Function Return Type Checking
+# ============================================================================
+
+describe "Function return type checking":
+    it "subsumes body type against declared return type":
+        """
+        fn get_number() -> i64: 42
+        Body type (i64) should be subsumed against declared return (i64).
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        val body_block = make_empty_block(make_int_lit(42))
+        val int_ty = make_int_type()
+
+        # Infer block, then subsume against return type
+        val block_result = ctx.infer_block(body_block)
+        expect(block_result.ok.?).to_equal(true)
+
+        match block_result:
+            case Ok(body_ty):
+                val sub_result = ctx.subsume(body_ty, int_ty)
+                expect(sub_result.ok.?).to_equal(true)
+            case Err(_):
+                expect(false).to_equal(true)
+
+    it "detects return type mismatch":
+        """
+        fn get_number() -> bool: 42
+        Body type (i64) should fail to subsume against declared return (bool).
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        val body_block = make_empty_block(make_int_lit(42))
+        val bool_ty = make_bool_type()
+
+        val block_result = ctx.infer_block(body_block)
+        expect(block_result.ok.?).to_equal(true)
+
+        match block_result:
+            case Ok(body_ty):
+                val sub_result = ctx.subsume(body_ty, bool_ty)
+                expect(sub_result.err.?).to_equal(true)
+            case Err(_):
+                expect(false).to_equal(true)
+
+
+# ============================================================================
+# Test Group 10: Array Element Type Propagation in Check Mode
+# ============================================================================
+
+describe "Array element type propagation in Check mode":
+    it "propagates element type into array literal elements":
+        """
+        check([1, 2, 3], [i64]) should check each element against i64.
+        """
+        var ctx = HmInferContext__new()
+
+        val elems = [make_int_lit(1), make_int_lit(2), make_int_lit(3)]
+        val array_expr = HirExpr(
+            kind: HirExprKind.ArrayLit(elems, nil),
+            type_: nil,
+            span: dummy_span()
+        )
+
+        val expected = make_array_type(make_int_type())
+        val result = ctx.check_expr(array_expr, expected)
+        expect(result.ok.?).to_equal(true)
+
+    it "synthesizes array type from first element":
+        """
+        synthesize([1, 2, 3]) should infer element type from first element
+        and check rest against it.
+        """
+        var ctx = HmInferContext__new()
+
+        val elems = [make_int_lit(1), make_int_lit(2), make_int_lit(3)]
+        val array_expr = HirExpr(
+            kind: HirExprKind.ArrayLit(elems, nil),
+            type_: nil,
+            span: dummy_span()
+        )
+
+        val result = ctx.synthesize_expr(array_expr)
+        expect(result.ok.?).to_equal(true)
+
+    it "synthesizes empty array with fresh type variable":
+        var ctx = HmInferContext__new()
+
+        val empty_array = HirExpr(
+            kind: HirExprKind.ArrayLit([], nil),
+            type_: nil,
+            span: dummy_span()
+        )
+
+        val result = ctx.synthesize_expr(empty_array)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 11: Tuple Element Type Propagation in Check Mode
+# ============================================================================
+
+describe "Tuple element type propagation in Check mode":
+    it "propagates element types into tuple literal":
+        """
+        check((42, true), (i64, bool)) should check each element individually.
+        """
+        var ctx = HmInferContext__new()
+
+        val tuple_expr = HirExpr(
+            kind: HirExprKind.TupleLit([make_int_lit(42), make_bool_lit(true)]),
+            type_: nil,
+            span: dummy_span()
+        )
+
+        val expected = make_tuple_type([make_int_type(), make_bool_type()])
+        val result = ctx.check_expr(tuple_expr, expected)
+        expect(result.ok.?).to_equal(true)
+
+    it "falls back to synthesize+subsume when expected is not tuple":
+        """
+        check((42, true), i64) should fall back since expected is not a tuple.
+        """
+        var ctx = HmInferContext__new()
+
+        val tuple_expr = HirExpr(
+            kind: HirExprKind.TupleLit([make_int_lit(42), make_bool_lit(true)]),
+            type_: nil,
+            span: dummy_span()
+        )
+
+        val expected = make_int_type()
+        val result = ctx.check_expr(tuple_expr, expected)
+        # Should fail because tuple cannot subsume i64
+        expect(result.err.?).to_equal(true)
+
+    it "rejects tuple with wrong arity":
+        """
+        check((42, true), (i64,)) should fall back (arity 2 vs 1).
+        """
+        var ctx = HmInferContext__new()
+
+        val tuple_expr = HirExpr(
+            kind: HirExprKind.TupleLit([make_int_lit(42), make_bool_lit(true)]),
+            type_: nil,
+            span: dummy_span()
+        )
+
+        val expected = make_tuple_type([make_int_type()])
+        val result = ctx.check_expr(tuple_expr, expected)
+        # Falls back to synthesize+subsume which should fail
+        expect(result.err.?).to_equal(true)
+
+    it "synthesizes tuple type from elements":
+        var ctx = HmInferContext__new()
+
+        val tuple_expr = HirExpr(
+            kind: HirExprKind.TupleLit([make_int_lit(42), make_bool_lit(true)]),
+            type_: nil,
+            span: dummy_span()
+        )
+
+        val result = ctx.synthesize_expr(tuple_expr)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 12: Match Arm Check Mode Propagation
+# ============================================================================
+
+describe "Match arm Check mode propagation":
+    it "propagates expected type into match arm bodies":
+        """
+        In check_expr, match arms should be checked with InferMode.Check(expected).
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        # Bind x to i64 so scrutinee synthesis succeeds
+        ctx.bind_mono("x", make_int_type())
+
+        # Construct: match x: case _: 42
+        val scrutinee = make_var("x")
+        val arm_body = make_empty_block(make_int_lit(42))
+        val wildcard_pattern = HirPattern(kind: HirPatternKind.Wildcard, span: span)
+        val arm = HirMatchArm(
+            pattern: wildcard_pattern,
+            has_guard: false,
+            guard: make_int_lit(0),
+            body: arm_body,
+            span: span
+        )
+
+        val match_expr = HirExpr(
+            kind: HirExprKind.MatchCase(scrutinee, [arm]),
+            type_: nil,
+            span: span
+        )
+
+        # Check match against i64
+        val expected = make_int_type()
+        val result = ctx.check_expr(match_expr, expected)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 13: If Expression Branch Check Mode
+# ============================================================================
+
+describe "If expression branch Check mode":
+    it "propagates expected type into both branches":
+        """
+        In check_expr, if-expression branches should be checked against expected type.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        val cond = make_bool_lit(true)
+        val then_block = make_empty_block(make_int_lit(42))
+        val else_block = make_empty_block(make_int_lit(0))
+
+        val if_expr = HirExpr(
+            kind: HirExprKind.If(cond, then_block, else_block),
+            type_: nil,
+            span: span
+        )
+
+        val expected = make_int_type()
+        val result = ctx.check_expr(if_expr, expected)
+        expect(result.ok.?).to_equal(true)
+
+    it "synthesizes if expression type from branches":
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        val cond = make_bool_lit(true)
+        val then_block = make_empty_block(make_int_lit(42))
+        val else_block = make_empty_block(make_int_lit(0))
+
+        val if_expr = HirExpr(
+            kind: HirExprKind.If(cond, then_block, else_block),
+            type_: nil,
+            span: span
+        )
+
+        val result = ctx.synthesize_expr(if_expr)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 14: infer_expr Dispatcher
+# ============================================================================
+
+describe "infer_expr dispatches correctly":
+    it "dispatches to synthesize_expr in Synthesize mode":
+        var ctx = HmInferContext__new()
+        val expr = make_int_lit(42)
+        val result = ctx.infer_expr(expr, InferMode.Synthesize)
+        expect(result.ok.?).to_equal(true)
+
+    it "dispatches to check_expr in Check mode":
+        var ctx = HmInferContext__new()
+        val expr = make_int_lit(42)
+        val expected = make_int_type()
+        val result = ctx.infer_expr(expr, InferMode.Check(expected))
+        expect(result.ok.?).to_equal(true)
+
+    it "returns expected type on successful check":
+        var ctx = HmInferContext__new()
+        val expr = make_int_lit(42)
+        val expected = make_int_type()
+        val result = ctx.infer_expr(expr, InferMode.Check(expected))
+        # On successful check, infer_expr returns the expected type
+        expect(result.ok.?).to_equal(true)
+
+    it "returns error on failed check":
+        var ctx = HmInferContext__new()
+        val expr = make_int_lit(42)
+        val expected = make_bool_type()
+        val result = ctx.infer_expr(expr, InferMode.Check(expected))
+        expect(result.err.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 15: Assign Statement Bidirectional Checking
+# ============================================================================
+
+describe "Assign statement bidirectional checking":
+    it "checks assigned value against target type":
+        """
+        For assignment: target = value
+        The value should be checked against the target's synthesized type.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+
+        # Bind target variable
+        ctx.bind_mono("x", make_int_type())
+
+        val target = make_var("x")
+        val value = make_int_lit(42)
+
+        val assign_stmt = HirStmt(
+            kind: HirStmtKind.Assign(target, HirAssignOp.Add, value),
+            span: span
+        )
+
+        val result = ctx.infer_stmt(assign_stmt)
+        expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Test Group 16: Edge Cases and Regressions
+# ============================================================================
+
+describe "Bidirectional type checking edge cases":
+    it "handles empty tuple in check mode":
+        var ctx = HmInferContext__new()
+        val tuple_expr = HirExpr(
+            kind: HirExprKind.TupleLit([]),
+            type_: nil,
+            span: dummy_span()
+        )
+        val expected = make_tuple_type([])
+        val result = ctx.check_expr(tuple_expr, expected)
+        expect(result.ok.?).to_equal(true)
+
+    it "handles lambda checked against non-function type":
+        """
+        check(\\x: x, i64) should fall back to synthesize+subsume.
+        Lambda synthesizes to fn(Infer) -> Infer, which cannot subsume i64.
+        """
+        var ctx = HmInferContext__new()
+
+        val x_param = make_infer_param("x")
+        val x_var = make_var("x")
+        val lambda = make_lambda([x_param], x_var)
+
+        val expected = make_int_type()
+        val result = ctx.check_expr(lambda, expected)
+        # Should fail: function type cannot unify with i64
+        expect(result.err.?).to_equal(true)
+
+    it "fresh type variables unify in subsumption":
+        """
+        A fresh type variable should successfully subsume with any concrete type.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+        val var_ty = ctx.fresh_var(span)
+        val str_ty = make_str_type()
+        val result = ctx.subsume(var_ty, str_ty)
+        expect(result.ok.?).to_equal(true)
+
+    it "resolved type after subsumption matches expected":
+        """
+        After unifying a type variable with i64 via subsumption,
+        resolving it should give i64.
+        """
+        var ctx = HmInferContext__new()
+        val span = dummy_span()
+        val var_ty = ctx.fresh_var(span)
+        val int_ty = make_int_type()
+        val sub_result = ctx.subsume(var_ty, int_ty)
+        expect(sub_result.ok.?).to_equal(true)
+
+        val resolved = ctx.resolve(var_ty)
+        # After subsumption, the type variable should be resolved
+        match resolved.kind:
+            case Int(bits, signed):
+                expect(bits).to_equal(64)
+                expect(signed).to_equal(true)
+            case _:
+                expect(false).to_equal(true)

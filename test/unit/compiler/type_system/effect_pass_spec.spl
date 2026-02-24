@@ -1,0 +1,412 @@
+# Effect Pass Coordinator Tests
+#
+# Tests effect inference logic: body scanning, effect propagation,
+# async-from-sync detection.
+# All types defined locally for interpreter mode compatibility.
+
+# ============================================================================
+# Local Type Definitions (mirror effect pass infrastructure)
+# ============================================================================
+
+enum EffectTag:
+    Sync
+    Async
+
+    fn is_async() -> bool:
+        match self:
+            case Async: true
+            case _: false
+
+    fn is_sync() -> bool:
+        match self:
+            case Sync: true
+            case _: false
+
+    fn to_string() -> text:
+        match self:
+            case Sync: "sync"
+            case Async: "async"
+
+struct FunctionEffectInfo:
+    name: text
+    is_async: bool
+    contains_suspension: bool
+    called_functions: [text]
+
+struct BodyScanResult:
+    has_suspension: bool
+    called_functions: [text]
+
+fn empty_scan() -> BodyScanResult:
+    BodyScanResult(has_suspension: false, called_functions: [])
+
+fn merge_scans(a: BodyScanResult, b: BodyScanResult) -> BodyScanResult:
+    BodyScanResult(
+        has_suspension: a.has_suspension or b.has_suspension,
+        called_functions: a.called_functions.concat(b.called_functions)
+    )
+
+# ============================================================================
+# Simplified Expression Tree for Testing
+# ============================================================================
+
+enum ExprKind:
+    IntLit(value: i64)
+    StringLit(value: text)
+    BoolLit(value: bool)
+    VarRef(name: text)
+    BinaryOp(op: text, left: ExprKind, right: ExprKind)
+    CallExpr(callee: text, args: [ExprKind])
+    MethodCallExpr(receiver: ExprKind, method: text, args: [ExprKind])
+    AwaitExpr(inner: ExprKind)
+    YieldExpr(value: ExprKind?)
+    BlockExpr(stmts: [ExprKind])
+    ReturnExpr(value: ExprKind?)
+
+fn scan_expr(expr: ExprKind) -> BodyScanResult:
+    """Scan an expression for suspension operators and function calls."""
+    match expr:
+        case IntLit(_): empty_scan()
+        case StringLit(_): empty_scan()
+        case BoolLit(_): empty_scan()
+        case VarRef(_): empty_scan()
+
+        case BinaryOp(_, left, right):
+            merge_scans(scan_expr(left), scan_expr(right))
+
+        case CallExpr(callee, args):
+            var result = BodyScanResult(has_suspension: false, called_functions: [callee])
+            for arg in args:
+                result = merge_scans(result, scan_expr(arg))
+            result
+
+        case MethodCallExpr(receiver, method, args):
+            var result = scan_expr(receiver)
+            result = BodyScanResult(
+                has_suspension: result.has_suspension,
+                called_functions: result.called_functions.push(method)
+            )
+            for arg in args:
+                result = merge_scans(result, scan_expr(arg))
+            result
+
+        case AwaitExpr(inner):
+            var result = scan_expr(inner)
+            BodyScanResult(
+                has_suspension: true,
+                called_functions: result.called_functions
+            )
+
+        case YieldExpr(value):
+            var result = BodyScanResult(has_suspension: true, called_functions: [])
+            if value.?:
+                result = merge_scans(result, scan_expr(value.unwrap()))
+            result
+
+        case BlockExpr(stmts):
+            var result = empty_scan()
+            for stmt in stmts:
+                result = merge_scans(result, scan_expr(stmt))
+            result
+
+        case ReturnExpr(value):
+            if value.?:
+                scan_expr(value.unwrap())
+            else:
+                empty_scan()
+
+        case _: empty_scan()
+
+# ============================================================================
+# Effect Environment (simplified)
+# ============================================================================
+
+class EffectEnv:
+    effects: Dict<text, EffectTag>
+
+    static fn new() -> EffectEnv:
+        EffectEnv(effects: {})
+
+    me set_effect(name: text, tag: EffectTag):
+        self.effects[name] = tag
+
+    fn get_effect(name: text) -> EffectTag:
+        if self.effects[name].?:
+            return self.effects[name]
+        EffectTag.Sync
+
+fn build_function_info(name: text, is_async: bool, body: ExprKind) -> FunctionEffectInfo:
+    val scan = scan_expr(body)
+    FunctionEffectInfo(
+        name: name,
+        is_async: is_async,
+        contains_suspension: scan.has_suspension,
+        called_functions: scan.called_functions
+    )
+
+fn run_effect_inference(functions: [FunctionEffectInfo]) -> (EffectEnv, [text]):
+    """Run simplified fixed-point effect inference.
+
+    Returns: (environment, warnings)
+    """
+    var env = EffectEnv.new()
+    var warnings: [text] = []
+
+    # Phase 1: Seed from is_async annotations and suspension
+    for func in functions:
+        if func.is_async or func.contains_suspension:
+            env.set_effect(func.name, EffectTag.Async)
+        else:
+            env.set_effect(func.name, EffectTag.Sync)
+
+    # Phase 2: Propagate (one pass for simplicity)
+    var changed = true
+    var iterations = 0
+    while changed and iterations < 10:
+        changed = false
+        iterations = iterations + 1
+        for func in functions:
+            val current = env.get_effect(func.name)
+            if current.is_sync():
+                for callee in func.called_functions:
+                    val callee_effect = env.get_effect(callee)
+                    if callee_effect.is_async():
+                        env.set_effect(func.name, EffectTag.Async)
+                        changed = true
+
+    # Phase 3: Validate - check sync-calls-async violations
+    for func in functions:
+        val tag = env.get_effect(func.name)
+        if tag.is_sync():
+            for callee in func.called_functions:
+                val callee_tag = env.get_effect(callee)
+                if callee_tag.is_async():
+                    warnings = warnings.push(
+                        "calling async '{callee}' from sync '{func.name}'"
+                    )
+
+    (env, warnings)
+
+# ============================================================================
+# Test Group 1: Body Scanning - Pure
+# ============================================================================
+
+describe "Effect Pass - Body Scanning Pure":
+    it "reports no suspension for integer literal":
+        val result = scan_expr(ExprKind.IntLit(42))
+        expect(result.has_suspension).to_equal(false)
+        expect(result.called_functions.len()).to_equal(0)
+
+    it "reports no suspension for binary expression":
+        val expr = ExprKind.BinaryOp("+", ExprKind.IntLit(1), ExprKind.IntLit(2))
+        val result = scan_expr(expr)
+        expect(result.has_suspension).to_equal(false)
+        expect(result.called_functions.len()).to_equal(0)
+
+    it "reports no suspension for string literal":
+        val result = scan_expr(ExprKind.StringLit("hello"))
+        expect(result.has_suspension).to_equal(false)
+
+    it "reports no suspension for variable reference":
+        val result = scan_expr(ExprKind.VarRef("x"))
+        expect(result.has_suspension).to_equal(false)
+
+# ============================================================================
+# Test Group 2: Body Scanning - Calls
+# ============================================================================
+
+describe "Effect Pass - Body Scanning Calls":
+    it "records called function from Call expression":
+        val expr = ExprKind.CallExpr("fetch_data", [ExprKind.StringLit("url")])
+        val result = scan_expr(expr)
+        expect(result.called_functions.len()).to_be_greater_than(0)
+        expect(result.called_functions).to_contain("fetch_data")
+
+    it "records method name from MethodCall expression":
+        val expr = ExprKind.MethodCallExpr(ExprKind.VarRef("obj"), "do_work", [])
+        val result = scan_expr(expr)
+        expect(result.called_functions).to_contain("do_work")
+
+    it "records nested function calls":
+        val inner = ExprKind.CallExpr("inner_fn", [])
+        val outer = ExprKind.CallExpr("outer_fn", [inner])
+        val result = scan_expr(outer)
+        expect(result.called_functions).to_contain("outer_fn")
+        expect(result.called_functions).to_contain("inner_fn")
+
+# ============================================================================
+# Test Group 3: Async/Await Detection
+# ============================================================================
+
+describe "Effect Pass - Async Await Detection":
+    it "detects suspension from Await expression":
+        val expr = ExprKind.AwaitExpr(ExprKind.CallExpr("fetch", []))
+        val result = scan_expr(expr)
+        expect(result.has_suspension).to_equal(true)
+
+    it "detects suspension from Yield expression":
+        val expr = ExprKind.YieldExpr(Some(ExprKind.IntLit(42)))
+        val result = scan_expr(expr)
+        expect(result.has_suspension).to_equal(true)
+
+    it "detects suspension in block with await":
+        val block = ExprKind.BlockExpr([
+            ExprKind.IntLit(1),
+            ExprKind.AwaitExpr(ExprKind.CallExpr("fetch", [])),
+            ExprKind.IntLit(2)
+        ])
+        val result = scan_expr(block)
+        expect(result.has_suspension).to_equal(true)
+
+    it "no suspension in block without await":
+        val block = ExprKind.BlockExpr([
+            ExprKind.IntLit(1),
+            ExprKind.CallExpr("compute", []),
+            ExprKind.IntLit(2)
+        ])
+        val result = scan_expr(block)
+        expect(result.has_suspension).to_equal(false)
+
+# ============================================================================
+# Test Group 4: build_function_info
+# ============================================================================
+
+describe "Effect Pass - build_function_info":
+    it "builds info for async function":
+        val info = build_function_info("fetch_user", true, ExprKind.IntLit(0))
+        expect(info.name).to_equal("fetch_user")
+        expect(info.is_async).to_equal(true)
+
+    it "builds info for sync function with no suspension":
+        val info = build_function_info("compute", false, ExprKind.IntLit(42))
+        expect(info.is_async).to_equal(false)
+        expect(info.contains_suspension).to_equal(false)
+        expect(info.called_functions.len()).to_equal(0)
+
+    it "builds info detecting suspension in body":
+        val body = ExprKind.AwaitExpr(ExprKind.CallExpr("fetch", []))
+        val info = build_function_info("handler", false, body)
+        expect(info.contains_suspension).to_equal(true)
+        expect(info.called_functions).to_contain("fetch")
+
+# ============================================================================
+# Test Group 5: Effect Inference
+# ============================================================================
+
+describe "Effect Pass - Effect Inference":
+    it "returns no warnings for empty function list":
+        val (env, warnings) = run_effect_inference([])
+        expect(warnings.len()).to_equal(0)
+
+    it "marks async function as Async":
+        val info = FunctionEffectInfo(
+            name: "fetch",
+            is_async: true,
+            contains_suspension: false,
+            called_functions: []
+        )
+        val (env, warnings) = run_effect_inference([info])
+        val fetch_tag = env.get_effect("fetch")
+        expect(fetch_tag.is_async()).to_equal(true)
+        expect(warnings.len()).to_equal(0)
+
+    it "marks sync function as Sync":
+        val info = FunctionEffectInfo(
+            name: "compute",
+            is_async: false,
+            contains_suspension: false,
+            called_functions: []
+        )
+        val (env, warnings) = run_effect_inference([info])
+        val compute_tag = env.get_effect("compute")
+        expect(compute_tag.is_sync()).to_equal(true)
+
+    it "propagates async through call chain":
+        val fetch = FunctionEffectInfo(
+            name: "fetch",
+            is_async: true,
+            contains_suspension: false,
+            called_functions: []
+        )
+        val process = FunctionEffectInfo(
+            name: "process",
+            is_async: false,
+            contains_suspension: false,
+            called_functions: ["fetch"]
+        )
+        val (env, _) = run_effect_inference([fetch, process])
+        val fetch_tag = env.get_effect("fetch")
+        val process_tag = env.get_effect("process")
+        expect(fetch_tag.is_async()).to_equal(true)
+        expect(process_tag.is_async()).to_equal(true)
+
+    it "marks function with suspension as Async":
+        val info = FunctionEffectInfo(
+            name: "generator",
+            is_async: false,
+            contains_suspension: true,
+            called_functions: []
+        )
+        val (env, _) = run_effect_inference([info])
+        val gen_tag = env.get_effect("generator")
+        expect(gen_tag.is_async()).to_equal(true)
+
+    it "no warnings when async calls async":
+        val fetch = FunctionEffectInfo(
+            name: "fetch",
+            is_async: true,
+            contains_suspension: false,
+            called_functions: []
+        )
+        val handler = FunctionEffectInfo(
+            name: "handler",
+            is_async: true,
+            contains_suspension: false,
+            called_functions: ["fetch"]
+        )
+        val (_, warnings) = run_effect_inference([fetch, handler])
+        expect(warnings.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 6: EffectTag
+# ============================================================================
+
+describe "EffectTag":
+    it "Sync is not async":
+        val tag = EffectTag.Sync
+        expect(tag.is_async()).to_equal(false)
+        expect(tag.is_sync()).to_equal(true)
+
+    it "Async is async":
+        val tag = EffectTag.Async
+        expect(tag.is_async()).to_equal(true)
+        expect(tag.is_sync()).to_equal(false)
+
+    it "converts to string":
+        expect(EffectTag.Sync.to_string()).to_equal("sync")
+        expect(EffectTag.Async.to_string()).to_equal("async")
+
+# ============================================================================
+# Test Group 7: Merge Scans
+# ============================================================================
+
+describe "Merge Scans":
+    it "merges two empty scans":
+        val a = empty_scan()
+        val b = empty_scan()
+        val result = merge_scans(a, b)
+        expect(result.has_suspension).to_equal(false)
+        expect(result.called_functions.len()).to_equal(0)
+
+    it "merges suspension from either side":
+        val a = BodyScanResult(has_suspension: true, called_functions: [])
+        val b = BodyScanResult(has_suspension: false, called_functions: ["f"])
+        val result = merge_scans(a, b)
+        expect(result.has_suspension).to_equal(true)
+        expect(result.called_functions).to_contain("f")
+
+    it "combines called functions from both sides":
+        val a = BodyScanResult(has_suspension: false, called_functions: ["a", "b"])
+        val b = BodyScanResult(has_suspension: false, called_functions: ["c"])
+        val result = merge_scans(a, b)
+        expect(result.called_functions.len()).to_equal(3)

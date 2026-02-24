@@ -14,6 +14,7 @@ use compiler.core.lexer.*
 use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
 use type_infer_types.*
+use compiler.semantics.narrowing.*
 
 impl HmInferContext:
     # =========================================================================
@@ -35,7 +36,10 @@ impl HmInferContext:
             runtime_checks: DimCheckGenerator.new(DimCheckMode.Assert),
             dim_check_mode: DimCheckMode.Assert,
             trait_solver: TraitSolver.create(),
-            function_bounds: {}
+            function_bounds: {},
+            narrowing: NarrowingContext.new(),
+            mutable_symbols: {},
+            current_function_effects: []
         )
 
     static fn with_dim_check_mode(mode: DimCheckMode) -> HmInferContext:
@@ -50,7 +54,10 @@ impl HmInferContext:
             runtime_checks: DimCheckGenerator.new(mode),
             dim_check_mode: mode,
             trait_solver: TraitSolver.create(),
-            function_bounds: {}
+            function_bounds: {},
+            narrowing: NarrowingContext.new(),
+            mutable_symbols: {},
+            current_function_effects: []
         )
 
     static fn with_builtins() -> HmInferContext:
@@ -109,6 +116,30 @@ impl HmInferContext:
             Ok(self.instantiate(scheme))
         else:
             Err(TypeInferError.Undefined(name, span))
+
+    me lookup_with_narrowing(sym_id: i64, name: text, span: Span) -> Result<HirType, TypeInferError>:
+        """Look up a name, checking narrowing context first for val bindings.
+
+        If the symbol is immutable and has a narrowing fact in the current scope,
+        returns the narrowed type. Otherwise falls back to normal lookup.
+        """
+        # Only narrow immutable (val) bindings for soundness
+        val is_mutable = self.mutable_symbols[sym_id]
+        if is_mutable.? and is_mutable.unwrap():
+            # Mutable symbol -- skip narrowing, use normal lookup
+            return self.lookup(name, span)
+
+        # Check narrowing context for a narrowed type
+        val narrowed = self.narrowing.lookup(sym_id)
+        if narrowed.?:
+            return Ok(narrowed.unwrap())
+
+        # Fall back to normal type environment lookup
+        self.lookup(name, span)
+
+    me register_symbol_mutability(sym_id: i64, is_mutable: bool):
+        """Register whether a symbol is mutable (var) or immutable (val)."""
+        self.mutable_symbols[sym_id] = is_mutable
 
     me bind_mono(name: text, ty: HirType):
         """Bind a name to a monomorphic type (no generalization)."""
