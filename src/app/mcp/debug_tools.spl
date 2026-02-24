@@ -13,7 +13,7 @@ use app.mcp.helpers.{escape_json}
 use app.io.mod (rt_debug_set_active, rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at, rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val, rt_debug_stack_trace_lines, rt_debug_local_vars, rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint, rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info, rt_debug_list_breakpoints, rt_debug_get_source_lines, rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches, rt_debug_set_variable, rt_debug_terminate, rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals)
 
 # Sub-module imports
-use app.mcp.debug_session.{SessionState, TargetType, SessionBreakpoint, DebugSession, SessionManager}
+use app.mcp.debug_session.{SessionState, TargetType, SessionBreakpoint, SessionDataBreakpoint, DebugSession, SessionManager}
 use app.mcp.debug_eval.{EvalResult, eval_expression, eval_get_type, eval_get_value}
 use app.mcp.debug_parse.{parse_var_entry, parse_stack_frame, step_mode_to_int}
 
@@ -108,6 +108,11 @@ fn schema_debug_evaluate() -> String:
     props = props + RB()
     val req = "[" + js("session_id") + "," + js("expression") + "]"
     make_tool_schema_multi("debug_evaluate", "Evaluate an expression in the context of a debug session", props, req, true, false, true)
+
+fn data_breakpoint_limit_for_target(target_type: String) -> Int:
+    if target_type == "remote" or target_type == "baremetal":
+        return 1
+    1024
 
 # --- Handler Functions ---
 
@@ -463,6 +468,40 @@ fn schema_debug_set_variable() -> String:
     val req = "[" + js("session_id") + "," + js("name") + "," + js("value") + "]"
     make_tool_schema_multi("debug_set_variable", "Set a variable value in a specific frame", props, req, false, false, false)
 
+fn schema_debug_set_data_breakpoint() -> String:
+    val p1 = jo2(jp("type", js("string")), jp("description", js("Debug session ID")))
+    val p2 = jo2(jp("type", js("string")), jp("description", js("Variable name to watch")))
+    val p3 = jo2(jp("type", js("string")), jp("description", js("Access type: write, read, readWrite")))
+    val p4 = jo2(jp("type", js("string")), jp("description", js("Optional condition expression")))
+    var props = LB()
+    props = props + jp("session_id", p1)
+    props = props + ","
+    props = props + jp("name", p2)
+    props = props + ","
+    props = props + jp("access_type", p3)
+    props = props + ","
+    props = props + jp("condition", p4)
+    props = props + RB()
+    val req = "[" + js("session_id") + "," + js("name") + "]"
+    make_tool_schema_multi("debug_set_data_breakpoint", "Set variable-change data breakpoint", props, req, false, false, false)
+
+fn schema_debug_list_data_breakpoints() -> String:
+    val p1 = jo2(jp("type", js("string")), jp("description", js("Debug session ID")))
+    val props = jo1(jp("session_id", p1))
+    val req = "[" + js("session_id") + "]"
+    make_tool_schema_multi("debug_list_data_breakpoints", "List variable-change data breakpoints", props, req, true, false, true)
+
+fn schema_debug_remove_data_breakpoint() -> String:
+    val p1 = jo2(jp("type", js("string")), jp("description", js("Debug session ID")))
+    val p2 = jo2(jp("type", js("string")), jp("description", js("Data breakpoint ID")))
+    var props = LB()
+    props = props + jp("session_id", p1)
+    props = props + ","
+    props = props + jp("breakpoint_id", p2)
+    props = props + RB()
+    val req = "[" + js("session_id") + "," + js("breakpoint_id") + "]"
+    make_tool_schema_multi("debug_remove_data_breakpoint", "Remove variable-change data breakpoint", props, req, false, true, true)
+
 fn schema_debug_terminate() -> String:
     val p1 = jo2(jp("type", js("string")), jp("description", js("Debug session ID")))
     val props = jo1(jp("session_id", p1))
@@ -615,6 +654,7 @@ fn handle_debug_set_variable(id: String, body: String, mgr: SessionManager) -> S
     val idx = mgr.find_session(session_id)
     if idx < 0:
         return make_error_response(id, -32602, "Session not found: " + session_id)
+    var session = mgr.sessions[idx]
     val frame_str = extract_nested_string(body, "arguments", "frame_index")
     var frame_idx = 0
     if frame_str != "":
@@ -623,6 +663,26 @@ fn handle_debug_set_variable(id: String, body: String, mgr: SessionManager) -> S
             Ok(v): frame_idx = v
             Err(_): pass
     val ok = rt_debug_set_variable(var_name, var_value, frame_idx)
+    var hit_ids = "["
+    var first_hit = true
+    var hit_count = 0
+    var updated_data_bps: [SessionDataBreakpoint] = []
+    for dbp in session.data_breakpoints:
+        var nd = dbp
+        if dbp.enabled and dbp.name == var_name:
+            val access = dbp.access_type
+            if access == "" or access == "write" or access == "readWrite" or access == "readwrite":
+                if dbp.last_value != var_value:
+                    nd.last_value = var_value
+                    if not first_hit:
+                        hit_ids = hit_ids + ","
+                    first_hit = false
+                    hit_ids = hit_ids + dbp.id.to_string()
+                    hit_count = hit_count + 1
+        updated_data_bps = updated_data_bps + [nd]
+    hit_ids = hit_ids + "]"
+    session.data_breakpoints = updated_data_bps
+    mgr.sessions[idx] = session
     var result_json = LB()
     result_json = result_json + jp("name", js(escape_json(var_name)))
     result_json = result_json + "," + jp("value", js(escape_json(var_value)))
@@ -631,6 +691,101 @@ fn handle_debug_set_variable(id: String, body: String, mgr: SessionManager) -> S
     if ok == 0:
         ok_str = "false"
     result_json = result_json + "," + jp("success", ok_str)
+    var hit_str = "false"
+    if hit_count > 0:
+        hit_str = "true"
+    result_json = result_json + "," + jp("data_breakpoint_hit", hit_str)
+    result_json = result_json + "," + jp("hit_breakpoint_ids", hit_ids)
+    result_json = result_json + RB()
+    make_tool_result(id, result_json)
+
+fn handle_debug_set_data_breakpoint(id: String, body: String, mgr: SessionManager) -> String:
+    val session_id = extract_nested_string(body, "arguments", "session_id")
+    if session_id == "":
+        return make_error_response(id, -32602, "Missing required parameter: session_id")
+    val name = extract_nested_string(body, "arguments", "name")
+    if name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+    val idx = mgr.find_session(session_id)
+    if idx < 0:
+        return make_error_response(id, -32602, "Session not found: " + session_id)
+
+    val session = mgr.sessions[idx]
+    val limit = data_breakpoint_limit_for_target(session.target_type)
+    if session.data_breakpoints.len() >= limit:
+        return make_error_response(id, -32602, "Data breakpoint capacity reached for target " + session.target_type + " (limit=" + limit.to_string() + ")")
+
+    var access_type = extract_nested_string(body, "arguments", "access_type")
+    if access_type == "":
+        access_type = "write"
+    if access_type != "write" and access_type != "read" and access_type != "readWrite":
+        return make_error_response(id, -32602, "Invalid access_type: " + access_type)
+    val condition = extract_nested_string(body, "arguments", "condition")
+
+    val bp_id = mgr.add_data_breakpoint(session_id, name, access_type, condition)
+    if bp_id == "":
+        return make_error_response(id, -32602, "Session not found: " + session_id)
+
+    var result_json = LB()
+    result_json = result_json + jp("breakpoint_id", bp_id)
+    result_json = result_json + "," + jp("session_id", js(session_id))
+    result_json = result_json + "," + jp("name", js(name))
+    result_json = result_json + "," + jp("access_type", js(access_type))
+    result_json = result_json + "," + jp("verified", "true")
+    result_json = result_json + "," + jp("limit", limit.to_string())
+    result_json = result_json + RB()
+    make_tool_result(id, result_json)
+
+fn handle_debug_list_data_breakpoints(id: String, body: String, mgr: SessionManager) -> String:
+    val session_id = extract_nested_string(body, "arguments", "session_id")
+    if session_id == "":
+        return make_error_response(id, -32602, "Missing required parameter: session_id")
+    val idx = mgr.find_session(session_id)
+    if idx < 0:
+        return make_error_response(id, -32602, "Session not found: " + session_id)
+    val session = mgr.sessions[idx]
+
+    var arr = "["
+    var first = true
+    for dbp in session.data_breakpoints:
+        if not first:
+            arr = arr + ","
+        first = false
+        var obj = LB()
+        obj = obj + jp("id", dbp.id.to_string())
+        obj = obj + "," + jp("name", js(dbp.name))
+        obj = obj + "," + jp("access_type", js(dbp.access_type))
+        var enabled_str = "false"
+        if dbp.enabled:
+            enabled_str = "true"
+        obj = obj + "," + jp("enabled", enabled_str)
+        obj = obj + "," + jp("last_value", js(dbp.last_value))
+        obj = obj + RB()
+        arr = arr + obj
+    arr = arr + "]"
+
+    var result_json = LB()
+    result_json = result_json + jp("session_id", js(session_id))
+    result_json = result_json + "," + jp("breakpoints", arr)
+    result_json = result_json + "," + jp("count", session.data_breakpoints.len().to_string())
+    result_json = result_json + RB()
+    make_tool_result(id, result_json)
+
+fn handle_debug_remove_data_breakpoint(id: String, body: String, mgr: SessionManager) -> String:
+    val session_id = extract_nested_string(body, "arguments", "session_id")
+    if session_id == "":
+        return make_error_response(id, -32602, "Missing required parameter: session_id")
+    val bp_id = extract_nested_string(body, "arguments", "breakpoint_id")
+    if bp_id == "":
+        return make_error_response(id, -32602, "Missing required parameter: breakpoint_id")
+    val removed = mgr.remove_data_breakpoint(session_id, bp_id)
+    if not removed:
+        return make_error_response(id, -32602, "Data breakpoint not found: " + bp_id)
+
+    var result_json = LB()
+    result_json = result_json + jp("removed", js(bp_id))
+    result_json = result_json + "," + jp("status", js("ok"))
+    result_json = result_json + "," + jp("kind", js("data_breakpoint"))
     result_json = result_json + RB()
     make_tool_result(id, result_json)
 
@@ -652,7 +807,7 @@ fn handle_debug_terminate(id: String, body: String, mgr: SessionManager) -> Stri
 # --- Exports ---
 
 # Re-export from sub-modules
-export SessionState, TargetType, SessionBreakpoint, DebugSession, SessionManager
+export SessionState, TargetType, SessionBreakpoint, SessionDataBreakpoint, DebugSession, SessionManager
 export EvalResult, eval_expression, eval_get_type, eval_get_value
 export parse_var_entry, parse_stack_frame, step_mode_to_int
 
@@ -663,7 +818,7 @@ export schema_debug_continue, schema_debug_step
 export schema_debug_get_variables, schema_debug_stack_trace, schema_debug_evaluate
 export schema_debug_set_function_breakpoint, schema_debug_enable_breakpoint
 export schema_debug_get_source, schema_debug_watch
-export schema_debug_set_variable, schema_debug_terminate
+export schema_debug_set_variable, schema_debug_set_data_breakpoint, schema_debug_list_data_breakpoints, schema_debug_remove_data_breakpoint, schema_debug_terminate
 
 # Own handler functions
 export handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session
@@ -672,4 +827,4 @@ export handle_debug_continue, handle_debug_step
 export handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate
 export handle_debug_set_function_breakpoint, handle_debug_enable_breakpoint
 export handle_debug_get_source, handle_debug_watch
-export handle_debug_set_variable, handle_debug_terminate
+export handle_debug_set_variable, handle_debug_set_data_breakpoint, handle_debug_list_data_breakpoints, handle_debug_remove_data_breakpoint, handle_debug_terminate

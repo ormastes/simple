@@ -234,3 +234,12 @@ Implementation note:
 - `src/rust/compiler/src/codegen/runtime_ffi.rs` - Added 14 debug FFI specs
 - `src/rust/compiler/src/interpreter/node_exec.rs` - Debug hook in exec_node
 - `src/app/mcp/main.spl` - Registered 10 new tools (5 debug + 5 edit)
+
+## Variable-Change Breakpoints (2026-02-24)
+
+- Added MCP tools: `debug_set_data_breakpoint`, `debug_list_data_breakpoints`, `debug_remove_data_breakpoint`.
+- Added session-level data breakpoint tracking and trigger reporting in `debug_set_variable`.
+- Capacity policy:
+  - host/interpreter: 1024 (software watchpoints)
+  - bare-metal/remote: 1 (conservative hardware slot sharing assumption)
+- Added DAP support for `dataBreakpointInfo`, `setDataBreakpoints`, and `setVariable` trigger path.
