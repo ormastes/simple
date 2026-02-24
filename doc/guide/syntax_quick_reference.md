@@ -340,42 +340,68 @@ val city = user?.address?.city ?? "N/A"
 val display = user?.profile?.display_name ?? user?.name ?? "Anonymous"
 ```
 
-### Existence Check (`.?`)
+### Existence Check (`.?`) — Returns `T?`
 
-The `.?` operator checks if a value is **present** (not nil AND not empty):
+The `.?` operator checks if a value is **present** (not nil AND not empty).
+It returns `T?` — the value itself if present, `nil` if absent. This enables
+pattern binding with `if val`:
 
 ```simple
-# Option types
-opt.?                         # true if Some, false if None
+# Returns T? (value if present, nil if absent)
+opt.?                         # T?:    pass-through (already optional)
+list.?                        # [T]?:  Some(list) if non-empty, nil if []
+dict.?                        # {K:V}?: Some(dict) if non-empty, nil if {}
+str.?                         # text?: Some(str) if non-empty, nil if ""
+num.?                         # i64?:  Some(num) — primitives always present
+flag.?                        # bool?: Some(flag) — primitives always present
 
-# Collections
-list.?                        # true if non-empty
-dict.?                        # true if non-empty
-set.?                         # true if non-empty
+# Pattern binding — the key benefit
+if val name = input.?:
+    process(name)             # bound, guaranteed non-empty
 
-# Strings
-str.?                         # true if non-empty string
+# Nil coalescing — one-liner defaults
+val host = config_host.? ?? env_host.? ?? "localhost"
 
-# Primitives (always true - they are values)
-num.?                         # true (0 is still a value)
-flag.?                        # true (false is still a value)
+# Still works in boolean context (truthiness of T?)
+if str.?:                     # truthy if non-nil, non-empty
+    use(str)
+```
 
-# Negation patterns
-not opt.?                     # true if None (replaces is_none())
-not list.?                    # true if empty (replaces is_empty())
+### `presence` / `presence_trimmed` — Text Presence Functions
+
+Named alternatives to `.?` for text, providing readable presence checks:
+
+```simple
+# Returns text? — value if non-empty, nil if empty
+presence("hello")             # "hello" (text?)
+presence("")                  # nil
+
+# Returns text? — value if non-blank, nil if empty/whitespace
+presence_trimmed("hello")     # "hello" (text?)
+presence_trimmed("  ")        # nil
+
+# Pattern binding
+if val name = input.presence:
+    process(name)
+
+# Nil coalescing
+val display = input.presence ?? "Anonymous"
+
+# Trimmed variant — skips whitespace-only strings
+val query = user_input.presence_trimmed ?? "default search"
 ```
 
 ### Result with `.?`
 
 ```simple
 # Result.ok returns Option, Result.err returns Option
-result.ok.?                   # true if Ok (replaces is_ok())
-result.err.?                  # true if Err (replaces is_err())
+result.ok.?                   # T? if Ok (replaces is_ok())
+result.err.?                  # E? if Err (replaces is_err())
 
-# Example
+# Example: pattern binding with Result
 val r: Result<i32, text> = Ok(42)
-if r.ok.?:
-    print "Success: {r!}"
+if val value = r.ok.?:
+    print "Success: {value}"
 ```
 
 ### No-Paren Method Calls
@@ -400,15 +426,17 @@ text.trim.upper.split(",")    # split needs parens (has arg)
 ### Combining `.?` with No-Paren
 
 ```simple
-# Check if first element exists
-list.first.?                  # true if list has first element
+# Extract first element if present
+if val first = list.first.?:
+    process(first)
 
-# Check if trimmed string is non-empty
-str.trim.?                    # true if trimmed result is non-empty
+# Extract trimmed string if non-empty
+if val trimmed = str.trim.?:
+    search(trimmed)
 
-# Full pattern
-if user?.profile?.tags.?:
-    for tag in user!.profile!.tags:
+# Full pattern with optional chaining + existence + binding
+if val tags = user?.profile?.tags.?:
+    for tag in tags:
         print tag.upper.trim
 ```
 
@@ -416,8 +444,11 @@ if user?.profile?.tags.?:
 
 | Verbose | Concise | Notes |
 |---------|---------|-------|
-| `opt.is_some()` | `opt.?` | Existence check |
+| `if opt.is_some(): use(opt!)` | `if val x = opt.?: use(x)` | Bind + use |
 | `opt.is_none()` | `not opt.?` | Negated existence |
+| `if s.not_empty: use(s)` | `if val s = s.?: use(s)` | Bind non-empty text |
+| `if s.not_empty: use(s) else: use(d)` | `val s = s.presence ?? d` | With fallback |
+| `s.not_empty` (bool) | `s.presence` (text?) | Value-returning check |
 | `result.is_ok()` | `result.ok.?` | `ok` returns Option |
 | `result.is_err()` | `result.err.?` | `err` returns Option |
 | `list.is_empty()` | `not list.?` | Empty = not present |

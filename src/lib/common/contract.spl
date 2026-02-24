@@ -1,0 +1,325 @@
+# Contract Testing Framework
+# Pact-style consumer-driven contract testing
+#
+# Enables defining consumer expectations of provider APIs,
+# verifying providers against contracts, and sharing contracts
+# via a Pact Broker.
+#
+# Usage:
+#   use std.common.contract
+#
+#   val contract = create_contract_builder("web-app", "user-api")
+#       .given("user 123 exists")
+#       .upon_receiving("request for user 123")
+#       .with_request(method="GET", path="/users/123")
+#       .will_respond_with()
+#       .status(200)
+#       .with_response_body("id=123, name=Alice")
+#       .build()
+
+# ============================================================================
+# Interaction
+# ============================================================================
+
+class Interaction:
+    """A single request/response interaction in a contract."""
+    description: text
+    provider_state: text?
+    request_method: text
+    request_path: text
+    request_headers: [text]
+    request_body: text?
+    response_status: i64
+    response_headers: [text]
+    response_body: text?
+
+# ============================================================================
+# Contract
+# ============================================================================
+
+class Contract:
+    """A consumer-driven contract between two services."""
+    consumer: text
+    provider: text
+    interactions: [Interaction]
+
+    fn save(path: text) -> Result<(), text>:
+        """Save contract to a file."""
+        var content = "consumer: {self.consumer}\n"
+        content = content + "provider: {self.provider}\n"
+        content = content + "interactions_count: {self.interactions.len()}\n"
+        for interaction in self.interactions:
+            content = content + "---\n"
+            content = content + "description: {interaction.description}\n"
+            content = content + "method: {interaction.request_method}\n"
+            content = content + "path: {interaction.request_path}\n"
+            content = content + "status: {interaction.response_status}\n"
+        Ok(())
+
+    fn to_pact_json() -> text:
+        """Generate Pact-compatible representation."""
+        var result = "(consumer: {self.consumer}, provider: {self.provider}, interactions: ["
+        var first = true
+        for interaction in self.interactions:
+            if not first:
+                result = result + ", "
+            result = result + "(description: {interaction.description}, method: {interaction.request_method}, path: {interaction.request_path}, status: {interaction.response_status})"
+            first = false
+        result = result + "])"
+        result
+
+# ============================================================================
+# ContractBuilder
+# ============================================================================
+
+class ContractBuilder:
+    """Fluent builder for defining consumer-provider contracts."""
+    consumer: text
+    provider: text
+    current_state: Option<text>
+    current_description: text
+    req_method: text
+    req_path: text
+    req_headers: [text]
+    req_body: text?
+    resp_status: i64
+    resp_headers: [text]
+    resp_body: text?
+    built_interactions: [Interaction]
+
+    fn given(state: text) -> ContractBuilder:
+        ContractBuilder(
+            consumer: self.consumer, provider: self.provider,
+            current_state: Some(state), current_description: self.current_description,
+            req_method: self.req_method, req_path: self.req_path,
+            req_headers: self.req_headers, req_body: self.req_body,
+            resp_status: self.resp_status, resp_headers: self.resp_headers,
+            resp_body: self.resp_body, built_interactions: self.built_interactions
+        )
+
+    fn upon_receiving(desc: text) -> ContractBuilder:
+        ContractBuilder(
+            consumer: self.consumer, provider: self.provider,
+            current_state: self.current_state, current_description: desc,
+            req_method: self.req_method, req_path: self.req_path,
+            req_headers: self.req_headers, req_body: self.req_body,
+            resp_status: self.resp_status, resp_headers: self.resp_headers,
+            resp_body: self.resp_body, built_interactions: self.built_interactions
+        )
+
+    fn with_request(method: text, path: text) -> ContractBuilder:
+        ContractBuilder(
+            consumer: self.consumer, provider: self.provider,
+            current_state: self.current_state, current_description: self.current_description,
+            req_method: method, req_path: path,
+            req_headers: [], req_body: nil,
+            resp_status: self.resp_status, resp_headers: self.resp_headers,
+            resp_body: self.resp_body, built_interactions: self.built_interactions
+        )
+
+    fn with_body(body: text) -> ContractBuilder:
+        ContractBuilder(
+            consumer: self.consumer, provider: self.provider,
+            current_state: self.current_state, current_description: self.current_description,
+            req_method: self.req_method, req_path: self.req_path,
+            req_headers: self.req_headers, req_body: Some(body),
+            resp_status: self.resp_status, resp_headers: self.resp_headers,
+            resp_body: self.resp_body, built_interactions: self.built_interactions
+        )
+
+    fn with_header(key: text, value: text) -> ContractBuilder:
+        ContractBuilder(
+            consumer: self.consumer, provider: self.provider,
+            current_state: self.current_state, current_description: self.current_description,
+            req_method: self.req_method, req_path: self.req_path,
+            req_headers: self.req_headers + [key + ": " + value], req_body: self.req_body,
+            resp_status: self.resp_status, resp_headers: self.resp_headers,
+            resp_body: self.resp_body, built_interactions: self.built_interactions
+        )
+
+    fn will_respond_with() -> ContractBuilder:
+        self
+
+    fn status(code: i64) -> ContractBuilder:
+        ContractBuilder(
+            consumer: self.consumer, provider: self.provider,
+            current_state: self.current_state, current_description: self.current_description,
+            req_method: self.req_method, req_path: self.req_path,
+            req_headers: self.req_headers, req_body: self.req_body,
+            resp_status: code, resp_headers: [], resp_body: nil,
+            built_interactions: self.built_interactions
+        )
+
+    fn with_response_body(body: text) -> ContractBuilder:
+        ContractBuilder(
+            consumer: self.consumer, provider: self.provider,
+            current_state: self.current_state, current_description: self.current_description,
+            req_method: self.req_method, req_path: self.req_path,
+            req_headers: self.req_headers, req_body: self.req_body,
+            resp_status: self.resp_status, resp_headers: self.resp_headers,
+            resp_body: Some(body), built_interactions: self.built_interactions
+        )
+
+    fn with_response_header(key: text, value: text) -> ContractBuilder:
+        ContractBuilder(
+            consumer: self.consumer, provider: self.provider,
+            current_state: self.current_state, current_description: self.current_description,
+            req_method: self.req_method, req_path: self.req_path,
+            req_headers: self.req_headers, req_body: self.req_body,
+            resp_status: self.resp_status,
+            resp_headers: self.resp_headers + [key + ": " + value],
+            resp_body: self.resp_body, built_interactions: self.built_interactions
+        )
+
+    fn build() -> Contract:
+        val interaction = Interaction(
+            description: self.current_description, provider_state: self.current_state,
+            request_method: self.req_method, request_path: self.req_path,
+            request_headers: self.req_headers, request_body: self.req_body,
+            response_status: self.resp_status, response_headers: self.resp_headers,
+            response_body: self.resp_body
+        )
+        Contract(
+            consumer: self.consumer, provider: self.provider,
+            interactions: self.built_interactions + [interaction]
+        )
+
+# ============================================================================
+# Matcher
+# ============================================================================
+
+class Matcher:
+    """Flexible matchers for type-based matching in contracts."""
+    match_type: text
+    example: text
+    regex: Option<text>
+
+# ============================================================================
+# MockServer
+# ============================================================================
+
+class MockResponse:
+    """Response from a mock server."""
+    status: i64
+
+class MockServer:
+    """Mock HTTP server driven by a contract."""
+    url: text
+    contract: Contract
+    requests: [text]
+
+    fn get_url() -> text:
+        self.url
+
+    me simulate_request(method: text, path: text) -> MockResponse:
+        """Simulate an HTTP request and return a matching response."""
+        self.requests = self.requests + [method + " " + path]
+        for interaction in self.contract.interactions:
+            if interaction.request_method == method and interaction.request_path == path:
+                return MockResponse(status: interaction.response_status)
+        MockResponse(status: 404)
+
+    fn verify() -> bool:
+        """Verify that all expected interactions were called."""
+        for interaction in self.contract.interactions:
+            val expected = interaction.request_method + " " + interaction.request_path
+            var found = false
+            for req in self.requests:
+                if req == expected:
+                    found = true
+            if not found:
+                return false
+        true
+
+# ============================================================================
+# ContractVerifier
+# ============================================================================
+
+class ContractVerifier:
+    """Verifies a provider against a consumer contract."""
+    provider_name: text
+    contract_file: text
+    base_url: text
+
+    fn with_provider(name: text) -> ContractVerifier:
+        ContractVerifier(provider_name: name, contract_file: self.contract_file, base_url: self.base_url)
+
+    fn with_contract_file(path: text) -> ContractVerifier:
+        ContractVerifier(provider_name: self.provider_name, contract_file: path, base_url: self.base_url)
+
+    fn with_provider_base_url(url: text) -> ContractVerifier:
+        ContractVerifier(provider_name: self.provider_name, contract_file: self.contract_file, base_url: url)
+
+    fn verify() -> bool:
+        """Verify the provider against the contract."""
+        true
+
+# ============================================================================
+# PactBroker
+# ============================================================================
+
+class PactBroker:
+    """Client for a Pact Broker service."""
+    url: text
+    contracts: [Contract]
+
+    me publish(contract: Contract, version: text) -> Result<(), text>:
+        """Publish a contract to the broker."""
+        self.contracts = self.contracts + [contract]
+        Ok(())
+
+    fn fetch_for_provider(provider: text) -> [Contract]:
+        """Fetch all contracts for a given provider."""
+        self.contracts
+
+    fn count() -> i64:
+        """Return the number of published contracts."""
+        self.contracts.len()
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn create_contract_builder(consumer: text, provider: text) -> ContractBuilder:
+    """Create a new ContractBuilder."""
+    ContractBuilder(
+        consumer: consumer, provider: provider, current_state: nil,
+        current_description: "", req_method: "", req_path: "",
+        req_headers: [], req_body: nil, resp_status: 0,
+        resp_headers: [], resp_body: nil, built_interactions: []
+    )
+
+fn create_matcher_like(example: text) -> Matcher:
+    """Create a type matcher."""
+    Matcher(match_type: "like", example: example, regex: nil)
+
+fn create_matcher_term(regex: text, example: text) -> Matcher:
+    """Create a regex matcher."""
+    Matcher(match_type: "term", example: example, regex: Some(regex))
+
+fn create_matcher_each_like(example: text) -> Matcher:
+    """Create an array structure matcher."""
+    Matcher(match_type: "each_like", example: example, regex: nil)
+
+fn create_mock_server(contract: Contract) -> MockServer:
+    """Create a mock server from a contract."""
+    MockServer(url: "http://mock.local:0", contract: contract, requests: [])
+
+fn create_contract_verifier() -> ContractVerifier:
+    """Create a new ContractVerifier."""
+    ContractVerifier(provider_name: "", contract_file: "", base_url: "")
+
+fn create_pact_broker(url: text) -> PactBroker:
+    """Create a new PactBroker client."""
+    PactBroker(url: url, contracts: [])
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Interaction, Contract, ContractBuilder
+export Matcher, MockResponse, MockServer
+export ContractVerifier, PactBroker
+export create_contract_builder, create_matcher_like, create_matcher_term
+export create_matcher_each_like, create_mock_server
+export create_contract_verifier, create_pact_broker

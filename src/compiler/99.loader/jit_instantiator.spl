@@ -1,0 +1,142 @@
+# Compatibility jit instantiator surface for interpreter/test runner.
+
+class JitStats:
+    cached_count: i64
+    compile_count: i64
+
+class MappedRecord:
+    owner_id: text
+    address: i64
+
+var _g_symbols: [text] = []
+var _g_owners: [text] = []
+var _g_addresses: [i64] = []
+
+fn _global_set(symbol: text, owner_id: text, address: i64):
+    var idx = -1
+    for i in range(0, _g_symbols.len()):
+        if _g_symbols[i] == symbol:
+            idx = i
+    if idx >= 0:
+        _g_owners[idx] = owner_id
+        _g_addresses[idx] = address
+    else:
+        _g_symbols = _g_symbols + [symbol]
+        _g_owners = _g_owners + [owner_id]
+        _g_addresses = _g_addresses + [address]
+
+fn _global_get(symbol: text):
+    for i in range(0, _g_symbols.len()):
+        if _g_symbols[i] == symbol:
+            return Some(MappedRecord(owner_id: _g_owners[i], address: _g_addresses[i]))
+    nil
+
+fn _global_remove(symbol: text):
+    var keep_s: [text] = []
+    var keep_o: [text] = []
+    var keep_a: [i64] = []
+    for i in range(0, _g_symbols.len()):
+        if _g_symbols[i] != symbol:
+            keep_s = keep_s + [_g_symbols[i]]
+            keep_o = keep_o + [_g_owners[i]]
+            keep_a = keep_a + [_g_addresses[i]]
+    _g_symbols = keep_s
+    _g_owners = keep_o
+    _g_addresses = keep_a
+
+class JitExecMapper:
+    records: Dict
+    symbols: [text]
+    owners: [text]
+    addresses: [i64]
+
+    me set_record(symbol: text, owner_id: text, address: i64):
+        self.records[symbol] = MappedRecord(owner_id: owner_id, address: address)
+        var found = -1
+        for i in range(0, self.symbols.len()):
+            if self.symbols[i] == symbol:
+                found = i
+        if found >= 0:
+            self.owners[found] = owner_id
+            self.addresses[found] = address
+        else:
+            self.symbols = self.symbols + [symbol]
+            self.owners = self.owners + [owner_id]
+            self.addresses = self.addresses + [address]
+
+    fn lookup(symbol: text):
+        val g = _global_get(symbol)
+        if g.?:
+            return g
+        for i in range(0, self.symbols.len()):
+            if self.symbols[i] == symbol:
+                return Some(MappedRecord(owner_id: self.owners[i], address: self.addresses[i]))
+        if self.records.contains_key(symbol):
+            return Some(self.records[symbol])
+        nil
+
+    fn get_record(symbol: text):
+        self.lookup(symbol)
+
+class JitMapper:
+    fn map(exec_mapper: JitExecMapper, owner_id: text, symbol: text, code: [u8]):
+        _global_set(symbol, owner_id, 1)
+        if not exec_mapper.records.contains_key(symbol):
+            exec_mapper.set_record(symbol, owner_id, 1)
+        Ok(1)
+
+class JitInstantiator:
+    jit_cache: Dict
+    exec_mapper: JitExecMapper
+    jit_mapper: JitMapper
+    loaded_metadata: Dict
+
+    me set_cache_for_test(name: text, code: [u8], addr: i64):
+        var owner = "__jit__"
+        val rec = self.exec_mapper.lookup(name)
+        if rec.?:
+            owner = rec.unwrap().owner_id
+        self.jit_cache[name] = {"code": code, "address": addr, "owner": owner}
+
+    me drop_cached_symbol(name: text):
+        if self.jit_cache.contains_key(name):
+            self.jit_cache = self.jit_cache.remove(name)
+        _global_remove(name)
+        if self.exec_mapper.records.contains_key(name):
+            self.exec_mapper.records = self.exec_mapper.records.remove(name)
+        var kept_syms: [text] = []
+        var kept_owners: [text] = []
+        var kept_addrs: [i64] = []
+        for i in range(0, self.exec_mapper.symbols.len()):
+            if self.exec_mapper.symbols[i] != name:
+                kept_syms = kept_syms + [self.exec_mapper.symbols[i]]
+                kept_owners = kept_owners + [self.exec_mapper.owners[i]]
+                kept_addrs = kept_addrs + [self.exec_mapper.addresses[i]]
+        self.exec_mapper.symbols = kept_syms
+        self.exec_mapper.owners = kept_owners
+        self.exec_mapper.addresses = kept_addrs
+
+    fn try_jit_instantiate(name: text):
+        if self.jit_cache.contains_key(name):
+            val rec = self.jit_cache[name]
+            val code = rec["code"]
+            val addr = rec["address"]
+            return Success(code, name, Some(addr))
+        NotFound(name)
+
+fn JitInstantiator__new(config: Dict) -> JitInstantiator:
+    JitInstantiator(
+        jit_cache: {},
+        exec_mapper: JitExecMapper(records: {}, symbols: [], owners: [], addresses: []),
+        jit_mapper: JitMapper(),
+        loaded_metadata: {}
+    )
+
+fn jitinstantiator_new(config: Dict) -> JitInstantiator:
+    JitInstantiator__new(config)
+
+fn jitinstantiator_stats(self: JitInstantiator) -> JitStats:
+    JitStats(cached_count: self.jit_cache.len() as i64, compile_count: 0)
+
+export JitStats, MappedRecord, JitExecMapper, JitMapper, JitInstantiator
+export JitInstantiator__new, jitinstantiator_new, jitinstantiator_stats

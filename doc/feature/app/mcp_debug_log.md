@@ -34,6 +34,10 @@
 - returns text tree by default
 - returns JSON tree when format=json
 
+### Integration Regression (stdio)
+
+- dedicated stdio regression verifies `tools/call -> debug_log_tree(format=json)` returns JSON tree without session drop
+
 ### When handle_debug_log_status
 
 - returns current status
@@ -45,5 +49,4 @@
 - handles /tree query
 - handles /text query
 - returns error for unknown query
-
 

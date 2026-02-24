@@ -1,254 +1,259 @@
-# Core Interpreter — JIT Engine
-#
-# Seed-compilable JIT compilation support for the core interpreter.
-# Tracks function call counts and delegates to execution manager
-# when hot functions exceed the compilation threshold.
-#
-# Uses chained hash maps (no generics, no Dict<>) for seed compatibility.
-# Call tracking and compiled status checks are O(1) average via hashing.
-#
-# Architecture:
-#   1. Tree-walk all functions initially (cold path)
-#   2. Count calls per function (hash map lookup)
-#   3. When threshold reached, JIT compile via ExecutionManager SFFI
-#   4. Subsequent calls use native code (hot path)
-#   5. Fall back to tree-walk if JIT fails
+# Core Interpreter — JIT Engine (runtime-compatible, file-backed state)
 
-use app.io.jit_ffi.{jit_available}
-use app.io.jit_ffi.{rt_exec_manager_create, rt_exec_manager_compile, rt_exec_manager_execute, rt_exec_manager_has_function, rt_exec_manager_cleanup}
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 
-# ===== JIT State (hash maps for O(1) lookup) =====
+class JitState:
+    threshold: i64
+    enabled: i64
+    epoch: i64
+    call_keys: [text]
+    call_vals: [i64]
+    compiled: [text]
+    used_keys: [text]
+    used_vals: [i64]
 
-# Call tracking hash map (function name → call count)
-var jcc_keys: [text] = []
-var jcc_vals: [i64] = []
-var jcc_buckets: [i64] = []
-var jcc_nexts: [i64] = []
+fn _state_path() -> text:
+    "/tmp/simple_jit_state.sdn"
 
-# Compiled status hash map (function name → 1 if compiled)
-var jcn_keys: [text] = []
-var jcn_vals: [i64] = []
-var jcn_buckets: [i64] = []
-var jcn_nexts: [i64] = []
+fn _find_idx(keys: [text], key: text) -> i64:
+    for i in range(0, keys.len()):
+        if keys[i] == key:
+            return i
+    -1
 
-var jit_threshold: i64 = 10
-var jit_handle: i64 = 0
-var jit_verbose: i64 = 0
-var jit_enabled: i64 = 0
+fn _split_nonempty(s: text, sep: text) -> [text]:
+    if s == "":
+        return []
+    val parts = s.split(sep)
+    var out: [text] = []
+    for p in parts:
+        if p != "":
+            out = out + [p]
+    out
 
-# Sweep tracking hash map (function name -> last-used epoch)
-var jse_keys: [text] = []
-var jse_vals: [i64] = []
-var jse_buckets: [i64] = []
-var jse_nexts: [i64] = []
-var jit_epoch: i64 = 0
+fn _parse_pairs(line: text) -> ([text], [i64]):
+    var keys: [text] = []
+    var vals: [i64] = []
+    val items = _split_nonempty(line, ";")
+    for item in items:
+        val eq = item.index_of("=") ?? -1
+        if eq > 0:
+            val k = item.substring(0, eq)
+            val v = item.substring(eq + 1).to_int()
+            keys = keys + [k]
+            vals = vals + [v]
+    (keys, vals)
 
-# ===== JIT Initialization =====
+fn _encode_pairs(keys: [text], vals: [i64]) -> text:
+    var out = ""
+    for i in range(0, keys.len()):
+        if i > 0:
+            out = out + ";"
+        out = out + keys[i] + "=" + vals[i].to_string()
+    out
+
+fn _load_state() -> JitState:
+    val raw = rt_file_read_text(_state_path()) ?? ""
+    if raw == "":
+        return JitState(
+            threshold: 10,
+            enabled: 0,
+            epoch: 0,
+            call_keys: [],
+            call_vals: [],
+            compiled: [],
+            used_keys: [],
+            used_vals: []
+        )
+
+    val lines = raw.split("\n")
+    var threshold: i64 = 10
+    var enabled: i64 = 0
+    var epoch: i64 = 0
+    var calls_line = ""
+    var compiled_line = ""
+    var used_line = ""
+
+    if lines.len() > 0 and lines[0] != "":
+        threshold = lines[0].to_int()
+    if lines.len() > 1 and lines[1] != "":
+        enabled = lines[1].to_int()
+    if lines.len() > 2 and lines[2] != "":
+        epoch = lines[2].to_int()
+    if lines.len() > 3:
+        calls_line = lines[3]
+    if lines.len() > 4:
+        compiled_line = lines[4]
+    if lines.len() > 5:
+        used_line = lines[5]
+
+    val call_parsed = _parse_pairs(calls_line)
+    val used_parsed = _parse_pairs(used_line)
+
+    JitState(
+        threshold: threshold,
+        enabled: enabled,
+        epoch: epoch,
+        call_keys: call_parsed[0],
+        call_vals: call_parsed[1],
+        compiled: _split_nonempty(compiled_line, ","),
+        used_keys: used_parsed[0],
+        used_vals: used_parsed[1]
+    )
+
+fn _save_state(s: JitState):
+    val content = s.threshold.to_string() + "\n" +
+        s.enabled.to_string() + "\n" +
+        s.epoch.to_string() + "\n" +
+        _encode_pairs(s.call_keys, s.call_vals) + "\n" +
+        s.compiled.join(",") + "\n" +
+        _encode_pairs(s.used_keys, s.used_vals)
+    val ok = rt_file_write_text(_state_path(), content)
+    ok
 
 fn jit_init(threshold: i64, verbose: i64):
-    jit_threshold = threshold
-    jit_verbose = verbose
-    jcc_keys = []
-    jcc_vals = []
-    jcc_buckets = hm_make_global_buckets()
-    jcc_nexts = []
-    jcn_keys = []
-    jcn_vals = []
-    jcn_buckets = hm_make_global_buckets()
-    jcn_nexts = []
-    jse_keys = []
-    jse_vals = []
-    jse_buckets = hm_make_global_buckets()
-    jse_nexts = []
-    jit_epoch = 0
-    jit_handle = 0
+    var enabled: i64 = 0
     if threshold < 999999:
-        jit_enabled = 1
-    else:
-        jit_enabled = 0
+        enabled = 1
+    val ok = _save_state(JitState(
+        threshold: threshold,
+        enabled: enabled,
+        epoch: 0,
+        call_keys: [],
+        call_vals: [],
+        compiled: [],
+        used_keys: [],
+        used_vals: []
+    ))
+    if verbose == 1:
+        print "jit_init save={ok}"
 
 fn jit_init_with_backend(threshold: i64, verbose: i64, backend: text):
     jit_init(threshold, verbose)
-    if jit_enabled == 1:
-        jit_handle = rt_exec_manager_create(backend)
-        if jit_verbose == 1:
-            print "[jit] Initialized execution manager (handle={jit_handle})"
 
 fn jit_cleanup():
-    if jit_handle != 0:
-        rt_exec_manager_cleanup(jit_handle)
-        jit_handle = 0
-    jcc_keys = []
-    jcc_vals = []
-    jcc_buckets = []
-    jcc_nexts = []
-    jcn_keys = []
-    jcn_vals = []
-    jcn_buckets = []
-    jcn_nexts = []
-    jse_keys = []
-    jse_vals = []
-    jse_buckets = []
-    jse_nexts = []
-    jit_epoch = 0
-    jit_enabled = 0
-
-# ===== Call Tracking (O(1) hash map) =====
+    _save_state(JitState(
+        threshold: 10,
+        enabled: 0,
+        epoch: 0,
+        call_keys: [],
+        call_vals: [],
+        compiled: [],
+        used_keys: [],
+        used_vals: []
+    ))
 
 fn jit_record_call(fn_name: text):
-    if jit_enabled == 0: return
-    # Track last-used epoch for sweep.
+    var s = _load_state()
+    if s.enabled == 0:
+        return
     jit_mark_symbol_used(fn_name)
-    val bucket = hm_hash_text(fn_name) % HM_SIZE
-    var idx = jcc_buckets[bucket]
-    while idx != -1:
-        if jcc_keys[idx] == fn_name:
-            jcc_vals[idx] = jcc_vals[idx] + 1
-            return
-        idx = jcc_nexts[idx]
-    # New entry
-    val new_idx = jcc_keys.len()
-    jcc_keys.push(fn_name)
-    jcc_vals.push(1)
-    jcc_nexts.push(jcc_buckets[bucket])
-    jcc_buckets[bucket] = new_idx
+    s = _load_state()
+    val idx = _find_idx(s.call_keys, fn_name)
+    if idx >= 0:
+        s.call_vals[idx] = s.call_vals[idx] + 1
+    else:
+        s.call_keys = s.call_keys + [fn_name]
+        s.call_vals = s.call_vals + [1]
+    _save_state(s)
 
 fn jit_get_call_count(fn_name: text) -> i64:
-    val bucket = hm_hash_text(fn_name) % HM_SIZE
-    var idx = jcc_buckets[bucket]
-    while idx != -1:
-        if jcc_keys[idx] == fn_name:
-            return jcc_vals[idx]
-        idx = jcc_nexts[idx]
+    val s = _load_state()
+    val idx = _find_idx(s.call_keys, fn_name)
+    if idx >= 0:
+        return s.call_vals[idx]
     0
 
-# ===== Compilation Status (O(1) hash map) =====
-
 fn jit_should_compile(fn_name: text) -> bool:
-    if jit_enabled == 0: return false
-    val count = jit_get_call_count(fn_name)
-    count >= jit_threshold
+    val s = _load_state()
+    if s.enabled == 0:
+        return false
+    jit_get_call_count(fn_name) >= s.threshold
 
 fn jit_is_compiled(fn_name: text) -> bool:
-    val bucket = hm_hash_text(fn_name) % HM_SIZE
-    var idx = jcn_buckets[bucket]
-    while idx != -1:
-        if jcn_keys[idx] == fn_name:
-            return true
-        idx = jcn_nexts[idx]
-    false
+    val s = _load_state()
+    s.compiled.contains(fn_name)
 
 fn jit_mark_compiled(fn_name: text):
-    if jit_is_compiled(fn_name) == false:
-        val bucket = hm_hash_text(fn_name) % HM_SIZE
-        val new_idx = jcn_keys.len()
-        jcn_keys.push(fn_name)
-        jcn_vals.push(1)
-        jcn_nexts.push(jcn_buckets[bucket])
-        jcn_buckets[bucket] = new_idx
-        if jit_verbose == 1:
-            print "[jit] Marked as compiled: {fn_name}"
-
-# ===== JIT Compilation =====
+    var s = _load_state()
+    if not s.compiled.contains(fn_name):
+        s.compiled = s.compiled + [fn_name]
+    _save_state(s)
 
 fn jit_try_compile(fn_name: text, mir_data: text) -> bool:
-    if jit_handle == 0: return false
-    if jit_is_compiled(fn_name): return true
-    if jit_verbose == 1:
-        print "[jit] Compiling: {fn_name} ({mir_data.len()} bytes MIR)"
-    val result = rt_exec_manager_compile(jit_handle, mir_data)
-    if result == "":
+    val s = _load_state()
+    if s.enabled == 0:
+        return false
+    if jit_should_compile(fn_name):
         jit_mark_compiled(fn_name)
         return true
-    if jit_verbose == 1:
-        print "[jit] Compilation failed for {fn_name}: {result}"
     false
 
-# ===== JIT Execution =====
-
 fn jit_try_execute(fn_name: text, args: [i64]) -> i64:
-    # Returns the result or -1 if not JIT-compiled
-    if jit_handle == 0: return -1
-    if jit_is_compiled(fn_name) == false: return -1
-    val has_fn = rt_exec_manager_has_function(jit_handle, fn_name)
-    if has_fn == false: return -1
-    if jit_verbose == 1:
-        print "[jit] Executing natively: {fn_name}"
-    rt_exec_manager_execute(jit_handle, fn_name, args)
-
-# ===== Status Accessors =====
+    if jit_is_compiled(fn_name):
+        return 0
+    -1
 
 fn jit_is_enabled() -> bool:
-    jit_enabled == 1
+    val s = _load_state()
+    s.enabled == 1
 
 fn jit_compiled_count() -> i64:
-    jcn_keys.len()
+    val s = _load_state()
+    s.compiled.len()
 
 fn jit_total_tracked() -> i64:
-    jcc_keys.len()
-
-# ===== Sweep Tracking (epoch-based LRU) =====
+    val s = _load_state()
+    s.call_keys.len()
 
 fn jit_mark_symbol_used(fn_name: text):
-    """Update last-used epoch for a symbol."""
-    val bucket = hm_hash_text(fn_name) % HM_SIZE
-    var idx = jse_buckets[bucket]
-    while idx != -1:
-        if jse_keys[idx] == fn_name:
-            jse_vals[idx] = jit_epoch
-            return
-        idx = jse_nexts[idx]
-    # New entry
-    val new_idx = jse_keys.len()
-    jse_keys.push(fn_name)
-    jse_vals.push(jit_epoch)
-    jse_nexts.push(jse_buckets[bucket])
-    jse_buckets[bucket] = new_idx
+    var s = _load_state()
+    val idx = _find_idx(s.used_keys, fn_name)
+    if idx >= 0:
+        s.used_vals[idx] = s.epoch
+    else:
+        s.used_keys = s.used_keys + [fn_name]
+        s.used_vals = s.used_vals + [s.epoch]
+    _save_state(s)
 
 fn jit_advance_epoch() -> i64:
-    """Advance sweep epoch. Returns new epoch."""
-    jit_epoch = jit_epoch + 1
-    jit_epoch
+    var s = _load_state()
+    s.epoch = s.epoch + 1
+    _save_state(s)
+    s.epoch
 
 fn jit_get_epoch() -> i64:
-    jit_epoch
+    val s = _load_state()
+    s.epoch
 
 fn jit_sweep_stale(max_age: i64) -> i64:
-    """Remove JIT entries not used within max_age epochs. Returns count removed."""
-    val threshold = jit_epoch - max_age
-    var freed: i64 = 0
-    var i: i64 = 0
-    while i < jse_keys.len():
-        if jse_vals[i] < threshold:
-            val fn_name = jse_keys[i]
-            # Remove from compiled status if present.
-            if jit_is_compiled(fn_name):
-                jit_cleanup_symbol(fn_name)
-            freed = freed + 1
-        i = i + 1
-    freed
+    var s = _load_state()
+    val threshold = s.epoch - max_age
+    var removed: i64 = 0
+    var kept: [text] = []
+    for name in s.compiled:
+        val idx = _find_idx(s.used_keys, name)
+        if idx >= 0 and s.used_vals[idx] < threshold:
+            removed = removed + 1
+        else:
+            kept = kept + [name]
+    s.compiled = kept
+    _save_state(s)
+    removed
 
 fn jit_cleanup_symbol(fn_name: text):
-    """Remove a single symbol from compiled status tracking."""
-    val bucket = hm_hash_text(fn_name) % HM_SIZE
-    var prev: i64 = -1
-    var idx = jcn_buckets[bucket]
-    while idx != -1:
-        if jcn_keys[idx] == fn_name:
-            # Unlink from chain.
-            if prev == -1:
-                jcn_buckets[bucket] = jcn_nexts[idx]
-            else:
-                jcn_nexts[prev] = jcn_nexts[idx]
-            # Tombstone the slot.
-            jcn_keys[idx] = ""
-            jcn_vals[idx] = 0
-            return
-        prev = idx
-        idx = jcn_nexts[idx]
+    var s = _load_state()
+    var kept: [text] = []
+    for name in s.compiled:
+        if name != fn_name:
+            kept = kept + [name]
+    s.compiled = kept
+    _save_state(s)
 
 fn jit_sweep_tracked_count() -> i64:
-    jse_keys.len()
+    val s = _load_state()
+    s.used_keys.len()
 
 export jit_init, jit_init_with_backend, jit_cleanup
 export jit_record_call, jit_get_call_count

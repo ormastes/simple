@@ -43,7 +43,7 @@ val addr = registry.resolve_symbol("my_func")
 
 | Metric | Count |
 |--------|-------|
-| Tests | 32 |
+| Tests | 33 |
 
 ## Test Structure
 
@@ -93,10 +93,13 @@ val addr = registry.resolve_symbol("my_func")
 - ✅ unload returns false for uncached
 - ✅ reload replaces cached module
 - ✅ reload updates cache
+
+### Runtime Loader Ownership Regression
+
+- ✅ purges `__jit__` cache entries that match owner path tag on reload/unload
 ### Registry Error Handling
 
 - ✅ resolve returns None for unknown symbol
 - ✅ resolve ignores local symbols
 - ✅ load nonexistent fails
 - ✅ unload nonexistent returns false
-

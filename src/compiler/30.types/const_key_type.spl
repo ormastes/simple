@@ -1,0 +1,247 @@
+"""
+Const Key Type - Phase 8B
+
+Implements HirType extensions for const key sets and TemplateTypeInference.
+Extracted from const_keys.spl.
+"""
+
+# ============================================================================
+# HirType Extensions for Const Keys (Phase 8B)
+# ============================================================================
+
+enum HirType:
+    """
+    Extended type system with const key support
+
+    New variants:
+    - ConstKeySet: Compile-time known keys from string template
+    - DependentKeys: Runtime-determined keys from variable
+    """
+    # Core types
+    Int
+    Float
+    Bool
+    Str
+    Unit
+
+    # Collection types
+    Array(elem_ty: HirType)
+    Dict(key_ty: HirType, val_ty: HirType)
+
+    # Const key types
+    ConstKeySet(keys: [Symbol])      # Compile-time known keys
+    DependentKeys(source: Symbol)    # Runtime-determined keys
+
+    # Generic types
+    TypeVar(name: Symbol)
+    Generic(base: Symbol, args: [HirType])
+
+impl HirType:
+    # ========================================================================
+    # Const Key Type Predicates
+    # ========================================================================
+
+    fn is_const_key_set() -> bool:
+        """Check if type is ConstKeySet"""
+        match self:
+            case ConstKeySet(_): true
+            case _: false
+
+    fn is_dependent_keys() -> bool:
+        """Check if type is DependentKeys"""
+        match self:
+            case DependentKeys(_): true
+            case _: false
+
+    fn has_const_keys() -> bool:
+        """Check if type has compile-time known keys"""
+        self.is_const_key_set()
+
+    # ========================================================================
+    # Key Extraction
+    # ========================================================================
+
+    fn get_keys() -> [Symbol]:
+        """
+        Get keys if ConstKeySet, empty otherwise
+
+        Returns:
+            List of keys for ConstKeySet
+            Empty list for other types
+        """
+        match self:
+            case ConstKeySet(keys): keys
+            case _: []
+
+    fn get_key_count() -> i64:
+        """Count number of keys"""
+        val keys = self.get_keys()
+        keys.len()
+
+    fn has_key(key: Symbol) -> bool:
+        """Check if specific key exists"""
+        val keys = self.get_keys()
+        key in keys
+
+    # ========================================================================
+    # Type Equality with Const Keys
+    # ========================================================================
+
+    fn equals(other: HirType) -> bool:
+        """
+        Check type equality including const keys
+
+        ConstKeySet equality:
+            - Keys must match exactly (order matters)
+            - Use structural equality for key lists
+        """
+        match (self, other):
+            case (Int, Int): true
+            case (Float, Float): true
+            case (Bool, Bool): true
+            case (Str, Str): true
+            case (Unit, Unit): true
+
+            case (Array(e1), Array(e2)):
+                e1.equals(e2)
+
+            case (Dict(k1, v1), Dict(k2, v2)):
+                k1.equals(k2) and v1.equals(v2)
+
+            case (ConstKeySet(keys1), ConstKeySet(keys2)):
+                self.keys_equal(keys1, keys2)
+
+            case (DependentKeys(s1), DependentKeys(s2)):
+                s1 == s2
+
+            case (TypeVar(n1), TypeVar(n2)):
+                n1 == n2
+
+            case (Generic(b1, args1), Generic(b2, args2)):
+                b1 == b2 and self.args_equal(args1, args2)
+
+            case _: false
+
+    fn keys_equal(keys1: [Symbol], keys2: [Symbol]) -> bool:
+        """Check if two key lists are equal"""
+        if keys1.len() != keys2.len():
+            return false
+
+        var i = 0
+        while i < keys1.len():
+            if keys1[i] != keys2[i]:
+                return false
+            i = i + 1
+
+        true
+
+    fn args_equal(args1: [HirType], args2: [HirType]) -> bool:
+        """Check if two type argument lists are equal"""
+        if args1.len() != args2.len():
+            return false
+
+        var i = 0
+        while i < args1.len():
+            if not args1[i].equals(args2[i]):
+                return false
+            i = i + 1
+
+        true
+
+    # ========================================================================
+    # String Representation
+    # ========================================================================
+
+    fn to_string() -> text:
+        """String representation including const keys"""
+        match self:
+            case Int: "i64"
+            case Float: "f64"
+            case Bool: "bool"
+            case Str: "text"
+            case Unit: "()"
+
+            case Array(elem_ty):
+                "[{elem_ty.to_string()}]"
+
+            case Dict(key_ty, val_ty):
+                "Dict<{key_ty.to_string()}, {val_ty.to_string()}>"
+
+            case ConstKeySet(keys):
+                val keys_str = self.format_keys(keys)
+                "ConstKeySet<[{keys_str}]>"
+
+            case DependentKeys(source):
+                "DependentKeys<{source}>"
+
+            case TypeVar(name):
+                name
+
+            case Generic(base, args):
+                val args_str = self.format_type_args(args)
+                "{base}<{args_str}>"
+
+    fn format_keys(keys: [Symbol]) -> text:
+        """Format key list for display"""
+        if keys.len() == 0:
+            return ""
+
+        var result = "\"{keys[0]}\""
+        var i = 1
+        while i < keys.len():
+            result = result + ", \"{keys[i]}\""
+            i = i + 1
+
+        result
+
+    fn format_type_args(args: [HirType]) -> text:
+        """Format type argument list"""
+        if args.len() == 0:
+            return ""
+
+        var result = args[0].to_string()
+        var i = 1
+        while i < args.len():
+            result = result + ", " + args[i].to_string()
+            i = i + 1
+
+        result
+
+# ============================================================================
+# Template Type Inference (Phase 8B)
+# ============================================================================
+
+class TemplateTypeInference:
+    """
+    Infer ConstKeySet type for string templates
+
+    Algorithm:
+    1. Check if string literal contains {key} patterns
+    2. Extract keys using KeyExtractor
+    3. Return ConstKeySet if keys found, Str otherwise
+    """
+
+impl TemplateTypeInference:
+    static fn infer_template(value: text) -> HirType:
+        """
+        Infer type of string literal
+
+        Returns:
+            ConstKeySet if template (has keys)
+            Str if plain string (no keys)
+        """
+        val keys = KeyExtractor.extract_keys(value)
+
+        if keys.len() > 0:
+            HirType.ConstKeySet(keys: keys)
+        else:
+            HirType.Str
+
+    static fn is_template(value: text) -> bool:
+        """Check if string is a template"""
+        val keys = KeyExtractor.extract_keys(value)
+        keys.len() > 0
+
+    static fn extract_keys_from_str(value: text) -> [Symbol]:
+        """Extract keys from string literal"""
+        KeyExtractor.extract_keys(value)
