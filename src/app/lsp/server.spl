@@ -31,15 +31,17 @@ class DocumentInfo:
     uri: String
     version: Int
     text: String
-    tree: Option<Tree>          # Parsed syntax tree
-    parser: TreeSitterParser    # Parser instance
+    tree: Option<Tree>                  # Parsed syntax tree
+    parser: Option<TreeSitterParser>    # Parser instance (nil if creation failed)
 
     static fn new(uri: String, version: Int, text: String) -> DocumentInfo:
-        # Create parser - just unwrap for now (TODO: better error handling)
-        val parser = TreeSitterParser__create("simple").unwrap()
+        val parser = match TreeSitterParser__create("simple"):
+            Ok(p): Some(p)
+            Err(_): nil
 
-        # Parse document
-        val tree = parser.parse(text).ok()
+        val tree = match parser:
+            Some(p): p.parse(text).ok()
+            nil: nil
 
         DocumentInfo(
             uri: uri,
@@ -51,15 +53,16 @@ class DocumentInfo:
 
     # Update document with new text
     me update(new_text: String, new_version: Int):
-        # Compute edits for incremental parsing
-        val edits = parser.treesitter.edits.compute_edits(self.text, new_text)
-
-        # Incremental parse
-        self.tree = match self.tree:
-            case Some(old_tree):
-                self.parser.parse_incremental(new_text, old_tree, edits).ok()
-            case nil:
-                self.parser.parse(new_text).ok()
+        match self.parser:
+            Some(p):
+                val edits = parser.treesitter.edits.compute_edits(self.text, new_text)
+                self.tree = match self.tree:
+                    case Some(old_tree):
+                        p.parse_incremental(new_text, old_tree, edits).ok()
+                    case nil:
+                        p.parse(new_text).ok()
+            nil:
+                pass_dn
 
         self.text = new_text
         self.version = new_version

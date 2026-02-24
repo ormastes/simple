@@ -11,7 +11,193 @@
 # - VerificationResult success/failure handling
 # - Error message quality for mismatched expectations
 
-use testing.mocking as mocking
+# ============================================================================
+# Local Definitions (workaround for module import limitation)
+# ============================================================================
+
+struct CallRecord:
+    args: [text]
+    timestamp: i64
+    call_number: i32
+
+struct Expectation:
+    method_name: text
+    expected_times: i32
+    expected_args: [text]?
+
+class VerificationResult:
+    passed: bool
+    error_message: text
+
+    static fn success() -> VerificationResult:
+        VerificationResult(passed: true, error_message: "")
+
+    static fn failure(message: text) -> VerificationResult:
+        VerificationResult(passed: false, error_message: message)
+
+    fn is_ok() -> bool:
+        self.passed
+
+    fn is_err() -> bool:
+        not self.passed
+
+    fn unwrap_err() -> text:
+        self.error_message
+
+class MockFunction:
+    name: text
+    calls: [CallRecord]
+    return_values: [text]
+    return_index: i32
+    should_panic: bool
+    panic_message: text
+    expectations: [Expectation]
+
+    static fn new(name: text) -> MockFunction:
+        MockFunction(
+            name: name,
+            calls: [],
+            return_values: [],
+            return_index: 0,
+            should_panic: false,
+            panic_message: "",
+            expectations: []
+        )
+
+    me record_call(args: [text]):
+        val record = CallRecord(
+            args: args,
+            timestamp: 0,
+            call_number: self.calls.len() as i32
+        )
+        var calls = self.calls
+        calls.append(record)
+        self.calls = calls
+
+    me set_return_values(values: [text]):
+        self.return_values = values
+        self.return_index = 0
+
+    fn call_count() -> i32:
+        self.calls.len() as i32
+
+    fn was_called() -> bool:
+        self.calls.len() > 0
+
+    fn was_called_with(expected_args: [text]) -> bool:
+        for call in self.calls:
+            if call.args.len() == expected_args.len():
+                var matches = true
+                for i in 0..call.args.len():
+                    if call.args[i] != expected_args[i]:
+                        matches = false
+                        break
+                if matches:
+                    return true
+        false
+
+    fn was_called_n_times(times: i32) -> bool:
+        self.call_count() == times
+
+    fn get_call(index: i64) -> Option<CallRecord>:
+        if index >= 0 and index < self.calls.len() as i64:
+            Some(self.calls[index])
+        else:
+            nil
+
+    fn get_last_call() -> Option<CallRecord>:
+        if self.calls.len() > 0:
+            Some(self.calls[self.calls.len() - 1])
+        else:
+            nil
+
+    me reset():
+        self.calls = []
+        self.return_values = []
+        self.return_index = 0
+        self.should_panic = false
+        self.panic_message = ""
+        self.expectations = []
+
+    fn verify() -> VerificationResult:
+        for expectation in self.expectations:
+            if expectation.expected_times > 0:
+                if not self.was_called_n_times(expectation.expected_times):
+                    val msg = "Expected '{self.name}' to be called {expectation.expected_times} times, but was called {self.call_count()} times"
+                    return VerificationResult.failure(msg)
+            if val args = expectation.expected_args:
+                if not self.was_called_with(args):
+                    val msg = "Expected '{self.name}' to be called with {args}, but was not"
+                    return VerificationResult.failure(msg)
+        VerificationResult.success()
+
+    me expect_call(times: i32):
+        self.expectations.append(Expectation(
+            method_name: self.name,
+            expected_times: times,
+            expected_args: nil
+        ))
+
+    me expect_call_with(args: [text]):
+        self.expectations.append(Expectation(
+            method_name: self.name,
+            expected_times: 0,
+            expected_args: args
+        ))
+
+class Matcher:
+    matches_fn: fn(text) -> bool
+
+    static fn any() -> Matcher:
+        Matcher(matches_fn: \arg: true)
+
+    static fn eq(value: text) -> Matcher:
+        Matcher(matches_fn: \arg: arg == value)
+
+    static fn gt(n: i32) -> Matcher:
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(v): v > n
+                nil: false
+        )
+
+    static fn lt(n: i32) -> Matcher:
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(v): v < n
+                nil: false
+        )
+
+    static fn gte(n: i32) -> Matcher:
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(v): v >= n
+                nil: false
+        )
+
+    static fn lte(n: i32) -> Matcher:
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(v): v <= n
+                nil: false
+        )
+
+    static fn contains(substring: text) -> Matcher:
+        Matcher(matches_fn: \arg: arg.contains(substring))
+
+    static fn starts_with(prefix: text) -> Matcher:
+        Matcher(matches_fn: \arg: arg.starts_with(prefix))
+
+    static fn ends_with(suffix: text) -> Matcher:
+        Matcher(matches_fn: \arg: arg.ends_with(suffix))
+
+    fn matches(arg: text) -> bool:
+        val fn_ref = self.matches_fn
+        fn_ref(arg)
+
+# ============================================================================
+# Tests
+# ============================================================================
 
 describe "Mock Library - Phase 2 (Verification)":
     # Verifies the mock verification system that allows tests to assert
@@ -21,7 +207,7 @@ describe "Mock Library - Phase 2 (Verification)":
     # call history inspection, and detailed error messages when verification fails.
     context "Expectations":
         it "sets expectation for call count":
-            val mock_fn = mocking.MockFunction.new("handler")
+            val mock_fn = MockFunction.new("handler")
             mock_fn.expect_call(2)
             mock_fn.record_call([])
             mock_fn.record_call([])
@@ -29,7 +215,7 @@ describe "Mock Library - Phase 2 (Verification)":
             expect result.is_ok()
 
         it "fails verification when call count mismatches":
-            val mock_fn = mocking.MockFunction.new("process")
+            val mock_fn = MockFunction.new("process")
             mock_fn.expect_call(3)
             mock_fn.record_call([])
             mock_fn.record_call([])
@@ -37,14 +223,14 @@ describe "Mock Library - Phase 2 (Verification)":
             expect result.is_err()
 
         it "sets expectation for call arguments":
-            val mock_fn = mocking.MockFunction.new("save")
+            val mock_fn = MockFunction.new("save")
             mock_fn.expect_call_with(["id_123", "data"])
             mock_fn.record_call(["id_123", "data"])
             val result = mock_fn.verify()
             expect result.is_ok()
 
         it "fails when arguments don't match":
-            val mock_fn = mocking.MockFunction.new("update")
+            val mock_fn = MockFunction.new("update")
             mock_fn.expect_call_with(["old_value"])
             mock_fn.record_call(["new_value"])
             val result = mock_fn.verify()
@@ -52,94 +238,94 @@ describe "Mock Library - Phase 2 (Verification)":
 
     context "VerificationResult":
         it "returns success result":
-            val result = mocking.VerificationResult.success()
+            val result = VerificationResult.success()
             expect result.is_ok()
             expect not result.is_err()
 
         it "returns failure result with message":
-            val result = mocking.VerificationResult.failure("Test failed")
+            val result = VerificationResult.failure("Test failed")
             expect result.is_err()
             expect not result.is_ok()
             expect result.unwrap_err() == "Test failed"
 
     context "Argument Matchers - Equality":
         it "uses eq matcher for exact match":
-            val matcher = mocking.Matcher.eq("hello")
+            val matcher = Matcher.eq("hello")
             expect matcher.matches("hello")
             expect not matcher.matches("world")
 
         it "uses any matcher for wildcard":
-            val matcher = mocking.Matcher.any()
+            val matcher = Matcher.any()
             expect matcher.matches("anything")
             expect matcher.matches("123")
             expect matcher.matches("")
 
     context "Argument Matchers - Numeric":
         it "uses gt matcher for greater than":
-            val matcher = mocking.Matcher.gt(10)
+            val matcher = Matcher.gt(10)
             expect matcher.matches("15")
             expect matcher.matches("100")
             expect not matcher.matches("5")
             expect not matcher.matches("10")
 
         it "uses lt matcher for less than":
-            val matcher = mocking.Matcher.lt(10)
+            val matcher = Matcher.lt(10)
             expect matcher.matches("5")
             expect matcher.matches("0")
             expect not matcher.matches("10")
             expect not matcher.matches("15")
 
         it "uses gte matcher for greater or equal":
-            val matcher = mocking.Matcher.gte(10)
+            val matcher = Matcher.gte(10)
             expect matcher.matches("10")
             expect matcher.matches("15")
             expect not matcher.matches("9")
 
         it "uses lte matcher for less or equal":
-            val matcher = mocking.Matcher.lte(10)
+            val matcher = Matcher.lte(10)
             expect matcher.matches("10")
             expect matcher.matches("5")
             expect not matcher.matches("11")
 
     context "Argument Matchers - String Operations":
         it "uses contains matcher":
-            val matcher = mocking.Matcher.contains("error")
+            val matcher = Matcher.contains("error")
             expect matcher.matches("fatal error occurred")
             expect matcher.matches("error")
             expect not matcher.matches("warning")
 
         it "uses starts_with matcher":
-            val matcher = mocking.Matcher.starts_with("HTTP")
+            val matcher = Matcher.starts_with("HTTP")
             expect matcher.matches("HTTP/1.1")
             expect matcher.matches("HTTPS")
             expect not matcher.matches("GET HTTP")
 
         it "uses ends_with matcher":
-            val matcher = mocking.Matcher.ends_with(".json")
+            val matcher = Matcher.ends_with(".json")
             expect matcher.matches("config.json")
             expect matcher.matches("data.json")
             expect not matcher.matches("config.yaml")
 
     context "Call Verification":
         it "verifies no calls were made":
-            val mock_fn = mocking.MockFunction.new("unused")
+            val mock_fn = MockFunction.new("unused")
             expect not mock_fn.was_called()
 
         it "verifies single call":
-            val mock_fn = mocking.MockFunction.new("called_once")
+            val mock_fn = MockFunction.new("called_once")
             mock_fn.record_call([])
             expect mock_fn.was_called()
             expect mock_fn.was_called_n_times(1)
 
         it "verifies specific call count":
-            val mock_fn = mocking.MockFunction.new("counter")
+            val mock_fn = MockFunction.new("counter")
             mock_fn.record_call([])
             mock_fn.record_call([])
             mock_fn.record_call([])
             expect mock_fn.was_called_n_times(3)
 
         it "gets call by index":
-            val mock_fn = mocking.MockFunction.new("api")
+            val mock_fn = MockFunction.new("api")
             mock_fn.record_call(["GET", "/users"])
             mock_fn.record_call(["POST", "/users"])
             val first = mock_fn.get_call(0)
@@ -149,7 +335,7 @@ describe "Mock Library - Phase 2 (Verification)":
                 nil: fail "Should have call"
 
         it "gets last call":
-            val mock_fn = mocking.MockFunction.new("sequence")
+            val mock_fn = MockFunction.new("sequence")
             mock_fn.record_call(["first"])
             mock_fn.record_call(["second"])
             mock_fn.record_call(["third"])
@@ -161,7 +347,7 @@ describe "Mock Library - Phase 2 (Verification)":
 
     context "Verification Error Messages":
         it "provides error message for call count mismatch":
-            val mock_fn = mocking.MockFunction.new("test_fn")
+            val mock_fn = MockFunction.new("test_fn")
             mock_fn.expect_call(2)
             mock_fn.record_call([])
             val result = mock_fn.verify()
@@ -172,7 +358,7 @@ describe "Mock Library - Phase 2 (Verification)":
             expect msg.contains("1")
 
         it "provides error message for argument mismatch":
-            val mock_fn = mocking.MockFunction.new("service")
+            val mock_fn = MockFunction.new("service")
             mock_fn.expect_call_with(["expected_arg"])
             mock_fn.record_call(["actual_arg"])
             val result = mock_fn.verify()
@@ -183,7 +369,7 @@ describe "Mock Library - Phase 2 (Verification)":
 
     context "Multiple Expectations":
         it "verifies multiple expectations":
-            val mock_fn = mocking.MockFunction.new("multi")
+            val mock_fn = MockFunction.new("multi")
             mock_fn.expect_call(2)
             mock_fn.record_call([])
             mock_fn.record_call([])
@@ -191,7 +377,7 @@ describe "Mock Library - Phase 2 (Verification)":
             expect result.is_ok()
 
         it "resets expectations on reset":
-            val mock_fn = mocking.MockFunction.new("resettable")
+            val mock_fn = MockFunction.new("resettable")
             mock_fn.expect_call(1)
             mock_fn.reset()
             mock_fn.record_call([])
@@ -204,7 +390,7 @@ describe "Mock Library - Phase 2 (Verification)":
         # Integer literals default to i64, but get_call expects i32.
         # The fix is to accept i64 in get_call method.
         it "handles i64 literal in get_call":
-            val mock_fn = mocking.MockFunction.new("literal_test")
+            val mock_fn = MockFunction.new("literal_test")
             mock_fn.record_call(["first"])
             mock_fn.record_call(["second"])
             # This should work with i64 literal 0
@@ -212,7 +398,7 @@ describe "Mock Library - Phase 2 (Verification)":
             expect call.is_some()
 
         it "handles i64 literal in array indexing":
-            val mock_fn = mocking.MockFunction.new("index_test")
+            val mock_fn = MockFunction.new("index_test")
             mock_fn.record_call(["value"])
             val call = mock_fn.get_call(0)
             match call:

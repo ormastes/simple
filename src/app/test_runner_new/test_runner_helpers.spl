@@ -175,20 +175,30 @@ fn display_call_graph_warnings():
 # =========================================================================
 
 fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
-    # FIXME: Database loading causes semantic error in runtime
-    # Error: "semantic: method `split` not found on type `enum`"
-    # Location: lib.database.test_extended loading chain via SdnDatabase.load()
-    # The error appears when loading test_db.sdn during database initialization.
-    #
-    # To reproduce: uncomment the load_test_db_compat() call below
-    # To fix: Investigate SdnDatabase.load() and ensure all Option values
-    # are unwrapped before calling string methods like .split()
-    #
-    # Impact: Test database and documentation are not updated after test runs
-    # Workaround: Tests still execute correctly, just no persistence
-    #
-    # TODO: Fix the underlying issue in database library
-    pass
+    val db_result = load_test_db_compat()
+    if not db_result.is_ok():
+        print "Warning: Could not load test database: {db_result.unwrap_err()}"
+        return
+
+    var db = db_result.unwrap()
+    val run_id = db.start_run()
+
+    for file_result in result.files:
+        val status = if file_result.is_ok(): TestStatus.Passed else: TestStatus.Failed
+        db.update_test_result(
+            test_name: file_result.path,
+            test_file: file_result.path,
+            suite_name: "spec",
+            category: "",
+            status: status,
+            duration_ms: file_result.duration_ms.to_f64()
+        )
+
+    db.complete_run(run_id, result.files.len(), result.total_passed, result.total_failed, result.total_timed_out)
+    db.cleanup_stale_runs(48)
+    val save_result = db.save()
+    if not save_result.is_ok():
+        print "Warning: Could not save test database: {save_result.unwrap_err()}"
 
 # =========================================================================
 # M3/H6: Update feature status from test results
