@@ -135,6 +135,9 @@ class DapServer:
     step_mode: Option<StepMode>   # Current stepping mode
     hook_context: InterpreterHookContext   # Interpreter hook context for debugging
     remote_backend: Option<RemoteRiscV32Backend>  # Remote debug backend (GDB/Trace32)
+    data_breakpoints: [Dict]         # Active data breakpoints/watchpoints
+    next_data_breakpoint_id: Int
+    max_data_breakpoints: Int        # Runtime capacity policy (host vs bare-metal)
 
     static fn new() -> DapServer:
         DapServer(
@@ -147,7 +150,10 @@ class DapServer:
             debug_context: DebugContext__new(),
             step_mode: nil,
             hook_context: InterpreterHookContext__create(),
-            remote_backend: nil
+            remote_backend: nil,
+            data_breakpoints: [],
+            next_data_breakpoint_id: 1,
+            max_data_breakpoints: 1024
         )
 
     # Create a DAP server with a remote backend
@@ -162,7 +168,10 @@ class DapServer:
             debug_context: DebugContext__new(),
             step_mode: nil,
             hook_context: InterpreterHookContext__create(),
-            remote_backend: Some(backend)
+            remote_backend: Some(backend),
+            data_breakpoints: [],
+            next_data_breakpoint_id: 1,
+            max_data_breakpoints: 1
         )
 
     # Create a DAP server with a Trace32 backend
@@ -178,7 +187,10 @@ class DapServer:
             debug_context: DebugContext__new(),
             step_mode: nil,
             hook_context: InterpreterHookContext__create(),
-            remote_backend: Some(backend)
+            remote_backend: Some(backend),
+            data_breakpoints: [],
+            next_data_breakpoint_id: 1,
+            max_data_breakpoints: 1
         ))
 
 # Step mode for stepping commands
@@ -217,6 +229,15 @@ impl DapServer:
 
                 # Initialize debug context with source path
                 self.debug_context.source_path = self.launch_config.program
+                # Watchpoint policy:
+                # - Host/interpreter mode: effectively unbounded software watchpoints.
+                # - Bare-metal/remote mode: conservative default 1 slot because HW slots
+                #   can be shared with loader/scripts and may be unavailable.
+                match self.remote_backend:
+                    Some(_):
+                        self.max_data_breakpoints = 1
+                    nil:
+                        self.max_data_breakpoints = 1024
             nil:
                 transport.log_debug("No launch arguments provided")
 
@@ -577,6 +598,61 @@ impl DapServer:
         transport.write_response(request_seq, true, command, nil)?
 
         Ok(nil)
+    fn lookup_data_breakpoint_value(name: String) -> Option<String>:
+        # Prefer in-memory debug context values if available.
+        match self.debug_context.local_variables.get(name):
+            Some(v):
+                return Some(v.value)
+            nil:
+                pass
+        match self.debug_context.global_variables.get(name):
+            Some(v):
+                return Some(v.value)
+            nil:
+                pass
+
+        # Fallback to hook context scope snapshots.
+        val local_vars = self.hook_context.variables_in_scope(0, VariableScope.Local)
+        for v in local_vars:
+            if v.name == name:
+                return Some(v.value)
+        val global_vars = self.hook_context.variables_in_scope(0, VariableScope.Global)
+        for v in global_vars:
+            if v.name == name:
+                return Some(v.value)
+
+        nil
+    fn check_runtime_data_breakpoints() -> Bool:
+        var hit = false
+        var updated: [Dict] = []
+        for dbp in self.data_breakpoints:
+            var nd = dbp
+            val access = nd.get("accessType") ?? "write"
+            val data_id = nd.get("dataId") ?? ""
+            if access == "read":
+                updated.push(nd)
+                continue
+
+            if data_id == "":
+                updated.push(nd)
+                continue
+
+            match self.lookup_data_breakpoint_value(data_id):
+                Some(current_value):
+                    val prev_value = nd.get("lastValue") ?? ""
+                    if prev_value == "":
+                        nd["lastValue"] = current_value
+                    elif prev_value != current_value:
+                        nd["lastValue"] = current_value
+                        val prev_hits = nd.get("hitCount") ?? 0
+                        nd["hitCount"] = prev_hits + 1
+                        hit = true
+                nil:
+                    pass
+            updated.push(nd)
+
+        self.data_breakpoints = updated
+        hit
     fn execute_until_stop() -> Result<Nil, String>:
         # NOTE: This is the interpreter integration point
         # When connected to the interpreter, this will:
@@ -587,6 +663,11 @@ impl DapServer:
 
         # For now, simulate stopping at the next line
         self.debug_context.current_line = self.debug_context.current_line + 1
+
+        # Runtime data breakpoint check (variable-change watchpoints).
+        if self.check_runtime_data_breakpoints():
+            self.send_stopped_event(protocol.StopReason.DataBreakpoint)?
+            return Ok(nil)
 
         # Check if we hit a breakpoint
         match self.breakpoint_manager.should_stop_at_line(
@@ -646,6 +727,11 @@ impl DapServer:
                 nil:
                     pass
 
+        # Runtime data breakpoint check (variable-change watchpoints).
+        if self.check_runtime_data_breakpoints():
+            self.send_stopped_event(protocol.StopReason.DataBreakpoint)?
+            return Ok(nil)
+
         # Send stopped event
         self.send_stopped_event(protocol.StopReason.Step)?
 
@@ -692,6 +778,185 @@ impl DapServer:
         transport.write_event("terminated", {})?
 
         Ok(nil)
+    fn handle_data_breakpoint_info(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        var name = ""
+        match arguments:
+            Some(args):
+                match args.get_optional("name"):
+                    Some(n):
+                        name = n
+                    nil:
+                        pass
+            nil:
+                pass
+
+        var data_id = name
+        if data_id == "":
+            data_id = "watch_expr"
+
+        val body = {
+            "dataId": data_id,
+            "description": "Break when value changes: {data_id}",
+            "accessTypes": ["read", "write", "readWrite"],
+            "canPersist": true
+        }
+        transport.write_response(request_seq, true, command, Some(body))?
+        Ok(nil)
+    fn handle_set_data_breakpoints(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        match arguments:
+            nil:
+                return Err("Missing arguments for setDataBreakpoints")
+            Some(args):
+                val requested = args.get("breakpoints")?
+                self.data_breakpoints = []
+                var response_breakpoints = []
+                var applied = 0
+                var limit = self.max_data_breakpoints
+                if limit < 1:
+                    limit = 1
+
+                match self.remote_backend:
+                    Some(backend):
+                        val cap = backend.watchpoint_capacity()
+                        if cap > 0:
+                            limit = cap
+                    nil:
+                        pass
+
+                for bp_data in requested:
+                    var data_id = ""
+                    var access_type = "write"
+                    var condition = ""
+                    var hit_condition = ""
+
+                    match bp_data.get_optional("dataId"):
+                        Some(v):
+                            data_id = v
+                        nil:
+                            pass
+                    if data_id == "":
+                        match bp_data.get_optional("expression"):
+                            Some(v):
+                                data_id = v
+                            nil:
+                                pass
+                    if data_id == "":
+                        data_id = "watch_{self.next_data_breakpoint_id}"
+
+                    match bp_data.get_optional("accessType"):
+                        Some(v):
+                            access_type = v
+                        nil:
+                            pass
+                    match bp_data.get_optional("condition"):
+                        Some(v):
+                            condition = v
+                        nil:
+                            pass
+                    match bp_data.get_optional("hitCondition"):
+                        Some(v):
+                            hit_condition = v
+                        nil:
+                            pass
+
+                    if applied >= limit:
+                        val out_bp = {
+                            "verified": false,
+                            "message": "data breakpoint capacity reached (limit={limit})"
+                        }
+                        response_breakpoints.push(out_bp)
+                    else:
+                        var remote_ok = true
+                        var remote_error = ""
+                        match self.remote_backend:
+                            Some(backend):
+                                val set_result = backend.set_watchpoint(data_id, access_type)
+                                match set_result:
+                                    Ok(_):
+                                        remote_ok = true
+                                    Err(e):
+                                        remote_ok = false
+                                        remote_error = e
+                            nil:
+                                pass
+
+                        if not remote_ok:
+                            val out_bp = {
+                                "verified": false,
+                                "message": "failed to set target watchpoint: {remote_error}"
+                            }
+                            response_breakpoints.push(out_bp)
+                        else:
+                            val dbp_id = self.next_data_breakpoint_id
+                            self.next_data_breakpoint_id = self.next_data_breakpoint_id + 1
+                            val stored = {
+                                "id": dbp_id,
+                                "dataId": data_id,
+                                "accessType": access_type,
+                                "condition": condition,
+                                "hitCondition": hit_condition,
+                                "hitCount": 0
+                            }
+                            self.data_breakpoints.push(stored)
+                            applied = applied + 1
+
+                            val out_bp = {
+                                "id": dbp_id,
+                                "verified": true
+                            }
+                            response_breakpoints.push(out_bp)
+
+                val body = {
+                    "breakpoints": response_breakpoints
+                }
+                transport.write_response(request_seq, true, command, Some(body))?
+                Ok(nil)
+    fn handle_set_variable(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        match arguments:
+            nil:
+                return Err("Missing arguments for setVariable")
+            Some(args):
+                val variables_reference = args.get("variablesReference")?
+                val name = args.get("name")?
+                val value = args.get("value")?
+
+                var old_value = ""
+                if variables_reference == 2:
+                    match self.debug_context.global_variables.get(name):
+                        Some(v):
+                            old_value = v.value
+                        nil:
+                            pass
+                    self.debug_context.global_variables[name] = VariableInfo__new(name, value, "string")
+                else:
+                    match self.debug_context.local_variables.get(name):
+                        Some(v):
+                            old_value = v.value
+                        nil:
+                            pass
+                    self.debug_context.local_variables[name] = VariableInfo__new(name, value, "string")
+
+                val body = {
+                    "value": value,
+                    "type": "string",
+                    "variablesReference": 0
+                }
+                transport.write_response(request_seq, true, command, Some(body))?
+
+                # If the value changed and a data breakpoint targets this variable,
+                # emit a stopped event with data breakpoint reason.
+                if old_value != value:
+                    var should_stop = false
+                    for dbp in self.data_breakpoints:
+                        val data_id = dbp["dataId"]
+                        val access = dbp["accessType"]
+                        if data_id == name:
+                            if access == "write" or access == "readWrite" or access == "readwrite":
+                                should_stop = true
+                    if should_stop:
+                        self.send_stopped_event(protocol.StopReason.DataBreakpoint)?
+
+                Ok(nil)
     fn send_stopped_event(reason: protocol.StopReason) -> Result<Nil, String>:
         self.state = DebuggerState.Stopped
         self.stop_reason = Some(reason)
@@ -715,6 +980,10 @@ impl DapServer:
                 self.handle_configuration_done(request.id, request.command)
             case "setBreakpoints":
                 self.handle_set_breakpoints(request.id, request.command, request.arguments)
+            case "dataBreakpointInfo":
+                self.handle_data_breakpoint_info(request.id, request.command, request.arguments)
+            case "setDataBreakpoints":
+                self.handle_set_data_breakpoints(request.id, request.command, request.arguments)
             case "threads":
                 self.handle_threads(request.id, request.command)
             case "stackTrace":
@@ -735,6 +1004,8 @@ impl DapServer:
                 self.handle_step_out(request.id, request.command, request.arguments)
             case "evaluate":
                 self.handle_evaluate(request.id, request.command, request.arguments)
+            case "setVariable":
+                self.handle_set_variable(request.id, request.command, request.arguments)
             case "disconnect":
                 self.handle_disconnect(request.id, request.command, request.arguments)
             case _:
