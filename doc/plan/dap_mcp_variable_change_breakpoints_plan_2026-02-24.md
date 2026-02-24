@@ -55,6 +55,17 @@ Implement variable-change breakpoints (data breakpoints/watchpoints) across DAP 
 - Updated MCP protocol matrix/runtime specs to include new debug data-breakpoint tool exposure and counts.
 - Verified MCP probes (Python/TypeScript/Rust) still pass.
 - Verified DAP unit protocol/server specs pass.
+- Fixed MCP debug unit timeout by removing heavyweight helper imports from parser/session/tool modules.
+- Verified `test/unit/app/mcp/mcp_debug_tools_spec.spl` now passes.
+
+## Package Parser Follow-up
+- Replaced placeholder manifest/lockfile parsing with lightweight local parsing logic.
+- Added support for:
+  - manifest package metadata extraction
+  - registry/path/git dependency parsing
+  - optional dependency flags
+  - lockfile table row parsing and deps-array extraction
+- Note: legacy package specs under `test/unit/app/package/` still show module-resolution issues in this workspace layout; parser behavior was validated with isolated specs.
 
 ## Remaining Work
 - Bind DAP data-breakpoint hit path to real runtime memory/variable mutation events (beyond `setVariable` simulation).
