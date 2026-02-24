@@ -21,21 +21,24 @@ class PackageManifest:
 
     static fn from_file(path: text) -> PackageManifest:
         val content = file_read(path)
-        val data = sdn.parse(content)
+        val parsed_result = parse_manifest_string(content)
+        if parsed_result.is_err():
+            return PackageManifest.generate_bootstrap("0.0.0", "unknown")
+        val parsed = parsed_result.unwrap()
 
         PackageManifest(
-            name: data.get("package.name") ?? "simple",
-            version: data.get("package.version") ?? "0.0.0",
-            package_type: data.get("package.type") ?? "bootstrap",
-            platform: data.get("package.platform") ?? "unknown",
-            build_timestamp: data.get("build.timestamp") ?? "",
-            build_profile: data.get("build.profile") ?? "release-opt",
-            build_commit: data.get("build.commit") ?? "",
-            runtime_binary: data.get("runtime.binary") ?? "simple",
-            runtime_size: data.get("runtime.size") ?? 0,
-            runtime_checksum: data.get("runtime.checksum") ?? "",
-            stdlib_files: data.get("contents.stdlib") ?? [],
-            app_dirs: data.get("contents.apps") ?? []
+            name: parsed.package.name,
+            version: parsed.package.version.to_string(),
+            package_type: "full",
+            platform: "unknown",
+            build_timestamp: "",
+            build_profile: "release-opt",
+            build_commit: "",
+            runtime_binary: "simple",
+            runtime_size: 0,
+            runtime_checksum: "",
+            stdlib_files: [],
+            app_dirs: []
         )
 
     static fn generate_bootstrap(version: text, platform: text) -> PackageManifest:
@@ -129,46 +132,241 @@ fn parse_manifest_string(content: text) -> Result<Manifest, text>:
         dev_dependencies:
           test: ^1.0
     """
-    # NOTE: Needs proper SDN parsing
-    # For now, return a minimal valid manifest to prevent timeouts
+    var name = ""
+    var version_str = ""
+    var description: text? = nil
+    var authors: [text] = []
+    var license: text? = nil
+    var repository: text? = nil
+    var homepage: text? = nil
+    var dependencies: [Dependency] = []
+    var dev_dependencies: [Dependency] = []
 
-    # Try to extract basic fields with simple string parsing
-    var name = "unknown"
-    var version_str = "0.1.0"
+    var section = ""
+    var current_dep_name = ""
+    var current_dep_is_dev = false
+    var current_dep_version = ""
+    var current_dep_git = ""
+    var current_dep_path = ""
+    var current_dep_ref_type = ""
+    var current_dep_ref_value = ""
+    var current_dep_optional = false
 
-    # Simple line-by-line parsing (temporary until SDN is ready)
     val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("name:"):
-            val parts = trimmed.split(":")
-            if parts.len() >= 2:
-                name = parts[1].trim()
-        if trimmed.starts_with("version:"):
-            val parts = trimmed.split(":")
-            if parts.len() >= 2:
-                version_str = parts[1].trim()
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val indent = leading_space_count(raw_line)
 
-    # Parse version
-    val version = parse_version(version_str)?
+        # New top-level section.
+        if indent == 0 and line.ends_with(":"):
+            if current_dep_name != "":
+                val dep_result = build_manifest_dependency(
+                    current_dep_name, current_dep_version, current_dep_git, current_dep_path,
+                    current_dep_ref_type, current_dep_ref_value, current_dep_optional
+                )
+                if dep_result.is_err():
+                    return Err(dep_result.unwrap_err())
+                if current_dep_is_dev:
+                    dev_dependencies.push(dep_result.unwrap())
+                else:
+                    dependencies.push(dep_result.unwrap())
+                current_dep_name = ""
+            section = line.substring(0, line.length - 1)
+            continue
 
-    # Create minimal manifest
+        if section == "package":
+            val sep = line.find(":")
+            if sep < 0:
+                continue
+            val key = line.substring(0, sep).trim()
+            val value = line.substring(sep + 1).trim()
+            if key == "name":
+                name = value
+            elif key == "version":
+                version_str = value
+            elif key == "description":
+                description = Some(value)
+            elif key == "authors":
+                authors = parse_inline_text_array(value)
+            elif key == "license":
+                license = Some(value)
+            elif key == "repository":
+                repository = Some(value)
+            elif key == "homepage":
+                homepage = Some(value)
+            continue
+
+        if section != "dependencies" and section != "dev_dependencies":
+            continue
+
+        # Dependency entry line (either inline or start of nested block).
+        if indent <= 2 and line.contains(":"):
+            if current_dep_name != "":
+                val dep_result = build_manifest_dependency(
+                    current_dep_name, current_dep_version, current_dep_git, current_dep_path,
+                    current_dep_ref_type, current_dep_ref_value, current_dep_optional
+                )
+                if dep_result.is_err():
+                    return Err(dep_result.unwrap_err())
+                if current_dep_is_dev:
+                    dev_dependencies.push(dep_result.unwrap())
+                else:
+                    dependencies.push(dep_result.unwrap())
+                current_dep_name = ""
+
+            val sep = line.find(":")
+            val dep_name = line.substring(0, sep).trim()
+            val dep_value = line.substring(sep + 1).trim()
+            if dep_value != "":
+                val dep_result = build_manifest_dependency(dep_name, dep_value, "", "", "", "", false)
+                if dep_result.is_err():
+                    return Err(dep_result.unwrap_err())
+                if section == "dev_dependencies":
+                    dev_dependencies.push(dep_result.unwrap())
+                else:
+                    dependencies.push(dep_result.unwrap())
+            else:
+                current_dep_name = dep_name
+                current_dep_is_dev = section == "dev_dependencies"
+                current_dep_version = ""
+                current_dep_git = ""
+                current_dep_path = ""
+                current_dep_ref_type = ""
+                current_dep_ref_value = ""
+                current_dep_optional = false
+            continue
+
+        # Nested dependency fields.
+        if current_dep_name != "" and line.contains(":"):
+            val sep = line.find(":")
+            val key = line.substring(0, sep).trim()
+            val value = line.substring(sep + 1).trim()
+            if key == "version":
+                current_dep_version = value
+            elif key == "git":
+                current_dep_git = value
+            elif key == "path":
+                current_dep_path = value
+            elif key == "tag":
+                current_dep_ref_type = "tag"
+                current_dep_ref_value = value
+            elif key == "branch":
+                current_dep_ref_type = "branch"
+                current_dep_ref_value = value
+            elif key == "commit":
+                current_dep_ref_type = "commit"
+                current_dep_ref_value = value
+            elif key == "optional":
+                current_dep_optional = value == "true"
+
+    if current_dep_name != "":
+        val dep_result = build_manifest_dependency(
+            current_dep_name, current_dep_version, current_dep_git, current_dep_path,
+            current_dep_ref_type, current_dep_ref_value, current_dep_optional
+        )
+        if dep_result.is_err():
+            return Err(dep_result.unwrap_err())
+        if current_dep_is_dev:
+            dev_dependencies.push(dep_result.unwrap())
+        else:
+            dependencies.push(dep_result.unwrap())
+
+    if name == "":
+        return Err("Missing required package name")
+    if version_str == "":
+        return Err("Missing required package version")
+    if not is_valid_package_name(name):
+        return Err("Invalid package name: {name}")
+
+    val (ver_ok, ver_opt, ver_err) = parse_version(version_str)
+    if not ver_ok:
+        return Err("Invalid version '{version_str}': {ver_err}")
+    val version = ver_opt.unwrap()
+
     val pkg_info = PackageInfo(
         name: name,
         version: version,
-        description: nil,
-        authors: [],
-        license: nil,
-        repository: nil,
-        homepage: nil
+        description: description,
+        authors: authors,
+        license: license,
+        repository: repository,
+        homepage: homepage
     )
 
-    val manifest = Manifest(
+    Ok(Manifest(
         package: pkg_info,
-        dependencies: [],
-        dev_dependencies: []
-    )
+        dependencies: dependencies,
+        dev_dependencies: dev_dependencies
+    ))
 
-    Ok(manifest)
+fn is_valid_package_name(name: text) -> bool:
+    if name == "":
+        return false
+    for ch in name:
+        if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "-" or ch == "_":
+            pass
+        else:
+            return false
+    true
+
+fn leading_space_count(s: text) -> i64:
+    var c = 0
+    for ch in s:
+        if ch == " ":
+            c = c + 1
+        else:
+            break
+    c
+
+fn parse_inline_text_array(raw: text) -> [text]:
+    val trimmed = raw.trim()
+    if not trimmed.starts_with("[") or not trimmed.ends_with("]"):
+        return []
+    val inner = trimmed.substring(1, trimmed.length - 1).trim()
+    if inner == "":
+        return []
+    var values: [text] = []
+    for part in inner.split(","):
+        val value = part.trim()
+        if value != "":
+            values.push(value)
+    values
+
+fn build_manifest_dependency(name: text, version_field: text, git_url: text, path_value: text, ref_type: text, ref_value: text, optional: bool) -> Result<Dependency, text>:
+    if path_value != "":
+        return Ok(Dependency(
+            name: name,
+            constraint: VersionConstraint.Any,
+            source: DependencySource.Path(path: path_value),
+            optional: optional
+        ))
+
+    if git_url != "":
+        var ref = GitRef.Branch(name: "main")
+        if ref_type == "tag":
+            ref = GitRef.Tag(name: ref_value)
+        elif ref_type == "branch":
+            ref = GitRef.Branch(name: ref_value)
+        elif ref_type == "commit":
+            ref = GitRef.Commit(hash: ref_value)
+        return Ok(Dependency(
+            name: name,
+            constraint: VersionConstraint.Any,
+            source: DependencySource.Git(url: git_url, ref: ref),
+            optional: optional
+        ))
+
+    val version_text = if version_field == "" then "*" else version_field
+    val (ok, constraint_opt, err) = parse_constraint(version_text)
+    if not ok:
+        return Err("Invalid constraint for '{name}': {err}")
+    Ok(Dependency(
+        name: name,
+        constraint: constraint_opt.unwrap(),
+        source: DependencySource.Registry,
+        optional: optional
+    ))
 
 export PackageManifest, parse_manifest_string

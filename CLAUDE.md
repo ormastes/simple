@@ -86,6 +86,11 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - **Live API tests:** `test/system/llm_caret_live_comprehensive_spec.spl` requires `CLAUDECODE=` env var
 - **Test costs:** Live LLM tests cost ~$1-2 per run, use sparingly
 
+### TODOs
+- **NEVER convert TODO/FIXME to NOTE** - that hides work, not resolves it
+- Either **implement** the TODO or **delete the code entirely** if it's not needed
+- If a TODO cannot be implemented yet, leave it as TODO
+
 ### Code Style
 - **NEVER over-engineer** - only make requested changes
 - **NEVER add unused code** - delete completely
