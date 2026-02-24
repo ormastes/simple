@@ -522,6 +522,36 @@ describe "ModuleLoader Loading":
             expect(loader.jit.jit_cache.contains_key("jit_owned_fn")).to_equal(false)
             expect(loader.jit.exec_mapper.lookup("jit_owned_fn").?).to_equal(false)
 
+        it "purges __jit__ cache entries that match owner path tag":
+            var loader = ModuleLoader__with_defaults()
+            val owner_path = "owner_mod.smf"
+            loader.modules[owner_path] = create_test_module(owner_path)
+
+            # No explicit mapper owner: set_cache_for_test defaults to __jit__ owner.
+            loader.jit.set_cache_for_test("owner_fn", [170], 0x3333)
+            loader.jit.set_cache_for_test("other_fn", [187], 0x4444)
+
+            val owner_resolved = loader.resolve_symbol("owner_fn")
+            match owner_resolved:
+                case JitCompiled(sym, _):
+                    expect(sym.name).to_equal("owner_fn")
+                case _:
+                    fail("Expected JitCompiled for owner_fn before unload")
+
+            val other_resolved = loader.resolve_symbol("other_fn")
+            match other_resolved:
+                case JitCompiled(sym, _):
+                    expect(sym.name).to_equal("other_fn")
+                case _:
+                    fail("Expected JitCompiled for other_fn before unload")
+
+            val _ = loader.reload(owner_path)
+
+            expect(loader.jit.jit_cache.contains_key("owner_fn")).to_equal(false)
+            expect(loader.global_symbols.contains_key("owner_fn")).to_equal(false)
+            expect(loader.jit.jit_cache.contains_key("other_fn")).to_equal(true)
+            expect(loader.global_symbols.contains_key("other_fn")).to_equal(true)
+
         it "removes from global symbols":
             # TODO: Verify symbols removed
             pass

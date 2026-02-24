@@ -93,14 +93,19 @@ Ask Claude Desktop (NOT in CLI):
 - `debug_log_tree` - View log hierarchy
 - `debug_log_status` - Check logging status
 
-## Why Can't I Test in Terminal?
+## Testing via Terminal
 
-The MCP server uses **stdio protocol** (JSON-RPC over stdin/stdout), which is designed for:
+The MCP server uses **stdio protocol** (JSON-RPC over stdin/stdout). You can test in terminal if
+you send correctly framed JSON-RPC messages (with `Content-Length` headers).
 
-✅ **Process-to-process communication** (Claude Desktop ↔ MCP Server)
-❌ **NOT for terminal interaction** (requires precise protocol handshake)
+Recommended local regression path:
 
-This is why terminal tests timeout - it's **expected behavior**, not a bug!
+```bash
+SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
+```
+
+This integration spec validates initialize, tools/resources listing, error handling, and
+`debug_log_tree(format=json)` over real stdio transport.
 
 ## Configuration Details
 
@@ -162,7 +167,7 @@ This is why terminal tests timeout - it's **expected behavior**, not a bug!
 
 ## Testing Scripts
 
-Created for verification (but remember: stdio protocol doesn't work well in terminal):
+Created for verification:
 
 ```bash
 # Quick verification

@@ -1,0 +1,292 @@
+"""
+Bidirectional Type Checking - Type Inferencer
+
+Complete bidirectional type inference engine supporting:
+- Synthesize mode: Infer type from expression structure (bottom-up)
+- Check mode: Validate expression matches expected type (top-down)
+- Application argument checking against parameter types
+- Let binding with optional type annotations
+- Function return type checking
+- Tuple, array, and if expression types
+
+Types are defined in bidirectional_types.spl (same directory, no import needed).
+"""
+
+# ============================================================================
+# Manual Desugaring for Bootstrap Compatibility
+# ============================================================================
+
+fn TypeInferencer__empty() -> TypeInferencer:
+    TypeInferencer(context: "", next_var_id: 0, expected_return_type: Option.None)
+
+# ============================================================================
+# Complete Bidirectional Type Inferencer
+# ============================================================================
+
+class TypeInferencer:
+    """
+    Bidirectional type inference engine
+
+    Supports two modes:
+    - Synthesize: Infer type from expression (bottom-up)
+    - Check: Verify expression has expected type (top-down)
+    """
+    context: text
+    next_var_id: i64
+    expected_return_type: Option<HirType>
+
+impl TypeInferencer:
+    static fn empty() -> TypeInferencer:
+        """Create empty inference engine"""
+        TypeInferencer(
+            context: "",
+            next_var_id: 0,
+            expected_return_type: Option.None
+        )
+
+    # ========================================================================
+    # Function Type Checking with Return Type
+    # ========================================================================
+
+    me infer_function(func: HirFunction) -> HirType:
+        """
+        Infer function type with return type checking
+
+        If return type is annotated, checks body against it.
+        Otherwise, synthesizes return type from body.
+        """
+        val param_tys = func.param_types
+
+        match func.return_type:
+            case Some(ret_ty):
+                # Return type annotated - use Check mode for body
+                self.expected_return_type = Option.Some(ret_ty)
+
+                # Check body against declared return type
+                val _body_ty = self.infer_expr(func.body, InferMode.Check(ret_ty))
+
+                # Clear expected return
+                self.expected_return_type = Option.None
+
+                # Return function type
+                HirType.Function(params: param_tys, ret: ret_ty)
+
+            case nil:
+                # No return type annotation - synthesize from body
+                val inferred_ret = self.infer_expr(func.body, InferMode.Synthesize)
+
+                HirType.Function(params: param_tys, ret: inferred_ret)
+
+    # ========================================================================
+    # Main Entry Point (Mode-Aware)
+    # ========================================================================
+
+    me infer_expr(expr: HirExpr, mode: InferMode) -> HirType:
+        """
+        Infer expression type with mode
+
+        Args:
+            expr: Expression to infer
+            mode: Synthesize or Check(expected)
+
+        Returns:
+            Inferred or checked type
+        """
+        match mode:
+            case Synthesize:
+                self.synthesize_expr(expr)
+            case Check(expected):
+                self.check_expr(expr, expected)
+
+    # ========================================================================
+    # Complete Synthesis Mode (Bottom-Up)
+    # ========================================================================
+
+    me synthesize_expr(expr: HirExpr) -> HirType:
+        """
+        Synthesize type from expression structure
+
+        This is the existing inference algorithm - infers types
+        from the ground up without expected type hints.
+        """
+        match expr.kind:
+            case IntLit(_): HirType.Int
+            case BoolLit(_): HirType.Bool
+            case TextLit(_): HirType.Text
+            case Var(_): HirType.Int  # Placeholder
+
+            case Lambda(params, body):
+                var param_tys = []
+                for _param in params:
+                    val var_ty = HirType.Var(id: self.next_var_id)
+                    self.next_var_id = self.next_var_id + 1
+                    param_tys.push(var_ty)
+                val body_ty = self.synthesize_expr(body)
+                HirType.Function(params: param_tys, ret: body_ty)
+
+            case Call(callee, args):
+                val callee_ty = self.synthesize_expr(callee)
+                match callee_ty:
+                    case Function(param_tys, ret_ty):
+                        for i in 0..args.len():
+                            if i < param_tys.len():
+                                self.infer_expr(args[i], InferMode.Check(param_tys[i]))
+                            else:
+                                self.synthesize_expr(args[i])
+                        ret_ty
+                    case _: HirType.Unit
+
+            case Let(_name, type_ann, value, body):
+                match type_ann:
+                    case Some(ann):
+                        self.infer_expr(value, InferMode.Check(ann))
+                        self.synthesize_expr(body)
+                    case nil:
+                        self.synthesize_expr(value)
+                        self.synthesize_expr(body)
+
+            case Return(value):
+                match self.expected_return_type:
+                    case Some(expected_ret):
+                        self.infer_expr(value, InferMode.Check(expected_ret))
+                    case nil:
+                        self.synthesize_expr(value)
+
+            case Tuple(elems):
+                var elem_tys = []
+                for elem in elems:
+                    val elem_ty = self.synthesize_expr(elem)
+                    elem_tys.push(elem_ty)
+                HirType.Tuple(elems: elem_tys)
+
+            case ArrayLit(elems):
+                if elems.len() == 0:
+                    HirType.Array(elem: HirType.Var(id: self.next_var_id))
+                else:
+                    val first_ty = self.synthesize_expr(elems[0])
+                    for i in 1..elems.len():
+                        self.infer_expr(elems[i], InferMode.Check(first_ty))
+                    HirType.Array(elem: first_ty)
+
+            case If(cond, then_expr, else_expr):
+                self.infer_expr(cond, InferMode.Check(HirType.Bool))
+                val then_ty = self.synthesize_expr(then_expr)
+                self.infer_expr(else_expr, InferMode.Check(then_ty))
+                then_ty
+
+    # ========================================================================
+    # Complete Check Mode (Top-Down)
+    # ========================================================================
+
+    me check_expr(expr: HirExpr, expected: HirType) -> HirType:
+        """
+        Check expression against expected type
+
+        Uses expected type to guide inference, especially for lambdas.
+        """
+        match expr.kind:
+            case Lambda(params, body):
+                match expected:
+                    case Function(param_tys, ret_ty):
+                        if params.len() != param_tys.len():
+                            return HirType.Unit
+                        self.infer_expr(body, InferMode.Check(ret_ty))
+                        expected
+                    case _:
+                        self.synthesize_and_subsume(expr, expected)
+
+            case Let(_name, type_ann, value, body):
+                match type_ann:
+                    case Some(ann):
+                        self.infer_expr(value, InferMode.Check(ann))
+                    case nil:
+                        self.synthesize_expr(value)
+                self.infer_expr(body, InferMode.Check(expected))
+
+            case Return(value):
+                self.infer_expr(value, InferMode.Check(expected))
+
+            case Tuple(elems):
+                match expected:
+                    case Tuple(expected_elems):
+                        if elems.len() != expected_elems.len():
+                            return HirType.Unit
+                        for i in 0..elems.len():
+                            self.infer_expr(elems[i], InferMode.Check(expected_elems[i]))
+                        expected
+                    case _:
+                        self.synthesize_and_subsume(expr, expected)
+
+            case ArrayLit(elems):
+                match expected:
+                    case Array(elem_ty):
+                        for elem in elems:
+                            self.infer_expr(elem, InferMode.Check(elem_ty))
+                        expected
+                    case _:
+                        self.synthesize_and_subsume(expr, expected)
+
+            case If(cond, then_expr, else_expr):
+                self.infer_expr(cond, InferMode.Check(HirType.Bool))
+                self.infer_expr(then_expr, InferMode.Check(expected))
+                self.infer_expr(else_expr, InferMode.Check(expected))
+                expected
+
+            case _:
+                self.synthesize_and_subsume(expr, expected)
+
+    # ========================================================================
+    # Subsumption (Unification)
+    # ========================================================================
+
+    me synthesize_and_subsume(expr: HirExpr, expected: HirType) -> HirType:
+        """
+        Synthesize expression type and check it's compatible with expected
+
+        Algorithm:
+        1. Synthesize actual type from expression
+        2. Subsume (unify) with expected type
+        3. Return expected type
+        """
+        val inferred = self.synthesize_expr(expr)
+        if self.subsume(inferred, expected):
+            expected
+        else:
+            HirType.Unit
+
+    me subsume(inferred: HirType, expected: HirType) -> bool:
+        """
+        Check that inferred type is compatible with expected
+
+        For now, this is just structural equality.
+        Future: variance-aware subtyping.
+        """
+        self.types_equal(inferred, expected)
+
+    fn types_equal(ty1: HirType, ty2: HirType) -> bool:
+        """Check if two types are structurally equal"""
+        match (ty1, ty2):
+            case (Unit, Unit): true
+            case (Int, Int): true
+            case (Float, Float): true
+            case (Bool, Bool): true
+            case (Text, Text): true
+            case (Function(params1, ret1), Function(params2, ret2)):
+                if params1.len() != params2.len():
+                    return false
+                for i in 0..params1.len():
+                    if not self.types_equal(params1[i], params2[i]):
+                        return false
+                self.types_equal(ret1, ret2)
+            case (Tuple(elems1), Tuple(elems2)):
+                if elems1.len() != elems2.len():
+                    return false
+                for i in 0..elems1.len():
+                    if not self.types_equal(elems1[i], elems2[i]):
+                        return false
+                true
+            case (Array(elem1), Array(elem2)):
+                self.types_equal(elem1, elem2)
+            case (Var(id1), Var(id2)):
+                id1 == id2
+            case _: false

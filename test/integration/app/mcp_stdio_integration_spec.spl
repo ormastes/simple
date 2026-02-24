@@ -44,10 +44,14 @@ fn unknown_method_request(id: text) -> text:
     val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"nonexistent/method\"}"
     mcp_msg(body)
 
+fn tools_call_request(id: text, name: text, arguments_json: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + arguments_json + "}}"
+    mcp_msg(body)
+
 fn send_mcp(messages: text) -> text:
     val tmp = "/tmp/mcp_e2e_input.txt"
     rt_file_write_text(tmp, messages)
-    val result = shell("cat " + tmp + " | bin/simple mcp server 2>/dev/null")
+    val result = shell("cat " + tmp + " | timeout 8s bin/simple mcp server 2>/dev/null")
     result.stdout ?? ""
 
 # =========================================================================
@@ -110,3 +114,11 @@ describe "MCP Stdio E2E - Shutdown":
         val input = init_request() + initialized_notification() + shutdown_request("2")
         val output = send_mcp(input)
         expect(output.contains("\"id\":\"2\"")).to_equal(true)
+
+describe "MCP Stdio E2E - Debug Log Tree":
+    it "returns JSON tree without dropping stdio session":
+        val input = init_request() + initialized_notification() + tools_call_request("2", "debug_log_enable", "{\"pattern\":\"handle_debug_log_*\"}") + tools_call_request("3", "debug_log_tree", "{\"format\":\"json\"}") + shutdown_request("4")
+        val output = send_mcp(input)
+        expect(output.contains("\"id\":\"3\"")).to_equal(true)
+        expect(output.contains("\"format\":\"json\"")).to_equal(true)
+        expect(output.contains("\"tree\":[")).to_equal(true)

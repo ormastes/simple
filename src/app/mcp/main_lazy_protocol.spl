@@ -1,0 +1,465 @@
+# MCP Lazy Server - Protocol I/O, initialize, tools list, schemas, resources, prompts
+# Extracted from main_lazy.spl
+
+# --- Protocol I/O ---
+
+fn read_stdin_message() -> text:
+    var line = input()
+    if line == "":
+        return ""
+    if line.ends_with("\r"):
+        line = line.substring(0, line.len() - 1)
+    if line.starts_with(LB()):
+        USE_JSON_LINES = true
+        return line
+    if line.starts_with("Content-Length:"):
+        var len_str = line.replace("Content-Length:", "")
+        len_str = len_str.trim()
+        val content_length = int(len_str)
+        if content_length == 0:
+            return ""
+        input()
+        var body = input()
+        return body
+    ""
+
+fn write_stdout_message(body: text):
+    if USE_JSON_LINES:
+        print_raw(body + NL)
+    else:
+        var header = "Content-Length: " + str(body.len()) + "\r" + NL + "\r" + NL
+        print_raw(header)
+        print_raw(body)
+
+# --- Initialize response ---
+
+fn make_init_response(id: text) -> text:
+    if INIT_CACHE != "":
+        return make_json_result(id, INIT_CACHE)
+    var tools_cap = jo1(jp("listChanged", "true"))
+    var resources_cap = jo2(jp("subscribe", "true"), jp("listChanged", "true"))
+    var prompts_cap = jo1(jp("listChanged", "true"))
+    var caps = jo3(
+        jp("tools", tools_cap),
+        jp("resources", resources_cap),
+        jp("prompts", prompts_cap)
+    )
+    caps = caps.substring(0, caps.len() - 1) + "," + jp("logging", LB() + RB()) + "," + jp("completions", LB() + RB()) + "," + jp("roots", jo1(jp("listChanged", "false"))) + RB()
+    val server_info = jo3(
+        jp("name", js(SERVER_NAME)),
+        jp("version", js(SERVER_VERSION)),
+        jp("instructions", js("Full-featured MCP server with inline tool handlers. All 34 tools available with zero-import fast execution."))
+    )
+    val result = jo3(
+        jp("protocolVersion", js("2025-06-18")),
+        jp("capabilities", caps),
+        jp("serverInfo", server_info)
+    )
+    INIT_CACHE = result
+    make_json_result(id, result)
+
+# --- Tools list (all 34 tools, minimal schemas) ---
+
+fn make_tools_list(id: text) -> text:
+    if TOOLS_CACHE != "":
+        return make_json_result(id, TOOLS_CACHE)
+
+    var tool_parts: [text] = []
+
+    # Debug tools (16)
+    tool_parts.push(make_tool_schema("debug_create_session", "Create a debug session"))
+    tool_parts.push(make_tool_schema("debug_list_sessions", "List active debug sessions"))
+    tool_parts.push(make_tool_schema("debug_close_session", "Close a debug session"))
+    tool_parts.push(make_tool_schema("debug_set_breakpoint", "Set a breakpoint"))
+    tool_parts.push(make_tool_schema("debug_remove_breakpoint", "Remove a breakpoint"))
+    tool_parts.push(make_tool_schema("debug_continue", "Continue execution"))
+    tool_parts.push(make_tool_schema("debug_step", "Step through code"))
+    tool_parts.push(make_tool_schema("debug_get_variables", "Get variable values"))
+    tool_parts.push(make_tool_schema("debug_stack_trace", "Get stack trace"))
+    tool_parts.push(make_tool_schema("debug_evaluate", "Evaluate expression"))
+    tool_parts.push(make_tool_schema("debug_set_function_breakpoint", "Set function breakpoint"))
+    tool_parts.push(make_tool_schema("debug_enable_breakpoint", "Enable/disable breakpoint"))
+    tool_parts.push(make_tool_schema("debug_get_source", "Get source code"))
+    tool_parts.push(make_tool_schema("debug_watch", "Add watch expression"))
+    tool_parts.push(make_tool_schema("debug_set_variable", "Set variable value"))
+    tool_parts.push(make_tool_schema("debug_set_data_breakpoint", "Set variable-change breakpoint"))
+    tool_parts.push(make_tool_schema("debug_list_data_breakpoints", "List variable-change breakpoints"))
+    tool_parts.push(make_tool_schema("debug_remove_data_breakpoint", "Remove variable-change breakpoint"))
+    tool_parts.push(make_tool_schema("debug_terminate", "Terminate debug session"))
+
+    # Debug log tools (6)
+    tool_parts.push(make_tool_schema("debug_log_enable", "Enable debug logging"))
+    tool_parts.push(make_tool_schema("debug_log_disable", "Disable debug logging"))
+    tool_parts.push(make_tool_schema("debug_log_clear", "Clear debug logs"))
+    tool_parts.push(make_tool_schema("debug_log_query", "Query debug logs"))
+    tool_parts.push(make_tool_schema("debug_log_tree", "Get debug log tree"))
+    tool_parts.push(make_tool_schema("debug_log_status", "Get debug log status"))
+
+    # Diagnostic read tools (4)
+    tool_parts.push(make_tool_schema("simple_read", "Read Simple source with diagnostics"))
+    tool_parts.push(make_tool_schema("simple_check", "Check Simple source for errors"))
+    tool_parts.push(make_tool_schema("simple_symbols", "List symbols in file"))
+    tool_parts.push(make_tool_schema("simple_status", "Get project status"))
+
+    # Diagnostic edit tools (3)
+    tool_parts.push(make_tool_schema("simple_edit", "Edit Simple source file"))
+    tool_parts.push(make_tool_schema("simple_multi_edit", "Edit multiple files"))
+    tool_parts.push(make_tool_schema("simple_run", "Run Simple code"))
+
+    # Diagnostic VCS tools (4)
+    tool_parts.push(make_tool_schema("simple_diff", "Show file diff"))
+    tool_parts.push(make_tool_schema("simple_log", "Show git log"))
+    tool_parts.push(make_tool_schema("simple_squash", "Squash commits"))
+    tool_parts.push(make_tool_schema("simple_new", "Create new change"))
+
+    # API search tools (1)
+    tool_parts.push(make_tool_schema("simple_api", "Search module API with visibility-aware filtering"))
+
+    val tools = SB_L() + tool_parts.join(",") + SB_R()
+    val result = jo1(jp("tools", tools))
+    TOOLS_CACHE = result
+    make_json_result(id, result)
+
+fn make_tool_schema(name: text, description: text) -> text:
+    var props = LB() + RB()
+    var req = "[]"
+
+    if name == "debug_create_session":
+        props = jo2(
+            jp("program", jo2(jp("type", js("string")), jp("description", js("Path to program")))),
+            jp("target_type", jo2(jp("type", js("string")), jp("description", js("interpreter|smf|native|remote"))))
+        )
+        req = "[" + js("program") + "]"
+    elif name == "debug_close_session" or name == "debug_continue" or name == "debug_get_variables" or name == "debug_stack_trace" or name == "debug_terminate":
+        props = jo1(jp("session_id", jo2(jp("type", js("string")), jp("description", js("Debug session id")))))
+        req = "[" + js("session_id") + "]"
+    elif name == "debug_set_breakpoint":
+        var p = LB()
+        p = p + jp("session_id", jo1(jp("type", js("string"))))
+        p = p + "," + jp("file", jo1(jp("type", js("string"))))
+        p = p + "," + jp("line", jo1(jp("type", js("string"))))
+        p = p + "," + jp("condition", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("session_id") + "," + js("file") + "," + js("line") + "]"
+    elif name == "debug_remove_breakpoint":
+        props = jo2(
+            jp("session_id", jo1(jp("type", js("string")))),
+            jp("breakpoint_id", jo1(jp("type", js("string"))))
+        )
+        req = "[" + js("session_id") + "," + js("breakpoint_id") + "]"
+    elif name == "debug_step":
+        props = jo2(
+            jp("session_id", jo1(jp("type", js("string")))),
+            jp("mode", jo2(jp("type", js("string")), jp("description", js("over|in|out"))))
+        )
+        req = "[" + js("session_id") + "," + js("mode") + "]"
+    elif name == "debug_evaluate":
+        props = jo2(
+            jp("session_id", jo1(jp("type", js("string")))),
+            jp("expression", jo1(jp("type", js("string"))))
+        )
+        req = "[" + js("session_id") + "," + js("expression") + "]"
+    elif name == "debug_set_function_breakpoint":
+        props = jo2(
+            jp("session_id", jo1(jp("type", js("string")))),
+            jp("function_name", jo1(jp("type", js("string"))))
+        )
+        req = "[" + js("session_id") + "," + js("function_name") + "]"
+    elif name == "debug_enable_breakpoint":
+        var p = LB()
+        p = p + jp("session_id", jo1(jp("type", js("string"))))
+        p = p + "," + jp("breakpoint_id", jo1(jp("type", js("string"))))
+        p = p + "," + jp("enabled", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("session_id") + "," + js("breakpoint_id") + "," + js("enabled") + "]"
+    elif name == "debug_get_source":
+        var p = LB()
+        p = p + jp("session_id", jo1(jp("type", js("string"))))
+        p = p + "," + jp("file", jo1(jp("type", js("string"))))
+        p = p + "," + jp("start_line", jo1(jp("type", js("string"))))
+        p = p + "," + jp("count", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("session_id") + "," + js("file") + "]"
+    elif name == "debug_watch":
+        var p = LB()
+        p = p + jp("session_id", jo1(jp("type", js("string"))))
+        p = p + "," + jp("action", jo1(jp("type", js("string"))))
+        p = p + "," + jp("expression", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("session_id") + "," + js("action") + "]"
+    elif name == "debug_set_variable":
+        var p = LB()
+        p = p + jp("session_id", jo1(jp("type", js("string"))))
+        p = p + "," + jp("name", jo1(jp("type", js("string"))))
+        p = p + "," + jp("value", jo1(jp("type", js("string"))))
+        p = p + "," + jp("frame_index", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("session_id") + "," + js("name") + "," + js("value") + "]"
+    elif name == "debug_set_data_breakpoint":
+        var p = LB()
+        p = p + jp("session_id", jo1(jp("type", js("string"))))
+        p = p + "," + jp("name", jo1(jp("type", js("string"))))
+        p = p + "," + jp("access_type", jo1(jp("type", js("string"))))
+        p = p + "," + jp("condition", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("session_id") + "," + js("name") + "]"
+    elif name == "debug_list_data_breakpoints":
+        props = jo1(jp("session_id", jo1(jp("type", js("string")))))
+        req = "[" + js("session_id") + "]"
+    elif name == "debug_remove_data_breakpoint":
+        props = jo2(
+            jp("session_id", jo1(jp("type", js("string")))),
+            jp("breakpoint_id", jo1(jp("type", js("string"))))
+        )
+        req = "[" + js("session_id") + "," + js("breakpoint_id") + "]"
+    elif name == "debug_log_enable":
+        props = jo1(jp("pattern", jo1(jp("type", js("string")))))
+    elif name == "debug_log_query":
+        var p = LB()
+        p = p + jp("since_id", jo1(jp("type", js("integer"))))
+        p = p + "," + jp("entry_type", jo1(jp("type", js("string"))))
+        p = p + "," + jp("max_results", jo1(jp("type", js("integer"))))
+        p = p + "," + jp("function_pattern", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+    elif name == "debug_log_tree":
+        var p = LB()
+        p = p + jp("format", jo1(jp("type", js("string"))))
+        p = p + "," + jp("max_depth", jo1(jp("type", js("integer"))))
+        p = p + "," + jp("since_id", jo1(jp("type", js("integer"))))
+        p = p + "," + jp("expanded_groups", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+    elif name == "simple_read":
+        var p = LB()
+        p = p + jp("path", jo1(jp("type", js("string"))))
+        p = p + "," + jp("show_hints", jo1(jp("type", js("boolean"))))
+        p = p + "," + jp("fold_mode", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("path") + "]"
+    elif name == "simple_check" or name == "simple_symbols" or name == "simple_run":
+        props = jo1(jp("path", jo1(jp("type", js("string")))))
+        req = "[" + js("path") + "]"
+    elif name == "simple_status":
+        props = jo2(jp("directory", jo1(jp("type", js("string")))), jp("paths", jo1(jp("type", js("array")))))
+    elif name == "simple_edit":
+        var p = LB()
+        p = p + jp("path", jo1(jp("type", js("string"))))
+        p = p + "," + jp("old_string", jo1(jp("type", js("string"))))
+        p = p + "," + jp("new_string", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+        req = "[" + js("path") + "," + js("old_string") + "," + js("new_string") + "]"
+    elif name == "simple_multi_edit":
+        props = jo2(jp("path", jo1(jp("type", js("string")))), jp("edits", jo1(jp("type", js("array")))))
+        req = "[" + js("path") + "," + js("edits") + "]"
+    elif name == "simple_diff":
+        props = jo2(jp("revision", jo1(jp("type", js("string")))), jp("paths", jo1(jp("type", js("string")))))
+    elif name == "simple_log":
+        props = jo2(jp("limit", jo1(jp("type", js("integer")))), jp("revsets", jo1(jp("type", js("string")))))
+    elif name == "simple_squash" or name == "simple_new":
+        props = jo2(jp("revision", jo1(jp("type", js("string")))), jp("message", jo1(jp("type", js("string")))))
+    elif name == "simple_api":
+        var p = LB()
+        p = p + jp("module", jo1(jp("type", js("string"))))
+        p = p + "," + jp("query", jo1(jp("type", js("string"))))
+        p = p + "," + jp("visibility", jo1(jp("type", js("string"))))
+        p = p + RB()
+        props = p
+
+    var schema = LB()
+    schema = schema + jp("type", js("object"))
+    schema = schema + "," + jp("properties", props)
+    schema = schema + "," + jp("required", req)
+    schema = schema + RB()
+
+    var read_only = "false"
+    var destructive = "false"
+    var idempotent = "true"
+    if name.starts_with("simple_read") or name == "simple_check" or name == "simple_symbols" or name == "simple_status" or name == "simple_log" or name == "simple_api" or name == "debug_list_sessions" or name == "debug_get_variables" or name == "debug_stack_trace" or name == "debug_evaluate" or name == "debug_get_source" or name == "debug_log_query" or name == "debug_log_tree" or name == "debug_log_status" or name == "debug_list_data_breakpoints":
+        read_only = "true"
+    if name == "simple_edit" or name == "simple_multi_edit" or name == "simple_squash" or name == "simple_new" or name == "debug_log_clear" or name == "debug_set_variable" or name == "debug_terminate" or name == "debug_remove_data_breakpoint":
+        destructive = "true"
+    if name == "simple_run" or name == "simple_new" or name == "simple_squash" or name == "debug_continue" or name == "debug_step" or name == "debug_set_data_breakpoint":
+        idempotent = "false"
+
+    var annotations = LB()
+    annotations = annotations + jp("readOnlyHint", read_only)
+    annotations = annotations + "," + jp("destructiveHint", destructive)
+    annotations = annotations + "," + jp("idempotentHint", idempotent)
+    annotations = annotations + "," + jp("openWorldHint", "false")
+    annotations = annotations + RB()
+
+    var tool_obj = jo3(
+        jp("name", js(name)),
+        jp("description", js(description)),
+        jp("inputSchema", schema)
+    )
+    tool_obj = tool_obj.substring(0, tool_obj.len() - 1) + "," + jp("annotations", annotations) + RB()
+    tool_obj
+
+# ============================================================================
+# Resources / Prompts / Completion
+# ============================================================================
+
+fn make_result_response(id: text, result: text) -> text:
+    make_json_result(id, result)
+
+fn make_resource_json(uri: text, name: text, desc: text, mime: text) -> text:
+    var r = LB()
+    r = r + jp("uri", js(uri))
+    r = r + "," + jp("name", js(name))
+    if desc != "":
+        r = r + "," + jp("description", js(desc))
+    if mime != "":
+        r = r + "," + jp("mimeType", js(mime))
+    r = r + RB()
+    r
+
+fn build_resources_json() -> text:
+    var r = make_resource_json("project:///info", "Project Information", "Project metadata and cwd", "text/plain")
+    r = r + "," + make_resource_json("file:///*", "File Contents", "Read file contents by absolute path", "text/plain")
+    r = r + "," + make_resource_json("debuglog:///status", "Debug Log Status", "Debug log status", "application/json")
+    "[" + r + "]"
+
+fn handle_resources_list(id: text) -> text:
+    val result = jo1(jp("resources", build_resources_json()))
+    make_result_response(id, result)
+
+fn handle_resource_templates_list(id: text) -> text:
+    var t1 = LB()
+    t1 = t1 + jp("uriTemplate", js("file:///" + LB() + "path" + RB()))
+    t1 = t1 + "," + jp("name", js("File Contents"))
+    t1 = t1 + "," + jp("description", js("Read file contents by path"))
+    t1 = t1 + "," + jp("mimeType", js("text/plain"))
+    t1 = t1 + RB()
+
+    var t2 = LB()
+    t2 = t2 + jp("uriTemplate", js("project:///" + LB() + "name" + RB()))
+    t2 = t2 + "," + jp("name", js("Project Info"))
+    t2 = t2 + "," + jp("description", js("Read project information"))
+    t2 = t2 + "," + jp("mimeType", js("text/plain"))
+    t2 = t2 + RB()
+
+    val result = jo1(jp("resourceTemplates", "[" + t1 + "," + t2 + "]"))
+    make_result_response(id, result)
+
+fn get_cwd() -> text:
+    val (out, _) = shell_cmd("pwd")
+    if out.ends_with(NL):
+        return out.substring(0, out.len() - 1)
+    out
+
+fn make_resource_content_response(id: text, uri: text, content: text, mime: text) -> text:
+    var rc = LB()
+    rc = rc + jp("uri", js(uri))
+    rc = rc + "," + jp("mimeType", js(mime))
+    rc = rc + "," + jp("text", js(escape_json(content)))
+    rc = rc + RB()
+    val result = jo1(jp("contents", "[" + rc + "]"))
+    make_result_response(id, result)
+
+fn handle_resources_read(id: text, uri: text) -> text:
+    if uri == "":
+        return make_error(id, -32602, "Missing required parameter: uri")
+    if uri == "project:///info":
+        val info = "Simple MCP (main_lazy)" + NL + "Working Dir: " + get_cwd()
+        return make_resource_content_response(id, uri, info, "text/plain")
+    if uri.starts_with("file:///"):
+        val path = uri.substring(8)
+        val content = file_read(path)
+        if content == "":
+            return make_error(id, -32002, "File not found: " + path)
+        return make_resource_content_response(id, uri, content, "text/plain")
+    if uri == "debuglog:///status":
+        val status_json = debug_log_status_json()
+        return make_resource_content_response(id, uri, status_json, "application/json")
+    make_error(id, -32002, "Resource not found: " + uri)
+
+fn make_prompt_arg(name: text, desc: text, required: bool) -> text:
+    var r = LB()
+    r = r + jp("name", js(name))
+    r = r + "," + jp("description", js(desc))
+    var req = "false"
+    if required:
+        req = "true"
+    r = r + "," + jp("required", req)
+    r = r + RB()
+    r
+
+fn make_prompt_json(name: text, desc: text, args_json: text) -> text:
+    var r = LB()
+    r = r + jp("name", js(name))
+    r = r + "," + jp("description", js(desc))
+    r = r + "," + jp("arguments", args_json)
+    r = r + RB()
+    r
+
+fn handle_prompts_list(id: text) -> text:
+    val p1 = make_prompt_json("analyze-file", "Analyze a Simple source file", "[" + make_prompt_arg("path", "Path to file", true) + "]")
+    val p2 = make_prompt_json("generate-tests", "Generate SSpec tests for a file", "[" + make_prompt_arg("path", "Path to file", true) + "]")
+    val result = jo1(jp("prompts", "[" + p1 + "," + p2 + "]"))
+    make_result_response(id, result)
+
+fn make_prompt_response(id: text, description: text, user_content: text) -> text:
+    var msg = LB()
+    msg = msg + jp("role", js("user"))
+    var content_obj = LB()
+    content_obj = content_obj + jp("type", js("text"))
+    content_obj = content_obj + "," + jp("text", js(escape_json(user_content)))
+    content_obj = content_obj + RB()
+    msg = msg + "," + jp("content", content_obj)
+    msg = msg + RB()
+
+    var result = LB()
+    result = result + jp("description", js(escape_json(description)))
+    result = result + "," + jp("messages", "[" + msg + "]")
+    result = result + RB()
+    make_result_response(id, result)
+
+fn handle_prompts_get(id: text, prompt_name: text, body: text) -> text:
+    if prompt_name == "":
+        return make_error(id, -32602, "Missing required parameter: name")
+    val path = extract_field(body, "path")
+    if prompt_name == "analyze-file":
+        var content = "Analyze this file for issues and improvements."
+        if path != "":
+            content = content + " File: " + path
+        return make_prompt_response(id, "Analyze file", content)
+    elif prompt_name == "generate-tests":
+        var content = "Generate comprehensive SSpec tests."
+        if path != "":
+            content = content + " File: " + path
+        return make_prompt_response(id, "Generate tests", content)
+    make_error(id, -32601, "Unknown prompt: " + prompt_name)
+
+fn handle_completion_req(id: text, body: text) -> text:
+    val arg_name = extract_field(body, "name")
+    val arg_value = extract_field(body, "value")
+    var values = "[]"
+    if arg_name == "path":
+        values = "[" + js("src/") + "," + js("test/") + "," + js("doc/") + "," + js("scripts/") + "]"
+    elif arg_name == "mode":
+        values = "[" + js("over") + "," + js("in") + "," + js("out") + "]"
+    elif arg_name == "target_type":
+        values = "[" + js("interpreter") + "," + js("smf") + "," + js("native") + "," + js("remote") + "]"
+    elif arg_name == "level":
+        values = "[" + js("trace") + "," + js("debug") + "," + js("info") + "," + js("warn") + "," + js("error") + "]"
+    elif arg_value != "":
+        values = "[" + js(arg_value) + "]"
+
+    val total = top_level_item_count(values)
+    var completion = LB()
+    completion = completion + jp("values", values)
+    completion = completion + "," + jp("total", str(total))
+    completion = completion + "," + jp("hasMore", "false")
+    completion = completion + RB()
+    val result = jo1(jp("completion", completion))
+    make_result_response(id, result)

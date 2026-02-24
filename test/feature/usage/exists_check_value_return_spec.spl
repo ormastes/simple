@@ -1,0 +1,184 @@
+"""
+# Existence Check Value Return (.? → T?) Specification
+
+**Feature IDs:** #2100-VALUE-RETURN
+**Category:** Syntax
+**Difficulty:** 3/5
+**Status:** Implemented (requires compiler rebuild)
+**Research:** doc/research/text_validity_presence_pattern_2026-02-24.md
+
+## Overview
+
+After the `.?` return-type change, the operator returns `T?` instead of `bool`.
+This enables pattern binding (`if val x = expr.?:`) and nil coalescing
+(`expr.? ?? default`).
+
+## Behavior
+
+`.?` returns `T?` — value if present, nil if absent. Option types pass through
+without double-wrapping. See `doc/spec/feature/exists_check_spec.md` for the
+full type/return table.
+
+## Related
+
+- `exists_check_spec.spl` — boolean truthiness tests
+- `elif_val_pattern_binding_spec.spl` — `if val` / `elif val` patterns
+"""
+
+describe "Existence Check Value Return (.? -> T?)":
+    """
+    ## Value Return Semantics
+
+    Verifies that `.?` returns `T?` (value if present, nil if absent),
+    enabling pattern binding and nil coalescing. These tests require a
+    compiler rebuild to pass — the pre-built binary returns `bool`.
+    """
+
+    context "nil coalescing with text":
+        """
+        ### Text Nil Coalescing
+
+        `.?` on text returns `text?`, enabling `?? default` patterns.
+        Non-empty strings return the value, empty strings return nil.
+        """
+
+        it "returns value for non-empty string via ??":
+            val s = "hello"
+            val result = s.? ?? "default"
+            expect result == "hello"
+
+        it "returns default for empty string via ??":
+            val s = ""
+            val result = s.? ?? "default"
+            expect result == "default"
+
+        it "chains multiple ?? fallbacks":
+            val a = ""
+            val b = ""
+            val c = "found"
+            val result = a.? ?? b.? ?? c.? ?? "none"
+            expect result == "found"
+
+    context "nil coalescing with collections":
+        """
+        ### Collection Nil Coalescing
+
+        `.?` on lists/dicts returns the collection wrapped in `T?`.
+        Empty collections yield nil, enabling `?? default` fallback.
+        """
+
+        it "returns list for non-empty list via ??":
+            val items = [1, 2, 3]
+            val result = items.? ?? [0]
+            expect result == [1, 2, 3]
+
+        it "returns default for empty list via ??":
+            val empty: List<i32> = []
+            val result = empty.? ?? [0]
+            expect result == [0]
+
+    context "pattern binding with if val":
+        """
+        ### Pattern Binding
+
+        `.?` returns `T?`, which can be destructured with `if val`.
+        The bound variable is guaranteed non-empty.
+        """
+
+        it "binds non-empty string":
+            val input = "hello"
+            var result = "unset"
+            if val name = input.?:
+                result = name
+            expect result == "hello"
+
+        it "skips binding for empty string":
+            val input = ""
+            var result = "default"
+            if val name = input.?:
+                result = name
+            expect result == "default"
+
+        it "binds non-empty list":
+            val items = [10, 20]
+            var result = "unset"
+            if val bound = items.?:
+                result = "bound"
+            expect result == "bound"
+
+        it "skips binding for empty list":
+            val empty: List<i32> = []
+            var result = "default"
+            if val bound = empty.?:
+                result = "bound"
+            expect result == "default"
+
+    context "Option pass-through":
+        """
+        ### Option Pass-Through
+
+        `.?` on `T?` does not double-wrap. `Some(x).?` returns `Some(x)`,
+        `nil.?` returns `nil`.
+        """
+
+        it "passes through Some value":
+            val opt: Option<i32> = Some(42)
+            val result = opt.? ?? 0
+            expect result == 42
+
+        it "returns default for None":
+            val opt: Option<i32> = None
+            val result = opt.? ?? 0
+            expect result == 0
+
+        it "binds Some value with if val":
+            val opt: Option<text> = Some("hi")
+            var result = "unset"
+            if val s = opt.?:
+                result = s
+            expect result == "hi"
+
+    context "primitive values":
+        """
+        ### Primitive Pass-Through
+
+        Primitives are always present — `.?` wraps them in `T?`.
+        Even `0` and `false` are present values.
+        """
+
+        it "returns number via ??":
+            val n = 42
+            val result = n.? ?? 0
+            expect result == 42
+
+        it "returns zero via ??":
+            val n = 0
+            val result = n.? ?? -1
+            expect result == 0
+
+    context "chained with methods":
+        """
+        ### Method Chaining
+
+        `.?` integrates with no-paren method calls and chaining.
+        """
+
+        it "works with trim and ??":
+            val s = "  hello  "
+            val result = s.trim.? ?? "empty"
+            expect result == "hello"
+
+        it "returns default for empty trim result":
+            val s = ""
+            val result = s.trim.? ?? "empty"
+            expect result == "empty"
+
+        it "works with list.first and ??":
+            val items = [42, 99]
+            val result = items.first.? ?? 0
+            expect result == 42
+
+        it "returns default for empty list.first":
+            val empty: List<i32> = []
+            val result = empty.first.? ?? 0
+            expect result == 0

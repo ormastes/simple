@@ -1,0 +1,218 @@
+"""
+Const Key Validator - Phase 8C
+
+Implements key validation errors, ConstKeyValidator, Result type, and helper functions.
+Extracted from const_keys.spl.
+"""
+
+# ============================================================================
+# Key Validation Errors (Phase 8C)
+# ============================================================================
+
+enum KeyError:
+    """
+    Key validation errors
+
+    Variants:
+    - MissingKeys: Required keys not provided
+    - ExtraKeys: Unknown keys provided
+    - NotConstKeySet: Template doesn't have const keys
+    - BothErrors: Both missing and extra keys
+    """
+    MissingKeys(keys: [Symbol])
+    ExtraKeys(keys: [Symbol])
+    NotConstKeySet(message: text)
+    BothErrors(missing: [Symbol], extra: [Symbol])
+
+impl KeyError:
+    fn to_string() -> text:
+        """Error message"""
+        match self:
+            case MissingKeys(keys):
+                val keys_str = format_key_list(keys)
+                "Missing keys: [{keys_str}]"
+
+            case ExtraKeys(keys):
+                val keys_str = format_key_list(keys)
+                "Unknown keys: [{keys_str}]"
+
+            case NotConstKeySet(msg):
+                msg
+
+            case BothErrors(missing, extra):
+                val missing_str = format_key_list(missing)
+                val extra_str = format_key_list(extra)
+                "Missing keys: [{missing_str}]; Unknown keys: [{extra_str}]"
+
+    fn is_missing_keys() -> bool:
+        match self:
+            case MissingKeys(_): true
+            case BothErrors(_, _): true
+            case _: false
+
+    fn is_extra_keys() -> bool:
+        match self:
+            case ExtraKeys(_): true
+            case BothErrors(_, _): true
+            case _: false
+
+fn format_key_list(keys: [Symbol]) -> text:
+    """Format key list for error message"""
+    if keys.len() == 0:
+        return ""
+
+    var result = "\"{keys[0]}\""
+    var i = 1
+    while i < keys.len():
+        result = result + ", \"{keys[i]}\""
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Const Key Validator (Phase 8C)
+# ============================================================================
+
+class ConstKeyValidator:
+    """
+    Validates keys in .with() calls
+
+    Algorithm:
+    1. Check template type is ConstKeySet
+    2. Find missing keys (required but not provided)
+    3. Find extra keys (provided but not required)
+    4. Return error if any issues found
+    """
+
+impl ConstKeyValidator:
+    static fn validate_with_call(
+        tmpl_ty: HirType,
+        provided_keys: [Symbol]
+    ) -> Result<(), KeyError>:
+        """
+        Validate .with() call against template type
+
+        Args:
+            tmpl_ty: Template type (must be ConstKeySet)
+            provided_keys: Keys provided in .with() dict
+
+        Returns:
+            Ok(()) if valid
+            Err(KeyError) if validation fails
+        """
+        # Check template type is ConstKeySet
+        if not tmpl_ty.is_const_key_set():
+            val msg = "Not a template with const keys"
+            return Err(KeyError.NotConstKeySet(message: msg))
+
+        val required_keys = tmpl_ty.get_keys()
+
+        # Find missing and extra keys
+        val missing = find_missing_keys(required_keys, provided_keys)
+        val extra = find_extra_keys(required_keys, provided_keys)
+
+        # Return appropriate error
+        if missing.len() > 0 and extra.len() > 0:
+            return Err(KeyError.BothErrors(missing: missing, extra: extra))
+
+        if missing.len() > 0:
+            return Err(KeyError.MissingKeys(keys: missing))
+
+        if extra.len() > 0:
+            return Err(KeyError.ExtraKeys(keys: extra))
+
+        Ok(())
+
+    static fn validate_keys_match(
+        required: [Symbol],
+        provided: [Symbol]
+    ) -> bool:
+        """
+        Check if provided keys match required keys exactly
+
+        Returns: true if all required keys provided and no extras
+        """
+        val missing = find_missing_keys(required, provided)
+        val extra = find_extra_keys(required, provided)
+
+        missing.len() == 0 and extra.len() == 0
+
+    static fn has_missing_keys(
+        required: [Symbol],
+        provided: [Symbol]
+    ) -> bool:
+        """Check if any required keys are missing"""
+        val missing = find_missing_keys(required, provided)
+        missing.len() > 0
+
+    static fn has_extra_keys(
+        required: [Symbol],
+        provided: [Symbol]
+    ) -> bool:
+        """Check if any extra keys provided"""
+        val extra = find_extra_keys(required, provided)
+        extra.len() > 0
+
+fn find_missing_keys(required: [Symbol], provided: [Symbol]) -> [Symbol]:
+    """
+    Find keys in required but not in provided
+
+    Algorithm: For each required key, check if it's in provided list
+    """
+    var missing = []
+
+    for key in required:
+        if key not in provided:
+            missing.push(key)
+
+    missing
+
+fn find_extra_keys(required: [Symbol], provided: [Symbol]) -> [Symbol]:
+    """
+    Find keys in provided but not in required
+
+    Algorithm: For each provided key, check if it's in required list
+    """
+    var extra = []
+
+    for key in provided:
+        if key not in required:
+            extra.push(key)
+
+    extra
+
+# ============================================================================
+# Result Type (Phase 8C)
+# ============================================================================
+
+enum Result<T, E>:
+    Ok(value: T)
+    Err(error: E)
+
+impl Result<T, E>:
+    fn is_ok() -> bool:
+        match self:
+            case Ok(_): true
+            case _: false
+
+    fn is_err() -> bool:
+        match self:
+            case Err(_): true
+            case _: false
+
+    fn unwrap() -> T:
+        match self:
+            case Ok(value): value
+            case Err(_):
+                assert false, "Called unwrap on Err"
+                # Unreachable but needed for type checking
+                val dummy = 0
+                dummy as T
+
+    fn unwrap_err() -> E:
+        match self:
+            case Err(error): error
+            case Ok(_):
+                assert false, "Called unwrap_err on Ok"
+                val dummy = 0
+                dummy as E

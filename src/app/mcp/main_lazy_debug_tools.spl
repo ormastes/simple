@@ -1,0 +1,532 @@
+# MCP Lazy Server - Debug tool handlers
+# Extracted from main_lazy.spl
+# Handles: debug session, breakpoint, variable, step, continue, evaluate,
+#          source, watch, data breakpoint, terminate handlers
+
+# ============================================================================
+# Debug tools (lightweight in-process stateful implementation)
+# ============================================================================
+
+fn find_session_index(session_id: text) -> i64:
+    var idx = 0
+    for s in DEBUG_SESSIONS:
+        if s.id == session_id:
+            return idx
+        idx = idx + 1
+    -1
+
+fn bool_text(v: bool) -> text:
+    if v:
+        return "true"
+    "false"
+
+fn data_breakpoint_limit_for_target(target_type: text) -> i64:
+    if target_type == "remote" or target_type == "baremetal":
+        # Conservative default for bare-metal where HW watchpoints can be shared
+        # with loaders/scripts and effectively leave only one user slot.
+        return 1
+    # Host/interpreter mode: software watchpoints are effectively abundant.
+    1024
+
+fn debug_log_add(entry_type: text, function_name: text, message: text):
+    if not DEBUG_LOG_ENABLED:
+        return
+    var e = LB()
+    e = e + jp("id", str(DEBUG_LOG_NEXT_ID))
+    e = e + "," + jp("entry_type", js(entry_type))
+    e = e + "," + jp("function_name", js(function_name))
+    e = e + "," + jp("message", js(message))
+    e = e + RB()
+    DEBUG_LOG_ENTRIES = DEBUG_LOG_ENTRIES + [e]
+    DEBUG_LOG_NEXT_ID = DEBUG_LOG_NEXT_ID + 1
+
+fn handle_debug_create_session(id: text, body: text) -> text:
+    val program = extract_field(body, "program")
+    if program == "":
+        return make_tool_error(id, -32602, "Missing required parameter: program")
+    var target_type = extract_field(body, "target_type")
+    if target_type == "":
+        target_type = "interpreter"
+    val session_id = "session_" + str(DEBUG_NEXT_SESSION_ID)
+    DEBUG_NEXT_SESSION_ID = DEBUG_NEXT_SESSION_ID + 1
+    val session = LazySession(
+        id: session_id,
+        program: program,
+        target_type: target_type,
+        state: "created",
+        breakpoints: [],
+        data_breakpoints: [],
+        watches: [],
+        next_bp_id: 1,
+        next_data_bp_id: 1
+    )
+    DEBUG_SESSIONS = DEBUG_SESSIONS + [session]
+    debug_log_add("enter", "debug_create_session", "created " + session_id)
+    var r = LB()
+    r = r + jp("session_id", js(session_id))
+    r = r + "," + jp("program", js(program))
+    r = r + "," + jp("target_type", js(target_type))
+    r = r + "," + jp("state", js("created"))
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_list_sessions(id: text) -> text:
+    var arr = SB_L()
+    var first = true
+    for s in DEBUG_SESSIONS:
+        if not first:
+            arr = arr + ","
+        first = false
+        var obj = LB()
+        obj = obj + jp("session_id", js(s.id))
+        obj = obj + "," + jp("program", js(s.program))
+        obj = obj + "," + jp("target_type", js(s.target_type))
+        obj = obj + "," + jp("state", js(s.state))
+        obj = obj + RB()
+        arr = arr + obj
+    arr = arr + SB_R()
+    make_tool_result(id, arr)
+
+fn handle_debug_close_session(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    var found = false
+    var kept: [LazySession] = []
+    for s in DEBUG_SESSIONS:
+        if s.id == session_id:
+            found = true
+        else:
+            kept = kept + [s]
+    if not found:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    DEBUG_SESSIONS = kept
+    debug_log_add("exit", "debug_close_session", "closed " + session_id)
+    make_tool_result(id, jo2(jp("closed", js(session_id)), jp("status", js("ok"))))
+
+fn handle_debug_set_breakpoint(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val file = extract_field(body, "file")
+    val line_str = extract_field(body, "line")
+    if session_id == "" or file == "" or line_str == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/file/line")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var s = DEBUG_SESSIONS[idx]
+    var line_num = int(line_str)
+    if line_num < 1:
+        line_num = 1
+    val bp_id = s.next_bp_id
+    s.next_bp_id = s.next_bp_id + 1
+    val bp = LazyBreakpoint(
+        id: bp_id,
+        file: file,
+        line: line_num,
+        function_name: "",
+        condition: extract_field(body, "condition"),
+        enabled: true
+    )
+    s.breakpoints = s.breakpoints + [bp]
+    DEBUG_SESSIONS[idx] = s
+    debug_log_add("enter", "debug_set_breakpoint", session_id + " #" + str(bp_id))
+    var r = LB()
+    r = r + jp("breakpoint_id", str(bp_id))
+    r = r + "," + jp("session_id", js(session_id))
+    r = r + "," + jp("file", js(file))
+    r = r + "," + jp("line", str(line_num))
+    r = r + "," + jp("verified", "true")
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_remove_breakpoint(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val bp_id_str = extract_field(body, "breakpoint_id")
+    if session_id == "" or bp_id_str == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/breakpoint_id")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val bp_id = int(bp_id_str)
+    var s = DEBUG_SESSIONS[idx]
+    var found = false
+    var kept: [LazyBreakpoint] = []
+    for bp in s.breakpoints:
+        if bp.id == bp_id:
+            found = true
+        else:
+            kept = kept + [bp]
+    if not found:
+        return make_tool_error(id, -32602, "Breakpoint not found: " + bp_id_str)
+    s.breakpoints = kept
+    DEBUG_SESSIONS[idx] = s
+    debug_log_add("exit", "debug_remove_breakpoint", session_id + " #" + bp_id_str)
+    make_tool_result(id, jo2(jp("removed", js(bp_id_str)), jp("status", js("ok"))))
+
+fn handle_debug_continue(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var s = DEBUG_SESSIONS[idx]
+    s.state = "running"
+    DEBUG_SESSIONS[idx] = s
+    debug_log_add("enter", "debug_continue", session_id)
+    make_tool_result(id, jo2(jp("session_id", js(session_id)), jp("state", js("running"))))
+
+fn handle_debug_step(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    var mode = extract_field(body, "mode")
+    if session_id == "" or mode == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/mode")
+    if mode != "over" and mode != "in" and mode != "out":
+        return make_tool_error(id, -32602, "Invalid step mode: " + mode)
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var s = DEBUG_SESSIONS[idx]
+    s.state = "paused"
+    DEBUG_SESSIONS[idx] = s
+    debug_log_add("enter", "debug_step", session_id + " " + mode)
+    make_tool_result(id, jo3(jp("session_id", js(session_id)), jp("mode", js(mode)), jp("state", js("paused"))))
+
+fn handle_debug_get_variables(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    make_tool_result(id, jo2(jp("session_id", js(session_id)), jp("variables", SB_L() + SB_R())))
+
+fn handle_debug_stack_trace(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val s = DEBUG_SESSIONS[idx]
+    var frame = LB()
+    frame = frame + jp("id", "0")
+    frame = frame + "," + jp("name", js("main"))
+    frame = frame + "," + jp("source", js(s.program))
+    frame = frame + "," + jp("line", "1")
+    frame = frame + RB()
+    var r = LB()
+    r = r + jp("session_id", js(session_id))
+    r = r + "," + jp("frames", SB_L() + frame + SB_R())
+    r = r + "," + jp("total_frames", "1")
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_evaluate(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val expression = extract_field(body, "expression")
+    if session_id == "" or expression == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/expression")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var r = LB()
+    r = r + jp("session_id", js(session_id))
+    r = r + "," + jp("expression", js(expression))
+    r = r + "," + jp("result", js(expression))
+    r = r + "," + jp("type", js("string"))
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_set_function_breakpoint(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val function_name = extract_field(body, "function_name")
+    if session_id == "" or function_name == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/function_name")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var s = DEBUG_SESSIONS[idx]
+    val bp_id = s.next_bp_id
+    s.next_bp_id = s.next_bp_id + 1
+    val bp = LazyBreakpoint(
+        id: bp_id,
+        file: "",
+        line: 0,
+        function_name: function_name,
+        condition: extract_field(body, "condition"),
+        enabled: true
+    )
+    s.breakpoints = s.breakpoints + [bp]
+    DEBUG_SESSIONS[idx] = s
+    var r = LB()
+    r = r + jp("breakpoint_id", str(bp_id))
+    r = r + "," + jp("session_id", js(session_id))
+    r = r + "," + jp("function_name", js(function_name))
+    r = r + "," + jp("type", js("function"))
+    r = r + "," + jp("verified", "true")
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_enable_breakpoint(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val bp_id_str = extract_field(body, "breakpoint_id")
+    val enabled_str = extract_field(body, "enabled")
+    if session_id == "" or bp_id_str == "" or enabled_str == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/breakpoint_id/enabled")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val bp_id = int(bp_id_str)
+    var enabled = true
+    if enabled_str == "false" or enabled_str == "0":
+        enabled = false
+    var s = DEBUG_SESSIONS[idx]
+    var found = false
+    var updated: [LazyBreakpoint] = []
+    for bp in s.breakpoints:
+        var nbp = bp
+        if bp.id == bp_id:
+            nbp.enabled = enabled
+            found = true
+        updated = updated + [nbp]
+    if not found:
+        return make_tool_error(id, -32602, "Breakpoint not found: " + bp_id_str)
+    s.breakpoints = updated
+    DEBUG_SESSIONS[idx] = s
+    make_tool_result(id, jo3(jp("breakpoint_id", str(bp_id)), jp("enabled", bool_text(enabled)), jp("status", js("ok"))))
+
+fn handle_debug_get_source(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val path = extract_field(body, "file")
+    if session_id == "" or path == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/file")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var start_line = int(extract_field(body, "start_line"))
+    if start_line < 1:
+        start_line = 1
+    var count = int(extract_field(body, "count"))
+    if count < 1:
+        count = 20
+    val content = file_read(path)
+    if content == "":
+        return make_tool_error(id, -32602, "Could not read file: " + path)
+    val lines = content.split(NL)
+    var end_line = start_line + count - 1
+    if end_line > lines.len():
+        end_line = lines.len()
+    var out: [text] = []
+    var i = start_line
+    for _k in range(0, count + 1):
+        if i > end_line:
+            break
+        out.push(str(i) + " | " + lines[i - 1])
+        i = i + 1
+    var r = LB()
+    r = r + jp("session_id", js(session_id))
+    r = r + "," + jp("file", js(path))
+    r = r + "," + jp("start_line", str(start_line))
+    r = r + "," + jp("source", js(out.join(NL)))
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_watch(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val action = extract_field(body, "action")
+    if session_id == "" or action == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/action")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var s = DEBUG_SESSIONS[idx]
+    if action == "add":
+        val expr = extract_field(body, "expression")
+        if expr == "":
+            return make_tool_error(id, -32602, "Missing expression for add")
+        s.watches = s.watches + [expr]
+        DEBUG_SESSIONS[idx] = s
+        return make_tool_result(id, jo3(jp("action", js("add")), jp("expression", js(expr)), jp("success", "true")))
+    elif action == "remove":
+        val expr = extract_field(body, "expression")
+        if expr == "":
+            return make_tool_error(id, -32602, "Missing expression for remove")
+        var found = false
+        var kept: [text] = []
+        for w in s.watches:
+            if w == expr and not found:
+                found = true
+            else:
+                kept = kept + [w]
+        s.watches = kept
+        DEBUG_SESSIONS[idx] = s
+        return make_tool_result(id, jo3(jp("action", js("remove")), jp("expression", js(expr)), jp("success", bool_text(found))))
+    elif action == "list":
+        var arr = SB_L()
+        var first = true
+        for w in s.watches:
+            if not first:
+                arr = arr + ","
+            first = false
+            arr = arr + js(w)
+        arr = arr + SB_R()
+        return make_tool_result(id, jo2(jp("action", js("list")), jp("watches", arr)))
+    make_tool_error(id, -32602, "Invalid action: " + action)
+
+fn handle_debug_set_variable(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val name = extract_field(body, "name")
+    val value = extract_field(body, "value")
+    if session_id == "" or name == "" or value == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/name/value")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var frame_index = int(extract_field(body, "frame_index"))
+    if frame_index < 0:
+        frame_index = 0
+    var s = DEBUG_SESSIONS[idx]
+    var hit_ids = SB_L()
+    var first_hit = true
+    var hit_count = 0
+    var updated_data_bps: [LazyDataBreakpoint] = []
+    for dbp in s.data_breakpoints:
+        var nd = dbp
+        if dbp.enabled and dbp.name == name:
+            val access = dbp.access_type
+            if access == "" or access == "write" or access == "readWrite" or access == "readwrite":
+                if dbp.last_value != value:
+                    nd.last_value = value
+                    if not first_hit:
+                        hit_ids = hit_ids + ","
+                    first_hit = false
+                    hit_ids = hit_ids + str(dbp.id)
+                    hit_count = hit_count + 1
+                    debug_log_add("event", "debug_set_variable", "data-breakpoint hit #" + str(dbp.id) + " on " + name)
+        updated_data_bps = updated_data_bps + [nd]
+    hit_ids = hit_ids + SB_R()
+    s.data_breakpoints = updated_data_bps
+    DEBUG_SESSIONS[idx] = s
+    var r = LB()
+    r = r + jp("name", js(name))
+    r = r + "," + jp("value", js(value))
+    r = r + "," + jp("frame_index", str(frame_index))
+    r = r + "," + jp("success", "true")
+    r = r + "," + jp("data_breakpoint_hit", bool_text(hit_count > 0))
+    r = r + "," + jp("hit_breakpoint_ids", hit_ids)
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_set_data_breakpoint(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val name = extract_field(body, "name")
+    if session_id == "" or name == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/name")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var s = DEBUG_SESSIONS[idx]
+
+    val limit = data_breakpoint_limit_for_target(s.target_type)
+    if s.data_breakpoints.len() >= limit:
+        return make_tool_error(id, -32602, "Data breakpoint capacity reached for target " + s.target_type + " (limit=" + str(limit) + ")")
+
+    var access_type = extract_field(body, "access_type")
+    if access_type == "":
+        access_type = "write"
+    if access_type != "write" and access_type != "read" and access_type != "readWrite":
+        return make_tool_error(id, -32602, "Invalid access_type: " + access_type + ". Must be write/read/readWrite")
+    val condition = extract_field(body, "condition")
+
+    val dbp_id = s.next_data_bp_id
+    s.next_data_bp_id = s.next_data_bp_id + 1
+    val dbp = LazyDataBreakpoint(
+        id: dbp_id,
+        name: name,
+        access_type: access_type,
+        condition: condition,
+        last_value: "",
+        enabled: true,
+        hardware_slot: dbp_id - 1
+    )
+    s.data_breakpoints = s.data_breakpoints + [dbp]
+    DEBUG_SESSIONS[idx] = s
+    debug_log_add("enter", "debug_set_data_breakpoint", session_id + " #" + str(dbp_id) + " " + name)
+
+    var r = LB()
+    r = r + jp("breakpoint_id", str(dbp_id))
+    r = r + "," + jp("session_id", js(session_id))
+    r = r + "," + jp("name", js(name))
+    r = r + "," + jp("access_type", js(access_type))
+    r = r + "," + jp("verified", "true")
+    r = r + "," + jp("limit", str(limit))
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_list_data_breakpoints(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val s = DEBUG_SESSIONS[idx]
+    var arr = SB_L()
+    var first = true
+    for dbp in s.data_breakpoints:
+        if not first:
+            arr = arr + ","
+        first = false
+        var obj = LB()
+        obj = obj + jp("id", str(dbp.id))
+        obj = obj + "," + jp("name", js(dbp.name))
+        obj = obj + "," + jp("access_type", js(dbp.access_type))
+        obj = obj + "," + jp("enabled", bool_text(dbp.enabled))
+        obj = obj + "," + jp("last_value", js(dbp.last_value))
+        obj = obj + RB()
+        arr = arr + obj
+    arr = arr + SB_R()
+    var r = LB()
+    r = r + jp("session_id", js(session_id))
+    r = r + "," + jp("breakpoints", arr)
+    r = r + "," + jp("count", str(s.data_breakpoints.len()))
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_remove_data_breakpoint(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    val bp_id_str = extract_field(body, "breakpoint_id")
+    if session_id == "" or bp_id_str == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id/breakpoint_id")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    val bp_id = int(bp_id_str)
+    var s = DEBUG_SESSIONS[idx]
+    var kept: [LazyDataBreakpoint] = []
+    var found = false
+    for dbp in s.data_breakpoints:
+        if dbp.id == bp_id:
+            found = true
+        else:
+            kept = kept + [dbp]
+    if not found:
+        return make_tool_error(id, -32602, "Data breakpoint not found: " + bp_id_str)
+    s.data_breakpoints = kept
+    DEBUG_SESSIONS[idx] = s
+    debug_log_add("exit", "debug_remove_data_breakpoint", session_id + " #" + bp_id_str)
+    make_tool_result(id, jo3(jp("removed", js(bp_id_str)), jp("status", js("ok")), jp("kind", js("data_breakpoint"))))
+
+fn handle_debug_terminate(id: text, body: text) -> text:
+    val session_id = extract_field(body, "session_id")
+    if session_id == "":
+        return make_tool_error(id, -32602, "Missing required parameter: session_id")
+    val idx = find_session_index(session_id)
+    if idx < 0:
+        return make_tool_error(id, -32602, "Session not found: " + session_id)
+    var s = DEBUG_SESSIONS[idx]
+    s.state = "terminated"
+    DEBUG_SESSIONS[idx] = s
+    debug_log_add("exit", "debug_terminate", session_id)
+    make_tool_result(id, jo3(jp("session_id", js(session_id)), jp("state", js("terminated")), jp("status", js("ok"))))

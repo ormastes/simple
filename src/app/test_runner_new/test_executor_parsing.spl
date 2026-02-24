@@ -1,0 +1,351 @@
+# Test Executor Parsing & Discovery
+#
+# Binary location discovery, test output parsing, coverage wrapper generation,
+# and static test listing helpers.
+#
+# Split from test_runner_execute.spl for maintainability.
+
+use test_runner_types.*
+use test_runner_files.{strip_ansi, read_file_content}
+use app.io.file_ops.{file_exists, file_write, file_delete}
+use app.io.env_ops.{env_get}
+
+# =========================================================================
+# Binary Location Discovery
+# =========================================================================
+
+val COVERAGE_BEGIN = "__SIMPLE_COVERAGE_SDN_BEGIN__"
+val COVERAGE_END = "__SIMPLE_COVERAGE_SDN_END__"
+
+fn find_simple_new_binary() -> text:
+    if file_exists("./rust/target/bootstrap/simple_new1_"):
+        return "./rust/target/bootstrap/simple_new1_"
+    if file_exists("./rust/target/bootstrap/simple_new1"):
+        return "./rust/target/bootstrap/simple_new1"
+    ""
+
+fn find_runtime_lib_dir() -> text:
+    val env_path = env_get("SIMPLE_RUNTIME_PATH")
+    if env_path != "" and env_path != nil:
+        return env_path
+    if file_exists("rust/target/debug/libsimple_compiler.so"):
+        return "rust/target/debug"
+    if file_exists("rust/target/release/libsimple_compiler.so"):
+        return "rust/target/release"
+    "rust/target/debug"
+
+fn find_simple_binary() -> text:
+    # Check environment variable first
+    val env_path = env_get("SIMPLE_RUNTIME")
+    if env_path != "" and env_path != nil:
+        if file_exists(env_path):
+            return env_path
+
+    # Try multiple locations for the bootstrap binary
+    # Platform-specific binaries first (real ELF executables),
+    # then wrapper scripts (bin/release/simple needs downloaded/ which may not exist).
+    val candidates = [
+        "bin/release/linux-x86_64/simple",
+        "./bin/release/linux-x86_64/simple",
+        "bin/release/macos-arm64/simple",
+        "./bin/release/macos-arm64/simple",
+        "bin/release/macos-x86_64/simple",
+        "./bin/release/macos-x86_64/simple",
+        "bin/release/simple",
+        "./bin/release/simple",
+        "bin/simple",
+        "./bin/simple",
+        "./rust/target/debug/simple",
+        "./rust/target/release/simple",
+        "rust/target/debug/simple",
+        "rust/target/release/simple",
+    ]
+
+    for candidate in candidates:
+        if file_exists(candidate):
+            return candidate
+
+    # Fallback to bin/release/simple (primary location in pure Simple setup)
+    "bin/release/simple"
+
+# =========================================================================
+# Test Output Parsing
+# =========================================================================
+
+fn extract_error_message(output: text) -> text:
+    # Extract first meaningful error message from test output
+    val lines = output.split("\n")
+    var error_lines: [text] = []
+
+    for line in lines:
+        val clean = strip_ansi(line).trim()
+
+        # Look for error patterns
+        if clean.contains("semantic:") or clean.contains("parse error:") or clean.contains("compile failed:") or clean.contains("ERROR:"):
+            error_lines.push(clean)
+            if error_lines.len() >= 3:  # Limit to first 3 error lines
+                break
+        elif clean.starts_with("Error:") or clean.starts_with("error:"):
+            error_lines.push(clean)
+            if error_lines.len() >= 3:
+                break
+        elif clean.contains("unsupported path call:") or clean.contains("not found"):
+            error_lines.push(clean)
+            if error_lines.len() >= 3:
+                break
+
+    # Join error lines with semicolon separator
+    if error_lines.len() > 0:
+        error_lines[0:3].join("; ")
+    else:
+        ""
+
+fn parse_test_output(output: text) -> (i64, i64, i64, i64):
+    var total_passed = 0
+    var total_failed = 0
+    var total_skipped = 0
+    var total_pending = 0
+    val lines = output.split("\n")
+    for line in lines:
+        val clean = strip_ansi(line)
+        if clean.contains("examples") and clean.contains("failure"):
+            val examples_count = extract_number_before(clean, "examples")
+            val failures_count = extract_number_before(clean, "failure")
+            if examples_count >= 0 and failures_count >= 0:
+                val passed = examples_count - failures_count
+                if passed > 0:
+                    total_passed = total_passed + passed
+                total_failed = total_failed + failures_count
+        # Parse summary line: "Pending: N" from spec.spl print_summary
+        if clean.trim().starts_with("Pending:"):
+            val pending_count = extract_number_after_colon(clean, "Pending:")
+            if pending_count > 0:
+                total_pending = total_pending + pending_count
+        # Count individual "... pending" test lines
+        elif clean.contains("... pending"):
+            total_pending = total_pending + 1
+        # Count skipped (separate from pending)
+        if clean.contains("skipped"):
+            val skip_count2 = extract_number_before(clean, "skipped")
+            if skip_count2 > 0:
+                total_skipped = total_skipped + skip_count2
+    (total_passed, total_failed, total_skipped, total_pending)
+
+fn extract_number_after_colon(s: text, prefix: text) -> i64:
+    val idx_opt = s.index_of(prefix)
+    val idx = idx_opt ?? -1
+    if idx < 0:
+        return -1
+    val after = s[idx + prefix.len():].trim()
+    if after.len() == 0:
+        return -1
+    # Collect digits from start
+    var end_pos = 0
+    while end_pos < after.len():
+        val ch = after[end_pos:end_pos + 1]
+        if ch < "0" or ch > "9":
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return -1
+    val num_str = after[0:end_pos]
+    to_int(num_str)
+
+fn extract_number_before(s: text, keyword: text) -> i64:
+    val idx_opt = s.index_of(keyword)
+    val idx = idx_opt ?? -1
+    if idx < 0:
+        return -1
+    var end = idx - 1
+    # Skip whitespace
+    while end >= 0:
+        val ch = s[end:end + 1]
+        if ch != " ":
+            break
+        end = end - 1
+    if end < 0:
+        return -1
+    # Collect digits backwards
+    var start = end
+    while start >= 0:
+        val ch = s[start:start + 1]
+        if ch < "0" or ch > "9":
+            break
+        start = start - 1
+    start = start + 1
+    if start > end:
+        return -1
+    val num_str = s[start:end + 1]
+    to_int(num_str)
+
+# =========================================================================
+# Child Process Arguments & Result Building
+# =========================================================================
+
+fn build_child_args(file_path: text, options: TestOptions) -> [text]:
+    # Run test file directly WITHOUT "test" command to avoid infinite recursion
+    # The SSpec DSL is activated automatically when the file is loaded
+    var args: [text] = [file_path]
+    if options.gc_log:
+        args.push("--gc-log")
+    if options.gc_off:
+        args.push("--gc=off")
+    args
+
+fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
+    # Check for timeout
+    if exit_code == -1:
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, error: "TIMEOUT after {timeout_secs}s", timed_out: true)
+
+    val combined = stdout + "\n" + stderr
+    val (passed, failed, skipped, pending) = parse_test_output(combined)
+
+    if passed == 0 and failed == 0:
+        if exit_code == 0:
+            return TestFileResult(path: file_path, passed: 1, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, error: "", timed_out: false)
+        else:
+            # Extract error message from output
+            val extracted_error = extract_error_message(combined)
+            val error_msg = if extracted_error != "":
+                extracted_error
+            else:
+                "Process exited with code {exit_code}"
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, error: error_msg, timed_out: false)
+
+    # Extract error messages when tests fail
+    var error = ""
+    if failed > 0:
+        error = extract_error_message(combined)
+    elif exit_code != 0:
+        error = "Process exited with code {exit_code}"
+
+    TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, error: error, timed_out: false)
+
+# =========================================================================
+# Coverage Wrapper Generation
+# =========================================================================
+
+fn coverage_wrapper_suffix(file_path: text) -> text:
+    if file_path.ends_with("_spec.spl"):
+        "_spec.spl"
+    else:
+        ".spl"
+
+fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text):
+    if not options.coverage:
+        return (file_path, "")
+    val content = read_file_content(file_path)
+    if content == "":
+        return (file_path, "")
+
+    var base = file_path.replace("/", "_")
+    base = base.replace(".spl", "")
+    val tmp_path = "/tmp/simple_cov_" + base + coverage_wrapper_suffix(file_path)
+
+    var lines: [text] = []
+    lines.push(content)
+    lines.push("")
+    lines.push("# === Coverage Dump (auto-generated) ===")
+    lines.push("extern fn rt_coverage_enabled() -> bool")
+    lines.push("extern fn rt_coverage_dump_sdn() -> text")
+    lines.push("")
+    lines.push("fn __simple_cov_dump():")
+    lines.push("    if not rt_coverage_enabled():")
+    lines.push("        return")
+    lines.push("    val sdn = rt_coverage_dump_sdn()")
+    lines.push("    print \"" + COVERAGE_BEGIN + "\"")
+    lines.push("    print sdn")
+    lines.push("    print \"" + COVERAGE_END + "\"")
+    lines.push("")
+    lines.push("__simple_cov_dump()")
+
+    val wrapped = lines.join("\n")
+    file_write(tmp_path, wrapped)
+    (tmp_path, tmp_path)
+
+fn extract_coverage_sdn(output: text) -> text:
+    val lines = output.split("\n")
+    var in_block = false
+    var sdn_lines: [text] = []
+    for line in lines:
+        val clean = strip_ansi(line).trim()
+        if clean == COVERAGE_BEGIN:
+            in_block = true
+            continue
+        if clean == COVERAGE_END:
+            in_block = false
+            continue
+        if in_block:
+            sdn_lines.push(line)
+    sdn_lines.join("\n")
+
+fn strip_coverage_blocks(output: text) -> text:
+    val lines = output.split("\n")
+    var in_block = false
+    var kept: [text] = []
+    for line in lines:
+        val clean = strip_ansi(line).trim()
+        if clean == COVERAGE_BEGIN:
+            in_block = true
+            continue
+        if clean == COVERAGE_END:
+            in_block = false
+            continue
+        if not in_block:
+            kept.push(line)
+    kept.join("\n")
+
+# =========================================================================
+# G3: Static test listing (parse source without execution)
+# =========================================================================
+
+fn list_tests_static(files: [text]) -> [text]:
+    var test_names: [text] = []
+    for file_path in files:
+        val content = read_file_content(file_path)
+        if content == "":
+            continue
+        val lines = content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            # Match: it "...", slow_it "...", test "..."
+            val name = extract_static_test_name(trimmed)
+            if name != "":
+                test_names.push("{file_path}::{name}")
+    test_names
+
+fn extract_static_test_name(line: text) -> text:
+    # it "description"
+    if line.starts_with("it \""):
+        val end = line.index_of("\"", 4) ?? -1
+        if end > 4:
+            return line[4:end]
+    # slow_it "description"
+    if line.starts_with("slow_it \""):
+        val end = line.index_of("\"", 9) ?? -1
+        if end > 9:
+            return "[slow] " + line[9:end]
+    # test "description"
+    if line.starts_with("test \""):
+        val end = line.index_of("\"", 6) ?? -1
+        if end > 6:
+            return line[6:end]
+    # pending_on "description"
+    if line.starts_with("pending_on \""):
+        val end = line.index_of("\"", 12) ?? -1
+        if end > 12:
+            return "[pending] " + line[12:end]
+    ""
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
+export parse_test_output, extract_number_before, extract_number_after_colon
+export extract_error_message
+export build_child_args, make_result_from_output
+export coverage_wrapper_suffix, build_coverage_wrapper
+export extract_coverage_sdn, strip_coverage_blocks
+export COVERAGE_BEGIN, COVERAGE_END
+export list_tests_static, extract_static_test_name

@@ -1,0 +1,204 @@
+"""
+Bidirectional Type Checking - Type Definitions
+
+Type definitions for the bidirectional type inference engine:
+- Symbol type alias
+- InferMode enum (Synthesize / Check)
+- HirType enum (complete type system)
+- Option<T> enum
+- HirFunction struct
+- HirExprKind enum and HirExpr struct with factory methods
+"""
+
+type Symbol = text
+
+# ============================================================================
+# InferMode
+# ============================================================================
+
+enum InferMode:
+    """
+    Mode for bidirectional type checking.
+
+    Synthesize: Infer type from expression structure (bottom-up)
+    Check:      Validate expression matches expected type (top-down)
+    """
+    Synthesize
+    Check(expected: HirType)
+
+impl InferMode:
+    fn is_check() -> bool:
+        """Check if mode is Check"""
+        match self:
+            case Check(_): true
+            case _: false
+
+    fn is_synthesize() -> bool:
+        """Check if mode is Synthesize"""
+        match self:
+            case Synthesize: true
+            case _: false
+
+    fn expected() -> HirType:
+        """Get expected type (only for Check mode)"""
+        match self:
+            case Check(ty): ty
+            case Synthesize:
+                # Return Unit as placeholder (shouldn't be called in Synthesize)
+                HirType.Unit
+
+    fn to_string() -> text:
+        """String representation"""
+        match self:
+            case Synthesize: "Synthesize"
+            case Check(ty): "Check({ty.to_string()})"
+
+# ============================================================================
+# HirType - Complete Type System
+# ============================================================================
+
+enum HirType:
+    """Type representation"""
+    Unit
+    Int
+    Float
+    Bool
+    Text
+    Function(params: [HirType], ret: HirType)
+    Tuple(elems: [HirType])
+    Array(elem: HirType)
+    Var(id: i64)
+
+impl HirType:
+    fn to_string() -> text:
+        """String representation"""
+        match self:
+            case Unit: "()"
+            case Int: "i64"
+            case Float: "f64"
+            case Bool: "bool"
+            case Text: "text"
+            case Function(params, ret):
+                val params_str = format_type_list(params)
+                "fn({params_str}) -> {ret.to_string()}"
+            case Tuple(elems):
+                val elems_str = format_type_list(elems)
+                "({elems_str})"
+            case Array(elem):
+                "[{elem.to_string()}]"
+            case Var(id):
+                "T{id}"
+
+fn format_type_list(types: [HirType]) -> text:
+    """Format type list for display"""
+    if types.len() == 0:
+        return ""
+    var result = types[0].to_string()
+    var i = 1
+    while i < types.len():
+        result = result + ", " + types[i].to_string()
+        i = i + 1
+    result
+
+# ============================================================================
+# Option Type
+# ============================================================================
+
+enum Option<T>:
+    Some(value: T)
+    None_
+
+impl Option<T>:
+    fn is_some() -> bool:
+        match self:
+            case Some(_): true
+            case nil: false
+
+    fn is_none() -> bool:
+        match self:
+            case nil: true
+            case Some(_): false
+
+# ============================================================================
+# HirFunction - Function Definition with Return Type
+# ============================================================================
+
+struct HirFunction:
+    """Function definition"""
+    name: Symbol
+    params: [Symbol]
+    param_types: [HirType]
+    return_type: Option<HirType>  # Optional return type annotation
+    body: HirExpr
+
+impl HirFunction:
+    static fn create(
+        name: Symbol,
+        params: [Symbol],
+        param_types: [HirType],
+        return_type: Option<HirType>,
+        body: HirExpr
+    ) -> HirFunction:
+        HirFunction(
+            name: name,
+            params: params,
+            param_types: param_types,
+            return_type: return_type,
+            body: body
+        )
+
+# ============================================================================
+# Complete Expression System
+# ============================================================================
+
+enum HirExprKind:
+    """Expression kinds"""
+    IntLit(value: i64)
+    BoolLit(value: bool)
+    TextLit(value: text)
+    Var(name: Symbol)
+    Lambda(params: [Symbol], body: HirExpr)
+    Call(callee: HirExpr, args: [HirExpr])
+    Let(name: Symbol, type_ann: Option<HirType>, value: HirExpr, body: HirExpr)
+    Return(value: HirExpr)
+    Tuple(elems: [HirExpr])
+    ArrayLit(elems: [HirExpr])
+    If(cond: HirExpr, then: HirExpr, otherwise: HirExpr)
+
+struct HirExpr:
+    """Expression with kind"""
+    kind: HirExprKind
+
+impl HirExpr:
+    static fn int_lit(value: i64) -> HirExpr:
+        HirExpr(kind: HirExprKind.IntLit(value: value))
+
+    static fn bool_lit(value: bool) -> HirExpr:
+        HirExpr(kind: HirExprKind.BoolLit(value: value))
+
+    static fn text_lit(value: text) -> HirExpr:
+        HirExpr(kind: HirExprKind.TextLit(value: value))
+
+    static fn var(name: Symbol) -> HirExpr:
+        HirExpr(kind: HirExprKind.Var(name: name))
+
+    static fn lambda(params: [Symbol], body: HirExpr) -> HirExpr:
+        HirExpr(kind: HirExprKind.Lambda(params: params, body: body))
+
+    static fn call(callee: HirExpr, args: [HirExpr]) -> HirExpr:
+        HirExpr(kind: HirExprKind.Call(callee: callee, args: args))
+
+    static fn let_bind(name: Symbol, type_ann: HirType?, value: HirExpr, body: HirExpr) -> HirExpr:
+        HirExpr(kind: HirExprKind.Let(name: name, type_ann: type_ann, value: value, body: body))
+
+    static fn return_expr(value: HirExpr) -> HirExpr:
+        HirExpr(kind: HirExprKind.Return(value: value))
+
+    static fn tuple(elems: [HirExpr]) -> HirExpr:
+        HirExpr(kind: HirExprKind.Tuple(elems: elems))
+
+    static fn array(elems: [HirExpr]) -> HirExpr:
+        HirExpr(kind: HirExprKind.ArrayLit(elems: elems))
+
+    static fn if_expr(cond: HirExpr, then_expr: HirExpr, else_expr: HirExpr) -> HirExpr:
+        HirExpr(kind: HirExprKind.If(cond: cond, then: then_expr, otherwise: else_expr))

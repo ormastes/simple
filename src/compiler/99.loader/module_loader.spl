@@ -1,0 +1,282 @@
+# Compatibility runtime module loader surface.
+
+extern fn rt_file_exists(path: text) -> bool
+use compiler.loader.jit_instantiator.{JitInstantiator, JitInstantiator__new}
+use compiler.loader.compiler_ffi.{TypeInfo, type_to_string}
+
+fn _path_tag(path: text) -> text:
+    val base = path.split("/").last() ?? path
+    val stem = base.split(".").first() ?? base
+    if stem.contains("_"):
+        return stem.split("_").first() ?? stem
+    stem
+
+fn _symbol_matches_path(symbol: text, path: text) -> bool:
+    val tag = _path_tag(path)
+    if tag == "":
+        return false
+    symbol.starts_with(tag + "_") or symbol.contains("_" + tag + "_")
+
+fn _name_in(list: [text], name: text) -> bool:
+    for n in list:
+        if n == name:
+            return true
+    false
+
+enum SymbolType:
+    Function
+    Data
+
+struct LoadedSymbol:
+    name: text
+    address: i64
+    size: i64
+    ty: SymbolType
+    is_jit: bool
+    file_offset: i64
+
+struct LoadedModule:
+    path: text
+    reader: text
+    symbols: Dict<text, LoadedSymbol>
+    load_time: i64
+    version: i64
+
+impl LoadedModule:
+    fn has_symbol(name: text) -> bool:
+        self.symbols.contains_key(name)
+
+    fn get_symbol(name: text):
+        if self.symbols.contains_key(name):
+            return Some(self.symbols[name])
+        nil
+
+    fn exported_symbols() -> [LoadedSymbol]:
+        var out: [LoadedSymbol] = []
+        for item in self.symbols:
+            out = out + [item[1]]
+        out
+
+struct ModuleLoaderConfig:
+    enable_jit: bool
+    enable_cache: bool
+    max_cache_size: i64
+    verbose: bool
+    hot_reload: bool
+
+struct LoaderStats:
+    module_count: i64
+    symbol_count: i64
+    jit_stats: Dict<text, i64>
+    cache_stats: Dict<text, i64>
+
+enum LoadResult:
+    Success(module: LoadedModule)
+    AlreadyLoaded(module: LoadedModule)
+    Error(message: text)
+
+enum SymbolResult:
+    Found(symbol: LoadedSymbol, code: [u8])
+    JitCompiled(symbol: LoadedSymbol, code: [u8])
+    NotFound(name: text)
+    Error(message: text)
+
+struct ModuleLoader:
+    config: ModuleLoaderConfig
+    modules: Dict<text, LoadedModule>
+    global_symbols: Dict<text, (text, LoadedSymbol)>
+    jit: JitInstantiator
+
+impl ModuleLoader:
+    fn stats() -> LoaderStats:
+        LoaderStats(
+            module_count: self.modules.len() as i64,
+            symbol_count: self.global_symbols.len() as i64,
+            jit_stats: {"cached_count": self.jit.jit_cache.len() as i64},
+            cache_stats: {"template_count": 0, "instance_count": 0}
+        )
+
+    fn is_loaded(path: text) -> bool:
+        self.modules.contains_key(path)
+
+    fn loaded_modules() -> [text]:
+        var out: [text] = []
+        for item in self.modules:
+            out = out + [item[0]]
+        out
+
+    me load(path: text) -> LoadResult:
+        moduleloader_load(self, path)
+
+    me reload(path: text) -> LoadResult:
+        self.unload(path)
+        self.load(path)
+
+    me unload(path: text):
+        var remove_jit: [text] = []
+        for item in self.jit.jit_cache:
+            val sym_name = item[0]
+            val rec_cache = item[1]
+            var owner = "__jit__"
+            if rec_cache.contains_key("owner"):
+                owner = rec_cache["owner"]
+            else:
+                val rec_opt = self.jit.exec_mapper.lookup(sym_name)
+                if rec_opt.?:
+                    owner = rec_opt.unwrap().owner_id
+
+            if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
+                remove_jit = remove_jit + [sym_name]
+
+        for sym_name in remove_jit:
+            self.jit.drop_cached_symbol(sym_name)
+
+        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = {}
+        for item in self.global_symbols:
+            val sym_name = item[0]
+            val owner_pair = item[1]
+            val kept_owner = owner_pair[0]
+            if kept_owner != path and not _name_in(remove_jit, sym_name):
+                rebuilt_globals[sym_name] = owner_pair
+
+        for item in self.jit.jit_cache:
+            val sym_name = item[0]
+            val rec_cache = item[1]
+            val code = rec_cache["code"]
+            val addr = rec_cache["address"]
+            var mapped_owner = "__jit__"
+            if rec_cache.contains_key("owner"):
+                mapped_owner = rec_cache["owner"]
+            else:
+                val rec_opt = self.jit.exec_mapper.lookup(sym_name)
+                if rec_opt.?:
+                    mapped_owner = rec_opt.unwrap().owner_id
+            val sym = LoadedSymbol(
+                name: sym_name,
+                address: addr,
+                size: code.len() as i64,
+                ty: SymbolType.Function,
+                is_jit: true,
+                file_offset: 0
+            )
+            rebuilt_globals[sym_name] = (mapped_owner, sym)
+
+        self.global_symbols = rebuilt_globals
+
+        if self.modules.contains_key(path):
+            self.modules = self.modules.remove(path)
+
+    me resolve_symbol(name: text) -> SymbolResult:
+        if self.global_symbols.contains_key(name):
+            val pair = self.global_symbols[name]
+            return SymbolResult.Found(symbol: pair[1], code: [])
+
+        if self.jit.jit_cache.contains_key(name):
+            val rec_cache = self.jit.jit_cache[name]
+            val code = rec_cache["code"]
+            val addr = rec_cache["address"]
+
+            var owner = "__jit__"
+            if rec_cache.contains_key("owner"):
+                owner = rec_cache["owner"]
+            else:
+                val rec = self.jit.exec_mapper.lookup(name)
+                if rec.?:
+                    owner = rec.unwrap().owner_id
+
+            val sym = LoadedSymbol(
+                name: name,
+                address: addr,
+                size: code.len() as i64,
+                ty: SymbolType.Function,
+                is_jit: true,
+                file_offset: 0
+            )
+            self.global_symbols[name] = (owner, sym)
+            return SymbolResult.JitCompiled(symbol: sym, code: code)
+
+        SymbolResult.NotFound(name: name)
+
+    fn resolve_generic(name: text, type_args: [TypeInfo]) -> SymbolResult:
+        moduleloader_resolve_generic(self, name, type_args)
+
+    fn get_module(path: text):
+        if self.modules.contains_key(path):
+            return Some(self.modules[path])
+        nil
+
+fn moduleloaderconfig_default() -> ModuleLoaderConfig:
+    ModuleLoaderConfig(
+        enable_jit: true,
+        enable_cache: true,
+        max_cache_size: 100,
+        verbose: false,
+        hot_reload: false
+    )
+
+fn ModuleLoaderConfig__default() -> ModuleLoaderConfig:
+    moduleloaderconfig_default()
+
+fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
+    ModuleLoader(
+        config: config,
+        modules: {},
+        global_symbols: {},
+        jit: JitInstantiator__new({})
+    )
+
+fn moduleloader_with_defaults() -> ModuleLoader:
+    moduleloader_new(moduleloaderconfig_default())
+
+fn ModuleLoader__new(config: ModuleLoaderConfig) -> ModuleLoader:
+    moduleloader_new(config)
+
+fn ModuleLoader__with_defaults() -> ModuleLoader:
+    moduleloader_with_defaults()
+
+fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
+    if self.modules.contains_key(path):
+        return LoadResult.AlreadyLoaded(module: self.modules[path])
+    if not rt_file_exists(path):
+        return LoadResult.Error(message: "module not found: " + path)
+
+    val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
+    self.modules[path] = m
+    LoadResult.Success(module: m)
+
+fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
+    moduleloader_unload(self, path)
+    if self.modules.contains_key(path):
+        self.modules = self.modules.remove(path)
+    moduleloader_load(self, path)
+
+fn moduleloader_unload(self: ModuleLoader, path: text):
+    self.unload(path)
+
+fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
+    self.resolve_symbol(name)
+
+fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
+    moduleloader_resolve_symbol(self, mangle_name(name, type_args))
+
+fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
+    if type_args.len() == 0:
+        return base
+
+    var names: [text] = []
+    for t in type_args:
+        names = names + [type_to_string(t)]
+    base + "$" + names.join("_")
+
+fn moduleloader_stats(self: ModuleLoader) -> LoaderStats:
+    self.stats()
+
+export SymbolType
+export ModuleLoader, ModuleLoaderConfig, LoadedModule, LoadedSymbol
+export LoadResult, SymbolResult, LoaderStats
+export moduleloaderconfig_default, ModuleLoaderConfig__default
+export moduleloader_new, moduleloader_with_defaults
+export ModuleLoader__new, ModuleLoader__with_defaults
+export moduleloader_load, moduleloader_reload, moduleloader_unload
+export moduleloader_resolve_symbol, moduleloader_resolve_generic
+export moduleloader_stats, mangle_name
