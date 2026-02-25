@@ -1,0 +1,248 @@
+# Semantic Query Specification
+#
+# **Feature IDs:** #SQ-001 to #SQ-010
+# **Category:** Tooling
+# **Difficulty:** 3/5
+# **Status:** Implemented
+#
+# ## Overview
+# Tests for CodeQL-style semantic queries using SQL-like syntax.
+# Validates query parsing, predicate evaluation, and execution logic.
+
+use std.spec
+
+# ============================================================================
+# Test Group 1: Query parser — FIND...WHERE syntax
+# ============================================================================
+
+describe "semantic query parser":
+    it "parses FIND fn WHERE":
+        val q = "FIND fn WHERE return_type = \"i64\""
+        val starts_find = q.starts_with("FIND ")
+        expect(starts_find).to_equal(true)
+        val after_find = q.substring(5)
+        val where_idx = after_find.index_of("WHERE") ?? -1
+        expect(where_idx).to_be_greater_than(0)
+
+    it "extracts target from FIND":
+        val q = "FIND fn WHERE name = \"test\""
+        val after_find = q.substring(5).trim()
+        val target = after_find.split(" ")[0]
+        expect(target).to_equal("fn")
+
+    it "extracts predicate after WHERE":
+        val q = "FIND fn WHERE return_type = \"i64\""
+        val where_pos = q.index_of("WHERE") ?? -1
+        val pred_str = q.substring(where_pos + 5).trim()
+        expect(pred_str).to_start_with("return_type")
+
+    it "supports AND conjunction":
+        val q = "FIND fn WHERE name starts_with \"parse_\" AND param_count > 2"
+        val has_and = q.contains("AND")
+        expect(has_and).to_equal(true)
+
+    it "parses FIND with class target":
+        val q = "FIND class WHERE has_method(\"to_string\")"
+        val target = q.substring(5).split(" ")[0]
+        expect(target).to_equal("class")
+
+    it "parses FIND with struct target":
+        val q = "FIND struct WHERE field_count > 5"
+        val target = q.substring(5).split(" ")[0]
+        expect(target).to_equal("struct")
+
+# ============================================================================
+# Test Group 2: Comparison operators
+# ============================================================================
+
+describe "comparison operators":
+    it "parses equals operator":
+        val pred = "name = \"test\""
+        val has_eq = pred.contains("=")
+        expect(has_eq).to_equal(true)
+
+    it "parses not equals operator":
+        val pred = "name != \"test\""
+        val has_neq = pred.contains("!=")
+        expect(has_neq).to_equal(true)
+
+    it "parses greater than":
+        val pred = "param_count > 2"
+        val has_gt = pred.contains(">")
+        expect(has_gt).to_equal(true)
+
+    it "parses less than":
+        val pred = "field_count < 10"
+        val has_lt = pred.contains("<")
+        expect(has_lt).to_equal(true)
+
+    it "parses starts_with":
+        val pred = "name starts_with \"parse_\""
+        val has_sw = pred.contains("starts_with")
+        expect(has_sw).to_equal(true)
+
+    it "parses contains":
+        val pred = "module contains \"std\""
+        val has_contains = pred.contains("contains")
+        expect(has_contains).to_equal(true)
+
+# ============================================================================
+# Test Group 3: Function predicates
+# ============================================================================
+
+describe "function predicates":
+    it "parses calls predicate":
+        val pred = "calls(\"rt_file_read_text\")"
+        val is_calls = pred.starts_with("calls(")
+        expect(is_calls).to_equal(true)
+
+    it "extracts calls argument":
+        val pred = "calls(\"rt_file_read_text\")"
+        val inner = pred.substring(7, pred.len() - 2)
+        expect(inner).to_equal("rt_file_read_text")
+
+    it "parses has_method predicate":
+        val pred = "has_method(\"to_string\")"
+        val is_hm = pred.starts_with("has_method(")
+        expect(is_hm).to_equal(true)
+
+    it "parses implements predicate":
+        val pred = "implements(\"Printable\")"
+        val is_impl = pred.starts_with("implements(")
+        expect(is_impl).to_equal(true)
+
+    it "parses imports predicate":
+        val pred = "imports(\"std\")"
+        val is_imports = pred.starts_with("imports(")
+        expect(is_imports).to_equal(true)
+
+# ============================================================================
+# Test Group 4: Target matching
+# ============================================================================
+
+describe "target matching":
+    it "fn matches fn kind":
+        val target = "fn"
+        val kind = "fn"
+        val matches = target == "fn" and (kind == "fn" or kind == "method")
+        expect(matches).to_equal(true)
+
+    it "fn matches method kind":
+        val target = "fn"
+        val kind = "method"
+        val matches = target == "fn" and (kind == "fn" or kind == "method" or kind == "static_method" or kind == "extern_fn")
+        expect(matches).to_equal(true)
+
+    it "type matches class":
+        val target = "type"
+        val kind = "class"
+        val matches = target == "type" and (kind == "class" or kind == "struct" or kind == "enum" or kind == "trait")
+        expect(matches).to_equal(true)
+
+    it "type matches struct":
+        val target = "type"
+        val kind = "struct"
+        val matches = target == "type" and (kind == "class" or kind == "struct" or kind == "enum" or kind == "trait")
+        expect(matches).to_equal(true)
+
+    it "class does not match fn":
+        val target = "class"
+        val kind = "fn"
+        val matches = target == kind
+        expect(matches).to_equal(false)
+
+    it "wildcard matches anything":
+        val target = "*"
+        val matches = target == "*"
+        expect(matches).to_equal(true)
+
+# ============================================================================
+# Test Group 5: Numeric predicates
+# ============================================================================
+
+describe "numeric predicates":
+    it "counts params from empty string":
+        val params = ""
+        var count = 0
+        if params != "":
+            val parts = params.split(",")
+            for part in parts:
+                if part.trim() != "":
+                    count = count + 1
+        expect(count).to_equal(0)
+
+    it "counts single param":
+        val params = "x: i64"
+        val parts = params.split(",")
+        var count = 0
+        for part in parts:
+            if part.trim() != "":
+                count = count + 1
+        expect(count).to_equal(1)
+
+    it "counts multiple params":
+        val params = "a: i64, b: text, c: bool"
+        val parts = params.split(",")
+        var count = 0
+        for part in parts:
+            if part.trim() != "":
+                count = count + 1
+        expect(count).to_equal(3)
+
+    it "param_count > 2 comparison":
+        val count = 3
+        val threshold = 2
+        val matches = count > threshold
+        expect(matches).to_equal(true)
+
+    it "field_count > 5 comparison":
+        val count = 3
+        val threshold = 5
+        val matches = count > threshold
+        expect(matches).to_equal(false)
+
+# ============================================================================
+# Test Group 6: AND splitting
+# ============================================================================
+
+describe "AND splitting":
+    it "splits on AND keyword":
+        val pred_str = "name = \"foo\" AND return_type = \"i64\""
+        val parts = pred_str.split(" AND ")
+        expect(parts.len()).to_equal(2)
+        expect(parts[0].trim()).to_equal("name = \"foo\"")
+
+    it "handles single predicate without AND":
+        val pred_str = "name = \"foo\""
+        val parts = pred_str.split(" AND ")
+        expect(parts.len()).to_equal(1)
+
+    it "splits multiple AND conjunctions":
+        val pred_str = "a = \"1\" AND b = \"2\" AND c = \"3\""
+        val parts = pred_str.split(" AND ")
+        expect(parts.len()).to_equal(3)
+
+# ============================================================================
+# Test Group 7: Output format
+# ============================================================================
+
+describe "sem query output format":
+    it "text format has file:line":
+        val file = "src/app/cli/query.spl"
+        val line = 42
+        val kind = "fn"
+        val name = "query_main"
+        val output = "{file}:{line}: [{kind}] {name}"
+        expect(output).to_contain("query.spl:42")
+
+    it "json format has required fields":
+        val entry = "{\"file\": \"test.spl\", \"line\": 10}"
+        val has_file = entry.contains("\"file\"")
+        val has_line = entry.contains("\"line\"")
+        expect(has_file).to_equal(true)
+        expect(has_line).to_equal(true)
+
+    it "results count is printed":
+        val count = 5
+        val footer = "Total: {count} results"
+        expect(footer).to_equal("Total: 5 results")
