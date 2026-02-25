@@ -1,0 +1,65 @@
+name: Rust Bootstrap
+
+on:
+  push:
+    paths: ['src/temp_bootstrap/**', 'src/compiler/**']
+  pull_request:
+    paths: ['src/temp_bootstrap/**', 'src/compiler/**']
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/temp_bootstrap/target
+          key: ${{ runner.os }}-bootstrap-${{ hashFiles('src/temp_bootstrap/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bootstrap-
+
+      - name: Build
+        working-directory: src/temp_bootstrap
+        run: cargo build --release -p simple-driver
+
+      - name: Test
+        working-directory: src/temp_bootstrap
+        run: cargo test --workspace
+
+      - name: Clippy
+        working-directory: src/temp_bootstrap
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Parse validation
+        working-directory: src/temp_bootstrap
+        run: |
+          find ../../src/compiler -name "*.spl" | sort | timeout 300 target/release/parse_check > parse_result.txt 2>&1 || true
+          cat parse_result.txt
+          # Extract parse rate from summary
+          RATE_LINE=$(grep 'Parse rate:' parse_result.txt || echo "Parse rate: 0.0%")
+          RATE=$(echo "$RATE_LINE" | grep -oP '[\d.]+(?=%)')
+          RATE_INT=${RATE%%.*}
+          PARSED_OK=$(grep 'Parsed OK:' parse_result.txt | grep -oP '\d+' || echo "0")
+          TOTAL=$(grep 'Total files:' parse_result.txt | grep -oP '\d+' || echo "0")
+          echo "## Parse Rate: ${PARSED_OK}/${TOTAL} (${RATE}%)" >> $GITHUB_STEP_SUMMARY
+          if [ "${RATE_INT:-0}" -lt 90 ]; then
+            echo "::warning::Parse rate ${RATE}% is below 90% threshold"
+          fi
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          name: rust-bootstrap-${{ github.sha }}
+          path: |
+            src/temp_bootstrap/target/release/simple
+            src/temp_bootstrap/target/release/parse_check
+          retention-days: 7

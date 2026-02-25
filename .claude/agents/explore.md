@@ -23,7 +23,7 @@ src/
     duplicate_check/  # Code duplication detection
     io/         # I/O module (SFFI wrappers)
     mcp/        # MCP server (simple-mcp)
-    mcp_jj/     # MCP jj-git server
+    mcp_jj/     # MCP git server
     test_runner_new/  # Test runner + sdoctest
   lib/          # Libraries
     database/   # Database (bug, test, feature DBs)

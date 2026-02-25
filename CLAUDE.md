@@ -32,7 +32,7 @@ Use these agent definitions when spawning Task subagents. Located in `.claude/ag
 | **debug** | Investigating bugs, tracing errors, profiling | `/debug` |
 | **explore** | Finding files, understanding structure, researching | `/research`, `/architecture` |
 | **docs** | Writing research/design/guide docs, reports | `/doc`, `/todo` |
-| **vcs** | Committing, pushing, viewing history (jj) | `/versioning` |
+| **vcs** | Committing, pushing, viewing history (git) | `/versioning` |
 | **infra** | MCP servers, database library, stdlib, SFFI | `/mcp`, `/database`, `/stdlib`, `/sffi` |
 | **build** | Building project, creating releases | `/release` |
 | **ml** | Machine learning features, neural networks | `/deeplearning` |
@@ -50,7 +50,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 
 | Skill | Purpose |
 |-------|---------|
-| `versioning` | Jujutsu (jj) workflow - **NOT git!** |
+| `versioning` | Git workflow |
 | `test` | Test writing, methodology, and container testing (safe/isolated runs) |
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
 | `coding` | Simple language rules, coding standards |
@@ -77,9 +77,9 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 ## Critical Rules
 
 ### Version Control
-- **NEVER use git** - use `jj` (see `/versioning` or vcs agent)
+- Use **git** for all version control
 - **NEVER create branches** - work directly on `main`
-- Push: `jj bookmark set main -r @ && jj git push --bookmark main`
+- Push: `git add -A && git commit -m "message" && git push origin main`
 
 ### Language
 - **ALL code in `.spl` or `.ssh`** - No Python, no Bash (except 3 bootstrap scripts in `scripts/`)
@@ -107,7 +107,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 ### Code Style
 - **NEVER over-engineer** - only make requested changes
 - **NEVER add unused code** - delete completely
-- **DO NOT ADD REPORT TO JJ** unless requested
+- **DO NOT ADD REPORT TO GIT** unless requested
 
 ---
 

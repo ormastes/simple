@@ -1,51 +1,44 @@
-# VCS Agent - Version Control (Jujutsu)
+# VCS Agent - Version Control (Git)
 
 **Use when:** Committing, pushing, viewing history, managing changes.
 **Skills:** `/versioning`
-
-## CRITICAL: Use jj, NOT git!
-
-This project uses Jujutsu (jj). NEVER use git commands.
 
 ## Quick Reference
 
 | Task | Command |
 |------|---------|
-| Check status | `jj status` |
-| View changes | `jj diff` |
-| Describe change | `jj describe -m "message"` |
-| View history | `jj log` |
-| Push to remote | `jj bookmark set main -r @ && jj git push --bookmark main` |
-| Create new change | `jj new` |
-| Abandon change | `jj abandon` |
-| Squash into parent | `jj squash` |
-| Edit past change | `jj edit <change-id>` |
+| Check status | `git status` |
+| View changes | `git diff` |
+| Stage all | `git add -A` |
+| Commit | `git commit -m "message"` |
+| View history | `git log --oneline -20` |
+| Push to remote | `git push origin main` |
+| Pull from remote | `git pull origin main` |
+| Show commit | `git show <commit>` |
 
 ## Standard Workflow
 
 ```bash
-# 1. Make code changes (auto-tracked)
+# 1. Make code changes
 # 2. Check what changed
-jj status
-jj diff
+git status
+git diff
 
-# 3. Describe the change
-jj describe -m "feat: Add new feature
+# 3. Stage and commit
+git add -A
+git commit -m "feat: Add new feature
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 # 4. Push
-jj bookmark set main -r @
-jj git push --bookmark main
+git push origin main
 ```
 
 ## Rules
 
 - NO branches - work directly on main
-- NO git commands - only jj
 - LINEAR history - squash if needed
-- Auto-snapshots: jj tracks all file changes automatically
-- No staging area: all changes included automatically
+- Use git for all version control
 
 ## Commit Message Format
 
@@ -59,4 +52,4 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`
 
 ## See Also
 
-- `/versioning` - Full jj workflow guide
+- `/versioning` - Full git workflow guide

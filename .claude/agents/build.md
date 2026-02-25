@@ -33,9 +33,9 @@ bin/simple test --only-slow              # Slow tests only
 
 1. Update version in `simple.sdn`
 2. Update `CHANGELOG.md`
-3. Commit: `jj describe -m "chore: Release vX.Y.Z"`
-4. Tag: `jj bookmark set vX.Y.Z -r @`
-5. Push: `jj git push --bookmark main && jj git push --bookmark vX.Y.Z`
+3. Commit: `git commit -m "chore: Release vX.Y.Z"`
+4. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
+5. Push: `git push origin main && git push origin vX.Y.Z`
 6. Monitor GitHub Actions
 7. Verify: `gh release view vX.Y.Z`
 

@@ -13,48 +13,54 @@ import threading
 import time
 
 
-def read_message(stream, framing_cb=None):
-    line = stream.readline()
-    if not line:
-        return None
-
-    # JSON-lines framing
-    if line.startswith(b"{"):
-        if framing_cb is not None:
-            framing_cb("json-lines")
-        return line.rstrip(b"\r\n")
-
-    # Content-Length framing
-    headers = [line]
+def read_message(stream, framing_cb=None, ignore_garbage=False):
     while True:
         line = stream.readline()
         if not line:
             return None
-        if line in (b"\r\n", b"\n"):
-            break
-        headers.append(line)
 
-    content_length = None
-    for header in headers:
-        if b":" not in header:
-            continue
-        key, value = header.split(b":", 1)
-        if key.strip().lower() == b"content-length":
-            try:
-                content_length = int(value.strip())
-            except ValueError:
+        # JSON-lines framing
+        if line.startswith(b"{"):
+            if framing_cb is not None:
+                framing_cb("json-lines")
+            return line.rstrip(b"\r\n")
+
+        # Content-Length framing
+        if line.startswith(b"Content-Length:"):
+            headers = [line]
+            while True:
+                line = stream.readline()
+                if not line:
+                    return None
+                if line in (b"\r\n", b"\n"):
+                    break
+                headers.append(line)
+
+            content_length = None
+            for header in headers:
+                if b":" not in header:
+                    continue
+                key, value = header.split(b":", 1)
+                if key.strip().lower() == b"content-length":
+                    try:
+                        content_length = int(value.strip())
+                    except ValueError:
+                        return None
+
+            if framing_cb is not None:
+                framing_cb("content-length")
+
+            if content_length is None or content_length < 0:
                 return None
 
-    if framing_cb is not None:
-        framing_cb("content-length")
+            body = stream.read(content_length)
+            if body is None or len(body) < content_length:
+                return None
+            return body
 
-    if content_length is None or content_length < 0:
-        return None
-
-    body = stream.read(content_length)
-    if body is None or len(body) < content_length:
-        return None
-    return body
+        # Some runtimes emit log noise on stdout; skip non-protocol lines.
+        if not ignore_garbage:
+            return None
 
 
 def write_content_length(stream, body):
@@ -89,7 +95,7 @@ def client_to_server(client_in, server_in, set_framing):
 def server_to_client(server_out, client_out, get_framing):
     try:
         while True:
-            msg = read_message(server_out)
+            msg = read_message(server_out, ignore_garbage=True)
             if msg is None:
                 break
             framing = get_framing()

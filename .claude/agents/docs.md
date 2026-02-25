@@ -32,7 +32,7 @@ RULES → enforced by CI + review
 - Specifications MUST be SSpec test files (`*_spec.spl`), not markdown
 - Research goes in `doc/research/`, NOT mixed with specs
 - Reports use format: `doc/report/<topic>_<date>.md`
-- DO NOT add reports to jj unless requested
+- DO NOT add reports to git unless requested
 
 ## Auto-Generated Docs (Updated Every Test Run)
 

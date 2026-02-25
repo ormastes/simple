@@ -1,0 +1,179 @@
+# Example Group Registry
+# Stores and manages test example groups and their hierarchies
+
+# Hook types (RSpec-aligned)
+export enum Hook:
+    BeforeEach(Fn() -> Void)
+    AfterEach(Fn() -> Void)
+    BeforeAll(Fn() -> Void)
+    AfterAll(Fn() -> Void)
+
+# Given block - fixture or setup
+export enum Given:
+    Lazy(name: Symbol, block: Fn() -> Any)     # given(:name) { ... } - memoized per-example
+    Eager(block: Fn() -> Void)                  # given { ... } - runs before each example
+
+# Reusable context definition
+export class ContextDefinition:
+    name: Symbol
+    givens: List[Given]
+
+    fn new(name: Symbol) -> ContextDefinition:
+        return ContextDefinition {
+            name: name,
+            givens: []
+        }
+
+    fn add_given(self, given: Given) -> Void:
+        self.givens.push(given)
+
+# Single test example
+export class Example:
+    description: String
+    block: Fn() -> Void
+    tags: List[Symbol]
+    pending: Bool
+    
+    fn new(description: String, block: Fn() -> Void) -> Example:
+        return Example {
+            description: description,
+            block: block,
+            tags: [],
+            pending: false
+        }
+    
+    fn tag(self, tag: Symbol) -> Example:
+        self.tags.push(tag)
+        return self
+    
+    fn skip(self) -> Example:
+        self.pending = true
+        return self
+
+# Example group (describe/context)
+export class ExampleGroup:
+    description: String
+    parent: Option[ExampleGroup]
+    children: List[ExampleGroup]
+    examples: List[Example]
+    hooks: List[Hook]
+    tags: List[Symbol]
+    
+    fn new(description: String, parent: Option[ExampleGroup]) -> ExampleGroup:
+        return ExampleGroup {
+            description: description,
+            parent: parent,
+            children: [],
+            examples: [],
+            hooks: [],
+            tags: []
+        }
+    
+    fn add_child(self, child: ExampleGroup) -> Void:
+        self.children.push(child)
+    
+    fn add_example(self, example: Example) -> Void:
+        self.examples.push(example)
+    
+    fn add_hook(self, hook: Hook) -> Void:
+        self.hooks.push(hook)
+    
+    fn tag(self, tag: Symbol) -> ExampleGroup:
+        self.tags.push(tag)
+        return self
+    
+    # Get full description path (e.g., "Stack when empty")
+    fn full_description(self) -> String:
+        match self.parent:
+            case Some(parent):
+                return "${parent.full_description()} ${self.description}"
+            case None:
+                return self.description
+    
+    # Collect all hooks from ancestors (for execution)
+    fn collect_hooks(self, hook_type: Type[Hook]) -> List[Hook]:
+        let hooks = []
+        
+        # Traverse up to collect outer hooks first
+        match self.parent:
+            case Some(parent):
+                hooks.extend(parent.collect_hooks(hook_type))
+            case None:
+                pass
+        
+        # Add own hooks
+        for hook in self.hooks:
+            match hook:
+                case h if h is hook_type:
+                    hooks.push(h)
+                case _:
+                    pass
+        
+        return hooks
+
+# Shared example definition (for shared_examples/it_behaves_like)
+export class SharedExampleDefinition:
+    name: String
+    block: Fn() -> Void
+    description: Option[String]
+    tags: List[Symbol]
+
+    fn new(name: String, block: Fn() -> Void) -> SharedExampleDefinition:
+        return SharedExampleDefinition {
+            name: name,
+            block: block,
+            description: None,
+            tags: []
+        }
+
+    fn with_description(self, desc: String) -> SharedExampleDefinition:
+        self.description = Some(desc)
+        return self
+
+    fn with_tag(self, tag: Symbol) -> SharedExampleDefinition:
+        self.tags.push(tag)
+        return self
+
+# Global registry of all example groups
+let all_groups: List[ExampleGroup] = []
+
+# Global registry of reusable context definitions
+let context_definitions: Dict[Symbol, ContextDefinition] = {}
+
+# Global registry of shared example definitions
+let shared_examples_registry: Dict[String, SharedExampleDefinition] = {}
+
+export fn register_group(group: ExampleGroup) -> Void:
+    all_groups.push(group)
+
+export fn get_all_groups() -> List[ExampleGroup]:
+    return all_groups
+
+export fn clear_registry() -> Void:
+    all_groups.clear()
+
+# Context definition registry functions
+export fn register_context(name: Symbol, definition: ContextDefinition) -> Void:
+    context_definitions[name] = definition
+
+export fn get_context(name: Symbol) -> Option[ContextDefinition]:
+    return context_definitions.get(name)
+
+export fn context_exists(name: Symbol) -> Bool:
+    return context_definitions.contains_key(name)
+
+export fn clear_context_registry() -> Void:
+    context_definitions.clear()
+
+# Shared examples registry functions
+export fn register_shared_examples(name: String, definition: SharedExampleDefinition) -> Void:
+    shared_examples_registry[name] = definition
+
+export fn get_shared_examples(name: String) -> Option[SharedExampleDefinition]:
+    return shared_examples_registry.get(name)
+
+export fn shared_examples_exists(name: String) -> Bool:
+    return shared_examples_registry.contains_key(name)
+
+export fn clear_shared_examples_registry() -> Void:
+    shared_examples_registry.clear()
