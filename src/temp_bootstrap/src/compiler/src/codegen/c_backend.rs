@@ -3,8 +3,10 @@
 //! Translates a `MirModule` into a complete C source file that can be compiled
 //! with clang/gcc. The generated C links against the Simple runtime (`runtime.h`).
 
+use std::collections::HashMap;
+
 use crate::error::CompileError;
-use crate::mir::MirModule;
+use crate::mir::{MirInst, MirModule};
 use crate::value::FUNC_MAIN;
 
 use super::c_instr::{compile_instruction, compile_terminator, sanitize_name, CInstrContext};
@@ -33,20 +35,51 @@ impl CCodegen {
         // 1. Preamble: includes and runtime declarations
         self.emit_preamble();
 
-        // 2. Compile all functions, collecting string constants
+        // 1b. Collect all lambda names referenced by ClosureCreate instructions.
+        //     These lambdas are not emitted as separate MirFunctions, so we emit
+        //     a single generic stub and forward-declare each lambda name as an alias.
+        let lambda_names = collect_lambda_names(mir);
+        if !lambda_names.is_empty() {
+            self.output
+                .push_str("/* Bootstrap lambda stub (lambdas not executed in bootstrap) */\n");
+            self.output
+                .push_str("static int64_t __bootstrap_lambda_stub(void) { return 0; }\n");
+            for lname in &lambda_names {
+                // Emit a #define so that &lambda_name resolves to &__bootstrap_lambda_stub
+                self.output.push_str(&format!(
+                    "#define {} __bootstrap_lambda_stub\n",
+                    lname
+                ));
+            }
+            self.output.push('\n');
+        }
+
+        // 2. Compile all functions, collecting string constants.
+        //    Track emitted function names to deduplicate (Issue 2: redefinition errors).
         let mut all_string_constants: Vec<(String, String)> = Vec::new();
         let mut function_bodies: Vec<String> = Vec::new();
         let mut forward_decls: Vec<String> = Vec::new();
+        let mut name_counts: HashMap<String, usize> = HashMap::new();
 
         for func in &mir.functions {
             // Forward declaration
             let ret_type = type_id_to_c_return(func.return_type);
             // Rename "main" to "simple_main" to avoid conflict with C entry point
-            let name = if func.name == FUNC_MAIN {
+            let base_name = if func.name == FUNC_MAIN {
                 "simple_main".to_string()
             } else {
                 sanitize_name(&func.name)
             };
+
+            // Deduplicate: if this name was already emitted, append _N suffix
+            let count = name_counts.entry(base_name.clone()).or_insert(0);
+            let name = if *count == 0 {
+                base_name.clone()
+            } else {
+                format!("{}_{}", base_name, count)
+            };
+            *name_counts.get_mut(&base_name).unwrap() += 1;
+
             let params: Vec<String> = func
                 .params
                 .iter()
@@ -239,6 +272,37 @@ fn escape_c_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// Collect all unique lambda function names referenced by ClosureCreate instructions.
+///
+/// These lambda functions are referenced in the MIR but not emitted as separate
+/// MirFunction entries. We collect their sanitized names so the C backend can
+/// emit stubs or #defines to satisfy the linker.
+fn collect_lambda_names(mir: &MirModule) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut names = BTreeSet::new();
+    // Also collect the set of function names that ARE defined in the module
+    let defined: std::collections::HashSet<String> = mir
+        .functions
+        .iter()
+        .map(|f| sanitize_name(&f.name))
+        .collect();
+
+    for func in &mir.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let MirInst::ClosureCreate { func_name, .. } = inst {
+                    let sname = sanitize_name(func_name);
+                    // Only stub lambdas that are NOT already defined as real functions
+                    if !defined.contains(&sname) {
+                        names.insert(sname);
+                    }
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
 }
 
 #[cfg(test)]

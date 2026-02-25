@@ -893,7 +893,39 @@ pub fn sanitize_name(name: &str) -> String {
             i += 1;
         }
     }
+    // Avoid C keywords and stdlib conflicts
+    if is_c_reserved(&result) {
+        result.insert_str(0, "spl_");
+    }
     result
+}
+
+/// Check if a name conflicts with C keywords or standard library functions.
+fn is_c_reserved(name: &str) -> bool {
+    matches!(
+        name,
+        // C keywords
+        "auto" | "break" | "case" | "char" | "const" | "continue" | "default"
+        | "do" | "double" | "else" | "enum" | "extern" | "float" | "for"
+        | "goto" | "if" | "inline" | "int" | "long" | "register" | "restrict"
+        | "return" | "short" | "signed" | "sizeof" | "static" | "struct"
+        | "switch" | "typedef" | "union" | "unsigned" | "void" | "volatile"
+        | "while" | "_Bool" | "_Complex" | "_Imaginary"
+        // C stdlib / math.h conflicts
+        | "log" | "log2" | "log10" | "exp" | "pow" | "sqrt" | "ceil" | "floor"
+        | "abs" | "div" | "exit" | "free" | "malloc" | "calloc" | "realloc"
+        | "printf" | "fprintf" | "sprintf" | "snprintf" | "scanf" | "sscanf"
+        | "puts" | "gets" | "fopen" | "fclose" | "fread" | "fwrite"
+        | "memcpy" | "memset" | "memmove" | "strcmp" | "strcpy" | "strcat"
+        | "strlen" | "strtol" | "atoi" | "atof" | "rand" | "srand"
+        | "time" | "clock" | "sleep" | "signal" | "raise"
+        | "stdin" | "stdout" | "stderr" | "NULL" | "EOF"
+        | "main" | "errno" | "assert" | "abort" | "atexit"
+        | "getenv" | "system" | "remove" | "rename" | "tmpfile"
+        | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+        | "sinh" | "cosh" | "tanh" | "fabs" | "fmod" | "frexp" | "ldexp"
+        | "modf" | "round" | "trunc" | "nan" | "isinf" | "isnan"
+    )
 }
 
 /// Format a float value for C, handling special cases.
