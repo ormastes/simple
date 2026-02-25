@@ -355,8 +355,19 @@ fn call_extern_function(
             }
         }
         "rt_get_args" | "sys_get_args" | "get_args" => {
-            let args: Vec<Value> = std::env::args().map(|a| Value::Str(a)).collect();
-            Ok(Value::Array(args))
+            // If program args were forwarded via -- separator, use those
+            // Uses ASCII Unit Separator (0x1F) as delimiter
+            if let Ok(forwarded) = std::env::var("SIMPLE_PROGRAM_ARGS") {
+                let args: Vec<Value> = forwarded
+                    .split('\x1F')
+                    .filter(|s| !s.is_empty())
+                    .map(|a| Value::Str(a.to_string()))
+                    .collect();
+                Ok(Value::Array(args))
+            } else {
+                let args: Vec<Value> = std::env::args().map(|a| Value::Str(a)).collect();
+                Ok(Value::Array(args))
+            }
         }
         "rt_time_now" | "time_now" => {
             use std::time::{SystemTime, UNIX_EPOCH};

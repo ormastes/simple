@@ -1,0 +1,278 @@
+# Database Fix Command
+#
+# Runs validation checks and applies auto-fixes to SDN databases.
+# Only fixes issues marked as auto_fixable unless --force is used.
+#
+# Usage:
+#   simple fix-dbs                    Fix all auto-fixable issues
+#   simple fix-dbs --dry-run          Preview without modifying
+#   simple fix-dbs bugs               Fix specific DB only
+#   simple fix-dbs --force            Apply aggressive fixes too
+
+use std.database.bug.{load_bug_database}
+use std.database.test.{load_test_database}
+use std.database.feature.{load_feature_database}
+use std.database.core.{SdnDatabase}
+use std.database.checker.{DbIssue, DbFixResult, count_by_severity, fixable_issues,
+    fix_remove_duplicates, fix_invalid_valid_col, fix_stale_running, fix_trim_fields}
+
+extern fn rt_file_exists(path: text) -> bool
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+# ============================================================================
+# Database paths
+# ============================================================================
+
+fn bug_db_path() -> text: "doc/bug/bug_db.sdn"
+fn test_db_path() -> text: "doc/test/test_db.sdn"
+fn feature_db_path() -> text: "doc/feature/feature_db.sdn"
+
+# ============================================================================
+# Per-database fix functions
+# ============================================================================
+
+fn fix_bug_db(dry_run: bool) -> DbFixResult:
+    val path = bug_db_path()
+    val result = DbFixResult(db_name: "bug", fixed: [], skipped: [])
+
+    if not file_exists(path):
+        result.skipped.push("Database file not found: {path}")
+        return result
+
+    val db_opt = load_bug_database(path)
+    if not db_opt.?:
+        result.skipped.push("Failed to parse bug database: {path}")
+        return result
+
+    var db = db_opt.unwrap()
+
+    # Get bugs table and apply fixes
+    val table_opt = db.db.get_table("bugs")
+    if not table_opt.?:
+        result.skipped.push("No 'bugs' table found")
+        return result
+
+    var table = table_opt.unwrap()
+
+    # Fix: remove duplicate IDs
+    val dup_fixes = fix_remove_duplicates(table, "id")
+    for f in dup_fixes:
+        result.fixed.push(f)
+
+    # Fix: invalid valid column
+    val valid_fixes = fix_invalid_valid_col(table)
+    for f in valid_fixes:
+        result.fixed.push(f)
+
+    # Fix: trim whitespace
+    val trim_fixes = fix_trim_fields(table)
+    for f in trim_fixes:
+        result.fixed.push(f)
+
+    # Write back table and save
+    if result.fixed.len() > 0:
+        db.db.set_table("bugs", table)
+        if not dry_run:
+            db.save()
+
+    result
+
+fn fix_test_db(dry_run: bool) -> DbFixResult:
+    val path = test_db_path()
+    val result = DbFixResult(db_name: "test", fixed: [], skipped: [])
+
+    if not file_exists(path):
+        result.skipped.push("Database file not found: {path}")
+        return result
+
+    val db_opt = load_test_database(path)
+    if not db_opt.?:
+        result.skipped.push("Failed to parse test database: {path}")
+        return result
+
+    var db = db_opt.unwrap()
+
+    # Fix test_runs table
+    val runs_opt = db.db.get_table("test_runs")
+    if runs_opt.?:
+        var runs_table = runs_opt.unwrap()
+
+        # Fix: stale running entries
+        val stale_fixes = fix_stale_running(runs_table, "status")
+        for f in stale_fixes:
+            result.fixed.push(f)
+
+        # Fix: invalid valid column
+        val valid_fixes = fix_invalid_valid_col(runs_table)
+        for f in valid_fixes:
+            result.fixed.push(f)
+
+        # Fix: trim whitespace
+        val trim_fixes = fix_trim_fields(runs_table)
+        for f in trim_fixes:
+            result.fixed.push(f)
+
+        if result.fixed.len() > 0:
+            db.db.set_table("test_runs", runs_table)
+
+    # Fix test_results table
+    val results_opt = db.db.get_table("test_results")
+    if results_opt.?:
+        var results_table = results_opt.unwrap()
+        val before_count = result.fixed.len()
+
+        val valid_fixes = fix_invalid_valid_col(results_table)
+        for f in valid_fixes:
+            result.fixed.push(f)
+
+        val trim_fixes = fix_trim_fields(results_table)
+        for f in trim_fixes:
+            result.fixed.push(f)
+
+        if result.fixed.len() > before_count:
+            db.db.set_table("test_results", results_table)
+
+    # Save if any fixes applied
+    if result.fixed.len() > 0 and not dry_run:
+        db.save()
+
+    result
+
+fn fix_feature_db(dry_run: bool) -> DbFixResult:
+    val path = feature_db_path()
+    val result = DbFixResult(db_name: "feature", fixed: [], skipped: [])
+
+    if not file_exists(path):
+        result.skipped.push("Database file not found: {path}")
+        return result
+
+    val db_opt = load_feature_database(path)
+    if not db_opt.?:
+        result.skipped.push("Failed to parse feature database: {path}")
+        return result
+
+    var db = db_opt.unwrap()
+
+    val table_opt = db.db.get_table("features")
+    if not table_opt.?:
+        result.skipped.push("No 'features' table found")
+        return result
+
+    var table = table_opt.unwrap()
+
+    # Fix: remove duplicate IDs
+    val dup_fixes = fix_remove_duplicates(table, "id")
+    for f in dup_fixes:
+        result.fixed.push(f)
+
+    # Fix: invalid valid column
+    val valid_fixes = fix_invalid_valid_col(table)
+    for f in valid_fixes:
+        result.fixed.push(f)
+
+    # Fix: trim whitespace
+    val trim_fixes = fix_trim_fields(table)
+    for f in trim_fixes:
+        result.fixed.push(f)
+
+    if result.fixed.len() > 0:
+        db.db.set_table("features", table)
+        if not dry_run:
+            db.save()
+
+    result
+
+# ============================================================================
+# Output formatting
+# ============================================================================
+
+fn print_fix_result(result: DbFixResult, dry_run: bool):
+    val prefix = if dry_run: "[DRY RUN] " else: ""
+    print "{prefix}[{result.db_name}]"
+
+    if result.fixed.len() == 0 and result.skipped.len() == 0:
+        print "  No issues to fix"
+        print ""
+        return
+
+    for fix in result.fixed:
+        val action = if dry_run: "Would fix" else: "Fixed"
+        print "  {action}: {fix}"
+
+    for skipped_item in result.skipped:
+        print "  Skipped: {skipped_item}"
+
+    print ""
+
+# ============================================================================
+# Main entry point
+# ============================================================================
+
+fn run_fix_dbs(args: [text]) -> i64:
+    var dry_run = false
+    var db_filters: [text] = []
+
+    for arg in args:
+        if arg == "--dry-run":
+            dry_run = true
+        elif not arg.starts_with("--"):
+            db_filters.push(arg)
+
+    val fix_all = db_filters.len() == 0
+
+    val do_bugs = fix_all or db_filters.contains("bugs") or db_filters.contains("bug")
+    val do_tests = fix_all or db_filters.contains("tests") or db_filters.contains("test")
+    val do_features = fix_all or db_filters.contains("features") or db_filters.contains("feature")
+
+    if dry_run:
+        print "Database Fix (dry run - no changes will be made)"
+    else:
+        print "Database Fix"
+    print "============"
+    print ""
+
+    var total_fixed = 0
+    var total_skipped = 0
+
+    if do_bugs:
+        val result = fix_bug_db(dry_run)
+        print_fix_result(result, dry_run)
+        total_fixed = total_fixed + result.fixed.len()
+        total_skipped = total_skipped + result.skipped.len()
+
+    if do_tests:
+        val result = fix_test_db(dry_run)
+        print_fix_result(result, dry_run)
+        total_fixed = total_fixed + result.fixed.len()
+        total_skipped = total_skipped + result.skipped.len()
+
+    if do_features:
+        val result = fix_feature_db(dry_run)
+        print_fix_result(result, dry_run)
+        total_fixed = total_fixed + result.fixed.len()
+        total_skipped = total_skipped + result.skipped.len()
+
+    # TodoDB and TaskDB are read-only wrappers, no fixes available
+    val do_todos = fix_all or db_filters.contains("todos") or db_filters.contains("todo")
+    val do_tasks = fix_all or db_filters.contains("tasks") or db_filters.contains("task")
+    if do_todos:
+        print "[todo] Read-only wrapper (fixes not supported — writes bypass shared lib)"
+        print ""
+    if do_tasks:
+        print "[task] Read-only wrapper (fixes not supported — writes bypass shared lib)"
+        print ""
+
+    # Summary
+    if dry_run:
+        print "Summary: {total_fixed} fix(es) would be applied, {total_skipped} skipped"
+    else:
+        print "Summary: {total_fixed} fix(es) applied, {total_skipped} skipped"
+
+    0
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export run_fix_dbs

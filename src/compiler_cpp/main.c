@@ -583,7 +583,7 @@ static long long cli_run_mcp(SimpleStringArray a) { (void)a; return delegate_to_
 static long long cli_run_lsp(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
 static long long cli_run_diff(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_constr(SimpleStringArray a) { (void)a; return 0; }
-static long long cli_run_query(SimpleStringArray a) { (void)a; return 0; }
+static long long cli_run_query(SimpleStringArray a) { return cli_run_file("src/app/cli/query.spl", a, 0, 0); }
 static long long cli_info(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_spec_coverage(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_replay(SimpleStringArray a) { (void)a; return 0; }

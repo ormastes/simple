@@ -276,6 +276,30 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("doctest_walk_directory", &[I64, I64, I64], &[I64]), // root, include, exclude -> array (RuntimeValue)
     RuntimeFuncSpec::new("doctest_path_has_extension", &[I64, I64], &[I64]), // path, ext -> bool (RuntimeValue)
     RuntimeFuncSpec::new("doctest_path_contains", &[I64, I64], &[I64]), // path, pattern -> bool (RuntimeValue)
+    // =========================================================================
+    // Environment, process, and string operations (needed for full compiler)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_env_get", &[I64], &[I64]),         // key -> Option<value>
+    RuntimeFuncSpec::new("rt_env_set", &[I64, I64], &[I64]),    // key, value -> nil
+    RuntimeFuncSpec::new("rt_env_vars", &[], &[I64]),            // -> dict
+    RuntimeFuncSpec::new("rt_process_run", &[I64, I64], &[I64]), // cmd, args -> result
+    RuntimeFuncSpec::new("rt_string_eq", &[I64, I64], &[I64]),  // a, b -> bool
+    // =========================================================================
+    // File system operations (needed for full compiler)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_file_read_text", &[I64], &[I64]),   // path -> Option<text>
+    RuntimeFuncSpec::new("rt_file_write", &[I64, I64], &[I64]),  // path, content -> result
+    RuntimeFuncSpec::new("rt_file_exists", &[I64], &[I64]),      // path -> bool
+    RuntimeFuncSpec::new("rt_dir_exists", &[I64], &[I64]),       // path -> bool
+    RuntimeFuncSpec::new("rt_dir_list", &[I64], &[I64]),         // path -> array
+    RuntimeFuncSpec::new("rt_dir_create", &[I64, I64], &[I64]),   // path, recursive -> result
+    RuntimeFuncSpec::new("rt_dir_remove_all", &[I64], &[I64]),   // path -> result
+    RuntimeFuncSpec::new("rt_path_join", &[I64, I64], &[I64]),   // a, b -> path
+    RuntimeFuncSpec::new("rt_path_parent", &[I64], &[I64]),      // path -> parent
+    // =========================================================================
+    // Optional/Result operations
+    // =========================================================================
+    RuntimeFuncSpec::new("__spl_optional_check", &[I64], &[I64]), // value -> is_some
 ];
 
 #[cfg(test)]

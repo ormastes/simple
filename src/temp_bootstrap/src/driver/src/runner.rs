@@ -76,6 +76,12 @@ impl Runner {
         self.core.compile_source(source, out)
     }
 
+    /// Compile a source file to an SMF at the given path (with import loading).
+    #[instrument(skip(self))]
+    pub fn compile_file_to_smf(&self, source: &Path, out: &Path) -> Result<(), String> {
+        self.core.compile_file(source, out)
+    }
+
     /// Compile source to an SMF at the given path for a specific target architecture.
     /// This enables cross-compilation to different architectures.
     #[instrument(skip(self, source))]

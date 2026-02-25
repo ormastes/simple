@@ -1,0 +1,899 @@
+# Simple Language - Query CLI
+#
+# Provides grep-based code query subcommands for IDE integration.
+# Called via: bin/simple query <subcommand> <file> <line> [column]
+#
+# Subcommands:
+#   definition          <file> <line> [column]  — Find definition of symbol at position
+#   references          <file> <line> [column]  — Find all references to symbol at position
+#   hover               <file> <line> [column]  — Show type + docs at position
+#   completions         <file> <line> [column] [--prefix X]  — Code completions at position
+#   type-at             <file> <line> [column]  — Type info at position
+#   signature-help      <file> <line> [column]  — Signature help for function call
+#   rename              <file> <line> [column] --new-name X  — Rename symbol
+#   code-actions        <file> <line>           — Code actions / quick fixes at position
+#   call-hierarchy      <file> <line> [column] [--direction incoming|outgoing]
+#   type-hierarchy      <file> <line> [column] [--direction supertypes|subtypes]
+#   selection-range     <file> <line> [column]  — Nested selection ranges
+#   workspace-symbols   [--query X] [--kind fn|class|struct|enum|trait]
+#   semantic-tokens     <file> [--start-line N] [--end-line N]
+#   inlay-hints         <file> [--start-line N] [--end-line N]
+#   document-formatting <file>                  — Format file
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn query_main() -> i64:
+    val all_args = rt_cli_get_args()
+    # Strip program name and script path (first 2 args: binary + script.spl)
+    var args: [text] = []
+    var i = 0
+    for arg in all_args:
+        if i >= 2:
+            args.push(arg)
+        i = i + 1
+    run_query(args)
+
+# Top-level entry point
+query_main()
+
+fn query_shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout, code)
+
+fn query_file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+# Extract the symbol name at a given line and optional column
+fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
+    val content = query_file_read(file)
+    if content == "":
+        return ""
+    val lines = content.split("\n")
+    if line_num < 1 or line_num > lines.len():
+        return ""
+    val target_line = lines[line_num - 1]
+    if target_line.trim() == "":
+        return ""
+
+    # If column is specified, extract word at that position
+    if col > 0 and col <= target_line.len():
+        var start = col - 1
+        var end_pos = col - 1
+        # Scan backward to find word start
+        for _i in range(0, col):
+            if start <= 0:
+                break
+            val ch = target_line.substring(start - 1, start)
+            val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not is_word:
+                break
+            start = start - 1
+        # Scan forward to find word end
+        for _i in range(0, 200):
+            if end_pos >= target_line.len():
+                break
+            val ch = target_line.substring(end_pos, end_pos + 1)
+            val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not is_word:
+                break
+            end_pos = end_pos + 1
+        if end_pos > start:
+            return target_line.substring(start, end_pos)
+
+    # No column or column extraction failed — extract first identifier-like token
+    val trimmed = target_line.trim()
+    # Skip common keywords to find the symbol name
+    var rest = trimmed
+    if rest.starts_with("fn "):
+        rest = rest.substring(3)
+    elif rest.starts_with("val "):
+        rest = rest.substring(4)
+    elif rest.starts_with("var "):
+        rest = rest.substring(4)
+    elif rest.starts_with("class "):
+        rest = rest.substring(6)
+    elif rest.starts_with("struct "):
+        rest = rest.substring(7)
+    elif rest.starts_with("enum "):
+        rest = rest.substring(5)
+    elif rest.starts_with("use "):
+        rest = rest.substring(4)
+    elif rest.starts_with("import "):
+        rest = rest.substring(7)
+    elif rest.starts_with("me "):
+        rest = rest.substring(3)
+    elif rest.starts_with("static fn "):
+        rest = rest.substring(10)
+
+    # Extract first word
+    var parts: [text] = []
+    for ch in rest:
+        val is_word = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not is_word:
+            break
+        parts.push(ch)
+    parts.join("")
+
+fn run_query(args: [text]) -> i64:
+    # Strip "query" from args if present
+    var cmd_args = args
+    if cmd_args.len() > 0 and cmd_args[0] == "query":
+        cmd_args = cmd_args[1:]
+
+    if cmd_args.len() == 0:
+        print "Usage: simple query <subcommand> <file> <line> [column]"
+        print ""
+        print "Subcommands:"
+        print "  definition          <file> <line> [col]  Find definition of symbol"
+        print "  references          <file> <line> [col]  Find all references"
+        print "  hover               <file> <line> [col]  Type + docs at position"
+        print "  completions         <file> <line> [col]  Code completions"
+        print "  type-at             <file> <line> [col]  Type info at position"
+        print "  signature-help      <file> <line> [col]  Signature help for call"
+        print "  rename              <file> <line> [col] --new-name X  Rename symbol"
+        print "  code-actions        <file> <line>        Code actions / quick fixes"
+        print "  call-hierarchy      <file> <line> [col] [--direction incoming|outgoing]"
+        print "  type-hierarchy      <file> <line> [col] [--direction supertypes|subtypes]"
+        print "  selection-range     <file> <line> [col]  Nested selection ranges"
+        print "  workspace-symbols   [--query X] [--kind fn|class|struct|enum|trait]"
+        print "  semantic-tokens     <file> [--start-line N] [--end-line N]"
+        print "  inlay-hints         <file> [--start-line N] [--end-line N]"
+        print "  document-formatting <file>               Format file"
+        return 0
+
+    val subcmd = cmd_args[0]
+
+    # Subcommands with non-standard args (no file+line positional)
+    if subcmd == "workspace-symbols":
+        return query_workspace_symbols(cmd_args)
+    if subcmd == "document-formatting" and cmd_args.len() >= 2:
+        return query_document_formatting(cmd_args[1])
+    if subcmd == "semantic-tokens" and cmd_args.len() >= 2:
+        return query_semantic_tokens(cmd_args[1], cmd_args)
+    if subcmd == "inlay-hints" and cmd_args.len() >= 2:
+        return query_inlay_hints(cmd_args[1], cmd_args)
+
+    if cmd_args.len() < 3:
+        print "Error: {subcmd} requires <file> and <line> arguments"
+        return 1
+
+    val file = cmd_args[1]
+    val line_num = cmd_args[2].to_int()
+    var col = 0
+    if cmd_args.len() > 3 and not cmd_args[3].starts_with("--"):
+        col = cmd_args[3].to_int()
+
+    val symbol = extract_symbol_at(file, line_num, col)
+    if symbol == "":
+        print "No symbol found at {file}:{line_num}"
+        return 1
+
+    if subcmd == "definition":
+        return query_definition(symbol, file)
+    elif subcmd == "references":
+        return query_references(symbol, file)
+    elif subcmd == "hover":
+        return query_hover(symbol, file, line_num)
+    elif subcmd == "completions":
+        var prefix = symbol
+        # Check for --prefix flag
+        var i = 3
+        while i < cmd_args.len():
+            if cmd_args[i] == "--prefix" and i + 1 < cmd_args.len():
+                prefix = cmd_args[i + 1]
+            i = i + 1
+        return query_completions(prefix, file)
+    elif subcmd == "type-at":
+        return query_type_at(symbol, file, line_num)
+    elif subcmd == "signature-help":
+        return query_signature_help(symbol, file, line_num, col)
+    elif subcmd == "rename":
+        return query_rename(symbol, file, line_num, cmd_args)
+    elif subcmd == "code-actions":
+        return query_code_actions(file, line_num)
+    elif subcmd == "call-hierarchy":
+        return query_call_hierarchy(symbol, file, cmd_args)
+    elif subcmd == "type-hierarchy":
+        return query_type_hierarchy(symbol, file, cmd_args)
+    elif subcmd == "selection-range":
+        return query_selection_range(file, line_num, col)
+    else:
+        print "Unknown query subcommand: {subcmd}"
+        return 1
+
+fn query_definition(symbol: text, file: text) -> i64:
+    # Search for definition: fn name, class name, struct name, enum name, val name
+    val (out, _) = query_shell("grep -rn '^fn " + symbol + "\\b\\|^class " + symbol + "\\b\\|^struct " + symbol + "\\b\\|^enum " + symbol + "\\b\\|^val " + symbol + " \\|^var " + symbol + " ' src/ --include='*.spl' 2>/dev/null | head -20")
+
+    if out.trim() == "":
+        # Try within the same file
+        val (local_out, _2) = query_shell("grep -n '^fn " + symbol + "\\b\\|^class " + symbol + "\\b\\|^struct " + symbol + "\\b\\|val " + symbol + " \\|var " + symbol + " ' " + file + " 2>/dev/null | head -10")
+        if local_out.trim() == "":
+            print "No definition found for: {symbol}"
+            return 1
+        print local_out
+        return 0
+
+    print out
+    0
+
+fn query_references(symbol: text, file: text) -> i64:
+    val (out, _) = query_shell("grep -rn '\\b" + symbol + "\\b' src/ --include='*.spl' 2>/dev/null | head -50")
+    if out.trim() == "":
+        print "No references found for: {symbol}"
+        return 1
+    print out
+    0
+
+fn query_hover(symbol: text, file: text, line_num: i64) -> i64:
+    # Find definition to get type info and doc comments
+    val (def_out, _) = query_shell("grep -rn '^fn " + symbol + "\\b\\|^class " + symbol + "\\b\\|^struct " + symbol + "\\b\\|^enum " + symbol + "\\b' src/ --include='*.spl' 2>/dev/null | head -5")
+
+    print "Symbol: {symbol}"
+    print "Location: {file}:{line_num}"
+    if def_out.trim() != "":
+        print ""
+        print "Definition:"
+        print def_out
+    else:
+        # Try local scope
+        val (local_def, _2) = query_shell("grep -n 'val " + symbol + " \\|var " + symbol + " \\|fn " + symbol + "(' " + file + " 2>/dev/null | head -5")
+        if local_def.trim() != "":
+            print ""
+            print "Local binding:"
+            print local_def
+    0
+
+fn query_completions(prefix: text, file: text) -> i64:
+    # Collect symbols starting with prefix from the file and its imports
+    val (local_out, _) = query_shell("grep -oh '\\b" + prefix + "[a-zA-Z0-9_]*\\b' " + file + " 2>/dev/null | sort -u | head -30")
+
+    # Also collect from common stdlib
+    val (lib_out, _2) = query_shell("grep -roh '^fn " + prefix + "[a-zA-Z0-9_]*' src/lib/ --include='*.spl' 2>/dev/null | sed 's/^fn //' | sort -u | head -20")
+
+    if local_out.trim() == "" and lib_out.trim() == "":
+        print "No completions for prefix: {prefix}"
+        return 0
+
+    if local_out.trim() != "":
+        print "--- Local ---"
+        print local_out
+    if lib_out.trim() != "":
+        print "--- Library ---"
+        print lib_out
+    0
+
+fn query_type_at(symbol: text, file: text, line_num: i64) -> i64:
+    # Find the symbol's definition to infer type
+    val content = query_file_read(file)
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+
+    val lines = content.split("\n")
+    if line_num >= 1 and line_num <= lines.len():
+        val target_line = lines[line_num - 1].trim()
+        print "Line {line_num}: {target_line}"
+        print "Symbol: {symbol}"
+
+    # Search for type annotations
+    val (type_out, _) = query_shell("grep -n '" + symbol + ".*:.*\\|.*-> ' " + file + " 2>/dev/null | grep '" + symbol + "' | head -5")
+    if type_out.trim() != "":
+        print ""
+        print "Type annotations:"
+        print type_out
+
+    # Search for definition
+    val (def_out, _2) = query_shell("grep -rn '^fn " + symbol + "\\|^class " + symbol + "\\|^struct " + symbol + "\\|^enum " + symbol + "' src/ --include='*.spl' 2>/dev/null | head -5")
+    if def_out.trim() != "":
+        print ""
+        print "Definition:"
+        print def_out
+    0
+
+# --- New query subcommands ---
+
+fn _extract_flag(cmd_args: [text], flag_name: text, default_val: text) -> text:
+    # Extract a --flag value from cmd_args list
+    var i = 0
+    while i < cmd_args.len():
+        if cmd_args[i] == flag_name and i + 1 < cmd_args.len():
+            return cmd_args[i + 1]
+        i = i + 1
+    default_val
+
+fn query_signature_help(symbol: text, file: text, line_num: i64, col: i64) -> i64:
+    # Find the function definition to extract parameter list
+    val (def_out, _) = query_shell("grep -rn '^ *fn " + symbol + "(' src/ --include='*.spl' 2>/dev/null | head -5")
+    if def_out.trim() == "":
+        print "No function definition found for: {symbol}"
+        return 1
+
+    # Extract the first match line
+    val def_lines = def_out.split("\n")
+    val first_def = def_lines[0]
+
+    # Extract the parameter portion between ( and )
+    var paren_start = -1
+    var paren_end = -1
+    var idx = 0
+    for ch in first_def:
+        if ch == "(" and paren_start == -1:
+            paren_start = idx
+        if ch == ")":
+            paren_end = idx
+        idx = idx + 1
+    var params_str = ""
+    if paren_start >= 0 and paren_end > paren_start:
+        params_str = first_def.substring(paren_start + 1, paren_end)
+
+    # Count commas before the cursor column on the call line to find active param
+    var active_param = 0
+    if col > 0:
+        val content = query_file_read(file)
+        val file_lines = content.split("\n")
+        if line_num >= 1 and line_num <= file_lines.len():
+            val call_line = file_lines[line_num - 1]
+            # Find opening paren before col
+            var paren_depth = 0
+            var ci = 0
+            while ci < col and ci < call_line.len():
+                val c = call_line.substring(ci, ci + 1)
+                if c == "(":
+                    paren_depth = paren_depth + 1
+                elif c == ")":
+                    paren_depth = paren_depth - 1
+                elif c == "," and paren_depth == 1:
+                    active_param = active_param + 1
+                ci = ci + 1
+
+    print "Function: {symbol}"
+    print "Parameters: {params_str}"
+    print "Active parameter: {active_param}"
+    0
+
+fn query_rename(symbol: text, file: text, line_num: i64, cmd_args: [text]) -> i64:
+    # Extract --new-name from cmd_args
+    val new_name = _extract_flag(cmd_args, "--new-name", "")
+    if new_name == "":
+        print "Error: --new-name <name> is required for rename"
+        return 1
+
+    # Find all occurrences with word boundaries
+    val (out, _) = query_shell("grep -rn '\\b" + symbol + "\\b' src/ --include='*.spl' 2>/dev/null")
+    if out.trim() == "":
+        print "No occurrences found for: {symbol}"
+        return 1
+
+    val result_lines = out.split("\n")
+    var count = 0
+    for line in result_lines:
+        val trimmed = line.trim()
+        if trimmed != "":
+            print "{trimmed}"
+            print "  -> rename '{symbol}' to '{new_name}'"
+            count = count + 1
+
+    print ""
+    print "Total occurrences: {count}"
+    print "Rename: {symbol} -> {new_name}"
+    0
+
+fn query_code_actions(file: text, line_num: i64) -> i64:
+    # Run check to get diagnostics
+    val (check_out, _) = query_shell("bin/simple check " + file + " 2>&1")
+    # Run fix --dry-run to get suggested fixes
+    val (fix_out, _2) = query_shell("bin/simple fix " + file + " --dry-run 2>&1")
+
+    val line_str = "{line_num}"
+
+    # Filter check output for target line
+    var has_diagnostics = false
+    if check_out.trim() != "":
+        val check_lines = check_out.split("\n")
+        print "--- Diagnostics ---"
+        for cline in check_lines:
+            val ct = cline.trim()
+            if ct != "" and ct.contains(":" + line_str + ":"):
+                print ct
+                has_diagnostics = true
+            elif ct != "" and ct.contains(":" + line_str + " "):
+                print ct
+                has_diagnostics = true
+
+    # Filter fix output for target line
+    var has_fixes = false
+    if fix_out.trim() != "":
+        val fix_lines = fix_out.split("\n")
+        print ""
+        print "--- Suggested Fixes ---"
+        for fline in fix_lines:
+            val ft = fline.trim()
+            if ft != "" and ft.contains(":" + line_str):
+                print ft
+                has_fixes = true
+
+    if not has_diagnostics and not has_fixes:
+        print "No code actions available at {file}:{line_num}"
+    0
+
+fn query_workspace_symbols(cmd_args: [text]) -> i64:
+    val query = _extract_flag(cmd_args, "--query", "")
+    val kind = _extract_flag(cmd_args, "--kind", "")
+
+    if query == "" and kind == "":
+        print "Error: --query <pattern> or --kind <kind> required"
+        print "Kinds: fn, class, struct, enum, trait"
+        return 1
+
+    var grep_pattern = ""
+    if kind != "":
+        if query != "":
+            grep_pattern = "'^" + kind + " " + query + "'"
+        else:
+            grep_pattern = "'^" + kind + " '"
+    else:
+        grep_pattern = "'^fn " + query + "\\|^class " + query + "\\|^struct " + query + "\\|^enum " + query + "\\|^trait " + query + "'"
+
+    val cmd = "grep -rn " + grep_pattern + " src/ --include='*.spl' 2>/dev/null | head -50"
+    val (out, _) = query_shell(cmd)
+    if out.trim() == "":
+        print "No workspace symbols found"
+        return 0
+
+    print out
+    0
+
+fn query_call_hierarchy(symbol: text, file: text, cmd_args: [text]) -> i64:
+    val direction = _extract_flag(cmd_args, "--direction", "incoming")
+
+    if direction == "incoming":
+        # Find call sites: places that call symbol(
+        val (out, _) = query_shell("grep -rn '\\b" + symbol + "(' src/ --include='*.spl' 2>/dev/null | head -50")
+        if out.trim() == "":
+            print "No incoming calls found for: {symbol}"
+            return 0
+        print "--- Incoming calls to {symbol} ---"
+        print out
+    elif direction == "outgoing":
+        # Read the function body and find calls it makes
+        val content = query_file_read(file)
+        if content == "":
+            print "Could not read file: {file}"
+            return 1
+
+        val lines = content.split("\n")
+        # Find function start
+        var fn_start = -1
+        var li = 0
+        while li < lines.len():
+            val line = lines[li]
+            val tl = line.trim()
+            if tl.starts_with("fn " + symbol + "(") or tl.starts_with("fn " + symbol + " ("):
+                fn_start = li
+                break
+            li = li + 1
+
+        if fn_start == -1:
+            print "Could not find function body for: {symbol}"
+            return 1
+
+        # Collect body lines (indented lines after fn declaration)
+        var body_text = ""
+        var bi = fn_start + 1
+        while bi < lines.len():
+            val bline = lines[bi]
+            if bline.len() == 0:
+                bi = bi + 1
+                body_text = body_text + "\n"
+                continue
+            val first_ch = bline.substring(0, 1)
+            if first_ch != " " and first_ch != "\t":
+                break
+            body_text = body_text + bline + "\n"
+            bi = bi + 1
+
+        # Extract function-call-like patterns from body
+        val (calls_out, _2) = query_shell("echo '" + body_text + "' | grep -oh '[a-zA-Z_][a-zA-Z0-9_]*(' 2>/dev/null | sed 's/($//' | sort -u | head -30")
+        if calls_out.trim() == "":
+            print "No outgoing calls found from: {symbol}"
+            return 0
+        print "--- Outgoing calls from {symbol} ---"
+        print calls_out
+    else:
+        print "Error: --direction must be 'incoming' or 'outgoing'"
+        return 1
+    0
+
+fn query_type_hierarchy(symbol: text, file: text, cmd_args: [text]) -> i64:
+    val direction = _extract_flag(cmd_args, "--direction", "supertypes")
+
+    if direction == "supertypes":
+        # Find trait implementations for this type
+        val (out, _) = query_shell("grep -rn 'impl.*" + symbol + "' src/ --include='*.spl' 2>/dev/null | head -30")
+        if out.trim() == "":
+            print "No supertypes found for: {symbol}"
+            return 0
+        print "--- Supertypes (trait impls) for {symbol} ---"
+        print out
+    elif direction == "subtypes":
+        # Find all implementors of this trait
+        val (trait_out, _) = query_shell("grep -rn '^trait " + symbol + "' src/ --include='*.spl' 2>/dev/null | head -5")
+        if trait_out.trim() == "":
+            print "No trait definition found for: {symbol}"
+            return 0
+        val (impls_out, _2) = query_shell("grep -rn 'impl " + symbol + " ' src/ --include='*.spl' 2>/dev/null | head -30")
+        if impls_out.trim() == "":
+            print "No subtypes (implementors) found for trait: {symbol}"
+            return 0
+        print "--- Subtypes (implementors) of trait {symbol} ---"
+        print impls_out
+    else:
+        print "Error: --direction must be 'supertypes' or 'subtypes'"
+        return 1
+    0
+
+fn query_semantic_tokens(file: text, cmd_args: [text]) -> i64:
+    val start_line_str = _extract_flag(cmd_args, "--start-line", "1")
+    val end_line_str = _extract_flag(cmd_args, "--end-line", "0")
+    val start_line = start_line_str.to_int()
+    var end_line = end_line_str.to_int()
+
+    val content = query_file_read(file)
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+
+    val lines = content.split("\n")
+    if end_line <= 0 or end_line > lines.len():
+        end_line = lines.len()
+
+    val keywords = "fn,class,struct,enum,trait,if,elif,else,for,while,match,case,return,val,var,use,import,extern,static,me,break,continue,in,not,and,or,true,false,nil"
+    val kw_list = keywords.split(",")
+
+    var token_count = 0
+    var li = start_line
+    while li <= end_line and li <= lines.len():
+        val line = lines[li - 1]
+        var ci = 0
+        while ci < line.len() and token_count < 500:
+            val ch = line.substring(ci, ci + 1)
+
+            # Skip whitespace
+            if ch == " " or ch == "\t":
+                ci = ci + 1
+                continue
+
+            # Comment
+            if ch == "#":
+                val comment_len = line.len() - ci
+                print "{li}:{ci}:{comment_len}:comment"
+                token_count = token_count + 1
+                break
+
+            # String literal
+            if ch == "\"":
+                var si = ci + 1
+                while si < line.len():
+                    val sc = line.substring(si, si + 1)
+                    if sc == "\\":
+                        si = si + 2
+                        continue
+                    if sc == "\"":
+                        si = si + 1
+                        break
+                    si = si + 1
+                val str_len = si - ci
+                print "{li}:{ci}:{str_len}:string"
+                token_count = token_count + 1
+                ci = si
+                continue
+
+            # Number
+            val is_digit = ch >= "0" and ch <= "9"
+            if is_digit:
+                var ni = ci + 1
+                while ni < line.len():
+                    val nc = line.substring(ni, ni + 1)
+                    val nd = nc >= "0" and nc <= "9"
+                    if not nd and nc != "." and nc != "_" and nc != "x" and nc != "b" and nc != "o":
+                        break
+                    ni = ni + 1
+                val num_len = ni - ci
+                print "{li}:{ci}:{num_len}:number"
+                token_count = token_count + 1
+                ci = ni
+                continue
+
+            # Identifier or keyword
+            val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+            if is_alpha:
+                var wi = ci + 1
+                while wi < line.len():
+                    val wc = line.substring(wi, wi + 1)
+                    val ww = (wc >= "a" and wc <= "z") or (wc >= "A" and wc <= "Z") or (wc >= "0" and wc <= "9") or wc == "_"
+                    if not ww:
+                        break
+                    wi = wi + 1
+                val word = line.substring(ci, wi)
+                val word_len = wi - ci
+
+                # Check if keyword
+                var is_kw = false
+                for kw in kw_list:
+                    if word == kw:
+                        is_kw = true
+                        break
+                if is_kw:
+                    print "{li}:{ci}:{word_len}:keyword"
+                else:
+                    print "{li}:{ci}:{word_len}:identifier"
+                token_count = token_count + 1
+                ci = wi
+                continue
+
+            # Other characters (operators, punctuation)
+            ci = ci + 1
+
+        li = li + 1
+
+    if token_count >= 500:
+        print "# (truncated at 500 tokens)"
+    0
+
+fn query_inlay_hints(file: text, cmd_args: [text]) -> i64:
+    val start_line_str = _extract_flag(cmd_args, "--start-line", "1")
+    val end_line_str = _extract_flag(cmd_args, "--end-line", "0")
+    val start_line = start_line_str.to_int()
+    var end_line = end_line_str.to_int()
+
+    val content = query_file_read(file)
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+
+    val lines = content.split("\n")
+    if end_line <= 0 or end_line > lines.len():
+        end_line = lines.len()
+
+    var hint_count = 0
+    var li = start_line
+    while li <= end_line and li <= lines.len():
+        val line = lines[li - 1]
+        val trimmed = line.trim()
+
+        # Check for val/var bindings without type annotation
+        var binding_prefix = ""
+        var name_start = 0
+        if trimmed.starts_with("val "):
+            binding_prefix = "val"
+            name_start = 4
+        elif trimmed.starts_with("var "):
+            binding_prefix = "var"
+            name_start = 4
+
+        if binding_prefix != "":
+            val after_kw = trimmed.substring(name_start)
+            # Extract name (up to = or : or space)
+            var name_chars: [text] = []
+            var ni = 0
+            for nc in after_kw:
+                val nw = (nc >= "a" and nc <= "z") or (nc >= "A" and nc <= "Z") or (nc >= "0" and nc <= "9") or nc == "_"
+                if not nw:
+                    break
+                name_chars.push(nc)
+                ni = ni + 1
+            val var_name = name_chars.join("")
+
+            if var_name != "":
+                # Check if there is a type annotation (: type) before =
+                val after_name = after_kw.substring(ni).trim()
+                var has_annotation = false
+                if after_name.starts_with(":"):
+                    # Check it's not := (walrus)
+                    if after_name.len() > 1:
+                        val next = after_name.substring(1, 2)
+                        if next != "=":
+                            has_annotation = true
+
+                if not has_annotation and after_name.contains("="):
+                    # Infer type from RHS
+                    var eq_pos = 0
+                    var found_eq = false
+                    var eqi = 0
+                    for ec in after_name:
+                        if ec == "=" and not found_eq:
+                            eq_pos = eqi
+                            found_eq = true
+                            break
+                        eqi = eqi + 1
+                    if found_eq:
+                        val rhs = after_name.substring(eq_pos + 1).trim()
+                        val inferred = _infer_type_from_rhs(rhs)
+                        if inferred != "":
+                            # Calculate column position after var name
+                            val indent_len = line.len() - trimmed.len()
+                            val col_pos = indent_len + name_start + var_name.len()
+                            print "{li}:{col_pos}: {var_name}: {inferred}"
+                            hint_count = hint_count + 1
+
+        li = li + 1
+
+    if hint_count == 0:
+        print "No inlay hints in range"
+    0
+
+fn _infer_type_from_rhs(rhs: text) -> text:
+    # Infer type from the right-hand side expression
+    if rhs == "":
+        return ""
+
+    val first = rhs.substring(0, 1)
+
+    # String literal
+    if first == "\"":
+        return "text"
+
+    # Boolean
+    if rhs == "true" or rhs == "false":
+        return "bool"
+
+    # Nil
+    if rhs == "nil":
+        return "nil"
+
+    # Array literal
+    if first == "[":
+        return "array"
+
+    # Negative number
+    if first == "-" and rhs.len() > 1:
+        val second = rhs.substring(1, 2)
+        val is_d = second >= "0" and second <= "9"
+        if is_d:
+            if rhs.contains("."):
+                return "f64"
+            return "i64"
+
+    # Number
+    val is_digit = first >= "0" and first <= "9"
+    if is_digit:
+        if rhs.starts_with("0x") or rhs.starts_with("0b") or rhs.starts_with("0o"):
+            return "i64"
+        if rhs.contains("."):
+            return "f64"
+        return "i64"
+
+    # Function call or other expression - return inferred
+    if rhs.contains("("):
+        return "inferred"
+
+    ""
+
+fn query_selection_range(file: text, line_num: i64, col: i64) -> i64:
+    val content = query_file_read(file)
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+
+    val lines = content.split("\n")
+    if line_num < 1 or line_num > lines.len():
+        print "Line {line_num} out of range (file has {lines.len()} lines)"
+        return 1
+
+    val target_line = lines[line_num - 1]
+    val target_indent = _count_indent(target_line)
+
+    # 1. Word at cursor
+    var word_start = col - 1
+    var word_end = col - 1
+    if col > 0 and col <= target_line.len():
+        for _i in range(0, col):
+            if word_start <= 0:
+                break
+            val ch = target_line.substring(word_start - 1, word_start)
+            val iw = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not iw:
+                break
+            word_start = word_start - 1
+        for _i in range(0, 200):
+            if word_end >= target_line.len():
+                break
+            val ch = target_line.substring(word_end, word_end + 1)
+            val iw = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not iw:
+                break
+            word_end = word_end + 1
+    print "Range: {line_num}:{word_start} - {line_num}:{word_end} (word)"
+
+    # 2. Full line (trimmed content)
+    val trim_start = target_indent
+    val trim_end = target_line.len()
+    print "Range: {line_num}:{trim_start} - {line_num}:{trim_end} (expression)"
+
+    # 3. Full line including indent
+    print "Range: {line_num}:0 - {line_num}:{target_line.len()} (line)"
+
+    # 4. Block at same or deeper indent level
+    var block_start = line_num
+    var bi = line_num - 2
+    while bi >= 0:
+        val bl = lines[bi]
+        if bl.trim() == "":
+            bi = bi - 1
+            continue
+        val bi_indent = _count_indent(bl)
+        if bi_indent < target_indent:
+            break
+        block_start = bi + 1
+        bi = bi - 1
+    var block_end = line_num
+    var bj = line_num
+    while bj < lines.len():
+        val bl = lines[bj]
+        if bl.trim() == "":
+            bj = bj + 1
+            continue
+        val bj_indent = _count_indent(bl)
+        if bj_indent < target_indent:
+            break
+        block_end = bj + 1
+        bj = bj + 1
+    print "Range: {block_start}:0 - {block_end}:{lines[block_end - 1].len()} (block)"
+
+    # 5. Enclosing function or class
+    var enclosing_start = -1
+    var ei = line_num - 2
+    while ei >= 0:
+        val el = lines[ei]
+        val et = el.trim()
+        val starts_fn = et.starts_with("fn ")
+        val starts_class = et.starts_with("class ")
+        val starts_struct = et.starts_with("struct ")
+        if starts_fn or starts_class or starts_struct:
+            enclosing_start = ei + 1
+            break
+        ei = ei - 1
+    if enclosing_start > 0:
+        # Find end of enclosing block
+        var enc_end = enclosing_start
+        var ej = enclosing_start
+        while ej < lines.len():
+            val el = lines[ej]
+            if el.trim() == "":
+                ej = ej + 1
+                continue
+            val ej_indent = _count_indent(el)
+            if ej > enclosing_start and ej_indent == 0:
+                break
+            enc_end = ej + 1
+            ej = ej + 1
+        print "Range: {enclosing_start}:0 - {enc_end}:{lines[enc_end - 1].len()} (function)"
+
+    # 6. Entire file
+    print "Range: 1:0 - {lines.len()}:{lines[lines.len() - 1].len()} (file)"
+    0
+
+fn _count_indent(line: text) -> i64:
+    var count = 0
+    for ch in line:
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn query_document_formatting(file: text) -> i64:
+    val (out, code) = query_shell("bin/simple fmt " + file + " 2>&1")
+    if out.trim() != "":
+        print out
+    else:
+        if code == 0:
+            print "File is already formatted: {file}"
+        else:
+            print "Formatting failed for: {file}"
+    code

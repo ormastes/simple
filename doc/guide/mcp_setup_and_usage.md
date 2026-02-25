@@ -74,10 +74,31 @@ The Simple language project includes a fully functional MCP server that provides
 **Resources & prompts**
 - Resource manager + prompt manager exposed for MCP clients (roots/list, resources/list, prompts/list, resource_updated notifications)
 
+**CLI tools (Tier 1)**
+- `simple_test` — run tests (path, filter, only_slow, list)
+- `simple_build` — build project (release, target, warn_docs)
+- `simple_format` — format file/project (path, check)
+- `simple_lint` — lint with output (path)
+- `simple_fix` — auto-fix issues (path required, dry_run)
+- `simple_doc_coverage` — doc coverage report (format, missing)
+
+**Query tools (Tier 2)**
+- `simple_definition` — go-to-definition (file, line, column)
+- `simple_references` — find all references (file, line, column)
+- `simple_hover` — type + docs at position (file, line, column)
+- `simple_completions` — code completions (file, line, column, prefix)
+- `simple_type_at` — type info at position (file, line, column)
+
+**Analysis tools (Tier 3)**
+- `simple_dependencies` — module dependency graph (file, depth, format)
+- `simple_api_diff` — API surface diff against git revision (file, revision)
+- `simple_context` — context pack for AI/docs (file, target)
+- `simple_search` — language-aware code search (query, kind, scope, file)
+
 **Database resources**
 - Bug DB / Feature DB / Test DB MCP endpoints (bugdb://*, featuredb://*, testdb://*)
 
-> Tool schemas live in `src/app/mcp/*_tools.spl`; the server registers every tool above at startup.
+> 49 tools total. Schemas in `main_lazy_protocol.spl`; handlers in `main_lazy_*_tools.spl`.
 
 ## Usage with Claude Code
 
