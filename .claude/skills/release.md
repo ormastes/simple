@@ -71,29 +71,19 @@
 ### Step 3: Commit Changes
 
 ```bash
-# Stage changes
-jj commit -m "chore: Prepare release v0.5.0-rc.1"
+git add -A
+git commit -m "chore: Prepare release v0.5.0-rc.1"
 ```
 
 ### Step 4: Create Tag
 
 ```bash
-# Create bookmark (jj equivalent of git tag)
-jj bookmark set v0.5.0-rc.1 -r @
-
-# Or for git compatibility
-jj git push --bookmark main  # Push main first
 git tag -a v0.5.0-rc.1 -m "Release v0.5.0-rc.1"
 ```
 
 ### Step 5: Push to GitHub
 
 ```bash
-# Push changes and tag
-jj git push --bookmark main
-jj git push --bookmark v0.5.0-rc.1
-
-# Or with git
 git push origin main
 git push origin v0.5.0-rc.1
 ```
@@ -103,11 +93,11 @@ git push origin v0.5.0-rc.1
 1. Go to: `https://github.com/OWNER/simple/actions`
 2. Watch "Release" workflow
 3. Check for:
-   - ✅ Build bootstrap (3 platforms)
-   - ✅ Build full package
-   - ✅ Test installation (2 platforms)
-   - ✅ Create release
-   - ✅ Publish to GHCR
+   - Build bootstrap (3 platforms)
+   - Build full package
+   - Test installation (2 platforms)
+   - Create release
+   - Publish to GHCR
 
 ### Step 7: Verify Release
 
@@ -167,10 +157,6 @@ If release has critical issues:
 gh release delete v0.5.0-rc.1 --yes
 
 # Delete tag locally and remotely
-jj bookmark delete v0.5.0-rc.1
-jj git push --bookmark v0.5.0-rc.1 --delete
-
-# Or with git
 git tag -d v0.5.0-rc.1
 git push origin :refs/tags/v0.5.0-rc.1
 ```
@@ -232,9 +218,9 @@ Copy this for each release:
 - [ ] Local build verified
 
 ### Release
-- [ ] Committed: `jj commit -m "chore: Release v0.5.0-rc.1"`
-- [ ] Tagged: `jj bookmark set v0.5.0-rc.1 -r @`
-- [ ] Pushed: `jj git push --bookmark v0.5.0-rc.1`
+- [ ] Committed: `git commit -m "chore: Release v0.5.0-rc.1"`
+- [ ] Tagged: `git tag -a v0.5.0-rc.1 -m "Release v0.5.0-rc.1"`
+- [ ] Pushed: `git push origin main && git push origin v0.5.0-rc.1`
 - [ ] GitHub Actions completed
 - [ ] Release created on GitHub
 
@@ -275,14 +261,15 @@ grep "version:" simple.sdn
 
 # Update version (edit file)
 # Then commit
-jj commit -m "chore: Release vX.Y.Z-rc.N"
+git add -A
+git commit -m "chore: Release vX.Y.Z-rc.N"
 
 # Create tag
-jj bookmark set vX.Y.Z-rc.N -r @
+git tag -a vX.Y.Z-rc.N -m "Release vX.Y.Z-rc.N"
 
 # Push
-jj git push --bookmark main
-jj git push --bookmark vX.Y.Z-rc.N
+git push origin main
+git push origin vX.Y.Z-rc.N
 
 # Check release status
 gh release view vX.Y.Z-rc.N
@@ -335,31 +322,17 @@ Based on current changes (binary structure, script migration):
 # Edit simple.sdn: version: 0.5.0-rc.1
 
 # 2. Update CHANGELOG.md
-cat >> CHANGELOG.md <<EOF
-## [0.5.0-rc.1] - 2026-02-05
-
-### Added
-- Simple scripts (.spl) for build and install
-
-### Changed
-- Bootstrap packages now use bin/simple as main binary
-- GitHub Actions prefers Simple scripts over bash
-- Binary size reduced: 13MB (bootstrap) vs 32MB (regular)
-
-### Fixed
-- Install script handles both old and new package formats
-- File extension policy clarified (use .spl, not .ssh)
-EOF
 
 # 3. Commit
-jj commit -m "chore: Release v0.5.0-rc.1"
+git add -A
+git commit -m "chore: Release v0.5.0-rc.1"
 
 # 4. Tag
-jj bookmark set v0.5.0-rc.1 -r @
+git tag -a v0.5.0-rc.1 -m "Release v0.5.0-rc.1"
 
 # 5. Push
-jj git push --bookmark main
-jj git push --bookmark v0.5.0-rc.1
+git push origin main
+git push origin v0.5.0-rc.1
 
 # 6. Monitor GitHub Actions
 # Go to: https://github.com/OWNER/simple/actions

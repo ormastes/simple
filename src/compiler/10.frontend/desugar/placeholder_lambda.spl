@@ -1,0 +1,447 @@
+# Placeholder Lambda Transform
+#
+# Transforms placeholder expressions using `_` into lambda expressions.
+# `_.method()` → `\__p0: __p0.method()`
+# `_ * 2`      → `\__p0: __p0 * 2`
+# `_ + _`      → `\__p0, __p1: __p0 + __p1`
+#
+# Also supports numbered placeholders `_1`, `_2`:
+# `_1 + _2`    → `\__p0, __p1: __p0 + __p1`
+# `_2 - _1`    → `\__p0, __p1: __p1 - __p0`
+#
+# Mixing numbered and unnumbered is an error.
+#
+# Nested scoping: call/method-call arguments are independent transform
+# boundaries. `_.items.any(_ > 3)` transforms to:
+#   outer: `\__p0: __p0.items.any(INNER)`
+#   inner: `\__p0: __p0 > 3`
+#
+# Operates on the compiler's arena-based AST (expr_tag[], expr_left[], etc.).
+# Applied to each call argument after parsing.
+
+use compiler.core.ast_expr.{
+    EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL,
+    EXPR_FIELD_ACCESS, EXPR_INDEX, EXPR_IF, EXPR_ARRAY_LIT, EXPR_DICT_LIT,
+    EXPR_NULL_COALESCE, EXPR_CAST, EXPR_SPREAD, EXPR_LAMBDA, EXPR_TUPLE,
+    EXPR_SLICE,
+    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts, expr_i_val,
+    expr_ident, expr_binary, expr_unary, expr_call, expr_method_call,
+    expr_field_access, expr_index, expr_if_expr, expr_array_lit, expr_dict_lit,
+    expr_null_coalesce, expr_cast, expr_spread, expr_lambda, expr_tuple, expr_slice
+}
+
+# ===== Placeholder Counter (module-level for mutation in recursive walk) =====
+
+var _ph_counter: i64 = 0
+
+# ===== Helper: Check if identifier is a numbered placeholder =====
+
+fn is_numbered_placeholder(name: text) -> bool:
+    """Check if name matches `_N` pattern (e.g. `_1`, `_2`, `_10`)."""
+    if name.len() < 2:
+        return false
+    if name[0:1] != "_":
+        return false
+    var i = 1
+    while i < name.len():
+        val ch = name[i:i + 1]
+        if (ch < "0" or ch > "9"):
+            return false
+        i = i + 1
+    true
+
+fn parse_placeholder_number(name: text) -> i64:
+    """Extract N from `_N` identifier. Returns -1 if not a numbered placeholder."""
+    if not is_numbered_placeholder(name):
+        return -1
+    val num_text = name[1:]
+    var result = 0
+    var i = 0
+    while i < num_text.len():
+        val ch = num_text[i:i + 1]
+        val digit = ch[0:1]
+        if digit == "0": result = result * 10
+        elif digit == "1": result = result * 10 + 1
+        elif digit == "2": result = result * 10 + 2
+        elif digit == "3": result = result * 10 + 3
+        elif digit == "4": result = result * 10 + 4
+        elif digit == "5": result = result * 10 + 5
+        elif digit == "6": result = result * 10 + 6
+        elif digit == "7": result = result * 10 + 7
+        elif digit == "8": result = result * 10 + 8
+        elif digit == "9": result = result * 10 + 9
+        i = i + 1
+    result
+
+# ===== Detect placeholder mode =====
+
+var _ph_has_unnumbered: bool = false
+var _ph_has_numbered: bool = false
+var _ph_max_number: i64 = 0
+
+fn detect_placeholder_mode(eid: i64):
+    """Scan expression to detect unnumbered `_` vs numbered `_N` usage."""
+    if eid < 0:
+        return
+    val tag = expr_tag[eid]
+
+    if tag == EXPR_IDENT:
+        val name = expr_s_val[eid]
+        if name == "_":
+            _ph_has_unnumbered = true
+        elif is_numbered_placeholder(name):
+            _ph_has_numbered = true
+            val num = parse_placeholder_number(name)
+            if num > _ph_max_number:
+                _ph_max_number = num
+        return
+
+    if tag == EXPR_BINARY:
+        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_right[eid])
+        return
+
+    if tag == EXPR_UNARY:
+        detect_placeholder_mode(expr_left[eid])
+        return
+
+    if tag == EXPR_CALL:
+        detect_placeholder_mode(expr_left[eid])
+        return
+
+    if tag == EXPR_METHOD_CALL:
+        detect_placeholder_mode(expr_left[eid])
+        return
+
+    if tag == EXPR_FIELD_ACCESS:
+        detect_placeholder_mode(expr_left[eid])
+        return
+
+    if tag == EXPR_INDEX:
+        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_right[eid])
+        return
+
+    if tag == EXPR_SLICE:
+        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_right[eid])
+        detect_placeholder_mode(expr_extra[eid])
+        return
+
+    if tag == EXPR_IF:
+        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_right[eid])
+        detect_placeholder_mode(expr_extra[eid])
+        return
+
+    if tag == EXPR_ARRAY_LIT:
+        val items = expr_args[eid]
+        var i = 0
+        while i < items.len():
+            detect_placeholder_mode(items[i])
+            i = i + 1
+        return
+
+    if tag == EXPR_TUPLE:
+        val items = expr_args[eid]
+        var i = 0
+        while i < items.len():
+            detect_placeholder_mode(items[i])
+            i = i + 1
+        return
+
+    if tag == EXPR_DICT_LIT:
+        val keys = expr_args[eid]
+        val vals = expr_stmts[eid]
+        var i = 0
+        while i < keys.len():
+            detect_placeholder_mode(keys[i])
+            detect_placeholder_mode(vals[i])
+            i = i + 1
+        return
+
+    if tag == EXPR_NULL_COALESCE:
+        detect_placeholder_mode(expr_left[eid])
+        detect_placeholder_mode(expr_right[eid])
+        return
+
+    if tag == EXPR_CAST:
+        detect_placeholder_mode(expr_left[eid])
+        return
+
+    if tag == EXPR_SPREAD:
+        detect_placeholder_mode(expr_left[eid])
+        return
+
+# ===== Main Transform Entry Point =====
+
+fn transform_placeholder_lambda(eid: i64) -> i64:
+    """Transform an expression containing `_` or `_N` placeholders into a lambda.
+
+    Supports two modes:
+    - Unnumbered: each `_` gets a sequential parameter `__p0`, `__p1`, ...
+    - Numbered: `_1` → `__p0`, `_2` → `__p1` (1-indexed to 0-indexed)
+    Mixing numbered and unnumbered is treated as unnumbered (numbered ignored).
+
+    Returns the original expression unchanged if no placeholders are found.
+    """
+    # Detect mode
+    _ph_has_unnumbered = false
+    _ph_has_numbered = false
+    _ph_max_number = 0
+    detect_placeholder_mode(eid)
+
+    if not _ph_has_unnumbered and not _ph_has_numbered:
+        return eid
+
+    # Error on mixing numbered and unnumbered
+    if _ph_has_numbered and _ph_has_unnumbered:
+        eprint("warning: mixing numbered (_1) and unnumbered (_) placeholders; treating all as unnumbered")
+
+    # Determine param count
+    var param_count = 0
+    if _ph_has_numbered and not _ph_has_unnumbered:
+        # Numbered mode: param count = max number (1-indexed)
+        param_count = _ph_max_number
+    else:
+        # Unnumbered mode (or mixed — treat as unnumbered)
+        param_count = count_placeholders(eid)
+
+    _ph_counter = 0
+    val body = replace_placeholders(eid)
+
+    var param_names: [i64] = []
+    var i = 0
+    while i < param_count:
+        param_names.push(expr_ident("__p{i}", 0))
+        i = i + 1
+
+    var body_stmts: [i64] = []
+    body_stmts.push(body)
+    expr_lambda(param_names, body_stmts, 0)
+
+# ===== Count Placeholders (unnumbered mode) =====
+
+fn count_placeholders(eid: i64) -> i64:
+    """Count the number of `_` placeholder identifiers in an expression.
+
+    Does NOT recurse into nested call/method-call arguments (they get their
+    own independent transform).
+    """
+    if eid < 0:
+        return 0
+    val tag = expr_tag[eid]
+
+    if tag == EXPR_IDENT:
+        val name = expr_s_val[eid]
+        if name == "_":
+            return 1
+        return 0
+
+    if tag == EXPR_BINARY:
+        val l = count_placeholders(expr_left[eid])
+        val r = count_placeholders(expr_right[eid])
+        return l + r
+
+    if tag == EXPR_UNARY:
+        return count_placeholders(expr_left[eid])
+
+    if tag == EXPR_CALL:
+        # Count in callee only, NOT in nested call arguments (scoping boundary)
+        return count_placeholders(expr_left[eid])
+
+    if tag == EXPR_METHOD_CALL:
+        # Count in receiver only, NOT in nested call arguments (scoping boundary)
+        return count_placeholders(expr_left[eid])
+
+    if tag == EXPR_FIELD_ACCESS:
+        return count_placeholders(expr_left[eid])
+
+    if tag == EXPR_INDEX:
+        val l = count_placeholders(expr_left[eid])
+        val r = count_placeholders(expr_right[eid])
+        return l + r
+
+    if tag == EXPR_SLICE:
+        val l = count_placeholders(expr_left[eid])
+        val r = count_placeholders(expr_right[eid])
+        val e = count_placeholders(expr_extra[eid])
+        return l + r + e
+
+    if tag == EXPR_IF:
+        val c = count_placeholders(expr_left[eid])
+        val t = count_placeholders(expr_right[eid])
+        val e = count_placeholders(expr_extra[eid])
+        return c + t + e
+
+    if tag == EXPR_ARRAY_LIT:
+        var total = 0
+        val items = expr_args[eid]
+        var i = 0
+        while i < items.len():
+            total = total + count_placeholders(items[i])
+            i = i + 1
+        return total
+
+    if tag == EXPR_TUPLE:
+        var total = 0
+        val items = expr_args[eid]
+        var i = 0
+        while i < items.len():
+            total = total + count_placeholders(items[i])
+            i = i + 1
+        return total
+
+    if tag == EXPR_DICT_LIT:
+        var total = 0
+        val keys = expr_args[eid]
+        val vals = expr_stmts[eid]
+        var i = 0
+        while i < keys.len():
+            total = total + count_placeholders(keys[i])
+            total = total + count_placeholders(vals[i])
+            i = i + 1
+        return total
+
+    if tag == EXPR_NULL_COALESCE:
+        val l = count_placeholders(expr_left[eid])
+        val r = count_placeholders(expr_right[eid])
+        return l + r
+
+    if tag == EXPR_CAST:
+        return count_placeholders(expr_left[eid])
+
+    if tag == EXPR_SPREAD:
+        return count_placeholders(expr_left[eid])
+
+    0
+
+# ===== Replace Placeholders =====
+
+fn replace_placeholders(eid: i64) -> i64:
+    """Replace `_` or `_N` identifiers with `__pN` parameter references.
+
+    In unnumbered mode: each `_` gets sequential `__p0`, `__p1`, ...
+    In numbered mode: `_1` → `__p0`, `_2` → `__p1` (1-indexed to 0-indexed)
+
+    Does NOT recurse into nested call/method-call arguments — those get their
+    own independent transform via the call-arg parsing path.
+    """
+    if eid < 0:
+        return eid
+    val tag = expr_tag[eid]
+
+    if tag == EXPR_IDENT:
+        val name = expr_s_val[eid]
+        if name == "_":
+            val new_name = "__p{_ph_counter}"
+            _ph_counter = _ph_counter + 1
+            return expr_ident(new_name, 0)
+        if _ph_has_numbered and not _ph_has_unnumbered:
+            if is_numbered_placeholder(name):
+                val num = parse_placeholder_number(name)
+                # _1 → __p0 (1-indexed to 0-indexed)
+                val param_idx = num - 1
+                return expr_ident("__p{param_idx}", 0)
+        return eid
+
+    if tag == EXPR_BINARY:
+        val new_left = replace_placeholders(expr_left[eid])
+        val new_right = replace_placeholders(expr_right[eid])
+        return expr_binary(expr_i_val[eid], new_left, new_right, 0)
+
+    if tag == EXPR_UNARY:
+        val new_operand = replace_placeholders(expr_left[eid])
+        return expr_unary(expr_i_val[eid], new_operand, 0)
+
+    if tag == EXPR_CALL:
+        # Replace in callee, but transform nested args independently
+        val new_callee = replace_placeholders(expr_left[eid])
+        val old_args = expr_args[eid]
+        var new_args: [i64] = []
+        var i = 0
+        while i < old_args.len():
+            new_args.push(transform_placeholder_lambda(old_args[i]))
+            i = i + 1
+        return expr_call(new_callee, new_args, 0)
+
+    if tag == EXPR_METHOD_CALL:
+        # Replace in receiver, but transform nested args independently
+        val new_receiver = replace_placeholders(expr_left[eid])
+        val old_args = expr_args[eid]
+        var new_args: [i64] = []
+        var i = 0
+        while i < old_args.len():
+            new_args.push(transform_placeholder_lambda(old_args[i]))
+            i = i + 1
+        return expr_method_call(new_receiver, expr_s_val[eid], new_args, 0)
+
+    if tag == EXPR_FIELD_ACCESS:
+        val new_base = replace_placeholders(expr_left[eid])
+        return expr_field_access(new_base, expr_s_val[eid], 0)
+
+    if tag == EXPR_INDEX:
+        val new_base = replace_placeholders(expr_left[eid])
+        val new_index = replace_placeholders(expr_right[eid])
+        return expr_index(new_base, new_index, 0)
+
+    if tag == EXPR_SLICE:
+        val new_base = replace_placeholders(expr_left[eid])
+        val new_start = replace_placeholders(expr_right[eid])
+        val new_end = replace_placeholders(expr_extra[eid])
+        return expr_slice(new_base, new_start, new_end, 0)
+
+    if tag == EXPR_IF:
+        val new_cond = replace_placeholders(expr_left[eid])
+        val new_then = replace_placeholders(expr_right[eid])
+        val new_else = replace_placeholders(expr_extra[eid])
+        return expr_if_expr(new_cond, new_then, new_else, 0)
+
+    if tag == EXPR_ARRAY_LIT:
+        val old_items = expr_args[eid]
+        var new_items: [i64] = []
+        var i = 0
+        while i < old_items.len():
+            new_items.push(replace_placeholders(old_items[i]))
+            i = i + 1
+        return expr_array_lit(new_items, 0)
+
+    if tag == EXPR_TUPLE:
+        val old_items = expr_args[eid]
+        var new_items: [i64] = []
+        var i = 0
+        while i < old_items.len():
+            new_items.push(replace_placeholders(old_items[i]))
+            i = i + 1
+        return expr_tuple(new_items, 0)
+
+    if tag == EXPR_DICT_LIT:
+        val old_keys = expr_args[eid]
+        val old_vals = expr_stmts[eid]
+        var new_keys: [i64] = []
+        var new_vals: [i64] = []
+        var i = 0
+        while i < old_keys.len():
+            new_keys.push(replace_placeholders(old_keys[i]))
+            new_vals.push(replace_placeholders(old_vals[i]))
+            i = i + 1
+        return expr_dict_lit(new_keys, new_vals, 0)
+
+    if tag == EXPR_NULL_COALESCE:
+        val new_left = replace_placeholders(expr_left[eid])
+        val new_right = replace_placeholders(expr_right[eid])
+        return expr_null_coalesce(new_left, new_right, 0)
+
+    if tag == EXPR_CAST:
+        val new_val = replace_placeholders(expr_left[eid])
+        return expr_cast(new_val, expr_i_val[eid], 0)
+
+    if tag == EXPR_SPREAD:
+        val new_inner = replace_placeholders(expr_left[eid])
+        return expr_spread(new_inner, 0)
+
+    # For any other expression type, return as-is
+    eid
+
+export transform_placeholder_lambda, count_placeholders, replace_placeholders
+export is_numbered_placeholder, parse_placeholder_number

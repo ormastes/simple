@@ -1,0 +1,248 @@
+# File Operations - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+# Extern fn declarations (runtime resolves at file level)
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [i64]
+extern fn rt_file_mmap_read_text(path: text) -> text
+extern fn rt_file_mmap_read_bytes(path: text) -> [i64]
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
+extern fn rt_file_unlock(handle: i64) -> bool
+extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64
+extern fn rt_munmap(addr: i64, size: i64) -> bool
+extern fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool
+extern fn rt_msync(addr: i64, size: i64) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+# extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_stat(path: text) -> i64
+
+# --- Shell helpers (local copies to avoid circular imports) ---
+# These are minimal copies needed for file operations.
+# The canonical versions live in process_ops.spl.
+
+fn _file_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn _file_shell_bool(command: text) -> bool:
+    val (out, err, code) = _file_shell(command)
+    code == 0
+
+fn _file_shell_output(command: text, default: text) -> text:
+    val (out, err, code) = _file_shell(command)
+    if code == 0:
+        out
+    else:
+        default
+
+fn _file_shell_int(command: text, default: i64) -> i64:
+    val (out, err, code) = _file_shell(command)
+    if code == 0:
+        val trimmed = out.trim()
+        if trimmed.len() > 0:
+            int(trimmed)
+        else:
+            default
+    else:
+        default
+
+# ============================================================================
+# Core File Operations
+# ============================================================================
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_size_raw(path: text) -> i64:
+    rt_file_size(path)
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path)
+
+fn file_write(path: text, content: text) -> bool:
+    # Use shell heredoc instead of rt_file_write (not in runtime extern registry)
+    val (out, err, code) = _file_shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    code == 0
+
+fn file_copy(src: text, dst: text) -> bool:
+    rt_file_copy(src, dst)
+
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+
+fn file_atomic_write(path: text, content: text) -> bool:
+    val temp = path + ".tmp." + _timestamp_str()
+    if file_write(temp, content):
+        val (out, err, code) = _file_shell("mv '{temp}' '{path}'")
+        code == 0
+    else:
+        false
+
+fn _timestamp_str() -> text:
+    val micros = _time_now_unix_micros()
+    "{micros}"
+
+fn file_append(path: text, content: text) -> bool:
+    val (out, err, code) = _file_shell("cat >> '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    code == 0
+
+fn file_stat(path: text) -> i64:
+    """Get file modification time in seconds since epoch (direct SFFI).
+
+    This is a direct wrapper around rt_file_stat for performance.
+    Returns 0 if file doesn't exist or on error.
+
+    @tag:api
+    @tag:perf
+    """
+    rt_file_stat(path)
+
+fn file_modified_time(path: text) -> i64:
+    """Get file modification time in seconds since epoch.
+
+    Uses direct syscall via SFFI (no subprocess spawning).
+    Returns 0 if file doesn't exist or on error.
+
+    @tag:api
+    """
+    file_stat(path)
+
+fn file_remove(path: text) -> bool:
+    file_delete(path)
+
+fn file_hash_sha256(path: text) -> text:
+    rt_file_hash_sha256(path)
+
+fn file_read_lines(path: text) -> [text]?:
+    val content = file_read(path)
+    if content.len() == 0:
+        nil
+    else:
+        Some(content.split("\n"))
+
+fn file_lock(path: text, timeout_secs: i64) -> i64:
+    rt_file_lock(path, timeout_secs)
+
+fn file_unlock(handle: i64) -> bool:
+    rt_file_unlock(handle)
+
+fn file_size(path: text) -> i64:
+    file_size_raw(path)
+
+# --- Memory-Mapped File I/O (SFFI wrappers) ---
+
+fn file_read_text(path: text) -> text:
+    rt_file_read_text(path)
+
+fn file_read_bytes(path: text) -> [i64]:
+    rt_file_read_bytes(path)
+
+fn file_mmap_read_text(path: text) -> text:
+    rt_file_mmap_read_text(path)
+
+fn file_mmap_read_bytes(path: text) -> [i64]:
+    rt_file_mmap_read_bytes(path)
+
+# --- Offset-based File I/O ---
+
+fn file_read_text_at(path: text, offset: i64, size: i64) -> text:
+    """Read text from file at specific offset without changing file position."""
+    rt_file_read_text_at(path, offset, size)
+
+fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
+    """Write text to file at specific offset without changing file position."""
+    rt_file_write_text_at(path, offset, data)
+
+# --- Memory-Mapped File I/O ---
+
+fn file_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64:
+    """
+    Memory-map a file into process address space.
+
+    Args:
+        path: File path to map
+        size: Number of bytes to map
+        offset: Byte offset in file to start mapping
+        readonly: true for read-only, false for read-write
+
+    Returns:
+        Memory address as i64, or 0 on error
+
+    Example:
+        val addr = file_mmap("data.bin", 1024, 0, true)  # Map 1KB read-only
+        # ... use memory directly ...
+        file_munmap(addr, 1024)  # Unmap when done
+    """
+    rt_mmap(path, size, offset, readonly)
+
+fn file_munmap(addr: i64, size: i64) -> bool:
+    """
+    Unmap a memory-mapped file region.
+
+    Args:
+        addr: Memory address returned by file_mmap
+        size: Size that was mapped
+
+    Returns:
+        true on success, false on failure
+    """
+    rt_munmap(addr, size)
+
+fn file_madvise(addr: i64, size: i64, advice: i64) -> bool:
+    """
+    Give advice about memory access patterns.
+
+    Args:
+        addr: Memory address
+        size: Size of region
+        advice: 0=NORMAL, 1=RANDOM, 2=SEQUENTIAL, 3=WILLNEED, 4=DONTNEED
+
+    Returns:
+        true on success, false on failure
+    """
+    rt_madvise(addr, size, advice)
+
+fn file_msync(addr: i64, size: i64) -> bool:
+    """
+    Synchronize mapped memory with file on disk.
+
+    Args:
+        addr: Memory address
+        size: Size of region
+
+    Returns:
+        true on success, false on failure
+    """
+    rt_msync(addr, size)
+
+# --- Additional File Functions ---
+
+fn rt_file_rename(src: text, dst: text) -> bool:
+    val (out, err, code) = _file_shell("mv '{src}' '{dst}'")
+    code == 0
+
+# --- Internal helpers (need extern fns) ---
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+fn _time_now_unix_micros() -> i64:
+    rt_time_now_unix_micros()
+
+fn _getpid() -> i64:
+    rt_getpid()
+
+export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write
+export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines
+export file_lock, file_unlock, file_size, file_size_raw
+export file_read_text, file_read_bytes, file_mmap_read_text, file_mmap_read_bytes
+export file_read_text_at, file_write_text_at
+export file_mmap, file_munmap, file_madvise, file_msync
+export rt_file_rename

@@ -12,12 +12,12 @@
 - **Resources:** File, symbol, type, documentation, directory tree
 - **Config:** `.mcp.json`
 
-### jj-git-mcp (Version Control)
+### git-mcp (Version Control)
 - **Location:** `src/app/mcp_jj/main.spl`
 - **Binary:** `bin/release/simple src/app/mcp_jj/main.spl server`
-- **Tools:** 48 jj_* tools + 27 git_* compatibility tools
-- **Resources:** jj://status, jj://log, jj://bookmarks, jj://conflicts, jj://op-log
-- **Env:** `JJ_MCP_REPO_PATH` must point to jj repo directory
+- **Tools:** git_* tools for version control operations
+- **Resources:** git://status, git://log, git://branches
+- **Env:** `GIT_MCP_REPO_PATH` must point to git repo directory
 
 ### MCP Protocol Notes
 - JSON-RPC 2.0 over stdio with Content-Length framing

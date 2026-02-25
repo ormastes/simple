@@ -1,0 +1,84 @@
+# Simple (.spl) replacement for scripts/fix_bare_imports_simple.sh
+# Quick Bare Import Fixer - Add .* to bare use statements
+#
+# Usage: bin/simple run src/app/fix/imports.spl <file_or_dir>
+
+use app.io.mod.{file_exists, file_read, file_write, is_dir, get_args, exit}
+use app.io.file_discovery.{find_spl_files}
+use std.text.{contains, ends_with, trim, split}
+use std.path.{join}
+
+fn is_bare_import(line: text) -> bool:
+    val trimmed = trim(line)
+    if trimmed.len() < 5:
+        return false
+    # Must start with "use "
+    if trimmed[0:4] != "use ":
+        return false
+    # Must not already have .* or .{
+    if contains(trimmed, ".*"):
+        return false
+    if contains(trimmed, ".{"):
+        return false
+    # Must contain at least one dot (use module.path)
+    if contains(trimmed, "."):
+        return true
+    false
+
+fn fix_file(path: text) -> bool:
+    val content = file_read(path)
+    val lines = split(content, "\n")
+    var modified = false
+    var new_lines = []
+    for line in lines:
+        if is_bare_import(line):
+            var fixed = trim(line)
+            fixed = fixed + ".*"
+            new_lines = new_lines + [fixed]
+            modified = true
+        else:
+            new_lines = new_lines + [line]
+    if modified:
+        # Rebuild content
+        var result = ""
+        var first = true
+        for line in new_lines:
+            if first:
+                result = line
+                first = false
+            else:
+                result = result + "\n" + line
+        file_write(path, result)
+    modified
+
+fn main():
+    val args = get_args()
+    var target = "."
+    if args.len() > 0:
+        target = args[0]
+
+    if file_exists(target) == false:
+        if is_dir(target) == false:
+            print "Error: {target} not found"
+            exit(1)
+
+    print "=== Bare Import Fixer ==="
+    print "Target: {target}"
+    print ""
+
+    var files = []
+    if is_dir(target):
+        files = find_spl_files(target)
+    else:
+        files = [target]
+    var fixed_count = 0
+
+    for file in files:
+        if fix_file(file):
+            print "Fixing: {file}"
+            fixed_count = fixed_count + 1
+
+    print ""
+    print "Summary: Fixed {fixed_count} files"
+
+main()

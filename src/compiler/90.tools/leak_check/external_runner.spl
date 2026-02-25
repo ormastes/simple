@@ -1,0 +1,165 @@
+# Leak Check - External Runner
+#
+# Runs leak detection using external tools (ASan or Valgrind)
+# by compiling the source to C and running with instrumentation.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+use app.io.file_shell.{shell, shell_output, file_write, file_delete}
+use app.compile.native.{find_cpp_compiler}
+use types
+use parser
+
+# Run external leak check (ASan or Valgrind)
+fn run_external_check(cfg: LeakCheckConfig) -> LeakCheckResult:
+    var result = empty_leak_check_result()
+    result.mode = "external"
+
+    if cfg.source_file == "":
+        print "Error: no source file specified"
+        result.exit_code = 1
+        return result
+
+    if not rt_file_exists(cfg.source_file):
+        print "Error: source file not found: {cfg.source_file}"
+        result.exit_code = 1
+        return result
+
+    # Step 1: Find C++ compiler
+    val cc = if cfg.compiler_override != "": cfg.compiler_override else: find_cpp_compiler()
+    if cc == "":
+        print "Error: no C++ compiler found (tried clang++, clang-cl)"
+        result.exit_code = 1
+        return result
+
+    if cfg.verbose:
+        print "Using C++ compiler: {cc}"
+
+    # Step 2: Generate C++ via MIR C backend (single-file mode)
+    val temp_dir = shell_output("mktemp -d /tmp/simple_leak_check_XXXXXX")
+    if temp_dir == "":
+        print "Error: failed to create temp directory"
+        result.exit_code = 1
+        return result
+
+    val temp_cpp = temp_dir + "/leak_check.cpp"
+    val gen_cmd = "bin/simple compile --backend=c -o '{temp_cpp}' '{cfg.source_file}' 2>&1"
+    if cfg.verbose:
+        print "Generating C++: bin/simple compile --backend=c ..."
+    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
+    if gen_exit != 0:
+        print "Error: C++ generation failed"
+        if gen_out != "":
+            print gen_out
+        shell("rm -rf '{temp_dir}'")
+        result.exit_code = 1
+        return result
+
+    if cfg.verbose:
+        print "Generated C++ code"
+
+    val temp_bin = temp_dir + "/leak_check_bin"
+
+    # Step 3: Compile and run based on tool selection
+    var ext_report = empty_external_leak_report()
+
+    match cfg.external_tool:
+        case ExternalTool.Asan:
+            ext_report = run_asan_check(cc, temp_cpp, temp_bin, cfg.verbose, cfg.timeout_seconds)
+        case ExternalTool.Valgrind:
+            ext_report = run_valgrind_check(cc, temp_cpp, temp_bin, cfg.verbose, cfg.timeout_seconds)
+
+    # Step 4: Cleanup
+    shell("rm -rf '{temp_dir}'")
+
+    result.external_report = ext_report
+    val has_leaks = (ext_report.definitely_lost_bytes > 0 or ext_report.indirectly_lost_bytes > 0 or ext_report.possibly_lost_bytes > 0)
+    if has_leaks:
+        result.exit_code = 1
+    else:
+        result.exit_code = 0
+
+    result
+
+# Run ASan-instrumented build and capture output
+fn run_asan_check(cc: text, temp_c: text, temp_bin: text, verbose: bool, timeout_seconds: i64) -> ExternalLeakReport:
+    # Compile with ASan
+    val rt_sources = "src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c"
+    val compile_cmd = "{cc} -std=c++20 -fsanitize=address,leak -fno-omit-frame-pointer -g -I src/runtime/ '{temp_c}' {rt_sources} -o '{temp_bin}' -lpthread -ldl -lm"
+    if verbose:
+        print "Compiling with ASan: {compile_cmd}"
+
+    val (comp_out, comp_err, comp_exit) = shell(compile_cmd)
+    if comp_exit != 0:
+        print "Error: ASan compilation failed (exit code {comp_exit})"
+        if comp_err != "":
+            print comp_err
+        var report = empty_external_leak_report()
+        report.tool = "asan"
+        report.raw_output = "Compilation failed: {comp_err}"
+        return report
+
+    # Run the instrumented binary
+    if verbose:
+        print "Running ASan-instrumented binary..."
+
+    var timeout_prefix = ""
+    if timeout_seconds > 0:
+        timeout_prefix = "timeout {timeout_seconds} "
+    val run_cmd = "{timeout_prefix}env ASAN_OPTIONS=detect_leaks=1 '{temp_bin}' 2>&1"
+    val (run_out, run_err, run_exit) = shell(run_cmd)
+
+    # ASan output goes to stderr, but we capture both via 2>&1
+    val combined_output = run_out + "\n" + run_err
+
+    if verbose:
+        print "ASan exit code: {run_exit}"
+
+    parse_asan_output(combined_output)
+
+# Run Valgrind check
+fn run_valgrind_check(cc: text, temp_c: text, temp_bin: text, verbose: bool, timeout_seconds: i64) -> ExternalLeakReport:
+    # Check if valgrind is available
+    val which_valgrind = shell_output("which valgrind 2>/dev/null")
+    if which_valgrind == "":
+        print "Error: valgrind not found in PATH"
+        var report = empty_external_leak_report()
+        report.tool = "valgrind"
+        report.raw_output = "valgrind not found"
+        return report
+
+    # Compile with debug info, no optimization
+    val rt_sources = "src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c"
+    val compile_cmd = "{cc} -std=c++20 -g -O0 -I src/runtime/ '{temp_c}' {rt_sources} -o '{temp_bin}' -lpthread -ldl -lm"
+    if verbose:
+        print "Compiling for Valgrind: {compile_cmd}"
+
+    val (comp_out, comp_err, comp_exit) = shell(compile_cmd)
+    if comp_exit != 0:
+        print "Error: compilation failed (exit code {comp_exit})"
+        if comp_err != "":
+            print comp_err
+        var report = empty_external_leak_report()
+        report.tool = "valgrind"
+        report.raw_output = "Compilation failed: {comp_err}"
+        return report
+
+    # Run under Valgrind
+    var timeout_prefix = ""
+    if timeout_seconds > 0:
+        timeout_prefix = "timeout {timeout_seconds} "
+    val valgrind_cmd = "{timeout_prefix}valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes '{temp_bin}' 2>&1"
+    if verbose:
+        print "Running under Valgrind: {valgrind_cmd}"
+
+    val (run_out, run_err, run_exit) = shell(valgrind_cmd)
+    val combined_output = run_out + "\n" + run_err
+
+    if verbose:
+        print "Valgrind exit code: {run_exit}"
+
+    parse_valgrind_output(combined_output)
+
+export run_external_check

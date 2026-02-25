@@ -1,0 +1,116 @@
+# QEMU Test Runner for Remote Debugging
+# Manages QEMU instances for integration testing of remote debug features.
+# Uses the unified QEMU library (lib/qemu) for shared functionality.
+
+use std.qemu.{QemuArch, QemuConfig, QemuInstance, is_qemu_available, is_gdb_available, find_rv32_gcc, build_rv32_binary}
+
+# SFFI: shell() not available in bootstrap runtime, use rt_process_run directly
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Convenience wrapper for remote debugging QEMU instances
+class QemuRunner:
+    instance: QemuInstance   # Underlying QEMU instance
+
+impl QemuRunner:
+    # Start QEMU with a RISC-V 32 binary, halted, with GDB stub
+    static fn start(elf_path: text, port: i32) -> Result<QemuRunner, text>:
+        # Create config for remote debugging
+        val config = QemuConfig__for_remote_debug(QemuArch.RiscV32, elf_path, port)
+
+        # Start QEMU instance
+        val result = QemuInstance__start(config)
+        match result:
+            case Ok(instance):
+                Ok(QemuRunner(instance: instance))
+            case Err(msg):
+                Err(msg)
+
+    # Start with custom QEMU arguments
+    static fn start_custom(elf_path: text, port: i32, extra_args: text) -> Result<QemuRunner, text>:
+        var config = QemuConfig__for_remote_debug(QemuArch.RiscV32, elf_path, port)
+
+        # Parse extra args and add to config
+        val args_list = extra_args.split(" ").filter(\s: s.len() > 0)
+        config.extra_args = args_list
+
+        # Start QEMU instance
+        val result = QemuInstance__start(config)
+        match result:
+            case Ok(instance):
+                Ok(QemuRunner(instance: instance))
+            case Err(msg):
+                Err(msg)
+
+    # Start with specific architecture
+    static fn start_arch(arch: QemuArch, elf_path: text, port: i32) -> Result<QemuRunner, text>:
+        val config = QemuConfig__for_remote_debug(arch, elf_path, port)
+
+        val result = QemuInstance__start(config)
+        match result:
+            case Ok(instance):
+                Ok(QemuRunner(instance: instance))
+            case Err(msg):
+                Err(msg)
+
+    # Stop QEMU
+    me stop():
+        self.instance.stop()
+
+    # Check if QEMU is still running
+    fn is_running() -> bool:
+        self.instance.is_running()
+
+    # Wait for QEMU to exit with timeout
+    fn wait_exit(timeout_ms: i32) -> Result<i32, text>:
+        self.instance.wait_exit(timeout_ms as i64)
+
+    # Get QEMU PID
+    fn pid() -> text:
+        self.instance.get_pid()
+
+    # Get GDB port
+    fn gdb_port() -> i32:
+        self.instance.get_gdb_port()
+
+    # Get monitor output (if any)
+    fn monitor_output() -> text:
+        # QEMU writes to stdout which we redirected
+        ""
+
+# Re-export utility functions for backward compatibility
+# BUG-RT: Imported functions from lib.qemu may use shell() which isn't available.
+# Inline the logic using rt_process_run.
+fn build_rv32_test(asm_path: text, output_path: text) -> Result<text, text>:
+    val gcc = find_rv32_gcc_local()
+    if gcc.len() == 0:
+        return Err("RISC-V cross-compiler not found")
+    val (stdout, stderr, exit_code) = rt_process_run(gcc, ["-nostdlib", "-march=rv32imac", "-mabi=ilp32", "-o", output_path, asm_path])
+    if exit_code != 0:
+        return Err("Build failed: {stderr}")
+    Ok(output_path)
+
+fn find_rv32_gcc_local() -> text:
+    val candidates = ["riscv32-unknown-elf-gcc", "riscv64-unknown-elf-gcc"]
+    for candidate in candidates:
+        val (stdout, stderr, exit_code) = rt_process_run("which", [candidate])
+        if exit_code == 0:
+            return stdout.trim()
+    ""
+
+fn is_rv32_gcc_available() -> bool:
+    find_rv32_gcc_local().len() > 0
+
+# Parameterless wrappers for RV32-specific checks
+# BUG-RT: Imported is_qemu_available/is_gdb_available from lib.qemu may not resolve.
+# BUG-RT: shell() not available in bootstrap runtime. Use rt_process_run directly.
+fn is_rv32_qemu_available() -> bool:
+    val (stdout, stderr, exit_code) = rt_process_run("which", ["qemu-system-riscv32"])
+    exit_code == 0
+
+fn is_rv32_gdb_available() -> bool:
+    val candidates = ["riscv32-unknown-elf-gdb", "riscv64-unknown-elf-gdb", "gdb-multiarch", "gdb"]
+    for candidate in candidates:
+        val (stdout, stderr, exit_code) = rt_process_run("which", [candidate])
+        if exit_code == 0:
+            return true
+    false
