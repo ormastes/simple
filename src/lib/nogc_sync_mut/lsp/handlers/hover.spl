@@ -1,272 +1,185 @@
-# LSP Hover Handler
-#
-# Provides hover information for symbols
+# Hover Handler
+# Provides hover information (documentation, type info, verification status) for symbols
 
-export handle_hover, HoverResult, keyword_doc, line_col_to_offset, detect_math_block, make_math_hover
+import lsp.protocol as protocol
+import lsp.transport as transport
+use compiler.treesitter.{TreeSitter, OutlineModule, ParseError}
+# TODO: awaiting FFI tree-sitter integration for Tree, Node, NodeId
+import lsp.handlers.verification as verification
 
-use compiler.treesitter.{TreeSitter, OutlineModule}
-# TODO: awaiting FFI tree-sitter integration for Node, Tree
-use app.lsp.utils (node_at_position)
-use std.math_repr.{render_latex_raw, to_pretty}
+# Find node at specific position
+fn find_node_at_position(tree: Tree, line: Int, column: Int) -> Option<Node>:
+    # Helper function to check if position is in span
+    fn position_in_span(span: Span, line: Int, column: Int) -> Bool:
+        if line < span.start_line or line > span.end_line:
+            return false
 
-# Hover result
-struct HoverResult:
-    content: text
-    range: Range?
+        if line == span.start_line and column < span.start_column:
+            return false
 
-struct Range:
-    start_line: i64
-    start_char: i64
-    end_line: i64
-    end_char: i64
+        if line == span.end_line and column > span.end_column:
+            return false
 
-struct Position:
-    line: i64
-    character: i64
+        true
 
-struct Point:
-    row: i64
-    column: i64
+    # Traverse tree to find deepest node containing position
+    fn traverse(node_id: NodeId, best: Option<Node>) -> Option<Node>:
+        match tree.arena.get(node_id):
+            case nil:
+                best
+            case Some(node):
+                # Check if position is in this node
+                if not position_in_span(node.span, line=line, column=column):
+                    return best
 
-# Handle hover request
-fn handle_hover(tree: Tree?, source: text, position: Position) -> HoverResult?:
-    """Provide hover information at cursor position.
+                # This node contains the position
+                var new_best = Some(node)
 
-    Args:
-        tree - Optional syntax tree
-        source - Source code
-        position - Cursor position
+                # Check children for a more specific match
+                for child_id in node.children:
+                    new_best = traverse(child_id, new_best)
 
-    Returns:
-        Hover result or nil
-    """
-    # Check for math block first (no tree needed)
-    val math_content = _detect_math_block(source, position)
-    if math_content != "":
-        return Some(_make_math_hover(math_content, position))
+                new_best
 
-    # If no tree, can't provide hover info
-    if not tree.?:
-        return nil
+    traverse(tree.root_node, nil)
 
-    val tree_val = tree.unwrap()
+# Get hover content for a node
+fn get_hover_content(node: Node, source: String) -> Option<String>:
+    # Provide hover information based on node kind
+    match node.kind:
+        case "function_def":
+            # Function definition - show signature
+            Some("function {node.text}")
 
-    # Get node at position
-    val node = node_at_position(tree_val, position)
-    if not node.?:
-        return nil
+        case "identifier":
+            # Identifier - show name and basic info
+            Some("identifier: {node.text}")
 
-    val node_val = node.unwrap()
-    val kind = node_val.kind()
+        case "type_identifier":
+            # Type identifier
+            Some("type: {node.text}")
 
-    # Extract hover content based on node type
-    var content = ""
+        case "keyword":
+            # Keyword - show documentation
+            match node.text:
+                case "fn":
+                    Some("**fn** - Function definition keyword")
+                case "val":
+                    Some("**val** - Variable declaration keyword")
+                case "mut":
+                    Some("**mut** - Mutable binding modifier")
+                case "return":
+                    Some("**return** - Return statement keyword")
+                case "if":
+                    Some("**if** - Conditional expression keyword")
+                case "else":
+                    Some("**else** - Alternative branch keyword")
+                case "match":
+                    Some("**match** - Pattern matching keyword")
+                case "case":
+                    Some("**case** - Match arm keyword")
+                case "for":
+                    Some("**for** - For loop keyword")
+                case "while":
+                    Some("**while** - While loop keyword")
+                case "loop":
+                    Some("**loop** - Infinite loop keyword")
+                case "break":
+                    Some("**break** - Loop break keyword")
+                case "continue":
+                    Some("**continue** - Loop continue keyword")
+                case _:
+                    Some("keyword: {node.text}")
 
-    if kind.contains("identifier"):
-        # Get identifier text
-        val name = node_val.text(source)
-        content = "**Symbol:** `{name}`\n\nType: identifier"
-    else if kind.contains("function"):
-        content = "**Type:** function\n\nFunction definition"
-    else if kind.contains("class"):
-        content = "**Type:** class\n\nClass definition"
-    else if kind.contains("struct"):
-        content = "**Type:** struct\n\nStructure definition"
-    else if kind.contains("keyword"):
-        val keyword_text = node_val.text(source)
-        content = keyword_doc(keyword_text)
-    else:
-        # Generic node info
-        content = "Node type: {kind}"
+        case "integer":
+            Some("integer literal: {node.text}")
 
-    # Create range from node bounds
-    val start_point = node_val.start_point()
-    val end_point = node_val.end_point()
-    val range = Range(
-        start_line: start_point.row,
-        start_char: start_point.column,
-        end_line: end_point.row,
-        end_char: end_point.column
-    )
+        case "float":
+            Some("float literal: {node.text}")
 
-    Some(HoverResult(content: content, range: Some(range)))
+        case "string":
+            Some("string literal")
 
-fn keyword_doc(keyword: text) -> text:
-    """Get documentation for a keyword.
+        case "binary_op":
+            Some("binary operation")
 
-    Args:
-        keyword - Keyword name
+        case "call":
+            # Function call - try to show signature
+            Some("function call")
 
-    Returns:
-        Documentation string
-    """
-    match keyword:
-        case "fn":
-            "**fn** - Function definition\n\nDefines a function or method."
-        case "val":
-            "**val** - Immutable variable\n\nDeclares an immutable binding."
-        case "var":
-            "**var** - Mutable variable\n\nDeclares a mutable binding."
-        case "class":
-            "**class** - Class definition\n\nDefines a class with methods and fields."
-        case "struct":
-            "**struct** - Struct definition\n\nDefines a data structure."
-        case "enum":
-            "**enum** - Enum definition\n\nDefines an enumeration type."
-        case "if":
-            "**if** - Conditional\n\nConditional branching."
-        case "else":
-            "**else** - Else branch\n\nAlternative branch in conditional."
-        case "match":
-            "**match** - Pattern matching\n\nPattern matching expression."
-        case "for":
-            "**for** - For loop\n\nIterates over a collection."
-        case "while":
-            "**while** - While loop\n\nLoops while condition is true."
-        case "return":
-            "**return** - Return statement\n\nReturns a value from function."
-        case "import" | "use":
-            "**{keyword}** - Import declaration\n\nImports a module or symbols."
-        case "export":
-            "**export** - Export declaration\n\nExports symbols from module."
-        case "trait":
-            "**trait** - Trait definition\n\nDefines a trait (interface)."
-        case "impl":
-            "**impl** - Implementation block\n\nImplements methods for a type."
-        case "static":
-            "**static** - Static modifier\n\nMarks a method or field as static."
-        case "me":
-            "**me** - Mutable method modifier\n\nMarks a method that can mutate self."
-        case "extern":
-            "**extern** - External function\n\nDeclares an external (FFI) function."
         case _:
-            "**{keyword}**"
+            # Unknown or not interesting
+            nil
 
-# ============================================================================
-# Math block detection for hover
-# ============================================================================
+# Handle textDocument/hover request
+fn handle_hover(tree: Tree, source: String, line: Int, column: Int) -> Result<Option<Dict>, String>:
+    # First check for verification hover (takes priority for verified symbols)
+    match verification.handle_verification_hover(tree, line=line, column=column):
+        case Some(verify_content):
+            # Found verified symbol - return verification info
+            val hover = {
+                "contents": {
+                    "kind": "markdown",
+                    "value": verify_content
+                }
+            }
+            return Ok(Some(hover))
+        case nil:
+            pass
 
-fn _line_col_to_offset(source: text, line: i64, col: i64) -> i64:
-    """Convert (line, character) to byte offset in source."""
-    var offset = 0
-    var current_line = 0
-    val slen = source.len()
-    for _loop in 0..1000000:
-        if current_line >= line:
-            break
-        if offset >= slen:
-            break
-        val ch = source.substring(offset, offset + 1)
-        offset = offset + 1
-        if ch == "\n":
-            current_line = current_line + 1
-    offset + col
+    # Find node at cursor position
+    match find_node_at_position(tree, line=line, column=column):
+        case nil:
+            # No node at position - return null (no hover)
+            Ok(nil)
 
-fn _detect_math_block(source: text, position: Position) -> text:
-    """Detect if cursor is inside a m{ ... } math block.
+        case Some(node):
+            # Get hover content for this node
+            match get_hover_content(node, source):
+                case nil:
+                    Ok(nil)
 
-    Returns the math content if found, empty string otherwise.
-    """
-    val offset = _line_col_to_offset(source, position.line, position.character)
-    val slen = source.len()
+                case Some(content):
+                    # Create hover response
+                    val range = {
+                        "start": {
+                            "line": node.span.start_line,
+                            "character": node.span.start_column
+                        },
+                        "end": {
+                            "line": node.span.end_line,
+                            "character": node.span.end_column
+                        }
+                    }
 
-    # Scan backward from cursor to find "m{"
-    var scan_start = offset
-    var found_open = -1
-    for _back in 0..10000:
-        if scan_start < 1:
-            break
-        scan_start = scan_start - 1
-        if scan_start + 1 < slen:
-            val two = source.substring(scan_start, scan_start + 2)
-            if two == "m{":
-                found_open = scan_start + 2
-                break
-        # If we hit a newline too far back, stop searching
-        val ch = source.substring(scan_start, scan_start + 1)
-        if ch == "\n":
-            # Allow multi-line math blocks, keep scanning
-            pass_dn
+                    val hover = {
+                        "contents": {
+                            "kind": "markdown",
+                            "value": content
+                        },
+                        "range": range
+                    }
 
-    if found_open < 0:
-        return ""
+                    Ok(Some(hover))
 
-    # Scan forward from "m{" to find matching "}"
-    var depth = 1
-    var scan_pos = found_open
-    var found_close = -1
-    for _fwd in 0..10000:
-        if scan_pos >= slen:
-            break
-        val ch = source.substring(scan_pos, scan_pos + 1)
-        if ch == "{":
-            depth = depth + 1
-        elif ch == "}":
-            depth = depth - 1
-            if depth == 0:
-                found_close = scan_pos
-                break
-        scan_pos = scan_pos + 1
-
-    if found_close < 0:
-        return ""
-
-    # Verify cursor is between open and close
-    if offset < found_open - 2 or offset > found_close:
-        return ""
-
-    # Extract content between m{ and }
-    val content = source.substring(found_open, found_close)
-    # Trim whitespace
-    var trimmed = content
-    # Simple leading/trailing space trim
-    for _t in 0..100:
-        if trimmed.len() == 0:
-            break
-        val first = trimmed.substring(0, 1)
-        if first == " " or first == "\t":
-            trimmed = trimmed.substring(1, trimmed.len())
-        else:
-            break
-    for _t in 0..100:
-        if trimmed.len() == 0:
-            break
-        val last = trimmed.substring(trimmed.len() - 1, trimmed.len())
-        if last == " " or last == "\t":
-            trimmed = trimmed.substring(0, trimmed.len() - 1)
-        else:
-            break
-    trimmed
-
-fn _make_math_hover(content: text, position: Position) -> HoverResult:
-    """Create hover result for a math block.
-
-    Shows LaTeX (as $$...$$ display math) and Unicode pretty text.
-    """
-    val latex = render_latex_raw(content)
-    val pretty = to_pretty(content)
-
-    var hover_content = "**Math Block** `m{ }`" + "\n" + "\n"
-    hover_content = hover_content + "---" + "\n" + "\n"
-    hover_content = hover_content + "$$" + latex + "$$" + "\n" + "\n"
-    hover_content = hover_content + "---" + "\n" + "\n"
-    hover_content = hover_content + "**Pretty:** " + pretty + "\n" + "\n"
-    hover_content = hover_content + "**Source:** `" + content + "`"
-
-    HoverResult(content: hover_content, range: nil)
-
-# ============================================================================
-# Public wrappers for testing
-# ============================================================================
-
-fn line_col_to_offset(source: text, line: i64, col: i64) -> i64:
-    """Public wrapper for _line_col_to_offset (for testing)."""
-    _line_col_to_offset(source, line, col)
-
-fn detect_math_block(source: text, position: Position) -> text:
-    """Public wrapper for _detect_math_block (for testing)."""
-    _detect_math_block(source, position)
-
-fn make_math_hover(content: text, position: Position) -> HoverResult:
-    """Public wrapper for _make_math_hover (for testing)."""
-    _make_math_hover(content, position)
+# Get documentation for built-in types
+fn get_type_documentation(type_name: String) -> Option<String>:
+    match type_name:
+        case "Int":
+            Some("**Int** - 64-bit signed integer type")
+        case "Float":
+            Some("**Float** - 64-bit floating point type")
+        case "String":
+            Some("**String** - UTF-8 string type")
+        case "Bool":
+            Some("**Bool** - Boolean type (true/false)")
+        case "List":
+            Some("**[T]** - Dynamic array type")
+        case "Dict":
+            Some("**Dict<K, V>** - Hash map type")
+        case "Option":
+            Some("**Option<T>** - Optional value type (Some/None)")
+        case "Result":
+            Some("**Result<T, E>** - Result type (Ok/Err)")
+        case _:
+            nil

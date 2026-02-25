@@ -42,6 +42,28 @@ impl Counter:
         self.value = self.value + 1
 ```
 
+## Lambda Shorthand
+
+```simple
+# Placeholder lambdas — each _ becomes a parameter
+items.map(_ * 2)            # \__p0: __p0 * 2
+items.filter(_ > 3)         # \__p0: __p0 > 3
+items.reduce(_ + _)         # \__p0, __p1: __p0 + __p1
+
+# Numbered placeholders — 1-indexed, allows reorder
+items.reduce(_2 - _1)       # \__p0, __p1: __p1 - __p0
+
+# Method reference — zero-arg methods
+items.map(&:len)            # \__p0: __p0.len()
+
+# Curry/partial (from std.common.functions)
+val add5 = curry2(\a, b: a + b)(5)
+val mul3 = partial1(\a, b: a * b, 3)
+```
+
+- **Nested scoping:** call args are independent transform boundaries
+- **Don't mix** `_` and `_1`/`_2` in the same expression
+
 ## SFFI Pattern (Two-Tier)
 
 ```simple

@@ -364,6 +364,58 @@ bin/simple fix file.spl --fix-interactive
 | `parser_contextual_keyword` | Reorder keywords | Safe |
 | `type_mismatch_coercion` | Insert `.to_string()` etc. | Likely |
 
+## Lambda Shorthand & Functional Features
+
+### Placeholder Lambdas (`_`)
+Each `_` becomes a sequential parameter. Transform applied per call argument.
+
+```simple
+items.map(_ * 2)           # → \__p0: __p0 * 2
+items.filter(_ > 3)        # → \__p0: __p0 > 3
+items.reduce(_ + _)        # → \__p0, __p1: __p0 + __p1
+_.name                     # → \__p0: __p0.name
+```
+
+### Numbered Placeholders (`_1`, `_2`)
+1-indexed. Allows reordering parameters. **Cannot mix with unnumbered `_`.**
+
+```simple
+items.reduce(_2 - _1)      # → \__p0, __p1: __p1 - __p0
+pairs.map(_1 + _2)         # → \__p0, __p1: __p0 + __p1
+```
+
+### Nested Scoping
+Call/method-call arguments are independent transform boundaries:
+
+```simple
+_.items.any(_ > 3)
+# outer: \__p0: __p0.items.any(INNER)
+# inner: \__p0: __p0 > 3
+```
+
+### Method Reference (`&:method`)
+Shorthand for `\__p0: __p0.method()`. Zero-arg methods only.
+
+```simple
+items.map(&:len)            # → \__p0: __p0.len()
+items.map(&:to_upper)       # → \__p0: __p0.to_upper()
+items.filter(&:is_valid)    # → \__p0: __p0.is_valid()
+```
+
+### Curry & Partial Application
+From `std.common.functions`:
+
+```simple
+use std.common.functions.{curry2, curry3, partial1, partial2}
+
+val add = curry2(\a, b: a + b)
+val add5 = add(5)            # partial: \b: 5 + b
+add5(3)                      # → 8
+
+val mul3 = partial1(\a, b: a * b, 3)  # fix first arg
+mul3(4)                       # → 12
+```
+
 ## See Also
 
 - **`doc/guide/common_mistakes.md`** - Complete guide for transitioning from other languages
