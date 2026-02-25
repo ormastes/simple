@@ -1,0 +1,152 @@
+# CLI Command Dispatch - Simple Implementation
+#
+# Table-driven command dispatch system that replaces rust/driver/src/main.rs
+#
+# Architecture:
+# 1. Check environment variable override → call Rust handler
+# 2. Check if args require Rust handler → call Rust handler
+# 3. Try Simple app implementation → execute .spl file
+# 4. Fallback to Rust handler if Simple app fails
+#
+# This module has been refactored into submodules:
+# - dispatch/types.spl  — CommandEntry struct and implementation
+# - dispatch/table.spl  — Command table (48 entries) and get_all_commands
+#
+# Migration from: rust/driver/src/main.rs (731 lines, 48 commands)
+
+# Import from submodules
+use app.cli.dispatch.types.{CommandEntry}
+use app.cli.dispatch.table.{get_command_table, get_all_commands}
+use std.log.{error}
+
+use app.io.{cli_run_file}
+
+export CommandEntry
+export dispatch_command, find_command, get_all_commands
+export command_count, simple_impl_count, coverage_percentage
+
+# Pre-compute counts at module load time (workaround for module closure limitation)
+var g_command_count = 50
+var g_simple_impl_count = 49
+
+# ============================================================================
+# Dispatch Functions
+# ============================================================================
+
+fn find_command(cmd: text) -> CommandEntry?:
+    """Find command entry by name.
+
+    Args:
+        cmd: Command name to search for
+
+    Returns:
+        Some(entry) if found, nil otherwise
+
+    Example:
+        find_command("compile")  # Some(CommandEntry(...))
+        find_command("invalid")  # nil
+    """
+    val table = get_command_table()
+    for entry in table:
+        if entry.name == cmd:
+            return Some(entry)
+    nil
+
+fn dispatch_command(entry: CommandEntry, args: [text], gc_log: bool, gc_off: bool) -> i64:
+    """Dispatch a command: Simple-first with Rust fallback.
+
+    Execution order:
+    1. Check if should use Rust (env override or special flags)
+    2. Try Simple implementation (if exists)
+    3. Fallback to Rust (if Simple fails or doesn't exist)
+
+    Args:
+        entry: Command table entry
+        args: Full command-line arguments (including command name)
+        gc_log: Enable GC logging
+        gc_off: Disable GC
+
+    Returns:
+        Exit code (0 = success, non-zero = error)
+    """
+    # 1. Check if Rust handler is required
+    if entry.should_use_rust(args):
+        return dispatch_to_rust(entry.name, args, gc_log, gc_off)
+
+    # 2. Try Simple app implementation
+    if entry.has_simple_impl():
+        match try_simple_app(entry.app_path, args, gc_log, gc_off):
+            case Some(code):
+                return code
+            case nil:
+                pass  # Fall through to Rust fallback
+
+    # 3. Fallback to Rust handler
+    dispatch_to_rust(entry.name, args, gc_log, gc_off)
+
+fn try_simple_app(app_path: text, args: [text], gc_log: bool, gc_off: bool) -> i64?:
+    """Try to execute Simple app implementation.
+
+    Args:
+        app_path: Path to Simple app (e.g., "src/app/compile/main.spl")
+        args: Command-line arguments
+        gc_log: Enable GC logging
+        gc_off: Disable GC
+
+    Returns:
+        Some(exit_code) if execution succeeded
+        nil if app doesn't exist or failed to load
+    """
+    # cli_run_file returns i64 (exit code)
+    # Negative values indicate errors (file not found, parse error, etc.)
+    val code = cli_run_file(app_path, args, gc_log, gc_off)
+    if code >= 0:
+        Some(code)  # Success (including non-zero exit codes from the app)
+    else:
+        nil  # Error loading/running app, fallback to Rust
+
+# ============================================================================
+# FFI Bridge to Rust Fallback
+# ============================================================================
+
+fn dispatch_to_rust(cmd: text, args: [text], gc_log: bool, gc_off: bool) -> i64:
+    """Report error - Rust fallback removed.
+
+    All commands must be implemented in Simple.
+    """
+    error("cli", "command '{cmd}' not implemented in Simple")
+    print "hint: Add Simple implementation at src/app/{cmd}/main.spl"
+    1
+
+# ============================================================================
+# Statistics and Debugging
+# ============================================================================
+
+fn command_count() -> i64:
+    """Get total number of registered commands."""
+    g_command_count
+
+fn simple_impl_count() -> i64:
+    """Get number of commands with Simple implementations."""
+    g_simple_impl_count
+
+fn coverage_percentage() -> f64:
+    """Get percentage of commands implemented in Simple."""
+    val total = g_command_count as f64
+    val simple = g_simple_impl_count as f64
+    if total > 0.0:
+        (simple / total) * 100.0
+    else:
+        0.0
+
+fn print_dispatch_stats():
+    """Print command dispatch statistics."""
+    val total = command_count()
+    val simple = simple_impl_count()
+    val coverage = coverage_percentage()
+
+    print "Command Dispatch Statistics:"
+    print "  Total commands: {total}"
+    print "  Simple implementations: {simple}"
+    print "  Rust-only: {total - simple}"
+    print "  Coverage: {coverage:.1f}%"

@@ -7,7 +7,8 @@ use super::lowerer::Lowerer;
 use super::super::types::*;
 
 impl Lowerer {
-    /// Helper to lower builtin function calls with consistent handling
+    /// Helper to lower builtin function calls with consistent handling.
+    /// Prefixes with `__spl_` to avoid C name collisions with user functions.
     fn lower_builtin_call(
         &mut self,
         name: &str,
@@ -21,18 +22,19 @@ impl Lowerer {
         }
         Ok(HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: name.to_string(),
+                name: format!("__spl_{}", name),
                 args: args_hir,
             },
             ty: ret_ty,
         })
     }
 
-    /// Helper to create a builtin call from already-lowered HIR exprs
+    /// Helper to create a builtin call from already-lowered HIR exprs.
+    /// Prefixes with `__spl_` to avoid C name collisions with user functions.
     fn make_builtin_call(&self, name: &str, args: Vec<HirExpr>, ty: TypeId) -> HirExpr {
         HirExpr {
             kind: HirExprKind::BuiltinCall {
-                name: name.to_string(),
+                name: format!("__spl_{}", name),
                 args,
             },
             ty,

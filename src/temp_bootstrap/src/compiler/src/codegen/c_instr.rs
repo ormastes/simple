@@ -3,6 +3,8 @@
 //! Dispatches each `MirInst` variant to a C code string.
 //! Follows the same structure as the Cranelift `instr.rs` module.
 
+use std::collections::HashMap;
+
 use crate::hir::{BinOp, PointerKind, UnaryOp};
 use crate::mir::{
     BlockId, ContractKind, FStringPart, MirInst, MirLiteral, MirPattern, Terminator, VReg,
@@ -19,6 +21,14 @@ pub struct CInstrContext {
     pub string_constants: Vec<(String, String)>,
     /// Counter for generating unique string constant labels.
     pub string_counter: usize,
+    /// Map from sanitized base function name to the first definition's parameter count.
+    /// Used to truncate excess arguments at call sites (e.g. when MethodCallStatic
+    /// prepends the receiver but the target function doesn't have a `self` param).
+    pub arity_map: HashMap<String, usize>,
+    /// Map from (sanitized_base_name, param_count) to the deduplicated C function name.
+    /// Used to resolve call targets when multiple functions share the same base name
+    /// but differ in arity (e.g. `info` with 2 params vs `info_1` with 1 param).
+    pub name_by_arity: HashMap<(String, usize), String>,
 }
 
 impl CInstrContext {
@@ -47,6 +57,18 @@ impl CInstrContext {
     /// Format a BlockId as a C label.
     fn bb(id: BlockId) -> String {
         format!("bb{}", id.0)
+    }
+
+    /// Resolve a sanitized function name to the correct deduplicated C name,
+    /// taking call arity into account. If a function with the exact arity exists
+    /// in the name_by_arity map, use that. Otherwise fall back to the base name.
+    fn resolve_call_name(&self, base_name: &str, call_arity: usize) -> String {
+        // First try exact arity match
+        if let Some(c_name) = self.name_by_arity.get(&(base_name.to_string(), call_arity)) {
+            return c_name.clone();
+        }
+        // Fall back to the base name (which corresponds to the first definition)
+        base_name.to_string()
     }
 }
 
@@ -125,12 +147,33 @@ pub fn compile_instruction(ctx: &mut CInstrContext, inst: &MirInst) {
         // Function call instructions
         // =====================================================================
         MirInst::Call { dest, target, args } => {
-            let func_name = sanitize_name(target.name());
-            let args_str = args
+            let base_name = sanitize_name(target.name());
+            let mut arg_strs: Vec<String> = args
                 .iter()
                 .map(|a| CInstrContext::v(*a))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .collect();
+
+            // Resolve to the correct deduplicated C name based on call arity.
+            // This handles cases where multiple functions share the same base name
+            // but differ in parameter count (e.g. info(level, msg) vs info(msg)).
+            let call_arity = arg_strs.len();
+            let mut func_name = ctx.resolve_call_name(&base_name, call_arity);
+
+            // If no exact arity match was found (resolve returns base_name unchanged)
+            // and the call has more args than the declared function, truncate trailing
+            // args. This handles MIR calls that include an extra receiver argument
+            // for functions that don't expect one.
+            if !ctx.name_by_arity.contains_key(&(base_name.clone(), call_arity)) {
+                if let Some(&declared_arity) = ctx.arity_map.get(&base_name) {
+                    if call_arity > declared_arity && declared_arity > 0 {
+                        // Try to find the function with declared_arity
+                        func_name = ctx.resolve_call_name(&base_name, declared_arity);
+                        arg_strs.truncate(declared_arity);
+                    }
+                }
+            }
+
+            let args_str = arg_strs.join(", ");
 
             if let Some(d) = dest {
                 ctx.emit(format!(
@@ -317,10 +360,54 @@ pub fn compile_instruction(ctx: &mut CInstrContext, inst: &MirInst) {
             func_name,
             args,
         } => {
-            let name = sanitize_name(func_name);
-            let mut all_args = vec![CInstrContext::v(*receiver)];
-            all_args.extend(args.iter().map(|a| CInstrContext::v(*a)));
-            let args_str = all_args.join(", ");
+            let base_name = sanitize_name(func_name);
+            // MethodCallStatic prepends receiver as the first argument
+            let all_args_with_receiver = {
+                let mut v = vec![CInstrContext::v(*receiver)];
+                v.extend(args.iter().map(|a| CInstrContext::v(*a)));
+                v
+            };
+            let args_without_receiver: Vec<String> = args.iter().map(|a| CInstrContext::v(*a)).collect();
+
+            // Determine which argument list to use by checking if a function
+            // definition exists that matches the arity.
+            //
+            // Strategy:
+            // 1. If a function with (receiver + args) arity exists -> use all args
+            // 2. Else if a function with (args only) arity exists -> drop receiver
+            // 3. Else fall back to all args (will be an undeclared function anyway)
+            let has_with_receiver = ctx.name_by_arity.contains_key(
+                &(base_name.clone(), all_args_with_receiver.len())
+            );
+            let has_without_receiver = ctx.name_by_arity.contains_key(
+                &(base_name.clone(), args_without_receiver.len())
+            );
+
+            let (name, final_args) = if has_with_receiver {
+                // Exact match with receiver included
+                let c_name = ctx.resolve_call_name(&base_name, all_args_with_receiver.len());
+                (c_name, all_args_with_receiver)
+            } else if has_without_receiver {
+                // Match without receiver (function doesn't have self param)
+                let c_name = ctx.resolve_call_name(&base_name, args_without_receiver.len());
+                (c_name, args_without_receiver)
+            } else {
+                // No arity match found; fall back to base name with all args.
+                // Also check if arity_map gives us a hint to truncate.
+                if let Some(&declared_arity) = ctx.arity_map.get(&base_name) {
+                    if all_args_with_receiver.len() > declared_arity && declared_arity > 0 {
+                        let mut truncated = all_args_with_receiver;
+                        truncated.truncate(declared_arity);
+                        (base_name, truncated)
+                    } else {
+                        (base_name, all_args_with_receiver)
+                    }
+                } else {
+                    (base_name, all_args_with_receiver)
+                }
+            };
+
+            let args_str = final_args.join(", ");
 
             if let Some(d) = dest {
                 ctx.emit(format!("{} = {}({});", CInstrContext::v(*d), name, args_str));

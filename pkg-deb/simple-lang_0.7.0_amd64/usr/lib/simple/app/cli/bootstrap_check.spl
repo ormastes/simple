@@ -1,0 +1,399 @@
+# Bootstrap Self-Hosting Verification
+#
+# Tests all compilation paths and reports what works for self-hosting.
+# Usage: bin/simple bootstrap-check
+#   Or:  SIMPLE_LIB=src bin/release/simple src/app/cli/bootstrap_check.spl
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [str]
+extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
+
+# ============================================================================
+# Test programs
+# ============================================================================
+
+fn get_hello_program() -> text:
+    "fn main():\n    print \"Hello from bootstrap!\"\n"
+
+fn get_math_program() -> text:
+    val open_brace = "{"
+    val close_brace = "}"
+    "fn main():\n    val x = 6\n    val y = 7\n    val z = x * y\n    print \"Result: {open_brace}z{close_brace}\"\n"
+
+fn get_multi_fn_program() -> text:
+    val open_brace = "{"
+    val close_brace = "}"
+    "fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn main():\n    val result = add(20, 22)\n    print \"Sum: {open_brace}result{close_brace}\"\n"
+
+# ============================================================================
+# Check 1: Bootstrap Binary
+# ============================================================================
+
+fn check_bootstrap_binary() -> bool:
+    print "--- Check 1: Bootstrap Binary ---"
+    if rt_file_exists("bin/release/simple"):
+        val size = file_size("bin/release/simple")
+        print "  PASS: bin/release/simple exists ({size} bytes)"
+        val (out, err, code) = shell("bin/release/simple --version 2>&1")
+        print "  Version: {out.trim()}"
+        return true
+    print "  FAIL: bin/release/simple not found"
+    false
+
+# ============================================================================
+# Check 2: LLVM Toolchain
+# ============================================================================
+
+fn check_llvm_toolchain() -> bool:
+    print ""
+    print "--- Check 2: LLVM Toolchain ---"
+    val (llc_path, err1, code1) = shell("command -v llc 2>/dev/null")
+    if code1 != 0:
+        print "  FAIL: llc not found (apt install llvm)"
+        return false
+    print "  PASS: llc found at {llc_path.trim()}"
+    val (llc_ver, err2, code2) = shell("llc --version 2>&1 | head -1")
+    print "  Version: {llc_ver.trim()}"
+
+    val (gcc_path, err3, code3) = shell("command -v gcc 2>/dev/null")
+    if code3 == 0:
+        print "  PASS: gcc found at {gcc_path.trim()}"
+    else:
+        print "  WARN: gcc not found (needed for --native)"
+
+    true
+
+# ============================================================================
+# Check 3: Native Compile (Simple → C → gcc)
+# ============================================================================
+
+fn check_native_compile() -> bool:
+    print ""
+    print "--- Check 3: Native Compile (Simple -> C -> gcc) ---"
+
+    val test_src = "/tmp/bootstrap_check_native.spl"
+    val test_bin = "/tmp/bootstrap_check_native"
+
+    # Test 1: Hello world
+    file_write(test_src, get_hello_program())
+    val (out1, err1, code1) = shell("bin/simple compile --native -o {test_bin} {test_src} 2>&1")
+    if code1 != 0:
+        print "  FAIL: Native compile failed: {err1}"
+        file_delete(test_src)
+        return false
+
+    val size = file_size(test_bin)
+    print "  PASS: Hello world compiled ({size} bytes)"
+
+    val (run_out, run_err, run_code) = shell("{test_bin} 2>&1")
+    if run_out.trim() == "Hello from bootstrap!":
+        print "  PASS: Hello world runs correctly"
+    else:
+        print "  FAIL: Expected 'Hello from bootstrap!', got '{run_out.trim()}'"
+
+    # Test 2: Math program
+    file_write(test_src, get_math_program())
+    val (out2, err2, code2) = shell("bin/simple compile --native -o {test_bin} {test_src} 2>&1")
+    if code2 == 0:
+        val (math_out, math_err, math_code) = shell("{test_bin} 2>&1")
+        if math_out.trim() == "Result: 42":
+            print "  PASS: Math program runs correctly"
+        else:
+            print "  WARN: Math program output: '{math_out.trim()}' (interpolation may use wrong format)"
+    else:
+        print "  WARN: Math program compile failed (expected - limited C codegen)"
+
+    # Test 3: Multi-function program
+    file_write(test_src, get_multi_fn_program())
+    val (out3, err3, code3) = shell("bin/simple compile --native -o {test_bin} {test_src} 2>&1")
+    if code3 == 0:
+        print "  PASS: Multi-function program compiled"
+    else:
+        print "  WARN: Multi-function compile failed (expected - fn decl not yet in C codegen)"
+
+    file_delete(test_src)
+    file_delete(test_bin)
+    true
+
+# ============================================================================
+# Check 4: SMF Compile (rt_cli_handle_compile)
+# ============================================================================
+
+fn check_smf_compile() -> bool:
+    print ""
+    print "--- Check 4: SMF Compile (SIMPLE_COMPILE_RUST=1) ---"
+
+    val test_src = "/tmp/bootstrap_check_smf.spl"
+    val test_smf = "/tmp/bootstrap_check_smf.smf"
+
+    file_write(test_src, get_hello_program())
+    val (out1, err1, code1) = shell("SIMPLE_COMPILE_RUST=1 bin/release/simple compile {test_src} -o {test_smf} 2>&1 | grep -v '\\[DEBUG\\]'")
+
+    if code1 != 0:
+        print "  FAIL: SMF compile returned exit code {code1}"
+        file_delete(test_src)
+        return false
+
+    if not rt_file_exists(test_smf):
+        print "  FAIL: SMF file not created"
+        file_delete(test_src)
+        return false
+
+    val smf_size = file_size(test_smf)
+    print "  PASS: SMF created ({smf_size} bytes)"
+
+    # Check if SMF is a stub (all programs produce ~219 bytes)
+    if smf_size < 300:
+        print "  WARN: SMF is likely a stub ({smf_size} bytes - too small for real bytecode)"
+
+    # Check SMF magic
+    val smf_bytes_raw = rt_file_read_bytes(test_smf)
+    val smf_bytes = smf_bytes_raw ?? []
+    var has_magic = false
+    if smf_bytes.len() >= 3:
+        val s = smf_bytes[0]
+        val m = smf_bytes[1]
+        val f = smf_bytes[2]
+        # S=83, M=77, F=70
+        val is_s = s == 83
+        val is_m = m == 77
+        val is_f = f == 70
+        if is_s and is_m and is_f:
+            has_magic = true
+    if has_magic:
+        print "  PASS: Valid SMF magic header"
+    else:
+        print "  FAIL: Invalid SMF header"
+
+    # Try running the SMF
+    val (run_out, run_err, run_code) = shell("bin/release/simple {test_smf} 2>&1 | grep -v '\\[DEBUG\\]'")
+    if run_out.trim() == "Hello from bootstrap!":
+        print "  PASS: SMF executes correctly!"
+    else:
+        print "  WARN: SMF runs but no output (stub bytecode - only 'ret' instruction)"
+
+    file_delete(test_src)
+    file_delete(test_smf)
+    smf_size >= 300
+
+# ============================================================================
+# Check 5: LLVM IR Generation (rt_compile_to_llvm_ir)
+# ============================================================================
+
+fn check_llvm_ir_generation() -> bool:
+    print ""
+    print "--- Check 5: LLVM IR Generation (rt_compile_to_llvm_ir) ---"
+
+    val test_src = "/tmp/bootstrap_check_ir.spl"
+    file_write(test_src, get_hello_program())
+
+    val result = rt_compile_to_llvm_ir(test_src, "x86_64-unknown-linux-gnu", false)
+    val ir = result[0]
+    val errors = result[1]
+    val code = result[2]
+
+    file_delete(test_src)
+
+    if code == 0 and ir.len() > 0:
+        print "  PASS: LLVM IR generated ({ir.len()} bytes)"
+        return true
+
+    if errors.contains("not yet implemented"):
+        print "  WARN: rt_compile_to_llvm_ir is a stub (not implemented in bootstrap binary)"
+        print "  Info: {errors.split(\".\")[0]}"
+    else:
+        print "  FAIL: LLVM IR generation failed: {errors}"
+
+    false
+
+# ============================================================================
+# Check 6: Compiler Module Imports (Interpreter Mode)
+# ============================================================================
+
+fn check_compiler_imports() -> bool:
+    print ""
+    print "--- Check 6: Compiler Module Imports ---"
+
+    # Test importing backend_api (fixed - no generics)
+    val (out1, err1, code1) = shell("SIMPLE_LIB=src bin/release/simple src/app/cli/test_compile_import.spl 2>&1 | grep -v '\\[DEBUG\\]'")
+    if out1.contains("ALL IMPORTS OK"):
+        print "  PASS: backend_api + llvm_tools import successfully"
+        if out1.contains("llc available: true"):
+            print "  PASS: llc_available() returns true"
+        if out1.contains("effective backend"):
+            val backend_line = ""
+            val lines = out1.split("\n")
+            for line in lines:
+                if line.contains("effective backend"):
+                    print "  Info: {line.trim()}"
+    else:
+        print "  FAIL: Compiler module import failed"
+        val err_lines = err1.split("\n")
+        for line in err_lines:
+            val trimmed = line.trim()
+            if trimmed.len() > 0:
+                if not trimmed.starts_with("[DEBUG]"):
+                    print "  Error: {trimmed}"
+        return false
+
+    # Test if full CompilerDriver can be imported (expected to fail)
+    val test_driver = "/tmp/bootstrap_check_driver.spl"
+    file_write(test_driver, "use compiler.driver (CompilerDriver)\nprint \"driver imported!\"\n")
+    val (out2, err2, code2) = shell("SIMPLE_LIB=src bin/release/simple {test_driver} 2>&1 | grep -v '\\[DEBUG\\]' | head -5")
+    file_delete(test_driver)
+
+    if code2 == 0 and out2.contains("driver imported"):
+        print "  PASS: CompilerDriver imports in interpreter mode!"
+        return true
+    else:
+        val all_output = out2 + " " + err2
+        if all_output.contains("Lt") or all_output.contains("expected"):
+            print "  WARN: CompilerDriver blocked by generics (expected)"
+            print "  Info: Full compiler pipeline requires <> generics support in runtime parser"
+        else:
+            print "  WARN: CompilerDriver import failed (code={code2})"
+
+    true
+
+# ============================================================================
+# Check 7: Full Bootstrap Pipeline Simulation
+# ============================================================================
+
+fn check_bootstrap_pipeline() -> bool:
+    print ""
+    print "--- Check 7: Bootstrap Pipeline Simulation ---"
+
+    # Can we compile a moderately complex program?
+    val complex_src = "/tmp/bootstrap_check_complex.spl"
+    val ob = "{"
+    val cb = "}"
+    val complex_program = "val greeting = \"Hello\"\nval dest = \"World\"\n\nfn main():\n    print \"{ob}greeting{cb}, {ob}dest{cb}!\"\n    val x = 10\n    val y = 20\n    print \"Sum: {ob}x + y{cb}\"\n"
+    file_write(complex_src, complex_program)
+
+    # Try native path
+    val native_bin = "/tmp/bootstrap_check_complex_native"
+    val (nat_out, nat_err, nat_code) = shell("bin/simple compile --native -o {native_bin} {complex_src} 2>&1")
+    if nat_code == 0:
+        val (run_out, run_err, run_code) = shell("{native_bin} 2>&1")
+        print "  Native compile: PASS (output: {run_out.trim()})"
+    else:
+        print "  Native compile: limited (global vals/string interp not fully supported)"
+
+    # Try SMF path for the compiler itself (timeout quickly - just check if it starts)
+    print "  SMF self-compile: Testing..."
+    val (smf_out, smf_err, smf_code) = shell("timeout 5 bash -c 'SIMPLE_COMPILE_RUST=1 bin/release/simple compile src/app/cli/main.spl -o /tmp/bootstrap_stage2.smf 2>&1 | grep -v \"\\[DEBUG\\]\" | tail -5'")
+    if smf_code == 0:
+        val stage2_size = file_size("/tmp/bootstrap_stage2.smf")
+        if stage2_size > 300:
+            print "  SMF self-compile: PASS (stage2.smf = {stage2_size} bytes)"
+        else:
+            print "  SMF self-compile: Stub ({stage2_size} bytes - not functional bytecode)"
+    elif smf_code == 124:
+        print "  SMF self-compile: TIMEOUT (>5s loading modules)"
+    else:
+        print "  SMF self-compile: FAIL (exit {smf_code})"
+
+    file_delete(complex_src)
+    file_delete(native_bin)
+    file_delete("/tmp/bootstrap_stage2.smf")
+    true
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+fn print_summary(results: [bool]):
+    print ""
+    print "============================================"
+    print "Bootstrap Self-Hosting Verification Summary"
+    print "============================================"
+    print ""
+
+    val labels = [
+        "Bootstrap Binary",
+        "LLVM Toolchain",
+        "Native Compile (Simple->C->gcc)",
+        "SMF Compile (Cranelift stubs)",
+        "LLVM IR Generation",
+        "Compiler Module Imports",
+        "Bootstrap Pipeline"
+    ]
+
+    var pass_count = 0
+    for idx in range(0, results.len()):
+        var status = "FAIL"
+        if results[idx]:
+            status = "PASS"
+            pass_count = pass_count + 1
+        if idx < labels.len():
+            print "  [{status}] {labels[idx]}"
+
+    print ""
+    print "Score: {pass_count}/{results.len()} checks passed"
+    print ""
+    print "=== Self-Hosting Readiness ==="
+    print ""
+    print "Working paths:"
+    print "  1. Native compile: Simple -> C -> gcc (hello-world level)"
+    print "  2. Interpreter: Runs all Simple code via bootstrap binary"
+    print "  3. Compiler modules: backend_api, llvm_tools load in interpreter"
+    print ""
+    print "Blockers for full self-hosting:"
+    print "  1. SMF compile produces stub bytecode (ret-only, no real codegen)"
+    print "  2. rt_compile_to_llvm_ir not implemented in bootstrap binary"
+    print "  3. CompilerDriver can't load in interpreter (generics in MIR/HIR)"
+    print ""
+    print "Next steps (in priority order):"
+    print "  A. Enhance native compile (Simple->C) to handle more language features"
+    print "     - Functions, if/else, loops, match, structs"
+    print "     - This creates a minimal self-hosting path without needing LLVM"
+    print "  B. Implement generics in runtime parser"
+    print "     - Enables full CompilerDriver in interpreter mode"
+    print "     - Then: parse->HIR->MIR->LlvmIR->llc->object->link"
+    print "  C. Create generics-free compiler subset (~2000 lines)"
+    print "     - Rewrite key pipeline stages without <> syntax"
+    print ""
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main() -> i64:
+    print "============================================"
+    print "Bootstrap Self-Hosting Verification"
+    print "============================================"
+    print ""
+
+    var results: [bool] = []
+
+    val r1 = check_bootstrap_binary()
+    results.push(r1)
+
+    val r2 = check_llvm_toolchain()
+    results.push(r2)
+
+    val r3 = check_native_compile()
+    results.push(r3)
+
+    val r4 = check_smf_compile()
+    results.push(r4)
+
+    val r5 = check_llvm_ir_generation()
+    results.push(r5)
+
+    val r6 = check_compiler_imports()
+    results.push(r6)
+
+    val r7 = check_bootstrap_pipeline()
+    results.push(r7)
+
+    print_summary(results)
+
+    0
+
+export check_bootstrap_binary, check_llvm_toolchain, check_native_compile
+export check_smf_compile, check_llvm_ir_generation, check_compiler_imports

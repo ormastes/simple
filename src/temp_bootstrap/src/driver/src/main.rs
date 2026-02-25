@@ -34,6 +34,7 @@ fn print_help() {
     eprintln!("  simple -c \"code\"            Run code string");
     eprintln!("  simple compile <src> [-o <out>] [--target <arch>] [--snapshot]  Compile to SMF");
     eprintln!("  simple compile <src> --emit-c [-o <out.c>]  Emit C source code");
+    eprintln!("  simple compile <src> --native [-o <out.smf>]  Compile via native Cranelift pipeline");
     eprintln!("  simple watch <file.spl>     Watch and auto-recompile");
     eprintln!("  simple targets              List available target architectures");
     eprintln!();
@@ -149,18 +150,11 @@ fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
 fn compile_to_c(source: &PathBuf, output: Option<PathBuf>) -> i32 {
     let out_path = output.unwrap_or_else(|| source.with_extension("c"));
 
-    let source_content = match std::fs::read_to_string(source) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("error: cannot read {}: {}", source.display(), e);
-            return 1;
-        }
-    };
-
     let mut pipeline =
         simple_compiler::pipeline::CompilerPipeline::new().expect("pipeline creation failed");
 
-    match pipeline.compile_source_to_c(&source_content) {
+    // Use file-based compilation which loads imports
+    match pipeline.compile_file_to_c(source) {
         Ok(c_source) => {
             match std::fs::write(&out_path, &c_source) {
                 Ok(()) => {
@@ -185,6 +179,29 @@ fn compile_to_c(source: &PathBuf, output: Option<PathBuf>) -> i32 {
     }
 }
 
+fn compile_native(source: &PathBuf, output: Option<PathBuf>) -> i32 {
+    let out_path = output.unwrap_or_else(|| source.with_extension("smf"));
+
+    let mut pipeline =
+        simple_compiler::pipeline::CompilerPipeline::new().expect("pipeline creation failed");
+
+    // Use native compilation pipeline (HIR → MIR → Cranelift) with import loading
+    match pipeline.compile_native(source, &out_path) {
+        Ok(()) => {
+            println!(
+                "Compiled (native): {} -> {}",
+                source.display(),
+                out_path.display()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            1
+        }
+    }
+}
+
 fn compile_file(
     source: &PathBuf,
     output: Option<PathBuf>,
@@ -197,14 +214,6 @@ fn compile_file(
     let runner = Runner::new();
     let out_path = output.unwrap_or_else(|| source.with_extension("smf"));
 
-    let source_content = match std::fs::read_to_string(source) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("error: cannot read {}: {}", source.display(), e);
-            return 1;
-        }
-    };
-
     // Start timing and create build event
     let start_time = Instant::now();
     let mut build_state = BuildState::new();
@@ -213,12 +222,21 @@ fn compile_file(
         files: vec![source.display().to_string()],
     });
 
-    // Use target-specific compilation if target is specified
+    // Use file-based compilation with import loading
     let result = if let Some(target) = target {
         println!("Cross-compiling for target: {}", target);
+        // For cross-compilation, read source since compile_file_to_smf doesn't support target yet
+        let source_content = match std::fs::read_to_string(source) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("error: cannot read {}: {}", source.display(), e);
+                return 1;
+            }
+        };
         runner.compile_to_smf_for_target(&source_content, &out_path, target)
     } else {
-        runner.compile_to_smf(&source_content, &out_path)
+        // Use path-based compilation which loads imports
+        runner.compile_file_to_smf(source, &out_path)
     };
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -327,7 +345,21 @@ fn main() {
     // Initialize interpreter handlers for hybrid execution
     simple_compiler::interpreter_ffi::init_interpreter_handlers();
 
-    let args: Vec<String> = env::args().skip(1).collect();
+    let all_args: Vec<String> = env::args().skip(1).collect();
+
+    // Split at "--" separator: before = bootstrap args, after = program args
+    let (args, program_args) = if let Some(sep_pos) = all_args.iter().position(|a| a == "--") {
+        let (before, after) = all_args.split_at(sep_pos);
+        (before.to_vec(), Some(after[1..].to_vec())) // skip the "--" itself
+    } else {
+        (all_args, None)
+    };
+
+    // Set forwarded program args via environment variable for interpreter's rt_get_args
+    // Use ASCII Unit Separator (0x1F) since NUL bytes aren't allowed in env vars
+    if let Some(ref pargs) = program_args {
+        env::set_var("SIMPLE_PROGRAM_ARGS", pargs.join("\x1F"));
+    }
 
     // Parse global flags
     let gc_log = args.iter().any(|a| a == "--gc-log");
@@ -383,6 +415,13 @@ fn main() {
 
             if emit_c {
                 std::process::exit(compile_to_c(&source, output));
+            }
+
+            // Parse --native flag (native Cranelift pipeline)
+            let native = args.iter().any(|a| a == "--native");
+
+            if native {
+                std::process::exit(compile_native(&source, output));
             }
 
             // Parse --target flag

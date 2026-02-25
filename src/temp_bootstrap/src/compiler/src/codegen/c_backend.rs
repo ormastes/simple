@@ -54,31 +54,48 @@ impl CCodegen {
             self.output.push('\n');
         }
 
-        // 2. Compile all functions, collecting string constants.
-        //    Track emitted function names to deduplicate (Issue 2: redefinition errors).
-        let mut all_string_constants: Vec<(String, String)> = Vec::new();
-        let mut function_bodies: Vec<String> = Vec::new();
-        let mut forward_decls: Vec<String> = Vec::new();
+        // 2. First pass: compute deduplicated C names for all functions and build
+        //    the name resolution map. This maps (sanitized_base_name, param_count)
+        //    to the actual C function name (which may have a _N dedup suffix).
+        //    Also builds an arity_map for truncating excess arguments at call sites.
         let mut name_counts: HashMap<String, usize> = HashMap::new();
+        // Maps (base_name, arity) -> deduplicated C name for resolving call targets
+        let mut name_by_arity: HashMap<(String, usize), String> = HashMap::new();
+        // Maps base_name -> first deduplicated C name (for calls where arity doesn't match any variant)
+        let mut arity_map: HashMap<String, usize> = HashMap::new();
 
+        let mut dedup_names: Vec<String> = Vec::new();
         for func in &mir.functions {
-            // Forward declaration
-            let ret_type = type_id_to_c_return(func.return_type);
-            // Rename "main" to "simple_main" to avoid conflict with C entry point
             let base_name = if func.name == FUNC_MAIN {
                 "simple_main".to_string()
             } else {
                 sanitize_name(&func.name)
             };
-
-            // Deduplicate: if this name was already emitted, append _N suffix
             let count = name_counts.entry(base_name.clone()).or_insert(0);
-            let name = if *count == 0 {
+            let c_name = if *count == 0 {
                 base_name.clone()
             } else {
                 format!("{}_{}", base_name, count)
             };
             *name_counts.get_mut(&base_name).unwrap() += 1;
+
+            // Record the mapping from (base_name, param_count) -> c_name
+            name_by_arity.insert((base_name.clone(), func.params.len()), c_name.clone());
+            // Record the first definition's arity for the base name
+            arity_map.entry(base_name).or_insert(func.params.len());
+
+            dedup_names.push(c_name);
+        }
+
+        // 3. Compile all functions, collecting string constants.
+        let mut all_string_constants: Vec<(String, String)> = Vec::new();
+        let mut function_bodies: Vec<String> = Vec::new();
+        let mut forward_decls: Vec<String> = Vec::new();
+
+        for (func_idx, func) in mir.functions.iter().enumerate() {
+            // Forward declaration
+            let ret_type = type_id_to_c_return(func.return_type);
+            let name = dedup_names[func_idx].clone();
 
             let params: Vec<String> = func
                 .params
@@ -99,6 +116,10 @@ impl CCodegen {
             let mut ctx = CInstrContext::new();
             // Carry forward the string counter from previous functions
             ctx.string_counter = all_string_constants.len();
+            // Share resolution maps so call sites can resolve deduplicated names
+            // and truncate excess arguments
+            ctx.arity_map = arity_map.clone();
+            ctx.name_by_arity = name_by_arity.clone();
 
             let mut body = String::new();
             body.push_str(&format!("{} {}({}) {{\n", ret_type, name, params_str));
@@ -150,7 +171,7 @@ impl CCodegen {
             all_string_constants.extend(ctx.string_constants);
         }
 
-        // 3. Emit string constants
+        // 4. Emit string constants
         if !all_string_constants.is_empty() {
             self.output.push_str("/* String constants */\n");
             for (label, value) in &all_string_constants {
@@ -163,7 +184,7 @@ impl CCodegen {
             self.output.push('\n');
         }
 
-        // 4. Emit forward declarations
+        // 5. Emit forward declarations
         if !forward_decls.is_empty() {
             self.output.push_str("/* Forward declarations */\n");
             for decl in &forward_decls {
@@ -173,12 +194,12 @@ impl CCodegen {
             self.output.push('\n');
         }
 
-        // 5. Emit function bodies
+        // 6. Emit function bodies
         for body in &function_bodies {
             self.output.push_str(body);
         }
 
-        // 6. Emit main entry point (if simple_main exists)
+        // 7. Emit main entry point (if simple_main exists)
         let has_main = mir.functions.iter().any(|f| f.name == FUNC_MAIN);
         if has_main {
             self.emit_entry_point();
@@ -198,6 +219,25 @@ impl CCodegen {
 
         // Runtime FFI declarations
         self.output.push_str(&generate_runtime_declarations());
+        self.output.push('\n');
+
+        // Built-in method stubs for string operations not yet in runtime
+        self.output.push_str("/* Built-in method dispatch stubs */\n");
+        self.output.push_str("int64_t __spl_method_lower(int64_t s) { return s; /* TODO: lowercase */ }\n");
+        self.output.push_str("int64_t __spl_method_upper(int64_t s) { return s; /* TODO: uppercase */ }\n");
+        self.output.push_str("int64_t __spl_method_trim(int64_t s) { return s; /* TODO: trim */ }\n");
+        self.output.push_str("int64_t __spl_method_contains(int64_t s, int64_t sub) { return 0; /* TODO */ }\n");
+        self.output.push_str("int64_t __spl_method_split_2(int64_t s, int64_t sep) { return 0; /* TODO */ }\n");
+        self.output.push_str("int64_t __spl_method_split_3(int64_t s, int64_t sep, int64_t limit) { (void)limit; return 0; /* TODO */ }\n");
+        // Dispatch macro: select arity based on number of arguments
+        self.output.push_str("#define __SPL_SPLIT_SELECT(_1,_2,_3,NAME,...) NAME\n");
+        self.output.push_str("#define __spl_method_split(...) __SPL_SPLIT_SELECT(__VA_ARGS__,__spl_method_split_3,__spl_method_split_2)(__VA_ARGS__)\n");
+        self.output.push_str("int64_t __spl_method_starts_with(int64_t s, int64_t prefix) { return 0; /* TODO */ }\n");
+        self.output.push_str("int64_t __spl_method_ends_with(int64_t s, int64_t suffix) { return 0; /* TODO */ }\n");
+        self.output.push_str("int64_t __spl_method_replace(int64_t s, int64_t from, int64_t to) { return s; /* TODO */ }\n");
+        self.output.push_str("int64_t __spl_to_string(int64_t v) { return v; /* TODO: toString */ }\n");
+        self.output.push_str("int64_t __spl_string_concat(int64_t a, int64_t b) { return a; /* TODO: concat */ }\n");
+        self.output.push_str("int64_t __spl_optional_check(int64_t v) { return v != 0; /* TODO: optional check */ }\n");
         self.output.push('\n');
     }
 

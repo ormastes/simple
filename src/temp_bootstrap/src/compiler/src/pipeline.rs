@@ -31,7 +31,7 @@ use tracing::instrument;
 use crate::codegen::Codegen;
 use crate::compilability::analyze_module;
 use crate::hir;
-use crate::import_loader::{has_script_statements, load_module_with_imports};
+use crate::import_loader::{has_script_statements, load_module_with_imports, wrap_script_as_main};
 use crate::interpreter::evaluate_module;
 use crate::lint::{LintChecker, LintConfig, LintDiagnostic};
 use crate::mir::{self, ContractMode};
@@ -300,22 +300,22 @@ impl CompilerPipeline {
 
     fn compile_module_to_memory_native(
         &mut self,
-        ast_module: simple_parser::ast::Module,
+        mut ast_module: simple_parser::ast::Module,
     ) -> Result<Vec<u8>, CompileError> {
         // Clear previous lint diagnostics
         self.lint_diagnostics.clear();
+
+        // If script-style statements exist, wrap them in an implicit main function
+        // so the native pipeline can compile them.
+        if has_script_statements(&ast_module.items) {
+            wrap_script_as_main(&mut ast_module);
+        }
 
         // 2. Monomorphization: specialize generic functions for concrete types
         let ast_module = monomorphize_module(&ast_module);
 
         // 3. Run lint checks
         self.run_lint_checks(&ast_module.items)?;
-
-        // If script-style statements exist, interpret directly and wrap result.
-        if has_script_statements(&ast_module.items) {
-            let main_value = evaluate_module(&ast_module.items)?;
-            return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
-        }
 
         // 4. Compilability analysis for hybrid execution
         let compilability = analyze_module(&ast_module.items);
@@ -441,6 +441,41 @@ impl CompilerPipeline {
             self.gc.as_ref(),
             target,
         ))
+    }
+
+    /// Compile a Simple source file to C source code (with import loading).
+    ///
+    /// Uses the native compilation pipeline (Parse → Monomorphize → HIR → MIR → C)
+    /// to generate a complete C source file that can be compiled with clang/gcc.
+    /// Resolves and flattens all imports before compilation.
+    #[instrument(skip(self, source_path))]
+    pub fn compile_file_to_c(&mut self, source_path: &Path) -> Result<String, CompileError> {
+        let module = load_module_with_imports(source_path, &mut HashSet::new())?;
+        self.compile_module_to_c(module)
+    }
+
+    /// Compile an AST module to C source code.
+    fn compile_module_to_c(
+        &mut self,
+        ast_module: simple_parser::ast::Module,
+    ) -> Result<String, CompileError> {
+        // Clear previous lint diagnostics
+        self.lint_diagnostics.clear();
+
+        // Monomorphization
+        let ast_module = monomorphize_module(&ast_module);
+
+        // Run lint checks
+        self.run_lint_checks(&ast_module.items)?;
+
+        // Type check and lower to MIR
+        let mir_module = self.type_check_and_lower(&ast_module)?;
+
+        // Generate C source via CCodegen
+        let mut codegen = crate::codegen::CCodegen::new();
+        codegen
+            .compile_module(&mir_module)
+            .map_err(|e| CompileError::Codegen(format!("{e}")))
     }
 
     /// Compile a Simple source string to C source code.

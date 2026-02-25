@@ -1,0 +1,569 @@
+# Architecture Validation Command
+#
+# Scans __init__.spl files for arch {} blocks defining dependency rules,
+# then checks actual use/import statements against allow/deny rules.
+# Also enforces dimension conventions (feature/entity/transform) inferred
+# from directory names — zero config needed.
+#
+# Usage: simple check-arch [root_dir]
+
+extern fn rt_file_read_text(path: text) -> text
+
+use app.io.mod (cwd, shell)
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct ArchRule:
+    init_file: text
+    module_path: text
+    allow_patterns: [text]
+    deny_patterns: [text]
+    dimension: text
+    transform_allow_from: [text]
+
+struct FileImports:
+    file_path: text
+    imports: [text]
+
+struct ArchViolation:
+    file_path: text
+    import_path: text
+    rule_file: text
+    allow_list: [text]
+    violation_type: text
+
+# ============================================================================
+# String helpers
+# ============================================================================
+
+fn _str_trim(s: text) -> text:
+    var start = 0
+    var end = s.len()
+    while start < end:
+        val ch = s[start : start + 1]
+        if ch == " " or ch == "\t" or ch == "\r":
+            start = start + 1
+        else:
+            break
+    while end > start:
+        val ch = s[end - 1 : end]
+        if ch == " " or ch == "\t" or ch == "\r":
+            end = end - 1
+        else:
+            break
+    s[start : end]
+
+fn _parse_pattern_list(line: text) -> [text]:
+    # Parse a list like: allow = ["core", "std"] or deny = ["compiler/**"]
+    # Find the '[' and ']' by scanning
+    var result: [text] = []
+    var bracket_start = -1
+    var bracket_end = -1
+    var i = 0
+    while i < line.len():
+        val ch = line[i : i + 1]
+        if ch == "[" and bracket_start < 0:
+            bracket_start = i
+        elif ch == "]":
+            bracket_end = i
+        i = i + 1
+
+    if bracket_start < 0 or bracket_end < 0:
+        return result
+
+    val inner = line[bracket_start + 1 : bracket_end]
+    val parts = inner.split(",")
+    for part in parts:
+        val trimmed = _str_trim(part)
+        var clean = trimmed
+        if clean.len() >= 2:
+            if clean.starts_with("\"") and clean.ends_with("\""):
+                clean = clean[1 : clean.len() - 1]
+            elif clean.starts_with("'") and clean.ends_with("'"):
+                clean = clean[1 : clean.len() - 1]
+        if clean.len() > 0:
+            result = result + [clean]
+    result
+
+fn _parse_string_value(line: text) -> text:
+    # Extract "value" from: key = "value"
+    var i = 0
+    var eq_pos = -1
+    while i < line.len():
+        val ch = line[i : i + 1]
+        if ch == "=":
+            eq_pos = i
+            break
+        i = i + 1
+    if eq_pos < 0:
+        return ""
+    val after = _str_trim(line[eq_pos + 1:])
+    if after.len() >= 2:
+        if after.starts_with("\"") and after.ends_with("\""):
+            return after[1 : after.len() - 1]
+        if after.starts_with("'") and after.ends_with("'"):
+            return after[1 : after.len() - 1]
+    ""
+
+# ============================================================================
+# Arch block parsing
+# ============================================================================
+
+fn _parse_arch_block(content: text) -> (bool, [text], [text], text, [text]):
+    # Returns (found_arch, allow_patterns, deny_patterns, dimension, transform_allow_from)
+    var allow_patterns: [text] = []
+    var deny_patterns: [text] = []
+    var dimension = ""
+    var transform_allow_from: [text] = []
+
+    # Check if arch block exists at all
+    if not content.contains("arch {"):
+        return (false, allow_patterns, deny_patterns, dimension, transform_allow_from)
+
+    # Parse line-by-line looking for arch block structure
+    val lines = content.split("\n")
+    var in_arch = false
+    var in_imports = false
+    var in_transform = false
+    var brace_depth = 0
+
+    for line in lines:
+        val trimmed = _str_trim(line)
+        if trimmed.len() == 0:
+            continue
+
+        # Detect arch block start
+        if trimmed == "arch {" or trimmed.starts_with("arch {"):
+            in_arch = true
+            brace_depth = 1
+            continue
+
+        if not in_arch:
+            continue
+
+        # Track brace depth to know when we exit arch block
+        for ch in trimmed:
+            if ch == "{":
+                brace_depth = brace_depth + 1
+            elif ch == "}":
+                brace_depth = brace_depth - 1
+
+        if brace_depth <= 0:
+            in_arch = false
+            in_imports = false
+            in_transform = false
+            continue
+
+        # Detect sub-blocks
+        if trimmed == "imports {" or trimmed.starts_with("imports {"):
+            in_imports = true
+            continue
+
+        if trimmed == "transform {" or trimmed.starts_with("transform {"):
+            in_transform = true
+            continue
+
+        if trimmed == "}":
+            in_imports = false
+            in_transform = false
+            continue
+
+        # Parse content based on current block
+        if in_imports:
+            if trimmed.starts_with("allow") and trimmed.contains("["):
+                allow_patterns = _parse_pattern_list(trimmed)
+            elif trimmed.starts_with("deny") and trimmed.contains("["):
+                deny_patterns = _parse_pattern_list(trimmed)
+        elif in_transform:
+            if trimmed.starts_with("allow_from") and trimmed.contains("["):
+                transform_allow_from = _parse_pattern_list(trimmed)
+        else:
+            # Direct arch block content (not in any sub-block)
+            if trimmed.starts_with("dimension"):
+                dimension = _parse_string_value(trimmed)
+
+    (true, allow_patterns, deny_patterns, dimension, transform_allow_from)
+
+fn _module_path_from_init_file(init_file: text, root: text) -> text:
+    # Convert path like /root/src/compiler/10.frontend/core/entity/__init__.spl -> src/compiler/10.frontend/core/entity
+    var path = init_file
+    # Remove root prefix
+    if path.starts_with(root):
+        val after_root = path[root.len():]
+        if after_root.starts_with("/"):
+            path = after_root[1:]
+        else:
+            path = after_root
+    # Remove /__init__.spl suffix
+    val init_suffix = "/__init__.spl"
+    if path.ends_with(init_suffix):
+        path = path[0 : path.len() - init_suffix.len()]
+    path
+
+# ============================================================================
+# Dimension inference
+# ============================================================================
+
+fn _infer_dimension_from_file(file_path: text, root: text) -> text:
+    # Strip root + "/src/" prefix to get the relative path under src/
+    var rel = file_path
+    val src_prefix = root + "/src/"
+    if rel.starts_with(src_prefix):
+        rel = rel[src_prefix.len():]
+    elif rel.starts_with(root + "/"):
+        rel = rel[root.len() + 1:]
+
+    if rel.starts_with("feature/"):
+        return "feature"
+    if rel.starts_with("entity/"):
+        return "entity"
+    if rel.starts_with("transform/"):
+        return "transform"
+    "unknown"
+
+fn _infer_dimension_from_import(import_path: text) -> text:
+    if import_path.starts_with("feature/"):
+        return "feature"
+    if import_path.starts_with("entity/"):
+        return "entity"
+    if import_path.starts_with("transform/"):
+        return "transform"
+    "unknown"
+
+fn _dim_allows_import(file_dim: text, import_dim: text) -> bool:
+    # Unknown dimension means no restriction
+    if file_dim == "unknown" or import_dim == "unknown":
+        return true
+    # feature cannot import entity
+    if file_dim == "feature" and import_dim == "entity":
+        return false
+    # entity cannot import feature or transform
+    if file_dim == "entity":
+        if import_dim == "feature" or import_dim == "transform":
+            return false
+    # transform cannot import feature
+    if file_dim == "transform" and import_dim == "feature":
+        return false
+    true
+
+fn _arch_explicitly_allows(import_path: text, rules: [ArchRule], file_path: text, root: text) -> bool:
+    # Check if any rule applicable to file_path explicitly allows this import
+    for rule in rules:
+        if not _file_is_under_module(file_path, rule.module_path, root):
+            continue
+        if rule.allow_patterns.len() == 0:
+            continue
+        for pattern in rule.allow_patterns:
+            if _match_pattern(import_path, pattern):
+                return true
+    false
+
+fn _transform_allows_entity_import(import_path: text, rules: [ArchRule], file_path: text, root: text) -> bool:
+    # If a transform { allow_from = [...] } constraint exists for this file,
+    # check if the import matches. Liberal default: no constraint → allowed.
+    for rule in rules:
+        if not _file_is_under_module(file_path, rule.module_path, root):
+            continue
+        if rule.transform_allow_from.len() == 0:
+            continue
+        # Constraint found — check if import matches
+        for pattern in rule.transform_allow_from:
+            if _match_pattern(import_path, pattern):
+                return true
+        # Constraint exists but no match
+        return false
+    # No constraint found — liberal default
+    true
+
+# ============================================================================
+# Scan arch rules
+# ============================================================================
+
+fn scan_arch_rules(root: text) -> [ArchRule]:
+    var rules: [ArchRule] = []
+
+    # Find all __init__.spl files
+    val find_result = shell("find '{root}' -name '__init__.spl' -type f 2>/dev/null | sort")
+    if find_result.exit_code != 0:
+        return rules
+
+    val stdout = find_result.stdout
+    if stdout.len() == 0:
+        return rules
+
+    val files = stdout.split("\n")
+    for file_path in files:
+        val trimmed = _str_trim(file_path)
+        if trimmed.len() == 0:
+            continue
+
+        val content = rt_file_read_text(trimmed) ?? ""
+        if content.len() == 0:
+            continue
+
+        val parsed = _parse_arch_block(content)
+        val found = parsed.0
+        if not found:
+            continue
+
+        val allow_list = parsed.1
+        val deny_list = parsed.2
+        val dimension = parsed.3
+        val transform_allow_from = parsed.4
+
+        # Add rule if it has any configuration
+        if (deny_list.len() > 0 or allow_list.len() > 0 or
+            dimension.len() > 0 or transform_allow_from.len() > 0):
+            val mod_path = _module_path_from_init_file(trimmed, root)
+            rules = rules + [ArchRule(
+                init_file: trimmed,
+                module_path: mod_path,
+                allow_patterns: allow_list,
+                deny_patterns: deny_list,
+                dimension: dimension,
+                transform_allow_from: transform_allow_from
+            )]
+
+    rules
+
+# ============================================================================
+# Scan imports from source files
+# ============================================================================
+
+fn _parse_imports_from_content(content: text) -> [text]:
+    var imports: [text] = []
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = _str_trim(line)
+        if not trimmed.starts_with("use "):
+            continue
+        val after_use = trimmed[4:]
+        # Extract module path up to whitespace, (, {, or *
+        var mod_end = after_use.len()
+        var i = 0
+        while i < after_use.len():
+            val ch = after_use[i : i + 1]
+            if ch == " " or ch == "(" or ch == "{" or ch == "*":
+                mod_end = i
+                break
+            i = i + 1
+        var mod_path = after_use[0 : mod_end]
+        if mod_path.len() == 0:
+            continue
+        # Strip trailing dot (e.g. "std.text." -> "std.text")
+        if mod_path.ends_with("."):
+            mod_path = mod_path[0 : mod_path.len() - 1]
+        if mod_path.len() == 0:
+            continue
+        # Convert dot notation to slash: core.ast -> core/ast
+        var slash_path = ""
+        var j = 0
+        while j < mod_path.len():
+            val ch = mod_path[j : j + 1]
+            if ch == ".":
+                slash_path = slash_path + "/"
+            else:
+                slash_path = slash_path + ch
+            j = j + 1
+        imports = imports + [slash_path]
+    imports
+
+fn scan_imports(root: text) -> [FileImports]:
+    var result: [FileImports] = []
+
+    # Find all .spl source files (exclude __init__.spl)
+    val find_result = shell("find '{root}/src' -name '*.spl' -type f ! -name '__init__.spl' 2>/dev/null | sort")
+    if find_result.exit_code != 0:
+        return result
+
+    val stdout = find_result.stdout
+    if stdout.len() == 0:
+        return result
+
+    val files = stdout.split("\n")
+    for file_path in files:
+        val trimmed = _str_trim(file_path)
+        if trimmed.len() == 0:
+            continue
+
+        val content = rt_file_read_text(trimmed) ?? ""
+        if content.len() == 0:
+            continue
+
+        val imports = _parse_imports_from_content(content)
+        if imports.len() > 0:
+            result = result + [FileImports(file_path: trimmed, imports: imports)]
+
+    result
+
+# ============================================================================
+# Pattern matching
+# ============================================================================
+
+fn _match_pattern(import_path: text, pattern: text) -> bool:
+    # Exact match
+    if pattern == import_path:
+        return true
+
+    # Glob: ends with /** - match prefix and all sub-paths
+    if pattern.ends_with("/**"):
+        val prefix = pattern[0 : pattern.len() - 3]
+        if import_path.starts_with(prefix):
+            return true
+
+    # Glob: ends with /* - match single level sub-paths
+    if pattern.ends_with("/*"):
+        val prefix = pattern[0 : pattern.len() - 2]
+        if import_path.starts_with(prefix + "/"):
+            val rest = import_path[prefix.len() + 1:]
+            if not rest.contains("/"):
+                return true
+
+    # Prefix match: pattern matches the start of import_path with / boundary
+    if import_path.starts_with(pattern + "/"):
+        return true
+
+    false
+
+fn _is_import_allowed(import_path: text, rule: ArchRule) -> bool:
+    # If explicit allow patterns exist, import must match at least one
+    if rule.allow_patterns.len() > 0:
+        var matched_allow = false
+        for pattern in rule.allow_patterns:
+            if _match_pattern(import_path, pattern):
+                matched_allow = true
+        if not matched_allow:
+            return false
+
+    # If import matches any deny pattern, it is denied
+    for pattern in rule.deny_patterns:
+        if _match_pattern(import_path, pattern):
+            return false
+
+    true
+
+fn _file_is_under_module(file_path: text, module_path: text, root: text) -> bool:
+    # Check if file_path is under root/module_path/
+    if module_path.len() == 0:
+        return true
+    val expected_prefix = root + "/" + module_path + "/"
+    file_path.starts_with(expected_prefix)
+
+# ============================================================================
+# Check architecture
+# ============================================================================
+
+fn check_arch(root: text) -> [ArchViolation]:
+    var violations: [ArchViolation] = []
+
+    val rules = scan_arch_rules(root)
+    val all_imports = scan_imports(root)
+
+    if all_imports.len() == 0:
+        return violations
+
+    # 1. Dimension convention checking (runs for all files, zero config needed)
+    for file_imports in all_imports:
+        val file_dim = _infer_dimension_from_file(file_imports.file_path, root)
+        if file_dim == "unknown":
+            continue
+        for import_path in file_imports.imports:
+            val import_dim = _infer_dimension_from_import(import_path)
+            if not _dim_allows_import(file_dim, import_dim):
+                if not _arch_explicitly_allows(import_path, rules, file_imports.file_path, root):
+                    violations = violations + [ArchViolation(
+                        file_path: file_imports.file_path,
+                        import_path: import_path,
+                        rule_file: "",
+                        allow_list: [],
+                        violation_type: "dimension"
+                    )]
+            if file_dim == "transform" and import_dim == "entity":
+                if not _transform_allows_entity_import(import_path, rules, file_imports.file_path, root):
+                    violations = violations + [ArchViolation(
+                        file_path: file_imports.file_path,
+                        import_path: import_path,
+                        rule_file: "",
+                        allow_list: [],
+                        violation_type: "transform_scope"
+                    )]
+
+    # 2. Explicit arch rule checking (original logic)
+    if rules.len() > 0:
+        for rule in rules:
+            for file_imports in all_imports:
+                if not _file_is_under_module(file_imports.file_path, rule.module_path, root):
+                    continue
+                for import_path in file_imports.imports:
+                    if not _is_import_allowed(import_path, rule):
+                        violations = violations + [ArchViolation(
+                            file_path: file_imports.file_path,
+                            import_path: import_path,
+                            rule_file: rule.init_file,
+                            allow_list: rule.allow_patterns,
+                            violation_type: "arch_rule"
+                        )]
+
+    violations
+
+# ============================================================================
+# Main entry point
+# ============================================================================
+
+fn run_arch_check(args: [text]) -> i64:
+    var root = cwd()
+
+    for arg in args:
+        if not arg.starts_with("--"):
+            root = arg
+
+    val rules = scan_arch_rules(root)
+    val all_imports = scan_imports(root)
+    val violations = check_arch(root)
+
+    if violations.len() == 0:
+        print "Architecture check PASSED. ({all_imports.len()} files checked, {rules.len()} rules applied)"
+        return 0
+
+    for v in violations:
+        var rel_file = v.file_path
+        val root_prefix = root + "/"
+        if rel_file.starts_with(root_prefix):
+            rel_file = rel_file[root_prefix.len():]
+        var rel_rule = v.rule_file
+        if rel_rule.starts_with(root_prefix):
+            rel_rule = rel_rule[root_prefix.len():]
+
+        if v.violation_type == "dimension":
+            print "DIM VIOLATION: {rel_file} imports {v.import_path}"
+        elif v.violation_type == "transform_scope":
+            print "TRANSFORM SCOPE: {rel_file} imports {v.import_path} (not in allow_from list)"
+        else:
+            print "ARCH VIOLATION: {rel_file} imports {v.import_path}"
+            print "  Rule: denied by {rel_rule}"
+            if v.allow_list.len() > 0:
+                var allowed_str = "["
+                var first = true
+                for p in v.allow_list:
+                    if not first:
+                        allowed_str = allowed_str + ", "
+                    allowed_str = allowed_str + "\"" + p + "\""
+                    first = false
+                allowed_str = allowed_str + "]"
+                print "  Allowed: {allowed_str}"
+            print ""
+
+    val n = violations.len()
+    print "{n} violation(s) found. Architecture check FAILED."
+    1
+
+export run_arch_check
+export scan_arch_rules, scan_imports, check_arch
+export ArchRule, FileImports, ArchViolation
+export _str_trim, _parse_pattern_list, _parse_string_value, _parse_arch_block
+export _module_path_from_init_file, _parse_imports_from_content
+export _match_pattern, _is_import_allowed, _file_is_under_module
+export _infer_dimension_from_file, _infer_dimension_from_import
+export _dim_allows_import, _arch_explicitly_allows, _transform_allows_entity_import
