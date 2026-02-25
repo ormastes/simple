@@ -1,24 +1,14 @@
-# LSP Completion Handler
-#
-# Provides auto-completion for Simple language including:
-# - Keywords (fn, val, var, if, etc.)
-# - Identifiers from scope
-# - Member access completions
-# - Import completions
+# Completion Handler
+# Provides auto-completion suggestions based on context
 
-use app.lsp.utils (node_at_position)
 
-export handle_completion, CompletionItem, CompletionItemKind
+import lsp.protocol as protocol
+import lsp.transport as transport
+use compiler.treesitter.{TreeSitter, OutlineModule, ParseError}
+# TODO: awaiting FFI tree-sitter integration for Tree, Node, NodeId
 
-use compiler.treesitter.{TreeSitter, OutlineModule}
-# TODO: awaiting FFI tree-sitter integration for Node, Query, QueryCursor, Tree
-
-# ============================================================================
-# LSP Protocol Types
-# ============================================================================
-
+# Completion item kinds (LSP standard)
 enum CompletionItemKind:
-    """LSP completion item kinds."""
     Text = 1
     Method = 2
     Function = 3
@@ -45,423 +35,455 @@ enum CompletionItemKind:
     Operator = 24
     TypeParameter = 25
 
-impl CompletionItemKind:
-    fn to_i64() -> i64:
-        match self:
-            case Text: 1
-            case Method: 2
-            case Function: 3
-            case Constructor: 4
-            case Field: 5
-            case Variable: 6
-            case Class: 7
-            case Interface: 8
-            case Module: 9
-            case Property: 10
-            case Unit: 11
-            case Value: 12
-            case Enum: 13
-            case Keyword: 14
-            case Snippet: 15
-            case Color: 16
-            case File: 17
-            case Reference: 18
-            case Folder: 19
-            case EnumMember: 20
-            case Constant: 21
-            case Struct: 22
-            case Event: 23
-            case Operator: 24
-            case TypeParameter: 25
-
+# Completion item
 class CompletionItem:
-    """LSP completion item."""
-    label: text
-    kind: i64
-    detail: text?
-    documentation: text?
-    insert_text: text?
+    label: String
+    kind: Int
+    detail: Option<String>
+    documentation: Option<String>
+    insert_text: Option<String>
 
-    static fn create(label: text, kind: CompletionItemKind) -> CompletionItem:
-        """Create completion item.
-
-        Args:
-            label - Display text
-            kind - Completion kind
-
-        Returns:
-            Completion item
-        """
+    static fn new(label: String, kind: Int) -> CompletionItem:
         CompletionItem(
             label: label,
-            kind: kind.to_i64(),
+            kind: kind,
             detail: nil,
             documentation: nil,
             insert_text: nil
         )
 
-    fn with_detail(detail_text: text) -> CompletionItem:
-        """Add detail text (builder pattern).
+    fn with_detail(detail: String) -> CompletionItem:
+        CompletionItem(
+            label: self.label,
+            kind: self.kind,
+            detail: Some(detail),
+            documentation: self.documentation,
+            insert_text: self.insert_text
+        )
 
-        Args:
-            detail_text - Detail text
+    fn with_documentation(doc: String) -> CompletionItem:
+        CompletionItem(
+            label: self.label,
+            kind: self.kind,
+            detail: self.detail,
+            documentation: Some(doc),
+            insert_text: self.insert_text
+        )
 
-        Returns:
-            Self for chaining
-        """
-        self.detail = Some(detail_text)
-        self
+    fn with_insert_text(text: String) -> CompletionItem:
+        CompletionItem(
+            label: self.label,
+            kind: self.kind,
+            detail: self.detail,
+            documentation: self.documentation,
+            insert_text: Some(text)
+        )
 
-    fn with_documentation(doc_text: text) -> CompletionItem:
-        """Add documentation (builder pattern).
+    fn to_json() -> Dict:
+        var item = {
+            "label": self.label,
+            "kind": self.kind
+        }
 
-        Args:
-            doc_text - Documentation text
+        match self.detail:
+            case Some(d):
+                item["detail"] = d
+            case nil:
+                pass
 
-        Returns:
-            Self for chaining
-        """
-        self.documentation = Some(doc_text)
-        self
+        match self.documentation:
+            case Some(doc):
+                item["documentation"] = doc
+            case nil:
+                pass
 
-    fn with_insert_text(text: text) -> CompletionItem:
-        """Add insert text (builder pattern).
+        match self.insert_text:
+            case Some(text):
+                item["insertText"] = text
+            case nil:
+                pass
 
-        Args:
-            text - Text to insert
+        item
 
-        Returns:
-            Self for chaining
-        """
-        self.insert_text = Some(text)
-        self
+# Simple language keywords
+fn get_keyword_completions() -> [CompletionItem]:
+    [
+        # Control flow
+        CompletionItem.new("fn", CompletionItemKind.Keyword)
+            .with_documentation("Function definition"),
+        CompletionItem.new("return", CompletionItemKind.Keyword)
+            .with_documentation("Return statement"),
+        CompletionItem.new("if", CompletionItemKind.Keyword)
+            .with_documentation("Conditional expression"),
+        CompletionItem.new("else", CompletionItemKind.Keyword)
+            .with_documentation("Alternative branch"),
+        CompletionItem.new("elif", CompletionItemKind.Keyword)
+            .with_documentation("Else-if branch"),
+        CompletionItem.new("match", CompletionItemKind.Keyword)
+            .with_documentation("Pattern matching"),
+        CompletionItem.new("case", CompletionItemKind.Keyword)
+            .with_documentation("Match arm"),
 
-struct Position:
-    """LSP position (line, character)."""
-    line: i64
-    character: i64
+        # Loops
+        CompletionItem.new("for", CompletionItemKind.Keyword)
+            .with_documentation("For loop"),
+        CompletionItem.new("while", CompletionItemKind.Keyword)
+            .with_documentation("While loop"),
+        CompletionItem.new("loop", CompletionItemKind.Keyword)
+            .with_documentation("Infinite loop"),
+        CompletionItem.new("break", CompletionItemKind.Keyword)
+            .with_documentation("Break from loop"),
+        CompletionItem.new("continue", CompletionItemKind.Keyword)
+            .with_documentation("Continue to next iteration"),
 
-# ============================================================================
-# Completion Context
-# ============================================================================
+        # Declarations
+        CompletionItem.new("val", CompletionItemKind.Keyword)
+            .with_documentation("Variable declaration"),
+        CompletionItem.new("mut", CompletionItemKind.Keyword)
+            .with_documentation("Mutable binding"),
+        CompletionItem.new("struct", CompletionItemKind.Keyword)
+            .with_documentation("Struct definition"),
+        CompletionItem.new("class", CompletionItemKind.Keyword)
+            .with_documentation("Class definition"),
+        CompletionItem.new("enum", CompletionItemKind.Keyword)
+            .with_documentation("Enum definition"),
+        CompletionItem.new("trait", CompletionItemKind.Keyword)
+            .with_documentation("Trait definition"),
+        CompletionItem.new("impl", CompletionItemKind.Keyword)
+            .with_documentation("Implementation block"),
 
+        # Import/export
+        CompletionItem.new("import", CompletionItemKind.Keyword)
+            .with_documentation("Import module"),
+        CompletionItem.new("export", CompletionItemKind.Keyword)
+            .with_documentation("Export symbol"),
+        CompletionItem.new("from", CompletionItemKind.Keyword)
+            .with_documentation("Import from module"),
+
+        # Special
+        CompletionItem.new("async", CompletionItemKind.Keyword)
+            .with_documentation("Async function"),
+        CompletionItem.new("await", CompletionItemKind.Keyword)
+            .with_documentation("Await async result"),
+        CompletionItem.new("yield", CompletionItemKind.Keyword)
+            .with_documentation("Yield value in generator"),
+    ]
+
+# Built-in type completions
+fn get_type_completions() -> [CompletionItem]:
+    [
+        CompletionItem.new("Int", CompletionItemKind.Class)
+            .with_detail("64-bit signed integer"),
+        CompletionItem.new("Float", CompletionItemKind.Class)
+            .with_detail("64-bit floating point"),
+        CompletionItem.new("String", CompletionItemKind.Class)
+            .with_detail("UTF-8 string"),
+        CompletionItem.new("Bool", CompletionItemKind.Class)
+            .with_detail("Boolean (true/false)"),
+        CompletionItem.new("List", CompletionItemKind.Class)
+            .with_detail("Dynamic array"),
+        CompletionItem.new("Dict", CompletionItemKind.Class)
+            .with_detail("Hash map"),
+        CompletionItem.new("Option", CompletionItemKind.Class)
+            .with_detail("Optional value (Some/None)"),
+        CompletionItem.new("Result", CompletionItemKind.Class)
+            .with_detail("Result type (Ok/Err)"),
+        CompletionItem.new("Tuple", CompletionItemKind.Class)
+            .with_detail("Fixed-size tuple"),
+    ]
+
+# Collect symbols from tree
+fn collect_symbols(tree: Tree) -> [CompletionItem]:
+    var symbols: [CompletionItem] = []
+
+    fn traverse(node_id: NodeId):
+        match tree.arena.get(node_id):
+            case nil:
+                return
+            case Some(node):
+                # Collect function definitions
+                if node.kind == "function_def":
+                    match node.fields.get("name"):
+                        case Some(name_id):
+                            match tree.arena.get(name_id):
+                                case Some(name_node):
+                                    val item = CompletionItem.new(name_node.text, CompletionItemKind.Function)
+                                        .with_detail("function")
+                                    symbols.push(item)
+                                case nil:
+                                    pass
+                        case nil:
+                            pass
+
+                # Collect variable declarations
+                if node.kind == "let_stmt":
+                    match node.fields.get("pattern"):
+                        case Some(pattern_id):
+                            match tree.arena.get(pattern_id):
+                                case Some(pattern_node):
+                                    if pattern_node.kind == "identifier":
+                                        val item = CompletionItem.new(pattern_node.text, CompletionItemKind.Variable)
+                                            .with_detail("variable")
+                                        symbols.push(item)
+                                case nil:
+                                    pass
+                        case nil:
+                            pass
+
+                # Collect struct/class definitions
+                if node.kind == "struct_def" or node.kind == "class_def":
+                    match node.fields.get("name"):
+                        case Some(name_id):
+                            match tree.arena.get(name_id):
+                                case Some(name_node):
+                                    val item = CompletionItem.new(name_node.text, CompletionItemKind.Struct)
+                                        .with_detail("type")
+                                    symbols.push(item)
+                                case nil:
+                                    pass
+                        case nil:
+                            pass
+
+                # Traverse children
+                for child_id in node.children:
+                    traverse(child_id)
+
+    traverse(tree.root_node)
+    symbols
+
+# Completion context types
 enum CompletionContext:
-    """Context for completion."""
-    KeywordContext
-    IdentifierContext
-    MemberAccessContext(object_type: text)
-    ImportContext
-    UnknownContext
+    FunctionName   # After "fn " - suggest function names
+    VariableName   # After "val " or "var " - suggest variable names
+    TypeName       # After ": " - suggest types
+    Import         # After "import " - suggest modules
+    Expression     # Default - suggest keywords, types, and symbols
 
-# ============================================================================
-# Main Completion Handler
-# ============================================================================
+# Determine completion context by analyzing the source text before cursor
+fn get_completion_context(tree: Tree, line: Int, column: Int) -> String:
+    # Find the node at cursor position
+    match find_node_at_cursor(tree, line, column):
+        Some(node):
+            # Check parent node to determine context
+            val parent_id = find_parent_node(tree, node.id)
+            match parent_id:
+                Some(pid):
+                    match tree.arena.get(pid):
+                        Some(parent):
+                            # Determine context based on parent node type
+                            match parent.kind:
+                                "function_def":
+                                    # Check if cursor is at name position
+                                    match parent.fields.get("name"):
+                                        Some(name_id):
+                                            if name_id == node.id:
+                                                return "function_name"
+                                        nil:
+                                            pass
+                                    # Check if cursor is at return type position
+                                    match parent.fields.get("return_type"):
+                                        Some(rt_id):
+                                            if rt_id == node.id:
+                                                return "type"
+                                        nil:
+                                            pass
+                                "let_stmt":
+                                    # Variable declaration - check for type annotation
+                                    match parent.fields.get("type"):
+                                        Some(type_id):
+                                            if type_id == node.id:
+                                                return "type"
+                                        nil:
+                                            pass
+                                "parameter":
+                                    # Function parameter - check for type annotation
+                                    match parent.fields.get("type"):
+                                        Some(type_id):
+                                            if type_id == node.id:
+                                                return "type"
+                                        nil:
+                                            pass
+                                "type_annotation":
+                                    return "type"
+                                "import_stmt":
+                                    return "import"
+                                _:
+                                    pass
+                        nil:
+                            pass
+                nil:
+                    pass
+        nil:
+            pass
 
-fn handle_completion(tree: Tree?, source: text, position: Position) -> Result<[CompletionItem], text>:
-    """Generate completion items at cursor position.
+    # Default to expression context
+    "expression"
 
-    Args:
-        tree - Optional syntax tree
-        source - Source code
-        position - Cursor position
+# Find node at cursor position (helper for context detection)
+fn find_node_at_cursor(tree: Tree, line: Int, column: Int) -> Option<Node>:
+    fn position_in_span(span: Span, l: Int, c: Int) -> Bool:
+        if l < span.start_line or l > span.end_line:
+            return false
+        if l == span.start_line and c < span.start_column:
+            return false
+        if l == span.end_line and c > span.end_column:
+            return false
+        true
 
-    Returns:
-        List of completion items
-    """
-    # If no tree, return keyword completions only
-    if not tree.?:
-        return Ok(keyword_completions())
+    fn traverse(node_id: NodeId, best: Option<Node>) -> Option<Node>:
+        match tree.arena.get(node_id):
+            nil:
+                best
+            Some(node):
+                if not position_in_span(node.span, line, column):
+                    return best
+                var new_best = Some(node)
+                for child_id in node.children:
+                    new_best = traverse(child_id, new_best)
+                new_best
 
-    val tree_val = tree.unwrap()
+    traverse(tree.root_node, nil)
 
-    # Get node at position
-    val node = node_at_position(tree_val, position)
-    if not node.?:
-        return Ok(keyword_completions())
+# Find parent node (helper for context detection)
+fn find_parent_node(tree: Tree, target_id: NodeId) -> Option<NodeId>:
+    fn search(node_id: NodeId) -> Option<NodeId>:
+        match tree.arena.get(node_id):
+            nil:
+                nil
+            Some(node):
+                for child_id in node.children:
+                    if child_id == target_id:
+                        return Some(node_id)
+                for child_id in node.children:
+                    match search(child_id):
+                        Some(parent):
+                            return Some(parent)
+                        nil:
+                            continue
+                nil
 
-    val node_val = node.unwrap()
+    search(tree.root_node)
 
-    # Determine completion context
-    val context = completion_context(node_val)
+# Generate completions based on context
+fn generate_completions(tree: Tree, context: String) -> [CompletionItem]:
+    var completions: [CompletionItem] = []
 
-    # Generate completions based on context
     match context:
-        case KeywordContext:
-            Ok(keyword_completions())
-        case IdentifierContext:
-            Ok(merge_completions(
-                keyword_completions(),
-                identifier_completions(tree_val, node_val)
-            ))
-        case MemberAccessContext(obj_type):
-            Ok(member_completions(obj_type))
-        case ImportContext:
-            Ok(import_completions())
-        case UnknownContext:
-            Ok(keyword_completions())
+        "type":
+            # Type context - only suggest types
+            completions.extend(get_type_completions())
+            # Also include struct/class definitions from the tree
+            for symbol in collect_symbols(tree):
+                if symbol.kind == CompletionItemKind.Struct or symbol.kind == CompletionItemKind.Class:
+                    completions.push(symbol)
 
-# ============================================================================
-# Completion Generators
-# ============================================================================
+        "function_name":
+            # After "fn " - no suggestions, user defines the name
+            pass
 
-fn keyword_completions() -> [CompletionItem]:
-    """Return Simple language keyword completions."""
+        "import":
+            # Import context - suggest known modules
+            completions.extend(get_module_completions())
+
+        _:
+            # Expression context - include everything
+            completions.extend(get_keyword_completions())
+            completions.extend(get_type_completions())
+            completions.extend(collect_symbols(tree))
+
+    completions
+
+# Built-in module completions for import statements
+fn get_module_completions() -> [CompletionItem]:
     [
-        CompletionItem.create("fn", CompletionItemKind.Keyword)
-            .with_detail("Function definition")
-            .with_insert_text("fn ${1:name}(${2:args}):\n    ${0}"),
-
-        CompletionItem.create("val", CompletionItemKind.Keyword)
-            .with_detail("Immutable variable"),
-
-        CompletionItem.create("var", CompletionItemKind.Keyword)
-            .with_detail("Mutable variable"),
-
-        CompletionItem.create("class", CompletionItemKind.Keyword)
-            .with_detail("Class definition")
-            .with_insert_text("class ${1:Name}:\n    ${0}"),
-
-        CompletionItem.create("struct", CompletionItemKind.Keyword)
-            .with_detail("Struct definition")
-            .with_insert_text("struct ${1:Name}:\n    ${0}"),
-
-        CompletionItem.create("enum", CompletionItemKind.Keyword)
-            .with_detail("Enum definition")
-            .with_insert_text("enum ${1:Name}:\n    ${0}"),
-
-        CompletionItem.create("if", CompletionItemKind.Keyword)
-            .with_detail("Conditional")
-            .with_insert_text("if ${1:condition}:\n    ${0}"),
-
-        CompletionItem.create("else", CompletionItemKind.Keyword)
-            .with_detail("Else branch"),
-
-        CompletionItem.create("elif", CompletionItemKind.Keyword)
-            .with_detail("Else-if branch")
-            .with_insert_text("elif ${1:condition}:\n    ${0}"),
-
-        CompletionItem.create("match", CompletionItemKind.Keyword)
-            .with_detail("Pattern matching")
-            .with_insert_text("match ${1:expr}:\n    case ${2:pattern}: ${0}"),
-
-        CompletionItem.create("case", CompletionItemKind.Keyword)
-            .with_detail("Match case"),
-
-        CompletionItem.create("for", CompletionItemKind.Keyword)
-            .with_detail("For loop")
-            .with_insert_text("for ${1:item} in ${2:iterable}:\n    ${0}"),
-
-        CompletionItem.create("while", CompletionItemKind.Keyword)
-            .with_detail("While loop")
-            .with_insert_text("while ${1:condition}:\n    ${0}"),
-
-        CompletionItem.create("return", CompletionItemKind.Keyword)
-            .with_detail("Return value"),
-
-        CompletionItem.create("break", CompletionItemKind.Keyword)
-            .with_detail("Break loop"),
-
-        CompletionItem.create("continue", CompletionItemKind.Keyword)
-            .with_detail("Continue loop"),
-
-        CompletionItem.create("import", CompletionItemKind.Keyword)
-            .with_detail("Import module")
-            .with_insert_text("import ${1:module}"),
-
-        CompletionItem.create("from", CompletionItemKind.Keyword)
-            .with_detail("Import from module")
-            .with_insert_text("from ${1:module} import ${2:item}"),
-
-        CompletionItem.create("use", CompletionItemKind.Keyword)
-            .with_detail("Use declaration")
-            .with_insert_text("use ${1:module}"),
-
-        CompletionItem.create("export", CompletionItemKind.Keyword)
-            .with_detail("Export declaration"),
-
-        CompletionItem.create("trait", CompletionItemKind.Keyword)
-            .with_detail("Trait definition")
-            .with_insert_text("trait ${1:Name}:\n    ${0}"),
-
-        CompletionItem.create("impl", CompletionItemKind.Keyword)
-            .with_detail("Implementation block")
-            .with_insert_text("impl ${1:Type}:\n    ${0}"),
-
-        CompletionItem.create("static", CompletionItemKind.Keyword)
-            .with_detail("Static method/field"),
-
-        CompletionItem.create("me", CompletionItemKind.Keyword)
-            .with_detail("Mutable method"),
-
-        CompletionItem.create("extern", CompletionItemKind.Keyword)
-            .with_detail("External function"),
-
-        CompletionItem.create("true", CompletionItemKind.Keyword)
-            .with_detail("Boolean true"),
-
-        CompletionItem.create("false", CompletionItemKind.Keyword)
-            .with_detail("Boolean false"),
-
-        CompletionItem.create("None", CompletionItemKind.Keyword)
-            .with_detail("None value"),
-
-        CompletionItem.create("Some", CompletionItemKind.Keyword)
-            .with_detail("Some value")
-            .with_insert_text("Some(${1:value})"),
-
-        CompletionItem.create("Ok", CompletionItemKind.Keyword)
-            .with_detail("Ok result")
-            .with_insert_text("Ok(${1:value})"),
-
-        CompletionItem.create("Err", CompletionItemKind.Keyword)
-            .with_detail("Error result")
-            .with_insert_text("Err(${1:error})")
-    ]
-
-fn identifier_completions(tree: Tree, node: Node) -> [CompletionItem]:
-    """Complete identifiers from scope.
-
-    Args:
-        tree - Syntax tree
-        node - Current node
-
-    Returns:
-        List of identifier completions
-    """
-    var items: [CompletionItem] = []
-
-    # Query for function definitions
-    val fn_query_result = Query.create("simple", """
-        (function_definition name: (identifier) @name)
-    """)
-
-    match fn_query_result:
-        Ok(fn_query):
-            val cursor = QueryCursor.create()
-            cursor.exec(fn_query, tree.root_node())
-
-            # Collect function names
-            var seen: [text] = []
-            while true:
-                val match_opt = cursor.next_match()
-                if not match_opt.?:
-                    break
-
-                val match_val = match_opt.unwrap()
-                for capture in match_val.captures:
-                    # Get node from handle (simplified for now)
-                    val name = capture.node.text() ?? "function"
-                    if not seen.contains(name):
-                        items.push(CompletionItem.create(name, CompletionItemKind.Function))
-                        seen.push(name)
-
-            fn_query.free()
-            cursor.free()
-        Err(_):
-            # Ignore query errors
-            ()
-
-    items
-
-fn member_completions(object_type: text) -> [CompletionItem]:
-    """Complete members of a type.
-
-    Args:
-        object_type - Type name
-
-    Returns:
-        List of member completions
-    """
-    # Common methods for built-in types
-    match object_type:
-        case "text" | "String":
-            [
-                CompletionItem.create("len", CompletionItemKind.Method)
-                    .with_detail("Get string length"),
-                CompletionItem.create("trim", CompletionItemKind.Method)
-                    .with_detail("Trim whitespace"),
-                CompletionItem.create("split", CompletionItemKind.Method)
-                    .with_detail("Split string"),
-                CompletionItem.create("contains", CompletionItemKind.Method)
-                    .with_detail("Check if contains substring"),
-                CompletionItem.create("starts_with", CompletionItemKind.Method)
-                    .with_detail("Check if starts with prefix"),
-                CompletionItem.create("ends_with", CompletionItemKind.Method)
-                    .with_detail("Check if ends with suffix")
-            ]
-        case "Array" | "List":
-            [
-                CompletionItem.create("len", CompletionItemKind.Method)
-                    .with_detail("Get array length"),
-                CompletionItem.create("push", CompletionItemKind.Method)
-                    .with_detail("Add element"),
-                CompletionItem.create("pop", CompletionItemKind.Method)
-                    .with_detail("Remove last element"),
-                CompletionItem.create("filter", CompletionItemKind.Method)
-                    .with_detail("Filter elements"),
-                CompletionItem.create("map", CompletionItemKind.Method)
-                    .with_detail("Transform elements"),
-                CompletionItem.create("contains", CompletionItemKind.Method)
-                    .with_detail("Check if contains element")
-            ]
-        case _:
-            []
-
-fn import_completions() -> [CompletionItem]:
-    """Complete module imports.
-
-    Returns:
-        List of import completions
-    """
-    [
-        CompletionItem.create("std", CompletionItemKind.Module)
+        CompletionItem.new("std", CompletionItemKind.Module)
             .with_detail("Standard library"),
-        CompletionItem.create("core", CompletionItemKind.Module)
-            .with_detail("Core module"),
-        CompletionItem.create("io", CompletionItemKind.Module)
-            .with_detail("I/O module"),
-        CompletionItem.create("collections", CompletionItemKind.Module)
-            .with_detail("Collections module"),
-        CompletionItem.create("parser", CompletionItemKind.Module)
-            .with_detail("Parser module")
+        CompletionItem.new("core", CompletionItemKind.Module)
+            .with_detail("Core library"),
+        CompletionItem.new("io", CompletionItemKind.Module)
+            .with_detail("I/O operations"),
+        CompletionItem.new("fs", CompletionItemKind.Module)
+            .with_detail("File system operations"),
+        CompletionItem.new("math", CompletionItemKind.Module)
+            .with_detail("Math functions"),
+        CompletionItem.new("collections", CompletionItemKind.Module)
+            .with_detail("Collection types"),
+        CompletionItem.new("json", CompletionItemKind.Module)
+            .with_detail("JSON parsing/serialization"),
     ]
 
-# ============================================================================
-# Helper Functions
-# ============================================================================
+# Filter completions by prefix
+fn filter_by_prefix(completions: [CompletionItem], prefix: String) -> [CompletionItem]:
+    if prefix.len() == 0:
+        return completions
 
-fn completion_context(node: Node) -> CompletionContext:
-    """Determine completion context from node.
+    var filtered: [CompletionItem] = []
 
-    Args:
-        node - Current node
+    for completion in completions:
+        if completion.label.starts_with(prefix):
+            filtered.push(completion)
 
-    Returns:
-        Completion context
-    """
-    val kind = node.kind()
+    filtered
 
-    # Check node type to determine context
-    if kind.contains("function") or kind.contains("identifier"):
-        CompletionContext.IdentifierContext
-    else if kind.contains("member") or kind.contains("field"):
-        CompletionContext.MemberAccessContext("unknown")
-    else if kind.contains("import") or kind.contains("use"):
-        CompletionContext.ImportContext
+# Extract the word prefix at cursor position for filtering completions
+fn extract_prefix_at_cursor(source: String, line: Int, column: Int) -> String:
+    # Split source into lines
+    val lines = source.split("\n")
+
+    # Validate line number
+    if line < 0 or line >= lines.len():
+        return ""
+
+    val current_line = lines[line]
+
+    # Validate column number
+    if column < 0 or column > current_line.len():
+        return ""
+
+    # Walk backwards from cursor to find start of identifier
+    var start = column
+    while start > 0:
+        val char = current_line[start - 1]
+        # Check if character is part of an identifier (alphanumeric or underscore)
+        if is_identifier_char(char):
+            start = start - 1
+        else:
+            break
+
+    # Extract the prefix
+    if start < column:
+        current_line.slice(start, column)
     else:
-        CompletionContext.KeywordContext
+        ""
 
-fn merge_completions(list1: [CompletionItem], list2: [CompletionItem]) -> [CompletionItem]:
-    """Merge two completion lists.
+# Check if a character can be part of an identifier
+fn is_identifier_char(c: Char) -> Bool:
+    # Alphanumeric or underscore
+    (c >= 'a' and c <= 'z') or
+    (c >= 'A' and c <= 'Z') or
+    (c >= '0' and c <= '9') or
+    c == '_'
 
-    Args:
-        list1 - First list
-        list2 - Second list
+# Handle textDocument/completion request
+fn handle_completion(tree: Tree, source: String, line: Int, column: Int) -> Result<Option<[Dict]>, String>:
+    # Determine completion context
+    val context = get_completion_context(tree, line, column)
 
-    Returns:
-        Merged list
-    """
-    var result = list1
-    for item in list2:
-        result.push(item)
-    result
+    # Generate completions
+    val completions = generate_completions(tree, context)
+
+    # Extract prefix at cursor position for filtering
+    val prefix = extract_prefix_at_cursor(source, line, column)
+
+    # Filter by prefix
+    val filtered = filter_by_prefix(completions, prefix)
+
+    if filtered.len() == 0:
+        return Ok(nil)
+
+    # Convert to JSON
+    var items: [Dict] = []
+    for completion in filtered:
+        items.push(completion.to_json())
+
+    Ok(Some(items))

@@ -1,202 +1,95 @@
-# LSP Diagnostics Handler
-#
-# Provides error and warning diagnostics
+# Diagnostics Handler
+# Provides error diagnostics from tree-sitter parse errors and verification
 
-export handle_diagnostics, Diagnostic, DiagnosticSeverity
-
+import lsp.protocol as protocol
+import lsp.transport as transport
 use compiler.treesitter.{TreeSitter, OutlineModule, ParseError}
-# TODO: awaiting FFI tree-sitter integration for Node, Tree, Query, QueryCursor
+# TODO: awaiting FFI tree-sitter integration for Tree, Node, NodeId
+import lsp.handlers.verification as verification
 
-# Diagnostic severity levels
-enum DiagnosticSeverity:
-    Error = 1
-    Warning = 2
-    Information = 3
-    Hint = 4
+# Find all ERROR nodes in the tree
+fn find_error_nodes(tree: Tree) -> [Node]:
+    var errors: [Node] = []
 
-# Diagnostic message
-struct Diagnostic:
-    message: text
-    severity: i64
-    line: i64
-    character: i64
-    end_line: i64
-    end_character: i64
+    # Helper function to traverse tree recursively
+    fn traverse(node_id: NodeId):
+        match tree.arena.get(node_id):
+            case nil:
+                return
+            case Some(node):
+                # Check if this node is an error
+                if node.kind == "ERROR" or node.has_error:
+                    errors.push(node)
 
-# Handle diagnostics request
-fn handle_diagnostics(tree: Tree?, source: text, uri: text) -> [Diagnostic]:
-    """Generate diagnostics (errors/warnings) for document.
+                # Traverse children
+                for child_id in node.children:
+                    traverse(child_id)
 
-    Args:
-        tree - Optional syntax tree
-        source - Source code
-        uri - Document URI
+    # Start traversal from root
+    traverse(tree.root_node)
 
-    Returns:
-        List of diagnostics
-    """
-    var diagnostics: [Diagnostic] = []
+    errors
 
-    # Check for parse errors
-    if not tree.?:
-        diagnostics.push(Diagnostic(
-            message: "Failed to parse document",
-            severity: DiagnosticSeverity.Error.to_i64(),
-            line: 0,
-            character: 0,
-            end_line: 0,
-            end_character: 0
-        ))
-        return diagnostics
+# Convert tree-sitter node to LSP diagnostic
+fn node_to_diagnostic(node: Node) -> Dict:
+    # Create range
+    val range = {
+        "start": {
+            "line": node.span.start_line,
+            "character": node.span.start_column
+        },
+        "end": {
+            "line": node.span.end_line,
+            "character": node.span.end_column
+        }
+    }
 
-    val tree_val = tree.unwrap()
-    val root = tree_val.root_node()
+    # Determine message based on node context
+    val message = if node.text.len() > 0:
+        "Syntax error near '{node.text}'"
+    else:
+        "Syntax error"
 
-    # Check for error nodes in tree
-    if root.has_error():
-        diagnostics.push(Diagnostic(
-            message: "Syntax error in document",
-            severity: DiagnosticSeverity.Error.to_i64(),
-            line: 0,
-            character: 0,
-            end_line: 0,
-            end_character: 0
-        ))
+    # Create diagnostic
+    {
+        "range": range,
+        "severity": protocol.DiagnosticSeverity.Error,
+        "source": "simple-lsp",
+        "message": message
+    }
 
-    # Check for common issues
-    diagnostics = check_unused_variables(tree_val, source, diagnostics)
-    diagnostics = check_missing_return(tree_val, source, diagnostics)
-    diagnostics = check_unreachable_code(tree_val, source, diagnostics)
+# Generate diagnostics from parse tree
+fn generate_diagnostics(tree: Tree) -> [Dict]:
+    val error_nodes = find_error_nodes(tree)
+    var diagnostics: [Dict] = []
+
+    for error_node in error_nodes:
+        val diagnostic = node_to_diagnostic(error_node)
+        diagnostics.push(diagnostic)
 
     diagnostics
 
-fn check_unused_variables(tree: Tree, source: text, diagnostics: [Diagnostic]) -> [Diagnostic]:
-    """Check for unused variable declarations.
+# Handle diagnostics for a document
+fn handle_diagnostics(uri: String, tree: Tree) -> Result<Nil, String>:
+    # Generate syntax diagnostics from tree
+    var diagnostics = generate_diagnostics(tree)
 
-    Args:
-        tree - Syntax tree
-        source - Source code
-        diagnostics - Current diagnostics list
+    # Add verification diagnostics
+    match verification.handle_verification_diagnostics(tree, uri):
+        case Ok(verify_diags):
+            for diag in verify_diags:
+                diagnostics.push(diag)
+        case Err(e):
+            transport.log_debug("Verification diagnostics error: {e}")
 
-    Returns:
-        Updated diagnostics list
-    """
-    var result = diagnostics
+    transport.log_debug("Found {diagnostics.len()} diagnostics for {uri}")
 
-    # Query for variable declarations
-    val var_query_result = Query.create("simple", """
-        (variable_declaration) @var
-    """)
+    # Send publishDiagnostics notification
+    val params = {
+        "uri": uri,
+        "diagnostics": diagnostics
+    }
 
-    match var_query_result:
-        Ok(var_query):
-            val cursor = QueryCursor.create()
-            cursor.exec(var_query, tree.root_node())
+    transport.write_notification("textDocument/publishDiagnostics", params)?
 
-            while true:
-                val match_opt = cursor.next_match()
-                if not match_opt.?:
-                    break
-
-                # For each variable, would check if it's used
-                # Simplified: just mark as hint that variable should be used
-                result.push(Diagnostic(
-                    message: "Consider using declared variable",
-                    severity: DiagnosticSeverity.Hint.to_i64(),
-                    line: 0,
-                    character: 0,
-                    end_line: 0,
-                    end_character: 0
-                ))
-                break  # Only show one for now
-
-            var_query.free()
-            cursor.free()
-        Err(_):
-            ()
-
-    result
-
-fn check_missing_return(tree: Tree, source: text, diagnostics: [Diagnostic]) -> [Diagnostic]:
-    """Check for functions missing return statements.
-
-    Args:
-        tree - Syntax tree
-        source - Source code
-        diagnostics - Current diagnostics list
-
-    Returns:
-        Updated diagnostics list
-    """
-    var result = diagnostics
-
-    # Query for function definitions with return type
-    val fn_query_result = Query.create("simple", """
-        (function_definition) @fn
-    """)
-
-    match fn_query_result:
-        Ok(fn_query):
-            val cursor = QueryCursor.create()
-            cursor.exec(fn_query, tree.root_node())
-
-            while true:
-                val match_opt = cursor.next_match()
-                if not match_opt.?:
-                    break
-
-                # Would check if function has explicit return type but no return statement
-                # For now, skip actual check
-
-            fn_query.free()
-            cursor.free()
-        Err(_):
-            ()
-
-    result
-
-fn check_unreachable_code(tree: Tree, source: text, diagnostics: [Diagnostic]) -> [Diagnostic]:
-    """Check for unreachable code after return/break.
-
-    Args:
-        tree - Syntax tree
-        source - Source code
-        diagnostics - Current diagnostics list
-
-    Returns:
-        Updated diagnostics list
-    """
-    var result = diagnostics
-
-    # Query for return statements
-    val return_query_result = Query.create("simple", """
-        (return_statement) @ret
-    """)
-
-    match return_query_result:
-        Ok(return_query):
-            val cursor = QueryCursor.create()
-            cursor.exec(return_query, tree.root_node())
-
-            while true:
-                val match_opt = cursor.next_match()
-                if not match_opt.?:
-                    break
-
-                # Would check if there's code after return in same block
-                # For now, skip actual check
-
-            return_query.free()
-            cursor.free()
-        Err(_):
-            ()
-
-    result
-
-impl DiagnosticSeverity:
-    fn to_i64() -> i64:
-        match self:
-            case Error: 1
-            case Warning: 2
-            case Information: 3
-            case Hint: 4
+    Ok(nil)
