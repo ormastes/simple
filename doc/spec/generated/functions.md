@@ -442,6 +442,53 @@ test "lambdas_and_closures_7":
     assert_compiles()
 ```
 
+### Placeholder Lambdas {#placeholder_lambdas}
+
+Placeholder lambdas use `_` or numbered `_1`, `_2` as stand-ins for lambda parameters:
+
+```simple
+# Unnumbered: each _ is a successive parameter
+items.map(_ * 2)                     # → \__p0: __p0 * 2
+items.filter(_ > 3)                  # → \__p0: __p0 > 3
+items.reduce(_ + _)                  # → \__p0, __p1: __p0 + __p1
+
+# Numbered: explicit parameter ordering (1-indexed)
+items.map(_1 * 10)                   # → \__p0: __p0 * 10
+pairs.reduce(_2 - _1)               # → \__p0, __p1: __p1 - __p0
+
+# Nested scoping: each call's arguments get independent transforms
+_.items.any(_ > 3)                   # outer: \__p0: __p0.items.any(inner)
+                                     # inner: \__p0: __p0 > 3
+```
+
+### Method Reference {#method_reference}
+
+The `&:method` syntax creates a lambda that calls a method on its argument (inspired by Ruby's `&:to_proc`):
+
+```simple
+words.map(&:len)                     # → \__p0: __p0.len()
+nums.map(&:to_s)                     # → \__p0: __p0.to_s()
+val get_len = &:len                  # can be stored as a value
+```
+
+### Curry and Partial Application {#curry_partial}
+
+Standard library functions for currying and partial application:
+
+```simple
+use std.common.functions.{curry2, curry3, partial1, partial2}
+
+val curried = curry2(add)            # \a: \b: add(a, b)
+val add5 = curried(5)               # \b: add(5, b)
+add5(3)                              # 8
+
+val inc = partial1(add, 1)           # \b: add(1, b)
+[1, 2, 3].map(inc)                   # [2, 3, 4]
+
+val f = curry3(triple_add)           # \a: \b: \c: triple_add(a, b, c)
+f(1)(2)(3)                           # 6
+```
+
 ### Test 8: Pattern Matching {#pattern_matching_8}
 
 *Source line: ~7*
