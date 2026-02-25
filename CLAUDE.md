@@ -213,6 +213,9 @@ pass                                  # Generic no-op (use specific variants)
 
 user?.name ?? "Anonymous"             # Optional chaining + coalescing
 items.map(\x: x * 2)                 # Lambda
+items.map(_ * 2)                     # Placeholder lambda (_ = param)
+items.map(_1 * 10)                   # Numbered placeholder (_1, _2)
+words.map(&:len)                     # Method reference (&:method)
 [for x in 0..10 if x % 2 == 0: x]   # Comprehension
 ```
 

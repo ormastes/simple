@@ -517,6 +517,45 @@ items.each \item:
     print "Item: {item}"
 ```
 
+### Placeholder Lambda
+
+```simple
+# `_` stands for each successive parameter
+items.map(_ * 2)                     # \__p0: __p0 * 2
+items.filter(_ > 3)                  # \__p0: __p0 > 3
+items.reduce(_ + _)                  # \__p0, __p1: __p0 + __p1
+
+# Numbered placeholders: explicit parameter ordering
+items.map(_1 * 10)                   # \__p0: __p0 * 10
+pairs.reduce(_2 - _1)               # \__p0, __p1: __p1 - __p0
+
+# Nested scoping: each call's args are independent
+_.items.any(_ > 3)                   # outer: \__p0: __p0.items.any(INNER)
+                                     # inner: \__p0: __p0 > 3
+```
+
+### Method Reference
+
+```simple
+# &:method → \__p0: __p0.method()
+words.map(&:len)                     # [2, 5, 3]
+nums.map(&:to_s)                     # ["1", "2", "3"]
+val get_len = &:len                  # store as value
+```
+
+### Curry and Partial Application
+
+```simple
+use std.common.functions.{curry2, curry3, partial1, partial2}
+
+val curried_add = curry2(add)        # curry2(f) → \a: \b: f(a, b)
+val add5 = curried_add(5)            # \b: add(5, b)
+add5(3)                              # 8
+
+val inc = partial1(add, 1)           # partial1(f, a) → \b: f(a, b)
+[1, 2, 3].map(inc)                   # [2, 3, 4]
+```
+
 ---
 
 ## Pattern Matching
