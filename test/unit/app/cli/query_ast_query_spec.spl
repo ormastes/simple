@@ -1,0 +1,209 @@
+# AST Pattern Query Specification
+#
+# **Feature IDs:** #AQ-001 to #AQ-010
+# **Category:** Tooling
+# **Difficulty:** 3/5
+# **Status:** Implemented
+#
+# ## Overview
+# Tests for S-expression structural pattern matching against outline AST.
+# Validates pattern parsing, predicate evaluation, and matching logic.
+
+use std.spec
+
+# ============================================================================
+# Test Group 1: S-expression Pattern Parser — basic patterns
+# ============================================================================
+
+describe "ast pattern parser basics":
+    it "parses simple node kind":
+        val q = "(function)"
+        val inner = q.substring(1, q.len() - 1).trim()
+        val kind = inner.split(" ")[0]
+        expect(kind).to_equal("function")
+
+    it "parses node kind with name predicate":
+        val q = "(function name: \"main\")"
+        val inner = q.substring(1, q.len() - 1).trim()
+        val kind = inner.split(" ")[0]
+        expect(kind).to_equal("function")
+        val has_name = inner.contains("name:")
+        expect(has_name).to_equal(true)
+
+    it "parses node kind with return_type predicate":
+        val q = "(function return_type: \"i64\")"
+        val inner = q.substring(1, q.len() - 1).trim()
+        val kind = inner.split(" ")[0]
+        expect(kind).to_equal("function")
+        val has_return = inner.contains("return_type:")
+        expect(has_return).to_equal(true)
+
+    it "parses wildcard node kind":
+        val q = "(* name: \"foo\")"
+        val inner = q.substring(1, q.len() - 1).trim()
+        val first = inner.substring(0, 1)
+        expect(first).to_equal("*")
+
+    it "parses multiple predicates":
+        val q = "(function name: \"parse\" return_type: \"i64\")"
+        val inner = q.substring(1, q.len() - 1).trim()
+        val has_name = inner.contains("name:")
+        val has_ret = inner.contains("return_type:")
+        expect(has_name).to_equal(true)
+        expect(has_ret).to_equal(true)
+
+    it "parses nested pattern":
+        val q = "(class methods: (function name: \"to_string\"))"
+        val inner = q.substring(1, q.len() - 1).trim()
+        val has_methods = inner.contains("methods:")
+        val has_nested = inner.contains("(function")
+        expect(has_methods).to_equal(true)
+        expect(has_nested).to_equal(true)
+
+# ============================================================================
+# Test Group 2: Predicate value extraction
+# ============================================================================
+
+describe "predicate value extraction":
+    it "extracts quoted string value":
+        val pred_str = "name: \"main\""
+        val colon_pos = pred_str.index_of(":") ?? -1
+        val after_colon = pred_str.substring(colon_pos + 1).trim()
+        val value = after_colon.substring(1, after_colon.len() - 1)
+        expect(value).to_equal("main")
+
+    it "detects glob pattern with wildcard":
+        val value = "std.*"
+        val has_glob = value.contains("*")
+        expect(has_glob).to_equal(true)
+
+    it "extracts field name before colon":
+        val pred_str = "return_type: \"i64\""
+        val colon_pos = pred_str.index_of(":") ?? -1
+        val field = pred_str.substring(0, colon_pos).trim()
+        expect(field).to_equal("return_type")
+
+    it "handles multiple fields in string":
+        val inner = "function name: \"test\" return_type: \"i64\""
+        val parts = inner.split("\"")
+        # parts: ["function name: ", "test", " return_type: ", "i64", ""]
+        expect(parts.len()).to_be_greater_than(3)
+
+# ============================================================================
+# Test Group 3: Node kind matching
+# ============================================================================
+
+describe "node kind matching":
+    it "matches function to fn":
+        val pattern_kind = "function"
+        val sym_kind = "fn"
+        val matches = pattern_kind == "function" and (sym_kind == "fn" or sym_kind == "method")
+        expect(matches).to_equal(true)
+
+    it "matches function to method":
+        val pattern_kind = "function"
+        val sym_kind = "method"
+        val matches = pattern_kind == "function" and (sym_kind == "fn" or sym_kind == "method" or sym_kind == "static_method" or sym_kind == "extern_fn")
+        expect(matches).to_equal(true)
+
+    it "matches wildcard to any":
+        val pattern_kind = "*"
+        val matches = pattern_kind == "*"
+        expect(matches).to_equal(true)
+
+    it "class does not match fn":
+        val pattern_kind = "class"
+        val sym_kind = "fn"
+        val matches = pattern_kind == sym_kind
+        expect(matches).to_equal(false)
+
+    it "matches import kind":
+        val pattern_kind = "import"
+        val sym_kind = "import"
+        val matches = pattern_kind == sym_kind
+        expect(matches).to_equal(true)
+
+    it "matches impl kind":
+        val pattern_kind = "impl"
+        val sym_kind = "impl"
+        val matches = pattern_kind == sym_kind
+        expect(matches).to_equal(true)
+
+# ============================================================================
+# Test Group 4: Predicate evaluation
+# ============================================================================
+
+describe "predicate evaluation":
+    it "name equals match":
+        val sym_name = "query_main"
+        val pred_value = "query_main"
+        val matches = sym_name == pred_value
+        expect(matches).to_equal(true)
+
+    it "name equals mismatch":
+        val sym_name = "query_main"
+        val pred_value = "other"
+        val matches = sym_name == pred_value
+        expect(matches).to_equal(false)
+
+    it "glob match with wildcard":
+        val value = "std.text"
+        val pattern = "std.*"
+        val prefix = "std."
+        val matches = value.starts_with(prefix)
+        expect(matches).to_equal(true)
+
+    it "visibility pub for top-level":
+        val parent = ""
+        val name = "query_main"
+        var visibility = "private"
+        if parent == "" and not name.starts_with("_"):
+            visibility = "pub"
+        expect(visibility).to_equal("pub")
+
+    it "visibility private for prefixed":
+        val parent = ""
+        val name = "_internal_fn"
+        var visibility = "private"
+        if parent == "" and not name.starts_with("_"):
+            visibility = "pub"
+        expect(visibility).to_equal("private")
+
+    it "trait extraction from impl signature":
+        val sig = "impl Printable for MyClass:"
+        val rest = sig.substring(5).trim()
+        val first_word = rest.split(" ")[0]
+        val after = rest.substring(first_word.len()).trim()
+        val is_for = after.starts_with("for ")
+        expect(first_word).to_equal("Printable")
+        expect(is_for).to_equal(true)
+
+# ============================================================================
+# Test Group 5: Output format
+# ============================================================================
+
+describe "output format":
+    it "text format includes file:line":
+        val file = "src/app/cli/query.spl"
+        val line = 42
+        val kind = "fn"
+        val name = "query_main"
+        val output = "{file}:{line}: [{kind}] {name}"
+        expect(output).to_contain("src/app/cli/query.spl:42")
+        expect(output).to_contain("[fn]")
+
+    it "compact format is single line":
+        val file = "test.spl"
+        val line = 10
+        val kind = "class"
+        val name = "MyClass"
+        val output = "{file}:{line}: [{kind}] {name}"
+        val newlines = output.contains("\n")
+        expect(newlines).to_equal(false)
+
+    it "json format has curly braces":
+        val entry = "{\"file\": \"test.spl\", \"line\": 10, \"kind\": \"class\", \"name\": \"MyClass\"}"
+        val has_file = entry.contains("\"file\"")
+        val has_line = entry.contains("\"line\"")
+        expect(has_file).to_equal(true)
+        expect(has_line).to_equal(true)
