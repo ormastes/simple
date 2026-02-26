@@ -23,14 +23,12 @@ impl Lowerer {
     /// inherits all invariants from the parent. This ensures Liskov Substitution
     /// Principle - a child class must maintain all parent invariants.
     pub(crate) fn register_class(&mut self, c: &ast::ClassDef) -> LowerResult<TypeId> {
-        eprintln!("[DEBUG register_class] Registering class: {}", c.name);
         // Collect class's own fields
         let mut fields: Vec<_> = c
             .fields
             .iter()
             .map(|f| {
                 let ty = self.resolve_type(&f.ty).unwrap_or(TypeId::VOID);
-                eprintln!("[DEBUG register_class] Field {} resolved to {:?}", f.name, ty);
                 (f.name.clone(), ty)
             })
             .collect();
@@ -104,16 +102,13 @@ impl Lowerer {
     }
 
     pub(crate) fn register_struct(&mut self, s: &ast::StructDef) -> LowerResult<TypeId> {
-        eprintln!("[DEBUG register_struct] Registering struct: {}", s.name);
         let mut fields = Vec::new();
         for field in &s.fields {
             match self.resolve_type(&field.ty) {
                 Ok(ty) => {
-                    eprintln!("[DEBUG register_struct] Field {} resolved to {:?}", field.name, ty);
                     fields.push((field.name.clone(), ty));
                 }
                 Err(e) => {
-                    eprintln!("[DEBUG register_struct] Field {} FAILED: {:?}", field.name, e);
                     return Err(e);
                 }
             }

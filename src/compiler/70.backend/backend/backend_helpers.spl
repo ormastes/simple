@@ -35,16 +35,16 @@ fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind
             return preferred_value
 
     # Auto-select based on target only (no build mode consideration)
+    # Note: Cranelift adapter is currently stubbed; prefer LLVM everywhere
+    # so auto-selection never picks the non-working backend.
     if target_is_cuda(target):
         BackendKind.Cuda
     elif target_is_vulkan(target):
         BackendKind.Vulkan
     elif false:  # Stub: target_is_wasm not available in seed.cpp
         BackendKind.Wasm
-    elif false:  # Stub: target_is_32bit not available in seed.cpp
-        BackendKind.Llvm
     else:
-        BackendKind.Cranelift
+        BackendKind.Llvm
 
 fn select_backend_with_mode(
     target: CodegenTarget,
@@ -90,19 +90,20 @@ fn select_backend_with_mode(
     if mode == BuildMode.Test:
         return BackendKind.Interpreter
 
-    # 5. For 64-bit targets, choose based on build mode
+    # 5. Cranelift backend is currently stubbed (adapter returns error).
+    #    Force LLVM for all non-test modes until Cranelift is implemented.
     match mode:
         case Debug:
-            BackendKind.Cranelift  # Fast compilation (2[5]x vs LLVM)
+            BackendKind.Llvm
 
         case Release:
-            BackendKind.Llvm       # Better optimization (15-30% faster runtime)
+            BackendKind.Llvm
 
         case Bootstrap:
-            BackendKind.Cranelift  # Minimal dependencies
+            BackendKind.Llvm
 
         case Test:
-            BackendKind.Interpreter  # Already handled above, but included for completeness
+            BackendKind.Interpreter  # Already handled above
 
 fn available_backends() -> [BackendKind]:
     """Get list of available backends."""
@@ -166,7 +167,7 @@ fn compile_module_with_backend(
         CompiledModule with object_code bytes, or CompileError
     """
     # Resolve backend kind
-    var kind = BackendKind.Cranelift
+    var kind = BackendKind.Llvm
     if backend_name == "llvm":
         kind = BackendKind.Llvm
     elif backend_name == "native":
@@ -174,11 +175,12 @@ fn compile_module_with_backend(
     elif backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
         kind = BackendKind.CCodegen
     elif backend_name == "auto":
-        if is_release:
-            if llc_available():
-                kind = BackendKind.Llvm
-        else:
-            kind = BackendKind.Cranelift
+        # Prefer LLVM; if llc is unavailable, return a clear error instead of
+        # silently selecting the stubbed Cranelift backend.
+        if not llc_available():
+            return Err(compileerror_backend_error(BackendKind.Llvm,
+                "llc not found. Install LLVM (e.g., apt install llvm, brew install llvm)"))
+        kind = BackendKind.Llvm
 
     # Select build mode and optimization
     val mode = if is_release: BuildMode.Release else: BuildMode.Debug

@@ -307,18 +307,15 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
 }
 
 /// Find the simple binary path
-// TODO(bootstrap): Update to use simple_new (Simple CLI) once self-hosting compiler is ready.
-//                  Currently uses simple_old (Rust runtime) directly.
 fn find_simple_binary() -> PathBuf {
     // Try to find the binary in common locations
     let candidates = vec![
         PathBuf::from("./bin/wrappers/simple"),              // Wrapper script (preferred)
         PathBuf::from("./rust/target/debug/simple_runtime"), // Direct runtime (debug)
         PathBuf::from("./rust/target/release/simple_runtime"), // Direct runtime (release)
-        PathBuf::from("./target/debug/simple_old"),          // Legacy (old)
-        PathBuf::from("./target/release/simple_old"),        // Legacy (old)
+        PathBuf::from("./target/debug/simple"),              // Current binary (debug)
+        PathBuf::from("./target/release/simple"),            // Current binary (release)
         PathBuf::from("simple"),                             // In PATH
-        PathBuf::from("simple_old"),                         // Legacy in PATH
     ];
 
     for candidate in candidates {
@@ -330,13 +327,13 @@ fn find_simple_binary() -> PathBuf {
     // If we're running as the simple binary, use the current executable
     if let Ok(exe) = std::env::current_exe() {
         let filename = exe.file_name().and_then(|n| n.to_str());
-        if filename == Some("simple") || filename == Some("simple_runtime") || filename == Some("simple_old") {
+        if filename == Some("simple") || filename == Some("simple_runtime") {
             return exe;
         }
     }
 
     // Default to looking in target/debug
-    PathBuf::from("./target/debug/simple_old")
+    PathBuf::from("./target/debug/simple")
 }
 
 /// Wait for a process with timeout

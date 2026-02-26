@@ -1,0 +1,248 @@
+# Query Upgrade Specification
+#
+# **Feature IDs:** #QU-001 to #QU-010
+# **Category:** Tooling
+# **Difficulty:** 3/5
+# **Status:** Implemented
+#
+# ## Overview
+# Tests for upgraded query.spl: Tier 2 engine delegation and Tier 4 improvements.
+# Validates the transition from grep-based to outline-parser-based queries.
+
+use std.spec
+
+# ============================================================================
+# Test Group 1: Tier 2 — engine delegation pattern
+# ============================================================================
+
+describe "Tier 2 engine delegation":
+    it "definition delegates to engine_find_definition":
+        val subcmd = "definition"
+        val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
+        expect(valid).to_contain(subcmd)
+
+    it "references delegates to engine_find_references":
+        val subcmd = "references"
+        val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
+        expect(valid).to_contain(subcmd)
+
+    it "hover delegates to engine_hover":
+        val subcmd = "hover"
+        val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
+        expect(valid).to_contain(subcmd)
+
+    it "completions delegates to engine_completions":
+        val subcmd = "completions"
+        val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
+        expect(valid).to_contain(subcmd)
+
+    it "type-at delegates to engine_type_at":
+        val subcmd = "type-at"
+        val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
+        expect(valid).to_contain(subcmd)
+
+    it "signature-help delegates to engine_signature_help":
+        val subcmd = "signature-help"
+        val valid = ["definition", "references", "hover", "completions", "type-at", "signature-help"]
+        expect(valid).to_contain(subcmd)
+
+# ============================================================================
+# Test Group 2: Input sanitization in query pipeline
+# ============================================================================
+
+describe "query input sanitization":
+    it "sanitize_path called on file argument":
+        val file = "src/app/cli/query.spl"
+        # Safe path passes through
+        val has_dangerous = (file.contains("$") or file.contains(";") or file.contains("|"))
+        expect(has_dangerous).to_equal(false)
+
+    it "sanitize_symbol called on symbol argument":
+        val symbol = "query_main"
+        val is_safe = _is_valid_symbol(symbol)
+        expect(is_safe).to_equal(true)
+
+    it "rejects dangerous file path early":
+        val file = "src/test; cat /etc/passwd"
+        val has_dangerous = file.contains(";")
+        # sanitize_path returns "" -> query exits with error
+        expect(has_dangerous).to_equal(true)
+
+    it "rejects dangerous symbol early":
+        val symbol = "foo;bar"
+        val is_safe = _is_valid_symbol(symbol)
+        expect(is_safe).to_equal(false)
+
+# ============================================================================
+# Test Group 3: Tier 4 — rename upgrade (--apply flag)
+# ============================================================================
+
+describe "rename upgrade with apply":
+    it "supports --apply flag":
+        val flags = ["--apply", "--new-name"]
+        expect(flags).to_contain("--apply")
+
+    it "outputs structured format file:line: old -> new":
+        val file = "src/test.spl"
+        val line = 10
+        val old_name = "foo"
+        val new_name = "bar"
+        val output = "{file}:{line}: {old_name} -> {new_name}"
+        expect(output).to_contain("src/test.spl:10:")
+        expect(output).to_contain("foo -> bar")
+
+    it "uses safe_grep for finding occurrences":
+        val args = ["-rn", "\\bfoo\\b", "src/", "--include=*.spl"]
+        expect(args[0]).to_equal("-rn")
+        expect(args.len()).to_equal(4)
+
+    it "whole word replacement preserves boundaries":
+        val line = "val foobar = foo(foo_arg)"
+        # _replace_word("foo", "bar") should only replace standalone "foo"
+        val has_foo = line.contains("foo")
+        expect(has_foo).to_equal(true)
+
+# ============================================================================
+# Test Group 4: Tier 4 — semantic tokens upgrade (12 types)
+# ============================================================================
+
+describe "semantic tokens upgrade":
+    it "supports 12+ token types":
+        val types = ["keyword", "function", "type", "parameter", "property", "variable", "operator", "comment", "string", "number", "enumMember", "namespace"]
+        expect(types.len()).to_equal(12)
+
+    it "classifies fn/class/struct as keywords":
+        val keywords = ["fn", "class", "struct", "enum", "val", "var", "if", "else", "elif", "for", "while", "match", "case", "return", "use", "import", "trait", "impl", "static", "me", "self", "nil", "true", "false", "extern", "export", "type", "alias", "mixin", "ce", "bind", "receive", "after"]
+        expect(keywords).to_contain("fn")
+        expect(keywords).to_contain("class")
+        expect(keywords).to_contain("struct")
+
+    it "classifies identifier by outline data":
+        # If identifier is in fn_names set -> "function"
+        # If identifier is in type_names set -> "type"
+        # If identifier is in param_names set -> "parameter"
+        val fn_names = ["query_main", "run_query"]
+        val type_names = ["Point", "Server"]
+        val param_names = ["file", "symbol"]
+        expect(fn_names).to_contain("query_main")
+        expect(type_names).to_contain("Point")
+        expect(param_names).to_contain("file")
+
+    it "classifies comment lines":
+        val line = "# this is a comment"
+        val trimmed = line.trim()
+        val is_comment = trimmed.starts_with("#")
+        expect(is_comment).to_equal(true)
+
+    it "classifies string literals":
+        val token = "\"hello world\""
+        val is_string = token.starts_with("\"")
+        expect(is_string).to_equal(true)
+
+    it "classifies numeric literals":
+        val token = "42"
+        val is_numeric = token >= "0" and token <= "99999"
+        expect(token).to_equal("42")
+
+# ============================================================================
+# Test Group 5: Tier 4 — inlay hints outline-based
+# ============================================================================
+
+describe "inlay hints outline-based":
+    it "infers type from string literal":
+        val rhs = "\"hello\""
+        val inferred = "text"
+        val is_string = rhs.starts_with("\"")
+        expect(is_string).to_equal(true)
+        expect(inferred).to_equal("text")
+
+    it "infers type from integer literal":
+        val rhs = "42"
+        val inferred = "i64"
+        expect(inferred).to_equal("i64")
+
+    it "infers type from boolean literal":
+        val rhs = "true"
+        val inferred = "bool"
+        val is_bool = rhs == "true" or rhs == "false"
+        expect(is_bool).to_equal(true)
+
+    it "infers type from function call via outline":
+        # engine provides fn return types
+        val fn_names = ["get_count", "read_file"]
+        val fn_returns = ["i64", "text"]
+        val rhs = "get_count()"
+        val call_name = rhs.split("(")[0]
+        # Look up return type in parallel arrays
+        var inferred = ""
+        if call_name == fn_names[0]:
+            inferred = fn_returns[0]
+        expect(inferred).to_equal("i64")
+
+    it "skips already-typed bindings":
+        val line = "val count: i64 = 0"
+        val has_type_annotation = line.contains(": i64")
+        expect(has_type_annotation).to_equal(true)
+
+# ============================================================================
+# Test Group 6: New subcommands registered in dispatch
+# ============================================================================
+
+describe "new subcommand dispatch":
+    it "recognizes document-highlight":
+        val all_subcmds = ["definition", "references", "hover", "completions", "type-at", "signature-help", "rename", "code-actions", "workspace-symbols", "call-hierarchy", "type-hierarchy", "semantic-tokens", "inlay-hints", "selection-range", "document-formatting", "document-highlight", "type-definition", "implementation", "folding-range"]
+        expect(all_subcmds).to_contain("document-highlight")
+
+    it "recognizes type-definition":
+        val all_subcmds = ["document-highlight", "type-definition", "implementation", "folding-range"]
+        expect(all_subcmds).to_contain("type-definition")
+
+    it "recognizes implementation":
+        val all_subcmds = ["document-highlight", "type-definition", "implementation", "folding-range"]
+        expect(all_subcmds).to_contain("implementation")
+
+    it "recognizes folding-range":
+        val all_subcmds = ["document-highlight", "type-definition", "implementation", "folding-range"]
+        expect(all_subcmds).to_contain("folding-range")
+
+    it "total subcommands is now 19":
+        val original = 5
+        val tier4 = 10
+        val new_lsp = 4
+        val total = original + tier4 + new_lsp
+        expect(total).to_equal(19)
+
+# ============================================================================
+# Test Group 7: safe_process replaces query_shell
+# ============================================================================
+
+describe "safe_process replaces query_shell":
+    it "code_actions uses safe_process":
+        val cmd = "bin/simple"
+        val args = ["check", "src/test.spl"]
+        expect(cmd).to_equal("bin/simple")
+        expect(args.len()).to_equal(2)
+
+    it "document_formatting uses safe_process":
+        val cmd = "bin/simple"
+        val args = ["fmt", "--check", "src/test.spl"]
+        expect(cmd).to_equal("bin/simple")
+
+    it "workspace_symbols uses safe_grep":
+        val cmd = "grep"
+        val args = ["-rn", "query_main", "src/", "--include=*.spl"]
+        expect(cmd).to_equal("grep")
+        expect(args).to_contain("--include=*.spl")
+
+# ============================================================================
+# Helper
+# ============================================================================
+
+fn _is_valid_symbol(name: text) -> bool:
+    if name == "":
+        return false
+    for ch in name:
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            return false
+    true

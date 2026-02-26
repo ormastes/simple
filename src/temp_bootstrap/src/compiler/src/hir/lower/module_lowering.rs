@@ -9,7 +9,51 @@ impl Lowerer {
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         self.module.name = ast_module.name.clone();
 
-        // First pass: collect type and function declarations
+        // Pass 0: Pre-register all struct/class/enum names as I64 placeholders.
+        // This allows forward references in field types (e.g., Dict<K, HirFunction>
+        // where HirFunction is defined after the type that references it).
+        for item in &ast_module.items {
+            match item {
+                Node::Struct(s) => {
+                    if self.module.types.lookup(&s.name).is_none() {
+                        self.module.types.register_named(
+                            s.name.clone(),
+                            HirType::Struct {
+                                name: s.name.clone(),
+                                fields: vec![],
+                                has_snapshot: false,
+                            },
+                        );
+                    }
+                }
+                Node::Class(c) => {
+                    if self.module.types.lookup(&c.name).is_none() {
+                        self.module.types.register_named(
+                            c.name.clone(),
+                            HirType::Struct {
+                                name: c.name.clone(),
+                                fields: vec![],
+                                has_snapshot: false,
+                            },
+                        );
+                    }
+                }
+                Node::Enum(e) => {
+                    if self.module.types.lookup(&e.name).is_none() {
+                        self.module.types.register_named(
+                            e.name.clone(),
+                            HirType::Enum {
+                                name: e.name.clone(),
+                                variants: vec![],
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // First pass: collect type and function declarations (re-registers with full field info)
         for item in &ast_module.items {
             match item {
                 Node::Struct(s) => {
@@ -40,26 +84,60 @@ impl Lowerer {
                             (v.name.clone(), fields)
                         })
                         .collect();
-                    self.module.types.register_named(
-                        e.name.clone(),
-                        HirType::Enum {
-                            name: e.name.clone(),
-                            variants,
-                        },
-                    );
+                    let hir_type = HirType::Enum {
+                        name: e.name.clone(),
+                        variants,
+                    };
+                    // If already pre-registered (pass 0), update existing
+                    if let Some(existing_id) = self.module.types.lookup(&e.name) {
+                        self.module.types.update_type(existing_id, hir_type);
+                    } else {
+                        self.module.types.register_named(e.name.clone(), hir_type);
+                    }
                 }
                 Node::TypeAlias(ta) => {
                     self.register_type_alias(ta)?;
                 }
+                Node::Impl(impl_block) => {
+                    // Register impl methods in the first pass so they can be resolved.
+                    // Use both unqualified and qualified names so method calls on
+                    // typed receivers resolve to the correct return type.
+                    for method in &impl_block.methods {
+                        let ret_ty = self.resolve_type_opt(&method.return_type)?;
+                        // Extract the type name from the Type enum
+                        let target_name = match &impl_block.target_type {
+                            ast::Type::Simple(name) => name.clone(),
+                            ast::Type::Generic { name, .. } => name.clone(),
+                            other => format!("{:?}", other),
+                        };
+                        // Qualified name (e.g., "MirLowering::lower_module")
+                        let qualified = format!("{}::{}", target_name, method.name);
+                        self.globals.insert(qualified, ret_ty);
+                        // Unqualified name — only insert if not already registered,
+                        // to avoid overwriting a different impl's return type
+                        self.globals.entry(method.name.clone()).or_insert(ret_ty);
+                    }
+                }
                 Node::Trait(_)
                 | Node::Actor(_)
-                | Node::Impl(_)
                 | Node::Extern(_)
                 | Node::Macro(_)
                 | Node::Unit(_)
                 | Node::UnitFamily(_) => {}
-                Node::Let(_)
-                | Node::Const(_)
+                Node::Let(l) => {
+                    // Module-level variable declaration (val or var)
+                    // Extract name from pattern, handling Typed wrapper
+                    let name = extract_pattern_name(&l.pattern);
+                    if let Some(name) = name {
+                        let ty = extract_pattern_type(&l.pattern)
+                            .and_then(|t| self.resolve_type(t).ok())
+                            .or_else(|| l.ty.as_ref().and_then(|t| self.resolve_type(t).ok()))
+                            .unwrap_or(TypeId::I64);
+                        self.globals.insert(name.clone(), ty);
+                        self.module.globals.push((name.clone(), ty));
+                    }
+                }
+                Node::Const(_)
                 | Node::Static(_)
                 | Node::Assignment(_)
                 | Node::Return(_)
@@ -81,7 +159,11 @@ impl Lowerer {
             }
         }
 
-        // Second pass: lower function bodies and class/struct methods
+        // Second pass: lower function bodies, class/struct methods, and module init
+        let mut init_body: Vec<HirStmt> = Vec::new();
+        let mut init_ctx = FunctionContext::new(TypeId::VOID);
+        let mut has_init = false;
+
         for item in &ast_module.items {
             match item {
                 Node::Function(f) => {
@@ -102,8 +184,57 @@ impl Lowerer {
                         self.module.functions.push(hir_func);
                     }
                 }
+                Node::Let(l) => {
+                    // Module-level variable with initializer → add to __module_init
+                    if let Some(ref value) = l.value {
+                        let name = extract_pattern_name(&l.pattern);
+                        if let Some(name) = name {
+                            let init_expr = self.lower_expr(value, &mut init_ctx)?;
+                            init_body.push(HirStmt::Assign {
+                                target: HirExpr {
+                                    kind: HirExprKind::Global(name),
+                                    ty: init_expr.ty,
+                                },
+                                value: init_expr,
+                            });
+                            has_init = true;
+                        }
+                    }
+                }
+                Node::Expression(e) => {
+                    // Module-level expression → add to __module_init
+                    if let Ok(expr) = self.lower_expr(e, &mut init_ctx) {
+                        init_body.push(HirStmt::Expr(expr));
+                        has_init = true;
+                    }
+                }
+                Node::Impl(impl_block) => {
+                    // Lower impl block methods with the target type as owner
+                    let owner_name = match &impl_block.target_type {
+                        simple_parser::Type::Simple(name) => Some(name.as_str()),
+                        _ => None,
+                    };
+                    for method in &impl_block.methods {
+                        let hir_func = self.lower_function(method, owner_name)?;
+                        self.module.functions.push(hir_func);
+                    }
+                }
                 _ => {}
             }
+        }
+
+        // Emit __module_init function if there are module-level initializers
+        if has_init {
+            self.module.functions.push(HirFunction {
+                name: "__module_init".to_string(),
+                params: Vec::new(),
+                locals: init_ctx.locals,
+                return_type: TypeId::VOID,
+                body: init_body,
+                visibility: simple_parser::ast::Visibility::Public,
+                contract: None,
+                is_pure: false,
+            });
         }
 
         Ok(self.module)
@@ -122,14 +253,18 @@ impl Lowerer {
             })
             .collect();
 
-        let type_id = self.module.types.register_named(
-            c.name.clone(),
-            HirType::Struct {
-                name: c.name.clone(),
-                fields,
-                has_snapshot: c.is_snapshot(),
-            },
-        );
+        let hir_type = HirType::Struct {
+            name: c.name.clone(),
+            fields,
+            has_snapshot: c.is_snapshot(),
+        };
+        // If already pre-registered (pass 0), update the existing type
+        let type_id = if let Some(existing_id) = self.module.types.lookup(&c.name) {
+            self.module.types.update_type(existing_id, hir_type);
+            existing_id
+        } else {
+            self.module.types.register_named(c.name.clone(), hir_type)
+        };
 
         // Register class invariant if present
         if let Some(ref invariant) = c.invariant {
@@ -165,7 +300,13 @@ impl Lowerer {
             has_snapshot: s.is_snapshot(),
         };
 
-        let type_id = self.module.types.register_named(s.name.clone(), hir_type);
+        // If already pre-registered (pass 0), update the existing type rather than creating new
+        let type_id = if let Some(existing_id) = self.module.types.lookup(&s.name) {
+            self.module.types.update_type(existing_id, hir_type);
+            existing_id
+        } else {
+            self.module.types.register_named(s.name.clone(), hir_type)
+        };
 
         // Register struct invariant if present
         if let Some(ref invariant) = s.invariant {
@@ -230,12 +371,32 @@ impl Lowerer {
         let return_type = self.resolve_type_opt(&f.return_type)?;
         let mut ctx = FunctionContext::new(return_type);
 
+        // For `fn` methods inside a class/struct, the parser doesn't add
+        // an implicit `self` param (only `me` methods get it). We ALWAYS
+        // add one for methods so the C function signature matches call
+        // sites where the receiver is passed as first arg.
+        let has_explicit_self = f.params.iter().any(|p| p.name == "self" || p.name == "me");
+        if owner_type.is_some() && !has_explicit_self && body_references_self(&f.body) {
+            let owner_ty = owner_type
+                .and_then(|o| self.module.types.lookup(o))
+                .unwrap_or(TypeId::I64);
+            ctx.add_local("self".to_string(), owner_ty, simple_parser::Mutability::Immutable);
+        }
+
         // Add parameters as locals
         for param in &f.params {
-            let ty = if let Some(t) = &param.ty {
+            let ty = if param.name == "self" || param.name == "me" {
+                // Method self/me parameter: use the owner struct/class type
+                // so field accesses compute correct byte offsets.
+                if let Some(owner) = owner_type {
+                    self.module.types.lookup(owner).unwrap_or(TypeId::I64)
+                } else {
+                    TypeId::I64
+                }
+            } else if let Some(t) = &param.ty {
                 self.resolve_type(t)?
             } else {
-                // Bootstrap: untyped params (self, etc.) default to I64
+                // Bootstrap: untyped params default to I64
                 TypeId::I64
             };
             ctx.add_local(param.name.clone(), ty, param.mutability);
@@ -319,8 +480,15 @@ impl Lowerer {
             }
         }
 
+        // Qualify method names with owner class for unique C function names.
+        let func_name = if let Some(owner) = owner_type {
+            format!("{}::{}", owner, f.name)
+        } else {
+            f.name.clone()
+        };
+
         Ok(HirFunction {
-            name: f.name.clone(),
+            name: func_name,
             params,
             locals: ctx.locals[params_len..].to_vec(),
             return_type,
@@ -393,5 +561,163 @@ impl Lowerer {
         ctx.contract_ctx = None;
 
         Ok(hir_contract)
+    }
+}
+
+/// Extract variable name from a pattern, handling Typed wrapper.
+fn extract_pattern_name(pattern: &simple_parser::Pattern) -> Option<String> {
+    match pattern {
+        simple_parser::Pattern::Identifier(n) => Some(n.clone()),
+        simple_parser::Pattern::MutIdentifier(n) => Some(n.clone()),
+        simple_parser::Pattern::Typed { pattern, .. } => extract_pattern_name(pattern),
+        _ => None,
+    }
+}
+
+/// Extract type from a Typed pattern wrapper.
+fn extract_pattern_type(pattern: &simple_parser::Pattern) -> Option<&simple_parser::ast::Type> {
+    match pattern {
+        simple_parser::Pattern::Typed { ty, .. } => Some(ty),
+        _ => None,
+    }
+}
+
+/// Check if a function body references `self` or `me` as an identifier.
+/// Used to determine if an `fn` method needs an implicit `self` parameter.
+fn body_references_self(block: &simple_parser::Block) -> bool {
+    use simple_parser::Expr;
+    for node in &block.statements {
+        if node_references_self(node) {
+            return true;
+        }
+    }
+    false
+}
+
+fn expr_references_self(expr: &simple_parser::Expr) -> bool {
+    use simple_parser::Expr;
+    match expr {
+        Expr::Identifier(name) if name == "self" || name == "me" => true,
+        Expr::FieldAccess { receiver, .. } => expr_references_self(receiver),
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_references_self(receiver)
+                || args.iter().any(|a| expr_references_self(&a.value))
+        }
+        Expr::Call { callee, args } => {
+            expr_references_self(callee)
+                || args.iter().any(|a| expr_references_self(&a.value))
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_references_self(left) || expr_references_self(right)
+        }
+        Expr::Unary { operand, .. } => expr_references_self(operand),
+        Expr::If { condition, then_branch, else_branch } => {
+            expr_references_self(condition)
+                || expr_references_self(then_branch)
+                || else_branch.as_ref().map_or(false, |e| expr_references_self(e))
+        }
+        Expr::Index { receiver, index } => {
+            expr_references_self(receiver) || expr_references_self(index)
+        }
+        // FString: "{self.field}" contains self references in interpolated parts
+        Expr::FString(parts) => {
+            parts.iter().any(|part| match part {
+                simple_parser::FStringPart::Expr(e) => expr_references_self(e),
+                _ => false,
+            })
+        }
+        Expr::TupleIndex { receiver, .. } => expr_references_self(receiver),
+        Expr::Lambda { body, .. } => expr_references_self(body),
+        Expr::Tuple(elems) | Expr::Array(elems) => {
+            elems.iter().any(|e| expr_references_self(e))
+        }
+        Expr::Dict(pairs) => {
+            pairs.iter().any(|(k, v)| expr_references_self(k) || expr_references_self(v))
+        }
+        Expr::StructInit { fields, .. } => {
+            fields.iter().any(|(_, v)| expr_references_self(v))
+        }
+        Expr::Slice { receiver, start, end, step } => {
+            expr_references_self(receiver)
+                || start.as_ref().map_or(false, |e| expr_references_self(e))
+                || end.as_ref().map_or(false, |e| expr_references_self(e))
+                || step.as_ref().map_or(false, |e| expr_references_self(e))
+        }
+        Expr::NullCoalesce { expr: e, default } => {
+            expr_references_self(e) || expr_references_self(default)
+        }
+        Expr::Try(e) | Expr::Spread(e) | Expr::DictSpread(e)
+        | Expr::OptionalCheck(e) | Expr::Spawn(e) | Expr::Await(e)
+        | Expr::ContractOld(e) | Expr::New { expr: e, .. }
+        | Expr::TypeCast { expr: e, .. } => expr_references_self(e),
+        Expr::Yield(opt) => opt.as_ref().map_or(false, |e| expr_references_self(e)),
+        Expr::DoBlock(nodes) => nodes.iter().any(|n| node_references_self(n)),
+        Expr::Match { subject, arms } => {
+            expr_references_self(subject)
+                || arms.iter().any(|arm| {
+                    arm.body.statements.iter().any(|n| node_references_self(n))
+                        || arm.guard.as_ref().map_or(false, |e| expr_references_self(e))
+                })
+        }
+        Expr::ListComprehension { expr: e, iterable, condition, .. } => {
+            expr_references_self(e)
+                || expr_references_self(iterable)
+                || condition.as_ref().map_or(false, |c| expr_references_self(c))
+        }
+        Expr::DictComprehension { key, value, iterable, condition, .. } => {
+            expr_references_self(key)
+                || expr_references_self(value)
+                || expr_references_self(iterable)
+                || condition.as_ref().map_or(false, |c| expr_references_self(c))
+        }
+        Expr::Range { start, end, .. } => {
+            start.as_ref().map_or(false, |e| expr_references_self(e))
+                || end.as_ref().map_or(false, |e| expr_references_self(e))
+        }
+        Expr::FunctionalUpdate { target, args, .. } => {
+            expr_references_self(target)
+                || args.iter().any(|a| expr_references_self(&a.value))
+        }
+        Expr::LetBinding { value, .. } => expr_references_self(value),
+        // Literals and identifiers that can't contain self
+        _ => false,
+    }
+}
+
+fn node_references_self(node: &simple_parser::Node) -> bool {
+    use simple_parser::Node;
+    match node {
+        Node::Expression(e) => expr_references_self(e),
+        Node::Let(l) => {
+            l.value.as_ref().map_or(false, |v| expr_references_self(v))
+        }
+        Node::Assignment(a) => {
+            expr_references_self(&a.target) || expr_references_self(&a.value)
+        }
+        Node::Return(r) => {
+            r.value.as_ref().map_or(false, |v| expr_references_self(v))
+        }
+        Node::If(i) => {
+            expr_references_self(&i.condition)
+                || i.then_block.statements.iter().any(|n| node_references_self(n))
+                || i.else_block.as_ref().map_or(false, |b| {
+                    b.statements.iter().any(|n| node_references_self(n))
+                })
+        }
+        Node::While(w) => {
+            expr_references_self(&w.condition)
+                || w.body.statements.iter().any(|n| node_references_self(n))
+        }
+        Node::For(f) => {
+            expr_references_self(&f.iterable)
+                || f.body.statements.iter().any(|n| node_references_self(n))
+        }
+        Node::Match(m) => {
+            expr_references_self(&m.subject)
+                || m.arms.iter().any(|arm| {
+                    arm.body.statements.iter().any(|n| node_references_self(n))
+                })
+        }
+        _ => false,
     }
 }

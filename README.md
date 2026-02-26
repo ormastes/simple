@@ -2,6 +2,7 @@
 
 [![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen)](PRODUCTION_READY.md)
 [![Tests](https://img.shields.io/badge/tests-4067%2F4067%20passing-brightgreen)](doc/session/full_test_suite_results_2026-02-14.md)
+[![LLVM Cross](https://github.com/simple-lang/simple/actions/workflows/simple-llvm-cross.yml/badge.svg)](.github/workflows/simple-llvm-cross.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > **🎉 Production Ready (2026-02-14)** - 100% test pass rate (4,067/4,067), all critical features complete. [Read the announcement](PRODUCTION_READY.md)

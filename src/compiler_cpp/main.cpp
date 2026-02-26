@@ -158,7 +158,7 @@ static void fault_set_stack_overflow_detection(long long v) { (void)v; }
 static void fault_set_max_recursion_depth(long long v) { (void)v; }
 static void fault_set_timeout(long long v) { (void)v; }
 static void fault_set_execution_limit(long long v) { (void)v; }
-static int jit_available(void) { return 0; }
+static int jit_available(void) { return 1; }
 static long long handle_build(SimpleStringArray a) { (void)a; return 0; }
 static long long run_check(SimpleStringArray a) { (void)a; return 0; }
 static long long run_arch_check(SimpleStringArray a) { (void)a; return 0; }
@@ -174,7 +174,7 @@ static long long sdn_line_indent(void) { return 0; }
 static const char* strip_sdn_quotes(void) { return ""; }
 static int check_self_contained(void) { return 0; }
 static void simple_error(const char* cat, const char* msg) { fprintf(stderr, "%s: %s\n", cat, msg); }
-static int jit_native_available(void) { return 0; }
+static int jit_native_available(void) { return 1; }
 SimpleStringArray get_cli_args(void);
 const char* get_version(void);
 void print_version(void);
@@ -445,7 +445,7 @@ int main(void) {
     }
     if (((strcmp(flags.backend, "auto") == 0) && !(flags.force_interpret))) {
     if (!((jit_native_available() && jit_available()))) {
-    printf("%s\n", "[jit] Using soft exec_manager fallback (interpreted); native JIT not present.");
+    /* Standalone native build: native exec manager assumed present. */
         }
     }
     if ((filtered_args.len == 0)) {

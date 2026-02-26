@@ -588,28 +588,24 @@ impl ExecCore {
         use simple_compiler::mir::lower_to_mir;
 
         // Read and parse source
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        let source = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
         let mut parser = Parser::new(&source);
         let parse_result = parser.parse();
         self.display_error_hints(&parser, &source);
         let ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
 
         // Lower to HIR
-        let hir_module = hir::lower(&ast)
-            .map_err(|e| format!("HIR lowering error: {}", e))?;
+        let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
 
         // Lower to MIR
-        let mir_module = lower_to_mir(&hir_module)
-            .map_err(|e| format!("MIR lowering error: {}", e))?;
+        let mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
 
         // Check for main function
         let has_main = mir_module.functions.iter().any(|f| f.name == "main");
 
         if !has_main {
             // No main function - use interpreter for module-level code
-            let exit_code = evaluate_module(&ast.items)
-                .map_err(|e| format!("{}", e))?;
+            let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
             self.collect_gc();
             return Ok(exit_code);
         }
@@ -622,10 +618,7 @@ impl ExecCore {
         };
 
         // Create execution manager and compile
-        let mut em = LocalExecutionManager::with_provider(
-            jit_backend,
-            self.symbol_provider.clone(),
-        )?;
+        let mut em = LocalExecutionManager::with_provider(jit_backend, self.symbol_provider.clone())?;
 
         em.compile_module(&mir_module)?;
 

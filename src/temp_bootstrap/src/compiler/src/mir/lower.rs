@@ -8,6 +8,15 @@ use crate::hir::{HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirS
 use std::collections::HashMap;
 use thiserror::Error;
 
+/// Calculate discriminant for enum variant (hash of name)
+fn calculate_variant_discriminant(variant_name: &str) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    variant_name.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
 //==============================================================================
 // Contract Mode (CTR-040 to CTR-043)
 //==============================================================================
@@ -255,6 +264,8 @@ pub struct MirLowerer<'a> {
     contract_mode: ContractMode,
     /// Reference to refined types for emitting refinement checks (CTR-020)
     refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
+    /// Set of module-level variable names (to distinguish from function globals)
+    module_vars: std::collections::HashSet<String>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -263,6 +274,7 @@ impl<'a> MirLowerer<'a> {
             state: LowererState::Idle,
             contract_mode: ContractMode::All,
             refined_types: None,
+            module_vars: std::collections::HashSet::new(),
         }
     }
 
@@ -272,6 +284,7 @@ impl<'a> MirLowerer<'a> {
             state: LowererState::Idle,
             contract_mode,
             refined_types: None,
+            module_vars: std::collections::HashSet::new(),
         }
     }
 
@@ -421,6 +434,12 @@ impl<'a> MirLowerer<'a> {
     pub fn lower_module(mut self, hir: &HirModule) -> MirLowerResult<MirModule> {
         let mut module = MirModule::new();
         module.name = hir.name.clone();
+
+        // Populate module_vars from HirModule globals
+        for (name, _ty) in &hir.globals {
+            self.module_vars.insert(name.clone());
+            module.globals.push((name.clone(), 0));
+        }
 
         for func in &hir.functions {
             let mir_func = self.lower_function(func)?;
@@ -688,7 +707,20 @@ impl<'a> MirLowerer<'a> {
                         Ok(())
                     }
 
-                    // Global/deref/other assignment: bootstrap no-op (value is lowered for side effects)
+                    // Global variable assignment: emit GlobalStore
+                    HirExprKind::Global(name) if self.module_vars.contains(name) => {
+                        let name = name.clone();
+                        self.with_func(|func, current_block| {
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::GlobalStore {
+                                name,
+                                value: val_reg,
+                            });
+                        })?;
+                        Ok(())
+                    }
+
+                    // Other assignment targets: bootstrap no-op (value is lowered for side effects)
                     _ => {
                         // Value already lowered above for side effects
                         Ok(())
@@ -767,22 +799,25 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::While { condition, body } => {
+            HirStmt::While { condition, body, increment } => {
                 // Create blocks and set initial jump
-                let (cond_id, body_id, exit_id) = self.with_func(|func, current_block| {
+                let has_increment = !increment.is_empty();
+                let (cond_id, body_id, incr_id, exit_id) = self.with_func(|func, current_block| {
                     let cond_id = func.new_block();
                     let body_id = func.new_block();
+                    let incr_id = if has_increment { func.new_block() } else { cond_id };
                     let exit_id = func.new_block();
 
                     // Jump to condition check
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Jump(cond_id);
-                    (cond_id, body_id, exit_id)
+                    (cond_id, body_id, incr_id, exit_id)
                 })?;
 
                 // Push loop context for break/continue
+                // `continue` jumps to increment block (for for-loops) or condition (for while)
                 self.push_loop(LoopContext {
-                    continue_target: cond_id,
+                    continue_target: incr_id,
                     break_target: exit_id,
                 })?;
 
@@ -803,7 +838,20 @@ impl<'a> MirLowerer<'a> {
                 for stmt in body {
                     self.lower_stmt(stmt, contract)?;
                 }
-                self.finalize_block_jump(cond_id)?;
+
+                if has_increment {
+                    // Body falls through to increment block
+                    self.finalize_block_jump(incr_id)?;
+
+                    // Lower increment block
+                    self.set_current_block(incr_id)?;
+                    for stmt in increment {
+                        self.lower_stmt(stmt, contract)?;
+                    }
+                    self.finalize_block_jump(cond_id)?;
+                } else {
+                    self.finalize_block_jump(cond_id)?;
+                }
 
                 // Pop loop context
                 self.pop_loop()?;
@@ -1367,6 +1415,37 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
+            HirExprKind::EnumUnit { enum_name, variant_name } => {
+                let enum_name = enum_name.clone();
+                let variant_name = variant_name.clone();
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::EnumUnit {
+                        dest,
+                        enum_name,
+                        variant_name,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::LetBind { local_idx, value, body } => {
+                let val_reg = self.lower_expr(value)?;
+                let local_idx = *local_idx;
+                // Copy value to the local's vreg slot
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Copy {
+                        dest: VReg(local_idx as u32),
+                        src: val_reg,
+                    });
+                    val_reg // dummy return
+                })?;
+                // Lower body expression
+                self.lower_expr(body)
+            }
+
             HirExprKind::Nil => {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -1377,16 +1456,79 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirExprKind::Global(name) => {
-                // Global function reference - emit a call target reference
-                // For now, treat as a function pointer (will be resolved at call site)
-                let _name = name.clone();
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
+                if self.module_vars.contains(name) {
+                    // Module-level variable: emit GlobalLoad
+                    let name = name.clone();
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::GlobalLoad { dest, name });
+                        dest
+                    })
+                } else if name.contains("::") {
+                    // Enum variant pattern used for integer-tag comparison.
+                    // Try to resolve the variant name as a global variable.
+                    // Convention: CamelCase variant -> UPPER_SNAKE_CASE constant
+                    // e.g., "Call" -> try "Call", "CALL", "EXPR_CALL", "STMT_CALL", etc.
+                    let variant_name = name.split("::").last().unwrap_or(name).to_string();
+
+                    // Convert CamelCase to UPPER_SNAKE_CASE
+                    let upper_snake = {
+                        let mut result = String::new();
+                        for (i, ch) in variant_name.chars().enumerate() {
+                            if ch.is_uppercase() && i > 0 {
+                                result.push('_');
+                            }
+                            result.push(ch.to_ascii_uppercase());
+                        }
+                        result
+                    };
+
+                    // Try to find a matching global variable
+                    let found_global = if self.module_vars.contains(&variant_name) {
+                        Some(variant_name.clone())
+                    } else {
+                        // Try common prefixes: EXPR_, STMT_, DECL_, TOK_, etc.
+                        let prefixes = ["EXPR_", "STMT_", "DECL_", "TOK_", "TYPE_", ""];
+                        let mut found = None;
+                        for prefix in &prefixes {
+                            let candidate = format!("{}{}", prefix, upper_snake);
+                            if self.module_vars.contains(&candidate) {
+                                found = Some(candidate);
+                                break;
+                            }
+                        }
+                        found
+                    };
+
+                    if let Some(global_name) = found_global {
+                        // Found as module variable — emit GlobalLoad
+                        self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::GlobalLoad { dest, name: global_name });
+                            dest
+                        })
+                    } else {
+                        // Not a known global — emit discriminant hash as fallback
+                        let disc_hash = calculate_variant_discriminant(&variant_name) as i64;
+                        self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::ConstInt { dest, value: disc_hash });
+                            dest
+                        })
+                    }
+                } else {
+                    // Global function reference - emit a call target reference
                     // Store 0 as placeholder - the actual call will use CallTarget::from_name
-                    block.instructions.push(MirInst::ConstInt { dest, value: 0 });
-                    dest
-                })
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                        dest
+                    })
+                }
             }
 
             HirExprKind::If { condition, then_branch, else_branch } => {

@@ -1,0 +1,671 @@
+# Query Engine - Structured code analysis using lightweight heuristic parsing
+#
+# Replaces grep-based query functions with scope-aware, line-based parsing.
+# Each function parses the target file into a lightweight outline and queries it.
+# Falls back to safe_grep for cross-file references.
+#
+# Functions: engine_find_definition, engine_find_references, engine_hover,
+#            engine_completions, engine_type_at, engine_signature_help,
+#            engine_document_symbols
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Internal Types (used within this file only)
+# ============================================================================
+
+struct _SymInfo:
+    name: text
+    kind: text
+    line: i64
+    signature: text
+    doc_comment: text
+    parent: text
+    return_type: text
+    params: text
+
+struct _ImpInfo:
+    module_path: text
+    items: [text]
+
+# ============================================================================
+# Lightweight Heuristic Parser
+# ============================================================================
+
+fn _parse_file(file: text) -> [_SymInfo]:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return []
+    _parse_source(content)
+
+fn _parse_source(content: text) -> [_SymInfo]:
+    val lines = content.split("\n")
+    var symbols: [_SymInfo] = []
+    var doc_lines: [text] = []
+    var current_impl = ""
+    var line_num = 0
+
+    while line_num < lines.len():
+        val line = lines[line_num]
+        val trimmed = line.trim()
+        line_num = line_num + 1
+
+        if trimmed == "":
+            doc_lines = []
+            continue
+
+        if trimmed.starts_with("#"):
+            doc_lines.push(trimmed.substring(1).trim())
+            continue
+
+        val indent = _leading_spaces(line)
+        val doc = doc_lines.join("\n")
+        doc_lines = []
+
+        if indent == 0:
+            current_impl = ""
+            if trimmed.starts_with("fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("me "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("static fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("extern fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("class "):
+                val name = _extract_ident(trimmed.substring(6))
+                symbols.push(_SymInfo(name: name, kind: "class", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("struct "):
+                val name = _extract_ident(trimmed.substring(7))
+                symbols.push(_SymInfo(name: name, kind: "struct", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("enum "):
+                val name = _extract_ident(trimmed.substring(5))
+                symbols.push(_SymInfo(name: name, kind: "enum", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("trait "):
+                val name = _extract_ident(trimmed.substring(6))
+                symbols.push(_SymInfo(name: name, kind: "trait", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("impl "):
+                current_impl = _extract_ident(trimmed.substring(5))
+                symbols.push(_SymInfo(name: current_impl, kind: "impl", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("val "):
+                val name = _extract_ident(trimmed.substring(4))
+                val rtype = _extract_binding_type(trimmed)
+                symbols.push(_SymInfo(name: name, kind: "val", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: rtype, params: ""))
+            elif trimmed.starts_with("var "):
+                val name = _extract_ident(trimmed.substring(4))
+                val rtype = _extract_binding_type(trimmed)
+                symbols.push(_SymInfo(name: name, kind: "var", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: rtype, params: ""))
+        elif indent > 0 and current_impl != "":
+            if trimmed.starts_with("fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
+            elif trimmed.starts_with("me "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
+            elif trimmed.starts_with("static fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_impl))
+
+    symbols
+
+fn _parse_imports(file: text) -> [_ImpInfo]:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return []
+    val lines = content.split("\n")
+    var imports: [_ImpInfo] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("use "):
+            imports.push(_parse_use_line(trimmed))
+        elif trimmed.starts_with("import "):
+            imports.push(_parse_use_line(trimmed))
+    imports
+
+fn _parse_use_line(trimmed: text) -> _ImpInfo:
+    var rest = trimmed
+    if rest.starts_with("use "):
+        rest = rest.substring(4)
+    elif rest.starts_with("import "):
+        rest = rest.substring(7)
+    rest = rest.trim()
+    # Check for .{item1, item2} syntax
+    var brace_idx = -1
+    var bi = 0
+    while bi < rest.len():
+        val ch = rest.substring(bi, bi + 1)
+        if ch == "{":
+            brace_idx = bi
+            break
+        bi = bi + 1
+    if brace_idx > 0:
+        val module_part = rest.substring(0, brace_idx)
+        var mod_path = module_part.trim()
+        if mod_path.ends_with("."):
+            mod_path = mod_path.substring(0, mod_path.len() - 1)
+        var items_part = rest.substring(brace_idx + 1)
+        # Remove trailing }
+        var close_idx = -1
+        var ci = 0
+        while ci < items_part.len():
+            if items_part.substring(ci, ci + 1) == "}":
+                close_idx = ci
+                break
+            ci = ci + 1
+        if close_idx >= 0:
+            items_part = items_part.substring(0, close_idx)
+        val item_list = items_part.split(",")
+        var items: [text] = []
+        for item in item_list:
+            val it = item.trim()
+            if it != "":
+                items.push(it)
+        return _ImpInfo(module_path: mod_path, items: items)
+    # No braces — import all or single module
+    _ImpInfo(module_path: rest, items: [])
+
+# ============================================================================
+# Parsing Helpers
+# ============================================================================
+
+fn _parse_fn(trimmed: text, line_num: i64, doc: text, parent: text) -> _SymInfo:
+    var rest = trimmed
+    var kind = "fn"
+    if rest.starts_with("extern fn "):
+        rest = rest.substring(10)
+        kind = "extern_fn"
+    elif rest.starts_with("static fn "):
+        rest = rest.substring(10)
+        kind = "static_method"
+    elif rest.starts_with("me "):
+        rest = rest.substring(3)
+        kind = "method"
+    elif rest.starts_with("fn "):
+        rest = rest.substring(3)
+        if parent != "":
+            kind = "method"
+    val name = _extract_ident(rest)
+    val params = _extract_params(rest)
+    val ret = _extract_return_type(rest)
+    _SymInfo(name: name, kind: kind, line: line_num, signature: trimmed, doc_comment: doc, parent: parent, return_type: ret, params: params)
+
+fn _extract_ident(s: text) -> text:
+    var end_pos = 0
+    while end_pos < s.len():
+        val ch = s.substring(end_pos, end_pos + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return ""
+    s.substring(0, end_pos)
+
+fn _extract_params(s: text) -> text:
+    # Find text between first ( and matching )
+    var paren_start = -1
+    var pi = 0
+    while pi < s.len():
+        if s.substring(pi, pi + 1) == "(":
+            paren_start = pi
+            break
+        pi = pi + 1
+    if paren_start < 0:
+        return ""
+    var depth = 0
+    var paren_end = -1
+    var qi = paren_start
+    while qi < s.len():
+        val ch = s.substring(qi, qi + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                paren_end = qi
+                break
+        qi = qi + 1
+    if paren_end < 0:
+        return ""
+    s.substring(paren_start + 1, paren_end)
+
+fn _extract_return_type(s: text) -> text:
+    # Find -> in the line and extract what follows
+    var ai = 0
+    while ai < s.len() - 1:
+        val two = s.substring(ai, ai + 2)
+        if two == "->":
+            val after = s.substring(ai + 2).trim()
+            # Take until : or end of line
+            var end_pos = 0
+            while end_pos < after.len():
+                val ch = after.substring(end_pos, end_pos + 1)
+                if ch == ":":
+                    break
+                end_pos = end_pos + 1
+            return after.substring(0, end_pos).trim()
+        ai = ai + 1
+    ""
+
+fn _extract_binding_type(s: text) -> text:
+    # For val/var, extract type annotation after name: type = ...
+    # Pattern: val name: Type = ... or val name = ...
+    var rest = s
+    if rest.starts_with("val "):
+        rest = rest.substring(4)
+    elif rest.starts_with("var "):
+        rest = rest.substring(4)
+    val name = _extract_ident(rest)
+    if name == "":
+        return ""
+    rest = rest.substring(name.len()).trim()
+    if rest.starts_with(":"):
+        rest = rest.substring(1).trim()
+        # Check it's not := (walrus)
+        if rest.starts_with("="):
+            return ""
+        # Take until = or end
+        var end_pos = 0
+        while end_pos < rest.len():
+            val ch = rest.substring(end_pos, end_pos + 1)
+            if ch == "=":
+                break
+            end_pos = end_pos + 1
+        return rest.substring(0, end_pos).trim()
+    ""
+
+fn _leading_spaces(line: text) -> i64:
+    var count = 0
+    while count < line.len():
+        val ch = line.substring(count, count + 1)
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+# ============================================================================
+# Safe grep wrapper (local copy to avoid import issues)
+# ============================================================================
+
+fn _safe_grep(pattern: text, dir: text, include: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("grep", ["-rn", pattern, dir, "--include=" + include])
+    (stdout, code)
+
+fn _safe_grep_file(pattern: text, file: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("grep", ["-n", pattern, file])
+    (stdout, code)
+
+# ============================================================================
+# Public Engine Functions
+# ============================================================================
+
+# Find definition of symbol — scope-aware, cross-file via imports
+fn engine_find_definition(file: text, symbol: text) -> i64:
+    val symbols = _parse_file(file)
+    var found = false
+
+    # Search in file's own symbols
+    for sym in symbols:
+        if sym.name == symbol:
+            if sym.parent != "":
+                print "{file}:{sym.line}: [{sym.kind}] {sym.parent}.{sym.name}"
+            else:
+                print "{file}:{sym.line}: [{sym.kind}] {sym.signature}"
+            found = true
+
+    if found:
+        return 0
+
+    # Search imported files
+    val imports = _parse_imports(file)
+    for imp in imports:
+        val resolved = _resolve_module_path(imp.module_path)
+        if resolved != "":
+            val imp_syms = _parse_file(resolved)
+            for sym in imp_syms:
+                if sym.name == symbol:
+                    print "{resolved}:{sym.line}: [{sym.kind}] {sym.signature}"
+                    found = true
+
+    if found:
+        return 0
+
+    # Fallback: grep across src/
+    val (out, code) = _safe_grep("^fn " + symbol + "\\b\\|^class " + symbol + "\\b\\|^struct " + symbol + "\\b\\|^enum " + symbol + "\\b\\|^val " + symbol + " \\|^var " + symbol + " ", "src/", "*.spl")
+    if out.trim() != "":
+        # Limit output
+        val result_lines = out.split("\n")
+        var count = 0
+        for rline in result_lines:
+            if rline.trim() != "" and count < 20:
+                print rline
+                count = count + 1
+        return 0
+
+    print "No definition found for: {symbol}"
+    1
+
+# Find references to symbol — same-file outline + cross-file grep
+fn engine_find_references(file: text, symbol: text) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    var found_count = 0
+
+    # Same-file: scan all lines for word boundary matches
+    if content != "":
+        val lines = content.split("\n")
+        var li = 0
+        while li < lines.len():
+            val line = lines[li]
+            li = li + 1
+            if _contains_word(line, symbol):
+                print "{file}:{li}: {line.trim()}"
+                found_count = found_count + 1
+
+    # Cross-file references via safe_grep
+    val (out, code) = _safe_grep("\\b" + symbol + "\\b", "src/", "*.spl")
+    if out.trim() != "":
+        val result_lines = out.split("\n")
+        var count = 0
+        for rline in result_lines:
+            val rt = rline.trim()
+            if rt != "" and not rt.starts_with(file + ":") and count < 50:
+                print rt
+                count = count + 1
+                found_count = found_count + 1
+
+    if found_count == 0:
+        print "No references found for: {symbol}"
+        return 1
+    0
+
+# Hover info — type signature + doc comment + kind from outline
+fn engine_hover(file: text, line_num: i64, symbol: text) -> i64:
+    val symbols = _parse_file(file)
+
+    # First check in this file's symbols
+    for sym in symbols:
+        if sym.name == symbol:
+            _print_hover_info(sym, file)
+            return 0
+
+    # Check imported files
+    val imports = _parse_imports(file)
+    for imp in imports:
+        val resolved = _resolve_module_path(imp.module_path)
+        if resolved != "":
+            val imp_syms = _parse_file(resolved)
+            for sym in imp_syms:
+                if sym.name == symbol:
+                    _print_hover_info(sym, resolved)
+                    return 0
+
+    # Fallback: basic info
+    print "Symbol: {symbol}"
+    print "Location: {file}:{line_num}"
+
+    val (def_out, _) = _safe_grep("^fn " + symbol + "\\b\\|^class " + symbol + "\\b\\|^struct " + symbol + "\\b", "src/", "*.spl")
+    if def_out.trim() != "":
+        print ""
+        print "Definition:"
+        val def_lines = def_out.split("\n")
+        var dc = 0
+        for dl in def_lines:
+            if dl.trim() != "" and dc < 5:
+                print dl
+                dc = dc + 1
+    0
+
+fn _print_hover_info(sym: _SymInfo, file: text) -> i64:
+    print "Symbol: {sym.name}"
+    print "Kind: {sym.kind}"
+    print "Location: {file}:{sym.line}"
+    if sym.parent != "":
+        print "Parent: {sym.parent}"
+    print ""
+    print "Signature:"
+    print "  {sym.signature}"
+    if sym.return_type != "":
+        print "Return type: {sym.return_type}"
+    if sym.params != "":
+        print "Parameters: {sym.params}"
+    if sym.doc_comment != "":
+        print ""
+        print "Documentation:"
+        val doc_lines = sym.doc_comment.split("\n")
+        for dl in doc_lines:
+            print "  {dl}"
+    0
+
+# Completions — collect local symbols + imported symbols + keywords
+fn engine_completions(file: text, line_num: i64, prefix: text) -> i64:
+    var found: [text] = []
+    val symbols = _parse_file(file)
+
+    # Local symbols matching prefix
+    print "--- Local ---"
+    for sym in symbols:
+        if sym.name.starts_with(prefix) and not _list_contains(found, sym.name):
+            print "{sym.name} [{sym.kind}]"
+            found.push(sym.name)
+
+    # Imported module symbols
+    val imports = _parse_imports(file)
+    var imp_found: [text] = []
+    for imp in imports:
+        val resolved = _resolve_module_path(imp.module_path)
+        if resolved != "":
+            val imp_syms = _parse_file(resolved)
+            for sym in imp_syms:
+                if sym.name.starts_with(prefix) and not _list_contains(imp_found, sym.name) and not _list_contains(found, sym.name):
+                    imp_found.push(sym.name + " [" + sym.kind + "] (" + imp.module_path + ")")
+
+    if imp_found.len() > 0:
+        print ""
+        print "--- Imported ---"
+        for entry in imp_found:
+            print entry
+
+    # Keywords matching prefix
+    val keywords = _matching_keywords(prefix)
+    if keywords.len() > 0:
+        print ""
+        print "--- Keywords ---"
+        for kw in keywords:
+            print kw
+
+    0
+
+# Type at position — extract type from declaration
+fn engine_type_at(file: text, line_num: i64, symbol: text) -> i64:
+    val symbols = _parse_file(file)
+
+    # Read the line at position
+    val content = rt_file_read_text(file) ?? ""
+    if content != "":
+        val lines = content.split("\n")
+        if line_num >= 1 and line_num <= lines.len():
+            print "Line {line_num}: {lines[line_num - 1].trim()}"
+
+    print "Symbol: {symbol}"
+
+    for sym in symbols:
+        if sym.name == symbol:
+            if sym.return_type != "":
+                print "Type: {sym.return_type}"
+            elif sym.kind == "class" or sym.kind == "struct" or sym.kind == "enum" or sym.kind == "trait":
+                print "Type: {sym.kind} {sym.name}"
+            else:
+                print "Type: (inferred)"
+            print "Kind: {sym.kind}"
+            print "Definition: {sym.signature}"
+            return 0
+
+    # Check imported files
+    val imports = _parse_imports(file)
+    for imp in imports:
+        val resolved = _resolve_module_path(imp.module_path)
+        if resolved != "":
+            val imp_syms = _parse_file(resolved)
+            for sym in imp_syms:
+                if sym.name == symbol:
+                    if sym.return_type != "":
+                        print "Type: {sym.return_type}"
+                    else:
+                        print "Type: {sym.kind} {sym.name}"
+                    print "Source: {resolved}:{sym.line}"
+                    return 0
+
+    print "Type: (unknown)"
+    0
+
+# Signature help — function params with types, active param index
+fn engine_signature_help(file: text, line_num: i64, col: i64, symbol: text) -> i64:
+    var fn_sym: _SymInfo = _SymInfo(name: "", kind: "", line: 0, signature: "", doc_comment: "", parent: "", return_type: "", params: "")
+    var found_fn = false
+
+    # Search in file
+    val symbols = _parse_file(file)
+    for sym in symbols:
+        if sym.name == symbol and (sym.kind == "fn" or sym.kind == "method" or sym.kind == "static_method" or sym.kind == "extern_fn"):
+            fn_sym = sym
+            found_fn = true
+            break
+
+    # Search imported files if not found
+    if not found_fn:
+        val imports = _parse_imports(file)
+        for imp in imports:
+            if found_fn:
+                break
+            val resolved = _resolve_module_path(imp.module_path)
+            if resolved != "":
+                val imp_syms = _parse_file(resolved)
+                for sym in imp_syms:
+                    if sym.name == symbol and (sym.kind == "fn" or sym.kind == "method" or sym.kind == "static_method" or sym.kind == "extern_fn"):
+                        fn_sym = sym
+                        found_fn = true
+                        break
+
+    if not found_fn:
+        print "No function definition found for: {symbol}"
+        return 1
+
+    # Count commas before cursor to find active parameter
+    var active_param = 0
+    if col > 0:
+        val content = rt_file_read_text(file) ?? ""
+        if content != "":
+            val file_lines = content.split("\n")
+            if line_num >= 1 and line_num <= file_lines.len():
+                val call_line = file_lines[line_num - 1]
+                var paren_depth = 0
+                var ci = 0
+                while ci < col and ci < call_line.len():
+                    val c = call_line.substring(ci, ci + 1)
+                    if c == "(":
+                        paren_depth = paren_depth + 1
+                    elif c == ")":
+                        paren_depth = paren_depth - 1
+                    elif c == "," and paren_depth == 1:
+                        active_param = active_param + 1
+                    ci = ci + 1
+
+    print "Function: {fn_sym.name}"
+    print "Parameters: {fn_sym.params}"
+    if fn_sym.return_type != "":
+        print "Returns: {fn_sym.return_type}"
+    print "Active parameter: {active_param}"
+    0
+
+# Document symbols — list all symbols with kind and line
+fn engine_document_symbols(file: text) -> i64:
+    val symbols = _parse_file(file)
+    if symbols.len() == 0:
+        print "No symbols found in {file}"
+        return 0
+    for sym in symbols:
+        if sym.parent != "":
+            print "{sym.name}:{sym.kind}:{sym.line} (in {sym.parent})"
+        else:
+            print "{sym.name}:{sym.kind}:{sym.line}"
+    0
+
+# ============================================================================
+# Utility Helpers
+# ============================================================================
+
+fn _resolve_module_path(mod_path: text) -> text:
+    # Convert module path (std.text, app.cli.query) to file path
+    var path = mod_path
+    # std -> lib
+    if path.starts_with("std."):
+        path = "lib." + path.substring(4)
+    elif path.starts_with("lib."):
+        pass
+    elif path.starts_with("app."):
+        pass
+    elif path.starts_with("compiler."):
+        pass
+    else:
+        path = "lib." + path
+
+    # Replace dots with /
+    var parts = path.split(".")
+    var file_path = "src/" + parts.join("/")
+
+    # Try mod.spl first, then direct .spl
+    val mod_file = file_path + "/mod.spl"
+    val direct_file = file_path + ".spl"
+
+    # Check mod.spl
+    val mod_content = rt_file_read_text(mod_file) ?? ""
+    if mod_content != "":
+        return mod_file
+
+    # Check direct .spl
+    val direct_content = rt_file_read_text(direct_file) ?? ""
+    if direct_content != "":
+        return direct_file
+
+    ""
+
+fn _contains_word(line: text, word: text) -> bool:
+    # Check if line contains the word with word boundary-like checks
+    var pos = 0
+    while pos <= line.len() - word.len():
+        val candidate = line.substring(pos, pos + word.len())
+        if candidate == word:
+            # Check boundaries
+            var left_ok = true
+            var right_ok = true
+            if pos > 0:
+                val lch = line.substring(pos - 1, pos)
+                left_ok = not _is_word_char(lch)
+            if pos + word.len() < line.len():
+                val rch = line.substring(pos + word.len(), pos + word.len() + 1)
+                right_ok = not _is_word_char(rch)
+            if left_ok and right_ok:
+                return true
+        pos = pos + 1
+    false
+
+fn _is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _list_contains(items: [text], item: text) -> bool:
+    for x in items:
+        if x == item:
+            return true
+    false
+
+fn _matching_keywords(prefix: text) -> [text]:
+    val all_kw = ["fn", "val", "var", "class", "struct", "enum", "trait", "impl", "if", "elif", "else", "for", "while", "match", "case", "return", "break", "continue", "use", "import", "export", "extern", "static", "me", "in", "not", "and", "or", "true", "false", "nil", "self"]
+    var result: [text] = []
+    for kw in all_kw:
+        if kw.starts_with(prefix):
+            result.push(kw)
+    result
+
+export engine_find_definition, engine_find_references, engine_hover
+export engine_completions, engine_type_at, engine_signature_help, engine_document_symbols

@@ -1,0 +1,607 @@
+# Query CLI - AST Pattern Matching (S-expression structural queries)
+#
+# Provides tree-sitter-style structural pattern matching against outline AST.
+# Queries are S-expressions that match against file outlines parsed by query_engine.
+#
+# Syntax:
+#   (function name: "main")
+#   (function return_type: "i64" visibility: "pub")
+#   (class methods: (function name: "to_string"))
+#   (struct fields: (field type: "i64"))
+#   (import module: "std.*")
+#   (impl trait: "Printable")
+#   (* name: "foo")                      — wildcard node kind
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+use app.cli.query_engine.{engine_find_definition, engine_find_references, engine_hover, engine_completions, engine_type_at, engine_signature_help, engine_document_symbols}
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct _AstPattern:
+    node_kind: text
+    predicates: [_AstPred]
+    has_nested: bool
+    nested_field: text
+    nested_pattern_kind: text
+    nested_predicates: [_AstPred]
+
+struct _AstPred:
+    field: text
+    op: text
+    value: text
+
+struct _QueryMatch:
+    file: text
+    line: i64
+    kind: text
+    name: text
+    signature: text
+
+# ============================================================================
+# Internal: reuse query_engine parse helpers (duplicated to avoid import issues)
+# ============================================================================
+
+struct _SymInfo:
+    name: text
+    kind: text
+    line: i64
+    signature: text
+    doc_comment: text
+    parent: text
+    return_type: text
+    params: text
+
+struct _ImpInfo:
+    module_path: text
+    items: [text]
+
+fn _parse_file(file: text) -> [_SymInfo]:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return []
+    _parse_source(content)
+
+fn _parse_source(content: text) -> [_SymInfo]:
+    val lines = content.split("\n")
+    var symbols: [_SymInfo] = []
+    var doc_lines: [text] = []
+    var current_parent = ""
+    var line_num = 0
+
+    while line_num < lines.len():
+        val line = lines[line_num]
+        val trimmed = line.trim()
+        line_num = line_num + 1
+
+        if trimmed == "":
+            doc_lines = []
+            continue
+
+        if trimmed.starts_with("#"):
+            doc_lines.push(trimmed.substring(1).trim())
+            continue
+
+        val indent = _leading_spaces(line)
+        val doc = doc_lines.join("\n")
+        doc_lines = []
+
+        if indent == 0:
+            current_parent = ""
+            if trimmed.starts_with("fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("me "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("static fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("extern fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("class "):
+                val name = _extract_ident(trimmed.substring(6))
+                symbols.push(_SymInfo(name: name, kind: "class", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
+            elif trimmed.starts_with("struct "):
+                val name = _extract_ident(trimmed.substring(7))
+                symbols.push(_SymInfo(name: name, kind: "struct", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
+            elif trimmed.starts_with("enum "):
+                val name = _extract_ident(trimmed.substring(5))
+                symbols.push(_SymInfo(name: name, kind: "enum", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("trait "):
+                val name = _extract_ident(trimmed.substring(6))
+                symbols.push(_SymInfo(name: name, kind: "trait", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
+            elif trimmed.starts_with("impl "):
+                val name = _extract_ident(trimmed.substring(5))
+                symbols.push(_SymInfo(name: name, kind: "impl", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
+            elif trimmed.starts_with("val "):
+                val name = _extract_ident(trimmed.substring(4))
+                symbols.push(_SymInfo(name: name, kind: "val", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("var "):
+                val name = _extract_ident(trimmed.substring(4))
+                symbols.push(_SymInfo(name: name, kind: "var", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("use ") or trimmed.starts_with("import "):
+                var mod_path = trimmed
+                if mod_path.starts_with("use "):
+                    mod_path = mod_path.substring(4)
+                elif mod_path.starts_with("import "):
+                    mod_path = mod_path.substring(7)
+                # Strip brace part
+                var brace_idx = -1
+                var bi = 0
+                while bi < mod_path.len():
+                    if mod_path.substring(bi, bi + 1) == "{":
+                        brace_idx = bi
+                        break
+                    bi = bi + 1
+                if brace_idx > 0:
+                    mod_path = mod_path.substring(0, brace_idx).trim()
+                    if mod_path.ends_with("."):
+                        mod_path = mod_path.substring(0, mod_path.len() - 1)
+                symbols.push(_SymInfo(name: mod_path, kind: "import", line: line_num, signature: trimmed, doc_comment: "", parent: "", return_type: "", params: ""))
+        elif indent > 0 and current_parent != "":
+            if trimmed.starts_with("fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
+            elif trimmed.starts_with("me "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
+            elif trimmed.starts_with("static fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
+            # Fields inside struct/class
+            elif trimmed.contains(":") and not trimmed.starts_with("#"):
+                val colon_pos = _find_char(trimmed, ":")
+                if colon_pos > 0:
+                    val field_name = trimmed.substring(0, colon_pos).trim()
+                    val field_type = trimmed.substring(colon_pos + 1).trim()
+                    val is_ident = _is_valid_ident(field_name)
+                    if is_ident and field_name != "if" and field_name != "elif" and field_name != "else" and field_name != "for" and field_name != "while" and field_name != "return" and field_name != "val" and field_name != "var":
+                        symbols.push(_SymInfo(name: field_name, kind: "field", line: line_num, signature: trimmed, doc_comment: doc, parent: current_parent, return_type: field_type, params: ""))
+
+    symbols
+
+fn _parse_fn(trimmed: text, line_num: i64, doc: text, parent: text) -> _SymInfo:
+    var rest = trimmed
+    var kind = "fn"
+    if rest.starts_with("extern fn "):
+        rest = rest.substring(10)
+        kind = "extern_fn"
+    elif rest.starts_with("static fn "):
+        rest = rest.substring(10)
+        kind = "static_method"
+    elif rest.starts_with("me "):
+        rest = rest.substring(3)
+        kind = "method"
+    elif rest.starts_with("fn "):
+        rest = rest.substring(3)
+        if parent != "":
+            kind = "method"
+    val name = _extract_ident(rest)
+    val params = _extract_params(rest)
+    val ret = _extract_return_type(rest)
+    _SymInfo(name: name, kind: kind, line: line_num, signature: trimmed, doc_comment: doc, parent: parent, return_type: ret, params: params)
+
+fn _extract_ident(s: text) -> text:
+    var end_pos = 0
+    while end_pos < s.len():
+        val ch = s.substring(end_pos, end_pos + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return ""
+    s.substring(0, end_pos)
+
+fn _extract_params(s: text) -> text:
+    var paren_start = -1
+    var pi = 0
+    while pi < s.len():
+        if s.substring(pi, pi + 1) == "(":
+            paren_start = pi
+            break
+        pi = pi + 1
+    if paren_start < 0:
+        return ""
+    var depth = 0
+    var paren_end = -1
+    var qi = paren_start
+    while qi < s.len():
+        val ch = s.substring(qi, qi + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                paren_end = qi
+                break
+        qi = qi + 1
+    if paren_end < 0:
+        return ""
+    s.substring(paren_start + 1, paren_end)
+
+fn _extract_return_type(s: text) -> text:
+    var ai = 0
+    while ai < s.len() - 1:
+        val two = s.substring(ai, ai + 2)
+        if two == "->":
+            val after = s.substring(ai + 2).trim()
+            var end_pos = 0
+            while end_pos < after.len():
+                val ch = after.substring(end_pos, end_pos + 1)
+                if ch == ":":
+                    break
+                end_pos = end_pos + 1
+            return after.substring(0, end_pos).trim()
+        ai = ai + 1
+    ""
+
+fn _leading_spaces(line: text) -> i64:
+    var count = 0
+    while count < line.len():
+        val ch = line.substring(count, count + 1)
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn _find_char(s: text, target: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == target:
+            return i
+        i = i + 1
+    -1
+
+fn _is_valid_ident(s: text) -> bool:
+    if s == "":
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# S-expression Pattern Parser
+# ============================================================================
+
+fn _parse_ast_pattern(query_str: text) -> _AstPattern:
+    val q = query_str.trim()
+    # Expected format: (node_kind pred1: "val1" pred2: "val2")
+    # or nested: (node_kind field: (nested_kind pred: "val"))
+    if q.len() < 3:
+        return _AstPattern(node_kind: "", predicates: [], has_nested: false, nested_field: "", nested_pattern_kind: "", nested_predicates: [])
+    # Strip outer parens
+    var inner = q
+    if inner.starts_with("(") and inner.ends_with(")"):
+        inner = inner.substring(1, inner.len() - 1).trim()
+
+    # Extract node kind (first word) — handle * wildcard specially
+    var node_kind = _extract_ident(inner)
+    if node_kind == "" and inner.starts_with("*"):
+        node_kind = "*"
+    if node_kind == "":
+        return _AstPattern(node_kind: "", predicates: [], has_nested: false, nested_field: "", nested_pattern_kind: "", nested_predicates: [])
+
+    var rest = inner.substring(node_kind.len()).trim()
+    var predicates: [_AstPred] = []
+    var has_nested = false
+    var nested_field = ""
+    var nested_kind = ""
+    var nested_preds: [_AstPred] = []
+
+    # Parse predicates: field: "value" or field: (nested)
+    var safety = 0
+    while rest != "" and safety < 50:
+        safety = safety + 1
+        # Extract field name (before colon)
+        val field = _extract_ident(rest)
+        if field == "":
+            break
+        rest = rest.substring(field.len()).trim()
+        if not rest.starts_with(":"):
+            break
+        rest = rest.substring(1).trim()
+
+        # Check if value is nested pattern or string
+        if rest.starts_with("("):
+            # Nested pattern — find matching paren
+            var depth = 0
+            var end_pos = 0
+            while end_pos < rest.len():
+                val ch = rest.substring(end_pos, end_pos + 1)
+                if ch == "(":
+                    depth = depth + 1
+                elif ch == ")":
+                    depth = depth - 1
+                    if depth == 0:
+                        end_pos = end_pos + 1
+                        break
+                end_pos = end_pos + 1
+            val nested_str = rest.substring(0, end_pos)
+            has_nested = true
+            nested_field = field
+            val np = _parse_ast_pattern(nested_str)
+            nested_kind = np.node_kind
+            nested_preds = np.predicates
+            rest = rest.substring(end_pos).trim()
+        elif rest.starts_with("\""):
+            # String value
+            val close_q = _find_char(rest.substring(1), "\"")
+            if close_q >= 0:
+                val value = rest.substring(1, close_q + 1)
+                # Determine operator: default is "="
+                var op = "="
+                if value.contains("*"):
+                    op = "~"
+                predicates.push(_AstPred(field: field, op: op, value: value))
+                rest = rest.substring(close_q + 2).trim()
+            else:
+                break
+        elif rest.starts_with("@"):
+            # Capture binding — skip for now (treat as wildcard match)
+            val cap_name = _extract_ident(rest.substring(1))
+            rest = rest.substring(1 + cap_name.len()).trim()
+            predicates.push(_AstPred(field: field, op: "=", value: "*"))
+        else:
+            # Bare word value
+            val bare_val = _extract_ident(rest)
+            if bare_val != "":
+                predicates.push(_AstPred(field: field, op: "=", value: bare_val))
+                rest = rest.substring(bare_val.len()).trim()
+            else:
+                break
+
+    _AstPattern(node_kind: node_kind, predicates: predicates, has_nested: has_nested, nested_field: nested_field, nested_pattern_kind: nested_kind, nested_predicates: nested_preds)
+
+# ============================================================================
+# Matching Logic
+# ============================================================================
+
+fn _match_against_file(pattern: _AstPattern, file: text) -> [_QueryMatch]:
+    var matches: [_QueryMatch] = []
+    val syms = _parse_file(file)
+
+    for sym in syms:
+        if _match_sym(pattern, sym):
+            if pattern.has_nested:
+                # For nested patterns (e.g. class with specific methods)
+                val nested_matches = _match_nested(pattern, sym.name, syms, file)
+                if nested_matches.len() > 0:
+                    matches.push(_QueryMatch(file: file, line: sym.line, kind: sym.kind, name: sym.name, signature: sym.signature))
+            else:
+                matches.push(_QueryMatch(file: file, line: sym.line, kind: sym.kind, name: sym.name, signature: sym.signature))
+
+    matches
+
+fn _kind_matches(pattern_kind: text, sym_kind: text) -> bool:
+    if pattern_kind == "*":
+        return true
+    # Map query node kinds to symbol kinds
+    if pattern_kind == "function" or pattern_kind == "fn":
+        return sym_kind == "fn" or sym_kind == "method" or sym_kind == "static_method" or sym_kind == "extern_fn"
+    if pattern_kind == "class":
+        return sym_kind == "class"
+    if pattern_kind == "struct":
+        return sym_kind == "struct"
+    if pattern_kind == "enum":
+        return sym_kind == "enum"
+    if pattern_kind == "trait":
+        return sym_kind == "trait"
+    if pattern_kind == "impl":
+        return sym_kind == "impl"
+    if pattern_kind == "import":
+        return sym_kind == "import"
+    if pattern_kind == "field":
+        return sym_kind == "field"
+    if pattern_kind == "val":
+        return sym_kind == "val"
+    if pattern_kind == "var":
+        return sym_kind == "var"
+    sym_kind == pattern_kind
+
+fn _match_sym(pattern: _AstPattern, sym: _SymInfo) -> bool:
+    if not _kind_matches(pattern.node_kind, sym.kind):
+        return false
+    # Evaluate all predicates
+    for pred in pattern.predicates:
+        if not _eval_ast_pred(pred, sym):
+            return false
+    true
+
+fn _eval_ast_pred(pred: _AstPred, sym: _SymInfo) -> bool:
+    var field_val = ""
+    if pred.field == "name":
+        field_val = sym.name
+    elif pred.field == "return_type":
+        field_val = sym.return_type
+    elif pred.field == "params":
+        field_val = sym.params
+    elif pred.field == "type":
+        field_val = sym.return_type
+    elif pred.field == "module":
+        if sym.kind == "import":
+            field_val = sym.name
+        else:
+            field_val = ""
+    elif pred.field == "parent":
+        field_val = sym.parent
+    elif pred.field == "kind":
+        field_val = sym.kind
+    elif pred.field == "signature":
+        field_val = sym.signature
+    elif pred.field == "trait":
+        # For impl nodes, extract trait name from signature
+        if sym.kind == "impl":
+            field_val = _extract_trait_from_impl(sym.signature)
+        else:
+            field_val = ""
+    elif pred.field == "visibility":
+        # Approximate: top-level with no _ prefix = pub
+        if sym.parent == "" and not sym.name.starts_with("_"):
+            field_val = "pub"
+        else:
+            field_val = "private"
+    else:
+        return false
+
+    if pred.value == "*":
+        return field_val != ""
+
+    if pred.op == "=":
+        return field_val == pred.value
+    elif pred.op == "~":
+        return _glob_match(field_val, pred.value)
+    elif pred.op == "starts_with":
+        return field_val.starts_with(pred.value)
+    elif pred.op == "contains":
+        return field_val.contains(pred.value)
+    false
+
+fn _extract_trait_from_impl(sig: text) -> text:
+    # "impl Trait for Type:" -> "Trait"
+    # "impl Type:" -> "Type"
+    var rest = sig
+    if rest.starts_with("impl "):
+        rest = rest.substring(5).trim()
+    val first_word = _extract_ident(rest)
+    val after = rest.substring(first_word.len()).trim()
+    if after.starts_with("for "):
+        return first_word
+    first_word
+
+fn _glob_match(value: text, pattern: text) -> bool:
+    # Simple glob: * matches any sequence
+    if pattern == "*":
+        return true
+    if not pattern.contains("*"):
+        return value == pattern
+    # Split pattern on * and check parts appear in order
+    val parts = pattern.split("*")
+    var pos = 0
+    for part in parts:
+        if part == "":
+            continue
+        val idx = _index_of_from(value, part, pos)
+        if idx < 0:
+            return false
+        pos = idx + part.len()
+    true
+
+fn _index_of_from(s: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i <= s.len() - needle.len():
+        if s.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _match_nested(pattern: _AstPattern, parent_name: text, syms: [_SymInfo], file: text) -> [_QueryMatch]:
+    var matches: [_QueryMatch] = []
+    for sym in syms:
+        if sym.parent == parent_name:
+            if _kind_matches(pattern.nested_pattern_kind, sym.kind):
+                var all_match = true
+                for pred in pattern.nested_predicates:
+                    if not _eval_ast_pred(pred, sym):
+                        all_match = false
+                        break
+                if all_match:
+                    matches.push(_QueryMatch(file: file, line: sym.line, kind: sym.kind, name: sym.name, signature: sym.signature))
+    matches
+
+# ============================================================================
+# File Expansion
+# ============================================================================
+
+fn _expand_files(file_pattern: text) -> [text]:
+    # If file_pattern is a directory, find all .spl files in it
+    var files: [text] = []
+    if file_pattern == "":
+        return files
+    if file_pattern.ends_with("/"):
+        val (out, stderr, code) = rt_process_run("find", [file_pattern, "-name", "*.spl", "-type", "f"])
+        if code == 0 and out.trim() != "":
+            val found = out.split("\n")
+            for f in found:
+                val ft = f.trim()
+                if ft != "":
+                    files.push(ft)
+        return files
+    if file_pattern.contains("*"):
+        # Use shell glob
+        val (out, stderr, code) = rt_process_run("/bin/sh", ["-c", "ls " + file_pattern + " 2>/dev/null"])
+        if code == 0 and out.trim() != "":
+            val found = out.split("\n")
+            for f in found:
+                val ft = f.trim()
+                if ft != "":
+                    files.push(ft)
+        return files
+    # Single file
+    files.push(file_pattern)
+    files
+
+# ============================================================================
+# Output Formatting
+# ============================================================================
+
+fn _print_ast_matches(matches: [_QueryMatch], format_str: text):
+    if format_str == "json":
+        print "["
+        var i = 0
+        for m in matches:
+            var comma = ","
+            if i == matches.len() - 1:
+                comma = ""
+            print "  {\"file\": \"{m.file}\", \"line\": {m.line}, \"kind\": \"{m.kind}\", \"name\": \"{m.name}\", \"signature\": \"{m.signature}\"}{comma}"
+            i = i + 1
+        print "]"
+    elif format_str == "compact":
+        for m in matches:
+            print "{m.file}:{m.line}: [{m.kind}] {m.name}"
+    else:
+        for m in matches:
+            print "{m.file}:{m.line}: [{m.kind}] {m.name}"
+            print "  {m.signature}"
+
+# ============================================================================
+# Public Entry Point
+# ============================================================================
+
+fn engine_ast_query(query_str: text, files: [text], format_str: text) -> i64:
+    val pattern = _parse_ast_pattern(query_str)
+    if pattern.node_kind == "":
+        print "Error: invalid AST query pattern"
+        print "Expected: (node_kind predicate: \"value\" ...)"
+        print "Node kinds: function, class, struct, enum, trait, impl, import, field, val, var, *"
+        print "Predicates: name, return_type, params, type, module, parent, kind, signature, trait, visibility"
+        return 1
+
+    var all_matches: [_QueryMatch] = []
+    for file_pat in files:
+        val expanded = _expand_files(file_pat)
+        for file in expanded:
+            val file_matches = _match_against_file(pattern, file)
+            for m in file_matches:
+                all_matches.push(m)
+
+    if all_matches.len() == 0:
+        print "No matches found"
+        return 0
+
+    _print_ast_matches(all_matches, format_str)
+    print ""
+    print "Total: {all_matches.len()} matches"
+    0
+
+export engine_ast_query

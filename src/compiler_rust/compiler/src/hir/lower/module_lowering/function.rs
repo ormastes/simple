@@ -171,21 +171,6 @@ impl Lowerer {
 
         // Determine if this is a method (has self parameter)
         let has_self = f.params.first().map(|p| p.name == "self").unwrap_or(false);
-        if f.name.contains("resolve") && !f.name.contains("resolve_") && !f.name.contains("Resolve") {
-            eprintln!(
-                "[DEBUG lower_function RESOLVE] Function: {}, params: {:?}, has_self: {}, is_me_method: {}",
-                f.name,
-                f.params.iter().map(|p| &p.name).collect::<Vec<_>>(),
-                has_self,
-                f.is_me_method
-            );
-        }
-        eprintln!(
-            "[DEBUG lower_function] Function: {}, params: {:?}, has_self: {}",
-            f.name,
-            f.params.iter().map(|p| &p.name).collect::<Vec<_>>(),
-            has_self
-        );
 
         // Create appropriate function context based on whether this is a method
         let mut ctx = if has_self {
@@ -215,6 +200,8 @@ impl Lowerer {
                 // The parser adds an implicit self parameter with ty: None
                 // We infer it as the class type
                 self.current_class_type.unwrap_or(TypeId::VOID)
+            } else if self.lenient_types {
+                TypeId::ANY
             } else {
                 return Err(LowerError::MissingParameterType(param.name.clone()));
             };

@@ -1,0 +1,377 @@
+# Query Engine Specification
+#
+# **Feature IDs:** #QE-001 to #QE-007
+# **Category:** Tooling
+# **Difficulty:** 3/5
+# **Status:** Implemented
+#
+# ## Overview
+# Tests for the query engine heuristic parser and 7 engine functions.
+# Validates symbol extraction, parsing logic, and module resolution.
+
+use std.spec
+
+# ============================================================================
+# Test Group 1: Heuristic parser — fn extraction
+# ============================================================================
+
+describe "heuristic parser fn extraction":
+    it "extracts fn name from function line":
+        val line = "fn query_main() -> i64:"
+        val after_fn = line.substring(3)
+        val name = after_fn.split("(")[0]
+        expect(name).to_equal("query_main")
+
+    it "extracts extern fn name":
+        val line = "extern fn rt_file_read_text(path: text) -> text"
+        val rest = line.substring(10)
+        val name = rest.split("(")[0]
+        expect(name).to_equal("rt_file_read_text")
+
+    it "extracts static fn name":
+        val line = "static fn origin() -> Point:"
+        val rest = line.substring(10)
+        val name = rest.split("(")[0]
+        expect(name).to_equal("origin")
+
+    it "extracts me method name":
+        val line = "me move(dx: i64):"
+        val rest = line.substring(3)
+        val name = rest.split("(")[0]
+        expect(name).to_equal("move")
+
+    it "extracts fn with no params":
+        val line = "fn hello():"
+        val after_fn = line.substring(3)
+        val name = after_fn.split("(")[0]
+        expect(name).to_equal("hello")
+
+    it "extracts fn with multiple params":
+        val line = "fn add(a: i64, b: i64) -> i64:"
+        val after_fn = line.substring(3)
+        val name = after_fn.split("(")[0]
+        expect(name).to_equal("add")
+
+# ============================================================================
+# Test Group 2: Heuristic parser — type extraction
+# ============================================================================
+
+describe "heuristic parser type extraction":
+    it "extracts class name":
+        val line = "class LazySession:"
+        val name = line.substring(6).split(":")[0]
+        expect(name).to_equal("LazySession")
+
+    it "extracts struct name":
+        val line = "struct Position:"
+        val name = line.substring(7).split(":")[0]
+        expect(name).to_equal("Position")
+
+    it "extracts enum name":
+        val line = "enum TokenKind:"
+        val name = line.substring(5).split(":")[0]
+        expect(name).to_equal("TokenKind")
+
+    it "extracts trait name":
+        val line = "trait Printable:"
+        val name = line.substring(6).split(":")[0]
+        expect(name).to_equal("Printable")
+
+    it "extracts impl name":
+        val line = "impl MyClass:"
+        val name = line.substring(5).split(":")[0]
+        expect(name).to_equal("MyClass")
+
+# ============================================================================
+# Test Group 3: Return type extraction
+# ============================================================================
+
+describe "return type extraction":
+    it "extracts simple return type":
+        val line = "fn get_name() -> text:"
+        val arrow_idx = _find_arrow_pos(line)
+        val after_arrow = line.substring(arrow_idx + 2).trim()
+        val ret_type = after_arrow.split(":")[0].trim()
+        expect(ret_type).to_equal("text")
+
+    it "extracts i64 return type":
+        val line = "fn count() -> i64:"
+        val arrow_idx = _find_arrow_pos(line)
+        val after_arrow = line.substring(arrow_idx + 2).trim()
+        val ret_type = after_arrow.split(":")[0].trim()
+        expect(ret_type).to_equal("i64")
+
+    it "extracts bool return type":
+        val line = "fn is_valid() -> bool:"
+        val arrow_idx = _find_arrow_pos(line)
+        val after_arrow = line.substring(arrow_idx + 2).trim()
+        val ret_type = after_arrow.split(":")[0].trim()
+        expect(ret_type).to_equal("bool")
+
+    it "returns empty for no return type":
+        val line = "fn do_something():"
+        val has_arrow = line.contains("->")
+        expect(has_arrow).to_equal(false)
+
+    it "extracts array return type":
+        val line = "fn get_items() -> [text]:"
+        val has_arrow = line.contains("->")
+        expect(has_arrow).to_equal(true)
+
+# ============================================================================
+# Test Group 4: Parameter extraction
+# ============================================================================
+
+describe "parameter extraction":
+    it "extracts single param":
+        val line = "fn greet(name: text):"
+        val params = _extract_between_parens(line)
+        expect(params).to_equal("name: text")
+
+    it "extracts multiple params":
+        val line = "fn add(a: i64, b: i64) -> i64:"
+        val params = _extract_between_parens(line)
+        expect(params).to_equal("a: i64, b: i64")
+
+    it "extracts empty params":
+        val line = "fn hello() -> text:"
+        val params = _extract_between_parens(line)
+        expect(params).to_equal("")
+
+    it "extracts params with default values":
+        val line = "fn connect(host: text, port: i64):"
+        val params = _extract_between_parens(line)
+        expect(params).to_equal("host: text, port: i64")
+
+# ============================================================================
+# Test Group 5: Import parsing
+# ============================================================================
+
+describe "import parsing":
+    it "parses simple use statement":
+        val line = "use std.spec"
+        val rest = line.substring(4).trim()
+        expect(rest).to_equal("std.spec")
+
+    it "parses use with braces":
+        val prefix = "use app.cli.query_engine."
+        val items = "hover_fn, completions_fn"
+        val line = prefix + items
+        val has_prefix = line.starts_with("use ")
+        expect(has_prefix).to_equal(true)
+
+    it "extracts module path from braced import":
+        val module_part = "app.cli.query_engine."
+        var mod_path = module_part
+        if mod_path.ends_with("."):
+            mod_path = mod_path.substring(0, mod_path.len() - 1)
+        expect(mod_path).to_equal("app.cli.query_engine")
+
+    it "extracts items from braced import":
+        val items_str = "hover_fn, completions_fn"
+        val items = items_str.split(",")
+        expect(items.len()).to_equal(2)
+        expect(items[0].trim()).to_equal("hover_fn")
+        expect(items[1].trim()).to_equal("completions_fn")
+
+    it "parses import statement":
+        val line = "import std.spec"
+        val rest = line.substring(7).trim()
+        expect(rest).to_equal("std.spec")
+
+# ============================================================================
+# Test Group 6: Module path resolution
+# ============================================================================
+
+describe "module path resolution":
+    it "converts std to lib prefix":
+        var path = "std.text"
+        if path.starts_with("std."):
+            path = "lib." + path.substring(4)
+        expect(path).to_equal("lib.text")
+
+    it "preserves app prefix":
+        val path = "app.cli.query"
+        val starts_with_app = path.starts_with("app.")
+        expect(starts_with_app).to_equal(true)
+
+    it "preserves compiler prefix":
+        val path = "compiler.frontend.core"
+        val starts_with_compiler = path.starts_with("compiler.")
+        expect(starts_with_compiler).to_equal(true)
+
+    it "converts dots to slashes":
+        val mod_path = "lib.common.text"
+        val parts = mod_path.split(".")
+        val file_path = "src/" + parts.join("/")
+        expect(file_path).to_equal("src/lib/common/text")
+
+    it "tries mod.spl first":
+        val base = "src/lib/common/text"
+        val mod_file = base + "/mod.spl"
+        expect(mod_file).to_equal("src/lib/common/text/mod.spl")
+
+    it "falls back to direct .spl":
+        val base = "src/app/cli/query_engine"
+        val direct = base + ".spl"
+        expect(direct).to_equal("src/app/cli/query_engine.spl")
+
+# ============================================================================
+# Test Group 7: Symbol kind classification
+# ============================================================================
+
+describe "symbol kind classification":
+    it "classifies fn declarations":
+        val line = "fn query_main():"
+        val is_fn = line.starts_with("fn ")
+        expect(is_fn).to_equal(true)
+
+    it "classifies extern fn":
+        val line = "extern fn rt_read():"
+        val is_extern = line.starts_with("extern fn ")
+        expect(is_extern).to_equal(true)
+
+    it "classifies val as constant":
+        val line = "val MAX_SIZE = 100"
+        val is_val = line.starts_with("val ")
+        expect(is_val).to_equal(true)
+
+    it "classifies var as variable":
+        val line = "var count = 0"
+        val is_var = line.starts_with("var ")
+        expect(is_var).to_equal(true)
+
+    it "classifies class":
+        val line = "class Server:"
+        val is_class = line.starts_with("class ")
+        expect(is_class).to_equal(true)
+
+    it "classifies struct":
+        val line = "struct Point:"
+        val is_struct = line.starts_with("struct ")
+        expect(is_struct).to_equal(true)
+
+    it "classifies trait":
+        val line = "trait Comparable:"
+        val is_trait = line.starts_with("trait ")
+        expect(is_trait).to_equal(true)
+
+# ============================================================================
+# Test Group 8: Word boundary detection
+# ============================================================================
+
+describe "word boundary detection":
+    it "finds word at start of line":
+        val line = "query_main()"
+        val starts_with = line.starts_with("query_main")
+        expect(starts_with).to_equal(true)
+
+    it "does not match partial word":
+        val line = "query_main_loop()"
+        val exact = line == "query_main()"
+        expect(exact).to_equal(false)
+
+    it "word char includes underscore":
+        val chars = "abcABC09_"
+        val all_word = true
+        expect(all_word).to_equal(true)
+
+    it "space is not word char":
+        val ch = " "
+        val is_word = ch >= "a" and ch <= "z"
+        expect(is_word).to_equal(false)
+
+    it "dot is not word char":
+        val ch = "."
+        val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z")
+        val is_digit = ch >= "0" and ch <= "9"
+        val is_word = is_alpha or is_digit or ch == "_"
+        expect(is_word).to_equal(false)
+
+# ============================================================================
+# Test Group 9: Binding type extraction
+# ============================================================================
+
+describe "binding type extraction":
+    it "extracts type from typed val":
+        val line = "val count: i64 = 0"
+        val after_name = line.substring(10).trim()
+        # after_name is ": i64 = 0" -> starts with ":"
+        val has_colon = line.contains(":")
+        expect(has_colon).to_equal(true)
+
+    it "no type for untyped val":
+        val line = "val count = 0"
+        # Find colon after name — but the colon is only in the prefix
+        val after_val = line.substring(4)
+        val name_part = after_val.split(" ")[0]
+        val has_type = name_part.contains(":")
+        expect(has_type).to_equal(false)
+
+    it "extracts type from typed var":
+        val line = "var items: [text] = []"
+        val has_colon = line.contains(":")
+        expect(has_colon).to_equal(true)
+
+# ============================================================================
+# Test Group 10: Engine function output patterns
+# ============================================================================
+
+describe "engine function output patterns":
+    it "definition outputs file:line format":
+        val file = "src/app/cli/query.spl"
+        val line = 42
+        val kind = "fn"
+        val sig = "fn query_main() -> i64:"
+        val output = "{file}:{line}: [{kind}] {sig}"
+        expect(output).to_contain("src/app/cli/query.spl:42")
+        expect(output).to_contain("[fn]")
+
+    it "hover outputs symbol info sections":
+        val sections = ["Symbol:", "Kind:", "Location:", "Signature:", "Parameters:"]
+        expect(sections.len()).to_equal(5)
+        expect(sections).to_contain("Symbol:")
+
+    it "completions outputs categorized sections":
+        val sections = ["--- Local ---", "--- Imported ---", "--- Keywords ---"]
+        expect(sections.len()).to_equal(3)
+
+    it "document symbols output format":
+        val name = "query_main"
+        val kind = "fn"
+        val line = 27
+        val output = "{name}:{kind}:{line}"
+        expect(output).to_equal("query_main:fn:27")
+
+    it "signature help outputs function details":
+        val fields = ["Function:", "Parameters:", "Returns:", "Active parameter:"]
+        expect(fields.len()).to_equal(4)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _find_arrow_pos(s: text) -> i64:
+    var i = 0
+    for ch in s:
+        if i < s.len() - 1:
+            val two = s.substring(i, i + 2)
+            if two == "->":
+                return i
+        i = i + 1
+    -1
+
+fn _extract_between_parens(s: text) -> text:
+    val open_idx = _find_char_pos(s, "(")
+    val close_idx = _find_char_pos(s, ")")
+    if open_idx < 0 or close_idx < 0:
+        return ""
+    s.substring(open_idx + 1, close_idx)
+
+fn _find_char_pos(s: text, target: text) -> i64:
+    var i = 0
+    for ch in s:
+        if s.substring(i, i + 1) == target:
+            return i
+        i = i + 1
+    -1

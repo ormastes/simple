@@ -124,6 +124,11 @@ pub enum HirType {
         name: String,
         variants: Vec<(String, Option<Vec<TypeId>>)>,
     },
+    /// Dict type with key and value types (enables correct field access on dict values)
+    Dict {
+        key: TypeId,
+        value: TypeId,
+    },
     Unknown,
 }
 
@@ -467,12 +472,22 @@ impl TypeRegistry {
         id
     }
 
+    /// Update an existing type's definition (used to fill in placeholder types).
+    pub fn update_type(&mut self, id: TypeId, ty: HirType) {
+        self.types.insert(id, ty);
+    }
+
     pub fn get(&self, id: TypeId) -> Option<&HirType> {
         self.types.get(&id)
     }
 
     pub fn lookup(&self, name: &str) -> Option<TypeId> {
         self.name_to_id.get(name).copied()
+    }
+
+    /// Iterate over all registered types.
+    pub fn all_types(&self) -> impl Iterator<Item = &HirType> {
+        self.types.values()
     }
 
     /// Register a type alias - maps a name to an existing type ID
@@ -529,6 +544,8 @@ impl TypeRegistry {
                 matches!(kind, PointerKind::Borrow) && self.is_snapshot_safe(*inner)
             }
 
+            // Dicts are not snapshot-safe (mutable container)
+            Some(HirType::Dict { .. }) => false,
             // Functions and unknown types are not snapshot-safe
             Some(HirType::Function { .. }) => false,
             Some(HirType::Unknown) => false,
@@ -686,6 +703,19 @@ pub enum HirExprKind {
     /// old(expr) in postconditions - refers to value at function entry
     /// The expression is evaluated at function entry and stored for use in postconditions
     ContractOld(Box<HirExpr>),
+
+    /// Enum unit variant construction (no payload): `TypeName.VariantName`
+    EnumUnit {
+        enum_name: String,
+        variant_name: String,
+    },
+
+    /// Let binding in expression context — binds value to local, then evaluates body
+    LetBind {
+        local_idx: usize,
+        value: Box<HirExpr>,
+        body: Box<HirExpr>,
+    },
 }
 
 impl HirExprKind {
@@ -747,6 +777,20 @@ impl HirExprKind {
                 name: name.clone(),
                 args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
             },
+
+            HirExprKind::LetBind { local_idx, value, body } => {
+                HirExprKind::LetBind {
+                    local_idx: if *local_idx == from_idx { to_idx } else { *local_idx },
+                    value: Box::new(HirExpr {
+                        kind: value.kind.substitute_local(from_idx, to_idx),
+                        ty: value.ty,
+                    }),
+                    body: Box::new(HirExpr {
+                        kind: body.kind.substitute_local(from_idx, to_idx),
+                        ty: body.ty,
+                    }),
+                }
+            }
 
             // Literals and other non-local expressions are unchanged
             _ => self.clone(),
@@ -923,6 +967,9 @@ pub enum HirStmt {
     While {
         condition: HirExpr,
         body: Vec<HirStmt>,
+        /// Increment statements for for-loop desugaring.
+        /// `continue` jumps to these before re-checking the condition.
+        increment: Vec<HirStmt>,
     },
     Loop {
         body: Vec<HirStmt>,

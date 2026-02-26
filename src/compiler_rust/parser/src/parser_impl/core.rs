@@ -69,6 +69,9 @@ pub struct Parser<'a> {
     pub(crate) no_brace_postfix: bool,
     /// Buffer for statements produced by multi-node desugaring (e.g., structured_export)
     pub(crate) pending_statements: Vec<Node>,
+    /// Count of INDENT tokens consumed during binary expression line continuation
+    /// that need matching DEDENTs consumed after the expression.
+    pub(crate) binary_indent_count: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -93,6 +96,7 @@ impl<'a> Parser<'a> {
             pattern_indent_count: 0,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
+            binary_indent_count: 0,
         };
 
         // Check for common mistakes in the initial token
@@ -178,6 +182,7 @@ impl<'a> Parser<'a> {
             pattern_indent_count: 0,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
+            binary_indent_count: 0,
         }
     }
 
@@ -328,10 +333,40 @@ impl<'a> Parser<'a> {
         // Check for doc comment before item
         let doc_comment = self.try_parse_doc_comment();
 
+        // Handle metadata/config blocks: `arch { ... }`, `config { ... }` etc.
+        // These are identifier followed by `{` containing key = value pairs.
+        // Check before the match to avoid borrow checker issues with match guards.
+        let is_metadata_block = matches!(&self.current.kind,
+            TokenKind::Identifier { name, .. }
+                if name == "arch" || name == "config" || name == "metadata"
+        ) && self.peek_is(&TokenKind::LBrace);
+
+        if is_metadata_block {
+            return self.parse_metadata_block();
+        }
+
+        // `me` starts a mutable method declaration (me method_name(...):)
+        // BUT `me.field` or `me.method()` is an expression (field access/method call on self).
+        // Similarly, `gen` and `kernel` start function declarations but can also be variable names.
+        // Disambiguate by checking what follows: dot/assign/lparen means expression, identifier means decl.
+        // Check before the match to avoid borrow checker issues with match guards.
+        let is_me_method_decl = matches!(&self.current.kind, TokenKind::Me)
+            && !self.peek_is(&TokenKind::Dot);
+        let is_gen_or_kernel_decl = matches!(&self.current.kind, TokenKind::Gen | TokenKind::Kernel)
+            && !self.peek_is(&TokenKind::Dot)
+            && !self.peek_is(&TokenKind::Assign)
+            && !self.peek_is(&TokenKind::LParen);
+
         match &self.current.kind {
             TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
             TokenKind::At => self.parse_decorated_function_with_doc(doc_comment),
-            TokenKind::Fn | TokenKind::Me | TokenKind::Kernel | TokenKind::Gen => {
+            TokenKind::Fn => {
+                self.parse_function_with_doc(doc_comment)
+            }
+            TokenKind::Kernel | TokenKind::Gen if is_gen_or_kernel_decl => {
+                self.parse_function_with_doc(doc_comment)
+            }
+            TokenKind::Me if is_me_method_decl => {
                 self.parse_function_with_doc(doc_comment)
             }
             TokenKind::Async => self.parse_async_function_with_doc(doc_comment),
@@ -546,9 +581,65 @@ impl<'a> Parser<'a> {
                     self.parse_examples()
                 }
             }
-            TokenKind::Given | TokenKind::When | TokenKind::Then | TokenKind::AndThen => self.parse_step_ref_as_node(),
+            TokenKind::Given | TokenKind::Then | TokenKind::AndThen => self.parse_step_ref_as_node(),
+            TokenKind::When => {
+                // Disambiguate `when COND:` (conditional compilation) from `when "step":` (BDD/Gherkin)
+                // If followed by an identifier (not a string), treat as conditional compilation
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+                if matches!(next.kind, TokenKind::Identifier { .. } | TokenKind::Not) {
+                    self.parse_when_block()
+                } else {
+                    self.parse_step_ref_as_node()
+                }
+            }
             // Wildcard suspension: _ ~= expr (discard awaited result)
             TokenKind::Underscore => self.parse_wildcard_suspend(),
+            // `module name:` is an alias for `mod name:` (inline module block)
+            TokenKind::Identifier { name, .. } if name == "module" => {
+                // Check if followed by an identifier (module name) - if so, treat like mod
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+                if matches!(next.kind, TokenKind::Identifier { .. }) {
+                    // Replace 'module' identifier with Mod keyword behavior
+                    self.advance(); // consume 'module' identifier
+                    // Now parse the rest like `mod name: ...` but without expecting 'mod' keyword
+                    let start_span = self.previous.span;
+                    let mod_name = self.expect_identifier()?;
+                    let body = if self.check(&TokenKind::Colon) {
+                        self.advance();
+                        self.expect(&TokenKind::Newline)?;
+                        self.expect(&TokenKind::Indent)?;
+                        let mut items = Vec::new();
+                        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                            while self.check(&TokenKind::Newline) { self.advance(); }
+                            if self.check(&TokenKind::Dedent) { break; }
+                            items.push(self.parse_item()?);
+                        }
+                        if self.check(&TokenKind::Dedent) { self.advance(); }
+                        Some(items)
+                    } else {
+                        None
+                    };
+                    Ok(Node::ModDecl(crate::ast::ModDecl {
+                        span: crate::token::Span::new(
+                            start_span.start, self.previous.span.end, start_span.line, start_span.column,
+                        ),
+                        name: mod_name,
+                        visibility: crate::ast::Visibility::Private,
+                        attributes: vec![],
+                        body,
+                    }))
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
             // Note: Implicit val/var (`name = expr`) is experimental/future.
             // Currently disabled because it conflicts with assignment syntax.
             // When enabled, it needs scope analysis to distinguish new bindings from reassignment.
@@ -560,9 +651,77 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_block(&mut self) -> Result<Block, ParseError> {
         // Expect NEWLINE then INDENT
         self.expect(&TokenKind::Newline)?;
+
+        // Simple supports "flat body" pattern where block body appears on the
+        // next line at the SAME indentation level (no indent token):
+        //   if cond:
+        //   return val          # <-- same indent as `if`
+        //
+        // Handle by checking if next token is a valid statement-start token
+        // instead of an Indent. If so, parse a single-statement body.
+        if !self.check(&TokenKind::Indent) {
+            // Skip blank lines before checking
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+
+            if self.is_statement_start() {
+                let start_span = self.current.span;
+                let stmt = self.parse_item()?;
+                return Ok(Block {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                    statements: vec![stmt],
+                });
+            }
+
+            // Empty body: `case nil:` followed by dedent or another case
+            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+                let span = self.current.span;
+                return Ok(Block {
+                    span,
+                    statements: vec![],
+                });
+            }
+
+            // Fall through to expect Indent (will produce error)
+        }
+
         self.expect(&TokenKind::Indent)?;
 
         self.parse_block_body()
+    }
+
+    /// Check if the current token can start a statement.
+    /// Used to detect "flat body" patterns (body at same indentation after colon).
+    fn is_statement_start(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::Return
+                | TokenKind::Break
+                | TokenKind::Continue
+                | TokenKind::If
+                | TokenKind::For
+                | TokenKind::While
+                | TokenKind::Match
+                | TokenKind::Loop
+                | TokenKind::Pass
+                | TokenKind::Val
+                | TokenKind::Var
+                | TokenKind::Fn
+                | TokenKind::Me
+                | TokenKind::Defer
+                | TokenKind::Assert
+                | TokenKind::Assume
+                | TokenKind::Use
+                | TokenKind::Import
+                | TokenKind::Export
+                | TokenKind::Identifier { .. }
+        )
     }
 
     /// Parse block body (assumes INDENT has already been consumed).
@@ -739,5 +898,46 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::RParen)?;
         Ok(types)
+    }
+
+    /// Parse a metadata/config block: `arch { key = value ... }`
+    /// This consumes the identifier, opening brace, all contents (balancing nested braces),
+    /// and the closing brace. Returns a Pass node since metadata blocks don't affect AST.
+    pub(crate) fn parse_metadata_block(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.advance(); // consume the identifier (arch, config, etc.)
+
+        // Skip newlines before the opening brace
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        self.expect(&TokenKind::LBrace)?;
+
+        // Consume everything until we find the matching closing brace
+        let mut depth = 1u32;
+        while depth > 0 && !self.is_at_end() {
+            match &self.current.kind {
+                TokenKind::LBrace => {
+                    depth += 1;
+                    self.advance();
+                }
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    if depth > 0 {
+                        self.advance();
+                    }
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+
+        if self.check(&TokenKind::RBrace) {
+            self.advance(); // consume final }
+        }
+
+        Ok(Node::Pass(PassStmt { span: start_span }))
     }
 }

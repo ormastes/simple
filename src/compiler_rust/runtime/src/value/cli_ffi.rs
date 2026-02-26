@@ -167,75 +167,16 @@ fn extract_string_array(arr: RuntimeValue) -> Vec<String> {
     result
 }
 
-/// Find the simple runtime binary for subprocess calls
-/// Looks for simple_runtime first (new name), then simple_old (backward compat).
-/// Search order: 1) SIMPLE_RUNTIME_PATH/SIMPLE_OLD_PATH env var, 2) same directory as current exe, 3) dev paths, 4) PATH
-fn find_simple_old() -> Option<std::path::PathBuf> {
-    // 1. Check environment variables (new name first, then legacy)
-    for env_var in ["SIMPLE_RUNTIME_PATH", "SIMPLE_OLD_PATH"] {
-        if let Ok(path) = std::env::var(env_var) {
-            let p = std::path::PathBuf::from(&path);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-
-    // 2. Check relative to current executable (new name first, then legacy)
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            for name in ["simple_runtime", "simple_old"] {
-                let bin = exe_dir.join(name);
-                if bin.exists() {
-                    return Some(bin);
-                }
-            }
-        }
-    }
-
-    // 3. Check common development paths
-    let dev_paths = [
-        "rust/target/debug/simple_runtime",
-        "rust/target/release/simple_runtime",
-        "rust/target/debug/simple_old",
-        "rust/target/release/simple_old",
-        "./simple_runtime",
-        "./simple_old",
-    ];
-    for path in dev_paths {
-        let p = std::path::PathBuf::from(path);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    // 4. Check PATH using which-style lookup (new name first, then legacy)
-    for name in ["simple_runtime", "simple_old"] {
-        if let Ok(output) = Command::new("which").arg(name).output() {
-            if output.status.success() {
-                let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path_str.is_empty() {
-                    return Some(std::path::PathBuf::from(path_str));
-                }
-            }
-        }
-    }
-
-    None
+/// Resolve the current Simple binary (this process) for subprocess calls.
+fn simple_binary_path() -> std::path::PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("simple"))
 }
 
-/// Delegate a CLI command to simple_old subprocess
-fn delegate_to_simple_old(command: &str, args: RuntimeValue) -> i64 {
-    let simple_old = match find_simple_old() {
-        Some(path) => path,
-        None => {
-            eprintln!("error: cannot find simple_old binary");
-            eprintln!("hint: Set SIMPLE_OLD_PATH environment variable or ensure simple_old is in PATH");
-            return 1;
-        }
-    };
+/// Delegate a CLI command to the Rust Simple binary (standalone mode).
+fn delegate_to_simple_binary(command: &str, args: RuntimeValue) -> i64 {
+    let simple_bin = simple_binary_path();
 
-    let mut cmd = Command::new(&simple_old);
+    let mut cmd = Command::new(&simple_bin);
     cmd.arg(command);
 
     // Add arguments from the array (skip first element which is the command itself)
@@ -255,7 +196,11 @@ fn delegate_to_simple_old(command: &str, args: RuntimeValue) -> i64 {
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1) as i64,
         Err(e) => {
-            eprintln!("error: failed to execute simple_old: {}", e);
+            eprintln!(
+                "error: failed to execute simple binary ({}): {}",
+                simple_bin.display(),
+                e
+            );
             1
         }
     }
@@ -322,127 +267,127 @@ pub extern "C" fn rt_cli_run_tests(args: RuntimeValue, gc_log: u8, gc_off: u8) -
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_lint(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("lint", args)
+    delegate_to_simple_binary("lint", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_fmt(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("fmt", args)
+    delegate_to_simple_binary("fmt", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_fix(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("lint", args)
+    delegate_to_simple_binary("lint", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_check(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("check", args)
+    delegate_to_simple_binary("check", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_verify(args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
-    delegate_to_simple_old("verify", args)
+    delegate_to_simple_binary("verify", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_migrate(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("migrate", args)
+    delegate_to_simple_binary("migrate", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_mcp(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("mcp", args)
+    delegate_to_simple_binary("mcp", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_diff(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("diff", args)
+    delegate_to_simple_binary("diff", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_context(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("context", args)
+    delegate_to_simple_binary("context", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_constr(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("constr", args)
+    delegate_to_simple_binary("constr", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_query(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("query", args)
+    delegate_to_simple_binary("query", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_info(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("info", args)
+    delegate_to_simple_binary("info", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_spec_coverage(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("spec-coverage", args)
+    delegate_to_simple_binary("spec-coverage", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_replay(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("replay", args)
+    delegate_to_simple_binary("replay", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_gen_lean(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("gen-lean", args)
+    delegate_to_simple_binary("gen-lean", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_feature_gen(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("feature-gen", args)
+    delegate_to_simple_binary("feature-gen", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_task_gen(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("task-gen", args)
+    delegate_to_simple_binary("task-gen", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_spec_gen(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("spec-gen", args)
+    delegate_to_simple_binary("spec-gen", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_sspec_docgen(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("sspec-docgen", args)
+    delegate_to_simple_binary("sspec-docgen", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_todo_scan(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("todo-scan", args)
+    delegate_to_simple_binary("todo-scan", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_todo_gen(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("todo-gen", args)
+    delegate_to_simple_binary("todo-gen", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_i18n(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("i18n", args)
+    delegate_to_simple_binary("i18n", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_lex(_args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("lex", _args)
+    delegate_to_simple_binary("lex", _args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_brief(_args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("brief", _args)
+    delegate_to_simple_binary("brief", _args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_ffi_gen(_args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("ffi-gen", _args)
+    delegate_to_simple_binary("ffi-gen", _args)
 }
 
 #[no_mangle]
@@ -468,7 +413,7 @@ pub extern "C" fn rt_settlement_main() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_compile(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("compile", args)
+    delegate_to_simple_binary("compile", args)
 }
 
 #[no_mangle]
@@ -476,7 +421,7 @@ pub extern "C" fn rt_cli_handle_targets() -> i64 {
     // Create empty args array for delegate
     let args = rt_array_new(1);
     rt_array_push(args, rt_string_new("targets".as_ptr(), 7));
-    delegate_to_simple_old("targets", args)
+    delegate_to_simple_binary("targets", args)
 }
 
 #[no_mangle]
@@ -484,83 +429,83 @@ pub extern "C" fn rt_cli_handle_linkers() -> i64 {
     // Create empty args array for delegate
     let args = rt_array_new(1);
     rt_array_push(args, rt_string_new("linkers".as_ptr(), 7));
-    delegate_to_simple_old("linkers", args)
+    delegate_to_simple_binary("linkers", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_web(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("web", args)
+    delegate_to_simple_binary("web", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_diagram(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("diagram", args)
+    delegate_to_simple_binary("diagram", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_init(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("init", args)
+    delegate_to_simple_binary("init", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_add(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("add", args)
+    delegate_to_simple_binary("add", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_remove(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("remove", args)
+    delegate_to_simple_binary("remove", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_install() -> i64 {
     let args = rt_array_new(1);
     rt_array_push(args, rt_string_new("install".as_ptr(), 7));
-    delegate_to_simple_old("install", args)
+    delegate_to_simple_binary("install", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_update(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("update", args)
+    delegate_to_simple_binary("update", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_list() -> i64 {
     let args = rt_array_new(1);
     rt_array_push(args, rt_string_new("list".as_ptr(), 4));
-    delegate_to_simple_old("list", args)
+    delegate_to_simple_binary("list", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_tree() -> i64 {
     let args = rt_array_new(1);
     rt_array_push(args, rt_string_new("tree".as_ptr(), 4));
-    delegate_to_simple_old("tree", args)
+    delegate_to_simple_binary("tree", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_cache(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("cache", args)
+    delegate_to_simple_binary("cache", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_env(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("env", args)
+    delegate_to_simple_binary("env", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_lock(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("lock", args)
+    delegate_to_simple_binary("lock", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_run_qualify_ignore(args: RuntimeValue) -> i64 {
-    delegate_to_simple_old("qualify-ignore", args)
+    delegate_to_simple_binary("qualify-ignore", args)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_cli_handle_run(args: RuntimeValue, _gc_log: u8, _gc_off: u8) -> i64 {
-    delegate_to_simple_old("run", args)
+    delegate_to_simple_binary("run", args)
 }
 
 #[no_mangle]
@@ -716,8 +661,8 @@ pub extern "C" fn rt_test_db_validate(db_path: RuntimeValue) -> i64 {
     };
 
     // This requires simple-driver which has the Database implementation
-    // For now, we'll delegate to simple_old
-    let mut cmd = Command::new(std::env::current_exe().unwrap_or_else(|_| "simple_old".into()));
+    // For now, delegate to the current simple binary
+    let mut cmd = Command::new(simple_binary_path());
     cmd.arg("test");
     cmd.arg("--validate-db");
     cmd.arg(&path_str);
@@ -774,7 +719,7 @@ pub extern "C" fn rt_test_db_cleanup_stale_runs(db_path: RuntimeValue) -> i64 {
         None => return -1,
     };
 
-    let mut cmd = Command::new(std::env::current_exe().unwrap_or_else(|_| "simple_old".into()));
+    let mut cmd = Command::new(simple_binary_path());
     cmd.arg("test");
     cmd.arg("--cleanup-runs");
     cmd.arg("--db-path");

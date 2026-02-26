@@ -12,6 +12,15 @@ use crate::mir::{
 
 use super::c_types::type_id_to_c_local;
 
+/// Calculate discriminant for enum variant (hash of name, matches Cranelift backend)
+pub fn calculate_variant_discriminant(variant_name: &str) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    variant_name.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
 /// State carried through instruction compilation for a single function.
 #[derive(Default)]
 pub struct CInstrContext {
@@ -29,6 +38,9 @@ pub struct CInstrContext {
     /// Used to resolve call targets when multiple functions share the same base name
     /// but differ in arity (e.g. `info` with 2 params vs `info_1` with 1 param).
     pub name_by_arity: HashMap<(String, usize), String>,
+    /// External function calls: functions called but not defined in this module.
+    /// Maps function_name → set of observed call arities.
+    pub external_calls: HashMap<String, std::collections::BTreeSet<usize>>,
 }
 
 impl CInstrContext {
@@ -160,17 +172,33 @@ pub fn compile_instruction(ctx: &mut CInstrContext, inst: &MirInst) {
             let mut func_name = ctx.resolve_call_name(&base_name, call_arity);
 
             // If no exact arity match was found (resolve returns base_name unchanged)
-            // and the call has more args than the declared function, truncate trailing
-            // args. This handles MIR calls that include an extra receiver argument
-            // for functions that don't expect one.
+            // and the call arity differs from the declared function, adjust args.
+            // - Too many args: truncate trailing (MIR prepends extra receiver)
+            // - Too few args: pad with 0 (nil) (different module's function with same name)
             if !ctx.name_by_arity.contains_key(&(base_name.clone(), call_arity)) {
                 if let Some(&declared_arity) = ctx.arity_map.get(&base_name) {
                     if call_arity > declared_arity && declared_arity > 0 {
                         // Try to find the function with declared_arity
                         func_name = ctx.resolve_call_name(&base_name, declared_arity);
                         arg_strs.truncate(declared_arity);
+                    } else if call_arity < declared_arity {
+                        // Pad with 0 (nil) for missing arguments
+                        func_name = ctx.resolve_call_name(&base_name, declared_arity);
+                        while arg_strs.len() < declared_arity {
+                            arg_strs.push("0".to_string());
+                        }
                     }
                 }
+            }
+
+            // Track external function calls (not defined in this module)
+            // so the backend can emit extern declarations for them.
+            if !ctx.arity_map.contains_key(&func_name) {
+                let final_arity = arg_strs.len();
+                ctx.external_calls
+                    .entry(func_name.clone())
+                    .or_default()
+                    .insert(final_arity);
             }
 
             let args_str = arg_strs.join(", ");
@@ -520,34 +548,35 @@ pub fn compile_instruction(ctx: &mut CInstrContext, inst: &MirInst) {
         MirInst::EnumUnit {
             dest,
             enum_name: _,
-            variant_name: _,
+            variant_name,
         } => {
-            // Unit enum variant = tag index as int
-            // The variant index is determined at compile time; for now use a hash
-            ctx.emit(format!("{} = rt_value_int(0);", CInstrContext::v(*dest)));
+            // Unit enum variant: create proper enum with discriminant hash
+            let disc = calculate_variant_discriminant(variant_name);
+            ctx.emit(format!(
+                "{} = rt_enum_new(0, (int64_t){}, 0);",
+                CInstrContext::v(*dest),
+                disc
+            ));
         }
 
         MirInst::EnumWith {
             dest,
             enum_name: _,
-            variant_name: _,
+            variant_name,
             payload,
         } => {
-            // Enum with payload: create (tag, payload) tuple
+            // Enum with payload: create proper enum with discriminant hash + payload
+            let disc = calculate_variant_discriminant(variant_name);
             ctx.emit(format!(
-                "{} = rt_tuple_new(2);",
-                CInstrContext::v(*dest)
-            ));
-            ctx.emit(format!(
-                "rt_tuple_set({}, 0, rt_value_int(0));",
-                CInstrContext::v(*dest)
-            ));
-            ctx.emit(format!(
-                "rt_tuple_set({}, 1, {});",
+                "{} = rt_enum_new(0, (int64_t){}, {});",
                 CInstrContext::v(*dest),
+                disc,
                 CInstrContext::v(*payload)
             ));
         }
+
+
+
 
         MirInst::EnumDiscriminant { dest, value } => {
             ctx.emit(format!(
@@ -919,6 +948,25 @@ pub fn compile_instruction(ctx: &mut CInstrContext, inst: &MirInst) {
                 CInstrContext::v(*generator)
             ));
         }
+
+        // =====================================================================
+        // Module-level global variable instructions
+        // =====================================================================
+        MirInst::GlobalLoad { dest, name } => {
+            ctx.emit(format!(
+                "{} = __global_{};",
+                CInstrContext::v(*dest),
+                sanitize_name(name)
+            ));
+        }
+
+        MirInst::GlobalStore { name, value } => {
+            ctx.emit(format!(
+                "__global_{} = {};",
+                sanitize_name(name),
+                CInstrContext::v(*value)
+            ));
+        }
     }
 }
 
@@ -1043,15 +1091,15 @@ fn compile_binop(ctx: &mut CInstrContext, dest: VReg, op: &BinOp, left: VReg, ri
     let r = CInstrContext::v(right);
 
     match op {
-        BinOp::Add => ctx.emit(format!("{d} = {l} + {r};")),
+        BinOp::Add => ctx.emit(format!("{d} = __spl_add({l}, {r});")),
         BinOp::Sub => ctx.emit(format!("{d} = {l} - {r};")),
         BinOp::Mul => ctx.emit(format!("{d} = {l} * {r};")),
         BinOp::Div => ctx.emit(format!("{d} = {l} / {r};")),
         BinOp::Mod => ctx.emit(format!("{d} = {l} % {r};")),
         BinOp::Pow => ctx.emit(format!("{d} = (int64_t)pow((double){l}, (double){r});")),
         BinOp::FloorDiv => ctx.emit(format!("{d} = {l} / {r}; /* floor div */")),
-        BinOp::Eq => ctx.emit(format!("{d} = (int64_t)({l} == {r});")),
-        BinOp::NotEq => ctx.emit(format!("{d} = (int64_t)({l} != {r});")),
+        BinOp::Eq => ctx.emit(format!("{d} = (int64_t)__spl_eq({l}, {r});")),
+        BinOp::NotEq => ctx.emit(format!("{d} = (int64_t)(!__spl_eq({l}, {r}));")),
         BinOp::Lt => ctx.emit(format!("{d} = (int64_t)({l} < {r});")),
         BinOp::Gt => ctx.emit(format!("{d} = (int64_t)({l} > {r});")),
         BinOp::LtEq => ctx.emit(format!("{d} = (int64_t)({l} <= {r});")),
@@ -1385,7 +1433,7 @@ mod tests {
             right: VReg(1),
         });
         assert_eq!(ctx.lines.len(), 1);
-        assert!(ctx.lines[0].contains("_v2 = _v0 + _v1;"));
+        assert!(ctx.lines[0].contains("_v2 = __spl_add(_v0, _v1);"));
     }
 
     #[test]

@@ -1122,27 +1122,27 @@ int64_t spl_wffi_call_i64(void* fptr, int64_t* args, int64_t nargs) {
  * JIT Exec Manager (stubs — core compiler uses tree-walk interpreter)
  * ================================================================ */
 
-int64_t rt_exec_manager_create(const char* backend) {
+__attribute__((weak)) int64_t rt_exec_manager_create(const char* backend) {
     (void)backend;
     return 0;
 }
 
-const char* rt_exec_manager_compile(int64_t handle, const char* mir_data) {
+__attribute__((weak)) const char* rt_exec_manager_compile(int64_t handle, const char* mir_data) {
     (void)handle; (void)mir_data;
     return "";
 }
 
-int64_t rt_exec_manager_execute(int64_t handle, const char* name, SplArray* args) {
+__attribute__((weak)) int64_t rt_exec_manager_execute(int64_t handle, const char* name, SplArray* args) {
     (void)handle; (void)name; (void)args;
     return 0;
 }
 
-bool rt_exec_manager_has_function(int64_t handle, const char* name) {
+__attribute__((weak)) bool rt_exec_manager_has_function(int64_t handle, const char* name) {
     (void)handle; (void)name;
     return false;
 }
 
-void rt_exec_manager_cleanup(int64_t handle) {
+__attribute__((weak)) void rt_exec_manager_cleanup(int64_t handle) {
     /* Clean up soft JIT temp file if it exists. */
     char path[256];
     snprintf(path, sizeof(path), "tmp/jit/simple_soft_jit_%lld.spl",

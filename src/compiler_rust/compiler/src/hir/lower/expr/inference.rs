@@ -19,6 +19,8 @@ impl Lowerer {
                     Ok(ctx.locals[idx].ty)
                 } else if let Some(ty) = self.globals.get(name) {
                     Ok(*ty)
+                } else if self.lenient_types {
+                    Ok(TypeId::ANY)
                 } else {
                     Err(LowerError::UnknownVariable(name.clone()))
                 }
@@ -177,10 +179,20 @@ impl Lowerer {
                     }
                 }
                 // Cannot infer type for other method calls
-                Err(LowerError::CannotInferTypeFor(format!("{:?}", expr)))
+                if self.lenient_types {
+                    Ok(TypeId::ANY)
+                } else {
+                    Err(LowerError::CannotInferTypeFor(format!("{:?}", expr)))
+                }
             }
             // Cannot infer type for complex expressions - require annotation
-            _ => Err(LowerError::CannotInferTypeFor(format!("{:?}", expr))),
+            _ => {
+                if self.lenient_types {
+                    Ok(TypeId::ANY)
+                } else {
+                    Err(LowerError::CannotInferTypeFor(format!("{:?}", expr)))
+                }
+            }
         }
     }
 }

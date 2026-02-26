@@ -43,7 +43,10 @@ fn get_ptr(val: &Value, func_name: &str) -> Result<*mut u8, CompileError> {
             }
             Ok(bytes.as_ptr() as *mut u8)
         }
-        _ => Err(CompileError::runtime(&format!("{}: ptr must be Int or Array", func_name))),
+        _ => Err(CompileError::runtime(&format!(
+            "{}: ptr must be Int or Array",
+            func_name
+        ))),
     }
 }
 
@@ -74,7 +77,9 @@ pub fn rc_box_size(_args: &[Value]) -> Result<Value, CompileError> {
 /// Args: (ptr: Int, value: T, strong: Int, weak: Int)
 pub fn rc_box_init(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 4 {
-        return Err(CompileError::runtime("rc_box_init requires 4 arguments (ptr, value, strong, weak)"));
+        return Err(CompileError::runtime(
+            "rc_box_init requires 4 arguments (ptr, value, strong, weak)",
+        ));
     }
 
     let ptr = get_ptr(&args[0], "rc_box_init")?;
@@ -273,7 +278,9 @@ pub fn arc_box_size(_args: &[Value]) -> Result<Value, CompileError> {
 /// Args: (ptr: Int, value: T, strong: Int, weak: Int)
 pub fn arc_box_init(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 4 {
-        return Err(CompileError::runtime("arc_box_init requires 4 arguments (ptr, value, strong, weak)"));
+        return Err(CompileError::runtime(
+            "arc_box_init requires 4 arguments (ptr, value, strong, weak)",
+        ));
     }
 
     let ptr = get_ptr(&args[0], "arc_box_init")?;

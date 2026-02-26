@@ -268,11 +268,12 @@ impl<M: Module> CodegenBackend<M> {
 
             let sig = super::shared::build_mir_signature(func);
 
-            // Determine linkage (same logic as in shared::declare_functions)
+            // Determine linkage — use Preemptible for defined functions so that
+            // per-file compilation works (linker merges duplicates from shared imports)
             let linkage = if func.blocks.is_empty() {
                 cranelift_module::Linkage::Import
             } else if func.is_public() || func.name == "main" {
-                cranelift_module::Linkage::Export
+                cranelift_module::Linkage::Preemptible
             } else {
                 cranelift_module::Linkage::Local
             };
@@ -335,9 +336,11 @@ impl<M: Module> CodegenBackend<M> {
             }
 
             eprintln!("[DEBUG] Global: '{}', type: {:?}, mutable: {}", name, ty, is_mutable);
+            // Use Preemptible linkage so that when multiple .o files define the same
+            // global (from shared imports), the linker merges them instead of erroring.
             let data_id = self
                 .module
-                .declare_data(name, cranelift_module::Linkage::Export, *is_mutable, false)
+                .declare_data(name, cranelift_module::Linkage::Preemptible, *is_mutable, false)
                 .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
             // Initialize with zero (will be set by runtime initialization)

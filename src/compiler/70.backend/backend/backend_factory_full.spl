@@ -1,0 +1,278 @@
+# Backend Factory - Centralized Backend Selection and Creation
+#
+# Provides unified interface for creating backends based on target and options.
+# Eliminates scattered match statements throughout the codebase.
+
+use compiler.backend.common.bootstrap_guard.{BOOTSTRAP_MINIMAL}
+when BOOTSTRAP_MINIMAL:
+    export
+else:
+    use compiler.backend.backend_api.*
+    use std.log.{debug}
+
+# ============================================================================
+# Backend Factory
+# ============================================================================
+
+class BackendFactory:
+    """
+    Factory for creating backends based on target and options.
+    Centralizes backend selection logic.
+
+    Usage:
+        val backend = BackendFactory.create(target, options)
+        val result = backend.compile(module)
+    """
+
+    static fn create(target: CodegenTarget, options: CompileOptions) -> Backend:
+        """
+        Create appropriate backend for target and options.
+
+        Selection priority:
+        1. User override (options.backend_kind)
+        2. Target requirements (32-bit → LLVM)
+        3. Build mode (debug → Cranelift, release → LLVM)
+        4. Default (Cranelift)
+        """
+
+        # User override
+        if options.backend_kind.?:
+            val override_kind = options.backend_kind.unwrap()
+            debug("backend", "User override: backend={override_kind}")
+            return Self.create_specific(override_kind, target, options)
+
+        # Auto-select based on target and build mode
+        val kind = Self.auto_select(target, options.build_mode)
+        debug("backend", "Auto-selected backend={kind} for target={target}, mode={options.build_mode}")
+        Self.create_specific(kind, target, options)
+
+    static fn auto_select(target: CodegenTarget, mode: BuildMode) -> BackendKind:
+        """
+        Auto-select backend based on target and mode.
+
+        Rules:
+        - 32-bit targets → LLVM (only backend that supports 32-bit)
+        - WebAssembly → Wasm backend
+        - Debug mode → Cranelift (fast compilation)
+        - Release mode → LLVM (better optimization)
+        - Test mode → Interpreter (no compilation overhead)
+        - Bootstrap mode → Cranelift (minimal dependencies)
+        """
+
+        # 32-bit requires LLVM (Cranelift doesn't support)
+        if target.is_32bit():
+            debug("backend", "auto_select: 32-bit target -> LLVM")
+            return BackendKind.Llvm
+
+        # WebAssembly uses Wasm backend
+        if target.is_wasm():
+            debug("backend", "auto_select: WASM target -> Wasm backend")
+            return BackendKind.Wasm
+
+        # For 64-bit, choose based on build mode
+        debug("backend", "auto_select: 64-bit target, selecting by build mode={mode}")
+        match mode:
+            case BuildMode.Debug:
+                BackendKind.Cranelift  # Fast compilation
+            case BuildMode.Release:
+                BackendKind.Llvm       # Better optimization
+            case BuildMode.Test:
+                BackendKind.Interpreter  # No compilation overhead
+            case BuildMode.Bootstrap:
+                BackendKind.Cranelift   # Minimal dependencies
+
+    static fn create_specific(kind: BackendKind, target: CodegenTarget, options: CompileOptions)
+        -> Backend:
+        """
+        Create specific backend by kind.
+        Validates target support and creates appropriate backend instance.
+        """
+
+        # Validate target support
+        if not Self.supports_target(kind, target):
+            error("Backend {kind} does not support target {target}")
+
+        debug("backend", "Creating backend: kind={kind}, target={target}")
+
+        # Create backend based on kind
+        match kind:
+            case BackendKind.Cranelift:
+                CraneliftBackend.create(target, options)
+
+            case BackendKind.Llvm:
+                LlvmBackend.create(target, options)
+
+            case BackendKind.Wasm:
+                WasmBackend.create(target, options)
+
+            case BackendKind.Interpreter:
+                InterpreterBackend.create(options)
+
+            case BackendKind.Lean:
+                LeanBackend.create(target, options)
+
+            case BackendKind.Vhdl:
+                VhdlBackend.create(target, options)
+
+            case BackendKind.CCodegen:
+                CCodegenBackend.create(target, options)
+
+    static fn try_create(target: CodegenTarget, options: CompileOptions)
+        -> Result<Backend, BackendError>:
+        """
+        Try to create backend, returning error instead of panicking.
+        Useful for graceful error handling.
+        """
+        val kind = if options.backend_kind.?:
+            options.backend_kind.unwrap()
+        else:
+            Self.auto_select(target, options.build_mode)
+
+        if not Self.supports_target(kind, target):
+            return Err(BackendError.NotSupported(
+                ("Backend {kind} does not support target {target}. " +
+                "Try --backend=llvm for 32-bit targets."),
+                nil
+            ))
+
+        Ok(Self.create_specific(kind, target, options))
+
+    static fn create_with_fallback(target: CodegenTarget, options: CompileOptions,
+                                   llvm_available: bool) -> Backend:
+        """
+        Create backend with fallback strategy.
+        If LLVM not available, fall back to Cranelift (64-bit only).
+        """
+        val preferred = Self.auto_select(target, options.build_mode)
+        debug("backend", "create_with_fallback: preferred={preferred}, llvm_available={llvm_available}")
+
+        # If preferred is LLVM but not available, try fallback
+        if preferred == BackendKind.Llvm and not llvm_available:
+            if target.is_32bit():
+                error("32-bit compilation requires LLVM backend, but LLVM is not available")
+            else:
+                # Fall back to Cranelift for 64-bit
+                debug("backend", "Falling back to Cranelift (LLVM unavailable, 64-bit target)")
+                return Self.create_specific(BackendKind.Cranelift, target, options)
+
+        Self.create_specific(preferred, target, options)
+
+    static fn supports_target(kind: BackendKind, target: CodegenTarget) -> bool:
+        """
+        Check if backend supports target.
+
+        Support matrix:
+        - Cranelift: 64-bit only (x86_64, AArch64, RISC-V 64)
+        - LLVM: All targets (32-bit + 64-bit)
+        - Native: x86_64, AArch64, RISC-V 64 (ELF + Mach-O)
+        - Wasm: WebAssembly only (Wasm32, Wasm64)
+        - Interpreter: All targets (architecture-independent)
+        - Lean: All targets (verification only)
+        """
+        match kind:
+            case BackendKind.Cranelift:
+                target.is_64bit()  # Cranelift 64-bit only
+
+            case BackendKind.Llvm:
+                true  # LLVM supports all targets
+
+            case BackendKind.Native:
+                match target:
+                    case X86_64 | AArch64 | Riscv64: true
+                    case AArch64_MacOS | X86_64_MacOS: true
+                    case Host: true
+                    case _: false
+
+            case BackendKind.Wasm:
+                target.is_wasm()  # Wasm backend for Wasm targets
+
+            case BackendKind.Interpreter:
+                true  # Interpreter supports all
+
+            case BackendKind.Lean:
+                true  # Lean backend for all (verification)
+
+            case BackendKind.Vhdl:
+                true  # VHDL backend is target-independent
+
+            case BackendKind.CCodegen:
+                true  # C backend generates portable C++20
+
+    static fn available_backends() -> [BackendKind]:
+        """List all available backends."""
+        [
+            BackendKind.Cranelift,
+            BackendKind.Llvm,
+            BackendKind.Wasm,
+            BackendKind.Interpreter,
+            BackendKind.Lean,
+            BackendKind.Vhdl,
+            BackendKind.CCodegen
+        ]
+
+    static fn get_description(kind: BackendKind) -> text:
+        """Get human-readable description of backend."""
+        match kind:
+            case BackendKind.Cranelift:
+                "Cranelift - Fast compilation, 64-bit only (x86_64, AArch64, RISC-V 64)"
+
+            case BackendKind.Llvm:
+                "LLVM - Better optimization, supports 32-bit and 64-bit (all architectures)"
+
+            case BackendKind.Wasm:
+                "WebAssembly - Compile to Wasm32/Wasm64"
+
+            case BackendKind.Interpreter:
+                "Interpreter - No compilation, architecture-independent"
+
+            case BackendKind.Lean:
+                "Lean - Formal verification backend"
+
+            case BackendKind.Vhdl:
+                "VHDL - Hardware description language backend (produces .vhd files)"
+
+            case BackendKind.CCodegen:
+                "C - Generate C++20 source code (for bootstrap and cross-compilation)"
+
+# ============================================================================
+# Helper Extensions for CodegenTarget
+# ============================================================================
+
+impl CodegenTarget:
+    fn is_32bit() -> bool:
+        """Check if target is 32-bit architecture."""
+        match self:
+            case X86 | Arm | Riscv32 | Wasm32:
+                true
+            case _:
+                false
+
+    fn is_64bit() -> bool:
+        """Check if target is 64-bit architecture."""
+        match self:
+            case X86_64 | AArch64 | Riscv64 | Wasm64 | Host | AArch64_MacOS | X86_64_MacOS:
+                true
+            case _:
+                false
+
+    fn is_wasm() -> bool:
+        """Check if target is WebAssembly."""
+        match self:
+            case Wasm32 | Wasm64:
+                true
+            case _:
+                false
+
+    fn is_macos() -> bool:
+        """Check if target is macOS."""
+        match self:
+            case AArch64_MacOS | X86_64_MacOS:
+                true
+            case _:
+                false
+
+# ============================================================================
+# Export
+# ============================================================================
+
+export BackendFactory

@@ -1,0 +1,83 @@
+# Query CLI - Input Sanitization
+# Prevents shell injection in query subcommands.
+#
+# All query functions that invoke external processes should use these
+# sanitizers instead of concatenating user input into shell strings.
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Characters that are dangerous in shell contexts.
+# Reject paths containing any of these.
+val _SHELL_DANGEROUS = "$`|;&><\n\r"
+
+# Validate a file path is safe for use in shell commands.
+# Rejects paths containing: $ ` $( | ; & > < newlines carriage returns.
+# Returns "" on violation, the original path if safe.
+fn sanitize_path(path: text) -> text:
+    if path == "":
+        return ""
+    # Check for $( substring explicitly
+    if path.contains("$("):
+        return ""
+    # Check each character against the dangerous set
+    var i = 0
+    while i < path.len():
+        val ch = path.substring(i, i + 1)
+        if _is_dangerous_char(ch):
+            return ""
+        i = i + 1
+    path
+
+# Check if a character is in the dangerous set.
+fn _is_dangerous_char(ch: text) -> bool:
+    if ch == "$":
+        return true
+    if ch == "`":
+        return true
+    if ch == "|":
+        return true
+    if ch == ";":
+        return true
+    if ch == "&":
+        return true
+    if ch == ">":
+        return true
+    if ch == "<":
+        return true
+    if ch == "\n":
+        return true
+    if ch == "\r":
+        return true
+    false
+
+# Validate a symbol name contains only word characters [a-zA-Z0-9_].
+# Returns "" on violation, the original name if safe.
+fn sanitize_symbol(name: text) -> text:
+    if name == "":
+        return ""
+    var i = 0
+    while i < name.len():
+        val ch = name.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            return ""
+        i = i + 1
+    name
+
+# Wrapper around rt_process_run that returns (stdout, exit_code).
+fn safe_process(cmd: text, args: [text]) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run(cmd, args)
+    (stdout, code)
+
+# Safe grep using array args instead of shell string concatenation.
+# Runs: grep -rn <pattern> <dir> --include=<include>
+fn safe_grep(pattern: text, dir: text, include: text) -> (text, i64):
+    val include_flag = "--include=" + include
+    safe_process("grep", ["-rn", pattern, dir, include_flag])
+
+# Safe grep on a single file using array args.
+# Runs: grep -n <pattern> <file>
+fn safe_grep_file(pattern: text, file: text) -> (text, i64):
+    safe_process("grep", ["-n", pattern, file])
+
+export sanitize_path, sanitize_symbol, safe_grep, safe_grep_file, safe_process

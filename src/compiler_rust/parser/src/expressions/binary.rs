@@ -5,12 +5,27 @@ use crate::token::TokenKind;
 
 /// Macro to generate binary operator parsing functions.
 /// Reduces duplication in precedence-climbing parser.
+///
+/// Handles line continuation in two ways:
+/// 1. Trailing operator: `expr +\n  expr` - skips newline/indent after operator
+/// 2. Leading operator: `expr\n  + expr` - peeks through newline/indent to find operator
 macro_rules! parse_binary_single {
     ($fn_name:ident, $next_fn:ident, $token:ident, $op:expr) => {
         pub(crate) fn $fn_name(&mut self) -> Result<Expr, ParseError> {
             let mut left = self.$next_fn()?;
-            while self.check(&TokenKind::$token) {
-                self.advance();
+            loop {
+                if self.check(&TokenKind::$token) {
+                    // Case 1: trailing operator on this line
+                    self.advance();
+                    self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                } else if self.peek_through_newlines_and_indents_is(&TokenKind::$token) {
+                    // Case 2: operator on next line (leading continuation)
+                    self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                    self.advance(); // consume the operator
+                    self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                } else {
+                    break;
+                }
                 let right = self.$next_fn()?;
                 left = Expr::Binary {
                     op: $op,
@@ -23,23 +38,57 @@ macro_rules! parse_binary_single {
     };
 }
 
-/// Macro for binary operators with multiple token options
+/// Macro for binary operators with multiple token options.
+///
+/// Handles line continuation in two ways:
+/// 1. Trailing operator: `expr +\n  expr` - skips newline/indent after operator
+/// 2. Leading operator: `expr\n  + expr` - peeks through newline/indent to find operator
 macro_rules! parse_binary_multi {
     ($fn_name:ident, $next_fn:ident, $( $token:ident => $op:expr ),+ $(,)?) => {
         pub(crate) fn $fn_name(&mut self) -> Result<Expr, ParseError> {
             let mut left = self.$next_fn()?;
             loop {
+                // Try to match operator at current position first
                 let op = match &self.current.kind {
-                    $( TokenKind::$token => $op, )+
-                    _ => break,
+                    $( TokenKind::$token => Some($op), )+
+                    _ => None,
                 };
-                self.advance();
-                let right = self.$next_fn()?;
-                left = Expr::Binary {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                };
+                if let Some(op) = op {
+                    // Case 1: trailing operator on this line
+                    self.advance();
+                    self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                    let right = self.$next_fn()?;
+                    left = Expr::Binary {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
+                    continue;
+                }
+                // Case 2: operator on next line (leading continuation)
+                // Only check if current token is Newline or Indent
+                if matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+                    let found_op = {
+                        let peeked = self.peek_through_newlines_and_indents();
+                        match peeked {
+                            $( Some(TokenKind::$token) => Some($op), )+
+                            _ => None,
+                        }
+                    };
+                    if let Some(op) = found_op {
+                        self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                        self.advance(); // consume the operator
+                        self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                        let right = self.$next_fn()?;
+                        left = Expr::Binary {
+                            op,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        };
+                        continue;
+                    }
+                }
+                break;
             }
             Ok(left)
         }

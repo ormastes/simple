@@ -690,11 +690,10 @@ fn resolve_app_path(relative_path: &str) -> Option<PathBuf> {
 
 /// Dispatch a command to its Simple app, returning None if app not found
 fn dispatch_to_simple_app(app_relative_path: &str, args: &[String], gc_log: bool, gc_off: bool) -> Option<i32> {
-    let app_path = resolve_app_path(app_relative_path)?;
-    // Match normal file execution: argv[0] is the script path, then user args
-    let mut full_args = vec![app_path.to_string_lossy().to_string()];
-    full_args.extend(args[1..].iter().cloned());
-    Some(run_file_with_args(&app_path, gc_log, gc_off, full_args))
+    // Fallback to Simple apps is disabled for the standalone Rust compiler.
+    // Keeping the signature allows future re-enabling without changing callers.
+    let _ = (app_relative_path, args, gc_log, gc_off);
+    None
 }
 
 /// Original Rust test runner implementation (fallback)

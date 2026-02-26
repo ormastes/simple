@@ -97,7 +97,7 @@ impl<'a> super::Lexer<'a> {
             "import" => TokenKind::Import,
             "from" => TokenKind::From,
             "as" => TokenKind::As,
-            "mod" | "module" => TokenKind::Mod,
+            "mod" => TokenKind::Mod,
             "use" => TokenKind::Use,
             "export" => TokenKind::Export,
             "common" => TokenKind::Common,

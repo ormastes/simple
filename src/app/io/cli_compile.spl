@@ -2,6 +2,11 @@
 # Extracted from cli_ops.spl for modularity
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
 
+# Helpers from cli_ops.spl
+use app.io.cli_ops.{rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl}
+
+extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+
 # Check if native compiler FFI is available
 fn has_native_compiler_ffi() -> bool:
     # Default to native compiler FFI in compiled CLI.
@@ -290,7 +295,8 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
             _cli_eprint(compile_err)
         return 1
 
-    val base_name = source_file.replace(".spl", "").replace("/", "_")
+    # Keep bootstrap-safe: avoid nested method calls on str/text
+    val base_name = "baremetal_stub"
     val ir_file = "build/baremetal/{base_name}.ll"
     if not _cli_file_write_impl(ir_file, llvm_ir):
         _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
@@ -347,11 +353,19 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
         "build/baremetal/kernel.elf"
 
     val linker_script = "build/baremetal/linker.ld"
+    if not _cli_file_exists_impl(linker_script):
+        val fmt = if arch == "i686": "elf32-i386" else: "elf64-x86-64"
+        val script = "OUTPUT_FORMAT(" + fmt + ")\nENTRY(_start)\nSECTIONS {\n  . = 0x00100000;\n  .text : { *(.text*) }\n  .rodata : { *(.rodata*) }\n  .data : { *(.data*) }\n  .bss : { *(.bss*) *(COMMON) }\n}\n"
+        if not _cli_file_write_impl(linker_script, script):
+            _cli_eprint("Error: Failed to write linker script {linker_script}")
+            return 1
 
     val (ld_out, ld_err, ld_exit) = _cli_process_run("ld", [
         "-T", linker_script,
         "-nostdlib",
         "--entry=_start",
+        # Force 32-bit output for i686 target
+        "-m", if arch == "i686": "elf_i386" else: "elf64_x86_64",
         obj_file,
         "-o", elf_file
     ])

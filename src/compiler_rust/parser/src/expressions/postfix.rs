@@ -560,6 +560,24 @@ impl<'a> Parser<'a> {
             self.advance();
             capture_all = true;
         }
+        // Check for destructuring lambda: \(name, pattern):
+        // Treat (ident, ident, ...) as individual lambda parameters
+        else if self.check(&TokenKind::LParen) {
+            self.advance(); // consume '('
+            while !self.check(&TokenKind::RParen) && !self.is_at_end() {
+                let name = if self.check(&TokenKind::Underscore) {
+                    self.advance();
+                    "_".to_string()
+                } else {
+                    self.expect_identifier()?
+                };
+                params.push(LambdaParam { name, ty: None });
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                }
+            }
+            self.expect(&TokenKind::RParen)?;
+        }
         // Check for no-param lambda: \: expr (also treated as capture-all)
         else if !self.check(&TokenKind::Colon) {
             // Check for wildcard parameter: \_

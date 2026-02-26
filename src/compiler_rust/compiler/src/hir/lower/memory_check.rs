@@ -306,6 +306,10 @@ impl Lowerer {
 
         // Check if target is self.field or self[idx] = ...
         if self.is_self_mutation(target) {
+            if self.lenient_types {
+                // In lenient mode, allow self mutation in fn methods (treat as warning)
+                return Ok(());
+            }
             return Err(LowerError::SelfMutationInImmutableMethod);
         }
 

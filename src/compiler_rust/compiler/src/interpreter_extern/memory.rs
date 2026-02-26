@@ -200,7 +200,9 @@ pub fn sys_malloc(args: &[Value]) -> Result<Value, CompileError> {
 /// * `args` - [ptr: [u8], size: usize, align: usize]
 pub fn sys_free(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 3 {
-        return Err(CompileError::runtime("sys_free requires 3 arguments (ptr, size, align)"));
+        return Err(CompileError::runtime(
+            "sys_free requires 3 arguments (ptr, size, align)",
+        ));
     }
 
     let ptr_val = args[0].as_int()?;
@@ -235,7 +237,9 @@ pub fn sys_free(args: &[Value]) -> Result<Value, CompileError> {
 /// * New pointer as byte array
 pub fn sys_realloc(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 4 {
-        return Err(CompileError::runtime("sys_realloc requires 4 arguments (ptr, old_size, new_size, align)"));
+        return Err(CompileError::runtime(
+            "sys_realloc requires 4 arguments (ptr, old_size, new_size, align)",
+        ));
     }
 
     let ptr_val = args[0].as_int()?;

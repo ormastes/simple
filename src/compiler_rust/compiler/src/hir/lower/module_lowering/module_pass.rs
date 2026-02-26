@@ -303,6 +303,16 @@ impl Lowerer {
             }
         }
 
+        // Pass 0.5: Load types from imported modules BEFORE declaration registration.
+        // This ensures imported types are available when resolving function signatures
+        // and struct field types in Pass 1.
+        for item in &ast_module.items {
+            if let Node::UseStmt(use_stmt) = item {
+                // Silently ignore import loading failures for backward compatibility
+                let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
+            }
+        }
+
         // First pass: collect type and function declarations (with full field resolution)
         for item in &ast_module.items {
             self.register_declarations_from_node(item)?;

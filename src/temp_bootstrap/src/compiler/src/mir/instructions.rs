@@ -399,6 +399,15 @@ pub enum MirInst {
         /// The expression value to capture
         value: VReg,
     },
+
+    // =========================================================================
+    // Module-level global variable instructions
+    // =========================================================================
+    /// Load a module-level global variable into a register
+    GlobalLoad { dest: VReg, name: String },
+
+    /// Store a register value into a module-level global variable
+    GlobalStore { name: String, value: VReg },
 }
 
 /// Kind of contract being checked
@@ -586,6 +595,9 @@ impl HasEffects for MirInst {
 
             // Interpreter fallback (temporary - will be removed)
             MirInst::InterpCall { .. } | MirInst::InterpEval { .. } => Effect::Io,
+
+            // Module-level globals (mutable state)
+            MirInst::GlobalLoad { .. } | MirInst::GlobalStore { .. } => Effect::Compute,
         }
     }
 }
@@ -647,7 +659,8 @@ impl MirInst {
             | MirInst::ContractOldCapture { dest, .. }
             | MirInst::PointerNew { dest, .. }
             | MirInst::PointerRef { dest, .. }
-            | MirInst::PointerDeref { dest, .. } => Some(*dest),
+            | MirInst::PointerDeref { dest, .. }
+            | MirInst::GlobalLoad { dest, .. } => Some(*dest),
             MirInst::Call { dest, .. }
             | MirInst::IndirectCall { dest, .. }
             | MirInst::Wait { dest, .. }
@@ -775,6 +788,8 @@ impl MirInst {
             MirInst::PointerNew { value, .. } => vec![*value],
             MirInst::PointerRef { source, .. } => vec![*source],
             MirInst::PointerDeref { pointer, .. } => vec![*pointer],
+            MirInst::GlobalLoad { .. } => vec![],
+            MirInst::GlobalStore { value, .. } => vec![*value],
         }
     }
 }

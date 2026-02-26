@@ -6,6 +6,15 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use super::super::types::*;
 
+/// Calculate discriminant hash for enum variant name
+fn calculate_variant_discriminant(variant_name: &str) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    variant_name.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
 impl Lowerer {
     /// Helper to lower builtin function calls with consistent handling.
     /// Prefixes with `__spl_` to avoid C name collisions with user functions.
@@ -306,7 +315,20 @@ impl Lowerer {
                     args_hir.push(self.lower_expr(&arg.value, ctx)?);
                 }
 
-                let ret_ty = func_hir.ty;
+                // If the callee is a known type name (constructor call), use
+                // the struct/class TypeId so field accesses resolve correct offsets.
+                // Also check globals for function return types from declarations.
+                let ret_ty = if let Expr::Identifier(name) = callee.as_ref() {
+                    if let Some(type_id) = self.module.types.lookup(name) {
+                        type_id
+                    } else if let Some(ty) = self.globals.get(name).copied() {
+                        if ty != TypeId::VOID { ty } else { func_hir.ty }
+                    } else {
+                        func_hir.ty
+                    }
+                } else {
+                    func_hir.ty
+                };
 
                 Ok(HirExpr {
                     kind: HirExprKind::Call {
@@ -317,21 +339,91 @@ impl Lowerer {
                 })
             }
 
-            // Bootstrap: MethodCall → BuiltinCall with method_ prefix
+            // Bootstrap: MethodCall → qualified call or BuiltinCall
             Expr::MethodCall { receiver, method, args } => {
                 let recv_hir = self.lower_expr(receiver, ctx)?;
+                let ret_ty = self.infer_method_return_type(recv_hir.ty, method);
+
+                // Check if receiver is a type name (static method call like TypeName.method(...))
+                // For static calls, DON'T prepend receiver as argument — the function
+                // doesn't have a self parameter.
+                if let Expr::Identifier(type_name) = receiver.as_ref() {
+                    if let Some(type_id) = self.module.types.lookup(type_name) {
+                        let qualified_name = format!("{}::{}", type_name, method);
+                        // For constructor/factory methods, return the type itself
+                        // so downstream method calls on the result also resolve correctly
+                        let final_ret_ty = if Self::is_constructor_method(method) {
+                            type_id
+                        } else {
+                            self.infer_method_return_type(type_id, method)
+                        };
+                        // Static call: only include explicit args, no receiver
+                        let mut static_args = Vec::new();
+                        for arg in args {
+                            static_args.push(self.lower_expr(&arg.value, ctx)?);
+                        }
+                        return Ok(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: qualified_name,
+                                args: static_args,
+                            },
+                            ty: final_ret_ty,
+                        });
+                    }
+                }
+
+                // Instance method: prepend receiver as first argument
                 let mut all_args = vec![recv_hir];
                 for arg in args {
                     all_args.push(self.lower_expr(&arg.value, ctx)?);
                 }
-                Ok(self.make_builtin_call(
-                    &format!("method_{}", method),
-                    all_args,
-                    TypeId::I64,
-                ))
+                // If receiver type is a known struct/class, use qualified name
+                // directly (no __spl_ prefix) for the C backend.
+                // Also try qualified return type lookup for better disambiguation.
+                if let Some(type_name) = self.module.types.get_type_name(all_args[0].ty) {
+                    let qualified_name = format!("{}::{}", type_name, method);
+                    // Try qualified return type first (e.g., "MirLowering::lower_module")
+                    let final_ret_ty = if let Some(ty) = self.globals.get(&qualified_name).copied() {
+                        if ty != TypeId::VOID { ty } else { ret_ty }
+                    } else {
+                        ret_ty
+                    };
+                    Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: qualified_name,
+                            args: all_args,
+                        },
+                        ty: final_ret_ty,
+                    })
+                } else {
+                    Ok(self.make_builtin_call(
+                        &format!("method_{}", method),
+                        all_args,
+                        ret_ty,
+                    ))
+                }
             }
 
             Expr::FieldAccess { receiver, field } => {
+                // Check for enum unit variant access: TypeName.VariantName
+                if let Expr::Identifier(name) = receiver.as_ref() {
+                    if let Some(type_id) = self.module.types.lookup(name) {
+                        if let Some(HirType::Enum { variants, .. }) = self.module.types.get(type_id).cloned().as_ref() {
+                            let is_unit_variant = variants.iter().any(|(vname, vfields)| {
+                                vname == field && vfields.is_none()
+                            });
+                            if is_unit_variant {
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::EnumUnit {
+                                        enum_name: name.clone(),
+                                        variant_name: field.clone(),
+                                    },
+                                    ty: type_id,
+                                });
+                            }
+                        }
+                    }
+                }
                 let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
                 let (field_index, field_ty) = self.get_field_info(recv_hir.ty, field)?;
                 Ok(HirExpr {
@@ -506,10 +598,13 @@ impl Lowerer {
                 for (_field_name, field_val) in fields {
                     args.push(self.lower_expr(field_val, ctx)?);
                 }
+                // Use the actual struct type if registered, so field accesses
+                // can resolve correct byte offsets.
+                let ty = self.module.types.lookup(name).unwrap_or(TypeId::I64);
                 Ok(self.make_builtin_call(
                     &format!("struct_init_{}", name),
                     args,
-                    TypeId::I64,
+                    ty,
                 ))
             }
 
@@ -708,26 +803,177 @@ impl Lowerer {
             return Ok(HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL });
         }
 
+        eprintln!("[lower_match_expr] arms.len() = {}", arms.len());
+        for (i, arm) in arms.iter().enumerate() {
+            eprintln!("[lower_match_expr]   arm[{}] pattern = {:?}", i, arm.pattern);
+        }
+
         // Build if/else chain in reverse
         let mut result: Option<HirExpr> = None;
 
         for arm in arms.iter().rev() {
-            // Lower arm body: use last expression from body block
-            let body_hir = if let Some(last_stmt) = arm.body.statements.last() {
-                if let ast::Node::Expression(e) = last_stmt {
-                    self.lower_expr(e, ctx)?
-                } else {
+            // Lower arm body: handle multi-statement blocks by chaining LetBind
+            // For `case Expr(e): val x = f(e); g(x)` we need all statements, not just the last
+            let body_hir = {
+                let stmts = &arm.body.statements;
+                if stmts.is_empty() {
                     HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL }
+                } else {
+                    // Lower the last statement as the final expression
+                    let mut result = if let ast::Node::Expression(e) = stmts.last().unwrap() {
+                        self.lower_expr(e, ctx)?
+                    } else if let ast::Node::Return(ret) = stmts.last().unwrap() {
+                        if let Some(ref val) = ret.value {
+                            self.lower_expr(val, ctx)?
+                        } else {
+                            HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL }
+                        }
+                    } else {
+                        HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL }
+                    };
+
+                    // Process preceding statements in reverse, wrapping with LetBind
+                    for stmt in stmts[..stmts.len() - 1].iter().rev() {
+                        match stmt {
+                            ast::Node::Let(let_stmt) => {
+                                // val name = expr → LetBind(local, expr, rest)
+                                let init_expr = if let Some(ref init) = let_stmt.value {
+                                    self.lower_expr(init, ctx)?
+                                } else {
+                                    HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL }
+                                };
+                                let name = match &let_stmt.pattern {
+                                    ast::Pattern::Identifier(n) => n.clone(),
+                                    ast::Pattern::MutIdentifier(n) => n.clone(),
+                                    _ => format!("__pat_{}", ctx.locals.len()),
+                                };
+                                let local_idx = ctx.add_local(
+                                    name,
+                                    TypeId::I64,
+                                    let_stmt.mutability,
+                                );
+                                let result_ty = result.ty;
+                                result = HirExpr {
+                                    kind: HirExprKind::LetBind {
+                                        local_idx,
+                                        value: Box::new(init_expr),
+                                        body: Box::new(result),
+                                    },
+                                    ty: result_ty,
+                                };
+                            }
+                            ast::Node::Expression(e) => {
+                                // Expression statement — evaluate for side effects
+                                let side_expr = self.lower_expr(e, ctx)?;
+                                let dummy_local = ctx.add_local(
+                                    format!("__side_{}", ctx.locals.len()),
+                                    TypeId::I64,
+                                    ast::Mutability::Immutable,
+                                );
+                                let result_ty = result.ty;
+                                result = HirExpr {
+                                    kind: HirExprKind::LetBind {
+                                        local_idx: dummy_local,
+                                        value: Box::new(side_expr),
+                                        body: Box::new(result),
+                                    },
+                                    ty: result_ty,
+                                };
+                            }
+                            ast::Node::Assignment(assign) => {
+                                // var assignment — lower target and value
+                                let value_expr = self.lower_expr(&assign.value, ctx)?;
+                                let dummy_local = ctx.add_local(
+                                    format!("__assign_{}", ctx.locals.len()),
+                                    TypeId::I64,
+                                    ast::Mutability::Immutable,
+                                );
+                                let result_ty = result.ty;
+                                result = HirExpr {
+                                    kind: HirExprKind::LetBind {
+                                        local_idx: dummy_local,
+                                        value: Box::new(value_expr),
+                                        body: Box::new(result),
+                                    },
+                                    ty: result_ty,
+                                };
+                            }
+                            _ => {
+                                // Other statement types — skip for now
+                            }
+                        }
+                    }
+                    result
                 }
+            };
+
+            // Inject pattern bindings for enum variants
+            let body_hir = if let ast::Pattern::Enum { payload: Some(ref patterns), .. } = &arm.pattern {
+                let mut wrapped = body_hir;
+                // Process bindings in reverse order so the outermost LetBind is for the first binding
+                for (i, pat) in patterns.iter().enumerate().rev() {
+                    if let ast::Pattern::Identifier(ref bind_name) | ast::Pattern::MutIdentifier(ref bind_name) = pat {
+                        let local_idx = ctx.add_local(
+                            bind_name.clone(),
+                            TypeId::I64,
+                            ast::Mutability::Immutable,
+                        );
+                        let payload_extract = if patterns.len() == 1 {
+                            // Single payload: rt_enum_payload(subject)
+                            HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_enum_payload".to_string(),
+                                    args: vec![subject_hir.clone()],
+                                },
+                                ty: TypeId::I64,
+                            }
+                        } else {
+                            // Multi-payload: rt_object_field_get(rt_enum_payload(subject), i*8)
+                            HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_object_field_get".to_string(),
+                                    args: vec![
+                                        HirExpr {
+                                            kind: HirExprKind::BuiltinCall {
+                                                name: "rt_enum_payload".to_string(),
+                                                args: vec![subject_hir.clone()],
+                                            },
+                                            ty: TypeId::I64,
+                                        },
+                                        HirExpr {
+                                            kind: HirExprKind::Integer((i * 8) as i64),
+                                            ty: TypeId::I64,
+                                        },
+                                    ],
+                                },
+                                ty: TypeId::I64,
+                            }
+                        };
+                        let wrapped_ty = wrapped.ty;
+                        wrapped = HirExpr {
+                            kind: HirExprKind::LetBind {
+                                local_idx,
+                                value: Box::new(payload_extract),
+                                body: Box::new(wrapped),
+                            },
+                            ty: wrapped_ty,
+                        };
+                    }
+                }
+                wrapped
             } else {
-                HirExpr { kind: HirExprKind::Nil, ty: TypeId::NIL }
+                body_hir
             };
 
             // Check if this is a wildcard/catch-all
-            let is_wildcard = matches!(
-                &arm.pattern,
-                ast::Pattern::Wildcard | ast::Pattern::Identifier(_) | ast::Pattern::MutIdentifier(_)
-            );
+            // Uppercase identifiers (like NilLit, Error) are unit enum variants, not bindings
+            let is_wildcard = match &arm.pattern {
+                ast::Pattern::Wildcard => true,
+                ast::Pattern::Identifier(name) | ast::Pattern::MutIdentifier(name) => {
+                    !name.chars().next().map_or(false, |c| c.is_uppercase())
+                }
+                _ => false,
+            };
 
             if is_wildcard {
                 result = Some(body_hir);
@@ -783,21 +1029,115 @@ impl Lowerer {
                 }
             }
             ast::Pattern::Enum { name, variant, .. } => {
-                // Compare subject to enum variant (use string-based comparison for bootstrap)
-                let variant_name = format!("{}::{}", name, variant);
-                HirExpr {
+                // Two-way comparison for both enum discriminants AND integer tags:
+                // (rt_enum_discriminant(subject) == hash("Variant")) OR (subject == Variant_global)
+                let disc_hash = calculate_variant_discriminant(variant) as i64;
+                let enum_cond = HirExpr {
                     kind: HirExprKind::Binary {
-                        op: BinOp::Eq,
-                        left: Box::new(subject.clone()),
+                        op: BinOp::Is,
+                        left: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_enum_discriminant".to_string(),
+                                args: vec![subject.clone()],
+                            },
+                            ty: TypeId::I64,
+                        }),
                         right: Box::new(HirExpr {
-                            kind: HirExprKind::Global(variant_name),
+                            kind: HirExprKind::Integer(disc_hash),
                             ty: TypeId::I64,
                         }),
                     },
                     ty: TypeId::BOOL,
+                };
+                // Also try integer-tag comparison: subject == Global("Variant")
+                let variant_str = format!("{}::{}", name, variant);
+                let int_tag_cond = HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::Is,
+                        left: Box::new(subject.clone()),
+                        right: Box::new(HirExpr {
+                            kind: HirExprKind::Global(variant_str),
+                            ty: TypeId::I64,
+                        }),
+                    },
+                    ty: TypeId::BOOL,
+                };
+                HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::Or,
+                        left: Box::new(enum_cond),
+                        right: Box::new(int_tag_cond),
+                    },
+                    ty: TypeId::BOOL,
                 }
             }
-            // Default: unconditional match
+            ast::Pattern::Or(patterns) => {
+                // Build: subject == p1 || subject == p2 || ...
+                let mut result: Option<HirExpr> = None;
+                for p in patterns {
+                    let cond = self.lower_pattern_condition(subject, p, _ctx);
+                    result = Some(match result {
+                        Some(prev) => HirExpr {
+                            kind: HirExprKind::Binary {
+                                op: BinOp::Or,
+                                left: Box::new(prev),
+                                right: Box::new(cond),
+                            },
+                            ty: TypeId::BOOL,
+                        },
+                        None => cond,
+                    });
+                }
+                result.unwrap_or(HirExpr { kind: HirExprKind::Bool(true), ty: TypeId::BOOL })
+            }
+            ast::Pattern::Identifier(name) => {
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    // Uppercase identifier = unit enum variant (e.g., NilLit, Error)
+                    // Two-way comparison: rt_enum_discriminant(s) == hash(name) OR s == Global(name)
+                    let disc_hash = calculate_variant_discriminant(name) as i64;
+                    let enum_cond = HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::Is,
+                            left: Box::new(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_enum_discriminant".to_string(),
+                                    args: vec![subject.clone()],
+                                },
+                                ty: TypeId::I64,
+                            }),
+                            right: Box::new(HirExpr {
+                                kind: HirExprKind::Integer(disc_hash),
+                                ty: TypeId::I64,
+                            }),
+                        },
+                        ty: TypeId::BOOL,
+                    };
+                    let variant_str = format!("_::{}", name);
+                    let int_tag_cond = HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::Is,
+                            left: Box::new(subject.clone()),
+                            right: Box::new(HirExpr {
+                                kind: HirExprKind::Global(variant_str),
+                                ty: TypeId::I64,
+                            }),
+                        },
+                        ty: TypeId::BOOL,
+                    };
+                    HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::Or,
+                            left: Box::new(enum_cond),
+                            right: Box::new(int_tag_cond),
+                        },
+                        ty: TypeId::BOOL,
+                    }
+                } else {
+                    // Lowercase binding pattern — unconditional match
+                    HirExpr { kind: HirExprKind::Bool(true), ty: TypeId::BOOL }
+                }
+            }
+            // Default: unconditional match for unhandled pattern types
             _ => HirExpr { kind: HirExprKind::Bool(true), ty: TypeId::BOOL },
         }
     }
@@ -836,6 +1176,13 @@ impl Lowerer {
                 _ => self.infer_type(operand, ctx),
             },
             Expr::Call { callee, .. } => {
+                // If callee is a known struct/class name, this is a constructor
+                // call — return the struct type for correct field offset resolution.
+                if let Expr::Identifier(name) = callee.as_ref() {
+                    if let Some(ty) = self.module.types.lookup(name) {
+                        return Ok(ty);
+                    }
+                }
                 self.infer_type(callee, ctx)
             }
             Expr::If { then_branch, .. } => {
@@ -872,10 +1219,102 @@ impl Lowerer {
                 let (_idx, field_ty) = self.get_field_info(struct_ty, field)?;
                 Ok(field_ty)
             }
-            // Bootstrap: MethodCall → I64
-            Expr::MethodCall { .. } => Ok(TypeId::I64),
+            // Bootstrap: MethodCall → infer from receiver type + method name
+            Expr::MethodCall { receiver, method, .. } => {
+                // Check if receiver is a type name (static constructor/factory call)
+                if let Expr::Identifier(name) = receiver.as_ref() {
+                    if let Some(type_id) = self.module.types.lookup(name) {
+                        if Self::is_constructor_method(method) {
+                            return Ok(type_id);
+                        }
+                        return Ok(self.infer_method_return_type(type_id, method));
+                    }
+                }
+                let recv_ty = self.infer_type(receiver, ctx).unwrap_or(TypeId::I64);
+                Ok(self.infer_method_return_type(recv_ty, method))
+            }
             // Bootstrap: all other expressions → I64
             _ => Ok(TypeId::I64),
         }
+    }
+
+    /// Infer the return type of a method call based on receiver type and method name.
+    /// This enables correct field offsets when accessing fields on dict values, etc.
+    pub(super) fn infer_method_return_type(&mut self, recv_ty: TypeId, method: &str) -> TypeId {
+        if let Some(hir_ty) = self.module.types.get(recv_ty).cloned() {
+            match &hir_ty {
+                HirType::Dict { key, value, .. } => {
+                    let key = *key;
+                    let value = *value;
+                    match method {
+                        "values" => {
+                            // Dict<K,V>.values() → Array<V>
+                            return self.module.types.register(HirType::Array {
+                                element: value,
+                                size: None,
+                            });
+                        }
+                        "keys" => {
+                            // Dict<K,V>.keys() → Array<K>
+                            return self.module.types.register(HirType::Array {
+                                element: key,
+                                size: None,
+                            });
+                        }
+                        "items" => {
+                            // Dict<K,V>.items() → Array<(K,V)>
+                            let tuple_ty = self.module.types.register(HirType::Tuple(vec![key, value]));
+                            return self.module.types.register(HirType::Array {
+                                element: tuple_ty,
+                                size: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                HirType::Array { element, .. } => {
+                    let element = *element;
+                    match method {
+                        // Array methods that return the element type
+                        "pop" | "first" | "last" | "remove" => return element,
+                        // Array methods that return the same array type
+                        "push" | "filter" | "sort" | "reverse" | "slice" => return recv_ty,
+                        _ => {}
+                    }
+                }
+                // Option<T> (represented as Pointer) — unwrap returns inner type T
+                HirType::Pointer { inner, .. } => {
+                    let inner = *inner;
+                    match method {
+                        "unwrap" | "expect" | "unwrap_or" | "unwrap_or_else" => return inner,
+                        _ => {}
+                    }
+                }
+                // Struct type — try qualified method lookup
+                HirType::Struct { name, .. } => {
+                    let qualified = format!("{}::{}", name, method);
+                    if let Some(ty) = self.globals.get(&qualified).copied() {
+                        if ty != TypeId::VOID && ty != TypeId::I64 {
+                            return ty;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Check globals for function return type (from function declarations)
+        if let Some(ty) = self.globals.get(method).copied() {
+            if ty != TypeId::VOID && ty != TypeId::I64 {
+                return ty;
+            }
+        }
+
+        TypeId::I64
+    }
+
+    /// Check if a method name is a constructor/factory that returns the receiver type.
+    pub(super) fn is_constructor_method(method: &str) -> bool {
+        method == "new" || method == "create" || method.starts_with("create_")
     }
 }
