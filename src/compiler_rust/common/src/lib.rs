@@ -179,12 +179,16 @@ impl<L: DynLoader + Default> Default for ModuleRegistry<L> {
     }
 }
 
+pub mod platform;
+
 pub mod fault_detection;
 
 pub mod gc;
 
 pub mod target;
-pub use target::{PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError};
+pub use target::{
+    LinkerFlavor, PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError,
+};
 
 pub mod diagnostic;
 pub use diagnostic::{Diagnostic, EasyFix, FixConfidence, Label, Replacement, Severity, Span};
