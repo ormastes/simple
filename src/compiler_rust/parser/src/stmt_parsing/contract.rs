@@ -64,11 +64,7 @@ impl Parser<'_> {
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
             if name == "proof" {
                 // Peek ahead to check if next token is "uses"
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
                 if matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "uses") {
                     self.advance(); // consume "proof"
                     self.advance(); // consume "uses"

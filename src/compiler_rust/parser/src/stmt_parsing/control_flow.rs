@@ -54,11 +54,7 @@ impl<'a> Parser<'a> {
         );
         if is_ident_like {
             // Peek ahead to see if next token is = or compound assignment
-            let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                let tok = self.lexer.next_token();
-                self.pending_tokens.push_back(tok.clone());
-                tok
-            });
+            let next = self.peek_next();
             return matches!(
                 next.kind,
                 TokenKind::Assign
@@ -121,15 +117,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                     self.expect(&TokenKind::Colon)?;
-                    let elif_block = if !self.check(&TokenKind::Newline) {
-                        let stmt = self.parse_item()?;
-                        Block {
-                            span: self.previous.span,
-                            statements: vec![stmt],
-                        }
-                    } else {
-                        self.parse_block()?
-                    };
+                    let elif_block = self.parse_inline_or_block()?;
                     elif_branches.push((elif_pattern, elif_condition, elif_block));
                 }
 
@@ -141,27 +129,11 @@ impl<'a> Parser<'a> {
                         self.advance();
                         let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                         self.expect(&TokenKind::Colon)?;
-                        let elif_block = if !self.check(&TokenKind::Newline) {
-                            let stmt = self.parse_item()?;
-                            Block {
-                                span: self.previous.span,
-                                statements: vec![stmt],
-                            }
-                        } else {
-                            self.parse_block()?
-                        };
+                        let elif_block = self.parse_inline_or_block()?;
                         elif_branches.push((elif_pattern, elif_condition, elif_block));
                     } else {
                         self.expect(&TokenKind::Colon)?;
-                        else_block = if !self.check(&TokenKind::Newline) {
-                            let stmt = self.parse_item()?;
-                            Some(Block {
-                                span: self.previous.span,
-                                statements: vec![stmt],
-                            })
-                        } else {
-                            Some(self.parse_block()?)
-                        };
+                        else_block = Some(self.parse_inline_or_block()?);
                     }
                 }
 
@@ -297,17 +269,7 @@ impl<'a> Parser<'a> {
             self.advance();
             let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
-            // Support both inline and block-form elif
-            let elif_block = if !self.check(&TokenKind::Newline) {
-                // Inline elif: `elif cond: stmt` or `elif cond: expr`
-                let stmt = self.parse_item()?;
-                Block {
-                    span: self.previous.span,
-                    statements: vec![stmt],
-                }
-            } else {
-                self.parse_block()?
-            };
+            let elif_block = self.parse_inline_or_block()?;
             elif_branches.push((elif_pattern, elif_condition, elif_block));
         }
 
@@ -322,16 +284,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume 'if'
                 let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
-                // Support both inline and block-form else-if
-                let elif_block = if !self.check(&TokenKind::Newline) {
-                    let stmt = self.parse_item()?;
-                    Block {
-                        span: self.previous.span,
-                        statements: vec![stmt],
-                    }
-                } else {
-                    self.parse_block()?
-                };
+                let elif_block = self.parse_inline_or_block()?;
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 // Check if there's another 'else if' or final 'else'
@@ -348,16 +301,7 @@ impl<'a> Parser<'a> {
             // we need to parse the else block
             if self.check(&TokenKind::Colon) {
                 self.expect(&TokenKind::Colon)?;
-                // Support both inline and block-form else
-                else_block = if !self.check(&TokenKind::Newline) {
-                    let stmt = self.parse_item()?;
-                    Some(Block {
-                        span: self.previous.span,
-                        statements: vec![stmt],
-                    })
-                } else {
-                    Some(self.parse_block()?)
-                };
+                else_block = Some(self.parse_inline_or_block()?);
             }
         }
 
@@ -741,17 +685,7 @@ impl<'a> Parser<'a> {
 
         let body = if valid_separator {
             self.advance();
-            // Support inline match arm: `case X => return Y` or `| X -> expr`
-            if self.check(&TokenKind::Newline) {
-                self.parse_block()?
-            } else {
-                // Parse inline statement (return, expression, etc.)
-                let stmt = self.parse_item()?;
-                Block {
-                    span: self.previous.span,
-                    statements: vec![stmt],
-                }
-            }
+            self.parse_inline_or_block()?
         } else {
             let expected = if is_pipe_syntax { "->" } else { "-> or => or :" };
             return Err(ParseError::unexpected_token(

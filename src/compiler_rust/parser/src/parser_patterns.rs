@@ -65,11 +65,7 @@ impl<'a> Parser<'a> {
     /// Peek at the token after the comma to see if it starts a pattern.
     fn is_comma_or_pattern_context(&mut self) -> bool {
         // Peek at the token after the comma
-        let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-            let tok = self.lexer.next_token();
-            self.pending_tokens.push_back(tok.clone());
-            tok
-        });
+        let next = self.peek_next();
         matches!(
             next.kind,
             TokenKind::Identifier { .. }
@@ -515,6 +511,27 @@ impl<'a> Parser<'a> {
             // Additional keywords that appear as enum variant names
             TokenKind::Self_ => self.parse_keyword_as_pattern("Self"),
             TokenKind::Export => self.parse_keyword_as_pattern("Export"),
+            // Negative literal patterns: -1, -2.5, etc.
+            TokenKind::Minus => {
+                self.advance(); // consume '-'
+                match &self.current.kind {
+                    TokenKind::Integer(n) => {
+                        let neg = -n;
+                        self.advance();
+                        Ok(Pattern::Literal(Box::new(Expr::Integer(neg))))
+                    }
+                    TokenKind::Float(f) => {
+                        let neg = -f;
+                        self.advance();
+                        Ok(Pattern::Literal(Box::new(Expr::Float(neg))))
+                    }
+                    _ => Err(ParseError::unexpected_token(
+                        "number after '-' in pattern",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    )),
+                }
+            }
             _ => Err(ParseError::unexpected_token(
                 "pattern",
                 format!("{:?}", self.current.kind),
