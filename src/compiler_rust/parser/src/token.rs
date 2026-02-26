@@ -427,6 +427,72 @@ impl TokenKind {
     pub fn is_identifier_named(&self, expected: &str) -> bool {
         matches!(self, TokenKind::Identifier { name, .. } if name == expected)
     }
+
+    /// Returns the string name for keyword tokens that can also be used as identifiers.
+    /// Returns None for non-keyword tokens (operators, literals, etc).
+    pub fn keyword_name(&self) -> Option<&'static str> {
+        match self {
+            TokenKind::Result => Some("result"),
+            TokenKind::Out => Some("out"),
+            TokenKind::OutErr => Some("out_err"),
+            TokenKind::Type => Some("type"),
+            TokenKind::Feature => Some("feature"),
+            TokenKind::Scenario => Some("scenario"),
+            TokenKind::Outline => Some("outline"),
+            TokenKind::Examples => Some("examples"),
+            TokenKind::Given => Some("given"),
+            TokenKind::When => Some("when"),
+            TokenKind::Then => Some("then"),
+            TokenKind::AndThen => Some("and_then"),
+            TokenKind::Context => Some("context"),
+            TokenKind::Common => Some("common"),
+            TokenKind::Gpu => Some("gpu"),
+            TokenKind::Slice => Some("slice"),
+            TokenKind::Flat => Some("flat"),
+            TokenKind::Alias => Some("alias"),
+            TokenKind::Bounds => Some("bounds"),
+            TokenKind::Default => Some("default"),
+            TokenKind::From => Some("from"),
+            TokenKind::To => Some("to"),
+            TokenKind::Loop => Some("loop"),
+            TokenKind::Unit => Some("unit"),
+            TokenKind::Sync => Some("sync"),
+            TokenKind::Async => Some("async"),
+            TokenKind::Kernel => Some("kernel"),
+            TokenKind::Val => Some("val"),
+            TokenKind::Literal => Some("literal"),
+            TokenKind::As => Some("as"),
+            TokenKind::Repr => Some("repr"),
+            TokenKind::Extern => Some("extern"),
+            TokenKind::Static => Some("static"),
+            TokenKind::Const => Some("const"),
+            TokenKind::Shared => Some("shared"),
+            TokenKind::Dyn => Some("dyn"),
+            TokenKind::Macro => Some("macro"),
+            TokenKind::Mixin => Some("mixin"),
+            TokenKind::Actor => Some("actor"),
+            TokenKind::Ghost => Some("ghost"),
+            TokenKind::Gen => Some("gen"),
+            TokenKind::Impl => Some("impl"),
+            TokenKind::Exists => Some("exists"),
+            TokenKind::Asm => Some("asm"),
+            TokenKind::Bitfield => Some("bitfield"),
+            TokenKind::Newtype => Some("newtype"),
+            TokenKind::Extend => Some("extend"),
+            TokenKind::Comptime => Some("comptime"),
+            TokenKind::Struct => Some("struct"),
+            TokenKind::Enum => Some("enum"),
+            TokenKind::Class => Some("class"),
+            TokenKind::Fn => Some("fn"),
+            TokenKind::Trait => Some("trait"),
+            TokenKind::New => Some("new"),
+            TokenKind::Old => Some("old"),
+            TokenKind::Self_ => Some("self"),
+            TokenKind::Super => Some("super"),
+            TokenKind::Vec => Some("vec"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
