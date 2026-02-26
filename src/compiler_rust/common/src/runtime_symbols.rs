@@ -86,6 +86,153 @@ pub trait RuntimeSymbolProvider: Send + Sync {
     fn name(&self) -> &str;
 }
 
+/// Runtime symbol tier, matching the standard library hierarchy.
+///
+/// Used to filter which runtime symbols are available for a given target
+/// configuration (e.g., baremetal targets only get Core + Alloc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeSymbolTier {
+    /// Tier 0: Value types, enums, errors, contracts — no alloc, no OS
+    Core,
+    /// Tier 1: Collections, strings, objects, closures, pointers, memory
+    Alloc,
+    /// Tier 2: I/O, files, env, process, networking, regex, sandbox, CLI
+    Sys,
+    /// Tier 3: Futures, actors, channels, executor, threads, generators
+    Async,
+    /// Tier 4: SIMD, GPU, Vulkan, Cranelift self-hosting
+    Ext,
+}
+
+/// Classify a runtime symbol name into its tier.
+pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
+    use RuntimeSymbolTier::*;
+
+    // Tier 4: Ext
+    if name.starts_with("rt_vec_")
+        || name.starts_with("rt_neighbor_load")
+        || name.starts_with("rt_gpu_")
+        || name.starts_with("rt_vk_")
+        || name.starts_with("rt_cranelift_")
+        || name.starts_with("rt_par_")
+    {
+        return Ext;
+    }
+
+    // Tier 3: Async
+    if name.starts_with("rt_future_")
+        || name.starts_with("rt_async_")
+        || name.starts_with("rt_actor_")
+        || name.starts_with("rt_channel_")
+        || name.starts_with("rt_executor_")
+        || name.starts_with("rt_thread_")
+        || name.starts_with("rt_generator_")
+        || name == "rt_wait"
+    {
+        return Async;
+    }
+
+    // Tier 2: Sys
+    if name.starts_with("rt_print_")
+        || name.starts_with("rt_println_")
+        || name.starts_with("rt_eprint_")
+        || name.starts_with("rt_eprintln_")
+        || name.starts_with("rt_capture_")
+        || name.starts_with("rt_env_")
+        || name.starts_with("rt_get_env")
+        || name.starts_with("rt_set_env")
+        || name.starts_with("rt_get_args")
+        || name.starts_with("rt_platform_name")
+        || name.starts_with("rt_exit")
+        || name.starts_with("rt_file_")
+        || name.starts_with("rt_dir_")
+        || name.starts_with("rt_path_")
+        || name.starts_with("rt_current_dir")
+        || name.starts_with("rt_set_current_dir")
+        || name.starts_with("rt_process_")
+        || name.starts_with("rt_exec")
+        || name.starts_with("rt_write_file")
+        || name.starts_with("rt_getpid")
+        || name.starts_with("rt_hostname")
+        || name.starts_with("rt_system_")
+        || name.starts_with("rt_time_")
+        || name.starts_with("ffi_regex_")
+        || name.starts_with("rt_sdn_")
+        || name.starts_with("rt_sandbox_")
+        || name.starts_with("rt_coverage_")
+        || name.starts_with("rt_decision_probe")
+        || name.starts_with("rt_condition_probe")
+        || name.starts_with("rt_path_probe")
+        || name.starts_with("rt_bdd_")
+        || name.starts_with("rt_cli_")
+        || name.starts_with("rt_fault_")
+        || name.starts_with("rt_interp_")
+        || name.starts_with("rt_set_macro_trace")
+        || name.starts_with("rt_is_macro_trace")
+        || name.starts_with("rt_set_debug_mode")
+        || name.starts_with("rt_is_debug_mode")
+        || name.starts_with("rt_settlement_")
+        || name.starts_with("rt_context_")
+        || name.starts_with("rt_test_")
+        || name.starts_with("rt_ffi_")
+        || name.starts_with("doctest_")
+        || name.starts_with("native_tcp_")
+        || name.starts_with("native_udp_")
+        || name.starts_with("native_http_")
+    {
+        return Sys;
+    }
+
+    // Tier 1: Alloc
+    if name.starts_with("rt_array_")
+        || name.starts_with("rt_tuple_")
+        || name.starts_with("rt_dict_")
+        || name.starts_with("rt_index_")
+        || name.starts_with("rt_slice")
+        || name.starts_with("rt_contains")
+        || name.starts_with("rt_len")
+        || name.starts_with("rt_string_")
+        || name.starts_with("rt_to_string")
+        || name.starts_with("rt_cstring_to_text")
+        || name.starts_with("rt_object_")
+        || name.starts_with("rt_closure_")
+        || name.starts_with("rt_unique_")
+        || name.starts_with("rt_shared_")
+        || name.starts_with("rt_weak_")
+        || name.starts_with("rt_handle_")
+        || name.starts_with("rt_hashmap_")
+        || name.starts_with("rt_btreemap_")
+        || name.starts_with("rt_hashset_")
+        || name.starts_with("rt_btreeset_")
+        || name.starts_with("rt_alloc")
+        || name.starts_with("rt_free")
+        || name.starts_with("rt_ptr_to_value")
+        || name.starts_with("rt_value_to_ptr")
+    {
+        return Alloc;
+    }
+
+    // Tier 0: Core
+    Core
+}
+
+/// Get runtime symbol names filtered for a given target.
+///
+/// Baremetal targets only get Core + Alloc symbols.
+pub fn runtime_symbols_for_baremetal(is_baremetal: bool) -> Vec<&'static str> {
+    RUNTIME_SYMBOL_NAMES
+        .iter()
+        .copied()
+        .filter(|name| {
+            match symbol_tier_of(name) {
+                RuntimeSymbolTier::Core | RuntimeSymbolTier::Alloc => true,
+                RuntimeSymbolTier::Sys | RuntimeSymbolTier::Async => !is_baremetal,
+                RuntimeSymbolTier::Ext => true,
+            }
+        })
+        .collect()
+}
+
 /// List of all runtime FFI symbols.
 ///
 /// These are the extern "C" functions exported by the runtime library

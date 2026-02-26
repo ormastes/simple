@@ -2,9 +2,162 @@
 //!
 //! This module provides a shared specification of runtime functions that
 //! both AOT (cranelift.rs) and JIT (jit.rs) compilers need to declare.
+//!
+//! Functions are organized into tiers matching the standard library hierarchy:
+//! - **Core**: Value types, enums, errors, contracts — no alloc, no OS
+//! - **Alloc**: Collections, strings, objects, closures, pointers, memory
+//! - **Sys**: I/O, files, env, process, networking, regex, sandbox, CLI
+//! - **Async**: Futures, actors, channels, executor, threads, generators
+//! - **Ext**: SIMD, GPU, Vulkan, Cranelift self-hosting
 
 use cranelift_codegen::ir::{types, AbiParam, Signature};
 use cranelift_codegen::isa::CallConv;
+
+/// Runtime function tier, matching the standard library hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeFuncTier {
+    /// Tier 0: Value types, enums, errors, contracts — no alloc, no OS
+    Core,
+    /// Tier 1: Collections, strings, objects, closures, pointers, memory
+    Alloc,
+    /// Tier 2: I/O, files, env, process, networking, regex, sandbox, CLI
+    Sys,
+    /// Tier 3: Futures, actors, channels, executor, threads, generators
+    Async,
+    /// Tier 4: SIMD, GPU, Vulkan, Cranelift self-hosting
+    Ext,
+}
+
+/// Classify a runtime function name into its tier.
+pub fn tier_of(name: &str) -> RuntimeFuncTier {
+    use RuntimeFuncTier::*;
+
+    // Tier 4: Ext — SIMD, GPU, Vulkan, Cranelift
+    if name.starts_with("rt_vec_")
+        || name.starts_with("rt_neighbor_load")
+        || name.starts_with("rt_gpu_")
+        || name.starts_with("rt_vk_")
+        || name.starts_with("rt_cranelift_")
+        || name.starts_with("rt_par_")
+    {
+        return Ext;
+    }
+
+    // Tier 3: Async — futures, actors, channels, executor, threads, generators
+    if name.starts_with("rt_future_")
+        || name.starts_with("rt_async_")
+        || name.starts_with("rt_actor_")
+        || name.starts_with("rt_channel_")
+        || name.starts_with("rt_executor_")
+        || name.starts_with("rt_thread_")
+        || name.starts_with("rt_generator_")
+        || name == "rt_wait"
+    {
+        return Async;
+    }
+
+    // Tier 2: Sys — I/O, files, env, process, networking, CLI, sandbox, etc.
+    if name.starts_with("rt_print_")
+        || name.starts_with("rt_println_")
+        || name.starts_with("rt_eprint_")
+        || name.starts_with("rt_eprintln_")
+        || name.starts_with("rt_capture_")
+        || name.starts_with("rt_env_")
+        || name.starts_with("rt_get_env")
+        || name.starts_with("rt_set_env")
+        || name.starts_with("rt_get_args")
+        || name.starts_with("rt_platform_name")
+        || name.starts_with("rt_exit")
+        || name.starts_with("rt_file_")
+        || name.starts_with("rt_dir_")
+        || name.starts_with("rt_path_")
+        || name.starts_with("rt_current_dir")
+        || name.starts_with("rt_set_current_dir")
+        || name.starts_with("rt_process_")
+        || name.starts_with("rt_exec")
+        || name.starts_with("rt_write_file")
+        || name.starts_with("rt_getpid")
+        || name.starts_with("rt_hostname")
+        || name.starts_with("rt_system_")
+        || name.starts_with("rt_time_")
+        || name.starts_with("ffi_regex_")
+        || name.starts_with("rt_sdn_")
+        || name.starts_with("rt_sandbox_")
+        || name.starts_with("rt_coverage_")
+        || name.starts_with("rt_decision_probe")
+        || name.starts_with("rt_condition_probe")
+        || name.starts_with("rt_path_probe")
+        || name.starts_with("rt_bdd_")
+        || name.starts_with("rt_cli_")
+        || name.starts_with("rt_fault_")
+        || name.starts_with("rt_interp_")
+        || name.starts_with("rt_set_macro_trace")
+        || name.starts_with("rt_is_macro_trace")
+        || name.starts_with("rt_set_debug_mode")
+        || name.starts_with("rt_is_debug_mode")
+        || name.starts_with("rt_settlement_")
+        || name.starts_with("rt_context_")
+        || name.starts_with("rt_test_")
+        || name.starts_with("rt_ffi_")
+        || name.starts_with("doctest_")
+        || name.starts_with("native_tcp_")
+        || name.starts_with("native_udp_")
+        || name.starts_with("native_http_")
+    {
+        return Sys;
+    }
+
+    // Tier 1: Alloc — collections, strings, objects, closures, pointers, memory
+    if name.starts_with("rt_array_")
+        || name.starts_with("rt_tuple_")
+        || name.starts_with("rt_dict_")
+        || name.starts_with("rt_index_")
+        || name.starts_with("rt_slice")
+        || name.starts_with("rt_contains")
+        || name.starts_with("rt_len")
+        || name.starts_with("rt_string_")
+        || name.starts_with("rt_to_string")
+        || name.starts_with("rt_cstring_to_text")
+        || name.starts_with("rt_object_")
+        || name.starts_with("rt_closure_")
+        || name.starts_with("rt_unique_")
+        || name.starts_with("rt_shared_")
+        || name.starts_with("rt_weak_")
+        || name.starts_with("rt_handle_")
+        || name.starts_with("rt_hashmap_")
+        || name.starts_with("rt_btreemap_")
+        || name.starts_with("rt_hashset_")
+        || name.starts_with("rt_btreeset_")
+        || name.starts_with("rt_alloc")
+        || name.starts_with("rt_free")
+        || name.starts_with("rt_ptr_to_value")
+        || name.starts_with("rt_value_to_ptr")
+    {
+        return Alloc;
+    }
+
+    // Tier 0: Core — everything else (value types, enums, errors, contracts, profiler)
+    Core
+}
+
+/// Get all runtime function specs for a given target.
+///
+/// - Baremetal targets get Core + Alloc only (no OS, no I/O)
+/// - Normal targets get Core + Alloc + Sys + Async
+/// - Ext tier (SIMD, GPU, Cranelift) is always included for now
+///   (individual features are opt-in at the Simple source level)
+pub fn runtime_funcs_for_target(target: &simple_common::target::Target) -> Vec<&'static RuntimeFuncSpec> {
+    RUNTIME_FUNCS
+        .iter()
+        .filter(|f| {
+            match tier_of(f.name) {
+                RuntimeFuncTier::Core | RuntimeFuncTier::Alloc => true,
+                RuntimeFuncTier::Sys | RuntimeFuncTier::Async => !target.is_baremetal(),
+                RuntimeFuncTier::Ext => true, // always available; opt-in at source level
+            }
+        })
+        .collect()
+}
 
 /// Specification for a runtime FFI function signature.
 #[derive(Debug, Clone)]
@@ -20,6 +173,11 @@ pub struct RuntimeFuncSpec {
 impl RuntimeFuncSpec {
     pub const fn new(name: &'static str, params: &'static [types::Type], returns: &'static [types::Type]) -> Self {
         Self { name, params, returns }
+    }
+
+    /// Get the tier this function belongs to.
+    pub fn tier(&self) -> RuntimeFuncTier {
+        tier_of(self.name)
     }
 
     /// Build a Cranelift signature from this spec.
@@ -972,5 +1130,92 @@ mod tests {
         let sig = spec.build_signature(CallConv::SystemV);
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.returns.len(), 1);
+    }
+
+    #[test]
+    fn all_funcs_have_a_tier() {
+        // Every function should be classified into exactly one tier
+        for spec in RUNTIME_FUNCS {
+            let _tier = tier_of(spec.name);
+            // Just ensure it doesn't panic
+        }
+    }
+
+    #[test]
+    fn tier_classification_samples() {
+        use RuntimeFuncTier::*;
+        // Core
+        assert_eq!(tier_of("rt_value_int"), Core);
+        assert_eq!(tier_of("rt_enum_new"), Core);
+        assert_eq!(tier_of("rt_function_not_found"), Core);
+        assert_eq!(tier_of("simple_contract_check"), Core);
+        assert_eq!(tier_of("rt_profiler_record_call"), Core);
+        // Alloc
+        assert_eq!(tier_of("rt_array_new"), Alloc);
+        assert_eq!(tier_of("rt_string_concat"), Alloc);
+        assert_eq!(tier_of("rt_object_new"), Alloc);
+        assert_eq!(tier_of("rt_closure_new"), Alloc);
+        assert_eq!(tier_of("rt_hashmap_new"), Alloc);
+        assert_eq!(tier_of("rt_alloc"), Alloc);
+        // Sys
+        assert_eq!(tier_of("rt_print_str"), Sys);
+        assert_eq!(tier_of("rt_file_read_text"), Sys);
+        assert_eq!(tier_of("rt_env_get"), Sys);
+        assert_eq!(tier_of("rt_process_run"), Sys);
+        assert_eq!(tier_of("ffi_regex_is_match"), Sys);
+        assert_eq!(tier_of("rt_cli_version"), Sys);
+        assert_eq!(tier_of("native_tcp_bind"), Sys);
+        // Async
+        assert_eq!(tier_of("rt_future_new"), Async);
+        assert_eq!(tier_of("rt_actor_spawn"), Async);
+        assert_eq!(tier_of("rt_channel_new"), Async);
+        assert_eq!(tier_of("rt_executor_start"), Async);
+        assert_eq!(tier_of("rt_thread_spawn_isolated"), Async);
+        assert_eq!(tier_of("rt_generator_new"), Async);
+        assert_eq!(tier_of("rt_wait"), Async);
+        // Ext
+        assert_eq!(tier_of("rt_vec_sum"), Ext);
+        assert_eq!(tier_of("rt_gpu_barrier"), Ext);
+        assert_eq!(tier_of("rt_vk_available"), Ext);
+        assert_eq!(tier_of("rt_cranelift_module_new"), Ext);
+        assert_eq!(tier_of("rt_par_map"), Ext);
+    }
+
+    #[test]
+    fn tier_counts_are_reasonable() {
+        let mut counts = std::collections::HashMap::new();
+        for spec in RUNTIME_FUNCS {
+            *counts.entry(tier_of(spec.name)).or_insert(0usize) += 1;
+        }
+        // Each tier should have at least a few functions
+        assert!(*counts.get(&RuntimeFuncTier::Core).unwrap_or(&0) >= 5,
+            "Core tier should have at least 5 functions");
+        assert!(*counts.get(&RuntimeFuncTier::Alloc).unwrap_or(&0) >= 20,
+            "Alloc tier should have at least 20 functions");
+        assert!(*counts.get(&RuntimeFuncTier::Sys).unwrap_or(&0) >= 30,
+            "Sys tier should have at least 30 functions");
+        assert!(*counts.get(&RuntimeFuncTier::Async).unwrap_or(&0) >= 10,
+            "Async tier should have at least 10 functions");
+        assert!(*counts.get(&RuntimeFuncTier::Ext).unwrap_or(&0) >= 20,
+            "Ext tier should have at least 20 functions");
+    }
+
+    #[test]
+    fn baremetal_target_filters_correctly() {
+        use simple_common::target::{Target, TargetArch, TargetOS};
+        let baremetal = Target {
+            arch: TargetArch::Aarch64,
+            os: TargetOS::None,
+            ..Target::default()
+        };
+        let funcs = runtime_funcs_for_target(&baremetal);
+        // Baremetal should NOT include sys/async tier functions
+        assert!(funcs.iter().all(|f| {
+            let t = tier_of(f.name);
+            t != RuntimeFuncTier::Sys && t != RuntimeFuncTier::Async
+        }), "Baremetal target should not include Sys or Async tier functions");
+        // But should include Core and Alloc
+        assert!(funcs.iter().any(|f| tier_of(f.name) == RuntimeFuncTier::Core));
+        assert!(funcs.iter().any(|f| tier_of(f.name) == RuntimeFuncTier::Alloc));
     }
 }
