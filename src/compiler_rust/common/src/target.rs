@@ -483,6 +483,71 @@ impl Target {
     pub const fn triple_str(&self) -> &'static str {
         self.arch.triple_str()
     }
+
+    /// Check if this is a baremetal target (no OS).
+    pub const fn is_baremetal(&self) -> bool {
+        matches!(self.os, TargetOS::None) && self.wasm_runtime.is_none()
+    }
+
+    /// Check if this is a WASM target.
+    pub const fn is_wasm(&self) -> bool {
+        matches!(self.arch, TargetArch::Wasm32 | TargetArch::Wasm64)
+    }
+
+    /// Get the default executable file extension for this target.
+    pub const fn default_exe_ext(&self) -> &'static str {
+        match self.os {
+            TargetOS::Windows => ".exe",
+            _ if self.is_wasm() => ".wasm",
+            _ => "",
+        }
+    }
+
+    /// Get the default shared library extension for this target.
+    pub const fn default_lib_ext(&self) -> &'static str {
+        match self.os {
+            TargetOS::Windows => ".dll",
+            TargetOS::MacOS => ".dylib",
+            _ if self.is_wasm() => ".wasm",
+            _ => ".so",
+        }
+    }
+
+    /// Get the default static library extension for this target.
+    pub const fn default_static_lib_ext(&self) -> &'static str {
+        match self.os {
+            TargetOS::Windows => ".lib",
+            _ => ".a",
+        }
+    }
+
+    /// Get the linker flavor for this target.
+    pub const fn linker_flavor(&self) -> LinkerFlavor {
+        match self.os {
+            TargetOS::Windows => LinkerFlavor::Msvc,
+            _ if self.is_wasm() => LinkerFlavor::WasmLd,
+            _ => LinkerFlavor::Gnu,
+        }
+    }
+
+    /// Get the path separator for this target OS.
+    pub const fn path_separator(&self) -> char {
+        match self.os {
+            TargetOS::Windows => '\\',
+            _ => '/',
+        }
+    }
+}
+
+/// Linker flavor determines which linker/link conventions to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkerFlavor {
+    /// GNU-style linker (ld, lld) - Linux, macOS, FreeBSD
+    Gnu,
+    /// MSVC-style linker (link.exe) - Windows
+    Msvc,
+    /// WASM linker (wasm-ld)
+    WasmLd,
 }
 
 impl Default for Target {
