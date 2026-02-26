@@ -1,0 +1,604 @@
+# MCP Lazy Server - Query and Analysis tool handlers (Tier 2 + Tier 3 + Tier 4)
+# Tier 2: simple_definition, simple_references, simple_hover, simple_completions, simple_type_at
+# Tier 3: simple_dependencies, simple_api_diff, simple_context, simple_search
+# Tier 4: simple_signature_help, simple_rename, simple_code_actions, simple_workspace_symbols,
+#          simple_call_hierarchy, simple_type_hierarchy, simple_semantic_tokens, simple_inlay_hints,
+#          simple_selection_range, simple_document_formatting
+# LSP Extras: simple_document_highlight, simple_type_definition, simple_implementation, simple_folding_range
+
+# ============================================================================
+# Tier 2 — Query API Tools (via bin/simple query CLI bridge)
+# ============================================================================
+
+# simple_definition — Go-to-definition
+fn handle_simple_definition(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+
+    var cmd = "timeout 30 bin/simple query definition " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_definition (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_references — Find all references
+fn handle_simple_references(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+
+    var cmd = "timeout 30 bin/simple query references " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_references (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_hover — Type + docs at position
+fn handle_simple_hover(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+
+    var cmd = "timeout 30 bin/simple query hover " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_hover (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_completions — Code completions
+fn handle_simple_completions(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    val prefix = extract_field(body, "prefix")
+
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+
+    var cmd = "timeout 30 bin/simple query completions " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    if prefix != "":
+        cmd = cmd + " --prefix " + prefix
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_completions (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_type_at — Type info at position
+fn handle_simple_type_at(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+
+    var cmd = "timeout 30 bin/simple query type-at " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_type_at (exit: " + str(exit_code) + ") --\n" + out)
+
+# ============================================================================
+# Tier 3 — Analysis Tools
+# ============================================================================
+
+# simple_dependencies — Module dependency graph
+fn handle_simple_dependencies(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val depth = extract_field(body, "depth")
+    val format_str = extract_field(body, "format")
+
+    var cmd = ""
+    if file != "":
+        # Show imports for a specific file
+        cmd = "grep -n '^use \\|^import ' " + file + " 2>/dev/null"
+        val (imports_out, _) = shell_cmd(cmd)
+
+        # Also find reverse dependencies (who imports this module)
+        val basename = file
+        var module_name = ""
+        # Extract module path from file path (e.g. src/lib/common/text/mod.spl -> std.text)
+        val (name_out, _2) = shell_cmd("echo " + basename + " | sed 's|src/lib/||;s|src/||;s|/|.|g;s|\\.spl$||;s|\\.mod$||'")
+        module_name = name_out.trim()
+
+        var rev_cmd = "grep -rn 'use.*" + module_name + "\\|import.*" + module_name + "' src/ --include='*.spl' 2>/dev/null | head -30"
+        val (rev_out, _3) = shell_cmd(rev_cmd)
+
+        var out_parts: [text] = []
+        out_parts.push("-- simple_dependencies file=" + file + " --\n")
+        out_parts.push("\n--- Imports ---\n")
+        if imports_out.trim() == "":
+            out_parts.push("(no imports)\n")
+        else:
+            out_parts.push(imports_out)
+        out_parts.push("\n--- Reverse Dependencies ---\n")
+        if rev_out.trim() == "":
+            out_parts.push("(no reverse dependencies found)\n")
+        else:
+            out_parts.push(rev_out)
+        return make_tool_result(id, out_parts.join(""))
+    else:
+        # Project-wide dependency summary
+        var summary_cmd = r"grep -rch '^use \|^import ' src/ --include='*.spl' 2>/dev/null | awk '{s+=$1} END {print s}'"
+        val (total_out, _4) = shell_cmd(summary_cmd)
+
+        var top_cmd = r"grep -roh '^use [^ .]*\.[^ .{]*' src/ --include='*.spl' 2>/dev/null | sort | uniq -c | sort -rn | head -20"
+        val (top_out, _5) = shell_cmd(top_cmd)
+
+        var out_parts: [text] = []
+        out_parts.push("-- simple_dependencies (project summary) --\n")
+        out_parts.push("Total import statements: " + total_out.trim() + "\n")
+        out_parts.push("\n--- Most imported modules ---\n")
+        out_parts.push(top_out)
+        return make_tool_result(id, out_parts.join(""))
+
+# simple_api_diff — API surface diff
+fn handle_simple_api_diff(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val revision = extract_field(body, "revision")
+
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+
+    var rev = "HEAD"
+    if revision != "":
+        rev = revision
+
+    # Get current public API (fn, class, struct, enum, export)
+    val (current_api, _) = shell_cmd("grep -n '^fn \\|^class \\|^struct \\|^enum \\|^export ' " + file + " 2>/dev/null")
+
+    # Get previous version API
+    val (prev_api, prev_exit) = shell_cmd("git show " + rev + ":" + file + " 2>/dev/null | grep -n '^fn \\|^class \\|^struct \\|^enum \\|^export '")
+
+    var out_parts: [text] = []
+    out_parts.push("-- simple_api_diff file=" + file + " revision=" + rev + " --\n")
+
+    if prev_exit != 0:
+        out_parts.push("(file not found in revision " + rev + ", showing current API only)\n\n")
+        out_parts.push("--- Current API ---\n")
+        if current_api.trim() == "":
+            out_parts.push("(no public symbols)\n")
+        else:
+            out_parts.push(current_api)
+    else:
+        out_parts.push("\n--- Previous API (" + rev + ") ---\n")
+        out_parts.push(prev_api)
+        out_parts.push("\n--- Current API ---\n")
+        out_parts.push(current_api)
+
+        # Show unified diff of API lines
+        val (diff_out, _2) = shell_cmd("diff <(git show " + rev + ":" + file + " 2>/dev/null | grep '^fn \\|^class \\|^struct \\|^enum \\|^export ') <(grep '^fn \\|^class \\|^struct \\|^enum \\|^export ' " + file + " 2>/dev/null) 2>/dev/null")
+        if diff_out.trim() != "":
+            out_parts.push("\n--- API Changes ---\n")
+            out_parts.push(diff_out)
+        else:
+            out_parts.push("\n(no API changes)\n")
+
+    make_tool_result(id, out_parts.join(""))
+
+# simple_context — Context pack for AI/docs
+fn handle_simple_context(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val target = extract_field(body, "target")
+
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+
+    var out_parts: [text] = []
+    out_parts.push("-- simple_context file=" + file + " --\n")
+
+    # 1. File content with line numbers
+    val source = file_read(file)
+    if source == "":
+        return make_tool_error(id, -32602, "Could not read file: " + file)
+
+    val lines = source.split("\n")
+    var num_parts: [text] = []
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        num_parts.push(str(line_num) + " | " + line + "\n")
+
+    out_parts.push("\n--- Source (" + str(line_num) + " lines) ---\n")
+    out_parts.push(num_parts.join(""))
+
+    # 2. Imports
+    val (imports_out, _) = shell_cmd("grep -n '^use \\|^import ' " + file + " 2>/dev/null")
+    out_parts.push("\n--- Imports ---\n")
+    if imports_out.trim() == "":
+        out_parts.push("(none)\n")
+    else:
+        out_parts.push(imports_out)
+
+    # 3. Public symbols
+    val (symbols_out, _2) = shell_cmd("grep -n '^fn \\|^class \\|^struct \\|^enum \\|^export \\|^val \\|^var ' " + file + " 2>/dev/null")
+    out_parts.push("\n--- Symbols ---\n")
+    if symbols_out.trim() == "":
+        out_parts.push("(none)\n")
+    else:
+        out_parts.push(symbols_out)
+
+    # 4. Diagnostics
+    val (check_out, check_exit) = shell_cmd("timeout 10 bin/simple check " + file + " 2>&1")
+    out_parts.push("\n--- Diagnostics ---\n")
+    if check_exit == 0:
+        out_parts.push("clean (no errors)\n")
+    else:
+        out_parts.push(check_out)
+
+    # 5. If target specified, grep for it
+    if target != "":
+        val (target_out, _3) = shell_cmd("grep -n '" + target + "' " + file + " 2>/dev/null")
+        out_parts.push("\n--- Target: " + target + " ---\n")
+        if target_out.trim() == "":
+            out_parts.push("(not found in file)\n")
+        else:
+            out_parts.push(target_out)
+
+    make_tool_result(id, out_parts.join(""))
+
+# simple_search — Language-aware code search
+fn handle_simple_search(id: text, body: text) -> text:
+    val query = extract_field(body, "query")
+    val kind = extract_field(body, "kind")
+    val scope = extract_field(body, "scope")
+    val file = extract_field(body, "file")
+
+    if query == "":
+        return make_tool_error(id, -32602, "Missing required parameter: query")
+
+    var search_dir = "src/"
+    if scope == "test":
+        search_dir = "test/"
+    elif scope == "all":
+        search_dir = "."
+    elif scope == "lib":
+        search_dir = "src/lib/"
+    elif scope == "compiler":
+        search_dir = "src/compiler/"
+    elif scope == "app":
+        search_dir = "src/app/"
+
+    var cmd = ""
+    if kind == "fn" or kind == "function":
+        cmd = "grep -rn '^fn " + query + "\\|^ *fn " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+    elif kind == "class":
+        cmd = "grep -rn '^class " + query + "\\|^ *class " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+    elif kind == "struct":
+        cmd = "grep -rn '^struct " + query + "\\|^ *struct " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+    elif kind == "enum":
+        cmd = "grep -rn '^enum " + query + "\\|^ *enum " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+    elif kind == "import" or kind == "use":
+        cmd = "grep -rn 'use.*" + query + "\\|import.*" + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+    elif kind == "type":
+        cmd = "grep -rn '^type " + query + "\\|^alias " + query + "\\|^class " + query + "\\|^struct " + query + "\\|^enum " + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+    else:
+        # General search
+        cmd = "grep -rn '" + query + "' " + search_dir + " --include='*.spl' 2>/dev/null | head -50"
+
+    if file != "":
+        # Restrict to specific file
+        cmd = "grep -n '" + query + "' " + file + " 2>/dev/null | head -50"
+
+    val (out, _) = shell_cmd(cmd)
+
+    var out_parts: [text] = []
+    out_parts.push("-- simple_search query=" + query)
+    if kind != "":
+        out_parts.push(" kind=" + kind)
+    if scope != "":
+        out_parts.push(" scope=" + scope)
+    out_parts.push(" --\n")
+    if out.trim() == "":
+        out_parts.push("No results found.")
+    else:
+        out_parts.push(out)
+    make_tool_result(id, out_parts.join(""))
+
+# ============================================================================
+# Tier 4 — LSP Tools
+# ============================================================================
+
+# simple_signature_help — Function parameter hints at call site
+fn handle_simple_signature_help(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    var cmd = "timeout 30 bin/simple query signature-help " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_signature_help (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_rename — Rename symbol across project
+fn handle_simple_rename(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    val new_name = extract_field(body, "new_name")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    if new_name == "":
+        return make_tool_error(id, -32602, "Missing required parameter: new_name")
+    var cmd = "timeout 30 bin/simple query rename " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " --new-name " + new_name + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_rename (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_code_actions — Quick fixes for diagnostics at position
+fn handle_simple_code_actions(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    var cmd = "timeout 30 bin/simple query code-actions " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_code_actions (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_workspace_symbols — Search symbols across project
+fn handle_simple_workspace_symbols(id: text, body: text) -> text:
+    val query = extract_field(body, "query")
+    val kind = extract_field(body, "kind")
+    if query == "":
+        return make_tool_error(id, -32602, "Missing required parameter: query")
+    var cmd = "timeout 30 bin/simple query workspace-symbols --query " + query
+    if kind != "":
+        cmd = cmd + " --kind " + kind
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_workspace_symbols (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_call_hierarchy — Incoming/outgoing call chains
+fn handle_simple_call_hierarchy(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    val direction = extract_field(body, "direction")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    var cmd = "timeout 30 bin/simple query call-hierarchy " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    if direction != "":
+        cmd = cmd + " --direction " + direction
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_call_hierarchy (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_type_hierarchy — Super/sub type relationships
+fn handle_simple_type_hierarchy(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    val direction = extract_field(body, "direction")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    var cmd = "timeout 30 bin/simple query type-hierarchy " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    if direction != "":
+        cmd = cmd + " --direction " + direction
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_type_hierarchy (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_semantic_tokens — Semantic token data for highlighting
+fn handle_simple_semantic_tokens(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val start_line = extract_field(body, "start_line")
+    val end_line = extract_field(body, "end_line")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    var cmd = "timeout 30 bin/simple query semantic-tokens " + file
+    if start_line != "":
+        cmd = cmd + " --start-line " + start_line
+    if end_line != "":
+        cmd = cmd + " --end-line " + end_line
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_semantic_tokens (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_inlay_hints — Inline type/parameter annotations
+fn handle_simple_inlay_hints(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val start_line = extract_field(body, "start_line")
+    val end_line = extract_field(body, "end_line")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    var cmd = "timeout 30 bin/simple query inlay-hints " + file
+    if start_line != "":
+        cmd = cmd + " --start-line " + start_line
+    if end_line != "":
+        cmd = cmd + " --end-line " + end_line
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_inlay_hints (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_selection_range — Smart selection expand/shrink
+fn handle_simple_selection_range(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    var cmd = "timeout 30 bin/simple query selection-range " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_selection_range (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_document_formatting — Format a document
+fn handle_simple_document_formatting(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    var cmd = "timeout 30 bin/simple query document-formatting " + file + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_document_formatting (exit: " + str(exit_code) + ") --\n" + out)
+
+# ============================================================================
+# LSP Extra Tools (4)
+# ============================================================================
+
+# simple_document_highlight — Same-file references with Read/Write classification
+fn handle_simple_document_highlight(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    var cmd = "timeout 30 bin/simple query document-highlight " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_document_highlight (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_type_definition — Find where a type is defined
+fn handle_simple_type_definition(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    var cmd = "timeout 30 bin/simple query type-definition " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_type_definition (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_implementation — Find trait implementations
+fn handle_simple_implementation(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    val line = extract_field(body, "line")
+    val column = extract_field(body, "column")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    if line == "":
+        return make_tool_error(id, -32602, "Missing required parameter: line")
+    var cmd = "timeout 30 bin/simple query implementation " + file + " " + line
+    if column != "":
+        cmd = cmd + " " + column
+    cmd = cmd + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_implementation (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_folding_range — Get folding ranges for a file
+fn handle_simple_folding_range(id: text, body: text) -> text:
+    val file = extract_field(body, "file")
+    if file == "":
+        return make_tool_error(id, -32602, "Missing required parameter: file")
+    var cmd = "timeout 30 bin/simple query folding-range " + file + " 2>&1"
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_folding_range (exit: " + str(exit_code) + ") --\n" + out)
+
+# ============================================================================
+# Code Query Tools (3) — AST pattern, Semantic query, Schema
+# ============================================================================
+
+# simple_ast_query — S-expression structural pattern matching
+fn handle_simple_ast_query(id: text, body: text) -> text:
+    val query = extract_field(body, "query")
+    val files = extract_field(body, "files")
+    val format_str = extract_field(body, "format")
+
+    if query == "":
+        return make_tool_error(id, -32602, "Missing required parameter: query")
+
+    var cmd = "timeout 60 bin/simple query ast-query '" + query + "'"
+    if files != "":
+        cmd = cmd + " --files " + files
+    if format_str != "":
+        cmd = cmd + " --format " + format_str
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_ast_query (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_sem_query — CodeQL-style semantic query
+fn handle_simple_sem_query(id: text, body: text) -> text:
+    val query = extract_field(body, "query")
+    val files = extract_field(body, "files")
+    val format_str = extract_field(body, "format")
+
+    if query == "":
+        return make_tool_error(id, -32602, "Missing required parameter: query")
+
+    var cmd = "timeout 60 bin/simple query sem-query '" + query + "'"
+    if files != "":
+        cmd = cmd + " --files " + files
+    if format_str != "":
+        cmd = cmd + " --format " + format_str
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_sem_query (exit: " + str(exit_code) + ") --\n" + out)
+
+# simple_query_schema — List available query node types and predicates
+fn handle_simple_query_schema(id: text, body: text) -> text:
+    val kind = extract_field(body, "kind")
+
+    var cmd = "timeout 10 bin/simple query query-schema"
+    if kind != "":
+        cmd = cmd + " " + kind
+    cmd = cmd + " 2>&1"
+
+    val (out, exit_code) = shell_cmd(cmd)
+    make_tool_result(id, "-- simple_query_schema (exit: " + str(exit_code) + ") --\n" + out)

@@ -1,0 +1,378 @@
+# MCP Debug Expression Evaluator
+#
+# Pure Simple expression evaluator for interpreter mode.
+# Tokenizes + recursive descent parses expressions using debug state variables.
+
+class EvalResult:
+    value: String
+    new_pos: Int
+
+fn eval_is_digit(ch) -> Bool:
+    ch >= '0' and ch <= '9'
+
+fn eval_is_alpha(ch) -> Bool:
+    val code = ch as int
+    val is_lower = code >= 97 and code <= 122
+    if is_lower: return true
+    val is_upper = code >= 65 and code <= 90
+    if is_upper: return true
+    if ch == '_': return true
+    false
+
+fn eval_is_alnum(ch) -> Bool:
+    if eval_is_digit(ch): return true
+    eval_is_alpha(ch)
+
+fn eval_tokenize(expr: String) -> [String]:
+    var tokens = []
+    val length = expr.len()
+    var pos = 0
+    for _i in range(0, length + 1):
+        if pos >= length:
+            return tokens
+        val ch = expr[pos]
+        if ch == ' ' or ch == '\t':
+            pos = pos + 1
+        elif eval_is_digit(ch):
+            var num_str = ch.to_string()
+            var np = pos + 1
+            for _j in range(0, length):
+                if np >= length: break
+                val nc = expr[np]
+                if eval_is_digit(nc) or nc == '.':
+                    num_str = num_str + nc.to_string()
+                    np = np + 1
+                else:
+                    break
+            tokens = tokens + [num_str]
+            pos = np
+        elif eval_is_alpha(ch):
+            var id_str = ch.to_string()
+            var np = pos + 1
+            for _j in range(0, length):
+                if np >= length: break
+                val nc = expr[np]
+                if eval_is_alnum(nc):
+                    id_str = id_str + nc.to_string()
+                    np = np + 1
+                else:
+                    break
+            tokens = tokens + [id_str]
+            pos = np
+        elif ch == '"' or ch == '\'':
+            val quote = ch
+            var str_val = ""
+            var np = pos + 1
+            for _j in range(0, length):
+                if np >= length: break
+                val sc = expr[np]
+                if sc == quote:
+                    np = np + 1
+                    break
+                str_val = str_val + sc.to_string()
+                np = np + 1
+            tokens = tokens + ["Q:" + str_val]
+            pos = np
+        elif ch == '=':
+            if pos + 1 < length:
+                if expr[pos + 1] == '=':
+                    tokens = tokens + ["=="]
+                    pos = pos + 2
+                else:
+                    tokens = tokens + ["="]
+                    pos = pos + 1
+            else:
+                tokens = tokens + ["="]
+                pos = pos + 1
+        elif ch == '!':
+            if pos + 1 < length:
+                if expr[pos + 1] == '=':
+                    tokens = tokens + ["!="]
+                    pos = pos + 2
+                else:
+                    tokens = tokens + ["!"]
+                    pos = pos + 1
+            else:
+                tokens = tokens + ["!"]
+                pos = pos + 1
+        elif ch == '<':
+            if pos + 1 < length:
+                if expr[pos + 1] == '=':
+                    tokens = tokens + ["<="]
+                    pos = pos + 2
+                else:
+                    tokens = tokens + ["<"]
+                    pos = pos + 1
+            else:
+                tokens = tokens + ["<"]
+                pos = pos + 1
+        elif ch == '>':
+            if pos + 1 < length:
+                if expr[pos + 1] == '=':
+                    tokens = tokens + [">="]
+                    pos = pos + 2
+                else:
+                    tokens = tokens + [">"]
+                    pos = pos + 1
+            else:
+                tokens = tokens + [">"]
+                pos = pos + 1
+        elif ch == '+' or ch == '-':
+            tokens = tokens + [ch.to_string()]
+            pos = pos + 1
+        elif ch == '*' or ch == '/':
+            tokens = tokens + [ch.to_string()]
+            pos = pos + 1
+        elif ch == '%' or ch == '(' or ch == ')' or ch == ',':
+            tokens = tokens + [ch.to_string()]
+            pos = pos + 1
+        else:
+            pos = pos + 1
+    tokens
+
+fn eval_peek(tokens: [String], pos: Int) -> String:
+    if pos >= tokens.len():
+        return ""
+    tokens[pos]
+
+fn eval_lookup(var_name: String, vars_list: [String]) -> String:
+    for entry in vars_list:
+        val parts = entry.split(" = ")
+        if parts.len() >= 2:
+            if parts[0].trim() == var_name:
+                val rest = parts[1]
+                val type_parts = rest.split(" : ")
+                val var_value = type_parts[0].trim()
+                var var_type = "unknown"
+                if type_parts.len() >= 2:
+                    var_type = type_parts[1].trim()
+                if var_type == "Int" or var_type == "i64":
+                    return "i:" + var_value
+                elif var_type == "Float" or var_type == "f64":
+                    return "f:" + var_value
+                elif var_type == "Bool":
+                    return "b:" + var_value
+                else:
+                    return "s:" + var_value
+    "e:undefined variable '" + var_name + "'"
+
+fn eval_get_type(typed_val: String) -> String:
+    if typed_val.starts_with("i:"): return "int"
+    if typed_val.starts_with("f:"): return "float"
+    if typed_val.starts_with("s:"): return "string"
+    if typed_val.starts_with("b:"): return "bool"
+    if typed_val.starts_with("n:"): return "nil"
+    "error"
+
+fn eval_get_value(typed_val: String) -> String:
+    if typed_val.len() < 2: return typed_val
+    typed_val.substring(2)
+
+fn eval_arith(left: String, op: String, right: String) -> String:
+    val l_val = eval_get_value(left)
+    val r_val = eval_get_value(right)
+    val l_int = left.starts_with("i:")
+    val r_int = right.starts_with("i:")
+    if l_int and r_int:
+        val lv = l_val.to_int()
+        val rv = r_val.to_int()
+        var result = 0
+        if op == "+":
+            result = lv + rv
+        elif op == "-":
+            result = lv - rv
+        elif op == "*":
+            result = lv * rv
+        elif op == "/":
+            if rv == 0:
+                return "e:division by zero"
+            result = lv / rv
+        elif op == "%":
+            if rv == 0:
+                return "e:modulo by zero"
+            result = lv % rv
+        return "i:" + result.to_string()
+    val l_str = left.starts_with("s:")
+    val r_str = right.starts_with("s:")
+    if l_str and r_str and op == "+":
+        return "s:" + l_val + r_val
+    "e:cannot apply '" + op + "' to " + eval_get_type(left) + " and " + eval_get_type(right)
+
+fn eval_compare(left: String, op: String, right: String) -> String:
+    val l_val = eval_get_value(left)
+    val r_val = eval_get_value(right)
+    val l_int = left.starts_with("i:")
+    val r_int = right.starts_with("i:")
+    if l_int and r_int:
+        val lv = l_val.to_int()
+        val rv = r_val.to_int()
+        var cmp = false
+        if op == "==":
+            cmp = lv == rv
+        elif op == "!=":
+            cmp = lv != rv
+        elif op == "<":
+            cmp = lv < rv
+        elif op == ">":
+            cmp = lv > rv
+        elif op == "<=":
+            cmp = lv <= rv
+        elif op == ">=":
+            cmp = lv >= rv
+        if cmp: return "b:true"
+        return "b:false"
+    if op == "==":
+        if l_val == r_val: return "b:true"
+        return "b:false"
+    if op == "!=":
+        if l_val != r_val: return "b:true"
+        return "b:false"
+    "e:cannot compare " + eval_get_type(left) + " and " + eval_get_type(right)
+
+fn eval_primary(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
+    val tok = eval_peek(tokens, pos)
+    if tok == "":
+        return EvalResult(value: "e:unexpected end of expression", new_pos: pos)
+    if tok == "(":
+        val inner = eval_expr(tokens, pos + 1, vars_list)
+        if inner.value.starts_with("e:"): return inner
+        var np = inner.new_pos
+        if eval_peek(tokens, np) == ")": np = np + 1
+        return EvalResult(value: inner.value, new_pos: np)
+    if tok == "-":
+        val operand = eval_primary(tokens, pos + 1, vars_list)
+        if operand.value.starts_with("e:"): return operand
+        if operand.value.starts_with("i:"):
+            val nv = -(eval_get_value(operand.value).to_int())
+            return EvalResult(value: "i:" + nv.to_string(), new_pos: operand.new_pos)
+        return EvalResult(value: "e:cannot negate " + eval_get_type(operand.value), new_pos: operand.new_pos)
+    if tok == "not":
+        val operand = eval_expr(tokens, pos + 1, vars_list)
+        if operand.value.starts_with("e:"): return operand
+        if operand.value == "b:true":
+            return EvalResult(value: "b:false", new_pos: operand.new_pos)
+        if operand.value == "b:false":
+            return EvalResult(value: "b:true", new_pos: operand.new_pos)
+        return EvalResult(value: "e:cannot apply 'not' to " + eval_get_type(operand.value), new_pos: operand.new_pos)
+    # Number literal
+    val first_ch = tok[0]
+    val is_num = first_ch >= '0' and first_ch <= '9'
+    if is_num:
+        if tok.contains("."):
+            return EvalResult(value: "f:" + tok, new_pos: pos + 1)
+        return EvalResult(value: "i:" + tok, new_pos: pos + 1)
+    # String literal (tokenized as Q:content)
+    if tok.starts_with("Q:"):
+        return EvalResult(value: "s:" + tok.substring(2), new_pos: pos + 1)
+    # Keywords
+    if tok == "true": return EvalResult(value: "b:true", new_pos: pos + 1)
+    if tok == "false": return EvalResult(value: "b:false", new_pos: pos + 1)
+    if tok == "nil": return EvalResult(value: "n:", new_pos: pos + 1)
+    # Built-in: type(expr)
+    if tok == "type":
+        if eval_peek(tokens, pos + 1) == "(":
+            val arg = eval_expr(tokens, pos + 2, vars_list)
+            var np = arg.new_pos
+            if eval_peek(tokens, np) == ")": np = np + 1
+            return EvalResult(value: "s:" + eval_get_type(arg.value), new_pos: np)
+    # Built-in: len(expr)
+    if tok == "len":
+        if eval_peek(tokens, pos + 1) == "(":
+            val arg = eval_expr(tokens, pos + 2, vars_list)
+            var np = arg.new_pos
+            if eval_peek(tokens, np) == ")": np = np + 1
+            if arg.value.starts_with("s:"):
+                val sv = eval_get_value(arg.value)
+                return EvalResult(value: "i:" + sv.len().to_string(), new_pos: np)
+            return EvalResult(value: "e:len() requires string argument", new_pos: np)
+    # Built-in: str(expr)
+    if tok == "str":
+        if eval_peek(tokens, pos + 1) == "(":
+            val arg = eval_expr(tokens, pos + 2, vars_list)
+            var np = arg.new_pos
+            if eval_peek(tokens, np) == ")": np = np + 1
+            return EvalResult(value: "s:" + eval_get_value(arg.value), new_pos: np)
+    # Variable lookup
+    EvalResult(value: eval_lookup(tok, vars_list), new_pos: pos + 1)
+
+fn eval_mul(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
+    var left = eval_primary(tokens, pos, vars_list)
+    if left.value.starts_with("e:"): return left
+    for _i in range(0, 50):
+        val op = eval_peek(tokens, left.new_pos)
+        if op == "*" or op == "/" or op == "%":
+            val right = eval_primary(tokens, left.new_pos + 1, vars_list)
+            if right.value.starts_with("e:"): return right
+            val rv = eval_arith(left.value, op, right.value)
+            left = EvalResult(value: rv, new_pos: right.new_pos)
+            if left.value.starts_with("e:"): return left
+        else:
+            return left
+    left
+
+fn eval_add(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
+    var left = eval_mul(tokens, pos, vars_list)
+    if left.value.starts_with("e:"): return left
+    for _i in range(0, 50):
+        val op = eval_peek(tokens, left.new_pos)
+        if op == "+" or op == "-":
+            val right = eval_mul(tokens, left.new_pos + 1, vars_list)
+            if right.value.starts_with("e:"): return right
+            val rv = eval_arith(left.value, op, right.value)
+            left = EvalResult(value: rv, new_pos: right.new_pos)
+            if left.value.starts_with("e:"): return left
+        else:
+            return left
+    left
+
+fn eval_expr(tokens: [String], pos: Int, vars_list: [String]) -> EvalResult:
+    var left = eval_add(tokens, pos, vars_list)
+    if left.value.starts_with("e:"): return left
+    val op = eval_peek(tokens, left.new_pos)
+    if op == "==" or op == "!=" or op == "<" or op == ">":
+        val right = eval_add(tokens, left.new_pos + 1, vars_list)
+        if right.value.starts_with("e:"): return right
+        return EvalResult(value: eval_compare(left.value, op, right.value), new_pos: right.new_pos)
+    if op == "<=" or op == ">=":
+        val right = eval_add(tokens, left.new_pos + 1, vars_list)
+        if right.value.starts_with("e:"): return right
+        return EvalResult(value: eval_compare(left.value, op, right.value), new_pos: right.new_pos)
+    if op == "and":
+        val right = eval_expr(tokens, left.new_pos + 1, vars_list)
+        if right.value.starts_with("e:"): return right
+        val lb = left.value == "b:true"
+        val rb = right.value == "b:true"
+        val both = lb and rb
+        var bv = "b:false"
+        if both:
+            bv = "b:true"
+        return EvalResult(value: bv, new_pos: right.new_pos)
+    if op == "or":
+        val right = eval_expr(tokens, left.new_pos + 1, vars_list)
+        if right.value.starts_with("e:"): return right
+        val lb = left.value == "b:true"
+        val rb = right.value == "b:true"
+        val either = lb or rb
+        var bv = "b:false"
+        if either:
+            bv = "b:true"
+        return EvalResult(value: bv, new_pos: right.new_pos)
+    left
+
+fn eval_expression(expr: String, vars_list: [String]) -> String:
+    val trimmed = expr.trim()
+    if trimmed == "": return "e:empty expression"
+    val tokens = eval_tokenize(trimmed)
+    if tokens.len() == 0: return "e:empty expression"
+    val result = eval_expr(tokens, 0, vars_list)
+    result.value
+
+# --- Exports ---
+
+export EvalResult
+export eval_is_digit, eval_is_alpha, eval_is_alnum
+export eval_tokenize, eval_peek, eval_lookup
+export eval_get_type, eval_get_value
+export eval_arith, eval_compare
+export eval_primary, eval_mul, eval_add, eval_expr
+export eval_expression
