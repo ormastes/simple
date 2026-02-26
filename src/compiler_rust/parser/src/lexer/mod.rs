@@ -463,6 +463,9 @@ impl<'a> Lexer<'a> {
             // Numbers
             '0'..='9' => self.scan_number(ch),
 
+            // Backtick atom literal: `symbol`
+            '`' => self.scan_atom(),
+
             // Identifiers and keywords
             'a'..='z' | 'A'..='Z' | '_' => self.scan_identifier(ch),
 

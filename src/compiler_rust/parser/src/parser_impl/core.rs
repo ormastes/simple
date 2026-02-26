@@ -72,6 +72,12 @@ pub struct Parser<'a> {
     /// Count of INDENT tokens consumed during binary expression line continuation
     /// that need matching DEDENTs consumed after the expression.
     pub(crate) binary_indent_count: usize,
+    /// Count of unmatched DEDENTs from multi-line expression continuation.
+    /// When `consume_dedents_for_method_chain` can't consume all DEDENTs immediately
+    /// (because the DEDENTs appear later in the token stream, after block bodies),
+    /// this counter tracks how many should be consumed at a later point (e.g., after
+    /// an if-block before checking for elif/else).
+    pub(crate) deferred_dedent_count: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -97,6 +103,7 @@ impl<'a> Parser<'a> {
             no_brace_postfix: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
+            deferred_dedent_count: 0,
         };
 
         // Check for common mistakes in the initial token
@@ -183,6 +190,7 @@ impl<'a> Parser<'a> {
             no_brace_postfix: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
+            deferred_dedent_count: 0,
         }
     }
 
@@ -444,6 +452,12 @@ impl<'a> Parser<'a> {
                     self.parse_expression_or_assignment()
                 }
             }
+            // Low-level features
+            TokenKind::Asm => self.parse_asm(),
+            TokenKind::Bitfield => self.parse_bitfield(),
+            TokenKind::Newtype => self.parse_newtype(),
+            TokenKind::Extend => self.parse_extend(),
+            TokenKind::Comptime => self.parse_comptime_val(),
             TokenKind::Unit => self.parse_unit(),
             TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),

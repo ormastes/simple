@@ -38,6 +38,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Bool(_)
             | TokenKind::Nil
             | TokenKind::Symbol(_)
+            | TokenKind::Atom(_)
             | TokenKind::CustomBlock { .. } => self.parse_primary_literal(),
             TokenKind::I18nString { .. } | TokenKind::I18nFString { .. } => self.parse_i18n_literal(),
             TokenKind::Result
@@ -87,7 +88,16 @@ impl<'a> Parser<'a> {
             | TokenKind::Gen
             | TokenKind::Impl
             | TokenKind::Exists
-            | TokenKind::Me => self.parse_primary_identifier(),
+            | TokenKind::Me
+            | TokenKind::Asm
+            | TokenKind::Bitfield
+            | TokenKind::Newtype
+            | TokenKind::Extend
+            | TokenKind::Comptime
+            | TokenKind::Struct
+            | TokenKind::Enum
+            | TokenKind::Class
+            | TokenKind::Trait => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
             // fn(): lambda syntax (alias for \:) - only in expression context
             // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions

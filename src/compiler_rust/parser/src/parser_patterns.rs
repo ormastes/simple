@@ -500,6 +500,21 @@ impl<'a> Parser<'a> {
             TokenKind::Val => self.parse_keyword_as_pattern("Val"),
             TokenKind::Kernel => self.parse_keyword_as_pattern("Kernel"),
             TokenKind::Literal => self.parse_keyword_as_pattern("Literal"),
+            // Low-level keywords usable as pattern identifiers
+            TokenKind::Asm => self.parse_keyword_as_pattern("Asm"),
+            TokenKind::Bitfield => self.parse_keyword_as_pattern("Bitfield"),
+            TokenKind::Newtype => self.parse_keyword_as_pattern("Newtype"),
+            TokenKind::Extend => self.parse_keyword_as_pattern("Extend"),
+            TokenKind::Comptime => self.parse_keyword_as_pattern("Comptime"),
+            // Type definition keywords usable as pattern identifiers
+            TokenKind::Struct => self.parse_keyword_as_pattern("Struct"),
+            TokenKind::Enum => self.parse_keyword_as_pattern("Enum"),
+            TokenKind::Class => self.parse_keyword_as_pattern("Class"),
+            TokenKind::Fn => self.parse_keyword_as_pattern("Fn"),
+            TokenKind::Trait => self.parse_keyword_as_pattern("Trait"),
+            // Additional keywords that appear as enum variant names
+            TokenKind::Self_ => self.parse_keyword_as_pattern("Self"),
+            TokenKind::Export => self.parse_keyword_as_pattern("Export"),
             _ => Err(ParseError::unexpected_token(
                 "pattern",
                 format!("{:?}", self.current.kind),

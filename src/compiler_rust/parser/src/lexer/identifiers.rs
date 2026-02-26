@@ -277,6 +277,12 @@ impl<'a> super::Lexer<'a> {
                 }
             }
             "_" => TokenKind::Underscore,
+            // Low-level keywords
+            "asm" => TokenKind::Asm,
+            "bitfield" => TokenKind::Bitfield,
+            "newtype" => TokenKind::Newtype,
+            "extend" => TokenKind::Extend,
+            "comptime" => TokenKind::Comptime,
             // AOP keywords
             "on" => TokenKind::On,
             "bind" => TokenKind::Bind,
@@ -620,6 +626,31 @@ impl<'a> super::Lexer<'a> {
 
         // Unclosed block - return error
         TokenKind::Error(format!("Unclosed {} block (missing '}}')", kind))
+    }
+
+    /// Scan a backtick atom literal: `symbol`
+    /// Returns TokenKind::Atom("symbol")
+    pub(super) fn scan_atom(&mut self) -> TokenKind {
+        let mut name = String::new();
+
+        while let Some(ch) = self.peek() {
+            if ch == '`' {
+                self.advance(); // consume closing backtick
+                return TokenKind::Atom(name);
+            } else if ch.is_alphanumeric() || ch == '_' {
+                name.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        // Unclosed backtick or empty atom
+        if name.is_empty() {
+            TokenKind::Error("Empty backtick atom literal".to_string())
+        } else {
+            TokenKind::Error("Unclosed backtick atom literal (missing closing '`')".to_string())
+        }
     }
 
     pub(super) fn scan_symbol(&mut self) -> TokenKind {

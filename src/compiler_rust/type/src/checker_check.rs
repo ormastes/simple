@@ -274,6 +274,17 @@ impl TypeChecker {
                     // Literal functions don't introduce new type bindings
                     // They register suffix → type mappings at runtime
                 }
+                Node::InlineAsm(_) => {
+                    // Inline assembly doesn't introduce type bindings
+                }
+                Node::Newtype(nt) => {
+                    // Register newtype wrapper as a type
+                    let ty = self.fresh_var();
+                    self.env.insert(nt.name.clone(), ty);
+                }
+                Node::Extend(_) => {
+                    // Extension methods don't introduce new type names
+                }
             }
         }
         // Second pass: check all nodes in order, enforcing macro definition order

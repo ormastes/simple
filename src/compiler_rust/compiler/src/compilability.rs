@@ -674,6 +674,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             }
             add_reason(reasons, FallbackReason::MethodCall);
         }
+
+        // Atom literals (backtick symbols)
+        Expr::Atom(_) => {
+            add_reason(reasons, FallbackReason::NotYetImplemented("atom literal".into()));
+        }
     }
 }
 

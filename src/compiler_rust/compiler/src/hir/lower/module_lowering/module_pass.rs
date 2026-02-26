@@ -380,7 +380,10 @@ impl Lowerer {
                 | Node::Pass(_)
                 | Node::Skip(_)
                 | Node::Guard(_)
-                | Node::Defer(_) => {}
+                | Node::Defer(_)
+                | Node::InlineAsm(_)
+                | Node::Newtype(_)
+                | Node::Extend(_) => {}
             }
         }
 

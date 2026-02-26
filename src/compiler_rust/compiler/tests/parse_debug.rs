@@ -1,16 +1,39 @@
 #[test]
 fn test_as_cast_in_func_args() {
-    let cases = vec![
-        ("as cast in args", "fn foo():\n    bar(value as i64)\n"),
-        ("not in args", "fn foo(x):\n    if not x.contains(y): return\n"),
-        ("as cast in match arm", "fn foo(target, value: i64):\n    match target:\n        case I8: bar(value as i64)\n        case F32: baz(value as f64)\n"),
-        ("pipe in match", "fn foo(x):\n    match x:\n        case A | B: 1\n"),
+    // Test parsing the actual failing files with minimal reproduction
+    let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+    let test_files = [
+        "src/compiler/35.semantics/semantics/cast_rules.spl",
+        "src/compiler/99.loader/loader/compiler_ffi.spl",
+        "src/compiler/30.types/type_system/effects.spl",
+        "src/compiler/70.backend/inline_asm.spl",
+        "src/compiler/99.loader/loader/smf_mmap_native.spl",
+        "src/compiler/60.mir_opt/mir_opt/auto_vectorize_analysis.spl",
+        "src/compiler/90.tools/aop_proceed.spl",
+        "src/compiler/55.borrow/gc_analysis/roots.spl",
+        "src/compiler/60.mir_opt/optimization_passes.spl",
+        "src/compiler/40.mono/monomorphize/deferred_deserialize.spl",
+        "src/compiler/40.mono/monomorphize/deferred.spl",
+        "src/compiler/00.common/predicate_parser.spl",
     ];
-    for (name, src) in &cases {
-        let mut parser = simple_parser::Parser::new(src);
+    for f in &test_files {
+        let path = base.join(f);
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => { eprintln!("  {f}: READ ERROR: {e}"); continue; }
+        };
+        let mut parser = simple_parser::Parser::new(&src);
         match parser.parse() {
-            Ok(_) => eprintln!("  {name}: OK"),
-            Err(e) => eprintln!("  {name}: ERR: {e}"),
+            Ok(_) => eprintln!("  {f}: OK"),
+            Err(e) => {
+                let (line, col) = match &e {
+                    simple_parser::ParseError::UnexpectedToken { span, .. } => (span.line, span.column),
+                    simple_parser::ParseError::SyntaxError { line, column, .. } => (*line, *column),
+                    _ => (0, 0),
+                };
+                eprintln!("  {f}:{line}:{col}: {e}");
+            }
         }
     }
 }

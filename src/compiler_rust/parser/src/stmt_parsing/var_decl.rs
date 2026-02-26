@@ -1041,6 +1041,46 @@ impl Parser<'_> {
         }))
     }
 
+    /// Parse newtype definition: `newtype Name = Type`
+    /// Creates a wrapper struct with a single `value` field.
+    pub(crate) fn parse_newtype(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Newtype)?;
+
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Assign)?;
+        let inner_type = self.parse_type()?;
+
+        Ok(Node::Newtype(NewtypeDef {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            name,
+            inner_type,
+            visibility: Visibility::Private,
+            doc_comment: None,
+        }))
+    }
+
+    /// Parse comptime val: `comptime val x = expr`
+    /// Treated like val (eager evaluation marker for compile-time).
+    pub(crate) fn parse_comptime_val(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Comptime)?;
+
+        // After `comptime`, expect `val` or `fn`
+        if self.check(&TokenKind::Val) {
+            // comptime val = compile-time constant
+            self.parse_val()
+        } else if self.check(&TokenKind::Fn) {
+            // comptime fn = const fn (computed at compile time)
+            self.parse_function_with_doc(None)
+        } else {
+            Err(ParseError::syntax_error_with_span(
+                "expected 'val' or 'fn' after 'comptime'".to_string(),
+                self.current.span,
+            ))
+        }
+    }
+
     /// Parse extern class definition.
     ///
     /// Syntax:

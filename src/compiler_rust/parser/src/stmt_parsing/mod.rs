@@ -13,6 +13,7 @@
 //! - AOP and bounds
 
 mod aop;
+mod asm;
 mod assert;
 mod bounds;
 mod contract;

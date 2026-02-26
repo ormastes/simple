@@ -186,13 +186,17 @@ impl<'a> Parser<'a> {
             // Parse the body first, then check if else follows
             let then_expr = self.parse_expression()?;
 
-            // Skip newlines before checking for else/elif
-            // This allows:
-            //   if x < min_val: min_val
-            //   else if x > max_val: max_val
-            //   else: x
-            while self.check(&TokenKind::Newline) {
-                self.advance();
+            // Peek through newlines/dedents to check for elif/else continuation.
+            // Only consume newlines if elif/else actually follows,
+            // otherwise leave them for the outer block parser.
+            if self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {
+                let has_elif_or_else = self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
+                    || self.peek_through_newlines_and_indents_is(&TokenKind::Else);
+                if has_elif_or_else {
+                    while self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {
+                        self.advance();
+                    }
+                }
             }
 
             // If no else clause, treat as statement-form (no else required)
@@ -269,8 +273,24 @@ impl<'a> Parser<'a> {
             }));
         }
 
+        // Save deferred dedent count before parsing block.
+        // Multi-line conditions (e.g., `if expr or\n   expr:`) may have consumed
+        // Indent tokens during expression parsing whose matching Dedents appear after
+        // the block body. These are tracked in `deferred_dedent_count`.
+        let deferred_before = self.deferred_dedent_count;
+        self.deferred_dedent_count = 0;
+
         // Block-style: original behavior
         let then_block = self.parse_block()?;
+
+        // Consume deferred Dedent tokens from multi-line expression continuation.
+        let deferred = self.deferred_dedent_count + deferred_before;
+        self.deferred_dedent_count = 0;
+        for _ in 0..deferred {
+            if self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+        }
 
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
