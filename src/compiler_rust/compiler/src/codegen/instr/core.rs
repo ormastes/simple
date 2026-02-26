@@ -272,7 +272,10 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
 
                 let print_id = ctx.runtime_funcs[fn_to_use];
                 let print_ref = ctx.module.declare_func_in_func(print_id, builder.func);
-                let arg_val = ctx.vreg_values[arg];
+                let arg_val = match ctx.vreg_values.get(arg) {
+                    Some(&v) => v,
+                    None => return Err(format!("print: arg vreg {:?} not found", arg)),
+                };
                 builder.ins().call(print_ref, &[arg_val]);
             }
 
@@ -329,7 +332,10 @@ pub(crate) fn compile_interp_call<M: Module>(
     let array_push_ref = ctx.module.declare_func_in_func(array_push_id, builder.func);
 
     for arg in args {
-        let arg_val = ctx.vreg_values[arg];
+        let arg_val = match ctx.vreg_values.get(arg) {
+            Some(&v) => v,
+            None => return Err(format!("interp_call: arg vreg {:?} not found", arg)),
+        };
         builder.ins().call(array_push_ref, &[args_array, arg_val]);
     }
 

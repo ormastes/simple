@@ -100,10 +100,10 @@ pub(crate) fn compile_builtin_method<M: Module>(
     method: &str,
     args: &[VReg],
 ) -> InstrResult<()> {
-    let receiver_val = ctx.vreg_values[&receiver];
+    let receiver_val = ctx.get_vreg(&receiver)?;
     let result = match (receiver_type, method) {
         ("Array", "push") | ("array", "push") => {
-            let arg_val = ctx.vreg_values[&args[0]];
+            let arg_val = ctx.get_vreg(&args[0])?;
             let wrapped = wrap_value(ctx, builder, arg_val);
             call_runtime_2_void(ctx, builder, "rt_array_push", receiver_val, wrapped);
             // push() modifies in-place and returns the receiver for chaining
@@ -111,13 +111,13 @@ pub(crate) fn compile_builtin_method<M: Module>(
         }
         ("Array", "len") | ("array", "len") => Some(call_len_method(ctx, builder, "rt_array_len", receiver_val)),
         ("Array", "get") | ("array", "get") => {
-            let idx_val = ctx.vreg_values[&args[0]];
+            let idx_val = ctx.get_vreg(&args[0])?;
             let wrapped_idx = wrap_value(ctx, builder, idx_val);
             Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_idx))
         }
         ("Array", "set") | ("array", "set") => {
-            let idx_val = ctx.vreg_values[&args[0]];
-            let arg_val = ctx.vreg_values[&args[1]];
+            let idx_val = ctx.get_vreg(&args[0])?;
+            let arg_val = ctx.get_vreg(&args[1])?;
             let wrapped_idx = wrap_value(ctx, builder, idx_val);
             let wrapped_val = wrap_value(ctx, builder, arg_val);
             let result_i8 = call_runtime_3(ctx, builder, "rt_index_set", receiver_val, wrapped_idx, wrapped_val);
@@ -130,11 +130,11 @@ pub(crate) fn compile_builtin_method<M: Module>(
         }
         ("String", "len") | ("string", "len") => Some(call_len_method(ctx, builder, "rt_string_len", receiver_val)),
         ("String", "concat") | ("string", "concat") => {
-            let arg_val = ctx.vreg_values[&args[0]];
+            let arg_val = ctx.get_vreg(&args[0])?;
             Some(call_runtime_2(ctx, builder, "rt_string_concat", receiver_val, arg_val))
         }
         ("String", "starts_with") | ("string", "starts_with") => {
-            let arg_val = ctx.vreg_values[&args[0]];
+            let arg_val = ctx.get_vreg(&args[0])?;
             Some(call_runtime_2(
                 ctx,
                 builder,
@@ -144,7 +144,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
             ))
         }
         ("String", "ends_with") | ("string", "ends_with") => {
-            let arg_val = ctx.vreg_values[&args[0]];
+            let arg_val = ctx.get_vreg(&args[0])?;
             Some(call_runtime_2(
                 ctx,
                 builder,
@@ -154,13 +154,13 @@ pub(crate) fn compile_builtin_method<M: Module>(
             ))
         }
         ("Dict", "get") | ("dict", "get") => {
-            let key_val = ctx.vreg_values[&args[0]];
+            let key_val = ctx.get_vreg(&args[0])?;
             let wrapped_key = wrap_value(ctx, builder, key_val);
             Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_key))
         }
         ("Dict", "set") | ("dict", "set") => {
-            let key_val = ctx.vreg_values[&args[0]];
-            let val_val = ctx.vreg_values[&args[1]];
+            let key_val = ctx.get_vreg(&args[0])?;
+            let val_val = ctx.get_vreg(&args[1])?;
             let wrapped_key = wrap_value(ctx, builder, key_val);
             let wrapped_val = wrap_value(ctx, builder, val_val);
             let result_i8 = call_runtime_3(ctx, builder, "rt_dict_set", receiver_val, wrapped_key, wrapped_val);
@@ -174,13 +174,13 @@ pub(crate) fn compile_builtin_method<M: Module>(
         ("Dict", "keys") | ("dict", "keys") => Some(call_runtime_1(ctx, builder, "rt_dict_keys", receiver_val)),
         ("Dict", "values") | ("dict", "values") => Some(call_runtime_1(ctx, builder, "rt_dict_values", receiver_val)),
         ("Tuple", "get") | ("tuple", "get") => {
-            let idx_val = ctx.vreg_values[&args[0]];
+            let idx_val = ctx.get_vreg(&args[0])?;
             Some(call_runtime_2(ctx, builder, "rt_tuple_get", receiver_val, idx_val))
         }
         ("Tuple", "len") | ("tuple", "len") => Some(call_len_method(ctx, builder, "rt_tuple_len", receiver_val)),
         ("Tuple", "set") | ("tuple", "set") => {
-            let idx_val = ctx.vreg_values[&args[0]];
-            let arg_val = ctx.vreg_values[&args[1]];
+            let idx_val = ctx.get_vreg(&args[0])?;
+            let arg_val = ctx.get_vreg(&args[1])?;
             let wrapped = wrap_value(ctx, builder, arg_val);
             let result_i8 = call_runtime_3(ctx, builder, "rt_tuple_set", receiver_val, idx_val, wrapped);
             Some(builder.ins().uextend(types::I64, result_i8))
@@ -191,21 +191,21 @@ pub(crate) fn compile_builtin_method<M: Module>(
         | ("dict", "contains")
         | ("String", "contains")
         | ("string", "contains") => {
-            let arg_val = ctx.vreg_values[&args[0]];
+            let arg_val = ctx.get_vreg(&args[0])?;
             let result_i8 = call_runtime_2(ctx, builder, "rt_contains", receiver_val, arg_val);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
         ("Array", "slice") | ("array", "slice") | ("String", "slice") | ("string", "slice") => {
             let slice_id = ctx.runtime_funcs["rt_slice"];
             let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);
-            let start = ctx.vreg_values[&args[0]];
+            let start = ctx.get_vreg(&args[0])?;
             let end = if args.len() > 1 {
-                ctx.vreg_values[&args[1]]
+                ctx.get_vreg(&args[1])?
             } else {
                 builder.ins().iconst(types::I64, i64::MAX)
             };
             let step = if args.len() > 2 {
-                ctx.vreg_values[&args[2]]
+                ctx.get_vreg(&args[2])?
             } else {
                 builder.ins().iconst(types::I64, 1)
             };

@@ -18,7 +18,10 @@ pub fn compile_copy<M: Module>(
     dest: VReg,
     src: VReg,
 ) -> InstrResult<()> {
-    let val = ctx.vreg_values[&src];
+    let val = match ctx.vreg_values.get(&src) {
+        Some(&v) => v,
+        None => return Err(format!("Copy: source vreg {:?} not found", src)),
+    };
     ctx.vreg_values.insert(dest, val);
     Ok(())
 }
@@ -32,7 +35,10 @@ pub fn compile_cast<M: Module>(
     from_ty: TypeId,
     to_ty: TypeId,
 ) -> InstrResult<()> {
-    let src_val = ctx.vreg_values[&source];
+    let src_val = match ctx.vreg_values.get(&source) {
+        Some(&v) => v,
+        None => return Err(format!("Cast: source vreg {:?} not found", source)),
+    };
 
     // Determine source and target types
     let is_from_float = from_ty == TypeId::F64 || from_ty == TypeId::F32;
@@ -72,7 +78,10 @@ pub fn compile_unary_op<M: Module>(
     op: UnaryOp,
     operand: VReg,
 ) -> InstrResult<()> {
-    let val = ctx.vreg_values[&operand];
+    let val = match ctx.vreg_values.get(&operand) {
+        Some(&v) => v,
+        None => return Err(format!("UnaryOp: operand vreg {:?} not found", operand)),
+    };
     let result = match op {
         UnaryOp::Neg => builder.ins().ineg(val),
         UnaryOp::Not => builder
@@ -91,7 +100,10 @@ pub fn compile_spread<M: Module>(
     dest: VReg,
     source: VReg,
 ) -> InstrResult<()> {
-    let source_val = ctx.vreg_values[&source];
+    let source_val = match ctx.vreg_values.get(&source) {
+        Some(&v) => v,
+        None => return Err(format!("Spread: source vreg {:?} not found", source)),
+    };
     ctx.vreg_values.insert(dest, source_val);
     Ok(())
 }

@@ -22,7 +22,7 @@ pub(crate) fn compile_unit_bound_check<M: Module>(
     max: i64,
     overflow: UnitOverflowBehavior,
 ) -> InstrResult<()> {
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
 
     // Create constants for bounds
     let min_val = builder.ins().iconst(types::I64, min);
@@ -99,7 +99,7 @@ pub(crate) fn compile_unit_widen<M: Module>(
     to_bits: u8,
     signed: bool,
 ) -> InstrResult<()> {
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
 
     // For widening, we just need to extend the value
     let result = if signed {
@@ -132,7 +132,7 @@ pub(crate) fn compile_unit_narrow<M: Module>(
     signed: bool,
     overflow: UnitOverflowBehavior,
 ) -> InstrResult<()> {
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
 
     // Calculate the bounds for the target type
     let (min, max) = if signed {
@@ -197,7 +197,7 @@ pub(crate) fn compile_unit_saturate<M: Module>(
     min: i64,
     max: i64,
 ) -> InstrResult<()> {
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
 
     // Create constants for bounds
     let min_val = builder.ins().iconst(types::I64, min);

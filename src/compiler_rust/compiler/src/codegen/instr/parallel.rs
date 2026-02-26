@@ -42,8 +42,8 @@ pub(crate) fn compile_par_map<M: Module>(
     closure: VReg,
     backend: Option<ParallelBackend>,
 ) -> InstrResult<()> {
-    let input_val = ctx.vreg_values[&input];
-    let closure_val = ctx.vreg_values[&closure];
+    let input_val = ctx.get_vreg(&input)?;
+    let closure_val = ctx.get_vreg(&closure)?;
     let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
 
     // Get the array length via runtime function
@@ -73,9 +73,9 @@ pub(crate) fn compile_par_reduce<M: Module>(
     closure: VReg,
     backend: Option<ParallelBackend>,
 ) -> InstrResult<()> {
-    let input_val = ctx.vreg_values[&input];
-    let initial_val = ctx.vreg_values[&initial];
-    let closure_val = ctx.vreg_values[&closure];
+    let input_val = ctx.get_vreg(&input)?;
+    let initial_val = ctx.get_vreg(&initial)?;
+    let closure_val = ctx.get_vreg(&closure)?;
     let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
 
     // Get the array length via runtime function
@@ -104,8 +104,8 @@ pub(crate) fn compile_par_filter<M: Module>(
     predicate: VReg,
     backend: Option<ParallelBackend>,
 ) -> InstrResult<()> {
-    let input_val = ctx.vreg_values[&input];
-    let predicate_val = ctx.vreg_values[&predicate];
+    let input_val = ctx.get_vreg(&input)?;
+    let predicate_val = ctx.get_vreg(&predicate)?;
     let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
 
     // Get the array length via runtime function
@@ -133,8 +133,8 @@ pub(crate) fn compile_par_for_each<M: Module>(
     closure: VReg,
     backend: Option<ParallelBackend>,
 ) -> InstrResult<()> {
-    let input_val = ctx.vreg_values[&input];
-    let closure_val = ctx.vreg_values[&closure];
+    let input_val = ctx.get_vreg(&input)?;
+    let closure_val = ctx.get_vreg(&closure)?;
     let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
 
     // Get the array length via runtime function

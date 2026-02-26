@@ -108,6 +108,13 @@ pub struct InstrContext<'a, M: Module> {
     pub async_state_map: &'a Option<HashMap<BlockId, crate::mir::AsyncState>>,
 }
 
+impl<'a, M: Module> InstrContext<'a, M> {
+    /// Get a vreg value, returning an error instead of panicking if not found
+    pub fn get_vreg(&self, vreg: &VReg) -> InstrResult<cranelift_codegen::ir::Value> {
+        self.vreg_values.get(vreg).copied().ok_or_else(|| format!("vreg {:?} not found in vreg_values", vreg))
+    }
+}
+
 /// Result type for instruction compilation - uses String errors for genericity
 pub type InstrResult<T> = Result<T, String>;
 

@@ -120,8 +120,8 @@ pub fn compile_get_element_ptr<M: Module>(
     base: VReg,
     index: VReg,
 ) -> InstrResult<()> {
-    let base_val = ctx.vreg_values[&base];
-    let index_val = ctx.vreg_values[&index];
+    let base_val = ctx.get_vreg(&base)?;
+    let index_val = ctx.get_vreg(&index)?;
     let element_size = builder.ins().iconst(types::I64, 8);
     let offset = builder.ins().imul(index_val, element_size);
     let addr = builder.ins().iadd(base_val, offset);
@@ -155,7 +155,7 @@ pub fn compile_wait<M: Module>(
 ) -> InstrResult<()> {
     let wait_id = ctx.runtime_funcs["rt_wait"];
     let wait_ref = ctx.module.declare_func_in_func(wait_id, builder.func);
-    let target_val = ctx.vreg_values[&target];
+    let target_val = ctx.get_vreg(&target)?;
     let call = builder.ins().call(wait_ref, &[target_val]);
     let result = builder.inst_results(call)[0];
     if let Some(d) = dest {

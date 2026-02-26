@@ -27,7 +27,7 @@ pub(crate) fn build_ctx_array<M: Module>(
             let push_id = ctx.runtime_funcs["rt_array_push"];
             let push_ref = ctx.module.declare_func_in_func(push_id, builder.func);
             for reg in &meta.live_ins {
-                let val = ctx.vreg_values[reg];
+                let val = *ctx.vreg_values.get(reg).unwrap_or(&arr);
                 let _ = builder.ins().call(push_ref, &[arr, val]);
             }
             arr
@@ -103,7 +103,7 @@ pub(crate) fn compile_yield<M: Module>(
             let store_id = ctx.runtime_funcs["rt_generator_store_slot"];
             let store_ref = ctx.module.declare_func_in_func(store_id, builder.func);
             for (idx, reg) in state.live_after_yield.iter().enumerate() {
-                let val = ctx.vreg_values[reg];
+                let val = ctx.get_vreg(reg)?;
                 let idx_val = builder.ins().iconst(types::I64, idx as i64);
                 let _ = builder.ins().call(store_ref, &[gen_param, idx_val, val]);
             }
@@ -113,7 +113,7 @@ pub(crate) fn compile_yield<M: Module>(
             let next_state = builder.ins().iconst(types::I64, (state.state_id + 1) as i64);
             let _ = builder.ins().call(set_state_ref, &[gen_param, next_state]);
 
-            let val = ctx.vreg_values[&value];
+            let val = ctx.get_vreg(&value)?;
             // Wrap the yielded value as a RuntimeValue so the dispatcher ABI
             // matches the runtime's expectations.
             let wrap_id = ctx.runtime_funcs["rt_value_int"];
@@ -177,7 +177,7 @@ pub(crate) fn compile_await<M: Module>(
 
             // Return the future itself (suspended state)
             // Wrap as RuntimeValue for ABI compatibility
-            let future_val = ctx.vreg_values[&future];
+            let future_val = ctx.get_vreg(&future)?;
             let wrap_id = ctx
                 .runtime_funcs
                 .get("rt_value_future")
@@ -205,7 +205,7 @@ pub(crate) fn compile_await<M: Module>(
         .copied();
     if let Some(await_id) = await_id {
         let await_ref = ctx.module.declare_func_in_func(await_id, builder.func);
-        let future_val = ctx.vreg_values[&future];
+        let future_val = ctx.get_vreg(&future)?;
         let call = builder.ins().call(await_ref, &[future_val]);
         let result = builder.inst_results(call)[0];
         ctx.vreg_values.insert(dest, result);
