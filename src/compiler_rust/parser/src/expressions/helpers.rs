@@ -352,11 +352,7 @@ impl<'a> Parser<'a> {
             };
             if let Some(id_clone) = maybe_name {
                 // Peek ahead for '=' or ':' without consuming the stream
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
                 if next.kind == TokenKind::Assign {
                     name = Some(id_clone);
                     self.advance(); // consume identifier/keyword

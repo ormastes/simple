@@ -105,11 +105,7 @@ impl<'a> Parser<'a> {
             // fn name(): ... => function definition (not allowed in expression position)
             TokenKind::Fn => {
                 // Peek at next token to see if it's immediately LParen
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
 
                 // Only treat as lambda if IMMEDIATELY followed by (
                 // This distinguishes fn(): from fn name():
@@ -130,11 +126,7 @@ impl<'a> Parser<'a> {
             // Otherwise, it's used as a variable name identifier
             TokenKind::New => {
                 // Peek at next token
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
 
                 // Check if next token indicates allocation context: new Type, new &Type, new *Type
                 match next.kind {
@@ -155,11 +147,7 @@ impl<'a> Parser<'a> {
             // Handle 'old' specially: if followed by (, it's contract old(x)
             // Otherwise, it's used as a variable name identifier
             TokenKind::Old => {
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
 
                 if matches!(next.kind, TokenKind::LParen) {
                     // Contract: old(x)
@@ -185,11 +173,7 @@ impl<'a> Parser<'a> {
                 // Matrix multiplication (@) requires a left operand, while @rt_func appears at expression start
 
                 // Peek at next token to see if it's an identifier
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
 
                 if matches!(next.kind, TokenKind::Identifier { .. }) {
                     self.advance(); // consume '@'

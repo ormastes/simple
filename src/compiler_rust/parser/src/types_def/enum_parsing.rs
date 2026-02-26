@@ -279,6 +279,26 @@ impl<'a> Parser<'a> {
                 TokenKind::Exists => Some("exists".to_string()),
                 TokenKind::Gen => Some("gen".to_string()),
                 TokenKind::Impl => Some("impl".to_string()),
+                // Low-level keywords as field names
+                TokenKind::Asm => Some("asm".to_string()),
+                TokenKind::Bitfield => Some("bitfield".to_string()),
+                TokenKind::Newtype => Some("newtype".to_string()),
+                TokenKind::Extend => Some("extend".to_string()),
+                TokenKind::Comptime => Some("comptime".to_string()),
+                // Type definition keywords as field names
+                TokenKind::Struct => Some("struct".to_string()),
+                TokenKind::Enum => Some("enum".to_string()),
+                TokenKind::Class => Some("class".to_string()),
+                TokenKind::Fn => Some("fn".to_string()),
+                TokenKind::Trait => Some("trait".to_string()),
+                // Module system keywords as field names
+                TokenKind::Export => Some("export".to_string()),
+                TokenKind::Dyn => Some("dyn".to_string()),
+                TokenKind::Macro => Some("macro".to_string()),
+                TokenKind::Mixin => Some("mixin".to_string()),
+                TokenKind::Actor => Some("actor".to_string()),
+                TokenKind::Ghost => Some("ghost".to_string()),
+                TokenKind::Move => Some("move".to_string()),
                 _ => None,
             };
 

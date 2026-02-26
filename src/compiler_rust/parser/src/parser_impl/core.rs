@@ -408,11 +408,7 @@ impl<'a> Parser<'a> {
             TokenKind::Alias => {
                 // Check if this is a class alias (alias NewName = OldName) or identifier usage
                 // Class alias names must be PascalCase (start with uppercase)
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
 
                 // Check if next token is an uppercase identifier (class alias pattern)
                 if let TokenKind::Identifier { name, .. } = &next.kind {
@@ -432,11 +428,7 @@ impl<'a> Parser<'a> {
                 // Check if this is a type alias (type Name = ...) or expression (expect type to eq)
                 // Simple heuristic: type alias names are PascalCase (start with uppercase)
                 // Expression context uses lowercase like "expect type to eq"
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
 
                 // Check if next token is an uppercase identifier (type alias pattern)
                 if let TokenKind::Identifier { name, .. } = &next.kind {
@@ -452,12 +444,57 @@ impl<'a> Parser<'a> {
                     self.parse_expression_or_assignment()
                 }
             }
-            // Low-level features
-            TokenKind::Asm => self.parse_asm(),
-            TokenKind::Bitfield => self.parse_bitfield(),
-            TokenKind::Newtype => self.parse_newtype(),
-            TokenKind::Extend => self.parse_extend(),
-            TokenKind::Comptime => self.parse_comptime_val(),
+            // Low-level features - disambiguate keyword vs identifier usage
+            TokenKind::Asm => {
+                // asm: "..." or asm match: ... -> inline assembly
+                // asm = ... or asm.method() -> expression (variable named 'asm')
+                let next = self.peek_next();
+                if matches!(next.kind, TokenKind::Colon | TokenKind::Match) {
+                    self.parse_asm()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Bitfield => {
+                // bitfield Name...: -> bitfield definition
+                // bitfield as identifier (import path, variable) -> expression
+                let next = self.peek_next();
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase())) {
+                    self.parse_bitfield()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Newtype => {
+                // newtype Name = ... -> newtype definition
+                // newtype as identifier -> expression
+                let next = self.peek_next();
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase())) {
+                    self.parse_newtype()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Extend => {
+                // extend TypeName: -> extension block
+                // extend as identifier (method call, import, etc.) -> expression
+                let next = self.peek_next();
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase())) {
+                    self.parse_extend()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Comptime => {
+                // comptime val ... or comptime fn ... -> compile-time marker
+                // comptime as identifier -> expression
+                let next = self.peek_next();
+                if matches!(next.kind, TokenKind::Val | TokenKind::Fn) {
+                    self.parse_comptime_val()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::Unit => self.parse_unit(),
             TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),
@@ -469,11 +506,7 @@ impl<'a> Parser<'a> {
             TokenKind::From => {
                 // Disambiguate: 'from module import ...' vs 'from' as identifier
                 // Check if followed by an identifier (module name) - if so, it's an import
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
                 if matches!(next.kind, TokenKind::Identifier { .. }) {
                     self.parse_from_import() // Python-style: from module import {...}
                 } else {
@@ -493,11 +526,7 @@ impl<'a> Parser<'a> {
                 // Disambiguate between:
                 // - DI binding: `bind on pc{...} -> Impl`
                 // - Interface binding: `bind [static|dyn] Interface = ImplType`
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
                 if matches!(next.kind, TokenKind::On) {
                     self.parse_di_binding().map(Node::DiBinding)
                 } else {
@@ -527,11 +556,7 @@ impl<'a> Parser<'a> {
             // "calc" is parsed contextually - not a reserved keyword
             TokenKind::Identifier { name, .. } if name == "calc" => {
                 // Check if followed by colon - if so, it's a calc statement
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
                 if matches!(next.kind, TokenKind::Colon) {
                     self.parse_calc()
                 } else {
@@ -541,11 +566,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Context => {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
 
                 // If next token is a string literal, treat as BDD expression (no-paren call)
                 if matches!(
@@ -567,11 +588,7 @@ impl<'a> Parser<'a> {
             // lean import "..." and lean hint: "..." need contextual check since "lean" is also a valid identifier
             TokenKind::Identifier { name, .. } if name == "lean" => {
                 // Check if this is "lean import" or "lean hint" - if so, parse as lean block/hint
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
                 if matches!(next.kind, TokenKind::Import) {
                     self.parse_lean_import_block()
                 } else if matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "hint") {
@@ -605,11 +622,7 @@ impl<'a> Parser<'a> {
             TokenKind::When => {
                 // Disambiguate `when COND:` (conditional compilation) from `when "step":` (BDD/Gherkin)
                 // If followed by an identifier (not a string), treat as conditional compilation
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
                 if matches!(next.kind, TokenKind::Identifier { .. } | TokenKind::Not) {
                     self.parse_when_block()
                 } else {
@@ -621,11 +634,7 @@ impl<'a> Parser<'a> {
             // `module name:` is an alias for `mod name:` (inline module block)
             TokenKind::Identifier { name, .. } if name == "module" => {
                 // Check if followed by an identifier (module name) - if so, treat like mod
-                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
-                    let tok = self.lexer.next_token();
-                    self.pending_tokens.push_back(tok.clone());
-                    tok
-                });
+                let next = self.peek_next();
                 if matches!(next.kind, TokenKind::Identifier { .. }) {
                     // Replace 'module' identifier with Mod keyword behavior
                     self.advance(); // consume 'module' identifier
