@@ -95,6 +95,64 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// Parse a keyword used as an identifier in pattern position.
+    /// If followed by `(`, parse as an enum variant pattern with payload.
+    /// If followed by `.` or `::`, parse as qualified enum variant.
+    /// Otherwise return a simple identifier pattern.
+    fn parse_keyword_as_pattern(&mut self, name: &str) -> Result<Pattern, ParseError> {
+        self.advance(); // consume the keyword token
+
+        // Check for enum variant with payload: Const(dest, _, _)
+        if self.check(&TokenKind::LParen) {
+            self.advance(); // consume '('
+            let mut patterns = Vec::new();
+            while !self.check(&TokenKind::RParen) {
+                patterns.push(self.parse_pattern()?);
+                if !self.check(&TokenKind::RParen) {
+                    self.expect(&TokenKind::Comma)?;
+                }
+            }
+            self.expect(&TokenKind::RParen)?;
+            return Ok(Pattern::Enum {
+                name: "_".to_string(),
+                variant: name.to_string(),
+                payload: Some(patterns),
+            });
+        }
+
+        // Check for qualified path: Name.Variant or Name::Variant
+        if self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
+            let mut path = vec![name.to_string()];
+            while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
+                self.advance();
+                path.push(self.expect_identifier()?);
+            }
+            let variant = path.pop().unwrap();
+            let enum_name = path.join(".");
+            let payload = if self.check(&TokenKind::LParen) {
+                self.advance();
+                let mut patterns = Vec::new();
+                while !self.check(&TokenKind::RParen) {
+                    patterns.push(self.parse_pattern()?);
+                    if !self.check(&TokenKind::RParen) {
+                        self.expect(&TokenKind::Comma)?;
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                Some(patterns)
+            } else {
+                None
+            };
+            return Ok(Pattern::Enum {
+                name: enum_name,
+                variant,
+                payload,
+            });
+        }
+
+        Ok(Pattern::Identifier(name.to_string()))
+    }
+
     /// Skip newlines and indents for pattern continuation.
     /// Returns the number of Indent tokens skipped.
     fn skip_newlines_and_indents_for_pattern(&mut self) -> usize {
@@ -149,34 +207,14 @@ impl<'a> Parser<'a> {
             }
             // Allow certain keywords as identifier patterns
             // These are keywords that are commonly used as variable names
-            TokenKind::New
-            | TokenKind::Old
-            | TokenKind::Type
-            | TokenKind::Examples
-            | TokenKind::From
-            | TokenKind::Val
-            | TokenKind::Var
-            | TokenKind::Gen
-            | TokenKind::Kernel
-            | TokenKind::Impl
-            | TokenKind::Exists => {
-                let name = match &self.current.kind {
-                    TokenKind::New => "new".to_string(),
-                    TokenKind::Old => "old".to_string(),
-                    TokenKind::Type => "type".to_string(),
-                    TokenKind::Examples => "examples".to_string(),
-                    TokenKind::From => "from".to_string(),
-                    TokenKind::Val => "val".to_string(),
-                    TokenKind::Var => "var".to_string(),
-                    TokenKind::Gen => "gen".to_string(),
-                    TokenKind::Kernel => "kernel".to_string(),
-                    TokenKind::Impl => "impl".to_string(),
-                    TokenKind::Exists => "exists".to_string(),
-                    _ => unreachable!(),
-                };
-                self.advance();
-                Ok(Pattern::Identifier(name))
-            }
+            // Use parse_keyword_as_pattern to also handle enum variant form: Keyword(...)
+            TokenKind::New => self.parse_keyword_as_pattern("new"),
+            TokenKind::Old => self.parse_keyword_as_pattern("old"),
+            TokenKind::Type => self.parse_keyword_as_pattern("type"),
+            TokenKind::Examples => self.parse_keyword_as_pattern("examples"),
+            TokenKind::From => self.parse_keyword_as_pattern("from"),
+            TokenKind::Var => self.parse_keyword_as_pattern("var"),
+            TokenKind::Exists => self.parse_keyword_as_pattern("exists"),
             TokenKind::Identifier { name, .. } => {
                 let name = name.clone();
                 self.advance();
@@ -435,114 +473,33 @@ impl<'a> Parser<'a> {
                 Ok(Pattern::Identifier("default".to_string()))
             }
             // Allow additional keywords as identifier patterns (used as enum variant names)
-            TokenKind::Loop => {
-                self.advance();
-                Ok(Pattern::Identifier("Loop".to_string()))
-            }
-            TokenKind::Vec => {
-                self.advance();
-                Ok(Pattern::Identifier("Vec".to_string()))
-            }
-            TokenKind::Unit => {
-                self.advance();
-                Ok(Pattern::Identifier("Unit".to_string()))
-            }
-            TokenKind::Sync => {
-                self.advance();
-                Ok(Pattern::Identifier("Sync".to_string()))
-            }
-            TokenKind::Async => {
-                self.advance();
-                Ok(Pattern::Identifier("Async".to_string()))
-            }
-            TokenKind::Slice => {
-                self.advance();
-                Ok(Pattern::Identifier("Slice".to_string()))
-            }
-            TokenKind::Tensor => {
-                self.advance();
-                Ok(Pattern::Identifier("Tensor".to_string()))
-            }
-            TokenKind::Grid => {
-                self.advance();
-                Ok(Pattern::Identifier("Grid".to_string()))
-            }
-            TokenKind::Flat => {
-                self.advance();
-                Ok(Pattern::Identifier("Flat".to_string()))
-            }
-            TokenKind::Shared => {
-                self.advance();
-                Ok(Pattern::Identifier("Shared".to_string()))
-            }
-            TokenKind::Gpu => {
-                self.advance();
-                Ok(Pattern::Identifier("Gpu".to_string()))
-            }
-            TokenKind::Extern => {
-                self.advance();
-                Ok(Pattern::Identifier("Extern".to_string()))
-            }
-            TokenKind::Static => {
-                self.advance();
-                Ok(Pattern::Identifier("Static".to_string()))
-            }
-            TokenKind::Const => {
-                self.advance();
-                Ok(Pattern::Identifier("Const".to_string()))
-            }
-            TokenKind::Super => {
-                self.advance();
-                Ok(Pattern::Identifier("super".to_string()))
-            }
-            TokenKind::Repr => {
-                self.advance();
-                Ok(Pattern::Identifier("Repr".to_string()))
-            }
-            TokenKind::Match => {
-                self.advance();
-                Ok(Pattern::Identifier("Match".to_string()))
-            }
-            TokenKind::Dyn => {
-                self.advance();
-                Ok(Pattern::Identifier("Dyn".to_string()))
-            }
-            TokenKind::Macro => {
-                self.advance();
-                Ok(Pattern::Identifier("Macro".to_string()))
-            }
-            TokenKind::Mixin => {
-                self.advance();
-                Ok(Pattern::Identifier("Mixin".to_string()))
-            }
-            TokenKind::Actor => {
-                self.advance();
-                Ok(Pattern::Identifier("Actor".to_string()))
-            }
-            TokenKind::Ghost => {
-                self.advance();
-                Ok(Pattern::Identifier("Ghost".to_string()))
-            }
-            TokenKind::Gen => {
-                self.advance();
-                Ok(Pattern::Identifier("Gen".to_string()))
-            }
-            TokenKind::Impl => {
-                self.advance();
-                Ok(Pattern::Identifier("Impl".to_string()))
-            }
-            TokenKind::Val => {
-                self.advance();
-                Ok(Pattern::Identifier("Val".to_string()))
-            }
-            TokenKind::Kernel => {
-                self.advance();
-                Ok(Pattern::Identifier("Kernel".to_string()))
-            }
-            TokenKind::Literal => {
-                self.advance();
-                Ok(Pattern::Identifier("Literal".to_string()))
-            }
+            TokenKind::Loop => self.parse_keyword_as_pattern("Loop"),
+            TokenKind::Vec => self.parse_keyword_as_pattern("Vec"),
+            TokenKind::Unit => self.parse_keyword_as_pattern("Unit"),
+            TokenKind::Sync => self.parse_keyword_as_pattern("Sync"),
+            TokenKind::Async => self.parse_keyword_as_pattern("Async"),
+            TokenKind::Slice => self.parse_keyword_as_pattern("Slice"),
+            TokenKind::Tensor => self.parse_keyword_as_pattern("Tensor"),
+            TokenKind::Grid => self.parse_keyword_as_pattern("Grid"),
+            TokenKind::Flat => self.parse_keyword_as_pattern("Flat"),
+            TokenKind::Shared => self.parse_keyword_as_pattern("Shared"),
+            TokenKind::Gpu => self.parse_keyword_as_pattern("Gpu"),
+            TokenKind::Extern => self.parse_keyword_as_pattern("Extern"),
+            TokenKind::Static => self.parse_keyword_as_pattern("Static"),
+            TokenKind::Const => self.parse_keyword_as_pattern("Const"),
+            TokenKind::Super => self.parse_keyword_as_pattern("super"),
+            TokenKind::Repr => self.parse_keyword_as_pattern("Repr"),
+            TokenKind::Match => self.parse_keyword_as_pattern("Match"),
+            TokenKind::Dyn => self.parse_keyword_as_pattern("Dyn"),
+            TokenKind::Macro => self.parse_keyword_as_pattern("Macro"),
+            TokenKind::Mixin => self.parse_keyword_as_pattern("Mixin"),
+            TokenKind::Actor => self.parse_keyword_as_pattern("Actor"),
+            TokenKind::Ghost => self.parse_keyword_as_pattern("Ghost"),
+            TokenKind::Gen => self.parse_keyword_as_pattern("Gen"),
+            TokenKind::Impl => self.parse_keyword_as_pattern("Impl"),
+            TokenKind::Val => self.parse_keyword_as_pattern("Val"),
+            TokenKind::Kernel => self.parse_keyword_as_pattern("Kernel"),
+            TokenKind::Literal => self.parse_keyword_as_pattern("Literal"),
             _ => Err(ParseError::unexpected_token(
                 "pattern",
                 format!("{:?}", self.current.kind),

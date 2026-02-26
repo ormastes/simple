@@ -177,6 +177,13 @@ impl<'a> Parser<'a> {
             }
 
             Expr::DoBlock(statements)
+        } else if self.check(&TokenKind::Return)
+            || self.check(&TokenKind::Break)
+            || self.check(&TokenKind::Continue)
+        {
+            // Diverging statement in then branch: `if cond: return val`
+            let stmt = self.parse_item()?;
+            Expr::DoBlock(vec![stmt])
         } else {
             // Inline form: parse as expression
             self.parse_expression()?
@@ -231,6 +238,13 @@ impl<'a> Parser<'a> {
                     }
 
                     Expr::DoBlock(statements)
+                } else if self.check(&TokenKind::Return)
+                    || self.check(&TokenKind::Break)
+                    || self.check(&TokenKind::Continue)
+                {
+                    // Diverging statement in else branch: `else: return nil`
+                    let stmt = self.parse_item()?;
+                    Expr::DoBlock(vec![stmt])
                 } else {
                     // Inline form: parse as expression
                     self.parse_expression()?
@@ -594,6 +608,13 @@ impl<'a> Parser<'a> {
                         break;
                     }
 
+                    // Stop at closing brackets when the lambda body is inside a function call.
+                    // Example: items.filter(\d:\n    not done.contains(d)).len()
+                    // The `)` that closes .filter(...) terminates the lambda body.
+                    if matches!(self.current.kind, TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) {
+                        break;
+                    }
+
                     let stmt = self.parse_item()?;
                     statements.push(stmt);
 
@@ -603,9 +624,15 @@ impl<'a> Parser<'a> {
                     }
                 }
 
-                // Consume dedent if present
+                // Consume dedent if present.
+                // If we broke at a closing bracket (RParen etc.), the dedent may come
+                // later as the bracket closes. Pop the lexer's indent stack to stay in sync.
                 if self.check(&TokenKind::Dedent) {
                     self.advance();
+                } else if matches!(self.current.kind, TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) {
+                    // Lambda body ended at a closing bracket without a Dedent.
+                    // Pop the indent stack to keep it in sync.
+                    self.lexer.pop_indent();
                 }
 
                 // Disable forced indentation after lambda body

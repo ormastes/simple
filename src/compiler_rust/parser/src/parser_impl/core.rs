@@ -356,6 +356,12 @@ impl<'a> Parser<'a> {
             && !self.peek_is(&TokenKind::Dot)
             && !self.peek_is(&TokenKind::Assign)
             && !self.peek_is(&TokenKind::LParen);
+        // `match` is usually a statement keyword, but can be used as a variable name:
+        //   for match in matches: results.push(match.0)
+        // If followed by `.` or `=`, treat as an expression/identifier.
+        let is_match_stmt = matches!(&self.current.kind, TokenKind::Match)
+            && !self.peek_is(&TokenKind::Dot)
+            && !self.peek_is(&TokenKind::Assign);
 
         match &self.current.kind {
             TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
@@ -488,7 +494,7 @@ impl<'a> Parser<'a> {
             TokenKind::Mock => self.parse_mock_decl().map(Node::MockDecl),
             TokenKind::If => self.parse_if(),
             TokenKind::IfSuspend => self.parse_if_suspend(),
-            TokenKind::Match => self.parse_match_stmt(),
+            TokenKind::Match if is_match_stmt => self.parse_match_stmt(),
             TokenKind::MatchSuspend => self.parse_match_suspend(),
             TokenKind::For => self.parse_for(),
             TokenKind::ForSuspend => self.parse_for_suspend(),

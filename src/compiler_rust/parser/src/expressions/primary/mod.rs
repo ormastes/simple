@@ -159,6 +159,9 @@ impl<'a> Parser<'a> {
                     self.parse_primary_identifier()
                 }
             }
+            // `match` can be used as a variable name (e.g., `for match in matches: match.0`)
+            // If followed by `.` or `=`, treat as identifier
+            TokenKind::Match if self.peek_is(&TokenKind::Dot) || self.peek_is(&TokenKind::Assign) => self.parse_primary_identifier(),
             TokenKind::Spawn
             | TokenKind::Go
             | TokenKind::If

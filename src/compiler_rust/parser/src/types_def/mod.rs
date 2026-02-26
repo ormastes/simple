@@ -549,6 +549,18 @@ impl<'a> Parser<'a> {
                         start_span,
                     ));
                 }
+            } else if self.check(&TokenKind::Val) || self.check(&TokenKind::Var) {
+                // Skip val/var bindings inside struct bodies.
+                // These are desugared type variables: `val _tv_0 = [[text], [text]]`
+                // They define local type aliases used by subsequent fields.
+                self.advance(); // consume val/var
+                // Skip everything until the next newline (consume the whole binding)
+                while !self.check(&TokenKind::Newline)
+                    && !self.check(&TokenKind::Dedent)
+                    && !self.is_at_end()
+                {
+                    self.advance();
+                }
             } else {
                 // Field (may be public: pub field_name: Type)
                 fields.push(self.parse_field()?);

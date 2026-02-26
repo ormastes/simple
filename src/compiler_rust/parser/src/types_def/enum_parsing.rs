@@ -274,6 +274,11 @@ impl<'a> Parser<'a> {
                 TokenKind::New => Some("new".to_string()),
                 TokenKind::Old => Some("old".to_string()),
                 TokenKind::Var => Some("var".to_string()),
+                TokenKind::Then => Some("then".to_string()),
+                TokenKind::Else => Some("else".to_string()),
+                TokenKind::Exists => Some("exists".to_string()),
+                TokenKind::Gen => Some("gen".to_string()),
+                TokenKind::Impl => Some("impl".to_string()),
                 _ => None,
             };
 

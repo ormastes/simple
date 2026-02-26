@@ -48,6 +48,11 @@ impl<'a> Parser<'a> {
                                 break;
                             }
 
+                            // Stop at closing brackets when the lambda body is inside a function call.
+                            if matches!(self.current.kind, TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) {
+                                break;
+                            }
+
                             let stmt = self.parse_item()?;
                             statements.push(stmt);
 

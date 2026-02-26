@@ -20,9 +20,13 @@ pub struct Lexer<'a> {
     at_line_start: bool,
     /// Track bracket depth to suppress INDENT/DEDENT inside delimiters
     bracket_depth: usize,
-    /// Force indentation tracking even inside brackets (for lambda bodies, match expressions)
-    /// Uses a counter to support nested contexts that both require forced indentation
+    /// Force indentation tracking even inside brackets (for lambda bodies, match expressions).
+    /// Uses a counter to support nested contexts that both require forced indentation.
     force_indentation_depth: usize,
+    /// Stack of bracket depths at which forced indentation was enabled.
+    /// Forced indentation only applies at or below the bracket depth when it was enabled.
+    /// This ensures that inner parenthesized expressions still suppress indentation normally.
+    force_indent_bracket_depths: Vec<usize>,
 }
 
 impl<'a> Lexer<'a> {
@@ -38,6 +42,7 @@ impl<'a> Lexer<'a> {
             at_line_start: true,
             bracket_depth: 0,
             force_indentation_depth: 0,
+            force_indent_bracket_depths: Vec::new(),
         }
     }
 
@@ -55,19 +60,45 @@ impl<'a> Lexer<'a> {
             at_line_start: false, // Don't treat leading whitespace as indentation
             bracket_depth: 0,
             force_indentation_depth: 0,
+            force_indent_bracket_depths: Vec::new(),
         }
     }
 
-    /// Enable indentation tracking even inside brackets (for lambda bodies, match expressions)
-    /// Uses a counter to support nested contexts (e.g., lambda inside match arm body)
+    /// Enable indentation tracking even inside brackets (for lambda bodies, match expressions).
+    /// Records the current bracket depth so that forced indentation only applies at or below
+    /// this depth. Inner parenthesized expressions still suppress indentation normally.
     pub fn enable_forced_indentation(&mut self) {
         self.force_indentation_depth += 1;
+        self.force_indent_bracket_depths.push(self.bracket_depth);
     }
 
-    /// Disable forced indentation tracking
-    /// Only fully disables when all nested contexts have been closed
+    /// Disable forced indentation tracking.
+    /// Only fully disables when all nested contexts have been closed.
     pub fn disable_forced_indentation(&mut self) {
         self.force_indentation_depth = self.force_indentation_depth.saturating_sub(1);
+        self.force_indent_bracket_depths.pop();
+    }
+
+    /// Check if forced indentation is currently active at the current bracket depth.
+    /// Returns true if forced indentation is enabled AND the current bracket depth
+    /// is at or below the bracket depth when forced indentation was enabled.
+    fn is_forced_indentation_active(&self) -> bool {
+        if self.force_indentation_depth == 0 {
+            return false;
+        }
+        // Check if any forced indentation context applies at the current bracket depth
+        self.force_indent_bracket_depths
+            .iter()
+            .any(|&depth| self.bracket_depth <= depth)
+    }
+
+    /// Pop the topmost indent level from the indent stack.
+    /// Used to keep the indent stack in sync when a lambda body ends at
+    /// a closing bracket without a matching Dedent token.
+    pub fn pop_indent(&mut self) {
+        if self.indent_stack.len() > 1 {
+            self.indent_stack.pop();
+        }
     }
 
     pub fn tokenize(&mut self) -> Vec<Token> {
@@ -94,8 +125,8 @@ impl<'a> Lexer<'a> {
         // Handle indentation at line start (but not inside brackets, unless forced)
         if self.at_line_start {
             self.at_line_start = false;
-            // Skip indentation handling when inside brackets/parens/braces, unless force_indentation is enabled
-            if self.bracket_depth == 0 || self.force_indentation_depth > 0 {
+            // Skip indentation handling when inside brackets/parens/braces, unless force_indentation is active
+            if self.bracket_depth == 0 || self.is_forced_indentation_active() {
                 if let Some(indent_token) = self.handle_indentation() {
                     return indent_token;
                 }
@@ -151,8 +182,8 @@ impl<'a> Lexer<'a> {
                 self.column = 1;
                 self.at_line_start = true;
                 // Skip newlines inside brackets (parentheses, braces, brackets)
-                // unless force_indentation is enabled (for match bodies inside lambdas)
-                if self.bracket_depth > 0 && self.force_indentation_depth == 0 {
+                // unless force_indentation is active at the current bracket depth
+                if self.bracket_depth > 0 && !self.is_forced_indentation_active() {
                     // Continue to next token instead of emitting Newline
                     return self.next_token();
                 }

@@ -135,11 +135,11 @@ pub fn compile_instruction<M: Module>(
 
         MirInst::BinOp { dest, op, left, right } => {
             let lhs = ctx.vreg_values.get(left).copied().unwrap_or_else(|| {
-                eprintln!("[DEBUG BinOp] Missing lhs VReg {:?}, using default 0", left);
+                // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
             let rhs = ctx.vreg_values.get(right).copied().unwrap_or_else(|| {
-                eprintln!("[DEBUG BinOp] Missing rhs VReg {:?}, using default 0", right);
+                // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
             let val = compile_binop(ctx, builder, *op, lhs, rhs)?;
@@ -891,7 +891,7 @@ pub fn compile_instruction<M: Module>(
             // Box integer as RuntimeValue: (value << 3) | TAG_INT
             // TAG_INT is 0, so this is equivalent to value << 3
             let mut val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
-                eprintln!("[DEBUG BoxInt] Missing VReg {:?}, using default 0", value);
+                // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
             // Ensure value is i64 - some paths may produce i32 (e.g., FFI returns)
@@ -910,7 +910,7 @@ pub fn compile_instruction<M: Module>(
             // Box float as RuntimeValue: (bits >> 3) << 3 | TAG_FLOAT
             // TAG_FLOAT is 2 (0b010)
             let val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
-                eprintln!("[DEBUG BoxFloat] Missing VReg {:?}, using default 0", value);
+                // Missing VReg, use default 0
                 builder.ins().f64const(0.0)
             });
             let bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
@@ -925,7 +925,7 @@ pub fn compile_instruction<M: Module>(
         MirInst::UnboxInt { dest, value } => {
             // Unbox RuntimeValue to integer: value >> 3 (arithmetic shift for sign extension)
             let val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
-                eprintln!("[DEBUG UnboxInt] Missing VReg {:?}, using default 0", value);
+                // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
             let three = builder.ins().iconst(types::I64, 3);
@@ -936,7 +936,7 @@ pub fn compile_instruction<M: Module>(
         MirInst::UnboxFloat { dest, value } => {
             // Unbox RuntimeValue to float: extract bits and shift back
             let val = ctx.vreg_values.get(value).copied().unwrap_or_else(|| {
-                eprintln!("[DEBUG UnboxFloat] Missing VReg {:?}, using default 0", value);
+                // Missing VReg, use default 0
                 builder.ins().iconst(types::I64, 0)
             });
             let three = builder.ins().iconst(types::I64, 3);

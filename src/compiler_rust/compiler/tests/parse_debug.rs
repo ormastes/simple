@@ -1,4 +1,47 @@
 #[test]
+fn test_as_cast_in_func_args() {
+    let cases = vec![
+        ("as cast in args", "fn foo():\n    bar(value as i64)\n"),
+        ("not in args", "fn foo(x):\n    if not x.contains(y): return\n"),
+        ("as cast in match arm", "fn foo(target, value: i64):\n    match target:\n        case I8: bar(value as i64)\n        case F32: baz(value as f64)\n"),
+        ("pipe in match", "fn foo(x):\n    match x:\n        case A | B: 1\n"),
+    ];
+    for (name, src) in &cases {
+        let mut parser = simple_parser::Parser::new(src);
+        match parser.parse() {
+            Ok(_) => eprintln!("  {name}: OK"),
+            Err(e) => eprintln!("  {name}: ERR: {e}"),
+        }
+    }
+}
+
+#[test]
+fn debug_match_in_val() {
+    // Test: match as expression in val binding with multi-line args
+    let src = r#"fn foo(intro):
+    val sym = match intro.kind:
+        case "fn":
+            do_fn(name: name, params: [],
+                return_type: intro.type_pattern)
+        case "field":
+            do_field()
+    print sym
+"#;
+    let mut parser = simple_parser::Parser::new(src);
+    match parser.parse() {
+        Ok(_) => eprintln!("match_in_val: OK"),
+        Err(e) => {
+            let (line, col) = match &e {
+                simple_parser::ParseError::UnexpectedToken { span, .. } => (span.line, span.column),
+                simple_parser::ParseError::SyntaxError { line, column, .. } => (*line, *column),
+                _ => (0, 0),
+            };
+            eprintln!("match_in_val ERROR at {line}:{col}: {e}");
+        }
+    }
+}
+
+#[test]
 fn debug_specific_files() {
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -53,6 +96,13 @@ fn debug_specific_files() {
         "src/compiler/35.semantics/semantics/binary_ops.spl",
         "src/compiler/35.semantics/semantics/cast_rules.spl",
         "src/compiler/60.mir_opt/mir_opt/auto_vectorize_analysis.spl",
+        "src/compiler/80.driver/compilability.spl",
+        "src/compiler/50.mir/mir/ghost_erasure.spl",
+        "src/compiler/90.tools/aop_proceed.spl",
+        "src/compiler/70.backend/codegen_enhanced.spl",
+        "src/compiler/55.borrow/gc_analysis/roots.spl",
+        "src/compiler/60.mir_opt/optimization_passes.spl",
+        "src/compiler/40.mono/monomorphize/deferred_deserialize.spl",
     ];
 
     for f in &files {

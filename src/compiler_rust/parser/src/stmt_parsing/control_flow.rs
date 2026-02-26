@@ -25,15 +25,49 @@ impl<'a> Parser<'a> {
     /// Check if the inline body looks like an assignment statement (identifier = expr)
     /// This allows `if cond: x = value` without requiring an else clause
     fn is_inline_assignment(&mut self) -> bool {
-        // Check if current token is an identifier followed by =
-        if let TokenKind::Identifier { .. } = &self.current.kind {
-            // Peek ahead to see if next token is =
+        // Check if current token is an identifier (or keyword used as variable name) followed by =
+        let is_ident_like = matches!(
+            self.current.kind,
+            TokenKind::Identifier { .. }
+            | TokenKind::Result
+            | TokenKind::Type
+            | TokenKind::Default
+            | TokenKind::Val
+            | TokenKind::Var
+            | TokenKind::New
+            | TokenKind::Old
+            | TokenKind::From
+            | TokenKind::To
+            | TokenKind::In
+            | TokenKind::Is
+            | TokenKind::As
+            | TokenKind::Match
+            | TokenKind::Use
+            | TokenKind::Out
+            | TokenKind::OutErr
+            | TokenKind::Gen
+            | TokenKind::Impl
+            | TokenKind::Exists
+            | TokenKind::Context
+            | TokenKind::Alias
+            | TokenKind::Bounds
+        );
+        if is_ident_like {
+            // Peek ahead to see if next token is = or compound assignment
             let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
                 let tok = self.lexer.next_token();
                 self.pending_tokens.push_back(tok.clone());
                 tok
             });
-            return matches!(next.kind, TokenKind::Assign);
+            return matches!(
+                next.kind,
+                TokenKind::Assign
+                    | TokenKind::PlusAssign
+                    | TokenKind::MinusAssign
+                    | TokenKind::StarAssign
+                    | TokenKind::SlashAssign
+                    | TokenKind::PercentAssign
+            );
         }
         false
     }
@@ -68,6 +102,20 @@ impl<'a> Parser<'a> {
                 };
 
                 // Parse optional elif/else as blocks
+                // Peek through newlines to check for elif/else continuation
+                // (e.g., `if cond: x = value\nelse: y = other`)
+                // Only consume newlines if elif/else actually follows,
+                // otherwise leave them for the outer block parser.
+                if self.check(&TokenKind::Newline) {
+                    let has_elif_or_else = self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
+                        || self.peek_through_newlines_and_indents_is(&TokenKind::Else);
+                    if has_elif_or_else {
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                    }
+                }
+
                 let mut elif_branches = Vec::new();
                 while self.check(&TokenKind::Elif) {
                     self.advance();
@@ -184,7 +232,30 @@ impl<'a> Parser<'a> {
                     Some(Box::new(elif_expr))
                 } else {
                     self.expect(&TokenKind::Colon)?;
-                    Some(Box::new(self.parse_expression()?))
+                    if self.check(&TokenKind::Newline) {
+                        // Block-form else: parse as DoBlock
+                        self.advance(); // consume Newline
+                        self.expect(&TokenKind::Indent)?;
+                        let mut stmts = Vec::new();
+                        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+                            if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                                break;
+                            }
+                            stmts.push(self.parse_item()?);
+                            if self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+                        }
+                        if self.check(&TokenKind::Dedent) {
+                            self.advance();
+                        }
+                        Some(Box::new(Expr::DoBlock(stmts)))
+                    } else {
+                        Some(Box::new(self.parse_expression()?))
+                    }
                 }
             } else {
                 None
@@ -206,7 +277,17 @@ impl<'a> Parser<'a> {
             self.advance();
             let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
-            let elif_block = self.parse_block()?;
+            // Support both inline and block-form elif
+            let elif_block = if !self.check(&TokenKind::Newline) {
+                // Inline elif: `elif cond: stmt` or `elif cond: expr`
+                let stmt = self.parse_item()?;
+                Block {
+                    span: self.previous.span,
+                    statements: vec![stmt],
+                }
+            } else {
+                self.parse_block()?
+            };
             elif_branches.push((elif_pattern, elif_condition, elif_block));
         }
 
@@ -221,7 +302,16 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume 'if'
                 let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
-                let elif_block = self.parse_block()?;
+                // Support both inline and block-form else-if
+                let elif_block = if !self.check(&TokenKind::Newline) {
+                    let stmt = self.parse_item()?;
+                    Block {
+                        span: self.previous.span,
+                        statements: vec![stmt],
+                    }
+                } else {
+                    self.parse_block()?
+                };
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 // Check if there's another 'else if' or final 'else'
@@ -238,7 +328,16 @@ impl<'a> Parser<'a> {
             // we need to parse the else block
             if self.check(&TokenKind::Colon) {
                 self.expect(&TokenKind::Colon)?;
-                else_block = Some(self.parse_block()?);
+                // Support both inline and block-form else
+                else_block = if !self.check(&TokenKind::Newline) {
+                    let stmt = self.parse_item()?;
+                    Some(Block {
+                        span: self.previous.span,
+                        statements: vec![stmt],
+                    })
+                } else {
+                    Some(self.parse_block()?)
+                };
             }
         }
 

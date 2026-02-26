@@ -520,6 +520,11 @@ impl<'a> MirLowerer<'a> {
                 let receiver_val = self.lower_expr(receiver)?;
                 Ok(receiver_val)
             }
+            HirExprKind::If { .. } => {
+                // TODO: model conditional lvalue properly.
+                // For now, lower as value to keep pipeline progressing.
+                self.lower_expr(expr)
+            }
             _ => {
                 eprintln!("[DEBUG lower_lvalue] Unsupported lvalue kind: {:?}", expr.kind);
                 Err(MirLowerError::Unsupported(format!("complex lvalue: {:?}", expr.kind)))

@@ -90,6 +90,7 @@ impl<'a> Parser<'a> {
             TokenKind::Gen => self.parse_keyword_identifier("gen"),
             TokenKind::Impl => self.parse_keyword_identifier("impl"),
             TokenKind::Exists => self.parse_keyword_identifier("exists"),
+            TokenKind::Match => self.parse_keyword_identifier("match"),
             // 'me' is the mutable-self keyword; treat it like 'self' in expression context
             // so that `me.field` and `me.method()` work.
             TokenKind::Me => {
