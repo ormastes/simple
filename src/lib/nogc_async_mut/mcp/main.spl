@@ -1,0 +1,528 @@
+# Full MCP Server for Simple Language
+#
+# All debug/diagnostic tools + resources + prompts + completions.
+# Protocol: Content-Length framed (std.mcp.protocol).
+#
+# Tool dispatch uses DI-resolved handler adapters (in-process).
+# SessionManager persists across calls for state retention.
+#
+# Tool groups:
+#   debug_*       (19) - Debug session/breakpoint/inspect tools
+#   debug_log_*   (6)  - AOP debug logging tools
+#   simple_read/check/symbols/status/expand_at (5)  - Diagnostic read tools
+#   simple_edit/multi_edit/run       (3)  - Diagnostic edit tools
+#   simple_diff/log/squash/new      (4)  - Diagnostic VCS tools
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> text
+extern fn rt_env_get(name: text) -> text
+
+# JSON and response helpers
+use std.mcp.helpers.{LB, RB, jp, js, jo1, escape_json, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_result_response, make_error_response}
+use app.mcp.helpers.{make_no_param_tool}
+
+# Protocol I/O
+use std.mcp.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
+
+# SDK server builder + router
+use std.mcp_sdk.server.builder.{ServerConfig, server_config, server_set_instructions, server_set_capabilities, server_add_tool_json}
+use std.mcp_sdk.server.router.{handle_method}
+use std.mcp_sdk.core.types.{McpCapabilities}
+
+# DI runtime
+use compiler.di_runtime.{di_register, di_resolve}
+use compiler.di_config.{di_setup_from_config}
+
+# Handler adapters (DI-resolved, in-process dispatch)
+use app.mcp.handler_adapters.debug_adapter.{create_debug_handler}
+use app.mcp.handler_adapters.debug_log_adapter.{create_debug_log_handler, dispatch_debuglog_resource}
+use app.mcp.handler_adapters.diag_adapter.{create_diag_handler}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val NL = "\n"
+
+# ============================================================================
+# Module state
+# ============================================================================
+
+var PROTOCOL = create_protocol_state()
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+init_di()
+start_server()
+
+fn init_di():
+    val lib_root = rt_env_get("SIMPLE_LIB") ?? ""
+    var config_path = "config/di.sdn"
+    if lib_root != "":
+        config_path = lib_root + "/../config/di.sdn"
+    val config_content = rt_file_read_text(config_path) ?? ""
+    val profile = rt_env_get("SIMPLE_PROFILE") ?? ""
+    di_setup_from_config(config_content, profile)
+    # Override placeholders with real factories
+    di_register("debug_handler", fn(): create_debug_handler(), true)
+    di_register("debug_log_handler", fn(): create_debug_log_handler(), true)
+    di_register("diag_handler", fn(): create_diag_handler(), true)
+
+# ============================================================================
+# Server config (built once at startup)
+# ============================================================================
+
+fn build_server_config() -> ServerConfig:
+    var cfg = server_config("simple-mcp", "3.0.0")
+    cfg = server_set_instructions(cfg, "Simple language MCP server: 33 tools for debugging, diagnostics, editing, and version control.")
+    cfg = server_set_capabilities(cfg, McpCapabilities(
+        tools: true,
+        tools_list_changed: true,
+        resources: true,
+        resources_subscribe: true,
+        resources_list_changed: true,
+        prompts: true,
+        prompts_list_changed: true,
+        logging: true,
+        completions: true
+    ))
+
+    # Debug tools (16)
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_create_session", "Create a debug session"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_list_sessions", "List active debug sessions"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_close_session", "Close a debug session"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_set_breakpoint", "Set a breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_remove_breakpoint", "Remove a breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_continue", "Continue execution"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_step", "Step through code"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_get_variables", "Get variable values"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_stack_trace", "Get stack trace"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_evaluate", "Evaluate expression"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_set_function_breakpoint", "Set function breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_enable_breakpoint", "Enable/disable breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_get_source", "Get source code"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_watch", "Add watch expression"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_set_variable", "Set variable value"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_set_data_breakpoint", "Set variable-change breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_list_data_breakpoints", "List variable-change breakpoints"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_remove_data_breakpoint", "Remove variable-change breakpoint"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_terminate", "Terminate debug session"))
+
+    # Debug log tools (6)
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_enable", "Enable debug logging"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_disable", "Disable debug logging"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_clear", "Clear debug logs"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_query", "Query debug logs"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_tree", "Get debug log tree"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("debug_log_status", "Get debug log status"))
+
+    # Diagnostic tools (12)
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_read", "Read Simple source with diagnostics"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_check", "Check Simple source for errors"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_symbols", "List symbols in file"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_status", "Get project status"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_expand_at", "Expand symbol at position"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_edit", "Edit Simple source file"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_multi_edit", "Edit multiple files"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_run", "Run Simple code"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_diff", "Show file diff"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_log", "Show version history"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_squash", "Squash commits"))
+    cfg = server_add_tool_json(cfg, "", make_tool_schema("simple_new", "Create new change"))
+
+    cfg
+
+fn make_tool_schema(name: text, description: text) -> text:
+    make_no_param_tool(name, description, false, false, false)
+
+# ============================================================================
+# Server loop
+# ============================================================================
+
+fn start_server():
+    val CFG = build_server_config()
+
+    for _iter in range(0, 999999):
+        val line = protocol_read_message(PROTOCOL)
+        if line == "":
+            return
+        val method = extract_json_string_v2(line, "method")
+        val id = extract_json_value(line, "id")
+        var response = ""
+
+        # Intercept methods that need local handling
+        if method == "resources/list":
+            response = handle_resources_list(id)
+        elif method == "resources/templates/list":
+            response = handle_resource_templates_list(id)
+        elif method == "prompts/list":
+            response = handle_prompts_list(id)
+        else:
+            # SDK router handles builtins + returns sentinels for custom dispatch
+            response = handle_method(CFG, method, id, line)
+            if response == "TOOLS_CALL":
+                val tool_name = extract_nested_string(line, "params", "name")
+                response = dispatch_tool(id, tool_name, line)
+            elif response == "RESOURCES_READ":
+                val uri = extract_nested_string(line, "params", "uri")
+                response = handle_resources_read(id, uri)
+            elif response == "PROMPTS_GET":
+                val prompt_name = extract_nested_string(line, "params", "name")
+                response = handle_prompts_get(id, prompt_name, line)
+            elif response == "COMPLETION":
+                response = handle_completion_req(id, line)
+            elif response == "EXIT":
+                return
+
+        if response != "":
+            protocol_write_message(PROTOCOL, response)
+
+# ============================================================================
+# Tool dispatch
+# ============================================================================
+
+fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
+    if tool_name == "":
+        return make_error_response(id, -32602, "Missing tool name")
+    if tool_name.starts_with("debug_log_"):
+        val handler = di_resolve("debug_log_handler")
+        if handler == nil:
+            return make_error_response(id, -32603, "Handler not available: debug_log_handler")
+        return handler.handle_fn(tool_name, id, body)
+    elif tool_name.starts_with("debug_"):
+        val handler = di_resolve("debug_handler")
+        if handler == nil:
+            return make_error_response(id, -32603, "Handler not available: debug_handler")
+        return handler.handle_fn(tool_name, id, body)
+    elif tool_name.starts_with("simple_"):
+        val handler = di_resolve("diag_handler")
+        if handler == nil:
+            return make_error_response(id, -32603, "Handler not available: diag_handler")
+        return handler.handle_fn(tool_name, id, body)
+    make_error_response(id, -32601, "Unknown tool: " + tool_name)
+
+# ============================================================================
+# Resources
+# ============================================================================
+
+fn make_resource_json(uri: text, name: text, desc: text, mime: text) -> text:
+    var r = LB()
+    r = r + jp("uri", js(uri))
+    r = r + "," + jp("name", js(name))
+    if desc != "":
+        r = r + "," + jp("description", js(desc))
+    if mime != "":
+        r = r + "," + jp("mimeType", js(mime))
+    r = r + RB()
+    r
+
+fn build_resources_json() -> text:
+    var r = make_resource_json("project:///info", "Project Information", "Project metadata and manifest", "text/plain")
+    r = r + "," + make_resource_json("file:///*", "File Contents", "Read file contents", "text/plain")
+    r = r + "," + make_resource_json("symbol:///*", "Symbol Information", "Get symbol details", "application/json")
+    r = r + "," + make_resource_json("type:///*", "Type Information", "Get type details", "application/json")
+    r = r + "," + make_resource_json("docs:///*", "Documentation", "Get documentation", "text/markdown")
+    r = r + "," + make_resource_json("tree:///*", "Directory Tree", "Get directory structure", "text/plain")
+    # BugDB
+    r = r + "," + make_resource_json("bugdb:///all", "All Bugs", "All bugs from bug database", "application/json")
+    r = r + "," + make_resource_json("bugdb:///open", "Open Bugs", "Open bugs from bug database", "application/json")
+    r = r + "," + make_resource_json("bugdb:///critical", "Critical Bugs", "Critical bugs (P0/P1)", "application/json")
+    r = r + "," + make_resource_json("bugdb:///stats", "Bug Statistics", "Bug database statistics", "application/json")
+    # FeatureDB
+    r = r + "," + make_resource_json("featuredb:///all", "All Features", "All features from feature database", "application/json")
+    r = r + "," + make_resource_json("featuredb:///stats", "Feature Statistics", "Feature database statistics", "application/json")
+    # TestDB
+    r = r + "," + make_resource_json("testdb:///runs", "Test Runs", "All test runs", "application/json")
+    r = r + "," + make_resource_json("testdb:///stats", "Test Statistics", "Test statistics", "application/json")
+    r = r + "," + make_resource_json("testdb:///flaky", "Flaky Tests", "Flaky tests", "application/json")
+    # Debug Log
+    r = r + "," + make_resource_json("debuglog:///tree", "Debug Log Tree", "Collapsible call tree from AOP debug logger", "application/json")
+    r = r + "," + make_resource_json("debuglog:///entries", "Debug Log Entries", "All debug log entries", "application/json")
+    r = r + "," + make_resource_json("debuglog:///status", "Debug Log Status", "Current debug logging status", "application/json")
+    r = r + "," + make_resource_json("debuglog:///text", "Debug Log Text", "Plain text call tree", "text/plain")
+    "[" + r + "]"
+
+fn handle_resources_list(id: text) -> text:
+    val result = jo1(jp("resources", build_resources_json()))
+    make_result_response(id, result)
+
+fn handle_resource_templates_list(id: text) -> text:
+    var t1 = LB()
+    t1 = t1 + jp("uriTemplate", js("file:///" + LB() + "path" + RB()))
+    t1 = t1 + "," + jp("name", js("File Contents"))
+    t1 = t1 + "," + jp("description", js("Read file contents by path"))
+    t1 = t1 + "," + jp("mimeType", js("text/plain"))
+    t1 = t1 + RB()
+
+    var t2 = LB()
+    t2 = t2 + jp("uriTemplate", js("symbol:///" + LB() + "symbol_name" + RB()))
+    t2 = t2 + "," + jp("name", js("Symbol Information"))
+    t2 = t2 + "," + jp("description", js("Get symbol details by name"))
+    t2 = t2 + "," + jp("mimeType", js("application/json"))
+    t2 = t2 + RB()
+
+    var t3 = LB()
+    t3 = t3 + jp("uriTemplate", js("type:///" + LB() + "type_name" + RB()))
+    t3 = t3 + "," + jp("name", js("Type Information"))
+    t3 = t3 + "," + jp("description", js("Get type details by name"))
+    t3 = t3 + "," + jp("mimeType", js("application/json"))
+    t3 = t3 + RB()
+
+    var t4 = LB()
+    t4 = t4 + jp("uriTemplate", js("docs:///" + LB() + "path" + RB()))
+    t4 = t4 + "," + jp("name", js("Documentation"))
+    t4 = t4 + "," + jp("description", js("Get documentation by path"))
+    t4 = t4 + "," + jp("mimeType", js("text/markdown"))
+    t4 = t4 + RB()
+
+    var t5 = LB()
+    t5 = t5 + jp("uriTemplate", js("tree:///" + LB() + "path" + RB()))
+    t5 = t5 + "," + jp("name", js("Directory Tree"))
+    t5 = t5 + "," + jp("description", js("Get directory structure"))
+    t5 = t5 + "," + jp("mimeType", js("text/plain"))
+    t5 = t5 + RB()
+
+    val templates = "[" + t1 + "," + t2 + "," + t3 + "," + t4 + "," + t5 + "]"
+    val result = jo1(jp("resourceTemplates", templates))
+    make_result_response(id, result)
+
+fn handle_resources_read(id: text, uri: text) -> text:
+    if uri == "":
+        return make_error_response(id, -32602, "Missing required parameter: uri")
+
+    # project:///info
+    if uri == "project:///info":
+        return handle_resource_project_info(id, uri)
+
+    # file:///path
+    if uri.starts_with("file:///"):
+        val path = uri.substring(8)
+        return handle_resource_file(id, uri, path)
+
+    # debuglog:///... (direct in-process call)
+    if uri.starts_with("debuglog:///"):
+        val log_content = dispatch_debuglog_resource(uri)
+        if log_content.starts_with("Unknown debuglog query:"):
+            return make_error_response(id, -32002, log_content)
+        if log_content != "":
+            var log_mime = "application/json"
+            if uri.ends_with("/text"):
+                log_mime = "text/plain"
+            return make_resource_content_response(id, uri, log_content, log_mime)
+        return make_resource_content_response(id, uri, "[]", "application/json")
+
+    make_error_response(id, -32002, "Resource not found: " + uri)
+
+fn handle_resource_project_info(id: text, uri: text) -> text:
+    var info = "Simple Language Compiler" + NL
+    info = info + "Working Dir: " + get_cwd() + NL
+    val test_file = rt_file_read_text("doc/test/test_result.md") ?? ""
+    if test_file != "":
+        # Show first 500 chars of test results
+        var limit = test_file.len()
+        if limit > 500:
+            limit = 500
+        info = info + NL + "Recent Test Results:" + NL
+        info = info + test_file.substring(0, limit)
+    make_resource_content_response(id, uri, info, "text/plain")
+
+fn handle_resource_file(id: text, uri: text, path: text) -> text:
+    val file_found = rt_file_exists(path)
+    if not file_found:
+        return make_error_response(id, -32002, "File not found: " + path)
+    val content = rt_file_read_text(path) ?? ""
+    var mime = "text/plain"
+    if path.ends_with(".json"):
+        mime = "application/json"
+    elif path.ends_with(".md"):
+        mime = "text/markdown"
+    make_resource_content_response(id, uri, content, mime)
+
+fn make_resource_content_response(id: text, uri: text, content: text, mime: text) -> text:
+    var rc = LB()
+    rc = rc + jp("uri", js(uri))
+    rc = rc + "," + jp("mimeType", js(mime))
+    rc = rc + "," + jp("text", js(escape_json(content)))
+    rc = rc + RB()
+    val result = jo1(jp("contents", "[" + rc + "]"))
+    make_result_response(id, result)
+
+# ============================================================================
+# Prompts
+# ============================================================================
+
+fn make_prompt_arg(name: text, desc: text, required: bool) -> text:
+    var r = LB()
+    r = r + jp("name", js(name))
+    r = r + "," + jp("description", js(desc))
+    var req_str = "false"
+    if required:
+        req_str = "true"
+    r = r + "," + jp("required", req_str)
+    r = r + RB()
+    r
+
+fn make_prompt_json(name: text, desc: text, args_json: text) -> text:
+    var r = LB()
+    r = r + jp("name", js(name))
+    r = r + "," + jp("description", js(desc))
+    r = r + "," + jp("arguments", args_json)
+    r = r + RB()
+    r
+
+fn build_prompts_json() -> text:
+    # Refactoring prompts
+    var p1 = make_prompt_json("refactor-rename", "Rename a symbol throughout the codebase", "[" + make_prompt_arg("old_name", "Current symbol name", true) + "," + make_prompt_arg("new_name", "New symbol name", true) + "," + make_prompt_arg("file", "File containing the symbol", false) + "]")
+    var p2 = make_prompt_json("refactor-extract-function", "Extract code into a new function", "[" + make_prompt_arg("code", "Code to extract", true) + "," + make_prompt_arg("function_name", "Name for new function", true) + "," + make_prompt_arg("file", "File containing the code", true) + "]")
+    var p3 = make_prompt_json("refactor-inline", "Inline a function or variable", "[" + make_prompt_arg("name", "Symbol to inline", true) + "," + make_prompt_arg("file", "File containing the symbol", true) + "]")
+    # Code generation prompts
+    var p4 = make_prompt_json("generate-tests", "Generate SSpec tests for a function or class", "[" + make_prompt_arg("target", "Function or class name", true) + "," + make_prompt_arg("file", "File containing the target", true) + "]")
+    var p5 = make_prompt_json("generate-trait-impl", "Generate trait implementation for a class", "[" + make_prompt_arg("class_name", "Class name", true) + "," + make_prompt_arg("trait_name", "Trait name", true) + "," + make_prompt_arg("file", "File containing the class", true) + "]")
+    var p6 = make_prompt_json("generate-constructor", "Generate constructor for a class", "[" + make_prompt_arg("class_name", "Class name", true) + "," + make_prompt_arg("file", "File containing the class", true) + "]")
+    # Documentation prompts
+    var p7 = make_prompt_json("docs-add-docstrings", "Add documentation comments to functions and classes", "[" + make_prompt_arg("target", "Function or class name", false) + "," + make_prompt_arg("file", "File to document", true) + "]")
+    var p8 = make_prompt_json("docs-explain-code", "Explain how code works", "[" + make_prompt_arg("code", "Code to explain", false) + "," + make_prompt_arg("file", "File containing the code", false) + "]")
+    var p9 = make_prompt_json("docs-generate-readme", "Generate README.md for the project", "[]")
+    # Analysis prompts
+    var p10 = make_prompt_json("analyze-find-bugs", "Analyze code for potential bugs", "[" + make_prompt_arg("file", "File to analyze", true) + "]")
+    var p11 = make_prompt_json("analyze-suggest-improvements", "Suggest code improvements", "[" + make_prompt_arg("file", "File to analyze", true) + "]")
+    var p12 = make_prompt_json("analyze-performance", "Analyze code for performance issues", "[" + make_prompt_arg("file", "File to analyze", true) + "]")
+
+    var all = "[" + p1
+    all = all + "," + p2
+    all = all + "," + p3
+    all = all + "," + p4
+    all = all + "," + p5
+    all = all + "," + p6
+    all = all + "," + p7
+    all = all + "," + p8
+    all = all + "," + p9
+    all = all + "," + p10
+    all = all + "," + p11
+    all = all + "," + p12
+    all = all + "]"
+    all
+
+fn handle_prompts_list(id: text) -> text:
+    val result = jo1(jp("prompts", build_prompts_json()))
+    make_result_response(id, result)
+
+fn handle_prompts_get(id: text, prompt_name: text, body: text) -> text:
+    if prompt_name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+
+    # Extract arguments from request
+    val args_json = extract_arguments_dict(body)
+
+    # Build prompt messages based on prompt name
+    if prompt_name == "refactor-rename":
+        val old_name = extract_json_string_v2(args_json, "old_name")
+        val new_name = extract_json_string_v2(args_json, "new_name")
+        val file = extract_json_string_v2(args_json, "file")
+        var content = "Rename the symbol '" + old_name + "' to '" + new_name + "' throughout the codebase."
+        if file != "":
+            content = content + " Start with file: " + file
+        return make_prompt_response(id, "Rename symbol", content)
+    elif prompt_name == "refactor-extract-function":
+        val code = extract_json_string_v2(args_json, "code")
+        val fn_name = extract_json_string_v2(args_json, "function_name")
+        val file = extract_json_string_v2(args_json, "file")
+        val content = "Extract the following code into a new function named '" + fn_name + "' in " + file + ":" + NL + NL + code
+        return make_prompt_response(id, "Extract function", content)
+    elif prompt_name == "refactor-inline":
+        val sym_name = extract_json_string_v2(args_json, "name")
+        val file = extract_json_string_v2(args_json, "file")
+        val content = "Inline the symbol '" + sym_name + "' in " + file + ". Replace all uses with the definition and remove the original."
+        return make_prompt_response(id, "Inline symbol", content)
+    elif prompt_name == "generate-tests":
+        val target = extract_json_string_v2(args_json, "target")
+        val file = extract_json_string_v2(args_json, "file")
+        val content = "Generate comprehensive SSpec tests for '" + target + "' defined in " + file + ". Use describe/it blocks with expect().to_equal() matchers."
+        return make_prompt_response(id, "Generate tests", content)
+    elif prompt_name == "generate-trait-impl":
+        val cls = extract_json_string_v2(args_json, "class_name")
+        val trait_n = extract_json_string_v2(args_json, "trait_name")
+        val file = extract_json_string_v2(args_json, "file")
+        val content = "Generate trait implementation of '" + trait_n + "' for class '" + cls + "' in " + file + "."
+        return make_prompt_response(id, "Generate trait impl", content)
+    elif prompt_name == "generate-constructor":
+        val cls = extract_json_string_v2(args_json, "class_name")
+        val file = extract_json_string_v2(args_json, "file")
+        val content = "Generate a constructor (static fn create) for class '" + cls + "' in " + file + "."
+        return make_prompt_response(id, "Generate constructor", content)
+    elif prompt_name == "docs-add-docstrings":
+        val target = extract_json_string_v2(args_json, "target")
+        val file = extract_json_string_v2(args_json, "file")
+        var content = "Add documentation comments to all public functions and classes in " + file + "."
+        if target != "":
+            content = "Add documentation comments to '" + target + "' in " + file + "."
+        return make_prompt_response(id, "Add docstrings", content)
+    elif prompt_name == "docs-explain-code":
+        val code = extract_json_string_v2(args_json, "code")
+        val file = extract_json_string_v2(args_json, "file")
+        var content = "Explain how this code works"
+        if file != "":
+            content = content + " (from " + file + ")"
+        if code != "":
+            content = content + ":" + NL + NL + code
+        return make_prompt_response(id, "Explain code", content)
+    elif prompt_name == "docs-generate-readme":
+        return make_prompt_response(id, "Generate README", "Generate a comprehensive README.md for the Simple language compiler project.")
+    elif prompt_name == "analyze-find-bugs":
+        val file = extract_json_string_v2(args_json, "file")
+        val content = "Analyze " + file + " for potential bugs, null pointer issues, off-by-one errors, and logic flaws."
+        return make_prompt_response(id, "Find bugs", content)
+    elif prompt_name == "analyze-suggest-improvements":
+        val file = extract_json_string_v2(args_json, "file")
+        val content = "Suggest improvements for " + file + ": refactoring opportunities, better patterns, simplifications."
+        return make_prompt_response(id, "Suggest improvements", content)
+    elif prompt_name == "analyze-performance":
+        val file = extract_json_string_v2(args_json, "file")
+        val content = "Analyze " + file + " for performance issues: unnecessary allocations, O(n^2) patterns, redundant computations."
+        return make_prompt_response(id, "Analyze performance", content)
+    make_error_response(id, -32601, "Unknown prompt: " + prompt_name)
+
+fn make_prompt_response(id: text, description: text, user_content: text) -> text:
+    var msg = LB()
+    msg = msg + jp("role", js("user"))
+    var content_obj = LB()
+    content_obj = content_obj + jp("type", js("text"))
+    content_obj = content_obj + "," + jp("text", js(escape_json(user_content)))
+    content_obj = content_obj + RB()
+    msg = msg + "," + jp("content", content_obj)
+    msg = msg + RB()
+
+    var result = LB()
+    result = result + jp("description", js(escape_json(description)))
+    result = result + "," + jp("messages", "[" + msg + "]")
+    result = result + RB()
+    make_result_response(id, result)
+
+# ============================================================================
+# Completion
+# ============================================================================
+
+fn handle_completion_req(id: text, body: text) -> text:
+    # Return empty completion results
+    var completion = LB()
+    completion = completion + jp("values", "[]")
+    completion = completion + "," + jp("total", "0")
+    completion = completion + "," + jp("hasMore", "false")
+    completion = completion + RB()
+    val result = jo1(jp("completion", completion))
+    make_result_response(id, result)
+
+# ============================================================================
+# Local helpers
+# ============================================================================
+
+fn get_cwd() -> text:
+    var args: [text] = ["-c", "pwd"]
+    val result = rt_process_run("/bin/sh", args)
+    var out = result[0]
+    if out.ends_with("\n"):
+        out = out.substring(0, out.len() - 1)
+    out

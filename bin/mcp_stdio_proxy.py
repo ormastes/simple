@@ -152,6 +152,12 @@ def main():
     t_server.start()
 
     client_closed_at = None
+    eof_grace_seconds = 2.0
+    try:
+        eof_grace_seconds = float(os.environ.get("MCP_PROXY_EOF_GRACE", "2.0"))
+    except ValueError:
+        eof_grace_seconds = 2.0
+
     while True:
         child_exited = child.poll() is not None
         client_alive = t_client.is_alive()
@@ -178,7 +184,7 @@ def main():
 
         # Safety valve: do not wait forever after client EOF.
         if client_closed_at is not None and not child_exited:
-            if time.monotonic() - client_closed_at > 2.0:
+            if time.monotonic() - client_closed_at > eof_grace_seconds:
                 break
 
         time.sleep(0.05)

@@ -1,0 +1,546 @@
+# MCP Diagnostic Core - Parse, overlay, delta, serialize
+#
+# Provides the engine for virtual text diagnostics:
+#   - Run `bin/simple check` and parse output into structured DiagEntry records
+#   - Overlay diagnostics as virtual text comments on source lines
+#   - Compute deltas between diagnostic snapshots (resolved/introduced/remaining)
+#   - Serialize diagnostics to JSON
+
+use app.io.file_ops.{file_read}
+use app.io.process_ops.{shell}
+use app.io.env_ops.{cwd}
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, parse_int, min_int}
+use std.text.{NL}
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+class DiagEntry:
+    line_num: i64
+    col_num: i64
+    severity: text
+    message: text
+    easyfix: text
+    code: text
+
+class DiagResult:
+    file_path: text
+    status: text
+    exit_code: i64
+    entries: [DiagEntry]
+    error_count: i64
+    warning_count: i64
+
+class DiagDelta:
+    resolved: [DiagEntry]
+    introduced: [DiagEntry]
+    remaining: [DiagEntry]
+
+# ============================================================================
+# Run diagnostics
+# ============================================================================
+
+fn run_diagnostics(path: text) -> DiagResult:
+    val cmd = "bin/simple check " + path + " 2>&1"
+    val result = shell(cmd)
+    val exit_code = result.exit_code ?? 1
+    val output = result.stdout ?? ""
+
+    var status = "ok"
+    if exit_code == 1:
+        status = "type_errors"
+    elif exit_code == 2:
+        status = "parse_errors"
+    elif exit_code == 3:
+        status = "file_not_found"
+    elif exit_code != 0:
+        status = "unknown_error"
+
+    val entries = parse_diag_output(output, exit_code, path)
+
+    var err_count = 0
+    var warn_count = 0
+    for entry in entries:
+        if entry.severity == "error":
+            err_count = err_count + 1
+        elif entry.severity == "warning":
+            warn_count = warn_count + 1
+
+    DiagResult(file_path: path, status: status, exit_code: exit_code, entries: entries, error_count: err_count, warning_count: warn_count)
+
+# ============================================================================
+# Parse diagnostic output
+# ============================================================================
+
+fn parse_diag_output(output: text, exit_code: i64, path: text) -> [DiagEntry]:
+    var entries: [DiagEntry] = []
+    if exit_code == 0:
+        return entries
+
+    val lines = output.split(NL)
+    var cur_sev = "error"
+    var cur_msg = ""
+    var cur_line = 0
+    var cur_col = 0
+    var cur_easyfix = ""
+    var cur_code = ""
+
+    for line in lines:
+        val t = line.trim()
+        if t == "":
+            continue
+
+        # Skip summary lines
+        if t.ends_with("type error(s) found"):
+            continue
+        if t.ends_with("error(s) found"):
+            continue
+
+        # Format: "error[E:code]: line N:M: message"
+        var is_error_bracket = t.starts_with("error[")
+        var is_warning_bracket = t.starts_with("warning[")
+        var is_hint_bracket = t.starts_with("hint[")
+        var is_info_bracket = t.starts_with("info[")
+
+        val is_bracket = is_error_bracket or is_warning_bracket or is_hint_bracket or is_info_bracket
+
+        if is_bracket:
+            # Flush previous entry
+            if cur_msg != "":
+                val entry = DiagEntry(line_num: cur_line, col_num: cur_col, severity: cur_sev, message: cur_msg, easyfix: cur_easyfix, code: cur_code)
+                entries.push(entry)
+
+            # Parse severity
+            if is_error_bracket:
+                cur_sev = "error"
+            elif is_warning_bracket:
+                cur_sev = "warning"
+            elif is_hint_bracket:
+                cur_sev = "hint"
+            else:
+                cur_sev = "info"
+
+            # Extract code from brackets: "error[E:code]: ..."
+            var bracket_start = t.index_of("[") ?? -1
+            var bracket_end = t.index_of("]") ?? -1
+            cur_code = ""
+            if bracket_start >= 0:
+                val has_end = bracket_end > bracket_start
+                if has_end:
+                    cur_code = t.substring(bracket_start + 1, bracket_end)
+
+            # Extract line:col after "]: line N:M:" or "]: line N:"
+            cur_line = 0
+            cur_col = 0
+            cur_easyfix = ""
+            val after_bracket = extract_after_bracket(t)
+            val line_info = parse_line_col(after_bracket)
+            cur_line = line_info.line_num
+            cur_col = line_info.col_num
+            cur_msg = line_info.message
+            continue
+
+        # Format: "Type error in file.spl:" or "Parse error in file.spl:"
+        val is_type_hdr = t.starts_with("Type error in ")
+        val is_parse_hdr = t.starts_with("Parse error in ")
+        if is_type_hdr or is_parse_hdr:
+            if cur_msg != "":
+                val entry = DiagEntry(line_num: cur_line, col_num: cur_col, severity: cur_sev, message: cur_msg, easyfix: cur_easyfix, code: cur_code)
+                entries.push(entry)
+            cur_sev = "error"
+            cur_msg = ""
+            cur_line = 0
+            cur_col = 0
+            cur_easyfix = ""
+            cur_code = ""
+            continue
+
+        # Format: "error: semantic: ..." or "error: parse: ..."
+        if t.starts_with("error: "):
+            if cur_msg != "":
+                val entry = DiagEntry(line_num: cur_line, col_num: cur_col, severity: cur_sev, message: cur_msg, easyfix: cur_easyfix, code: cur_code)
+                entries.push(entry)
+            cur_sev = "error"
+            cur_msg = t
+            cur_line = 0
+            cur_col = 0
+            cur_easyfix = ""
+            cur_code = ""
+            continue
+
+        # Format: "warning: ..."
+        if t.starts_with("warning: "):
+            if cur_msg != "":
+                val entry = DiagEntry(line_num: cur_line, col_num: cur_col, severity: cur_sev, message: cur_msg, easyfix: cur_easyfix, code: cur_code)
+                entries.push(entry)
+            cur_sev = "warning"
+            cur_msg = t.substring(9)
+            cur_line = 0
+            cur_col = 0
+            cur_easyfix = ""
+            cur_code = ""
+            continue
+
+        # Easyfix line: "  help: did you mean `foo`?"
+        if t.starts_with("help: "):
+            cur_easyfix = t.substring(6)
+            continue
+
+        # Note continuation: "  note: ..."
+        if t.starts_with("note: "):
+            if cur_msg != "":
+                cur_msg = cur_msg + " [note: " + t.substring(6) + "]"
+            continue
+
+        # Regular error line (first error message after header)
+        val is_err_start = t.starts_with("Error: ") or t.starts_with("Undefined ") or t.starts_with("Type mismatch") or t.starts_with("Unknown key") or t.starts_with("Missing required") or t.starts_with("Trait coherence")
+        if is_err_start:
+            if cur_msg == "":
+                cur_msg = t
+            else:
+                cur_msg = cur_msg + " | " + t
+            continue
+
+        # Line number patterns: "  --> path:N:M" or "  at line N"
+        if t.starts_with("--> "):
+            val arrow_info = parse_arrow_location(t.substring(4))
+            if arrow_info.line_num > 0:
+                cur_line = arrow_info.line_num
+                cur_col = arrow_info.col_num
+            continue
+
+        if t.starts_with("at line "):
+            val at_line_str = t.substring(8)
+            val at_parts = at_line_str.split(" ")
+            if at_parts.len() > 0:
+                val plr = parse_int(at_parts[0])
+                match plr:
+                    Ok(v): cur_line = v
+                    Err(_): pass
+            continue
+
+        # Otherwise append to current message
+        if cur_msg != "":
+            cur_msg = cur_msg + " " + t
+
+    # Flush last entry
+    if cur_msg != "":
+        val entry = DiagEntry(line_num: cur_line, col_num: cur_col, severity: cur_sev, message: cur_msg, easyfix: cur_easyfix, code: cur_code)
+        entries.push(entry)
+
+    entries
+
+# ============================================================================
+# Parse helpers
+# ============================================================================
+
+class LineColMsg:
+    line_num: i64
+    col_num: i64
+    message: text
+
+fn extract_after_bracket(t: text) -> text:
+    # Extract text after "]: " in a bracket diagnostic line
+    val bracket_end = t.index_of("]: ") ?? -1
+    if bracket_end >= 0:
+        return t.substring(bracket_end + 3)
+    ""
+
+fn parse_line_col(s: text) -> LineColMsg:
+    # Parse "line N:M: message" or "line N: message" or just "message"
+    var line_num = 0
+    var col_num = 0
+    var msg = s
+
+    if s.starts_with("line "):
+        val rest = s.substring(5)
+        val colon_idx = rest.index_of(":") ?? -1
+        if colon_idx > 0:
+            val num_str = rest.substring(0, colon_idx)
+            val pr = parse_int(num_str)
+            match pr:
+                Ok(v):
+                    line_num = v
+                    val after_first = rest.substring(colon_idx + 1)
+                    # Check for col:
+                    val second_colon = after_first.index_of(":") ?? -1
+                    if second_colon > 0:
+                        val col_str = after_first.substring(0, second_colon).trim()
+                        val cr = parse_int(col_str)
+                        match cr:
+                            Ok(cv):
+                                col_num = cv
+                                msg = after_first.substring(second_colon + 1).trim()
+                            Err(_):
+                                msg = after_first.trim()
+                                if msg.starts_with(": "):
+                                    msg = msg.substring(2)
+                    else:
+                        msg = after_first.trim()
+                        if msg.starts_with(" "):
+                            msg = msg.trim()
+                Err(_):
+                    msg = s
+
+    LineColMsg(line_num: line_num, col_num: col_num, message: msg)
+
+fn parse_arrow_location(s: text) -> LineColMsg:
+    # Parse "path:N:M" from "--> path:N:M"
+    var line_num = 0
+    var col_num = 0
+    # Find last two colons (path may contain colons on Windows)
+    val parts = s.split(":")
+    val plen = parts.len()
+    if plen >= 3:
+        val line_str = parts[plen - 2].trim()
+        val col_str = parts[plen - 1].trim()
+        val lr = parse_int(line_str)
+        match lr:
+            Ok(v): line_num = v
+            Err(_): pass
+        val cr = parse_int(col_str)
+        match cr:
+            Ok(v): col_num = v
+            Err(_): pass
+    elif plen == 2:
+        val line_str = parts[1].trim()
+        val lr = parse_int(line_str)
+        match lr:
+            Ok(v): line_num = v
+            Err(_): pass
+    LineColMsg(line_num: line_num, col_num: col_num, message: "")
+
+# ============================================================================
+# Virtual text overlay
+# ============================================================================
+
+fn severity_tag(severity: text) -> text:
+    if severity == "error":
+        return "[E]"
+    elif severity == "warning":
+        return "[W]"
+    elif severity == "info":
+        return "[I]"
+    elif severity == "hint":
+        return "[H]"
+    "[?]"
+
+fn pad_line(line: text, target_col: i64) -> text:
+    var result = line
+    for _i in range(0, target_col - line.len()):
+        result = result + " "
+    result
+
+fn overlay_virtual_text(source: text, entries: [DiagEntry], show_hints: Bool, fold_mode: text) -> text:
+    val source_lines = source.split(NL)
+    val line_count = source_lines.len()
+
+    # Find max line length for alignment
+    var max_len = 0
+    for sl in source_lines:
+        if sl.len() > max_len:
+            max_len = sl.len()
+
+    var align_col = max_len + 2
+    if align_col < 40:
+        align_col = 40
+
+    # Build line number width
+    val num_width = line_count.to_string().len()
+
+    var output = ""
+    var line_idx = 0
+    for sl in source_lines:
+        line_idx = line_idx + 1
+        val num_str = line_idx.to_string()
+        # Pad line number
+        var padded_num = ""
+        for _p in range(0, num_width - num_str.len()):
+            padded_num = padded_num + " "
+        padded_num = padded_num + num_str
+
+        # Collect diagnostics for this line
+        var line_diags: [DiagEntry] = []
+        for entry in entries:
+            if entry.line_num == line_idx:
+                line_diags.push(entry)
+
+        if line_diags.len() == 0:
+            output = output + padded_num + " | " + sl + NL
+        else:
+            # First diagnostic inline
+            val first_diag = line_diags[0]
+            val tag = severity_tag(first_diag.severity)
+            val padded = pad_line(sl, align_col)
+            output = output + padded_num + " | " + padded + "# " + tag + " " + first_diag.message + NL
+
+            # Easyfix for first diagnostic
+            val show_easy = show_hints and first_diag.easyfix != ""
+            if show_easy:
+                val easy_expanded = fold_mode == "expanded"
+                var pad_prefix = ""
+                for _p in range(0, num_width):
+                    pad_prefix = pad_prefix + " "
+                pad_prefix = pad_prefix + " | "
+                var easy_pad = ""
+                for _p in range(0, align_col):
+                    easy_pad = easy_pad + " "
+                output = output + pad_prefix + easy_pad + "# [H] easyfix: " + first_diag.easyfix + NL
+
+            # Additional diagnostics on continuation lines
+            var diag_idx = 0
+            for extra_diag in line_diags:
+                diag_idx = diag_idx + 1
+                if diag_idx <= 1:
+                    continue
+                var pad_prefix2 = ""
+                for _p in range(0, num_width):
+                    pad_prefix2 = pad_prefix2 + " "
+                pad_prefix2 = pad_prefix2 + " | "
+                var easy_pad2 = ""
+                for _p in range(0, align_col):
+                    easy_pad2 = easy_pad2 + " "
+                val tag2 = severity_tag(extra_diag.severity)
+                output = output + pad_prefix2 + easy_pad2 + "# " + tag2 + " " + extra_diag.message + NL
+                val show_extra_easy = show_hints and extra_diag.easyfix != ""
+                if show_extra_easy:
+                    output = output + pad_prefix2 + easy_pad2 + "# [H] easyfix: " + extra_diag.easyfix + NL
+
+    # Append file-level diagnostics (line_num == 0)
+    for entry in entries:
+        if entry.line_num == 0:
+            val tag0 = severity_tag(entry.severity)
+            output = output + "  " + tag0 + " " + entry.message + NL
+
+    output
+
+# ============================================================================
+# Delta computation
+# ============================================================================
+
+fn compute_delta(baseline: [DiagEntry], current: [DiagEntry]) -> DiagDelta:
+    var resolved: [DiagEntry] = []
+    var introduced: [DiagEntry] = []
+    var remaining: [DiagEntry] = []
+
+    # Track which current entries are matched
+    var matched_current: [Bool] = []
+    for _c in current:
+        matched_current.push(false)
+
+    # For each baseline entry, try to find a matching current entry
+    for base_entry in baseline:
+        var found = false
+        var ci = 0
+        for cur_entry in current:
+            val already = matched_current[ci]
+            if not already:
+                val same_line = base_entry.line_num == cur_entry.line_num
+                val same_msg = base_entry.message == cur_entry.message
+                if same_line and same_msg:
+                    matched_current[ci] = true
+                    remaining.push(cur_entry)
+                    found = true
+                    break
+            ci = ci + 1
+        if not found:
+            resolved.push(base_entry)
+
+    # Unmatched current entries are introduced
+    var ci2 = 0
+    for cur_entry2 in current:
+        val was_matched = matched_current[ci2]
+        if not was_matched:
+            introduced.push(cur_entry2)
+        ci2 = ci2 + 1
+
+    DiagDelta(resolved: resolved, introduced: introduced, remaining: remaining)
+
+fn format_delta_text(delta: DiagDelta) -> text:
+    var output = "-- diagnostic delta --{NL}"
+    var res_err = 0
+    var res_warn = 0
+    for r in delta.resolved:
+        if r.severity == "error":
+            res_err = res_err + 1
+        elif r.severity == "warning":
+            res_warn = res_warn + 1
+    output = output + "  resolved: " + res_err.to_string() + " error(s), " + res_warn.to_string() + " warning(s){NL}"
+
+    var intro_err = 0
+    var intro_warn = 0
+    for i in delta.introduced:
+        if i.severity == "error":
+            intro_err = intro_err + 1
+        elif i.severity == "warning":
+            intro_warn = intro_warn + 1
+    output = output + "  introduced: " + intro_err.to_string() + " error(s), " + intro_warn.to_string() + " warning(s){NL}"
+
+    var rem_err = 0
+    var rem_warn = 0
+    for rm in delta.remaining:
+        if rm.severity == "error":
+            rem_err = rem_err + 1
+        elif rm.severity == "warning":
+            rem_warn = rem_warn + 1
+    output = output + "  remaining: " + rem_err.to_string() + " error(s), " + rem_warn.to_string() + " warning(s){NL}"
+
+    output
+
+# ============================================================================
+# JSON serialization
+# ============================================================================
+
+fn diag_entry_to_json(entry: DiagEntry) -> text:
+    var r = LB()
+    r = r + jp("line", entry.line_num.to_string())
+    r = r + "," + jp("col", entry.col_num.to_string())
+    r = r + "," + jp("severity", js(entry.severity))
+    r = r + "," + jp("message", js(escape_json(entry.message)))
+    if entry.easyfix != "":
+        r = r + "," + jp("easyfix", js(escape_json(entry.easyfix)))
+    if entry.code != "":
+        r = r + "," + jp("code", js(escape_json(entry.code)))
+    r = r + RB()
+    r
+
+fn diag_entries_to_json(entries: [DiagEntry]) -> text:
+    var arr = "["
+    var first = true
+    for entry in entries:
+        if not first:
+            arr = arr + ","
+        first = false
+        arr = arr + diag_entry_to_json(entry)
+    arr = arr + "]"
+    arr
+
+fn diag_result_to_json(result: DiagResult) -> text:
+    var r = LB()
+    r = r + jp("file", js(escape_json(result.file_path)))
+    r = r + "," + jp("status", js(result.status))
+    r = r + "," + jp("exit_code", result.exit_code.to_string())
+    r = r + "," + jp("error_count", result.error_count.to_string())
+    r = r + "," + jp("warning_count", result.warning_count.to_string())
+    r = r + "," + jp("diagnostics", diag_entries_to_json(result.entries))
+    r = r + RB()
+    r
+
+fn diag_delta_to_json(delta: DiagDelta) -> text:
+    var r = LB()
+    r = r + jp("resolved", diag_entries_to_json(delta.resolved))
+    r = r + "," + jp("introduced", diag_entries_to_json(delta.introduced))
+    r = r + "," + jp("remaining", diag_entries_to_json(delta.remaining))
+    r = r + RB()
+    r
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export DiagEntry, DiagResult, DiagDelta, LineColMsg
+export run_diagnostics, parse_diag_output
+export overlay_virtual_text, severity_tag, pad_line
+export compute_delta, format_delta_text
+export diag_entry_to_json, diag_entries_to_json, diag_result_to_json, diag_delta_to_json
