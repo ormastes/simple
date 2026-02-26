@@ -91,6 +91,17 @@ impl<'a> Parser<'a> {
             TokenKind::Impl => self.parse_keyword_identifier("impl"),
             TokenKind::Exists => self.parse_keyword_identifier("exists"),
             TokenKind::Match => self.parse_keyword_identifier("match"),
+            TokenKind::Asm => self.parse_keyword_identifier("asm"),
+            TokenKind::Bitfield => self.parse_keyword_identifier("bitfield"),
+            TokenKind::Newtype => self.parse_keyword_identifier("newtype"),
+            TokenKind::Extend => self.parse_keyword_identifier("extend"),
+            TokenKind::Comptime => self.parse_keyword_identifier("comptime"),
+            // Type definition keywords usable as identifiers in expression contexts
+            TokenKind::Struct => self.parse_keyword_identifier("struct"),
+            TokenKind::Enum => self.parse_keyword_identifier("enum"),
+            TokenKind::Class => self.parse_keyword_identifier("class"),
+            TokenKind::Fn => self.parse_keyword_identifier("fn"),
+            TokenKind::Trait => self.parse_keyword_identifier("trait"),
             // 'me' is the mutable-self keyword; treat it like 'self' in expression context
             // so that `me.field` and `me.method()` work.
             TokenKind::Me => {

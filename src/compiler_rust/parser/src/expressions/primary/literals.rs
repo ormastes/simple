@@ -108,6 +108,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Symbol(s))
             }
+            TokenKind::Atom(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Expr::Atom(s))
+            }
             TokenKind::CustomBlock { kind, payload, .. } => {
                 // Custom block expression: m{...}, sh{...}, sql{...}, re{...}, etc.
                 let kind = kind.clone();

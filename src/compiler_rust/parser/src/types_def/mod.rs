@@ -8,6 +8,7 @@
 //! - impl
 //! - actor
 
+mod bitfield;
 mod enum_parsing;
 mod trait_impl_parsing;
 
@@ -817,5 +818,70 @@ impl<'a> Parser<'a> {
             name,
             args,
         })
+    }
+
+    /// Parse extend block: `extend TypeName: methods`
+    /// Adds methods to an existing type (like Rust's impl blocks without traits).
+    pub(crate) fn parse_extend(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Extend)?;
+
+        let target_type = self.expect_identifier()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
+
+        self.expect(&TokenKind::Colon)?;
+
+        // Parse body with methods
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        let mut methods = Vec::new();
+
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            // Skip empty lines
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                break;
+            }
+
+            // Parse doc comment
+            let doc_comment = self.try_parse_doc_comment();
+
+            // Parse function definition
+            if self.check(&TokenKind::Fn) || self.check(&TokenKind::Me) || self.check(&TokenKind::Static) {
+                let is_static = if self.check(&TokenKind::Static) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+
+                let func_node = self.parse_function_with_doc(doc_comment)?;
+                if let Node::Function(mut func_def) = func_node {
+                    func_def.is_static = is_static;
+                    methods.push(func_def);
+                }
+            } else {
+                // Skip anything that isn't a function
+                self.advance();
+            }
+
+            if self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+        }
+
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+
+        Ok(Node::Extend(ExtendBlock {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            target_type,
+            generic_params,
+            methods,
+        }))
     }
 }

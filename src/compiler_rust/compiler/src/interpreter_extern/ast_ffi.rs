@@ -212,6 +212,7 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
             Expr::GridLiteral { .. } => "GridLiteral",
             Expr::TensorLiteral { .. } => "TensorLiteral",
             Expr::BlockExpr { .. } => "BlockExpr",
+            Expr::Atom(_) => "Atom",
         };
         Ok(Value::Str(tag.to_string()))
     })

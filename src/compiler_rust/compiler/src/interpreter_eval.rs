@@ -1107,7 +1107,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::Skip(_)
             | Node::Guard(_)
             | Node::Defer(_)
-            | Node::Mixin(_) => {
+            | Node::Mixin(_)
+            | Node::InlineAsm(_)
+            | Node::Newtype(_)
+            | Node::Extend(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access

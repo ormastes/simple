@@ -268,6 +268,10 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
+        // Track unmatched dedents for deferred consumption (e.g., after if-block body)
+        if remaining > 0 {
+            self.deferred_dedent_count += remaining;
+        }
     }
 
     /// Check if the next token after the current could start a type.
@@ -532,6 +536,18 @@ impl<'a> Parser<'a> {
             TokenKind::Ghost => "ghost".to_string(),
             TokenKind::Gen => "gen".to_string(),
             TokenKind::Alias => "alias".to_string(),
+            // Low-level keywords usable as identifiers in non-statement contexts
+            TokenKind::Asm => "asm".to_string(),
+            TokenKind::Bitfield => "bitfield".to_string(),
+            TokenKind::Newtype => "newtype".to_string(),
+            TokenKind::Extend => "extend".to_string(),
+            TokenKind::Comptime => "comptime".to_string(),
+            // Type definition keywords usable as identifiers (parameter names, field names)
+            TokenKind::Struct => "struct".to_string(),
+            TokenKind::Enum => "enum".to_string(),
+            TokenKind::Class => "class".to_string(),
+            TokenKind::Fn => "fn".to_string(),
+            TokenKind::Trait => "trait".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

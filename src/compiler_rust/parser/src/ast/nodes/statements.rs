@@ -3,6 +3,7 @@
 use super::super::enums::*;
 use super::contracts::ContractClause;
 use super::core::*;
+use super::definitions::FunctionDef;
 use crate::token::Span;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -352,4 +353,53 @@ pub struct LeanBlock {
     pub import_path: Option<String>,
     /// Inline Lean 4 code (may be empty if import-only)
     pub code: String,
+}
+
+/// Inline assembly statement: `asm: "instruction"` or `asm: block`
+/// Also supports target-conditional: `asm match: case [target]: instructions`
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineAsmStmt {
+    pub span: Span,
+    /// Assembly instructions (one per line in block form)
+    pub instructions: Vec<String>,
+    /// Target-conditional arms: `asm match: case [target]: instructions`
+    pub target_match: Vec<AsmTargetArm>,
+    /// Clobber registers declared by this asm block
+    pub clobbers: Vec<String>,
+}
+
+/// Target-conditional arm in asm match
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsmTargetArm {
+    pub span: Span,
+    /// Target platform pattern (e.g., "x86_64", "aarch64", "_" for default)
+    pub target: String,
+    /// Instructions for this target
+    pub instructions: Vec<String>,
+}
+
+/// Newtype definition: `newtype Name = Type`
+/// Creates a wrapper struct with a single `value` field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewtypeDef {
+    pub span: Span,
+    pub name: String,
+    /// The wrapped type
+    pub inner_type: Type,
+    pub visibility: Visibility,
+    /// Documentation comment
+    pub doc_comment: Option<DocComment>,
+}
+
+/// Extend block: `extend TypeName: methods`
+/// Adds methods to an existing type (like Rust's impl blocks without traits).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtendBlock {
+    pub span: Span,
+    /// The type being extended
+    pub target_type: String,
+    /// Generic type parameters
+    pub generic_params: Vec<String>,
+    /// Methods to add
+    pub methods: Vec<FunctionDef>,
 }

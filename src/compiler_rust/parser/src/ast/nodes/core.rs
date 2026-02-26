@@ -92,6 +92,14 @@ pub enum Node {
     With(WithStmt),
     Expression(Expr),
     LeanBlock(LeanBlock),
+
+    // Low-level features
+    /// Inline assembly: `asm: "instruction"` or `asm: block`
+    InlineAsm(InlineAsmStmt),
+    /// Newtype wrapper: `newtype Name = Type`
+    Newtype(NewtypeDef),
+    /// Extension methods: `extend TypeName: methods`
+    Extend(ExtendBlock),
 }
 
 /// Decorator applied to a function: @decorator or @decorator(args)
@@ -445,6 +453,8 @@ pub enum Expr {
     Bool(bool),
     Nil,
     Symbol(String),
+    /// Backtick atom literal: `symbol` - identity comparison
+    Atom(String),
 
     /// i18n named string: Name_"default text"
     I18nString {

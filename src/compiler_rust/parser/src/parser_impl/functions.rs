@@ -364,7 +364,7 @@ impl<'a> Parser<'a> {
 
     // === Doc Comment Variants ===
 
-    pub(super) fn parse_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    pub(crate) fn parse_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_function()?;
         if let Node::Function(ref mut f) = node {
             f.doc_comment = doc_comment;
