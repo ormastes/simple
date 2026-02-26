@@ -17,7 +17,7 @@ pub(crate) fn compile_pointer_new<M: Module>(
     kind: PointerKind,
     value: VReg,
 ) -> InstrResult<()> {
-    let value_val = ctx.vreg_values[&value];
+    let value_val = ctx.get_vreg(&value)?;
 
     // Select runtime function based on pointer kind
     let rt_func = match kind {
@@ -71,7 +71,7 @@ pub(crate) fn compile_pointer_ref<M: Module>(
 ) -> InstrResult<()> {
     // Borrow references are currently passed through as the source value
     // In a full implementation, this would track borrow state at runtime
-    let source_val = ctx.vreg_values[&source];
+    let source_val = ctx.get_vreg(&source)?;
     ctx.vreg_values.insert(dest, source_val);
     Ok(())
 }
@@ -84,7 +84,7 @@ pub(crate) fn compile_pointer_deref<M: Module>(
     pointer: VReg,
     kind: PointerKind,
 ) -> InstrResult<()> {
-    let ptr_val = ctx.vreg_values[&pointer];
+    let ptr_val = ctx.get_vreg(&pointer)?;
 
     // Select runtime function based on pointer kind
     let rt_func = match kind {

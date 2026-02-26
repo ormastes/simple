@@ -19,7 +19,10 @@ pub(crate) fn compile_contract_check<M: Module>(
     func_name: &str,
     _message: Option<&str>,
 ) -> InstrResult<()> {
-    let cond = ctx.vreg_values[&condition];
+    let cond = match ctx.vreg_values.get(&condition) {
+        Some(&v) => v,
+        None => return Err(format!("ContractCheck: condition vreg {:?} not found", condition)),
+    };
 
     // Get the kind as an integer for the runtime call
     let kind_val = match kind {

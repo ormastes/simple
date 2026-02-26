@@ -25,7 +25,7 @@ pub fn compile_enum_discriminant<M: Module>(
 ) -> InstrResult<()> {
     let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];
     let disc_ref = ctx.module.declare_func_in_func(disc_id, builder.func);
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
     let call = builder.ins().call(disc_ref, &[val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
@@ -41,7 +41,7 @@ pub fn compile_enum_payload<M: Module>(
 ) -> InstrResult<()> {
     let payload_id = ctx.runtime_funcs["rt_enum_payload"];
     let payload_ref = ctx.module.declare_func_in_func(payload_id, builder.func);
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
     let call = builder.ins().call(payload_ref, &[val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
@@ -58,7 +58,7 @@ pub fn compile_union_discriminant<M: Module>(
 ) -> InstrResult<()> {
     let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];
     let disc_ref = ctx.module.declare_func_in_func(disc_id, builder.func);
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
     let call = builder.ins().call(disc_ref, &[val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
@@ -75,7 +75,7 @@ pub fn compile_union_payload<M: Module>(
 ) -> InstrResult<()> {
     let payload_id = ctx.runtime_funcs["rt_enum_payload"];
     let payload_ref = ctx.module.declare_func_in_func(payload_id, builder.func);
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
     let call = builder.ins().call(payload_ref, &[val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
@@ -96,7 +96,7 @@ pub fn compile_union_wrap<M: Module>(
     let disc = builder.ins().iconst(types::I32, type_index as i64);
     // variant_count is not strictly needed for runtime, use 0
     let variant_count = builder.ins().iconst(types::I32, 0);
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
     let call = builder.ins().call(wrap_ref, &[disc, variant_count, val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);

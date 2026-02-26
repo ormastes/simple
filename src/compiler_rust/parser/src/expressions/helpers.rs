@@ -189,6 +189,27 @@ impl<'a> Parser<'a> {
             self.parse_expression()?
         };
 
+        // Peek through newlines/indents to check for elif/else continuation.
+        // Handles multi-line if-expressions like:
+        //   val kind = if cond: ValueA
+        //              else: ValueB
+        // Only consume newlines/indents if elif/else actually follows,
+        // otherwise leave them for the outer parser.
+        // Track indent count to consume matching Dedent tokens after parsing else.
+        let mut continuation_indents = 0;
+        if self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
+            let has_elif_or_else = self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
+                || self.peek_through_newlines_and_indents_is(&TokenKind::Else);
+            if has_elif_or_else {
+                while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
+                    if self.check(&TokenKind::Indent) {
+                        continuation_indents += 1;
+                    }
+                    self.advance();
+                }
+            }
+        }
+
         let else_branch = if self.check(&TokenKind::Elif) {
             self.advance();
             Some(Box::new(self.parse_if_expr()?))
@@ -255,6 +276,29 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+
+        // Consume Dedent tokens matching the Indent tokens we consumed
+        // when peeking through for continuation elif/else.
+        // After parsing the else-branch, the token stream has: Newline Dedent
+        // We need to consume both to balance the Indent we consumed earlier.
+        // If we don't, the block parser will see the Dedent and think the
+        // block ended prematurely.
+        if continuation_indents > 0 {
+            for _ in 0..continuation_indents {
+                // Skip the trailing Newline to reach the Dedent
+                if self.check(&TokenKind::Newline) {
+                    // Peek to see if Dedent follows
+                    let next = self.peek_next();
+                    if matches!(next.kind, TokenKind::Dedent) {
+                        self.advance(); // consume Newline
+                        self.advance(); // consume Dedent
+                    }
+                } else if self.check(&TokenKind::Dedent) {
+                    self.advance(); // consume Dedent
+                }
+            }
+        }
+
         Ok(Expr::If {
             let_pattern,
             condition: Box::new(condition),

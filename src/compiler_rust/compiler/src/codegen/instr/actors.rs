@@ -25,8 +25,8 @@ pub fn compile_actor_send<M: Module>(
 ) -> InstrResult<()> {
     let send_id = ctx.runtime_funcs["rt_actor_send"];
     let send_ref = ctx.module.declare_func_in_func(send_id, builder.func);
-    let actor_val = ctx.vreg_values[&actor];
-    let msg_val = ctx.vreg_values[&message];
+    let actor_val = ctx.get_vreg(&actor)?;
+    let msg_val = ctx.get_vreg(&message)?;
     builder.ins().call(send_ref, &[actor_val, msg_val]);
     Ok(())
 }
@@ -54,7 +54,7 @@ pub fn compile_actor_join<M: Module>(
 ) -> InstrResult<()> {
     let join_id = ctx.runtime_funcs["rt_actor_join"];
     let join_ref = ctx.module.declare_func_in_func(join_id, builder.func);
-    let actor_val = ctx.vreg_values[&actor];
+    let actor_val = ctx.get_vreg(&actor)?;
     let call = builder.ins().call(join_ref, &[actor_val]);
     let raw_result = builder.inst_results(call)[0];
     // Convert i64 to RuntimeValue by tagging (shift left 3 bits)
@@ -71,7 +71,7 @@ pub fn compile_actor_reply<M: Module>(
 ) -> InstrResult<()> {
     let reply_id = ctx.runtime_funcs["rt_actor_reply"];
     let reply_ref = ctx.module.declare_func_in_func(reply_id, builder.func);
-    let message_val = ctx.vreg_values[&message];
+    let message_val = ctx.get_vreg(&message)?;
     builder.ins().call(reply_ref, &[message_val]);
     // Reply returns RuntimeValue (NIL), but we don't need to store it
     // The result is handled by the ConstNil instruction that follows
@@ -87,7 +87,7 @@ pub fn compile_await<M: Module>(
 ) -> InstrResult<()> {
     let await_id = ctx.runtime_funcs["rt_future_await"];
     let await_ref = ctx.module.declare_func_in_func(await_id, builder.func);
-    let future_val = ctx.vreg_values[&future];
+    let future_val = ctx.get_vreg(&future)?;
     let call = builder.ins().call(await_ref, &[future_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
@@ -103,7 +103,7 @@ pub fn compile_generator_next<M: Module>(
 ) -> InstrResult<()> {
     let next_id = ctx.runtime_funcs["rt_generator_next"];
     let next_ref = ctx.module.declare_func_in_func(next_id, builder.func);
-    let gen_val = ctx.vreg_values[&generator];
+    let gen_val = ctx.get_vreg(&generator)?;
     let call = builder.ins().call(next_ref, &[gen_val]);
     let result = builder.inst_results(call)[0];
 

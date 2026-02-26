@@ -42,7 +42,7 @@ pub fn compile_contract_old_capture<M: Module>(
     dest: VReg,
     value: VReg,
 ) -> InstrResult<()> {
-    let val = ctx.vreg_values[&value];
+    let val = ctx.get_vreg(&value)?;
     ctx.vreg_values.insert(dest, val);
     Ok(())
 }

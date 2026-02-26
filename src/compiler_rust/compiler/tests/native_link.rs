@@ -69,9 +69,23 @@ fn compile_file_safe(source: String, file_path: PathBuf) -> Result<Vec<u8>, Stri
         .name("compile-worker".into())
         .stack_size(STACK_SIZE)
         .spawn(move || {
-            let result = compile_file_to_object(&source, &file_path);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                compile_file_to_object(&source, &file_path)
+            }));
             let _ = tx.send(());
-            result
+            match result {
+                Ok(r) => r,
+                Err(e) => {
+                    let msg = if let Some(s) = e.downcast_ref::<String>() {
+                        format!("panic: {s}")
+                    } else if let Some(s) = e.downcast_ref::<&str>() {
+                        format!("panic: {s}")
+                    } else {
+                        "panic: unknown".to_string()
+                    };
+                    Err(msg)
+                }
+            }
         })
         .expect("spawn failed");
 
@@ -79,16 +93,7 @@ fn compile_file_safe(source: String, file_path: PathBuf) -> Result<Vec<u8>, Stri
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(()) => match handle.join() {
             Ok(result) => result,
-            Err(e) => {
-                let msg = if let Some(s) = e.downcast_ref::<String>() {
-                    format!("panic: {s}")
-                } else if let Some(s) = e.downcast_ref::<&str>() {
-                    format!("panic: {s}")
-                } else {
-                    "panic: unknown".to_string()
-                };
-                Err(msg)
-            }
+            Err(_) => Err("thread join error".to_string()),
         },
         Err(_) => {
             // Timeout — thread is still running but we move on
