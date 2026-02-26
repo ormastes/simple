@@ -4,8 +4,20 @@
 # No Rust FFI required - everything is in Simple!
 
 use compiler.driver (CompilerDriver, CompileOptions, CompileMode, CompileResult)
-use compiler.backend.llvm_backend (LlvmBackend, MirToLlvm, CodegenTarget, OptimizationLevel)
-use compiler.mir_data (MirModule)
+use compiler.backend.llvm_backend (MirToLlvm, CodegenTarget, OptimizationLevel)
+use compiler.mir_opt.mir_opt_integration.{OptimizationConfig__speed}
+use compiler.backend.linker.target_triple (normalize_triple)
+
+fn select_target(target_triple: text) -> CodegenTarget:
+    val lower = target_triple.lower()
+    if lower.contains("aarch64") or lower.contains("arm64"):
+        CodegenTarget.Aarch64
+    else if lower.contains("riscv64"):
+        CodegenTarget.RiscV64
+    else if lower.contains("wasm"):
+        CodegenTarget.Wasm32
+    else:
+        CodegenTarget.X86
 
 export compile_to_llvm_ir_pure
 
@@ -20,36 +32,44 @@ fn compile_to_llvm_ir_pure(source_file: text, target_triple: text, bare_metal: b
     # Step 1: Parse and compile to MIR using CompilerDriver
     val options = CompileOptions.default()
     options.input_files = [source_file]
-    options.mode = CompileMode.Check  # Parse + type check + lower to MIR
+    options.mode = CompileMode.Aot  # run full pipeline to MIR
+    options.release = not bare_metal
 
     val driver = CompilerDriver.create(options)
-    val result = driver.compile()
 
-    match result:
-        case CompileResult.ParseError(errors):
-            val error_msg = errors.join("\n")
-            return ("", "Parse error:\n{error_msg}", 1)
+    # Run phases manually so we can capture MIR without linking
+    if not driver.load_sources_impl():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "Load error:\n{msg}", 1)
 
-        case CompileResult.TypeError(errors):
-            val error_msg = errors.join("\n")
-            return ("", "Type error:\n{error_msg}", 1)
+    if not driver.parse_all_impl():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "Parse error:\n{msg}", 1)
 
-        case CompileResult.Success(mir_module):
-            # Step 2: Translate MIR to LLVM IR
-            val backend = if bare_metal:
-                LlvmBackend.create_baremetal(CodegenTarget.X86, OptimizationLevel.Size)
-            else:
-                LlvmBackend.create(CodegenTarget.X86, OptimizationLevel.Speed)
+    if not driver.lower_and_check_impl():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "Type error:\n{msg}", 1)
 
-            # Get the MIR module (need to extract from result)
-            # TODO: Fix this - need to get MIR from CompileResult
-            val mir = MirModule.empty()  # Placeholder
+    if not driver.monomorphize_impl():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "Monomorphization error:\n{msg}", 1)
 
-            # Create translator
-            val translator = MirToLlvm.create("module", CodegenTarget.X86, nil)
-            val llvm_ir = translator.translate_module(mir)
+    if not driver.lower_to_mir():
+        val msg = driver.ctx.errors.join("\n")
+        return ("", "MIR lowering error:\n{msg}", 1)
 
-            return (llvm_ir, "", 0)
+    driver.optimize_mir(OptimizationConfig__speed())
 
-        case _:
-            return ("", "Unknown compilation error", 1)
+    # Translate each MIR module to LLVM IR and concatenate
+    val target = select_target(normalize_triple(target_triple))
+    val translator = if bare_metal:
+        MirToLlvm.create_baremetal("module", target, nil)
+    else:
+        MirToLlvm.create("module", target, nil)
+
+    var llvm_ir = ""
+    for name in driver.ctx.mir_modules.keys():
+        val mir = driver.ctx.mir_modules[name]
+        llvm_ir = llvm_ir + translator.translate_module(mir) + "\n"
+
+    (llvm_ir, "", 0)
