@@ -1,0 +1,419 @@
+# Query CLI - Extra LSP Features
+# document-highlight, type-definition, implementation, folding-range
+#
+# Each function takes file/line/col parameters and prints output to stdout.
+# Returns 0 on success, 1 on error.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _extract_word_at(lines: [text], line_num: i64, col: i64) -> text:
+    if line_num < 1 or line_num > lines.len():
+        return ""
+    val line = lines[line_num - 1]
+    if line.trim() == "":
+        return ""
+
+    # If column specified, use it
+    var start = 0
+    var end_pos = 0
+    if col > 0 and col <= line.len():
+        start = col - 1
+        end_pos = col - 1
+    else:
+        # Find first word-like token on line (skip leading whitespace + keywords)
+        var si = 0
+        while si < line.len():
+            val ch = line.substring(si, si + 1)
+            if ch != " " and ch != "\t":
+                break
+            si = si + 1
+        start = si
+        end_pos = si
+
+    # Scan backward to find word start
+    var bi = 0
+    while bi < start:
+        if start <= 0:
+            break
+        val ch = line.substring(start - 1, start)
+        val is_word = _is_word_char(ch)
+        if not is_word:
+            break
+        start = start - 1
+        bi = bi + 1
+
+    # Scan forward to find word end
+    while end_pos < line.len():
+        val ch = line.substring(end_pos, end_pos + 1)
+        val is_word = _is_word_char(ch)
+        if not is_word:
+            break
+        end_pos = end_pos + 1
+
+    if end_pos <= start:
+        return ""
+    line.substring(start, end_pos)
+
+fn _is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn _classify_highlight(line: text, pos: i64, symbol: text) -> text:
+    val trimmed = line.trim()
+    # Write if it's a variable declaration
+    if trimmed.starts_with("val " + symbol):
+        return "Write"
+    if trimmed.starts_with("var " + symbol):
+        return "Write"
+    # Write if symbol is on left side of assignment
+    # Check if chars after symbol (skipping whitespace) start with = but not ==
+    var after_idx = pos + symbol.len()
+    while after_idx < line.len():
+        val ch = line.substring(after_idx, after_idx + 1)
+        if ch == " " or ch == "\t":
+            after_idx = after_idx + 1
+            continue
+        if ch == "=":
+            # Make sure it's not == or =>
+            if after_idx + 1 < line.len():
+                val next_ch = line.substring(after_idx + 1, after_idx + 2)
+                if next_ch == "=" or next_ch == ">":
+                    return "Read"
+            return "Write"
+        break
+    # Write if line starts with fn symbol( or me symbol(
+    if trimmed.starts_with("fn " + symbol):
+        return "Write"
+    if trimmed.starts_with("me " + symbol):
+        return "Write"
+    if trimmed.starts_with("static fn " + symbol):
+        return "Write"
+    "Read"
+
+fn _safe_grep(pattern: text, dir: text, include: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("grep", ["-rn", pattern, dir, "--include=" + include])
+    (stdout, code)
+
+fn _safe_grep_file(pattern: text, file: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("grep", ["-n", pattern, file])
+    (stdout, code)
+
+# ============================================================================
+# Function 1: document-highlight
+# Same-file references with Read/Write classification
+# Output format: line:col:length:kind
+# ============================================================================
+
+fn query_document_highlight(file: text, line_num: i64, col: i64) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+    val lines = content.split("\n")
+    val symbol = _extract_word_at(lines, line_num, col)
+    if symbol == "":
+        print "No symbol at position"
+        return 1
+
+    var count = 0
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        var pos = 0
+        while pos <= line.len() - symbol.len():
+            val candidate = line.substring(pos, pos + symbol.len())
+            if candidate == symbol:
+                # Check word boundaries
+                var left_ok = true
+                var right_ok = true
+                if pos > 0:
+                    val lch = line.substring(pos - 1, pos)
+                    if _is_word_char(lch):
+                        left_ok = false
+                if pos + symbol.len() < line.len():
+                    val rch = line.substring(pos + symbol.len(), pos + symbol.len() + 1)
+                    if _is_word_char(rch):
+                        right_ok = false
+                if left_ok and right_ok:
+                    val kind = _classify_highlight(line, pos, symbol)
+                    print "{li + 1}:{pos}:{symbol.len()}:{kind}"
+                    count = count + 1
+                    pos = pos + symbol.len()
+                    li = li
+                else:
+                    pos = pos + 1
+            else:
+                pos = pos + 1
+        li = li + 1
+
+    if count == 0:
+        print "No highlights found"
+    0
+
+# ============================================================================
+# Function 2: type-definition
+# Find where the type of a symbol is defined
+# ============================================================================
+
+fn query_type_definition(file: text, line_num: i64, col: i64) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+    val lines = content.split("\n")
+    val symbol = _extract_word_at(lines, line_num, col)
+    if symbol == "":
+        print "No symbol at position"
+        return 1
+
+    # Search for the declaration of this symbol to find its type
+    var found_type = ""
+    for line in lines:
+        val trimmed = line.trim()
+        # val symbol: Type = ...
+        if trimmed.starts_with("val " + symbol + ":"):
+            val after = trimmed.substring(4 + symbol.len() + 1).trim()
+            found_type = _extract_type_name(after)
+        elif trimmed.starts_with("var " + symbol + ":"):
+            val after = trimmed.substring(4 + symbol.len() + 1).trim()
+            found_type = _extract_type_name(after)
+        # fn symbol(...) -> RetType:
+        elif trimmed.starts_with("fn " + symbol + "("):
+            val arrow_idx = _find_arrow(trimmed)
+            if arrow_idx >= 0:
+                val after = trimmed.substring(arrow_idx + 2).trim()
+                found_type = _extract_type_name(after)
+        if found_type != "":
+            break
+
+    if found_type == "":
+        print "Could not determine type for symbol: {symbol}"
+        return 1
+
+    # Now search for the type definition: class/struct/enum/trait
+    # First search in the same file
+    var type_line = 0
+    var li = 0
+    while li < lines.len():
+        val trimmed = lines[li].trim()
+        if (trimmed.starts_with("class " + found_type) or
+            trimmed.starts_with("struct " + found_type) or
+            trimmed.starts_with("enum " + found_type) or
+            trimmed.starts_with("trait " + found_type)):
+            type_line = li + 1
+            break
+        li = li + 1
+
+    if type_line > 0:
+        print "{file}:{type_line}: {lines[type_line - 1].trim()}"
+        return 0
+
+    # Cross-file search
+    val pattern = "^class " + found_type + "\\|^struct " + found_type + "\\|^enum " + found_type + "\\|^trait " + found_type
+    val (out, code) = _safe_grep(pattern, "src/", "*.spl")
+    if out.trim() != "":
+        val result_lines = out.split("\n")
+        var rcount = 0
+        for rline in result_lines:
+            if rline.trim() != "" and rcount < 10:
+                print rline
+                rcount = rcount + 1
+        return 0
+
+    print "Type definition not found for: {found_type}"
+    1
+
+fn _extract_type_name(s: text) -> text:
+    # Extract the first identifier from a type annotation string
+    # Handles: "Type", "Type =", "Type:", "Option<Type>"
+    var end_pos = 0
+    while end_pos < s.len():
+        val ch = s.substring(end_pos, end_pos + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return ""
+    s.substring(0, end_pos)
+
+fn _find_arrow(s: text) -> i64:
+    var i = 0
+    while i < s.len() - 1:
+        val two = s.substring(i, i + 2)
+        if two == "->":
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Function 3: implementation
+# Find implementations of a trait or type
+# ============================================================================
+
+fn query_implementation(file: text, line_num: i64, col: i64) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+    val lines = content.split("\n")
+    val symbol = _extract_word_at(lines, line_num, col)
+    if symbol == "":
+        print "No symbol at position"
+        return 1
+
+    # Check if symbol is a trait
+    var is_trait = false
+    val (trait_out, trait_code) = _safe_grep("^trait " + symbol, "src/", "*.spl")
+    if trait_out.trim() != "":
+        is_trait = true
+
+    var found_count = 0
+    if is_trait:
+        # Find all impl blocks that implement this trait
+        # Pattern: impl TraitName for TypeName or impl TraitName
+        val (impl_out, _) = _safe_grep("impl " + symbol, "src/", "*.spl")
+        if impl_out.trim() != "":
+            print "--- Implementations of trait {symbol} ---"
+            val result_lines = impl_out.split("\n")
+            for rline in result_lines:
+                if rline.trim() != "" and found_count < 50:
+                    print rline
+                    found_count = found_count + 1
+    else:
+        # Symbol is a class/struct — find impl blocks for it
+        # Pattern: impl TypeName or impl TraitName for TypeName
+        val (impl_out, _) = _safe_grep("impl.*" + symbol, "src/", "*.spl")
+        if impl_out.trim() != "":
+            print "--- Implementations for {symbol} ---"
+            val result_lines = impl_out.split("\n")
+            for rline in result_lines:
+                if rline.trim() != "" and found_count < 50:
+                    print rline
+                    found_count = found_count + 1
+
+    if found_count == 0:
+        print "No implementations found for: {symbol}"
+        return 1
+    0
+
+# ============================================================================
+# Function 4: folding-range
+# Identify foldable regions in the file
+# Output format: start_line:end_line:kind
+# ============================================================================
+
+fn query_folding_range(file: text) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+    val lines = content.split("\n")
+
+    var count = 0
+
+    # Track import groups
+    var import_start = -1
+    var import_end = -1
+
+    # Track comment blocks
+    var comment_start = -1
+    var comment_end = -1
+
+    var li = 0
+    while li < lines.len():
+        val line = lines[li]
+        val trimmed = line.trim()
+        val indent = _leading_spaces(line)
+        val current_line = li + 1
+
+        # Track import groups (consecutive use/import lines)
+        if trimmed.starts_with("use ") or trimmed.starts_with("import "):
+            if import_start == -1:
+                import_start = current_line
+            import_end = current_line
+        else:
+            if import_start > 0 and import_end > import_start:
+                print "{import_start}:{import_end}:imports"
+                count = count + 1
+            import_start = -1
+            import_end = -1
+
+        # Track comment blocks (consecutive # lines at same indent)
+        if trimmed.starts_with("#"):
+            if comment_start == -1:
+                comment_start = current_line
+            comment_end = current_line
+        else:
+            if comment_start > 0 and comment_end > comment_start:
+                print "{comment_start}:{comment_end}:comment"
+                count = count + 1
+            comment_start = -1
+            comment_end = -1
+
+        # Detect block-starting declarations at indent 0
+        if indent == 0 and trimmed != "":
+            var block_kind = ""
+            if trimmed.starts_with("fn ") or trimmed.starts_with("extern fn "):
+                block_kind = "function"
+            elif trimmed.starts_with("class "):
+                block_kind = "class"
+            elif trimmed.starts_with("struct "):
+                block_kind = "struct"
+            elif trimmed.starts_with("enum "):
+                block_kind = "enum"
+            elif trimmed.starts_with("trait "):
+                block_kind = "trait"
+            elif trimmed.starts_with("impl "):
+                block_kind = "impl"
+
+            if block_kind != "" and trimmed.contains(":"):
+                # Find the end of this block (where indentation returns to 0)
+                var end_li = li + 1
+                while end_li < lines.len():
+                    val next_line = lines[end_li]
+                    val next_trimmed = next_line.trim()
+                    if next_trimmed == "":
+                        end_li = end_li + 1
+                        continue
+                    val next_indent = _leading_spaces(next_line)
+                    if next_indent == 0:
+                        break
+                    end_li = end_li + 1
+
+                val block_end = end_li
+                if block_end > li + 1:
+                    print "{current_line}:{block_end}:{block_kind}"
+                    count = count + 1
+
+        li = li + 1
+
+    # Flush trailing import/comment groups
+    if import_start > 0 and import_end > import_start:
+        print "{import_start}:{import_end}:imports"
+        count = count + 1
+    if comment_start > 0 and comment_end > comment_start:
+        print "{comment_start}:{comment_end}:comment"
+        count = count + 1
+
+    if count == 0:
+        print "No folding ranges found"
+    0
+
+fn _leading_spaces(line: text) -> i64:
+    var count = 0
+    while count < line.len():
+        val ch = line.substring(count, count + 1)
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+export query_document_highlight, query_type_definition, query_implementation, query_folding_range

@@ -62,7 +62,10 @@ pub(super) fn register_definitions(
 ) {
     eprintln!("[DEBUG] register_definitions: processing {} items", items.len());
     for item in items.iter() {
-        eprintln!("[DEBUG] register_definitions: processing node type: {:?}", std::mem::discriminant(item));
+        eprintln!(
+            "[DEBUG] register_definitions: processing node type: {:?}",
+            std::mem::discriminant(item)
+        );
         match item {
             Node::Function(f) => {
                 local_functions.insert(f.name.clone(), f.clone());
@@ -159,7 +162,11 @@ pub(super) fn register_definitions(
                 crate::interpreter::EXTERN_FUNCTIONS.with(|cell| {
                     let mut externs = cell.borrow_mut();
                     externs.insert(ext.name.clone());
-                    eprintln!("[DEBUG] Registered extern function from module: {} (total: {})", ext.name, externs.len());
+                    eprintln!(
+                        "[DEBUG] Registered extern function from module: {} (total: {})",
+                        ext.name,
+                        externs.len()
+                    );
                 });
             }
             Node::Trait(t) => {

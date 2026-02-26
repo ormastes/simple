@@ -91,6 +91,15 @@ impl<'a> Parser<'a> {
         let generic_params = self.parse_generic_params_as_strings()?;
         let params = self.parse_parameters()?;
 
+        // Skip newlines/indents for multi-line function signatures:
+        //   fn name(params)
+        //       -> ReturnType:
+        let sig_indents = if self.peek_through_newlines_and_indents_is(&TokenKind::Arrow) {
+            self.skip_newlines_and_indents_for_method_chain()
+        } else {
+            0
+        };
+
         let return_type = if self.check(&TokenKind::Arrow) {
             self.advance();
             Some(self.parse_type()?)
@@ -109,6 +118,10 @@ impl<'a> Parser<'a> {
 
         // Skip newlines before the function body colon or abstract semicolon
         self.skip_newlines();
+        // Consume any dedents from multi-line signature
+        if sig_indents > 0 {
+            self.consume_dedents_for_method_chain(sig_indents);
+        }
 
         // Check for abstract/extern method (semicolon instead of body, or no body at all)
         let is_abstract = if self.check(&TokenKind::Semicolon) {
@@ -139,7 +152,18 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Newline) {
                 // Block form: fn name(): \n INDENT body
                 self.expect(&TokenKind::Newline)?;
-                self.expect(&TokenKind::Indent)?;
+
+                // For multiline signatures where the colon is on the indented line
+                // (e.g., `fn foo()\n    -> T:\n    body`), the body is at the same
+                // indent level as the arrow, so no additional Indent token appears.
+                // In that case, skip the Indent expectation.
+                if self.check(&TokenKind::Indent) {
+                    self.advance();
+                } else if sig_indents == 0 {
+                    // Only require indent for normal (non-multiline-sig) functions
+                    self.expect(&TokenKind::Indent)?;
+                }
+                // else: sig_indents > 0 means body at sig continuation level, no Indent expected
 
                 // Parse optional contract block at the start of the function body
                 // (new: in/out/out_err/invariant/decreases, legacy: requires/ensures)
@@ -532,6 +556,45 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
+
+        // Decorators can apply to extern, class, struct, enum etc. not just functions
+        if self.check(&TokenKind::Extern) {
+            let attrs: Vec<crate::ast::Attribute> = decorators
+                .iter()
+                .map(|d| {
+                    let name = match &d.name {
+                        crate::ast::Expr::Identifier(n) => n.clone(),
+                        crate::ast::Expr::Call { callee, .. } => {
+                            if let crate::ast::Expr::Identifier(n) = callee.as_ref() {
+                                n.clone()
+                            } else {
+                                "decorator".to_string()
+                            }
+                        }
+                        _ => "decorator".to_string(),
+                    };
+                    crate::ast::Attribute {
+                        span: d.span,
+                        name,
+                        value: None,
+                        args: None,
+                    }
+                })
+                .collect();
+            return self.parse_extern_with_attrs(attrs);
+        }
+
+        if self.check(&TokenKind::Class) {
+            return self.parse_class();
+        }
+
+        if self.check(&TokenKind::Struct) {
+            return self.parse_struct();
+        }
+
+        if self.check(&TokenKind::Enum) {
+            return self.parse_enum();
+        }
 
         // Now parse the function with the collected decorators and effects
         let mut node = self.parse_function_with_decorators(decorators)?;

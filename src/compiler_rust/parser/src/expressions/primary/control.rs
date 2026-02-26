@@ -116,13 +116,26 @@ impl<'a> Parser<'a> {
                 arms,
             })
         } else {
-            // Disable forced indentation before returning error
+            // Inline match expression: `match self: case X: expr; case Y: expr`
             self.lexer.disable_forced_indentation();
-            Err(ParseError::unexpected_token(
-                "newline after match",
-                format!("{:?}", self.current.kind),
-                self.current.span,
-            ))
+            let mut arms = Vec::new();
+            loop {
+                if self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe) {
+                    arms.push(self.parse_match_arm_expr()?);
+                } else {
+                    break;
+                }
+                // Consume semicolons between inline arms
+                if self.check(&TokenKind::Semicolon) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            Ok(Expr::Match {
+                subject: Box::new(subject),
+                arms,
+            })
         }
     }
 

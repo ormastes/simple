@@ -3,7 +3,9 @@
 # Placed in 70.backend/backend/ to resolve imports relative to this directory.
 # backend.spl facade MUST be renamed to backend.spl.bak to prevent cascade loading.
 
-use c_backend.*
+use compiler.backend.common.bootstrap_guard.{BOOTSTRAP_NO_C}
+when not BOOTSTRAP_NO_C:
+    use c_backend.*
 use c_ir_builder.{CIRBuilder__create}
 use c_type_mapper.{CTypeMapper__create}
 use compiler.mir.mir_data.*
@@ -12,11 +14,523 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.hir.hir_lowering.statements.*
 use compiler.mir.mir_lowering.*
-use compiler.core.parser.{SymbolTable, Scope, ScopeId, ScopeKind}
+use compiler.core.parser.{SymbolTable, Scope, ScopeId, ScopeKind, parse_module, parser_has_errors, parser_get_errors, parser_init, parser_advance, parse_module_body}
+use compiler.core.ast.*
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.lexer_types.Span
 
 extern fn sys_get_args() -> [text]
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
+
+# ============================================================================
+# Flat AST → Rich AST Converter
+# ============================================================================
+# The core parser produces a flat, index-based AST stored in global arrays.
+# The HIR lowering expects a rich Module with Dict<text, Function> etc.
+# This bridge converts between the two formats.
+
+fn make_span() -> Span:
+    Span(start: 0, end: 0, line: 0, col: 0)
+
+fn convert_flat_type(type_expr_idx: i64) -> Type:
+    if type_expr_idx <= 0:
+        return Type(kind: TypeKind.Infer, span: make_span())
+    val tag = expr_tag[type_expr_idx]
+    if tag == EXPR_IDENT:
+        Type(kind: TypeKind.Named(expr_s_val[type_expr_idx], []), span: make_span())
+    elif tag == EXPR_INDEX:
+        # Generic type like Array<T> stored as Index(Array, T)
+        val base_name = expr_s_val[expr_left[type_expr_idx]]
+        var type_args: [Type] = []
+        val arg_idx = expr_right[type_expr_idx]
+        if arg_idx >= 0:
+            type_args = type_args.push(convert_flat_type(arg_idx))
+        Type(kind: TypeKind.Named(base_name, type_args), span: make_span())
+    else:
+        Type(kind: TypeKind.Infer, span: make_span())
+
+fn convert_flat_expr(idx: i64) -> Expr:
+    if idx < 0:
+        return Expr(kind: ExprKind.NilLit, span: make_span())
+    val tag = expr_tag[idx]
+    val span = make_span()
+    if tag == EXPR_INT_LIT:
+        Expr(kind: ExprKind.IntLit(expr_i_val[idx]), span: span)
+    elif tag == EXPR_FLOAT_LIT:
+        Expr(kind: ExprKind.FloatLit(0.0), span: span)
+    elif tag == EXPR_STRING_LIT:
+        Expr(kind: ExprKind.StringLit(expr_s_val[idx], nil), span: span)
+    elif tag == EXPR_BOOL_LIT:
+        Expr(kind: ExprKind.BoolLit(expr_i_val[idx] != 0), span: span)
+    elif tag == EXPR_NIL_LIT:
+        Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_IDENT:
+        Expr(kind: ExprKind.Ident(expr_s_val[idx]), span: span)
+    elif tag == EXPR_CALL:
+        val callee = convert_flat_expr(expr_left[idx])
+        val arg_indices = expr_args[idx]
+        var args: [CallArg] = []
+        var ai = 0
+        while ai < arg_indices.len():
+            args = args.push(CallArg(
+                has_name: false,
+                name: "",
+                value: convert_flat_expr(arg_indices[ai]),
+                span: span
+            ))
+            ai = ai + 1
+        Expr(kind: ExprKind.Call(callee, args), span: span)
+    elif tag == EXPR_BINARY:
+        val left = convert_flat_expr(expr_left[idx])
+        val right = convert_flat_expr(expr_right[idx])
+        # Binary op stored as token kind in i_val; default to Add for now
+        Expr(kind: ExprKind.Binary(BinOp.Add, left, right), span: span)
+    elif tag == EXPR_UNARY:
+        val operand = convert_flat_expr(expr_left[idx])
+        Expr(kind: ExprKind.Unary(UnaryOp.Neg, operand), span: span)
+    elif tag == EXPR_FIELD_ACCESS:
+        val obj = convert_flat_expr(expr_left[idx])
+        val field_name = expr_s_val[idx]
+        Expr(kind: ExprKind.Field(obj, field_name), span: span)
+    elif tag == EXPR_METHOD_CALL:
+        val obj = convert_flat_expr(expr_left[idx])
+        val method_name = expr_s_val[idx]
+        val m_arg_indices = expr_args[idx]
+        var m_args: [CallArg] = []
+        var mai = 0
+        while mai < m_arg_indices.len():
+            m_args = m_args.push(CallArg(
+                has_name: false,
+                name: "",
+                value: convert_flat_expr(m_arg_indices[mai]),
+                span: span
+            ))
+            mai = mai + 1
+        Expr(kind: ExprKind.MethodCall(obj, method_name, m_args), span: span)
+    elif tag == EXPR_INDEX:
+        val obj = convert_flat_expr(expr_left[idx])
+        val index = convert_flat_expr(expr_right[idx])
+        Expr(kind: ExprKind.Index(obj, index), span: span)
+    elif tag == EXPR_ARRAY_LIT:
+        val elem_indices = expr_args[idx]
+        var elems: [Expr] = []
+        var ei = 0
+        while ei < elem_indices.len():
+            elems = elems.push(convert_flat_expr(elem_indices[ei]))
+            ei = ei + 1
+        Expr(kind: ExprKind.ArrayLit(elems), span: span)
+    elif tag == EXPR_INTERPOLATED_STRING:
+        # Interpolated strings: s_val has the template, args have the expressions
+        val parts = expr_args[idx]
+        var interpolations: [Interpolation] = []
+        var ii = 0
+        while ii < parts.len():
+            interpolations = interpolations.push(Interpolation(
+                expr: convert_flat_expr(parts[ii]),
+                has_format: false,
+                format: "",
+                span: span
+            ))
+            ii = ii + 1
+        Expr(kind: ExprKind.StringLit(expr_s_val[idx], interpolations), span: span)
+    elif tag == EXPR_IF:
+        val cond = convert_flat_expr(expr_left[idx])
+        val then_stmts = expr_stmts[idx]
+        var then_body: [Stmt] = []
+        var ti = 0
+        while ti < then_stmts.len():
+            then_body = then_body.push(convert_flat_stmt(then_stmts[ti]))
+            ti = ti + 1
+        val then_block = Block(stmts: then_body, span: span)
+        Expr(kind: ExprKind.If(cond, then_block, nil), span: span)
+    elif tag == EXPR_RETURN:
+        val ret_expr = convert_flat_expr(expr_left[idx])
+        Expr(kind: ExprKind.Return(ret_expr), span: span)
+    elif tag == EXPR_LAMBDA:
+        val body_expr = convert_flat_expr(expr_left[idx])
+        var lambda_params: [LambdaParam] = []
+        val lp_names = expr_args[idx]
+        var lpi = 0
+        while lpi < lp_names.len():
+            lambda_params = lambda_params.push(LambdaParam(
+                name: expr_s_val[lp_names[lpi]],
+                has_type_: false,
+                type_: Type(kind: TypeKind.Infer, span: span),
+                span: span
+            ))
+            lpi = lpi + 1
+        Expr(kind: ExprKind.Lambda(lambda_params, body_expr), span: span)
+    elif tag == EXPR_NULL_COALESCE:
+        val lhs = convert_flat_expr(expr_left[idx])
+        val rhs = convert_flat_expr(expr_right[idx])
+        Expr(kind: ExprKind.NullCoalesce(lhs, rhs), span: span)
+    elif tag == EXPR_OPTIONAL_CHAIN:
+        val obj = convert_flat_expr(expr_left[idx])
+        Expr(kind: ExprKind.OptionalChain(obj, expr_s_val[idx]), span: span)
+    elif tag == EXPR_STRUCT_LIT:
+        val struct_name = expr_s_val[idx]
+        val field_exprs = expr_args[idx]
+        var fields: [(text, Expr)] = []
+        var fi = 0
+        while fi < field_exprs.len():
+            val field_idx = field_exprs[fi]
+            fields = fields.push((expr_s_val[field_idx], convert_flat_expr(expr_left[field_idx])))
+            fi = fi + 1
+        Expr(kind: ExprKind.StructLit(struct_name, fields), span: span)
+    elif tag == EXPR_TUPLE:
+        val tuple_args = expr_args[idx]
+        var tuple_elems: [Expr] = []
+        var tui = 0
+        while tui < tuple_args.len():
+            tuple_elems = tuple_elems.push(convert_flat_expr(tuple_args[tui]))
+            tui = tui + 1
+        Expr(kind: ExprKind.TupleLit(tuple_elems), span: span)
+    elif tag == EXPR_DICT_LIT:
+        Expr(kind: ExprKind.DictLit([]), span: span)
+    elif tag == EXPR_UNIT:
+        Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_PASS or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN or tag == EXPR_PASS_TODO:
+        Expr(kind: ExprKind.NilLit, span: span)
+    elif tag == EXPR_EXISTS_CHECK:
+        val inner = convert_flat_expr(expr_left[idx])
+        Expr(kind: ExprKind.ExistsCheck(inner), span: span)
+    else:
+        # Fallback for unhandled expression types
+        print "[bridge] WARNING: unhandled expr tag {tag}"
+        Expr(kind: ExprKind.NilLit, span: span)
+
+fn convert_flat_stmt(idx: i64) -> Stmt:
+    val tag = stmt_tag[idx]
+    val span = make_span()
+    if tag == STMT_EXPR:
+        val e = convert_flat_expr(stmt_expr[idx])
+        Stmt(kind: StmtKind.Expr(e), span: span)
+    elif tag == STMT_RETURN:
+        val ret_idx = stmt_expr[idx]
+        if ret_idx >= 0:
+            val e = convert_flat_expr(ret_idx)
+            Stmt(kind: StmtKind.Return(e), span: span)
+        else:
+            Stmt(kind: StmtKind.Return(nil), span: span)
+    elif tag == STMT_VAL_DECL:
+        val name = stmt_name[idx]
+        val type_idx = stmt_type_tag[idx]
+        val init_idx = stmt_expr[idx]
+        val type_ = convert_flat_type(type_idx)
+        val init_expr = convert_flat_expr(init_idx)
+        Stmt(kind: StmtKind.Val(name, type_, init_expr), span: span)
+    elif tag == STMT_VAR_DECL:
+        val name = stmt_name[idx]
+        val type_idx = stmt_type_tag[idx]
+        val init_idx = stmt_expr[idx]
+        val type_ = convert_flat_type(type_idx)
+        if init_idx >= 0:
+            val init_expr = convert_flat_expr(init_idx)
+            Stmt(kind: StmtKind.Var(name, type_, init_expr), span: span)
+        else:
+            Stmt(kind: StmtKind.Var(name, type_, nil), span: span)
+    elif tag == STMT_ASSIGN:
+        val target = convert_flat_expr(stmt_expr[idx])
+        val body = stmt_body[idx]
+        val value = convert_flat_expr(body[0])
+        Stmt(kind: StmtKind.Assign(target, nil, value), span: span)
+    elif tag == STMT_IF:
+        val cond = convert_flat_expr(stmt_expr[idx])
+        val then_stmts = stmt_body[idx]
+        var then_body: [Stmt] = []
+        var si = 0
+        while si < then_stmts.len():
+            then_body = then_body.push(convert_flat_stmt(then_stmts[si]))
+            si = si + 1
+        val then_block = Block(stmts: then_body, span: span)
+        Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, nil), span: span)), span: span)
+    elif tag == STMT_WHILE:
+        val cond = convert_flat_expr(stmt_expr[idx])
+        val body_stmts = stmt_body[idx]
+        var body: [Stmt] = []
+        var wi = 0
+        while wi < body_stmts.len():
+            body = body.push(convert_flat_stmt(body_stmts[wi]))
+            wi = wi + 1
+        val block = Block(stmts: body, span: span)
+        Stmt(kind: StmtKind.While(cond, block), span: span)
+    elif tag == STMT_FOR:
+        val iter_name = stmt_name[idx]
+        val iterable = convert_flat_expr(stmt_expr[idx])
+        val body_stmts = stmt_body[idx]
+        var body: [Stmt] = []
+        var fi = 0
+        while fi < body_stmts.len():
+            body = body.push(convert_flat_stmt(body_stmts[fi]))
+            fi = fi + 1
+        val block = Block(stmts: body, span: span)
+        Stmt(kind: StmtKind.For(iter_name, iterable, block), span: span)
+    elif tag == STMT_BREAK:
+        Stmt(kind: StmtKind.Break(nil), span: span)
+    elif tag == STMT_CONTINUE:
+        Stmt(kind: StmtKind.Continue(nil), span: span)
+    elif tag == STMT_BLOCK:
+        val body_stmts = stmt_body[idx]
+        var body: [Stmt] = []
+        var bi = 0
+        while bi < body_stmts.len():
+            body = body.push(convert_flat_stmt(body_stmts[bi]))
+            bi = bi + 1
+        Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Block(Block(stmts: body, span: span)), span: span)), span: span)
+    else:
+        print "[bridge] WARNING: unhandled stmt tag {tag}"
+        Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
+
+fn convert_decl_fn(idx: i64) -> Function:
+    val name = decl_name[idx]
+    val p_names = decl_param_names[idx]
+    val p_types = decl_param_types[idx]
+    val span = make_span()
+    var params: [Param] = []
+    var pi = 0
+    while pi < p_names.len():
+        val has_t = pi < p_types.len() and p_types[pi] > 0
+        params = params.push(Param(
+            name: p_names[pi],
+            has_type_: has_t,
+            type_: if has_t: convert_flat_type(p_types[pi]) else: Type(kind: TypeKind.Infer, span: span),
+            has_default: false,
+            default: Expr(kind: ExprKind.NilLit, span: span),
+            span: span
+        ))
+        pi = pi + 1
+
+    val ret = decl_ret_type[idx]
+    val body_stmt_indices = decl_body_stmts[idx]
+    var stmts: [Stmt] = []
+    var si = 0
+    while si < body_stmt_indices.len():
+        stmts = stmts.push(convert_flat_stmt(body_stmt_indices[si]))
+        si = si + 1
+
+    Function(
+        name: name,
+        type_params: [],
+        params: params,
+        has_return_type: ret > 0,
+        return_type: if ret > 0: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span),
+        body: Block(stmts: stmts, span: span),
+        is_async: decl_is_async[idx] != 0,
+        is_static: false,
+        is_public: decl_is_pub[idx] != 0,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_kernel: false,
+        is_extern: false,
+        attributes: [],
+        has_doc_comment: false,
+        doc_comment: "",
+        span: span
+    )
+
+fn convert_decl_extern_fn(idx: i64) -> Function:
+    val name = decl_name[idx]
+    val p_names = decl_param_names[idx]
+    val p_types = decl_param_types[idx]
+    val span = make_span()
+    var params: [Param] = []
+    var pi = 0
+    while pi < p_names.len():
+        val has_t = pi < p_types.len() and p_types[pi] > 0
+        params = params.push(Param(
+            name: p_names[pi],
+            has_type_: has_t,
+            type_: if has_t: convert_flat_type(p_types[pi]) else: Type(kind: TypeKind.Infer, span: span),
+            has_default: false,
+            default: Expr(kind: ExprKind.NilLit, span: span),
+            span: span
+        ))
+        pi = pi + 1
+
+    val ret = decl_ret_type[idx]
+    Function(
+        name: name,
+        type_params: [],
+        params: params,
+        has_return_type: ret > 0,
+        return_type: if ret > 0: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span),
+        body: Block(stmts: [], span: span),
+        is_async: false,
+        is_static: false,
+        is_public: false,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_kernel: false,
+        is_extern: true,
+        attributes: [],
+        has_doc_comment: false,
+        doc_comment: "",
+        span: span
+    )
+
+fn flat_ast_to_module(path: text) -> Module:
+    val decls = module_get_decls()
+    var functions: Dict<text, Function> = {}
+    var structs: Dict<text, Struct> = {}
+    var enums: Dict<text, Enum> = {}
+    var constants: Dict<text, Const> = {}
+    var imports: [Import] = []
+    var exports: [Export] = []
+    var impls: [Impl] = []
+    val span = make_span()
+
+    print "[bridge] Converting {decls.len()} declarations to rich Module"
+
+    var di = 0
+    while di < decls.len():
+        val idx = decls[di]
+        val tag = decl_tag[idx]
+        if tag == DECL_FN:
+            val fn_ = convert_decl_fn(idx)
+            print "[bridge] Function: {fn_.name}"
+            functions[fn_.name] = fn_
+        elif tag == DECL_EXTERN_FN:
+            val fn_ = convert_decl_extern_fn(idx)
+            print "[bridge] Extern function: {fn_.name}"
+            functions[fn_.name] = fn_
+        elif tag == DECL_STRUCT:
+            val s_name = decl_name[idx]
+            print "[bridge] Struct: {s_name} (stub)"
+            var fields: [Field] = []
+            val f_names = decl_field_names[idx]
+            val f_types = decl_field_types[idx]
+            val f_defaults = decl_field_defaults[idx]
+            var fi = 0
+            while fi < f_names.len():
+                val ft = if fi < f_types.len() and f_types[fi] > 0: convert_flat_type(f_types[fi]) else: Type(kind: TypeKind.Infer, span: span)
+                val fd = if fi < f_defaults.len() and f_defaults[fi] >= 0: convert_flat_expr(f_defaults[fi]) else: nil
+                fields = fields.push(Field(
+                    name: f_names[fi],
+                    type_: ft,
+                    has_default: fd != nil,
+                    default: if fd != nil: fd else: Expr(kind: ExprKind.NilLit, span: span),
+                    is_public: false,
+                    is_volatile: false,
+                    has_fixed_address: false,
+                    fixed_address: 0,
+                    span: span
+                ))
+                fi = fi + 1
+            structs[s_name] = Struct(
+                name: s_name,
+                type_params: [],
+                fields: fields,
+                is_public: decl_is_pub[idx] != 0,
+                attributes: [],
+                has_doc_comment: false,
+                doc_comment: "",
+                span: span
+            )
+        elif tag == DECL_ENUM:
+            val e_name = decl_name[idx]
+            print "[bridge] Enum: {e_name} (stub)"
+            enums[e_name] = Enum(
+                name: e_name,
+                type_params: [],
+                variants: [],
+                is_public: decl_is_pub[idx] != 0,
+                has_doc_comment: false,
+                doc_comment: "",
+                span: span
+            )
+        elif tag == DECL_VAL or tag == DECL_VAR:
+            val c_name = decl_name[idx]
+            val body = decl_body_stmts[idx]
+            val init = if body.len() > 0: convert_flat_expr(body[0]) else: Expr(kind: ExprKind.NilLit, span: span)
+            constants[c_name] = Const(
+                name: c_name,
+                has_type_: false,
+                type_: Type(kind: TypeKind.Infer, span: span),
+                value: init,
+                is_mutable: tag == DECL_VAR,
+                is_public: decl_is_pub[idx] != 0,
+                is_volatile: false,
+                has_fixed_address: false,
+                fixed_address: 0,
+                span: span
+            )
+        elif tag == DECL_USE:
+            val module_path = decl_name[idx]
+            val items_list = decl_imports[idx]
+            var import_items: [ImportItem] = []
+            var ii = 0
+            while ii < items_list.len():
+                import_items = import_items.push(ImportItem(
+                    name: items_list[ii],
+                    has_alias: false,
+                    alias: ""
+                ))
+                ii = ii + 1
+            imports = imports.push(Import(
+                module: module_path,
+                items: import_items,
+                is_lazy: decl_is_lazy[idx] != 0,
+                span: span
+            ))
+        elif tag == DECL_EXPORT:
+            val export_items = decl_imports[idx]
+            exports = exports.push(Export(items: export_items, span: span))
+        else:
+            print "[bridge] WARNING: unhandled decl tag {tag}"
+        di = di + 1
+
+    Module(
+        name: path,
+        imports: imports,
+        exports: exports,
+        functions: functions,
+        classes: {},
+        actors: {},
+        structs: structs,
+        enums: enums,
+        bitfields: {},
+        traits: {},
+        impls: impls,
+        type_aliases: {},
+        constants: constants,
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: []
+    )
+
+fn parse_and_build_module(source: text, path: text) -> Module:
+    # Manually call parser steps instead of parse_module() to debug
+    print "[bridge] Step A: ast_reset..."
+    ast_reset()
+    print "[bridge] Step A done. decl_count={decl_count()}"
+    print "[bridge] Step B: parser_init..."
+    parser_init(source)
+    print "[bridge] Step B done. decl_count={decl_count()}"
+    print "[bridge] Step C: module_set_path..."
+    module_set_path(path)
+    print "[bridge] Step D: parse_module_body..."
+    parse_module_body()
+    print "[bridge] Step D done. decl_count={decl_count()}"
+    if parser_has_errors():
+        val errors = parser_get_errors()
+        print "[bridge] Parse errors ({errors.len()}):"
+        var ei = 0
+        while ei < errors.len():
+            print "  {errors[ei]}"
+            ei = ei + 1
+    flat_ast_to_module(path)
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
 
 fn main() -> i64:
     val raw_args = sys_get_args()
@@ -67,11 +581,17 @@ fn main() -> i64:
     print "[c-compile] Compiling {source_file} to C++20..."
     print "[c-compile] Output: {output_file}"
 
-    # Step 1: Parse using core parser functions
+    # Step 1: Parse source using core parser + flat-to-rich conversion
     print "[c-compile] Step 1: Parsing..."
-    parser_init(source_text)
-    val ast_module = parse_module_body("main")
-    print "[c-compile] Step 1: Done"
+    val ast_module = parse_and_build_module(source_text, source_file)
+    print "[c-compile] Step 1: Done (functions: {ast_module.functions.len()})"
+    val fn_keys = ast_module.functions.keys()
+    print "[c-compile] Step 1b: functions dict keys raw: {fn_keys}"
+    print "[c-compile] Step 1b: fn_keys.len(): {fn_keys.len()}"
+    var ki = 0
+    while ki < fn_keys.len():
+        print "[c-compile] Step 1b: key[{ki}] = {fn_keys[ki]}"
+        ki = ki + 1
 
     # Step 2: Lower to HIR
     print "[c-compile] Step 2: Lowering to HIR..."
@@ -95,13 +615,13 @@ fn main() -> i64:
         loop_depth: 0
     )
     val hir_module = hir_low.lower_module(ast_module)
-    print "[c-compile] Step 2: Done"
+    print "[c-compile] Step 2: Done (HIR functions: {hir_module.functions.len()})"
 
     # Step 3: Lower to MIR
     print "[c-compile] Step 3: Lowering to MIR..."
     var mir_low = MirLowering.new(sym_table)
     var mir_module = mir_low.lower_module(hir_module)
-    print "[c-compile] Step 3: Done"
+    print "[c-compile] Step 3: Done (MIR functions: {mir_module.functions.len()}, types: {mir_module.types.len()})"
 
     # Step 4: Generate C++
     print "[c-compile] Step 4: Generating C++..."

@@ -101,7 +101,10 @@ impl BackendKind {
 
     /// Check if this is a JIT backend kind.
     pub fn is_jit(&self) -> bool {
-        matches!(self, BackendKind::CraneliftJit | BackendKind::LlvmJit | BackendKind::AutoJit)
+        matches!(
+            self,
+            BackendKind::CraneliftJit | BackendKind::LlvmJit | BackendKind::AutoJit
+        )
     }
 
     /// Select the appropriate backend for GPU kernel compilation

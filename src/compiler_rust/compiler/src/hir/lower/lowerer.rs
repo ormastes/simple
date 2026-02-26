@@ -47,6 +47,9 @@ pub struct Lowerer {
     pub(super) type_inference_config: TypeInferenceConfig,
     /// Pre-registered method return types: "ClassName.method" -> return TypeId
     pub(super) method_return_types: HashMap<String, TypeId>,
+    /// When true, unknown types resolve to ANY instead of erroring.
+    /// This allows compilation to proceed even when imports can't be fully resolved.
+    pub(super) lenient_types: bool,
 }
 
 impl Lowerer {
@@ -73,6 +76,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            lenient_types: false,
         }
     }
 
@@ -98,6 +102,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            lenient_types: false,
         }
     }
 
@@ -146,6 +151,7 @@ impl Lowerer {
             deprecation_warnings: DeprecationWarningCollector::new(),
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
+            lenient_types: false,
         }
     }
 
@@ -162,6 +168,13 @@ impl Lowerer {
     /// Set whether to use strict mode for memory safety checks
     pub fn set_strict_mode(&mut self, strict: bool) {
         self.memory_warnings.set_strict(strict);
+    }
+
+    /// Set whether to use lenient type resolution.
+    /// When enabled, unknown types resolve to ANY instead of producing errors.
+    /// This allows compilation to proceed even when imports can't be fully resolved.
+    pub fn set_lenient_types(&mut self, lenient: bool) {
+        self.lenient_types = lenient;
     }
 
     /// Take ownership of the memory warnings

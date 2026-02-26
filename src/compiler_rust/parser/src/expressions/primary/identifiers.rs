@@ -67,6 +67,35 @@ impl<'a> Parser<'a> {
             // These are keywords only in specific contexts: from keyword in imports, to in ranges
             TokenKind::From => self.parse_keyword_identifier("from"),
             TokenKind::To => self.parse_keyword_identifier("to"),
+            // Allow various keywords to be used as identifiers in expression contexts
+            // Simple uses these as variable/parameter names in source files
+            TokenKind::Loop => self.parse_keyword_identifier("loop"),
+            TokenKind::Unit => self.parse_keyword_identifier("Unit"),
+            TokenKind::Sync => self.parse_keyword_identifier("sync"),
+            TokenKind::Async => self.parse_keyword_identifier("async"),
+            TokenKind::Kernel => self.parse_keyword_identifier("kernel"),
+            TokenKind::Val => self.parse_keyword_identifier("val"),
+            TokenKind::Literal => self.parse_keyword_identifier("literal"),
+            TokenKind::As => self.parse_keyword_identifier("as"),
+            TokenKind::Repr => self.parse_keyword_identifier("repr"),
+            TokenKind::Extern => self.parse_keyword_identifier("extern"),
+            TokenKind::Static => self.parse_keyword_identifier("static"),
+            TokenKind::Const => self.parse_keyword_identifier("const"),
+            TokenKind::Shared => self.parse_keyword_identifier("Shared"),
+            TokenKind::Dyn => self.parse_keyword_identifier("dyn"),
+            TokenKind::Macro => self.parse_keyword_identifier("macro"),
+            TokenKind::Mixin => self.parse_keyword_identifier("mixin"),
+            TokenKind::Actor => self.parse_keyword_identifier("actor"),
+            TokenKind::Ghost => self.parse_keyword_identifier("ghost"),
+            TokenKind::Gen => self.parse_keyword_identifier("gen"),
+            TokenKind::Impl => self.parse_keyword_identifier("impl"),
+            TokenKind::Exists => self.parse_keyword_identifier("exists"),
+            // 'me' is the mutable-self keyword; treat it like 'self' in expression context
+            // so that `me.field` and `me.method()` work.
+            TokenKind::Me => {
+                self.advance();
+                Ok(Expr::Identifier("self".to_string()))
+            }
             _ => Err(ParseError::unexpected_token(
                 "identifier",
                 format!("{:?}", self.current.kind),

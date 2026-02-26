@@ -70,10 +70,7 @@ impl LocalExecutionManager {
     }
 
     /// Create with a specific runtime symbol provider.
-    pub fn with_provider(
-        backend: JitBackend,
-        provider: Arc<dyn RuntimeSymbolProvider>,
-    ) -> Result<Self, String> {
+    pub fn with_provider(backend: JitBackend, provider: Arc<dyn RuntimeSymbolProvider>) -> Result<Self, String> {
         let resolved = match backend {
             JitBackend::Auto => JitBackend::auto_select(),
             other => other,
@@ -81,14 +78,12 @@ impl LocalExecutionManager {
 
         let backend_impl = match resolved {
             JitBackend::Cranelift | JitBackend::Auto => {
-                let jit = JitCompiler::with_provider(provider)
-                    .map_err(|e| format!("Cranelift JIT init: {}", e))?;
+                let jit = JitCompiler::with_provider(provider).map_err(|e| format!("Cranelift JIT init: {}", e))?;
                 JitBackendImpl::Cranelift(jit)
             }
             #[cfg(feature = "llvm")]
             JitBackend::Llvm => {
-                let jit = super::llvm_jit::LlvmJitCompiler::new()
-                    .map_err(|e| format!("LLVM JIT init: {}", e))?;
+                let jit = super::llvm_jit::LlvmJitCompiler::new().map_err(|e| format!("LLVM JIT init: {}", e))?;
                 JitBackendImpl::Llvm(jit)
             }
             #[cfg(not(feature = "llvm"))]
@@ -126,11 +121,7 @@ impl ExecutionManager for LocalExecutionManager {
                 jit.compile_module(mir)
                     .map_err(|e| format!("Cranelift JIT compile: {}", e))?;
 
-                let symbol_names: Vec<String> = mir
-                    .functions
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect();
+                let symbol_names: Vec<String> = mir.functions.iter().map(|f| f.name.clone()).collect();
 
                 let entry_point = if mir.functions.iter().any(|f| f.name == "main") {
                     "main".to_string()
@@ -149,11 +140,7 @@ impl ExecutionManager for LocalExecutionManager {
                 jit.compile_module(mir)
                     .map_err(|e| format!("LLVM JIT compile: {}", e))?;
 
-                let symbol_names: Vec<String> = mir
-                    .functions
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect();
+                let symbol_names: Vec<String> = mir.functions.iter().map(|f| f.name.clone()).collect();
 
                 let entry_point = if mir.functions.iter().any(|f| f.name == "main") {
                     "main".to_string()
@@ -176,11 +163,10 @@ impl ExecutionManager for LocalExecutionManager {
                 // Dispatch based on argument count
                 unsafe {
                     match args.len() {
-                        0 => jit.call_i64_void(name)
-                            .map_err(|e| format!("{}", e)),
-                        1 => jit.call_i64_i64(name, args[0])
-                            .map_err(|e| format!("{}", e)),
-                        2 => jit.call_i64_i64_i64(name, args[0], args[1])
+                        0 => jit.call_i64_void(name).map_err(|e| format!("{}", e)),
+                        1 => jit.call_i64_i64(name, args[0]).map_err(|e| format!("{}", e)),
+                        2 => jit
+                            .call_i64_i64_i64(name, args[0], args[1])
                             .map_err(|e| format!("{}", e)),
                         n => Err(format!(
                             "Cranelift JIT: unsupported argument count {} for '{}'",
@@ -190,17 +176,13 @@ impl ExecutionManager for LocalExecutionManager {
                 }
             }
             #[cfg(feature = "llvm")]
-            JitBackendImpl::Llvm(jit) => {
-                jit.execute(name, args)
-                    .map_err(|e| format!("{}", e))
-            }
+            JitBackendImpl::Llvm(jit) => jit.execute(name, args).map_err(|e| format!("{}", e)),
         }
     }
 
     fn execute_captured(&self, name: &str, args: &[i64]) -> Result<ExecutionResult, String> {
         use simple_runtime::value::{
-            rt_capture_stderr_start, rt_capture_stderr_stop,
-            rt_capture_stdout_start, rt_capture_stdout_stop,
+            rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start, rt_capture_stdout_stop,
         };
 
         // Start capturing output

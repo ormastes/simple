@@ -96,14 +96,25 @@ impl Lowerer {
                 } else if let Some(ref v) = value {
                     // Infer from value
                     v.ty
+                } else if self.lenient_types {
+                    TypeId::ANY
                 } else {
                     return Err(LowerError::CannotInferType);
                 };
 
-                let name =
-                    Self::extract_pattern_name(&let_stmt.pattern).ok_or_else(|| LowerError::LetBindingFailed {
+                let name = Self::extract_pattern_name(&let_stmt.pattern).unwrap_or_else(|| {
+                    if self.lenient_types {
+                        // In lenient mode, generate a dummy name for complex patterns (e.g., Wildcard)
+                        format!("_discard_{}", ctx.locals.len())
+                    } else {
+                        String::new()
+                    }
+                });
+                if name.is_empty() {
+                    return Err(LowerError::LetBindingFailed {
                         pattern: format!("{:?}", let_stmt.pattern),
-                    })?;
+                    });
+                }
 
                 // W1003: Check for mutable binding with shared pointer type
                 self.check_mutable_shared_binding(&name, ty, let_stmt.mutability, let_stmt.span);
@@ -554,7 +565,7 @@ impl Lowerer {
 
             // Context statement: context obj: body
             // Requires expression-level context tracking - mark as unsupported for native codegen
-            Node::Context(_) => Err(LowerError::Unsupported(
+            Node::Context(_) if !self.lenient_types => Err(LowerError::Unsupported(
                 "Context statements require interpreter mode. Native codegen support is planned.".to_string(),
             )),
 
@@ -588,10 +599,17 @@ impl Lowerer {
             | Node::AopAdvice(_)
             | Node::DiBinding(_)
             | Node::ArchitectureRule(_)
-            | Node::MockDecl(_) => Err(LowerError::Unsupported(format!(
-                "Definition type {:?} cannot appear as a statement in function body",
-                node
-            ))),
+            | Node::MockDecl(_)
+                if !self.lenient_types =>
+            {
+                Err(LowerError::Unsupported(format!(
+                    "Definition type {:?} cannot appear as a statement in function body",
+                    node
+                )))
+            }
+
+            // In lenient mode, skip unsupported/definition nodes as no-ops
+            _ => Ok(vec![]),
         }
     }
 

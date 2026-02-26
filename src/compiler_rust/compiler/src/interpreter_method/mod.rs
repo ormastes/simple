@@ -919,13 +919,23 @@ pub(crate) fn evaluate_method_call(
     if let Some(hint_text) = hint {
         ctx = ctx.with_help(hint_text);
         Err(CompileError::semantic_with_context(
-            format!("method `{}` not found on type `{}`{}", method, recv_val.type_name(), receiver_debug),
+            format!(
+                "method `{}` not found on type `{}`{}",
+                method,
+                recv_val.type_name(),
+                receiver_debug
+            ),
             ctx,
         ))
     } else {
         ctx = ctx.with_help("check that the method is defined for this type");
         Err(CompileError::semantic_with_context(
-            format!("method `{}` not found on type `{}`{}", method, recv_val.type_name(), receiver_debug),
+            format!(
+                "method `{}` not found on type `{}`{}",
+                method,
+                recv_val.type_name(),
+                receiver_debug
+            ),
             ctx,
         ))
     }

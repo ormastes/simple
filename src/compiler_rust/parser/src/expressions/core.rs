@@ -39,7 +39,17 @@ impl<'a> Parser<'a> {
     // === Expression Parsing (Pratt Parser) ===
 
     pub(crate) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_pipe()
+        let saved_indent_count = self.binary_indent_count;
+        self.binary_indent_count = 0;
+        let result = self.parse_pipe();
+        // Consume matching DEDENTs for any INDENTs consumed during binary operator
+        // line continuation.
+        let consumed = self.binary_indent_count;
+        self.binary_indent_count = saved_indent_count;
+        if consumed > 0 {
+            self.consume_dedents_for_method_chain(consumed);
+        }
+        result
     }
 
     /// Parse optional step expression for slice syntax (`:step` at end of slice)

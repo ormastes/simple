@@ -12,6 +12,8 @@ impl Lowerer {
                 if name == "Self" {
                     if let Some(class_ty) = self.current_class_type {
                         return Ok(class_ty);
+                    } else if self.lenient_types {
+                        return Ok(TypeId::ANY);
                     } else {
                         // Self used outside of class context - special case
                         return Err(LowerError::UnknownType {
@@ -20,14 +22,25 @@ impl Lowerer {
                         });
                     }
                 }
-                self.module.types.lookup(name).ok_or_else(|| {
-                    // Gather available type names for suggestions
-                    let available_types = self.module.types.all_type_names();
-                    LowerError::UnknownType {
-                        type_name: name.clone(),
-                        available_types,
-                    }
-                })
+                self.module
+                    .types
+                    .lookup(name)
+                    .ok_or_else(|| {
+                        // Gather available type names for suggestions
+                        let available_types = self.module.types.all_type_names();
+                        LowerError::UnknownType {
+                            type_name: name.clone(),
+                            available_types,
+                        }
+                    })
+                    .or_else(|e| {
+                        if self.lenient_types {
+                            // In lenient mode, treat unknown types as ANY to allow compilation to proceed
+                            Ok(TypeId::ANY)
+                        } else {
+                            Err(e)
+                        }
+                    })
             }
             Type::Pointer { kind, inner } => {
                 let inner_id = self.resolve_type(inner)?;
@@ -218,7 +231,13 @@ impl Lowerer {
                     _ => Ok(TypeId::ANY),
                 }
             }
-            _ => Err(LowerError::Unsupported(format!("{:?}", ty))),
+            _ => {
+                if self.lenient_types {
+                    Ok(TypeId::ANY)
+                } else {
+                    Err(LowerError::Unsupported(format!("{:?}", ty)))
+                }
+            }
         }
     }
 
@@ -230,13 +249,27 @@ impl Lowerer {
     }
 
     pub(super) fn get_deref_type(&self, ptr_ty: TypeId) -> LowerResult<TypeId> {
+        // Handle built-in ANY type
+        if ptr_ty == TypeId::ANY {
+            return Ok(TypeId::ANY);
+        }
         if let Some(hir_ty) = self.module.types.get(ptr_ty) {
             match hir_ty {
                 HirType::Pointer { inner, .. } => Ok(*inner),
-                _ => Err(LowerError::CannotInferDerefType(format!("{:?}", hir_ty))),
+                _ => {
+                    if self.lenient_types {
+                        Ok(TypeId::ANY)
+                    } else {
+                        Err(LowerError::CannotInferDerefType(format!("{:?}", hir_ty)))
+                    }
+                }
             }
         } else {
-            Err(LowerError::CannotInferDerefType(format!("TypeId({:?})", ptr_ty)))
+            if self.lenient_types {
+                Ok(TypeId::ANY)
+            } else {
+                Err(LowerError::CannotInferDerefType(format!("TypeId({:?})", ptr_ty)))
+            }
         }
     }
 
@@ -301,11 +334,19 @@ impl Lowerer {
                     })
                 }
                 HirType::Pointer { inner, .. } => self.get_field_info(*inner, field),
-                _ => Err(LowerError::CannotInferFieldType {
-                    struct_name: format!("{:?}", hir_ty),
-                    field: field.to_string(),
-                    available_fields: vec![],
-                }),
+                // Enum types - field access returns ANY (dynamic variant access)
+                HirType::Enum { .. } => Ok((0, TypeId::ANY)),
+                _ => {
+                    if self.lenient_types {
+                        Ok((0, TypeId::ANY))
+                    } else {
+                        Err(LowerError::CannotInferFieldType {
+                            struct_name: format!("{:?}", hir_ty),
+                            field: field.to_string(),
+                            available_fields: vec![],
+                        })
+                    }
+                }
             }
         } else {
             Err(LowerError::CannotInferFieldType {
@@ -344,10 +385,20 @@ impl Lowerer {
                 HirType::Struct { .. } => Ok(TypeId::ANY),
                 // Enum type - indexing is dynamic
                 HirType::Enum { .. } => Ok(TypeId::ANY),
-                _ => Err(LowerError::CannotInferIndexType(format!("{:?}", hir_ty))),
+                _ => {
+                    if self.lenient_types {
+                        Ok(TypeId::ANY)
+                    } else {
+                        Err(LowerError::CannotInferIndexType(format!("{:?}", hir_ty)))
+                    }
+                }
             }
         } else {
-            Err(LowerError::CannotInferIndexType(format!("TypeId({:?})", arr_ty)))
+            if self.lenient_types {
+                Ok(TypeId::ANY)
+            } else {
+                Err(LowerError::CannotInferIndexType(format!("TypeId({:?})", arr_ty)))
+            }
         }
     }
 }

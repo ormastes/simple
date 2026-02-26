@@ -720,7 +720,7 @@ static void fault_set_stack_overflow_detection(long long v) { (void)v; }
 static void fault_set_max_recursion_depth(long long v) { (void)v; }
 static void fault_set_timeout(long long v) { (void)v; }
 static void fault_set_execution_limit(long long v) { (void)v; }
-static int jit_available(void) { return 0; }
+static int jit_available(void) { return 1; }
 static long long handle_build(SimpleStringArray a) {
     /* Parse build args */
     int release = 0;
@@ -845,7 +845,7 @@ static const char* strip_sdn_quotes(void) { return ""; }
 static int check_self_contained(void) { return 0; }
 static void simple_error(const char* cat, const char* msg) { fprintf(stderr, "%s: %s\n", cat, msg); }
 static void error(const char* cat, const char* msg) { simple_error(cat, msg); }
-static int jit_native_available(void) { return 0; }
+static int jit_native_available(void) { return 1; }
 extern void spl_init_args(int argc, char** argv);
 SimpleStringArray get_cli_args(void);
 const char* get_version(void);

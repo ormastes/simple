@@ -48,45 +48,72 @@ impl MirLowering:
         self.builder = builder
 
         # Build field map from struct and class definitions
-        for (sym_id, struct_def) in module.structs:
+        # (use while loops - for-in broken in compiled native code)
+        val struct_keys = module.structs.keys()
+        var si = 0
+        while si < struct_keys.len():
+            val sym_id = struct_keys[si]
+            val struct_def = module.structs[sym_id]
             var field_names: [text] = []
-            for field in struct_def.fields:
-                field_names.push(field.name)
+            var fi = 0
+            while fi < struct_def.fields.len():
+                field_names.push(struct_def.fields[fi].name)
+                fi = fi + 1
             self.field_map[sym_id.id] = field_names
+            si = si + 1
 
-        for (sym_id, class_def) in module.classes:
+        val class_keys = module.classes.keys()
+        var ci = 0
+        while ci < class_keys.len():
+            val sym_id = class_keys[ci]
+            val class_def = module.classes[sym_id]
             var field_names: [text] = []
-            for field in class_def.fields:
-                field_names.push(field.name)
+            var fi = 0
+            while fi < class_def.fields.len():
+                field_names.push(class_def.fields[fi].name)
+                fi = fi + 1
             self.field_map[sym_id.id] = field_names
+            ci = ci + 1
 
         # Lower functions (skip extern declarations - they have no body)
-        for fn_ in module.functions.values():
+        val fn_vals = module.functions.values()
+        var fni = 0
+        while fni < fn_vals.len():
+            val fn_ = fn_vals[fni]
             var fn_is_extern = false
             if fn_.is_extern.?:
                 fn_is_extern = fn_.is_extern
             if fn_is_extern:
-                continue
-            val mir_fn = self.lower_function(fn_)
-            # Copy-modify-reassign: self.builder.add_function() won't propagate
-            var bldr = self.builder
-            bldr.add_function(mir_fn)
-            self.builder = bldr
+                fni = fni + 1
+                # skip extern functions
+            else:
+                val mir_fn = self.lower_function(fn_)
+                # Copy-modify-reassign: self.builder.add_function() won't propagate
+                var bldr = self.builder
+                bldr.add_function(mir_fn)
+                self.builder = bldr
+                fni = fni + 1
 
         # Lower constants
-        for const_ in module.constants.values():
-            self.lower_const(const_)
+        val const_vals = module.constants.values()
+        var coni = 0
+        while coni < const_vals.len():
+            self.lower_const(const_vals[coni])
+            coni = coni + 1
 
         self.builder.module
 
     me lower_function(fn_: HirFunction) -> MirFunction:
         """Lower HIR function to MIR."""
+        print "[lower_function] ENTERED name={fn_.name}"
         self.local_map = {}
 
         # Build signature
         var params: [MirType] = []
-        for p in fn_.params:
-            params = params.push(self.lower_type(p.type_))
+        var pmi = 0
+        while pmi < fn_.params.len():
+            params = params.push(self.lower_type(fn_.params[pmi].type_))
+            pmi = pmi + 1
 
         val return_type = self.lower_type(fn_.return_type)
         val signature = MirSignature(
@@ -96,18 +123,25 @@ impl MirLowering:
         )
 
         # Begin function (copy-modify-reassign for interpreter)
+        print "[lower_function] calling begin_function..."
         var bldr = self.builder
         bldr.begin_function(fn_.symbol, fn_.name, signature, fn_.span)
         self.builder = bldr
+        print "[lower_function] after begin_function, instructions={self.builder.instructions}, blocks={self.builder.blocks.len()}"
 
         # Map parameters to locals
-        for i in 0..fn_.params.len():
-            val param = fn_.params[i]
-            val local = LocalId(id: i + 1)  # +1 for return slot
+        var pli = 0
+        while pli < fn_.params.len():
+            val param = fn_.params[pli]
+            val local = LocalId(id: pli + 1)  # +1 for return slot
             self.local_map[param.symbol] = local
+            pli = pli + 1
 
         # Lower body
+        print "[lower_function] body stmts count: {fn_.body.stmts.len()}, value: {fn_.body.value.?}"
+        print "[lower_function] builder.instructions before lower_block: {self.builder.instructions}"
         val result = self.lower_block(fn_.body)
+        print "[lower_function] builder.instructions after lower_block: {self.builder.instructions.len()}"
 
         # Return result (copy-modify-reassign for interpreter)
         var bldr2 = self.builder
@@ -197,8 +231,14 @@ impl MirLowering:
 
     me lower_block(block: HirBlock) -> LocalId?:
         """Lower HIR block to MIR, return result local if any."""
-        for stmt in block.stmts:
+        print "[lower_block] stmts count: {block.stmts.len()}"
+        var blk_i = 0
+        while blk_i < block.stmts.len():
+            val stmt = block.stmts[blk_i]
+            print "[lower_block] lowering stmt kind={stmt.kind}"
             self.lower_stmt(stmt)
+            print "[lower_block] after stmt, instructions: {self.builder.instructions.len()}"
+            blk_i = blk_i + 1
 
         if block.value.?:
             val local = self.lower_expr(block.value.unwrap())

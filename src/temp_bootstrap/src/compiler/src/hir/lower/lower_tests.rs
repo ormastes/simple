@@ -100,17 +100,26 @@ fn test_lower_struct() {
 }
 
 #[test]
-fn test_unknown_type_error() {
-    let result = parse_and_lower("fn test(x: Unknown) -> i64:\n    return 0\n");
+fn test_unknown_type_fallback() {
+    // Bootstrap mode: unknown types fall back to I64 instead of erroring
+    let module = parse_and_lower("fn test(x: Unknown) -> i64:\n    return 0\n").unwrap();
 
-    assert!(matches!(result, Err(LowerError::UnknownType(_))));
+    let func = &module.functions[0];
+    assert_eq!(func.params[0].ty, TypeId::I64);
 }
 
 #[test]
-fn test_unknown_variable_error() {
-    let result = parse_and_lower("fn test() -> i64:\n    return unknown\n");
+fn test_unknown_variable_fallback() {
+    // Bootstrap mode: unknown variables fall back to Global with I64 type
+    let module = parse_and_lower("fn test() -> i64:\n    return unknown\n").unwrap();
 
-    assert!(matches!(result, Err(LowerError::UnknownVariable(_))));
+    let func = &module.functions[0];
+    if let HirStmt::Return(Some(expr)) = &func.body[0] {
+        assert!(matches!(expr.kind, HirExprKind::Global(_)));
+        assert_eq!(expr.ty, TypeId::I64);
+    } else {
+        panic!("Expected return statement with global reference");
+    }
 }
 
 #[test]

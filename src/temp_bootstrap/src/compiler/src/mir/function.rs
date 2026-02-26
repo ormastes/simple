@@ -229,6 +229,8 @@ impl MirFunction {
 pub struct MirModule {
     pub name: Option<String>,
     pub functions: Vec<MirFunction>,
+    /// Module-level global variables (name, initial_value).
+    pub globals: Vec<(String, i64)>,
 }
 
 impl MirModule {
@@ -236,6 +238,7 @@ impl MirModule {
         Self {
             name: None,
             functions: Vec::new(),
+            globals: Vec::new(),
         }
     }
 }

@@ -87,12 +87,27 @@ impl Parser<'_> {
         self.parse_let_impl(start_span, mutability, StorageClass::Auto, true)
     }
 
-    /// Parse wildcard suspension: `_ ~= expr`
-    /// Evaluates expr with await and discards the result
+    /// Parse wildcard assignment: `_ ~= expr` (suspend) or `_ = expr` (discard)
+    /// Evaluates expr (optionally with await) and discards the result
     pub(crate) fn parse_wildcard_suspend(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Underscore)?;
-        self.expect(&TokenKind::TildeAssign)?;
+
+        // Accept both ~= (suspend) and = (discard)
+        let is_suspend = if self.check(&TokenKind::TildeAssign) {
+            self.advance();
+            true
+        } else if self.check(&TokenKind::Assign) {
+            self.advance();
+            false
+        } else {
+            return Err(ParseError::unexpected_token(
+                "= or ~=",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        };
+
         let value = self.parse_expression()?;
 
         Ok(Node::Let(LetStmt {
@@ -108,7 +123,7 @@ impl Parser<'_> {
             mutability: Mutability::Immutable,
             storage_class: StorageClass::Auto,
             is_ghost: false,
-            is_suspend: true,
+            is_suspend,
         }))
     }
 
@@ -395,6 +410,31 @@ impl Parser<'_> {
         if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
             let target = self.parse_import_target(None)?;
             Ok((path, target))
+        } else if self.check(&TokenKind::LParen) {
+            // Python-style parenthesized import: use module (Item1, Item2)
+            self.advance(); // consume '('
+            let mut targets = Vec::new();
+            self.skip_newlines();
+            while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                let name = self.expect_path_segment()?;
+                let target = if self.check(&TokenKind::As) {
+                    self.advance();
+                    let alias = self.expect_path_segment()?;
+                    ImportTarget::Aliased { name, alias }
+                } else {
+                    ImportTarget::Single(name)
+                };
+                targets.push(target);
+                self.skip_newlines();
+                if !self.check(&TokenKind::RParen) {
+                    if self.check(&TokenKind::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                    }
+                }
+            }
+            self.expect(&TokenKind::RParen)?;
+            Ok((path, ImportTarget::Group(targets)))
         } else {
             let mut segments = path.segments.clone();
 

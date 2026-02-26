@@ -99,18 +99,18 @@ impl Lowerer {
                 })
             }
             // Try expression: expr? - unwrap Result or propagate error
-            Expr::Try(inner) => {
-                eprintln!("[DEBUG lower_expr] Matched Try expression");
-                self.lower_try(inner, ctx)
-            }
+            Expr::Try(inner) => self.lower_try(inner, ctx),
             // Range expression: start..end or start..=end
-            Expr::Range { start, end, bound } => {
-                eprintln!("[DEBUG lower_expr] Matched Range expression");
-                self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx)
-            }
+            Expr::Range { start, end, bound } => self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx),
             _ => {
-                eprintln!("[DEBUG lower_expr] Unmatched expression: {:?}", expr);
-                Err(LowerError::Unsupported(format!("{:?}", expr)))
+                if self.lenient_types {
+                    Ok(HirExpr {
+                        kind: HirExprKind::Nil,
+                        ty: TypeId::ANY,
+                    })
+                } else {
+                    Err(LowerError::Unsupported(format!("{:?}", expr)))
+                }
             }
         }
     }
@@ -154,6 +154,11 @@ impl Lowerer {
                     kind: HirExprKind::Global(name.to_string()),
                     ty,
                 });
+            } else if self.lenient_types {
+                return Ok(HirExpr {
+                    kind: HirExprKind::Global(name.to_string()),
+                    ty: TypeId::ANY,
+                });
             } else {
                 return Err(LowerError::UnknownVariable(format!(
                     "{} (FFI call to undefined extern function '{}')",
@@ -176,10 +181,25 @@ impl Lowerer {
         } else {
             // E1032 - Self in Static: Special case for 'self' not found
             if name == "self" && self.current_class_type.is_some() {
+                if self.lenient_types {
+                    // In lenient mode, treat self as a global with the class type
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Global("self".to_string()),
+                        ty: self.current_class_type.unwrap_or(TypeId::ANY),
+                    });
+                }
                 // We're in a class method but self is not in scope = static method
                 return Err(LowerError::SelfInStatic);
             }
-            Err(LowerError::UnknownVariable(name.to_string()))
+            if self.lenient_types {
+                // In lenient mode, treat unknown variables as globals with type ANY
+                Ok(HirExpr {
+                    kind: HirExprKind::Global(name.to_string()),
+                    ty: TypeId::ANY,
+                })
+            } else {
+                Err(LowerError::UnknownVariable(name.to_string()))
+            }
         }
     }
 
@@ -479,8 +499,21 @@ impl Lowerer {
 
             // Special case: ClassName.new() should be ClassName()
             if method_name == "new" {
+                if self.lenient_types {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Global(format!("{}.{}", class_name, method_name)),
+                        ty: TypeId::ANY,
+                    });
+                }
                 return Err(LowerError::UseConstructorNotNew {
                     class_name: class_name.clone(),
+                });
+            }
+
+            if self.lenient_types {
+                return Ok(HirExpr {
+                    kind: HirExprKind::Global(format!("{}.{}", class_name, method_name)),
+                    ty: TypeId::ANY,
                 });
             }
 
@@ -488,6 +521,13 @@ impl Lowerer {
             return Err(LowerError::StaticMethodNotSupported {
                 class_name: class_name.clone(),
                 method_name: method_name.clone(),
+            });
+        }
+
+        if self.lenient_types {
+            return Ok(HirExpr {
+                kind: HirExprKind::Global(segments.join(".")),
+                ty: TypeId::ANY,
             });
         }
 

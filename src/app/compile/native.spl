@@ -257,9 +257,9 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         debug("compile", "Generated C++ ({cpp_size} bytes)")
 
     # Step 2: Find C++ compiler
-    val cc = if compiler_override != "": compiler_override else: find_cpp_compiler()
+    val cc = if compiler_override != "": compiler_override else: find_c_compiler()
     if cc == "":
-        error("compile", "No C++ compiler found (tried clang++, clang-cl)")
+        error("compile", "No C compiler found (tried clang, clang-cl, gcc)")
         file_delete(temp_cpp)
         return 1
 
@@ -284,8 +284,9 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         if verbose:
             debug("compile", "No mold found, using system linker")
 
-    val rt_sources = "src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c"
-    val clang_cmd = "{cc} -std=c++20 {san_flags}{mold_link}-I src/runtime/ '{temp_cpp}' {rt_sources} -o '{output_file}' -lpthread -ldl -lm 2>&1"
+    # Compile runtime files as C even when using a C++ driver
+    val rt_sources = "-x c src/runtime/runtime.c src/runtime/runtime_thread.c src/runtime/runtime_memtrack.c src/runtime/runtime_fork.c"
+    val clang_cmd = "{cc} -std=gnu11 {san_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources} -o '{output_file}' -lpthread -ldl -lm 2>&1"
     if verbose:
         debug("compile", "Compiling: {cc} -std=c++20 ...")
 
@@ -414,14 +415,20 @@ fn compile_gen_c_only(source_file: text, output_file: text, verbose: bool) -> i6
 
 fn main() -> i64:
     val args = rt_cli_get_args()
-    # args[0] = binary, args[1] = script path, args[2..] = user args
-    # Usage: native.spl <source_file> <output_file> [--verbose] [--linked] [--gen-c-only] [--compiler=X]
-    if args.len() < 4:
+    # Handle both invocation styles:
+    # 1) simple native.spl <src> <out> ...  (args[1] = script)
+    # 2) simple <src> <out> ...             (script omitted by runtime)
+    var arg_idx = 2
+    if args.len() >= 2 and not args[1].ends_with(".spl"):
+        # Runtime omitted script path; user args start at 1
+        arg_idx = 1
+
+    if args.len() <= arg_idx + 1:
         print "Usage: native.spl <source.spl> <output> [--verbose] [--linked] [--gen-c-only] [--compiler=X]"
         return 1
 
-    val source_file = args[2]
-    val output_file = args[3]
+    val source_file = args[arg_idx]
+    val output_file = args[arg_idx + 1]
     var verbose = false
     var use_linked = false
     var gen_c_only = false

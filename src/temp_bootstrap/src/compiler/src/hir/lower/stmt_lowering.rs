@@ -6,6 +6,15 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use super::super::types::*;
 
+/// Calculate discriminant hash for enum variant name (same as expr_lowering.rs)
+fn calculate_variant_discriminant(variant_name: &str) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    variant_name.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
 impl Lowerer {
     pub(super) fn lower_block(
         &mut self,
@@ -118,7 +127,7 @@ impl Lowerer {
             Node::While(while_stmt) => {
                 let condition = self.lower_expr(&while_stmt.condition, ctx)?;
                 let body = self.lower_block(&while_stmt.body, ctx)?;
-                Ok(vec![HirStmt::While { condition, body }])
+                Ok(vec![HirStmt::While { condition, body, increment: vec![] }])
             }
 
             Node::Loop(loop_stmt) => {
@@ -159,11 +168,130 @@ impl Lowerer {
                 let mut else_block: Option<Vec<HirStmt>> = None;
 
                 for arm in match_stmt.arms.iter().rev() {
-                    let body = self.lower_block(&arm.body, ctx)?;
+                    // Register pattern binding locals BEFORE lowering body
+                    // so that references to payload variables resolve correctly
+                    let mut binding_info: Vec<(usize, usize)> = Vec::new(); // (local_idx, payload_index)
+                    let payload_count;
+                    if let simple_parser::Pattern::Enum { payload, .. } = &arm.pattern {
+                        if let Some(payload_patterns) = payload {
+                            payload_count = payload_patterns.len();
+                            for (i, pat) in payload_patterns.iter().enumerate() {
+                                if let Some(name) = Self::extract_pattern_name(pat) {
+                                    let local_idx = ctx.add_local(name, TypeId::I64, Mutability::Immutable);
+                                    binding_info.push((local_idx, i));
+                                }
+                            }
+                        } else {
+                            payload_count = 0;
+                        }
+                    } else if let simple_parser::Pattern::Identifier(name) = &arm.pattern {
+                        // Bind the entire subject to the identifier
+                        payload_count = 0;
+                        let local_idx = ctx.add_local(name.clone(), TypeId::I64, Mutability::Immutable);
+                        binding_info.push((local_idx, usize::MAX)); // MAX signals "bind whole subject"
+                    } else {
+                        payload_count = 0;
+                    }
+
+                    let mut body = self.lower_block(&arm.body, ctx)?;
+
+                    // Prepend Let statements for pattern bindings
+                    if !binding_info.is_empty() {
+                        let mut bindings = Vec::new();
+                        for &(local_idx, payload_index) in &binding_info {
+                            let value_expr = if payload_index == usize::MAX {
+                                // Identifier pattern: bind the whole subject
+                                temp_local.clone()
+                            } else if payload_count == 1 {
+                                // Single payload: rt_enum_payload(subject)
+                                HirExpr {
+                                    kind: HirExprKind::BuiltinCall {
+                                        name: "rt_enum_payload".to_string(),
+                                        args: vec![temp_local.clone()],
+                                    },
+                                    ty: TypeId::I64,
+                                }
+                            } else {
+                                // Multi payload: rt_object_field_get(rt_enum_payload(subject), i*8)
+                                HirExpr {
+                                    kind: HirExprKind::BuiltinCall {
+                                        name: "rt_object_field_get".to_string(),
+                                        args: vec![
+                                            HirExpr {
+                                                kind: HirExprKind::BuiltinCall {
+                                                    name: "rt_enum_payload".to_string(),
+                                                    args: vec![temp_local.clone()],
+                                                },
+                                                ty: TypeId::I64,
+                                            },
+                                            HirExpr {
+                                                kind: HirExprKind::Integer((payload_index * 8) as i64),
+                                                ty: TypeId::I64,
+                                            },
+                                        ],
+                                    },
+                                    ty: TypeId::I64,
+                                }
+                            };
+                            bindings.push(HirStmt::Let {
+                                local_index: local_idx,
+                                ty: TypeId::I64,
+                                value: Some(value_expr),
+                            });
+                        }
+                        // Prepend bindings before the body
+                        bindings.append(&mut body);
+                        body = bindings;
+                    }
 
                     let condition = match &arm.pattern {
-                        simple_parser::Pattern::Wildcard | simple_parser::Pattern::Identifier(_) => {
+                        simple_parser::Pattern::Wildcard => {
                             // Always matches
+                            None
+                        }
+                        simple_parser::Pattern::Identifier(name) if name.chars().next().map_or(false, |c| c.is_uppercase()) => {
+                            // Uppercase identifier = unit enum variant (NilLit, Error, etc.)
+                            let disc_hash = calculate_variant_discriminant(name) as i64;
+                            let enum_cond = HirExpr {
+                                kind: HirExprKind::Binary {
+                                    op: BinOp::Is,
+                                    left: Box::new(HirExpr {
+                                        kind: HirExprKind::BuiltinCall {
+                                            name: "rt_enum_discriminant".to_string(),
+                                            args: vec![temp_local.clone()],
+                                        },
+                                        ty: TypeId::I64,
+                                    }),
+                                    right: Box::new(HirExpr {
+                                        kind: HirExprKind::Integer(disc_hash),
+                                        ty: TypeId::I64,
+                                    }),
+                                },
+                                ty: TypeId::BOOL,
+                            };
+                            let variant_str = format!("_::{}", name);
+                            let int_tag_cond = HirExpr {
+                                kind: HirExprKind::Binary {
+                                    op: BinOp::Is,
+                                    left: Box::new(temp_local.clone()),
+                                    right: Box::new(HirExpr {
+                                        kind: HirExprKind::Global(variant_str),
+                                        ty: TypeId::I64,
+                                    }),
+                                },
+                                ty: TypeId::BOOL,
+                            };
+                            Some(HirExpr {
+                                kind: HirExprKind::Binary {
+                                    op: BinOp::Or,
+                                    left: Box::new(enum_cond),
+                                    right: Box::new(int_tag_cond),
+                                },
+                                ty: TypeId::BOOL,
+                            })
+                        }
+                        simple_parser::Pattern::Identifier(_) => {
+                            // Lowercase binding pattern — always matches
                             None
                         }
                         simple_parser::Pattern::Literal(lit_expr) => {
@@ -178,19 +306,165 @@ impl Lowerer {
                             })
                         }
                         simple_parser::Pattern::Enum { name, variant, .. } => {
+                            // Two-way comparison for both enum discriminants AND integer tags:
+                            // (rt_enum_discriminant(subject) == hash("Variant")) OR (subject == Variant_global)
+                            let disc_hash = calculate_variant_discriminant(variant) as i64;
+                            let enum_cond = HirExpr {
+                                kind: HirExprKind::Binary {
+                                    op: BinOp::Is,
+                                    left: Box::new(HirExpr {
+                                        kind: HirExprKind::BuiltinCall {
+                                            name: "rt_enum_discriminant".to_string(),
+                                            args: vec![temp_local.clone()],
+                                        },
+                                        ty: TypeId::I64,
+                                    }),
+                                    right: Box::new(HirExpr {
+                                        kind: HirExprKind::Integer(disc_hash),
+                                        ty: TypeId::I64,
+                                    }),
+                                },
+                                ty: TypeId::BOOL,
+                            };
+                            // Also try integer-tag comparison: subject == Global("Variant")
                             let variant_str = format!("{}::{}", name, variant);
-                            let variant_hir = HirExpr {
-                                kind: HirExprKind::Global(variant_str),
-                                ty: TypeId::I64,
+                            let int_tag_cond = HirExpr {
+                                kind: HirExprKind::Binary {
+                                    op: BinOp::Is,
+                                    left: Box::new(temp_local.clone()),
+                                    right: Box::new(HirExpr {
+                                        kind: HirExprKind::Global(variant_str),
+                                        ty: TypeId::I64,
+                                    }),
+                                },
+                                ty: TypeId::BOOL,
                             };
                             Some(HirExpr {
                                 kind: HirExprKind::Binary {
-                                    op: BinOp::Eq,
-                                    left: Box::new(temp_local.clone()),
-                                    right: Box::new(variant_hir),
+                                    op: BinOp::Or,
+                                    left: Box::new(enum_cond),
+                                    right: Box::new(int_tag_cond),
                                 },
                                 ty: TypeId::BOOL,
                             })
+                        }
+                        simple_parser::Pattern::Or(patterns) => {
+                            // Build: subject == p1 || subject == p2 || ...
+                            let mut result: Option<HirExpr> = None;
+                            for p in patterns {
+                                let sub_cond = match p {
+                                    simple_parser::Pattern::Literal(lit_expr) => {
+                                        if let Ok(lit_hir) = self.lower_expr(lit_expr, ctx) {
+                                            Some(HirExpr {
+                                                kind: HirExprKind::Binary {
+                                                    op: BinOp::Eq,
+                                                    left: Box::new(temp_local.clone()),
+                                                    right: Box::new(lit_hir),
+                                                },
+                                                ty: TypeId::BOOL,
+                                            })
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    simple_parser::Pattern::Enum { name, variant, .. } => {
+                                        let disc_hash = calculate_variant_discriminant(variant) as i64;
+                                        let enum_cond = HirExpr {
+                                            kind: HirExprKind::Binary {
+                                                op: BinOp::Is,
+                                                left: Box::new(HirExpr {
+                                                    kind: HirExprKind::BuiltinCall {
+                                                        name: "rt_enum_discriminant".to_string(),
+                                                        args: vec![temp_local.clone()],
+                                                    },
+                                                    ty: TypeId::I64,
+                                                }),
+                                                right: Box::new(HirExpr {
+                                                    kind: HirExprKind::Integer(disc_hash),
+                                                    ty: TypeId::I64,
+                                                }),
+                                            },
+                                            ty: TypeId::BOOL,
+                                        };
+                                        let variant_str = format!("{}::{}", name, variant);
+                                        let int_tag_cond = HirExpr {
+                                            kind: HirExprKind::Binary {
+                                                op: BinOp::Is,
+                                                left: Box::new(temp_local.clone()),
+                                                right: Box::new(HirExpr {
+                                                    kind: HirExprKind::Global(variant_str),
+                                                    ty: TypeId::I64,
+                                                }),
+                                            },
+                                            ty: TypeId::BOOL,
+                                        };
+                                        Some(HirExpr {
+                                            kind: HirExprKind::Binary {
+                                                op: BinOp::Or,
+                                                left: Box::new(enum_cond),
+                                                right: Box::new(int_tag_cond),
+                                            },
+                                            ty: TypeId::BOOL,
+                                        })
+                                    }
+                                    simple_parser::Pattern::Identifier(name) if name.chars().next().map_or(false, |c| c.is_uppercase()) => {
+                                        // Uppercase identifier = unit enum variant in or-pattern
+                                        let disc_hash = calculate_variant_discriminant(name) as i64;
+                                        let enum_cond = HirExpr {
+                                            kind: HirExprKind::Binary {
+                                                op: BinOp::Is,
+                                                left: Box::new(HirExpr {
+                                                    kind: HirExprKind::BuiltinCall {
+                                                        name: "rt_enum_discriminant".to_string(),
+                                                        args: vec![temp_local.clone()],
+                                                    },
+                                                    ty: TypeId::I64,
+                                                }),
+                                                right: Box::new(HirExpr {
+                                                    kind: HirExprKind::Integer(disc_hash),
+                                                    ty: TypeId::I64,
+                                                }),
+                                            },
+                                            ty: TypeId::BOOL,
+                                        };
+                                        let variant_str = format!("_::{}", name);
+                                        let int_tag_cond = HirExpr {
+                                            kind: HirExprKind::Binary {
+                                                op: BinOp::Is,
+                                                left: Box::new(temp_local.clone()),
+                                                right: Box::new(HirExpr {
+                                                    kind: HirExprKind::Global(variant_str),
+                                                    ty: TypeId::I64,
+                                                }),
+                                            },
+                                            ty: TypeId::BOOL,
+                                        };
+                                        Some(HirExpr {
+                                            kind: HirExprKind::Binary {
+                                                op: BinOp::Or,
+                                                left: Box::new(enum_cond),
+                                                right: Box::new(int_tag_cond),
+                                            },
+                                            ty: TypeId::BOOL,
+                                        })
+                                    }
+                                    _ => None, // Wildcard in or-pattern
+                                };
+                                if let Some(cond) = sub_cond {
+                                    result = Some(match result {
+                                        Some(prev) => HirExpr {
+                                            kind: HirExprKind::Binary {
+                                                op: BinOp::Or,
+                                                left: Box::new(prev),
+                                                right: Box::new(cond),
+                                            },
+                                            ty: TypeId::BOOL,
+                                        },
+                                        None => cond,
+                                    });
+                                }
+                            }
+                            result // None means wildcard (if all sub-patterns were wildcards)
                         }
                         _ => {
                             // For other patterns, treat as always matching (bootstrap)
@@ -363,9 +637,9 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 };
 
-                let mut body_stmts = self.lower_block(&for_stmt.body, ctx)?;
+                let body_stmts = self.lower_block(&for_stmt.body, ctx)?;
 
-                body_stmts.push(HirStmt::Assign {
+                let increment = vec![HirStmt::Assign {
                     target: HirExpr {
                         kind: HirExprKind::Local(iter_local),
                         ty: TypeId::I64,
@@ -384,11 +658,12 @@ impl Lowerer {
                         },
                         ty: TypeId::I64,
                     },
-                });
+                }];
 
                 stmts.push(HirStmt::While {
                     condition,
                     body: body_stmts,
+                    increment,
                 });
 
                 Ok(stmts)
@@ -436,11 +711,13 @@ impl Lowerer {
 
         // Step 1: var _iter_N = <iterable>
         let iterable_expr = self.lower_expr(&for_stmt.iterable, ctx)?;
+        let iter_ty = iterable_expr.ty;
+        let elem_ty = self.get_index_element_type(iter_ty).unwrap_or(TypeId::I64);
         let iter_name = format!("_iter_{}", uid);
-        let iter_local = ctx.add_local(iter_name, TypeId::I64, Mutability::Immutable);
+        let iter_local = ctx.add_local(iter_name, iter_ty, Mutability::Immutable);
         stmts.push(HirStmt::Let {
             local_index: iter_local,
-            ty: TypeId::I64,
+            ty: iter_ty,
             value: Some(iterable_expr),
         });
 
@@ -464,7 +741,7 @@ impl Lowerer {
             ty: TypeId::I64,
             value: Some(HirExpr {
                 kind: HirExprKind::BuiltinCall {
-                    name: "len".to_string(),
+                    name: "__spl_method_len".to_string(),
                     args: vec![HirExpr {
                         kind: HirExprKind::Local(iter_local),
                         ty: TypeId::I64,
@@ -498,24 +775,25 @@ impl Lowerer {
             kind: HirExprKind::Index {
                 receiver: Box::new(HirExpr {
                     kind: HirExprKind::Local(iter_local),
-                    ty: TypeId::I64,
+                    ty: iter_ty,
                 }),
                 index: Box::new(HirExpr {
                     kind: HirExprKind::Local(idx_local),
                     ty: TypeId::I64,
                 }),
             },
-            ty: TypeId::I64,
+            ty: elem_ty,
         };
 
         // Bind the element to the pattern variable(s)
-        self.lower_for_pattern_binding(&for_stmt.pattern, elem_expr, ctx, &mut body_stmts)?;
+        // Pass iterable type so Dict tuple destructuring can use proper key/value types
+        self.lower_for_pattern_binding(&for_stmt.pattern, elem_expr, ctx, &mut body_stmts, Some(iter_ty))?;
 
         // Lower the user's loop body
         body_stmts.extend(self.lower_block(&for_stmt.body, ctx)?);
 
-        // Append: _idx_N = _idx_N + 1
-        body_stmts.push(HirStmt::Assign {
+        // Increment: _idx_N = _idx_N + 1 (separate from body for correct `continue`)
+        let increment = vec![HirStmt::Assign {
             target: HirExpr {
                 kind: HirExprKind::Local(idx_local),
                 ty: TypeId::I64,
@@ -534,31 +812,35 @@ impl Lowerer {
                 },
                 ty: TypeId::I64,
             },
-        });
+        }];
 
-        // Build while loop
+        // Build while loop with separate increment
         stmts.push(HirStmt::While {
             condition,
             body: body_stmts,
+            increment,
         });
 
         Ok(stmts)
     }
 
     /// Bind a for-loop pattern to the current element expression.
+    /// `iter_ty` is the type of the iterable being looped over (used to extract Dict key/value types).
     fn lower_for_pattern_binding(
         &mut self,
         pattern: &Pattern,
         elem_expr: HirExpr,
         ctx: &mut FunctionContext,
         body_stmts: &mut Vec<HirStmt>,
+        iter_ty: Option<TypeId>,
     ) -> LowerResult<()> {
         match pattern {
             Pattern::Identifier(name) => {
-                let local = ctx.add_local(name.clone(), TypeId::I64, Mutability::Immutable);
+                let ty = elem_expr.ty;
+                let local = ctx.add_local(name.clone(), ty, Mutability::Immutable);
                 body_stmts.push(HirStmt::Let {
                     local_index: local,
-                    ty: TypeId::I64,
+                    ty,
                     value: Some(elem_expr),
                 });
                 Ok(())
@@ -573,7 +855,7 @@ impl Lowerer {
                 Ok(())
             }
             Pattern::Typed { pattern: inner, .. } => {
-                self.lower_for_pattern_binding(inner, elem_expr, ctx, body_stmts)
+                self.lower_for_pattern_binding(inner, elem_expr, ctx, body_stmts, iter_ty)
             }
             Pattern::Tuple(elements) => {
                 // Create intermediate: var _elem_N = <elem_expr>
@@ -586,8 +868,22 @@ impl Lowerer {
                     value: Some(elem_expr),
                 });
 
+                // For Dict iteration with tuple pattern (key, value), use Dict's key/value types
+                let dict_kv = iter_ty.and_then(|it| self.get_dict_kv_types(it));
+
                 // Destructure: var a = _elem_N[0], var b = _elem_N[1], ...
                 for (idx, sub_pattern) in elements.iter().enumerate() {
+                    // Determine the type of this tuple element
+                    let sub_ty = if let Some((key_ty, val_ty)) = dict_kv {
+                        match idx {
+                            0 => key_ty,   // Dict key
+                            1 => val_ty,   // Dict value
+                            _ => TypeId::I64,
+                        }
+                    } else {
+                        TypeId::I64
+                    };
+
                     let field_expr = HirExpr {
                         kind: HirExprKind::Index {
                             receiver: Box::new(HirExpr {
@@ -599,9 +895,9 @@ impl Lowerer {
                                 ty: TypeId::I64,
                             }),
                         },
-                        ty: TypeId::I64,
+                        ty: sub_ty,
                     };
-                    self.lower_for_pattern_binding(sub_pattern, field_expr, ctx, body_stmts)?;
+                    self.lower_for_pattern_binding(sub_pattern, field_expr, ctx, body_stmts, None)?;
                 }
                 Ok(())
             }
@@ -692,8 +988,8 @@ impl Lowerer {
             ty: TypeId::BOOL,
         };
 
-        let mut body_stmts = self.lower_block(body, ctx)?;
-        body_stmts.push(HirStmt::Assign {
+        let body_stmts = self.lower_block(body, ctx)?;
+        let increment = vec![HirStmt::Assign {
             target: HirExpr {
                 kind: HirExprKind::Local(iter_local),
                 ty: TypeId::I64,
@@ -712,11 +1008,12 @@ impl Lowerer {
                 },
                 ty: TypeId::I64,
             },
-        });
+        }];
 
         stmts.push(HirStmt::While {
             condition,
             body: body_stmts,
+            increment,
         });
 
         Ok(stmts)

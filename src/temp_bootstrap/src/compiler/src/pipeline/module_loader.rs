@@ -362,6 +362,13 @@ fn resolve_use_to_path(
                 {
                     return Some(resolved);
                 }
+                // Also try deep search within compiler tree for paths like
+                // `compiler.core.parser` where `core` is inside `10.frontend/core/`
+                if let Some(idx) = get_compiler_index(Some(root)) {
+                    if let Some(resolved) = idx.resolve(&segments[1..], &target_names) {
+                        return Some(resolved);
+                    }
+                }
             }
             "std" | "lib" => {
                 if let Some(resolved) =

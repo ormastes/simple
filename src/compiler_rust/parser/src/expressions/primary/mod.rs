@@ -65,7 +65,29 @@ impl<'a> Parser<'a> {
             | TokenKind::Bounds
             | TokenKind::Default
             | TokenKind::From
-            | TokenKind::To => self.parse_primary_identifier(),
+            | TokenKind::To
+            | TokenKind::Loop
+            | TokenKind::Unit
+            | TokenKind::Sync
+            | TokenKind::Async
+            | TokenKind::Kernel
+            | TokenKind::Val
+            | TokenKind::Literal
+            | TokenKind::As
+            | TokenKind::Repr
+            | TokenKind::Extern
+            | TokenKind::Static
+            | TokenKind::Const
+            | TokenKind::Shared
+            | TokenKind::Dyn
+            | TokenKind::Macro
+            | TokenKind::Mixin
+            | TokenKind::Actor
+            | TokenKind::Ghost
+            | TokenKind::Gen
+            | TokenKind::Impl
+            | TokenKind::Exists
+            | TokenKind::Me => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
             // fn(): lambda syntax (alias for \:) - only in expression context
             // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions

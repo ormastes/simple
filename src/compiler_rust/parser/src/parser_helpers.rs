@@ -202,8 +202,43 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Peek through newlines and indents to find the next meaningful token kind.
+    /// Returns None if we hit a Dedent or EOF before finding a real token.
+    /// Does NOT consume any tokens (only buffers from lexer for lookahead).
+    pub(crate) fn peek_through_newlines_and_indents(&mut self) -> Option<TokenKind> {
+        let mut lookahead_pos = 0;
+
+        loop {
+            let token = if lookahead_pos == 0 {
+                &self.current
+            } else if lookahead_pos <= self.pending_tokens.len() {
+                &self.pending_tokens[lookahead_pos - 1]
+            } else {
+                let tok = self.lexer.next_token();
+                self.pending_tokens.push_back(tok);
+                self.pending_tokens.back().unwrap()
+            };
+
+            match &token.kind {
+                TokenKind::Newline | TokenKind::Indent => {
+                    lookahead_pos += 1;
+                }
+                TokenKind::Dedent | TokenKind::Eof => {
+                    return None;
+                }
+                _ => {
+                    return Some(token.kind.clone());
+                }
+            }
+
+            if lookahead_pos > 100 {
+                return None;
+            }
+        }
+    }
+
     /// Skip through newlines and indents when we've confirmed a dot follows.
-    /// Used for multi-line method chaining.
+    /// Used for multi-line method chaining and binary operator line continuation.
     /// Call this AFTER peek_through_newlines_and_indents_is returns true.
     /// Returns the number of INDENT tokens skipped (need to consume matching DEDENTs later).
     pub(crate) fn skip_newlines_and_indents_for_method_chain(&mut self) -> usize {
@@ -463,6 +498,28 @@ impl<'a> Parser<'a> {
             // Allow 'sync' to be used as identifier (method names like 'fn sync()')
             // The 'sync' keyword is only used in sync/async context declarations
             TokenKind::Sync => "sync".to_string(),
+            // Allow 'async' to be used as identifier
+            TokenKind::Async => "async".to_string(),
+            // Allow additional keywords as identifiers
+            TokenKind::Loop => "loop".to_string(),
+            TokenKind::Vec => "Vec".to_string(),
+            TokenKind::Gpu => "Gpu".to_string(),
+            TokenKind::Shared => "Shared".to_string(),
+            TokenKind::Repr => "repr".to_string(),
+            TokenKind::Super => "super".to_string(),
+            TokenKind::Extern => "extern".to_string(),
+            TokenKind::Literal => "literal".to_string(),
+            TokenKind::Dyn => "dyn".to_string(),
+            TokenKind::Static => "static".to_string(),
+            TokenKind::Const => "const".to_string(),
+            TokenKind::Macro => "macro".to_string(),
+            TokenKind::Mixin => "mixin".to_string(),
+            TokenKind::Val => "val".to_string(),
+            TokenKind::Impl => "impl".to_string(),
+            TokenKind::Actor => "actor".to_string(),
+            TokenKind::Ghost => "ghost".to_string(),
+            TokenKind::Gen => "gen".to_string(),
+            TokenKind::Alias => "alias".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -500,6 +557,13 @@ impl<'a> Parser<'a> {
         // First try regular identifier
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
             let name = name.clone();
+            self.advance();
+            return Ok(name);
+        }
+
+        // Allow integer literals as path segments (for numbered directories like 70.backend)
+        if let TokenKind::Integer(n) = &self.current.kind {
+            let name = n.to_string();
             self.advance();
             return Ok(name);
         }
@@ -557,6 +621,36 @@ impl<'a> Parser<'a> {
             TokenKind::Tensor => "Tensor",
             TokenKind::Grid => "Grid",
             TokenKind::Flat => "Flat",
+            // Allow additional keywords in module paths
+            TokenKind::Repr => "repr",
+            TokenKind::Super => "super",
+            TokenKind::Extern => "extern",
+            TokenKind::Literal => "literal",
+            TokenKind::Impl => "impl",
+            TokenKind::Dyn => "dyn",
+            TokenKind::Vec => "Vec",
+            TokenKind::Gpu => "Gpu",
+            TokenKind::Shared => "shared",
+            TokenKind::Macro => "macro",
+            TokenKind::Mixin => "mixin",
+            TokenKind::Actor => "actor",
+            TokenKind::Kernel => "kernel",
+            TokenKind::Gen => "gen",
+            TokenKind::Ghost => "ghost",
+            TokenKind::Const => "const",
+            TokenKind::Val => "val",
+            TokenKind::Alias => "alias",
+            TokenKind::Bounds => "bounds",
+            TokenKind::From => "from",
+            TokenKind::By => "by",
+            TokenKind::Into => "into",
+            TokenKind::Onto => "onto",
+            TokenKind::With => "with",
+            TokenKind::On => "on",
+            TokenKind::Bind => "bind",
+            TokenKind::Var => "var",
+            TokenKind::Move => "move",
+            TokenKind::Unwrap => "unwrap",
             _ => {
                 let ctx = parse_context!(format!("parsing path segment, previous tokens analyzed"));
                 return Err(ParseError::unexpected_token_with_context(
@@ -676,6 +770,23 @@ impl<'a> Parser<'a> {
             TokenKind::Exists => "exists",
             // Allow 'kernel' as method/function name (e.g., fn kernel(...))
             TokenKind::Kernel => "kernel",
+            // Allow additional keywords as method/function names
+            TokenKind::Sync => "sync",
+            TokenKind::Async => "async",
+            TokenKind::Gpu => "gpu",
+            TokenKind::Shared => "shared",
+            TokenKind::Repr => "repr",
+            TokenKind::Extern => "extern",
+            TokenKind::Static => "static",
+            TokenKind::Const => "const",
+            TokenKind::Dyn => "dyn",
+            TokenKind::Macro => "macro",
+            TokenKind::Mixin => "mixin",
+            TokenKind::Actor => "actor",
+            TokenKind::Ghost => "ghost",
+            TokenKind::Gen => "gen",
+            TokenKind::Impl => "impl",
+            TokenKind::Vec => "vec",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

@@ -137,21 +137,20 @@ impl<'a> Parser<'a> {
             } else {
                 // Parse enum variant(s) - may be comma-separated on same line
                 variants.push(self.parse_enum_variant()?);
-                // Handle comma-separated variants on the same line: Add, Sub, Mul
-                while self.check(&TokenKind::Comma) {
+                // Handle comma-separated or pipe-separated variants on the same line:
+                //   Add, Sub, Mul       (comma)
+                //   Rax | Rbx | Rcx     (pipe)
+                while self.check(&TokenKind::Comma) || self.check(&TokenKind::Pipe) {
                     self.advance();
-                    // If we hit newline/indent/dedent after comma, stop the comma-separated list
+                    // If we hit newline/indent/dedent after separator, stop
                     if self.check(&TokenKind::Newline)
                         || self.check(&TokenKind::Indent)
                         || self.check(&TokenKind::Dedent)
+                        || self.is_at_end()
                     {
                         break;
                     }
-                    // If we're at dedent/newline, the line is done
-                    if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Newline) || self.is_at_end() {
-                        break;
-                    }
-                    // Parse next variant in the comma-separated list
+                    // Parse next variant in the separated list
                     variants.push(self.parse_enum_variant()?);
                 }
             }
@@ -258,6 +257,23 @@ impl<'a> Parser<'a> {
                 TokenKind::Unit => Some("unit".to_string()),
                 TokenKind::Out => Some("out".to_string()),
                 TokenKind::OutErr => Some("out_err".to_string()),
+                TokenKind::Loop => Some("loop".to_string()),
+                TokenKind::Sync => Some("sync".to_string()),
+                TokenKind::Async => Some("async".to_string()),
+                TokenKind::Kernel => Some("kernel".to_string()),
+                TokenKind::Val => Some("val".to_string()),
+                TokenKind::Literal => Some("literal".to_string()),
+                TokenKind::Repr => Some("repr".to_string()),
+                TokenKind::Extern => Some("extern".to_string()),
+                TokenKind::Static => Some("static".to_string()),
+                TokenKind::Const => Some("const".to_string()),
+                TokenKind::Shared => Some("shared".to_string()),
+                TokenKind::Gpu => Some("gpu".to_string()),
+                TokenKind::Vec => Some("vec".to_string()),
+                TokenKind::Context => Some("context".to_string()),
+                TokenKind::New => Some("new".to_string()),
+                TokenKind::Old => Some("old".to_string()),
+                TokenKind::Var => Some("var".to_string()),
                 _ => None,
             };
 

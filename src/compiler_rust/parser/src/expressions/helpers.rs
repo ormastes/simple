@@ -131,10 +131,18 @@ impl<'a> Parser<'a> {
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.no_brace_postfix = old_no_brace;
 
-        // Support both colon syntax (if cond: body) and curly brace syntax (if cond { body })
+        // Support colon, 'then', or curly brace syntax:
+        //   if cond: body
+        //   if cond then body else other
+        //   if cond { body } else { other }
         let use_braces = self.check(&TokenKind::LBrace);
         if !use_braces {
-            self.expect(&TokenKind::Colon)?;
+            // Accept either ':' or 'then' keyword
+            if self.check(&TokenKind::Then) {
+                self.advance(); // consume 'then'
+            } else {
+                self.expect(&TokenKind::Colon)?;
+            }
         }
 
         // Support both inline and block-form syntax for then branch
@@ -188,7 +196,11 @@ impl<'a> Parser<'a> {
                 // Curly brace form: else { body }
                 Some(Box::new(self.parse_brace_block_expr()?))
             } else {
-                self.expect(&TokenKind::Colon)?;
+                // Accept ':' after else, or skip it for 'then...else...' form
+                // (if then was used instead of colon, else doesn't need colon either)
+                if self.check(&TokenKind::Colon) {
+                    self.advance();
+                }
 
                 // Support both inline and block-form syntax for else branch
                 let else_expr = if self.check(&TokenKind::Newline) {
@@ -241,14 +253,21 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LParen)?;
         let mut args = Vec::new();
 
-        // Skip newlines and indent after opening paren (for multi-line argument lists)
-        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
+        // Skip newlines, indent, and doc comments after opening paren (for multi-line argument lists)
+        while self.check(&TokenKind::Newline)
+            || self.check(&TokenKind::Indent)
+            || matches!(&self.current.kind, TokenKind::DocComment(_))
+        {
             self.advance();
         }
 
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
-            // Skip any stray whitespace tokens at the start of each argument
-            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+            // Skip any stray whitespace and doc comment tokens at the start of each argument
+            while self.check(&TokenKind::Newline)
+                || self.check(&TokenKind::Indent)
+                || self.check(&TokenKind::Dedent)
+                || matches!(&self.current.kind, TokenKind::DocComment(_))
+            {
                 self.advance();
             }
             if self.check(&TokenKind::RParen) {
@@ -281,6 +300,40 @@ impl<'a> Parser<'a> {
                 TokenKind::Into => Some("into".to_string()),
                 TokenKind::Onto => Some("onto".to_string()),
                 TokenKind::With => Some("with".to_string()),
+                // Additional keywords used as named argument names in Simple source
+                TokenKind::Loop => Some("loop".to_string()),
+                TokenKind::Unit => Some("unit".to_string()),
+                TokenKind::Sync => Some("sync".to_string()),
+                TokenKind::Async => Some("async".to_string()),
+                TokenKind::Kernel => Some("kernel".to_string()),
+                TokenKind::Val => Some("val".to_string()),
+                TokenKind::Literal => Some("literal".to_string()),
+                TokenKind::Repr => Some("repr".to_string()),
+                TokenKind::Extern => Some("extern".to_string()),
+                TokenKind::Static => Some("static".to_string()),
+                TokenKind::Const => Some("const".to_string()),
+                TokenKind::Shared => Some("shared".to_string()),
+                TokenKind::Dyn => Some("dyn".to_string()),
+                TokenKind::Macro => Some("macro".to_string()),
+                TokenKind::Mixin => Some("mixin".to_string()),
+                TokenKind::Actor => Some("actor".to_string()),
+                TokenKind::Ghost => Some("ghost".to_string()),
+                TokenKind::Gen => Some("gen".to_string()),
+                TokenKind::Impl => Some("impl".to_string()),
+                TokenKind::Gpu => Some("gpu".to_string()),
+                TokenKind::Vec => Some("vec".to_string()),
+                TokenKind::Context => Some("context".to_string()),
+                TokenKind::Feature => Some("feature".to_string()),
+                TokenKind::Scenario => Some("scenario".to_string()),
+                TokenKind::Given => Some("given".to_string()),
+                TokenKind::When => Some("when".to_string()),
+                TokenKind::Then => Some("then".to_string()),
+                TokenKind::On => Some("on".to_string()),
+                TokenKind::Bind => Some("bind".to_string()),
+                TokenKind::New => Some("new".to_string()),
+                TokenKind::Old => Some("old".to_string()),
+                TokenKind::Out => Some("out".to_string()),
+                TokenKind::Var => Some("var".to_string()),
                 _ => None,
             };
             if let Some(id_clone) = maybe_name {
@@ -351,8 +404,13 @@ impl<'a> Parser<'a> {
                 label,
             });
 
-            // Skip newlines, indent, dedent after argument (for multi-line argument lists)
-            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+            // Skip newlines, indent, dedent, and doc comments after argument (for multi-line argument lists)
+            // DocComment tokens may appear from desugared code (e.g., "DESUGARED: field: nil")
+            while self.check(&TokenKind::Newline)
+                || self.check(&TokenKind::Indent)
+                || self.check(&TokenKind::Dedent)
+                || matches!(&self.current.kind, TokenKind::DocComment(_))
+            {
                 self.advance();
             }
 
@@ -378,6 +436,39 @@ impl<'a> Parser<'a> {
                         | TokenKind::Into
                         | TokenKind::Onto
                         | TokenKind::With
+                        | TokenKind::Loop
+                        | TokenKind::Unit
+                        | TokenKind::Sync
+                        | TokenKind::Async
+                        | TokenKind::Kernel
+                        | TokenKind::Val
+                        | TokenKind::Literal
+                        | TokenKind::Repr
+                        | TokenKind::Extern
+                        | TokenKind::Static
+                        | TokenKind::Const
+                        | TokenKind::Shared
+                        | TokenKind::Dyn
+                        | TokenKind::Macro
+                        | TokenKind::Mixin
+                        | TokenKind::Actor
+                        | TokenKind::Ghost
+                        | TokenKind::Gen
+                        | TokenKind::Impl
+                        | TokenKind::Gpu
+                        | TokenKind::Vec
+                        | TokenKind::Context
+                        | TokenKind::Feature
+                        | TokenKind::Scenario
+                        | TokenKind::Given
+                        | TokenKind::When
+                        | TokenKind::Then
+                        | TokenKind::On
+                        | TokenKind::Bind
+                        | TokenKind::New
+                        | TokenKind::Old
+                        | TokenKind::Out
+                        | TokenKind::Var
                 );
 
                 if is_likely_named_arg {

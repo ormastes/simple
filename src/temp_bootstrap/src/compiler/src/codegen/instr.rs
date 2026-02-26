@@ -582,6 +582,16 @@ pub fn compile_instruction<M: Module>(
         MirInst::PointerDeref { dest, pointer, kind } => {
             compile_pointer_deref(ctx, builder, *dest, *pointer, *kind)?;
         }
+
+        // Module-level global variables — not yet supported in Cranelift,
+        // fall through as zero for now (same as previous behavior)
+        MirInst::GlobalLoad { dest, name: _ } => {
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+        MirInst::GlobalStore { name: _, value: _ } => {
+            // No-op in Cranelift for now
+        }
     }
     Ok(())
 }

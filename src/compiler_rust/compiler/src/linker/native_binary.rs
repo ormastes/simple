@@ -84,6 +84,13 @@ impl Default for NativeBinaryOptions {
             }
         }
 
+        // Add Simple compiler static library path so -lsimple_compiler resolves
+        if let Some(compiler_path) = Self::find_compiler_library_path() {
+            if !library_paths.contains(&compiler_path) {
+                library_paths.insert(0, compiler_path);
+            }
+        }
+
         Self {
             output: PathBuf::from("a.out"),
             target: Target::host(),
@@ -103,6 +110,7 @@ impl Default for NativeBinaryOptions {
                 "dl".to_string(),
                 "m".to_string(),
                 "gcc_s".to_string(),           // Unwinding support
+                "lzma".to_string(),            // Needed by xz2 (dependency chain)
                 "simple_compiler".to_string(), // Runtime FFI functions
             ],
             #[cfg(not(target_os = "linux"))]
@@ -247,6 +255,65 @@ impl NativeBinaryOptions {
                 for profile in ["release", "debug"] {
                     let lib_path = root.join("target").join(profile);
                     if lib_path.join("libsimple_runtime.a").exists() {
+                        return Some(lib_path);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Find the Simple compiler static library path (libsimple_compiler.a).
+    ///
+    /// Checks the same locations as runtime detection plus current/parent target dirs.
+    pub fn find_compiler_library_path() -> Option<PathBuf> {
+        // Check env override
+        if let Ok(path) = std::env::var("SIMPLE_COMPILER_PATH") {
+            let p = PathBuf::from(&path);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+
+        // Check current executable directory and ../lib
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let lib_dir = exe_dir.join("../lib");
+                if lib_dir.join("libsimple_compiler.a").exists() {
+                    return lib_dir.canonicalize().ok();
+                }
+                if exe_dir.join("libsimple_compiler.a").exists() {
+                    return Some(exe_dir.to_path_buf());
+                }
+            }
+        }
+
+        // Check common cargo target locations
+        let cargo_target_paths = [
+            "target/release",
+            "target/debug",
+            "../target/release",
+            "../target/debug",
+            "../../target/release",
+            "../../target/debug",
+        ];
+
+        for path in cargo_target_paths {
+            let p = PathBuf::from(path);
+            if p.join("libsimple_compiler.a").exists() {
+                return p.canonicalize().ok();
+            }
+        }
+
+        // Check workspace root from manifest dir
+        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            let workspace_root = PathBuf::from(&manifest_dir).ancestors().nth(1).map(|p| p.to_path_buf());
+
+            if let Some(root) = workspace_root {
+                for profile in ["release", "debug"] {
+                    let lib_path = root.join("target").join(profile);
+                    if lib_path.join("libsimple_compiler.a").exists() {
                         return Some(lib_path);
                     }
                 }

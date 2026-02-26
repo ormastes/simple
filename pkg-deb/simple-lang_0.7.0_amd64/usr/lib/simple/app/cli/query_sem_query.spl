@@ -1,0 +1,753 @@
+# Query CLI - Semantic Query (CodeQL-style SQL-like queries)
+#
+# Provides CodeQL-style semantic queries using SQL-like syntax.
+# Operates on outline-level parsed symbols from source files.
+#
+# Syntax:
+#   FIND fn WHERE return_type = "i64"
+#   FIND fn WHERE name starts_with "parse_" AND param_count > 2
+#   FIND fn WHERE calls("rt_file_read_text")
+#   FIND class WHERE has_method("to_string")
+#   FIND type WHERE implements("Printable")
+#   FIND struct WHERE field_count > 5
+#   FIND import WHERE module contains "std"
+#   FIND impl WHERE trait = "Iterator"
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct _SemQuery:
+    target: text
+    predicates: [_SemPred]
+
+struct _SemPred:
+    kind: text
+    field: text
+    op: text
+    value: text
+    fn_name: text
+    fn_arg: text
+
+struct _SemResult:
+    file: text
+    line: i64
+    kind: text
+    name: text
+    signature: text
+
+# ============================================================================
+# Internal: reuse outline parser (local copy)
+# ============================================================================
+
+struct _SymInfo:
+    name: text
+    kind: text
+    line: i64
+    signature: text
+    doc_comment: text
+    parent: text
+    return_type: text
+    params: text
+
+fn _parse_file(file: text) -> [_SymInfo]:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return []
+    _parse_source(content)
+
+fn _parse_source(content: text) -> [_SymInfo]:
+    val lines = content.split("\n")
+    var symbols: [_SymInfo] = []
+    var doc_lines: [text] = []
+    var current_parent = ""
+    var line_num = 0
+
+    while line_num < lines.len():
+        val line = lines[line_num]
+        val trimmed = line.trim()
+        line_num = line_num + 1
+
+        if trimmed == "":
+            doc_lines = []
+            continue
+
+        if trimmed.starts_with("#"):
+            doc_lines.push(trimmed.substring(1).trim())
+            continue
+
+        val indent = _leading_spaces(line)
+        val doc = doc_lines.join("\n")
+        doc_lines = []
+
+        if indent == 0:
+            current_parent = ""
+            if trimmed.starts_with("fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("me "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("static fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("extern fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, ""))
+            elif trimmed.starts_with("class "):
+                val name = _extract_ident(trimmed.substring(6))
+                symbols.push(_SymInfo(name: name, kind: "class", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
+            elif trimmed.starts_with("struct "):
+                val name = _extract_ident(trimmed.substring(7))
+                symbols.push(_SymInfo(name: name, kind: "struct", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
+            elif trimmed.starts_with("enum "):
+                val name = _extract_ident(trimmed.substring(5))
+                symbols.push(_SymInfo(name: name, kind: "enum", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("trait "):
+                val name = _extract_ident(trimmed.substring(6))
+                symbols.push(_SymInfo(name: name, kind: "trait", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
+            elif trimmed.starts_with("impl "):
+                val name = _extract_ident(trimmed.substring(5))
+                symbols.push(_SymInfo(name: name, kind: "impl", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+                current_parent = name
+            elif trimmed.starts_with("val "):
+                val name = _extract_ident(trimmed.substring(4))
+                symbols.push(_SymInfo(name: name, kind: "val", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("var "):
+                val name = _extract_ident(trimmed.substring(4))
+                symbols.push(_SymInfo(name: name, kind: "var", line: line_num, signature: trimmed, doc_comment: doc, parent: "", return_type: "", params: ""))
+            elif trimmed.starts_with("use ") or trimmed.starts_with("import "):
+                var mod_path = trimmed
+                if mod_path.starts_with("use "):
+                    mod_path = mod_path.substring(4)
+                elif mod_path.starts_with("import "):
+                    mod_path = mod_path.substring(7)
+                var brace_idx = -1
+                var bi = 0
+                while bi < mod_path.len():
+                    if mod_path.substring(bi, bi + 1) == "{":
+                        brace_idx = bi
+                        break
+                    bi = bi + 1
+                if brace_idx > 0:
+                    mod_path = mod_path.substring(0, brace_idx).trim()
+                    if mod_path.ends_with("."):
+                        mod_path = mod_path.substring(0, mod_path.len() - 1)
+                symbols.push(_SymInfo(name: mod_path, kind: "import", line: line_num, signature: trimmed, doc_comment: "", parent: "", return_type: "", params: ""))
+        elif indent > 0 and current_parent != "":
+            if trimmed.starts_with("fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
+            elif trimmed.starts_with("me "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
+            elif trimmed.starts_with("static fn "):
+                symbols.push(_parse_fn(trimmed, line_num, doc, current_parent))
+            elif trimmed.contains(":") and not trimmed.starts_with("#"):
+                val colon_pos = _find_char(trimmed, ":")
+                if colon_pos > 0:
+                    val field_name = trimmed.substring(0, colon_pos).trim()
+                    val is_ident = _is_valid_ident(field_name)
+                    if is_ident and field_name != "if" and field_name != "elif" and field_name != "else" and field_name != "for" and field_name != "while" and field_name != "return" and field_name != "val" and field_name != "var":
+                        val field_type = trimmed.substring(colon_pos + 1).trim()
+                        symbols.push(_SymInfo(name: field_name, kind: "field", line: line_num, signature: trimmed, doc_comment: doc, parent: current_parent, return_type: field_type, params: ""))
+
+    symbols
+
+fn _parse_fn(trimmed: text, line_num: i64, doc: text, parent: text) -> _SymInfo:
+    var rest = trimmed
+    var kind = "fn"
+    if rest.starts_with("extern fn "):
+        rest = rest.substring(10)
+        kind = "extern_fn"
+    elif rest.starts_with("static fn "):
+        rest = rest.substring(10)
+        kind = "static_method"
+    elif rest.starts_with("me "):
+        rest = rest.substring(3)
+        kind = "method"
+    elif rest.starts_with("fn "):
+        rest = rest.substring(3)
+        if parent != "":
+            kind = "method"
+    val name = _extract_ident(rest)
+    val params = _extract_params(rest)
+    val ret = _extract_return_type(rest)
+    _SymInfo(name: name, kind: kind, line: line_num, signature: trimmed, doc_comment: doc, parent: parent, return_type: ret, params: params)
+
+fn _extract_ident(s: text) -> text:
+    var end_pos = 0
+    while end_pos < s.len():
+        val ch = s.substring(end_pos, end_pos + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return ""
+    s.substring(0, end_pos)
+
+fn _extract_params(s: text) -> text:
+    var paren_start = -1
+    var pi = 0
+    while pi < s.len():
+        if s.substring(pi, pi + 1) == "(":
+            paren_start = pi
+            break
+        pi = pi + 1
+    if paren_start < 0:
+        return ""
+    var depth = 0
+    var paren_end = -1
+    var qi = paren_start
+    while qi < s.len():
+        val ch = s.substring(qi, qi + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                paren_end = qi
+                break
+        qi = qi + 1
+    if paren_end < 0:
+        return ""
+    s.substring(paren_start + 1, paren_end)
+
+fn _extract_return_type(s: text) -> text:
+    var ai = 0
+    while ai < s.len() - 1:
+        val two = s.substring(ai, ai + 2)
+        if two == "->":
+            val after = s.substring(ai + 2).trim()
+            var end_pos = 0
+            while end_pos < after.len():
+                val ch = after.substring(end_pos, end_pos + 1)
+                if ch == ":":
+                    break
+                end_pos = end_pos + 1
+            return after.substring(0, end_pos).trim()
+        ai = ai + 1
+    ""
+
+fn _leading_spaces(line: text) -> i64:
+    var count = 0
+    while count < line.len():
+        val ch = line.substring(count, count + 1)
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn _find_char(s: text, target: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.substring(i, i + 1) == target:
+            return i
+        i = i + 1
+    -1
+
+fn _is_valid_ident(s: text) -> bool:
+    if s == "":
+        return false
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# SQL-like Query Parser
+# ============================================================================
+
+fn _parse_sem_query(query_str: text) -> _SemQuery:
+    val q = query_str.trim()
+    # Expected: FIND <target> WHERE <pred1> AND <pred2> ...
+    var target = ""
+    var pred_str = ""
+
+    if q.starts_with("FIND ") or q.starts_with("find "):
+        val after_find = q.substring(5).trim()
+        # Find WHERE
+        val where_idx = _find_word(after_find, "WHERE")
+        var where_idx2 = -1
+        if where_idx < 0:
+            where_idx2 = _find_word(after_find, "where")
+        val actual_where = where_idx
+        var actual_where_final = actual_where
+        if actual_where_final < 0:
+            actual_where_final = where_idx2
+        if actual_where_final > 0:
+            target = after_find.substring(0, actual_where_final).trim()
+            pred_str = after_find.substring(actual_where_final + 5).trim()
+        else:
+            target = after_find.trim()
+    else:
+        return _SemQuery(target: "", predicates: [])
+
+    if target == "":
+        return _SemQuery(target: "", predicates: [])
+
+    var predicates: [_SemPred] = []
+    if pred_str != "":
+        # Split on AND
+        val and_parts = _split_on_and(pred_str)
+        for part in and_parts:
+            val pred = _parse_single_pred(part.trim())
+            if pred.kind != "":
+                predicates.push(pred)
+
+    _SemQuery(target: target, predicates: predicates)
+
+fn _find_word(s: text, word: text) -> i64:
+    # Find word with word boundaries in s
+    var i = 0
+    while i <= s.len() - word.len():
+        val candidate = s.substring(i, i + word.len())
+        if candidate == word:
+            var left_ok = true
+            var right_ok = true
+            if i > 0:
+                val lch = s.substring(i - 1, i)
+                left_ok = lch == " " or lch == "\t"
+            if i + word.len() < s.len():
+                val rch = s.substring(i + word.len(), i + word.len() + 1)
+                right_ok = rch == " " or rch == "\t"
+            if left_ok and right_ok:
+                return i
+        i = i + 1
+    -1
+
+fn _split_on_and(s: text) -> [text]:
+    var parts: [text] = []
+    var remaining = s
+    var safety = 0
+    while remaining != "" and safety < 50:
+        safety = safety + 1
+        val and_idx = _find_word(remaining, "AND")
+        var and_idx2 = -1
+        if and_idx < 0:
+            and_idx2 = _find_word(remaining, "and")
+        var actual_and = and_idx
+        if actual_and < 0:
+            actual_and = and_idx2
+        if actual_and > 0:
+            parts.push(remaining.substring(0, actual_and).trim())
+            remaining = remaining.substring(actual_and + 3).trim()
+        else:
+            parts.push(remaining.trim())
+            remaining = ""
+    parts
+
+fn _parse_single_pred(s: text) -> _SemPred:
+    # Patterns:
+    #   field op "value"     — field_op predicate
+    #   calls("name")        — fn_call predicate
+    #   has_method("name")   — fn_call predicate
+    #   implements("name")   — fn_call predicate
+    #   imports("name")      — fn_call predicate
+
+    # Check for function-style predicates
+    if s.starts_with("calls("):
+        val arg = _extract_paren_arg(s.substring(5))
+        return _SemPred(kind: "fn_call", field: "", op: "", value: "", fn_name: "calls", fn_arg: arg)
+    if s.starts_with("has_method("):
+        val arg = _extract_paren_arg(s.substring(10))
+        return _SemPred(kind: "fn_call", field: "", op: "", value: "", fn_name: "has_method", fn_arg: arg)
+    if s.starts_with("implements("):
+        val arg = _extract_paren_arg(s.substring(10))
+        return _SemPred(kind: "fn_call", field: "", op: "", value: "", fn_name: "implements", fn_arg: arg)
+    if s.starts_with("imports("):
+        val arg = _extract_paren_arg(s.substring(7))
+        return _SemPred(kind: "fn_call", field: "", op: "", value: "", fn_name: "imports", fn_arg: arg)
+
+    # field op value patterns
+    val field = _extract_ident(s)
+    if field == "":
+        return _SemPred(kind: "", field: "", op: "", value: "", fn_name: "", fn_arg: "")
+    var rest = s.substring(field.len()).trim()
+
+    # Determine operator
+    var op = ""
+    if rest.starts_with("starts_with "):
+        op = "starts_with"
+        rest = rest.substring(12).trim()
+    elif rest.starts_with("ends_with "):
+        op = "ends_with"
+        rest = rest.substring(10).trim()
+    elif rest.starts_with("contains "):
+        op = "contains"
+        rest = rest.substring(9).trim()
+    elif rest.starts_with("!="):
+        op = "!="
+        rest = rest.substring(2).trim()
+    elif rest.starts_with(">="):
+        op = ">="
+        rest = rest.substring(2).trim()
+    elif rest.starts_with("<="):
+        op = "<="
+        rest = rest.substring(2).trim()
+    elif rest.starts_with(">"):
+        op = ">"
+        rest = rest.substring(1).trim()
+    elif rest.starts_with("<"):
+        op = "<"
+        rest = rest.substring(1).trim()
+    elif rest.starts_with("="):
+        op = "="
+        rest = rest.substring(1).trim()
+    else:
+        return _SemPred(kind: "", field: "", op: "", value: "", fn_name: "", fn_arg: "")
+
+    # Extract value (quoted or bare)
+    var value = ""
+    if rest.starts_with("\""):
+        val close_q = _find_char(rest.substring(1), "\"")
+        if close_q >= 0:
+            value = rest.substring(1, close_q + 1)
+        else:
+            value = rest.substring(1)
+    else:
+        value = rest.trim()
+
+    _SemPred(kind: "field_op", field: field, op: op, value: value, fn_name: "", fn_arg: "")
+
+fn _extract_paren_arg(s: text) -> text:
+    # Extract argument from ("value") or (value)
+    var rest = s.trim()
+    if rest.starts_with("("):
+        rest = rest.substring(1)
+    if rest.starts_with("\""):
+        val close_q = _find_char(rest.substring(1), "\"")
+        if close_q >= 0:
+            return rest.substring(1, close_q + 1)
+    # Bare
+    var end_pos = 0
+    while end_pos < rest.len():
+        val ch = rest.substring(end_pos, end_pos + 1)
+        if ch == ")" or ch == "\"":
+            break
+        end_pos = end_pos + 1
+    rest.substring(0, end_pos).trim()
+
+# ============================================================================
+# Query Execution
+# ============================================================================
+
+fn _target_matches(target: text, sym_kind: text) -> bool:
+    if target == "fn" or target == "function":
+        return sym_kind == "fn" or sym_kind == "method" or sym_kind == "static_method" or sym_kind == "extern_fn"
+    if target == "class":
+        return sym_kind == "class"
+    if target == "struct":
+        return sym_kind == "struct"
+    if target == "enum":
+        return sym_kind == "enum"
+    if target == "trait":
+        return sym_kind == "trait"
+    if target == "impl":
+        return sym_kind == "impl"
+    if target == "import":
+        return sym_kind == "import"
+    if target == "type":
+        return sym_kind == "class" or sym_kind == "struct" or sym_kind == "enum" or sym_kind == "trait"
+    if target == "field":
+        return sym_kind == "field"
+    if target == "val":
+        return sym_kind == "val"
+    if target == "var":
+        return sym_kind == "var"
+    if target == "*":
+        return true
+    sym_kind == target
+
+fn _execute_sem_query(query: _SemQuery, files: [text]) -> [_SemResult]:
+    var results: [_SemResult] = []
+
+    for file in files:
+        val syms = _parse_file(file)
+        for sym in syms:
+            if _target_matches(query.target, sym.kind):
+                var all_match = true
+                for pred in query.predicates:
+                    if not _eval_sem_pred(pred, sym, file, syms):
+                        all_match = false
+                        break
+                if all_match:
+                    results.push(_SemResult(file: file, line: sym.line, kind: sym.kind, name: sym.name, signature: sym.signature))
+
+    results
+
+fn _eval_sem_pred(pred: _SemPred, sym: _SymInfo, file: text, all_syms: [_SymInfo]) -> bool:
+    if pred.kind == "fn_call":
+        if pred.fn_name == "calls":
+            return _eval_calls(sym.name, pred.fn_arg, file)
+        elif pred.fn_name == "has_method":
+            return _eval_has_method(sym.name, pred.fn_arg, all_syms)
+        elif pred.fn_name == "implements":
+            return _eval_implements(sym.name, pred.fn_arg, file)
+        elif pred.fn_name == "imports":
+            return _eval_imports(sym.name, pred.fn_arg)
+        return false
+
+    # field_op predicate
+    var field_val = ""
+    if pred.field == "name":
+        field_val = sym.name
+    elif pred.field == "return_type":
+        field_val = sym.return_type
+    elif pred.field == "params":
+        field_val = sym.params
+    elif pred.field == "parent":
+        field_val = sym.parent
+    elif pred.field == "kind":
+        field_val = sym.kind
+    elif pred.field == "signature":
+        field_val = sym.signature
+    elif pred.field == "module":
+        if sym.kind == "import":
+            field_val = sym.name
+    elif pred.field == "trait":
+        if sym.kind == "impl":
+            field_val = _extract_trait_from_impl(sym.signature)
+    elif pred.field == "visibility":
+        if sym.parent == "" and not sym.name.starts_with("_"):
+            field_val = "pub"
+        else:
+            field_val = "private"
+    elif pred.field == "param_count":
+        val count = _count_params(sym.params)
+        return _compare_int(count, pred.op, pred.value)
+    elif pred.field == "field_count":
+        val count = _count_fields(sym.kind, sym.name, all_syms)
+        return _compare_int(count, pred.op, pred.value)
+    else:
+        return false
+
+    # String comparison
+    if pred.op == "=":
+        return field_val == pred.value
+    elif pred.op == "!=":
+        return field_val != pred.value
+    elif pred.op == "starts_with":
+        return field_val.starts_with(pred.value)
+    elif pred.op == "ends_with":
+        return field_val.ends_with(pred.value)
+    elif pred.op == "contains":
+        return field_val.contains(pred.value)
+    elif pred.op == ">":
+        return field_val > pred.value
+    elif pred.op == "<":
+        return field_val < pred.value
+    false
+
+fn _compare_int(actual: i64, op: text, expected_str: text) -> bool:
+    val expected = expected_str.to_int()
+    if op == "=":
+        return actual == expected
+    elif op == "!=":
+        return actual != expected
+    elif op == ">":
+        return actual > expected
+    elif op == "<":
+        return actual < expected
+    elif op == ">=":
+        return actual >= expected
+    elif op == "<=":
+        return actual <= expected
+    false
+
+fn _extract_trait_from_impl(sig: text) -> text:
+    var rest = sig
+    if rest.starts_with("impl "):
+        rest = rest.substring(5).trim()
+    val first_word = _extract_ident(rest)
+    val after = rest.substring(first_word.len()).trim()
+    if after.starts_with("for "):
+        return first_word
+    first_word
+
+fn _count_params(params_str: text) -> i64:
+    if params_str == "":
+        return 0
+    val parts = params_str.split(",")
+    var count = 0
+    for part in parts:
+        if part.trim() != "":
+            count = count + 1
+    count
+
+fn _count_fields(kind: text, name: text, syms: [_SymInfo]) -> i64:
+    var count = 0
+    for sym in syms:
+        if sym.parent == name and sym.kind == "field":
+            count = count + 1
+    count
+
+fn _eval_calls(fn_name: text, callee: text, file: text) -> bool:
+    # Grep file for callee( to check if fn calls it
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return false
+    # Find the function body and check if it contains callee(
+    val lines = content.split("\n")
+    var in_fn = false
+    var fn_indent = -1
+    for line in lines:
+        val trimmed = line.trim()
+        val indent = _leading_spaces(line)
+        if indent == 0:
+            if in_fn:
+                in_fn = false
+            if (trimmed.starts_with("fn " + fn_name + "(") or
+                trimmed.starts_with("fn " + fn_name + " (")):
+                in_fn = true
+                fn_indent = 0
+        elif in_fn and indent > 0:
+            if trimmed.contains(callee + "("):
+                return true
+    false
+
+fn _eval_has_method(type_name: text, method: text, syms: [_SymInfo]) -> bool:
+    for sym in syms:
+        if (sym.parent == type_name and
+            (sym.kind == "method" or sym.kind == "static_method" or sym.kind == "fn") and
+            sym.name == method):
+            return true
+    false
+
+fn _eval_implements(type_name: text, trait_name: text, file: text) -> bool:
+    # Grep for "impl Trait for Type" or "impl Trait" in the same file
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return false
+    val pattern1 = "impl " + trait_name + " for " + type_name
+    val pattern2 = "impl " + trait_name + ":"
+    if content.contains(pattern1):
+        return true
+    if content.contains(pattern2):
+        return true
+    false
+
+fn _eval_imports(sym_name: text, module_pattern: text) -> bool:
+    # sym_name for imports is the module path
+    if module_pattern.contains("*"):
+        return _glob_match(sym_name, module_pattern)
+    sym_name.contains(module_pattern)
+
+fn _glob_match(value: text, pattern: text) -> bool:
+    if pattern == "*":
+        return true
+    if not pattern.contains("*"):
+        return value == pattern
+    val parts = pattern.split("*")
+    var pos = 0
+    for part in parts:
+        if part == "":
+            continue
+        val idx = _index_of_from(value, part, pos)
+        if idx < 0:
+            return false
+        pos = idx + part.len()
+    true
+
+fn _index_of_from(s: text, needle: text, start: i64) -> i64:
+    var i = start
+    while i <= s.len() - needle.len():
+        if s.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# File Expansion
+# ============================================================================
+
+fn _expand_files(file_pattern: text) -> [text]:
+    var files: [text] = []
+    if file_pattern == "":
+        return files
+    if file_pattern.ends_with("/"):
+        val (out, stderr, code) = rt_process_run("find", [file_pattern, "-name", "*.spl", "-type", "f"])
+        if code == 0 and out.trim() != "":
+            val found = out.split("\n")
+            for f in found:
+                val ft = f.trim()
+                if ft != "":
+                    files.push(ft)
+        return files
+    if file_pattern.contains("*"):
+        val (out, stderr, code) = rt_process_run("/bin/sh", ["-c", "ls " + file_pattern + " 2>/dev/null"])
+        if code == 0 and out.trim() != "":
+            val found = out.split("\n")
+            for f in found:
+                val ft = f.trim()
+                if ft != "":
+                    files.push(ft)
+        return files
+    files.push(file_pattern)
+    files
+
+# ============================================================================
+# Output Formatting
+# ============================================================================
+
+fn _print_sem_results(results: [_SemResult], format_str: text):
+    if format_str == "json":
+        print "["
+        var i = 0
+        for r in results:
+            var comma = ","
+            if i == results.len() - 1:
+                comma = ""
+            print "  {\"file\": \"{r.file}\", \"line\": {r.line}, \"kind\": \"{r.kind}\", \"name\": \"{r.name}\", \"signature\": \"{r.signature}\"}{comma}"
+            i = i + 1
+        print "]"
+    elif format_str == "compact":
+        for r in results:
+            print "{r.file}:{r.line}: [{r.kind}] {r.name}"
+    else:
+        for r in results:
+            print "{r.file}:{r.line}: [{r.kind}] {r.name}"
+            print "  {r.signature}"
+
+# ============================================================================
+# Public Entry Point
+# ============================================================================
+
+fn engine_sem_query(query_str: text, files: [text], format_str: text) -> i64:
+    val query = _parse_sem_query(query_str)
+    if query.target == "":
+        print "Error: invalid semantic query"
+        print "Expected: FIND <target> WHERE <predicate> [AND <predicate> ...]"
+        print "Targets: fn, class, struct, enum, trait, impl, import, type, field, val, var, *"
+        print "Predicates: name, return_type, params, parent, kind, signature, module, trait, visibility"
+        print "Operators: =, !=, >, <, >=, <=, starts_with, ends_with, contains"
+        print "Functions: calls(\"name\"), has_method(\"name\"), implements(\"name\"), imports(\"name\")"
+        print "Numeric: param_count, field_count"
+        return 1
+
+    var all_files: [text] = []
+    for file_pat in files:
+        val expanded = _expand_files(file_pat)
+        for f in expanded:
+            all_files.push(f)
+
+    val results = _execute_sem_query(query, all_files)
+
+    if results.len() == 0:
+        print "No results found"
+        return 0
+
+    _print_sem_results(results, format_str)
+    print ""
+    print "Total: {results.len()} results"
+    0
+
+export engine_sem_query

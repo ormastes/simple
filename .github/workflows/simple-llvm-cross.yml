@@ -1,0 +1,157 @@
+name: Simple LLVM Toolchains
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/compiler/**'
+      - '.github/workflows/simple-llvm-cross.yml'
+
+jobs:
+  linux-and-windows:
+    name: Linux host + Windows cross (LLVM)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight (llc/ld.lld)
+        run: |
+          llc --version || (echo "llc missing" && exit 1)
+          ld.lld --version || (echo "ld.lld missing" && exit 1)
+
+      - name: Install LLVM, LLD, Clang, MinGW
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq llvm lld clang mingw-w64
+
+      - name: Show tool versions
+        run: |
+          llc --version
+          ld.lld --version
+          x86_64-w64-windows-gnu-gcc -v
+
+      - name: Host object (Linux x86_64)
+        run: |
+          cat > /tmp/hello.ll <<'EOF'
+          ; simple return 0
+          define i32 @main() {
+          entry:
+            ret i32 0
+          }
+          EOF
+          llc -filetype=obj /tmp/hello.ll -o /tmp/hello_linux.o
+          file /tmp/hello_linux.o
+
+      - name: Windows object (PE/COFF)
+        run: |
+          llc -mtriple=x86_64-w64-windows-gnu -filetype=obj /tmp/hello.ll -o /tmp/hello_win.o
+          file /tmp/hello_win.o
+
+      - name: Link Windows exe (lld-link via MinGW sysroot)
+        run: |
+          x86_64-w64-windows-gnu-gcc /tmp/hello_win.o -o /tmp/hello_win.exe -Wl,--strip-all
+          file /tmp/hello_win.exe
+
+      - name: Upload Windows exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-windows-exe
+          path: /tmp/hello_win.exe
+
+      - name: Build Simple (Linux, LLVM)
+        run: |
+          chmod +x bin/release/simple || true
+          bin/release/simple build --release --backend=llvm
+          file bin/release/simple
+
+      - name: Upload Linux LLVM binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: simple-linux-llvm
+          path: bin/release/simple
+
+  freebsd-cross:
+    name: FreeBSD cross (LLVM)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight (llc/ld.lld)
+        run: |
+          llc --version || (echo "llc missing" && exit 1)
+          ld.lld --version || (echo "ld.lld missing" && exit 1)
+
+      - name: Install LLVM/LLD
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq llvm lld curl tar
+
+      - name: Fetch FreeBSD sysroot
+        run: |
+          curl -L -o /tmp/freebsd-base.txz https://archive.freebsd.org/old-releases/amd64/14.1-RELEASE/base.txz
+          sudo mkdir -p /opt/sysroots/freebsd
+          sudo tar xf /tmp/freebsd-base.txz -C /opt/sysroots/freebsd ./usr/include ./usr/lib ./lib
+          sudo chmod -R a+rX /opt/sysroots/freebsd
+
+      - name: FreeBSD object (ELF)
+        run: |
+          cat > /tmp/hello.ll <<'EOF'
+          define i32 @main() { ret i32 0 }
+          EOF
+          llc -mtriple=x86_64-unknown-freebsd13 -filetype=obj /tmp/hello.ll -o /tmp/hello_freebsd.o
+          file /tmp/hello_freebsd.o
+
+      - name: Link FreeBSD exe (via ld.lld and sysroot)
+        run: |
+          cat > /tmp/hello_fb.c <<'EOF'
+          int main(){return 0;}
+          EOF
+          # Use clang to drive ld.lld with the FreeBSD sysroot
+          clang --target=x86_64-unknown-freebsd13 \
+            --sysroot=/opt/sysroots/freebsd \
+            /tmp/hello_freebsd.o \
+            -o /tmp/hello_freebsd \
+            -fuse-ld=lld \
+            -nostdlib \
+            /opt/sysroots/freebsd/usr/lib/crt1.o \
+            /opt/sysroots/freebsd/usr/lib/crti.o \
+            -L/opt/sysroots/freebsd/usr/lib \
+            -lc \
+            /opt/sysroots/freebsd/usr/lib/crtn.o
+          file /tmp/hello_freebsd
+
+      - name: Upload FreeBSD exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-freebsd-exe
+          path: /tmp/hello_freebsd
+
+      - name: Upload FreeBSD object
+        uses: actions/upload-artifact@v4
+        with:
+          name: hello-freebsd-obj
+          path: /tmp/hello_freebsd.o
+
+  macos-host:
+    name: macOS host prep
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM (brew)
+        run: |
+          brew install llvm || true
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+
+      - name: Host object (Mach-O)
+        run: |
+          cat > /tmp/hello.ll <<'EOF'
+          define i32 @main() { ret i32 0 }
+          EOF
+          llc -filetype=obj /tmp/hello.ll -o /tmp/hello_macos.o
+          file /tmp/hello_macos.o

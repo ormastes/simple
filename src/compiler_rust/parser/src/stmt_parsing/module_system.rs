@@ -46,10 +46,27 @@ impl<'a> Parser<'a> {
                         self.error_hints.push(warning);
                     }
                     self.advance();
+
+                    // Check for glob: module.*
+                    if self.check(&TokenKind::Star) {
+                        break; // Stop, let caller handle *
+                    }
+
+                    // Check for group: module.{A, B}
+                    if self.check(&TokenKind::LBrace) {
+                        break; // Stop, let caller handle {}
+                    }
+
                     segments.push(self.expect_path_segment()?);
                 }
             }
             return Ok(ModulePath::new(segments));
+        }
+
+        // Handle `...` (Ellipsis) as triple-dot relative import: ...grandparent
+        while self.check(&TokenKind::Ellipsis) {
+            self.advance();
+            segments.push("...".to_string());
         }
 
         while self.check(&TokenKind::DoubleDot) {
@@ -125,6 +142,12 @@ impl<'a> Parser<'a> {
         // Check for group: {A, B, C}
         if self.check(&TokenKind::LBrace) {
             self.advance();
+            // Check for {*} glob pattern
+            if self.check(&TokenKind::Star) {
+                self.advance();
+                self.expect(&TokenKind::RBrace)?;
+                return Ok(ImportTarget::Glob);
+            }
             let mut targets = Vec::new();
 
             while !self.check(&TokenKind::RBrace) {
@@ -243,25 +266,32 @@ impl<'a> Parser<'a> {
             self.advance();
             ImportTarget::Glob
         } else if self.check(&TokenKind::LBrace) {
-            // Group import: from module import {A, B, C}
+            // Group import: from module import {A, B, C} or {*}
             self.advance();
-            let mut items = Vec::new();
-            while !self.check(&TokenKind::RBrace) {
-                // Allow keywords as import names
-                let name = self.expect_path_segment()?;
-                if self.check(&TokenKind::As) {
-                    self.advance();
-                    let alias = self.expect_path_segment()?;
-                    items.push(ImportTarget::Aliased { name, alias });
-                } else {
-                    items.push(ImportTarget::Single(name));
+            // Check for {*} glob pattern
+            if self.check(&TokenKind::Star) {
+                self.advance();
+                self.expect(&TokenKind::RBrace)?;
+                ImportTarget::Glob
+            } else {
+                let mut items = Vec::new();
+                while !self.check(&TokenKind::RBrace) {
+                    // Allow keywords as import names
+                    let name = self.expect_path_segment()?;
+                    if self.check(&TokenKind::As) {
+                        self.advance();
+                        let alias = self.expect_path_segment()?;
+                        items.push(ImportTarget::Aliased { name, alias });
+                    } else {
+                        items.push(ImportTarget::Single(name));
+                    }
+                    if !self.check(&TokenKind::RBrace) {
+                        self.expect(&TokenKind::Comma)?;
+                    }
                 }
-                if !self.check(&TokenKind::RBrace) {
-                    self.expect(&TokenKind::Comma)?;
-                }
-            }
-            self.expect(&TokenKind::RBrace)?;
-            ImportTarget::Group(items)
+                self.expect(&TokenKind::RBrace)?;
+                ImportTarget::Group(items)
+            } // end of non-glob group
         } else {
             // Single import: from module import Name or from module import Name as Alias
             let name = self.expect_path_segment()?;
@@ -337,7 +367,13 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_mod(&mut self, visibility: Visibility, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mod)?;
-        let name = self.expect_identifier()?;
+        // Support dotted module paths: mod rules.helpers
+        let mut name = self.expect_identifier()?;
+        while self.check(&TokenKind::Dot) {
+            self.advance();
+            let segment = self.expect_path_segment()?;
+            name = format!("{}.{}", name, segment);
+        }
 
         // Check for inline module body
         let body = if self.check(&TokenKind::Colon) {
@@ -400,6 +436,23 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_export_use(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Export)?;
+
+        // Handle bare `export` (no arguments) - used in conditional compilation blocks
+        if self.check(&TokenKind::Newline)
+            || self.check(&TokenKind::Dedent)
+            || self.is_at_end()
+        {
+            return Ok(Node::ExportUseStmt(ExportUseStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                path: ModulePath::new(Vec::new()),
+                target: ImportTarget::Glob,
+            }));
+        }
 
         // Check for two syntaxes:
         // 1. export use X (traditional)
@@ -535,6 +588,60 @@ impl<'a> Parser<'a> {
                             ),
                             path: ModulePath::new(segments),
                             target: ImportTarget::Glob,
+                        }));
+                    }
+
+                    // Check for group: export module.{A, B}
+                    if self.check(&TokenKind::LBrace) {
+                        // Parse the group items
+                        self.advance(); // consume '{'
+
+                        // Check for {*} glob pattern
+                        if self.check(&TokenKind::Star) {
+                            self.advance();
+                            self.expect(&TokenKind::RBrace)?;
+                            return Ok(Node::ExportUseStmt(ExportUseStmt {
+                                span: Span::new(
+                                    start_span.start,
+                                    self.previous.span.end,
+                                    start_span.line,
+                                    start_span.column,
+                                ),
+                                path: ModulePath::new(segments),
+                                target: ImportTarget::Glob,
+                            }));
+                        }
+
+                        let mut targets = Vec::new();
+                        self.skip_newlines();
+                        while !self.check(&TokenKind::RBrace) {
+                            let item_name = self.expect_path_segment()?;
+                            let target = if self.check(&TokenKind::As) {
+                                self.advance();
+                                let alias = self.expect_path_segment()?;
+                                ImportTarget::Aliased { name: item_name, alias }
+                            } else {
+                                ImportTarget::Single(item_name)
+                            };
+                            targets.push(target);
+                            self.skip_newlines();
+                            if !self.check(&TokenKind::RBrace) {
+                                if self.check(&TokenKind::Comma) {
+                                    self.advance();
+                                    self.skip_newlines();
+                                }
+                            }
+                        }
+                        self.expect(&TokenKind::RBrace)?;
+                        return Ok(Node::ExportUseStmt(ExportUseStmt {
+                            span: Span::new(
+                                start_span.start,
+                                self.previous.span.end,
+                                start_span.line,
+                                start_span.column,
+                            ),
+                            path: ModulePath::new(segments),
+                            target: ImportTarget::Group(targets),
                         }));
                     }
 

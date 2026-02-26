@@ -14,7 +14,9 @@ impl<'a> Parser<'a> {
         // Parse the first pattern
         let first = self.parse_single_pattern()?;
 
-        // Check for or patterns (pattern1 | pattern2 | ...)
+        // Check for or patterns (pattern1 | pattern2 | ...) or comma-separated
+        // (pattern1, pattern2, ...). Both syntaxes produce Or patterns.
+        //
         // Support multi-line patterns where pipe continues on next line:
         //   case 'a' | 'b'
         //      | 'c' | 'd':
@@ -44,7 +46,53 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Comma-separated or-patterns: `case Int(_), Float(_), Bool(_):`
+        // The comma acts as pattern separator when followed by a pattern-start token
+        // (not a colon, which would indicate named arguments).
+        if self.check(&TokenKind::Comma) && self.is_comma_or_pattern_context() {
+            let mut patterns = vec![first];
+            while self.check(&TokenKind::Comma) {
+                self.advance();
+                patterns.push(self.parse_single_pattern()?);
+            }
+            return Ok(Pattern::Or(patterns));
+        }
+
         Ok(first)
+    }
+
+    /// Check if comma is being used as an or-pattern separator in a match arm.
+    /// Peek at the token after the comma to see if it starts a pattern.
+    fn is_comma_or_pattern_context(&mut self) -> bool {
+        // Peek at the token after the comma
+        let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+            let tok = self.lexer.next_token();
+            self.pending_tokens.push_back(tok.clone());
+            tok
+        });
+        matches!(
+            next.kind,
+            TokenKind::Identifier { .. }
+                | TokenKind::Underscore
+                | TokenKind::Integer(_)
+                | TokenKind::Float(_)
+                | TokenKind::String(_)
+                | TokenKind::RawString(_)
+                | TokenKind::FString(_)
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Nil
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::Mut
+                | TokenKind::Move
+                | TokenKind::New
+                | TokenKind::Old
+                | TokenKind::Type
+                | TokenKind::Val
+                | TokenKind::Var
+                | TokenKind::Minus
+        )
     }
 
     /// Skip newlines and indents for pattern continuation.
@@ -110,7 +158,8 @@ impl<'a> Parser<'a> {
             | TokenKind::Var
             | TokenKind::Gen
             | TokenKind::Kernel
-            | TokenKind::Impl => {
+            | TokenKind::Impl
+            | TokenKind::Exists => {
                 let name = match &self.current.kind {
                     TokenKind::New => "new".to_string(),
                     TokenKind::Old => "old".to_string(),
@@ -122,6 +171,7 @@ impl<'a> Parser<'a> {
                     TokenKind::Gen => "gen".to_string(),
                     TokenKind::Kernel => "kernel".to_string(),
                     TokenKind::Impl => "impl".to_string(),
+                    TokenKind::Exists => "exists".to_string(),
                     _ => unreachable!(),
                 };
                 self.advance();
@@ -383,6 +433,115 @@ impl<'a> Parser<'a> {
             TokenKind::Default => {
                 self.advance();
                 Ok(Pattern::Identifier("default".to_string()))
+            }
+            // Allow additional keywords as identifier patterns (used as enum variant names)
+            TokenKind::Loop => {
+                self.advance();
+                Ok(Pattern::Identifier("Loop".to_string()))
+            }
+            TokenKind::Vec => {
+                self.advance();
+                Ok(Pattern::Identifier("Vec".to_string()))
+            }
+            TokenKind::Unit => {
+                self.advance();
+                Ok(Pattern::Identifier("Unit".to_string()))
+            }
+            TokenKind::Sync => {
+                self.advance();
+                Ok(Pattern::Identifier("Sync".to_string()))
+            }
+            TokenKind::Async => {
+                self.advance();
+                Ok(Pattern::Identifier("Async".to_string()))
+            }
+            TokenKind::Slice => {
+                self.advance();
+                Ok(Pattern::Identifier("Slice".to_string()))
+            }
+            TokenKind::Tensor => {
+                self.advance();
+                Ok(Pattern::Identifier("Tensor".to_string()))
+            }
+            TokenKind::Grid => {
+                self.advance();
+                Ok(Pattern::Identifier("Grid".to_string()))
+            }
+            TokenKind::Flat => {
+                self.advance();
+                Ok(Pattern::Identifier("Flat".to_string()))
+            }
+            TokenKind::Shared => {
+                self.advance();
+                Ok(Pattern::Identifier("Shared".to_string()))
+            }
+            TokenKind::Gpu => {
+                self.advance();
+                Ok(Pattern::Identifier("Gpu".to_string()))
+            }
+            TokenKind::Extern => {
+                self.advance();
+                Ok(Pattern::Identifier("Extern".to_string()))
+            }
+            TokenKind::Static => {
+                self.advance();
+                Ok(Pattern::Identifier("Static".to_string()))
+            }
+            TokenKind::Const => {
+                self.advance();
+                Ok(Pattern::Identifier("Const".to_string()))
+            }
+            TokenKind::Super => {
+                self.advance();
+                Ok(Pattern::Identifier("super".to_string()))
+            }
+            TokenKind::Repr => {
+                self.advance();
+                Ok(Pattern::Identifier("Repr".to_string()))
+            }
+            TokenKind::Match => {
+                self.advance();
+                Ok(Pattern::Identifier("Match".to_string()))
+            }
+            TokenKind::Dyn => {
+                self.advance();
+                Ok(Pattern::Identifier("Dyn".to_string()))
+            }
+            TokenKind::Macro => {
+                self.advance();
+                Ok(Pattern::Identifier("Macro".to_string()))
+            }
+            TokenKind::Mixin => {
+                self.advance();
+                Ok(Pattern::Identifier("Mixin".to_string()))
+            }
+            TokenKind::Actor => {
+                self.advance();
+                Ok(Pattern::Identifier("Actor".to_string()))
+            }
+            TokenKind::Ghost => {
+                self.advance();
+                Ok(Pattern::Identifier("Ghost".to_string()))
+            }
+            TokenKind::Gen => {
+                self.advance();
+                Ok(Pattern::Identifier("Gen".to_string()))
+            }
+            TokenKind::Impl => {
+                self.advance();
+                Ok(Pattern::Identifier("Impl".to_string()))
+            }
+            TokenKind::Val => {
+                self.advance();
+                Ok(Pattern::Identifier("Val".to_string()))
+            }
+            TokenKind::Kernel => {
+                self.advance();
+                Ok(Pattern::Identifier("Kernel".to_string()))
+            }
+            TokenKind::Literal => {
+                self.advance();
+                Ok(Pattern::Identifier("Literal".to_string()))
             }
             _ => Err(ParseError::unexpected_token(
                 "pattern",

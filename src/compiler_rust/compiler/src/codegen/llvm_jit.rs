@@ -57,8 +57,8 @@ impl LlvmJitCompiler {
         let module = self.context.create_module(module_name);
 
         // Set up the LLVM backend for compilation
-        let backend = LlvmBackend::new(simple_common::target::Target::host())
-            .map_err(|e| format!("LLVM backend init: {}", e))?;
+        let backend =
+            LlvmBackend::new(simple_common::target::Target::host()).map_err(|e| format!("LLVM backend init: {}", e))?;
 
         // Use the backend to compile all functions into the module
         // Forward-declare all function signatures first
@@ -119,10 +119,7 @@ impl LlvmJitCompiler {
                     let func: fn(i64, i64, i64) -> i64 = std::mem::transmute(addr as *const u8);
                     Ok(func(args[0], args[1], args[2]))
                 }
-                n => Err(format!(
-                    "LLVM JIT: unsupported argument count {} for '{}'",
-                    n, name
-                )),
+                n => Err(format!("LLVM JIT: unsupported argument count {} for '{}'", n, name)),
             }
         }
     }
@@ -149,12 +146,24 @@ fn create_function_in_module(
 
     let map_type = |ty: &TypeId| -> BasicMetadataTypeEnum {
         match ty {
-            TypeId::Int | TypeId::I64 | TypeId::I32 | TypeId::I16 | TypeId::I8
-            | TypeId::U64 | TypeId::U32 | TypeId::U16 | TypeId::U8 | TypeId::Bool
+            TypeId::Int
+            | TypeId::I64
+            | TypeId::I32
+            | TypeId::I16
+            | TypeId::I8
+            | TypeId::U64
+            | TypeId::U32
+            | TypeId::U16
+            | TypeId::U8
+            | TypeId::Bool
             | TypeId::Char => i64_type.into(),
             TypeId::Float | TypeId::F64 | TypeId::F32 => f64_type.into(),
-            TypeId::String | TypeId::Array(_) | TypeId::Tuple(_) | TypeId::Struct(_)
-            | TypeId::Ref(_) | TypeId::MutRef(_) => ptr_type.into(),
+            TypeId::String
+            | TypeId::Array(_)
+            | TypeId::Tuple(_)
+            | TypeId::Struct(_)
+            | TypeId::Ref(_)
+            | TypeId::MutRef(_) => ptr_type.into(),
             _ => i64_type.into(),
         }
     };

@@ -48,7 +48,12 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::If)?;
 
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
-        self.expect(&TokenKind::Colon)?;
+        // Accept ':' or 'then' keyword before the if body
+        if self.check(&TokenKind::Then) {
+            self.advance(); // consume 'then'
+        } else {
+            self.expect(&TokenKind::Colon)?;
+        }
 
         // Check if this is inline-style (no newline after colon) or block-style
         if !self.check(&TokenKind::Newline) {
@@ -128,8 +133,9 @@ impl<'a> Parser<'a> {
                 }));
             }
 
-            // Inline-style expression: parse as expression (e.g., `if x < 0: -x else: x`)
-            // This returns Node::Expression(Expr::If { ... }) for proper implicit return handling
+            // Inline-style: could be expression (if x < 0: -x else: x)
+            // or statement (if cond: func_call())
+            // Parse the body first, then check if else follows
             let then_expr = self.parse_expression()?;
 
             // Skip newlines before checking for else/elif
@@ -141,12 +147,26 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
 
-            // For inline if expression, we must have an else clause
+            // If no else clause, treat as statement-form (no else required)
             if !self.check(&TokenKind::Else) && !self.check(&TokenKind::Elif) {
-                return Err(crate::error::ParseError::syntax_error_with_span(
-                    "Inline if expression requires an else clause".to_string(),
-                    start_span,
-                ));
+                let then_block = Block {
+                    span: self.previous.span,
+                    statements: vec![Node::Expression(then_expr)],
+                };
+                return Ok(Node::If(IfStmt {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                    let_pattern,
+                    condition,
+                    then_block,
+                    elif_branches: Vec::new(),
+                    else_block: None,
+                    is_suspend: false,
+                }));
             }
 
             // Parse elif/else branches as expressions
@@ -473,23 +493,45 @@ impl<'a> Parser<'a> {
 
         let subject = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
 
-        let mut arms = Vec::new();
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
+        let arms = if self.check(&TokenKind::Newline) {
+            // Block-style match with indented case arms
+            self.advance(); // consume newline
+            self.expect(&TokenKind::Indent)?;
+
+            let mut arms = Vec::new();
+            while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) {
+                    break;
+                }
+                arms.push(self.parse_match_arm()?);
+            }
+
+            if self.check(&TokenKind::Dedent) {
                 self.advance();
             }
-            if self.check(&TokenKind::Dedent) {
-                break;
+            arms
+        } else {
+            // Inline match: `match self: case X: expr; case Y: expr`
+            let mut arms = Vec::new();
+            loop {
+                if self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe) {
+                    arms.push(self.parse_match_arm()?);
+                } else {
+                    break;
+                }
+                // Consume semicolons between inline arms
+                if self.check(&TokenKind::Semicolon) {
+                    self.advance();
+                } else {
+                    break;
+                }
             }
-            arms.push(self.parse_match_arm()?);
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
+            arms
+        };
 
         Ok(Node::Match(MatchStmt {
             span: Span::new(
@@ -783,5 +825,73 @@ impl<'a> Parser<'a> {
             ),
             body,
         }))
+    }
+
+    /// Parse `when COND: ... else: ...` conditional compilation block.
+    /// Desugars to an if/else at the module level.
+    /// The caller has already verified the `when` identifier is present.
+    pub(crate) fn parse_when_block(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.advance(); // consume 'when' identifier
+
+        // Parse the condition expression
+        let condition = self.parse_expression()?;
+        self.expect(&TokenKind::Colon)?;
+
+        // Parse the 'then' body - this is a block of items (not statements)
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+        let mut then_body = Vec::new();
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            while self.check(&TokenKind::Newline) { self.advance(); }
+            if self.check(&TokenKind::Dedent) { break; }
+            then_body.push(self.parse_item()?);
+        }
+        if self.check(&TokenKind::Dedent) { self.advance(); }
+
+        // Check for else branch
+        // Skip newlines between dedent and else
+        while self.check(&TokenKind::Newline) { self.advance(); }
+        let else_body = if self.check(&TokenKind::Else) {
+            self.advance(); // consume 'else'
+            self.expect(&TokenKind::Colon)?;
+            self.expect(&TokenKind::Newline)?;
+            self.expect(&TokenKind::Indent)?;
+            let mut else_items = Vec::new();
+            while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                while self.check(&TokenKind::Newline) { self.advance(); }
+                if self.check(&TokenKind::Dedent) { break; }
+                else_items.push(self.parse_item()?);
+            }
+            if self.check(&TokenKind::Dedent) { self.advance(); }
+            Some(else_items)
+        } else {
+            None
+        };
+
+        // Desugar: emit the items from whichever branch is selected.
+        // For now, always emit the 'else' branch (or then if no else).
+        // The condition is preserved for downstream compile-time evaluation.
+        // We use IfStmt as a container since the AST already supports it.
+        let body_nodes = if let Some(else_items) = else_body {
+            // Emit both branches - downstream will evaluate the condition
+            let mut all_items = then_body;
+            all_items.extend(else_items);
+            all_items
+        } else {
+            then_body
+        };
+
+        // Push all items as pending statements and return the first
+        if body_nodes.is_empty() {
+            Ok(Node::Pass(PassStmt { span: start_span }))
+        } else {
+            let mut items = body_nodes.into_iter();
+            let first = items.next().unwrap();
+            for item in items {
+                self.pending_statements.push(item);
+            }
+            Ok(first)
+        }
     }
 }

@@ -55,6 +55,12 @@ impl Lowerer {
                         }
                     }
                     // Variant not found
+                    if self.lenient_types {
+                        return Ok(HirExpr {
+                            kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                            ty: type_id,
+                        });
+                    }
                     return Err(LowerError::Unsupported(format!(
                         "enum '{}' has no variant named '{}'",
                         recv_name, field

@@ -11,9 +11,37 @@ use simple_dependency_tracker::{
     visibility::Visibility as TrackerVisibility,
 };
 use simple_parser::ast::{CommonUseStmt, ImportTarget, ModulePath, Visibility};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{codes, CompileError, ErrorContext};
+
+/// Find a numbered directory matching the pattern `NN.name` or `NNN.name`.
+///
+/// The Simple compiler organizes source into numbered layers like:
+///   src/compiler/00.common/
+///   src/compiler/10.frontend/
+///   src/compiler/70.backend/
+///
+/// When resolving `compiler.frontend`, this function finds `10.frontend` for segment `frontend`.
+fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Match pattern: 1-3 digits, dot, then the segment name
+        if let Some(after_dot) = name_str.find('.') {
+            let prefix = &name_str[..after_dot];
+            let suffix = &name_str[after_dot + 1..];
+            if suffix == segment && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
+                let path = parent.join(&*name_str);
+                if path.is_dir() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
 
 impl ModuleResolver {
     /// Resolve a module path to a filesystem path
@@ -50,28 +78,56 @@ impl ModuleResolver {
         match self.resolve_from_base(&base_dir, remaining, path) {
             Ok(resolved) => Ok(resolved),
             Err(err) => {
-                // If relative resolution failed and stdlib is available, try stdlib
+                // If relative resolution failed, try alternative resolution strategies
+
+                // Strategy 1: Try stdlib
                 if segments[0] != "crate" {
                     if let Some(ref stdlib_root) = self.stdlib_root {
-                        // If path starts with "std_lib", strip that prefix since stdlib_root
-                        // already points to the std_lib directory
                         let stdlib_segments = if !segments.is_empty() && segments[0] == "std_lib" {
+                            &segments[1..]
+                        } else if !segments.is_empty() && (segments[0] == "std" || segments[0] == "lib") {
+                            // std.X and lib.X both resolve from stdlib
                             &segments[1..]
                         } else {
                             segments
                         };
 
                         if !stdlib_segments.is_empty() {
-                            match self.resolve_from_base(stdlib_root, stdlib_segments, path) {
-                                Ok(resolved) => return Ok(resolved),
-                                Err(_) => {
-                                    // Stdlib resolution also failed, return original error
-                                    return Err(err);
-                                }
+                            if let Ok(resolved) = self.resolve_from_base(stdlib_root, stdlib_segments, path) {
+                                return Ok(resolved);
                             }
                         }
                     }
                 }
+
+                // Strategy 2: Try "compiler.*" → source_root/compiler/ with numbered prefix support
+                if segments[0] == "compiler" && segments.len() > 1 {
+                    let compiler_dir = self.source_root.join("compiler");
+                    if compiler_dir.is_dir() {
+                        if let Ok(resolved) = self.resolve_from_base(&compiler_dir, &segments[1..], path) {
+                            return Ok(resolved);
+                        }
+                    }
+                    // Also try project_root/src/compiler/
+                    let alt_compiler_dir = self.project_root.join("src").join("compiler");
+                    if alt_compiler_dir.is_dir() {
+                        if let Ok(resolved) = self.resolve_from_base(&alt_compiler_dir, &segments[1..], path) {
+                            return Ok(resolved);
+                        }
+                    }
+                }
+
+                // Strategy 3: Try numbered directory at source root level
+                if segments[0] != "crate" && !segments.is_empty() {
+                    if let Some(numbered) = find_numbered_dir(&self.source_root, &segments[0]) {
+                        if segments.len() > 1 {
+                            if let Ok(resolved) = self.resolve_from_base(&numbered, &segments[1..], path) {
+                                return Ok(resolved);
+                            }
+                        }
+                    }
+                }
+
                 Err(err)
             }
         }
@@ -98,17 +154,18 @@ impl ModuleResolver {
 
         // Navigate through all but the last segment
         for segment in &segments[..segments.len() - 1] {
-            current = current.join(segment);
+            let direct = current.join(segment);
 
-            // Check for __init__.spl in each directory
-            let init_path = current.join("__init__.spl");
-            if init_path.exists() && init_path.is_file() {
-                // Directory module - continue navigation
-            } else if !current.exists() {
+            if direct.exists() {
+                current = direct;
+            } else if let Some(numbered) = find_numbered_dir(&current, segment) {
+                // Found numbered directory (e.g., 10.frontend for segment "frontend")
+                current = numbered;
+            } else {
                 // E1034 - Unresolved Import
                 let ctx = ErrorContext::new()
                     .with_code(codes::UNRESOLVED_IMPORT)
-                    .with_help(format!("check that the module exists at {:?}", current))
+                    .with_help(format!("check that the module exists at {:?}", direct))
                     .with_note("ensure the module file or __init__.spl exists");
 
                 return Err(CompileError::semantic_with_context(
@@ -153,6 +210,30 @@ impl ModuleResolver {
                 is_directory: false,
                 manifest: None,
             });
+        }
+
+        // Try numbered directory fallback for the last segment
+        // e.g., "backend" → "70.backend/__init__.spl" or "70.backend/backend.spl"
+        if let Some(numbered_dir) = find_numbered_dir(&current, last) {
+            let numbered_init = numbered_dir.join("__init__.spl");
+            if numbered_init.exists() && numbered_init.is_file() {
+                return Ok(ResolvedModule {
+                    path: numbered_init,
+                    module_path: original_path.clone(),
+                    is_directory: true,
+                    manifest: None,
+                });
+            }
+            // Try NN.name/name.spl (e.g., 70.backend/backend.spl)
+            let numbered_file = numbered_dir.join(format!("{}.spl", last));
+            if numbered_file.exists() && numbered_file.is_file() {
+                return Ok(ResolvedModule {
+                    path: numbered_file,
+                    module_path: original_path.clone(),
+                    is_directory: false,
+                    manifest: None,
+                });
+            }
         }
 
         // E1034 - Unresolved Import

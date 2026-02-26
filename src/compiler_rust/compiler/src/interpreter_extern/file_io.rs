@@ -613,11 +613,7 @@ pub fn rt_file_lock(args: &[Value]) -> Result<Value, CompileError> {
 
     loop {
         // Try to create lock file exclusively
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
+        match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
             Ok(mut f) => {
                 let _ = f.write_all(lock_content.as_bytes());
                 // Register handle
@@ -681,7 +677,9 @@ pub fn rt_getpid(_args: &[Value]) -> Result<Value, CompileError> {
 /// Check if a process with given PID exists
 pub fn rt_process_exists(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::semantic("rt_process_exists() expects 1 argument (pid: i64)"));
+        return Err(CompileError::semantic(
+            "rt_process_exists() expects 1 argument (pid: i64)",
+        ));
     }
 
     let pid = match &args[0] {
@@ -724,9 +722,11 @@ fn get_hostname() -> String {
 
 /// Get number of CPU cores
 pub fn rt_system_cpu_count(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(std::thread::available_parallelism()
-        .map(|n| n.get() as i64)
-        .unwrap_or(1)))
+    Ok(Value::Int(
+        std::thread::available_parallelism()
+            .map(|n| n.get() as i64)
+            .unwrap_or(1),
+    ))
 }
 
 /// Get monotonic time in milliseconds
