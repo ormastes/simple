@@ -1,0 +1,196 @@
+# Example: Regenerate Type Inference Verification Module
+#
+# This script demonstrates how to use the auto-generation system
+# to regenerate Lean scaffolding for the type_inference_compile verification module.
+#
+# Usage: simple run regenerate_type_inference.spl
+#
+# Output files:
+#   verification/type_inference_compile/src/Generated_Types.lean
+#   verification/type_inference_compile/src/Generated_Lookups.lean
+#   verification/type_inference_compile/src/Generated_BEq.lean
+#   verification/type_inference_compile/src/Generated_Theorems.lean
+
+use verification.lean.auto_gen as auto_gen
+use verification.lean.structure_gen as structure_gen
+use verification.lean.lookup_gen as lookup_gen
+use verification.lean.theorem_gen as theorem_gen
+
+# Define the output directory
+val OUTPUT_DIR = "verification/type_inference_compile/src"
+val MODULE_NAME = "TypeInferenceCompile"
+
+# Create the auto-generator builder
+fn create_builder() -> auto_gen.AutoGenBuilder:
+    var builder = auto_gen.AutoGenBuilder.new(OUTPUT_DIR, MODULE_NAME)
+
+    # Add imports
+    builder = builder.add_import("Mathlib.Data.List.Basic")
+
+    # ============================================================
+    # Type Definitions (from Classes.lean)
+    # ============================================================
+
+    # TyVar - type variables for polymorphism
+    builder = builder.add_enum("TyVar", [
+        ("Mk", ["Nat"])  # mk (id : Nat)
+    ])
+
+    # Ty - types in the class system
+    builder = builder.add_enum("Ty", [
+        ("Int", []),
+        ("Bool", []),
+        ("Str", []),
+        ("Var", ["TyVar"]),
+        ("Named", ["String"]),
+        ("Arrow", ["List Ty", "Ty"]),
+        ("Generic", ["String", "List Ty"])
+    ])
+
+    # FieldDef - field definition in a class
+    builder = builder.add_class("FieldDef", [
+        ("name", "text"),
+        ("ty", "Ty")
+    ])
+
+    # MethodDef - method definition in a class
+    builder = builder.add_class("MethodDef", [
+        ("name", "text"),
+        ("self_ty", "Ty"),
+        ("params", "List Ty"),
+        ("ret", "Ty")
+    ])
+
+    # ClassDef - class definition
+    builder = builder.add_class("ClassDef", [
+        ("name", "text"),
+        ("type_params", "List TyVar"),
+        ("fields", "List FieldDef"),
+        ("methods", "List MethodDef"),
+        ("parent", "Option String")
+    ])
+
+    # ============================================================
+    # Trait Definitions (from Traits.lean)
+    # ============================================================
+
+    # AssocType - associated type binding
+    builder = builder.add_class("AssocType", [
+        ("name", "text"),
+        ("ty", "Ty")
+    ])
+
+    # TraitMethod - method signature in a trait
+    builder = builder.add_class("TraitMethod", [
+        ("name", "text"),
+        ("self_ty", "Ty"),
+        ("params", "List Ty"),
+        ("ret", "Ty")
+    ])
+
+    # TraitDef - trait definition
+    builder = builder.add_class("TraitDef", [
+        ("name", "text"),
+        ("type_params", "List TyVar"),
+        ("methods", "List TraitMethod"),
+        ("assoc_types", "List String"),
+        ("parent_traits", "List String")
+    ])
+
+    # TraitImpl - trait implementation
+    builder = builder.add_class("TraitImpl", [
+        ("trait_name", "text"),
+        ("for_type", "Ty"),
+        ("type_params", "List TyVar"),
+        ("assoc_type_bindings", "List AssocType"),
+        ("method_impls", "List (String, Ty)"),
+        ("where_clause", "List (Ty, String)")
+    ])
+
+    # InterfaceBinding - for static polymorphism
+    builder = builder.add_class("InterfaceBinding", [
+        ("trait_name", "text"),
+        ("impl_type", "Ty")
+    ])
+
+    # DispatchMode - static vs dynamic dispatch
+    builder = builder.add_enum("DispatchMode", [
+        ("Static", []),
+        ("Dynamic", [])
+    ])
+
+    # ============================================================
+    # Generic Types (for instantiation)
+    # ============================================================
+
+    builder = builder.add_generic("Class", ["fields", "methods"])
+    builder = builder.add_generic("Trait", ["methods"])
+
+    # ============================================================
+    # Deterministic Functions
+    # ============================================================
+
+    # Field access
+    builder = builder.add_deterministic("inferFieldAccess",
+        [("env", "ClassEnv"), ("objTy", "Ty"), ("fieldName", "String")],
+        "Ty")
+
+    # Method call
+    builder = builder.add_deterministic("inferMethodCall",
+        [("env", "ClassEnv"), ("objTy", "Ty"), ("methodName", "String"), ("argTys", "List Ty")],
+        "Ty")
+
+    # Constructor
+    builder = builder.add_deterministic("checkConstructor",
+        [("env", "ClassEnv"), ("className", "String"), ("fieldAssigns", "List (String, Ty)")],
+        "Ty")
+
+    # Trait method
+    builder = builder.add_deterministic("inferTraitMethodCall",
+        [("env", "TraitEnv"), ("registry", "ImplRegistry"), ("traitName", "String"),
+         ("methodName", "String"), ("selfTy", "Ty"), ("argTys", "List Ty")],
+        "Ty")
+
+    # Associated type resolution
+    builder = builder.add_deterministic("resolveAssocType",
+        [("impl", "TraitImpl"), ("assocName", "String")],
+        "Ty")
+
+    # Binding resolution
+    builder = builder.add_deterministic("lookupBinding",
+        [("registry", "BindingRegistry"), ("traitName", "String")],
+        "InterfaceBinding")
+
+    builder
+
+# Main entry point
+fn main():
+    print "Regenerating Lean scaffolding for type_inference_compile..."
+    print "Output directory: {OUTPUT_DIR}"
+    print ""
+
+    val builder = create_builder()
+
+    # Generate all files
+    val files = builder.generate()
+
+    print "Generated {files.len()} files:"
+    for (name, _) in files:
+        print "  - {name}"
+
+    # Write files to disk
+    val success = builder.write()
+
+    if success:
+        print ""
+        print "Successfully wrote generated files."
+        print ""
+        print "Next steps:"
+        print "  1. Review generated files in {OUTPUT_DIR}/"
+        print "  2. Run: cd verification/type_inference_compile && lake build"
+        print "  3. Verify no errors"
+    else:
+        print "Error: Failed to write generated files."
+
+# Run main
+main()

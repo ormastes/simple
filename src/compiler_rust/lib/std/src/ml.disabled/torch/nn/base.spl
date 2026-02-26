@@ -1,0 +1,410 @@
+# Neural Network Base Classes
+#
+# Provides foundational classes for building neural network modules:
+# - Module: Base class for all neural network modules
+# - Sequential: Container for chaining layers sequentially
+# - ModuleList: List container for storing multiple modules
+#
+# These classes form the core abstraction layer for building custom models.
+
+use ml.torch.tensor_class.{Tensor}
+
+
+# ============================================================================
+# Module Base Class
+# ============================================================================
+
+class Module:
+    """Base class for all neural network modules.
+
+    All layer classes should inherit from this and implement forward().
+
+    Example:
+        ```simple
+        class MyLayer(nn.Module):
+            fn __init__(in_size, out_size):
+                super().__init__()
+                self.weight = torch.randn([out_size, in_size])
+
+            fn forward(x):
+                return x @ self.weight.transpose(0, 1)
+        ```
+    """
+    training: bool
+
+    fn __init__():
+        """Initialize module in training mode."""
+        self.training = true
+
+    fn forward(x: Tensor) -> Tensor:
+        """Forward pass (must be overridden by subclasses).
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Output tensor
+        """
+        panic("forward() must be implemented by subclass")
+
+    fn __call__(x: Tensor) -> Tensor:
+        """Call forward pass."""
+        return self.forward(x)
+
+    me train(mode: bool = true):
+        """Set module to training mode.
+
+        Args:
+            mode: True for training, False for evaluation
+        """
+        self.training = mode
+
+    fn eval():
+        """Set module to evaluation mode."""
+        self.train(false)
+
+    fn to(device: torch.Device) -> Module:
+        """Move module to device (override in subclasses).
+
+        Args:
+            device: Target device
+
+        Returns:
+            Self for chaining
+        """
+        return self
+
+    fn parameters() -> [Tensor]:
+        """Get all trainable parameters.
+
+        Returns:
+            List of parameter tensors
+
+        Example:
+            ```simple
+            val model = MyModel()
+            val params = model.parameters()
+            val optimizer = optim.Adam(params, lr=0.001)
+            ```
+
+        Note:
+            Subclasses should override this to return their actual parameters.
+            Default implementation returns empty list.
+        """
+        return []
+
+    fn named_parameters() -> {str: Tensor}:
+        """Get parameters with their names.
+
+        Returns:
+            Dictionary mapping parameter names to tensors
+
+        Example:
+            ```simple
+            val model = MyModel()
+            for name, param in model.named_parameters().items():
+                print("{name}: {param.shape}")
+            ```
+
+        Note:
+            Subclasses should override this to return their actual named parameters.
+            Default implementation returns empty dict.
+        """
+        return {}
+
+    fn num_parameters(trainable_only: bool = true) -> i64:
+        """Count total number of parameters.
+
+        Args:
+            trainable_only: If True, only count trainable parameters (default: True)
+
+        Returns:
+            Total parameter count
+
+        Example:
+            ```simple
+            val model = MyModel()
+            print("Total parameters: {model.num_parameters()}")
+            print("All parameters: {model.num_parameters(trainable_only=false)}")
+            ```
+        """
+        var total = 0
+
+        for param in self.parameters():
+            if trainable_only:
+                if param.requires_grad:
+                    total = total + param.numel()
+            else:
+                total = total + param.numel()
+
+        return total
+
+    fn freeze():
+        """Freeze all parameters (disable gradient computation).
+
+        Useful for transfer learning when you want to keep pretrained weights fixed.
+
+        Example:
+            ```simple
+            # Freeze pretrained backbone
+            val backbone = PretrainedModel()
+            backbone.freeze()
+
+            # Only train the new classifier head
+            val classifier = nn.Linear(512, 10)
+            ```
+        """
+        for param in self.parameters():
+            param.requires_grad = false
+
+    fn unfreeze():
+        """Unfreeze all parameters (enable gradient computation).
+
+        Example:
+            ```simple
+            # First freeze for warmup
+            model.freeze()
+            train_warmup()
+
+            # Then unfreeze for fine-tuning
+            model.unfreeze()
+            train_full()
+            ```
+        """
+        for param in self.parameters():
+            param.requires_grad = true
+
+    fn state_dict() -> {str: Tensor}:
+        """Get module state dictionary for saving.
+
+        Returns:
+            Dictionary of parameter names to tensors
+
+        Example:
+            ```simple
+            # Save model
+            val model = MyModel()
+            val state = model.state_dict()
+            torch.save(state, "model.pth")
+
+            # Load model
+            val new_model = MyModel()
+            val state = torch.load("model.pth")
+            new_model.load_state_dict(state)
+            ```
+
+        Note:
+            Default implementation uses named_parameters().
+            Override for custom state handling.
+        """
+        return self.named_parameters()
+
+    fn load_state_dict(state: {str: Tensor}):
+        """Load module state from dictionary.
+
+        Args:
+            state: Dictionary of parameter names to tensors
+
+        Example:
+            ```simple
+            val model = MyModel()
+            val checkpoint = torch.load("checkpoint.pth")
+            model.load_state_dict(checkpoint["model_state"])
+            ```
+
+        Note:
+            Subclasses should override this to properly load their parameters.
+            Default implementation is a no-op.
+        """
+        # Default implementation - subclasses should override
+        pass
+
+
+# ============================================================================
+# FFI Module Base Class
+# ============================================================================
+
+class FFIModule(Module):
+    """Base class for modules with native FFI handles.
+
+    Subclasses should:
+    1. Set `module_handle` in __init__ using their FFI creation function
+    2. Override forward() to call their FFI forward function
+    3. NOT override __del__() - this class handles cleanup
+
+    This consolidates the common pattern of:
+    - Handle validation (panic on 0 handle)
+    - Resource cleanup via @rt_torch_module_free
+
+    Example:
+        ```simple
+        class MyNativeLayer(FFIModule):
+            fn __init__(config):
+                super().__init__()
+                self.module_handle = @rt_my_layer_new(config)
+                self.validate_handle("MyNativeLayer")
+
+            fn forward(x: Tensor) -> Tensor:
+                val h = @rt_my_layer_forward(self.module_handle, x.handle)
+                return self.wrap_output(h, "MyNativeLayer forward")
+        ```
+    """
+    module_handle: u64
+
+    fn __init__():
+        """Initialize FFI module."""
+        super().__init__()
+        self.module_handle = 0
+
+    fn __del__():
+        """Free native resources."""
+        if self.module_handle != 0:
+            val _ = @rt_torch_module_free(self.module_handle)
+
+    fn validate_handle(layer_name: str):
+        """Validate handle is non-zero after FFI creation.
+
+        Args:
+            layer_name: Name of layer for error message
+
+        Panics if handle is 0.
+        """
+        if self.module_handle == 0:
+            panic("Failed to create {layer_name}")
+
+    fn wrap_output(handle: u64, op_name: str) -> Tensor:
+        """Wrap FFI output handle as Tensor, validating result.
+
+        Args:
+            handle: Output handle from FFI call
+            op_name: Operation name for error message
+
+        Returns:
+            Tensor wrapping the handle
+
+        Panics if handle is 0.
+        """
+        if handle == 0:
+            panic("{op_name} failed")
+        return Tensor(handle)
+
+
+# ============================================================================
+# Sequential Container
+# ============================================================================
+
+class Sequential(Module):
+    """Sequential container for chaining layers.
+
+    Applies layers in order, passing output of each as input to next.
+
+    Example:
+        ```simple
+        val model = nn.Sequential([
+            nn.Linear(784, 128),
+            nn.ReLU(),
+            nn.Linear(128, 10)
+        ])
+
+        val output = model(input)
+        ```
+    """
+    layers: [Module]
+
+    fn __init__(layers: [Module]):
+        """Initialize sequential container.
+
+        Args:
+            layers: List of modules to chain
+        """
+        super().__init__()
+        self.layers = layers
+
+    fn forward(x: Tensor) -> Tensor:
+        """Apply all layers in sequence.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Output after all layers
+        """
+        var out = x
+        for layer in self.layers:
+            out = layer(out)
+        return out
+
+    fn to(device: torch.Device) -> Sequential:
+        """Move all layers to device.
+
+        Args:
+            device: Target device
+
+        Returns:
+            Self for chaining
+        """
+        for layer in self.layers:
+            layer.to(device)
+        return self
+
+
+# ============================================================================
+# ModuleList Container
+# ============================================================================
+
+class ModuleList:
+    """Container for storing a list of modules.
+
+    Useful for building dynamic networks or networks with repeated sub-modules.
+
+    Example:
+        ```simple
+        val layers = nn.ModuleList([
+            nn.Linear(10, 20),
+            nn.Linear(20, 30),
+            nn.Linear(30, 10)
+        ])
+
+        # Apply all layers sequentially
+        val x = input
+        for layer in layers:
+            x = nn.relu(layer(x))
+        ```
+    """
+    modules: [Module]
+
+    fn __init__(modules: [Module] = []):
+        """Initialize module list.
+
+        Args:
+            modules: List of modules to store (default: empty)
+        """
+        self.modules = modules
+
+    fn append(module: Module):
+        """Add module to the list.
+
+        Args:
+            module: Module to add
+        """
+        self.modules.append(module)
+
+    fn __len__() -> i32:
+        """Get number of modules.
+
+        Returns:
+            Number of modules in list
+        """
+        return self.modules.len() as i32
+
+    fn __getitem__(index: i32) -> Module:
+        """Get module by index.
+
+        Args:
+            index: Index of module
+
+        Returns:
+            Module at index
+        """
+        return self.modules[index as usize]
+

@@ -1,0 +1,414 @@
+# Physics Collision - Collision Detection and Response
+#
+# Collision detection and response for rigid bodies with material properties.
+#
+# ## Modules
+# - `aabb`: Axis-Aligned Bounding Box for broad-phase collision
+# - `obb`: Oriented Bounding Box for narrow-phase collision
+# - `shapes`: Collision shapes (Sphere, Box, Capsule)
+# - `materials`: Physical material properties (friction, restitution, density)
+# - `contact`: Collision contact information and resolution
+# - `detector`: Collision detection algorithms
+# - `ray`: Ray casting and intersection tests
+# - `spatial_hash`: Spatial hashing for broad-phase optimization
+# - `gjk`: Gilbert-Johnson-Keerthi convex collision detection
+# - `continuous`: Continuous collision detection (CCD)
+# - `triangle_mesh`: Triangle mesh collision detection
+#
+# ## Classes
+# - `AABB`: Axis-Aligned Bounding Box
+# - `OBB`: Oriented Bounding Box
+# - `Shape`: Collision shapes (Sphere, Box, Capsule)
+# - `Capsule`: Capsule shape for character controllers
+# - `SphereShape`: Sphere shape for collision detection
+# - `BoxShape`: Box shape for collision detection
+# - `Material`: Physical material properties (friction, restitution, density)
+# - `Contact`: Collision contact information
+# - `ContactResolver`: Impulse-based collision response
+# - `Detector`: Collision detection algorithms (sphere-sphere, AABB-AABB, sphere-AABB, OBB-OBB)
+# - `Ray`: Ray for ray casting
+# - `RayHit`: Ray intersection result
+# - `SpatialHash`: Spatial hash grid for broad-phase collision
+# - `SpatialHashGrid`: Grid-based spatial partitioning
+# - `ConvexHull`: Convex hull for GJK algorithm
+# - `GJK`: Gilbert-Johnson-Keerthi algorithm
+# - `GJKSimplex`: GJK simplex structure
+# - `ContinuousCollisionQuery`: Continuous collision query
+# - `CCDResult`: Continuous collision detection result
+# - `TriangleMesh`: Triangle mesh for collision
+# - `EPATriangle`: EPA triangle for penetration depth
+# - `EPAResult`: EPA result
+#
+# ## Example
+# ```simple
+# import physics.collision as collision
+# import physics.dynamics as dynamics
+# import physics.core as core
+#
+# # AABB collision
+# val aabb1 = collision.AABB.from_center_size(core.Vector3(0, 0, 0), core.Vector3(1, 1, 1))
+# val aabb2 = collision.AABB.from_center_size(core.Vector3(0.5, 0, 0), core.Vector3(1, 1, 1))
+# if aabb1.intersects(aabb2):
+#     print("AABB collision detected!")
+#
+# # OBB collision (with rotation)
+# val box1 = collision.OBB(core.Vector3(0, 0, 0), core.Vector3(1, 1, 1))
+# val box2 = collision.OBB(
+#     core.Vector3(1.5, 0, 0),
+#     core.Vector3(1, 1, 1),
+#     core.Quaternion.from_axis_angle(core.Vector3(0, 1, 0), 0.785)  # 45 degrees
+# )
+# if collision.Detector.box_box(box1, box2):
+#     print("OBB collision detected!")
+#
+# # Collision response with materials
+# val body1 = dynamics.RigidBody(mass=1.0, position=core.Vector3(0, 0, 0))
+# val body2 = dynamics.RigidBody(mass=1.0, position=core.Vector3(1, 0, 0))
+# val rubber = collision.Material.rubber()
+# val metal = collision.Material.metal()
+# val contact = collision.Contact(
+#     point=core.Vector3(0.5, 0, 0),
+#     normal=core.Vector3(1, 0, 0),
+#     penetration=0.1,
+#     body1_index=0,
+#     body2_index=1
+# )
+# collision.ContactResolver.resolve_contact(body1, body2, contact, rubber, metal)
+# ```
+
+# Re-export all public symbols from submodules
+export AABB, OBB, Capsule, Shape, Material, Detector, Contact, ContactResolver
+export Ray, RayHit
+export SpatialHash, SpatialHashGrid, ConvexHull
+export GJK, GJKSimplex, SphereShape, BoxShape
+export gjk_sphere_support, gjk_box_support, gjk_test, gjk_test_with_stats
+export ContinuousCollisionQuery, CCDResult, continuous_collision_detection
+export EPATriangle, EPAResult, epa_penetration_depth
+export TriangleMesh, triangle_sphere_collision, mesh_sphere_collision
+export SphereCastResult, sphere_cast
+export Heightfield, heightfield_sphere_collision
+export CompoundShape
+export BVHNode, BVH
+
+# Import dependencies
+use ..core as core
+use ..dynamics as dynamics
+
+# Import from submodules
+use .aabb as aabb_mod
+# Selective imports from .aabb: AABB
+use .obb as obb_mod
+# Selective imports from .obb: OBB
+use .shapes as shapes_mod
+# Selective imports from .shapes: Capsule, Shape, SphereShape, BoxShape
+use .materials as materials_mod
+# Selective imports from .materials: Material
+use .contact as contact_mod
+# Selective imports from .contact: Contact, ContactResolver
+use .detector as detector_mod
+# Selective imports from .detector: Detector
+use .ray as ray_mod
+# Selective imports from .ray: Ray, RayHit
+use .spatial_hash as spatial_hash_mod
+# Selective imports from .spatial_hash: SpatialHash, ConvexHull, SpatialHashGrid
+use .gjk as gjk_mod
+# Selective imports from .gjk: GJK, GJKSimplex, gjk_sphere_support, gjk_box_support, gjk_test, gjk_test_with_stats, EPATriangle, EPAResult, epa_penetration_depth
+
+use .continuous as continuous_mod
+# Selective imports from .continuous: ContinuousCollisionQuery, CCDResult, continuous_collision_detection
+use .triangle_mesh as triangle_mesh_mod
+# Selective imports from .triangle_mesh: TriangleMesh, triangle_sphere_collision, mesh_sphere_collision
+# Advanced collision features (exported but implementations may be in progress)
+# These are exported to maintain API compatibility but may not yet have full implementations
+
+# SphereCastResult and sphere_cast - Advanced ray casting
+class SphereCastResult:
+    """Result of a sphere cast operation.
+
+    Attributes:
+        hit: Whether sphere cast hit something
+        distance: Distance traveled before hit
+        point: Hit point in 3D space
+        normal: Surface normal at hit point
+    """
+    hit: bool
+    distance: f64
+    point: core.Vector3
+    normal: core.Vector3
+    fn __init__(hit: bool, distance: f64, point: core.Vector3, normal: core.Vector3):
+        self.hit = hit
+        self.distance = distance
+        self.point = point
+        self.normal = normal
+
+fn sphere_cast(start: core.Vector3, direction: core.Vector3, radius: f64, max_distance: f64) -> SphereCastResult:
+    """Cast a sphere along a direction and detect collisions.
+
+    Args:
+        start: Starting position
+        direction: Cast direction (will be normalized)
+        radius: Sphere radius
+        max_distance: Maximum distance to cast
+
+    Returns:
+        SphereCastResult with hit information
+    """
+    """Sphere cast implementation using swept sphere algorithm.
+
+    Tests a moving sphere against static geometry by computing
+    the closest point of approach along the ray.
+    """
+    val dir_normalized = direction.normalize()
+
+    # For each collidable object in the scene, test intersection
+    # This is a simplified version - real implementation would
+    # query a spatial data structure (BVH, octree, etc.)
+
+    var closest_hit = SphereCastResult(
+        hit=false,
+        distance=max_distance,
+        point=start.add(dir_normalized.scale(max_distance)),
+        normal=core.Vector3(0, 1, 0)
+    )
+
+    # Ground plane test (y = 0)
+    if dir_normalized.y < 0:
+        # Ray going downward, check ground intersection
+        val ground_dist = (radius - start.y) / (-dir_normalized.y)
+        if ground_dist >= 0 and ground_dist < closest_hit.distance:
+            closest_hit = SphereCastResult(
+                hit=true,
+                distance=ground_dist,
+                point=core.Vector3(
+                    start.x + dir_normalized.x * ground_dist,
+                    radius,
+                    start.z + dir_normalized.z * ground_dist
+                ),
+                normal=core.Vector3(0, 1, 0)
+            )
+
+    return closest_hit
+
+# Heightfield - Terrain collision
+class Heightfield:
+    """Heightfield terrain for collision detection.
+
+    Attributes:
+        width: Width of heightfield
+        depth: Depth of heightfield
+        heights: 2D array of height values
+        scale: Scale factor for heights
+    """
+    width: i64
+    depth: i64
+    heights: [[f64]]
+    scale: f64
+    fn __init__(width: i64, depth: i64, heights: [[f64]], scale: f64 = 1.0):
+        self.width = width
+        self.depth = depth
+        self.heights = heights
+        self.scale = scale
+
+fn heightfield_sphere_collision(heightfield: Heightfield, sphere_pos: core.Vector3, sphere_radius: f64) -> bool:
+    """Test collision between heightfield and sphere.
+
+    Args:
+        heightfield: Heightfield terrain
+        sphere_pos: Sphere center
+        sphere_radius: Sphere radius
+
+    Returns:
+        True if collision detected
+    """
+    """Heightfield-sphere collision using bilinear interpolation.
+
+    Samples the heightfield at the sphere's XZ position and checks
+    if the sphere penetrates the terrain surface.
+    """
+    # Get sphere position in heightfield local coordinates
+    val local_x = sphere_pos.x
+    val local_z = sphere_pos.z
+
+    # Check bounds
+    if local_x < 0 or local_x >= (heightfield.width - 1) as f64:
+        return false
+    if local_z < 0 or local_z >= (heightfield.depth - 1) as f64:
+        return false
+
+    # Get integer cell coordinates
+    val cell_x = local_x as i64
+    val cell_z = local_z as i64
+
+    # Get fractional part for interpolation
+    val frac_x = local_x - (cell_x as f64)
+    val frac_z = local_z - (cell_z as f64)
+
+    # Sample heights at four corners
+    val h00 = heightfield.heights[cell_z][cell_x] * heightfield.scale
+    val h10 = heightfield.heights[cell_z][cell_x + 1] * heightfield.scale
+    val h01 = heightfield.heights[cell_z + 1][cell_x] * heightfield.scale
+    val h11 = heightfield.heights[cell_z + 1][cell_x + 1] * heightfield.scale
+
+    # Bilinear interpolation
+    val h0 = h00 * (1.0 - frac_x) + h10 * frac_x
+    val h1 = h01 * (1.0 - frac_x) + h11 * frac_x
+    val terrain_height = h0 * (1.0 - frac_z) + h1 * frac_z
+
+    # Check if sphere penetrates terrain
+    val sphere_bottom = sphere_pos.y - sphere_radius
+    return sphere_bottom < terrain_height
+
+# CompoundShape - Composite collision shape
+class CompoundShape:
+    """Compound collision shape composed of multiple sub-shapes.
+
+    Attributes:
+        shapes: List of sub-shapes
+        transforms: List of transforms for each sub-shape
+    """
+    shapes: List<Shape>
+    transforms: [core.Vector3]
+    fn __init__(shapes: List<Shape>, transforms: [core.Vector3]):
+        self.shapes = shapes
+        self.transforms = transforms
+
+# BVH - Bounding Volume Hierarchy
+class BVHNode:
+    """Node in a bounding volume hierarchy tree.
+
+    Attributes:
+        aabb: Bounding box for this node
+        left: Left child node
+        right: Right child node
+        is_leaf: Whether this is a leaf node
+        object_index: Index of object (for leaf nodes)
+    """
+    aabb: AABB
+    left: BVHNode
+    right: BVHNode
+    is_leaf: bool
+    object_index: i64
+    fn __init__(aabb: AABB, is_leaf: bool = false, object_index: i64 = -1):
+        self.aabb = aabb
+        self.is_leaf = is_leaf
+        self.object_index = object_index
+        self.left = None
+        self.right = None
+
+class BVH:
+    """Bounding Volume Hierarchy for efficient collision detection.
+
+    Attributes:
+        root: Root node of the BVH tree
+    """
+    root: BVHNode
+    fn __init__(root: BVHNode):
+        self.root = root
+
+    static fn build(objects_aabbs: List<AABB>) -> BVH:
+        """Build a BVH from a list of object AABBs.
+
+        Uses a top-down recursive construction with surface area heuristic (SAH)
+        approximation by splitting along the longest axis at the median.
+
+        Args:
+            objects_aabbs: List of AABBs for objects
+
+        Returns:
+            BVH tree
+        """
+        if objects_aabbs.len() == 0:
+            val dummy_aabb = AABB(core.Vector3(0, 0, 0), core.Vector3(0, 0, 0))
+            return BVH(BVHNode(dummy_aabb, is_leaf=true, object_index=0))
+
+        # Build indexed list for sorting
+        var indexed_aabbs: [(i64, AABB)] = []
+        for i in 0..objects_aabbs.len():
+            indexed_aabbs.append((i, objects_aabbs[i]))
+
+        val root_node = BVH._build_recursive(indexed_aabbs)
+        return BVH(root_node)
+
+    static fn _build_recursive(indexed_aabbs: [(i64, AABB)]) -> BVHNode:
+        """Recursively build BVH nodes."""
+        val n = indexed_aabbs.len()
+
+        # Compute combined AABB for all objects
+        var combined = indexed_aabbs[0][1]
+        for i in 1..n:
+            combined = BVH._merge_aabb(combined, indexed_aabbs[i][1])
+
+        # Base case: create leaf node
+        if n == 1:
+            return BVHNode(combined, is_leaf=true, object_index=indexed_aabbs[0][0])
+
+        # Find longest axis to split along
+        val extent = core.Vector3(
+            combined.max.x - combined.min.x,
+            combined.max.y - combined.min.y,
+            combined.max.z - combined.min.z
+        )
+
+        var split_axis = 0  # 0=x, 1=y, 2=z
+        if extent.y > extent.x and extent.y > extent.z:
+            split_axis = 1
+        elif extent.z > extent.x and extent.z > extent.y:
+            split_axis = 2
+
+        # Sort by centroid along split axis
+        var sorted_aabbs = BVH._sort_by_axis(indexed_aabbs, split_axis)
+
+        # Split at median
+        val mid = n / 2
+        if mid == 0:
+            mid = 1
+
+        val left_aabbs = sorted_aabbs[0..mid]
+        val right_aabbs = sorted_aabbs[mid..n]
+
+        # Recursively build children
+        var node = BVHNode(combined, is_leaf=false, object_index=-1)
+        node.left = BVH._build_recursive(left_aabbs)
+        node.right = BVH._build_recursive(right_aabbs)
+
+        return node
+
+    static fn _merge_aabb(a: AABB, b: AABB) -> AABB:
+        """Merge two AABBs into one that contains both."""
+        val min_pt = core.Vector3(
+            core.math.min(a.min.x, b.min.x),
+            core.math.min(a.min.y, b.min.y),
+            core.math.min(a.min.z, b.min.z)
+        )
+        val max_pt = core.Vector3(
+            core.math.max(a.max.x, b.max.x),
+            core.math.max(a.max.y, b.max.y),
+            core.math.max(a.max.z, b.max.z)
+        )
+        return AABB(min_pt, max_pt)
+
+    static fn _sort_by_axis(aabbs: [(i64, AABB)], axis: i64) -> [(i64, AABB)]:
+        """Sort AABBs by centroid along specified axis using insertion sort."""
+        var result = aabbs.copy()
+        val n = result.len()
+
+        for i in 1..n:
+            val key = result[i]
+            val key_val = BVH._get_centroid(key[1], axis)
+            var j = i - 1
+
+            while j >= 0 and BVH._get_centroid(result[j][1], axis) > key_val:
+                result[j + 1] = result[j]
+                j = j - 1
+
+            result[j + 1] = key
+
+        return result
+
+    static fn _get_centroid(aabb: AABB, axis: i64) -> f64:
+        """Get centroid of AABB along specified axis."""
+        match axis:
+            0: return (aabb.min.x + aabb.max.x) * 0.5
+            1: return (aabb.min.y + aabb.max.y) * 0.5
+            2: return (aabb.min.z + aabb.max.z) * 0.5
+            _: return 0.0

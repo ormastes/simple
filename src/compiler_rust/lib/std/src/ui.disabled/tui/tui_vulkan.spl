@@ -1,0 +1,642 @@
+# TUI Vulkan Renderer - GPU-Accelerated Terminal UI Rendering
+#
+# Renders terminal UI content using Vulkan for GPU acceleration.
+# Unlike the standard TUI renderer which outputs ANSI codes to a terminal,
+# this renderer creates a Vulkan window and renders text/graphics directly.
+#
+# Use Cases:
+#   - Preview TUI applications in a GUI window
+#   - Record/screenshot TUI applications
+#   - Embed TUI components in desktop applications
+#   - Test TUI apps in headless CI/CD environments
+#   - GPU-accelerated text rendering for complex TUI interfaces
+#
+# Architecture:
+#   ┌─────────────────────────────────────┐
+#   │       TUI Application Code          │
+#   │  (describe, it, buttons, etc.)      │
+#   └─────────────────────────────────────┘
+#                │
+#                ▼
+#   ┌─────────────────────────────────────┐
+#   │     TuiVulkanRenderer               │
+#   │  • Manages Vulkan window            │
+#   │  • Renders cells to texture         │
+#   │  • Handles input events             │
+#   └─────────────────────────────────────┘
+#                │
+#       ┌────────┴────────┐
+#       ▼                 ▼
+#   ┌─────────┐    ┌──────────┐
+#   │ Vulkan  │    │  Font    │
+#   │ Backend │    │ Renderer │
+#   └─────────┘    └──────────┘
+#
+# Usage:
+#   import ui.tui.tui_vulkan.*
+#   import ui.element.*
+#
+#   async fn main():
+#       # Create Vulkan-based TUI renderer
+#       val renderer = TuiVulkanRenderer.new(80, 24, "My TUI App")?
+#       await renderer.init()
+#
+#       # Render TUI content
+#       val root = div([], [
+#           h1([], ["Welcome to TUI + Vulkan!"]),
+#           p([], ["GPU-accelerated terminal UI"])
+#       ])
+#
+#       loop:
+#           await renderer.render(&root)
+#
+#           # Handle events
+#           match renderer.poll_event(16):
+#               case Some(Event.CloseRequested):
+#                   break
+#               case _: pass
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.renderer.*
+use ui.gui.vulkan_types.*
+use ui.gui.vulkan_renderer.*
+use ui.gui.vulkan_window.*
+
+# =============================================================================
+# Font and Text Rendering
+# =============================================================================
+
+# Monospace font metrics for terminal rendering
+pub struct MonospaceFontMetrics:
+    char_width: u32
+    char_height: u32
+    baseline: u32
+    line_spacing: u32
+
+impl MonospaceFontMetrics:
+    # Standard terminal font (8x16 pixels)
+    pub fn terminal_default() -> MonospaceFontMetrics:
+        return MonospaceFontMetrics {char_width: 8, char_height: 16, baseline: 13, line_spacing: 2}
+
+    # High-DPI terminal font (16x32 pixels)
+    pub fn terminal_2x() -> MonospaceFontMetrics:
+        return MonospaceFontMetrics {
+            char_width: 16,
+            char_height: 32,
+            baseline: 26,
+            line_spacing: 4
+        }
+
+# Terminal cell with character and styling
+struct TuiCell:
+    ch: char
+    fg_color: Color
+    bg_color: Color
+    bold: bool
+    italic: bool
+    underline: bool
+
+impl TuiCell:
+    static fn default() -> TuiCell:
+        return TuiCell {
+            ch: ' ',
+            fg_color: Color.rgb(200, 200, 200),
+            bg_color: Color.rgb(0, 0, 0),
+            bold: false,
+            italic: false,
+            underline: false
+        }
+
+# Color representation (RGB)
+pub struct Color:
+    r: u8
+    g: u8
+    b: u8
+
+impl Color:
+    pub fn rgb(r: u8, g: u8, b: u8) -> Color:
+        return Color { r: r, g: g, b: b }
+
+    pub fn black() -> Color:
+        return Color.rgb(0, 0, 0)
+
+    pub fn white() -> Color:
+        return Color.rgb(255, 255, 255)
+
+    pub fn red() -> Color:
+        return Color.rgb(255, 0, 0)
+
+    pub fn green() -> Color:
+        return Color.rgb(0, 255, 0)
+
+    pub fn blue() -> Color:
+        return Color.rgb(0, 0, 255)
+
+    pub fn yellow() -> Color:
+        return Color.rgb(255, 255, 0)
+
+    pub fn cyan() -> Color:
+        return Color.rgb(0, 255, 255)
+
+    pub fn magenta() -> Color:
+        return Color.rgb(255, 0, 255)
+
+# =============================================================================
+# TUI Vulkan Renderer
+# =============================================================================
+
+pub struct TuiVulkanRenderer:
+    # Vulkan rendering backend
+    vulkan_renderer: VulkanAsyncRenderer
+    window: Window
+
+    # Terminal dimensions (in characters)
+    cols: u16
+    rows: u16
+
+    # Font metrics
+    font: MonospaceFontMetrics
+
+    # Screen buffer (cells)
+    cells: Array<TuiCell>
+    dirty: Array<bool>
+
+    # Layout cache for hit testing
+    layout_cache: Dict<u64, Layout>
+
+    # Rendering state
+    initialized: bool
+
+    # Window pixel dimensions
+    pixel_width: u32
+    pixel_height: u32
+
+impl TuiVulkanRenderer:
+    # Create a new TUI Vulkan renderer
+    #
+    # Args:
+    #   cols: Number of terminal columns
+    #   rows: Number of terminal rows
+    #   title: Window title
+    #
+    # Example:
+    #   val renderer = TuiVulkanRenderer.new(80, 24, "My TUI App")?
+    pub fn new(cols: u16, rows: u16, title: &str) -> Result<TuiVulkanRenderer, RenderError>:
+        val font = MonospaceFontMetrics.terminal_default()
+
+        # Calculate window size in pixels
+        val pixel_width = (cols as u32) * font.char_width
+        val pixel_height = (rows as u32) * font.char_height
+
+        # Create Vulkan window
+        val window = match Window.new(pixel_width, pixel_height, title):
+            case Ok(w): w
+            case Err(e):
+                return Err(RenderError.IoError("Failed to create window: {e}"))
+
+        # Create Vulkan renderer
+        val vulkan_renderer = VulkanAsyncRenderer.new(&window)?
+
+        # Initialize cell buffer
+        val cell_count = (cols as u64) * (rows as u64)
+        var cells: Array<TuiCell> = []
+        var dirty: Array<bool> = []
+        for _ in 0..cell_count:
+            cells.push(TuiCell.default())
+            dirty.push(true)
+
+        return Ok(TuiVulkanRenderer {
+            vulkan_renderer: vulkan_renderer,
+            window: window,
+            cols: cols,
+            rows: rows,
+            font: font,
+            cells: cells,
+            dirty: dirty,
+            layout_cache: Dict.new(),
+            initialized: false,
+            pixel_width: pixel_width,
+            pixel_height: pixel_height
+        })
+
+    # Initialize the renderer
+    pub async fn init(self) -> Result<(), RenderError>:
+        if self.initialized:
+            return Err(RenderError.AlreadyInitialized)
+
+        # Initialize Vulkan renderer
+        await self.vulkan_renderer.init()
+
+        self.initialized = true
+        return Ok(())
+
+    # Get terminal dimensions
+    pub fn dimensions(self) -> (u16, u16):
+        return (self.cols, self.rows)
+
+    # Set a cell at the given position
+    fn set_cell(col: u16, row: u16, cell: TuiCell):
+        if col < self.cols and row < self.rows:
+            val idx = (row as u64) * (self.cols as u64) + (col as u64)
+            self.cells[idx] = cell
+            self.dirty[idx] = true
+
+    # Get a cell at the given position
+    fn get_cell(col: u16, row: u16) -> &TuiCell:
+        val idx = (row as u64) * (self.cols as u64) + (col as u64)
+        return &self.cells[idx]
+
+    # Render element to cell buffer (like TuiRenderer)
+    fn render_element_to_cells(elem: &Element, layout: Layout):
+        # Store layout for later hit testing
+        self.layout_cache.insert(elem.id, layout)
+
+        # Render based on element kind
+        match elem.kind:
+            case ElementKind.Text:
+                self.render_text_to_cells(elem, layout)
+            case ElementKind.Box:
+                self.render_box_to_cells(elem, layout)
+            case ElementKind.Button:
+                self.render_button_to_cells(elem, layout)
+            case ElementKind.Div | ElementKind.Row | ElementKind.Column:
+                self.render_container_to_cells(elem, layout)
+            case _:
+                self.render_container_to_cells(elem, layout)
+
+    # Render text element to cells
+    fn render_text_to_cells(elem: &Element, layout: Layout):
+        if val Some(text) = &elem.text:
+            val fg = self.parse_element_fg(elem)
+            val bg = self.parse_element_bg(elem)
+
+            var col = layout.x
+            for ch in text.chars():
+                if col >= layout.x + layout.width:
+                    break
+                self.set_cell(col, layout.y, TuiCell {
+                    ch: ch,
+                    fg_color: fg,
+                    bg_color: bg,
+                    bold: elem.classes.contains(&"bold".to_string()),
+                    italic: elem.classes.contains(&"italic".to_string()),
+                    underline: elem.classes.contains(&"underline".to_string())
+                })
+                col = col + 1
+
+    # Render box with border
+    fn render_box_to_cells(elem: &Element, layout: Layout):
+        val fg = self.parse_element_fg(elem)
+        val bg = self.parse_element_bg(elem)
+
+        # Draw border using box-drawing characters
+        self.set_cell(layout.x, layout.y, TuiCell {
+            ch: '┌',
+            fg_color: fg,
+            bg_color: bg,
+            bold: false,
+            italic: false,
+            underline: false
+        })
+
+        # Top border
+        for x in (layout.x + 1)..(layout.x + layout.width - 1):
+            self.set_cell(x, layout.y, TuiCell {
+                ch: '─',
+                fg_color: fg,
+                bg_color: bg,
+                bold: false,
+                italic: false,
+                underline: false
+            })
+
+        self.set_cell(layout.x + layout.width - 1, layout.y, TuiCell {
+            ch: '┐',
+            fg_color: fg,
+            bg_color: bg,
+            bold: false,
+            italic: false,
+            underline: false
+        })
+
+        # Side borders
+        for y in (layout.y + 1)..(layout.y + layout.height - 1):
+            self.set_cell(layout.x, y, TuiCell {
+                ch: '│',
+                fg_color: fg,
+                bg_color: bg,
+                bold: false,
+                italic: false,
+                underline: false
+            })
+            self.set_cell(layout.x + layout.width - 1, y, TuiCell {
+                ch: '│',
+                fg_color: fg,
+                bg_color: bg,
+                bold: false,
+                italic: false,
+                underline: false
+            })
+
+        # Bottom border
+        self.set_cell(layout.x, layout.y + layout.height - 1, TuiCell {
+            ch: '└',
+            fg_color: fg,
+            bg_color: bg,
+            bold: false,
+            italic: false,
+            underline: false
+        })
+
+        for x in (layout.x + 1)..(layout.x + layout.width - 1):
+            self.set_cell(x, layout.y + layout.height - 1, TuiCell {
+                ch: '─',
+                fg_color: fg,
+                bg_color: bg,
+                bold: false,
+                italic: false,
+                underline: false
+            })
+
+        self.set_cell(layout.x + layout.width - 1, layout.y + layout.height - 1, TuiCell {
+            ch: '┘',
+            fg_color: fg,
+            bg_color: bg,
+            bold: false,
+            italic: false,
+            underline: false
+        })
+
+        # Render children in content area
+        val content_layout = Layout.new(
+            layout.x + 1,
+            layout.y + 1,
+            if layout.width > 2 { layout.width - 2 } else { 0 },
+            if layout.height > 2 { layout.height - 2 } else { 0 }
+        )
+        self.render_children_to_cells(elem, content_layout)
+
+    # Render button
+    fn render_button_to_cells(elem: &Element, layout: Layout):
+        val fg = if elem.focused { Color.black() } else { self.parse_element_fg(elem) }
+        val bg = if elem.focused { Color.cyan() } else { self.parse_element_bg(elem) }
+
+        # Draw button brackets
+        self.set_cell(layout.x, layout.y, TuiCell {
+            ch: '[',
+            fg_color: fg,
+            bg_color: bg,
+            bold: false,
+            italic: false,
+            underline: false
+        })
+        self.set_cell(layout.x + layout.width - 1, layout.y, TuiCell {
+            ch: ']',
+            fg_color: fg,
+            bg_color: bg,
+            bold: false,
+            italic: false,
+            underline: false
+        })
+
+        # Draw label
+        if val Some(text) = &elem.text:
+            var x = layout.x + 1
+            for ch in text.chars():
+                if x >= layout.x + layout.width - 1:
+                    break
+                self.set_cell(x, layout.y, TuiCell {
+                    ch: ch,
+                    fg_color: fg,
+                    bg_color: bg,
+                    bold: false,
+                    italic: false,
+                    underline: false
+                })
+                x = x + 1
+
+    # Render container
+    fn render_container_to_cells(elem: &Element, layout: Layout):
+        self.render_children_to_cells(elem, layout)
+
+    # Render children with vertical stacking
+    fn render_children_to_cells(elem: &Element, layout: Layout):
+        if elem.children.is_empty():
+            return
+
+        val child_height = layout.height / (elem.children.len() as u16).max(1)
+        var y = layout.y
+
+        for child in &elem.children:
+            if y >= layout.y + layout.height:
+                break
+
+            val child_layout = Layout.new(layout.x, y, layout.width, child_height)
+            self.render_element_to_cells(child, child_layout)
+
+            y = y + child_height
+
+    # Parse foreground color from element
+    fn parse_element_fg(elem: &Element) -> Color:
+        if val Some(color) = elem.styles.get("color"):
+            return self.parse_color(color)
+        return Color.white()
+
+    # Parse background color from element
+    fn parse_element_bg(elem: &Element) -> Color:
+        if val Some(color) = elem.styles.get("background-color"):
+            return self.parse_color(color)
+        return Color.black()
+
+    # Parse color string
+    fn parse_color(s: &str) -> Color:
+        match s.lower().as_str():
+            case "black": return Color.black()
+            case "white": return Color.white()
+            case "red": return Color.red()
+            case "green": return Color.green()
+            case "blue": return Color.blue()
+            case "yellow": return Color.yellow()
+            case "cyan": return Color.cyan()
+            case "magenta": return Color.magenta()
+            case _: return Color.white()
+
+    # Render cells to Vulkan framebuffer
+    async fn render_cells_to_vulkan(self) -> Result<(), RenderError>:
+        # For each dirty cell, render a quad with the character glyph
+        for row in 0..self.rows:
+            for col in 0..self.cols:
+                val idx = (row as u64) * (self.cols as u64) + (col as u64)
+                if self.dirty[idx]:
+                    val cell = &self.cells[idx]
+
+                    # Calculate pixel position
+                    val x = (col as f32) * (self.font.char_width as f32)
+                    val y = (row as f32) * (self.font.char_height as f32)
+
+                    # Render background quad
+                    await self.render_background_quad(
+                        x, y,
+                        self.font.char_width as f32,
+                        self.font.char_height as f32,
+                        cell.bg_color
+                    )
+
+                    # Render character glyph
+                    await self.render_character_glyph(
+                        cell.ch,
+                        x, y,
+                        cell.fg_color,
+                        cell.bold,
+                        cell.italic,
+                        cell.underline
+                    )
+
+                    self.dirty[idx] = false
+
+        return Ok(())
+
+    # Render a solid color quad (background)
+    async fn render_background_quad(self, x: f32, y: f32, w: f32, h: f32, color: Color):
+        # Convert to normalized device coordinates
+        val ndc_x = (x / (self.pixel_width as f32)) * 2.0 - 1.0
+        val ndc_y = (y / (self.pixel_height as f32)) * 2.0 - 1.0
+        val ndc_w = (w / (self.pixel_width as f32)) * 2.0
+        val ndc_h = (h / (self.pixel_height as f32)) * 2.0
+
+        # Create quad vertices
+        val vertices = [
+            Vertex { x: ndc_x,         y: ndc_y,         r: color.r, g: color.g, b: color.b },
+            Vertex { x: ndc_x + ndc_w, y: ndc_y,         r: color.r, g: color.g, b: color.b },
+            Vertex { x: ndc_x + ndc_w, y: ndc_y + ndc_h, r: color.r, g: color.g, b: color.b },
+            Vertex { x: ndc_x,         y: ndc_y + ndc_h, r: color.r, g: color.g, b: color.b }
+        ]
+
+        # Submit quad to Vulkan renderer
+        # (In real implementation, would batch quads and submit efficiently)
+        await self.vulkan_renderer.draw_quad(&vertices)
+
+    # Render character glyph (text)
+    async fn render_character_glyph(
+        self,
+        ch: char,
+        x: f32,
+        y: f32,
+        color: Color,
+        bold: bool,
+        italic: bool,
+        underline: bool
+    ):
+        # In a real implementation, this would:
+        # 1. Look up the glyph in a font atlas texture
+        # 2. Create a textured quad with the glyph UV coordinates
+        # 3. Apply bold/italic transformations
+        # 4. Draw underline if needed
+        #
+        # For now, this is a placeholder that would call into
+        # a font rendering subsystem
+        await self.vulkan_renderer.draw_glyph(ch, x, y, color, bold, italic, underline)
+
+# Simple vertex structure for quad rendering
+struct Vertex:
+    x: f32
+    y: f32
+    r: u8
+    g: u8
+    b: u8
+
+# =============================================================================
+# RenderBackend Implementation
+# =============================================================================
+
+impl RenderBackend for TuiVulkanRenderer:
+    async fn init(self) -> Future<Result<(), RenderError>>:
+        return Future.ready(self.init().await)
+
+    async fn render(self, root: &Element) -> Future<Result<(), RenderError>>:
+        if not self.initialized:
+            return Future.ready(Err(RenderError.NotInitialized))
+
+        # Clear layout cache
+        self.layout_cache.clear()
+
+        # Render root element to cell buffer
+        val root_layout = Layout.new(0, 0, self.cols, self.rows)
+        self.render_element_to_cells(root, root_layout)
+
+        # Render cells to Vulkan framebuffer
+        await self.render_cells_to_vulkan()
+
+        # Present frame
+        return self.vulkan_renderer.present()
+
+    async fn shutdown(self) -> Future<Result<(), RenderError>>:
+        if not self.initialized:
+            return Future.ready(Err(RenderError.NotInitialized))
+
+        # Shutdown Vulkan renderer
+        await self.vulkan_renderer.shutdown()
+
+        self.initialized = false
+        return Future.ready(Ok(()))
+
+# =============================================================================
+# Layout Helper
+# =============================================================================
+
+struct Layout:
+    x: u16
+    y: u16
+    width: u16
+    height: u16
+
+impl Layout:
+    fn new(x: u16, y: u16, width: u16, height: u16) -> Layout:
+        return Layout {
+            x: x,
+            y: y,
+            width: width,
+            height: height
+        }
+
+# =============================================================================
+# Example Usage
+# =============================================================================
+
+# Example: Basic TUI application with Vulkan rendering
+#
+# import ui.tui.tui_vulkan.*
+# import ui.element.*
+#
+# async fn main():
+#     # Create TUI Vulkan renderer (80x24 terminal)
+#     val renderer = TuiVulkanRenderer.new(80, 24, "My TUI App")?
+#     await renderer.init()
+#
+#     # Create TUI content
+#     val root = div([], [
+#         box([], [
+#             h1([], ["Welcome to TUI + Vulkan!"]),
+#             p([], ["This is GPU-accelerated terminal UI."])
+#         ]),
+#         button([], ["Click Me"], on_click: || print("Clicked!"))
+#     ])
+#
+#     # Render loop
+#     loop:
+#         await renderer.render(&root)
+#
+#         # Handle window events
+#         while val Some(event) = renderer.window.poll_event():
+#             match event:
+#                 case WindowEvent.CloseRequested:
+#                     return Ok(())
+#                 case WindowEvent.KeyPressed(key):
+#                     # Handle keyboard input
+#                     pass
+#                 case _: pass
+#
+#         # Sleep briefly (60 FPS)
+#         await Future.delay(16)

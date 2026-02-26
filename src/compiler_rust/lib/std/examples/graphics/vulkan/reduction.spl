@@ -1,0 +1,255 @@
+# Parallel Reduction - Advanced GPU Patterns
+#
+# This example demonstrates parallel reduction using shared memory
+# and atomic operations. Common for computing sum, max, min, etc.
+#
+# Compilation: ./simple examples/gpu/vulkan/reduction.spl
+
+import std.gpu
+import std.io
+import std.math
+
+# GPU kernel - parallel sum reduction
+#[gpu]
+fn sum_reduction_kernel(input: []f32, output: []f32, n: i32):
+    """
+    Compute sum of all elements using parallel reduction.
+
+    Strategy:
+    1. Each work group computes partial sum of 256 elements
+    2. Store partial sums in output array
+    3. Second pass sums the partial sums
+    """
+    # Thread and work group info
+    global_id = gpu.global_id(0)
+    local_id = gpu.local_id(0)
+    group_id = gpu.group_id(0)
+    local_size = gpu.local_size(0)
+
+    # Allocate shared memory for this work group
+    shared_data = gpu.shared_memory<f32>(256)  # 256 = typical work group size
+
+    # Load element into shared memory (0 if out of bounds)
+    if global_id < n:
+        shared_data[local_id] = input[global_id]
+    else:
+        shared_data[local_id] = 0.0
+
+    gpu.barrier()  # Wait for all threads to load
+
+    # Parallel reduction within work group
+    # Tree-based reduction: 128 -> 64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1
+    stride = local_size / 2
+    while stride > 0:
+        if local_id < stride:
+            shared_data[local_id] += shared_data[local_id + stride]
+        gpu.barrier()
+        stride /= 2
+
+    # First thread writes work group result
+    if local_id == 0:
+        output[group_id] = shared_data[0]
+
+# GPU kernel - find maximum value
+#[gpu]
+fn max_reduction_kernel(input: []f32, output: []f32, n: i32):
+    """
+    Find maximum value using parallel reduction.
+    Similar to sum, but uses max operation instead of addition.
+    """
+    global_id = gpu.global_id(0)
+    local_id = gpu.local_id(0)
+    group_id = gpu.group_id(0)
+    local_size = gpu.local_size(0)
+
+    shared_data = gpu.shared_memory<f32>(256)
+
+    # Load element (use -infinity for out of bounds)
+    if global_id < n:
+        shared_data[local_id] = input[global_id]
+    else:
+        shared_data[local_id] = -f32.infinity
+
+    gpu.barrier()
+
+    # Parallel reduction with max operation
+    stride = local_size / 2
+    while stride > 0:
+        if local_id < stride:
+            a = shared_data[local_id]
+            b = shared_data[local_id + stride]
+            shared_data[local_id] = max(a, b)
+        gpu.barrier()
+        stride /= 2
+
+    if local_id == 0:
+        output[group_id] = shared_data[0]
+
+# GPU kernel - atomic operations example
+#[gpu]
+fn atomic_sum_kernel(input: []f32, output: []f32, n: i32):
+    """
+    Compute sum using atomic operations.
+    Simpler but slower than tree reduction for large arrays.
+    Good for small arrays or when you need exact ordering.
+    """
+    global_id = gpu.global_id(0)
+
+    if global_id < n:
+        # Atomically add to output[0]
+        # Multiple threads can safely update the same location
+        gpu.atomic_add_f32(&output[0], input[global_id])
+
+fn sum_example():
+    """
+    Example: Sum array elements using parallel reduction
+    """
+    size = 1_000_000  # 1 million elements
+
+    io.println("Sum Reduction Example")
+    io.println("Array size: " + str(size) + " elements")
+    io.println("")
+
+    # Create test data
+    data = [math.random() * 10.0 for _ in range(size)]
+
+    # Compute reference sum on CPU
+    cpu_sum = sum(data)  # Built-in sum function
+    io.println("CPU reference sum: " + str(cpu_sum))
+    io.println("")
+
+    if !gpu.device_available():
+        io.println("Error: Vulkan not available")
+        return
+
+    device = gpu.Device()
+
+    # Test 1: Tree reduction (fast, two-pass)
+    io.println("Method 1: Tree Reduction")
+    buf_input = device.alloc_buffer(data)
+
+    # First pass: reduce to work group count
+    work_group_size = 256
+    num_work_groups = (size + work_group_size - 1) / work_group_size
+    buf_partial = device.alloc_buffer<f32>(num_work_groups)
+
+    start = time.now()
+
+    device.launch_1d(
+        sum_reduction_kernel,
+        [buf_input, buf_partial, size],
+        global_size=size,
+        local_size=work_group_size
+    )
+
+    # Second pass: reduce partial sums (could do on CPU for small arrays)
+    buf_final = device.alloc_buffer<f32>(1)
+    device.launch_1d(
+        sum_reduction_kernel,
+        [buf_partial, buf_final, num_work_groups],
+        global_size=num_work_groups,
+        local_size=work_group_size
+    )
+
+    device.sync()
+    tree_time = time.now() - start
+
+    result = device.download(buf_final)[0]
+    error = abs(result - cpu_sum)
+    io.println("  Result: " + str(result))
+    io.println("  Error: " + str(error))
+    io.println("  Time: " + str(tree_time * 1000.0) + " ms")
+    io.println("  Throughput: " + str(f64(size) / (tree_time * 1e9)) + " GB/s")
+    io.println("")
+
+    # Test 2: Atomic operations (simple, one-pass, slower)
+    io.println("Method 2: Atomic Operations")
+    buf_atomic = device.alloc_buffer<f32>(1)
+    device.buffer_fill(buf_atomic, 0.0)  # Initialize to 0
+
+    start = time.now()
+
+    device.launch_1d(
+        atomic_sum_kernel,
+        [buf_input, buf_atomic, size],
+        global_size=size
+    )
+
+    device.sync()
+    atomic_time = time.now() - start
+
+    result = device.download(buf_atomic)[0]
+    error = abs(result - cpu_sum)
+    io.println("  Result: " + str(result))
+    io.println("  Error: " + str(error))
+    io.println("  Time: " + str(atomic_time * 1000.0) + " ms")
+    io.println("  Speedup vs atomics: " + str(atomic_time / tree_time) + "×")
+
+fn max_example():
+    """
+    Example: Find maximum value in array
+    """
+    size = 1_000_000
+
+    io.println("")
+    io.println("=" * 60)
+    io.println("Max Reduction Example")
+    io.println("Array size: " + str(size) + " elements")
+    io.println("")
+
+    # Create test data with known max
+    data = [math.random() * 100.0 for _ in range(size)]
+    data[12345] = 999.9  # Inject known maximum
+    cpu_max = max(data)
+
+    io.println("CPU reference max: " + str(cpu_max))
+    io.println("")
+
+    if !gpu.device_available():
+        return
+
+    device = gpu.Device()
+
+    # Two-pass reduction
+    buf_input = device.alloc_buffer(data)
+    work_group_size = 256
+    num_work_groups = (size + work_group_size - 1) / work_group_size
+    buf_partial = device.alloc_buffer<f32>(num_work_groups)
+
+    start = time.now()
+
+    # First pass
+    device.launch_1d(
+        max_reduction_kernel,
+        [buf_input, buf_partial, size],
+        global_size=size,
+        local_size=work_group_size
+    )
+
+    # Second pass
+    buf_final = device.alloc_buffer<f32>(1)
+    device.launch_1d(
+        max_reduction_kernel,
+        [buf_partial, buf_final, num_work_groups],
+        global_size=num_work_groups,
+        local_size=work_group_size
+    )
+
+    device.sync()
+    elapsed = time.now() - start
+
+    result = device.download(buf_final)[0]
+    error = abs(result - cpu_max)
+
+    io.println("GPU Result: " + str(result))
+    io.println("Error: " + str(error))
+    io.println("Time: " + str(elapsed * 1000.0) + " ms")
+
+    if error < 0.001:
+        io.println("✓ Correct!")
+    else:
+        io.println("✗ Error too large")
+
+fn main():
+    sum_example()
+    max_example()

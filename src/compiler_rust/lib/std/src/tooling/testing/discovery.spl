@@ -1,0 +1,537 @@
+# Test Discovery Across Languages
+# Find all tests in a multi-language project
+
+use tooling.core.project.{Language, ProjectContext}
+use host.async_nogc_mut.io.fs
+use host.common.io.types.{FileType, DirPath, FilePath}
+
+# Test suite information
+pub class TestSuite:
+    pub language: Language
+    pub path: text
+    pub test_count: i32
+    pub test_files: List<text>
+
+    pub fn new(language: Language, path: text) -> TestSuite:
+        """Create test suite.
+
+        Args:
+            language: Test language
+            path: Suite root path
+
+        Returns:
+            Test suite
+        """
+        TestSuite {
+            language: language,
+            path: path,
+            test_count: 0,
+            test_files: []
+        }
+
+    pub fn is_empty(self) -> bool:
+        """Check if suite has no tests.
+
+        Returns:
+            True if no tests found
+
+        Example:
+            if suite.is_empty():
+                print("No tests found for {suite.language}")
+        """
+        self.test_count == 0
+
+    pub fn has_files(self) -> bool:
+        """Check if suite has test files.
+
+        Returns:
+            True if test files exist
+        """
+        self.test_files.len() > 0
+
+    pub fn summary(self) -> text:
+        """Get suite summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            suite.summary()
+            # → "Rust: 25 tests in 10 files"
+        """
+        "{self.language}: {self.test_count} tests in {self.test_files.len()} files"
+
+# Test discovery
+pub class TestDiscovery:
+    pub root: text
+    pub verbose: bool
+
+    pub fn new(root: text) -> TestDiscovery:
+        """Create test discovery.
+
+        Args:
+            root: Project root
+
+        Returns:
+            Test discovery instance
+
+        Example:
+            val discovery = TestDiscovery.new(".")
+            val suites = discovery.discover_all()
+
+            for suite in suites:
+                print("{suite.language}: {suite.test_count} tests")
+        """
+        TestDiscovery {
+            root: root,
+            verbose: false
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
+
+    pub fn count_total_tests(self) -> i32:
+        """Count total tests across all languages.
+
+        Returns:
+            Total test count
+
+        Example:
+            val discovery = TestDiscovery.new(".")
+            val total = discovery.count_total_tests()
+            print("Found {total} tests")
+        """
+        val suites = self.discover_all()
+        var total = 0
+        for suite in suites:
+            total += suite.test_count
+        total
+
+    pub fn get_language_summary(self) -> Dict<Language, i32>:
+        """Get test count by language.
+
+        Returns:
+            Map of language to test count
+
+        Example:
+            val summary = discovery.get_language_summary()
+            for (lang, count) in summary.items():
+                print("{lang}: {count} tests")
+        """
+        val suites = self.discover_all()
+        val summary: Dict<Language, i32> = {}
+        for suite in suites:
+            summary[suite.language] = suite.test_count
+        summary
+
+    pub fn discover_all(self) -> List<TestSuite>:
+        """Discover all test suites.
+
+        Returns:
+            List of test suites
+        """
+        var suites: List<TestSuite> = []
+
+        # Discover Simple tests
+        suites.extend(self.discover_simple_tests())
+
+        # Discover Rust tests
+        suites.extend(self.discover_rust_tests())
+
+        # Discover Python tests
+        suites.extend(self.discover_python_tests())
+
+        # Discover JavaScript tests
+        suites.extend(self.discover_javascript_tests())
+
+        suites
+
+    pub fn discover_by_language(self, language: Language) -> List<TestSuite>:
+        """Discover tests for specific language.
+
+        Args:
+            language: Language to discover
+
+        Returns:
+            List of test suites
+        """
+        match language:
+            Language.Simple:
+                self.discover_simple_tests()
+            Language.Rust:
+                self.discover_rust_tests()
+            Language.Python:
+                self.discover_python_tests()
+            Language.JavaScript:
+                self.discover_javascript_tests()
+            Language.TypeScript:
+                self.discover_javascript_tests()
+            _:
+                []
+
+    pub fn discover_by_pattern(self, pattern: text) -> List<TestSuite>:
+        """Discover tests matching pattern.
+
+        Args:
+            pattern: Test name pattern (supports * wildcard)
+
+        Returns:
+            Filtered test suites
+
+        Examples:
+            discovery.discover_by_pattern("*_spec")  # All spec files
+            discovery.discover_by_pattern("user*")   # Tests starting with 'user'
+            discovery.discover_by_pattern("*integration*")  # Integration tests
+        """
+        val all_suites = self.discover_all()
+        val filtered: List<TestSuite> = []
+
+        for suite in all_suites:
+            # Filter test files within each suite by pattern
+            val matching_files: List<text> = []
+            for file in suite.test_files:
+                if self.matches_test_pattern(file, pattern):
+                    matching_files.append(file)
+
+            # Only include suite if it has matching files
+            if matching_files.len() > 0:
+                val filtered_suite = TestSuite.new(suite.language, suite.path)
+                filtered_suite.test_files = matching_files
+                filtered_suite.test_count = matching_files.len()
+                filtered.append(filtered_suite)
+
+        filtered
+
+    fn matches_test_pattern(file_path: text, pattern: text) -> bool:
+        """Check if file path matches test pattern.
+
+        Args:
+            file_path: Full file path
+            pattern: Pattern to match (supports * wildcard)
+
+        Returns:
+            True if matches
+        """
+        # Extract filename from path
+        val filename = self.get_filename_from_path(file_path)
+
+        # Handle wildcard patterns
+        if pattern.starts_with("*") and pattern.ends_with("*"):
+            # *substring* - matches anywhere
+            val substr = pattern[1:pattern.len()-1]
+            return filename.contains(substr) or file_path.contains(substr)
+        elif pattern.starts_with("*"):
+            # *suffix
+            val suffix = pattern[1:]
+            return filename.ends_with(suffix)
+        elif pattern.ends_with("*"):
+            # prefix*
+            val prefix = pattern[0:pattern.len()-1]
+            return filename.starts_with(prefix)
+        else:
+            # Exact match or substring
+            return filename.contains(pattern) or file_path.contains(pattern)
+
+    fn get_filename_from_path(path: text) -> text:
+        """Extract filename from a file path."""
+        val last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[last_slash+1:]
+        else:
+            path
+
+    fn discover_simple_tests() -> List<TestSuite>:
+        """Discover Simple language tests.
+
+        Returns:
+            Simple test suites
+
+        Patterns:
+        - *_spec.spl
+        - *_test.spl
+        """
+        val test_files = self.find_files_matching(["*_spec.spl", "*_test.spl"])
+
+        if test_files.len() == 0:
+            return []
+
+        val suite = TestSuite.new(Language.Simple, self.root)
+        suite.test_files = test_files
+        suite.test_count = test_files.len()
+
+        [suite]
+
+    fn discover_rust_tests() -> List<TestSuite>:
+        """Discover Rust tests.
+
+        Returns:
+            Rust test suites
+
+        Patterns:
+        - Files with #[test] or #[cfg(test)]
+        - Cargo.toml projects
+        """
+        # Find Cargo projects
+        val cargo_files = self.find_files_named("Cargo.toml")
+
+        val suites: List<TestSuite> = []
+
+        for cargo_file in cargo_files:
+            val project_dir = self.get_parent_directory(cargo_file)
+            val suite = TestSuite.new(Language.Rust, cargo_file)
+
+            # Count tests by scanning for #[test] attributes in .rs files
+            val test_count = self.count_rust_tests_in_directory(project_dir)
+            suite.test_count = test_count
+
+            # Find test files
+            val test_files = self.find_rust_test_files(project_dir)
+            suite.test_files = test_files
+
+            suites.append(suite)
+
+        suites
+
+    fn get_parent_directory(file_path: text) -> text:
+        """Get parent directory of a file path."""
+        val last_slash = file_path.rfind("/")
+        if last_slash >= 0:
+            file_path[0:last_slash]
+        else:
+            "."
+
+    fn count_rust_tests_in_directory(dir: text) -> i32:
+        """Count #[test] attributes in Rust files.
+
+        Args:
+            dir: Directory to scan
+
+        Returns:
+            Number of tests found
+        """
+        @extern("runtime", "rt_file_read")
+        fn _rt_file_read(path_ptr: &u8, path_len: u64) -> text
+
+        var count: i32 = 0
+
+        # Find all .rs files
+        val rs_files = self.find_files_with_extension(dir, ".rs")
+
+        for file in rs_files:
+            val content = _rt_file_read(file.ptr(), file.len())
+            # Count #[test] occurrences
+            count += self.count_substring(content, "#[test]")
+
+        count
+
+    fn count_substring(text: text, substring: text) -> i32:
+        """Count occurrences of substring in text."""
+        var count: i32 = 0
+        var pos: i32 = 0
+
+        while pos < text.len():
+            val found = text[pos:].find(substring)
+            if found >= 0:
+                count += 1
+                pos += found + substring.len()
+            else:
+                break
+
+        count
+
+    fn find_rust_test_files(dir: text) -> List<text>:
+        """Find Rust files containing tests.
+
+        Args:
+            dir: Directory to scan
+
+        Returns:
+            List of file paths with tests
+        """
+        @extern("runtime", "rt_file_read")
+        fn _rt_file_read(path_ptr: &u8, path_len: u64) -> text
+
+        val test_files: List<text> = []
+
+        # Find all .rs files
+        val rs_files = self.find_files_with_extension(dir, ".rs")
+
+        for file in rs_files:
+            val content = _rt_file_read(file.ptr(), file.len())
+            # Check if file contains #[test] or #[cfg(test)]
+            if content.contains("#[test]") or content.contains("#[cfg(test)]"):
+                test_files.append(file)
+
+        test_files
+
+    fn find_files_with_extension(dir: text, extension: text) -> List<text>:
+        """Find files with given extension recursively."""
+        val results: List<text> = []
+        self.find_files_with_extension_recursive(dir, extension, results)
+        results
+
+    fn find_files_with_extension_recursive(dir: text, extension: text, results: List<text>):
+        """Recursively find files with given extension."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val name = entry.name() as text
+                    val path = entry.path() as text
+
+                    match entry.file_type():
+                        FileType.File:
+                            if name.ends_with(extension):
+                                results.append(path)
+                        FileType.Directory:
+                            if not self.should_skip_dir(name):
+                                self.find_files_with_extension_recursive(path, extension, results)
+                        _:
+                            pass
+            Err(_):
+                pass
+
+    fn discover_python_tests() -> List<TestSuite>:
+        """Discover Python tests.
+
+        Returns:
+            Python test suites
+
+        Patterns:
+        - test_*.py
+        - *_test.py
+        """
+        val test_files = self.find_files_matching(["test_*.py", "*_test.py"])
+
+        if test_files.len() == 0:
+            return []
+
+        val suite = TestSuite.new(Language.Python, self.root)
+        suite.test_files = test_files
+        suite.test_count = test_files.len()
+
+        [suite]
+
+    fn discover_javascript_tests() -> List<TestSuite>:
+        """Discover JavaScript/TypeScript tests.
+
+        Returns:
+            JS test suites
+
+        Patterns:
+        - *.test.js, *.spec.js
+        - *.test.ts, *.spec.ts
+        """
+        val test_files = self.find_files_matching([
+            "*.test.js", "*.spec.js",
+            "*.test.ts", "*.spec.ts"
+        ])
+
+        if test_files.len() == 0:
+            return []
+
+        val suite = TestSuite.new(Language.JavaScript, self.root)
+        suite.test_files = test_files
+        suite.test_count = test_files.len()
+
+        [suite]
+
+    fn find_files_matching(patterns: List<text>) -> List<text>:
+        """Find files matching glob patterns.
+
+        Args:
+            patterns: Glob patterns (simplified - supports *.ext and name_*.ext)
+
+        Returns:
+            Matching file paths
+        """
+        val results: List<text> = []
+        for pattern in patterns:
+            self.find_files_by_pattern(self.root, pattern, results)
+        results
+
+    fn find_files_by_pattern(dir: text, pattern: text, results: List<text>):
+        """Recursively find files matching pattern."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val name = entry.name() as text
+                    val path = entry.path() as text
+
+                    match entry.file_type():
+                        FileType.File:
+                            # Check if file matches pattern
+                            if self.matches_pattern(name, pattern):
+                                results.append(path)
+                        FileType.Directory:
+                            # Skip common exclude patterns
+                            if not self.should_skip_dir(name):
+                                self.find_files_by_pattern(path, pattern, results)
+                        _:
+                            pass
+            Err(_):
+                # Ignore errors
+                pass
+
+    fn matches_pattern(name: text, pattern: text) -> bool:
+        """Check if name matches simplified glob pattern.
+
+        Supports:
+        - *.ext (ends with .ext)
+        - prefix_*.ext (starts with prefix_, ends with .ext)
+        - *_suffix.ext (ends with _suffix.ext)
+        """
+        if pattern.starts_with("*"):
+            # Pattern: *.ext or *_suffix.ext
+            val suffix = pattern[1:]  # Remove leading *
+            name.ends_with(suffix)
+        elif pattern.ends_with("*"):
+            # Pattern: prefix_*
+            val prefix = pattern[0:pattern.len()-1]
+            name.starts_with(prefix)
+        elif pattern.contains("*"):
+            # Pattern: prefix_*.ext
+            val star_idx = pattern.find("*")
+            val prefix = pattern[0:star_idx]
+            val suffix = pattern[star_idx+1:]
+            name.starts_with(prefix) and name.ends_with(suffix)
+        else:
+            # Exact match
+            name == pattern
+
+    fn should_skip_dir(name: text) -> bool:
+        """Check if directory should be skipped during test discovery."""
+        name == "node_modules" or name == "target" or name == "__pycache__" or name == ".git" or name == ".venv" or name == "venv" or name == "build" or name == "dist" or name.starts_with(".")
+
+    fn find_files_named(name: text) -> List<text>:
+        """Find files with exact name.
+
+        Args:
+            name: File name
+
+        Returns:
+            Matching file paths
+        """
+        val results: List<text> = []
+        self.find_files_named_recursive(self.root, name, results)
+        results
+
+    fn find_files_named_recursive(dir: text, name: text, results: List<text>):
+        """Recursively find files with exact name."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val entry_name = entry.name() as text
+                    val path = entry.path() as text
+
+                    # If this is the file we're looking for, add its path
+                    if entry_name == name:
+                        results.append(path)
+
+                    # Recursively search subdirectories
+                    if entry.file_type() == FileType.Directory:
+                        if not self.should_skip_dir(entry_name):
+                            self.find_files_named_recursive(path, name, results)
+            Err(_):
+                # Ignore errors
+                pass

@@ -1,0 +1,822 @@
+# TUI Async Renderer - Terminal UI Backend
+#
+# Renders UI elements to terminal using ANSI escape codes and box-drawing characters.
+# Demonstrates that the same Element/PatchSet API works for terminal output.
+#
+# Key Features:
+#   - ANSI color support (16 colors, 256 colors, true color)
+#   - Box drawing characters (Unicode)
+#   - Keyboard and mouse input
+#   - Async rendering with terminal buffering
+#   - Layout calculation for text-based UI
+#   - Focus management
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+use ui.renderer.*
+use ui.common.colors.parse_color_string
+use ui.common.colors.Color
+
+# =============================================================================
+# TUI Async Renderer (Terminal-based)
+# =============================================================================
+
+pub struct TuiAsyncRenderer:
+    # Terminal state
+    terminal_fd: i32           # File descriptor (stdin/stdout)
+    width: u16                 # Terminal width in columns
+    height: u16                # Terminal height in rows
+
+    # Display buffer (double buffering)
+    front_buffer: TerminalBuffer
+    back_buffer: TerminalBuffer
+
+    # Element tracking
+    layout_cache: LayoutCache
+    focus_id: Option<NodeId>
+
+    # State
+    initialized: bool
+    mouse_enabled: bool
+    alternate_screen: bool
+
+    # Current tree (for diffing)
+    current_tree: Option<ElementTree>
+
+impl TuiAsyncRenderer:
+    # Create a new TUI renderer
+    pub fn new() -> Result<TuiAsyncRenderer, RenderError>:
+        return Ok(TuiAsyncRenderer {terminal_fd: 0, # Will be set in init width: 80, # Default, updated in init height: 24, # Default, updated in init front_buffer: TerminalBuffer.new(80, 24), back_buffer: TerminalBuffer.new(80, 24), layout_cache: LayoutCache.new(), focus_id: None, initialized: false, mouse_enabled: false, alternate_screen: false, current_tree: None})
+
+    # Create with options
+    pub fn with_mouse(mut self) -> TuiAsyncRenderer:
+        self.mouse_enabled = true
+        return self
+
+    pub fn with_alternate_screen(mut self) -> TuiAsyncRenderer:
+        self.alternate_screen = true
+        return self
+
+# =============================================================================
+# Async RenderBackend Implementation
+# =============================================================================
+
+impl RenderBackend for TuiAsyncRenderer:
+    async fn init(self) -> Future<Result<(), RenderError>>:
+        if self.initialized:
+            return Future.ready(Err(RenderError.AlreadyInitialized))
+
+        # Get terminal file descriptor
+        self.terminal_fd = await terminal_get_fd()
+
+        # Enter raw mode (disable line buffering, echo, etc.)
+        await terminal_enter_raw_mode(self.terminal_fd)
+
+        # Get terminal size
+        val (width, height) = await terminal_get_size(self.terminal_fd)
+        self.width = width
+        self.height = height
+
+        # Resize buffers
+        self.front_buffer = TerminalBuffer.new(width, height)
+        self.back_buffer = TerminalBuffer.new(width, height)
+
+        # Enter alternate screen (optional)
+        if self.alternate_screen:
+            await terminal_write(self.terminal_fd, "\x1b[?1049h")  # Enter alt screen
+
+        # Enable mouse (optional)
+        if self.mouse_enabled:
+            await terminal_write(self.terminal_fd, "\x1b[?1000h")  # Enable mouse tracking
+            await terminal_write(self.terminal_fd, "\x1b[?1003h")  # Enable any-event tracking
+
+        # Hide cursor
+        await terminal_write(self.terminal_fd, "\x1b[?25l")
+
+        # Clear screen
+        await terminal_write(self.terminal_fd, "\x1b[2J")
+        await terminal_write(self.terminal_fd, "\x1b[H")
+
+        self.initialized = true
+        return Future.ready(Ok(()))
+
+    async fn shutdown(self) -> Future<Result<(), RenderError>>:
+        if not self.initialized:
+            return Future.ready(Err(RenderError.NotInitialized))
+
+        # Show cursor
+        await terminal_write(self.terminal_fd, "\x1b[?25h")
+
+        # Disable mouse
+        if self.mouse_enabled:
+            await terminal_write(self.terminal_fd, "\x1b[?1000l")
+            await terminal_write(self.terminal_fd, "\x1b[?1003l")
+
+        # Exit alternate screen
+        if self.alternate_screen:
+            await terminal_write(self.terminal_fd, "\x1b[?1049l")
+
+        # Leave raw mode
+        await terminal_exit_raw_mode(self.terminal_fd)
+
+        self.initialized = false
+        return Future.ready(Ok(()))
+
+    fn dimensions() -> (u16, u16):
+        return (self.width, self.height)
+
+    # Render element tree to terminal
+    async fn render(self, tree: &ElementTree) -> Future<Result<(), RenderError>>:
+        if not self.initialized:
+            return Future.ready(Err(RenderError.NotInitialized))
+
+        # Compute layout
+        val layout_result = self.compute_layout(tree)
+
+        # Render to back buffer
+        self.back_buffer.clear()
+        self.render_element_to_buffer(tree.root(), &layout_result, &mut self.back_buffer)
+
+        # Swap buffers and flush diff to terminal
+        await self.flush_buffer_diff()
+
+        # Store tree for diffing
+        self.current_tree = Some(tree.clone())
+
+        return Future.ready(Ok(()))
+
+    async fn apply_patches(self, patches: &PatchSet) -> Future<Result<(), RenderError>>:
+        if not self.initialized:
+            return Future.ready(Err(RenderError.NotInitialized))
+
+        # For TUI, we typically re-render the whole screen
+        # (incremental updates are harder with terminal rendering)
+        # But we can optimize by only updating dirty regions
+
+        if val Some(tree) = &self.current_tree:
+            # Apply patches to tree
+            val updated_tree = self.apply_patches_to_tree(tree, patches)
+            # Re-render
+            await self.render(&updated_tree)
+
+        return Future.ready(Ok(()))
+
+    async fn clear(self) -> Future<Result<(), RenderError>>:
+        if not self.initialized:
+            return Future.ready(Err(RenderError.NotInitialized))
+
+        # Clear both buffers
+        self.front_buffer.clear()
+        self.back_buffer.clear()
+
+        # Clear terminal
+        await terminal_write(self.terminal_fd, "\x1b[2J")
+        await terminal_write(self.terminal_fd, "\x1b[H")
+
+        return Future.ready(Ok(()))
+
+    async fn flush(self) -> Future<Result<(), RenderError>>:
+        if not self.initialized:
+            return Future.ready(Err(RenderError.NotInitialized))
+
+        # Flush any pending writes
+        await terminal_flush(self.terminal_fd)
+
+        return Future.ready(Ok(()))
+
+    # Poll terminal events (keyboard, mouse, resize)
+    async fn poll_event(self, timeout_ms: u64) -> Future<Result<Option<Event>, RenderError>>:
+        if not self.initialized:
+            return Future.ready(Err(RenderError.NotInitialized))
+
+        # Poll terminal for input with timeout
+        val input = await terminal_poll_input(self.terminal_fd, timeout_ms)
+
+        match input:
+            case Some(bytes):
+                # Parse input bytes into Event
+                val event = self.parse_input_bytes(&bytes)
+                return Future.ready(Ok(Some(event)))
+            case None:
+                return Future.ready(Ok(None))
+
+    async fn read_event(self) -> Future<Result<Event, RenderError>>:
+        # Block until event arrives
+        loop:
+            match await self.poll_event(1000):
+                case Ok(Some(event)): return Future.ready(Ok(event))
+                case Ok(None): pass
+                case Err(e): return Future.ready(Err(e))
+
+# =============================================================================
+# Internal Implementation
+# =============================================================================
+
+impl TuiAsyncRenderer:
+    # Compute layout for terminal
+    fn compute_layout(tree: &ElementTree) -> LayoutResult:
+        # Terminal layout is character-based
+        var result = LayoutResult.default()
+
+        # Root element takes full terminal
+        val root_layout = Layout.new(0, 0, self.width, self.height)
+        result.bounds.set(tree.root().id.value(), self.layout_to_rect(root_layout))
+
+        # Recursively layout children
+        self.layout_element(tree.root(), root_layout, &mut result)
+
+        return result
+
+    fn layout_element(elem: &Element, parent_layout: Layout, result: &mut LayoutResult):
+        # Proper flexbox/grid layout implementation
+        val num_children = elem.children.len() as u16
+        if num_children == 0:
+            return
+
+        # Determine layout mode from element style or kind
+        val layout_mode = match elem.style.display:
+            case Some("flex"): LayoutMode.Flex
+            case Some("grid"): LayoutMode.Grid
+            case _: LayoutMode.Block
+
+        match layout_mode:
+            case LayoutMode.Flex:
+                self.layout_flex_children(elem, parent_layout, result)
+            case LayoutMode.Grid:
+                self.layout_grid_children(elem, parent_layout, result)
+            case LayoutMode.Block:
+                self.layout_block_children(elem, parent_layout, result)
+
+    fn layout_flex_children(elem: &Element, parent_layout: Layout, result: &mut LayoutResult):
+        # Flexbox layout: distribute space based on flex properties
+        val is_row = elem.style.flex_direction.unwrap_or("row") == "row"
+        val num_children = elem.children.len() as u16
+
+        # Calculate flex factors
+        var total_flex: f32 = 0.0
+        for child in &elem.children:
+            total_flex += child.style.flex_grow.unwrap_or(1.0)
+
+        val gap = elem.style.gap.unwrap_or(0) as u16
+
+        if is_row:
+            # Horizontal flex
+            val available_width = parent_layout.content_width - (gap * (num_children - 1).max(0))
+            var x = parent_layout.content_x
+
+            for child in &elem.children:
+                val flex = child.style.flex_grow.unwrap_or(1.0)
+                val child_width = ((available_width as f32) * (flex / total_flex)) as u16
+
+                val child_layout = Layout.new(
+                    x,
+                    parent_layout.content_y,
+                    child_width,
+                    parent_layout.content_height
+                )
+
+                result.bounds.set(child.id.value(), self.layout_to_rect(child_layout))
+                self.layout_element(child, child_layout, result)
+
+                x = x + child_width + gap
+        else:
+            # Vertical flex
+            val available_height = parent_layout.content_height - (gap * (num_children - 1).max(0))
+            var y = parent_layout.content_y
+
+            for child in &elem.children:
+                val flex = child.style.flex_grow.unwrap_or(1.0)
+                val child_height = ((available_height as f32) * (flex / total_flex)) as u16
+
+                val child_layout = Layout.new(
+                    parent_layout.content_x,
+                    y,
+                    parent_layout.content_width,
+                    child_height
+                )
+
+                result.bounds.set(child.id.value(), self.layout_to_rect(child_layout))
+                self.layout_element(child, child_layout, result)
+
+                y = y + child_height + gap
+
+    fn layout_grid_children(elem: &Element, parent_layout: Layout, result: &mut LayoutResult):
+        # Grid layout: arrange children in a grid
+        val columns = elem.style.grid_columns.unwrap_or(2) as u16
+        val num_children = elem.children.len() as u16
+        val rows = (num_children + columns - 1) / columns
+
+        val gap = elem.style.gap.unwrap_or(0) as u16
+        val cell_width = (parent_layout.content_width - (gap * (columns - 1))) / columns
+        val cell_height = (parent_layout.content_height - (gap * (rows - 1).max(0))) / rows.max(1)
+
+        for (i, child) in elem.children.iter().enumerate():
+            val col = (i as u16) % columns
+            val row = (i as u16) / columns
+
+            val x = parent_layout.content_x + col * (cell_width + gap)
+            val y = parent_layout.content_y + row * (cell_height + gap)
+
+            val child_layout = Layout.new(x, y, cell_width, cell_height)
+
+            result.bounds.set(child.id.value(), self.layout_to_rect(child_layout))
+            self.layout_element(child, child_layout, result)
+
+    fn layout_block_children(elem: &Element, parent_layout: Layout, result: &mut LayoutResult):
+        # Block layout: stack children vertically with full width
+        val num_children = elem.children.len() as u16
+        val child_height = parent_layout.content_height / num_children.max(1)
+        var y = parent_layout.content_y
+
+        for child in &elem.children:
+            val child_layout = Layout.new(
+                parent_layout.content_x,
+                y,
+                parent_layout.content_width,
+                child_height
+            )
+
+            result.bounds.set(child.id.value(), self.layout_to_rect(child_layout))
+            self.layout_element(child, child_layout, result)
+
+            y = y + child_height
+
+enum LayoutMode:
+    Flex
+    Grid
+    Block
+
+impl TuiAsyncRenderer:
+    fn layout_to_rect(layout: Layout) -> Rect:
+        return Rect {x: layout.x as f32, y: layout.y as f32, width: layout.width as f32, height: layout.height as f32}
+
+    # Render element to terminal buffer
+    fn render_element_to_buffer(elem: &Element, layout: &LayoutResult, buffer: &mut TerminalBuffer):
+        # Get layout bounds
+        val bounds = match layout.bounds.get(&elem.id.value()):
+            case Some(rect): rect
+            case None: return
+
+        val x = bounds.x as u16
+        val y = bounds.y as u16
+        val w = bounds.width as u16
+        val h = bounds.height as u16
+
+        # Render based on element type
+        match elem.kind:
+            case ElementKind.Box:
+                self.render_box(x, y, w, h, elem, buffer)
+            case ElementKind.Button:
+                self.render_button(x, y, w, h, elem, buffer)
+            case ElementKind.Text:
+                self.render_text(x, y, w, h, elem, buffer)
+            case ElementKind.Paragraph:
+                self.render_paragraph(x, y, w, h, elem, buffer)
+            case _:
+                # Default: just render background
+                self.render_background(x, y, w, h, elem, buffer)
+
+        # Render children
+        for child in &elem.children:
+            self.render_element_to_buffer(child, layout, buffer)
+
+    fn render_box(x: u16, y: u16, w: u16, h: u16, elem: &Element, buffer: &mut TerminalBuffer):
+        # Draw box with Unicode box-drawing characters
+        val (fg, bg) = self.get_colors(elem)
+
+        # Top edge
+        buffer.set_cell(x, y, Cell.new('┌', fg, bg))
+        for i in 1..(w-1):
+            buffer.set_cell(x + i, y, Cell.new('─', fg, bg))
+        buffer.set_cell(x + w - 1, y, Cell.new('┐', fg, bg))
+
+        # Sides
+        for j in 1..(h-1):
+            buffer.set_cell(x, y + j, Cell.new('│', fg, bg))
+            buffer.set_cell(x + w - 1, y + j, Cell.new('│', fg, bg))
+
+        # Bottom edge
+        buffer.set_cell(x, y + h - 1, Cell.new('└', fg, bg))
+        for i in 1..(w-1):
+            buffer.set_cell(x + i, y + h - 1, Cell.new('─', fg, bg))
+        buffer.set_cell(x + w - 1, y + h - 1, Cell.new('┘', fg, bg))
+
+    fn render_button(x: u16, y: u16, w: u16, h: u16, elem: &Element, buffer: &mut TerminalBuffer):
+        val (fg, bg) = self.get_colors(elem)
+
+        # Draw button background
+        for j in 0..h:
+            for i in 0..w:
+                buffer.set_cell(x + i, y + j, Cell.new(' ', fg, bg))
+
+        # Draw label (centered)
+        if val Some(text) = &elem.text:
+            val text_len = text.len() as u16
+            val text_x = x + (w - text_len) / 2
+            val text_y = y + h / 2
+
+            for (i, ch) in text.chars().enumerate():
+                buffer.set_cell(text_x + (i as u16), text_y, Cell.new(ch, fg, bg))
+
+        # Draw border if focused
+        if elem.focused:
+            self.render_box(x, y, w, h, elem, buffer)
+
+    fn render_text(x: u16, y: u16, w: u16, h: u16, elem: &Element, buffer: &mut TerminalBuffer):
+        val (fg, bg) = self.get_colors(elem)
+
+        if val Some(text) = &elem.text:
+            # Render single line of text
+            for (i, ch) in text.chars().enumerate():
+                if i as u16 >= w:
+                    break
+                buffer.set_cell(x + (i as u16), y, Cell.new(ch, fg, bg))
+
+    fn render_paragraph(x: u16, y: u16, w: u16, h: u16, elem: &Element, buffer: &mut TerminalBuffer):
+        val (fg, bg) = self.get_colors(elem)
+
+        if val Some(text) = &elem.text:
+            # Word wrap text
+            val lines = self.wrap_text(text, w)
+
+            for (j, line) in lines.iter().enumerate():
+                if j as u16 >= h:
+                    break
+                for (i, ch) in line.chars().enumerate():
+                    if i as u16 >= w:
+                        break
+                    buffer.set_cell(x + (i as u16), y + (j as u16), Cell.new(ch, fg, bg))
+
+    fn render_background(x: u16, y: u16, w: u16, h: u16, elem: &Element, buffer: &mut TerminalBuffer):
+        val (fg, bg) = self.get_colors(elem)
+
+        for j in 0..h:
+            for i in 0..w:
+                buffer.set_cell(x + i, y + j, Cell.new(' ', fg, bg))
+
+    fn get_colors(elem: &Element) -> (Color, Color):
+        val fg = match elem.styles.get("color"):
+            case Some(color_str): parse_color_string(color_str)
+            case None: Color.Default
+
+        val bg = match elem.styles.get("background-color"):
+            case Some(color_str): parse_color_string(color_str)
+            case None: Color.Default
+
+        return (fg, bg)
+
+    fn wrap_text(text: &str, width: u16) -> Array<text>:
+        # Simple word wrapping
+        var lines: Array<text> = []
+        var current_line = text.new()
+
+        for word in text.split(' '):
+            if (current_line.len() + word.len() + 1) as u16 > width:
+                if not current_line.is_empty():
+                    lines.push(current_line)
+                    current_line = text.new()
+
+            if not current_line.is_empty():
+                current_line.push(' ')
+            current_line.push_str(word)
+
+        if not current_line.is_empty():
+            lines.push(current_line)
+
+        return lines
+
+    # Flush buffer diff to terminal
+    async fn flush_buffer_diff(self) -> Future<()>:
+        # Compare front and back buffers, output only diff
+        var output = text.new()
+
+        for y in 0..self.height:
+            for x in 0..self.width:
+                val front_cell = self.front_buffer.get_cell(x, y)
+                val back_cell = self.back_buffer.get_cell(x, y)
+
+                if front_cell != back_cell:
+                    # Move cursor to position
+                    output.push_str(&"\x1b[{y + 1};{x + 1}H")
+
+                    # Set colors if changed
+                    if front_cell.fg != back_cell.fg or front_cell.bg != back_cell.bg:
+                        output.push_str(&self.color_to_ansi(back_cell.fg, back_cell.bg))
+
+                    # Output character
+                    output.push(back_cell.ch)
+
+        # Write to terminal
+        if not output.is_empty():
+            await terminal_write(self.terminal_fd, &output)
+
+        # Swap buffers
+        val temp = self.front_buffer
+        self.front_buffer = self.back_buffer
+        self.back_buffer = temp
+
+        return Future.ready(())
+
+    fn color_to_ansi(fg: Color, bg: Color) -> text:
+        var result = text.new()
+
+        # Foreground color
+        match fg:
+            case Color.Black: result.push_str("\x1b[30m")
+            case Color.Red: result.push_str("\x1b[31m")
+            case Color.Green: result.push_str("\x1b[32m")
+            case Color.Yellow: result.push_str("\x1b[33m")
+            case Color.Blue: result.push_str("\x1b[34m")
+            case Color.Magenta: result.push_str("\x1b[35m")
+            case Color.Cyan: result.push_str("\x1b[36m")
+            case Color.White: result.push_str("\x1b[37m")
+            case Color.Default: result.push_str("\x1b[39m")
+            case Color.Rgb(r, g, b):
+                result.push_str(&"\x1b[38;2;{r};{g};{b}m")
+            case _: pass
+
+        # Background color
+        match bg:
+            case Color.Black: result.push_str("\x1b[40m")
+            case Color.Red: result.push_str("\x1b[41m")
+            case Color.Green: result.push_str("\x1b[42m")
+            case Color.Yellow: result.push_str("\x1b[43m")
+            case Color.Blue: result.push_str("\x1b[44m")
+            case Color.Magenta: result.push_str("\x1b[45m")
+            case Color.Cyan: result.push_str("\x1b[46m")
+            case Color.White: result.push_str("\x1b[47m")
+            case Color.Default: result.push_str("\x1b[49m")
+            case Color.Rgb(r, g, b):
+                result.push_str(&"\x1b[48;2;{r};{g};{b}m")
+            case _: pass
+
+        return result
+
+    # Parse terminal input into Event
+    fn parse_input_bytes(bytes: &Array<u8>) -> Event:
+        # Parse ANSI escape sequences
+        if bytes.is_empty():
+            return Event.Key(KeyEvent { code: KeyCode.Null, modifiers: KeyModifiers.none() })
+
+        # Special keys (escape sequences)
+        if bytes[0] == 0x1b:  # ESC
+            if bytes.len() == 1:
+                return Event.Key(KeyEvent { code: KeyCode.Escape, modifiers: KeyModifiers.none() })
+
+            # Arrow keys, function keys, etc.
+            if bytes.len() >= 3 and bytes[1] == 0x5b:  # ESC [
+                match bytes[2]:
+                    case 0x41: return Event.Key(KeyEvent { code: KeyCode.Up, modifiers: KeyModifiers.none() })
+                    case 0x42: return Event.Key(KeyEvent { code: KeyCode.Down, modifiers: KeyModifiers.none() })
+                    case 0x43: return Event.Key(KeyEvent { code: KeyCode.Right, modifiers: KeyModifiers.none() })
+                    case 0x44: return Event.Key(KeyEvent { code: KeyCode.Left, modifiers: KeyModifiers.none() })
+                    case _: pass
+
+            # Mouse events
+            if bytes.len() >= 6 and bytes[1] == 0x5b and bytes[2] == 0x4d:  # ESC [ M
+                val button = bytes[3] - 32
+                val x = (bytes[4] - 32) as u16
+                val y = (bytes[5] - 32) as u16
+
+                val kind = if button & 0x3 == 0:
+                    MouseEventKind.Down(MouseButton.Left)
+                else if button & 0x3 == 1:
+                    MouseEventKind.Down(MouseButton.Middle)
+                else:
+                    MouseEventKind.Down(MouseButton.Right)
+
+                return Event.Mouse(MouseEvent.new(kind, x, y))
+
+        # Regular keys
+        match bytes[0]:
+            case 0x0d: return Event.Key(KeyEvent { code: KeyCode.Enter, modifiers: KeyModifiers.none() })
+            case 0x7f: return Event.Key(KeyEvent { code: KeyCode.Backspace, modifiers: KeyModifiers.none() })
+            case 0x09: return Event.Key(KeyEvent { code: KeyCode.Tab, modifiers: KeyModifiers.none() })
+            case ch:
+                return Event.Key(KeyEvent {
+                    code: KeyCode.Char(ch as char),
+                    modifiers: KeyModifiers.none()
+                })
+
+    fn apply_patches_to_tree(tree: &ElementTree, patches: &PatchSet) -> ElementTree:
+        # Apply each patch operation to the tree
+        # Note: Modifies tree in-place since Simple uses reference semantics
+        for patch in patches.iter():
+            apply_single_patch(tree, patch)
+        return tree
+
+
+# Apply a single patch operation to the element tree
+fn apply_single_patch(tree: &ElementTree, patch: &PatchOp):
+    match patch:
+        case SetText { node_id, text }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.text = Some(text)
+
+        case SetAttr { node_id, name, value }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.attrs.insert(name, value)
+
+        case RemoveAttr { node_id, name }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.attrs.remove(name)
+
+        case AddClass { node_id, class }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                if not elem.classes.contains(class):
+                    elem.classes.push(class)
+
+        case RemoveClass { node_id, class }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.classes = elem.classes.filter(fn(c): c != class)
+
+        case SetStyle { node_id, property, value }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.styles.insert(property, value)
+
+        case RemoveStyle { node_id, property }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.styles.remove(property)
+
+        case InsertChild { parent_id, index, element }:
+            if val Some(parent) = find_element_mut(tree, parent_id):
+                val idx = index as i64
+                if idx >= parent.children.len() as i64:
+                    parent.children.push(element)
+                else:
+                    parent.children.insert(idx, element)
+
+        case RemoveChild { parent_id, child_id }:
+            if val Some(parent) = find_element_mut(tree, parent_id):
+                parent.children = parent.children.filter(fn(c): c.id != child_id)
+
+        case ReplaceChild { parent_id, old_id, element }:
+            if val Some(parent) = find_element_mut(tree, parent_id):
+                for i in 0..parent.children.len():
+                    if parent.children[i].id == old_id:
+                        parent.children[i] = element
+                        break
+
+        case MoveChild { parent_id, child_id, from_index, to_index }:
+            if val Some(parent) = find_element_mut(tree, parent_id):
+                val from_i = from_index as i64
+                val to_i = to_index as i64
+                if from_i < parent.children.len() as i64:
+                    val child = parent.children.remove(from_i)
+                    if to_i >= parent.children.len() as i64:
+                        parent.children.push(child)
+                    else:
+                        parent.children.insert(to_i, child)
+
+        case ReplaceSubtree { node_id, element }:
+            # Find parent and replace the subtree
+            replace_subtree_recursive(&mut tree.root, node_id, element)
+
+        case SetFocus { node_id }:
+            tree.set_focus(node_id)
+
+        case ClearFocus { node_id }:
+            if tree.focus_id == Some(node_id):
+                tree.focus_id = None
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.focused = false
+
+        case BindEvent { node_id, event, handler_id }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.events.insert(event, handler_id)
+
+        case UnbindEvent { node_id, event }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.events.remove(event)
+
+
+# Find element by ID (mutable reference via tree traversal)
+fn find_element_mut(tree: &ElementTree, id: NodeId) -> Option<&Element>:
+    return find_element_in_subtree(&mut tree.root, id)
+
+
+fn find_element_in_subtree(elem: &mut Element, id: NodeId) -> Option<&Element>:
+    if elem.id == id:
+        return Some(elem)
+    for child in &mut elem.children:
+        match find_element_in_subtree(child, id):
+            case Some(found): return Some(found)
+            case None: pass
+    return None
+
+
+fn replace_subtree_recursive(elem: &mut Element, target_id: NodeId, replacement: Element) -> bool:
+    # Check if this element is the target
+    if elem.id == target_id:
+        # Can't replace root from within, caller handles this
+        return false
+
+    # Check children
+    for i in 0..elem.children.len():
+        if elem.children[i].id == target_id:
+            elem.children[i] = replacement
+            return true
+        # Recurse into child
+        if replace_subtree_recursive(&mut elem.children[i], target_id, replacement):
+            return true
+
+    return false
+
+# =============================================================================
+# Terminal Buffer (Double Buffering)
+# =============================================================================
+
+struct TerminalBuffer:
+    width: u16
+    height: u16
+    cells: Array<Cell>
+
+impl TerminalBuffer:
+    fn new(width: u16, height: u16) -> TerminalBuffer:
+        val size = (width * height) as u64
+        var cells: Array<Cell> = []
+        for _ in 0..size:
+            cells.push(Cell.default())
+
+        return TerminalBuffer {
+            width: width,
+            height: height,
+            cells: cells
+        }
+
+    fn clear():
+        for cell in &mut self.cells:
+            *cell = Cell.default()
+
+    fn get_cell(x: u16, y: u16) -> &Cell:
+        if x >= self.width or y >= self.height:
+            # Return default cell for out-of-bounds
+            return &Cell.default()
+
+        val idx = (y * self.width + x) as u64
+        return &self.cells[idx]
+
+    fn set_cell(x: u16, y: u16, cell: Cell):
+        if x >= self.width or y >= self.height:
+            return
+
+        val idx = (y * self.width + x) as u64
+        self.cells[idx] = cell
+
+struct Cell:
+    ch: char
+    fg: Color
+    bg: Color
+
+impl Cell:
+    fn new(ch: char, fg: Color, bg: Color) -> Cell:
+        return Cell { ch: ch, fg: fg, bg: bg }
+
+    static fn default() -> Cell:
+        return Cell {
+            ch: ' ',
+            fg: Color.Default,
+            bg: Color.Default
+        }
+
+impl Eq for Cell:
+    fn eq(other: &Cell) -> bool:
+        return self.ch == other.ch and self.fg == other.fg and self.bg == other.bg
+
+# =============================================================================
+# Terminal FFI (OS-specific)
+# =============================================================================
+
+# Terminal API functions (implemented via FFI to termios/Windows Console API)
+
+extern async fn terminal_get_fd() -> Future<i32>
+extern async fn terminal_enter_raw_mode(fd: i32) -> Future<()>
+extern async fn terminal_exit_raw_mode(fd: i32) -> Future<()>
+extern async fn terminal_get_size(fd: i32) -> Future<(u16, u16)>
+extern async fn terminal_write(fd: i32, data: &str) -> Future<()>
+extern async fn terminal_flush(fd: i32) -> Future<()>
+extern async fn terminal_poll_input(fd: i32, timeout_ms: u64) -> Future<Option<Array<u8>>>
+
+# Supporting types
+struct Rect:
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+
+struct LayoutResult:
+    bounds: Dict<u64, Rect>
+
+impl LayoutResult:
+    static fn default() -> LayoutResult:
+        return LayoutResult { bounds: Dict.new() }
+
+struct LayoutCache:
+    cache: Dict<u64, Layout>
+
+impl LayoutCache:
+    static fn new() -> LayoutCache:
+        return LayoutCache { cache: Dict.new() }

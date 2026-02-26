@@ -1,0 +1,259 @@
+# Set<T> - Unique element collection
+# Backed by Dict<T, bool> for O(1) operations
+# Feature ID: #33
+
+use core.traits.*
+use core.collections.*
+
+# ============================================
+# Set Type Definition
+# ============================================
+
+struct Set<T>:
+    elements: Dict<T, bool>
+
+# ============================================
+# Constructors
+# ============================================
+
+impl Set<T>:
+    # Create empty set
+    static fn new() -> Set<T>:
+        # Use empty dict literal {} instead of Dict.new()
+        val empty_dict: Dict<T, bool> = {}
+        Set { elements: empty_dict }
+
+    # Create set from array (deduplicates automatically)
+    static fn from_array(arr: [T]) -> Set<T>:
+        var set = Set.new()
+        for item in arr:
+            set.add(item)
+        return set
+
+    # Create set from iterator
+    static fn from_iter<I: Iterator<Item=T>>(iter: I) -> Set<T>:
+        var set = Set.new()
+        for item in iter:
+            set.add(item)
+        return set
+
+# ============================================
+# Core Methods
+# ============================================
+
+impl Set<T>:
+    # Add element to set (idempotent)
+    # Note: Uses local var pattern as workaround for field mutation
+    me add(elem: T):
+        var d = self.elements
+        d.insert(elem, true)
+        self.elements = d
+
+    # Remove element from set
+    me remove(elem: T):
+        var d = self.elements
+        d.remove(elem)
+        self.elements = d
+
+    # Check if element exists (O(1) via hashing)
+    fn contains(elem: T) -> bool:
+        self.elements.contains_key(elem)
+
+    # Number of elements
+    fn size() -> usize:
+        self.elements.len()
+
+    # Alias for size()
+    fn len() -> usize:
+        self.elements.len()
+
+    # Check if set has no elements
+    fn is_empty() -> bool:
+        self.elements.len() == 0
+
+    # Clear all elements
+    me clear():
+        val empty: Dict<T, bool> = {}
+        self.elements = empty
+
+# ============================================
+# Set Operations
+# ============================================
+
+impl Set<T>:
+    # Union: all elements from both sets
+    # Math: a ∪ b = {x | x ∈ a or x ∈ b}
+    fn union(other: Set<T>) -> Set<T>:
+        var result = Set.new()
+        # Add all from self
+        for key in self.elements.keys():
+            result.add(key)
+        # Add all from other
+        for key in other.elements.keys():
+            result.add(key)
+        return result
+
+    # Intersection: elements in both sets
+    # Math: a ∩ b = {x | x ∈ a and x ∈ b}
+    fn intersection(other: Set<T>) -> Set<T>:
+        var result = Set.new()
+        # Iterate smaller set for efficiency
+        val smaller = if self.size() <= other.size(): self else: other
+        val larger = if self.size() <= other.size(): other else: self
+
+        for key in smaller.elements.keys():
+            if larger.contains(key):
+                result.add(key)
+        return result
+
+    # Difference: elements in self but not in other
+    # Math: a \ b = {x | x ∈ a and x ∉ b}
+    fn difference(other: Set<T>) -> Set<T>:
+        var result = Set.new()
+        for key in self.elements.keys():
+            if not other.contains(key):
+                result.add(key)
+        return result
+
+    # Symmetric difference: elements in either but not both
+    # Math: a Δ b = (a \ b) ∪ (b \ a)
+    fn symmetric_difference(other: Set<T>) -> Set<T>:
+        var result = Set.new()
+        # Add elements in self but not other
+        for key in self.elements.keys():
+            if not other.contains(key):
+                result.add(key)
+        # Add elements in other but not self
+        for key in other.elements.keys():
+            if not self.contains(key):
+                result.add(key)
+        return result
+
+    # Check if all elements are in other set
+    fn is_subset(other: Set<T>) -> bool:
+        for key in self.elements.keys():
+            if not other.contains(key):
+                return false
+        return true
+
+    # Check if other set is subset of self
+    fn is_superset(other: Set<T>) -> bool:
+        other.is_subset(self)
+
+    # Check if sets have no common elements
+    fn is_disjoint(other: Set<T>) -> bool:
+        val smaller = if self.size() <= other.size(): self else: other
+        val larger = if self.size() <= other.size(): other else: self
+
+        for key in smaller.elements.keys():
+            if larger.contains(key):
+                return false
+        return true
+
+# ============================================
+# Conversion Methods
+# ============================================
+
+impl Set<T>:
+    # Convert to array (order undefined)
+    fn to_array() -> [T]:
+        self.elements.keys()
+
+    # Convert to list (order undefined)
+    fn to_list() -> List<T>:
+        List.from_iter(self.elements.keys())
+
+# ============================================
+# Iteration Support
+# ============================================
+
+impl Iterable<T> for Set<T>:
+    type Iter = SetIter<T>
+
+    fn iter() -> Self.Iter:
+        SetIter { keys: self.elements.keys(), index: 0 }
+
+    fn into_iter() -> Self.Iter:
+        self.iter()
+
+    fn each(f: fn(T)):
+        for key in self.elements.keys():
+            f(key)
+
+    fn each_with_index(f: fn(T, usize)):
+        var i: usize = 0
+        for key in self.elements.keys():
+            f(key, i)
+            i = i + 1
+
+# Set iterator
+struct SetIter<T>:
+    keys: [T]
+    index: usize
+
+impl Iterator<Item=T> for SetIter<T>:
+    fn next() -> Option<T>:
+        if self.index >= self.keys.len():
+            return nil
+        val item = self.keys[self.index]
+        self.index = self.index + 1
+        Some(item)
+
+# ============================================
+# Collection Trait Implementation
+# ============================================
+
+impl Len for Set<T>:
+    fn len() -> usize:
+        self.elements.len()
+
+impl Collection<T> for Set<T>:
+    fn contains(item: T) -> bool:
+        self.elements.contains_key(item)
+
+    fn count_matching(pred: fn(T) -> bool) -> usize:
+        var count: usize = 0
+        for key in self.elements.keys():
+            if pred(key):
+                count = count + 1
+        return count
+
+# ============================================
+# Display Support
+# ============================================
+
+impl Display for Set<T> where T: Display:
+    fn fmt() -> str:
+        # Use brackets instead of braces to avoid f-string parsing issues
+        var result = "Set["
+        var first = true
+        for key in self.elements.keys():
+            if not first:
+                result = result + ", "
+            result = result + key.to_string()
+            first = false
+        result + "]"
+
+    fn to_string() -> text:
+        self.fmt()
+
+# ============================================
+# Equality
+# ============================================
+
+impl Eq for Set<T> where T: Eq:
+    fn eq(other: Set<T>) -> bool:
+        if self.size() != other.size():
+            return false
+        for key in self.elements.keys():
+            if not other.contains(key):
+                return false
+        return true
+
+# ============================================
+# Type Aliases for Common Sets
+# ============================================
+
+type IntSet = Set<i32>
+type StringSet = Set<text>
+type FloatSet = Set<f64>

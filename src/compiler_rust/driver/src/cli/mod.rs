@@ -1,0 +1,33 @@
+//! CLI modules for the Simple language driver.
+
+pub mod analysis;
+pub mod audit;
+pub mod basic;
+pub mod check;
+pub mod code_quality;
+pub mod commands;
+pub mod compile;
+pub mod diagram_gen;
+pub mod doc_gen;
+pub mod electron;
+pub mod env;
+pub mod gen_lean;
+pub mod help;
+pub mod interactive_fix;
+pub mod i18n;
+pub mod init;
+pub mod llm_tools;
+pub mod lock;
+pub mod migrate;
+pub mod qualify_ignore;
+pub mod repl;
+pub mod sandbox;
+pub mod sspec_docgen;
+pub mod test_discovery;
+pub mod test_output;
+pub mod test_runner;
+#[cfg(feature = "tui")]
+pub mod tui;
+pub mod verify;
+pub mod vscode;
+pub mod web;

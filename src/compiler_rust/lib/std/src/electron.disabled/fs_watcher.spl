@@ -1,0 +1,224 @@
+# File System Watcher
+# Watch directories and files for changes
+
+# External FFI declarations (implemented in Rust/Node.js)
+extern fn electron_fs_watch(path: text, options: text, watcher_id: i64): void
+extern fn electron_fs_unwatch(watcher_id: i64): void
+extern fn electron_fs_unwatch_all(): void
+
+# Callback registry for file system events
+val event_callbacks: Dict<i64, Dict<text, List<fn(path: text): void>>> = {}
+val next_watcher_id: i64 = 0
+
+# FSWatcher class for managing file system watches
+class FSWatcher:
+    val watcher_id: i64
+    val path: text
+    val recursive: bool
+
+    fn __init__(path: text, recursive: bool = false):
+        """Create a new file system watcher.
+
+        Args:
+            path: Directory or file path to watch
+            recursive: Watch subdirectories recursively
+
+        Example:
+            watcher = FSWatcher("/path/to/dir", recursive=true)
+            watcher.on_change(fn(changed_path):
+                print("Changed: {changed_path}")
+            )
+        """
+        self.watcher_id = next_watcher_id
+        next_watcher_id = next_watcher_id + 1
+        self.path = path
+        self.recursive = recursive
+
+        # Initialize callback storage
+        event_callbacks[self.watcher_id] = {
+            "add": [],
+            "change": [],
+            "delete": [],
+            "error": []
+        }
+
+        # Start watching
+        options = self._build_options()
+        electron_fs_watch(path, options, self.watcher_id)
+
+    fn _build_options(): text =
+        """Build options JSON string for native watcher."""
+        # Simple JSON construction (proper JSON parser in stdlib would be better)
+        if self.recursive:
+            '{"recursive": true}'
+        else:
+            '{"recursive": false}'
+
+    fn on_add(handler: fn(path: text): void):
+        """Register handler for file/directory addition.
+
+        Example:
+            watcher.on_add(fn(path):
+                print("File added: {path}")
+            )
+        """
+        event_callbacks[self.watcher_id]["add"].append(handler)
+
+    fn on_change(handler: fn(path: text): void):
+        """Register handler for file/directory changes.
+
+        Example:
+            watcher.on_change(fn(path):
+                print("File changed: {path}")
+                reload_config(path)
+            )
+        """
+        event_callbacks[self.watcher_id]["change"].append(handler)
+
+    fn on_delete(handler: fn(path: text): void):
+        """Register handler for file/directory deletion.
+
+        Example:
+            watcher.on_delete(fn(path):
+                print("File deleted: {path}")
+            )
+        """
+        event_callbacks[self.watcher_id]["delete"].append(handler)
+
+    fn on_error(handler: fn(path: text): void):
+        """Register handler for watcher errors.
+
+        Example:
+            watcher.on_error(fn(error_msg):
+                print("Watch error: {error_msg}")
+            )
+        """
+        event_callbacks[self.watcher_id]["error"].append(handler)
+
+    fn close():
+        """Stop watching and clean up resources."""
+        electron_fs_unwatch(self.watcher_id)
+        event_callbacks.delete(self.watcher_id)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_recursive(): bool =
+        """Check if watching recursively.
+
+        Returns:
+            true if recursive watching is enabled
+
+        Example:
+            watcher.is_recursive()  # → true
+        """
+        self.recursive
+
+    fn get_watcher_id(): i64 =
+        """Get the watcher ID.
+
+        Returns:
+            Unique watcher identifier
+
+        Example:
+            watcher.get_watcher_id()  # → 0
+        """
+        self.watcher_id
+
+    fn get_path(): text =
+        """Get the watched path.
+
+        Returns:
+            Path being watched
+
+        Example:
+            watcher.get_path()  # → "/path/to/dir"
+        """
+        self.path
+
+    fn summary(): text =
+        """Get watcher summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            watcher.summary()
+            # → "FSWatcher: '/path/to/dir' (recursive), ID=0"
+        """
+        val recursive_str = if self.recursive { "recursive" } else { "non-recursive" }
+        "FSWatcher: '{self.path}' ({recursive_str}), ID={self.watcher_id}"
+
+# Trigger callback from native side (called by FFI)
+pub fn _trigger_callback(watcher_id: i64, event_type: text, path: text):
+    """Internal: Called by FFI layer when file system event fires."""
+    if event_callbacks.has_key(watcher_id):
+        watcher_events = event_callbacks[watcher_id]
+        if watcher_events.has_key(event_type):
+            handlers = watcher_events[event_type]
+            for handler in handlers:
+                handler(path)
+
+# Convenience function for simple file watching
+pub fn watch(path: text, handler: fn(event: text, path: text): void, recursive: bool = false): FSWatcher =
+    """Watch a file or directory for changes.
+
+    Args:
+        path: Path to watch
+        handler: Callback receiving (event_type, changed_path)
+        recursive: Watch subdirectories recursively
+
+    Returns:
+        FSWatcher instance (call .close() to stop)
+
+    Example:
+        watcher = fs_watcher.watch("/path/to/config", fn(event, path):
+            if event == "change":
+                reload_config(path)
+        )
+
+        # Later: watcher.close()
+    """
+    val watcher = FSWatcher(path, recursive)
+
+    # Attach unified handler to all event types
+    watcher.on_add(fn(p): handler("add", p))
+    watcher.on_change(fn(p): handler("change", p))
+    watcher.on_delete(fn(p): handler("delete", p))
+    watcher.on_error(fn(p): handler("error", p))
+
+    watcher
+
+# Convenience function for watching multiple paths
+pub fn watch_many(paths: List<text>, handler: fn(event: text, path: text): void, recursive: bool = false): List<FSWatcher> =
+    """Watch multiple paths with a single handler.
+
+    Args:
+        paths: List of paths to watch
+        handler: Unified callback for all paths
+        recursive: Watch subdirectories recursively
+
+    Returns:
+        List of FSWatcher instances
+
+    Example:
+        watchers = fs_watcher.watch_many(
+            ["/etc/config", "/home/user/.config"],
+            fn(event, path):
+                print("{event}: {path}")
+            )
+        )
+
+        # Later: for w in watchers: w.close()
+    """
+    val watchers = []
+    for path in paths:
+        watchers.append(watch(path, handler, recursive))
+    watchers
+
+# Stop all watchers
+pub fn unwatch_all():
+    """Stop all active file system watchers."""
+    electron_fs_unwatch_all()
+    event_callbacks.clear()

@@ -1,0 +1,217 @@
+# System module - Process control and standard streams
+# Provides access to stdin, stdout, stderr, arguments, and process control
+
+use host.common.io.term_ffi.{native_stdout, native_stderr, native_stdin, native_term_write, native_term_flush}
+use host.common.io.term_types.RawHandle
+
+# Extern declarations for FFI
+extern fn rt_get_args() -> List<text>
+extern fn rt_exit(code: i32) -> void
+
+# Standard output stream
+pub class Stdout:
+    handle: RawHandle
+
+    pub fn new() -> Stdout:
+        return Stdout { handle: native_stdout() }
+
+    @io
+    pub fn write(self, s: text) -> Result<i32, text>:
+        val written = native_term_write(self.handle, s.as_ptr(), s.len())
+        if written < 0:
+            return Err("Write error: {written}")
+        return Ok(written as i32)
+
+    @io
+    pub fn flush(self) -> Result<(), text>:
+        val result = native_term_flush(self.handle)
+        if result != 0:
+            return Err("Flush error: {result}")
+        return Ok(())
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn writeln(self, s: text) -> Result<i32, text>:
+        """Write string with newline to stdout.
+
+        Args:
+            s: text to write
+
+        Returns:
+            Number of bytes written on success, error message on failure
+
+        Example:
+            stdout.writeln("Hello")
+        """
+        return self.write(s + "\n")
+
+    pub fn print(self, s: text) -> Result<(), text>:
+        """Print string to stdout and flush.
+
+        Args:
+            s: text to print
+
+        Returns:
+            Ok on success, error message on failure
+
+        Example:
+            stdout.print("Hello")
+        """
+        match self.write(s):
+            case Ok(_):
+                return self.flush()
+            case Err(e):
+                return Err(e)
+
+    pub fn println(self, s: text) -> Result<(), text>:
+        """Print string with newline to stdout and flush.
+
+        Args:
+            s: text to print
+
+        Returns:
+            Ok on success, error message on failure
+
+        Example:
+            stdout.println("Hello")
+        """
+        match self.writeln(s):
+            case Ok(_):
+                return self.flush()
+            case Err(e):
+                return Err(e)
+
+# Standard error stream
+pub class Stderr:
+    handle: RawHandle
+
+    pub fn new() -> Stderr:
+        return Stderr { handle: native_stderr() }
+
+    @io
+    pub fn write(self, s: text) -> Result<i32, text>:
+        val written = native_term_write(self.handle, s.as_ptr(), s.len())
+        if written < 0:
+            return Err("Write error: {written}")
+        return Ok(written as i32)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn writeln(self, s: text) -> Result<i32, text>:
+        """Write string with newline to stderr.
+
+        Args:
+            s: text to write
+
+        Returns:
+            Number of bytes written on success, error message on failure
+
+        Example:
+            stderr.writeln("Error message")
+        """
+        return self.write(s + "\n")
+
+    pub fn print_error(self, s: text) -> Result<i32, text>:
+        """Print error message to stderr (alias for writeln).
+
+        Args:
+            s: Error message to print
+
+        Returns:
+            Number of bytes written on success, error message on failure
+
+        Example:
+            stderr.print_error("Fatal error")
+        """
+        return self.writeln(s)
+
+# Command line arguments
+pub class Args:
+    @pure
+    pub fn get_args() -> List<text>:
+        return rt_get_args()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    @pure
+    pub fn count() -> i32:
+        """Get number of command line arguments.
+
+        Returns:
+            Argument count (including program name)
+
+        Example:
+            Args.count()  # → 3
+        """
+        return rt_get_args().len()
+
+    @pure
+    pub fn get(index: i32) -> Option<text>:
+        """Get argument at index.
+
+        Args:
+            index: Argument index (0 = program name)
+
+        Returns:
+            Some(arg) if index is valid, None otherwise
+
+        Example:
+            Args.get(1)  # → Some("arg1")
+        """
+        val args = rt_get_args()
+        if index >= 0 and index < args.len():
+            return Some(args[index])
+        return nil
+
+    @pure
+    pub fn program_name() -> text:
+        """Get program name (first argument).
+
+        Returns:
+            Program name
+
+        Example:
+            Args.program_name()  # → "myapp"
+        """
+        val args = rt_get_args()
+        if args.len() > 0:
+            return args[0]
+        return ""
+
+    @pure
+    pub fn has_args() -> bool:
+        """Check if program has command line arguments (beyond program name).
+
+        Returns:
+            true if arguments exist
+
+        Example:
+            Args.has_args()  # → true
+        """
+        return rt_get_args().len() > 1
+
+# Get the global stdout instance
+pub fn stdout() -> Stdout:
+    Stdout.new()
+
+# Get the global stderr instance
+pub fn stderr() -> Stderr:
+    Stderr.new()
+
+# Get the global args instance
+pub fn args() -> Args:
+    Args.new()
+
+# Exit the process with the given code
+@io
+pub fn exit(code: i32) -> Never:
+    rt_exit(code)
+    # Unreachable, but needed for type system
+    loop:
+        pass

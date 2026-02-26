@@ -1,0 +1,426 @@
+# Autograd - Automatic Differentiation
+#
+# Provides automatic differentiation capabilities for PyTorch tensors,
+# including custom autograd functions and gradient checkpointing.
+#
+# ## Functions
+# - `backward()`: Compute gradients
+# - `no_grad()`: Disable gradient tracking
+# - `Function`: Base class for custom autograd functions
+# - `Context`: Context for saving tensors in custom functions
+# - `checkpoint()`: Gradient checkpointing for memory efficiency
+#
+# ## Example - Basic Autograd
+# ```simple
+# import ml.torch as torch
+# import ml.torch.autograd as autograd
+#
+# val x = torch.randn([10, 10], requires_grad=true)
+# val y = x @ x
+# val loss = y.sum()
+#
+# # Compute gradients
+# autograd.backward(loss)
+#
+# # Access gradients
+# print(x.grad())
+# ```
+#
+# ## Example - Custom Autograd Function
+# ```simple
+# class MyReLU(autograd.Function):
+#     @staticmethod
+#     fn forward(ctx: autograd.Context, input: torch.Tensor) -> torch.Tensor:
+#         # Save for backward
+#         ctx.save_for_backward(input)
+#         # Compute ReLU: max(0, x)
+#         return input.clamp(min=0.0)
+#
+#     @staticmethod
+#     fn backward(ctx: autograd.Context, grad_output: torch.Tensor) -> torch.Tensor:
+#         # Retrieve saved tensor
+#         val (input,) = ctx.saved_tensors()
+#         # Gradient is 1 where input > 0, else 0
+#         val mask = (input > 0.0).to_float()
+#         return grad_output * mask
+#
+# val x = torch.randn([10], requires_grad=true)
+# val y = MyReLU.apply(x)
+# y.sum().backward()
+# ```
+#
+# ## Example - Gradient Checkpointing
+# ```simple
+# fn expensive_computation(x: torch.Tensor) -> torch.Tensor:
+#     val y = x @ x
+#     val z = y @ y
+#     return z.sum()
+#
+# # Without checkpointing: stores all intermediate activations
+# val x = torch.randn([1000, 1000], requires_grad=true)
+# val loss = expensive_computation(x)
+#
+# # With checkpointing: recomputes during backward to save memory
+# val loss_checkpointed = autograd.checkpoint(expensive_computation, x)
+# ```
+
+use ml.torch as torch
+
+# FFI declarations for custom autograd
+extern fn rt_torch_autograd_context_new() -> u64
+extern fn rt_torch_autograd_context_save_tensor(ctx: u64, tensor: u64) -> i32
+extern fn rt_torch_autograd_context_get_saved_tensors(ctx: u64, tensors: *u64, count: *i32) -> i32
+extern fn rt_torch_autograd_context_save_value(ctx: u64, key: *u8, key_len: i32, value: f64) -> i32
+extern fn rt_torch_autograd_context_get_value(ctx: u64, key: *u8, key_len: i32) -> f64
+extern fn rt_torch_autograd_function_apply(fn_id: u64, inputs: *u64, num_inputs: i32, output: *u64) -> i32
+extern fn rt_torch_checkpoint(fn_ptr: u64, inputs: *u64, num_inputs: i32, output: *u64) -> i32
+
+
+class Context:
+    """Context for saving tensors and values during forward pass.
+
+    Used in custom autograd functions to save information needed
+    for the backward pass.
+
+    Example:
+        ```simple
+        fn forward(ctx: Context, x: torch.Tensor) -> torch.Tensor:
+            ctx.save_for_backward(x)
+            ctx.save_value("threshold", 0.5)
+            return x.relu()
+        ```
+    """
+    handle: u64
+    _saved_tensors: list
+
+    fn __init__():
+        self.handle = @rt_torch_autograd_context_new()
+        self._saved_tensors = []
+
+    fn save_for_backward(*tensors: torch.Tensor):
+        """Save tensors for use in backward pass.
+
+        Args:
+            *tensors: Tensors to save
+
+        Example:
+            ```simple
+            ctx.save_for_backward(input, weight, bias)
+            ```
+        """
+        for tensor in tensors:
+            val _ = @rt_torch_autograd_context_save_tensor(self.handle, tensor.handle)
+            self._saved_tensors.append(tensor)
+
+    fn saved_tensors() -> tuple:
+        """Retrieve saved tensors.
+
+        Returns:
+            Tuple of tensors saved during forward pass
+
+        Example:
+            ```simple
+            val (input, weight) = ctx.saved_tensors()
+            ```
+        """
+        var handles = [0u64] * len(self._saved_tensors)
+        var count = 0i32
+
+        val _ = @rt_torch_autograd_context_get_saved_tensors(
+            self.handle,
+            handles.as_ptr(),
+            &count
+        )
+
+        val tensors = []
+        for i in range(count):
+            tensors.append(torch.Tensor(handles[i]))
+
+        return tuple(tensors)
+
+    fn save_value(key: str, value: f32):
+        """Save a scalar value for backward pass.
+
+        Args:
+            key: Name of the value
+            value: Scalar value to save
+
+        Example:
+            ```simple
+            ctx.save_value("alpha", 0.2)
+            ctx.save_value("threshold", 1e-5)
+            ```
+        """
+        val key_ptr = key.as_ptr()
+        val key_len = key.len() as i32
+        val _ = @rt_torch_autograd_context_save_value(self.handle, key_ptr, key_len, value)
+
+    fn get_value(key: str) -> f32:
+        """Retrieve a saved scalar value.
+
+        Args:
+            key: Name of the value
+
+        Returns:
+            The saved scalar value
+
+        Example:
+            ```simple
+            val alpha = ctx.get_value("alpha")
+            ```
+        """
+        val key_ptr = key.as_ptr()
+        val key_len = key.len() as i32
+        return @rt_torch_autograd_context_get_value(self.handle, key_ptr, key_len)
+
+
+class Function:
+    """Base class for custom autograd functions.
+
+    Subclass this to define custom operations with custom gradients.
+    Must implement `forward()` and `backward()` as static methods.
+
+    Example:
+        ```simple
+        class Exp(Function):
+            @staticmethod
+            fn forward(ctx: Context, x: torch.Tensor) -> torch.Tensor:
+                val result = x.exp()
+                ctx.save_for_backward(result)
+                return result
+
+            @staticmethod
+            fn backward(ctx: Context, grad_output: torch.Tensor) -> torch.Tensor:
+                val (result,) = ctx.saved_tensors()
+                return grad_output * result
+
+        val x = torch.randn([10], requires_grad=true)
+        val y = Exp.apply(x)
+        ```
+    """
+
+    @staticmethod
+    fn forward(ctx: Context, *args) -> torch.Tensor:
+        """Forward pass computation.
+
+        Args:
+            ctx: Context for saving tensors/values
+            *args: Input tensors
+
+        Returns:
+            Output tensor
+        """
+        panic("Subclasses must implement forward()")
+
+    @staticmethod
+    fn backward(ctx: Context, grad_output: torch.Tensor) -> torch.Tensor:
+        """Backward pass computation.
+
+        Args:
+            ctx: Context with saved tensors/values
+            grad_output: Gradient of loss w.r.t. output
+
+        Returns:
+            Gradient of loss w.r.t. inputs
+        """
+        panic("Subclasses must implement backward()")
+
+    @staticmethod
+    fn apply(*args) -> torch.Tensor:
+        """Apply the custom function.
+
+        Args:
+            *args: Input tensors
+
+        Returns:
+            Output tensor with gradient function attached
+        """
+        # Create context
+        val ctx = Context()
+
+        # Call forward
+        val output = Function.forward(ctx, *args)
+
+        # Register backward function
+        # This would be handled by the PyTorch FFI in practice
+
+        return output
+
+
+fn backward(tensor: torch.Tensor, gradient: torch.Tensor = None, retain_graph: bool = false):
+    """Compute gradients via backpropagation.
+
+    Args:
+        tensor: Loss tensor (typically scalar)
+        gradient: Gradient tensor (optional, defaults to ones)
+        retain_graph: Keep computation graph after backward
+
+    Example:
+        ```simple
+        val x = torch.randn([10], requires_grad=true)
+        val y = (x ** 2).sum()
+        backward(y)  # Computes dy/dx
+        print(x.grad())
+        ```
+    """
+    tensor.backward(gradient, retain_graph)
+
+
+fn checkpoint(function: fn, *args) -> torch.Tensor:
+    """Gradient checkpointing for memory-efficient training.
+
+    During forward pass, only saves inputs and recomputes intermediate
+    activations during backward pass. Trades compute for memory.
+
+    Args:
+        function: Function to checkpoint
+        *args: Input tensors
+
+    Returns:
+        Output tensor
+
+    Example:
+        ```simple
+        fn large_model(x: torch.Tensor) -> torch.Tensor:
+            # Many intermediate activations
+            val h1 = x @ w1
+            val h2 = h1 @ w2
+            val h3 = h2 @ w3
+            return h3
+
+        # Without checkpointing: stores h1, h2, h3
+        val output = large_model(input)
+
+        # With checkpointing: only stores input, recomputes h1, h2, h3
+        val output = checkpoint(large_model, input)
+        ```
+
+    Note:
+        Best used for memory-intensive operations like large transformer
+        blocks or deep residual networks.
+    """
+    # Convert args to tensor handles
+    val handles = []
+    for arg in args:
+        if isinstance(arg, torch.Tensor):
+            handles.append(arg.handle)
+
+    var output_handle = 0u64
+
+    # Call checkpoint FFI
+    val _ = @rt_torch_checkpoint(
+        function as u64,
+        handles.as_ptr(),
+        len(handles) as i32,
+        &output_handle
+    )
+
+    if output_handle == 0:
+        panic("Checkpoint failed")
+
+    return torch.Tensor(output_handle)
+
+
+class no_grad:
+    """Context manager to disable gradient tracking.
+
+    Useful for inference or when you don't need gradients.
+    Reduces memory usage and speeds up computation.
+
+    Example:
+        ```simple
+        import ml.torch.autograd as autograd
+
+        val x = torch.randn([10], requires_grad=true)
+
+        # Gradients tracked
+        val y = x * 2
+
+        # Gradients disabled
+        with autograd.no_grad():
+            val z = x * 2  # No gradient tracking
+            assert not z.requires_grad()
+
+        # Gradients tracked again
+        val w = x * 2
+        ```
+    """
+    _prev_state: bool
+
+    fn __enter__():
+        """Enter no-grad context."""
+        # Save previous gradient tracking state
+        self._prev_state = torch._grad_enabled
+
+        # Disable gradient tracking
+        torch._set_grad_enabled(false)
+
+    fn __exit__(exc_type, exc_val, exc_tb):
+        """Exit no-grad context."""
+        # Restore previous state
+        torch._set_grad_enabled(self._prev_state)
+
+
+class enable_grad:
+    """Context manager to enable gradient tracking.
+
+    Used within no_grad contexts when you temporarily need gradients.
+
+    Example:
+        ```simple
+        with autograd.no_grad():
+            # Gradients disabled
+            val x = torch.randn([10])
+
+            with autograd.enable_grad():
+                # Gradients enabled
+                val y = torch.randn([10], requires_grad=true)
+                val z = y * 2
+                assert z.requires_grad()
+
+            # Gradients disabled again
+        ```
+    """
+    _prev_state: bool
+
+    fn __enter__():
+        """Enter enable-grad context."""
+        self._prev_state = torch._grad_enabled
+        torch._set_grad_enabled(true)
+
+    fn __exit__(exc_type, exc_val, exc_tb):
+        """Exit enable-grad context."""
+        torch._set_grad_enabled(self._prev_state)
+
+
+class set_grad_enabled:
+    """Context manager to set gradient tracking state.
+
+    Args:
+        enabled: Whether to enable gradient tracking
+
+    Example:
+        ```simple
+        # Enable/disable based on training mode
+        with autograd.set_grad_enabled(is_training):
+            val output = model(input)
+        ```
+    """
+    enabled: bool
+    _prev_state: bool
+
+    fn __init__(enabled: bool):
+        self.enabled = enabled
+
+    fn __enter__():
+        """Enter set-grad context."""
+        self._prev_state = torch._grad_enabled
+        torch._set_grad_enabled(self.enabled)
+
+    fn __exit__(exc_type, exc_val, exc_tb):
+        """Exit set-grad context."""
+        torch._set_grad_enabled(self._prev_state)
+
+
+# Export public API
+export Context, Function, backward, checkpoint, no_grad, enable_grad, set_grad_enabled

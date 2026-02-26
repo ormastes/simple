@@ -1,0 +1,547 @@
+# ============================================================================
+# Regex Library - Public API
+# ============================================================================
+#
+# User-facing regex API with high-level pattern matching functions.
+#
+# Contains:
+# - Match: Represents a successful match with captured groups
+# - Pattern: Compiled regex pattern with matching methods
+# - Helper functions: compile, match, search, findall, sub, split
+# - Pattern builders: digit, word, whitespace, quantifiers, anchors
+#
+# ============================================================================
+
+class Match:
+    text: text
+    start: i32
+    end: i32
+    groups: List<text>
+
+    fn new(text: text, start: i32, end: i32) -> Match:
+        return Match {
+            text: text,
+            start: start,
+            end: end,
+            groups: []
+        }
+
+    fn matched_text() -> text:
+        return self.text
+
+    fn span() -> (i32, i32):
+        return (self.start, self.end)
+
+    fn group(index: i32) -> Option<text>:
+        if index < 0 or index >= self.groups.len():
+            return nil
+        return Some(self.groups[index])
+
+    fn all_groups() -> List<text>:
+        return self.groups
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn length() -> i32:
+        """Get length of matched text.
+
+        Returns:
+            Number of characters matched
+
+        Example:
+            match = Match.new("hello", 0, 5)
+            match.length()  # → 5
+        """
+        return self.end - self.start
+
+    fn is_empty() -> bool:
+        """Check if match is empty (zero length).
+
+        Returns:
+            true if start == end
+
+        Example:
+            match = Match.new("", 0, 0)
+            match.is_empty()  # → true
+        """
+        return self.start == self.end
+
+    fn has_groups() -> bool:
+        """Check if match has capture groups.
+
+        Returns:
+            true if groups list is non-empty
+
+        Example:
+            match = Match.new("text", 0, 4)
+            match.has_groups()  # → false
+        """
+        return self.groups.len() > 0
+
+    fn group_count() -> i32:
+        """Get number of capture groups.
+
+        Returns:
+            Number of groups
+
+        Example:
+            match.group_count()  # → 0 or number of groups
+        """
+        return self.groups.len()
+
+    fn get_start() -> i32:
+        """Get start position of match.
+
+        Returns:
+            Start index
+
+        Example:
+            match = Match.new("text", 5, 9)
+            match.get_start()  # → 5
+        """
+        return self.start
+
+    fn get_end() -> i32:
+        """Get end position of match.
+
+        Returns:
+            End index
+
+        Example:
+            match = Match.new("text", 5, 9)
+            match.get_end()  # → 9
+        """
+        return self.end
+
+    fn summary() -> text:
+        """Get summary of match.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            match.summary()
+            # → "Match: 'text' at [5:9], 2 groups"
+        """
+        val text = self.text
+        val start = self.start
+        val end = self.end
+        val groups = self.group_count()
+        return "Match: '{text}' at [{start}:{end}], {groups} groups"
+
+# Compiled regex pattern
+class Pattern:
+    pattern: text
+    compiled: CompiledRegex
+
+    fn new(pattern: text) -> Pattern:
+        return Pattern {
+            pattern: pattern,
+            compiled: CompiledRegex.new(pattern)
+        }
+
+    # Match at the start of string
+    fn match(text: text) -> Option<Match>:
+        """Match pattern at the start of the text using NFA engine.
+
+        Args:
+            text: Text to match against
+
+        Returns:
+            Match object if pattern matches at start, None otherwise
+
+        Example:
+            pattern = Pattern.new("h.*o")
+            pattern.match("hello world")  # → Some(Match)
+            pattern.match("world hello")  # → None
+        """
+        return self.compiled.match_at(text, 0)
+
+    # Search anywhere in string
+    fn search(text: text) -> Option<Match>:
+        """Search for pattern anywhere in the text using NFA engine.
+
+        Args:
+            text: Text to search in
+
+        Returns:
+            First Match object found, None if no match
+
+        Example:
+            pattern = Pattern.new("\\d+")
+            pattern.search("age: 25")  # → Some(Match("25", 5, 7))
+        """
+        return self.compiled.search(text)
+
+    # Check if entire string matches
+    fn fullmatch(text: text) -> Option<Match>:
+        """Check if entire text matches the pattern.
+
+        Args:
+            text: Text to match
+
+        Returns:
+            Match object if entire text matches, None otherwise
+
+        Example:
+            pattern = Pattern.new("[a-z]+")
+            pattern.fullmatch("hello")  # → Some(Match)
+            pattern.fullmatch("hello123")  # → None
+        """
+        val m = self.compiled.match_at(text, 0)
+        if m!= nil:
+            val match_val = m.unwrap()
+            if match_val.end == text.len():
+                return Some(match_val)
+        return nil
+
+    # Find all matches
+    fn findall(text: text) -> List<Match>:
+        """Find all non-overlapping matches in the text.
+
+        Args:
+            text: Text to search in
+
+        Returns:
+            List of all Match objects found
+
+        Example:
+            pattern = Pattern.new("\\d+")
+            pattern.findall("1 2 3")  # → [Match("1", ...), Match("2", ...), Match("3", ...)]
+        """
+        return self.compiled.findall(text)
+
+    # Replace matches with replacement string
+    fn sub(replacement: text, text: text, count: i32 = -1) -> text:
+        """Replace matches with replacement string.
+
+        Args:
+            replacement: Replacement string (supports backreferences like \\1, \\2)
+            text: Text to perform substitution on
+            count: Maximum number of replacements (-1 for all)
+
+        Returns:
+            Text with substitutions performed
+
+        Example:
+            pattern = Pattern.new("(\\w+)\\s+(\\w+)")
+            pattern.sub(replacement="\\2 \\1", text="hello world")  # → "world hello"
+        """
+        val matches = self.findall(text)
+
+        if matches.len() == 0:
+            return text
+
+        var result = ""
+        var last_end = 0
+        var replaced = 0
+
+        for match_val in matches:
+            if count >= 0 and replaced >= count:
+                break
+
+            # Add text before match
+            result = result + text.substring(last_end, match_val.start)
+
+            # Process replacement string (handle backreferences)
+            val replaced_text = self.process_replacement(replacement, match_val)
+            result = result + replaced_text
+
+            last_end = match_val.end
+            replaced = replaced + 1
+
+        # Add remaining text
+        result = result + text.substring(last_end, text.len())
+
+        return result
+
+    fn process_replacement(replacement: text, match_val: Match) -> text:
+        """Process replacement string, handling backreferences.
+
+        Args:
+            replacement: Replacement string with possible backreferences
+            match_val: Match object with captured groups
+
+        Returns:
+            Processed replacement string
+        """
+        var result = ""
+        var i = 0
+
+        while i < replacement.len():
+            val c = replacement[i]
+
+            if c == "\\" and i + 1 < replacement.len():
+                val next = replacement[i + 1]
+
+                # Check for backreference
+                if next >= "0" and next <= "9":
+                    val group_num = next.to_int()
+                    val group = match_val.group(group_num)
+
+                    if group!= nil:
+                        result = result + group.unwrap()
+                    else:
+                        result = result + "\\" + next  # Keep as-is if group doesn't exist
+
+                    i = i + 2
+                    continue
+
+            result = result + c
+            i = i + 1
+
+        return result
+
+    # Split string by pattern
+    fn split(text: text, maxsplit: i32 = -1) -> List<text>:
+        """Split string by pattern matches.
+
+        Args:
+            text: Text to split
+            maxsplit: Maximum number of splits (-1 for unlimited)
+
+        Returns:
+            List of split parts
+
+        Example:
+            pattern = Pattern.new("\\s+")
+            pattern.split("hello  world  foo")  # → ["hello", "world", "foo"]
+        """
+        val matches = self.findall(text)
+
+        if matches.len() == 0:
+            return [text]
+
+        var result = []
+        var last_end = 0
+        var splits = 0
+
+        for match_val in matches:
+            if maxsplit >= 0 and splits >= maxsplit:
+                break
+
+            # Add text before match
+            result.append(text.substring(last_end, match_val.start))
+
+            last_end = match_val.end
+            splits = splits + 1
+
+        # Add remaining text
+        result.append(text.substring(last_end, text.len()))
+
+        return result
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_pattern() -> text:
+        """Get pattern string.
+
+        Returns:
+            Pattern string
+
+        Example:
+            pattern = Pattern.new("[0-9]+")
+            pattern.get_pattern()  # → "[0-9]+"
+        """
+        return self.pattern
+
+    fn is_empty() -> bool:
+        """Check if pattern is empty.
+
+        Returns:
+            true if pattern string is empty
+
+        Example:
+            pattern = Pattern.new("")
+            pattern.is_empty()  # → true
+        """
+        return self.pattern.len() == 0
+
+    fn pattern_length() -> i32:
+        """Get length of pattern string.
+
+        Returns:
+            Number of characters in pattern
+
+        Example:
+            pattern = Pattern.new("[a-z]+")
+            pattern.pattern_length()  # → 6
+        """
+        return self.pattern.len()
+
+    fn is_literal() -> bool:
+        """Check if pattern is a simple literal (no regex special chars).
+
+        Returns:
+            true if pattern contains no special regex characters
+
+        Example:
+            Pattern.new("hello").is_literal()  # → true
+            Pattern.new("h.*o").is_literal()   # → false
+        """
+        val special_chars = [
+            "\\", ".", "^", "$", "*", "+", "?", "{{", "}}", "[", "]", "(", ")", "|"
+        ]
+        for ch in special_chars:
+            if self.pattern.contains(ch):
+                return false
+        return true
+
+    fn summary() -> text:
+        """Get summary of pattern.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            pattern.summary()
+            # → "Pattern: '[0-9]+' (6 chars, non-literal)"
+        """
+        val pattern = self.pattern
+        val len = self.pattern_length()
+        val type = if self.is_literal(): "literal" else: "non-literal"
+        return "Pattern: '{pattern}' ({len} chars, {type})"
+
+# Compile a regex pattern
+fn compile(pattern: text) -> Pattern:
+    return Pattern.new(pattern)
+
+# Match at start of string (convenience function)
+#[allow(unnamed_duplicate_typed_args)]
+fn match(pattern: text, input: text) -> Option<Match>:
+    val p = compile(pattern)
+    return p.match(input)
+
+# Search anywhere in string (convenience function)
+#[allow(unnamed_duplicate_typed_args)]
+fn search(pattern: text, input: text) -> Option<Match>:
+    val p = compile(pattern)
+    return p.search(input)
+
+# Check if entire string matches (convenience function)
+#[allow(unnamed_duplicate_typed_args)]
+fn fullmatch(pattern: text, input: text) -> Option<Match>:
+    val p = compile(pattern)
+    return p.fullmatch(input)
+
+# Find all matches (convenience function)
+#[allow(unnamed_duplicate_typed_args)]
+fn findall(pattern: text, input: text) -> List<Match>:
+    val p = compile(pattern)
+    return p.findall(input)
+
+# Replace matches (convenience function)
+fn sub(pattern: text, replacement: text, input: text, count: i32 = -1) -> text:
+    val p = compile(pattern)
+    return p.sub(replacement=replacement, text=input, count=count)
+
+# Split by pattern (convenience function)
+fn split(pattern: text, input: text, maxsplit: i32 = -1) -> List<text>:
+    val p = compile(pattern)
+    return p.split(text=input, maxsplit=maxsplit)
+
+# Escape special regex characters
+fn escape(text: text) -> text:
+    # Escape special regex characters
+    var result = text
+    val special_chars = [
+        "\\", ".", "^", "$", "*", "+", "?", "{{", "}}", "[", "]", "(", ")", "|"
+    ]
+
+    for ch in special_chars:
+        result = result.replace(ch, "\\" + ch)
+
+    return result
+
+# Check if pattern matches (boolean)
+fn is_match(pattern: text, input: text) -> bool:
+    return search(pattern=pattern, input=input).?
+
+# Extract matched text from Match
+fn extract_text(m: Match) -> text:
+    return m.matched_text()
+
+# Character class helpers (for pattern building)
+fn digit() -> text:
+    return "[0-9]"
+
+fn word() -> text:
+    return "[a-zA-Z0-9_]"
+
+fn whitespace() -> text:
+    return "[ \t\n\r]"
+
+fn any_char() -> text:
+    return "."
+
+# Quantifier helpers
+fn zero_or_more(pattern: text) -> text:
+    return pattern + "*"
+
+fn one_or_more(pattern: text) -> text:
+    return pattern + "+"
+
+fn optional(pattern: text) -> text:
+    return pattern + "?"
+
+fn exactly(pattern: text, n: i32) -> text:
+    return "{pattern}{{{n}}}"
+
+fn at_least(pattern: text, n: i32) -> text:
+    return "{pattern}{{{n},}}"
+
+fn between(pattern: text, min: i32, max: i32) -> text:
+    return "{pattern}{{{min},{max}}}"
+
+# Anchor helpers
+fn start_of_line() -> text:
+    return "^"
+
+fn end_of_line() -> text:
+    return "$"
+
+fn word_boundary() -> text:
+    return "\\b"
+
+# Export all types and functions
+export Match
+export Pattern
+export compile
+export match
+export search
+export fullmatch
+export findall
+export sub
+export split
+export escape
+export is_match
+export extract_text
+export digit
+export word
+export whitespace
+export any_char
+export zero_or_more
+export one_or_more
+export optional
+export exactly
+export at_least
+export between
+export start_of_line
+export end_of_line
+export word_boundary
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Match, Pattern
+export compile, match, search, fullmatch, findall, sub, split, escape
+export is_match, extract_text
+export digit, word, whitespace, any_char
+export zero_or_more, one_or_more, optional
+export exactly, at_least, between
+export start_of_line, end_of_line, word_boundary

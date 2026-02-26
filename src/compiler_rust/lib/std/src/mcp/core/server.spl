@@ -1,0 +1,390 @@
+# MCP Generic Server Implementation
+# Reusable server that can be extended for any language/tool
+
+use core.*
+use core.json.*
+use std.mcp.core.protocol.*
+use std.mcp.core.provider.*
+use std.mcp.core.transport.*
+use std.mcp.core.logger.*
+use std.mcp.core.error_handler.*
+
+# Generic MCP server
+pub class McpServer:
+    pub name: text
+    pub version: text
+    pub provider: ResourceProvider
+    pub tools: Dict<text, ToolHandler>
+    pub transport: Option<Transport>
+    pub running: bool
+    pub debug_mode: bool
+    pub validator: InputValidator
+    pub recovery: CrashRecovery
+    pub log_file: text
+
+    pub fn new(name: text, version: text, provider: ResourceProvider) -> McpServer:
+        return McpServer(name: name, version: version, provider: provider, tools: {}, transport: nil, running: false, debug_mode: false, validator: InputValidator.default(), recovery: CrashRecovery.new(), log_file: "")
+
+    # Enable debug logging
+    pub fn enable_debug():
+        self.debug_mode = true
+
+    # Set log file path
+    pub fn set_log_file(path: text) -> Result<(), text>:
+        self.log_file = path
+        init_logger(path)
+
+    # Set validation limits
+    pub fn set_validation_limits(limits: ValidationLimits):
+        self.validator = InputValidator.new(limits)
+
+    # Disable crash recovery (for testing)
+    pub fn disable_recovery():
+        self.recovery.disable()
+
+    # Register a tool handler
+    pub fn register_tool(self, tool: Tool, handler: ToolHandler):
+        self.tools.set(tool.name, handler)
+
+    # Register a tool by name with a simple handler function
+    pub fn register_simple_tool(self, name: text, description: text,
+                                 handler: fn(Dict<text, Any>) -> text):
+        tool = create_text_tool(name, description, handler)
+        self.tools.set(name, tool)
+
+    # Set the transport layer
+    pub fn set_transport(self, transport: Transport):
+        self.transport = Some(transport)
+
+    # Run the server main loop with stdio transport
+    pub fn run_stdio(self):
+        transport = StdioTransport.new()
+        if self.debug_mode:
+            transport.enable_debug()
+        self.transport = Some(transport)
+        self.run()
+
+    # Run the server main loop
+    pub fn run():
+        if self.transport.is_none():
+            return
+
+        transport = self.transport.unwrap()
+        self.running = true
+
+        log_info("Server starting: {self.name} v{self.version}")
+        self.log("Server starting: " + self.name + " v" + self.version)
+
+        while self.running and transport.is_alive():
+            # Check if too many errors occurred
+            if self.recovery.should_stop():
+                log_fatal("Stopping server due to excessive errors")
+                self.log("ERROR: Too many consecutive errors, stopping")
+                break
+
+            # Read next message with error handling
+            match transport.read_message():
+                case Some(request):
+                    log_debug("Received method: {request.method}")
+                    self.log("Received: " + request.method)
+
+                    # Handle the request with crash recovery
+                    response = self.handle_request_safe(request)
+
+                    # Send response
+                    match response:
+                        case Ok(resp):
+                            transport.write_response(resp)
+                            self.recovery.record_success()
+                        case Err(error):
+                            # Send error response
+                            transport.write_error(request.id, error.code, error.message)
+                            self.recovery.record_error(error)
+
+                case None:
+                    # No message or EOF
+                    if not transport.is_alive():
+                        log_info("Transport closed normally")
+                        self.log("Transport closed")
+                        break
+
+        log_info("Server stopped")
+        self.log("Server stopped")
+
+        # Flush logs
+        match flush_logs():
+            case Ok(_):
+                pass
+            case Err(e):
+                stderr_write("Failed to flush logs: {e}\n")
+
+    # Stop the server
+    pub fn stop(self):
+        self.running = false
+
+    # Log message (to stderr if debug mode)
+    fn log(msg: text):
+        if self.debug_mode:
+            stderr_write("[" + self.name + "] " + msg + "\n")
+            stderr_flush()
+
+    # Handle request with error recovery
+    fn handle_request_safe(request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError>:
+        self.recovery.safe_call(
+            \:
+                match self.handle_request(request):
+                    case response:
+                        Ok(response)
+            ,
+            "request:{request.method}"
+        )
+
+    # Handle incoming JSON-RPC request
+    pub fn handle_request(request: JsonRpcRequest) -> JsonRpcResponse:
+        method = request.method
+
+        # Standard protocol methods
+        if method == "initialize":
+            return self.handle_initialize(request)
+        elif method == "initialized":
+            # Client acknowledgment - just return empty response
+            return JsonRpcResponse.new(request.id, {})
+        elif method == "ping":
+            return self.handle_ping(request)
+        elif method == "resources/list":
+            return self.handle_list_resources(request)
+        elif method == "resources/read":
+            return self.handle_read_resource(request)
+        elif method == "tools/list":
+            return self.handle_list_tools(request)
+        elif method == "tools/call":
+            return self.handle_call_tool(request)
+        elif method == "prompts/list":
+            return self.handle_list_prompts(request)
+        elif method == "prompts/get":
+            return self.handle_get_prompt(request)
+        elif method == "shutdown":
+            self.running = false
+            return JsonRpcResponse.new(request.id, {})
+        else:
+            # Unknown method
+            error = ErrorObject.new(-32601, "Method not found: " + method)
+            return JsonRpcError.new(request.id, error)
+
+    # Handle initialize
+    fn handle_initialize(request: JsonRpcRequest) -> JsonRpcResponse:
+        # Build capabilities
+        capabilities = {
+            "resources": {
+                "subscribe": false,
+                "listChanged": false
+            },
+            "tools": {},
+            "prompts": {
+                "listChanged": false
+            }
+        }
+
+        server_info = {
+            "name": self.name,
+            "version": self.version
+        }
+
+        result = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": capabilities,
+            "serverInfo": server_info
+        }
+
+        return JsonRpcResponse.new(request.id, result)
+
+    # Handle ping
+    fn handle_ping(request: JsonRpcRequest) -> JsonRpcResponse:
+        return JsonRpcResponse.new(request.id, {})
+
+    # Handle list resources
+    fn handle_list_resources(request: JsonRpcRequest) -> JsonRpcResponse:
+        resources = self.provider.list_resources()
+
+        # Convert to JSON-serializable format
+        resource_list = []
+        for res in resources:
+            resource_list.append({
+                "uri": res.uri,
+                "name": res.name,
+                "description": res.description,
+                "mimeType": res.mime_type
+            })
+
+        result = {"resources": resource_list}
+        return JsonRpcResponse.new(request.id, result)
+
+    # Handle read resource (with validation)
+    fn handle_read_resource(request: JsonRpcRequest) -> JsonRpcResponse:
+        uri = ""
+        if request.params.has_key("uri"):
+            uri = request.params.get("uri") as text
+
+        # Validate URI
+        match self.validator.validate_uri(uri):
+            case Ok(_):
+                pass
+            case Err(error):
+                log_error("Invalid URI: {error.message}")
+                return JsonRpcError.new(request.id, error.to_json_rpc_error())
+
+        # Read resource safely
+        match safe_read_resource(self.provider, uri, self.validator):
+            case Ok(contents):
+                pass
+            case Err(error):
+                return JsonRpcError.new(request.id, error.to_json_rpc_error())
+
+        contents = self.provider.read_resource(uri)
+
+        result = {
+            "contents": [{
+                "uri": contents.uri,
+                "mimeType": contents.mime_type,
+                "text": contents.text
+            }]
+        }
+        return JsonRpcResponse.new(request.id, result)
+
+    # Handle list tools
+    fn handle_list_tools(request: JsonRpcRequest) -> JsonRpcResponse:
+        tool_list = []
+        for tool_name in self.tools.keys():
+            handler = self.tools.get(tool_name)
+            tool = handler.tool
+
+            tool_info = {
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": tool.input_schema
+                }
+            }
+            tool_list.append(tool_info)
+
+        result = {"tools": tool_list}
+        return JsonRpcResponse.new(request.id, result)
+
+    # Handle call tool (with validation and error recovery)
+    fn handle_call_tool(request: JsonRpcRequest) -> JsonRpcResponse:
+        tool_name = ""
+        arguments = {}
+
+        if request.params.has_key("name"):
+            tool_name = request.params.get("name") as text
+        if request.params.has_key("arguments"):
+            arguments = request.params.get("arguments") as Dict<text, Any>
+
+        # Validate tool name
+        match self.validator.validate_tool_name(tool_name):
+            case Ok(_):
+                pass
+            case Err(error):
+                log_error("Invalid tool name: {error.message}")
+                return JsonRpcError.new(request.id, error.to_json_rpc_error())
+
+        if self.tools.has_key(tool_name):
+            handler = self.tools.get(tool_name)
+
+            # Execute tool safely
+            match safe_execute_tool(handler, arguments, self.validator, self.recovery):
+                case Ok(tool_result):
+                    pass
+                case Err(error):
+                    log_error("Tool execution failed: {error.message}")
+                    return JsonRpcError.new(request.id, error.to_json_rpc_error())
+
+            tool_result = handler.execute(arguments)
+
+            # Convert content blocks to JSON format
+            content_list = []
+            for block in tool_result.content:
+                match block:
+                    case ContentBlock.Text(text):
+                        content_list.append({
+                            "type": "text",
+                            "text": text
+                        })
+                    case ContentBlock.Image(img):
+                        content_list.append({
+                            "type": "image",
+                            "data": img.data,
+                            "mimeType": img.mime_type
+                        })
+                    case ContentBlock.Resource(res):
+                        content_list.append({
+                            "type": "resource",
+                            "resource": {
+                                "uri": res.uri,
+                                "mimeType": res.mime_type,
+                                "text": res.text
+                            }
+                        })
+
+            result = {
+                "content": content_list,
+                "isError": tool_result.is_error
+            }
+            return JsonRpcResponse.new(request.id, result)
+        else:
+            error = ErrorObject.new(-32602, "Tool not found: " + tool_name)
+            return JsonRpcError.new(request.id, error)
+
+    # Handle list prompts
+    fn handle_list_prompts(request: JsonRpcRequest) -> JsonRpcResponse:
+        # For now, return empty list - prompts can be added later
+        result = {"prompts": []}
+        return JsonRpcResponse.new(request.id, result)
+
+    # Handle get prompt
+    fn handle_get_prompt(request: JsonRpcRequest) -> JsonRpcResponse:
+        error = ErrorObject.new(-32602, "Prompt not found")
+        return JsonRpcError.new(request.id, error)
+
+# Tool handler interface - implement this for each tool
+pub class ToolHandler:
+    pub tool: Tool
+    pub execute_fn: fn(Dict<text, Any>) -> ToolResult
+
+    pub fn new(tool: Tool, execute_fn: fn(Dict<text, Any>) -> ToolResult) -> ToolHandler:
+        return ToolHandler(tool: tool, execute_fn: execute_fn)
+
+    pub fn execute(self, arguments: Dict<text, Any>) -> ToolResult:
+        return self.execute_fn(arguments)
+
+# Text tool handler wrapper - wraps a string-returning handler
+pub class TextToolWrapper:
+    pub handler: fn(Dict<text, Any>) -> text
+
+    pub fn new(handler: fn(Dict<text, Any>) -> text) -> TextToolWrapper:
+        return TextToolWrapper(handler: handler)
+
+    pub fn execute(self, args: Dict<text, Any>) -> ToolResult:
+        text = self.handler(args)
+        return ToolResult.new(text)
+
+# Helper to create a simple text tool
+pub fn create_text_tool(name: text, description: text,
+                        handler: fn(Dict<text, Any>) -> text) -> ToolHandler:
+    tool = Tool.new(name, description)
+    wrapper = TextToolWrapper.new(handler)
+    # Use method reference instead of inline lambda
+    return ToolHandler.new(tool, \args: wrapper.execute(args))
+
+# Helper to create a tool with input schema
+pub fn create_tool_with_schema(name: text, description: text,
+                               schema: Dict<text, Any>,
+                               handler: fn(Dict<text, Any>) -> ToolResult) -> ToolHandler:
+    tool = Tool.new(name, description)
+    tool.input_schema = schema
+    return ToolHandler.new(tool, handler)
+
+# Extern functions for stdio (referenced from transport.spl)
+extern fn stderr_write(s: text)
+extern fn stderr_flush()

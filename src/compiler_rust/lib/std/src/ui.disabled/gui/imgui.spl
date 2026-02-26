@@ -1,0 +1,1306 @@
+# Immediate Mode GUI - egui-style API
+#
+# Provides an immediate mode GUI paradigm where UI is rebuilt every frame.
+# Simpler mental model than retained mode - no state management needed.
+# Integrates with existing renderers (Browser, Electron, VSCode, Native, Vulkan).
+#
+# Key Features:
+#   - Stateless API: UI declared in render loop
+#   - Automatic layout: Stacking containers
+#   - Built-in widgets: Button, Slider, TextEdit, Checkbox, etc.
+#   - Response system: Immediate interaction feedback
+#   - No manual event handling: Widget functions return interaction state
+#
+# Example:
+#   loop:
+#       val ui = ImGui.new()
+#       ui.window("Demo Window"):
+#           if ui.button("Click me!"):
+#               println("Button clicked!")
+#           ui.label("Counter: {}", counter)
+#           ui.slider("Value", &mut value, 0.0, 100.0)
+#       ui.render(renderer)
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.attrs.*
+use ui.renderer.*
+
+# =============================================================================
+# Draw Commands - Render primitives for ImGui
+# =============================================================================
+
+pub enum DrawCommand:
+    Rect(x: f32, y: f32, w: f32, h: f32, color: Color)
+    RectOutline(x: f32, y: f32, w: f32, h: f32, color: Color, thickness: f32)
+    RoundedRect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color)
+    Text(x: f32, y: f32, content: text, color: Color, size: f32)
+    Line(x1: f32, y1: f32, x2: f32, y2: f32, color: Color, thickness: f32)
+    Circle(cx: f32, cy: f32, radius: f32, color: Color)
+    SetClipRect(x: f32, y: f32, w: f32, h: f32)
+    ResetClipRect
+
+pub struct DrawList:
+    commands: Array<DrawCommand>
+
+impl DrawList:
+    pub static fn new() -> DrawList:
+        DrawList { commands: [] }
+
+    pub fn add(&mut self, cmd: DrawCommand):
+        self.commands.push(cmd)
+
+    pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color):
+        self.add(DrawCommand.Rect(x, y, w, h, color))
+
+    pub fn add_rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color, thickness: f32):
+        self.add(DrawCommand.RectOutline(x, y, w, h, color, thickness))
+
+    pub fn add_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color):
+        self.add(DrawCommand.RoundedRect(x, y, w, h, radius, color))
+
+    pub fn add_text(&mut self, x: f32, y: f32, content: text, color: Color, size: f32):
+        self.add(DrawCommand.Text(x, y, content, color, size))
+
+    pub fn add_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, color: Color, thickness: f32):
+        self.add(DrawCommand.Line(x1, y1, x2, y2, color, thickness))
+
+    pub fn add_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color):
+        self.add(DrawCommand.Circle(cx, cy, radius, color))
+
+    pub fn clear(&mut self):
+        self.commands.clear()
+
+    pub fn len(&self) -> usize:
+        self.commands.len()
+
+    pub fn is_empty(&self) -> bool:
+        self.commands.is_empty()
+
+# =============================================================================
+# Immediate Mode GUI Context
+# =============================================================================
+
+pub struct ImGui:
+    # Render state
+    ctx: ImGuiContext
+    current_window: Option<WindowState>
+    current_container: Option<ContainerId>
+
+    # Layout state
+    cursor: Point2D
+    layout_stack: Array<LayoutInfo>
+
+    # Interaction state
+    hot_id: Option<WidgetId>     # Widget under cursor
+    active_id: Option<WidgetId>  # Widget being interacted with
+    keyboard_focus: Option<WidgetId>
+
+    # Input state
+    mouse_pos: Point2D
+    mouse_down: bool
+    mouse_clicked: bool
+    keys_down: Set<KeyCode>
+
+    # ID generation
+    id_stack: Array<u64>
+    next_id: u64
+
+    # Draw commands for rendering
+    draw_list: DrawList
+
+impl ImGui:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_current_window(self) -> bool:
+        """Check if a window is currently active."""
+        match self.current_window:
+            case Some(_): true
+            case None: false
+
+    pub fn has_hot_widget(self) -> bool:
+        """Check if a widget is currently hot (under cursor)."""
+        match self.hot_id:
+            case Some(_): true
+            case None: false
+
+    pub fn has_active_widget(self) -> bool:
+        """Check if a widget is currently active (being interacted with)."""
+        match self.active_id:
+            case Some(_): true
+            case None: false
+
+    pub fn has_keyboard_focus(self) -> bool:
+        """Check if any widget has keyboard focus."""
+        match self.keyboard_focus:
+            case Some(_): true
+            case None: false
+
+    pub fn is_mouse_down(self) -> bool:
+        """Check if mouse button is down."""
+        self.mouse_down
+
+    pub fn was_mouse_clicked(self) -> bool:
+        """Check if mouse was clicked this frame."""
+        self.mouse_clicked
+
+    pub fn has_keys_down(self) -> bool:
+        """Check if any keys are currently pressed."""
+        self.keys_down.len() > 0
+
+    pub fn key_count(self) -> usize:
+        """Get number of keys currently pressed."""
+        self.keys_down.len()
+
+    pub fn layout_depth(self) -> usize:
+        """Get current layout nesting depth."""
+        self.layout_stack.len()
+
+    pub fn summary(self) -> text:
+        """Get summary of ImGui state."""
+        val window = if self.has_current_window(): "yes" else: "no"
+        val focus = if self.has_keyboard_focus(): "yes" else: "no"
+        return "ImGui: window={window}, focus={focus}, {self.layout_depth()} layout levels"
+
+# Persistent context (survives frames)
+struct ImGuiContext:
+    windows: Dict<text, WindowState>
+    widget_state: Dict<WidgetId, WidgetState>
+    last_frame_time: f64
+    delta_time: f64
+
+impl ImGuiContext:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_windows(self) -> bool:
+        """Check if any windows exist."""
+        self.windows.len() > 0
+
+    pub fn has_widget_state(self) -> bool:
+        """Check if any widget state exists."""
+        self.widget_state.len() > 0
+
+    pub fn window_count(self) -> usize:
+        """Get number of windows."""
+        self.windows.len()
+
+    pub fn widget_count(self) -> usize:
+        """Get number of widgets with state."""
+        self.widget_state.len()
+
+    pub fn fps(self) -> f64:
+        """Calculate FPS from delta time."""
+        if self.delta_time > 0.0:
+            1.0 / self.delta_time
+        else:
+            0.0
+
+    pub fn summary(self) -> text:
+        """Get summary of context state."""
+        return "ImGuiContext: {self.window_count()} windows, {self.widget_count()} widgets, {self.fps():.1} FPS"
+
+# Window state
+struct WindowState:
+    id: text
+    title: text
+    pos: Point2D
+    size: Size2D
+    collapsed: bool
+    focused: bool
+    dragging: bool
+    drag_offset: Point2D
+
+impl WindowState:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_collapsed(self) -> bool:
+        """Check if window is collapsed."""
+        self.collapsed
+
+    pub fn is_focused(self) -> bool:
+        """Check if window is focused."""
+        self.focused
+
+    pub fn is_dragging(self) -> bool:
+        """Check if window is being dragged."""
+        self.dragging
+
+    pub fn is_expanded(self) -> bool:
+        """Check if window is expanded (not collapsed)."""
+        not self.collapsed
+
+    pub fn area(self) -> f32:
+        """Calculate window area."""
+        self.size.width * self.size.height
+
+    pub fn aspect_ratio(self) -> f32:
+        """Calculate window aspect ratio."""
+        if self.size.height > 0.0:
+            self.size.width / self.size.height
+        else:
+            0.0
+
+    pub fn summary(self) -> text:
+        """Get summary of window state."""
+        val state = if self.is_collapsed(): "collapsed" else if self.is_dragging(): "dragging" else if self.is_focused(): "focused" else: "normal"
+        return "Window '{self.title}': ({self.pos.x}, {self.pos.y}) {self.size.width}x{self.size.height} ({state})"
+
+# Widget identifier (hash-based)
+type WidgetId = u64
+
+# Widget state (persistent between frames)
+struct WidgetState:
+    value: Any  # Stored value (for sliders, inputs, etc.)
+    animation: f32  # Animation progress [0.0, 1.0]
+    last_interaction: f64
+
+impl WidgetState:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_animating(self) -> bool:
+        """Check if widget is animating."""
+        self.animation > 0.0 and self.animation < 1.0
+
+    pub fn is_animation_complete(self) -> bool:
+        """Check if animation is complete."""
+        self.animation >= 1.0
+
+    pub fn animation_progress(self) -> f32:
+        """Get animation progress [0.0, 1.0]."""
+        self.animation.max(0.0).min(1.0)
+
+    pub fn summary(self) -> text:
+        """Get summary of widget state."""
+        val anim = if self.is_animating(): "animating" else: "static"
+        return "WidgetState: {anim}, animation={self.animation:.2}"
+
+# Container identifier
+type ContainerId = u64
+
+# Layout info
+struct LayoutInfo:
+    direction: LayoutDirection
+    spacing: f32
+    padding: f32
+    available_width: f32
+    available_height: f32
+    cursor_x: f32
+    cursor_y: f32
+
+impl LayoutInfo:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_vertical(self) -> bool:
+        """Check if layout direction is vertical."""
+        match self.direction:
+            case LayoutDirection.Vertical: true
+            case _: false
+
+    pub fn is_horizontal(self) -> bool:
+        """Check if layout direction is horizontal."""
+        match self.direction:
+            case LayoutDirection.Horizontal: true
+            case _: false
+
+    pub fn available_area(self) -> f32:
+        """Calculate available area."""
+        self.available_width * self.available_height
+
+    pub fn cursor_position(self) -> Point2D:
+        """Get cursor position as Point2D."""
+        Point2D.new(self.cursor_x, self.cursor_y)
+
+    pub fn summary(self) -> text:
+        """Get summary of layout info."""
+        val dir = if self.is_vertical(): "vertical" else: "horizontal"
+        return "LayoutInfo: {dir}, {self.available_width}x{self.available_height}, cursor=({self.cursor_x}, {self.cursor_y})"
+
+enum LayoutDirection:
+    Vertical
+    Horizontal
+
+impl LayoutDirection:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> text:
+        """Convert to string representation."""
+        match self:
+            case Vertical: return "vertical"
+            case Horizontal: return "horizontal"
+
+    pub fn description(self) -> text:
+        """Get description of this layout direction."""
+        match self:
+            case Vertical: return "Layout stacks elements vertically"
+            case Horizontal: return "Layout stacks elements horizontally"
+
+    pub fn is_vertical(self) -> bool:
+        """Check if this is vertical layout."""
+        match self:
+            case Vertical: return true
+            case Horizontal: return false
+
+    pub fn is_horizontal(self) -> bool:
+        """Check if this is horizontal layout."""
+        match self:
+            case Horizontal: return true
+            case Vertical: return false
+
+# Point in 2D space
+struct Point2D:
+    x: f32
+    y: f32
+
+impl Point2D:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn distance_to(self, other: Point2D) -> f32:
+        """Calculate Euclidean distance to another point."""
+        val dx = other.x - self.x
+        val dy = other.y - self.y
+        (dx * dx + dy * dy).sqrt()
+
+    pub fn manhattan_distance(self, other: Point2D) -> f32:
+        """Calculate Manhattan distance to another point."""
+        (other.x - self.x).abs() + (other.y - self.y).abs()
+
+    pub fn is_zero(self) -> bool:
+        """Check if point is at origin."""
+        self.x == 0.0 and self.y == 0.0
+
+    pub fn summary(self) -> text:
+        """Get summary of point."""
+        return "Point2D({self.x}, {self.y})"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    fn new(x: f32, y: f32) -> Point2D:
+        return Point2D { x: x, y: y }
+
+# 2D size
+struct Size2D:
+    width: f32
+    height: f32
+
+impl Size2D:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn area(self) -> f32:
+        """Calculate area."""
+        self.width * self.height
+
+    pub fn aspect_ratio(self) -> f32:
+        """Calculate aspect ratio."""
+        if self.height > 0.0:
+            self.width / self.height
+        else:
+            0.0
+
+    pub fn is_landscape(self) -> bool:
+        """Check if landscape orientation."""
+        self.width > self.height
+
+    pub fn is_portrait(self) -> bool:
+        """Check if portrait orientation."""
+        self.height > self.width
+
+    pub fn is_square(self) -> bool:
+        """Check if square."""
+        self.width == self.height
+
+    pub fn is_zero(self) -> bool:
+        """Check if both dimensions are zero."""
+        self.width == 0.0 and self.height == 0.0
+
+    pub fn summary(self) -> text:
+        """Get summary of size."""
+        return "Size2D({self.width}x{self.height})"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    fn new(w: f32, h: f32) -> Size2D:
+        return Size2D { width: w, height: h }
+
+# Widget response
+pub struct Response:
+    id: WidgetId
+    rect: Rect
+    clicked: bool
+    hovered: bool
+    dragged: bool
+    drag_delta: Point2D
+    has_keyboard_focus: bool
+    changed: bool  # Value changed (for inputs)
+
+impl Response:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_clicked(self) -> bool:
+        """Check if widget was clicked."""
+        self.clicked
+
+    pub fn is_hovered(self) -> bool:
+        """Check if widget is hovered."""
+        self.hovered
+
+    pub fn is_dragged(self) -> bool:
+        """Check if widget is being dragged."""
+        self.dragged
+
+    pub fn is_focused(self) -> bool:
+        """Check if widget has keyboard focus."""
+        self.has_keyboard_focus
+
+    pub fn is_changed(self) -> bool:
+        """Check if widget value changed."""
+        self.changed
+
+    pub fn is_interacted(self) -> bool:
+        """Check if widget had any interaction."""
+        self.clicked or self.hovered or self.dragged or self.changed
+
+    pub fn drag_magnitude(self) -> f32:
+        """Calculate magnitude of drag delta."""
+        (self.drag_delta.x * self.drag_delta.x + self.drag_delta.y * self.drag_delta.y).sqrt()
+
+    pub fn summary(self) -> text:
+        """Get summary of response state."""
+        val states = []
+        if self.clicked: states.push("clicked")
+        if self.hovered: states.push("hovered")
+        if self.dragged: states.push("dragged")
+        if self.changed: states.push("changed")
+        val state_str = states.join(", ")
+        return "Response: {state_str}"
+
+struct Rect:
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+
+impl Rect:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn area(self) -> f32:
+        """Calculate rectangle area."""
+        self.width * self.height
+
+    pub fn aspect_ratio(self) -> f32:
+        """Calculate aspect ratio."""
+        if self.height > 0.0:
+            self.width / self.height
+        else:
+            0.0
+
+    pub fn center(self) -> Point2D:
+        """Get center point of rectangle."""
+        Point2D.new(self.x + self.width / 2.0, self.y + self.height / 2.0)
+
+    pub fn is_landscape(self) -> bool:
+        """Check if landscape orientation."""
+        self.width > self.height
+
+    pub fn is_portrait(self) -> bool:
+        """Check if portrait orientation."""
+        self.height > self.width
+
+    pub fn is_square(self) -> bool:
+        """Check if square."""
+        self.width == self.height
+
+    pub fn is_empty(self) -> bool:
+        """Check if rectangle has zero area."""
+        self.width == 0.0 or self.height == 0.0
+
+    pub fn summary(self) -> text:
+        """Get summary of rectangle."""
+        return "Rect: ({self.x}, {self.y}) {self.width}x{self.height}"
+
+    # =========================================================================
+    # Constructor and Existing Methods
+    # =========================================================================
+
+    fn new(x: f32, y: f32, w: f32, h: f32) -> Rect:
+        return Rect { x: x, y: y, width: w, height: h }
+
+    fn contains(p: Point2D) -> bool:
+        return p.x >= self.x and p.x < self.x + self.width
+            and p.y >= self.y and p.y < self.y + self.height
+
+# =============================================================================
+# ImGui Implementation
+# =============================================================================
+
+impl ImGui:
+    # Create new ImGui instance
+    pub fn new() -> ImGui:
+        return ImGui.with_context(ImGuiContext.new())
+
+    pub fn with_context(ctx: ImGuiContext) -> ImGui:
+        return ImGui {
+            ctx: ctx,
+            current_window: None,
+            current_container: None,
+            cursor: Point2D.new(0.0, 0.0),
+            layout_stack: [],
+            hot_id: None,
+            active_id: None,
+            keyboard_focus: None,
+            mouse_pos: Point2D.new(0.0, 0.0),
+            mouse_down: false,
+            mouse_clicked: false,
+            keys_down: Set.new(),
+            id_stack: [],
+            next_id: 0,
+            draw_list: DrawList.new()
+        }
+
+    # Get the draw list for rendering
+    pub fn get_draw_list(&self) -> &DrawList:
+        &self.draw_list
+
+    # Clear draw list for new frame
+    pub fn clear_draw_list(&mut self):
+        self.draw_list.clear()
+
+    # Begin new frame
+    pub fn begin_frame(self):
+        self.mouse_clicked = false
+        self.hot_id = None
+
+    # End frame and generate render commands
+    pub fn end_frame(self):
+        # Cleanup per-frame state
+        if not self.mouse_down:
+            self.active_id = None
+
+    # Create a window
+    pub fn window(self, title: &str) -> WindowScope:
+        val window_id = self.hash_str(title)
+
+        # Get or create window state
+        var win = self.ctx.windows.get(title).cloned().unwrap_or_else(||:
+            WindowState {
+                id: title.to_string(),
+                title: title.to_string(),
+                pos: Point2D.new(100.0, 100.0),
+                size: Size2D.new(300.0, 400.0),
+                collapsed: false,
+                focused: false,
+                dragging: false,
+                drag_offset: Point2D.new(0.0, 0.0)
+            }
+        )
+
+        # Handle window dragging
+        val title_bar_rect = Rect.new(win.pos.x, win.pos.y, win.size.width, 30.0)
+        if title_bar_rect.contains(self.mouse_pos) and self.mouse_clicked:
+            win.dragging = true
+            win.drag_offset = Point2D.new(
+                self.mouse_pos.x - win.pos.x,
+                self.mouse_pos.y - win.pos.y
+            )
+
+        if win.dragging:
+            if self.mouse_down:
+                win.pos.x = self.mouse_pos.x - win.drag_offset.x
+                win.pos.y = self.mouse_pos.y - win.drag_offset.y
+            else:
+                win.dragging = false
+
+        # Setup layout
+        self.cursor = Point2D.new(win.pos.x + 10.0, win.pos.y + 40.0)
+        self.push_layout(LayoutInfo {
+            direction: LayoutDirection.Vertical,
+            spacing: 5.0,
+            padding: 10.0,
+            available_width: win.size.width - 20.0,
+            available_height: win.size.height - 50.0,
+            cursor_x: self.cursor.x,
+            cursor_y: self.cursor.y
+        })
+
+        self.current_window = Some(win)
+        return WindowScope { gui: self }
+
+# Window scope (RAII-style)
+pub struct WindowScope:
+    gui: &mut ImGui
+
+impl WindowScope:
+    pub fn end(self):
+        if val Some(win) = &self.gui.current_window:
+            self.gui.ctx.windows.insert(win.id.clone(), win.clone())
+        self.gui.current_window = None
+        self.gui.pop_layout()
+
+# =============================================================================
+# Widget Functions
+# =============================================================================
+
+impl ImGui:
+    # Label widget (non-interactive text)
+    pub fn label(self, label_text: &str) -> Response:
+        val id = self.generate_id()
+        val layout = self.current_layout()
+
+        val size = Size2D.new(layout.available_width, 20.0)
+        val rect = Rect.new(self.cursor.x, self.cursor.y, size.width, size.height)
+
+        # Emit render command for text
+        self.draw_list.add_text(
+            rect.x + 4.0,
+            rect.y + 2.0,
+            label_text.to_string(),
+            Color.White,
+            14.0
+        )
+
+        self.advance_cursor(size.height + layout.spacing)
+
+        return Response {
+            id: id,
+            rect: rect,
+            clicked: false,
+            hovered: false,
+            dragged: false,
+            drag_delta: Point2D.new(0.0, 0.0),
+            has_keyboard_focus: false,
+            changed: false
+        }
+
+    # Button widget
+    pub fn button(self, label: &str) -> bool:
+        val id = self.generate_id()
+        val layout = self.current_layout()
+
+        val size = Size2D.new(layout.available_width, 30.0)
+        val rect = Rect.new(self.cursor.x, self.cursor.y, size.width, size.height)
+
+        val hovered = rect.contains(self.mouse_pos)
+        val clicked = hovered and self.mouse_clicked
+
+        if hovered:
+            self.hot_id = Some(id)
+
+        if clicked:
+            self.active_id = Some(id)
+
+        # Emit render command for button background
+        val bg_color = if clicked:
+            Color.Ansi256(240)
+        else if hovered:
+            Color.Ansi256(245)
+        else:
+            Color.Ansi256(242)
+
+        self.draw_list.add_rounded_rect(
+            rect.x, rect.y, rect.width, rect.height,
+            4.0,
+            bg_color
+        )
+
+        # Emit render command for button text
+        self.draw_list.add_text(
+            rect.x + rect.width / 2.0 - 20.0,
+            rect.y + 8.0,
+            label.to_string(),
+            Color.White,
+            14.0
+        )
+
+        self.advance_cursor(size.height + layout.spacing)
+
+        return clicked
+
+    # Checkbox widget
+    pub fn checkbox(self, label: &str, checked: &mut bool) -> Response:
+        val id = self.generate_id()
+        val layout = self.current_layout()
+
+        val size = Size2D.new(20.0, 20.0)
+        val rect = Rect.new(self.cursor.x, self.cursor.y, size.width, size.height)
+
+        val hovered = rect.contains(self.mouse_pos)
+        val clicked = hovered and self.mouse_clicked
+
+        if clicked:
+            *checked = not *checked
+
+        # Emit render command for checkbox box
+        val box_color = if hovered:
+            Color.Ansi256(245)
+        else:
+            Color.Ansi256(240)
+
+        self.draw_list.add_rect_outline(
+            rect.x, rect.y, rect.width, rect.height,
+            box_color,
+            2.0
+        )
+
+        # Draw checkmark if checked
+        if *checked:
+            self.draw_list.add_line(
+                rect.x + 4.0, rect.y + 10.0,
+                rect.x + 8.0, rect.y + 14.0,
+                Color.Green, 2.0
+            )
+            self.draw_list.add_line(
+                rect.x + 8.0, rect.y + 14.0,
+                rect.x + 16.0, rect.y + 4.0,
+                Color.Green, 2.0
+            )
+
+        # Draw label text
+        self.draw_list.add_text(
+            rect.x + rect.width + 8.0,
+            rect.y + 2.0,
+            label.to_string(),
+            Color.White,
+            14.0
+        )
+
+        self.advance_cursor(size.height + layout.spacing)
+
+        return Response {
+            id: id,
+            rect: rect,
+            clicked: clicked,
+            hovered: hovered,
+            dragged: false,
+            drag_delta: Point2D.new(0.0, 0.0),
+            has_keyboard_focus: false,
+            changed: clicked
+        }
+
+    # Slider widget
+    pub fn slider(self, label: &str, value: &mut f32, min: f32, max: f32) -> Response:
+        val id = self.generate_id()
+        val layout = self.current_layout()
+
+        val size = Size2D.new(layout.available_width, 20.0)
+        val rect = Rect.new(self.cursor.x, self.cursor.y, size.width, size.height)
+
+        val hovered = rect.contains(self.mouse_pos)
+        var changed = false
+
+        if hovered and self.mouse_down:
+            self.active_id = Some(id)
+
+        if self.active_id == Some(id) and self.mouse_down:
+            # Calculate value from mouse position
+            val normalized = (self.mouse_pos.x - rect.x) / rect.width
+            val clamped = normalized.max(0.0).min(1.0)
+            *value = min + (max - min) * clamped
+            changed = true
+
+        # Emit render command for slider track
+        val track_height = 4.0
+        val track_y = rect.y + (rect.height - track_height) / 2.0
+        self.draw_list.add_rounded_rect(
+            rect.x, track_y, rect.width, track_height,
+            2.0,
+            Color.Ansi256(238)
+        )
+
+        # Calculate handle position
+        val normalized_value = (*value - min) / (max - min)
+        val handle_x = rect.x + normalized_value * (rect.width - 12.0)
+        val handle_size = 12.0
+
+        # Emit render command for slider handle
+        val handle_color = if self.active_id == Some(id):
+            Color.Blue
+        else if hovered:
+            Color.Cyan
+        else:
+            Color.White
+
+        self.draw_list.add_circle(
+            handle_x + handle_size / 2.0,
+            rect.y + rect.height / 2.0,
+            handle_size / 2.0,
+            handle_color
+        )
+
+        # Draw label and value
+        self.draw_list.add_text(
+            rect.x + rect.width + 8.0,
+            rect.y + 2.0,
+            "{label}: {*value:.2}",
+            Color.White,
+            12.0
+        )
+
+        self.advance_cursor(size.height + layout.spacing)
+
+        return Response {
+            id: id,
+            rect: rect,
+            clicked: false,
+            hovered: hovered,
+            dragged: self.active_id == Some(id),
+            drag_delta: Point2D.new(0.0, 0.0),
+            has_keyboard_focus: false,
+            changed: changed
+        }
+
+    # Text input widget
+    pub fn text_edit(self, label: &str, text: &mut text) -> Response:
+        val id = self.generate_id()
+        val layout = self.current_layout()
+
+        val size = Size2D.new(layout.available_width, 30.0)
+        val rect = Rect.new(self.cursor.x, self.cursor.y, size.width, size.height)
+
+        val hovered = rect.contains(self.mouse_pos)
+        val clicked = hovered and self.mouse_clicked
+        var changed = false
+
+        if clicked:
+            self.keyboard_focus = Some(id)
+
+        val has_focus = self.keyboard_focus == Some(id)
+
+        if has_focus:
+            # Handle text input
+            for key in &self.keys_down:
+                match key:
+                    case KeyCode.Char(c):
+                        text.push(*c)
+                        changed = true
+                    case KeyCode.Backspace:
+                        if not text.is_empty():
+                            text.pop()
+                            changed = true
+                    case _:
+                        pass
+
+        # Emit render command for text input background
+        val bg_color = if has_focus:
+            Color.Ansi256(238)
+        else if hovered:
+            Color.Ansi256(240)
+        else:
+            Color.Ansi256(236)
+
+        self.draw_list.add_rect(
+            rect.x, rect.y, rect.width, rect.height,
+            bg_color
+        )
+
+        # Emit render command for text input border
+        val border_color = if has_focus:
+            Color.Blue
+        else:
+            Color.Ansi256(245)
+
+        self.draw_list.add_rect_outline(
+            rect.x, rect.y, rect.width, rect.height,
+            border_color,
+            1.0
+        )
+
+        # Emit render command for text content
+        self.draw_list.add_text(
+            rect.x + 8.0,
+            rect.y + 8.0,
+            text.to_string(),
+            Color.White,
+            14.0
+        )
+
+        # Draw cursor if focused
+        if has_focus:
+            val cursor_x = rect.x + 8.0 + (text.len() as f32) * 8.0
+            self.draw_list.add_line(
+                cursor_x, rect.y + 4.0,
+                cursor_x, rect.y + rect.height - 4.0,
+                Color.White, 1.0
+            )
+
+        # Draw label
+        self.draw_list.add_text(
+            rect.x + rect.width + 8.0,
+            rect.y + 8.0,
+            label.to_string(),
+            Color.Ansi256(250),
+            12.0
+        )
+
+        self.advance_cursor(size.height + layout.spacing)
+
+        return Response {
+            id: id,
+            rect: rect,
+            clicked: clicked,
+            hovered: hovered,
+            dragged: false,
+            drag_delta: Point2D.new(0.0, 0.0),
+            has_keyboard_focus: has_focus,
+            changed: changed
+        }
+
+    # Horizontal separator
+    pub fn separator(self):
+        val layout = self.current_layout()
+
+        # Emit render command for separator line
+        val y = self.cursor.y + 5.0
+        self.draw_list.add_line(
+            self.cursor.x, y,
+            self.cursor.x + layout.available_width, y,
+            Color.Ansi256(240),
+            1.0
+        )
+
+        self.advance_cursor(10.0)
+
+    # Collapsing header
+    pub fn collapsing_header(self, label: &str, default_open: bool) -> HeaderScope:
+        val id = self.generate_id()
+        val layout = self.current_layout()
+
+        # Get or create state
+        var is_open = self.ctx.widget_state.get(&id)
+            .and_then(|s|: s.value.as_bool())
+            .unwrap_or(default_open)
+
+        val size = Size2D.new(layout.available_width, 25.0)
+        val rect = Rect.new(self.cursor.x, self.cursor.y, size.width, size.height)
+
+        val hovered = rect.contains(self.mouse_pos)
+        val clicked = hovered and self.mouse_clicked
+
+        if clicked:
+            is_open = not is_open
+            self.ctx.widget_state.insert(id, WidgetState {
+                value: Any.bool(is_open),
+                animation: 0.0,
+                last_interaction: self.ctx.last_frame_time
+            })
+
+        # Emit render command for header background
+        val bg_color = if clicked:
+            Color.Ansi256(238)
+        else if hovered:
+            Color.Ansi256(242)
+        else:
+            Color.Ansi256(240)
+
+        self.draw_list.add_rect(
+            rect.x, rect.y, rect.width, rect.height,
+            bg_color
+        )
+
+        # Emit render command for arrow indicator
+        val arrow_x = rect.x + 8.0
+        val arrow_y = rect.y + rect.height / 2.0
+        if is_open:
+            # Down arrow (V shape)
+            self.draw_list.add_line(
+                arrow_x, arrow_y - 3.0,
+                arrow_x + 5.0, arrow_y + 3.0,
+                Color.White, 2.0
+            )
+            self.draw_list.add_line(
+                arrow_x + 5.0, arrow_y + 3.0,
+                arrow_x + 10.0, arrow_y - 3.0,
+                Color.White, 2.0
+            )
+        else:
+            # Right arrow (> shape)
+            self.draw_list.add_line(
+                arrow_x, arrow_y - 5.0,
+                arrow_x + 6.0, arrow_y,
+                Color.White, 2.0
+            )
+            self.draw_list.add_line(
+                arrow_x + 6.0, arrow_y,
+                arrow_x, arrow_y + 5.0,
+                Color.White, 2.0
+            )
+
+        # Emit render command for header label
+        self.draw_list.add_text(
+            rect.x + 24.0,
+            rect.y + 5.0,
+            label.to_string(),
+            Color.White,
+            14.0
+        )
+
+        self.advance_cursor(size.height + layout.spacing)
+
+        return HeaderScope {
+            gui: self,
+            is_open: is_open
+        }
+
+# Header scope
+pub struct HeaderScope:
+    gui: &mut ImGui
+    is_open: bool
+
+impl HeaderScope:
+    pub fn is_open(self) -> bool:
+        return self.is_open
+
+    pub fn end(self):
+        pass  # Nothing to clean up
+
+# =============================================================================
+# Layout Helpers
+# =============================================================================
+
+impl ImGui:
+    fn push_layout(info: LayoutInfo):
+        self.layout_stack.push(info)
+
+    fn pop_layout():
+        self.layout_stack.pop()
+
+    fn current_layout() -> &LayoutInfo:
+        return &self.layout_stack[self.layout_stack.len() - 1]
+
+    fn advance_cursor(amount: f32):
+        val layout = self.current_layout()
+        match layout.direction:
+            case LayoutDirection.Vertical:
+                self.cursor.y = self.cursor.y + amount
+            case LayoutDirection.Horizontal:
+                self.cursor.x = self.cursor.x + amount
+
+# =============================================================================
+# ID Generation
+# =============================================================================
+
+impl ImGui:
+    fn generate_id() -> WidgetId:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        return id
+
+    fn hash_str(s: &str) -> u64:
+        var hash: u64 = 5381
+        for c in s.chars():
+            hash = ((hash << 5) + hash) + (c as u64)
+        return hash
+
+# =============================================================================
+# Context Implementation
+# =============================================================================
+
+impl ImGuiContext:
+    static fn new() -> ImGuiContext:
+        return ImGuiContext {
+            windows: Dict.new(),
+            widget_state: Dict.new(),
+            last_frame_time: 0.0,
+            delta_time: 0.0
+        }
+
+# =============================================================================
+# Input Handling
+# =============================================================================
+
+impl ImGui:
+    pub fn handle_mouse_move(self, x: f32, y: f32):
+        self.mouse_pos = Point2D.new(x, y)
+
+    pub fn handle_mouse_down(self, x: f32, y: f32):
+        self.mouse_pos = Point2D.new(x, y)
+        self.mouse_down = true
+        self.mouse_clicked = true
+
+    pub fn handle_mouse_up(self, x: f32, y: f32):
+        self.mouse_pos = Point2D.new(x, y)
+        self.mouse_down = false
+
+    pub fn handle_key_down(self, key: KeyCode):
+        self.keys_down.insert(key)
+
+    pub fn handle_key_up(self, key: KeyCode):
+        self.keys_down.remove(&key)
+
+# Placeholder for Any type (would use real Any in production)
+enum Any:
+    bool(bool)
+    i32(i64)
+    f32(f64)
+    text(text)
+
+impl Any:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_bool(self) -> bool:
+        """Check if this is a boolean value."""
+        match self:
+            case bool(_): true
+            case _: false
+
+    pub fn is_int(self) -> bool:
+        """Check if this is an integer value."""
+        match self:
+            case i32(_): true
+            case _: false
+
+    pub fn is_float(self) -> bool:
+        """Check if this is a f32 value."""
+        match self:
+            case f32(_): true
+            case _: false
+
+    pub fn is_string(self) -> bool:
+        """Check if this is a string value."""
+        match self:
+            case text(_): true
+            case _: false
+
+    pub fn is_numeric(self) -> bool:
+        """Check if this is a numeric value (i32 or f32)."""
+        self.is_int() or self.is_float()
+
+    pub fn to_string(self) -> text:
+        """Convert to string representation."""
+        match self:
+            case bool(b): return if b: "true" else: "false"
+            case i32(i): return i.to_string()
+            case f32(f): return f.to_string()
+            case text(s): return s
+
+    pub fn description(self) -> text:
+        """Get description of this value type."""
+        match self:
+            case bool(_): return "Boolean value"
+            case i32(_): return "Integer value"
+            case f32(_): return "Floating-point value"
+            case text(_): return "text value"
+
+    # =========================================================================
+    # Existing Methods
+    # =========================================================================
+
+    fn as_bool() -> Option<bool>:
+        match self:
+            case Any.bool(b): return Some(b)
+            case _: return None
+
+# Key codes (simplified)
+enum KeyCode:
+    Char(char)
+    Enter
+    Backspace
+    Escape
+    Tab
+    Up
+    Down
+    Left
+    Right
+
+impl KeyCode:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> text:
+        """Convert to string representation."""
+        match self:
+            case Char(c): return c.to_string()
+            case Enter: return "Enter"
+            case Backspace: return "Backspace"
+            case Escape: return "Escape"
+            case Tab: return "Tab"
+            case Up: return "Up"
+            case Down: return "Down"
+            case Left: return "Left"
+            case Right: return "Right"
+
+    pub fn description(self) -> text:
+        """Get description of this key."""
+        match self:
+            case Char(_): return "Character key"
+            case Enter: return "Enter/Return key"
+            case Backspace: return "Backspace key"
+            case Escape: return "Escape key"
+            case Tab: return "Tab key"
+            case Up: return "Up arrow key"
+            case Down: return "Down arrow key"
+            case Left: return "Left arrow key"
+            case Right: return "Right arrow key"
+
+    pub fn is_char(self) -> bool:
+        """Check if this is a character key."""
+        match self:
+            case Char(_): true
+            case _: false
+
+    pub fn is_enter(self) -> bool:
+        """Check if this is the Enter key."""
+        match self:
+            case Enter: true
+            case _: false
+
+    pub fn is_backspace(self) -> bool:
+        """Check if this is the Backspace key."""
+        match self:
+            case Backspace: true
+            case _: false
+
+    pub fn is_escape(self) -> bool:
+        """Check if this is the Escape key."""
+        match self:
+            case Escape: true
+            case _: false
+
+    pub fn is_tab(self) -> bool:
+        """Check if this is the Tab key."""
+        match self:
+            case Tab: true
+            case _: false
+
+    pub fn is_arrow(self) -> bool:
+        """Check if this is an arrow key."""
+        match self:
+            case Up: true
+            case Down: true
+            case Left: true
+            case Right: true
+            case _: false
+
+    pub fn is_navigation(self) -> bool:
+        """Check if this is a navigation key (arrows, Enter, Escape, Tab)."""
+        self.is_arrow() or self.is_enter() or self.is_escape() or self.is_tab()
+
+    pub fn is_text_editing(self) -> bool:
+        """Check if this is a text editing key (char or backspace)."""
+        self.is_char() or self.is_backspace()

@@ -1,0 +1,287 @@
+# Buffer - Vulkan buffer management for 3D rendering
+#
+# Provides vertex, index, and uniform buffer creation
+# for 3D mesh rendering with proper memory management.
+#
+# Based on: doc/plans/floating-booping-coral.md (3D Graphics Library)
+
+use core.*
+use graphics.math.*
+use graphics.scene.*
+
+# =============================================================================
+# BufferHandle - Opaque handle to Vulkan buffer
+# =============================================================================
+
+pub struct BufferHandle:
+    handle: u64
+
+impl BufferHandle:
+    pub fn new(handle: u64) -> BufferHandle:
+        return BufferHandle { handle: handle }
+
+    pub fn invalid() -> BufferHandle:
+        return BufferHandle { handle: 0 }
+
+    pub fn is_valid(self) -> bool:
+        return self.handle != 0
+
+    pub fn get_handle(self) -> u64:
+        return self.handle
+
+# =============================================================================
+# VertexBuffer3D - Vertex buffer for 3D meshes
+# =============================================================================
+
+pub struct VertexBuffer3D:
+    buffer: BufferHandle
+    vertex_count: u32
+    size_bytes: u64
+
+impl VertexBuffer3D:
+    # Create vertex buffer from mesh vertices
+    pub fn from_mesh(mesh: Mesh) -> VertexBuffer3D:
+        val vertices = mesh.get_vertices()
+        val vertex_count = vertices.len() as u32
+        val size_bytes = (vertex_count as u64) * 64  # 64 bytes per MeshVertex
+
+        # Call FFI to create Vulkan buffer
+        val handle = vk_create_vertex_buffer(vertices, size_bytes)
+
+        return VertexBuffer3D {
+            buffer: BufferHandle.new(handle),
+            vertex_count: vertex_count,
+            size_bytes: size_bytes
+        }
+
+    # Create empty vertex buffer
+    pub fn with_capacity(capacity: u32) -> VertexBuffer3D:
+        val size_bytes = (capacity as u64) * 64
+
+        val handle = vk_create_empty_vertex_buffer(size_bytes)
+
+        return VertexBuffer3D {
+            buffer: BufferHandle.new(handle),
+            vertex_count: 0,
+            size_bytes: size_bytes
+        }
+
+    # Update vertex data
+    pub fn update(mut self, vertices: Array<MeshVertex>, offset: u32):
+        val count = vertices.len() as u32
+        val offset_bytes = (offset as u64) * 64
+        val size_bytes = (count as u64) * 64
+
+        vk_update_vertex_buffer(self.buffer.get_handle(), vertices, offset_bytes, size_bytes)
+        self.vertex_count = offset + count
+
+    # Getters
+    pub fn get_buffer(self) -> BufferHandle:
+        return self.buffer
+
+    pub fn get_vertex_count(self) -> u32:
+        return self.vertex_count
+
+    pub fn get_size_bytes(self) -> u64:
+        return self.size_bytes
+
+    # Cleanup
+    pub fn destroy(self):
+        vk_destroy_buffer(self.buffer.get_handle())
+
+# =============================================================================
+# IndexBuffer3D - Index buffer for 3D meshes
+# =============================================================================
+
+pub struct IndexBuffer3D:
+    buffer: BufferHandle
+    index_count: u32
+    size_bytes: u64
+
+impl IndexBuffer3D:
+    # Create index buffer from mesh indices
+    pub fn from_mesh(mesh: Mesh) -> IndexBuffer3D:
+        val indices = mesh.get_indices()
+        val index_count = indices.len() as u32
+        val size_bytes = (index_count as u64) * 4  # 4 bytes per u32 index
+
+        val handle = vk_create_index_buffer(indices, size_bytes)
+
+        return IndexBuffer3D {
+            buffer: BufferHandle.new(handle),
+            index_count: index_count,
+            size_bytes: size_bytes
+        }
+
+    # Create empty index buffer
+    pub fn with_capacity(capacity: u32) -> IndexBuffer3D:
+        val size_bytes = (capacity as u64) * 4
+
+        val handle = vk_create_empty_index_buffer(size_bytes)
+
+        return IndexBuffer3D {
+            buffer: BufferHandle.new(handle),
+            index_count: 0,
+            size_bytes: size_bytes
+        }
+
+    # Update index data
+    pub fn update(mut self, indices: Array<u32>, offset: u32):
+        val count = indices.len() as u32
+        val offset_bytes = (offset as u64) * 4
+        val size_bytes = (count as u64) * 4
+
+        vk_update_index_buffer(self.buffer.get_handle(), indices, offset_bytes, size_bytes)
+        self.index_count = offset + count
+
+    # Getters
+    pub fn get_buffer(self) -> BufferHandle:
+        return self.buffer
+
+    pub fn get_index_count(self) -> u32:
+        return self.index_count
+
+    pub fn get_size_bytes(self) -> u64:
+        return self.size_bytes
+
+    # Cleanup
+    pub fn destroy(self):
+        vk_destroy_buffer(self.buffer.get_handle())
+
+# =============================================================================
+# UniformBuffer - Uniform buffer for shader constants
+# =============================================================================
+
+pub struct CameraUniformData:
+    view: Mat4           # 64 bytes
+    proj: Mat4           # 64 bytes
+    view_proj: Mat4      # 64 bytes
+    camera_pos: Vec3     # 12 bytes
+    _pad0: f32           # 4 bytes (padding)
+    # Total: 196 bytes, padded to 256
+
+pub struct LightingUniformData:
+    # Directional light
+    dir_light_direction: Vec3      # 12 bytes
+    _pad0: f32                     # 4 bytes
+    dir_light_color: Vec3          # 12 bytes
+    dir_light_intensity: f32       # 4 bytes
+
+    # Point lights (up to 4)
+    point_light_positions: [Vec4; 4]  # 64 bytes
+    point_light_colors: [Vec4; 4]     # 64 bytes
+    point_light_count: i32            # 4 bytes
+    _pad1: [f32; 3]                   # 12 bytes (padding)
+
+    # Ambient
+    ambient_color: Vec3             # 12 bytes
+    ambient_intensity: f32          # 4 bytes
+    # Total: 192 bytes, padded to 256
+
+pub struct UniformBuffer<T>:
+    buffer: BufferHandle
+    size_bytes: u64
+
+impl<T> UniformBuffer<T>:
+    # Create uniform buffer
+    pub fn new() -> UniformBuffer<T>:
+        val size_bytes = 256  # Standard uniform buffer size (padded)
+
+        val handle = vk_create_uniform_buffer(size_bytes)
+
+        return UniformBuffer {
+            buffer: BufferHandle.new(handle),
+            size_bytes: size_bytes
+        }
+
+    # Update uniform data
+    pub fn update(self, data: T):
+        vk_update_uniform_buffer(self.buffer.get_handle(), data)
+
+    # Getters
+    pub fn get_buffer(self) -> BufferHandle:
+        return self.buffer
+
+    pub fn get_size_bytes(self) -> u64:
+        return self.size_bytes
+
+    # Cleanup
+    pub fn destroy(self):
+        vk_destroy_buffer(self.buffer.get_handle())
+
+# =============================================================================
+# DepthImage - Depth buffer for 3D rendering
+# =============================================================================
+
+pub struct DepthImage:
+    image: u64           # Vulkan image handle
+    view: u64            # Vulkan image view handle
+    memory: u64          # Vulkan memory handle
+    format: u32          # Depth format
+    width: u32
+    height: u32
+
+impl DepthImage:
+    # Create depth image
+    pub fn new(width: u32, height: u32) -> DepthImage:
+        # Use D24_UNORM_S8_UINT format (24-bit depth + 8-bit stencil)
+        val format = VK_FORMAT_D24_UNORM_S8_UINT
+
+        val (image, view, memory) = vk_create_depth_image(width, height, format)
+
+        return DepthImage {
+            image: image,
+            view: view,
+            memory: memory,
+            format: format,
+            width: width,
+            height: height
+        }
+
+    # Getters
+    pub fn get_image(self) -> u64:
+        return self.image
+
+    pub fn get_view(self) -> u64:
+        return self.view
+
+    pub fn get_format(self) -> u32:
+        return self.format
+
+    pub fn get_width(self) -> u32:
+        return self.width
+
+    pub fn get_height(self) -> u32:
+        return self.height
+
+    # Cleanup
+    pub fn destroy(self):
+        vk_destroy_depth_image(self.image, self.view, self.memory)
+
+# =============================================================================
+# FFI Function Declarations (Vulkan backend)
+# =============================================================================
+
+# Vulkan format constants
+const VK_FORMAT_D24_UNORM_S8_UINT: u32 = 129
+
+# Vertex buffer FFI
+extern fn vk_create_vertex_buffer(vertices: Array<MeshVertex>, size: u64) -> u64
+extern fn vk_create_empty_vertex_buffer(size: u64) -> u64
+extern fn vk_update_vertex_buffer(buffer: u64, vertices: Array<MeshVertex>, offset: u64, size: u64)
+
+# Index buffer FFI
+extern fn vk_create_index_buffer(indices: Array<u32>, size: u64) -> u64
+extern fn vk_create_empty_index_buffer(size: u64) -> u64
+extern fn vk_update_index_buffer(buffer: u64, indices: Array<u32>, offset: u64, size: u64)
+
+# Uniform buffer FFI
+extern fn vk_create_uniform_buffer(size: u64) -> u64
+extern fn vk_update_uniform_buffer<T>(buffer: u64, data: T)
+
+# Depth image FFI
+extern fn vk_create_depth_image(width: u32, height: u32, format: u32) -> (u64, u64, u64)
+extern fn vk_destroy_depth_image(image: u64, view: u64, memory: u64)
+
+# General cleanup
+extern fn vk_destroy_buffer(buffer: u64)

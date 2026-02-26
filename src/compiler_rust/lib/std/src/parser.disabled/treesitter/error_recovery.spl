@@ -1,0 +1,455 @@
+# Error Recovery for Tree-Sitter Parser
+#
+# Robust error recovery strategies to ensure parser never fails completely.
+# Goals:
+# - Always produce CST with ERROR nodes
+# - Smart synchronization on indentation boundaries
+# - Error cascade suppression
+# - Missing token auto-insertion (`:`, `)`, `]`, `}`)
+
+use tree.{Node, NodeId, Span}
+use simple_grammar.{Token, TokenKind}
+
+export ErrorRecovery, RecoveryStrategy, SyncPoint, recover_from_error
+export ErrorInfo, ParserContext, RecoveryAction
+
+# ============================================================================
+# Error Recovery Strategy
+# ============================================================================
+
+enum RecoveryStrategy:
+    # Skip the current token and continue
+    SkipToken
+
+    # Insert a missing token (e.g., `:`, `)`, `]`)
+    InsertToken(TokenKind)
+
+    # Synchronize to next statement boundary (newline/dedent)
+    SyncToStatement
+
+    # Synchronize to next block boundary (dedent)
+    SyncToBlock
+
+    # Synchronize to next declaration boundary
+    SyncToDeclaration
+
+    # Balance delimiters (find matching `)`, `]`, `}`)
+    BalanceDelimiter(TokenKind)
+
+    # Panic mode: skip until sync point
+    PanicMode(SyncPoint)
+
+# ============================================================================
+# Synchronization Points
+# ============================================================================
+
+enum SyncPoint:
+    # Statement boundaries
+    Newline           # Next newline
+    Indent            # Next indent
+    Dedent            # Next dedent
+    Semicolon         # Next semicolon (if used)
+
+    # Block boundaries
+    BlockStart        # Next `:`
+    BlockEnd          # Next dedent
+
+    # Declaration keywords
+    DeclKeyword       # fn, class, struct, enum, trait, impl
+
+    # Delimiters
+    CloseParen        # Next `)`
+    CloseBracket      # Next `]`
+    CloseBrace        # Next `}`
+
+    # Special
+    EndOfFile
+
+# ============================================================================
+# Error Recovery Context
+# ============================================================================
+
+struct ErrorRecovery:
+    # Track recent errors to suppress cascades
+    recent_errors: List<ErrorInfo>
+
+    # Maximum errors before giving up (safety limit)
+    max_errors: i32
+
+    # Current error count
+    error_count: i32
+
+    # Delimiter stack for balancing
+    delimiter_stack: List<TokenKind>
+
+    # Last synchronization point
+    last_sync_position: i32
+
+    # Error suppression window (positions)
+    suppression_window: i32
+
+impl ErrorRecovery:
+    static fn new() -> ErrorRecovery:
+        ErrorRecovery(
+            recent_errors: [],
+            max_errors: 1000,
+            error_count: 0,
+            delimiter_stack: [],
+            last_sync_position: 0,
+            suppression_window: 10
+        )
+
+    fn should_suppress_error(position: i32) -> bool:
+        """Check if error should be suppressed (too close to previous error)."""
+        if self.recent_errors.is_empty():
+            false
+        else:
+            val last_error = self.recent_errors.last().unwrap()
+            position - last_error.position < self.suppression_window
+
+    fn record_error(error: ErrorInfo):
+        """Record an error for cascade suppression."""
+        self.recent_errors.push(error)
+        self.error_count += 1
+
+    fn has_reached_error_limit() -> bool:
+        """Check if we've hit the maximum error limit."""
+        self.error_count >= self.max_errors
+
+    fn push_delimiter(delimiter: TokenKind):
+        """Track opening delimiter for balancing."""
+        self.delimiter_stack.push(delimiter)
+
+    fn pop_delimiter() -> TokenKind?:
+        """Pop delimiter stack."""
+        self.delimiter_stack.pop()
+
+    fn expected_closing_delimiter() -> TokenKind?:
+        """Get the expected closing delimiter."""
+        self.delimiter_stack.last()
+
+# ============================================================================
+# Error Information
+# ============================================================================
+
+struct ErrorInfo:
+    message: text
+    position: i32
+    line: i32
+    column: i32
+    expected: List<text>
+    found: text
+
+impl ErrorInfo:
+    static fn new(message: text, position: i32, line: i32, column: i32, expected: List<text>, found: text) -> ErrorInfo:
+        ErrorInfo(
+            message: message,
+            position: position,
+            line: line,
+            column: column,
+            expected: expected,
+            found: found
+        )
+
+# ============================================================================
+# Recovery Functions
+# ============================================================================
+
+fn recover_from_error(
+    recovery: ErrorRecovery,
+    tokens: List<Token>,
+    current_pos: i32,
+    expected: List<TokenKind>,
+    context: ParserContext
+) -> RecoveryAction:
+    """Main error recovery function.
+
+    Args:
+        recovery: Error recovery state
+        tokens: Token stream
+        current_pos: Current position in token stream
+        expected: List of expected token kinds
+        context: Parser context (what we're parsing)
+
+    Returns:
+        RecoveryAction with strategy and new position
+    """
+    # Check if we should suppress this error
+    if recovery.should_suppress_error(current_pos):
+        return RecoveryAction(
+            strategy: RecoveryStrategy.SkipToken,
+            new_position: current_pos + 1,
+            error_node: nil
+        )
+
+    # Get current token
+    val current_token = tokens[current_pos]
+
+    # Record the error
+    val error = ErrorInfo.new(
+        "Unexpected token",
+        current_pos,
+        current_token.line,
+        current_token.column,
+        expected.map(\tk: tk.to_string()),
+        current_token.kind.to_string()
+    )
+    recovery.record_error(error)
+
+    # Choose recovery strategy based on context and token
+    val strategy = choose_recovery_strategy(
+        current_token,
+        expected,
+        context,
+        recovery
+    )
+
+    RecoveryAction(
+        strategy: strategy,
+        new_position: execute_recovery(tokens, current_pos, strategy),
+        error_node: create_error_node(error, current_token)
+    )
+
+fn choose_recovery_strategy(
+    current_token: Token,
+    expected: List<TokenKind>,
+    context: ParserContext,
+    recovery: ErrorRecovery
+) -> RecoveryStrategy:
+    """Choose the best recovery strategy based on context.
+
+    Strategy priority:
+    1. Insert missing delimiter if expected
+    2. Balance delimiters if unmatched
+    3. Sync to statement boundary (indentation-aware)
+    4. Sync to block boundary
+    5. Panic mode
+    """
+    # Check if we're missing a common token
+    if expected.contains(TokenKind.Colon):
+        return RecoveryStrategy.InsertToken(TokenKind.Colon)
+
+    if expected.contains(TokenKind.RParen):
+        return RecoveryStrategy.InsertToken(TokenKind.RParen)
+
+    if expected.contains(TokenKind.RBracket):
+        return RecoveryStrategy.InsertToken(TokenKind.RBracket)
+
+    if expected.contains(TokenKind.RBrace):
+        return RecoveryStrategy.InsertToken(TokenKind.RBrace)
+
+    # Check if we have unbalanced delimiters
+    match recovery.expected_closing_delimiter():
+        case Some(delimiter):
+            return RecoveryStrategy.BalanceDelimiter(delimiter)
+        case None:
+            nil
+
+    # Context-specific recovery
+    match context:
+        case ParserContext.Statement:
+            # In statement context, sync to next newline or dedent
+            return RecoveryStrategy.SyncToStatement
+
+        case ParserContext.Block:
+            # In block context, sync to dedent
+            return RecoveryStrategy.SyncToBlock
+
+        case ParserContext.Declaration:
+            # In declaration context, sync to next declaration keyword
+            return RecoveryStrategy.SyncToDeclaration
+
+        case ParserContext.Expression:
+            # In expression, try to find statement boundary
+            return RecoveryStrategy.SyncToStatement
+
+        case _:
+            # Default: panic mode to next major sync point
+            return RecoveryStrategy.PanicMode(SyncPoint.Newline)
+
+fn execute_recovery(
+    tokens: List<Token>,
+    current_pos: i32,
+    strategy: RecoveryStrategy
+) -> i32:
+    """Execute the recovery strategy and return new position."""
+    match strategy:
+        case RecoveryStrategy.SkipToken:
+            current_pos + 1
+
+        case RecoveryStrategy.InsertToken(_):
+            # Don't advance position (inserted token is virtual)
+            current_pos
+
+        case RecoveryStrategy.SyncToStatement:
+            sync_to_point(tokens, current_pos, [
+                SyncPoint.Newline,
+                SyncPoint.Dedent,
+                SyncPoint.EndOfFile
+            ])
+
+        case RecoveryStrategy.SyncToBlock:
+            sync_to_point(tokens, current_pos, [
+                SyncPoint.Dedent,
+                SyncPoint.EndOfFile
+            ])
+
+        case RecoveryStrategy.SyncToDeclaration:
+            sync_to_point(tokens, current_pos, [
+                SyncPoint.DeclKeyword,
+                SyncPoint.Dedent,
+                SyncPoint.EndOfFile
+            ])
+
+        case RecoveryStrategy.BalanceDelimiter(delimiter):
+            balance_delimiter(tokens, current_pos, delimiter)
+
+        case RecoveryStrategy.PanicMode(sync_point):
+            sync_to_point(tokens, current_pos, [sync_point, SyncPoint.EndOfFile])
+
+fn sync_to_point(tokens: List<Token>, start_pos: i32, sync_points: List<SyncPoint>) -> i32:
+    """Synchronize to one of the given sync points."""
+    var pos = start_pos + 1
+
+    while pos < tokens.len():
+        val token = tokens[pos]
+
+        # Check each sync point
+        for sync_point in sync_points:
+            if is_sync_point(token, sync_point):
+                return pos
+
+        pos += 1
+
+    # Reached end of file
+    tokens.len()
+
+fn is_sync_point(token: Token, sync_point: SyncPoint) -> bool:
+    """Check if token is a synchronization point."""
+    match sync_point:
+        case SyncPoint.Newline:
+            token.kind == TokenKind.Newline
+
+        case SyncPoint.Indent:
+            token.kind == TokenKind.Indent
+
+        case SyncPoint.Dedent:
+            token.kind == TokenKind.Dedent
+
+        case SyncPoint.Semicolon:
+            token.kind == TokenKind.Semicolon
+
+        case SyncPoint.BlockStart:
+            token.kind == TokenKind.Colon
+
+        case SyncPoint.BlockEnd:
+            token.kind == TokenKind.Dedent
+
+        case SyncPoint.DeclKeyword:
+            is_declaration_keyword(token.kind)
+
+        case SyncPoint.CloseParen:
+            token.kind == TokenKind.RParen
+
+        case SyncPoint.CloseBracket:
+            token.kind == TokenKind.RBracket
+
+        case SyncPoint.CloseBrace:
+            token.kind == TokenKind.RBrace
+
+        case SyncPoint.EndOfFile:
+            token.kind == TokenKind.Eof
+
+        case _:
+            false
+
+fn is_declaration_keyword(kind: TokenKind) -> bool:
+    """Check if token is a declaration keyword."""
+    match kind:
+        case TokenKind.Fn: true
+        case TokenKind.Class: true
+        case TokenKind.Struct: true
+        case TokenKind.Enum: true
+        case TokenKind.Union: true
+        case TokenKind.Trait: true
+        case TokenKind.Impl: true
+        case TokenKind.Mixin: true
+        case TokenKind.Actor: true
+        case TokenKind.Type: true
+        case TokenKind.Unit: true
+        case TokenKind.Mod: true
+        case TokenKind.Val: true
+        case TokenKind.Var: true
+        case TokenKind.Const: true
+        case TokenKind.Static: true
+        case _: false
+
+fn balance_delimiter(tokens: List<Token>, start_pos: i32, expected: TokenKind) -> i32:
+    """Find matching closing delimiter."""
+    var pos = start_pos + 1
+    var depth = 1
+
+    # Determine opening delimiter for this closing delimiter
+    val opening = get_opening_delimiter(expected)
+
+    while pos < tokens.len() and depth > 0:
+        val token = tokens[pos]
+
+        if token.kind == opening:
+            depth += 1
+        elif token.kind == expected:
+            depth -= 1
+            if depth == 0:
+                return pos
+
+        pos += 1
+
+    # Couldn't find matching delimiter
+    pos
+
+fn get_opening_delimiter(closing: TokenKind) -> TokenKind:
+    """Get the opening delimiter for a closing delimiter."""
+    match closing:
+        case TokenKind.RParen: TokenKind.LParen
+        case TokenKind.RBracket: TokenKind.LBracket
+        case TokenKind.RBrace: TokenKind.LBrace
+        case _: closing  # Fallback
+
+fn create_error_node(error: ErrorInfo, token: Token) -> Node?:
+    """Create an ERROR node for the parse tree."""
+    nil
+
+# ============================================================================
+# Parser Context
+# ============================================================================
+
+enum ParserContext:
+    TopLevel       # Top-level declarations
+    Declaration    # Inside a declaration
+    Statement      # Inside a statement
+    Expression     # Inside an expression
+    Block          # Inside a block
+    Type           # Inside a type annotation
+    Pattern        # Inside a pattern
+
+# ============================================================================
+# Recovery Action
+# ============================================================================
+
+struct RecoveryAction:
+    strategy: RecoveryStrategy
+    new_position: i32
+    error_node: Node?
+
+impl RecoveryAction:
+    fn apply_to_parser(parser: Parser):
+        """Apply recovery action to parser state."""
+        # Update parser position
+        parser.set_position(self.new_position)
+
+        # Add error node to CST if present
+        match self.error_node:
+            case Some(node):
+                parser.add_error_node(node)
+            case None:
+                nil

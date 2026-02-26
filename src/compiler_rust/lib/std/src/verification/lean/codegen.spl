@@ -1,0 +1,573 @@
+# Lean Code Generator
+# Main entry point for generating Lean 4 code from Simple.
+#
+# This module provides the main orchestration for Lean codegen:
+# - LeanCodegen class for building Lean modules
+# - Helper functions for regeneration scripts
+# - Integration with all submodules (types, expressions, traits, etc.)
+
+use verification.lean.emitter as emitter
+use verification.lean.types as types
+use verification.lean.expressions as expressions
+use verification.lean.naming as naming
+use verification.lean.functions as functions
+use verification.lean.traits as traits
+use verification.lean.memory_safety as memory_safety
+use verification.lean.verification_checker as checker
+use verification.lean.verification_diagnostics as diagnostics
+use verification.lean.runner as runner
+use verification.models.contracts as models_contracts
+use io.fs as fs
+
+# Lean code generation options
+class LeanCodegenOptions:
+    module_name: text
+    generate_stubs: bool       # Generate sorry for unproven theorems
+    include_proofs: bool       # Include proof obligations
+    verbose: bool              # Emit comments
+    output_dir: text
+
+    static fn new() -> LeanCodegenOptions:
+        LeanCodegenOptions("Main", true, true, false, "build/lean")
+
+    me with_module_name(name: text) -> LeanCodegenOptions:
+        self.module_name = name
+        self
+
+    me with_stubs(generate: bool) -> LeanCodegenOptions:
+        self.generate_stubs = generate
+        self
+
+    me with_output_dir(dir: text) -> LeanCodegenOptions:
+        self.output_dir = dir
+        self
+
+# Lean function representation
+class LeanFunction:
+    name: text
+    params: List<(text, text)>  # (name, type)
+    return_type: text
+    body: text
+    is_partial: bool
+    termination_measure: Option<text>  # Renamed from decreases to avoid keyword conflict
+
+    fn new(name: text) -> LeanFunction:
+        LeanFunction(name, [], "Unit", "sorry", false, nil)
+
+    me add_param(name: text, ty: text) -> LeanFunction:
+        self.params = self.params + [(name, ty)]
+        self
+
+    me with_return_type(ty: text) -> LeanFunction:
+        self.return_type = ty
+        self
+
+    me with_body(body: text) -> LeanFunction:
+        self.body = body
+        self
+
+    me with_decreases(expr: text) -> LeanFunction:
+        self.termination_measure = Some(expr)
+        self
+
+    me partial() -> LeanFunction:
+        self.is_partial = true
+        self
+
+# Lean theorem representation
+class LeanTheorem:
+    name: text
+    params: List<(text, text)>
+    statement: text
+    proof: Option<text>
+
+    fn new(name: text, statement: text) -> LeanTheorem:
+        LeanTheorem(name, [], statement, nil)
+
+    me add_param(name: text, ty: text) -> LeanTheorem:
+        self.params = self.params + [(name, ty)]
+        self
+
+    me with_proof(proof: text) -> LeanTheorem:
+        self.proof = Some(proof)
+        self
+
+# Lean structure (for Simple classes)
+class LeanStructure:
+    name: text
+    fields: List<(text, text)>  # (name, type)
+    deriving: List<text>
+
+    fn new(name: text) -> LeanStructure:
+        LeanStructure(name, [], [])
+
+    me add_field(name: text, ty: text) -> LeanStructure:
+        self.fields = self.fields + [(name, ty)]
+        self
+
+    me derive(trait_name: text) -> LeanStructure:
+        self.deriving = self.deriving + [trait_name]
+        self
+
+# Lean inductive (for Simple enums)
+class LeanInductive:
+    name: text
+    constructors: List<(text, List<text>)>  # (name, param types)
+    deriving: List<text>
+
+    fn new(name: text) -> LeanInductive:
+        LeanInductive(name, [], [])
+
+    me add_constructor(name: text, params: List<text>) -> LeanInductive:
+        self.constructors = self.constructors + [(name, params)]
+        self
+
+    me with_deriving(trait_names: List<text>) -> LeanInductive:
+        for t in trait_names:
+            self.deriving = self.deriving + [t]
+        self
+
+# Lean abbreviation (for type aliases)
+class LeanAbbrev:
+    name: text
+    ty: text
+
+    fn new(name: text, ty: text) -> LeanAbbrev:
+        LeanAbbrev(name, ty)
+
+# Main Lean code generator
+class LeanCodegen:
+    options: LeanCodegenOptions
+    structures: List<LeanStructure>
+    inductives: List<LeanInductive>
+    functions: List<LeanFunction>
+    theorems: List<LeanTheorem>
+    imports: List<text>
+    raw_output: text  # For raw line output mode (string concatenation)
+
+    fn new(options: LeanCodegenOptions) -> LeanCodegen:
+        LeanCodegen(options, [], [], [], [], ["Mathlib.Data.Nat.Basic"], "")
+
+    # Static factory method for simplified creation
+    fn create(module_name: text) -> LeanCodegen:
+        var options = LeanCodegenOptions.new()
+        options = options.with_module_name(module_name)
+        LeanCodegen.new(options)
+
+    me add_import(import_path: text) -> LeanCodegen:
+        self.imports = self.imports + [import_path]
+        self
+
+    me add_structure(structure: LeanStructure) -> LeanCodegen:
+        self.structures = self.structures + [structure]
+        self
+
+    me add_inductive(inductive: LeanInductive) -> LeanCodegen:
+        self.inductives = self.inductives + [inductive]
+        self
+
+    me add_function(func: LeanFunction) -> LeanCodegen:
+        self.functions = self.functions + [func]
+        self
+
+    me add_theorem(theorem: LeanTheorem) -> LeanCodegen:
+        self.theorems = self.theorems + [theorem]
+        self
+
+    # Add theorem with implicit parameters
+    me add_theorem_implicit(theorem: LeanTheorem) -> LeanCodegen:
+        self.theorems = self.theorems + [theorem]
+        self
+
+    # Raw line output methods for flexible code generation
+    # All methods return self for method chaining
+    me add_raw_line(line: text) -> LeanCodegen:
+        self.raw_output = self.raw_output + line + "\n"
+        self
+
+    me add_blank() -> LeanCodegen:
+        self.raw_output = self.raw_output + "\n"
+        self
+
+    me add_doc_comment(doc: text) -> LeanCodegen:
+        self.raw_output = self.raw_output + "/-- {doc} -/\n"
+        self
+
+    me add_block_comment(lines: List<text>) -> LeanCodegen:
+        self.raw_output = self.raw_output + "/-\n"
+        for line in lines:
+            self.raw_output = self.raw_output + "  {line}\n"
+        self.raw_output = self.raw_output + "-/\n"
+        self
+
+    me add_namespace(name: text) -> LeanCodegen:
+        self.raw_output = self.raw_output + "namespace {name}\n"
+        self
+
+    me end_namespace(name: text) -> LeanCodegen:
+        self.raw_output = self.raw_output + "end {name}\n"
+        self
+
+    me add_section_header(title: text) -> LeanCodegen:
+        self.raw_output = self.raw_output + "-- ════════════════════════════════════════════════════════════════\n"
+        self.raw_output = self.raw_output + "-- {title}\n"
+        self.raw_output = self.raw_output + "-- ════════════════════════════════════════════════════════════════\n\n"
+        self
+
+    me add_abbrev(abbrev: LeanAbbrev) -> LeanCodegen:
+        self.raw_output = self.raw_output + "abbrev {abbrev.name} := {abbrev.ty}\n"
+        self
+
+    # Emit all raw output combined with structured content as a single string
+    # The structured content is inserted before "end <namespace>" if present
+    me emit() -> text:
+        # Build structured content first
+        var structured = ""
+
+        # Add inductives (enums)
+        for inductive in self.inductives:
+            structured = structured + "inductive {inductive.name}\n"
+            for (ctor_name, params) in inductive.constructors:
+                if params.len() == 0:
+                    structured = structured + "  | {ctor_name}\n"
+                else:
+                    val param_str = params.join(" → ")
+                    structured = structured + "  | {ctor_name} : {param_str} → {inductive.name}\n"
+            if inductive.deriving.len() > 0:
+                val derives = inductive.deriving.join(", ")
+                structured = structured + "deriving {derives}\n"
+            structured = structured + "\n"
+
+        # Add functions
+        for func in self.functions:
+            if func.is_partial:
+                structured = structured + "partial "
+            structured = structured + "def {func.name}"
+            for (pname, ptype) in func.params:
+                structured = structured + " ({pname} : {ptype})"
+            structured = structured + " : {func.return_type} :=\n"
+            structured = structured + "  {func.body}\n\n"
+
+        # Add theorems
+        for theorem in self.theorems:
+            structured = structured + "theorem {theorem.name}"
+            for (pname, ptype) in theorem.params:
+                structured = structured + " ({pname} : {ptype})"
+            structured = structured + " :\n  {theorem.statement} := by\n"
+            match theorem.proof:
+                case Some(proof):
+                    structured = structured + "  {proof}\n\n"
+                case nil:
+                    structured = structured + "  sorry\n\n"
+
+        # Find "end " in raw_output and insert structured content before it
+        val lines = self.raw_output.split("\n")
+        var result = ""
+        var found_end = false
+        for line in lines:
+            if line.starts_with("end ") and not found_end:
+                # Insert structured content before end namespace
+                result = result + structured
+                found_end = true
+            result = result + line + "\n"
+
+        # If no "end" found, just append structured content at the end
+        if not found_end:
+            result = result + structured
+
+        result
+
+    # Generate Lean code for a function contract
+    me generate_contract_theorems(func_name: text, contract: models_contracts.FunctionContract) -> LeanCodegen:
+        # Generate precondition theorem
+        for (i, clause) in contract.preconditions.enumerate():
+            val theorem_name = "{func_name}_pre_{i}"
+            val statement = expressions.translate_contract_expr(clause.expr)
+            val theorem = LeanTheorem.new(theorem_name, statement)
+            self.add_theorem(theorem)
+
+        # Generate postcondition theorems
+        for (i, clause) in contract.postconditions.enumerate():
+            val theorem_name = "{func_name}_post_{i}"
+            val statement = expressions.translate_contract_expr(clause.expr)
+            val theorem = LeanTheorem.new(theorem_name, statement)
+            self.add_theorem(theorem)
+
+        # Generate invariant theorems
+        for (i, clause) in contract.invariants.enumerate():
+            val theorem_name = "{func_name}_inv_{i}"
+            val statement = expressions.translate_contract_expr(clause.expr)
+            val theorem = LeanTheorem.new(theorem_name, statement)
+            self.add_theorem(theorem)
+
+        self
+
+    # Generate complete Lean module
+    me generate() -> text:
+        var emit = emitter.LeanEmitter.new()
+
+        # Module header
+        emit.emit_line("-- Auto-generated Lean 4 code from Simple")
+        emit.emit_line("-- Module: {self.options.module_name}")
+        emit.emit_blank()
+
+        # Imports
+        for import_path in self.imports:
+            emit.emit_line("import {import_path}")
+        emit.emit_blank()
+
+        # Namespace
+        emit.emit_namespace(self.options.module_name)
+
+        # Structures
+        for structure in self.structures:
+            emit.emit_structure_data(structure.name, structure.fields, structure.deriving)
+            emit.emit_blank()
+
+        # Inductives
+        for inductive in self.inductives:
+            emit.emit_inductive_data(inductive.name, inductive.constructors, inductive.deriving)
+            emit.emit_blank()
+
+        # Functions
+        for func in self.functions:
+            emit.emit_function_data(func.name, func.params, func.return_type, func.body, func.is_partial, func.termination_measure, self.options.generate_stubs)
+            emit.emit_blank()
+
+        # Theorems
+        for theorem in self.theorems:
+            emit.emit_theorem_data(theorem.name, theorem.params, theorem.statement, theorem.proof, self.options.generate_stubs)
+            emit.emit_blank()
+
+        # Close namespace
+        emit.emit_end_namespace(self.options.module_name)
+
+        emit.finish()
+
+    # Write generated code to file
+    me write_to_file(filename: text) -> bool:
+        val content = self.generate()
+        val path = "{self.options.output_dir}/{filename}.lean"
+
+        # Ensure output directory exists
+        fs.create_dir_all(self.options.output_dir)
+
+        # Write file
+        fs.write_text(path, content)
+
+# Convenience function to generate Lean for a module
+fn generate_module(module_name: text, output_dir: text) -> LeanCodegen:
+    var options = LeanCodegenOptions.new()
+    options = options.with_module_name(module_name)
+    options = options.with_output_dir(output_dir)
+    LeanCodegen.new(options)
+
+# =============================================================================
+# Helper Functions for Regeneration Scripts
+# =============================================================================
+
+# Create a simple type representation
+fn make_simple_type(name: text) -> text:
+    name
+
+# Create a list type representation
+fn make_list_type(elem_type: text) -> text:
+    "List {elem_type}"
+
+# Create a string type representation
+fn make_string_type() -> text:
+    "text"
+
+# Create an i32 type representation
+fn make_int_type() -> text:
+    "i32"
+
+# Create a bool type representation
+fn make_bool_type() -> text:
+    "bool"
+
+# Create an option type representation
+fn make_option_type(elem_type: text) -> text:
+    "Option {elem_type}"
+
+# Create a nat type representation
+fn make_nat_type() -> text:
+    "Nat"
+
+# Build an enum/inductive type for regeneration scripts
+# Note: Returns LeanInductive. Use with_deriving_enum for deriving clauses.
+fn build_enum(name: text, variants: List<(text, List<(text, text)>)>) -> LeanInductive:
+    var ind = LeanInductive.new(name)
+    for (var_name, params) in variants:
+        var param_types: List<text> = []
+        for (pname, ptype) in params:
+            param_types = param_types + [ptype]
+        ind = ind.add_constructor(var_name, param_types)
+    ind
+
+# Build an enum with deriving clause - to avoid method chaining issues
+fn build_enum_with_deriving(name: text, variants: List<(text, List<(text, text)>)>, derives: List<text>) -> LeanInductive:
+    var ind = build_enum(name, variants)
+    for d in derives:
+        ind.deriving = ind.deriving + [d]
+    ind
+
+# Build a class/structure for regeneration scripts
+fn build_class(name: text, fields: List<(text, text)>) -> LeanStructure:
+    var s = LeanStructure.new(name)
+    for (fname, ftype) in fields:
+        s = s.add_field(name=fname, ty=ftype)
+    s
+
+# Build a class/structure with deriving clause
+fn build_class_with_deriving(name: text, fields: List<(text, text)>, derives: List<text>) -> LeanStructure:
+    var s = build_class(name, fields)
+    for d in derives:
+        s.deriving = s.deriving + [d]
+    s
+
+# Build a function for regeneration scripts
+fn build_function(name: text, params: List<(text, text)>, ret_type: text, body: text) -> LeanFunction:
+    var func = LeanFunction.new(name)
+    for (pname, ptype) in params:
+        func = func.add_param(name=pname, ty=ptype)
+    func = func.with_return_type(ret_type)
+    func = func.with_body(body)
+    func
+
+# Build a theorem for regeneration scripts
+fn build_theorem(name: text, params: List<(text, text)>, statement: text, proof: text) -> LeanTheorem:
+    var thm = LeanTheorem.new(name, statement)
+    for (pname, ptype) in params:
+        thm = thm.add_param(name=pname, ty=ptype)
+    thm = thm.with_proof(proof)
+    thm
+
+# Build a theorem with implicit and explicit parameters
+fn build_theorem_implicit(name: text, impl_params: List<(text, text)>, expl_params: List<(text, text)>, statement: text, proof_lines: List<text>) -> LeanTheorem:
+    val proof = proof_lines.join("\n")
+    var thm = LeanTheorem.new(name, statement)
+    # Add implicit params first (treated the same for now)
+    for (pname, ptype) in impl_params:
+        thm = thm.add_param(name=pname, ty=ptype)
+    for (pname, ptype) in expl_params:
+        thm = thm.add_param(name=pname, ty=ptype)
+    thm = thm.with_proof(proof)
+    thm
+
+# Build an abbreviation for regeneration scripts
+fn build_abbrev(name: text, ty: text) -> LeanAbbrev:
+    LeanAbbrev.new(name, ty)
+
+# =============================================================================
+# Integration Functions
+# =============================================================================
+
+# Generate Lean code with full verification pipeline
+fn generate_verified_module(
+    module_name: text,
+    output_dir: text,
+    include_memory_safety: bool
+) -> text:
+    var options = LeanCodegenOptions.new()
+    options = options.with_module_name(module_name)
+    options = options.with_output_dir(output_dir)
+    var codegen = LeanCodegen.new(options)
+
+    # Add memory safety section if requested
+    if include_memory_safety:
+        val mem_code = memory_safety.generate_memory_safety_lean(module_name)
+        codegen = codegen.add_raw_line("-- Memory Safety Verification")
+        codegen = codegen.add_raw_line(mem_code)
+
+    codegen.emit()
+
+# Check verification constraints before codegen
+fn check_for_violations(
+    func_name: text,
+    is_recursive: bool,
+    has_termination: bool,
+    called_io_functions: List<text>,
+    has_unsafe_ops: bool
+) -> checker.CheckResult:
+    checker.validate_verified_function(
+        func_name,
+        is_recursive,
+        has_termination,
+        called_io_functions,
+        has_unsafe_ops
+    )
+
+# Run Lean to check generated code
+fn verify_lean_file(file_path: text) -> runner.LeanCheckResult:
+    runner.check_lean_file(file_path)
+
+# Check if Lean toolchain is available
+fn is_lean_available() -> bool:
+    runner.is_lean_installed()
+
+# Generate and verify a complete module
+fn generate_and_verify(
+    module_name: text,
+    output_dir: text,
+    content_builder: fn(LeanCodegen) -> LeanCodegen
+) -> (text, Option<runner.LeanCheckResult>):
+    var options = LeanCodegenOptions.new()
+    options = options.with_module_name(module_name)
+    options = options.with_output_dir(output_dir)
+    var codegen = LeanCodegen.new(options)
+
+    # Let the builder add content
+    codegen = content_builder(codegen)
+
+    # Generate the Lean code
+    val lean_code = codegen.emit()
+
+    # Write to file
+    val file_path = "{output_dir}/{module_name}.lean"
+    fs.create_dir_all(output_dir)
+    fs.write_text(file_path, lean_code)
+
+    # Try to verify if Lean is available
+    if is_lean_available():
+        val result = verify_lean_file(file_path)
+        (lean_code, Some(result))
+    else:
+        (lean_code, nil)
+
+# =============================================================================
+# Type Class Integration
+# =============================================================================
+
+# Build a type class from trait definition
+fn build_type_class(name: text, type_param: text, methods: List<(text, List<text>, text)>) -> traits.LeanClass:
+    var cls = traits.LeanClass.new(name)
+    cls = cls.with_type_param(type_param)
+    for (method_name, param_types, ret_type) in methods:
+        var params: List<types.LeanType> = []
+        for pt in param_types:
+            params = params + [types.TypeTranslator.translate_primitive(pt)]
+        val ret = types.TypeTranslator.translate_primitive(ret_type)
+        cls = cls.add_method(traits.LeanMethodSig.create(method_name, params, ret))
+    cls
+
+# Build an instance
+fn build_instance(class_name: text, for_type: text, methods: List<(text, text)>) -> traits.LeanInstance:
+    val ty = types.TypeTranslator.translate_primitive(for_type)
+    var inst = traits.LeanInstance.new(class_name, ty)
+    for (name, body) in methods:
+        inst = inst.add_method(name, body)
+    inst
+
+# Build a binding for static dispatch
+fn build_binding(interface_name: text, impl_type: text) -> traits.LeanBinding:
+    val ty = types.TypeTranslator.translate_primitive(impl_type)
+    traits.LeanBinding.new(interface_name, ty)
+
+# Export all public classes and functions
+export LeanCodegenOptions, LeanFunction, LeanTheorem, LeanStructure, LeanInductive, LeanAbbrev, LeanCodegen
+export build_enum, build_enum_with_deriving, build_class, build_class_with_deriving
+export build_function, build_theorem, build_theorem_implicit, build_abbrev
+export make_simple_type, make_list_type, make_string_type, make_int_type, make_bool_type, make_option_type, make_nat_type
+export generate_verified_module, check_for_violations, verify_lean_file, is_lean_available
+export generate_and_verify, build_type_class, build_instance, build_binding
