@@ -16,7 +16,10 @@ pub mod actor;
 pub use actor::{ActorHandle, ActorSpawner, Message, ThreadSpawner};
 
 pub mod runtime_symbols;
-pub use runtime_symbols::{AbiVersion, RuntimeSymbolProvider, RUNTIME_SYMBOL_NAMES};
+pub use runtime_symbols::{
+    AbiVersion, RuntimeSymbolProvider, RuntimeSymbolTier, RUNTIME_SYMBOL_NAMES,
+    symbol_tier_of, runtime_symbols_for_baremetal,
+};
 
 /// Common interface for dynamically loaded modules.
 pub trait DynModule {
