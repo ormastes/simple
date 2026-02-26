@@ -530,18 +530,12 @@ impl<'a> Parser<'a> {
             // Allow 'unit' to be used as identifier (field names like 'unit: Type')
             // The 'unit' keyword is only used for unit type context
             TokenKind::Unit => "unit".to_string(),
-            // Allow 'actor' to be used as identifier (parameter names like 'actor: VoidPtr')
+            // Allow contextual keywords as identifiers
             TokenKind::Actor => "actor".to_string(),
-            // Allow 'kernel' and 'gen' to be used as identifiers (function/variable names)
-            // These keywords are only used for GPU kernel and generator declarations
             TokenKind::Kernel => "kernel".to_string(),
             TokenKind::Gen => "gen".to_string(),
-            // Allow 'sync' to be used as identifier (method names like 'fn sync()')
-            // The 'sync' keyword is only used in sync/async context declarations
             TokenKind::Sync => "sync".to_string(),
-            // Allow 'async' to be used as identifier
             TokenKind::Async => "async".to_string(),
-            // Allow additional keywords as identifiers
             TokenKind::Loop => "loop".to_string(),
             TokenKind::Vec => "Vec".to_string(),
             TokenKind::Gpu => "Gpu".to_string(),
@@ -557,9 +551,7 @@ impl<'a> Parser<'a> {
             TokenKind::Mixin => "mixin".to_string(),
             TokenKind::Val => "val".to_string(),
             TokenKind::Impl => "impl".to_string(),
-            TokenKind::Actor => "actor".to_string(),
             TokenKind::Ghost => "ghost".to_string(),
-            TokenKind::Gen => "gen".to_string(),
             TokenKind::Alias => "alias".to_string(),
             // Low-level keywords usable as identifiers in non-statement contexts
             TokenKind::Asm => "asm".to_string(),
@@ -567,6 +559,7 @@ impl<'a> Parser<'a> {
             TokenKind::Newtype => "newtype".to_string(),
             TokenKind::Extend => "extend".to_string(),
             TokenKind::Comptime => "comptime".to_string(),
+            TokenKind::Export => "export".to_string(),
             // Type definition keywords usable as identifiers (parameter names, field names)
             TokenKind::Struct => "struct".to_string(),
             TokenKind::Enum => "enum".to_string(),
@@ -704,6 +697,16 @@ impl<'a> Parser<'a> {
             TokenKind::Var => "var",
             TokenKind::Move => "move",
             TokenKind::Unwrap => "unwrap",
+            // Low-level keywords in module paths
+            TokenKind::Bitfield => "bitfield",
+            TokenKind::Newtype => "newtype",
+            TokenKind::Extend => "extend",
+            TokenKind::Comptime => "comptime",
+            // Type definition keywords in paths
+            TokenKind::Struct => "struct",
+            TokenKind::Enum => "enum",
+            TokenKind::Class => "class",
+            TokenKind::Trait => "trait",
             _ => {
                 let ctx = parse_context!(format!("parsing path segment, previous tokens analyzed"));
                 return Err(ParseError::unexpected_token_with_context(
@@ -840,6 +843,21 @@ impl<'a> Parser<'a> {
             TokenKind::Gen => "gen",
             TokenKind::Impl => "impl",
             TokenKind::Vec => "vec",
+            // Low-level keywords as method names
+            TokenKind::Asm => "asm",
+            TokenKind::Bitfield => "bitfield",
+            TokenKind::Newtype => "newtype",
+            TokenKind::Extend => "extend",
+            TokenKind::Comptime => "comptime",
+            // Type definition keywords as method/field names
+            TokenKind::Struct => "struct",
+            TokenKind::Enum => "enum",
+            TokenKind::Class => "class",
+            TokenKind::Fn => "fn",
+            TokenKind::Trait => "trait",
+            // Module system keywords as method names
+            TokenKind::Export => "export",
+            TokenKind::Use => "use",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
