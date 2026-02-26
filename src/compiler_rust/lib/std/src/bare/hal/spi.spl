@@ -1,0 +1,137 @@
+# SPI - Serial Peripheral Interface HAL
+#
+# Hardware abstraction layer for SPI communication.
+
+# SPI mode (clock polarity and phase)
+enum SpiMode:
+    Mode0  # CPOL=0, CPHA=0
+    Mode1  # CPOL=0, CPHA=1
+    Mode2  # CPOL=1, CPHA=0
+    Mode3  # CPOL=1, CPHA=1
+
+# Bit order
+enum BitOrder:
+    MsbFirst
+    LsbFirst
+
+# SPI configuration
+struct SpiConfig:
+    clock_speed: u32
+    mode: SpiMode
+    bit_order: BitOrder
+    word_size: u8  # 8 or 16 bits typically
+
+    static fn default() -> SpiConfig:
+        return SpiConfig(
+            clock_speed: 1000000,  # 1 MHz
+            mode: SpiMode.Mode0,
+            bit_order: BitOrder.MsbFirst,
+            word_size: 8
+        )
+
+# SPI trait
+trait Spi:
+    # Initialize SPI with configuration
+    me init(config: SpiConfig)
+
+    # Transfer a single byte (send and receive simultaneously)
+    fn transfer_byte(tx: u8) -> u8
+
+    # Write a single byte (ignore received data)
+    me write_byte(byte: u8):
+        self.transfer_byte(byte)
+
+    # Read a single byte (send dummy byte)
+    fn read_byte() -> u8:
+        return self.transfer_byte(0xFF)
+
+    # Transfer multiple bytes
+    fn transfer_bytes(tx: [u8]) -> [u8]:
+        var rx: [u8] = []
+        for byte in tx:
+            rx.push(self.transfer_byte(byte))
+        return rx
+
+    # Write multiple bytes
+    me write_bytes(data: [u8]):
+        for byte in data:
+            self.write_byte(byte)
+
+    # Read multiple bytes
+    fn read_bytes(count: usize) -> [u8]:
+        var rx: [u8] = []
+        for i in 0..count:
+            rx.push(self.read_byte())
+        return rx
+
+    # Set clock speed
+    me set_clock_speed(speed: u32)
+
+    # Check if transfer is complete
+    fn is_busy() -> bool
+
+# Chip select management
+trait ChipSelect:
+    # Assert chip select (active low)
+    me select()
+
+    # Deassert chip select
+    me deselect()
+
+# Generic SPI implementation
+struct GenericSpi:
+    base_addr: usize
+    config: SpiConfig
+
+    static fn new(base: usize) -> GenericSpi:
+        return GenericSpi(base_addr: base, config: SpiConfig.default())
+
+impl GenericSpi: Spi:
+    me init(config: SpiConfig):
+        self.config = config
+        # Platform-specific initialization
+        pass
+
+    fn transfer_byte(tx: u8) -> u8:
+        # Platform-specific implementation
+        return 0
+
+    me set_clock_speed(speed: u32):
+        self.config.clock_speed = speed
+        # Platform-specific implementation
+        pass
+
+    fn is_busy() -> bool:
+        # Platform-specific implementation
+        return false
+
+# SPI device wrapper (SPI + chip select)
+struct SpiDevice:
+    spi: Spi
+    cs: ChipSelect
+
+    static fn new(spi: Spi, cs: ChipSelect) -> SpiDevice:
+        return SpiDevice(spi: spi, cs: cs)
+
+    # Transaction with automatic chip select handling
+    fn transaction<T>(self, f: fn(Spi) -> T) -> T:
+        self.cs.select()
+        val result = f(self.spi)
+        self.cs.deselect()
+        return result
+
+    # Write with chip select
+    me write(self, data: [u8]):
+        self.cs.select()
+        self.spi.write_bytes(data)
+        self.cs.deselect()
+
+    # Read with chip select
+    fn read(self, count: usize) -> [u8]:
+        self.cs.select()
+        val result = self.spi.read_bytes(count)
+        self.cs.deselect()
+        return result
+
+export SpiMode, BitOrder, SpiConfig
+export Spi, ChipSelect, GenericSpi, SpiDevice

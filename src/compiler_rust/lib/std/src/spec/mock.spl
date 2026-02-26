@@ -1,0 +1,720 @@
+# Mock - Test Doubles for Simple Language
+#
+# Provides mocking, spying, and stubbing for isolated unit testing.
+# Includes MockPolicy to prevent mock usage in system/integration tests.
+
+# ============================================================================
+# Mock Policy - Prevent mocks in system/integration tests
+# ============================================================================
+
+# Policy modes for mock usage
+enum MockMode:
+    All           # Allow all mocks (unit tests)
+    HalOnly       # Only HAL/hardware abstraction mocks (integration)
+    Disabled      # No mocks allowed (system tests)
+    Custom        # Custom pattern-based policy
+
+# Global policy state
+var _mock_policy_mode: MockMode = MockMode.All
+var _mock_policy_patterns: List<text> = []
+var _mock_policy_initialized: bool = false
+
+# Global mock stub registries (to avoid chained method call issues)
+var _mock_stub_returns: Dict<text, Any> = {}
+var _mock_stub_sequences: Dict<text, List<Any>> = {}
+var _mock_sequence_indices: Dict<text, i32> = {}
+var _mock_current_stub_key: text = ""
+
+# Helper functions to access global registries (workaround for module scoping)
+fn mock_registry_set_key(key: text):
+    _mock_current_stub_key = key
+
+fn mock_registry_set_return(key: text, value: Any):
+    _mock_stub_returns = _mock_stub_returns.set(key, value)
+
+fn mock_registry_set_sequence(key: text, values: List<Any>):
+    _mock_stub_sequences = _mock_stub_sequences.set(key, values)
+    _mock_sequence_indices = _mock_sequence_indices.set(key, 0)
+
+fn mock_registry_get_return(key: text) -> Any:
+    if _mock_stub_returns.contains_key(key):
+        return _mock_stub_returns.get(key)
+    return nil
+
+fn mock_registry_has_sequence(key: text) -> bool:
+    return _mock_stub_sequences.contains_key(key)
+
+fn mock_registry_get_sequence_value(key: text) -> Any:
+    val sequence = _mock_stub_sequences.get(key)
+    val idx = _mock_sequence_indices.get(key)
+    val result = sequence[idx % sequence.len()]
+    _mock_sequence_indices = _mock_sequence_indices.set(key, idx + 1)
+    return result
+
+fn mock_registry_has_return(key: text) -> bool:
+    return _mock_stub_returns.contains_key(key)
+
+fn mock_registry_get_current_key() -> text:
+    return _mock_current_stub_key
+
+# MockPolicy as module-level functions instead of a class
+# This avoids the module scope issue with static methods
+
+fn mock_policy_init(mode: MockMode):
+    # Initialize mock policy for this test binary
+    _mock_policy_mode = mode
+    _mock_policy_initialized = true
+
+fn mock_policy_init_with_patterns(patterns: List<text>):
+    # Initialize with custom allowed patterns
+    _mock_policy_mode = MockMode.Custom
+    _mock_policy_patterns = patterns
+    _mock_policy_initialized = true
+
+fn mock_policy_init_hal_only():
+    # Allow only HAL mocks (for integration tests)
+    mock_policy_init_with_patterns(["*.hal.*", "*.sub_hal.*"])
+    _mock_policy_mode = MockMode.HalOnly
+
+fn mock_policy_disable():
+    # Disable all mocks (for system tests)
+    _mock_policy_mode = MockMode.Disabled
+    _mock_policy_initialized = true
+
+fn mock_policy_reset():
+    # Reset policy to default (allow all)
+    _mock_policy_mode = MockMode.All
+    _mock_policy_patterns = []
+    _mock_policy_initialized = false
+
+fn mock_policy_check_allowed(source_module: text):
+    # Check if mock usage is allowed, panics if not
+    match _mock_policy_mode:
+        case MockMode.All:
+            return
+        case MockMode.Disabled:
+            panic("Mock used while mocks are disabled (system test policy). Source: {source_module}")
+        case MockMode.HalOnly:
+            if mock_policy_matches_hal_pattern(source_module):
+                return
+            panic("Mock from '{source_module}' not allowed. Only HAL mocks permitted in integration tests.")
+        case MockMode.Custom:
+            if mock_policy_matches_any_pattern(source_module):
+                return
+            panic("Mock from '{source_module}' not allowed by current mock policy.")
+
+fn mock_policy_matches_hal_pattern(module: text) -> bool:
+    # Check if module matches HAL patterns
+    return module.contains(".hal.") or module.contains(".sub_hal.")
+
+fn mock_policy_matches_any_pattern(module: text) -> bool:
+    # Check if module matches any allowed pattern
+    for pattern in _mock_policy_patterns:
+        if mock_policy_pattern_matches(module=module, pattern=pattern):
+            return true
+    return false
+
+fn mock_policy_pattern_matches(module: text, pattern: text) -> bool:
+    # Simple wildcard pattern matching (* matches any sequence)
+    if pattern == "*":
+        return true
+    if not pattern.contains("*"):
+        return module.contains(pattern)
+    # Split on * and check parts exist in order
+    val parts = pattern.split("*")
+    var idx = 0
+    for part in parts:
+        if part.is_empty():
+            continue
+        val found = module.index_of(part, idx)
+        if found < 0:
+            return false
+        idx = found + part.len()
+    return true
+
+fn mock_policy_is_enabled() -> bool:
+    # Check if mocks are enabled (not disabled mode)
+    return _mock_policy_mode != MockMode.Disabled
+
+fn mock_policy_current_mode() -> MockMode:
+    # Get current policy mode
+    return _mock_policy_mode
+
+# MockPolicy class wrapper for backward compatibility (delegates to functions)
+class MockPolicy:
+    static fn init(mode: MockMode):
+        mock_policy_init(mode)
+
+    static fn init_with_patterns(patterns: List<text>):
+        mock_policy_init_with_patterns(patterns)
+
+    static fn init_hal_only():
+        mock_policy_init_hal_only()
+
+    static fn disable():
+        mock_policy_disable()
+
+    static fn reset():
+        mock_policy_reset()
+
+    static fn check_allowed(source_module: text):
+        mock_policy_check_allowed(source_module)
+
+    static fn matches_hal_pattern(module: text) -> bool:
+        return mock_policy_matches_hal_pattern(module)
+
+    static fn matches_any_pattern(module: text) -> bool:
+        return mock_policy_matches_any_pattern(module)
+
+    static fn pattern_matches(module: text, pattern: text) -> bool:
+        return mock_policy_pattern_matches(module=module, pattern=pattern)
+
+    static fn is_enabled() -> bool:
+        return mock_policy_is_enabled()
+
+    static fn current_mode() -> MockMode:
+        return mock_policy_current_mode()
+
+# ============================================================================
+# Argument Matchers
+# ============================================================================
+
+# Flexible argument matching for mock expectations
+enum ArgMatcher:
+    Any                           # Match any value
+    Exact(value: Any)             # Match exact value
+    Gt(n: i64)                    # Greater than
+    Lt(n: i64)                    # Less than
+    Gte(n: i64)                   # Greater than or equal
+    Lte(n: i64)                   # Less than or equal
+    Range(min: i64, max: i64)     # Within range (inclusive)
+    Pattern(regex: text)          # Regex pattern match
+    TypeOf(type_name: text)       # Type check
+
+# Note: These functions use arg_ prefix to avoid conflicts with builtins
+# The interpreter checks builtins before user-defined functions
+fn arg_any() -> ArgMatcher:
+    return ArgMatcher.Any
+
+fn arg_exact(value: Any) -> ArgMatcher:
+    return ArgMatcher.Exact(value)
+
+fn arg_gt(n: i64) -> ArgMatcher:
+    return ArgMatcher.Gt(n)
+
+fn arg_lt(n: i64) -> ArgMatcher:
+    return ArgMatcher.Lt(n)
+
+fn arg_gte(n: i64) -> ArgMatcher:
+    return ArgMatcher.Gte(n)
+
+fn arg_lte(n: i64) -> ArgMatcher:
+    return ArgMatcher.Lte(n)
+
+fn arg_in_range(min: i64, max: i64) -> ArgMatcher:
+    return ArgMatcher.Range(min, max)
+
+fn arg_matching(regex: text) -> ArgMatcher:
+    return ArgMatcher.Pattern(regex)
+
+fn arg_type_of(type_name: text) -> ArgMatcher:
+    return ArgMatcher.TypeOf(type_name)
+
+# Aliases without prefix (for backward compatibility, may conflict with builtins)
+fn any() -> ArgMatcher:
+    return ArgMatcher.Any
+
+fn exact(value: Any) -> ArgMatcher:
+    return ArgMatcher.Exact(value)
+
+fn gt(n: i64) -> ArgMatcher:
+    return ArgMatcher.Gt(n)
+
+fn lt(n: i64) -> ArgMatcher:
+    return ArgMatcher.Lt(n)
+
+fn gte(n: i64) -> ArgMatcher:
+    return ArgMatcher.Gte(n)
+
+fn lte(n: i64) -> ArgMatcher:
+    return ArgMatcher.Lte(n)
+
+fn in_range(min: i64, max: i64) -> ArgMatcher:
+    return ArgMatcher.Range(min, max)
+
+fn matching(regex: text) -> ArgMatcher:
+    return ArgMatcher.Pattern(regex)
+
+fn type_of(type_name: text) -> ArgMatcher:
+    return ArgMatcher.TypeOf(type_name)
+
+fn matches_arg(matcher: ArgMatcher, value: Any) -> bool:
+    match matcher:
+        case ArgMatcher.Any:
+            return true
+        case ArgMatcher.Exact(expected):
+            return value == expected
+        case ArgMatcher.Gt(n):
+            return (value as i64) > n
+        case ArgMatcher.Lt(n):
+            return (value as i64) < n
+        case ArgMatcher.Gte(n):
+            return (value as i64) >= n
+        case ArgMatcher.Lte(n):
+            return (value as i64) <= n
+        case ArgMatcher.Range(min, max):
+            val v = value as i64
+            return v >= min and v <= max
+        case ArgMatcher.Pattern(regex):
+            return (value as text).contains(regex)
+        case ArgMatcher.TypeOf(type_name):
+            return type_name_of(value) == type_name
+
+fn type_name_of(value: Any) -> text:
+    return "Any"
+
+# ============================================================================
+# Call Recording
+# ============================================================================
+
+# Record of a single method call
+class CallInfo:
+    method_name: text
+    args: List<Any>
+    timestamp: i64
+
+    static fn new(method_name: text, args: List<Any>) -> CallInfo:
+        return CallInfo {method_name: method_name, args: args, timestamp: 0}
+
+    fn matches_args(expected: List<ArgMatcher>) -> bool:
+        if self.args.len() != expected.len():
+            return false
+        for i in 0..self.args.len():
+            if not matches_arg(expected[i], self.args[i]):
+                return false
+        return true
+
+# Records method calls for verification
+class CallRecorder:
+    calls: List<CallInfo>
+
+    static fn new() -> CallRecorder:
+        return CallRecorder {
+            calls: []
+        }
+
+    me record(method_name: text, args: List<Any>) -> CallRecorder:
+        self.calls = self.calls.push(CallInfo.new(method_name, args))
+        return self
+
+    fn calls_for(method_name: text) -> List<CallInfo>:
+        return self.calls.filter(\c: c.method_name == method_name)
+
+    fn call_count(method_name: text) -> i32:
+        return self.calls_for(method_name).len()
+
+    fn was_called(method_name: text) -> bool:
+        return self.call_count(method_name) > 0
+
+    me clear() -> CallRecorder:
+        self.calls = []
+        return self
+
+# ============================================================================
+# Verification
+# ============================================================================
+
+# Expected call count for verification
+enum VerifyCount:
+    Once
+    Exactly(n: i32)
+    AtLeast(n: i32)
+    AtMost(n: i32)
+    Never
+    AnyTimes
+
+# Fluent interface for verifying mock calls
+class CallVerifier:
+    recorder: CallRecorder
+    method_name: text
+    expected_args: Option<List<ArgMatcher>>
+    expected_count: VerifyCount
+
+    static fn new(recorder: CallRecorder, method_name: text) -> CallVerifier:
+        return CallVerifier {
+            recorder: recorder,
+            method_name: method_name,
+            expected_args: nil,
+            expected_count: VerifyCount.AnyTimes
+        }
+
+    me was_called() -> CallVerifier:
+        self.expected_count = VerifyCount.AtLeast(1)
+        return self
+
+    me called() -> CallVerifier:
+        return self.was_called()
+
+    me called_times(n: i32) -> CallVerifier:
+        self.expected_count = VerifyCount.Exactly(n)
+        return self
+
+    me times(count: VerifyCount) -> CallVerifier:
+        self.expected_count = count
+        return self
+
+    me once() -> CallVerifier:
+        self.expected_count = VerifyCount.Once
+        return self
+
+    me never() -> CallVerifier:
+        self.expected_count = VerifyCount.Never
+        return self
+
+    me at_least(n: i32) -> CallVerifier:
+        self.expected_count = VerifyCount.AtLeast(n)
+        return self
+
+    me at_most(n: i32) -> CallVerifier:
+        self.expected_count = VerifyCount.AtMost(n)
+        return self
+
+    me with_args(args: List<Any>) -> CallVerifier:
+        var matchers: List<ArgMatcher> = []
+        for arg in args:
+            matchers = matchers.push(ArgMatcher.Exact(arg))
+        self.expected_args = Some(matchers)
+        return self
+
+    me with_matchers(matchers: List<ArgMatcher>) -> CallVerifier:
+        self.expected_args = Some(matchers)
+        return self
+
+    me called_with(args: List<Any>) -> CallVerifier:
+        return self.with_args(args)
+
+    fn verify():
+        val calls = self.get_matching_calls()
+        val actual_count = calls.len()
+
+        val count_ok = match self.expected_count:
+            case VerifyCount.Once: actual_count == 1
+            case VerifyCount.Exactly(n): actual_count == n
+            case VerifyCount.AtLeast(n): actual_count >= n
+            case VerifyCount.AtMost(n): actual_count <= n
+            case VerifyCount.Never: actual_count == 0
+            case VerifyCount.AnyTimes: true
+
+        if not count_ok:
+            val expected_desc = self.count_description()
+            panic("Mock verification failed: expected {self.method_name} to be called {expected_desc}, but was called {actual_count} times")
+
+    fn get_matching_calls() -> List<CallInfo>:
+        val all_calls = self.recorder.calls_for(self.method_name)
+        match self.expected_args:
+            case Some(matchers):
+                return all_calls.filter(\c: c.matches_args(matchers))
+            case nil:
+                return all_calls
+
+    fn count_description() -> text:
+        match self.expected_count:
+            case VerifyCount.Once: return "once"
+            case VerifyCount.Exactly(n): return "exactly {n} times"
+            case VerifyCount.AtLeast(n): return "at least {n} times"
+            case VerifyCount.AtMost(n): return "at most {n} times"
+            case VerifyCount.Never: return "never"
+            case VerifyCount.AnyTimes: return "any number of times"
+
+# ============================================================================
+# Method Stub - Defines stubbed behavior
+# ============================================================================
+
+# Configuration for a stubbed method
+class MethodStub:
+    method_name: text
+    arg_matchers: List<ArgMatcher>
+    return_value: Option<Any>
+    return_values: List<Any>
+    return_index: i32
+    raises_error: Option<text>
+    call_through: bool
+
+    static fn new(method_name: text) -> MethodStub:
+        return MethodStub {
+            method_name: method_name,
+            arg_matchers: [],
+            return_value: nil,
+            return_values: [],
+            return_index: 0,
+            raises_error: nil,
+            call_through: false
+        }
+
+    me with_args(args: List<Any>) -> MethodStub:
+        self.arg_matchers = args.map(\a: ArgMatcher.Exact(a))
+        return self
+
+    me with_matchers(matchers: List<ArgMatcher>) -> MethodStub:
+        self.arg_matchers = matchers
+        return self
+
+    me with_any_args() -> MethodStub:
+        self.arg_matchers = []
+        return self
+
+    me returns(value: Any) -> MethodStub:
+        self.return_value = Some(value)
+        return self
+
+    me returns_once(value: Any) -> MethodStub:
+        self.return_values = self.return_values.push(value)
+        return self
+
+    me returns_sequence(values: List<Any>) -> MethodStub:
+        self.return_values = values
+        return self
+
+    me raises(error_msg: text) -> MethodStub:
+        self.raises_error = Some(error_msg)
+        return self
+
+    me calls_through() -> MethodStub:
+        self.call_through = true
+        return self
+
+    fn matches(args: List<Any>) -> bool:
+        if self.arg_matchers.is_empty():
+            return true
+        if args.len() != self.arg_matchers.len():
+            return false
+        for i in 0..args.len():
+            if not matches_arg(self.arg_matchers[i], args[i]):
+                return false
+        return true
+
+    me get_return_value() -> Any:
+        match self.raises_error:
+            case Some(msg):
+                panic("Mock error: {msg}")
+            case nil:
+                nil  # No-op, continue execution
+
+        if not self.return_values.is_empty():
+            val value = self.return_values[self.return_index % self.return_values.len()]
+            self.return_index = self.return_index + 1
+            return value
+
+        match self.return_value:
+            case Some(v):
+                return v
+            case nil:
+                return nil
+
+# ============================================================================
+# Mock - Main test double type
+# ============================================================================
+
+# Test double for isolating code under test
+class Mock:
+    name: text
+    _id: text
+    _stub_returns: Dict<text, Any>
+    _stub_sequences: Dict<text, List<Any>>
+    _sequence_indices: Dict<text, i32>
+    _stub_returns_with_args: Dict<text, Any>    # keyed by "method:arg1:arg2:..."
+    recorder: CallRecorder
+    _current_stub_method: text
+    _current_stub_args: List<Any>
+
+    static fn new(name: text) -> Mock:
+        # Note: Policy check moved to test setup via before_each hook
+        # Call mock_policy_check_allowed(name) explicitly if needed
+        return Mock {
+            name: name,
+            _id: name,
+            _stub_returns: {},
+            _stub_sequences: {},
+            _sequence_indices: {},
+            _stub_returns_with_args: {},
+            recorder: CallRecorder.new(),
+            _current_stub_method: "",
+            _current_stub_args: []
+        }
+
+    me when(method_name: text) -> Mock:
+        # Store the current method being stubbed for chaining
+        self._current_stub_method = method_name
+        self._current_stub_args = []  # Reset args for new stub
+        return self
+
+    me with_args(args: List<Any>) -> Mock:
+        # Set specific arguments for the current stub
+        self._current_stub_args = args
+        return self
+
+    me returns(value: Any) -> Mock:
+        # Store return value - use arg-specific storage if args were specified
+        if self._current_stub_args.len() > 0:
+            val key = self._make_args_key(self._current_stub_method, self._current_stub_args)
+            self._stub_returns_with_args = self._stub_returns_with_args.set(key, value)
+        else:
+            self._stub_returns = self._stub_returns.set(self._current_stub_method, value)
+        return self
+
+    fn _make_args_key(method_name: text, args: List<Any>) -> text:
+        # Create a composite key for method + args
+        var key_ = method_name
+        for arg in args:
+            key_ = "{key_}:{arg}"
+        return key_
+
+    me returns_sequence(values: List<Any>) -> Mock:
+        # Store sequence in local stub dict
+        self._stub_sequences = self._stub_sequences.set(self._current_stub_method, values)
+        self._sequence_indices = self._sequence_indices.set(self._current_stub_method, 0)
+        return self
+
+    # Non-chaining API that works around value semantics issue
+    me stub(method_name: text, return_value: Any) -> Mock:
+        self._stub_returns = self._stub_returns.set(method_name, return_value)
+        return self
+
+    me stub_sequence(method_name: text, values: List<Any>) -> Mock:
+        self._stub_sequences = self._stub_sequences.set(method_name, values)
+        self._sequence_indices = self._sequence_indices.set(method_name, 0)
+        return self
+
+    me call(method_name: text, args: List<Any>) -> Any:
+        self.recorder = self.recorder.record(method_name, args)
+
+        # Check for argument-specific stub first
+        val args_key = self._make_args_key(method_name, args)
+        if self._stub_returns_with_args.contains_key(args_key):
+            return self._stub_returns_with_args.get(args_key)
+
+        # Check for sequence
+        if self._stub_sequences.contains_key(method_name):
+            val sequence = self._stub_sequences.get(method_name)
+            val idx = self._sequence_indices.get(method_name)
+            val result = sequence[idx % sequence.len()]
+            self._sequence_indices = self._sequence_indices.set(method_name, idx + 1)
+            return result
+
+        # Then check for simple return value
+        if self._stub_returns.contains_key(method_name):
+            return self._stub_returns.get(method_name)
+
+        return nil
+
+    fn verify(method_name: text) -> CallVerifier:
+        return CallVerifier.new(self.recorder, method_name)
+
+    me reset():
+        # Clear all stubs and recordings
+        self._stub_returns = {}
+        self._stub_sequences = {}
+        self._sequence_indices = {}
+        self._stub_returns_with_args = {}
+        self.recorder = self.recorder.clear()
+
+    me reset_calls():
+        self.recorder = self.recorder.clear()
+
+# ============================================================================
+# Spy - Wraps real object and records calls
+# ============================================================================
+
+# Records calls to methods for verification
+class Spy:
+    name: text
+    recorder: CallRecorder
+
+    static fn new(name: text) -> Spy:
+        # Note: Policy check moved to test setup via before_each hook
+        return Spy {
+            name: name,
+            recorder: CallRecorder.new()
+        }
+
+    me record_call(method_name: text, args: List<Any>):
+        self.recorder = self.recorder.record(method_name, args)
+
+    fn verify(method_name: text) -> CallVerifier:
+        return CallVerifier.new(self.recorder, method_name)
+
+    fn call_count(method_name: text) -> i32:
+        return self.recorder.call_count(method_name)
+
+    fn was_called(method_name: text) -> bool:
+        return self.recorder.was_called(method_name)
+
+    fn calls_to(method_name: text) -> List<CallInfo>:
+        return self.recorder.calls_for(method_name)
+
+    me reset():
+        self.recorder = self.recorder.clear()
+
+# ============================================================================
+# Stub - Simple canned responses
+# ============================================================================
+
+# Simple test double with canned responses
+class Stub:
+    name: text
+    values: Dict<text, Any>
+
+    static fn new(name: text) -> Stub:
+        # Note: Policy check moved to test setup via before_each hook
+        return Stub {
+            name: name,
+            values: {}
+        }
+
+    me set(key: text, value: Any) -> Stub:
+        self.values = self.values.insert(key, value)
+        return self
+
+    fn get(key: text) -> Any:
+        # Dict.get() returns the value directly, not wrapped in Option
+        if self.values.contains_key(key):
+            return self.values.get(key)
+        return nil
+
+    fn has(key: text) -> bool:
+        return self.values.contains_key(key)
+
+    me reset():
+        self.values = {}
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn mock(name: text) -> Mock:
+    return Mock.new(name)
+
+fn spy(name: text) -> Spy:
+    return Spy.new(name)
+
+fn stub(name: text) -> Stub:
+    return Stub.new(name)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MockMode, MockPolicy
+# Export mock_policy functions for direct use (avoids class static method issues)
+export mock_policy_init, mock_policy_init_with_patterns, mock_policy_init_hal_only
+export mock_policy_disable, mock_policy_reset, mock_policy_check_allowed
+export mock_policy_matches_hal_pattern, mock_policy_matches_any_pattern
+export mock_policy_pattern_matches, mock_policy_is_enabled, mock_policy_current_mode
+export ArgMatcher, any, exact, gt, lt, gte, lte, in_range, matching, type_of
+export arg_any, arg_exact, arg_gt, arg_lt, arg_gte, arg_lte, arg_in_range, arg_matching, arg_type_of
+export matches_arg
+export CallInfo, CallRecorder
+export VerifyCount, CallVerifier
+export MethodStub
+export Mock, Spy, Stub
+export mock, spy, stub

@@ -1,0 +1,372 @@
+# Generic Syntax Migration: [] to <>
+#
+# Converts old generic syntax using square brackets to new angle bracket syntax.
+# Example: List[T] → List<T>
+#
+# Migrated from Rust src/driver/src/cli/migrate/generics.rs
+
+use core.*
+
+# =========================================================================
+# Constants
+# =========================================================================
+
+# Primitive types for array detection
+val PRIMITIVE_TYPES: List<text> = [
+    "i8", "i16", "i32", "i64", "i128",
+    "u8", "u16", "u32", "u64", "u128",
+    "f32", "f64", "bool", "char", "text"
+]
+
+# Keywords that can precede generic brackets
+val GENERIC_KEYWORDS: List<text> = [
+    "fn", "struct", "class", "enum", "impl", "trait", "type"
+]
+
+# =========================================================================
+# Data Structures
+# =========================================================================
+
+# Result of migration
+class MigrationResult:
+    modified_files: i32
+    total_files: i32
+    error_count: i32
+    errors: List<text>
+
+    static fn new() -> MigrationResult:
+        return MigrationResult {modified_files: 0, total_files: 0, error_count: 0, errors: []}
+
+    fn success() -> bool:
+        return self.error_count == 0
+
+# =========================================================================
+# Main Migration Functions
+# =========================================================================
+
+# Migrate generic syntax in a directory
+fn migrate_generics(path: text, dry_run: bool) -> i32:
+    if not path_exists(path):
+        print "error: path does not exist: {path}"
+        return 1
+
+    val files = collect_spl_files(path)
+
+    if files.len() == 0:
+        print "No .spl files found in {path}"
+        return 0
+
+    if dry_run:
+        print "DRY RUN: Previewing changes to {files.len()} file(s)..."
+    else:
+        print "Migrating {files.len()} file(s)..."
+
+    var modified_count = 0
+    var error_count = 0
+
+    for file in files:
+        match migrate_file_generics(file, dry_run):
+            Ok(modified) =>
+                if modified:
+                    modified_count = modified_count + 1
+                    if dry_run:
+                        print "  ⚠ {file} (would be modified)"
+                    else:
+                        print "  ✓ {file}"
+            Err(e) =>
+                error_count = error_count + 1
+                print "  ✗ {file}: {e}"
+
+    # Print summary
+    if dry_run:
+        print_dry_run_summary(modified_count, files.len(), error_count)
+    else:
+        print_migration_summary(modified_count, files.len(), error_count)
+
+    if error_count > 0:
+        return 1
+    else:
+        return 0
+
+# Migrate a single file's generic syntax
+fn migrate_file_generics(path: text, dry_run: bool) -> Result<bool, text>:
+    val content = read_file(path)
+    if content == "":
+        return Err("failed to read file")
+
+    val new_content = migrate_generic_syntax(content)
+
+    if new_content == content:
+        # No changes needed
+        return Ok(false)
+
+    # Write back only if not in dry-run mode
+    if not dry_run:
+        match write_file(path, new_content):
+            Ok(_) => pass
+            Err(e) => return Err("failed to write file: {e}")
+
+    return Ok(true)
+
+# =========================================================================
+# Core Migration Algorithm
+# =========================================================================
+
+# Migrate generic syntax from [] to <>
+# This is a two-pass implementation that properly tracks bracket conversions
+fn migrate_generic_syntax(source: text) -> text:
+    val chars = source.chars()
+    val len = chars.len()
+
+    # First pass: identify which brackets should be converted
+    var bracket_conversions: List<bool> = []
+    for i in 0..len:
+        bracket_conversions.append(false)
+
+    var bracket_stack: List<i32> = []  # Stack of '[' positions
+    var in_string = false
+    var in_comment = false
+    var escape_next = false
+
+    # Pass 1: Mark brackets for conversion
+    for i in 0..len:
+        val ch = chars[i]
+
+        if escape_next:
+            escape_next = false
+            continue
+
+        if ch == "\\" and in_string:
+            escape_next = true
+            continue
+
+        if ch == "\"" and not in_comment:
+            in_string = not in_string
+            continue
+
+        if ch == "#" and not in_string:
+            in_comment = true
+            continue
+
+        if ch == "\n":
+            in_comment = false
+            continue
+
+        if in_string or in_comment:
+            continue
+
+        if ch == "[":
+            # Check if this should be a generic bracket
+            if is_generic_bracket_at_pos(chars, i):
+                bracket_conversions[i] = true
+                bracket_stack.append(i)
+            else:
+                bracket_stack.append(i)
+
+        elif ch == "]":
+            # Match with opening bracket
+            if bracket_stack.len() > 0:
+                val open_pos = bracket_stack.pop().unwrap_or(-1)
+                if open_pos >= 0 and bracket_conversions[open_pos]:
+                    bracket_conversions[i] = true
+
+    # Pass 2: Build result with conversions
+    var result = ""
+    for i in 0..len:
+        val ch = chars[i]
+        if bracket_conversions[i]:
+            if ch == "[":
+                result = result + "<"
+            elif ch == "]":
+                result = result + ">"
+            else:
+                result = result + ch
+        else:
+            result = result + ch
+
+    return result
+
+# Check if the '[' at position i should be converted to '<'
+fn is_generic_bracket_at_pos(chars: List<text>, pos: i32) -> bool:
+    # Look backward to find context
+    val before = chars.slice(0, pos).join("")
+    val after = if pos + 1 < chars.len():
+        chars.slice(pos + 1, min(pos + 21, chars.len())).join("")
+    else:
+        ""
+
+    val trimmed_before = before.trim_end()
+
+    # Rule 1: After '=' is array literal, not generic
+    if trimmed_before.ends_with("="):
+        return false
+
+    # Rule 2: Check if preceded by an identifier
+    match trimmed_before.chars().last():
+        Some(last_char) =>
+            if last_char.is_alphanumeric() or last_char == "_" or last_char == ">":
+                # Extract the identifier before [
+                var ident = ""
+                for ch in trimmed_before.chars().reverse():
+                    if ch.is_alphanumeric() or ch == "_":
+                        ident = ch + ident
+                    else:
+                        break
+
+                # Check for capitalized type names (List, Option, Result, etc.)
+                if ident.len() > 0:
+                    val first_char = ident.chars()[0]
+                    if first_char.is_uppercase():
+                        # Check if this is array type syntax like [i32]
+                        val after_trimmed = after.trim_start()
+                        if is_array_type_syntax(after_trimmed):
+                            return false
+                        return true
+
+                # Check context: after keywords
+                for kw in GENERIC_KEYWORDS:
+                    if trimmed_before.ends_with(kw):
+                        return true
+
+                # Check if after ':' (type annotation) - but not array type
+                val before_ident = trimmed_before
+                    .trim_end_alphanumeric()
+                    .trim_end()
+                if before_ident.ends_with(":"):
+                    if ident.len() > 0:
+                        val first_char = ident.chars()[0]
+                        # Lowercase after : might be array type marker
+                        if first_char.is_lowercase():
+                            return false
+                    else:
+                        # No identifier before [, might be array type like : [i32]
+                        return false
+                    return true
+        None =>
+            pass
+
+    # Rule 3: Check what's inside the brackets
+    val after_trimmed = after.trim_start()
+
+    # Check for array type syntax FIRST
+    if is_array_type_syntax(after_trimmed):
+        return false
+
+    match after_trimmed.chars().first():
+        Some(first) =>
+            # Check for array literal patterns like [1, 2, 3]
+            if first.is_numeric():
+                return false
+            # Type parameter like T, U, V or type name (uppercase)
+            if first.is_uppercase():
+                return true
+            # Keyword 'const' for const generics
+            if after_trimmed.starts_with("const"):
+                return true
+        None =>
+            pass
+
+    return false
+
+# Check if the content looks like array type syntax
+# Examples: "i32]", "i32; 10]", "T; N]"
+fn is_array_type_syntax(content: text) -> bool:
+    # Check for patterns: primitive_type] or type; size]
+    if content.contains(";"):
+        return true  # Fixed-size array like [T; 10]
+
+    # Check if it's a primitive type followed by ]
+    for prim in PRIMITIVE_TYPES:
+        if content.starts_with(prim):
+            val rest = content.slice(prim.len(), content.len()).trim_start()
+            if rest.starts_with("]"):
+                return true
+
+    return false
+
+# =========================================================================
+# Summary Output
+# =========================================================================
+
+fn print_dry_run_summary(modified: i32, total: i32, errors: i32):
+    print ""
+    print "═══════════════════════════════════════════════════════════════"
+    print "Dry Run Summary"
+    print "═══════════════════════════════════════════════════════════════"
+    print "Files scanned: {total}"
+    print "Would modify: {modified}"
+    if errors > 0:
+        print "Errors: {errors}"
+    print ""
+    if modified > 0:
+        print "Run without --dry-run to apply changes."
+
+fn print_migration_summary(modified: i32, total: i32, errors: i32):
+    print ""
+    print "═══════════════════════════════════════════════════════════════"
+    print "Migration Summary"
+    print "═══════════════════════════════════════════════════════════════"
+    print "Files scanned: {total}"
+    print "Files modified: {modified}"
+    if errors > 0:
+        print "Errors: {errors}"
+    print ""
+    if errors == 0:
+        print "✓ Migration complete!"
+    else:
+        print "✗ Migration completed with errors."
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+fn min(a: i32, b: i32) -> i32:
+    if a < b:
+        return a
+    else:
+        return b
+
+# =========================================================================
+# FFI Functions
+# =========================================================================
+
+fn exist(path: text) -> bool:
+    @extern("runtime", "rt_path_exists")
+    fn _rt_path_exists(path_ptr: &u8, path_len: u64) -> bool
+    return _rt_path_exists(path.ptr(), path.len())
+
+fn read_file(path: text) -> text:
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+    return _rt_file_read_text(path.ptr(), path.len())
+
+fn write_file(path: text, content: text) -> Result<text, text>:
+    @extern("runtime", "rt_file_write_text")
+    fn _rt_file_write_text(path_ptr: &u8, path_len: u64, content_ptr: &u8, content_len: u64) -> i32
+
+    val result = _rt_file_write_text(path.ptr(), path.len(), content.ptr(), content.len())
+    if result == 0:
+        return Ok(path)
+    else:
+        return Err("Failed to write file: {path}")
+
+fn collect_spl_files(path: text) -> List<text>:
+    @extern("runtime", "rt_walk_directory")
+    fn _rt_walk_directory(
+        root_ptr: &u8, root_len: u64,
+        include_ptr: &List<text>,
+        exclude_ptr: &List<text>
+    ) -> List<text>
+
+    val include_patterns: List<text> = ["**/*.spl"]
+    val exclude_patterns: List<text> = ["**/target/**", "**/build/**", "**/vendor/**", "**/.*"]
+    return _rt_walk_directory(path.ptr(), path.len(), &include_patterns, &exclude_patterns)
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export MigrationResult
+export migrate_generics, migrate_file_generics, migrate_generic_syntax
+export is_generic_bracket_at_pos, is_array_type_syntax
+export print_dry_run_summary, print_migration_summary

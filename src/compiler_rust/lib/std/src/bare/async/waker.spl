@@ -1,0 +1,137 @@
+# Waker - Wake mechanism for async tasks
+#
+# Provides waker functionality for notifying the executor that a task is ready.
+
+# Waker - used to wake up a task
+struct Waker:
+    id: u32
+    context: WakerContext
+
+    # Wake the associated task
+    fn wake(self):
+        self.context.wake(self.id)
+
+    # Clone the waker
+    fn clone(self) -> Waker:
+        return Waker(id: self.id, context: self.context)
+
+# Waker context - manages waker state
+struct WakerContext:
+    ready_tasks: List<u32>
+    next_id: u32
+
+    static fn new() -> WakerContext:
+        return WakerContext(ready_tasks: [], next_id: 0)
+
+    # Create a new waker
+    me create_waker(self) -> Waker:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        return Waker(id: id, context: self)
+
+    # Wake a task by ID
+    me wake(self, id: u32):
+        if not self.is_ready(id):
+            self.ready_tasks.push(id)
+
+    # Check if a task is ready
+    fn is_ready(self, id: u32) -> bool:
+        for ready_id in self.ready_tasks:
+            if ready_id == id:
+                return true
+        return false
+
+    # Get and clear ready tasks
+    me take_ready(self) -> List<u32>:
+        val result = self.ready_tasks
+        self.ready_tasks = []
+        return result
+
+    # Clear a specific task from ready list
+    me clear_ready(self, id: u32):
+        var new_list: List<u32> = []
+        for ready_id in self.ready_tasks:
+            if ready_id != id:
+                new_list.push(ready_id)
+        self.ready_tasks = new_list
+
+# Raw waker for FFI compatibility
+struct RawWaker:
+    data: usize
+    wake_fn: fn(usize) -> ()
+
+    static fn new(data: usize, wake_fn: fn(usize) -> ()) -> RawWaker:
+        return RawWaker(data: data, wake_fn: wake_fn)
+
+    fn wake(self):
+        self.wake_fn(self.data)
+
+# Context passed to poll functions
+struct Context:
+    waker: Waker
+
+    static fn from_waker(waker: Waker) -> Context:
+        return Context(waker: waker)
+
+    fn waker(self) -> Waker:
+        return self.waker
+
+# Poll result for async operations
+enum Poll<T>:
+    Ready(T)
+    Pending
+
+    fn is_ready(self) -> bool:
+        match self:
+            Poll.Ready(_): return true
+            Poll.Pending: return false
+
+    fn is_pending(self) -> bool:
+        return not self.is_ready()
+
+    fn unwrap(self) -> T:
+        match self:
+            Poll.Ready(value): return value
+            Poll.Pending: panic("called unwrap on Pending")
+
+# Future trait
+trait Future<T>:
+    fn poll(ctx: Context) -> Poll<T>
+
+# Ready future - immediately returns a value
+struct Ready<T>:
+    value: T
+
+    static fn new(value: T) -> Ready<T>:
+        return Ready(value: value)
+
+impl Ready<T>: Future<T>:
+    fn poll(ctx: Context) -> Poll<T>:
+        return Poll.Ready(self.value)
+
+# Pending future - never completes
+struct Pending<T>:
+    static fn new() -> Pending<T>:
+        return Pending()
+
+impl Pending<T>: Future<T>:
+    fn poll(ctx: Context) -> Poll<T>:
+        return Poll.Pending
+
+# Yield future - yields once then completes
+struct YieldNow:
+    yielded: bool
+
+    static fn new() -> YieldNow:
+        return YieldNow(yielded: false)
+
+impl YieldNow: Future<()>:
+    fn poll(ctx: Context) -> Poll<()>:
+        if self.yielded:
+            return Poll.Ready(())
+        self.yielded = true
+        ctx.waker().wake()
+        return Poll.Pending
+
+export Waker, WakerContext, RawWaker, Context
+export Poll, Future, Ready, Pending, YieldNow

@@ -1,0 +1,330 @@
+# Unreal Header Tool (UHT) Integration
+#
+# Provides integration with Unreal's reflection system
+#
+# Features:
+# - UPROPERTY macro generation
+# - UFUNCTION macro generation
+# - UCLASS macro generation
+# - Reflection metadata
+#
+# Based on: https://docs.unrealengine.com/5.4/en-US/unreal-header-tool-for-unreal-engine/
+
+use sys.io
+
+mod uht
+
+# PropertyFlags
+# Flags for UPROPERTY macros
+pub struct PropertyFlags:
+    flags: Vec<text>
+
+impl PropertyFlags:
+    pub fn new() -> PropertyFlags:
+        return PropertyFlags(flags: [])
+
+    # Make property editable in editor
+    pub fn edit_anywhere(mut self) -> PropertyFlags:
+        self.flags.push("EditAnywhere")
+        return self
+
+    # Make property editable on default object only
+    pub fn edit_defaults_only(mut self) -> PropertyFlags:
+        self.flags.push("EditDefaultsOnly")
+        return self
+
+    # Make property editable on instances only
+    pub fn edit_instance_only(mut self) -> PropertyFlags:
+        self.flags.push("EditInstanceOnly")
+        return self
+
+    # Make property visible but not editable
+    pub fn visible_anywhere(mut self) -> PropertyFlags:
+        self.flags.push("VisibleAnywhere")
+        return self
+
+    # Make property Blueprint read-only
+    pub fn blueprint_readonly(mut self) -> PropertyFlags:
+        self.flags.push("BlueprintReadOnly")
+        return self
+
+    # Make property Blueprint read-write
+    pub fn blueprint_readwrite(mut self) -> PropertyFlags:
+        self.flags.push("BlueprintReadWrite")
+        return self
+
+    # Set category for editor
+    pub fn category(mut self, category: text) -> PropertyFlags:
+        self.flags.push("Category=\"" + category + "\"")
+        return self
+
+    # Set tooltip
+    pub fn tooltip(mut self, tooltip: text) -> PropertyFlags:
+        self.flags.push("Tooltip=\"" + tooltip + "\"")
+        return self
+
+    # Replicate this property
+    pub fn replicated(mut self) -> PropertyFlags:
+        self.flags.push("Replicated")
+        return self
+
+    # Generate macro string
+    pub fn to_string(self) -> text:
+        if self.flags.len() == 0:
+            return "UPROPERTY()"
+
+        var result = "UPROPERTY("
+        for i in 0..self.flags.len():
+            result = result + self.flags[i]
+            if i < self.flags.len() - 1:
+                result = result + ", "
+        result = result + ")"
+        return result
+
+
+# FunctionFlags
+# Flags for UFUNCTION macros
+pub struct FunctionFlags:
+    flags: Vec<text>
+
+impl FunctionFlags:
+    pub fn new() -> FunctionFlags:
+        return FunctionFlags(flags: [])
+
+    # Make function callable from Blueprint
+    pub fn blueprint_callable(mut self) -> FunctionFlags:
+        self.flags.push("BlueprintCallable")
+        return self
+
+    # Make function pure (no side effects)
+    pub fn blueprint_pure(mut self) -> FunctionFlags:
+        self.flags.push("BlueprintPure")
+        return self
+
+    # Make function implementable in Blueprint
+    pub fn blueprint_implementable_event(mut self) -> FunctionFlags:
+        self.flags.push("BlueprintImplementableEvent")
+        return self
+
+    # Make function a native event with Blueprint override
+    pub fn blueprint_native_event(mut self) -> FunctionFlags:
+        self.flags.push("BlueprintNativeEvent")
+        return self
+
+    # Set category for editor
+    pub fn category(mut self, category: text) -> FunctionFlags:
+        self.flags.push("Category=\"" + category + "\"")
+        return self
+
+    # Make this an RPC (Remote Procedure Call)
+    pub fn server(mut self) -> FunctionFlags:
+        self.flags.push("Server")
+        return self
+
+    pub fn client(mut self) -> FunctionFlags:
+        self.flags.push("Client")
+        return self
+
+    pub fn net_multicast(mut self) -> FunctionFlags:
+        self.flags.push("NetMulticast")
+        return self
+
+    # Mark as reliable RPC
+    pub fn reliable(mut self) -> FunctionFlags:
+        self.flags.push("Reliable")
+        return self
+
+    # Generate macro string
+    pub fn to_string(self) -> text:
+        if self.flags.len() == 0:
+            return "UFUNCTION()"
+
+        var result = "UFUNCTION("
+        for i in 0..self.flags.len():
+            result = result + self.flags[i]
+            if i < self.flags.len() - 1:
+                result = result + ", "
+        result = result + ")"
+        return result
+
+
+# ClassFlags
+# Flags for UCLASS macros
+pub struct ClassFlags:
+    flags: Vec<text>
+
+impl ClassFlags:
+    pub fn new() -> ClassFlags:
+        return ClassFlags(flags: [])
+
+    # Make class blueprintable
+    pub fn blueprintable(mut self) -> ClassFlags:
+        self.flags.push("Blueprintable")
+        return self
+
+    # Set Blueprint type
+    pub fn blueprint_type(mut self) -> ClassFlags:
+        self.flags.push("BlueprintType")
+        return self
+
+    # Make class abstract
+    pub fn abstract_class(mut self) -> ClassFlags:
+        self.flags.push("Abstract")
+        return self
+
+    # Set class group for editor
+    pub fn class_group(mut self, group: text) -> ClassFlags:
+        self.flags.push("ClassGroup=" + group)
+        return self
+
+    # Set config file name
+    pub fn config(mut self, config_name: text) -> ClassFlags:
+        self.flags.push("Config=" + config_name)
+        return self
+
+    # Generate macro string
+    pub fn to_string(self) -> text:
+        if self.flags.len() == 0:
+            return "UCLASS()"
+
+        var result = "UCLASS("
+        for i in 0..self.flags.len():
+            result = result + self.flags[i]
+            if i < self.flags.len() - 1:
+                result = result + ", "
+        result = result + ")"
+        return result
+
+
+# HeaderGenerator
+# Generates Unreal C++ header files with reflection
+pub struct HeaderGenerator:
+    class_name: text
+    parent_class: text
+    properties: Vec<(PropertyFlags, text, text)>  # (flags, type, name)
+    functions: Vec<(FunctionFlags, text, text, Vec<text>)>  # (flags, return_type, name, params)
+    includes: Vec<text>
+
+impl HeaderGenerator:
+    # Create new header generator
+    pub fn new(class_name: text, parent_class: text) -> HeaderGenerator:
+        return HeaderGenerator(
+            class_name: class_name,
+            parent_class: parent_class,
+            properties: [],
+            functions: [],
+            includes: [],
+        )
+
+    # Add include
+    pub fn include(mut self, include_path: text) -> HeaderGenerator:
+        self.includes.push(include_path)
+        return self
+
+    # Add property
+    pub fn property(mut self, flags: PropertyFlags, prop_type: text, name: text) -> HeaderGenerator:
+        self.properties.push((flags, prop_type, name))
+        return self
+
+    # Add function
+    pub fn function(mut self, flags: FunctionFlags, return_type: text, name: text, params: Vec<text>) -> HeaderGenerator:
+        self.functions.push((flags, return_type, name, params))
+        return self
+
+    # Generate header file content
+    pub fn generate(self) -> text:
+        var content = ""
+
+        # Pragma once
+        content = content + "#pragma once\n\n"
+
+        # Includes
+        content = content + "#include \"CoreMinimal.h\"\n"
+        for include in self.includes:
+            content = content + "#include \"" + include + "\"\n"
+        content = content + "#include \"" + self.class_name + ".generated.h\"\n\n"
+
+        # UCLASS macro
+        val class_flags = ClassFlags.new().blueprintable().blueprint_type()
+        content = content + class_flags.to_string() + "\n"
+
+        # Class definition
+        content = content + "class " + self.class_name.upper() + "_API " + self.class_name + " : public " + self.parent_class + "\n"
+        content = content + "{\n"
+        content = content + "\tGENERATED_BODY()\n\n"
+
+        # Public section
+        content = content + "public:\n"
+
+        # Constructor
+        content = content + "\t" + self.class_name + "();\n\n"
+
+        # Properties
+        for (flags, prop_type, name) in self.properties:
+            content = content + "\t" + flags.to_string() + "\n"
+            content = content + "\t" + prop_type + " " + name + ";\n\n"
+
+        # Functions
+        for (flags, return_type, name, params) in self.functions:
+            content = content + "\t" + flags.to_string() + "\n"
+            content = content + "\t" + return_type + " " + name + "("
+
+            for i in 0..params.len():
+                content = content + params[i]
+                if i < params.len() - 1:
+                    content = content + ", "
+
+            content = content + ");\n\n"
+
+        # Close class
+        content = content + "};\n"
+
+        return content
+
+    # Write to file
+    pub fn write_to_file(self, output_path: text) -> bool:
+        val content = self.generate()
+        return io.write_file(output_path, content)
+
+
+# Preset generators
+
+# Generate a basic Actor header
+pub fn generate_actor_header(class_name: text) -> text:
+    return HeaderGenerator.new(class_name, "AActor")
+        .include("GameFramework/Actor.h")
+        .property(
+            PropertyFlags.new().edit_anywhere().category("MyActor"),
+            "f32",
+            "Health"
+        )
+        .function(
+            FunctionFlags.new().blueprint_callable().category("MyActor"),
+            "void",
+            "TakeDamage",
+            ["f32 Amount"]
+        )
+        .generate()
+
+# Generate a basic Component header
+pub fn generate_component_header(class_name: text) -> text:
+    return HeaderGenerator.new(class_name, "UActorComponent")
+        .include("Components/ActorComponent.h")
+        .property(
+            PropertyFlags.new().edit_anywhere().category("MyComponent"),
+            "bool",
+            "bIsActive"
+        )
+        .generate()
+
+# Generate a basic GameMode header
+pub fn generate_gamemode_header(class_name: text) -> text:
+    return HeaderGenerator.new(class_name, "AGameModeBase")
+        .include("GameFramework/GameModeBase.h")
+        .function(
+            FunctionFlags.new().blueprint_implementable_event(),
+            "void",
+            "OnPlayerJoined",
+            ["APlayerController* Player"]
+        )
+        .generate()

@@ -1,0 +1,868 @@
+# Vulkan Buffers - Phase 2 Implementation
+#
+# Vertex, index, and uniform buffer management for graphics pipeline.
+# Supports both graphics and compute use cases.
+
+use core.*
+use ui.gui.vulkan_types.*
+
+# =============================================================================
+# Buffer Types
+# =============================================================================
+
+pub enum BufferUsage:
+    Vertex          # Vertex buffer
+    Index           # Index buffer
+    Uniform         # Uniform buffer (UBO)
+    Storage         # Storage buffer (SSBO)
+    TransferSrc     # Source for transfer
+    TransferDst     # Destination for transfer
+
+impl BufferUsage:
+    pub fn to_string(self) -> text:
+        """Convert buffer usage to string.
+
+        Returns:
+            text representation
+
+        Example:
+            val usage = BufferUsage.Vertex
+            assert(usage.to_string() == "vertex")
+        """
+        match self:
+            case Vertex: return "vertex"
+            case Index: return "index"
+            case Uniform: return "uniform"
+            case Storage: return "storage"
+            case TransferSrc: return "transfer_src"
+            case TransferDst: return "transfer_dst"
+
+    pub fn description(self) -> text:
+        """Get detailed description of buffer usage.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            val usage = BufferUsage.Uniform
+            assert(usage.description().contains("Uniform buffer"))
+        """
+        match self:
+            case Vertex: return "Vertex buffer - stores vertex attributes (position, normal, color, etc.)"
+            case Index: return "Index buffer - stores vertex indices for indexed drawing"
+            case Uniform: return "Uniform buffer (UBO) - stores shader uniform data"
+            case Storage: return "Storage buffer (SSBO) - stores large read/write data for compute shaders"
+            case TransferSrc: return "Transfer source - buffer used as source for copy operations"
+            case TransferDst: return "Transfer destination - buffer used as destination for copy operations"
+
+    pub fn is_graphics_buffer(self) -> bool:
+        """Check if this is a graphics pipeline buffer.
+
+        Returns:
+            True if used in graphics pipeline
+
+        Example:
+            assert(BufferUsage.Vertex.is_graphics_buffer())
+            assert(not BufferUsage.TransferSrc.is_graphics_buffer())
+        """
+        match self:
+            case Vertex: return true
+            case Index: return true
+            case Uniform: return true
+            case _: return false
+
+    pub fn is_compute_buffer(self) -> bool:
+        """Check if this is typically used for compute.
+
+        Returns:
+            True if commonly used in compute pipelines
+
+        Example:
+            assert(BufferUsage.Storage.is_compute_buffer())
+            assert(not BufferUsage.Vertex.is_compute_buffer())
+        """
+        match self:
+            case Storage: return true
+            case Uniform: return true
+            case _: return false
+
+    pub fn is_transfer_buffer(self) -> bool:
+        """Check if this is a transfer operation buffer.
+
+        Returns:
+            True if used for transfers
+
+        Example:
+            assert(BufferUsage.TransferSrc.is_transfer_buffer())
+            assert(not BufferUsage.Vertex.is_transfer_buffer())
+        """
+        match self:
+            case TransferSrc: return true
+            case TransferDst: return true
+            case _: return false
+
+    pub fn requires_host_visible(self) -> bool:
+        """Check if usage typically requires host-visible memory.
+
+        Returns:
+            True if should be CPU-accessible
+
+        Example:
+            assert(BufferUsage.Uniform.requires_host_visible())
+            assert(not BufferUsage.Vertex.requires_host_visible())
+        """
+        match self:
+            case Uniform: return true
+            case TransferSrc: return true
+            case _: return false
+
+    pub fn to_vk_flags(self) -> VkBufferUsageFlags:
+        """Convert to Vulkan buffer usage flags.
+
+        Returns:
+            Vulkan buffer usage bit flags
+
+        Example:
+            val usage = BufferUsage.Vertex
+            val flags = usage.to_vk_flags()
+            assert(flags == VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+        """
+        match self:
+            case Vertex: return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+            case Index: return VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+            case Uniform: return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+            case Storage: return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+            case TransferSrc: return VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+            case TransferDst: return VK_BUFFER_USAGE_TRANSFER_DST_BIT
+
+# =============================================================================
+# Vertex Buffer - GPU-side vertex data storage
+# =============================================================================
+
+pub struct VertexBuffer:
+    device: VkDevice
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+    size: u64
+    vertex_count: u32
+
+impl VertexBuffer:
+    # Create vertex buffer from data
+    pub fn new<T>(device: &VulkanDevice, vertices: &Array<T>) -> Result<VertexBuffer, text>:
+        val size = (vertices.len() * size_of.<T>()) as u64
+
+        # Create staging buffer (CPU-visible)
+        val staging_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Map and copy data to staging
+        val data_ptr = vulkan_map_memory(device.device, staging_buffer.memory, 0, size)?
+        vulkan_memcpy(data_ptr, vertices.as_ptr(), size)
+        vulkan_unmap_memory(device.device, staging_buffer.memory)
+
+        # Create device-local vertex buffer
+        val vertex_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        )?
+
+        # Copy from staging to device-local
+        vulkan_copy_buffer(device.device, staging_buffer.buffer, vertex_buffer.buffer, size)?
+
+        # Clean up staging buffer
+        vulkan_destroy_buffer(device.device, staging_buffer.buffer, staging_buffer.memory)
+
+        Ok(VertexBuffer {device: device.device, buffer: vertex_buffer.buffer, memory: vertex_buffer.memory, size: size, vertex_count: vertices.len() as u32,})
+
+    # Cleanup
+    pub async fn destroy(&self):
+        await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            val vb = VertexBuffer.new(&device, &vertices)?
+            val size = vb.get_size()
+        """
+        self.size
+
+    pub fn get_vertex_count(self) -> u32:
+        """Get number of vertices in buffer.
+
+        Returns:
+            Vertex count
+
+        Example:
+            val vb = VertexBuffer.new(&device, &vertices)?
+            assert(vb.get_vertex_count() == vertices.len() as u32)
+        """
+        self.vertex_count
+
+    pub fn is_empty(self) -> bool:
+        """Check if buffer is empty.
+
+        Returns:
+            True if no vertices
+
+        Example:
+            val vb = VertexBuffer.new(&device, &empty_array)?
+            assert(vb.is_empty())
+        """
+        self.vertex_count == 0
+
+    pub fn bytes_per_vertex(self) -> u64:
+        """Calculate bytes per vertex.
+
+        Returns:
+            Average bytes per vertex
+
+        Example:
+            val vb = VertexBuffer.new(&device, &vertices)?
+            val bpv = vb.bytes_per_vertex()
+        """
+        if self.vertex_count == 0:
+            return 0
+        self.size / (self.vertex_count as u64)
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large buffer (>1MB).
+
+        Returns:
+            True if buffer exceeds 1MB
+
+        Example:
+            val vb = VertexBuffer.new(&device, &large_mesh)?
+            if vb.is_large():
+                print("Large vertex buffer allocated")
+        """
+        self.size > 1024 * 1024
+
+    pub fn summary(self) -> text:
+        """Get vertex buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val vb = VertexBuffer.new(&device, &vertices)?
+            print(vb.summary())
+        """
+        val kb = self.size / 1024
+        val bpv = self.bytes_per_vertex()
+        return "VertexBuffer: {self.vertex_count} vertices, {kb} KB ({bpv} bytes/vertex)"
+
+# =============================================================================
+# Index Buffer - GPU-side index data storage
+# =============================================================================
+
+pub struct IndexBuffer:
+    device: VkDevice
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+    size: u64
+    index_count: u32
+    index_type: VkIndexType
+
+impl IndexBuffer:
+    # Create index buffer from u16 indices
+    pub fn new_u16(device: &VulkanDevice, indices: &Array<u16>) -> Result<IndexBuffer, text>:
+        Self.new_impl(device, indices, VK_INDEX_TYPE_UINT16)
+
+    # Create index buffer from u32 indices
+    pub fn new_u32(device: &VulkanDevice, indices: &Array<u32>) -> Result<IndexBuffer, text>:
+        Self.new_impl(device, indices, VK_INDEX_TYPE_UINT32)
+
+    # Internal implementation
+    fn new_impl<T>(device: &VulkanDevice, indices: &Array<T>, index_type: VkIndexType) -> Result<IndexBuffer, text>:
+        val size = (indices.len() * size_of.<T>()) as u64
+
+        # Create staging buffer
+        val staging_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Map and copy
+        val data_ptr = vulkan_map_memory(device.device, staging_buffer.memory, 0, size)?
+        vulkan_memcpy(data_ptr, indices.as_ptr(), size)
+        vulkan_unmap_memory(device.device, staging_buffer.memory)
+
+        # Create device-local index buffer
+        val index_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        )?
+
+        # Copy
+        vulkan_copy_buffer(device.device, staging_buffer.buffer, index_buffer.buffer, size)?
+
+        # Clean up staging
+        vulkan_destroy_buffer(device.device, staging_buffer.buffer, staging_buffer.memory)
+
+        Ok(IndexBuffer {
+            device: device.device,
+            buffer: index_buffer.buffer,
+            memory: index_buffer.memory,
+            size: size,
+            index_count: indices.len() as u32,
+            index_type: index_type,
+        })
+
+    # Cleanup
+    pub async fn destroy(&self):
+        await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            val ib = IndexBuffer.new_u16(&device, &indices)?
+            val size = ib.get_size()
+        """
+        self.size
+
+    pub fn get_index_count(self) -> u32:
+        """Get number of indices in buffer.
+
+        Returns:
+            Index count
+
+        Example:
+            val ib = IndexBuffer.new_u32(&device, &indices)?
+            assert(ib.get_index_count() == indices.len() as u32)
+        """
+        self.index_count
+
+    pub fn get_index_type(self) -> VkIndexType:
+        """Get index type (u16 or u32).
+
+        Returns:
+            Vulkan index type
+
+        Example:
+            val ib = IndexBuffer.new_u16(&device, &indices)?
+            assert(ib.get_index_type() == VK_INDEX_TYPE_UINT16)
+        """
+        self.index_type
+
+    pub fn is_empty(self) -> bool:
+        """Check if buffer is empty.
+
+        Returns:
+            True if no indices
+
+        Example:
+            val ib = IndexBuffer.new_u16(&device, &empty)?
+            assert(ib.is_empty())
+        """
+        self.index_count == 0
+
+    pub fn is_u16(self) -> bool:
+        """Check if using 16-bit indices.
+
+        Returns:
+            True if using u16 indices
+
+        Example:
+            val ib = IndexBuffer.new_u16(&device, &indices)?
+            assert(ib.is_u16())
+        """
+        self.index_type == VK_INDEX_TYPE_UINT16
+
+    pub fn is_u32(self) -> bool:
+        """Check if using 32-bit indices.
+
+        Returns:
+            True if using u32 indices
+
+        Example:
+            val ib = IndexBuffer.new_u32(&device, &indices)?
+            assert(ib.is_u32())
+        """
+        self.index_type == VK_INDEX_TYPE_UINT32
+
+    pub fn bytes_per_index(self) -> u64:
+        """Get bytes per index.
+
+        Returns:
+            2 for u16, 4 for u32
+
+        Example:
+            val ib = IndexBuffer.new_u16(&device, &indices)?
+            assert(ib.bytes_per_index() == 2)
+        """
+        if self.index_type == VK_INDEX_TYPE_UINT16:
+            return 2
+        else:
+            return 4
+
+    pub fn triangle_count(self) -> u32:
+        """Calculate number of triangles.
+
+        Returns:
+            Number of triangles (indices / 3)
+
+        Example:
+            val ib = IndexBuffer.new_u16(&device, &indices)?
+            val tris = ib.triangle_count()
+        """
+        self.index_count / 3
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large buffer (>1MB).
+
+        Returns:
+            True if buffer exceeds 1MB
+
+        Example:
+            val ib = IndexBuffer.new_u32(&device, &large_mesh)?
+            if ib.is_large():
+                print("Large index buffer allocated")
+        """
+        self.size > 1024 * 1024
+
+    pub fn summary(self) -> text:
+        """Get index buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val ib = IndexBuffer.new_u16(&device, &indices)?
+            print(ib.summary())
+        """
+        val kb = self.size / 1024
+        val index_type = if self.is_u16(): "u16" else: "u32"
+        val tris = self.triangle_count()
+        return "IndexBuffer: {self.index_count} {index_type} indices, {kb} KB ({tris} triangles)"
+
+# =============================================================================
+# Uniform Buffer - GPU-side uniform data (UBO)
+# =============================================================================
+
+pub struct UniformBuffer<T>:
+    device: VkDevice
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+    size: u64
+    mapped_ptr: Option<*mut u8>  # Persistently mapped
+
+impl UniformBuffer<T>:
+    # Create uniform buffer (persistently mapped for easy updates)
+    pub fn new(device: &VulkanDevice, initial_data: &T) -> Result<UniformBuffer<T>, text>:
+        val size = size_of.<T>() as u64
+
+        # Create host-visible uniform buffer (persistently mapped)
+        val uniform_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Map memory (keep mapped)
+        val mapped_ptr = vulkan_map_memory(device.device, uniform_buffer.memory, 0, size)?
+
+        # Copy initial data
+        vulkan_memcpy(mapped_ptr, initial_data as *const u8, size)
+
+        Ok(UniformBuffer {
+            device: device.device,
+            buffer: uniform_buffer.buffer,
+            memory: uniform_buffer.memory,
+            size: size,
+            mapped_ptr: Some(mapped_ptr),
+        })
+
+    # Update uniform data (no map/unmap needed - already mapped)
+    pub fn update(&mut self, data: &T):
+        if val Some(ptr) = self.mapped_ptr:
+            vulkan_memcpy(ptr, data as *const u8, self.size)
+
+    # Cleanup
+    pub async fn destroy(&mut self):
+        if val Some(_) = self.mapped_ptr:
+            vulkan_unmap_memory(self.device, self.memory)
+            self.mapped_ptr = None
+        await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            val ub = UniformBuffer.new(&device, &mvp_matrix)?
+            val size = ub.get_size()
+        """
+        self.size
+
+    pub fn is_mapped(self) -> bool:
+        """Check if buffer is currently mapped.
+
+        Returns:
+            True if mapped to CPU memory
+
+        Example:
+            val ub = UniformBuffer.new(&device, &data)?
+            assert(ub.is_mapped())
+        """
+        match self.mapped_ptr:
+            case Some(_): true
+            case None: false
+
+    pub fn can_update(self) -> bool:
+        """Check if buffer can be updated.
+
+        Returns:
+            True if mapped and ready for updates
+
+        Example:
+            var ub = UniformBuffer.new(&device, &data)?
+            if ub.can_update():
+                ub.update(&new_data)
+        """
+        self.is_mapped()
+
+    pub fn is_small(self) -> bool:
+        """Check if this is a small uniform buffer (<256 bytes).
+
+        Returns:
+            True if size is small
+
+        Example:
+            val ub = UniformBuffer.new(&device, &small_struct)?
+            if ub.is_small():
+                print("Small UBO, good for push constants")
+        """
+        self.size < 256
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large uniform buffer (>16KB).
+
+        Returns:
+            True if exceeds typical UBO size
+
+        Example:
+            val ub = UniformBuffer.new(&device, &large_struct)?
+            if ub.is_large():
+                print("Warning: Large UBO, consider using SSBO")
+        """
+        self.size > 16 * 1024
+
+    pub fn summary(self) -> text:
+        """Get uniform buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val ub = UniformBuffer.new(&device, &data)?
+            print(ub.summary())
+        """
+        val mapped = if self.is_mapped(): "mapped" else: "unmapped"
+        return "UniformBuffer: {self.size} bytes ({mapped})"
+
+# =============================================================================
+# Storage Buffer - GPU-side storage buffer (SSBO)
+# =============================================================================
+
+pub struct StorageBuffer<T>:
+    device: VkDevice
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+    size: u64
+    element_count: u32
+
+impl StorageBuffer<T>:
+    # Create storage buffer from array
+    pub fn new(device: &VulkanDevice, data: &Array<T>) -> Result<StorageBuffer<T>, text>:
+        val size = (data.len() * size_of.<T>()) as u64
+
+        # Create staging buffer
+        val staging_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Map and copy
+        val data_ptr = vulkan_map_memory(device.device, staging_buffer.memory, 0, size)?
+        vulkan_memcpy(data_ptr, data.as_ptr(), size)
+        vulkan_unmap_memory(device.device, staging_buffer.memory)
+
+        # Create device-local storage buffer
+        val storage_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        )?
+
+        # Copy
+        vulkan_copy_buffer(device.device, staging_buffer.buffer, storage_buffer.buffer, size)?
+
+        # Clean up staging
+        vulkan_destroy_buffer(device.device, staging_buffer.buffer, staging_buffer.memory)
+
+        Ok(StorageBuffer {
+            device: device.device,
+            buffer: storage_buffer.buffer,
+            memory: storage_buffer.memory,
+            size: size,
+            element_count: data.len() as u32,
+        })
+
+    # Download data from GPU
+    pub fn download(&self) -> Result<Array<T>, text>:
+        val size = self.size
+
+        # Create staging buffer for readback
+        val staging_buffer = vulkan_create_buffer(
+            self.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Copy from device to staging
+        vulkan_copy_buffer(self.device, self.buffer, staging_buffer.buffer, size)?
+
+        # Map and read
+        val data_ptr = vulkan_map_memory(self.device, staging_buffer.memory, 0, size)?
+        var result: Array<T> = Array.with_capacity(self.element_count as usize)
+        vulkan_memcpy(result.as_mut_ptr(), data_ptr, size)
+        result.set_len(self.element_count as usize)
+        vulkan_unmap_memory(self.device, staging_buffer.memory)
+
+        # Clean up staging
+        vulkan_destroy_buffer(self.device, staging_buffer.buffer, staging_buffer.memory)
+
+        Ok(result)
+
+    # Cleanup
+    pub async fn destroy(&self):
+        await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            val sb = StorageBuffer.new(&device, &data)?
+            val size = sb.get_size()
+        """
+        self.size
+
+    pub fn get_element_count(self) -> u32:
+        """Get number of elements in buffer.
+
+        Returns:
+            Element count
+
+        Example:
+            val sb = StorageBuffer.new(&device, &data)?
+            assert(sb.get_element_count() == data.len() as u32)
+        """
+        self.element_count
+
+    pub fn is_empty(self) -> bool:
+        """Check if buffer is empty.
+
+        Returns:
+            True if no elements
+
+        Example:
+            val sb = StorageBuffer.new(&device, &empty)?
+            assert(sb.is_empty())
+        """
+        self.element_count == 0
+
+    pub fn bytes_per_element(self) -> u64:
+        """Calculate bytes per element.
+
+        Returns:
+            Average bytes per element
+
+        Example:
+            val sb = StorageBuffer.new(&device, &data)?
+            val bpe = sb.bytes_per_element()
+        """
+        if self.element_count == 0:
+            return 0
+        self.size / (self.element_count as u64)
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large buffer (>1MB).
+
+        Returns:
+            True if buffer exceeds 1MB
+
+        Example:
+            val sb = StorageBuffer.new(&device, &big_data)?
+            if sb.is_large():
+                print("Large storage buffer allocated")
+        """
+        self.size > 1024 * 1024
+
+    pub fn is_small(self) -> bool:
+        """Check if this is a small buffer (<64KB).
+
+        Returns:
+            True if size is small
+
+        Example:
+            val sb = StorageBuffer.new(&device, &small_data)?
+            if sb.is_small():
+                print("Consider using UBO for small data")
+        """
+        self.size < 64 * 1024
+
+    pub fn can_download(self) -> bool:
+        """Check if buffer can be downloaded.
+
+        Returns:
+            True (storage buffers support download)
+
+        Example:
+            val sb = StorageBuffer.new(&device, &data)?
+            if sb.can_download():
+                val result = sb.download()?
+        """
+        true
+
+    pub fn summary(self) -> text:
+        """Get storage buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val sb = StorageBuffer.new(&device, &data)?
+            print(sb.summary())
+        """
+        val kb = self.size / 1024
+        val bpe = self.bytes_per_element()
+        return "StorageBuffer: {self.element_count} elements, {kb} KB ({bpe} bytes/element)"
+
+# =============================================================================
+# FFI Declarations
+# =============================================================================
+
+# Buffer creation/destruction
+extern fn vulkan_create_buffer(device: VkDevice, size: u64, usage: VkBufferUsageFlags, properties: VkMemoryPropertyFlags) -> Result<VkBufferMemory, text>
+extern fn vulkan_destroy_buffer(device: VkDevice, buffer: VkBuffer, memory: VkDeviceMemory)
+extern fn vulkan_destroy_buffer_async(device: VkDevice, buffer: VkBuffer, memory: VkDeviceMemory) -> Future<Result<(), text>>
+
+# Memory operations
+extern fn vulkan_map_memory(device: VkDevice, memory: VkDeviceMemory, offset: u64, size: u64) -> Result<*mut u8, text>
+extern fn vulkan_unmap_memory(device: VkDevice, memory: VkDeviceMemory)
+extern fn vulkan_memcpy(dst: *mut u8, src: *const u8, size: u64)
+extern fn vulkan_copy_buffer(device: VkDevice, src: VkBuffer, dst: VkBuffer, size: u64) -> Result<(), text>
+
+# Utility
+extern fn size_of<T>() -> usize
+
+# =============================================================================
+# Vulkan Constants - Buffer Usage
+# =============================================================================
+
+pub const VK_BUFFER_USAGE_TRANSFER_SRC_BIT: u32 = 0x00000001
+pub const VK_BUFFER_USAGE_TRANSFER_DST_BIT: u32 = 0x00000002
+pub const VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT: u32 = 0x00000010
+pub const VK_BUFFER_USAGE_STORAGE_BUFFER_BIT: u32 = 0x00000020
+pub const VK_BUFFER_USAGE_INDEX_BUFFER_BIT: u32 = 0x00000040
+pub const VK_BUFFER_USAGE_VERTEX_BUFFER_BIT: u32 = 0x00000080
+
+# Memory properties
+pub const VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT: u32 = 0x00000001
+pub const VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT: u32 = 0x00000002
+pub const VK_MEMORY_PROPERTY_HOST_COHERENT_BIT: u32 = 0x00000004
+
+# Index types
+pub const VK_INDEX_TYPE_UINT16: u32 = 0
+pub const VK_INDEX_TYPE_UINT32: u32 = 1
+
+# =============================================================================
+# Supporting Types
+# =============================================================================
+
+pub type VkBuffer = i64
+pub type VkDeviceMemory = i64
+pub type VkBufferUsageFlags = u32
+pub type VkMemoryPropertyFlags = u32
+pub type VkIndexType = u32
+
+pub struct VkBufferMemory:
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+
+impl VkBufferMemory:
+    pub fn get_buffer(self) -> VkBuffer:
+        """Get the Vulkan buffer handle.
+
+        Returns:
+            VkBuffer handle
+
+        Example:
+            val buf_mem = vulkan_create_buffer(...)?
+            val buffer = buf_mem.get_buffer()
+        """
+        self.buffer
+
+    pub fn get_memory(self) -> VkDeviceMemory:
+        """Get the Vulkan device memory handle.
+
+        Returns:
+            VkDeviceMemory handle
+
+        Example:
+            val buf_mem = vulkan_create_buffer(...)?
+            val memory = buf_mem.get_memory()
+        """
+        self.memory
+
+    pub fn is_valid(self) -> bool:
+        """Check if both handles are valid (non-zero).
+
+        Returns:
+            True if buffer and memory are valid
+
+        Example:
+            val buf_mem = vulkan_create_buffer(...)?
+            assert(buf_mem.is_valid())
+        """
+        self.buffer != 0 and self.memory != 0
+
+    pub fn summary(self) -> text:
+        """Get buffer memory summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val buf_mem = vulkan_create_buffer(...)?
+            print(buf_mem.summary())
+        """
+        return "VkBufferMemory: buffer={self.buffer}, memory={self.memory}"

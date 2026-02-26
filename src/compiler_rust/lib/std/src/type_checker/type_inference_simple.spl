@@ -1,0 +1,128 @@
+# Type Inference Engine - Simplified Working Version
+# Core type checking and inference logic for Simple language
+# Simplified to work with current Simple runtime capabilities
+
+# Type representation - simplified without complex generics
+enum Type:
+    Int
+    Bool
+    Str
+    Float
+    Unit
+    Var(id: i64)                    # Type variable for inference
+
+impl Type:
+    fn to_string() -> str:
+        match self:
+            Type.Int -> "Int"
+            Type.Bool -> "Bool"
+            Type.Str -> "Str"
+            Type.Float -> "Float"
+            Type.Unit -> "Unit"
+            Type.Var(id) -> "T{id}"
+
+# Type unification for Hindley-Milner inference
+class TypeUnifier:
+    substitution: any              # Will use dict at runtime
+    next_var: i64
+
+impl TypeUnifier:
+    static fn create() -> TypeUnifier:
+        TypeUnifier(
+            substitution: {},
+            next_var: 0
+        )
+
+    me fresh_var() -> Type:
+        val var_id = self.next_var
+        self.next_var = self.next_var + 1
+        Type.Var(var_id)
+
+    fn resolve(ty: Type) -> Type:
+        match ty:
+            Type.Var(id) ->
+                val sub = self.substitution.get(id)
+                if sub.?:
+                    self.resolve(sub)
+                else:
+                    ty
+            _ -> ty
+
+    me unify(t1: Type, t2: Type) -> bool:
+        val resolved_t1 = self.resolve(t1)
+        val resolved_t2 = self.resolve(t2)
+
+        # Same type - trivially unify
+        if resolved_t1 == resolved_t2:
+            return true
+
+        match (resolved_t1, resolved_t2):
+            # Type variable unification
+            (Type.Var(id1), Type.Var(id2)) ->
+                if id1 == id2:
+                    true
+                else:
+                    self.substitution[id1] = Type.Var(id2)
+                    true
+
+            (Type.Var(id), other) ->
+                if self.occurs_check(id, other):
+                    false
+                else:
+                    self.substitution[id] = other
+                    true
+
+            (other, Type.Var(id)) ->
+                if self.occurs_check(id, other):
+                    false
+                else:
+                    self.substitution[id] = other
+                    true
+
+            # Base type mismatch
+            _ -> false
+
+    fn occurs_check(var_id: i64, ty: Type) -> bool:
+        match self.resolve(ty):
+            Type.Var(id) -> id == var_id
+            _ -> false
+
+# Simplified test to verify it works
+fn test_basic_unification() -> bool:
+    var unifier = TypeUnifier.create()
+
+    # Test 1: Unify concrete types
+    val test1 = unifier.unify(Type.Int, Type.Int)
+    if not test1:
+        print "Failed: Int should unify with Int"
+        return false
+
+    # Test 2: Fail to unify different types
+    val test2 = unifier.unify(Type.Int, Type.Bool)
+    if test2:
+        print "Failed: Int should NOT unify with Bool"
+        return false
+
+    # Test 3: Unify type variable with concrete type
+    val tv1 = unifier.fresh_var()
+    val test3 = unifier.unify(tv1, Type.Int)
+    if not test3:
+        print "Failed: Type variable should unify with Int"
+        return false
+
+    # Test 4: Resolve type variable
+    val resolved = unifier.resolve(tv1)
+    match resolved:
+        Type.Int ->
+            print "✅ All 4 basic tests passed"
+            true
+        _ ->
+            print "Failed: Type variable should resolve to Int"
+            false
+
+# Self-test on module load
+val _test_result = test_basic_unification()
+if _test_result:
+    print "✅ Type inference module loaded successfully"
+else:
+    print "❌ Type inference module self-test failed"

@@ -1,0 +1,607 @@
+# Network Unit Types
+# IP addresses, ports, MAC addresses, and socket addresses
+
+# IP address - v4 or v6 (multi-base unit)
+# Accepts both string ("127.0.0.1"_ip) and numeric (0x7F000001_ip) literals
+unit IpAddr: str | u32 as ip
+
+# Specific IP versions
+unit Ipv4Addr: str | u32 as ipv4    # Both "127.0.0.1" and 0x7F000001
+unit Ipv6Addr: str | u128 as ipv6   # Both ".1" and numeric
+
+# Port number (0-65535)
+unit Port: u16 as port
+
+# Socket address (IP + port combination)
+unit SocketAddr: str as sock
+
+# MAC address (48-bit, string or numeric)
+unit MacAddr: str | u64 as mac
+
+# Network mask / CIDR prefix
+unit CidrPrefix: u8 as cidr
+
+# Error types
+enum AddrError:
+    InvalidFormat
+    InvalidOctet
+    InvalidPort
+    OutOfRange
+    Ipv4Only
+    Ipv6Only
+
+impl AddrError:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn to_string() -> text:
+        """Convert error to string."""
+        match self:
+            case InvalidFormat: return "InvalidFormat"
+            case InvalidOctet: return "InvalidOctet"
+            case InvalidPort: return "InvalidPort"
+            case OutOfRange: return "OutOfRange"
+            case Ipv4Only: return "Ipv4Only"
+            case Ipv6Only: return "Ipv6Only"
+
+    fn description() -> text:
+        """Get detailed error description."""
+        match self:
+            case InvalidFormat: return "Invalid address format"
+            case InvalidOctet: return "Invalid IP octet value"
+            case InvalidPort: return "Invalid port number"
+            case OutOfRange: return "Value out of valid range"
+            case Ipv4Only: return "Operation only valid for IPv4"
+            case Ipv6Only: return "Operation only valid for IPv6"
+
+    fn is_invalid_format() -> bool:
+        """Check if this is InvalidFormat error."""
+        match self:
+            case InvalidFormat: true
+            case _: false
+
+    fn is_invalid_octet() -> bool:
+        """Check if this is InvalidOctet error."""
+        match self:
+            case InvalidOctet: true
+            case _: false
+
+    fn is_invalid_port() -> bool:
+        """Check if this is InvalidPort error."""
+        match self:
+            case InvalidPort: true
+            case _: false
+
+    fn is_out_of_range() -> bool:
+        """Check if this is OutOfRange error."""
+        match self:
+            case OutOfRange: true
+            case _: false
+
+    fn is_ipv4_only() -> bool:
+        """Check if this is Ipv4Only error."""
+        match self:
+            case Ipv4Only: true
+            case _: false
+
+    fn is_ipv6_only() -> bool:
+        """Check if this is Ipv6Only error."""
+        match self:
+            case Ipv6Only: true
+            case _: false
+
+    fn is_version_specific() -> bool:
+        """Check if this is a version-specific error (Ipv4Only or Ipv6Only)."""
+        match self:
+            case Ipv4Only: true
+            case Ipv6Only: true
+            case _: false
+
+    fn summary() -> text:
+        """Get comprehensive summary of the error.
+        Returns: summary with error name, description, and category
+        Example: AddrError.InvalidPort.summary()
+                # → "AddrError: InvalidPort (Invalid port number)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        var category = "general"
+
+        if self.is_version_specific():
+            category = "version-specific"
+
+        "AddrError: {name} ({desc}, {category})"
+
+# IpAddr implementation
+impl IpAddr:
+    # Construction from components
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr:
+        val n = ((a as u32) << 24) | ((b as u32) << 16) | ((c as u32) << 8) | (d as u32)
+        return n_ipv4
+
+    fn v6(segments: [u16; 8]) -> Ipv6Addr:
+        # Build string representation
+        val parts = []
+        for seg in segments:
+            parts.push(seg.to_hex())
+        return parts.join(":")_ipv6
+
+    fn localhost() -> IpAddr:
+        return "127.0.0.1"_ip
+
+    fn any() -> IpAddr:
+        return "0.0.0.0"_ip
+
+    fn broadcast() -> IpAddr:
+        return "255.255.255.255"_ip
+
+    # Construction from literals (both formats)
+    fn from_str(s: str) -> Result<IpAddr, AddrError>:
+        # Try IPv4 first
+        if s.contains("."):
+            val parts = s.split(".")
+            if parts.len() != 4:
+                return Err(AddrError.InvalidFormat)
+            return Ok(s_ip)
+        # Try IPv6
+        if s.contains(":"):
+            return Ok(s_ip)
+        return Err(AddrError.InvalidFormat)
+
+    fn from_u32(n: u32) -> Ipv4Addr:
+        return n_ipv4
+
+    fn from_u128(n: u128) -> Ipv6Addr:
+        return n_ipv6
+
+    # Properties
+    fn is_v4() -> bool:
+        val s = self as str
+        return s.contains(".") and not s.contains(":")
+
+    fn is_v6() -> bool:
+        val s = self as str
+        return s.contains(":")
+
+    fn is_loopback() -> bool:
+        if self.is_v4():
+            val s = self as str
+            return s.starts_with("127.")
+        return (self as str) == ".1"
+
+    fn is_private() -> bool:
+        if self.is_v4():
+            val s = self as str
+            return s.starts_with("10.") or
+                   s.starts_with("192.168.") or
+                   s.starts_with("172.16.") or
+                   s.starts_with("172.17.") or
+                   s.starts_with("172.18.") or
+                   s.starts_with("172.19.") or
+                   s.starts_with("172.20.") or
+                   s.starts_with("172.21.") or
+                   s.starts_with("172.22.") or
+                   s.starts_with("172.23.") or
+                   s.starts_with("172.24.") or
+                   s.starts_with("172.25.") or
+                   s.starts_with("172.26.") or
+                   s.starts_with("172.27.") or
+                   s.starts_with("172.28.") or
+                   s.starts_with("172.29.") or
+                   s.starts_with("172.30.") or
+                   s.starts_with("172.31.")
+        return false
+
+    fn is_multicast() -> bool:
+        if self.is_v4():
+            val s = self as str
+            # 224.0.0.0 - 239.255.255.255
+            return s.starts_with("224.") or
+                   s.starts_with("225.") or
+                   s.starts_with("226.") or
+                   s.starts_with("227.") or
+                   s.starts_with("228.") or
+                   s.starts_with("229.") or
+                   s.starts_with("230.") or
+                   s.starts_with("231.") or
+                   s.starts_with("232.") or
+                   s.starts_with("233.") or
+                   s.starts_with("234.") or
+                   s.starts_with("235.") or
+                   s.starts_with("236.") or
+                   s.starts_with("237.") or
+                   s.starts_with("238.") or
+                   s.starts_with("239.")
+        return false
+
+    # Conversion
+    fn to_v4() -> Option<Ipv4Addr>:
+        if self.is_v4():
+            return Some((self as str)_ipv4)
+        return None
+
+    fn to_v6() -> Ipv6Addr:
+        if self.is_v6():
+            return (self as str)_ipv6
+        # IPv4-mapped IPv6 address: .ffff:a.b.c.d
+        return (".ffff:" + (self as str))_ipv6
+
+    fn as_str() -> &str:
+        return &(self as str)
+
+# Ipv4Addr implementation
+impl Ipv4Addr:
+    fn octets() -> [u8; 4]:
+        val s = self as str
+        val parts = s.split(".")
+        return [
+            parts[0].parse_u8().unwrap_or(0),
+            parts[1].parse_u8().unwrap_or(0),
+            parts[2].parse_u8().unwrap_or(0),
+            parts[3].parse_u8().unwrap_or(0)
+        ]
+
+    fn to_u32() -> u32:
+        val octets = self.octets()
+        return ((octets[0] as u32) << 24) |
+               ((octets[1] as u32) << 16) |
+               ((octets[2] as u32) << 8) |
+               (octets[3] as u32)
+
+    fn from_u32(n: u32) -> Ipv4Addr:
+        val a = (n >> 24) & 0xFF
+        val b = (n >> 16) & 0xFF
+        val c = (n >> 8) & 0xFF
+        val d = n & 0xFF
+        return "{a}.{b}.{c}.{d}"_ipv4
+
+# Port implementation
+impl Port:
+    fn from_u16(n: u16) -> Port:
+        return n_port
+
+    fn to_u16() -> u16:
+        return self as u16
+
+    fn is_privileged() -> bool:
+        return (self as u16) < 1024
+
+    fn is_ephemeral() -> bool:
+        val p = self as u16
+        return p >= 49152 and p <= 65535
+
+    # Well-known ports
+    fn http() -> Port:
+        return 80_port
+
+    fn https() -> Port:
+        return 443_port
+
+    fn ssh() -> Port:
+        return 22_port
+
+    fn ftp() -> Port:
+        return 21_port
+
+    fn ftp_data() -> Port:
+        return 20_port
+
+    fn dns() -> Port:
+        return 53_port
+
+# SocketAddr implementation
+impl SocketAddr:
+    fn new(ip: IpAddr, port: Port) -> SocketAddr:
+        if ip.is_v6():
+            return "[{ip as str}]:{port as u16}"_sock
+        return "{ip as str}:{port as u16}"_sock
+
+    fn from_str(s: str) -> Result<SocketAddr, AddrError>:
+        # Check for IPv6 format: [.1]:8080
+        if s.starts_with("["):
+            val close = s.find("]:")
+            match close:
+                case Some(_): return Ok(s_sock)
+                case None: return Err(AddrError.InvalidFormat)
+        # IPv4 format: 127.0.0.1:8080
+        if s.contains(":"):
+            return Ok(s_sock)
+        return Err(AddrError.InvalidFormat)
+
+    fn ip() -> IpAddr:
+        val s = self as str
+        if s.starts_with("["):
+            # IPv6: [.1]:8080
+            val close = s.find("]").unwrap_or(s.len())
+            return s.slice(1, close)_ip
+        # IPv4: 127.0.0.1:8080
+        val colon = s.rfind(":").unwrap_or(s.len())
+        return s.slice(0, colon)_ip
+
+    fn port() -> Port:
+        val s = self as str
+        val colon = s.rfind(":").unwrap_or(0)
+        val port_str = s.slice(colon + 1, s.len())
+        return port_str.parse_u16().unwrap_or(0)_port
+
+    fn localhost(port: Port) -> SocketAddr:
+        return "127.0.0.1:{port as u16}"_sock
+
+# MacAddr implementation
+impl MacAddr:
+    fn from_str(s: str) -> Result<MacAddr, AddrError>:
+        # Accept formats: 00:1A:2B:3C:4D:5E or 00-1A-2B-3C-4D-5E
+        val normalized = s.replace("-", ":")
+        val parts = normalized.split(":")
+        if parts.len() != 6:
+            return Err(AddrError.InvalidFormat)
+        return Ok(normalized_mac)
+
+    fn from_u64(n: u64) -> MacAddr:
+        val bytes = [
+            ((n >> 40) & 0xFF) as u8,
+            ((n >> 32) & 0xFF) as u8,
+            ((n >> 24) & 0xFF) as u8,
+            ((n >> 16) & 0xFF) as u8,
+            ((n >> 8) & 0xFF) as u8,
+            (n & 0xFF) as u8
+        ]
+        return "{bytes[0]:02X}:{bytes[1]:02X}:{bytes[2]:02X}:{bytes[3]:02X}:{bytes[4]:02X}:{bytes[5]:02X}"_mac
+
+    fn to_u64() -> u64:
+        val s = self as str
+        val parts = s.replace("-", ":").split(":")
+        var result: u64 = 0
+        for part in parts:
+            result = (result << 8) | part.parse_hex_u8().unwrap_or(0) as u64
+        return result
+
+    fn is_broadcast() -> bool:
+        return (self as str) == "FF:FF:FF:FF:FF:FF"
+
+    fn is_multicast() -> bool:
+        val s = self as str
+        val first_byte = s.slice(0, 2).parse_hex_u8().unwrap_or(0)
+        return (first_byte & 0x01) != 0
+
+    fn broadcast() -> MacAddr:
+        return "FF:FF:FF:FF:FF:FF"_mac
+
+# CidrPrefix implementation
+impl CidrPrefix:
+    fn from_u8(n: u8) -> Result<CidrPrefix, AddrError>:
+        if n > 128:
+            return Err(AddrError.OutOfRange)
+        return Ok(n_cidr)
+
+    fn to_ipv4_mask() -> Ipv4Addr:
+        val prefix = self as u8
+        if prefix > 32:
+            return "255.255.255.255"_ipv4
+        val mask = if prefix == 0:
+            0_u32
+        else:
+            0xFFFFFFFF_u32 << (32 - prefix)
+        return Ipv4Addr.from_u32(mask)
+
+    fn is_host() -> bool:
+        return (self as u8) == 32 or (self as u8) == 128
+
+# =============================================================================
+# Network Buffer and Size Units
+# =============================================================================
+
+# Generic network buffer size (bytes)
+unit BufferSize: u64 as bufsize
+
+# Packet size (bytes)
+unit PacketSize: u64 as pktsize
+
+# Connection limit (number of concurrent connections)
+unit ConnectionLimit: u32 as connlim
+
+# Retry count for network operations
+unit RetryCount: u32 as retries
+
+# Timeout duration (milliseconds)
+unit TimeoutMs: u64 as timeout_ms
+
+# BufferSize implementation
+impl BufferSize:
+    pub fn from_u64(n: u64) -> BufferSize:
+        return n_bufsize
+
+    pub fn value() -> u64:
+        return self as u64
+
+    pub fn zero() -> BufferSize:
+        return 0_bufsize
+
+    pub fn kb(n: u64) -> BufferSize:
+        """Create buffer size from kilobytes."""
+        return (n * 1024)_bufsize
+
+    pub fn mb(n: u64) -> BufferSize:
+        """Create buffer size from megabytes."""
+        return (n * 1024 * 1024)_bufsize
+
+    pub fn default_tcp() -> BufferSize:
+        """Default TCP buffer size (64KB)."""
+        return BufferSize.kb(64)
+
+    pub fn default_udp() -> BufferSize:
+        """Default UDP buffer size (8KB)."""
+        return BufferSize.kb(8)
+
+    pub fn add(other: BufferSize) -> BufferSize:
+        return (self.value() + other.value())_bufsize
+
+    pub fn is_zero() -> bool:
+        return self.value() == 0
+
+    pub fn fits_in(limit: BufferSize) -> bool:
+        """Check if this size fits within the limit."""
+        return self.value() <= limit.value()
+
+# PacketSize implementation
+impl PacketSize:
+    pub fn from_u64(n: u64) -> PacketSize:
+        return n_pktsize
+
+    pub fn value() -> u64:
+        return self as u64
+
+    pub fn zero() -> PacketSize:
+        return 0_pktsize
+
+    pub fn mtu_ethernet() -> PacketSize:
+        """Standard Ethernet MTU (1500 bytes)."""
+        return 1500_pktsize
+
+    pub fn mtu_jumbo() -> PacketSize:
+        """Jumbo frame MTU (9000 bytes)."""
+        return 9000_pktsize
+
+    pub fn max_udp() -> PacketSize:
+        """Maximum UDP packet size (65507 bytes)."""
+        return 65507_pktsize
+
+    pub fn is_zero() -> bool:
+        return self.value() == 0
+
+    pub fn exceeds_mtu() -> bool:
+        """Check if packet exceeds standard MTU."""
+        return self.value() > 1500
+
+# ConnectionLimit implementation
+impl ConnectionLimit:
+    pub fn from_u32(n: u32) -> ConnectionLimit:
+        return n_connlim
+
+    pub fn value() -> u32:
+        return self as u32
+
+    pub fn unlimited() -> ConnectionLimit:
+        """Unlimited connections (represented as max u32)."""
+        return 0xFFFFFFFF_connlim
+
+    pub fn default_server() -> ConnectionLimit:
+        """Default server connection limit (1000)."""
+        return 1000_connlim
+
+    pub fn is_unlimited() -> bool:
+        return self.value() == 0xFFFFFFFF
+
+    pub fn is_reached(current: u32) -> bool:
+        """Check if connection limit is reached."""
+        if self.is_unlimited():
+            return false
+        return current >= self.value()
+
+# RetryCount implementation
+impl RetryCount:
+    pub fn from_u32(n: u32) -> RetryCount:
+        return n_retries
+
+    pub fn value() -> u32:
+        return self as u32
+
+    pub fn zero() -> RetryCount:
+        return 0_retries
+
+    pub fn default_tcp() -> RetryCount:
+        """Default TCP retry count (3)."""
+        return 3_retries
+
+    pub fn default_dns() -> RetryCount:
+        """Default DNS retry count (2)."""
+        return 2_retries
+
+    pub fn increment() -> RetryCount:
+        return (self.value() + 1)_retries
+
+    pub fn decrement() -> RetryCount:
+        """Decrement retry count, clamped to 0."""
+        val current = self.value()
+        if current == 0:
+            return 0_retries
+        return (current - 1)_retries
+
+    pub fn is_exhausted() -> bool:
+        return self.value() == 0
+
+# TimeoutMs implementation
+impl TimeoutMs:
+    pub fn from_u64(n: u64) -> TimeoutMs:
+        return n_timeout_ms
+
+    pub fn value() -> u64:
+        return self as u64
+
+    pub fn zero() -> TimeoutMs:
+        return 0_timeout_ms
+
+    pub fn seconds(n: u64) -> TimeoutMs:
+        """Create timeout from seconds."""
+        return (n * 1000)_timeout_ms
+
+    pub fn minutes(n: u64) -> TimeoutMs:
+        """Create timeout from minutes."""
+        return (n * 60 * 1000)_timeout_ms
+
+    pub fn default_connect() -> TimeoutMs:
+        """Default connection timeout (30 seconds)."""
+        return TimeoutMs.seconds(30)
+
+    pub fn default_read() -> TimeoutMs:
+        """Default read timeout (60 seconds)."""
+        return TimeoutMs.seconds(60)
+
+    pub fn default_write() -> TimeoutMs:
+        """Default write timeout (30 seconds)."""
+        return TimeoutMs.seconds(30)
+
+    pub fn is_zero() -> bool:
+        return self.value() == 0
+
+# =============================================================================
+# Network Enums
+# =============================================================================
+
+# TCP/UDP shutdown modes
+pub enum ShutdownMode:
+    Read       # Shutdown read operations
+    Write      # Shutdown write operations
+    Both       # Shutdown both read and write
+
+impl ShutdownMode:
+    pub fn to_i64() -> i64:
+        """Convert to FFI integer value."""
+        match self:
+            case ShutdownMode.Read: 0
+            case ShutdownMode.Write: 1
+            case ShutdownMode.Both: 2
+
+    pub fn from_i64(n: i64) -> Option<ShutdownMode>:
+        """Create from FFI integer value."""
+        match n:
+            case 0: Some(ShutdownMode.Read)
+            case 1: Some(ShutdownMode.Write)
+            case 2: Some(ShutdownMode.Both)
+            case _: None
+
+    pub fn is_read() -> bool:
+        match self:
+            case ShutdownMode.Read: true
+            case _: false
+
+    pub fn is_write() -> bool:
+        match self:
+            case ShutdownMode.Write: true
+            case _: false
+
+    pub fn is_both() -> bool:
+        match self:
+            case ShutdownMode.Both: true
+            case _: false

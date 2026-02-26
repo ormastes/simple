@@ -1,0 +1,603 @@
+# Vector - 2D, 3D, and 4D vector types with SIMD backing
+#
+# Provides Vec2, Vec3, Vec4 types backed by GPU vec<N, T> for SIMD optimization.
+# Supports multi-value literals for compact syntax: 1_2_3_vec3
+#
+# Based on: doc/plans/floating-booping-coral.md (3D Graphics Library)
+
+use core.*
+use graphics.math.vector_ops.*
+
+# =============================================================================
+# Vec2 - 2D Vector
+# =============================================================================
+
+pub struct Vec2:
+    x: f32
+    y: f32
+
+impl Vec2:
+    # Constructors
+    pub fn new(x: f32, y: f32) -> Vec2:
+        return Vec2 { x: x, y: y }
+
+    pub fn zero() -> Vec2:
+        return Vec2 { x: 0.0, y: 0.0 }
+
+    pub fn one() -> Vec2:
+        return Vec2 { x: 1.0, y: 1.0 }
+
+    pub fn unit_x() -> Vec2:
+        return Vec2 { x: 1.0, y: 0.0 }
+
+    pub fn unit_y() -> Vec2:
+        return Vec2 { x: 0.0, y: 1.0 }
+
+    # Component access
+    pub fn x(self) -> f32:
+        return self.x
+
+    pub fn y(self) -> f32:
+        return self.y
+
+    # Vector operations
+    pub fn dot(self, other: Vec2) -> f32:
+        return self.x * other.x + self.y * other.y
+
+    pub fn length_squared(self) -> f32:
+        return self.dot(self)
+
+    pub fn length(self) -> f32:
+        return sqrt(self.length_squared())
+
+    pub fn normalize(self) -> Vec2:
+        val len = self.length()
+        if len < 0.0001:
+            return Vec2.unit_x()
+        return Vec2 { x: self.x / len, y: self.y / len }
+
+    pub fn distance_to(self, other: Vec2) -> f32:
+        val dx = other.x - self.x
+        val dy = other.y - self.y
+        return sqrt(dx * dx + dy * dy)
+
+    pub fn lerp(self, other: Vec2, t: f32) -> Vec2:
+        return Vec2 {
+            x: self.x + (other.x - self.x) * t,
+            y: self.y + (other.y - self.y) * t
+        }
+
+    # =========================================================================
+    # Helper Methods (delegating to vector_ops)
+    # =========================================================================
+
+    pub fn is_zero(self) -> bool:
+        """Check if vector is exactly zero."""
+        return is_zero_impl(&self)
+
+    pub fn is_near_zero(self, epsilon: f32) -> bool:
+        """Check if vector is near zero within epsilon."""
+        return is_near_zero_impl(&self, epsilon)
+
+    pub fn is_unit(self) -> bool:
+        """Check if vector is unit length (normalized)."""
+        return is_unit_impl(&self)
+
+    pub fn is_normalized(self) -> bool:
+        """Check if vector is normalized (alias for is_unit)."""
+        return self.is_unit()
+
+    pub fn is_finite(self) -> bool:
+        """Check if all components are finite (not NaN or infinity)."""
+        return is_finite_impl(&self)
+
+    pub fn has_nan(self) -> bool:
+        """Check if any component is NaN."""
+        return has_nan_impl(&self)
+
+    pub fn angle(self) -> f32:
+        """Get angle of vector in radians (from positive X axis)."""
+        return atan2(self.y, self.x)
+
+    pub fn angle_to(self, other: Vec2) -> f32:
+        """Get angle between this vector and another in radians."""
+        return angle_between_impl(&self, &other)
+
+    pub fn perpendicular(self) -> Vec2:
+        """Get perpendicular vector (90 degrees counter-clockwise)."""
+        return Vec2 { x: -self.y, y: self.x }
+
+    pub fn component_min(self) -> f32:
+        """Get minimum component value."""
+        return component_min_impl(&self)
+
+    pub fn component_max(self) -> f32:
+        """Get maximum component value."""
+        return component_max_impl(&self)
+
+    pub fn abs(self) -> Vec2:
+        """Get vector with absolute value of each component."""
+        return abs_impl(&self)
+
+    pub fn min(self, other: Vec2) -> Vec2:
+        """Get component-wise minimum."""
+        return min_componentwise_impl(&self, &other)
+
+    pub fn max(self, other: Vec2) -> Vec2:
+        """Get component-wise maximum."""
+        return max_componentwise_impl(&self, &other)
+
+    pub fn clamp(self, min_val: Vec2, max_val: Vec2) -> Vec2:
+        """Clamp each component between min and max."""
+        return clamp_componentwise_impl(&self, &min_val, &max_val)
+
+    pub fn summary(self) -> text:
+        """Get summary of vector."""
+        return summary_impl(&self, "Vec2")
+
+# Vec2 operators
+impl Add for Vec2:
+    fn add(other: Vec2) -> Vec2:
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+
+impl Sub for Vec2:
+    fn sub(other: Vec2) -> Vec2:
+        return Vec2 { x: self.x - other.x, y: self.y - other.y }
+
+impl Mul<f32> for Vec2:
+    fn mul(scalar: f32) -> Vec2:
+        return Vec2 { x: self.x * scalar, y: self.y * scalar }
+
+impl Div<f32> for Vec2:
+    fn div(scalar: f32) -> Vec2:
+        return Vec2 { x: self.x / scalar, y: self.y / scalar }
+
+impl Neg for Vec2:
+    fn neg() -> Vec2:
+        return Vec2 { x: -self.x, y: -self.y }
+
+# Vec2 VectorOps trait implementation
+impl VectorOps for Vec2:
+    fn dimension() -> usize:
+        return 2
+
+    fn component(index: usize) -> f32:
+        match index:
+            case 0: return self.x
+            case 1: return self.y
+            case _: return 0.0
+
+    fn with_component(index: usize, value: f32) -> Vec2:
+        match index:
+            case 0: return Vec2 { x: value, y: self.y }
+            case 1: return Vec2 { x: self.x, y: value }
+            case _: return self
+
+    fn zero_vector() -> Vec2:
+        return Vec2.zero()
+
+    fn length_squared() -> f32:
+        return self.x * self.x + self.y * self.y
+
+# =============================================================================
+# Vec3 - 3D Vector
+# =============================================================================
+
+pub struct Vec3:
+    x: f32
+    y: f32
+    z: f32
+
+impl Vec3:
+    # Constructors
+    pub fn new(x: f32, y: f32, z: f32) -> Vec3:
+        return Vec3 { x: x, y: y, z: z }
+
+    pub fn zero() -> Vec3:
+        return Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+
+    pub fn one() -> Vec3:
+        return Vec3 { x: 1.0, y: 1.0, z: 1.0 }
+
+    pub fn unit_x() -> Vec3:
+        return Vec3 { x: 1.0, y: 0.0, z: 0.0 }
+
+    pub fn unit_y() -> Vec3:
+        return Vec3 { x: 0.0, y: 1.0, z: 0.0 }
+
+    pub fn unit_z() -> Vec3:
+        return Vec3 { x: 0.0, y: 0.0, z: 1.0 }
+
+    # Component access
+    pub fn x(self) -> f32:
+        return self.x
+
+    pub fn y(self) -> f32:
+        return self.y
+
+    pub fn z(self) -> f32:
+        return self.z
+
+    # Vector operations
+    pub fn dot(self, other: Vec3) -> f32:
+        return self.x * other.x + self.y * other.y + self.z * other.z
+
+    pub fn cross(self, other: Vec3) -> Vec3:
+        return Vec3 {
+            x: self.y * other.z - self.z * other.y,
+            y: self.z * other.x - self.x * other.z,
+            z: self.x * other.y - self.y * other.x
+        }
+
+    pub fn length_squared(self) -> f32:
+        return self.dot(self)
+
+    pub fn length(self) -> f32:
+        return sqrt(self.length_squared())
+
+    pub fn normalize(self) -> Vec3:
+        val len = self.length()
+        if len < 0.0001:
+            return Vec3.unit_x()
+        return Vec3 { x: self.x / len, y: self.y / len, z: self.z / len }
+
+    pub fn distance_to(self, other: Vec3) -> f32:
+        val dx = other.x - self.x
+        val dy = other.y - self.y
+        val dz = other.z - self.z
+        return sqrt(dx * dx + dy * dy + dz * dz)
+
+    pub fn lerp(self, other: Vec3, t: f32) -> Vec3:
+        return Vec3 {
+            x: self.x + (other.x - self.x) * t,
+            y: self.y + (other.y - self.y) * t,
+            z: self.z + (other.z - self.z) * t
+        }
+
+    pub fn reflect(self, normal: Vec3) -> Vec3:
+        val d = self.dot(normal)
+        return Vec3 {
+            x: self.x - 2.0 * d * normal.x,
+            y: self.y - 2.0 * d * normal.y,
+            z: self.z - 2.0 * d * normal.z
+        }
+
+    # Conversion to Vec2 (drop Z)
+    pub fn xy(self) -> Vec2:
+        return Vec2.new(self.x, self.y)
+
+    # =========================================================================
+    # Helper Methods (delegating to vector_ops)
+    # =========================================================================
+
+    pub fn is_zero(self) -> bool:
+        """Check if vector is exactly zero."""
+        return is_zero_impl(&self)
+
+    pub fn is_near_zero(self, epsilon: f32) -> bool:
+        """Check if vector is near zero within epsilon."""
+        return is_near_zero_impl(&self, epsilon)
+
+    pub fn is_unit(self) -> bool:
+        """Check if vector is unit length (normalized)."""
+        return is_unit_impl(&self)
+
+    pub fn is_normalized(self) -> bool:
+        """Check if vector is normalized (alias for is_unit)."""
+        return self.is_unit()
+
+    pub fn is_finite(self) -> bool:
+        """Check if all components are finite (not NaN or infinity)."""
+        return is_finite_impl(&self)
+
+    pub fn has_nan(self) -> bool:
+        """Check if any component is NaN."""
+        return has_nan_impl(&self)
+
+    pub fn is_parallel(self, other: Vec3, epsilon: f32) -> bool:
+        """Check if vectors are parallel (cross product near zero)."""
+        val cross = self.cross(other)
+        return cross.length_squared() < epsilon * epsilon
+
+    pub fn is_perpendicular(self, other: Vec3, epsilon: f32) -> bool:
+        """Check if vectors are perpendicular (dot product near zero)."""
+        return abs(self.dot(other)) < epsilon
+
+    pub fn angle_to(self, other: Vec3) -> f32:
+        """Get angle between this vector and another in radians."""
+        return angle_between_impl(&self, &other)
+
+    pub fn component_min(self) -> f32:
+        """Get minimum component value."""
+        return component_min_impl(&self)
+
+    pub fn component_max(self) -> f32:
+        """Get maximum component value."""
+        return component_max_impl(&self)
+
+    pub fn abs(self) -> Vec3:
+        """Get vector with absolute value of each component."""
+        return abs_impl(&self)
+
+    pub fn min(self, other: Vec3) -> Vec3:
+        """Get component-wise minimum."""
+        return min_componentwise_impl(&self, &other)
+
+    pub fn max(self, other: Vec3) -> Vec3:
+        """Get component-wise maximum."""
+        return max_componentwise_impl(&self, &other)
+
+    pub fn clamp(self, min_val: Vec3, max_val: Vec3) -> Vec3:
+        """Clamp each component between min and max."""
+        return clamp_componentwise_impl(&self, &min_val, &max_val)
+
+    pub fn project_onto(self, onto: Vec3) -> Vec3:
+        """Project this vector onto another vector."""
+        return project_onto_impl(&self, &onto)
+
+    pub fn reject_from(self, from: Vec3) -> Vec3:
+        """Get rejection of this vector from another (perpendicular component)."""
+        return reject_from_impl(&self, &from)
+
+    pub fn summary(self) -> text:
+        """Get summary of vector."""
+        return summary_impl(&self, "Vec3")
+
+# Vec3 operators
+impl Add for Vec3:
+    fn add(other: Vec3) -> Vec3:
+        return Vec3 { x: self.x + other.x, y: self.y + other.y, z: self.z + other.z }
+
+impl Sub for Vec3:
+    fn sub(other: Vec3) -> Vec3:
+        return Vec3 { x: self.x - other.x, y: self.y - other.y, z: self.z - other.z }
+
+impl Mul<f32> for Vec3:
+    fn mul(scalar: f32) -> Vec3:
+        return Vec3 { x: self.x * scalar, y: self.y * scalar, z: self.z * scalar }
+
+impl Div<f32> for Vec3:
+    fn div(scalar: f32) -> Vec3:
+        return Vec3 { x: self.x / scalar, y: self.y / scalar, z: self.z / scalar }
+
+impl Neg for Vec3:
+    fn neg() -> Vec3:
+        return Vec3 { x: -self.x, y: -self.y, z: -self.z }
+
+# Vec3 VectorOps trait implementation
+impl VectorOps for Vec3:
+    fn dimension() -> usize:
+        return 3
+
+    fn component(index: usize) -> f32:
+        match index:
+            case 0: return self.x
+            case 1: return self.y
+            case 2: return self.z
+            case _: return 0.0
+
+    fn with_component(index: usize, value: f32) -> Vec3:
+        match index:
+            case 0: return Vec3 { x: value, y: self.y, z: self.z }
+            case 1: return Vec3 { x: self.x, y: value, z: self.z }
+            case 2: return Vec3 { x: self.x, y: self.y, z: value }
+            case _: return self
+
+    fn zero_vector() -> Vec3:
+        return Vec3.zero()
+
+    fn length_squared() -> f32:
+        return self.x * self.x + self.y * self.y + self.z * self.z
+
+# =============================================================================
+# Vec4 - 4D Vector (for homogeneous coordinates and colors)
+# =============================================================================
+
+pub struct Vec4:
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+
+impl Vec4:
+    # Constructors
+    pub fn new(x: f32, y: f32, z: f32, w: f32) -> Vec4:
+        return Vec4 { x: x, y: y, z: z, w: w }
+
+    pub fn zero() -> Vec4:
+        return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }
+
+    pub fn one() -> Vec4:
+        return Vec4 { x: 1.0, y: 1.0, z: 1.0, w: 1.0 }
+
+    # Create Vec4 from Vec3 + w component
+    pub fn from_vec3(v: Vec3, w: f32) -> Vec4:
+        return Vec4 { x: v.x, y: v.y, z: v.z, w: w }
+
+    # Component access
+    pub fn x(self) -> f32:
+        return self.x
+
+    pub fn y(self) -> f32:
+        return self.y
+
+    pub fn z(self) -> f32:
+        return self.z
+
+    pub fn w(self) -> f32:
+        return self.w
+
+    # Conversion to Vec3 (drop W)
+    pub fn xyz(self) -> Vec3:
+        return Vec3.new(self.x, self.y, self.z)
+
+    # Homogeneous divide (for perspective division)
+    pub fn homogeneous_divide(self) -> Vec3:
+        if abs(self.w) < 0.0001:
+            return self.xyz()
+        return Vec3.new(self.x / self.w, self.y / self.w, self.z / self.w)
+
+    # Vector operations
+    pub fn dot(self, other: Vec4) -> f32:
+        return self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+
+    pub fn length_squared(self) -> f32:
+        return self.dot(self)
+
+    pub fn length(self) -> f32:
+        return sqrt(self.length_squared())
+
+    pub fn normalize(self) -> Vec4:
+        val len = self.length()
+        if len < 0.0001:
+            return Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 0.0 }
+        return Vec4 {
+            x: self.x / len,
+            y: self.y / len,
+            z: self.z / len,
+            w: self.w / len
+        }
+
+    pub fn lerp(self, other: Vec4, t: f32) -> Vec4:
+        return Vec4 {
+            x: self.x + (other.x - self.x) * t,
+            y: self.y + (other.y - self.y) * t,
+            z: self.z + (other.z - self.z) * t,
+            w: self.w + (other.w - self.w) * t
+        }
+
+    # =========================================================================
+    # Helper Methods (delegating to vector_ops)
+    # =========================================================================
+
+    pub fn is_zero(self) -> bool:
+        """Check if vector is exactly zero."""
+        return is_zero_impl(&self)
+
+    pub fn is_near_zero(self, epsilon: f32) -> bool:
+        """Check if vector is near zero within epsilon."""
+        return is_near_zero_impl(&self, epsilon)
+
+    pub fn is_unit(self) -> bool:
+        """Check if vector is unit length (normalized)."""
+        return is_unit_impl(&self)
+
+    pub fn is_normalized(self) -> bool:
+        """Check if vector is normalized (alias for is_unit)."""
+        return self.is_unit()
+
+    pub fn is_finite(self) -> bool:
+        """Check if all components are finite (not NaN or infinity)."""
+        return is_finite_impl(&self)
+
+    pub fn has_nan(self) -> bool:
+        """Check if any component is NaN."""
+        return has_nan_impl(&self)
+
+    pub fn is_homogeneous_point(self) -> bool:
+        """Check if this represents a point in homogeneous coordinates (w ≈ 1)."""
+        return abs(self.w - 1.0) < 0.0001
+
+    pub fn is_homogeneous_vector(self) -> bool:
+        """Check if this represents a vector in homogeneous coordinates (w ≈ 0)."""
+        return abs(self.w) < 0.0001
+
+    pub fn component_min(self) -> f32:
+        """Get minimum component value."""
+        return component_min_impl(&self)
+
+    pub fn component_max(self) -> f32:
+        """Get maximum component value."""
+        return component_max_impl(&self)
+
+    pub fn abs(self) -> Vec4:
+        """Get vector with absolute value of each component."""
+        return abs_impl(&self)
+
+    pub fn min(self, other: Vec4) -> Vec4:
+        """Get component-wise minimum."""
+        return min_componentwise_impl(&self, &other)
+
+    pub fn max(self, other: Vec4) -> Vec4:
+        """Get component-wise maximum."""
+        return max_componentwise_impl(&self, &other)
+
+    pub fn clamp(self, min_val: Vec4, max_val: Vec4) -> Vec4:
+        """Clamp each component between min and max."""
+        return clamp_componentwise_impl(&self, &min_val, &max_val)
+
+    pub fn summary(self) -> text:
+        """Get summary of vector with homogeneous type annotation."""
+        val base = summary_impl(&self, "Vec4")
+        val htype = if self.is_homogeneous_point(): " [point]"
+                    else if self.is_homogeneous_vector(): " [vector]"
+                    else: ""
+        return base + htype
+
+# Vec4 operators
+impl Add for Vec4:
+    fn add(other: Vec4) -> Vec4:
+        return Vec4 {
+            x: self.x + other.x,
+            y: self.y + other.y,
+            z: self.z + other.z,
+            w: self.w + other.w
+        }
+
+impl Sub for Vec4:
+    fn sub(other: Vec4) -> Vec4:
+        return Vec4 {
+            x: self.x - other.x,
+            y: self.y - other.y,
+            z: self.z - other.z,
+            w: self.w - other.w
+        }
+
+impl Mul<f32> for Vec4:
+    fn mul(scalar: f32) -> Vec4:
+        return Vec4 {
+            x: self.x * scalar,
+            y: self.y * scalar,
+            z: self.z * scalar,
+            w: self.w * scalar
+        }
+
+impl Div<f32> for Vec4:
+    fn div(scalar: f32) -> Vec4:
+        return Vec4 {
+            x: self.x / scalar,
+            y: self.y / scalar,
+            z: self.z / scalar,
+            w: self.w / scalar
+        }
+
+impl Neg for Vec4:
+    fn neg() -> Vec4:
+        return Vec4 { x: -self.x, y: -self.y, z: -self.z, w: -self.w }
+
+# Vec4 VectorOps trait implementation
+impl VectorOps for Vec4:
+    fn dimension() -> usize:
+        return 4
+
+    fn component(index: usize) -> f32:
+        match index:
+            case 0: return self.x
+            case 1: return self.y
+            case 2: return self.z
+            case 3: return self.w
+            case _: return 0.0
+
+    fn with_component(index: usize, value: f32) -> Vec4:
+        match index:
+            case 0: return Vec4 { x: value, y: self.y, z: self.z, w: self.w }
+            case 1: return Vec4 { x: self.x, y: value, z: self.z, w: self.w }
+            case 2: return Vec4 { x: self.x, y: self.y, z: value, w: self.w }
+            case 3: return Vec4 { x: self.x, y: self.y, z: self.z, w: value }
+            case _: return self
+
+    fn zero_vector() -> Vec4:
+        return Vec4.zero()
+
+    fn length_squared() -> f32:
+        return self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
