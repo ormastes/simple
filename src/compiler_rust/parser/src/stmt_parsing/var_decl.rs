@@ -305,6 +305,17 @@ impl Parser<'_> {
     /// Used by if-let and while-let constructs
     pub(crate) fn parse_optional_let_pattern(&mut self) -> Result<(Option<Pattern>, Expr), ParseError> {
         if self.check(&TokenKind::Let) || self.check(&TokenKind::Val) || self.check(&TokenKind::Var) {
+            // Disambiguate: `if val pattern = expr:` (let-binding) vs `if val:` (variable test)
+            // When val/var/let is followed by `:` or `)`, it's used as a variable name,
+            // not a let-binding keyword. E.g., in `case Bool(val): if val: "1" else: "0"`
+            if (self.check(&TokenKind::Val) || self.check(&TokenKind::Var))
+                && (self.peek_is(&TokenKind::Colon) || self.peek_is(&TokenKind::RParen)
+                    || self.peek_is(&TokenKind::Then))
+            {
+                // `val`/`var` used as variable name in condition, not as binding keyword
+                return Ok((None, self.parse_expression()?));
+            }
+
             // Emit deprecation warning for `if let` / `while let`
             if self.check(&TokenKind::Let) {
                 use crate::error_recovery::{ErrorHint, ErrorHintLevel};
@@ -939,8 +950,8 @@ impl Parser<'_> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Extern)?;
 
-        // Check if this is `extern class` or `extern fn` or `extern "C":` block
-        if self.check(&TokenKind::Class) {
+        // Check if this is `extern class` / `extern struct` or `extern fn` or `extern "C":` block
+        if self.check(&TokenKind::Class) || self.check(&TokenKind::Struct) {
             return self.parse_extern_class_impl(start_span, attributes);
         }
 
@@ -1043,7 +1054,14 @@ impl Parser<'_> {
     fn parse_extern_class_impl(&mut self, start_span: Span, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         use crate::ast::{DocComment, ExternClassDef, ExternMethodDef, ExternMethodKind};
 
-        self.expect(&TokenKind::Class)?;
+        // Accept both `extern class` and `extern struct`
+        if self.check(&TokenKind::Class) {
+            self.advance();
+        } else if self.check(&TokenKind::Struct) {
+            self.advance();
+        } else {
+            self.expect(&TokenKind::Class)?; // will error with expected message
+        }
 
         // Parse class name
         let name = self.expect_identifier()?;
@@ -1084,6 +1102,20 @@ impl Parser<'_> {
             // Parse optional doc comment for method
             let doc_comment = self.try_parse_doc_comment();
 
+            // Skip triple-quoted docstrings ("""...""") that appear as String tokens
+            // in class/struct/extern bodies
+            if matches!(&self.current.kind, TokenKind::String(_) | TokenKind::RawString(_)) {
+                self.advance();
+                // Skip newlines after docstring
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) {
+                    break;
+                }
+                continue;
+            }
+
             // Parse optional attributes for method (#[...])
             let method_attrs = if self.check(&TokenKind::Hash) {
                 let attr = self.parse_attribute()?;
@@ -1091,6 +1123,22 @@ impl Parser<'_> {
             } else {
                 vec![]
             };
+
+            // Check for field declarations (extern struct): `name: Type`
+            // Fields are identifiers followed by `:` and a type name
+            let is_field = matches!(&self.current.kind, TokenKind::Identifier { .. })
+                && self.peek_is(&TokenKind::Colon);
+            if is_field {
+                // Skip field declaration: consume identifier, colon, and type
+                self.advance(); // consume field name
+                self.advance(); // consume colon
+                let _ty = self.parse_type()?; // consume type
+                // Skip newline after field
+                if self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                continue;
+            }
 
             // Determine method kind
             let method_span = self.current.span;
@@ -1106,7 +1154,7 @@ impl Parser<'_> {
                 ExternMethodKind::Immutable
             } else {
                 return Err(ParseError::syntax_error_with_span(
-                    "Expected 'static fn', 'fn', or 'me' in extern class method",
+                    "Expected 'static fn', 'fn', 'me', or field declaration in extern class/struct",
                     self.current.span,
                 ));
             };

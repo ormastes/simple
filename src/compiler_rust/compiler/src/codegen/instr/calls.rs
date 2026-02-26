@@ -326,12 +326,7 @@ pub fn compile_call<M: Module>(
             emit_profiler_return(ctx, builder)?;
         }
     } else {
-        eprintln!(
-            "[WARN compile_call] Function '{}' not found in func_ids ({} entries) or runtime_funcs ({} entries)",
-            func_name,
-            ctx.func_ids.len(),
-            ctx.runtime_funcs.len()
-        );
+        // Unknown function — skip call (function not in local module or runtime)
     }
 
     Ok(())

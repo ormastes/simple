@@ -56,23 +56,43 @@ fn compile_file_to_object(source: &str, file_path: &Path) -> Result<Vec<u8>, Str
 }
 
 fn compile_file_safe(source: String, file_path: PathBuf) -> Result<Vec<u8>, String> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let timeout_secs: u64 = std::env::var("COMPILE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+
+    let (tx, rx) = mpsc::channel();
     let handle = std::thread::Builder::new()
         .name("compile-worker".into())
         .stack_size(STACK_SIZE)
-        .spawn(move || compile_file_to_object(&source, &file_path))
+        .spawn(move || {
+            let result = compile_file_to_object(&source, &file_path);
+            let _ = tx.send(());
+            result
+        })
         .expect("spawn failed");
 
-    match handle.join() {
-        Ok(result) => result,
-        Err(e) => {
-            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                format!("panic: {s}")
-            } else if let Some(s) = e.downcast_ref::<&str>() {
-                format!("panic: {s}")
-            } else {
-                "panic: unknown".to_string()
-            };
-            Err(msg)
+    // Wait with timeout
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(()) => match handle.join() {
+            Ok(result) => result,
+            Err(e) => {
+                let msg = if let Some(s) = e.downcast_ref::<String>() {
+                    format!("panic: {s}")
+                } else if let Some(s) = e.downcast_ref::<&str>() {
+                    format!("panic: {s}")
+                } else {
+                    "panic: unknown".to_string()
+                };
+                Err(msg)
+            }
+        },
+        Err(_) => {
+            // Timeout — thread is still running but we move on
+            Err(format!("timeout ({}s)", timeout_secs))
         }
     }
 }

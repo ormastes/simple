@@ -243,12 +243,6 @@ impl<M: Module> CodegenBackend<M> {
 
     /// Declare all functions from a MIR module
     pub fn declare_functions(&mut self, functions: &[MirFunction]) -> BackendResult<()> {
-        eprintln!(
-            "[DEBUG declare_functions] Called with {} functions, {} runtime funcs already declared",
-            functions.len(),
-            self.runtime_funcs.len()
-        );
-
         let mut func_ids = HashMap::new();
 
         // First, add runtime function IDs for functions that are already declared
@@ -278,38 +272,10 @@ impl<M: Module> CodegenBackend<M> {
                 cranelift_module::Linkage::Local
             };
 
-            if func.name.contains("resolve") && (func.name.contains("blocks") || func.name.contains("BlockResolver")) {
-                eprintln!(
-                    "[DEBUG resolve] Function: '{}', params: {}, returns: {:?}, has_body: {}",
-                    func.name,
-                    func.params.len(),
-                    func.return_type,
-                    !func.blocks.is_empty()
-                );
-                for (i, param) in func.params.iter().enumerate() {
-                    eprintln!(
-                        "[DEBUG resolve]   param {}: name='{}', ty={:?}",
-                        i, param.name, param.ty
-                    );
-                }
-                eprintln!("[DEBUG resolve] Signature params: {}", sig.params.len());
-            }
-
             let func_id = self
                 .module
                 .declare_function(&func.name, linkage, &sig)
                 .map_err(|e| BackendError::ModuleError(format!("Failed to declare '{}': {}", func.name, e)))?;
-
-            // Debug: print ALL user function IDs to identify fn2
-            if func_id.as_u32() >= 467 {
-                eprintln!(
-                    "[DEBUG fn_id] funcid{} = fn{} = '{}' ({} params)",
-                    func_id.as_u32(),
-                    func_id.as_u32() - 467,
-                    func.name,
-                    func.params.len()
-                );
-            }
 
             func_ids.insert(func.name.clone(), func_id);
         }
@@ -322,20 +288,11 @@ impl<M: Module> CodegenBackend<M> {
     pub fn declare_globals(&mut self, globals: &[(String, TypeId, bool)]) -> BackendResult<()> {
         use super::types_util::type_to_cranelift;
 
-        eprintln!(
-            "[DEBUG declare_globals] Declaring {} globals (skipping {} runtime funcs)",
-            globals.len(),
-            self.runtime_funcs.len()
-        );
-
         for (name, ty, is_mutable) in globals {
             // Skip globals that are actually runtime functions (extern functions)
             if self.runtime_funcs.contains_key(name.as_str()) {
-                eprintln!("[DEBUG] Skipping runtime function global: '{}'", name);
                 continue;
             }
-
-            eprintln!("[DEBUG] Global: '{}', type: {:?}, mutable: {}", name, ty, is_mutable);
             // Use Preemptible linkage so that when multiple .o files define the same
             // global (from shared imports), the linker merges them instead of erroring.
             let data_id = self
@@ -380,11 +337,8 @@ impl<M: Module> CodegenBackend<M> {
         .map_err(BackendError::ModuleError)?;
 
         // Verify the function before defining - log errors but try to compile anyway
-        if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
-            eprintln!(
-                "[WARNING] Verifier errors in '{}': {} (attempting compilation anyway)",
-                func.name, errors
-            );
+        if let Err(_errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
+            // Verifier errors - attempt compilation anyway
         }
 
         // Define the function (may fail if verifier errors are critical)
@@ -408,21 +362,12 @@ impl<M: Module> CodegenBackend<M> {
         // Expand with outlined functions for body_block users
         let functions = expand_with_outlined(mir);
 
-        eprintln!(
-            "[DEBUG compile_all_functions] MIR functions: {}, After expansion: {}, Globals: {}",
-            mir.functions.len(),
-            functions.len(),
-            mir.globals.len()
-        );
-
         // Check for duplicate function names and deduplicate
         let mut seen_names = std::collections::HashSet::new();
         let mut unique_functions = Vec::new();
         for func in functions {
             if seen_names.insert(func.name.clone()) {
                 unique_functions.push(func);
-            } else {
-                eprintln!("[WARNING] Skipping duplicate function: {}", func.name);
             }
         }
         let functions = unique_functions;
@@ -437,9 +382,7 @@ impl<M: Module> CodegenBackend<M> {
         for func in &functions {
             match self.compile_function(func) {
                 Ok(()) => {}
-                Err(e) => {
-                    // Log the error but continue - we'll create a stub for this function
-                    eprintln!("[WARNING] Function '{}' compilation failed: {}", func.name, e);
+                Err(_e) => {
                     failed_functions.push(func);
                     // IMPORTANT: Clear context to prevent state from leaking to next function
                     self.module.clear_context(&mut self.ctx);

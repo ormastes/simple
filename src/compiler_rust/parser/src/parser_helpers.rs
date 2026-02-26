@@ -317,7 +317,19 @@ impl<'a> Parser<'a> {
                 is_type
             }
             // These tokens definitively start types
-            TokenKind::LBracket | TokenKind::Fn | TokenKind::Mut | TokenKind::Dyn | TokenKind::Ampersand => {
+            TokenKind::LBracket => {
+                // `[` could be array type `[T]` or empty array literal `[]`
+                // Peek at what follows: if `]` immediately, it's an empty array expression
+                self.advance();
+                let is_empty_array = matches!(self.current.kind, TokenKind::RBracket);
+                // Restore: push both consumed tokens back
+                self.pending_tokens.push_front(self.current.clone());
+                self.pending_tokens.push_front(first_token);
+                self.current = saved_current;
+                self.previous = saved_previous;
+                !is_empty_array // `[]` = expression, `[T]` = type
+            }
+            TokenKind::Fn | TokenKind::Mut | TokenKind::Dyn | TokenKind::Ampersand => {
                 // Restore: push the consumed token back
                 self.pending_tokens.push_front(first_token);
                 self.current = saved_current;

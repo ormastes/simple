@@ -572,13 +572,6 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Create a call to the builtin function
-                if name.contains("enum") {
-                    eprintln!(
-                        "[MIR-BUILTIN] lowering BuiltinCall: name={}, args={}",
-                        name,
-                        arg_regs.len()
-                    );
-                }
                 let target = CallTarget::from_name(name);
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
