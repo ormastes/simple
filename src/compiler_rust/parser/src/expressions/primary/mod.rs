@@ -97,7 +97,32 @@ impl<'a> Parser<'a> {
             | TokenKind::Struct
             | TokenKind::Enum
             | TokenKind::Class
-            | TokenKind::Trait => self.parse_primary_identifier(),
+            | TokenKind::Trait
+            | TokenKind::Xor
+            | TokenKind::Or
+            | TokenKind::And
+            | TokenKind::Not
+            | TokenKind::In
+            | TokenKind::Is
+            | TokenKind::Continue
+            | TokenKind::Break
+            | TokenKind::Return
+            | TokenKind::Union
+            // Additional keywords usable as identifiers in expression position
+            | TokenKind::By
+            | TokenKind::Onto
+            | TokenKind::Mod
+            | TokenKind::Where
+            | TokenKind::Import
+            | TokenKind::Auto
+            | TokenKind::Requires
+            | TokenKind::Export
+            | TokenKind::Use
+            | TokenKind::With
+            | TokenKind::On
+            | TokenKind::Into
+            | TokenKind::Bind
+            | TokenKind::Unwrap => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
             // fn(): lambda syntax (alias for \:) - only in expression context
             // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions
@@ -107,18 +132,25 @@ impl<'a> Parser<'a> {
                 // Peek at next token to see if it's immediately LParen
                 let next = self.peek_next();
 
-                // Only treat as lambda if IMMEDIATELY followed by (
-                // This distinguishes fn(): from fn name():
                 if matches!(next.kind, TokenKind::LParen) {
-                    // Check that current and next tokens are adjacent (no whitespace/identifier between)
-                    // In Simple, fn( is lambda, but fn foo( is function definition
-                    self.parse_primary_lambda()
-                } else {
+                    // fn( could be lambda `fn(params): body` or call to variable named `fn`
+                    // Disambiguate by scanning to matching ) and checking for : or ->
+                    if self.peek_fn_is_lambda() {
+                        self.parse_primary_lambda()
+                    } else {
+                        // Treat fn as identifier — postfix parser handles the (args) call
+                        self.parse_primary_identifier()
+                    }
+                } else if matches!(next.kind, TokenKind::Identifier { .. }) {
+                    // fn followed by identifier = function definition (not allowed in expression position)
                     return Err(ParseError::unexpected_token(
                         "expression",
                         "fn (function definitions are not expressions - use fn(): for lambdas)",
                         self.current.span,
                     ));
+                } else {
+                    // fn used as variable name: {"fn": fn}, fn.call(), etc.
+                    self.parse_primary_identifier()
                 }
             }
             TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => self.parse_primary_collection(),
@@ -157,16 +189,42 @@ impl<'a> Parser<'a> {
                     self.parse_primary_identifier()
                 }
             }
-            // `match` can be used as a variable name (e.g., `for match in matches: match.0`)
-            // If followed by `.` or `=`, treat as identifier
-            TokenKind::Match if self.peek_is(&TokenKind::Dot) || self.peek_is(&TokenKind::Assign) => self.parse_primary_identifier(),
+            // `match` can be used as a variable name (e.g., `var match = true; if match:`)
+            // Treat as identifier when followed by `.`, `=`, `:`, `)`, `,`, boolean ops, or comparisons.
+            // Only treat as match expression when followed by a subject expression (identifier, literal, etc.)
+            TokenKind::Match if self.peek_is(&TokenKind::Dot)
+                || self.peek_is(&TokenKind::Assign)
+                || self.peek_is(&TokenKind::Colon)
+                || self.peek_is(&TokenKind::RParen)
+                || self.peek_is(&TokenKind::RBracket)
+                || self.peek_is(&TokenKind::RBrace)
+                || self.peek_is(&TokenKind::Comma)
+                || self.peek_is(&TokenKind::And)
+                || self.peek_is(&TokenKind::Or)
+                || self.peek_is(&TokenKind::Eq)
+                || self.peek_is(&TokenKind::NotEq)
+                || self.peek_is(&TokenKind::Newline)
+                || self.peek_is(&TokenKind::Eof) => self.parse_primary_identifier(),
+            // pass in expression position = unit/no-op
+            TokenKind::Pass => {
+                self.advance();
+                Ok(Expr::Tuple(vec![]))
+            }
+            // var in expression position: treat as identifier
+            TokenKind::Var => self.parse_primary_identifier(),
+            // Mock as identifier in expression position
+            TokenKind::Mock => self.parse_primary_identifier(),
             TokenKind::Spawn
             | TokenKind::Go
             | TokenKind::If
             | TokenKind::Elif
             | TokenKind::Match
             | TokenKind::Dollar => self.parse_primary_control(),
-            TokenKind::Grid | TokenKind::Tensor => self.parse_primary_math(),
+            TokenKind::Grid => self.parse_primary_math(),
+            // Tensor is context-sensitive: if followed by an identifier (tensor literal: `tensor K: Float [...]`),
+            // parse as math. Otherwise treat as a regular identifier (variable named `tensor`).
+            TokenKind::Tensor if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) => self.parse_primary_math(),
+            TokenKind::Tensor => self.parse_primary_identifier(),
             TokenKind::At => {
                 // FFI call prefix: @rt_function_name
                 // No ambiguity: decorators only appear before declarations, not in expressions

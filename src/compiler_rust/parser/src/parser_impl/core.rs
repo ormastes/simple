@@ -369,13 +369,43 @@ impl<'a> Parser<'a> {
         // If followed by `.` or `=`, treat as an expression/identifier.
         let is_match_stmt = matches!(&self.current.kind, TokenKind::Match)
             && !self.peek_is(&TokenKind::Dot)
-            && !self.peek_is(&TokenKind::Assign);
+            && !self.peek_is(&TokenKind::Assign)
+            && !self.peek_is(&TokenKind::Colon)
+            && !self.peek_is(&TokenKind::And)
+            && !self.peek_is(&TokenKind::Or)
+            && !self.peek_is(&TokenKind::Eq)
+            && !self.peek_is(&TokenKind::NotEq)
+            && !self.peek_is(&TokenKind::RParen)
+            && !self.peek_is(&TokenKind::Comma)
+            && !self.peek_is(&TokenKind::Newline)
+            && !self.peek_is(&TokenKind::Eof);
+        // Allow 'continue', 'break', 'return' as variable names at statement level
+        // e.g., `continue = false`, `break.field`
+        let is_continue_as_ident = matches!(&self.current.kind, TokenKind::Continue)
+            && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
+        let is_break_as_ident = matches!(&self.current.kind, TokenKind::Break)
+            && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
+        let is_return_as_ident = matches!(&self.current.kind, TokenKind::Return)
+            && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
 
         match &self.current.kind {
             TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
             TokenKind::At => self.parse_decorated_function_with_doc(doc_comment),
             TokenKind::Fn => {
-                self.parse_function_with_doc(doc_comment)
+                // Disambiguate: fn name(...) is function definition,
+                // fn(...) is lambda or function call (expression statement)
+                let next = self.peek_next();
+                if matches!(next.kind, TokenKind::LParen) {
+                    // fn( — could be lambda or call to variable named 'fn'
+                    // Treat as expression statement (parse_primary handles fn( disambiguation)
+                    self.parse_expression_or_assignment()
+                } else if matches!(next.kind, TokenKind::Identifier { .. }) {
+                    // fn name — function definition
+                    self.parse_function_with_doc(doc_comment)
+                } else {
+                    // fn followed by something else — try as function definition first
+                    self.parse_function_with_doc(doc_comment)
+                }
             }
             TokenKind::Kernel | TokenKind::Gen if is_gen_or_kernel_decl => {
                 self.parse_function_with_doc(doc_comment)
@@ -505,12 +535,19 @@ impl<'a> Parser<'a> {
             TokenKind::Import => self.parse_import(), // alias for use
             TokenKind::From => {
                 // Disambiguate: 'from module import ...' vs 'from' as identifier
-                // Check if followed by an identifier (module name) - if so, it's an import
+                // Only route to parse_from_import when followed by a valid module name.
+                // NOTE: Do NOT include String/FString here — that would catch
+                // `import X from "path"` where `from` appears after the import target.
                 let next = self.peek_next();
-                if matches!(next.kind, TokenKind::Identifier { .. }) {
+                if matches!(next.kind,
+                    TokenKind::Identifier { .. }
+                    | TokenKind::Match  // used as module name in lz77/match.spl
+                    | TokenKind::Mod    // used as module name in failsafe/__init__.spl
+                    | TokenKind::Dot    // from .module import (relative import)
+                ) {
                     self.parse_from_import() // Python-style: from module import {...}
                 } else {
-                    // Not followed by identifier - treat 'from' as expression
+                    // Not followed by module name - treat 'from' as expression
                     self.parse_expression_or_assignment()
                 }
             }
@@ -544,6 +581,9 @@ impl<'a> Parser<'a> {
             TokenKind::While => self.parse_while(),
             TokenKind::WhileSuspend => self.parse_while_suspend(),
             TokenKind::Loop => self.parse_loop(),
+            TokenKind::Return if is_return_as_ident => self.parse_expression_or_assignment(),
+            TokenKind::Break if is_break_as_ident => self.parse_expression_or_assignment(),
+            TokenKind::Continue if is_continue_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Return => self.parse_return(),
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
@@ -721,6 +761,16 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(&TokenKind::Indent)?;
+
+        // Handle empty block: Indent immediately followed by Dedent
+        if self.check(&TokenKind::Dedent) {
+            let span = self.current.span;
+            self.advance(); // consume Dedent
+            return Ok(Block {
+                span,
+                statements: vec![],
+            });
+        }
 
         self.parse_block_body()
     }

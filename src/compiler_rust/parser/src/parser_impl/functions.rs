@@ -516,6 +516,11 @@ impl<'a> Parser<'a> {
                     while self.check(&TokenKind::Newline) {
                         self.advance();
                     }
+                    // Skip Indent if the decorated item is on a deeper indentation level
+                    // e.g., @section("...") followed by indented val/const
+                    if self.check(&TokenKind::Indent) {
+                        self.advance();
+                    }
                     continue;
                 }
 
@@ -531,6 +536,9 @@ impl<'a> Parser<'a> {
                     while self.check(&TokenKind::Newline) {
                         self.advance();
                     }
+                    if self.check(&TokenKind::Indent) {
+                        self.advance();
+                    }
                     continue;
                 }
             }
@@ -540,6 +548,11 @@ impl<'a> Parser<'a> {
 
             // Skip newlines between decorators
             while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            // Skip Indent if the decorated item is on a deeper indentation level
+            // Handles: @decorator\n    val/fn/class on indented line
+            if self.check(&TokenKind::Indent) {
                 self.advance();
             }
         }
@@ -594,6 +607,39 @@ impl<'a> Parser<'a> {
 
         if self.check(&TokenKind::Enum) {
             return self.parse_enum();
+        }
+
+        if self.check(&TokenKind::Impl) {
+            return self.parse_impl();
+        }
+
+        // Handle decorated non-function items:
+        // @cfg(...) export ..., @cfg(...) use ..., @cfg(...) var ..., etc.
+        // @section("...") val ..., @align(N) val ..., @cfg(...) const ..., etc.
+        // Skip the decorators (they're metadata for the compiler) and parse the item
+        if self.check(&TokenKind::Export)
+            || self.check(&TokenKind::Use)
+            || self.check(&TokenKind::Var)
+            || self.check(&TokenKind::Val)
+            || self.check(&TokenKind::Mod)
+            || self.check(&TokenKind::Trait)
+            || self.check(&TokenKind::Union)
+            || self.check(&TokenKind::Mixin)
+            || self.check(&TokenKind::Const)
+            || self.check(&TokenKind::Static)
+            || self.check(&TokenKind::Type)
+            || self.check(&TokenKind::From)
+            || self.check(&TokenKind::Import)
+        {
+            // Decorators like @cfg don't apply to these items in our compilation model,
+            // so we just parse the item normally
+            return self.parse_item();
+        }
+
+        // Handle decorator followed by empty block (e.g., @decorator \n Dedent)
+        // This can happen in stub files or conditional compilation
+        if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+            return Ok(Node::Pass(crate::ast::PassStmt { span: self.current.span }));
         }
 
         // Now parse the function with the collected decorators and effects

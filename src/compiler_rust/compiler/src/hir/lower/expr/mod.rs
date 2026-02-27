@@ -510,18 +510,18 @@ impl Lowerer {
                 });
             }
 
-            if self.lenient_types {
+            // Static method reference — produce Global("ClassName.method")
+            {
+                let qualified = format!("{}.{}", class_name, method_name);
+                let ty = self.method_return_types
+                    .get(&qualified)
+                    .copied()
+                    .unwrap_or(TypeId::ANY);
                 return Ok(HirExpr {
-                    kind: HirExprKind::Global(format!("{}.{}", class_name, method_name)),
-                    ty: TypeId::ANY,
+                    kind: HirExprKind::Global(qualified),
+                    ty,
                 });
             }
-
-            // Other static methods not yet supported
-            return Err(LowerError::StaticMethodNotSupported {
-                class_name: class_name.clone(),
-                method_name: method_name.clone(),
-            });
         }
 
         if self.lenient_types {

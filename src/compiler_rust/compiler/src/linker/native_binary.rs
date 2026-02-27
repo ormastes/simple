@@ -391,13 +391,52 @@ impl NativeBinaryBuilder {
     /// Build the native binary.
     pub fn build(self) -> LinkerResult<NativeBinaryResult> {
         // Create temporary directory for intermediate files
-        let temp_dir =
-            tempfile::tempdir().map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
+        let temp_dir = tempfile::tempdir()
+            .map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
+        let (temp_path, _temp_guard) = if std::env::var("SIMPLE_KEEP_TEMP").is_ok() {
+            let path = temp_dir.into_path();
+            eprintln!("SIMPLE_KEEP_TEMP=1: keeping temp objects in {}", path.display());
+            (path, None)
+        } else {
+            (temp_dir.path().to_path_buf(), Some(temp_dir))
+        };
 
         // Write object file
-        let obj_path = temp_dir.path().join("main.o");
+        let obj_path = temp_path.join("main.o");
         std::fs::write(&obj_path, &self.object_code)
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write object file: {}", e)))?;
+
+        // Bootstrap helper: emit a tiny C stub that calls spl_main so we don't rely
+        // on the Simple-generated symbol being named `main`.
+        let mut bootstrap_stub: Option<PathBuf> = None;
+        if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+            let stub_c = temp_path.join("_bootstrap_main.c");
+            let stub_o = temp_path.join("_bootstrap_main.o");
+            std::fs::write(
+                &stub_c,
+                r#"
+extern int spl_main(void);
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+    int r = spl_main ? spl_main() : 0;
+    return r;
+}
+"#,
+            )
+            .map_err(|e| LinkerError::LinkFailed(format!("failed to write stub: {}", e)))?;
+            let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+            let status = std::process::Command::new(&cc)
+                .args(["-c", "-o"])
+                .arg(&stub_o)
+                .arg(&stub_c)
+                .status()
+                .map_err(|e| LinkerError::LinkFailed(format!("failed to compile stub: {}", e)))?;
+            if status.success() {
+                bootstrap_stub = Some(stub_o);
+            } else {
+                eprintln!("warning: failed to build bootstrap main stub with {} (status {})", cc, status);
+            }
+        }
 
         // Debug: Print symbols in object file
         if self.options.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok() {
@@ -417,7 +456,7 @@ impl NativeBinaryBuilder {
 
         // Apply layout optimization if enabled
         let _ordering_file = if self.options.layout_optimize {
-            self.generate_ordering_file(temp_dir.path())?
+            self.generate_ordering_file(&temp_path)?
         } else {
             None
         };
@@ -434,6 +473,12 @@ impl NativeBinaryBuilder {
 
         // Add user object file
         builder = builder.object(&obj_path);
+        if let Some(stub) = bootstrap_stub {
+            builder = builder.object(&stub);
+            // Allow unresolved runtime symbols during bootstrap; the runtime
+            // library doesn't provide every rt_* stub used by optional features.
+            builder = builder.flag("--unresolved-symbols=ignore-all");
+        }
 
         // Add Simple runtime and compiler static libraries directly (not via -l)
         // This ensures static linking even when shared library exists

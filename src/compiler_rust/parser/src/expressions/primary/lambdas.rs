@@ -94,10 +94,38 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Pipe => {
                 // Lambda: |x| body or |x, y| body (Ruby/Rust style)
+                // Also supports brace block: |x| { stmt; stmt; expr }
                 self.advance();
                 let params = self.parse_pipe_lambda_params()?;
                 self.expect(&TokenKind::Pipe)?;
-                let body = self.parse_expression()?;
+
+                // Check for brace-delimited block body: |x| { ... }
+                let body = if self.check(&TokenKind::LBrace) && self.peek_brace_is_lambda_block() {
+                    self.advance(); // consume {
+                    // Skip newlines/indents inside brace block
+                    while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                        self.advance();
+                    }
+                    let mut statements = Vec::new();
+                    while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+                        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                            self.advance();
+                        }
+                        if self.check(&TokenKind::RBrace) || self.check(&TokenKind::Eof) {
+                            break;
+                        }
+                        let stmt = self.parse_item()?;
+                        statements.push(stmt);
+                        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                            self.advance();
+                        }
+                    }
+                    self.expect(&TokenKind::RBrace)?;
+                    Expr::DoBlock(statements)
+                } else {
+                    self.parse_expression()?
+                };
+
                 Ok(Expr::Lambda {
                     params,
                     body: Box::new(body),

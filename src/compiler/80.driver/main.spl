@@ -54,9 +54,13 @@ struct CliArgs:
         )
 
 fn CliArgs__default() -> CliArgs:
-    # Explicit construction to avoid bootstrap codegen eliding struct returns
+    # Explicit construction to avoid bootstrap codegen eliding struct returns.
+    # Use from_text instead of enum literal to avoid reliance on global enum
+    # constants, which currently miscompile in the bootstrap pipeline.
+    val default_mode = CompileMode__from_text("interpret").unwrap()
+
     var args = CliArgs(
-        mode: CompileMode.Interpret,
+        mode: default_mode,
         input_files: [],
         output_file: nil,
         optimize: false,
@@ -343,24 +347,27 @@ fn print_error_list(prefix: text, errors: [text]):
         print "  {errors[i]}"
         i = i + 1
 
+# Wrapper to force a concrete symbol in the entry module; used by main().
+fn run_compile_entry(opts: CompileOptions) -> CompileResult:
+    val drv = CompilerDriver__create(opts)
+    CompilerDriver__run_compile(drv)
+
 fn main() -> i32:
-    val args = sys_get_args()
+    # Allow overriding CLI args via env to avoid bootstrap crashes in new compiler builds.
+    # When SIMPLE_FORCE_ARGS is set, we skip sys_get_args() and use the provided list.
+    val forced = rt_env_get("SIMPLE_FORCE_ARGS")
+    val args = if forced == nil or forced == "":
+        sys_get_args()
+    else:
+        forced.split(" ")
+    print "[boot] args.len={args.len()} first={if args.len() > 0: args[0] else: \"(none)\"}"
     var idx = 1
-    var cli_args = CliArgs(
-        mode: CompileMode.Interpret,
-        input_files: [],
-        output_file: nil,
-        optimize: false,
-        debug_info: true,
-        verbose: false,
-        log_level: 4,
-        profile: "dev",
-        help: false,
-        version: false
-    )
+    var cli_args = CliArgs__default()
 
     while idx < args.len():
+        print "[boot] loop idx={idx} len={args.len()}"
         val arg = args[idx]
+        print "[boot] arg={arg}"
         idx = idx + 1
 
         # Ignore legacy "compile" subcommand
@@ -374,15 +381,15 @@ fn main() -> i32:
             print_version()
             return 0
         elif arg == "-c" or arg == "--aot" or arg == "--compile" or arg == "--native":
-            cli_args.mode = CompileMode.Aot
+            cli_args.mode = CompileMode__from_text("aot").unwrap()
         elif arg == "-i" or arg == "--interpret":
-            cli_args.mode = CompileMode.Interpret
+            cli_args.mode = CompileMode__from_text("interpret").unwrap()
         elif arg == "-j" or arg == "--jit":
-            cli_args.mode = CompileMode.Jit
+            cli_args.mode = CompileMode__from_text("jit").unwrap()
         elif arg == "-k" or arg == "--check":
-            cli_args.mode = CompileMode.Check
+            cli_args.mode = CompileMode__from_text("check").unwrap()
         elif arg == "-s" or arg == "--sdn":
-            cli_args.mode = CompileMode.Sdn
+            cli_args.mode = CompileMode__from_text("sdn").unwrap()
         elif arg == "-O" or arg == "--optimize":
             cli_args.optimize = true
         elif arg == "-g" or arg == "--debug":
@@ -436,6 +443,7 @@ fn main() -> i32:
         print ""
         print_help()
         return 1
+    print "[boot] parsed args ok; files={cli_args.input_files.len()} optimize={cli_args.optimize}"
 
     # Build compile options from CLI args
     var options = CompileOptions__default()
@@ -448,9 +456,7 @@ fn main() -> i32:
     options.verbose = cli_args.verbose
     options.log_level = cli_args.log_level
     options.profile = cli_args.profile
-
-    val driver = CompilerDriver__create(options)
-    val result = driver.compile()
+    val result = run_compile_entry(options)
 
     match result:
         case CompileResult.Success(_):

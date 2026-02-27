@@ -18,27 +18,23 @@ fn test_parser_available() {
 }
 
 // === Question Mark in Identifiers Tests ===
-// Design Decision: `?` is NOT allowed in method names (unlike Ruby)
-// The `?` character is reserved for:
+// `?` IS allowed as a suffix in function/method names (e.g., fn iter_empty?())
+// This supports the Simple language convention used in iterator and other modules.
+// The `?` character is also used for:
 // - Try operator: `result?` (error propagation)
 // - Optional types: `T?` (sugar for Option<T>)
 // - Future: Optional chaining `?.` and nullish coalescing `??`
-//
-// Use `is_*` prefix for predicates instead: is_empty(), is_valid(), is_some()
 
 #[test]
-fn test_question_mark_not_allowed_in_function_name() {
-    // Function names cannot contain `?` - this should fail to parse
-    // The `?` is tokenized separately from the identifier
+fn test_question_mark_allowed_in_function_name() {
+    // Function names CAN have a trailing `?` (e.g., fn is_valid?())
     let result = parse("fn is_valid?() -> bool:\n    return true\n");
-    // The parser will see `is_valid` as identifier, then `?` as a separate token
-    // This will cause a parse error because `?` is not valid after function name
-    assert!(result.is_err(), "Function names with ? should not parse");
+    assert!(result.is_ok(), "Function names with ? should parse");
 }
 
 #[test]
-fn test_question_mark_not_allowed_in_method_name() {
-    // Method names cannot contain `?`
+fn test_question_mark_allowed_in_method_name() {
+    // Method names CAN have a trailing `?`
     let result = parse(
         r#"
 impl Foo:
@@ -46,7 +42,7 @@ impl Foo:
         return true
 "#,
     );
-    assert!(result.is_err(), "Method names with ? should not parse");
+    assert!(result.is_ok(), "Method names with ? should parse");
 }
 
 #[test]
@@ -90,4 +86,59 @@ impl MyStruct:
 "#,
     );
     assert!(result.is_ok(), "is_* prefix predicates should parse correctly");
+}
+
+#[test]
+fn test_lambda_brace_block_with_if() {
+    let code = "fn test():\n    \\data: {\n        if true:\n            1\n        else:\n            2\n    }\n";
+    let result = parse(code);
+    if let Err(ref e) = result {
+        eprintln!("Parse error: {}", e);
+    }
+    assert!(result.is_ok(), "Lambda brace block with if/else should parse");
+}
+
+#[test]
+fn test_lambda_brace_block_simple() {
+    // Just a brace block with a simple expression — this falls to inline expression path
+    // because peek_brace_is_lambda_block only matches statement keywords, which is correct.
+    // The { 42 } is parsed as a dict/expression, not a block.
+    let code = "fn test():\n    \\data: {\n        var x = 42\n        x\n    }\n";
+    let result = parse(code);
+    if let Err(ref e) = result {
+        eprintln!("Simple brace block parse error: {}", e);
+    }
+    assert!(result.is_ok(), "Simple lambda brace block should parse: {:?}", result.err());
+}
+
+#[test]
+fn test_lambda_brace_block_with_var() {
+    // Brace block with var statement
+    let code = "fn test():\n    \\data: {\n        var x = 1\n        x\n    }\n";
+    let result = parse(code);
+    if let Err(ref e) = result {
+        eprintln!("Var brace block parse error: {}", e);
+    }
+    assert!(result.is_ok(), "Lambda brace block with var should parse: {:?}", result.err());
+}
+
+#[test]
+fn test_lambda_brace_block_with_for() {
+    let code = "fn test():\n    \\data: {\n        for item in data:\n            print(item)\n        data\n    }\n";
+    let result = parse(code);
+    if let Err(ref e) = result {
+        eprintln!("For brace block parse error: {}", e);
+    }
+    assert!(result.is_ok(), "Lambda brace block with for should parse: {:?}", result.err());
+}
+
+#[test]
+fn test_lambda_brace_block_comment_then_expr() {
+    // Brace block where first significant token is an identifier (function call, not dict key)
+    let code = "fn test():\n    \\data: {\n        inspect_fn(data)\n        data\n    }\n";
+    let result = parse(code);
+    if let Err(ref e) = result {
+        eprintln!("Comment+expr brace block parse error: {}", e);
+    }
+    assert!(result.is_ok(), "Lambda brace block with function call should parse: {:?}", result.err());
 }

@@ -83,7 +83,20 @@ impl<'a> super::Lexer<'a> {
                                     TokenKind::Integer(n)
                                 }
                             }
-                            Err(_) => TokenKind::Error(format!("Invalid hex number: {}", num_str)),
+                            Err(_) => {
+                                // Try u64 for large hex values (bit patterns, masks)
+                                match u64::from_str_radix(&num_str[2..], 16) {
+                                    Ok(n) => {
+                                        let val = n as i64;
+                                        if let Some(suffix) = self.scan_numeric_suffix() {
+                                            TokenKind::TypedInteger(val, suffix)
+                                        } else {
+                                            TokenKind::Integer(val)
+                                        }
+                                    }
+                                    Err(_) => TokenKind::Error(format!("Invalid hex number: {}", num_str)),
+                                }
+                            }
                         };
                     }
                     'o' | 'O' => {
@@ -206,7 +219,20 @@ impl<'a> super::Lexer<'a> {
                         TokenKind::Integer(n)
                     }
                 }
-                Err(_) => TokenKind::Error(format!("Invalid integer: {}", num_str)),
+                Err(_) => {
+                    // Try u64 for values just above i64::MAX (e.g., 9223372036854775808)
+                    match num_str.parse::<u64>() {
+                        Ok(n) => {
+                            let val = n as i64;
+                            if let Some(s) = suffix {
+                                TokenKind::TypedInteger(val, s)
+                            } else {
+                                TokenKind::Integer(val)
+                            }
+                        }
+                        Err(_) => TokenKind::Error(format!("Invalid integer: {}", num_str)),
+                    }
+                }
             }
         }
     }

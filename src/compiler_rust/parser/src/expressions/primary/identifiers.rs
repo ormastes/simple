@@ -102,6 +102,41 @@ impl<'a> Parser<'a> {
             TokenKind::Class => self.parse_keyword_identifier("class"),
             TokenKind::Fn => self.parse_keyword_identifier("fn"),
             TokenKind::Trait => self.parse_keyword_identifier("trait"),
+            // Allow operator keywords as identifiers (e.g., xor(a, b), or(a, b) function calls)
+            TokenKind::Xor => self.parse_keyword_identifier("xor"),
+            TokenKind::Or => self.parse_keyword_identifier("or"),
+            TokenKind::And => self.parse_keyword_identifier("and"),
+            TokenKind::Not => self.parse_keyword_identifier("not"),
+            TokenKind::In => self.parse_keyword_identifier("in"),
+            TokenKind::Is => self.parse_keyword_identifier("is"),
+            // Allow 'tensor' and 'union' as identifiers
+            TokenKind::Tensor => self.parse_keyword_identifier("tensor"),
+            TokenKind::Union => self.parse_keyword_identifier("union"),
+            // Allow control flow keywords as identifiers in expression contexts
+            // Simple uses these as variable names (e.g., `var continue = true; while continue:`)
+            TokenKind::Continue => self.parse_keyword_identifier("continue"),
+            TokenKind::Break => self.parse_keyword_identifier("break"),
+            TokenKind::Return => self.parse_keyword_identifier("return"),
+            // Allow 'var' as identifier in expression contexts (e.g., match arm with var binding)
+            TokenKind::Var => self.parse_keyword_identifier("var"),
+            // Allow 'mock' as identifier in expression contexts
+            TokenKind::Mock => self.parse_keyword_identifier("mock"),
+            // Additional keywords usable as identifiers in expression contexts
+            // (parameter names, variable names, function calls)
+            TokenKind::By => self.parse_keyword_identifier("by"),
+            TokenKind::Onto => self.parse_keyword_identifier("onto"),
+            TokenKind::Mod => self.parse_keyword_identifier("mod"),
+            TokenKind::Where => self.parse_keyword_identifier("where"),
+            TokenKind::Import => self.parse_keyword_identifier("import"),
+            TokenKind::Auto => self.parse_keyword_identifier("auto"),
+            TokenKind::Requires => self.parse_keyword_identifier("requires"),
+            TokenKind::Export => self.parse_keyword_identifier("export"),
+            TokenKind::Use => self.parse_keyword_identifier("use"),
+            TokenKind::With => self.parse_keyword_identifier("with"),
+            TokenKind::On => self.parse_keyword_identifier("on"),
+            TokenKind::Into => self.parse_keyword_identifier("into"),
+            TokenKind::Bind => self.parse_keyword_identifier("bind"),
+            TokenKind::Unwrap => self.parse_keyword_identifier("unwrap"),
             // 'me' is the mutable-self keyword; treat it like 'self' in expression context
             // so that `me.field` and `me.method()` work.
             TokenKind::Me => {
@@ -141,11 +176,56 @@ impl<'a> Parser<'a> {
             let mut segments = vec![name];
             while self.check(&TokenKind::DoubleColon) {
                 self.advance(); // consume '::'
-                                // Use expect_method_name to allow keywords like 'new', 'type', etc.
+
+                // Handle turbofish syntax: name::<T>() — skip generic args
+                // Emit deprecation warning but parse successfully
+                if self.check(&TokenKind::Lt) {
+                    let turbo_span = self.current.span;
+                    let warning = ErrorHint {
+                        level: ErrorHintLevel::Warning,
+                        message: "Deprecated: turbofish ::<T> syntax".to_string(),
+                        span: turbo_span,
+                        suggestion: Some("Generic type arguments are inferred automatically".to_string()),
+                        help: Some("Remove ::<T> — the compiler infers type parameters".to_string()),
+                    };
+                    self.error_hints.push(warning);
+
+                    // Skip generic args: consume < ... > with nesting support
+                    self.advance(); // consume '<'
+                    let mut depth = 1u32;
+                    while depth > 0 && !self.is_at_end() {
+                        if self.check(&TokenKind::Lt) {
+                            depth += 1;
+                        } else if self.check(&TokenKind::Gt) {
+                            depth -= 1;
+                            if depth == 0 {
+                                self.advance(); // consume final '>'
+                                break;
+                            }
+                        } else if self.check(&TokenKind::ShiftRight) {
+                            // >> counts as two > closings
+                            if depth <= 2 {
+                                depth = 0;
+                                self.advance(); // consume '>>'
+                                break;
+                            }
+                            depth -= 2;
+                        }
+                        self.advance();
+                    }
+                    break; // Done with path after turbofish
+                }
+
+                // Use expect_method_name to allow keywords like 'new', 'type', etc.
                 let segment = self.expect_method_name()?;
                 segments.push(segment);
             }
-            Ok(Expr::Path(segments))
+            // If only one segment, return as Identifier instead of Path
+            if segments.len() == 1 {
+                Ok(Expr::Identifier(segments.into_iter().next().unwrap()))
+            } else {
+                Ok(Expr::Path(segments))
+            }
         // Check for struct initialization: Name { field: value, ... }
         // Allow both uppercase (Point { x: 1 }) and lowercase (text { data: ptr }) names
         // Disambiguate from dict literals by checking if `{ identifier :` pattern follows

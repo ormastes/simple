@@ -181,6 +181,136 @@ impl<'a> Parser<'a> {
         is_struct
     }
 
+    /// Check if `{` after lambda colon starts a block body (not a dict literal).
+    /// Peeks past `{` + whitespace to see if the first token is a statement keyword.
+    ///
+    /// This function saves and restores the full lexer state so that no stale tokens
+    /// end up in pending_tokens. This is critical because tokens generated during the
+    /// peek have Newline/Indent/Dedent suppressed (bracket_depth > 0), and those stale
+    /// tokens would interfere with forced indentation during actual parsing.
+    pub(crate) fn peek_brace_is_lambda_block(&mut self) -> bool {
+        if !self.check(&TokenKind::LBrace) {
+            return false;
+        }
+        // Save full state: parser tokens + entire lexer (via Clone)
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+        let saved_lexer = self.lexer.clone();
+
+        // Advance past {
+        self.advance();
+
+        // Skip whitespace tokens
+        let max_lookahead = 10;
+        let mut count = 0;
+        while count < max_lookahead {
+            match &self.current.kind {
+                TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent => {
+                    self.advance();
+                    count += 1;
+                }
+                _ => break,
+            }
+        }
+
+        // Check if first significant token indicates a block (not a dict literal).
+        // Statement keywords always indicate a block.
+        // An identifier NOT followed by `:` also indicates a block (expression statement),
+        // because dict literals have the form `{ key: value, ... }`.
+        let is_block = if matches!(
+            self.current.kind,
+            TokenKind::Var | TokenKind::Val | TokenKind::For | TokenKind::While
+            | TokenKind::If | TokenKind::Loop | TokenKind::Return | TokenKind::Break
+            | TokenKind::Continue | TokenKind::Match | TokenKind::Fn | TokenKind::Let
+            | TokenKind::Mut
+        ) {
+            true
+        } else if matches!(self.current.kind, TokenKind::Identifier { .. }) {
+            // Peek one more token: `{ ident: value }` is dict, `{ ident(...) }` is block
+            self.advance();
+            !matches!(self.current.kind, TokenKind::Colon)
+        } else {
+            false
+        };
+
+        // Restore full state — no tokens added to pending_tokens
+        self.current = saved_current;
+        self.previous = saved_previous;
+        self.lexer = saved_lexer;
+
+        is_block
+    }
+
+    /// Check if `fn(` starts a lambda definition or a function call.
+    /// Scans forward to find the matching `)` and checks if `:` or `->` follows.
+    /// Returns true if it looks like a lambda: `fn(params): body` or `fn(params) -> RetType: body`
+    /// Returns false if it looks like a call: `fn(args)` followed by anything else.
+    pub(crate) fn peek_fn_is_lambda(&mut self) -> bool {
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+        let mut consumed = Vec::new();
+
+        // Advance past 'fn'
+        self.advance();
+        consumed.push(self.current.clone());
+
+        // Advance past '('
+        if !self.check(&TokenKind::LParen) {
+            // Not fn( — restore and return false
+            for token in consumed.into_iter().rev() {
+                self.pending_tokens.push_front(token);
+            }
+            self.current = saved_current;
+            self.previous = saved_previous;
+            return false;
+        }
+        self.advance();
+        consumed.push(self.current.clone());
+
+        // Scan to matching ')' counting paren depth
+        let mut depth = 1;
+        let max_lookahead = 50; // safety limit
+        let mut count = 0;
+        while depth > 0 && count < max_lookahead {
+            match &self.current.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        // Found matching ')'. Check what follows.
+                        self.advance();
+                        consumed.push(self.current.clone());
+                        let is_lambda = matches!(
+                            self.current.kind,
+                            TokenKind::Colon | TokenKind::Arrow
+                        );
+
+                        // Restore state
+                        for token in consumed.into_iter().rev() {
+                            self.pending_tokens.push_front(token);
+                        }
+                        self.current = saved_current;
+                        self.previous = saved_previous;
+                        return is_lambda;
+                    }
+                }
+                TokenKind::Eof => break,
+                _ => {}
+            }
+            self.advance();
+            consumed.push(self.current.clone());
+            count += 1;
+        }
+
+        // Couldn't determine — assume lambda for safety
+        for token in consumed.into_iter().rev() {
+            self.pending_tokens.push_front(token);
+        }
+        self.current = saved_current;
+        self.previous = saved_previous;
+        true
+    }
+
     /// Peek through newlines to check if the next meaningful token matches.
     /// Used for multi-line method chaining:
     ///   - obj.method()\n.another()  (dot at same indentation level)
@@ -566,6 +696,42 @@ impl<'a> Parser<'a> {
             TokenKind::Class => "class".to_string(),
             TokenKind::Fn => "fn".to_string(),
             TokenKind::Trait => "trait".to_string(),
+            // Runtime/test keywords usable as identifiers
+            TokenKind::Spawn => "spawn".to_string(),
+            TokenKind::Nil => "nil".to_string(),
+            TokenKind::Mock => "mock".to_string(),
+            TokenKind::Continue => "continue".to_string(),
+            TokenKind::Break => "break".to_string(),
+            TokenKind::Return => "return".to_string(),
+            TokenKind::Xor => "xor".to_string(),
+            TokenKind::Union => "union".to_string(),
+            TokenKind::Onto => "onto".to_string(),
+            TokenKind::Auto => "auto".to_string(),
+            TokenKind::Tensor => "tensor".to_string(),
+            TokenKind::Grid => "grid".to_string(),
+            TokenKind::Match => "match".to_string(),
+            TokenKind::Or => "or".to_string(),
+            TokenKind::And => "and".to_string(),
+            TokenKind::Not => "not".to_string(),
+            TokenKind::In => "in".to_string(),
+            TokenKind::Is => "is".to_string(),
+            TokenKind::Requires => "requires".to_string(),
+            TokenKind::By => "by".to_string(),
+            TokenKind::If => "if".to_string(),
+            TokenKind::Else => "else".to_string(),
+            TokenKind::For => "for".to_string(),
+            TokenKind::While => "while".to_string(),
+            TokenKind::Pass => "pass".to_string(),
+            TokenKind::Var => "var".to_string(),
+            TokenKind::Val => "val".to_string(),
+            TokenKind::Where => "where".to_string(),
+            TokenKind::Self_ => "self".to_string(),
+            TokenKind::Import => "import".to_string(),
+            TokenKind::On => "on".to_string(),
+            TokenKind::With => "with".to_string(),
+            TokenKind::Use => "use".to_string(),
+            TokenKind::Bind => "bind".to_string(),
+            TokenKind::Unwrap => "unwrap".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -575,6 +741,12 @@ impl<'a> Parser<'a> {
             }
         };
         self.advance();
+        // Handle ?-suffix identifiers (e.g., iter_empty?, is_valid?)
+        // The ? is lexed as a separate Question token; append it to form the full name
+        if self.check(&TokenKind::Question) {
+            self.advance();
+            return Ok(format!("{}?", name));
+        }
         Ok(name)
     }
 
@@ -602,8 +774,13 @@ impl<'a> Parser<'a> {
 
         // First try regular identifier
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
-            let name = name.clone();
+            let mut name = name.clone();
             self.advance();
+            // Allow trailing ? suffix for predicate-style names (e.g., iter_empty?, iter_single?)
+            if self.check(&TokenKind::Question) {
+                name.push('?');
+                self.advance();
+            }
             return Ok(name);
         }
 
@@ -680,6 +857,9 @@ impl<'a> Parser<'a> {
             TokenKind::Macro => "macro",
             TokenKind::Mixin => "mixin",
             TokenKind::Actor => "actor",
+            TokenKind::Spawn => "spawn",
+            TokenKind::Nil => "nil",
+            TokenKind::Xor => "xor",
             TokenKind::Kernel => "kernel",
             TokenKind::Gen => "gen",
             TokenKind::Ghost => "ghost",
@@ -707,6 +887,16 @@ impl<'a> Parser<'a> {
             TokenKind::Enum => "enum",
             TokenKind::Class => "class",
             TokenKind::Trait => "trait",
+            TokenKind::Union => "union",
+            TokenKind::Auto => "auto",
+            TokenKind::Requires => "requires",
+            TokenKind::Fn => "fn",
+            TokenKind::Export => "export",
+            TokenKind::Pass => "pass",
+            TokenKind::New => "new",
+            TokenKind::Where => "where",
+            TokenKind::Self_ => "self",
+            TokenKind::Import => "import",
             _ => {
                 let ctx = parse_context!(format!("parsing path segment, previous tokens analyzed"));
                 return Err(ParseError::unexpected_token_with_context(
@@ -718,7 +908,13 @@ impl<'a> Parser<'a> {
             }
         };
         self.advance();
-        Ok(name.to_string())
+        // Allow trailing ? suffix for predicate-style names (e.g., empty?, single?)
+        let mut result = name.to_string();
+        if self.check(&TokenKind::Question) {
+            result.push('?');
+            self.advance();
+        }
+        Ok(result)
     }
 
     /// Expect an identifier or a keyword that can be used as a method/field name.
@@ -726,8 +922,13 @@ impl<'a> Parser<'a> {
     pub(crate) fn expect_method_name(&mut self) -> Result<String, ParseError> {
         // First try regular identifier
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
-            let name = name.clone();
+            let mut name = name.clone();
             self.advance();
+            // Allow trailing `?` as part of the name (e.g., fn iter_empty?())
+            if self.check(&TokenKind::Question) {
+                name.push('?');
+                self.advance();
+            }
             return Ok(name);
         }
 
@@ -858,6 +1059,19 @@ impl<'a> Parser<'a> {
             // Module system keywords as method names
             TokenKind::Export => "export",
             TokenKind::Use => "use",
+            // Allow 'spawn', 'nil', 'xor' as method/function names
+            TokenKind::Spawn => "spawn",
+            TokenKind::Nil => "nil",
+            TokenKind::Xor => "xor",
+            // Additional keywords as method/function names
+            TokenKind::Where => "where",
+            TokenKind::Auto => "auto",
+            TokenKind::Import => "import",
+            TokenKind::Mod => "mod",
+            TokenKind::Requires => "requires",
+            TokenKind::Self_ => "self",
+            TokenKind::Super => "super",
+            TokenKind::Pass => "pass",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
