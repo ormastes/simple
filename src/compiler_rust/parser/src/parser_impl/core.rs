@@ -387,6 +387,14 @@ impl<'a> Parser<'a> {
             && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
         let is_return_as_ident = matches!(&self.current.kind, TokenKind::Return)
             && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
+        // `common` keyword: only treat as `common use` when followed by `use`.
+        // Otherwise it's used as a variable name (e.g., `common.push(x)`).
+        let is_common_use = matches!(&self.current.kind, TokenKind::Common)
+            && self.peek_is(&TokenKind::Use);
+        // `mock` keyword: only treat as mock declaration when followed by identifier
+        // (mock Name implements Trait:). Otherwise treat as expression (mock.field, etc.)
+        let is_mock_decl = matches!(&self.current.kind, TokenKind::Mock)
+            && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
 
         match &self.current.kind {
             TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
@@ -477,9 +485,12 @@ impl<'a> Parser<'a> {
             // Low-level features - disambiguate keyword vs identifier usage
             TokenKind::Asm => {
                 // asm: "..." or asm match: ... -> inline assembly
+                // asm volatile: ... or asm volatile(...) -> volatile inline assembly
                 // asm = ... or asm.method() -> expression (variable named 'asm')
                 let next = self.peek_next();
-                if matches!(next.kind, TokenKind::Colon | TokenKind::Match) {
+                if matches!(next.kind, TokenKind::Colon | TokenKind::Match)
+                    || matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "volatile")
+                {
                     self.parse_asm()
                 } else {
                     self.parse_expression_or_assignment()
@@ -552,7 +563,8 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Mod => self.parse_mod(Visibility::Private, vec![]),
-            TokenKind::Common => self.parse_common_use(),
+            TokenKind::Common if is_common_use => self.parse_common_use(),
+            TokenKind::Common => self.parse_expression_or_assignment(),
             TokenKind::Export => self.parse_export_use(),
             TokenKind::StructuredExport => self.parse_structured_export(),
             TokenKind::Auto => self.parse_auto_import(),
@@ -571,7 +583,8 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Forbid | TokenKind::Allow => self.parse_arch_rule().map(Node::ArchitectureRule),
-            TokenKind::Mock => self.parse_mock_decl().map(Node::MockDecl),
+            TokenKind::Mock if is_mock_decl => self.parse_mock_decl().map(Node::MockDecl),
+            TokenKind::Mock => self.parse_expression_or_assignment(),
             TokenKind::If => self.parse_if(),
             TokenKind::IfSuspend => self.parse_if_suspend(),
             TokenKind::Match if is_match_stmt => self.parse_match_stmt(),
@@ -608,8 +621,19 @@ impl<'a> Parser<'a> {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.peek_next();
 
-                // If next token is a string literal, treat as BDD expression (no-paren call)
+                // If next token is assignment, treat as variable name
                 if matches!(
+                    &next.kind,
+                    TokenKind::Assign
+                        | TokenKind::PlusAssign
+                        | TokenKind::MinusAssign
+                        | TokenKind::StarAssign
+                        | TokenKind::SlashAssign
+                        | TokenKind::Dot
+                ) {
+                    self.parse_expression_or_assignment()
+                // If next token is a string literal, treat as BDD expression (no-paren call)
+                } else if matches!(
                     &next.kind,
                     TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_)
                 ) {

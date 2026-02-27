@@ -464,6 +464,54 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
+                TokenKind::At => {
+                    // @volatile val: Type / @volatile var: Type
+                    // Volatile memory access postfix: addr_expr @volatile val: Type
+                    // Peek ahead: next must be identifier "volatile", and token after that must be Val or Var
+                    let next = self.peek_next();
+                    let is_volatile_access = if let TokenKind::Identifier { name, .. } = &next.kind {
+                        if name == "volatile" {
+                            // Need to peek 2 ahead: save state, advance twice, check
+                            let saved_current = self.current.clone();
+                            let saved_previous = self.previous.clone();
+                            self.advance(); // consume @
+                            self.advance(); // consume "volatile"
+                            let is_val_or_var = self.check(&TokenKind::Val) || self.check(&TokenKind::Var);
+                            // Restore state
+                            self.pending_tokens.push_front(self.current.clone());
+                            let volatile_tok = self.previous.clone();
+                            self.pending_tokens.push_front(crate::token::Token {
+                                kind: TokenKind::Identifier { name: "volatile".to_string(), pattern: crate::token::NamePattern::Immutable },
+                                lexeme: "volatile".to_string(),
+                                span: volatile_tok.span,
+                            });
+                            self.current = saved_current;
+                            self.previous = saved_previous;
+                            is_val_or_var
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_volatile_access {
+                        // Consume @, "volatile", val/var
+                        self.advance(); // consume @
+                        self.advance(); // consume "volatile"
+                        let mutable = self.check(&TokenKind::Var);
+                        self.advance(); // consume val or var
+                        self.expect(&TokenKind::Colon)?;
+                        let access_type = self.parse_type()?;
+                        expr = Expr::VolatileAccess {
+                            address: Box::new(expr),
+                            mutable,
+                            access_type,
+                        };
+                    } else {
+                        break;
+                    }
+                }
                 TokenKind::Newline => {
                     // Multi-line method chaining: obj.method()\n    .another()
                     // Check if a dot follows after newlines/indents

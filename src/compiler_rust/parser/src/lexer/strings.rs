@@ -256,6 +256,11 @@ impl<'a> super::Lexer<'a> {
                     current_literal.push('{');
                     continue;
                 }
+                // Save state for backtracking if expression scanning fails
+                let saved_state = self.clone();
+                let saved_parts_len = parts.len();
+                let saved_literal = current_literal.clone();
+
                 // Save current literal if any
                 if !current_literal.is_empty() {
                     parts.push(FStringToken::Literal(current_literal));
@@ -267,6 +272,7 @@ impl<'a> super::Lexer<'a> {
                 let mut expr = String::new();
                 let mut brace_depth = 1;
                 let mut in_string: Option<char> = None; // Track if inside string and which quote
+                let mut expr_failed = false;
                 while let Some(c) = self.peek() {
                     // Handle escape sequences - translate them for the expression
                     if c == '\\' {
@@ -372,8 +378,14 @@ impl<'a> super::Lexer<'a> {
                     expr.push(c);
                     self.advance();
                 }
-                if brace_depth != 0 {
-                    return TokenKind::Error("Unclosed { in f-string".to_string());
+                // If expression scanning failed or braces unmatched, backtrack
+                // and treat the { as a literal character
+                if expr_failed || brace_depth != 0 {
+                    *self = saved_state;
+                    parts.truncate(saved_parts_len);
+                    current_literal = saved_literal;
+                    current_literal.push('{');
+                    continue;
                 }
                 // If expression is empty (just "{}"), treat as literal "{}"
                 // This allows strings like "m{} block" without escaping

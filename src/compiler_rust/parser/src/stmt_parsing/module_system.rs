@@ -801,9 +801,28 @@ impl<'a> Parser<'a> {
             // Not a module path - parse as identifier list
             let mut items = vec![first_item];
 
+            let mut export_indent_depth = 0;
             while self.check(&TokenKind::Comma) {
                 self.advance(); // consume ','
+                // Skip newlines and indents after comma to support multi-line export lists:
+                // export A, B,
+                //        C, D
+                while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
+                    if self.check(&TokenKind::Indent) {
+                        export_indent_depth += 1;
+                    }
+                    self.advance();
+                }
+                // If we hit dedent/EOF after trailing comma, stop
+                if self.check(&TokenKind::Dedent) || self.is_at_end() || self.check(&TokenKind::From) {
+                    break;
+                }
                 items.push(self.expect_path_segment()?);
+            }
+            // Consume matching dedents
+            for _ in 0..export_indent_depth {
+                if self.check(&TokenKind::Newline) { self.advance(); }
+                if self.check(&TokenKind::Dedent) { self.advance(); }
             }
 
             // Check if 'from' keyword is present

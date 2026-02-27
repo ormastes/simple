@@ -679,6 +679,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::Atom(_) => {
             add_reason(reasons, FallbackReason::NotYetImplemented("atom literal".into()));
         }
+
+        // Catch-all for new expression kinds
+        _ => {
+            add_reason(reasons, FallbackReason::NotYetImplemented("expr (unknown)".into()));
+        }
     }
 }
 

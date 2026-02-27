@@ -190,7 +190,8 @@ impl<'a> Parser<'a> {
                 }
             }
             // `match` can be used as a variable name (e.g., `var match = true; if match:`)
-            // Treat as identifier when followed by `.`, `=`, `:`, `)`, `,`, boolean ops, or comparisons.
+            // Treat as identifier when followed by `.`, `=`, `:`, `)`, `,`, boolean ops, comparisons,
+            // `[` (indexing: match[0]), `(` (calling: match()), or other operators.
             // Only treat as match expression when followed by a subject expression (identifier, literal, etc.)
             TokenKind::Match if self.peek_is(&TokenKind::Dot)
                 || self.peek_is(&TokenKind::Assign)
@@ -204,7 +205,21 @@ impl<'a> Parser<'a> {
                 || self.peek_is(&TokenKind::Eq)
                 || self.peek_is(&TokenKind::NotEq)
                 || self.peek_is(&TokenKind::Newline)
-                || self.peek_is(&TokenKind::Eof) => self.parse_primary_identifier(),
+                || self.peek_is(&TokenKind::Eof)
+                || self.peek_is(&TokenKind::LBracket)
+                || self.peek_is(&TokenKind::Semicolon)
+                || self.peek_is(&TokenKind::Plus)
+                || self.peek_is(&TokenKind::Minus)
+                || self.peek_is(&TokenKind::Star)
+                || self.peek_is(&TokenKind::Slash)
+                || self.peek_is(&TokenKind::Percent)
+                || self.peek_is(&TokenKind::Lt)
+                || self.peek_is(&TokenKind::Gt)
+                || self.peek_is(&TokenKind::LtEq)
+                || self.peek_is(&TokenKind::GtEq)
+                || self.peek_is(&TokenKind::Pipe)
+                || self.peek_is(&TokenKind::Ampersand)
+                || self.peek_is(&TokenKind::QuestionDot) => self.parse_primary_identifier(),
             // pass in expression position = unit/no-op
             TokenKind::Pass => {
                 self.advance();

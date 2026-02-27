@@ -173,6 +173,11 @@ impl<'a> Parser<'a> {
         } else if self.check(&TokenKind::Newline) {
             // Block-form: parse as DoBlock expression
             self.advance(); // consume Newline
+
+            // Empty then-branch: `if cond:\nelse: ...` or `if cond:\nelif ...:`
+            if self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) {
+                Expr::Tuple(vec![]) // unit value
+            } else {
             self.expect(&TokenKind::Indent)?;
 
             let mut statements = Vec::new();
@@ -198,6 +203,7 @@ impl<'a> Parser<'a> {
             }
 
             Expr::DoBlock(statements)
+            } // close else for empty-then-branch check
         } else if self.check(&TokenKind::Return)
             || self.check(&TokenKind::Break)
             || self.check(&TokenKind::Continue)

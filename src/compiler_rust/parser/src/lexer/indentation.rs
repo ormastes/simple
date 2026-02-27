@@ -210,6 +210,7 @@ impl<'a> super::Lexer<'a> {
                 ));
             } else if indent < current_indent {
                 self.pending_tokens.push(token);
+                let pre_dedent_len = self.pending_tokens.len();
                 while let Some(&top) = self.indent_stack.last() {
                     if top <= indent {
                         break;
@@ -220,6 +221,20 @@ impl<'a> super::Lexer<'a> {
                         Span::new(start_pos, self.current_pos, start_line, 1),
                         String::new(),
                     ));
+                }
+                // Handle intermediate indent level (same as main branch)
+                if let Some(&new_top) = self.indent_stack.last() {
+                    if indent > new_top && self.bracket_depth == 0 {
+                        self.indent_stack.push(indent);
+                        self.pending_tokens.insert(
+                            pre_dedent_len,
+                            Token::new(
+                                TokenKind::Indent,
+                                Span::new(start_pos, self.current_pos, start_line, 1),
+                                String::new(),
+                            ),
+                        );
+                    }
                 }
                 return self.pending_tokens.pop();
             }
@@ -237,6 +252,7 @@ impl<'a> super::Lexer<'a> {
             ))
         } else if indent < current_indent {
             // Generate DEDENT tokens
+            let pre_dedent_len = self.pending_tokens.len();
             while let Some(&top) = self.indent_stack.last() {
                 if top <= indent {
                     break;
@@ -247,6 +263,32 @@ impl<'a> super::Lexer<'a> {
                     Span::new(start_pos, self.current_pos, start_line, 1),
                     String::new(),
                 ));
+            }
+            // Handle intermediate indent level: after dedenting, if the new
+            // indent is higher than the remaining stack top, also emit Indent.
+            // This handles multi-line expression continuations like:
+            //   while cond and     # indent 8
+            //         cont:        # indent 14 (continuation)
+            //       body           # indent 12 (between 8 and 14)
+            // The Dedent 14→8 is emitted first, then Indent 8→12.
+            if let Some(&new_top) = self.indent_stack.last() {
+                // Only emit intermediate Indent when NOT inside brackets/parens.
+                // Inside brackets with forced indentation (e.g., lambda bodies),
+                // the indent changes are for the lambda/match body, and adding
+                // intermediate levels would corrupt the indent stack.
+                if indent > new_top && self.bracket_depth == 0 {
+                    self.indent_stack.push(indent);
+                    // Insert Indent BEFORE the Dedent tokens so it's returned
+                    // AFTER them (pending_tokens is a stack, pop returns last).
+                    self.pending_tokens.insert(
+                        pre_dedent_len,
+                        Token::new(
+                            TokenKind::Indent,
+                            Span::new(start_pos, self.current_pos, start_line, 1),
+                            String::new(),
+                        ),
+                    );
+                }
             }
             self.pending_tokens.pop()
         } else {

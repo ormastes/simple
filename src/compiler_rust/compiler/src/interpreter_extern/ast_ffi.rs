@@ -213,6 +213,8 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
             Expr::TensorLiteral { .. } => "TensorLiteral",
             Expr::BlockExpr { .. } => "BlockExpr",
             Expr::Atom(_) => "Atom",
+            Expr::VolatileAccess { .. } => "VolatileAccess",
+            _ => "UnknownExpr",
         };
         Ok(Value::Str(tag.to_string()))
     })

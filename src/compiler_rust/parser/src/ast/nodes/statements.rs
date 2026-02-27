@@ -357,15 +357,56 @@ pub struct LeanBlock {
 
 /// Inline assembly statement: `asm: "instruction"` or `asm: block`
 /// Also supports target-conditional: `asm match: case [target]: instructions`
+/// Also supports volatile forms: `asm volatile: block` and `asm volatile(...)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct InlineAsmStmt {
     pub span: Span,
+    /// Whether the `volatile` keyword was present
+    pub volatile: bool,
     /// Assembly instructions (one per line in block form)
     pub instructions: Vec<String>,
     /// Target-conditional arms: `asm match: case [target]: instructions`
     pub target_match: Vec<AsmTargetArm>,
     /// Clobber registers declared by this asm block
     pub clobbers: Vec<String>,
+    /// Operand constraints (in/out/inout/lateout/clobber_abi/options)
+    pub constraints: Vec<AsmConstraint>,
+}
+
+/// An operand constraint in an inline assembly statement.
+/// Examples:
+///   `in(reg) expr` / `out(reg) var` / `name = in(reg) expr`
+///   `clobber_abi("C")` / `options(nostack)`
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsmConstraint {
+    pub span: Span,
+    /// Optional binding name (e.g., `op` in `op = in(reg) expr`)
+    pub name: Option<String>,
+    /// The constraint direction/kind
+    pub kind: AsmConstraintKind,
+    /// Register class (e.g., "reg") - None for clobber_abi/options
+    pub reg_class: Option<String>,
+    /// The operand expression - None for clobber_abi/options
+    pub operand: Option<Expr>,
+}
+
+/// Direction/kind of an asm operand constraint
+#[derive(Debug, Clone, PartialEq)]
+pub enum AsmConstraintKind {
+    /// Input operand: `in(reg) expr`
+    In,
+    /// Output operand: `out(reg) var`
+    Out,
+    /// Input+output operand: `inout(reg) var`
+    InOut,
+    /// Late output operand: `lateout(reg) var`
+    LateOut,
+    /// Clobber register: `clobber(reg)`
+    Clobber,
+    /// Clobber ABI: `clobber_abi("C")`
+    ClobberAbi(String),
+    /// Options: `options(nostack)` etc.
+    Options(Vec<String>),
 }
 
 /// Target-conditional arm in asm match

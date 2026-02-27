@@ -366,30 +366,61 @@ impl<'a> Parser<'a> {
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
 
-        // Parse block header (NEWLINE then INDENT)
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
+        // Support both block form and inline form:
+        // Block: `for x in items:\n    body`
+        // Inline: `for x in items: expr`
+        if self.check(&TokenKind::Newline) {
+            // Parse block header (NEWLINE then INDENT)
+            self.expect(&TokenKind::Newline)?;
+            self.expect(&TokenKind::Indent)?;
 
-        // Parse loop invariants at the start of the block body
-        let invariants = self.parse_loop_invariants()?;
+            // Parse loop invariants at the start of the block body
+            let invariants = self.parse_loop_invariants()?;
 
-        // Parse rest of block body
-        let body = self.parse_block_body()?;
+            // Parse rest of block body
+            let body = self.parse_block_body()?;
 
-        Ok(Node::For(ForStmt {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
-            pattern,
-            iterable,
-            body,
-            is_suspend: false,
-            auto_enumerate,
-            invariants,
-        }))
+            Ok(Node::For(ForStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                pattern,
+                iterable,
+                body,
+                is_suspend: false,
+                auto_enumerate,
+                invariants,
+            }))
+        } else {
+            // Inline for body: `for x in items: single_statement`
+            let stmt = self.parse_item()?;
+            let body = Block {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                statements: vec![stmt],
+            };
+            Ok(Node::For(ForStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                pattern,
+                iterable,
+                body,
+                is_suspend: false,
+                auto_enumerate,
+                invariants: vec![],
+            }))
+        }
     }
 
     /// Parse for loop pattern, detecting enumerate shorthand `for i, item in items:`
@@ -430,6 +461,22 @@ impl<'a> Parser<'a> {
 
         // Parse block header (NEWLINE then INDENT)
         self.expect(&TokenKind::Newline)?;
+        // Consume deferred Dedent tokens from multi-line condition expression.
+        // When a while condition spans multiple lines (e.g., `while expr and\n   expr:`),
+        // the expression parser consumes Indent tokens for line continuation, and
+        // matching Dedents appear between Newline and the block's Indent.
+        while self.deferred_dedent_count > 0 {
+            match &self.current.kind {
+                TokenKind::Newline => {
+                    self.advance();
+                }
+                TokenKind::Dedent => {
+                    self.advance();
+                    self.deferred_dedent_count -= 1;
+                }
+                _ => break,
+            }
+        }
         self.expect(&TokenKind::Indent)?;
 
         // Parse loop invariants at the start of the block body
