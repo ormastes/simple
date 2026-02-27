@@ -10,6 +10,7 @@
 
 use compiler.backend.backend.{compile_module_with_backend, get_effective_backend_name}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default, write_elf_bytes_to_file}
+use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.driver.smf_writer.{generate_smf_with_templates, Target}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use driver_types.{CompileResult, CompileOptions, OutputFormat}
@@ -51,17 +52,33 @@ impl CompilerDriver:
             else:
                 return CompileResult.CodegenError("Backend produced no object code for {name}")
 
-        # Link object files into final executable using linker wrapper
-        var link_config = NativeLinkConfig__default()
-        link_config.debug = self.ctx.options.debug_info
-        link_config.verbose = self.ctx.options.verbose
+        # Link object files into final executable
+        if effective_backend == "llvm":
+            # LLVM path: compile C runtime and link with entry point
+            val llvm_opts = NativeLinkOptions(
+                debug: self.ctx.options.debug_info,
+                verbose: self.ctx.options.verbose,
+                pie: true,
+                bare_metal: false
+            )
+            match link_llvm_native(object_files, output, llvm_opts):
+                case Ok(_):
+                    log.info("Native executable written to {output} (backend: LLVM)")
+                    CompileResult.Success(output)
+                case Err(e):
+                    CompileResult.CodegenError("LLVM native linking failed: {e}")
+        else:
+            # Original path for other backends
+            var link_config = NativeLinkConfig__default()
+            link_config.debug = self.ctx.options.debug_info
+            link_config.verbose = self.ctx.options.verbose
 
-        match link_to_native(object_files, output, link_config):
-            case Ok(_):
-                log.info("Native executable written to {output} (backend: {effective_backend})")
-                CompileResult.Success(output)
-            case Err(e):
-                CompileResult.CodegenError("Linking failed: {e}")
+            match link_to_native(object_files, output, link_config):
+                case Ok(_):
+                    log.info("Native executable written to {output} (backend: {effective_backend})")
+                    CompileResult.Success(output)
+                case Err(e):
+                    CompileResult.CodegenError("Linking failed: {e}")
 
     me compile_to_c(output: text) -> CompileResult:
         """Compile all MIR modules to C++20 source. Routes to single-file or directory mode."""

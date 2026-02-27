@@ -6,7 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{ContractKind, VReg};
 
-use super::helpers::create_string_constant;
+use super::helpers::{adapted_call, create_string_constant};
 use super::{InstrContext, InstrResult};
 
 /// Compile a contract check instruction.
@@ -42,13 +42,11 @@ pub(crate) fn compile_contract_check<M: Module>(
         // Create string data for function name and get (ptr, len) values
         let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
 
-        // Convert bool condition to i64 for the call
-        let cond_i64 = builder.ins().uextend(types::I64, cond);
+        // Convert condition to i64 for the call (skip if already i64)
+        let cond_i64 = super::helpers::safe_extend_to_i64(builder, cond);
         let kind_iconst = builder.ins().iconst(types::I64, kind_val);
 
-        builder
-            .ins()
-            .call(func_ref, &[cond_i64, kind_iconst, name_ptr, name_len]);
+        adapted_call(builder, func_ref, &[cond_i64, kind_iconst, name_ptr, name_len]);
     } else {
         // Fallback: generate inline check with trap on failure
         // Create a conditional branch that traps if the condition is false

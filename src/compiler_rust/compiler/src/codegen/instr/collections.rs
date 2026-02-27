@@ -6,7 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{FStringPart, VReg};
 
-use super::helpers::get_vreg_or_default;
+use super::helpers::{adapted_call, get_vreg_or_default};
 use super::{InstrContext, InstrResult};
 
 /// Helper to create a string literal in stack slot and get ptr/len
@@ -73,7 +73,7 @@ pub(crate) fn compile_collection_lit<M: Module>(
         elements.len()
     };
     let size = builder.ins().iconst(types::I64, capacity as i64);
-    let call = builder.ins().call(create_ref, &[size]);
+    let call = adapted_call(builder, create_ref, &[size]);
     let collection = builder.inst_results(call)[0];
 
     // Get add function
@@ -86,9 +86,9 @@ pub(crate) fn compile_collection_lit<M: Module>(
 
         if spec.needs_index {
             let idx = builder.ins().iconst(types::I64, i as i64);
-            builder.ins().call(add_ref, &[collection, idx, elem_val]);
+            adapted_call(builder, add_ref, &[collection, idx, elem_val]);
         } else {
-            builder.ins().call(add_ref, &[collection, elem_val]);
+            adapted_call(builder, add_ref, &[collection, elem_val]);
         }
     }
 
@@ -139,7 +139,7 @@ pub(crate) fn compile_vec_reduction<M: Module>(
     let func_id = ctx.runtime_funcs[runtime_fn];
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
     let source_val = get_vreg_or_default(ctx, builder, &source);
-    let call = builder.ins().call(func_ref, &[source_val]);
+    let call = adapted_call(builder, func_ref, &[source_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -156,7 +156,7 @@ pub(crate) fn compile_vec_extract<M: Module>(
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
     let vector_val = get_vreg_or_default(ctx, builder, &vector);
     let index_val = get_vreg_or_default(ctx, builder, &index);
-    let call = builder.ins().call(func_ref, &[vector_val, index_val]);
+    let call = adapted_call(builder, func_ref, &[vector_val, index_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -175,7 +175,7 @@ pub(crate) fn compile_vec_with<M: Module>(
     let vector_val = ctx.vreg_values[&vector];
     let index_val = ctx.vreg_values[&index];
     let value_val = ctx.vreg_values[&value];
-    let call = builder.ins().call(func_ref, &[vector_val, index_val, value_val]);
+    let call = adapted_call(builder, func_ref, &[vector_val, index_val, value_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -192,7 +192,7 @@ pub(crate) fn compile_vec_math<M: Module>(
     let func_id = ctx.runtime_funcs[runtime_fn];
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
     let source_val = get_vreg_or_default(ctx, builder, &source);
-    let call = builder.ins().call(func_ref, &[source_val]);
+    let call = adapted_call(builder, func_ref, &[source_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -210,7 +210,7 @@ pub(crate) fn compile_vec_shuffle<M: Module>(
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
     let source_val = ctx.vreg_values[&source];
     let indices_val = ctx.vreg_values[&indices];
-    let call = builder.ins().call(func_ref, &[source_val, indices_val]);
+    let call = adapted_call(builder, func_ref, &[source_val, indices_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -230,7 +230,7 @@ pub(crate) fn compile_vec_blend<M: Module>(
     let first_val = ctx.vreg_values[&first];
     let second_val = ctx.vreg_values[&second];
     let indices_val = ctx.vreg_values[&indices];
-    let call = builder.ins().call(func_ref, &[first_val, second_val, indices_val]);
+    let call = adapted_call(builder, func_ref, &[first_val, second_val, indices_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -250,7 +250,7 @@ pub(crate) fn compile_vec_select<M: Module>(
     let mask_val = ctx.vreg_values[&mask];
     let if_true_val = ctx.vreg_values[&if_true];
     let if_false_val = ctx.vreg_values[&if_false];
-    let call = builder.ins().call(func_ref, &[mask_val, if_true_val, if_false_val]);
+    let call = adapted_call(builder, func_ref, &[mask_val, if_true_val, if_false_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -280,7 +280,7 @@ pub(crate) fn compile_gpu_atomic<M: Module>(
     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
     let ptr_val = ctx.vreg_values[&ptr];
     let value_val = ctx.vreg_values[&value];
-    let call = builder.ins().call(func_ref, &[ptr_val, value_val]);
+    let call = adapted_call(builder, func_ref, &[ptr_val, value_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -300,7 +300,7 @@ pub(crate) fn compile_gpu_atomic_cmpxchg<M: Module>(
     let ptr_val = ctx.vreg_values[&ptr];
     let expected_val = ctx.vreg_values[&expected];
     let desired_val = ctx.vreg_values[&desired];
-    let call = builder.ins().call(func_ref, &[ptr_val, expected_val, desired_val]);
+    let call = adapted_call(builder, func_ref, &[ptr_val, expected_val, desired_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -315,7 +315,7 @@ pub(crate) fn compile_dict_lit<M: Module>(
     let dict_new_id = ctx.runtime_funcs["rt_dict_new"];
     let dict_new_ref = ctx.module.declare_func_in_func(dict_new_id, builder.func);
     let capacity = builder.ins().iconst(types::I64, (keys.len() * 2) as i64);
-    let call = builder.ins().call(dict_new_ref, &[capacity]);
+    let call = adapted_call(builder, dict_new_ref, &[capacity]);
     let dict = builder.inst_results(call)[0];
 
     let dict_set_id = ctx.runtime_funcs["rt_dict_set"];
@@ -325,7 +325,7 @@ pub(crate) fn compile_dict_lit<M: Module>(
         let key_val = ctx.vreg_values[key];
         let val_val = ctx.vreg_values[val];
         // Pass keys and values directly - they are already RuntimeValues.
-        builder.ins().call(dict_set_ref, &[dict, key_val, val_val]);
+        adapted_call(builder, dict_set_ref, &[dict, key_val, val_val]);
     }
     ctx.vreg_values.insert(dest, dict);
 }
@@ -345,7 +345,7 @@ pub(crate) fn compile_index_get<M: Module>(
     // Pass the index directly - all values in AOT codegen are already RuntimeValues
     // (tagged integers, heap pointers, etc.). Wrapping with rt_value_int would corrupt
     // non-integer keys (e.g., string keys for dict access).
-    let call = builder.ins().call(index_get_ref, &[coll_val, idx_val]);
+    let call = adapted_call(builder, index_get_ref, &[coll_val, idx_val]);
     let runtime_value = builder.inst_results(call)[0];
 
     // Return the RuntimeValue directly without unwrapping.
@@ -369,7 +369,7 @@ pub(crate) fn compile_index_set<M: Module>(
 
     // Pass index and value directly - all values in AOT codegen are already RuntimeValues.
     // Wrapping with rt_value_int would corrupt non-integer keys/values.
-    builder.ins().call(index_set_ref, &[coll_val, idx_val, val]);
+    adapted_call(builder, index_set_ref, &[coll_val, idx_val, val]);
 }
 
 pub(crate) fn compile_slice_op<M: Module>(
@@ -395,7 +395,7 @@ pub(crate) fn compile_slice_op<M: Module>(
         .map(|s| ctx.vreg_values[&s])
         .unwrap_or_else(|| builder.ins().iconst(types::I64, 1));
 
-    let call = builder.ins().call(slice_ref, &[coll_val, start_val, end_val, step_val]);
+    let call = adapted_call(builder, slice_ref, &[coll_val, start_val, end_val, step_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -415,7 +415,7 @@ pub(crate) fn compile_const_string<M: Module>(
         create_stack_string(builder, value)
     };
 
-    let call = builder.ins().call(string_new_ref, &[ptr, len_val]);
+    let call = adapted_call(builder, string_new_ref, &[ptr, len_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -433,7 +433,7 @@ pub(crate) fn compile_fstring_format<M: Module>(
 
     let null_ptr = builder.ins().iconst(types::I64, 0);
     let zero_len = builder.ins().iconst(types::I64, 0);
-    let empty_call = builder.ins().call(string_new_ref, &[null_ptr, zero_len]);
+    let empty_call = adapted_call(builder, string_new_ref, &[null_ptr, zero_len]);
     let mut result = builder.inst_results(empty_call)[0];
 
     for part in parts {
@@ -443,7 +443,7 @@ pub(crate) fn compile_fstring_format<M: Module>(
                     continue;
                 }
                 let (ptr, len_val) = create_stack_string(builder, s);
-                let call = builder.ins().call(string_new_ref, &[ptr, len_val]);
+                let call = adapted_call(builder, string_new_ref, &[ptr, len_val]);
                 builder.inst_results(call)[0]
             }
             FStringPart::Expr(vreg) => {
@@ -451,12 +451,12 @@ pub(crate) fn compile_fstring_format<M: Module>(
                 let val = ctx.vreg_values[vreg];
                 let to_str_id = ctx.runtime_funcs["rt_value_to_string"];
                 let to_str_ref = ctx.module.declare_func_in_func(to_str_id, builder.func);
-                let call = builder.ins().call(to_str_ref, &[val]);
+                let call = adapted_call(builder, to_str_ref, &[val]);
                 builder.inst_results(call)[0]
             }
         };
 
-        let concat_call = builder.ins().call(string_concat_ref, &[result, part_str]);
+        let concat_call = adapted_call(builder, string_concat_ref, &[result, part_str]);
         result = builder.inst_results(concat_call)[0];
     }
 

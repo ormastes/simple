@@ -19,6 +19,7 @@ use simple_driver::cli::gen_lean::run_gen_lean;
 use simple_driver::cli::help::{print_help, print_version, version};
 use simple_driver::cli::llm_tools::{run_constr, run_context, run_diff, run_mcp};
 use simple_driver::cli::migrate::run_migrate;
+use simple_driver::cli::native_build::handle_native_build;
 use simple_driver::cli::repl::run_repl;
 use simple_driver::cli::sandbox::{apply_sandbox, parse_sandbox_config};
 use simple_driver::cli::test_runner;
@@ -173,6 +174,14 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/app/compile/main.spl",
         rust_handler: Handler::Args(handle_compile),
         env_override: "SIMPLE_COMPILE_RUST",
+        needs_rust_flags: &[],
+    },
+    // Native build (Rust-only: compile .spl → native binary via Cranelift)
+    CommandEntry {
+        name: "native-build",
+        app_path: "",
+        rust_handler: Handler::Args(handle_native_build),
+        env_override: "",
         needs_rust_flags: &[],
     },
     CommandEntry {
@@ -529,6 +538,14 @@ const COMMAND_TABLE: &[CommandEntry] = &[
         app_path: "src/app/run/main.spl",
         rust_handler: Handler::ArgsGc(handle_run_wrapper),
         env_override: "SIMPLE_RUN_RUST",
+        needs_rust_flags: &[],
+    },
+    // Native build (compile .spl project to native binary via Cranelift)
+    CommandEntry {
+        name: "native-build",
+        app_path: "",
+        rust_handler: Handler::Args(handle_native_build),
+        env_override: "",
         needs_rust_flags: &[],
     },
 ];

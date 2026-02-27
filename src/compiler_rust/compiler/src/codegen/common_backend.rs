@@ -54,6 +54,27 @@ pub struct CodegenBackend<M: Module> {
     pub global_ids: HashMap<String, cranelift_module::DataId>,
     pub body_stub: Option<cranelift_module::FuncId>,
     pub target: Target,
+    /// Optional module prefix for name mangling (e.g., "compiler__frontend__core__lexer").
+    /// When set, local function declarations are mangled as `prefix__name` to prevent
+    /// symbol collisions in multi-file native builds. Raw names are also registered in
+    /// func_ids so that intra-module calls by raw name still resolve locally.
+    pub module_prefix: Option<String>,
+    /// Whether this module contains the program entry point.
+    /// When true, `main` is emitted as `spl_main` with Preemptible linkage so the
+    /// C runtime entry stub can find it. When false, `main` is mangled like any
+    /// other local function to avoid symbol collisions.
+    pub is_entry_module: bool,
+    /// Import map: raw function name → mangled name for cross-module resolution.
+    /// Built during the discovery phase of multi-file native builds.
+    pub import_map: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// Set of function names that have multiple definitions across modules.
+    /// These names keep their raw (unmangled) symbol name to avoid breaking
+    /// cross-module resolution when the import map can't disambiguate.
+    pub ambiguous_names: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Per-module use map: local imported name → mangled name.
+    /// Built from the current file's `use` statements. Used to resolve
+    /// ambiguous cross-module imports that the global import map can't handle.
+    pub use_map: std::collections::HashMap<String, String>,
 }
 
 /// Settings for creating a codegen backend
@@ -202,12 +223,62 @@ impl<M: Module> CodegenBackend<M> {
             global_ids: HashMap::new(),
             body_stub: None,
             target,
+            module_prefix: None,
+            is_entry_module: false,
+            import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+            ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+            use_map: std::collections::HashMap::new(),
         })
     }
 
     /// Get the target this backend is compiling for
     pub fn target(&self) -> &Target {
         &self.target
+    }
+
+    /// Set the module prefix for name mangling.
+    pub fn set_module_prefix(&mut self, prefix: String) {
+        self.module_prefix = Some(prefix);
+    }
+
+    /// Mark this module as the program entry point.
+    ///
+    /// When `true`, the `main` function is emitted as `spl_main` with
+    /// Preemptible linkage so the C runtime entry stub can call it.
+    /// When `false`, `main` is prefix-mangled like any other local symbol.
+    pub fn set_entry_module(&mut self, v: bool) {
+        self.is_entry_module = v;
+    }
+
+    /// Set the import map for cross-module function resolution.
+    pub fn set_import_map(&mut self, map: std::sync::Arc<std::collections::HashMap<String, String>>) {
+        self.import_map = map;
+    }
+
+    /// Set the ambiguous names set for symbol resolution.
+    pub fn set_ambiguous_names(&mut self, names: std::sync::Arc<std::collections::HashSet<String>>) {
+        self.ambiguous_names = names;
+    }
+
+    /// Set the per-module use map for resolving imports from `use` statements.
+    pub fn set_use_map(&mut self, map: std::collections::HashMap<String, String>) {
+        self.use_map = map;
+    }
+
+    /// Mangle a function name with the module prefix (if set).
+    ///
+    /// - If `name == "main"` **and** this is the entry module, return `"spl_main"`.
+    /// - If `name == "main"` **and** this is NOT the entry module, apply the normal
+    ///   prefix mangling (e.g. `module_prefix__main`).
+    /// - All other names follow the existing prefix logic.
+    pub fn mangle_name(&self, name: &str) -> String {
+        if name == "main" && self.is_entry_module {
+            return "spl_main".to_string();
+        }
+        match &self.module_prefix {
+            Some(prefix) => format!("{}__{}", prefix, name),
+            None => name.to_string(),
+        }
     }
 
     /// Declare external runtime functions for FFI using shared specifications.
@@ -241,7 +312,12 @@ impl<M: Module> CodegenBackend<M> {
         Ok(func_id)
     }
 
-    /// Declare all functions from a MIR module
+    /// Declare all functions from a MIR module.
+    ///
+    /// When `module_prefix` is set, locally-defined functions are declared under
+    /// their mangled name (`prefix__name`) to prevent symbol collisions across
+    /// compilation units. The raw name is also inserted into `func_ids` so that
+    /// intra-module call resolution by raw name still works.
     pub fn declare_functions(&mut self, functions: &[MirFunction]) -> BackendResult<()> {
         let mut func_ids = HashMap::new();
 
@@ -262,29 +338,53 @@ impl<M: Module> CodegenBackend<M> {
 
             let sig = super::shared::build_mir_signature(func);
 
-            // Determine linkage — use Preemptible for defined functions so that
-            // per-file compilation works (linker merges duplicates from shared imports)
-            let linkage = if func.blocks.is_empty() {
-                cranelift_module::Linkage::Import
-            } else if func.is_public() || func.name == "main" {
-                cranelift_module::Linkage::Preemptible
+            // Determine linkage and symbol name.
+            //
+            // `main` handling depends on is_entry_module:
+            //   - Entry module main:     symbol = "spl_main",      linkage = Preemptible
+            //   - Non-entry module main: symbol = mangled name,    linkage = Local
+            //
+            // All other functions with bodies get Preemptible linkage so they're
+            // visible across modules in multi-file builds. The mangled name avoids
+            // collisions between same-named functions in different modules.
+            let has_body = !func.blocks.is_empty();
+
+            let (symbol_name, linkage) = if func.name == "main" && has_body {
+                if self.is_entry_module {
+                    ("spl_main".to_string(), cranelift_module::Linkage::Preemptible)
+                } else {
+                    (self.mangle_name(&func.name), cranelift_module::Linkage::Local)
+                }
+            } else if !has_body {
+                (func.name.clone(), cranelift_module::Linkage::Import)
             } else {
-                cranelift_module::Linkage::Local
+                // All functions with bodies get mangled names + Preemptible linkage.
+                // This prevents symbol collisions when multiple modules define
+                // same-named functions (e.g., get_version(), init()).
+                // Cross-module calls are resolved via the import map in calls.rs.
+                (self.mangle_name(&func.name), cranelift_module::Linkage::Preemptible)
             };
 
             let func_id = self
                 .module
-                .declare_function(&func.name, linkage, &sig)
-                .map_err(|e| BackendError::ModuleError(format!("Failed to declare '{}': {}", func.name, e)))?;
+                .declare_function(&symbol_name, linkage, &sig)
+                .map_err(|e| BackendError::ModuleError(format!("Failed to declare '{}': {}", symbol_name, e)))?;
 
+            // Always register under the raw name so local calls resolve
             func_ids.insert(func.name.clone(), func_id);
+            // Also register under the mangled name if different
+            if symbol_name != func.name {
+                func_ids.insert(symbol_name, func_id);
+            }
         }
 
         self.func_ids = func_ids;
         Ok(())
     }
 
-    /// Declare all global variables from a MIR module
+    /// Declare all global variables from a MIR module.
+    ///
+    /// When `module_prefix` is set, globals are mangled to prevent collisions.
     pub fn declare_globals(&mut self, globals: &[(String, TypeId, bool)]) -> BackendResult<()> {
         use super::types_util::type_to_cranelift;
 
@@ -293,11 +393,14 @@ impl<M: Module> CodegenBackend<M> {
             if self.runtime_funcs.contains_key(name.as_str()) {
                 continue;
             }
+
+            let symbol_name = self.mangle_name(name);
+
             // Use Preemptible linkage so that when multiple .o files define the same
             // global (from shared imports), the linker merges them instead of erroring.
             let data_id = self
                 .module
-                .declare_data(name, cranelift_module::Linkage::Preemptible, *is_mutable, false)
+                .declare_data(&symbol_name, cranelift_module::Linkage::Preemptible, *is_mutable, false)
                 .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
             // Initialize with zero (will be set by runtime initialization)
@@ -309,7 +412,11 @@ impl<M: Module> CodegenBackend<M> {
                 .define_data(data_id, &data_desc)
                 .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
+            // Register under raw name for local lookups
             self.global_ids.insert(name.clone(), data_id);
+            if symbol_name != *name {
+                self.global_ids.insert(symbol_name, data_id);
+            }
         }
         Ok(())
     }
@@ -333,6 +440,8 @@ impl<M: Module> CodegenBackend<M> {
             &self.func_ids,
             &self.runtime_funcs,
             &self.global_ids,
+            &self.import_map,
+            &self.use_map,
         )
         .map_err(BackendError::ModuleError)?;
 
@@ -443,4 +552,38 @@ impl<M: Module> CodegenBackend<M> {
 
         Ok(functions)
     }
+}
+
+/// Compute a module prefix from a file path relative to a source root.
+///
+/// Example: `src/compiler/10.frontend/core/lexer.spl` → `compiler__frontend__core__lexer`
+///
+/// The numbered layer prefixes (e.g., `10.`, `70.`) are stripped.
+pub fn module_prefix_from_path(file_path: &std::path::Path, source_root: &std::path::Path) -> String {
+    let relative = file_path
+        .strip_prefix(source_root)
+        .unwrap_or(file_path);
+
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        if let std::path::Component::Normal(s) = component {
+            let s = s.to_string_lossy();
+            // Strip .spl extension for the last component
+            let s = s.strip_suffix(".spl").unwrap_or(&s).to_string();
+            // Strip numbered layer prefix (e.g., "10.frontend" -> "frontend")
+            let s = if let Some(dot_pos) = s.find('.') {
+                if s[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+                    s[dot_pos + 1..].to_string()
+                } else {
+                    s
+                }
+            } else {
+                s
+            };
+            if !s.is_empty() {
+                parts.push(s);
+            }
+        }
+    }
+    parts.join("__")
 }

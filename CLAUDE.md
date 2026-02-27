@@ -15,6 +15,8 @@ Impl in simple unless it has big performance differences.
 | **C bootstrap copy** | `build/bootstrap/c_simple/simple` | Same as `build/simple`, canonical bootstrap location | Same generated C source |
 | **Codegen tool** | `build/simple_codegen` | Compiles single `.spl` → `.c` | From `src/compiler_cpp/real_compiler.c` |
 
+- **Rust seed (dev bootstrap)** — build with `cargo build --profile bootstrap -p simple-driver` in `src/compiler_rust`; output at `src/compiler_rust/target/bootstrap/simple`. Use it to (a) compile the pure Simple compiler + essential libs, then (b) recompile with the freshly built Simple binary to get the final self-hosted `bin/simple`.
+
 - **C bootstrap is temporal** — it provides fast CLI dispatch but delegates all real work (test running, .spl interpretation, compilation) to `bin/release/simple`
 - **`bin/release/simple` is the real binary** — the self-hosted Simple compiler/interpreter
 - The C bootstrap preprocesses newer syntax (bitfield, pass_do_nothing, pass_dn) for compatibility with older interpreter versions
@@ -311,4 +313,3 @@ See code agent for full list. Key issues:
 - **Chained methods broken** - use intermediate `var`
 - **NO inheritance** - `class Child(Parent)` is NOT supported (by design — use composition, alias forwarding, traits, mixins)
 - **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`
-

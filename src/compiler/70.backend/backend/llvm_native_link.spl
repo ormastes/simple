@@ -1,0 +1,130 @@
+# LLVM Native Link Orchestrator
+#
+# Orchestrates the full native executable linking pipeline for LLVM backend:
+# 1. Compile C runtime sources to .o files
+# 2. Generate entry point LLVM IR and compile to .o
+# 3. Combine user objects + runtime objects + entry point
+# 4. Link everything into a native executable
+#
+# Usage:
+#   val result = link_llvm_native(user_objects, output, config, verbose)
+
+use app.io.mod (shell, file_write, file_delete, file_exists, getpid)
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+use compiler.backend.backend.llvm_backend.{compile_ir_to_object, LlvmTargetConfig, LlvmTargetConfig__for_target}
+use compiler.core.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
+
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct NativeLinkOptions:
+    """Options for LLVM native linking."""
+    debug: bool
+    verbose: bool
+    pie: bool
+    bare_metal: bool
+
+fn NativeLinkOptions__default() -> NativeLinkOptions:
+    NativeLinkOptions(
+        debug: false,
+        verbose: false,
+        pie: true,
+        bare_metal: false
+    )
+
+# ============================================================================
+# Main Orchestrator
+# ============================================================================
+
+fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
+    """Link LLVM-compiled user objects with C runtime into a native executable.
+
+    Pipeline:
+    1. Compile C runtime (runtime.c, runtime_native.c, etc.) to .o files
+    2. Generate and compile entry point IR to .o
+    3. Combine all objects and link with system linker
+
+    Returns Ok(output_path) on success, Err(message) on failure.
+    """
+    val verbose = options.verbose
+    val pid = getpid()
+
+    # Step 1: Compile C runtime to object files
+    if verbose:
+        shell("echo '[llvm-link] Compiling C runtime...' >&2")
+
+    val rt_result = compile_runtime_objects(verbose)
+    if rt_result.is_err():
+        return Err("Runtime compilation failed: {rt_result.unwrap_err()}")
+    val runtime_objects = rt_result.unwrap()
+
+    # Step 2: Generate entry point IR and compile to object
+    if verbose:
+        shell("echo '[llvm-link] Generating entry point...' >&2")
+
+    val entry_ir = generate_entry_point_ir("program")
+    val entry_obj_path = "/tmp/simple_entry_{pid}.o"
+
+    val target_config = LlvmTargetConfig__for_target(CodegenTarget.Host, nil)
+    val entry_compile = compile_ir_to_object(entry_ir, target_config, OptimizationLevel.Speed)
+    if entry_compile.is_err():
+        cleanup_runtime_objects(runtime_objects)
+        return Err("Entry point compilation failed: {entry_compile.unwrap_err()}")
+
+    val entry_obj = entry_compile.unwrap()
+    if not rt_file_write_bytes(entry_obj_path, entry_obj.bytes):
+        cleanup_runtime_objects(runtime_objects)
+        return Err("Failed to write entry point object file")
+
+    # Step 3: Combine all objects and link
+    if verbose:
+        shell("echo '[llvm-link] Linking native executable...' >&2")
+
+    var all_objects: [text] = []
+    # Add user objects first
+    for obj in user_objects:
+        all_objects = all_objects + [obj]
+    # Add runtime objects
+    for obj in runtime_objects:
+        all_objects = all_objects + [obj]
+    # Add entry point
+    all_objects = all_objects + [entry_obj_path]
+
+    # Configure linker — system libs added by linker_wrapper automatically.
+    # Set runtime_path to "none" to skip auto-detecting libsimple_compiler
+    # (we provide runtime symbols via the compiled C runtime objects instead).
+    var link_config = NativeLinkConfig(
+        libraries: [],
+        library_paths: [],
+        runtime_path: "none",
+        pie: options.pie,
+        debug: options.debug,
+        verbose: options.verbose,
+        extra_flags: []
+    )
+
+    val link_result = link_to_native(all_objects, output, link_config)
+
+    # Cleanup temp files
+    cleanup_runtime_objects(runtime_objects)
+    rt_file_delete(entry_obj_path)
+
+    match link_result:
+        case Ok(path):
+            if verbose:
+                shell("echo '[llvm-link] Native executable: {path}' >&2")
+            Ok(path)
+        case Err(e):
+            Err("Linking failed: {e}")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export link_llvm_native, NativeLinkOptions, NativeLinkOptions__default

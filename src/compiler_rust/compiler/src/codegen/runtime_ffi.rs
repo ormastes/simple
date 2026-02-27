@@ -307,6 +307,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_ends_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_eq", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_len", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]),   // RuntimeValue string -> raw ptr
     RuntimeFuncSpec::new("rt_string_char_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_split", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_replace", &[I64, I64, I64], &[I64]),

@@ -183,6 +183,16 @@ impl NativeLinker {
             cmd.arg(flag);
         }
 
+        // Entry point
+        if let Some(entry) = &options.entry_point {
+            cmd.arg("-e").arg(entry);
+        }
+
+        // Debug: emit full command when SIMPLE_LINKER_DEBUG is set
+        if std::env::var("SIMPLE_LINKER_DEBUG").is_ok() || options.verbose {
+            eprintln!("Link command: {:?}", cmd);
+        }
+
         // Execute linker
         let output_result = cmd.output()?;
 
@@ -340,6 +350,8 @@ pub struct LinkOptions {
     pub libraries: Vec<String>,
     /// Library search paths.
     pub library_paths: Vec<PathBuf>,
+    /// Custom entry point symbol (None = linker default/_start).
+    pub entry_point: Option<String>,
     /// Generate a linker map file.
     pub generate_map: bool,
     /// Path for map file (if generate_map is true).
@@ -416,6 +428,12 @@ impl LinkOptions {
     /// Add an extra linker flag.
     pub fn flag(mut self, flag: impl Into<String>) -> Self {
         self.extra_flags.push(flag.into());
+        self
+    }
+
+    /// Set entry point symbol.
+    pub fn entry(mut self, sym: impl Into<String>) -> Self {
+        self.entry_point = Some(sym.into());
         self
     }
 }

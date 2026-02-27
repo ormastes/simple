@@ -111,7 +111,7 @@ impl Default for NativeBinaryOptions {
                 "m".to_string(),
                 "gcc_s".to_string(),           // Unwinding support
                 "lzma".to_string(),            // Needed by xz2 (dependency chain)
-                "simple_compiler".to_string(), // Runtime FFI functions
+                "simple_runtime".to_string(),  // Runtime FFI functions
             ],
             #[cfg(not(target_os = "linux"))]
             libraries: vec!["c".to_string()],
@@ -446,17 +446,15 @@ impl NativeBinaryBuilder {
         });
 
         if let Some(runtime_dir) = runtime_dir {
-            // Check if we need the compiler library (for self-hosting compiler)
             let compiler_lib = runtime_dir.join("libsimple_compiler.a");
             let runtime_lib = runtime_dir.join("libsimple_runtime.a");
 
-            if compiler_lib.exists() {
-                // Link compiler library ONLY (it already includes runtime as staticlib)
-                // The compiler staticlib bundles all dependencies including simple-runtime
-                builder = builder.object(&compiler_lib);
-            } else if runtime_lib.exists() {
-                // Only runtime library (normal programs without compiler features)
+            if runtime_lib.exists() {
+                // Normal programs: link only the runtime (FFI functions)
                 builder = builder.object(&runtime_lib);
+            } else if compiler_lib.exists() {
+                // Fallback: compiler lib includes runtime as dependency
+                builder = builder.object(&compiler_lib);
             }
         }
 

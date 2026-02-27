@@ -1,14 +1,91 @@
-# Object Provider - stubbed for bootstrap
-# Original backed up to /tmp/object_provider.spl.bak
+# Object Provider - Unified object file and module access
+#
+# Wraps SmfGetter to provide a consistent API for accessing object files,
+# module bytes, and exported code units from SMF files and libraries.
+
+use std.io_runtime.{file_exists, file_read_bytes}
+use compiler.backend.linker.smf_getter.{SmfGetter, SmfLocation, SmfSourceType}
+use compiler.backend.linker.smf_reader.{SmfReaderImpl}
+use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
 
 struct ObjectProviderConfig:
     search_paths: [text]
     libraries: [text]
     enable_cache: bool
     verbose: bool
+    prefer_backend: text
 
 struct ObjectProvider:
+    getter: SmfGetter
     verbose: bool
+    config: ObjectProviderConfig
 
-export ObjectProvider
-export ObjectProviderConfig
+fn ObjectProvider__new(config: ObjectProviderConfig) -> ObjectProvider:
+    var getter = SmfGetter.new()
+    if config.verbose:
+        getter.set_verbose(true)
+
+    # Add search paths
+    for path in config.search_paths:
+        getter.add_search_path(path)
+
+    # Pre-load any configured libraries
+    for lib in config.libraries:
+        if file_exists(lib):
+            _ = getter.add_library(lib)
+
+    ObjectProvider(
+        getter: getter,
+        verbose: config.verbose,
+        config: config
+    )
+
+impl ObjectProvider:
+    # Add a library (.lsm) file to the provider
+    me add_library(lib_path: text) -> Result<(), text>:
+        self.getter.add_library(lib_path)
+
+    # List all known module names
+    fn list_modules() -> [text]:
+        self.getter.list_modules()
+
+    # Get raw SMF module bytes
+    fn get_module_bytes(module_name: text) -> Result<[u8], text>:
+        self.getter.get(module_name)
+
+    # Get object file bytes for a module (from library archive)
+    fn get_object(module_name: text) -> Result<[u8], text>:
+        self.getter.get_object(module_name)
+
+    # Get exported code units for a module
+    fn get_exported_code(module_name: text) -> Result<[ObjectCodeUnit], text>:
+        # Get module data
+        val data_result = self.getter.get(module_name)
+        if data_result.is_err():
+            return Err(data_result.unwrap_err())
+
+        val data = data_result.unwrap()
+
+        # Build a code unit from the raw module data
+        val unit = ObjectCodeUnit(
+            name: module_name,
+            bytes: data,
+            size: data.len()
+        )
+        Ok([unit])
+
+    # Get an SMF reader for a module path
+    fn get_reader(path: text) -> Result<SmfReaderImpl, text>:
+        # Try opening as a direct file first
+        if file_exists(path):
+            return SmfReaderImpl__open(path)
+
+        # Try as a module name via getter
+        self.getter.get_reader(path)
+
+    # Check if a module exists
+    fn has_module(module_name: text) -> bool:
+        self.getter.has_module(module_name)
+
+export ObjectProvider, ObjectProviderConfig
+export ObjectProvider__new

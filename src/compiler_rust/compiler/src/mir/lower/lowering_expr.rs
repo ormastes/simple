@@ -1254,11 +1254,12 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirExprKind::Nil => {
-                // Nil is represented as integer 0 (null pointer)
+                // Nil is tagged value 3 in the runtime (TAG_SPECIAL=0b011 | SPECIAL_NIL=0).
+                // Must match the runtime's RuntimeValue::NIL representation.
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                    block.instructions.push(MirInst::ConstInt { dest, value: 3 });
                     dest
                 })
             }

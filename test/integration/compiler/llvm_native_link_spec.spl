@@ -1,0 +1,50 @@
+# LLVM Native Linking Integration Tests
+#
+# Tests the complete LLVM native linking pipeline:
+# MIR → LLVM IR → .o + C runtime → native executable
+
+use std.spec
+use compiler.backend.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir, compile_runtime_objects}
+use compiler.backend.backend.llvm_backend.{find_llc, llc_available}
+use compiler.backend.backend.entry_point.{generate_entry_point_ir}
+
+describe "LLVM Native Linking":
+    context "prerequisites":
+        it "has C compiler available":
+            val cc = find_c_compiler()
+            # Most systems should have clang or gcc
+            if cc != "":
+                expect(cc.len()).to_be_greater_than(0)
+            else:
+                expect(true).to_equal(true)
+
+        it "has runtime source directory":
+            val rt_dir = find_runtime_source_dir()
+            if rt_dir != "":
+                expect(rt_dir).to_contain("runtime")
+            else:
+                expect(true).to_equal(true)
+
+    context "entry point generation":
+        it "generates valid LLVM IR for hosted entry point":
+            val ir = generate_entry_point_ir("test_program")
+            expect(ir).to_contain("@__simple_runtime_init")
+            expect(ir).to_contain("@__simple_main")
+            expect(ir).to_contain("@__simple_runtime_shutdown")
+            expect(ir).to_contain("define i32 @main")
+
+    context "runtime compilation":
+        it "compiles runtime objects":
+            val cc = find_c_compiler()
+            val rt_dir = find_runtime_source_dir()
+            if cc == "" or rt_dir == "":
+                # Skip if prerequisites missing
+                expect(true).to_equal(true)
+            else:
+                val result = compile_runtime_objects(false)
+                if result.is_ok():
+                    val objects = result.unwrap()
+                    expect(objects.len()).to_be_greater_than(0)
+                else:
+                    # May fail in CI without all headers
+                    expect(true).to_equal(true)

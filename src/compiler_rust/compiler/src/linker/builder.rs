@@ -34,6 +34,8 @@ pub struct LinkerBuilder {
     output: Option<PathBuf>,
     /// Link options.
     options: LinkOptions,
+    /// Custom entry point symbol (optional).
+    entry: Option<String>,
 }
 
 impl LinkerBuilder {
@@ -44,6 +46,7 @@ impl LinkerBuilder {
             objects: Vec::new(),
             output: None,
             options: LinkOptions::new(),
+            entry: None,
         }
     }
 
@@ -82,6 +85,12 @@ impl LinkerBuilder {
     /// Set the output file path.
     pub fn output(mut self, path: impl Into<PathBuf>) -> Self {
         self.output = Some(path.into());
+        self
+    }
+
+    /// Set a custom entry point symbol (passed as -e to the linker).
+    pub fn entry(mut self, symbol: impl Into<String>) -> Self {
+        self.entry = Some(symbol.into());
         self
     }
 
@@ -207,6 +216,11 @@ impl LinkerBuilder {
         // Set up auto-map if needed
         if self.options.generate_map && self.options.map_file.is_none() {
             self.options.map_file = Some(output.with_extension("map"));
+        }
+
+        // Propagate entry point if provided
+        if let Some(entry_sym) = &self.entry {
+            self.options.entry_point = Some(entry_sym.clone());
         }
 
         // Execute linking

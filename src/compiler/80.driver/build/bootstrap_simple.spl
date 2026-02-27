@@ -1,9 +1,13 @@
-# Bootstrap Pipeline (Simplified)
+# Bootstrap Pipeline
 #
 # 3-stage self-compilation verification for the Simple compiler.
+# Stage 1: Compile compiler with current binary
+# Stage 2: Compile compiler with Stage 1 output
+# Stage 3: Compile compiler with Stage 2 output, verify Stage 2 == Stage 3
 
 use app.build.types (BuildProfile)
 use app.build.cargo (Cargo, BuildConfig)
+use std.io_runtime.{process_run, shell_output, file_exists, file_size_raw}
 
 # Bootstrap stage
 enum BootstrapStage:
@@ -35,63 +39,156 @@ struct BootstrapResult:
     verified: bool
     overall_success: bool
 
-# Bootstrap class (simplified)
+# Bootstrap class
 class Bootstrap:
     static fn run(config: BootstrapConfig) -> BootstrapResult:
         print "Bootstrap pipeline starting..."
         print "Profile: {config.profile}"
-        print "Workspace: {config.workspace_root}"
+        print "Output dir: {config.output_dir}"
 
-        # NOTE: This is a simplified/stubbed bootstrap for testing/examples.
-        # For real multi-phase bootstrap (seed_cpp → 4-phase chain), use:
-        #   app.build.bootstrap_multiphase.MultiphaseBootstrap.run()
-        # TODO: Optionally implement actual 3-stage logic if quick() needs real output
-        Bootstrap.quick()
+        # Ensure output directory exists
+        val mkdir_result = process_run("mkdir", ["-p", config.output_dir])
 
-    static fn quick() -> BootstrapResult:
-        print "Bootstrap pipeline (simplified)"
+        # Determine the compiler to use for Stage 1
+        var compiler = "bin/release/simple"
+        if not file_exists(compiler):
+            compiler = "bin/simple"
+        if not file_exists(compiler):
+            print "Error: No compiler binary found at bin/release/simple or bin/simple"
+            return early_failure("No compiler binary found")
 
-        val stage1 = StageResult(
-            stage: BootstrapStage.Stage1,
-            success: true,
-            binary_path: "seed/simple_new1",
-            binary_size: 0,
-            build_duration_ms: 0,
-            hash: ""
-        )
+        # Stage 1: Compile compiler with current binary
+        print ""
+        print "=== Stage 1: Compile with current binary ==="
+        val stage1 = compile_stage(BootstrapStage.Stage1, compiler, config)
+        if not stage1.success:
+            print "Stage 1 FAILED"
+            return BootstrapResult(
+                stage1: stage1,
+                stage2: empty_stage(BootstrapStage.Stage2),
+                stage3: empty_stage(BootstrapStage.Stage3),
+                verified: false,
+                overall_success: false
+            )
+        print "Stage 1: OK ({stage1.binary_size} bytes, hash={stage1.hash})"
 
-        val stage2 = StageResult(
-            stage: BootstrapStage.Stage2,
-            success: true,
-            binary_path: "seed/simple_new2",
-            binary_size: 0,
-            build_duration_ms: 0,
-            hash: ""
-        )
+        # Stage 2: Compile compiler with Stage 1 output
+        print ""
+        print "=== Stage 2: Compile with Stage 1 binary ==="
+        val stage2 = compile_stage(BootstrapStage.Stage2, stage1.binary_path, config)
+        if not stage2.success:
+            print "Stage 2 FAILED"
+            return BootstrapResult(
+                stage1: stage1,
+                stage2: stage2,
+                stage3: empty_stage(BootstrapStage.Stage3),
+                verified: false,
+                overall_success: false
+            )
+        print "Stage 2: OK ({stage2.binary_size} bytes, hash={stage2.hash})"
 
-        val stage3 = StageResult(
-            stage: BootstrapStage.Stage3,
-            success: true,
-            binary_path: "seed/simple_new3",
-            binary_size: 0,
-            build_duration_ms: 0,
-            hash: ""
-        )
+        # Stage 3: Compile compiler with Stage 2 output, verify match
+        print ""
+        print "=== Stage 3: Compile with Stage 2 binary ==="
+        val stage3 = compile_stage(BootstrapStage.Stage3, stage2.binary_path, config)
+        if not stage3.success:
+            print "Stage 3 FAILED"
+            return BootstrapResult(
+                stage1: stage1,
+                stage2: stage2,
+                stage3: stage3,
+                verified: false,
+                overall_success: false
+            )
+        print "Stage 3: OK ({stage3.binary_size} bytes, hash={stage3.hash})"
+
+        # Verify reproducibility: Stage 2 and Stage 3 should produce identical binaries
+        val verified = stage2.hash == stage3.hash
+        print ""
+        if verified:
+            print "Bootstrap VERIFIED: Stage 2 and Stage 3 hashes match"
+            print "  Hash: {stage2.hash}"
+        else:
+            print "Bootstrap MISMATCH: Stage 2 and Stage 3 differ"
+            print "  Stage 2: {stage2.hash}"
+            print "  Stage 3: {stage3.hash}"
+
+        val success = stage3.success and (not config.verify or verified)
 
         BootstrapResult(
             stage1: stage1,
             stage2: stage2,
             stage3: stage3,
-            verified: true,
-            overall_success: true
+            verified: verified,
+            overall_success: success
         )
+
+fn compile_stage(stage: BootstrapStage, compiler: text, config: BootstrapConfig) -> StageResult:
+    val sname = stage_name(stage)
+    val output = "{config.output_dir}/simple_{sname}"
+
+    # Compile: run the compiler to build the main CLI entry point
+    val result = process_run(compiler, ["src/app/compile/native.spl", "src/app/cli/main.spl", output])
+    val stdout = result.0
+    val stderr = result.1
+    val exit_code = result.2
+
+    if exit_code != 0:
+        print "  Compile failed (exit {exit_code})"
+        if stderr != "":
+            print "  stderr: {stderr}"
+        return StageResult(
+            stage: stage,
+            success: false,
+            binary_path: output,
+            binary_size: 0,
+            build_duration_ms: 0,
+            hash: ""
+        )
+
+    # Get binary size
+    var size: i64 = 0
+    if file_exists(output):
+        size = file_size_raw(output)
+
+    # Compute SHA-256 hash
+    val hash_output = shell_output("sha256sum '{output}' 2>/dev/null | cut -d' ' -f1", "")
+    val hash = hash_output.trim()
+
+    StageResult(
+        stage: stage,
+        success: true,
+        binary_path: output,
+        binary_size: size,
+        build_duration_ms: 0,
+        hash: hash
+    )
+
+fn empty_stage(stage: BootstrapStage) -> StageResult:
+    StageResult(
+        stage: stage,
+        success: false,
+        binary_path: "",
+        binary_size: 0,
+        build_duration_ms: 0,
+        hash: ""
+    )
+
+fn early_failure(message: text) -> BootstrapResult:
+    BootstrapResult(
+        stage1: empty_stage(BootstrapStage.Stage1),
+        stage2: empty_stage(BootstrapStage.Stage2),
+        stage3: empty_stage(BootstrapStage.Stage3),
+        verified: false,
+        overall_success: false
+    )
 
 # Default configuration
 fn default_simple_bootstrap_config() -> BootstrapConfig:
     BootstrapConfig(
         profile: BuildProfile.Bootstrap,
         verify: true,
-        workspace_root: "build/rust/ffi_gen",
+        workspace_root: ".",
         output_dir: "bootstrap"
     )
 
@@ -102,6 +199,6 @@ fn default_bootstrap_config() -> BootstrapConfig:
 # Convert stage to string
 fn stage_name(stage: BootstrapStage) -> text:
     match stage:
-        case BootstrapStage.Stage1: "Stage1"
-        case BootstrapStage.Stage2: "Stage2"
-        case BootstrapStage.Stage3: "Stage3"
+        case BootstrapStage.Stage1: "stage1"
+        case BootstrapStage.Stage2: "stage2"
+        case BootstrapStage.Stage3: "stage3"

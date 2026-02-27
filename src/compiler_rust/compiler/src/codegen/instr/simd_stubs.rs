@@ -26,6 +26,7 @@ use cranelift_module::Module;
 use crate::hir::NeighborDirection;
 use crate::mir::VReg;
 
+use super::helpers::adapted_call;
 use super::{InstrContext, InstrResult};
 
 /// Compile NeighborLoad instruction via runtime FFI
@@ -51,7 +52,7 @@ pub fn compile_neighbor_load<M: Module>(
         .get("rt_neighbor_load")
         .ok_or_else(|| "rt_neighbor_load not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[array_val, dir_val]);
+    let call = adapted_call(builder, func_ref, &[array_val, dir_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -73,7 +74,7 @@ pub fn compile_vec_load<M: Module>(
         .get("rt_vec_load")
         .ok_or_else(|| "rt_vec_load not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[array_val, offset_val]);
+    let call = adapted_call(builder, func_ref, &[array_val, offset_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -96,7 +97,7 @@ pub fn compile_vec_store<M: Module>(
         .get("rt_vec_store")
         .ok_or_else(|| "rt_vec_store not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    builder.ins().call(func_ref, &[source_val, array_val, offset_val]);
+    adapted_call(builder, func_ref, &[source_val, array_val, offset_val]);
     Ok(())
 }
 
@@ -116,7 +117,7 @@ pub fn compile_vec_gather<M: Module>(
         .get("rt_vec_gather")
         .ok_or_else(|| "rt_vec_gather not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[array_val, indices_val]);
+    let call = adapted_call(builder, func_ref, &[array_val, indices_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -139,7 +140,7 @@ pub fn compile_vec_scatter<M: Module>(
         .get("rt_vec_scatter")
         .ok_or_else(|| "rt_vec_scatter not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    builder.ins().call(func_ref, &[source_val, array_val, indices_val]);
+    adapted_call(builder, func_ref, &[source_val, array_val, indices_val]);
     Ok(())
 }
 
@@ -161,7 +162,7 @@ pub fn compile_vec_fma<M: Module>(
         .get("rt_vec_fma")
         .ok_or_else(|| "rt_vec_fma not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[a_val, b_val, c_val]);
+    let call = adapted_call(builder, func_ref, &[a_val, b_val, c_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -181,7 +182,7 @@ pub fn compile_vec_recip<M: Module>(
         .get("rt_vec_recip")
         .ok_or_else(|| "rt_vec_recip not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[source_val]);
+    let call = adapted_call(builder, func_ref, &[source_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -207,9 +208,7 @@ pub fn compile_vec_masked_load<M: Module>(
         .get("rt_vec_masked_load")
         .ok_or_else(|| "rt_vec_masked_load not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder
-        .ins()
-        .call(func_ref, &[array_val, offset_val, mask_val, default_val]);
+    let call = adapted_call(builder, func_ref, &[array_val, offset_val, mask_val, default_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -234,9 +233,7 @@ pub fn compile_vec_masked_store<M: Module>(
         .get("rt_vec_masked_store")
         .ok_or_else(|| "rt_vec_masked_store not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    builder
-        .ins()
-        .call(func_ref, &[source_val, array_val, offset_val, mask_val]);
+    adapted_call(builder, func_ref, &[source_val, array_val, offset_val, mask_val]);
     Ok(())
 }
 
@@ -256,7 +253,7 @@ pub fn compile_vec_min_vec<M: Module>(
         .get("rt_vec_min_vec")
         .ok_or_else(|| "rt_vec_min_vec not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[a_val, b_val]);
+    let call = adapted_call(builder, func_ref, &[a_val, b_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -278,7 +275,7 @@ pub fn compile_vec_max_vec<M: Module>(
         .get("rt_vec_max_vec")
         .ok_or_else(|| "rt_vec_max_vec not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[a_val, b_val]);
+    let call = adapted_call(builder, func_ref, &[a_val, b_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -302,7 +299,7 @@ pub fn compile_vec_clamp<M: Module>(
         .get("rt_vec_clamp")
         .ok_or_else(|| "rt_vec_clamp not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[source_val, lo_val, hi_val]);
+    let call = adapted_call(builder, func_ref, &[source_val, lo_val, hi_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())

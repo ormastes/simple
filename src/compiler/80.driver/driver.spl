@@ -28,6 +28,10 @@ use compiler.driver.smf_writer.{generate_smf_with_templates, Target}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use compiler.driver.driver_aot_output.*
 
+extern fn rt_dir_exists(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+
 class CheckBackendImpl(Backend):
     fn name() -> text:
         "check"
@@ -137,18 +141,51 @@ class CompilerDriver:
         var i = 0
         while i < self.ctx.options.input_files.len():
             val path = self.ctx.options.input_files[i]
-            log.trace("loading file: {path}")
-            match SourceFile__load(path):
-                case Ok(source):
-                    log.trace("loaded OK: {source.path}")
-                    self.ctx.sources.push(source)
-                case Err(e):
-                    log.error("load error: {e}")
-                    self.ctx.add_error(e)
+            log.trace("loading file or directory: {path}")
+
+            # If a directory is provided, recursively gather .spl files
+            if rt_dir_exists(path):
+                val files = self.collect_spl_files(path)
+                log.debug("  found {files.len()} .spl files under {path}")
+                for f in files:
+                    match SourceFile__load(f):
+                        case Ok(source):
+                            self.ctx.sources.push(source)
+                        case Err(e):
+                            log.error("load error: {e}")
+                            self.ctx.add_error(e)
+            else:
+                match SourceFile__load(path):
+                    case Ok(source):
+                        log.trace("loaded OK: {source.path}")
+                        self.ctx.sources.push(source)
+                    case Err(e):
+                        log.error("load error: {e}")
+                        self.ctx.add_error(e)
             i = i + 1
         log.debug("sources stored, count={self.ctx.sources.len()}")
 
         not self.ctx.has_errors()
+
+    # Recursively collect .spl files (skips build/target/hidden dirs)
+    fn collect_spl_files(dir: text) -> [text]:
+        var files: [text] = []
+        if not rt_dir_exists(dir):
+            return files
+
+        val entries = rt_dir_list(dir)
+        for entry in entries:
+            if entry.starts_with("."):
+                continue
+            if entry == "build" or entry == "target":
+                continue
+
+            val full_path = dir + "/" + entry
+            if rt_dir_exists(full_path):
+                files = files + self.collect_spl_files(full_path)
+            elif entry.ends_with(".spl") and rt_file_exists(full_path):
+                files.push(full_path)
+        files
 
     # --------------------------------------------------------------------------
     # Phase 2: Parse

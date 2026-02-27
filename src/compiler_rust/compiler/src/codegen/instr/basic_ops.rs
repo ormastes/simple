@@ -82,11 +82,21 @@ pub fn compile_unary_op<M: Module>(
         Some(&v) => v,
         None => return Err(format!("UnaryOp: operand vreg {:?} not found", operand)),
     };
+    let val_type = builder.func.dfg.value_type(val);
+    let val_is_float = val_type == types::F32 || val_type == types::F64;
     let result = match op {
-        UnaryOp::Neg => builder.ins().ineg(val),
-        UnaryOp::Not => builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0),
+        UnaryOp::Neg => {
+            if val_is_float { builder.ins().fneg(val) }
+            else { builder.ins().ineg(val) }
+        }
+        UnaryOp::Not => {
+            if val_is_float {
+                let zero_f = if val_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, val, zero_f)
+            } else {
+                builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0)
+            }
+        }
         UnaryOp::BitNot => builder.ins().bnot(val),
     };
     ctx.vreg_values.insert(dest, result);

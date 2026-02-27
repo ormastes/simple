@@ -6,6 +6,7 @@
 use super::{rt_dict_new, rt_dict_set, rt_string_new, RuntimeValue};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::path::PathBuf;
 use std::process::Command;
 
 /// Helper: Create a RuntimeValue string from a Rust String
@@ -16,6 +17,30 @@ fn string_to_runtime(s: String) -> RuntimeValue {
 /// Helper: Create a RuntimeValue string from a &str
 fn str_to_runtime(s: &str) -> RuntimeValue {
     rt_string_new(s.as_ptr(), s.len() as u64)
+}
+
+/// Resolve the workspace directory to run cargo commands in.
+/// Order of precedence:
+/// 1) `SIMPLE_RUST_WORKSPACE` env var (absolute or relative)
+/// 2) `src/compiler_rust` (repo layout default)
+/// 3) `rust` (legacy path used by older bootstrap flow)
+fn workspace_dir() -> PathBuf {
+    if let Ok(env_dir) = std::env::var("SIMPLE_RUST_WORKSPACE") {
+        let path = PathBuf::from(env_dir);
+        if path.join("Cargo.toml").exists() {
+            return path;
+        }
+    }
+
+    for candidate in ["src/compiler_rust", "rust"] {
+        let path = PathBuf::from(candidate);
+        if path.join("Cargo.toml").exists() {
+            return path;
+        }
+    }
+
+    // Fallback to current dir to avoid panics; cargo will error with context.
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Build with cargo
@@ -57,7 +82,7 @@ pub extern "C" fn rt_cargo_build(
 
     let mut cmd = Command::new("cargo");
     cmd.arg("build");
-    cmd.current_dir("rust");
+    cmd.current_dir(workspace_dir());
 
     // Add profile
     match profile_str {
@@ -124,7 +149,7 @@ pub extern "C" fn rt_cargo_test(package: *const c_char, filter: *const c_char) -
 
     let mut cmd = Command::new("cargo");
     cmd.arg("test");
-    cmd.current_dir("rust");
+    cmd.current_dir(workspace_dir());
 
     if let Some(pkg) = package_str {
         cmd.arg("-p").arg(pkg);
@@ -173,7 +198,10 @@ pub extern "C" fn rt_cargo_test(package: *const c_char, filter: *const c_char) -
 /// Clean cargo build artifacts
 #[no_mangle]
 pub extern "C" fn rt_cargo_clean() -> i64 {
-    let output = Command::new("cargo").arg("clean").current_dir("rust").output();
+    let output = Command::new("cargo")
+        .arg("clean")
+        .current_dir(workspace_dir())
+        .output();
 
     match output {
         Ok(output) => {
@@ -195,7 +223,7 @@ pub extern "C" fn rt_cargo_check() -> RuntimeValue {
     let output = Command::new("cargo")
         .arg("check")
         .arg("--workspace")
-        .current_dir("rust")
+        .current_dir(workspace_dir())
         .output();
 
     let output = match output {

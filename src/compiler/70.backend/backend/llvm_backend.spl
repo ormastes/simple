@@ -17,7 +17,7 @@
 
 use compiler.mir.mir_data.*
 use compiler.backend.backend_api.*
-use compiler.core.backend_types.{CompiledModule, CompiledSymbol, CodegenTarget, OptimizationLevel}
+use compiler.core.backend_types.{CompiledModule, CompiledSymbol, CompiledSymbolKind, CodegenTarget, OptimizationLevel}
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode, LlvmTargetConfig__compatibility_build}
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, LlvmIRBuilder__create}
@@ -26,8 +26,9 @@ use compiler.mir_opt.mod.{optimize_module, OptLevel}
 use compiler.interp.interpreter.llvm.tools (find_llc as llvm_find_llc, find_opt as llvm_find_opt, llc_available as llvm_llc_available, opt_available as llvm_opt_available, find_wasm_ld as llvm_find_wasm_ld, find_wasm_opt as llvm_find_wasm_opt, find_wasi_sysroot as llvm_find_wasi_sysroot)
 use app.io.mod (shell, file_write, file_delete, file_exists, getpid, time_now_unix_micros)
 
-# FFI for reading binary files (object code)
+# FFI for reading files (object code + optimized IR)
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_text(path: text) -> text
 
 # ============================================================================
 # LLVM Backend
@@ -255,19 +256,22 @@ class LlvmBackend:
             if file_write(opt_ir_path, llvm_ir):
                 val opt_result = self.optimize_ir(opt_ir_path, opt_out_path)
                 if opt_result.is_ok():
-                    val optimized = shell("cat {opt_out_path}")
-                    if optimized.exit_code == 0:
-                        llvm_ir = optimized.stdout
+                    val optimized_ir = rt_file_read_text(opt_out_path) ?? ""
+                    if optimized_ir != "":
+                        llvm_ir = optimized_ir
                 file_delete(opt_ir_path)
                 file_delete(opt_out_path)
 
         # Compile IR to object code
         var object_code: [u8]? = nil
+        var symbols: [CompiledSymbol] = []
         if not self.emit_llvm_ir:  # Skip object generation if only IR requested
             val obj_result = compile_ir_to_object(llvm_ir, config, self.opt_level)
             if obj_result.is_err():
                 return Err(obj_result.unwrap_err())
-            object_code = Some(obj_result.unwrap())
+            val obj = obj_result.unwrap()
+            object_code = Some(obj.bytes)
+            symbols = obj.symbols
 
         val end_time = time_now_unix_micros()
         val compile_time = (end_time - start_time) / 1000  # Convert to ms
@@ -277,6 +281,7 @@ class LlvmBackend:
             llvm_ir: if self.emit_llvm_ir: Some(llvm_ir) else: nil,
             assembly: if self.emit_assembly: Some("; LLVM generated assembly") else: nil,
             object_code: object_code,
+            symbols: symbols,
             compile_time_ms: compile_time
         ))
 
@@ -286,6 +291,7 @@ struct LlvmCompileResult:
     llvm_ir: text?
     assembly: text?
     object_code: [u8]?
+    symbols: [CompiledSymbol]
     compile_time_ms: i64
 
 impl LlvmCompileResult:
@@ -300,7 +306,7 @@ impl LlvmCompileResult:
             assembly: self.assembly,
             llvm_ir: self.llvm_ir,
             mir_dump: nil,
-            symbols: [],  # TODO: Extract symbols from object code
+            symbols: self.symbols,
             compile_time_ms: self.compile_time_ms
         )
 
@@ -469,6 +475,75 @@ fn find_wasi_sysroot() -> text:
     """Find WASI sysroot directory. Returns path or empty string."""
     llvm_find_wasi_sysroot()
 
+struct LlvmObjectCode:
+    """Object code bytes with extracted symbol information."""
+    bytes: [u8]
+    symbols: [CompiledSymbol]
+
+fn extract_symbols_nm(obj_path: text) -> [CompiledSymbol]:
+    """Extract defined symbols from an object file using nm.
+
+    Parses nm output to identify function, data, and constant symbols.
+    Skips undefined (U) and weak (W/w) symbols.
+    """
+    val nm_result = shell("nm '{obj_path}' 2>/dev/null")
+    if nm_result.exit_code != 0:
+        return []
+
+    var symbols: [CompiledSymbol] = []
+    val lines = nm_result.stdout.split("\n")
+    for line in lines:
+        if line == "":
+            continue
+        # Filter empty parts from consecutive spaces
+        val raw_parts = line.split(" ")
+        var parts: [text] = []
+        for p in raw_parts:
+            if p != "":
+                parts = parts + [p]
+        val plen = parts.len()
+        if plen < 2:
+            continue
+
+        # nm output: "address TYPE name" (3+ parts) or "TYPE name" (2 parts)
+        var type_code = ""
+        var sym_name = ""
+        if plen >= 3:
+            type_code = parts[plen - 2]
+            sym_name = parts[plen - 1]
+        else:
+            type_code = parts[0]
+            sym_name = parts[1]
+
+        if sym_name == "":
+            continue
+
+        # Skip undefined and weak symbols
+        if type_code == "U" or type_code == "u":
+            continue
+        if type_code == "W" or type_code == "w":
+            continue
+        if type_code == "V" or type_code == "v":
+            continue
+
+        # Map type code to CompiledSymbolKind
+        var kind = CompiledSymbolKind.Function
+        if type_code == "T" or type_code == "t":
+            kind = CompiledSymbolKind.Function
+        elif type_code == "D" or type_code == "d":
+            kind = CompiledSymbolKind.Data
+        elif type_code == "B" or type_code == "b":
+            kind = CompiledSymbolKind.Data
+        elif type_code == "R" or type_code == "r":
+            kind = CompiledSymbolKind.Const
+        else:
+            continue
+
+        val sym = CompiledSymbol(name: sym_name, kind: kind, address: 0, size: 0)
+        symbols = symbols + [sym]
+
+    symbols
+
 fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel):
     """Compile LLVM IR text to object code bytes via llc CLI.
 
@@ -521,6 +596,9 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
         file_delete(obj_path)
         return Err("llc failed (exit {result.exit_code}):\n{result.stdout}\n\nCommand: {cmd}")
 
+    # Extract symbols before deleting the object file
+    val symbols = extract_symbols_nm(obj_path)
+
     # Read object bytes
     val bytes = rt_file_read_bytes(obj_path)
     file_delete(obj_path)
@@ -528,7 +606,7 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
     if bytes == nil:
         return Err("Failed to read compiled object file: {obj_path}")
 
-    Ok(bytes)
+    Ok(LlvmObjectCode(bytes: bytes, symbols: symbols))
 
 # ============================================================================
 # WASM Runtime Declarations
@@ -733,8 +811,8 @@ export LlvmIRBuilder__create
 export MirToLlvm__create, MirToLlvm__create_baremetal
 
 # This module's exports
-export LlvmBackend, LlvmCompileResult
-export compile_ir_to_object, compile_ir_to_wasm, llc_available, find_llc, find_opt, opt_available
+export LlvmBackend, LlvmCompileResult, LlvmObjectCode
+export compile_ir_to_object, compile_ir_to_wasm, extract_symbols_nm, llc_available, find_llc, find_opt, opt_available
 export generate_runtime_declarations, generate_runtime_declarations_for_target, generate_wasm_runtime_declarations
 export find_wasm_ld, find_wasm_opt, find_wasi_sysroot
 export LlvmBackend__create, LlvmBackend__create_baremetal, LlvmBackend__create_wasm, LlvmBackend__compatibility_build, LlvmBackend__default_backend

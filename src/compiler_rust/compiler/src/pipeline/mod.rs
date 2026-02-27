@@ -16,6 +16,7 @@
 //!    Use `compile_native()` or `compile_source_to_memory_native()` for this mode.
 
 pub mod module_loader;
+pub mod native_project;
 pub mod script_detection;
 
 mod codegen;
@@ -32,6 +33,9 @@ pub use execution::{
 
 // Re-export startup configuration types (#1979, #1986)
 pub use module_loader::{extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints};
+
+// Re-export native project builder types
+pub use native_project::{NativeBuildConfig, NativeBuildResult, NativeProjectBuilder};
 
 #[cfg(test)]
 mod tests {
