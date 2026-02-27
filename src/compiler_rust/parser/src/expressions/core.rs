@@ -41,7 +41,34 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
         let saved_indent_count = self.binary_indent_count;
         self.binary_indent_count = 0;
-        let result = self.parse_pipe();
+        let mut result = self.parse_pipe()?;
+
+        // Handle postfix ternary: `expr if cond else expr`
+        // Python-style conditional: `value_if_true if condition else value_if_false`
+        // Only when `if` directly follows the expression (not after Dedent/Newline/Indent,
+        // which would indicate a new statement on a separate line).
+        if self.check(&TokenKind::If)
+            && !matches!(
+                self.previous.kind,
+                TokenKind::Dedent | TokenKind::Newline | TokenKind::Indent
+            )
+        {
+            self.advance(); // consume 'if'
+            let condition = self.parse_pipe()?;
+            self.expect(&TokenKind::Else)?;
+            // Optional colon after else (Simple style: `else:`)
+            if self.check(&TokenKind::Colon) {
+                self.advance();
+            }
+            let else_expr = self.parse_pipe()?;
+            result = Expr::If {
+                let_pattern: None,
+                condition: Box::new(condition),
+                then_branch: Box::new(result),
+                else_branch: Some(Box::new(else_expr)),
+            };
+        }
+
         // Consume matching DEDENTs for any INDENTs consumed during binary operator
         // line continuation.
         let consumed = self.binary_indent_count;
@@ -49,7 +76,7 @@ impl<'a> Parser<'a> {
         if consumed > 0 {
             self.consume_dedents_for_method_chain(consumed);
         }
-        result
+        Ok(result)
     }
 
     /// Parse optional step expression for slice syntax (`:step` at end of slice)

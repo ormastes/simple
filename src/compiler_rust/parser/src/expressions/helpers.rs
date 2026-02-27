@@ -636,7 +636,9 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_comprehension_clause(&mut self) -> Result<(Pattern, Expr, Option<Box<Expr>>), ParseError> {
         let pattern = self.parse_pattern()?;
         self.expect(&TokenKind::In)?;
-        let iterable = self.parse_expression()?;
+        // Use parse_pipe() instead of parse_expression() to avoid consuming
+        // the comprehension's `if` filter as a postfix ternary operator.
+        let iterable = self.parse_pipe()?;
         let condition = if self.check(&TokenKind::If) {
             self.advance();
             Some(Box::new(self.parse_expression()?))
