@@ -357,7 +357,9 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::DoubleQuestion => {
                     // Null coalescing / Option fallback: expr ?? default
+                    // Supports multi-line: expr ??\n    default
                     self.advance();
+                    self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
                     let default = self.parse_unary()?; // Higher precedence than ??
                     expr = Expr::Coalesce {
                         expr: Box::new(expr),

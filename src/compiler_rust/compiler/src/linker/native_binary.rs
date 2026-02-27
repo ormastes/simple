@@ -548,106 +548,150 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
             None
         };
 
-        // Build linker command
-        // Order: crti.o, crt1.o, user objects, -lc, crtn.o
-        let mut builder = LinkerBuilder::new();
+        // Helper to build and execute a link with given output/flags
+        let mut do_link = |out_path: &Path, allow_unresolved: bool, extra_stubs: &[PathBuf]| -> LinkerResult<()> {
+            let mut builder = LinkerBuilder::new();
 
-        // Add CRT files in order: crti, Scrt1/crt1, then user code
-        if crt_files.len() >= 2 {
-            builder = builder.object(&crt_files[0]); // crti.o
-            builder = builder.object(&crt_files[1]); // Scrt1.o or crt1.o
-        }
-
-        // Add user object file
-        builder = builder.object(&obj_path);
-        if !bootstrap_stubs.is_empty() {
-            builder = builder.flag("--whole-archive");
-            for stub in &bootstrap_stubs {
-                builder = builder.object(stub);
-            }
-            builder = builder.flag("--no-whole-archive");
-            // Allow unresolved runtime symbols during bootstrap; the runtime
-            // library doesn't provide every rt_* stub used by optional features.
-            builder = builder.flag("--unresolved-symbols=ignore-all");
-        }
-
-        // Add Simple runtime and compiler static libraries directly (not via -l)
-        // This ensures static linking even when shared library exists
-        let runtime_dir = NativeBinaryOptions::find_runtime_library_path().or_else(|| {
-            // Fallback: try current working directory + target/debug
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.join("target/debug"))
-                .filter(|p| p.join("libsimple_runtime.a").exists())
-        });
-
-        if let Some(runtime_dir) = runtime_dir {
-            let compiler_lib = runtime_dir.join("libsimple_compiler.a");
-            let runtime_lib = runtime_dir.join("libsimple_runtime.a");
-
-            if runtime_lib.exists() {
-                // Normal programs: link only the runtime (FFI functions)
-                builder = builder.object(&runtime_lib);
-            } else if compiler_lib.exists() {
-                // Fallback: compiler lib includes runtime as dependency
-                builder = builder.object(&compiler_lib);
-            }
-        }
-
-        // Set output
-        builder = builder.output(&self.options.output);
-
-        // Apply options
-        if let Some(linker) = self.options.linker {
-            builder = builder.linker(linker);
-        }
-
-        for lib in &self.options.libraries {
-            builder = builder.library(lib);
-        }
-
-        for path in &self.options.library_paths {
-            builder = builder.library_path(path);
-        }
-
-        if self.options.strip {
-            builder = builder.strip();
-        }
-
-        // PIE and shared are mutually exclusive
-        if self.options.shared {
-            builder = builder.shared();
-        } else if self.options.pie {
-            builder = builder.pie();
-        }
-
-        if self.options.generate_map {
-            builder = builder.auto_map();
-        }
-
-        if self.options.verbose {
-            builder = builder.verbose();
-        }
-
-        // Add dynamic linker flag for executables (both PIE and non-PIE)
-        if !self.options.shared {
-            if let Some(dynamic_linker) = self.find_dynamic_linker() {
-                builder = builder.flag(format!("--dynamic-linker={}", dynamic_linker.display()));
+            if crt_files.len() >= 2 {
+                builder = builder.object(&crt_files[0]);
+                builder = builder.object(&crt_files[1]);
             }
 
-            // For non-PIE executables, explicitly pass -no-pie
-            if !self.options.pie {
-                builder = builder.flag("-no-pie".to_string());
+            builder = builder.object(&obj_path);
+            if !extra_stubs.is_empty() {
+                builder = builder.flag("--whole-archive");
+                for stub in extra_stubs {
+                    builder = builder.object(stub);
+                }
+                builder = builder.flag("--no-whole-archive");
             }
-        }
 
-        // Add crtn.o at the end (after libraries)
-        if crt_files.len() >= 3 {
-            builder = builder.object(&crt_files[2]); // crtn.o
-        }
+            if allow_unresolved {
+                builder = builder.flag("--unresolved-symbols=ignore-all");
+            }
 
-        // Execute linking
-        match builder.link() {
+            let runtime_dir = NativeBinaryOptions::find_runtime_library_path().or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.join("target/debug"))
+                    .filter(|p| p.join("libsimple_runtime.a").exists())
+            });
+
+            if let Some(runtime_dir) = runtime_dir {
+                let compiler_lib = runtime_dir.join("libsimple_compiler.a");
+                let runtime_lib = runtime_dir.join("libsimple_runtime.a");
+                if runtime_lib.exists() {
+                    builder = builder.object(&runtime_lib);
+                } else if compiler_lib.exists() {
+                    builder = builder.object(&compiler_lib);
+                }
+            }
+
+            builder = builder.output(out_path);
+
+            if let Some(linker) = self.options.linker {
+                builder = builder.linker(linker);
+            }
+            for lib in &self.options.libraries {
+                builder = builder.library(lib);
+            }
+            for path in &self.options.library_paths {
+                builder = builder.library_path(path);
+            }
+            if self.options.strip {
+                builder = builder.strip();
+            }
+            if self.options.shared {
+                builder = builder.shared();
+            } else if self.options.pie {
+                builder = builder.pie();
+            }
+            if self.options.generate_map {
+                builder = builder.auto_map();
+            }
+            if self.options.verbose {
+                builder = builder.verbose();
+            }
+            if !self.options.shared {
+                if let Some(dynamic_linker) = self.find_dynamic_linker() {
+                    builder = builder.flag(format!("--dynamic-linker={}", dynamic_linker.display()));
+                }
+                if !self.options.pie {
+                    builder = builder.flag("-no-pie".to_string());
+                }
+            }
+            if crt_files.len() >= 3 {
+                builder = builder.object(&crt_files[2]); // crtn.o
+            }
+
+            builder.link()
+        };
+
+        // First pass: allow unresolved during bootstrap so we can see missing symbols.
+        let temp_out = temp_path.join("_bootstrap_pass1");
+        let first_out = if bootstrap_mode { &temp_out } else { Path::new(&self.options.output) };
+        do_link(first_out, bootstrap_mode, &bootstrap_stubs)?;
+
+        // If bootstrap, scan undefineds, add auto-stubs (done earlier for main.o), then relink without allow-unresolved.
+        let final_result = if bootstrap_mode {
+            // Regenerate auto-stubs from first-pass binary (captures runtime needs)
+            let nm_out = std::process::Command::new("nm")
+                .arg("-u")
+                .arg(&first_out)
+                .output()
+                .map_err(|e| LinkerError::LinkFailed(format!("failed to run nm on first-pass output: {}", e)))?;
+
+            let mut symbols = std::collections::BTreeSet::new();
+            for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
+                if let Some(sym) = line.split_whitespace().last() {
+                    let keep = sym.starts_with("rt_")
+                        || sym.starts_with("get_global_")
+                        || sym.starts_with("set_global_")
+                        || sym.contains("GLOBAL_LOG_LEVEL")
+                        || sym.contains("SCOPE_LEVELS")
+                        || matches!(sym, "count_by_severity" | "future_alloc_ready" | "future_map" | "fallback" | "panic" | "int");
+                    if keep {
+                        symbols.insert(sym.to_string());
+                    }
+                }
+            }
+            if !symbols.is_empty() {
+                let auto_c = temp_path.join("_bootstrap_auto.c");
+                let auto_o = temp_path.join("_bootstrap_auto.o");
+                let mut code = String::from("#include <stdint.h>\n#include <stdbool.h>\n");
+                for sym in &symbols {
+                    let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
+                    let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && sym != "int";
+                    if is_data && valid_ident {
+                        code.push_str(&format!("__attribute__((weak, used)) int64_t {0} = 0;\n", sym));
+                    } else if valid_ident {
+                        code.push_str(&format!("__attribute__((weak, used)) int64_t {0}(void) {{ return 0; }}\n", sym));
+                    } else {
+                        let clean = sym.replace('\"', "");
+                        code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  ret\\n\");\n", clean));
+                    }
+                }
+                std::fs::write(&auto_c, code)
+                    .map_err(|e| LinkerError::LinkFailed(format!("failed to write auto stub: {}", e)))?;
+                let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+                let status = std::process::Command::new(&cc)
+                    .args(["-c", "-o"])
+                    .arg(&auto_o)
+                    .arg(&auto_c)
+                    .status()
+                    .map_err(|e| LinkerError::LinkFailed(format!("failed to compile auto stub: {}", e)))?;
+                if status.success() {
+                    bootstrap_stubs.push(auto_o);
+                } else {
+                    eprintln!("warning: failed to build auto stub (second pass) with {} (status {})", cc, status);
+                }
+            }
+            do_link(Path::new(&self.options.output), false, &bootstrap_stubs)
+        } else {
+            Ok(())
+        };
+
+        match final_result {
             Ok(()) => Ok(NativeBinaryResult {
                 output: self.options.output.clone(),
                 size: std::fs::metadata(&self.options.output).map(|m| m.len()).unwrap_or(0),
