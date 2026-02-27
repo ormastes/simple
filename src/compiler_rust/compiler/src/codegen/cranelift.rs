@@ -44,6 +44,35 @@ impl Codegen {
         self.backend.target()
     }
 
+    /// Set the module prefix for name mangling in multi-file builds.
+    pub fn set_module_prefix(&mut self, prefix: String) {
+        self.backend.set_module_prefix(prefix);
+    }
+
+    /// Mark this module as the program entry point.
+    ///
+    /// When `true`, the `main` function is emitted as `spl_main` with
+    /// Preemptible linkage. Non-entry modules mangle `main` like any
+    /// other local function to avoid symbol collisions.
+    pub fn set_entry_module(&mut self, is_entry: bool) {
+        self.backend.set_entry_module(is_entry);
+    }
+
+    /// Set the import map for cross-module function resolution.
+    pub fn set_import_map(&mut self, map: std::sync::Arc<std::collections::HashMap<String, String>>) {
+        self.backend.set_import_map(map);
+    }
+
+    /// Set the ambiguous names for symbol resolution.
+    pub fn set_ambiguous_names(&mut self, names: std::sync::Arc<std::collections::HashSet<String>>) {
+        self.backend.set_ambiguous_names(names);
+    }
+
+    /// Set the per-module use map for resolving imports from `use` statements.
+    pub fn set_use_map(&mut self, map: std::collections::HashMap<String, String>) {
+        self.backend.set_use_map(map);
+    }
+
     /// Compile a MIR module to object code.
     pub fn compile_module(mut self, mir: &MirModule) -> CodegenResult<Vec<u8>> {
         // Compile all functions

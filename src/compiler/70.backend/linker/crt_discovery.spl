@@ -1,5 +1,10 @@
-# CRT Discovery - stubbed for bootstrap
-# Original backed up to /tmp/crt_discovery.spl.bak
+# CRT Discovery - Real Filesystem Probing
+#
+# Discovers C runtime startup files (crt1.o, crti.o, crtn.o, crtbegin.o, crtend.o)
+# and the dynamic linker path by probing the filesystem. Supports x86_64, aarch64,
+# and riscv64 architectures on Linux.
+
+use std.io_runtime.{file_exists, shell_output, shell, host_arch}
 
 struct CrtFiles:
     crt1: text
@@ -12,22 +17,175 @@ struct CrtFiles:
     found: bool
 
 fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
+    val arch = host_arch()
+
+    # Build candidate search directories based on architecture
+    var candidates: [text] = []
+    if arch == "x86_64":
+        candidates = ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/lib/x86_64-linux-gnu", "/lib64"]
+    elif arch == "aarch64":
+        candidates = ["/usr/lib/aarch64-linux-gnu", "/usr/aarch64-linux-gnu/lib", "/lib/aarch64-linux-gnu"]
+    elif arch == "riscv64":
+        candidates = ["/usr/lib/riscv64-linux-gnu", "/usr/riscv64-linux-gnu/lib", "/lib/riscv64-linux-gnu"]
+    else:
+        candidates = ["/usr/lib"]
+
+    # Choose crt1 variant based on PIE
+    val crt1_name = if pie: "Scrt1.o" else: "crt1.o"
+
+    # Probe each candidate directory for CRT files
+    var found_crt1 = ""
+    var found_crti = ""
+    var found_crtn = ""
+    var found_dir = ""
+
+    for dir in candidates:
+        val try_crt1 = "{dir}/{crt1_name}"
+        val try_crti = "{dir}/crti.o"
+        val try_crtn = "{dir}/crtn.o"
+
+        if (file_exists(try_crt1) and
+            file_exists(try_crti) and
+            file_exists(try_crtn)):
+            found_crt1 = try_crt1
+            found_crti = try_crti
+            found_crtn = try_crtn
+            found_dir = dir
+            if verbose:
+                print "[crt-discovery] Found CRT files in {dir}"
+            break
+
+    if found_crt1 == "":
+        if verbose:
+            print "[crt-discovery] CRT files not found in any candidate directory"
+        return CrtFiles(
+            crt1: "", crti: "", crtn: "",
+            crtbegin: "", crtend: "",
+            dynamic_linker: "",
+            lib_dirs: [],
+            found: false
+        )
+
+    # Find crtbegin.o and crtend.o from GCC lib dirs
+    val gcc_dirs = find_gcc_lib_dirs()
+    var found_crtbegin = ""
+    var found_crtend = ""
+
+    val crtbegin_name = if pie: "crtbeginS.o" else: "crtbegin.o"
+    val crtend_name = if pie: "crtendS.o" else: "crtend.o"
+
+    for gcc_dir in gcc_dirs:
+        val try_begin = "{gcc_dir}/{crtbegin_name}"
+        val try_end = "{gcc_dir}/{crtend_name}"
+        if file_exists(try_begin):
+            found_crtbegin = try_begin
+            if verbose:
+                print "[crt-discovery] Found {crtbegin_name} in {gcc_dir}"
+        if file_exists(try_end):
+            found_crtend = try_end
+            if verbose:
+                print "[crt-discovery] Found {crtend_name} in {gcc_dir}"
+        if found_crtbegin != "" and found_crtend != "":
+            break
+
+    # Find dynamic linker
+    val dyn_linker = find_dynamic_linker()
+    if verbose:
+        if dyn_linker != "":
+            print "[crt-discovery] Dynamic linker: {dyn_linker}"
+        else:
+            print "[crt-discovery] Dynamic linker not found"
+
+    # Collect lib dirs
+    var lib_dirs: [text] = [found_dir]
+    for gcc_dir in gcc_dirs:
+        lib_dirs = lib_dirs + [gcc_dir]
+
     CrtFiles(
-        crt1: "/usr/lib/x86_64-linux-gnu/crt1.o",
-        crti: "/usr/lib/x86_64-linux-gnu/crti.o",
-        crtn: "/usr/lib/x86_64-linux-gnu/crtn.o",
-        crtbegin: "",
-        crtend: "",
-        dynamic_linker: "/lib64/ld-linux-x86-64.so.2",
-        lib_dirs: ["/usr/lib/x86_64-linux-gnu"],
+        crt1: found_crt1,
+        crti: found_crti,
+        crtn: found_crtn,
+        crtbegin: found_crtbegin,
+        crtend: found_crtend,
+        dynamic_linker: dyn_linker,
+        lib_dirs: lib_dirs,
         found: true
     )
 
 fn find_dynamic_linker() -> text:
-    "/lib64/ld-linux-x86-64.so.2"
+    val arch = host_arch()
+
+    # Architecture-specific dynamic linker candidates
+    var candidates: [text] = []
+    if arch == "x86_64":
+        candidates = [
+            "/lib64/ld-linux-x86-64.so.2",
+            "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "/lib/ld-linux-x86-64.so.2"
+        ]
+    elif arch == "aarch64":
+        candidates = [
+            "/lib/ld-linux-aarch64.so.1",
+            "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+        ]
+    elif arch == "riscv64":
+        candidates = [
+            "/lib/ld-linux-riscv64-lp64d.so.1",
+            "/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1"
+        ]
+
+    # Probe each candidate
+    for path in candidates:
+        if file_exists(path):
+            return path
+
+    # Fallback: parse from readelf -l /bin/sh
+    val readelf_output = shell_output("readelf -l /bin/sh 2>/dev/null | grep 'Requesting program interpreter' | sed 's/.*: //;s/]//'", "")
+    val trimmed = readelf_output.trim()
+    if trimmed != "" and file_exists(trimmed):
+        return trimmed
+
+    ""
 
 fn find_gcc_lib_dirs() -> [text]:
-    ["/usr/lib/gcc/x86_64-linux-gnu/13"]
+    var dirs: [text] = []
+
+    # Method 1: Ask GCC for crtbegin.o location
+    val gcc_crtbegin = shell_output("gcc -print-file-name=crtbegin.o 2>/dev/null", "")
+    val gcc_trimmed = gcc_crtbegin.trim()
+    if gcc_trimmed != "" and gcc_trimmed != "crtbegin.o" and file_exists(gcc_trimmed):
+        val dir = path_dirname(gcc_trimmed)
+        if dir != "":
+            dirs = dirs + [dir]
+
+    # Method 2: Ask cc (may be clang or gcc)
+    if dirs.len() == 0:
+        val cc_crtbegin = shell_output("cc -print-file-name=crtbegin.o 2>/dev/null", "")
+        val cc_trimmed = cc_crtbegin.trim()
+        if cc_trimmed != "" and cc_trimmed != "crtbegin.o" and file_exists(cc_trimmed):
+            val dir = path_dirname(cc_trimmed)
+            if dir != "":
+                dirs = dirs + [dir]
+
+    # Method 3: Probe common GCC installation paths
+    if dirs.len() == 0:
+        val arch = host_arch()
+        var triplet = "x86_64-linux-gnu"
+        if arch == "aarch64":
+            triplet = "aarch64-linux-gnu"
+        elif arch == "riscv64":
+            triplet = "riscv64-linux-gnu"
+
+        # Try GCC versions 14 down to 9
+        var ver = 14
+        while ver >= 9:
+            val try_dir = "/usr/lib/gcc/{triplet}/{ver}"
+            if file_exists("{try_dir}/crtbegin.o"):
+                dirs = dirs + [try_dir]
+                break
+            ver = ver - 1
+
+    dirs
 
 fn path_dirname(path: text) -> text:
     val last_slash = path.last_index_of("/")
@@ -37,7 +195,12 @@ fn path_dirname(path: text) -> text:
         ""
 
 fn cc_print_file(name: text) -> text:
-    name
+    val result = shell_output("cc -print-file-name={name} 2>/dev/null", "")
+    val trimmed = result.trim()
+    if trimmed != "" and trimmed != name:
+        trimmed
+    else:
+        name
 
 export find_crt_files, find_dynamic_linker, find_gcc_lib_dirs, path_dirname, cc_print_file
 export CrtFiles

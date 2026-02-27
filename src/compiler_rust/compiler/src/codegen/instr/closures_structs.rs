@@ -9,7 +9,7 @@ use crate::hir::TypeId;
 use crate::mir::VReg;
 
 use super::super::types_util::type_id_to_cranelift;
-use super::helpers::{create_string_constant, get_vreg_or_default, indirect_call_with_result};
+use super::helpers::{adapted_call, create_string_constant, get_vreg_or_default, indirect_call_with_result};
 use super::{InstrContext, InstrResult};
 
 pub(crate) fn compile_closure_create<M: Module>(
@@ -25,7 +25,7 @@ pub(crate) fn compile_closure_create<M: Module>(
     let alloc_ref = ctx.module.declare_func_in_func(alloc_id, builder.func);
 
     let size_val = builder.ins().iconst(types::I64, closure_size as i64);
-    let call = builder.ins().call(alloc_ref, &[size_val]);
+    let call = adapted_call(builder, alloc_ref, &[size_val]);
     let closure_ptr = builder.inst_results(call)[0];
 
     if let Some(&func_id) = ctx.func_ids.get(func_name) {
@@ -92,7 +92,7 @@ pub(crate) fn compile_struct_init<M: Module>(
     let alloc_ref = ctx.module.declare_func_in_func(alloc_id, builder.func);
 
     let size_val = builder.ins().iconst(types::I64, struct_size as i64);
-    let call = builder.ins().call(alloc_ref, &[size_val]);
+    let call = adapted_call(builder, alloc_ref, &[size_val]);
     let ptr = builder.inst_results(call)[0];
 
     for (i, (offset, field_type)) in field_offsets.iter().zip(field_types.iter()).enumerate() {
@@ -148,7 +148,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             call_args.push(get_vreg_or_default(ctx, builder, arg));
         }
         let call_args = super::calls::adapt_args_to_signature(builder, func_ref, call_args);
-        let call = builder.ins().call(func_ref, &call_args);
+        let call = adapted_call(builder, func_ref, &call_args);
         if let Some(d) = dest {
             let results = builder.inst_results(call);
             if !results.is_empty() {
@@ -163,7 +163,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
 
         let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
         let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
-        let call = builder.ins().call(not_found_ref, &[name_ptr, name_len]);
+        let call = adapted_call(builder, not_found_ref, &[name_ptr, name_len]);
 
         if let Some(d) = dest {
             let result = builder.inst_results(call)[0];
@@ -208,7 +208,7 @@ fn try_compile_builtin_method_call<M: Module>(
             // Default to collection length
             if let Some(&len_id) = ctx.runtime_funcs.get("rt_len") {
                 let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
-                let len_call = builder.ins().call(len_ref, &[receiver_val]);
+                let len_call = adapted_call(builder, len_ref, &[receiver_val]);
                 builder.inst_results(len_call)[0]
             } else {
                 builder.ins().iconst(types::I64, i64::MAX)
@@ -222,7 +222,7 @@ fn try_compile_builtin_method_call<M: Module>(
             builder.ins().iconst(types::I64, 1)
         };
 
-        let call = builder.ins().call(slice_ref, &[receiver_val, start, end, step]);
+        let call = adapted_call(builder, slice_ref, &[receiver_val, start, end, step]);
         return Ok(Some(builder.inst_results(call)[0]));
     }
 
@@ -230,7 +230,7 @@ fn try_compile_builtin_method_call<M: Module>(
     if method == "is_empty" {
         if let Some(&len_id) = ctx.runtime_funcs.get("rt_len") {
             let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
-            let call = builder.ins().call(len_ref, &[receiver_val]);
+            let call = adapted_call(builder, len_ref, &[receiver_val]);
             let len_val = builder.inst_results(call)[0];
             let zero = builder.ins().iconst(types::I64, 0);
             let result = builder
@@ -261,7 +261,7 @@ fn try_compile_builtin_method_call<M: Module>(
                 return Ok(None);
             };
             let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-            let call = builder.ins().call(func_ref, &[receiver_val]);
+            let call = adapted_call(builder, func_ref, &[receiver_val]);
             let bool_result = builder.inst_results(call)[0];
             let result = builder.ins().sextend(types::I64, bool_result);
             return Ok(Some(result));
@@ -271,7 +271,7 @@ fn try_compile_builtin_method_call<M: Module>(
                 return Ok(None);
             };
             let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-            let call = builder.ins().call(func_ref, &[receiver_val]);
+            let call = adapted_call(builder, func_ref, &[receiver_val]);
             let bool_result = builder.inst_results(call)[0];
             let result = builder.ins().sextend(types::I64, bool_result);
             return Ok(Some(result));
@@ -290,7 +290,7 @@ fn try_compile_builtin_method_call<M: Module>(
             };
             let check_ref = ctx.module.declare_func_in_func(check_id, builder.func);
             let disc_val = builder.ins().iconst(types::I64, disc);
-            let call = builder.ins().call(check_ref, &[receiver_val, disc_val]);
+            let call = adapted_call(builder, check_ref, &[receiver_val, disc_val]);
             let bool_result = builder.inst_results(call)[0];
             let result = builder.ins().sextend(types::I64, bool_result);
             return Ok(Some(result));
@@ -303,7 +303,7 @@ fn try_compile_builtin_method_call<M: Module>(
             if let Some(&func_id) = ctx.runtime_funcs.get("rt_option_map") {
                 let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                 let closure_val = get_vreg_or_default(ctx, builder, &args[0]);
-                let call = builder.ins().call(func_ref, &[receiver_val, closure_val]);
+                let call = adapted_call(builder, func_ref, &[receiver_val, closure_val]);
                 return Ok(Some(builder.inst_results(call)[0]));
             }
             return Ok(None);
@@ -332,9 +332,9 @@ fn try_compile_builtin_method_call<M: Module>(
                 let val_val = get_vreg_or_default(ctx, builder, &args[1]);
                 if let Some(&func_id) = ctx.runtime_funcs.get("rt_dict_set") {
                     let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-                    let call = builder.ins().call(func_ref, &[receiver_val, key_val, val_val]);
+                    let call = adapted_call(builder, func_ref, &[receiver_val, key_val, val_val]);
                     let result = builder.inst_results(call)[0];
-                    return Ok(Some(builder.ins().uextend(types::I64, result)));
+                    return Ok(Some(super::helpers::safe_extend_to_i64(builder, result)));
                 }
             }
             return Ok(None);
@@ -358,7 +358,7 @@ fn try_compile_builtin_method_call<M: Module>(
         call_args.push(get_vreg_or_default(ctx, builder, arg));
     }
 
-    let call = builder.ins().call(func_ref, &call_args);
+    let call = adapted_call(builder, func_ref, &call_args);
     let results = builder.inst_results(call);
 
     // Methods that mutate in-place (push, clear, reverse, sort) should return the receiver
@@ -376,9 +376,8 @@ fn try_compile_builtin_method_call<M: Module>(
         let result = results[0];
         // Extend smaller return types (e.g., I8 from rt_contains) to I64
         let result_type = builder.func.dfg.value_type(result);
-        if result_type == types::I8 {
-            let extended = builder.ins().uextend(types::I64, result);
-            Ok(Some(extended))
+        if result_type != types::I64 {
+            Ok(Some(super::helpers::safe_extend_to_i64(builder, result)))
         } else {
             Ok(Some(result))
         }

@@ -478,14 +478,17 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            // For more complex patterns (struct, tuple, array), return false for now
-            _ => {
-                eprintln!("[WARN] unimplemented pattern-to-expr lowering for: {:?}", pattern);
-                Ok(HirExpr {
-                    kind: HirExprKind::Bool(false),
-                    ty: TypeId::BOOL,
-                })
-            }
+            Pattern::MutIdentifier(_)
+            | Pattern::MoveIdentifier(_)
+            | Pattern::Rest => Ok(HirExpr {
+                kind: HirExprKind::Bool(true),
+                ty: TypeId::BOOL,
+            }),
+            Pattern::Typed { pattern, .. } => self.lower_pattern_condition(subject_idx, subject_ty, pattern, ctx),
+            Pattern::Tuple(_) | Pattern::Array(_) | Pattern::Struct { .. } => Ok(HirExpr {
+                kind: HirExprKind::Bool(true),
+                ty: TypeId::BOOL,
+            }),
         }
     }
 

@@ -17,6 +17,7 @@ use crate::hir::TypeId;
 use crate::mir::VReg;
 
 use super::super::types_util::type_id_size;
+use super::helpers::adapted_call;
 use super::{InstrContext, InstrResult};
 
 /// Compile LocalAddr instruction
@@ -94,8 +95,10 @@ pub fn compile_store<M: Module>(
                     if actual_ty.is_int() && expected_cl_ty.is_int() {
                         if actual_ty.bits() > expected_cl_ty.bits() {
                             builder.ins().ireduce(expected_cl_ty, v)
-                        } else {
+                        } else if actual_ty.bits() < expected_cl_ty.bits() {
                             builder.ins().uextend(expected_cl_ty, v)
+                        } else {
+                            v // same size, no conversion needed
                         }
                     } else {
                         create_default(builder)
@@ -140,7 +143,7 @@ pub fn compile_gc_alloc<M: Module>(
     let alloc_ref = ctx.module.declare_func_in_func(alloc_id, builder.func);
     let size = type_id_size(ty) as i64;
     let size_val = builder.ins().iconst(types::I64, size.max(8));
-    let call = builder.ins().call(alloc_ref, &[size_val]);
+    let call = adapted_call(builder, alloc_ref, &[size_val]);
     let ptr = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, ptr);
     Ok(())
@@ -156,7 +159,7 @@ pub fn compile_wait<M: Module>(
     let wait_id = ctx.runtime_funcs["rt_wait"];
     let wait_ref = ctx.module.declare_func_in_func(wait_id, builder.func);
     let target_val = ctx.get_vreg(&target)?;
-    let call = builder.ins().call(wait_ref, &[target_val]);
+    let call = adapted_call(builder, wait_ref, &[target_val]);
     let result = builder.inst_results(call)[0];
     if let Some(d) = dest {
         ctx.vreg_values.insert(d, result);

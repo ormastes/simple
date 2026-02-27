@@ -19,6 +19,7 @@ pub mod init;
 pub mod llm_tools;
 pub mod lock;
 pub mod migrate;
+pub mod native_build;
 pub mod qualify_ignore;
 pub mod repl;
 pub mod sandbox;

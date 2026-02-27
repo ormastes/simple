@@ -14,6 +14,7 @@ use cranelift_module::Module;
 
 use crate::mir::VReg;
 
+use super::helpers::adapted_call;
 use super::{InstrContext, InstrResult};
 
 /// Compile ActorSend instruction
@@ -27,7 +28,7 @@ pub fn compile_actor_send<M: Module>(
     let send_ref = ctx.module.declare_func_in_func(send_id, builder.func);
     let actor_val = ctx.get_vreg(&actor)?;
     let msg_val = ctx.get_vreg(&message)?;
-    builder.ins().call(send_ref, &[actor_val, msg_val]);
+    adapted_call(builder, send_ref, &[actor_val, msg_val]);
     Ok(())
 }
 
@@ -39,7 +40,7 @@ pub fn compile_actor_recv<M: Module>(
 ) -> InstrResult<()> {
     let recv_id = ctx.runtime_funcs["rt_actor_recv"];
     let recv_ref = ctx.module.declare_func_in_func(recv_id, builder.func);
-    let call = builder.ins().call(recv_ref, &[]);
+    let call = adapted_call(builder, recv_ref, &[]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -55,7 +56,7 @@ pub fn compile_actor_join<M: Module>(
     let join_id = ctx.runtime_funcs["rt_actor_join"];
     let join_ref = ctx.module.declare_func_in_func(join_id, builder.func);
     let actor_val = ctx.get_vreg(&actor)?;
-    let call = builder.ins().call(join_ref, &[actor_val]);
+    let call = adapted_call(builder, join_ref, &[actor_val]);
     let raw_result = builder.inst_results(call)[0];
     // Convert i64 to RuntimeValue by tagging (shift left 3 bits)
     let tagged_result = builder.ins().ishl_imm(raw_result, 3);
@@ -72,7 +73,7 @@ pub fn compile_actor_reply<M: Module>(
     let reply_id = ctx.runtime_funcs["rt_actor_reply"];
     let reply_ref = ctx.module.declare_func_in_func(reply_id, builder.func);
     let message_val = ctx.get_vreg(&message)?;
-    builder.ins().call(reply_ref, &[message_val]);
+    adapted_call(builder, reply_ref, &[message_val]);
     // Reply returns RuntimeValue (NIL), but we don't need to store it
     // The result is handled by the ConstNil instruction that follows
     Ok(())
@@ -88,7 +89,7 @@ pub fn compile_await<M: Module>(
     let await_id = ctx.runtime_funcs["rt_future_await"];
     let await_ref = ctx.module.declare_func_in_func(await_id, builder.func);
     let future_val = ctx.get_vreg(&future)?;
-    let call = builder.ins().call(await_ref, &[future_val]);
+    let call = adapted_call(builder, await_ref, &[future_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -104,14 +105,14 @@ pub fn compile_generator_next<M: Module>(
     let next_id = ctx.runtime_funcs["rt_generator_next"];
     let next_ref = ctx.module.declare_func_in_func(next_id, builder.func);
     let gen_val = ctx.get_vreg(&generator)?;
-    let call = builder.ins().call(next_ref, &[gen_val]);
+    let call = adapted_call(builder, next_ref, &[gen_val]);
     let result = builder.inst_results(call)[0];
 
     // The runtime returns a tagged RuntimeValue; unwrap to a raw i64 for
     // downstream arithmetic in codegen paths.
     let unwrap_id = ctx.runtime_funcs["rt_value_as_int"];
     let unwrap_ref = ctx.module.declare_func_in_func(unwrap_id, builder.func);
-    let unwrap_call = builder.ins().call(unwrap_ref, &[result]);
+    let unwrap_call = adapted_call(builder, unwrap_ref, &[result]);
     let unwrapped = builder.inst_results(unwrap_call)[0];
     ctx.vreg_values.insert(dest, unwrapped);
     Ok(())

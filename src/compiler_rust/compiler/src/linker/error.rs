@@ -15,7 +15,7 @@ pub enum LinkerError {
     LinkerNotFound(String),
 
     /// Linker execution failed.
-    #[error("linker failed with exit code {exit_code}: {message}")]
+    #[error("linker failed with exit code {exit_code}: {message}\n{stderr}")]
     LinkerFailed {
         exit_code: i32,
         message: String,

@@ -6,6 +6,7 @@ use cranelift_module::Module;
 
 use crate::mir::{ParallelBackend, VReg};
 
+use super::helpers::adapted_call;
 use super::{InstrContext, InstrResult};
 
 /// Helper to convert ParallelBackend to runtime constant
@@ -29,7 +30,7 @@ fn get_array_length<M: Module>(
         .get("rt_array_len")
         .ok_or_else(|| "rt_array_len not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = builder.ins().call(func_ref, &[array_val]);
+    let call = adapted_call(builder, func_ref, &[array_val]);
     Ok(builder.inst_results(call)[0])
 }
 
@@ -55,9 +56,7 @@ pub(crate) fn compile_par_map<M: Module>(
         .ok_or_else(|| "rt_par_map not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
-    let call = builder
-        .ins()
-        .call(func_ref, &[input_val, input_len, closure_val, backend_val]);
+    let call = adapted_call(builder, func_ref, &[input_val, input_len, closure_val, backend_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -87,9 +86,7 @@ pub(crate) fn compile_par_reduce<M: Module>(
         .ok_or_else(|| "rt_par_reduce not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
-    let call = builder
-        .ins()
-        .call(func_ref, &[input_val, input_len, initial_val, closure_val, backend_val]);
+    let call = adapted_call(builder, func_ref, &[input_val, input_len, initial_val, closure_val, backend_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -117,9 +114,7 @@ pub(crate) fn compile_par_filter<M: Module>(
         .ok_or_else(|| "rt_par_filter not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
-    let call = builder
-        .ins()
-        .call(func_ref, &[input_val, input_len, predicate_val, backend_val]);
+    let call = adapted_call(builder, func_ref, &[input_val, input_len, predicate_val, backend_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())
@@ -146,8 +141,6 @@ pub(crate) fn compile_par_for_each<M: Module>(
         .ok_or_else(|| "rt_par_for_each not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
-    builder
-        .ins()
-        .call(func_ref, &[input_val, input_len, closure_val, backend_val]);
+    adapted_call(builder, func_ref, &[input_val, input_len, closure_val, backend_val]);
     Ok(())
 }

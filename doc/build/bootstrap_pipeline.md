@@ -1,4 +1,38 @@
-# Bootstrap Pipeline — Seed / Core / Full
+# Bootstrap Pipeline — Rust Seed / Seed / Core / Full
+
+## Fast Path (Rust Seed → Pure Simple)
+
+This is the quickest way to re-bootstrap on a fresh checkout using the Rust seed compiler that lives in `src/compiler_rust/`.
+
+1) **Build Rust seed compiler (bootstrap profile)**
+   ```bash
+   cargo build --profile bootstrap -p simple-driver
+   # Output: src/compiler_rust/target/bootstrap/simple
+   ```
+
+2) **Use Rust seed to compile the pure Simple compiler (with essential libs)**
+   ```bash
+   SIMPLE_LIB=src \
+   src/compiler_rust/target/bootstrap/simple \
+     compile src/app/cli/main.spl \
+     --native --strip \
+     -o build/bootstrap/simple_stage2
+   ```
+   - `SIMPLE_LIB=src` ensures the compiler sees the in-repo stdlib and core libs.
+   - `--native` emits a self-contained native binary (uses the Cranelift AOT backend + linked runtime).
+
+3) **Self-hosting check: rebuild with the freshly built Simple compiler**
+   ```bash
+   SIMPLE_LIB=src \
+   build/bootstrap/simple_stage2 \
+     compile src/app/cli/main.spl \
+     --native --strip \
+     -o bin/simple
+   ```
+   - Optional reproducibility check: re-run the step above to produce `bin/simple.v2` and diff hashes.
+   - Interpreter and loader modes are included by default in the resulting binary (no extra flags needed).
+
+After step 3 you have a pure-Simple compiler (`bin/simple`) plus the full stdlib and loader/interpreter support. Keep the Rust seed around only if you need to re-bootstrap; day-to-day work should use `bin/simple`.
 
 ## Architecture
 

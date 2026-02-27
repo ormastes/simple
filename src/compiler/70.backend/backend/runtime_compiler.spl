@@ -1,0 +1,124 @@
+# Runtime Compiler - Compiles C runtime sources to object files
+#
+# Provides compile_runtime_objects() which compiles the C runtime
+# (runtime.c, runtime_native.c, runtime_thread.c, runtime_memtrack.c)
+# into object files that can be linked with LLVM-compiled user code.
+#
+# Usage:
+#   val objects = compile_runtime_objects(verbose)
+#   match objects:
+#       case Ok(paths): link_with(paths)
+#       case Err(msg): report_error(msg)
+
+use app.io.mod (shell, file_exists, getpid)
+
+extern fn rt_file_exists(path: text) -> bool
+
+# ============================================================================
+# C Compiler Discovery
+# ============================================================================
+
+fn find_c_compiler() -> text:
+    """Find a C compiler on the system.
+
+    Tries clang variants first (better LLVM compatibility), then gcc, then cc.
+    Returns the command name or empty string if none found.
+    """
+    val candidates = ["clang", "clang-18", "clang-17", "clang-16", "gcc", "cc"]
+    for candidate in candidates:
+        val result = shell("which {candidate} 2>/dev/null")
+        if result.exit_code == 0:
+            return candidate
+    ""
+
+# ============================================================================
+# Runtime Source Directory Discovery
+# ============================================================================
+
+fn find_runtime_source_dir() -> text:
+    """Find the runtime source directory.
+
+    Tries src/runtime/ relative to cwd first, then common install paths.
+    Returns the path or empty string if not found.
+    """
+    # Try relative to current working directory
+    if rt_file_exists("src/runtime/runtime.c"):
+        return "src/runtime"
+
+    # Try relative to executable location (common for installed binaries)
+    val exe_result = shell("readlink -f /proc/self/exe 2>/dev/null")
+    if exe_result.exit_code == 0:
+        val exe_dir = exe_result.stdout.trim()
+        # Go up from bin/release/simple to project root
+        val project_root_result = shell("dirname $(dirname $(dirname {exe_dir})) 2>/dev/null")
+        if project_root_result.exit_code == 0:
+            val project_root = project_root_result.stdout.trim()
+            val rt_path = "{project_root}/src/runtime/runtime.c"
+            if rt_file_exists(rt_path):
+                return "{project_root}/src/runtime"
+
+    ""
+
+# ============================================================================
+# Runtime Compilation
+# ============================================================================
+
+fn compile_runtime_objects(verbose: bool) -> Result<[text], text>:
+    """Compile all C runtime source files to object files.
+
+    Compiles runtime.c, runtime_native.c, runtime_thread.c, runtime_memtrack.c
+    with appropriate flags for linking with LLVM-generated code.
+
+    Returns a list of object file paths on success, or an error message.
+    """
+    val cc = find_c_compiler()
+    if cc == "":
+        return Err("No C compiler found. Install clang or gcc.")
+
+    val rt_dir = find_runtime_source_dir()
+    if rt_dir == "":
+        return Err("Runtime source directory not found. Expected src/runtime/runtime.c")
+
+    val pid = getpid()
+    val sources = ["runtime", "runtime_native", "runtime_thread", "runtime_memtrack"]
+    var object_files: [text] = []
+
+    for name in sources:
+        val src_path = "{rt_dir}/{name}.c"
+        if not rt_file_exists(src_path):
+            if verbose:
+                val msg = "Skipping {name}.c (not found)"
+                shell("echo '{msg}' >&2")
+            continue
+
+        val obj_path = "/tmp/simple_rt_{pid}_{name}.o"
+        val cmd = "{cc} -c -fPIC -O2 -std=gnu11 -I {rt_dir} -I {rt_dir}/platform -o {obj_path} {src_path} 2>&1"
+
+        if verbose:
+            shell("echo 'Compiling: {cmd}' >&2")
+
+        val result = shell(cmd)
+        if result.exit_code != 0:
+            # Clean up already-compiled objects
+            for obj in object_files:
+                shell("rm -f {obj}")
+            return Err("Failed to compile {name}.c:\n{result.stdout}")
+
+        object_files = object_files + [obj_path]
+
+    if object_files.len() == 0:
+        return Err("No runtime source files were compiled")
+
+    Ok(object_files)
+
+fn cleanup_runtime_objects(objects: [text]):
+    """Remove temporary runtime object files."""
+    for obj in objects:
+        shell("rm -f {obj}")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export compile_runtime_objects, cleanup_runtime_objects
+export find_c_compiler, find_runtime_source_dir

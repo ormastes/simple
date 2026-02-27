@@ -10,29 +10,21 @@ use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
 
 use super::super::types_util::type_to_cranelift;
 use super::async_ops::compile_yield;
+use super::helpers::adapted_call;
 use super::{compile_instruction, InstrContext, InstrResult};
 
-/// Collect all VRegs used as destinations in a MIR function.
-fn collect_all_dest_vregs(func: &MirFunction) -> HashSet<VReg> {
-    let mut vregs = HashSet::new();
-    for block in &func.blocks {
-        for inst in &block.instructions {
-            if let Some(dest) = inst.dest() {
-                vregs.insert(dest);
-            }
-        }
-        // Also collect VRegs used in terminators (branch conditions, return values)
-        match &block.terminator {
-            Terminator::Return(Some(v)) => {
-                vregs.insert(*v);
-            }
-            Terminator::Branch { cond, .. } => {
-                vregs.insert(*cond);
-            }
-            _ => {}
+/// Collect VRegs that are live across block boundaries.
+/// Only these need Cranelift Variables for phi node insertion.
+/// Block-local VRegs stay as raw Cranelift Values in vreg_values.
+fn collect_cross_block_vregs(func: &MirFunction) -> HashSet<VReg> {
+    let live_ins = func.compute_live_ins();
+    let mut cross_block = HashSet::new();
+    for live_set in live_ins.values() {
+        for vreg in live_set {
+            cross_block.insert(*vreg);
         }
     }
-    vregs
+    cross_block
 }
 
 /// Coerce a value to i64 for storage in a Variable declared as i64.
@@ -94,6 +86,8 @@ pub fn compile_function_body<M: Module>(
     func_ids: &HashMap<String, cranelift_module::FuncId>,
     runtime_funcs: &HashMap<&'static str, cranelift_module::FuncId>,
     global_ids: &HashMap<String, cranelift_module::DataId>,
+    import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
+    use_map: &std::collections::HashMap<String, String>,
 ) -> InstrResult<()> {
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
@@ -125,7 +119,7 @@ pub fn compile_function_body<M: Module>(
     // This lets Cranelift automatically insert phi nodes (block params) where needed.
     let mut vreg_vars: HashMap<VReg, Variable> = HashMap::new();
     {
-        let all_vregs = collect_all_dest_vregs(func);
+        let all_vregs = collect_cross_block_vregs(func);
         for vreg in &all_vregs {
             let var = Variable::from_u32(var_idx);
             builder.declare_var(var, types::I64); // default to i64; type is refined on def_var
@@ -160,7 +154,7 @@ pub fn compile_function_body<M: Module>(
                 let gen_param = builder.block_params(entry_block)[0];
                 let get_ctx_id = runtime_funcs["rt_generator_get_ctx"];
                 let get_ctx_ref = module.declare_func_in_func(get_ctx_id, builder.func);
-                let call = builder.ins().call(get_ctx_ref, &[gen_param]);
+                let call = adapted_call(&mut builder, get_ctx_ref, &[gen_param]);
                 builder.inst_results(call)[0]
             } else {
                 builder.block_params(entry_block)[func.params.len().saturating_sub(1)]
@@ -169,7 +163,7 @@ pub fn compile_function_body<M: Module>(
             let get_ref = module.declare_func_in_func(get_id, builder.func);
             for (idx, reg) in meta.live_ins.iter().enumerate() {
                 let idx_val = builder.ins().iconst(types::I64, idx as i64);
-                let call = builder.ins().call(get_ref, &[ctx_param, idx_val]);
+                let call = adapted_call(&mut builder, get_ref, &[ctx_param, idx_val]);
                 let val = builder.inst_results(call)[0];
                 vreg_values.insert(*reg, val);
                 if let Some(&var) = vreg_vars.get(reg) {
@@ -221,7 +215,7 @@ pub fn compile_function_body<M: Module>(
         let generator_param = builder.block_params(entry_block)[0];
         let get_state_id = runtime_funcs["rt_generator_get_state"];
         let get_state_ref = module.declare_func_in_func(get_state_id, builder.func);
-        let call = builder.ins().call(get_state_ref, &[generator_param]);
+        let call = adapted_call(&mut builder, get_state_ref, &[generator_param]);
         let state_val = builder.inst_results(call)[0];
 
         let mut dispatch_blocks = Vec::new();
@@ -283,7 +277,7 @@ pub fn compile_function_body<M: Module>(
 
             if let Some(get_state_id) = get_state_id {
                 let get_state_ref = module.declare_func_in_func(get_state_id, builder.func);
-                let call = builder.ins().call(get_state_ref, &[async_param]);
+                let call = adapted_call(&mut builder, get_state_ref, &[async_param]);
                 let state_val = builder.inst_results(call)[0];
 
                 let mut dispatch_blocks = Vec::new();
@@ -361,7 +355,7 @@ pub fn compile_function_body<M: Module>(
                 let load_ref = module.declare_func_in_func(load_id, builder.func);
                 for (idx, reg) in state.live_after_yield.iter().enumerate() {
                     let idx_val = builder.ins().iconst(types::I64, idx as i64);
-                    let call = builder.ins().call(load_ref, &[gen_param, idx_val]);
+                    let call = adapted_call(&mut builder, load_ref, &[gen_param, idx_val]);
                     let val = builder.inst_results(call)[0];
                     vreg_values.insert(*reg, val);
                     if let Some(&var) = vreg_vars.get(reg) {
@@ -381,14 +375,14 @@ pub fn compile_function_body<M: Module>(
                     .copied();
                 if let Some(get_ctx_id) = get_ctx_id {
                     let get_ctx_ref = module.declare_func_in_func(get_ctx_id, builder.func);
-                    let call = builder.ins().call(get_ctx_ref, &[async_param]);
+                    let call = adapted_call(&mut builder, get_ctx_ref, &[async_param]);
                     let ctx_val = builder.inst_results(call)[0];
 
                     let get_id = runtime_funcs["rt_array_get"];
                     let get_ref = module.declare_func_in_func(get_id, builder.func);
                     for (idx, reg) in state.live_after_await.iter().enumerate() {
                         let idx_val = builder.ins().iconst(types::I64, idx as i64);
-                        let call = builder.ins().call(get_ref, &[ctx_val, idx_val]);
+                        let call = adapted_call(&mut builder, get_ref, &[ctx_val, idx_val]);
                         let val = builder.inst_results(call)[0];
                         vreg_values.insert(*reg, val);
                         if let Some(&var) = vreg_vars.get(reg) {
@@ -417,6 +411,8 @@ pub fn compile_function_body<M: Module>(
                     mir_block_id: mir_block.id,
                     generator_state_map: &generator_state_map,
                     async_state_map: &async_state_map,
+                    import_map,
+                    use_map,
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 // Sync vreg_values → Variables after yield
@@ -438,6 +434,8 @@ pub fn compile_function_body<M: Module>(
                     mir_block_id: mir_block.id,
                     generator_state_map: &generator_state_map,
                     async_state_map: &async_state_map,
+                    import_map,
+                    use_map,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
                 // Ensure all vreg values are i64 (extend smaller int types)
@@ -484,11 +482,11 @@ pub fn compile_function_body<M: Module>(
                     let set_state_id = runtime_funcs["rt_generator_set_state"];
                     let set_state_ref = module.declare_func_in_func(set_state_id, builder.func);
                     let next_state = builder.ins().iconst(types::I64, next_state_val);
-                    let _ = builder.ins().call(set_state_ref, &[gen_param, next_state]);
+                    let _ = adapted_call(&mut builder, set_state_ref, &[gen_param, next_state]);
                     if mark_done || next_state_val == generator_done_state as i64 {
                         let mark_id = runtime_funcs["rt_generator_mark_done"];
                         let mark_ref = module.declare_func_in_func(mark_id, builder.func);
-                        let _ = builder.ins().call(mark_ref, &[gen_param]);
+                        let _ = adapted_call(&mut builder, mark_ref, &[gen_param]);
                     }
                 }
                 if let Some(v) = val {
@@ -515,16 +513,27 @@ pub fn compile_function_body<M: Module>(
                             let val_type = builder.func.dfg.value_type(rv);
                             if val_type == ret_ty {
                                 rv
-                            } else if val_type == types::I64
-                                && (ret_ty == types::I32 || ret_ty == types::I16 || ret_ty == types::I8)
-                            {
-                                // Truncate i64 to smaller integer type
-                                builder.ins().ireduce(ret_ty, rv)
-                            } else if (val_type == types::I8 || val_type == types::I16 || val_type == types::I32)
-                                && ret_ty == types::I64
-                            {
-                                // Extend smaller integer to i64
-                                builder.ins().sextend(types::I64, rv)
+                            } else if val_type.is_int() && ret_ty.is_int() {
+                                if val_type.bits() > ret_ty.bits() {
+                                    builder.ins().ireduce(ret_ty, rv)
+                                } else if val_type.bits() < ret_ty.bits() {
+                                    builder.ins().sextend(ret_ty, rv)
+                                } else {
+                                    rv
+                                }
+                            } else if val_type.is_int() && ret_ty.is_float() {
+                                // Int to float conversion for return value
+                                builder.ins().fcvt_from_sint(ret_ty, rv)
+                            } else if val_type.is_float() && ret_ty.is_int() {
+                                // Float to int conversion for return value
+                                builder.ins().fcvt_to_sint(ret_ty, rv)
+                            } else if val_type.is_float() && ret_ty.is_float() {
+                                // Float width conversion
+                                if val_type.bits() < ret_ty.bits() {
+                                    builder.ins().fpromote(ret_ty, rv)
+                                } else {
+                                    builder.ins().fdemote(ret_ty, rv)
+                                }
                             } else {
                                 rv
                             }
@@ -542,7 +551,7 @@ pub fn compile_function_body<M: Module>(
                         if generator_states.is_some() {
                             let wrap_id = runtime_funcs["rt_value_int"];
                             let wrap_ref = module.declare_func_in_func(wrap_id, builder.func);
-                            let wrap_call = builder.ins().call(wrap_ref, &[ret_val]);
+                            let wrap_call = adapted_call(&mut builder, wrap_ref, &[ret_val]);
                             ret_val = builder.inst_results(wrap_call)[0];
                         }
                         builder.ins().return_(&[ret_val]);
@@ -550,7 +559,7 @@ pub fn compile_function_body<M: Module>(
                 } else if generator_states.is_some() {
                     let nil_id = runtime_funcs["rt_value_nil"];
                     let nil_ref = module.declare_func_in_func(nil_id, builder.func);
-                    let call = builder.ins().call(nil_ref, &[]);
+                    let call = adapted_call(&mut builder, nil_ref, &[]);
                     let nil_val = builder.inst_results(call)[0];
                     builder.ins().return_(&[nil_val]);
                 } else if func.return_type == TypeId::VOID {

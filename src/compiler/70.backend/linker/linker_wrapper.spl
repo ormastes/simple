@@ -28,6 +28,8 @@ use compiler.backend.linker.smf_enums.{Platform, Arch}
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
 
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
 # ============================================================================
 # Configuration Structs
 # ============================================================================
@@ -734,6 +736,26 @@ fn hex_char_to_int(c: text) -> i64:
 # File I/O Helpers (using shell for binary data)
 # ============================================================================
 
+fn write_elf_bytes_to_file(path: text, bytes: [i64]) -> Result<(), text>:
+    """Write raw ELF bytes directly to disk."""
+    if path == "":
+        return Err("Output path is empty")
+
+    # Convert i64 list to u8 list (mask to 0xFF)
+    var data: [u8] = []
+    for b in bytes:
+        data.push(bitwise_and(b, 0xFF))
+
+    if not rt_file_write_bytes(path, data):
+        return Err("Failed to write ELF bytes to {path}")
+
+    # Lightweight magic check to catch obvious corruption
+    if bytes.len() >= 4:
+        if bytes[0] != 0x7f or bytes[1] != 0x45 or bytes[2] != 0x4c or bytes[3] != 0x46:
+            return Err("Invalid ELF magic in {path}")
+
+    Ok(())
+
 fn write_bytes_to_file(path: text, data: [u8]) -> bool:
     if data.len() == 0:
         return shell("touch '{path}'").exit_code == 0
@@ -771,3 +793,4 @@ export link_to_native, link_to_smf, link_to_self_contained
 export detect_self_contained, find_runtime_binary, find_runtime_lib_dir
 export build_trailer, fnv1a_hash
 export SMFE_MAGIC, SMFE_TRAILER_SIZE, SMFE_VERSION
+export write_elf_bytes_to_file

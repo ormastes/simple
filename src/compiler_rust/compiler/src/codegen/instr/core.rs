@@ -1,23 +1,69 @@
 // Core instruction compilation helpers: binary operations, builtin I/O, and interpreter calls.
 
-use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
+use cranelift_codegen::ir::{condcodes::{FloatCC, IntCC}, types, InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use crate::hir::BinOp;
 use crate::mir::VReg;
 
-use super::helpers::create_string_constant;
+use super::helpers::{adapted_call, create_string_constant};
 use super::{InstrContext, InstrResult};
 
-/// Ensure a value is i64, extending smaller integer types if needed.
-/// This is necessary because some values (e.g., from FFI functions returning i32)
-/// may not be i64 even though the rest of the codegen assumes i64.
+/// Ensure a value is i64, extending smaller integer types and bitcasting floats if needed.
+/// This is necessary because some values (e.g., from FFI functions returning i32 or
+/// float constants) may not be i64 even though runtime functions expect i64.
 fn ensure_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
     let val_type = builder.func.dfg.value_type(val);
     match val_type {
         types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
+        types::F64 => builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val),
+        types::F32 => {
+            let promoted = builder.ins().fpromote(types::F64, val);
+            builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted)
+        }
         _ => val,
+    }
+}
+
+/// Coerce both operands to matching types for binary operations.
+/// If either is float, convert the other to float too.
+/// If both are int, ensure both are i64.
+fn coerce_binop_operands(
+    builder: &mut FunctionBuilder,
+    lhs: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value, bool) {
+    let lhs_type = builder.func.dfg.value_type(lhs);
+    let rhs_type = builder.func.dfg.value_type(rhs);
+    let lhs_is_float = lhs_type == types::F32 || lhs_type == types::F64;
+    let rhs_is_float = rhs_type == types::F32 || rhs_type == types::F64;
+
+    if lhs_is_float && rhs_is_float {
+        // Both float - promote F32 to F64 if mismatched
+        let (l, r) = if lhs_type == types::F32 && rhs_type == types::F64 {
+            (builder.ins().fpromote(types::F64, lhs), rhs)
+        } else if lhs_type == types::F64 && rhs_type == types::F32 {
+            (lhs, builder.ins().fpromote(types::F64, rhs))
+        } else {
+            (lhs, rhs)
+        };
+        (l, r, true)
+    } else if lhs_is_float && !rhs_is_float {
+        // lhs float, rhs int - convert rhs to float
+        let target_float = if lhs_type == types::F32 { types::F32 } else { types::F64 };
+        let rhs_i64 = ensure_i64(builder, rhs);
+        let rhs_f = builder.ins().fcvt_from_sint(target_float, rhs_i64);
+        (lhs, rhs_f, true)
+    } else if !lhs_is_float && rhs_is_float {
+        // lhs int, rhs float - convert lhs to float
+        let target_float = if rhs_type == types::F32 { types::F32 } else { types::F64 };
+        let lhs_i64 = ensure_i64(builder, lhs);
+        let lhs_f = builder.ins().fcvt_from_sint(target_float, lhs_i64);
+        (lhs_f, rhs, true)
+    } else {
+        // Both int - ensure both are i64
+        (ensure_i64(builder, lhs), ensure_i64(builder, rhs), false)
     }
 }
 
@@ -28,87 +74,126 @@ pub(crate) fn compile_binop<M: Module>(
     lhs: cranelift_codegen::ir::Value,
     rhs: cranelift_codegen::ir::Value,
 ) -> InstrResult<cranelift_codegen::ir::Value> {
+    // Coerce operands to matching types (handles mixed int/float)
+    let (lhs, rhs, is_float) = coerce_binop_operands(builder, lhs, rhs);
+    let lhs_type = builder.func.dfg.value_type(lhs);
+
     let val = match op {
-        BinOp::Add => builder.ins().iadd(lhs, rhs),
-        BinOp::Sub => builder.ins().isub(lhs, rhs),
-        BinOp::Mul => builder.ins().imul(lhs, rhs),
-        BinOp::Div => builder.ins().sdiv(lhs, rhs),
-        BinOp::Mod => builder.ins().srem(lhs, rhs),
-        BinOp::BitAnd => builder.ins().band(lhs, rhs),
-        BinOp::BitOr => builder.ins().bor(lhs, rhs),
-        BinOp::BitXor => builder.ins().bxor(lhs, rhs),
-        BinOp::ShiftLeft => builder.ins().ishl(lhs, rhs),
-        BinOp::ShiftRight => builder.ins().sshr(lhs, rhs),
+        BinOp::Add => {
+            if is_float { builder.ins().fadd(lhs, rhs) }
+            else { builder.ins().iadd(lhs, rhs) }
+        }
+        BinOp::Sub => {
+            if is_float { builder.ins().fsub(lhs, rhs) }
+            else { builder.ins().isub(lhs, rhs) }
+        }
+        BinOp::Mul => {
+            if is_float { builder.ins().fmul(lhs, rhs) }
+            else { builder.ins().imul(lhs, rhs) }
+        }
+        BinOp::Div => {
+            if is_float { builder.ins().fdiv(lhs, rhs) }
+            else { builder.ins().sdiv(lhs, rhs) }
+        }
+        BinOp::Mod => {
+            if is_float {
+                // Float modulo: a - floor(a/b) * b
+                let div = builder.ins().fdiv(lhs, rhs);
+                let floored = builder.ins().floor(div);
+                let prod = builder.ins().fmul(floored, rhs);
+                builder.ins().fsub(lhs, prod)
+            } else {
+                builder.ins().srem(lhs, rhs)
+            }
+        }
+        BinOp::BitAnd => {
+            // Bitwise ops need integer operands
+            let li = ensure_i64(builder, lhs);
+            let ri = ensure_i64(builder, rhs);
+            builder.ins().band(li, ri)
+        }
+        BinOp::BitOr => {
+            let li = ensure_i64(builder, lhs);
+            let ri = ensure_i64(builder, rhs);
+            builder.ins().bor(li, ri)
+        }
+        BinOp::BitXor => {
+            let li = ensure_i64(builder, lhs);
+            let ri = ensure_i64(builder, rhs);
+            builder.ins().bxor(li, ri)
+        }
+        BinOp::ShiftLeft => {
+            let li = ensure_i64(builder, lhs);
+            let ri = ensure_i64(builder, rhs);
+            builder.ins().ishl(li, ri)
+        }
+        BinOp::ShiftRight => {
+            let li = ensure_i64(builder, lhs);
+            let ri = ensure_i64(builder, rhs);
+            builder.ins().sshr(li, ri)
+        }
         BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
-            // Use rt_value_compare for proper comparison of all types (int, float, string/char).
-            // rt_value_compare handles raw untagged integers via subnormal-float guards
-            // (see equality.rs) so it works for both native codegen integers and heap types.
-            let lhs_i64 = ensure_i64(builder, lhs);
-            let rhs_i64 = ensure_i64(builder, rhs);
-            let cmp_id = ctx.runtime_funcs["rt_value_compare"];
-            let cmp_ref = ctx.module.declare_func_in_func(cmp_id, builder.func);
-            let call = builder.ins().call(cmp_ref, &[lhs_i64, rhs_i64]);
-            let cmp_result = builder.inst_results(call)[0];
-            // icmp_imm returns I8, extend to I64
-            let cmp_i8 = match op {
-                BinOp::Lt => {
-                    builder
-                        .ins()
-                        .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, cmp_result, 0)
-                }
-                BinOp::Gt => builder.ins().icmp_imm(
-                    cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
-                    cmp_result,
-                    0,
-                ),
-                BinOp::LtEq => builder.ins().icmp_imm(
-                    cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
-                    cmp_result,
-                    0,
-                ),
-                BinOp::GtEq => builder.ins().icmp_imm(
-                    cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
-                    cmp_result,
-                    0,
-                ),
-                _ => unreachable!(),
-            };
-            ensure_i64(builder, cmp_i8)
+            if is_float {
+                // Use native float comparison
+                let cc = match op {
+                    BinOp::Lt => FloatCC::LessThan,
+                    BinOp::Gt => FloatCC::GreaterThan,
+                    BinOp::LtEq => FloatCC::LessThanOrEqual,
+                    BinOp::GtEq => FloatCC::GreaterThanOrEqual,
+                    _ => unreachable!(),
+                };
+                let cmp_i8 = builder.ins().fcmp(cc, lhs, rhs);
+                ensure_i64(builder, cmp_i8)
+            } else {
+                // Use rt_value_compare for proper comparison of all types (int, float, string/char).
+                let cmp_id = ctx.runtime_funcs["rt_value_compare"];
+                let cmp_ref = ctx.module.declare_func_in_func(cmp_id, builder.func);
+                let call = adapted_call(builder, cmp_ref, &[lhs, rhs]);
+                let cmp_result = builder.inst_results(call)[0];
+                let cmp_i8 = match op {
+                    BinOp::Lt => builder.ins().icmp_imm(IntCC::SignedLessThan, cmp_result, 0),
+                    BinOp::Gt => builder.ins().icmp_imm(IntCC::SignedGreaterThan, cmp_result, 0),
+                    BinOp::LtEq => builder.ins().icmp_imm(IntCC::SignedLessThanOrEqual, cmp_result, 0),
+                    BinOp::GtEq => builder.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, cmp_result, 0),
+                    _ => unreachable!(),
+                };
+                ensure_i64(builder, cmp_i8)
+            }
         }
         BinOp::Eq => {
-            // Use rt_value_eq for deep equality comparison (handles strings, etc.)
-            // Ensure both operands are i64 (FFI functions may return smaller types)
-            let lhs_i64 = ensure_i64(builder, lhs);
-            let rhs_i64 = ensure_i64(builder, rhs);
-            let eq_id = ctx.runtime_funcs["rt_value_eq"];
-            let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
-            let call = builder.ins().call(eq_ref, &[lhs_i64, rhs_i64]);
-            // rt_value_eq returns I8, extend to I64 for consistency
-            let result = builder.inst_results(call)[0];
-            ensure_i64(builder, result)
+            if is_float {
+                // Use native float equality
+                let cmp_i8 = builder.ins().fcmp(FloatCC::Equal, lhs, rhs);
+                ensure_i64(builder, cmp_i8)
+            } else {
+                // Use rt_value_eq for deep equality comparison (handles strings, etc.)
+                let eq_id = ctx.runtime_funcs["rt_value_eq"];
+                let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
+                let call = adapted_call(builder, eq_ref, &[lhs, rhs]);
+                let result = builder.inst_results(call)[0];
+                ensure_i64(builder, result)
+            }
         }
         BinOp::NotEq => {
-            // Use rt_value_eq and negate the result
-            // Ensure both operands are i64 (FFI functions may return smaller types)
-            let lhs_i64 = ensure_i64(builder, lhs);
-            let rhs_i64 = ensure_i64(builder, rhs);
-            let eq_id = ctx.runtime_funcs["rt_value_eq"];
-            let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
-            let call = builder.ins().call(eq_ref, &[lhs_i64, rhs_i64]);
-            // rt_value_eq returns I8, extend to I64 before negation
-            let eq_result = ensure_i64(builder, builder.inst_results(call)[0]);
-            // Negate: eq_result == 0 ? 1 : 0
-            let negated = builder
-                .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, eq_result, 0);
-            // icmp_imm returns I8, extend to I64
-            ensure_i64(builder, negated)
+            if is_float {
+                // Use native float inequality
+                let cmp_i8 = builder.ins().fcmp(FloatCC::NotEqual, lhs, rhs);
+                ensure_i64(builder, cmp_i8)
+            } else {
+                // Use rt_value_eq and negate the result
+                let eq_id = ctx.runtime_funcs["rt_value_eq"];
+                let eq_ref = ctx.module.declare_func_in_func(eq_id, builder.func);
+                let call = adapted_call(builder, eq_ref, &[lhs, rhs]);
+                let eq_result = ensure_i64(builder, builder.inst_results(call)[0]);
+                let negated = builder.ins().icmp_imm(IntCC::Equal, eq_result, 0);
+                ensure_i64(builder, negated)
+            }
         }
         BinOp::Is => {
-            // icmp returns I8, extend to I64
-            let result = builder
-                .ins()
-                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs);
+            // Identity comparison - bitcast floats to i64 for bit-level equality
+            let li = ensure_i64(builder, lhs);
+            let ri = ensure_i64(builder, rhs);
+            let result = builder.ins().icmp(IntCC::Equal, li, ri);
             ensure_i64(builder, result)
         }
         BinOp::In | BinOp::NotIn => {
@@ -117,69 +202,113 @@ pub(crate) fn compile_binop<M: Module>(
             let rhs_i64 = ensure_i64(builder, rhs);
             let contains_id = ctx.runtime_funcs["rt_contains"];
             let contains_ref = ctx.module.declare_func_in_func(contains_id, builder.func);
-            let call = builder.ins().call(contains_ref, &[rhs_i64, lhs_i64]);
-            // rt_contains returns I8, extend to I64
+            let call = adapted_call(builder, contains_ref, &[rhs_i64, lhs_i64]);
             let result = ensure_i64(builder, builder.inst_results(call)[0]);
             if matches!(op, BinOp::NotIn) {
-                // Negate the result for `not in`
-                let one = builder.ins().iconst(cranelift_codegen::ir::types::I64, 1);
+                let one = builder.ins().iconst(types::I64, 1);
                 builder.ins().bxor(result, one)
             } else {
                 result
             }
         }
         BinOp::And | BinOp::AndSuspend => {
-            let lhs_bool = builder
-                .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
-            let rhs_bool = builder
-                .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
-            // band on I8 values returns I8, extend to I64
+            let lhs_bool = if is_float {
+                let zero_f = if lhs_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                builder.ins().fcmp(FloatCC::NotEqual, lhs, zero_f)
+            } else {
+                builder.ins().icmp_imm(IntCC::NotEqual, lhs, 0)
+            };
+            let rhs_type = builder.func.dfg.value_type(rhs);
+            let rhs_is_float = rhs_type == types::F32 || rhs_type == types::F64;
+            let rhs_bool = if rhs_is_float {
+                let zero_f = if rhs_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                builder.ins().fcmp(FloatCC::NotEqual, rhs, zero_f)
+            } else {
+                builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0)
+            };
             let result = builder.ins().band(lhs_bool, rhs_bool);
             ensure_i64(builder, result)
         }
         BinOp::Or | BinOp::OrSuspend => {
-            let lhs_bool = builder
-                .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
-            let rhs_bool = builder
-                .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
-            // bor on I8 values returns I8, extend to I64
+            let lhs_bool = if is_float {
+                let zero_f = if lhs_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                builder.ins().fcmp(FloatCC::NotEqual, lhs, zero_f)
+            } else {
+                builder.ins().icmp_imm(IntCC::NotEqual, lhs, 0)
+            };
+            let rhs_type = builder.func.dfg.value_type(rhs);
+            let rhs_is_float = rhs_type == types::F32 || rhs_type == types::F64;
+            let rhs_bool = if rhs_is_float {
+                let zero_f = if rhs_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                builder.ins().fcmp(FloatCC::NotEqual, rhs, zero_f)
+            } else {
+                builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0)
+            };
             let result = builder.ins().bor(lhs_bool, rhs_bool);
             ensure_i64(builder, result)
         }
         BinOp::Pow => {
-            let loop_header = builder.create_block();
-            let loop_body = builder.create_block();
-            let loop_exit = builder.create_block();
+            if is_float {
+                // Float power: fall back to integer exponent loop with fmul
+                let rhs_type = builder.func.dfg.value_type(rhs);
+                let rhs_i64 = if rhs_type.is_float() {
+                    builder.ins().fcvt_to_sint(types::I64, rhs)
+                } else {
+                    ensure_i64(builder, rhs)
+                };
+                let loop_header = builder.create_block();
+                let loop_body = builder.create_block();
+                let loop_exit = builder.create_block();
 
-            builder.append_block_param(loop_header, types::I64);
-            builder.append_block_param(loop_header, types::I64);
-            builder.append_block_param(loop_exit, types::I64);
+                builder.append_block_param(loop_header, lhs_type); // result (float)
+                builder.append_block_param(loop_header, types::I64); // exponent (int)
+                builder.append_block_param(loop_exit, lhs_type); // final result (float)
 
-            let one = builder.ins().iconst(types::I64, 1);
-            builder.ins().jump(loop_header, &[one, rhs]);
+                let one_f = if lhs_type == types::F32 { builder.ins().f32const(1.0) } else { builder.ins().f64const(1.0) };
+                builder.ins().jump(loop_header, &[one_f, rhs_i64]);
 
-            builder.switch_to_block(loop_header);
-            let result_param = builder.block_params(loop_header)[0];
-            let exp_param = builder.block_params(loop_header)[1];
-            let zero = builder.ins().iconst(types::I64, 0);
-            let cond = builder.ins().icmp(
-                cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
-                exp_param,
-                zero,
-            );
-            builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
+                builder.switch_to_block(loop_header);
+                let result_param = builder.block_params(loop_header)[0];
+                let exp_param = builder.block_params(loop_header)[1];
+                let zero = builder.ins().iconst(types::I64, 0);
+                let cond = builder.ins().icmp(IntCC::SignedGreaterThan, exp_param, zero);
+                builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
 
-            builder.switch_to_block(loop_body);
-            let new_result = builder.ins().imul(result_param, lhs);
-            let new_exp = builder.ins().isub(exp_param, one);
-            builder.ins().jump(loop_header, &[new_result, new_exp]);
+                builder.switch_to_block(loop_body);
+                let new_result = builder.ins().fmul(result_param, lhs);
+                let one_i = builder.ins().iconst(types::I64, 1);
+                let new_exp = builder.ins().isub(exp_param, one_i);
+                builder.ins().jump(loop_header, &[new_result, new_exp]);
 
-            builder.switch_to_block(loop_exit);
-            builder.block_params(loop_exit)[0]
+                builder.switch_to_block(loop_exit);
+                builder.block_params(loop_exit)[0]
+            } else {
+                let loop_header = builder.create_block();
+                let loop_body = builder.create_block();
+                let loop_exit = builder.create_block();
+
+                builder.append_block_param(loop_header, types::I64);
+                builder.append_block_param(loop_header, types::I64);
+                builder.append_block_param(loop_exit, types::I64);
+
+                let one = builder.ins().iconst(types::I64, 1);
+                builder.ins().jump(loop_header, &[one, rhs]);
+
+                builder.switch_to_block(loop_header);
+                let result_param = builder.block_params(loop_header)[0];
+                let exp_param = builder.block_params(loop_header)[1];
+                let zero = builder.ins().iconst(types::I64, 0);
+                let cond = builder.ins().icmp(IntCC::SignedGreaterThan, exp_param, zero);
+                builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
+
+                builder.switch_to_block(loop_body);
+                let new_result = builder.ins().imul(result_param, lhs);
+                let new_exp = builder.ins().isub(exp_param, one);
+                builder.ins().jump(loop_header, &[new_result, new_exp]);
+
+                builder.switch_to_block(loop_exit);
+                builder.block_params(loop_exit)[0]
+            }
         }
         BinOp::MatMul => {
             // Matrix multiplication (@) - Simple Math #1930-#1939
@@ -251,7 +380,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                     };
                     let print_str_id = ctx.runtime_funcs[base_str_fn];
                     let print_str_ref = ctx.module.declare_func_in_func(print_str_id, builder.func);
-                    builder.ins().call(print_str_ref, &[space_ptr, space_len]);
+                    adapted_call(builder, print_str_ref, &[space_ptr, space_len]);
                 }
 
                 // Print the argument value using rt_print_value / rt_println_value
@@ -276,7 +405,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                     Some(&v) => v,
                     None => return Err(format!("print: arg vreg {:?} not found", arg)),
                 };
-                builder.ins().call(print_ref, &[arg_val]);
+                adapted_call(builder, print_ref, &[arg_val]);
             }
 
             // Handle empty print (just prints nothing or newline)
@@ -303,7 +432,7 @@ pub(crate) fn compile_builtin_io_call<M: Module>(
                 };
                 let print_str_id = ctx.runtime_funcs[base_str_fn];
                 let print_str_ref = ctx.module.declare_func_in_func(print_str_id, builder.func);
-                builder.ins().call(print_str_ref, &[newline_ptr, newline_len]);
+                adapted_call(builder, print_str_ref, &[newline_ptr, newline_len]);
             }
 
             // Return nil (0) for void functions
@@ -325,7 +454,7 @@ pub(crate) fn compile_interp_call<M: Module>(
     let array_new_id = ctx.runtime_funcs["rt_array_new"];
     let array_new_ref = ctx.module.declare_func_in_func(array_new_id, builder.func);
     let capacity = builder.ins().iconst(types::I64, args.len() as i64);
-    let call = builder.ins().call(array_new_ref, &[capacity]);
+    let call = adapted_call(builder, array_new_ref, &[capacity]);
     let args_array = builder.inst_results(call)[0];
 
     let array_push_id = ctx.runtime_funcs["rt_array_push"];
@@ -336,14 +465,14 @@ pub(crate) fn compile_interp_call<M: Module>(
             Some(&v) => v,
             None => return Err(format!("interp_call: arg vreg {:?} not found", arg)),
         };
-        builder.ins().call(array_push_ref, &[args_array, arg_val]);
+        adapted_call(builder, array_push_ref, &[args_array, arg_val]);
     }
 
     let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
 
     let interp_call_id = ctx.runtime_funcs["rt_interp_call"];
     let interp_call_ref = ctx.module.declare_func_in_func(interp_call_id, builder.func);
-    let call = builder.ins().call(interp_call_ref, &[name_ptr, name_len, args_array]);
+    let call = adapted_call(builder, interp_call_ref, &[name_ptr, name_len, args_array]);
     let result = builder.inst_results(call)[0];
 
     if let Some(d) = dest {
