@@ -735,6 +735,19 @@ pub enum Expr {
         /// Raw payload content (parsed by block-specific handler)
         payload: String,
     },
+
+    /// Volatile memory access: `@address(expr) @volatile val: Type` or `@address(expr) @volatile var: Type`
+    /// Creates a volatile pointer/reference to a memory-mapped address.
+    /// - `val` = read-only volatile access
+    /// - `var` = read-write volatile access
+    VolatileAccess {
+        /// The address expression (e.g., `@address(ptr as u64)`)
+        address: Box<Expr>,
+        /// Whether this is mutable (var) or immutable (val)
+        mutable: bool,
+        /// The type of the volatile access
+        access_type: Type,
+    },
 }
 
 /// Tensor rendering mode for N-dimensional tensors (#1910-#1969)

@@ -819,6 +819,24 @@ impl<'a> Parser<'a> {
                     }
                     methods.push(f);
                 }
+            } else if self.check(&TokenKind::Impl) {
+                // `impl TraitName` inside class body: declares trait implementation
+                // Parse and record as a mixin reference (trait implementation marker)
+                self.advance(); // consume 'impl'
+                let start_span = self.previous.span;
+                let name = self.expect_identifier()?;
+                let type_args = if self.check(&TokenKind::Lt) {
+                    self.parse_generic_args()?
+                } else {
+                    Vec::new()
+                };
+                mixins.push(MixinRef {
+                    span: self.make_span(start_span),
+                    name,
+                    type_args,
+                    overrides: Vec::new(),
+                });
+                self.skip_newlines();
             } else if self.check(&TokenKind::Pass) {
                 // pass/pass_dn/pass_do_nothing in class body: skip as no-op
                 self.advance();

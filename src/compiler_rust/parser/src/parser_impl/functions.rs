@@ -616,6 +616,7 @@ impl<'a> Parser<'a> {
         // Handle decorated non-function items:
         // @cfg(...) export ..., @cfg(...) use ..., @cfg(...) var ..., etc.
         // @section("...") val ..., @align(N) val ..., @cfg(...) const ..., etc.
+        // @cfg("target_feature", "thumb") asm volatile(...) - conditional asm in function bodies
         // Skip the decorators (they're metadata for the compiler) and parse the item
         if self.check(&TokenKind::Export)
             || self.check(&TokenKind::Use)
@@ -630,6 +631,7 @@ impl<'a> Parser<'a> {
             || self.check(&TokenKind::Type)
             || self.check(&TokenKind::From)
             || self.check(&TokenKind::Import)
+            || self.check(&TokenKind::Asm)
         {
             // Decorators like @cfg don't apply to these items in our compilation model,
             // so we just parse the item normally

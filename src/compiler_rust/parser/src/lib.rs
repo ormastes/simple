@@ -40,3 +40,8 @@ pub use parser_impl::{DebugMode, Parser, ParserMode, MAX_LOOP_ITERATIONS};
 pub use sui_parser::*;
 pub use test_analyzer::*;
 pub use token::*;
+
+#[cfg(test)]
+mod fstring_bug_tests;
+#[cfg(test)]
+mod import_parse_tests;

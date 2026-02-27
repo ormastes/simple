@@ -406,10 +406,14 @@ impl NativeBinaryBuilder {
         std::fs::write(&obj_path, &self.object_code)
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write object file: {}", e)))?;
 
-        // Bootstrap helper: emit a tiny C stub that calls spl_main so we don't rely
-        // on the Simple-generated symbol being named `main`.
-        let mut bootstrap_stub: Option<PathBuf> = None;
-        if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+        // Bootstrap helpers: stubs for entry + missing runtime symbols.
+        let mut bootstrap_stubs: Vec<PathBuf> = Vec::new();
+        let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+
+        if bootstrap_mode {
+            let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+
+            // 1) main shim
             let stub_c = temp_path.join("_bootstrap_main.c");
             let stub_o = temp_path.join("_bootstrap_main.o");
             std::fs::write(
@@ -424,7 +428,6 @@ int main(int argc, char** argv) {
 "#,
             )
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write stub: {}", e)))?;
-            let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
             let status = std::process::Command::new(&cc)
                 .args(["-c", "-o"])
                 .arg(&stub_o)
@@ -432,9 +435,93 @@ int main(int argc, char** argv) {
                 .status()
                 .map_err(|e| LinkerError::LinkFailed(format!("failed to compile stub: {}", e)))?;
             if status.success() {
-                bootstrap_stub = Some(stub_o);
+                bootstrap_stubs.push(stub_o);
             } else {
                 eprintln!("warning: failed to build bootstrap main stub with {} (status {})", cc, status);
+            }
+
+            // 2) common missing-symbol stub
+            let miss_c = temp_path.join("_bootstrap_missing.c");
+            let miss_o = temp_path.join("_bootstrap_missing.o");
+            std::fs::write(
+                &miss_c,
+                r#"
+#include <stdint.h>
+#include <stdbool.h>
+__attribute__((weak)) int64_t get_global_GLOBAL_LOG_LEVEL(void) { return 0; }
+__attribute__((weak)) void set_global_GLOBAL_LOG_LEVEL(int64_t v) { (void)v; }
+__attribute__((weak)) bool rt_file_rename(const char* a, const char* b) { (void)a; (void)b; return true; }
+__attribute__((weak)) void rt_fault_set_stack_overflow_detection(int64_t v) { (void)v; }
+__attribute__((weak)) void rt_fault_set_timeout(int64_t v) { (void)v; }
+__attribute__((weak)) void rt_fault_set_execution_limit(int64_t v) { (void)v; }
+__attribute__((weak)) void rt_debug_set_active(int64_t v) { (void)v; }
+__attribute__((weak)) void rt_debug_enable(void) {}
+__attribute__((weak)) void rt_debug_disable(void) {}
+__attribute__((weak, visibility("default"))) void* get_global_SCOPE_LEVELS(void) { return 0; }
+__attribute__((weak, visibility("default"))) int64_t count_by_severity(void) { return 0; }
+__asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
+"#,
+            )
+            .map_err(|e| LinkerError::LinkFailed(format!("failed to write missing-symbol stub: {}", e)))?;
+            let status = std::process::Command::new(&cc)
+                .args(["-c", "-o"])
+                .arg(&miss_o)
+                .arg(&miss_c)
+                .status()
+                .map_err(|e| LinkerError::LinkFailed(format!("failed to compile missing-symbol stub: {}", e)))?;
+            if status.success() {
+                bootstrap_stubs.push(miss_o);
+            } else {
+                eprintln!("warning: failed to build bootstrap missing-symbol stub with {} (status {})", cc, status);
+            }
+
+            // 3) auto-generate stubs for undefined rt_* symbols in the object.
+            if let Ok(nm_out) = std::process::Command::new("nm").arg("-u").arg(&obj_path).output() {
+                let mut symbols = std::collections::BTreeSet::new();
+                for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
+                    if let Some(sym) = line.split_whitespace().last() {
+                        let keep = sym.starts_with("rt_")
+                            || sym.starts_with("get_global_")
+                            || sym.starts_with("set_global_")
+                            || sym.contains("GLOBAL_LOG_LEVEL")
+                            || sym.contains("SCOPE_LEVELS")
+                            || matches!(sym, "count_by_severity" | "future_alloc_ready" | "future_map" | "fallback" | "panic" | "int");
+                        if keep {
+                            symbols.insert(sym.to_string());
+                        }
+                    }
+                }
+
+                if !symbols.is_empty() {
+                    let auto_c = temp_path.join("_bootstrap_auto.c");
+                    let auto_o = temp_path.join("_bootstrap_auto.o");
+                    let mut code = String::from("#include <stdint.h>\n#include <stdbool.h>\n");
+                    for sym in &symbols {
+                        let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
+                        let valid_ident = sym.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && sym != "int";
+                        if is_data && valid_ident {
+                            code.push_str(&format!("__attribute__((weak, used)) int64_t {0} = 0;\n", sym));
+                        } else if valid_ident {
+                            code.push_str(&format!("__attribute__((weak, used)) int64_t {0}(void) {{ return 0; }}\n", sym));
+                        } else {
+                            let clean = sym.replace('\"', "");
+                            code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  ret\\n\");\n", clean));
+                        }
+                    }
+                    std::fs::write(&auto_c, code)
+                        .map_err(|e| LinkerError::LinkFailed(format!("failed to write auto stub: {}", e)))?;
+                    let status = std::process::Command::new(&cc)
+                        .args(["-c", "-o"])
+                        .arg(&auto_o)
+                        .arg(&auto_c)
+                        .status()
+                        .map_err(|e| LinkerError::LinkFailed(format!("failed to compile auto stub: {}", e)))?;
+                    if status.success() {
+                        bootstrap_stubs.push(auto_o);
+                    } else {
+                        eprintln!("warning: failed to build auto stub with {} (status {})", cc, status);
+                    }
+                }
             }
         }
 
@@ -473,8 +560,12 @@ int main(int argc, char** argv) {
 
         // Add user object file
         builder = builder.object(&obj_path);
-        if let Some(stub) = bootstrap_stub {
-            builder = builder.object(&stub);
+        if !bootstrap_stubs.is_empty() {
+            builder = builder.flag("--whole-archive");
+            for stub in &bootstrap_stubs {
+                builder = builder.object(stub);
+            }
+            builder = builder.flag("--no-whole-archive");
             // Allow unresolved runtime symbols during bootstrap; the runtime
             // library doesn't provide every rt_* stub used by optional features.
             builder = builder.flag("--unresolved-symbols=ignore-all");
