@@ -123,9 +123,20 @@ impl<'a> Parser<'a> {
             _ => {}
         }
 
-        // Handle dict type: {K: V}
+        // Handle dict type: {K: V} or empty dict: {}
         if self.check(&TokenKind::LBrace) {
             self.advance();
+            // Handle empty dict type: {}
+            if self.check(&TokenKind::RBrace) {
+                self.advance();
+                return Ok(Type::Generic {
+                    name: "Dict".to_string(),
+                    args: vec![
+                        Type::Simple("Any".to_string()),
+                        Type::Simple("Any".to_string()),
+                    ],
+                });
+            }
             let key_type = self.parse_type()?;
             if self.check(&TokenKind::Colon) {
                 // Dict type: {K: V}
@@ -169,9 +180,22 @@ impl<'a> Parser<'a> {
             return Ok(tuple_type);
         }
 
-        // Handle array type: [T] or [T; N]
+        // Handle array type: [T] or [T; N] or [] (untyped/any array)
         if self.check(&TokenKind::LBracket) {
             self.advance();
+            // Handle empty array type: [] → [Any]
+            if self.check(&TokenKind::RBracket) {
+                self.advance();
+                let array_type = Type::Array {
+                    element: Box::new(Type::Simple("Any".to_string())),
+                    size: None,
+                };
+                if self.check(&TokenKind::Question) {
+                    self.advance();
+                    return Ok(Type::Optional(Box::new(array_type)));
+                }
+                return Ok(array_type);
+            }
             let element = self.parse_type()?;
 
             // Check for fixed-size array: [T; N]
@@ -294,6 +318,12 @@ impl<'a> Parser<'a> {
             }
             self.expect(&TokenKind::RParen)?;
             return Ok(Type::ConstKeySet { keys });
+        }
+
+        // Handle ? as wildcard type (unknown rank/dimension): Tensor<T, ?>
+        if self.check(&TokenKind::Question) {
+            self.advance();
+            return Ok(Type::Simple("?".to_string()));
         }
 
         // Simple or generic type (possibly qualified: module.Type or Iterator::Item)

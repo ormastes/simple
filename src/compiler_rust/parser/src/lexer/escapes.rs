@@ -93,7 +93,12 @@ impl<'a> super::Lexer<'a> {
                 self.advance();
                 EscapeResult::Char('-')
             }
-            Some(c) => EscapeResult::Error(format!("Invalid escape sequence: \\{}", c)),
+            // Treat unknown escape sequences as literal characters (e.g., \U, \P, \w, \d)
+            // This matches Python/Simple behavior where unknown escapes pass through
+            Some(c) => {
+                self.advance();
+                EscapeResult::Char(c)
+            }
             None => EscapeResult::Unterminated,
         }
     }

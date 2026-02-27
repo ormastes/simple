@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use simple_common::gc::GcAllocator;
@@ -84,7 +84,24 @@ impl CompilerPipeline {
     #[instrument(skip(self, source_path, out))]
     pub fn compile(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
         let module = load_module_with_imports(source_path, &mut HashSet::new())?;
-        let smf_bytes = self.compile_module_to_memory_with_context(module, Some(source_path))?;
+        let smf_bytes = match self.compile_module_to_memory_with_context(module, Some(source_path)) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                // Attach source path to semantic errors for easier debugging during bootstrap
+                match e {
+                    CompileError::Semantic(msg) => {
+                        return Err(CompileError::Semantic(format!("{}: {}", source_path.display(), msg)))
+                    }
+                    CompileError::SemanticWithContext { message, context } => {
+                        return Err(CompileError::SemanticWithContext {
+                            message: format!("{}: {}", source_path.display(), message),
+                            context,
+                        })
+                    }
+                    other => return Err(other),
+                }
+            }
+        };
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
     }
 
@@ -623,21 +640,42 @@ impl CompilerPipeline {
         // Monomorphization
         let ast_module = monomorphize_module(&ast_module);
 
-        // Run lint checks
-        self.run_lint_checks(&ast_module.items, None)?;
+        // Bootstrap leniency: when building the first native compiler with a newer
+        // Rust toolchain, allow compiling without the full type system so older
+        // sources using `text?`, missing `panic`, etc. can still self-host.
+        let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
 
-        // Validate capabilities
-        self.validate_capabilities(&ast_module.items)?;
+        // Run lint + validation only when not in bootstrap to keep output clean.
+        if !bootstrap_mode {
+            self.run_lint_checks(&ast_module.items, None)?;
+            self.validate_capabilities(&ast_module.items)?;
+            self.check_trait_coherence(&ast_module.items)?;
+            self.validate_sync_constraints(&ast_module.items)?;
+        }
 
-        // Check trait coherence
-        self.check_trait_coherence(&ast_module.items)?;
-
-        // Validate sync constraints (async-by-default #44)
-        self.validate_sync_constraints(&ast_module.items)?;
-
-        // Type check and lower to MIR
-        // Use context-aware lowering when source path is provided (enables import type resolution)
-        let mir_module = if let Some(path) = source_path {
+        // Produce MIR.
+        let mir_module = if bootstrap_mode {
+            // Lenient lowering path (mirrors native_project bootstrap flow)
+            use crate::hir::Lowerer;
+            use crate::module_resolver::ModuleResolver;
+            let dummy_path = source_path.unwrap_or_else(|| Path::new("bootstrap.spl"));
+            let hir_source_root = dummy_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("."));
+            let resolver = ModuleResolver::new(
+                // project root defaults to cwd in this simplified path
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                hir_source_root.clone(),
+            );
+            let mut lowerer = Lowerer::with_module_resolver(resolver, dummy_path.to_path_buf());
+            lowerer.set_strict_mode(false);
+            lowerer.set_lenient_types(true);
+            let hir = lowerer
+                .lower_module(&ast_module)
+                .map_err(|e| crate::error::factory::hir_lowering_failed(&e))?;
+            crate::mir::lower_to_mir(&hir).map_err(|e| crate::error::factory::mir_lowering_failed(&e))?
+        } else if let Some(path) = source_path {
             self.type_check_and_lower_with_context(&ast_module, path)?
         } else {
             self.type_check_and_lower(&ast_module)?

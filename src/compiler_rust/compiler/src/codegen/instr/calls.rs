@@ -322,8 +322,15 @@ pub fn compile_call<M: Module>(
     args: &[VReg],
 ) -> InstrResult<()> {
     let func_name_raw = target.name();
+    // Strip any module/class prefix that may have been baked into the MIR name
+    // (e.g., "compiler__driver__driver_types__rt_file_read_text") so runtime
+    // FFI resolution still recognizes built‑in rt_* symbols.
+    let func_name_unprefixed = func_name_raw
+        .rsplit_once("__")
+        .map(|(_, tail)| tail)
+        .unwrap_or(func_name_raw);
     // Map Simple builtin names to runtime FFI function names
-    let func_name: &str = match func_name_raw {
+    let func_name: &str = match func_name_unprefixed {
         "sys_get_args" => "rt_get_args",
         "sys_exit" => "rt_exit",
         // Map text-argument file FFI to RuntimeValue wrappers

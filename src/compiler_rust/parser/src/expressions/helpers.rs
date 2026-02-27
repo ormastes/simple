@@ -54,6 +54,16 @@ impl<'a> Parser<'a> {
 
         // Must have indent for a block
         if !self.check(&TokenKind::Indent) {
+            // Check for empty block: colon followed by dedent (comment-only or empty body)
+            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+                // Empty colon block — return empty lambda
+                return Ok(Some(Expr::Lambda {
+                    params: vec![],
+                    body: Box::new(Expr::Tuple(vec![])),
+                    move_mode: MoveMode::Copy,
+                    capture_all: false,
+                }));
+            }
             // Not a colon-block, but we already consumed the colon
             // This is an error state - colon without proper block
             return Err(ParseError::unexpected_token(
@@ -64,6 +74,17 @@ impl<'a> Parser<'a> {
         }
 
         self.advance(); // consume Indent
+
+        // Check for immediately empty block (Indent followed by Dedent)
+        if self.check(&TokenKind::Dedent) {
+            self.advance(); // consume Dedent
+            return Ok(Some(Expr::Lambda {
+                params: vec![],
+                body: Box::new(Expr::Tuple(vec![])),
+                move_mode: MoveMode::Copy,
+                capture_all: false,
+            }));
+        }
 
         // Parse statements until dedent
         let mut statements = Vec::new();
@@ -686,6 +707,37 @@ impl<'a> Parser<'a> {
                 // Just a newline, parse next expression
                 self.parse_expression()?
             }
+        } else if self.check(&TokenKind::LBrace) && self.peek_brace_is_lambda_block() {
+            // Brace-delimited block body: \x: { var acc = ...; for item in data: ... }
+            // Enable forced indentation BEFORE consuming { so the lexer generates
+            // proper Newline/Indent/Dedent tokens inside the brace block.
+            // bracket_depth is already at inside-brace level (lexer incremented when scanning {).
+            self.lexer.enable_forced_indentation();
+            self.advance(); // consume { — next token from lexer has proper indentation
+            // Skip newlines/indents inside brace block
+            while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                self.advance();
+            }
+            let mut statements = Vec::new();
+            while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+                while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::RBrace) || self.check(&TokenKind::Eof) {
+                    break;
+                }
+                let stmt = self.parse_item()?;
+                statements.push(stmt);
+                while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                    self.advance();
+                }
+            }
+            // Disable inner forced indentation before consuming }
+            self.lexer.disable_forced_indentation();
+            self.expect(&TokenKind::RBrace)?;
+            // Disable outer forced indentation (from before the colon at line 648)
+            self.lexer.disable_forced_indentation();
+            Expr::DoBlock(statements)
         } else {
             // Inline expression - disable forced indentation after parsing
             let expr = self.parse_expression()?;

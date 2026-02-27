@@ -49,6 +49,39 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
+        // Check for named tuple: (name: value, name2: value2)
+        // The `first` expr must be an Identifier and next token must be Colon
+        if self.check(&TokenKind::Colon) {
+            if let Expr::Identifier(field_name) = first {
+                self.advance(); // consume ':'
+                let value = self.parse_expression()?;
+                let mut fields = vec![(field_name, value)];
+                // Skip whitespace
+                while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                    self.advance();
+                }
+                while self.check(&TokenKind::Comma) {
+                    self.advance();
+                    while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                        self.advance();
+                    }
+                    if self.check(&TokenKind::RParen) { break; }
+                    let name = self.expect_identifier()?;
+                    self.expect(&TokenKind::Colon)?;
+                    let val = self.parse_expression()?;
+                    fields.push((name, val));
+                    while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                        self.advance();
+                    }
+                }
+                self.expect(&TokenKind::RParen)?;
+                return Ok(Expr::StructInit {
+                    name: "".to_string(),
+                    fields,
+                });
+            }
+        }
+
         if self.check(&TokenKind::Comma) {
             // Tuple
             let mut elements = vec![first];

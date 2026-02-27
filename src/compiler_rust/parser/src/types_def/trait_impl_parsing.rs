@@ -215,6 +215,17 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 continue;
             }
+            // Skip pass/pass_dn/pass_do_nothing in impl body
+            if self.check(&TokenKind::Pass) {
+                self.advance();
+                self.skip_newlines();
+                continue;
+            }
+            if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo") {
+                self.advance();
+                self.skip_newlines();
+                continue;
+            }
             // Check for associated type impl: `type Item = i64`
             if self.check(&TokenKind::Type) {
                 associated_types.push(self.parse_associated_type_impl()?);
@@ -357,6 +368,17 @@ impl<'a> Parser<'a> {
             // These are docstrings that appear before any method and aren't attached to a method
             if let TokenKind::String(_) = &self.current.kind {
                 self.advance(); // consume the docstring
+                self.skip_newlines();
+                continue;
+            }
+            // Skip pass/pass_dn/pass_do_nothing in trait body
+            if self.check(&TokenKind::Pass) {
+                self.advance();
+                self.skip_newlines();
+                continue;
+            }
+            if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo") {
+                self.advance();
                 self.skip_newlines();
                 continue;
             }

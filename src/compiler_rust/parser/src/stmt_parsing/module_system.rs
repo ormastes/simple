@@ -84,6 +84,22 @@ impl<'a> Parser<'a> {
             // Continue to parse the remaining path
         }
 
+        // Handle string-literal module paths: import "std/math", import "aes/utilities"
+        if let TokenKind::FString(parts) = &self.current.kind {
+            if parts.len() == 1 {
+                if let crate::token::FStringToken::Literal(path_str) = &parts[0] {
+                    let path_segments: Vec<String> = path_str.split('/').map(|s| s.to_string()).collect();
+                    self.advance();
+                    return Ok(ModulePath::new(path_segments));
+                }
+            }
+        }
+        if let TokenKind::String(path_str) = &self.current.kind {
+            let path_segments: Vec<String> = path_str.split('/').map(|s| s.to_string()).collect();
+            self.advance();
+            return Ok(ModulePath::new(path_segments));
+        }
+
         // First segment (could be 'crate' keyword or identifier)
         if segments.is_empty() {
             if self.check(&TokenKind::Crate) {
@@ -98,8 +114,25 @@ impl<'a> Parser<'a> {
             segments.push(self.expect_path_segment()?);
         }
 
-        // Parse dot-separated segments (also accept :: with deprecation warning)
-        while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
+        // Parse dot-separated segments (also accept :: and / with deprecation warning)
+        while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) || self.check(&TokenKind::Slash) {
+            // Slash-separated path (legacy): import aes/utilities
+            if self.check(&TokenKind::Slash) {
+                self.advance();
+
+                // Check for glob: module/*
+                if self.check(&TokenKind::Star) {
+                    break;
+                }
+
+                // Check for group: module/{A, B}
+                if self.check(&TokenKind::LBrace) {
+                    break;
+                }
+
+                segments.push(self.expect_path_segment()?);
+                continue;
+            }
             // Emit deprecation warning for '::' syntax
             if self.check(&TokenKind::DoubleColon) {
                 let warning = ErrorHint {
@@ -293,14 +326,38 @@ impl<'a> Parser<'a> {
                 ImportTarget::Group(items)
             } // end of non-glob group
         } else {
-            // Single import: from module import Name or from module import Name as Alias
+            // Single or comma-separated import: from module import A or from module import A, B, C
             let name = self.expect_path_segment()?;
-            if self.check(&TokenKind::As) {
+            let first = if self.check(&TokenKind::As) {
                 self.advance();
                 let alias = self.expect_path_segment()?;
                 ImportTarget::Aliased { name, alias }
             } else {
                 ImportTarget::Single(name)
+            };
+
+            // Check for comma-separated list: from module import A, B, C
+            if self.check(&TokenKind::Comma) {
+                let mut items = vec![first];
+                while self.check(&TokenKind::Comma) {
+                    self.advance();
+                    // Skip whitespace
+                    while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                        self.advance();
+                    }
+                    if self.is_at_end() { break; }
+                    let item_name = self.expect_path_segment()?;
+                    if self.check(&TokenKind::As) {
+                        self.advance();
+                        let alias = self.expect_path_segment()?;
+                        items.push(ImportTarget::Aliased { name: item_name, alias });
+                    } else {
+                        items.push(ImportTarget::Single(item_name));
+                    }
+                }
+                ImportTarget::Group(items)
+            } else {
+                first
             }
         };
 
@@ -454,6 +511,22 @@ impl<'a> Parser<'a> {
             }));
         }
 
+        // Handle bare `export ()` — empty export list (no-op placeholder)
+        if self.check(&TokenKind::LParen) {
+            self.advance(); // consume '('
+            self.expect(&TokenKind::RParen)?;
+            return Ok(Node::ExportUseStmt(ExportUseStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                path: ModulePath::new(Vec::new()),
+                target: ImportTarget::Group(vec![]),
+            }));
+        }
+
         // Check for two syntaxes:
         // 1. export use X (traditional)
         // 2. export X, Y from module (JS/Python style)
@@ -486,11 +559,15 @@ impl<'a> Parser<'a> {
             }))
         } else if self.check(&TokenKind::Star) {
             // export * from module (glob re-export)
+            // OR export * (bare — export all from current module)
             self.advance(); // consume '*'
-            self.expect(&TokenKind::From)?;
 
-            // Parse module path
-            let module_path = self.parse_module_path()?;
+            let module_path = if self.check(&TokenKind::From) {
+                self.advance(); // consume 'from'
+                self.parse_module_path()?
+            } else {
+                ModulePath::new(Vec::new()) // empty path = current module
+            };
 
             Ok(Node::ExportUseStmt(ExportUseStmt {
                 span: Span::new(
@@ -700,6 +777,25 @@ impl<'a> Parser<'a> {
                     "Expected '.*', '{...}', or specific item after module path in export statement".to_string(),
                     self.current.span,
                 ));
+            }
+
+            // Check for export assignment: export name = expr
+            // This creates a const binding with export visibility
+            if self.check(&TokenKind::Assign) {
+                self.advance(); // consume '='
+                let value = self.parse_expression()?;
+                return Ok(Node::Const(ConstStmt {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                    name: first_item,
+                    ty: None,
+                    value,
+                    visibility: Visibility::Public,
+                }));
             }
 
             // Not a module path - parse as identifier list

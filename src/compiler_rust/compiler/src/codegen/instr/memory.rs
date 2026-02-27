@@ -46,7 +46,8 @@ pub fn compile_load<M: Module>(
             ctx.vreg_values.insert(dest, val);
         } else {
             eprintln!(
-                "[CODEGEN-WARN] Load: local_index={} has no Variable! variables has {:?}",
+                "[CODEGEN-WARN] Load: func={} local_index={} has no Variable! variables has {:?}",
+                ctx.func.name,
                 local_index,
                 ctx.variables.keys().collect::<Vec<_>>()
             );

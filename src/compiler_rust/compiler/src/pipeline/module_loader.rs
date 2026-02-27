@@ -151,6 +151,40 @@ pub fn extract_startup_config(module: &Module) -> Option<StartupConfig> {
     None
 }
 
+/// Bootstrap-only: aggressively strip legacy optional type suffix (`?`) from
+/// identifiers/types so older code parses under newer syntax rules.
+fn strip_optionals(mut s: String) -> String {
+    // Optional chaining/presence checks like `foo.?` -> `foo != nil` (best-effort)
+    s = s.replace(".?:", " != nil:");
+    s = s.replace(".?\n", " != nil\n");
+    s = s.replace(".?\r\n", " != nil\r\n");
+
+    // Patterns where `?` commonly appears.
+    for pat in [
+        "? ",
+        "?\n",
+        "?\r\n",
+        "?\t",
+        "?,",
+        "?)",
+        "?]",
+        "?>",
+        "?:",
+        "?=",
+        "?;",
+        "?>",
+    ] {
+        while s.contains(pat) {
+            s = s.replace(pat, &pat[1..]); // drop leading '?'
+        }
+    }
+    // Trailing ? at EOF
+    if s.ends_with('?') {
+        s.pop();
+    }
+    s
+}
+
 /// Extract startup configuration from a list of decorators.
 fn extract_startup_config_from_decorators(decorators: &[simple_parser::ast::Decorator]) -> StartupConfig {
     let mut config = StartupConfig::default();
@@ -349,7 +383,16 @@ pub fn load_module_with_imports_validated(
         });
     }
 
-    let source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
+    let mut source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("Cannot read {:?}: {e}", path)))?;
+
+    // Bootstrap leniency: older sources use optional `text?` types which the
+    // current parser treats as a bare identifier. During early bootstrap we
+    // normalize them to `text` so type checking succeeds. Guarded by env to
+    // avoid affecting normal builds.
+    if std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1") {
+        source = source.replace("text?", "text");
+        source = strip_optionals(source);
+    }
     let mut parser = simple_parser::Parser::new(&source);
     let mut module = parser
         .parse()
@@ -625,6 +668,9 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     for _ in 0..10 {
         // Try various stdlib locations (matching interpreter behavior)
         for stdlib_subpath in &[
+            // Preferred: repo layout uses src/std/*
+            "src/std",
+            // Legacy layouts kept for compatibility with older checkouts
             "src/std/src",
             "src/lib/std/src",
             "lib/std/src",

@@ -316,7 +316,9 @@ impl ExecCore {
         let _ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
 
         let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
-        compiler.compile(path, out).map_err(|e| format!("compile failed: {e}"))
+        compiler
+            .compile(path, out)
+            .map_err(|e| format!("compile failed ({}): {e}", path.display()))
     }
 
     /// Compile a source file to SMF with compile options (LLM-friendly #885-887)
@@ -344,7 +346,9 @@ impl ExecCore {
             compiler.set_coverage_enabled(true);
         }
 
-        compiler.compile(path, out).map_err(|e| format!("compile failed: {e}"))
+        compiler
+            .compile(path, out)
+            .map_err(|e| format!("compile failed ({}): {e}", path.display()))
     }
 
     // =========================================================================

@@ -61,10 +61,6 @@ pub enum LowerError {
     #[error("Use Python-style constructor `{class_name}(...)` instead of `{class_name}.new(...)`")]
     UseConstructorNotNew { class_name: String },
 
-    /// E1051: Static method not supported in native compilation
-    #[error("Static method `{class_name}.{method_name}()` not yet supported in native compilation. Use interpreter mode or define as a free function")]
-    StaticMethodNotSupported { class_name: String, method_name: String },
-
     /// E1052: Attempted to mutate self in an immutable fn method
     #[error("cannot modify self in immutable fn method. Use `me` instead of `fn` to allow self mutation")]
     SelfMutationInImmutableMethod,

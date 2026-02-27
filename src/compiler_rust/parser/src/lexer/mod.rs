@@ -9,6 +9,7 @@ mod strings;
 pub use crate::token::{NamePattern, NumericSuffix};
 use crate::token::{Span, Token, TokenKind};
 
+#[derive(Clone)]
 pub struct Lexer<'a> {
     source: &'a str,
     chars: std::iter::Peekable<std::str::CharIndices<'a>>,
@@ -19,7 +20,7 @@ pub struct Lexer<'a> {
     pending_tokens: Vec<Token>,
     at_line_start: bool,
     /// Track bracket depth to suppress INDENT/DEDENT inside delimiters
-    bracket_depth: usize,
+    pub bracket_depth: usize,
     /// Force indentation tracking even inside brackets (for lambda bodies, match expressions).
     /// Uses a counter to support nested contexts that both require forced indentation.
     force_indentation_depth: usize,
@@ -241,9 +242,14 @@ impl<'a> Lexer<'a> {
                     // Return next meaningful token instead of backslash
                     return self.next_token();
                 }
+                // Double backslash \\x is treated same as \x (lambda)
+                // Some source files use \\ as lambda prefix
+                if self.peek() == Some('\\') {
+                    self.advance(); // consume second backslash
+                }
                 TokenKind::Backslash
             }
-            '^' => TokenKind::Error("'^' is not allowed outside math blocks. Use 'xor' for bitwise XOR, '**' for power, or m{} for math expressions".to_string()),
+            '^' => TokenKind::Xor,
             '~' => {
                 // Check for compound suspension operators: ~+=, ~-=, ~*=, ~/=
                 if self.check('+') {

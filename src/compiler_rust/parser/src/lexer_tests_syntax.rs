@@ -95,9 +95,8 @@ fn test_channel_arrow_disambiguation() {
 fn test_bitwise_operators() {
     assert_eq!(tokenize("&"), vec![TokenKind::Ampersand, TokenKind::Eof]);
     assert_eq!(tokenize("|"), vec![TokenKind::Pipe, TokenKind::Eof]);
-    // ^ is now a lexer error outside math blocks - test moved to dedicated test
-    let caret_tokens = tokenize("^");
-    assert!(matches!(&caret_tokens[0], TokenKind::Error(msg) if msg.contains("not allowed outside math blocks")));
+    // ^ is now Xor token (usable as bitwise XOR operator)
+    assert_eq!(tokenize("^"), vec![TokenKind::Xor, TokenKind::Eof]);
     assert_eq!(tokenize("~"), vec![TokenKind::Tilde, TokenKind::Eof]);
     assert_eq!(tokenize("<<"), vec![TokenKind::ShiftLeft, TokenKind::Eof]);
     assert_eq!(tokenize(">>"), vec![TokenKind::ShiftRight, TokenKind::Eof]);

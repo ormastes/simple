@@ -1185,8 +1185,13 @@ impl<'a> MirLowerer<'a> {
                             dest
                         });
                     }
-                    // Enum or variant not found - fall through to error
-                    return Err(MirLowerError::Unsupported(format!("unknown enum variant: {}", name)));
+
+                    if name.contains("::") {
+                        // Enum variant with :: separator not found — genuine error
+                        return Err(MirLowerError::Unsupported(format!("unknown enum variant: {}", name)));
+                    }
+                    // Dot-separated name that's not an enum — static method reference
+                    // (e.g. Point.origin). Fall through to GlobalLoad below.
                 }
 
                 // Regular global variable - load via GlobalLoad instruction

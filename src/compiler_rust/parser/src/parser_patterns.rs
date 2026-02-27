@@ -211,9 +211,42 @@ impl<'a> Parser<'a> {
             TokenKind::From => self.parse_keyword_as_pattern("from"),
             TokenKind::Var => self.parse_keyword_as_pattern("var"),
             TokenKind::Exists => self.parse_keyword_as_pattern("exists"),
+            TokenKind::Continue => self.parse_keyword_as_pattern("continue"),
+            TokenKind::Break => self.parse_keyword_as_pattern("break"),
+            TokenKind::Return => self.parse_keyword_as_pattern("return"),
+            TokenKind::Spawn => self.parse_keyword_as_pattern("spawn"),
+            TokenKind::Mock => self.parse_keyword_as_pattern("mock"),
+            TokenKind::Requires => self.parse_keyword_as_pattern("requires"),
+            TokenKind::Mod => self.parse_keyword_as_pattern("mod"),
+            TokenKind::By => self.parse_keyword_as_pattern("by"),
+            TokenKind::Union => self.parse_keyword_as_pattern("union"),
+            TokenKind::Match => self.parse_keyword_as_pattern("match"),
+            TokenKind::Or => self.parse_keyword_as_pattern("or"),
+            TokenKind::And => self.parse_keyword_as_pattern("and"),
+            TokenKind::Not => self.parse_keyword_as_pattern("not"),
+            TokenKind::In => self.parse_keyword_as_pattern("in"),
+            TokenKind::Is => self.parse_keyword_as_pattern("is"),
             TokenKind::Identifier { name, .. } => {
                 let name = name.clone();
                 self.advance();
+
+                // Skip generic type parameters in patterns: Some<Int>(x) -> treat as Some(x)
+                if self.check(&TokenKind::Lt) {
+                    let mut depth = 1;
+                    self.advance(); // consume '<'
+                    while !self.is_at_end() && depth > 0 {
+                        if self.check(&TokenKind::Lt) {
+                            depth += 1;
+                        } else if self.check(&TokenKind::Gt) {
+                            depth -= 1;
+                            if depth == 0 {
+                                self.advance(); // consume final '>'
+                                break;
+                            }
+                        }
+                        self.advance();
+                    }
+                }
 
                 // Check for struct pattern: Name { ... }
                 if self.check(&TokenKind::LBrace) {

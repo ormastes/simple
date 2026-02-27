@@ -25,6 +25,32 @@ use compiler.common.compiler_services.{CompilerServices, create_default_services
 # FFI declarations used by SourceFile.load and CompileContext
 extern fn rt_file_read_text(path: text) -> text
 
+# Minimal logger to avoid import-map issues during bootstrap
+class BootLogger:
+    level: i64
+
+    static fn from_env() -> BootLogger:
+        BootLogger(level: 0)
+
+    fn debug(message: text): ()
+    fn info(message: text): ()
+    fn warn(message: text): ()
+    fn error(message: text): ()
+    fn trace(message: text): ()
+
+# Minimal logger to avoid import-map resolution during bootstrap
+class BootLogger:
+    level: i64
+
+    static fn from_env() -> BootLogger:
+        BootLogger(level: 0)
+
+    fn debug(message: text): ()
+    fn info(message: text): ()
+    fn warn(message: text): ()
+    fn error(message: text): ()
+    fn trace(message: text): ()
+
 fn create_config() -> Config:
     Config(values: {})
 
@@ -167,11 +193,13 @@ struct CompileOptions:
     gc_off: bool            # Disable garbage collection
 
     static fn default() -> CompileOptions:
+        val default_mode = CompileMode__from_text("interpret").unwrap()
+        val default_format = OutputFormat__from_text("native")
         CompileOptions(
-            mode: CompileMode.Interpret,
+            mode: default_mode,
             input_files: [],
             output_file: nil,
-            output_format: OutputFormat.Native,
+            output_format: default_format,
             optimize: false,
             opt_level: nil,
             release: false,
@@ -187,11 +215,13 @@ struct CompileOptions:
 
 # Manually desugared static method for bootstrap runtime compatibility
 fn CompileOptions__default() -> CompileOptions:
+    val default_mode = CompileMode__from_text("interpret").unwrap()
+    val default_format = OutputFormat__from_text("native")
     CompileOptions(
-        mode: CompileMode.Interpret,
+        mode: default_mode,
         input_files: [],
         output_file: nil,
-        output_format: OutputFormat.Native,
+        output_format: default_format,
         optimize: false,
         opt_level: nil,
         release: false,
@@ -257,10 +287,13 @@ struct SourceFile:
             return Err("Failed to read file: {path}")
         val content = content_opt.unwrap()
 
-        # Extract module name from path
-        val name = path.split("/").last() ?? "main"
-        val name_no_spl = name.replace(".spl", "")
-        val module_name = name_no_spl.replace(".sdn", "")
+        # Derive module name from path relative to src/, using dot separators.
+        var mod_path = path
+        if mod_path.starts_with("src/"):
+            mod_path = mod_path.substring(4)
+        mod_path = mod_path.replace(".spl", "")
+        mod_path = mod_path.replace(".sdn", "")
+        val module_name = mod_path.replace("/", ".")
 
         Ok(SourceFile(
             path: path,
@@ -278,7 +311,7 @@ class CompileContext:
     backend: BackendPort       # Typed port: visible contract, replaces extensions.resolve("Backend")
     extensions: DiContainer    # Dynamic extension point for plugins (Feature 5)
     aop: AopWeaver
-    logger: Logger
+    logger: BootLogger
     sources: [SourceFile]
     modules: Dict<text, Module>
     hir_modules: Dict<text, HirModule>
@@ -340,9 +373,9 @@ class CompileContext:
 
         # Setup logger from env var (SIMPLE_LOG=debug|trace|info|warn|error)
         val logger = if options.verbose:
-            Logger(level: 10)  # verbose flag forces debug level
+            BootLogger(level: 10)  # verbose flag forces debug level
         else:
-            Logger.from_env()
+            BootLogger.from_env()
 
         # Setup AOP
         var aop = AopWeaver(aspects: [], logger: logger)
@@ -404,92 +437,10 @@ class CompileContext:
 # ------------------------------------------------------------------------------
 
 fn create_compile_context(options: CompileOptions) -> CompileContext:
-    """Create a CompileContext wired through the CompilerServices container.
-
-    Uses create_default_services() from compiler_services.spl to obtain
-    a CompilerServices struct with typed port contracts for each pipeline stage.
-    The backend port is then replaced with the real mode-specific implementation
-    based on options.mode.
-
-    This establishes the typed service wiring. As the MDSoC migration progresses,
-    additional pipeline stages can be wired from services into CompileContext fields.
-    """
-    # Step 1: Get the typed service container with noop stubs for all ports
-    val services = create_default_services()
-
-    # Step 2: Build the real mode-specific backend port (overrides services.backend noop)
-    val real_backend = match options.mode:
-        case CompileMode.Interpret:
-            val interp_impl = InterpreterBackendImpl.new()
-            BackendPort(
-                name: "interpreter",
-                run_fn: fn(m): interp_impl.process_module(m),
-                supports_jit_fn: fn(): false,
-                target_triple_fn: fn(): "interpreter"
-            )
-        case CompileMode.Jit:
-            val jit_impl = CompilerBackendImpl__jit()
-            BackendPort(
-                name: "jit",
-                run_fn: fn(m): jit_impl.process_module(m),
-                supports_jit_fn: fn(): true,
-                target_triple_fn: fn(): "native-jit"
-            )
-        case CompileMode.Aot:
-            val output = options.output_file ?? "a.out"
-            val aot_impl = CompilerBackendImpl__aot(output)
-            BackendPort(
-                name: "aot",
-                run_fn: fn(m): aot_impl.process_module(m),
-                supports_jit_fn: fn(): false,
-                target_triple_fn: fn(): "native-aot"
-            )
-        case CompileMode.Sdn:
-            val sdn_impl = SdnBackendImpl()
-            BackendPort(
-                name: "sdn",
-                run_fn: fn(m): sdn_impl.process_module(m),
-                supports_jit_fn: fn(): false,
-                target_triple_fn: fn(): "sdn"
-            )
-        case CompileMode.Check:
-            BackendPort(
-                name: "check",
-                run_fn: fn(m): Ok(BackendResult.Unit),
-                supports_jit_fn: fn(): false,
-                target_triple_fn: fn(): "check"
-            )
-
-    # Step 3: Build the remaining services (logger, extensions, aop) from options
-    # as done in CompileContext.create; these will migrate to services ports in future phases
-    val config = {}
-    val extensions = DiContainer(bindings: {}, singletons: {}, profile: options.profile, all_bindings: [], locked: false)
-    val logger = if options.verbose:
-        Logger(level: 10)
-    else:
-        Logger.from_env()
-    var aop = AopWeaver(aspects: [], logger: logger)
-    if options.verbose:
-        aop.add_aspect(LogAspect(level: 6, logger: aop.logger))
-
-    # Step 4: Construct CompileContext - backend comes from services wiring (step 2),
-    # other CompilerServices ports (lexer, parser, desugarer, etc.) are available
-    # at services.lexer, services.parser, etc. for future incremental migration
-    CompileContext(
-        options: options,
-        config: config,
-        backend: real_backend,
-        extensions: extensions,
-        aop: aop,
-        logger: logger,
-        sources: [],
-        modules: {},
-        hir_modules: {},
-        mir_modules: {},
-        errors: [],
-        warnings: [],
-        visibility_warnings: []
-    )
+    # Bootstrap path: reuse the original constructor that wires the backend directly.
+    # The generic services container uses helper functions that aren't mapped in
+    # the bootstrap import table, so calling it triggers a null function pointer.
+    CompileContext.create(options)
 
 # ============================================================================
 # Exports
@@ -500,3 +451,5 @@ export CompileMode, CompileMode__from_text, OutputFormat, OutputFormat__from_tex
 export CompileOptions, CompileOptions__default, CompileResult, SourceFile, CompileContext
 export BackendPort
 export CompilerServices, create_default_services, create_compile_context
+export BootLogger
+export BootLogger

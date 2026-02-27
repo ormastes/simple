@@ -93,21 +93,29 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         super::instr::memory::compile_store(self.ctx, self.builder, addr, value)
     }
     fn emit_global_load(&mut self, dest: VReg, global_name: &str, ty: TypeId) -> Result<(), String> {
-        let global_id = self
-            .ctx
-            .global_ids
-            .get(global_name)
-            .ok_or_else(|| format!("Global variable '{}' not found", global_name))?;
-        let global_ref = self.ctx.module.declare_data_in_func(*global_id, self.builder.func);
-        let global_addr = self.builder.ins().global_value(types::I64, global_ref);
-        let val = self.builder.ins().load(
-            super::types_util::type_id_to_cranelift(ty),
-            MemFlags::new(),
-            global_addr,
-            0,
-        );
-        self.ctx.vreg_values.insert(dest, val);
-        Ok(())
+        // First try regular global variables
+        if let Some(&global_id) = self.ctx.global_ids.get(global_name) {
+            let global_ref = self.ctx.module.declare_data_in_func(global_id, self.builder.func);
+            let global_addr = self.builder.ins().global_value(types::I64, global_ref);
+            let val = self.builder.ins().load(
+                super::types_util::type_id_to_cranelift(ty),
+                MemFlags::new(),
+                global_addr,
+                0,
+            );
+            self.ctx.vreg_values.insert(dest, val);
+            return Ok(());
+        }
+
+        // Fallback: static method reference (e.g. "Point.origin") — resolve as function address
+        if let Some(&func_id) = self.ctx.func_ids.get(global_name) {
+            let func_ref = self.ctx.module.declare_func_in_func(func_id, self.builder.func);
+            let addr = self.builder.ins().func_addr(types::I64, func_ref);
+            self.ctx.vreg_values.insert(dest, addr);
+            return Ok(());
+        }
+
+        Err(format!("Global variable '{}' not found", global_name))
     }
     fn emit_global_store(&mut self, global_name: &str, value: VReg, _ty: TypeId) -> Result<(), String> {
         let global_id = self

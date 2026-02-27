@@ -310,7 +310,21 @@ impl Parser<'_> {
             // not a let-binding keyword. E.g., in `case Bool(val): if val: "1" else: "0"`
             if (self.check(&TokenKind::Val) || self.check(&TokenKind::Var))
                 && (self.peek_is(&TokenKind::Colon) || self.peek_is(&TokenKind::RParen)
-                    || self.peek_is(&TokenKind::Then))
+                    || self.peek_is(&TokenKind::Then)
+                    || self.peek_is(&TokenKind::Dot)
+                    || self.peek_is(&TokenKind::Newline)
+                    || self.peek_is(&TokenKind::Eof)
+                    || self.peek_is(&TokenKind::And)
+                    || self.peek_is(&TokenKind::Or)
+                    || self.peek_is(&TokenKind::Eq)
+                    || self.peek_is(&TokenKind::NotEq)
+                    || self.peek_is(&TokenKind::Lt)
+                    || self.peek_is(&TokenKind::Gt)
+                    || self.peek_is(&TokenKind::LtEq)
+                    || self.peek_is(&TokenKind::GtEq)
+                    || self.peek_is(&TokenKind::Comma)
+                    || self.peek_is(&TokenKind::RBracket)
+                    || self.peek_is(&TokenKind::RBrace))
             {
                 // `val`/`var` used as variable name in condition, not as binding keyword
                 return Ok((None, self.parse_expression()?));
@@ -455,6 +469,26 @@ impl Parser<'_> {
             if segments.len() == 1 && (self.check(&TokenKind::Newline) || self.is_at_end()) {
                 // Import entire module: use core -> import * from core
                 return Ok((path, ImportTarget::Glob));
+            }
+
+            // Legacy syntax: import module: item1, item2
+            // The colon separates module name from imported symbols
+            if self.check(&TokenKind::Colon) {
+                self.advance(); // consume ':'
+                let name = self.expect_path_segment()?;
+                if self.check(&TokenKind::Comma) {
+                    let mut targets = vec![ImportTarget::Single(name)];
+                    while self.check(&TokenKind::Comma) {
+                        self.advance();
+                        if self.check(&TokenKind::Newline) || self.is_at_end() {
+                            break;
+                        }
+                        let n = self.expect_path_segment()?;
+                        targets.push(ImportTarget::Single(n));
+                    }
+                    return Ok((path, ImportTarget::Group(targets)));
+                }
+                return Ok((path, ImportTarget::Single(name)));
             }
 
             let last = segments.pop().unwrap_or_default();
@@ -978,6 +1012,8 @@ impl Parser<'_> {
                 // Parse each line as extern fn
                 self.expect(&TokenKind::Fn)?;
                 let name = self.expect_identifier()?;
+                // Skip generic params: extern fn name<T>(...)
+                let _generic_params = self.parse_generic_params_as_strings()?;
                 let params = self.parse_parameters()?;
                 let return_type = if self.check(&TokenKind::Arrow) {
                     self.advance();
@@ -1017,6 +1053,8 @@ impl Parser<'_> {
         self.expect(&TokenKind::Fn)?;
 
         let name = self.expect_identifier()?;
+        // Skip generic params: extern fn name<T>(...)
+        let _generic_params = self.parse_generic_params_as_strings()?;
         let params = self.parse_parameters()?;
 
         let return_type = if self.check(&TokenKind::Arrow) {

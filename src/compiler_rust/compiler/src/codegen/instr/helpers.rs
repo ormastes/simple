@@ -24,6 +24,12 @@ pub(crate) fn get_vreg_or_default<M: Module>(
     // (e.g., incomplete phi coverage). Fallbacks silently produced bad code
     // during bootstrap, so fail fast when debugging.
     if std::env::var("SIMPLE_STRICT_VREG").is_ok() {
+        // Emit immediate context to stderr so bootstrap logs show the offending site
+        eprintln!(
+            "[strict-vreg] missing value for {:?} in function {}",
+            vreg,
+            ctx.func.name
+        );
         panic!(
             "codegen: missing VReg value for {:?} in function {}",
             vreg,

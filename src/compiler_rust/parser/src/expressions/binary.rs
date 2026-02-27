@@ -335,7 +335,7 @@ impl<'a> Parser<'a> {
                     operand: Box::new(operand),
                 })
             }
-            TokenKind::Not => {
+            TokenKind::Not | TokenKind::Bang => {
                 self.advance();
                 let operand = self.parse_unary()?;
                 Ok(Expr::Unary {

@@ -201,6 +201,15 @@ impl<'a> Parser<'a> {
                             receiver: Box::new(expr),
                             index: index as usize,
                         };
+                    // Support computed field access: children.(idx - 1)
+                    } else if self.check(&TokenKind::LParen) {
+                        self.advance(); // consume '('
+                        let index_expr = self.parse_expression()?;
+                        self.expect(&TokenKind::RParen)?;
+                        expr = Expr::Index {
+                            receiver: Box::new(expr),
+                            index: Box::new(index_expr),
+                        };
                     } else {
                         let field = self.expect_method_name()?;
                         if self.check(&TokenKind::LParen) {
