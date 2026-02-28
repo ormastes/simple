@@ -1,4 +1,4 @@
-# Bootstrap Guide (2026-02-18)
+# Bootstrap Guide (2026-02-28)
 
 This guide is the quick bootstrap reference for the current repository layout.
 
@@ -11,7 +11,62 @@ This guide is the quick bootstrap reference for the current repository layout.
 `src/compiler_core_legacy/` is retired. Bootstrap and docs should use `src/compiler/`.
 Runtime files are in `src/runtime/` (previously `src/compiler_seed/`).
 
-## C Backend Bootstrap (current pipeline)
+## Bootstrap Fallback Chain
+
+The bootstrap script uses a two-phase strategy:
+
+```
+Phase 0: Download latest release binary from GitHub
+    ↓ (success → use it)
+    ↓ (fail → continue)
+Phase 1–3: Build from C source via CMake + Ninja
+```
+
+### Quick Start
+
+```bash
+# Automatic: try release download first, fall back to C bootstrap
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+
+# Download release binary only (no C build)
+scripts/bootstrap/download-release.sh --output=bin/release/simple
+
+# Force C bootstrap (skip release download)
+scripts/bootstrap/bootstrap-from-scratch.sh --skip-download --deploy
+
+# Pin to a specific release version
+scripts/bootstrap/bootstrap-from-scratch.sh --download-version=0.7.0 --deploy
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--deploy` / `--update-release` | Copy result to `bin/release/simple` |
+| `--skip-download` | Skip release download, force C bootstrap build |
+| `--download-version=X.Y.Z` | Pin release download to a specific version |
+| `--keep-artifacts` | Keep `build/` directory after completion |
+| `--step=full2` | Run self-host verification after build |
+| `--jobs=N` | Parallel build jobs (default: 7) |
+
+## Release Binary Download
+
+The `download-release.sh` script fetches a pre-built binary from GitHub releases:
+
+```bash
+# Download latest release
+scripts/bootstrap/download-release.sh
+
+# Download specific version
+scripts/bootstrap/download-release.sh --version=0.7.0
+
+# Custom output path
+scripts/bootstrap/download-release.sh --output=/tmp/simple
+```
+
+It auto-detects your platform (linux-x86_64, darwin-arm64, etc.), downloads the matching `.spk` package, extracts the binary, and verifies it with `--version`. Uses `gh` CLI when available, falls back to `curl`.
+
+## C Backend Bootstrap (fallback pipeline)
 
 The C backend emits C++20 from the full compiler and builds it with CMake + Ninja + Clang:
 
@@ -30,24 +85,19 @@ mkdir -p bin/bootstrap/cpp && cp build/simple bin/bootstrap/cpp/simple
 bin/bootstrap/cpp/simple build
 ```
 
-Or use the bootstrap script:
+Or use the bootstrap script with `--skip-download`:
 
 ```bash
-scripts/bootstrap/bootstrap-c.sh              # Generate + build
-scripts/bootstrap/bootstrap-c.sh --verify     # Generate + build + self-host verify
-```
-
-## Quick Commands
-
-```bash
-# C backend bootstrap (CMake + Ninja)
-scripts/bootstrap/bootstrap-c.sh
-scripts/bootstrap/bootstrap-c.sh --verify
+scripts/bootstrap/bootstrap-from-scratch.sh --skip-download --deploy
 ```
 
 ## Script Map
 
-- `scripts/bootstrap/bootstrap-c.sh`: C backend bootstrap (CMake + Ninja)
+| Script | Purpose |
+|--------|---------|
+| `scripts/bootstrap/download-release.sh` | Download release binary from GitHub |
+| `scripts/bootstrap/bootstrap-from-scratch.sh` | Full bootstrap (release download + C fallback) |
+| `scripts/bootstrap/bootstrap-c.sh` | C backend bootstrap (CMake + Ninja) |
 
 ## Expected Output
 
@@ -62,3 +112,4 @@ The self-hosted binary (`bin/release/simple`) no longer delegates any work to su
 ## Related Docs
 
 - `doc/build/bootstrap_pipeline.md`
+- `doc/build/github_actions_bootstrap_guide.md`

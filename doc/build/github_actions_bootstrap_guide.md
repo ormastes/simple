@@ -2,6 +2,18 @@
 
 Since the Rust source code (`rust/` directory) has been removed as part of the Pure Simple implementation, local compilation is not possible. Instead, we use GitHub Actions to build bootstrap binaries for all platforms.
 
+## Bootstrap Strategy (CI)
+
+The CI workflow (`.github/workflows/bootstrap-build.yml`) uses a fallback chain:
+
+1. **Try latest release binary** — downloads from GitHub releases via `download-release.sh`
+2. **Verify** — runs `simple --version` on the downloaded binary
+3. **Build from release** — if release binary works, uses it to build a new binary (`simple build --release`)
+4. **Fall back to C bootstrap** — if release binary fails/missing, runs `bootstrap-from-scratch.sh --skip-download`
+5. **Upload artifact** — final verified binary
+
+The job output `bootstrap-method` indicates which path was taken (`release` or `c-bootstrap`).
+
 ## Current Status
 
 **Local:** Placeholder binaries created (all platforms)

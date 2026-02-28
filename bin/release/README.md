@@ -110,14 +110,30 @@ all platforms on push to main:
 
 If you don't have a bootstrap binary for your platform:
 
-1. **GitHub Releases:**
+1. **Automatic download (recommended):**
    ```bash
-   wget https://github.com/simple-lang/simple/releases/latest/download/simple-linux-x86_64.tar.gz
-   tar xzf simple-linux-x86_64.tar.gz
+   # Auto-detects platform, downloads latest, verifies
+   scripts/bootstrap/download-release.sh --output=bin/release/simple
+
+   # Or pin a specific version
+   scripts/bootstrap/download-release.sh --version=0.7.0 --output=bin/release/simple
    ```
 
-2. **Manual Installation:**
-   - Download from: https://github.com/simple-lang/simple/releases
+2. **Full bootstrap with fallback:**
+   ```bash
+   # Tries release download first, falls back to C bootstrap
+   scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+   ```
+
+3. **GitHub Releases (manual):**
+   ```bash
+   wget https://github.com/ormastes/simple/releases/latest/download/simple-bootstrap-0.7.0-linux-x86_64.spk
+   tar xzf simple-bootstrap-0.7.0-linux-x86_64.spk
+   # Find and copy the binary to bin/release/simple
+   ```
+
+4. **Manual Installation:**
+   - Download from: https://github.com/ormastes/simple/releases
    - Extract to `bin/release/<platform>/`
    - Make executable: `chmod +x bin/release/<platform>/simple`
 

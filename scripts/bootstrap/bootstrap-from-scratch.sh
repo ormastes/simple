@@ -8,9 +8,11 @@
 #   bin/simple compile --backend=c -o src/compiler_cpp/ src/app/cli/main.spl
 #
 # Usage:
-#   scripts/bootstrap/bootstrap-from-scratch.sh                     # Build bootstrap
+#   scripts/bootstrap/bootstrap-from-scratch.sh                     # Try release download, fall back to C build
+#   scripts/bootstrap/bootstrap-from-scratch.sh --skip-download     # Skip release download, force C build
 #   scripts/bootstrap/bootstrap-from-scratch.sh --step=full2        # With self-host verify
 #   scripts/bootstrap/bootstrap-from-scratch.sh --deploy            # Copy to bin/release/
+#   scripts/bootstrap/bootstrap-from-scratch.sh --update-release    # Alias for --deploy
 #   scripts/bootstrap/bootstrap-from-scratch.sh --keep-artifacts    # Keep build dir
 #   scripts/bootstrap/bootstrap-from-scratch.sh --jobs=4            # Parallel jobs
 #
@@ -32,15 +34,25 @@ STEP="full1"
 DEPLOY=false
 KEEP_ARTIFACTS=false
 JOBS=7
+SKIP_DOWNLOAD=false
+DOWNLOAD_VERSION=""
 
 for arg in "$@"; do
     case "$arg" in
         --step=*) STEP="${arg#--step=}" ;;
-        --deploy) DEPLOY=true ;;
+        --deploy|--update-release) DEPLOY=true ;;
         --keep-artifacts) KEEP_ARTIFACTS=true ;;
         --jobs=*) JOBS="${arg#--jobs=}" ;;
+        --skip-download) SKIP_DOWNLOAD=true ;;
+        --download-version=*) DOWNLOAD_VERSION="${arg#--download-version=}" ;;
         --help|-h)
-            echo "Usage: $0 [--step=seed|core1|core2|full1|full2] [--deploy] [--keep-artifacts] [--jobs=N]"
+            echo "Usage: $0 [--step=seed|core1|core2|full1|full2] [--deploy] [--update-release]"
+            echo "         [--keep-artifacts] [--jobs=N] [--skip-download] [--download-version=X.Y.Z]"
+            echo ""
+            echo "Options:"
+            echo "  --skip-download          Skip release binary download, force C bootstrap build"
+            echo "  --download-version=X.Y.Z Pin release download to a specific version"
+            echo "  --deploy, --update-release  Copy result to bin/release/simple"
             exit 0
             ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
@@ -55,78 +67,126 @@ echo "Step:       ${STEP}"
 echo "Jobs:       ${JOBS}"
 echo ""
 
-# Check prerequisites
-check_tool() {
-    if ! command -v "$1" &>/dev/null; then
-        echo "Error: $1 not found. Please install $1."
+# ================================================================
+# Phase 0: Try downloading a release binary from GitHub
+# ================================================================
+USED_RELEASE_BINARY=false
+
+if [[ "${SKIP_DOWNLOAD}" != "true" ]]; then
+    echo "--- Phase 0: Download release binary ---"
+
+    DOWNLOAD_SCRIPT="${SCRIPT_DIR}/download-release.sh"
+    DOWNLOAD_ARGS=("--output=${BUILD_DIR}/simple" "--quiet")
+
+    if [[ -n "${DOWNLOAD_VERSION}" ]]; then
+        DOWNLOAD_ARGS+=("--version=${DOWNLOAD_VERSION}")
+    fi
+
+    if [[ -x "${DOWNLOAD_SCRIPT}" ]]; then
+        if DOWNLOADED_BIN=$("${DOWNLOAD_SCRIPT}" "${DOWNLOAD_ARGS[@]}" 2>/dev/null); then
+            # Double-check with --version
+            if "${BUILD_DIR}/simple" --version &>/dev/null; then
+                echo "Release binary downloaded and verified: ${BUILD_DIR}/simple"
+                USED_RELEASE_BINARY=true
+            else
+                echo "Downloaded binary failed verification, falling back to C bootstrap."
+                rm -f "${BUILD_DIR}/simple"
+            fi
+        else
+            echo "Release download failed or unavailable, falling back to C bootstrap."
+        fi
+    else
+        echo "download-release.sh not found, falling back to C bootstrap."
+    fi
+    echo ""
+else
+    echo "--- Phase 0: Skipped (--skip-download) ---"
+    echo ""
+fi
+
+# If release binary worked, skip the C bootstrap build phases
+if [[ "${USED_RELEASE_BINARY}" == "true" ]]; then
+    echo "Using downloaded release binary — skipping C bootstrap build."
+    echo ""
+else
+    # ================================================================
+    # Phase 1–3: C Bootstrap Build (CMake + Ninja)
+    # ================================================================
+
+    # Check prerequisites
+    check_tool() {
+        if ! command -v "$1" &>/dev/null; then
+            echo "Error: $1 not found. Please install $1."
+            exit 1
+        fi
+    }
+
+    check_tool cmake
+
+    # Detect build generator
+    GENERATOR=""
+    if command -v ninja &>/dev/null; then
+        GENERATOR="-G Ninja"
+        echo "Generator:  Ninja"
+    elif command -v make &>/dev/null; then
+        echo "Generator:  Make"
+    else
+        echo "Error: Neither ninja nor make found."
         exit 1
     fi
-}
 
-check_tool cmake
+    # Detect C compiler
+    CXX_FLAG=""
+    C_FLAG=""
+    if command -v clang++ &>/dev/null; then
+        CXX_FLAG="-DCMAKE_CXX_COMPILER=clang++"
+        C_FLAG="-DCMAKE_C_COMPILER=clang"
+        echo "Compiler:   clang"
+    elif command -v g++ &>/dev/null; then
+        CXX_FLAG="-DCMAKE_CXX_COMPILER=g++"
+        C_FLAG="-DCMAKE_C_COMPILER=gcc"
+        echo "Compiler:   gcc"
+    else
+        echo "Warning: No preferred compiler found, using system default."
+    fi
 
-# Detect build generator
-GENERATOR=""
-if command -v ninja &>/dev/null; then
-    GENERATOR="-G Ninja"
-    echo "Generator:  Ninja"
-elif command -v make &>/dev/null; then
-    echo "Generator:  Make"
-else
-    echo "Error: Neither ninja nor make found."
-    exit 1
-fi
+    echo ""
 
-# Detect C compiler
-CXX_FLAG=""
-C_FLAG=""
-if command -v clang++ &>/dev/null; then
-    CXX_FLAG="-DCMAKE_CXX_COMPILER=clang++"
-    C_FLAG="-DCMAKE_C_COMPILER=clang"
-    echo "Compiler:   clang"
-elif command -v g++ &>/dev/null; then
-    CXX_FLAG="-DCMAKE_CXX_COMPILER=g++"
-    C_FLAG="-DCMAKE_C_COMPILER=gcc"
-    echo "Compiler:   gcc"
-else
-    echo "Warning: No preferred compiler found, using system default."
-fi
+    # Step 1: CMake configure
+    echo "--- Phase 1: Configure ---"
+    cmake -B "${BUILD_DIR}" ${GENERATOR} ${CXX_FLAG} ${C_FLAG} \
+        -DCMAKE_BUILD_TYPE=Release \
+        -S "${SRC_DIR}" 2>&1
 
-echo ""
+    echo ""
 
-# Step 1: CMake configure
-echo "--- Phase 1: Configure ---"
-cmake -B "${BUILD_DIR}" ${GENERATOR} ${CXX_FLAG} ${C_FLAG} \
-    -DCMAKE_BUILD_TYPE=Release \
-    -S "${SRC_DIR}" 2>&1
+    # Step 2: Build
+    echo "--- Phase 2: Build ---"
+    cmake --build "${BUILD_DIR}" --parallel "${JOBS}" 2>&1
 
-echo ""
+    echo ""
 
-# Step 2: Build
-echo "--- Phase 2: Build ---"
-cmake --build "${BUILD_DIR}" --parallel "${JOBS}" 2>&1
+    # Verify build outputs
+    if [[ ! -f "${BUILD_DIR}/simple" ]]; then
+        echo "Error: Build failed — ${BUILD_DIR}/simple not found."
+        exit 1
+    fi
 
-echo ""
+    if [[ ! -f "${BUILD_DIR}/simple_codegen" ]]; then
+        echo "Error: Build failed — ${BUILD_DIR}/simple_codegen not found."
+        exit 1
+    fi
 
-# Verify build outputs
-if [[ ! -f "${BUILD_DIR}/simple" ]]; then
-    echo "Error: Build failed — ${BUILD_DIR}/simple not found."
-    exit 1
-fi
+    echo "Build artifacts:"
+    ls -lh "${BUILD_DIR}/simple" "${BUILD_DIR}/simple_codegen"
+    echo ""
 
-if [[ ! -f "${BUILD_DIR}/simple_codegen" ]]; then
-    echo "Error: Build failed — ${BUILD_DIR}/simple_codegen not found."
-    exit 1
-fi
+    # Step 3: Verify (simple --version)
+    echo "--- Phase 3: Verify ---"
+    "${BUILD_DIR}/simple" --version 2>&1 || true
+    echo ""
 
-echo "Build artifacts:"
-ls -lh "${BUILD_DIR}/simple" "${BUILD_DIR}/simple_codegen"
-echo ""
-
-# Step 3: Verify (simple --version)
-echo "--- Phase 3: Verify ---"
-"${BUILD_DIR}/simple" --version 2>&1 || true
-echo ""
+fi  # end of C bootstrap build (USED_RELEASE_BINARY else branch)
 
 # Step 4: Self-host verify (full2)
 if [[ "${STEP}" == "full2" ]]; then
@@ -144,12 +204,15 @@ if [[ "${DEPLOY}" == "true" ]]; then
     cp "${BUILD_DIR}/simple" "${RELEASE_DIR}/simple"
     chmod +x "${RELEASE_DIR}/simple"
 
-    # Also copy simple_codegen alongside it
-    cp "${BUILD_DIR}/simple_codegen" "${RELEASE_DIR}/simple_codegen"
-    chmod +x "${RELEASE_DIR}/simple_codegen"
+    # Also copy simple_codegen alongside it (only exists for C bootstrap builds)
+    if [[ -f "${BUILD_DIR}/simple_codegen" ]]; then
+        cp "${BUILD_DIR}/simple_codegen" "${RELEASE_DIR}/simple_codegen"
+        chmod +x "${RELEASE_DIR}/simple_codegen"
+    fi
 
     echo "Deployed to:"
-    ls -lh "${RELEASE_DIR}/simple" "${RELEASE_DIR}/simple_codegen"
+    ls -lh "${RELEASE_DIR}/simple" "${RELEASE_DIR}/simple_codegen" 2>/dev/null || \
+        ls -lh "${RELEASE_DIR}/simple"
     echo ""
 fi
 
@@ -160,4 +223,8 @@ if [[ "${KEEP_ARTIFACTS}" != "true" ]]; then
 fi
 
 echo ""
-echo "=== Bootstrap complete ==="
+if [[ "${USED_RELEASE_BINARY}" == "true" ]]; then
+    echo "=== Bootstrap complete (via release download) ==="
+else
+    echo "=== Bootstrap complete (via C bootstrap build) ==="
+fi
