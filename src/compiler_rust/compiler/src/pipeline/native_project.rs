@@ -581,8 +581,11 @@ int main(int argc, char** argv) {
             cmd.arg(obj);
         }
 
-        // Add runtime library if found
-        if let Some(runtime) = find_runtime_library() {
+        // Add runtime/compiler library. Prefer combined native_all library
+        // (includes Cranelift FFI for self-hosting) over runtime-only.
+        if let Some(native_all) = find_native_all_library() {
+            cmd.arg(&native_all);
+        } else if let Some(runtime) = find_runtime_library() {
             cmd.arg(&runtime);
         }
 
@@ -1147,6 +1150,34 @@ fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
             }
         }
     }
+}
+
+/// Find the combined native_all library (runtime + compiler with Cranelift FFI).
+fn find_native_all_library() -> Option<PathBuf> {
+    let candidates = [
+        "src/compiler_rust/target/release/libsimple_native_all.a",
+        "src/compiler_rust/target/debug/libsimple_native_all.a",
+        "src/compiler_rust/target/bootstrap/libsimple_native_all.a",
+    ];
+
+    for candidate in &candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // Try relative to current exe
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let path = dir.join("libsimple_native_all.a");
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
 }
 
 /// Find the Simple runtime library.

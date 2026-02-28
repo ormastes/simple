@@ -873,6 +873,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Settlement stub
     RuntimeFuncSpec::new("rt_settlement_main", &[], &[I64]),
     // Compilation
+    RuntimeFuncSpec::new("rt_native_build", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_handle_compile", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cli_handle_targets", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cli_handle_linkers", &[], &[I64]),

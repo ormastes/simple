@@ -365,6 +365,11 @@ pub fn rt_settlement_main(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_settlement_main")
 }
 
+/// Handle native-build command
+pub fn rt_native_build(_args: &[Value]) -> Result<Value, CompileError> {
+    interpreter_not_supported("rt_native_build")
+}
+
 /// Handle compile command
 pub fn rt_cli_handle_compile(_args: &[Value]) -> Result<Value, CompileError> {
     interpreter_not_supported("rt_cli_handle_compile")
