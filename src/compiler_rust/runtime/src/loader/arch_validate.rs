@@ -402,8 +402,11 @@ pub fn supported_compile_targets() -> Vec<Target> {
         Target::new(TargetArch::X86_64, TargetOS::Linux),
         Target::new(TargetArch::X86_64, TargetOS::Windows),
         Target::new(TargetArch::X86_64, TargetOS::MacOS),
+        Target::new(TargetArch::X86_64, TargetOS::FreeBSD),
         Target::new(TargetArch::Aarch64, TargetOS::Linux),
+        Target::new(TargetArch::Aarch64, TargetOS::Windows),
         Target::new(TargetArch::Aarch64, TargetOS::MacOS),
+        Target::new(TargetArch::Aarch64, TargetOS::FreeBSD),
         Target::new(TargetArch::Riscv64, TargetOS::Linux),
     ]
 }

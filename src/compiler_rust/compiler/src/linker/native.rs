@@ -5,7 +5,7 @@
 //!
 //! # Linker Selection Priority
 //!
-//! 1. **Mold** (Linux only): Fastest linker, 4x faster than lld
+//! 1. **Mold** (Linux/FreeBSD): Fastest linker, 4x faster than lld
 //! 2. **LLD**: LLVM's linker, cross-platform, fast
 //! 3. **GNU ld**: Fallback, always available on Unix systems
 //!
@@ -23,7 +23,7 @@ use super::error::{LinkerError, LinkerResult};
 /// Native linker variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NativeLinker {
-    /// Mold: Modern, fast linker (Linux only)
+    /// Mold: Modern, fast linker (Linux/FreeBSD)
     /// See: https://github.com/rui314/mold
     Mold,
     /// LLD: LLVM's linker (cross-platform)
@@ -36,7 +36,7 @@ impl NativeLinker {
     /// Detect the best available linker on the system.
     ///
     /// Checks for linkers in order of preference:
-    /// 1. Mold (Linux only)
+    /// 1. Mold (Linux/FreeBSD)
     /// 2. LLD
     /// 3. GNU ld
     ///
@@ -47,8 +47,8 @@ impl NativeLinker {
             return Self::from_name(&linker);
         }
 
-        // Mold is only available on Linux
-        #[cfg(target_os = "linux")]
+        // Mold is available on Linux and FreeBSD
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if Self::is_available(Self::Mold) {
             return Some(Self::Mold);
         }
@@ -62,6 +62,19 @@ impl NativeLinker {
         #[cfg(unix)]
         if Self::is_available(Self::Ld) {
             return Some(Self::Ld);
+        }
+
+        // On Windows, check for lld-link (MSVC-compatible LLD variant)
+        #[cfg(target_os = "windows")]
+        {
+            if Command::new("lld-link")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return Some(Self::Lld);
+            }
         }
 
         None
