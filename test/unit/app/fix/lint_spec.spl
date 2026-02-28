@@ -4,180 +4,33 @@
 #   L:print_in_test_spec         — Replace print() with expect() in test specs
 #   L:sspec_missing_docstrings   — Add template docstring to describe/context
 #   L:sspec_manual_assertions    — Replace manual if/fail with expect()
+#
+# These rules are implemented in std.common.tooling.easy_fix.rules
+# and comprehensively tested in test/feature/app/easy_fix_rules_spec.spl
 
-use std.tooling.easy_fix.*
-use super.super.helpers.*
+use std.common.tooling.easy_fix.types.*
+use std.common.tooling.easy_fix.rules.*
 
-# ============================================================================
-# Rule 1: print_in_test_spec
-# Detects print(...) calls in _spec.spl files and suggests expect().
-# Confidence: Likely
-# ============================================================================
+describe "Spec file lint rules":
+    context "print_in_test_spec":
+        it "detects print in spec files":
+            val source = "it \"test\":\n    print(42)\n"
+            val fixes = check_print_in_test_spec(source, "my_spec.spl")
+            expect(fixes.len()).to_equal(1)
 
-fn check_print_in_test_spec(source: String, file: String) -> [EasyFix]:
-    # Only applies to spec files
-    if not file.ends_with("_spec.spl"):
-        return []
+        it "ignores non-spec files":
+            val source = "fn main():\n    print(42)\n"
+            val fixes = check_print_in_test_spec(source, "main.spl")
+            expect(fixes.len()).to_equal(0)
 
-    for_each_line(source, \ctx:
-        var line_fixes: [EasyFix] = []
+    context "sspec_missing_docstrings":
+        it "detects missing docstrings":
+            val source = "describe \"X\":\n    it \"y\":\n        expect true\n"
+            val fixes = check_sspec_missing_docstrings(source, "test_spec.spl")
+            expect(fixes.len() >= 1).to_equal(true)
 
-        # Detect bare print(...) inside test context
-        if ctx.trimmed.starts_with("print(") or ctx.trimmed.starts_with("print "):
-            val start = ctx.byte_offset + ctx.indent
-            val end = ctx.byte_offset + ctx.line.len()
-
-            # Extract the argument
-            var arg = ""
-            if ctx.trimmed.starts_with("print("):
-                # Find matching closing paren
-                val inner = ctx.trimmed.slice(6)
-                if inner.ends_with(")"):
-                    arg = inner.slice(0, inner.len() - 1)
-                else:
-                    arg = inner
-
-            if arg.len() > 0:
-                var fix = EasyFix.create(
-                    id: "L:print_in_test_spec:{ctx.line_num}",
-                    description: "replace print() with expect() in test spec",
-                    confidence: FixConfidence.Likely
-                )
-                val spaces = " ".repeat(ctx.indent)
-                fix.add_replacement(Replacement.create(
-                    file: file,
-                    start: start,
-                    end: end,
-                    line: ctx.line_num,
-                    column: ctx.indent + 1,
-                    new_text: "{spaces}expect({arg}).to_be_truthy()"
-                ))
-                line_fixes.push(fix)
-
-        line_fixes
-    )
-
-# ============================================================================
-# Rule 4: sspec_missing_docstrings
-# Detects describe/context blocks without docstrings.
-# Confidence: Safe
-# ============================================================================
-
-fn check_sspec_missing_docstrings(source: String, file: String) -> [EasyFix]:
-    var fixes: [EasyFix] = []
-
-    if not file.ends_with("_spec.spl"):
-        return fixes
-
-    val lines = source.split("\n")
-    var line_num = 0
-    var byte_offset = 0
-
-    for line in lines:
-        line_num = line_num + 1
-        val trimmed = line.trim()
-
-        val is_describe = trimmed.starts_with("describe ")
-        val is_context = trimmed.starts_with("context ")
-
-        if is_describe or is_context:
-            val keyword = if is_describe then "describe" else "context"
-
-            # Extract the name string
-            val after_kw = trimmed.slice(keyword.len()).trim()
-            var block_name = after_kw
-            if after_kw.starts_with("\""):
-                val close_quote = after_kw.slice(1).find("\"")
-                if close_quote >= 0:
-                    block_name = after_kw.slice(1, close_quote + 1)
-
-            # Check if next non-empty line is a docstring (""")
-            var next_idx = line_num  # 0-indexed for next line
-            var has_docstring = false
-            var check_offset = byte_offset + line.len() + 1
-
-            if next_idx < lines.len():
-                val next_line = lines[next_idx]
-                val next_trimmed = next_line.trim()
-                if next_trimmed.starts_with("\"\"\""):
-                    has_docstring = true
-
-            if not has_docstring:
-                val indent = line.len() - trimmed.len()
-                val insert_pos = byte_offset + line.len() + 1  # After newline
-                val spaces = " ".repeat(indent + 4)
-                val header = if is_describe then "##" else "###"
-                val scenario = if is_describe then "" else "Scenario: "
-                val docstring = "{spaces}\"\"\"\n{spaces}{header} {scenario}{block_name}\n{spaces}\n{spaces}Description of this {keyword} block.\n{spaces}\"\"\"\n"
-
-                var fix = EasyFix.create(
-                    id: "L:sspec_missing_docstrings:{line_num}",
-                    description: "add template docstring to {keyword} block",
-                    confidence: FixConfidence.Safe
-                )
-                fix.add_replacement(Replacement.create(
-                    file: file,
-                    start: insert_pos,
-                    end: insert_pos,
-                    line: line_num + 1,
-                    column: 1,
-                    new_text: docstring
-                ))
-                fixes.push(fix)
-
-        byte_offset = byte_offset + line.len() + 1
-
-    fixes
-
-# ============================================================================
-# Rule 5: sspec_manual_assertions
-# Detects `if condition: fail(...)` and suggests `expect(condition)`.
-# Confidence: Likely
-# ============================================================================
-
-fn check_sspec_manual_assertions(source: String, file: String) -> [EasyFix]:
-    if not file.ends_with("_spec.spl"):
-        return []
-
-    for_each_line(source, \ctx:
-        var line_fixes: [EasyFix] = []
-
-        # Pattern: if <cond>: fail(...) or if not <cond>: fail(...)
-        if ctx.trimmed.starts_with("if ") and ctx.trimmed.contains("fail("):
-            # Extract condition: between "if " and ":"
-            val colon_pos = ctx.trimmed.find(":")
-            if colon_pos > 3:
-                val condition = ctx.trimmed.slice(3, colon_pos).trim()
-                val after_colon = ctx.trimmed.slice(colon_pos + 1).trim()
-
-                if after_colon.starts_with("fail("):
-                    val start = ctx.byte_offset + ctx.indent
-                    val end = ctx.byte_offset + ctx.line.len()
-                    val spaces = " ".repeat(ctx.indent)
-
-                    # If condition is negated, expect the positive
-                    var expect_expr = ""
-                    if condition.starts_with("not "):
-                        expect_expr = "expect({condition.slice(4).trim()}).to_be_truthy()"
-                    else:
-                        expect_expr = "expect({condition}).to_be_falsy()"
-
-                    var fix = EasyFix.create(
-                        id: "L:sspec_manual_assertions:{ctx.line_num}",
-                        description: "replace manual if/fail with expect()",
-                        confidence: FixConfidence.Likely
-                    )
-                    fix.add_replacement(Replacement.create(
-                        file: file,
-                        start: start,
-                        end: end,
-                        line: ctx.line_num,
-                        column: ctx.indent + 1,
-                        new_text: "{spaces}{expect_expr}"
-                    ))
-                    line_fixes.push(fix)
-
-        line_fixes
-    )
-
-export check_print_in_test_spec, check_sspec_missing_docstrings, check_sspec_manual_assertions
+    context "sspec_manual_assertions":
+        it "detects manual assertions":
+            val source = "    if x > 5: fail(\"too big\")\n"
+            val fixes = check_sspec_manual_assertions(source, "test_spec.spl")
+            expect(fixes.len()).to_equal(1)

@@ -1,0 +1,259 @@
+# EasyFix Data Structures for Machine-Applicable Fixes
+# Part of Simple Language Standard Library - Tooling Module
+
+# ============================================================================
+# Lint Levels and Categories
+# ============================================================================
+
+enum LintLevel:
+    Allow
+    Warn
+    Deny
+
+enum LintCategory:
+    Safety      # Memory safety, null checks
+    Correctness # Logic errors, type mismatches
+    Warning     # Potential issues
+    Style       # Code style recommendations
+    Concurrency # Concurrency-related issues
+
+# ============================================================================
+# Fix Confidence Levels
+# ============================================================================
+
+enum FixConfidence:
+    Safe       # Auto-apply without review
+    Likely     # Probably correct, review recommended
+    Uncertain  # May change semantics, needs human review
+
+# ============================================================================
+# Replacement: a single text substitution
+# ============================================================================
+
+class Replacement:
+    file: String
+    start: Int
+    end: Int
+    line: Int
+    column: Int
+    new_text: String
+
+    static fn create(file: String, start: Int, end: Int, line: Int, column: Int, new_text: String) -> Replacement:
+        Replacement(file: file, start: start, end: end, line: line, column: column, new_text: new_text)
+
+    fn format() -> String:
+        "{self.file}:{self.line}:{self.column} [{self.start}..{self.end}] -> \"{self.new_text}\""
+
+# ============================================================================
+# EasyFix: a machine-applicable fix for a diagnostic
+# ============================================================================
+
+class EasyFix:
+    id: String
+    description: String
+    replacements: [Replacement]
+    confidence: FixConfidence
+
+    static fn create(id: String, description: String, confidence: FixConfidence) -> EasyFix:
+        EasyFix(id: id, description: description, replacements: [], confidence: confidence)
+
+    me add_replacement(replacement: Replacement):
+        self.replacements.push(replacement)
+
+    fn is_safe() -> Bool:
+        match self.confidence:
+            case Safe: true
+            case _: false
+
+    fn is_likely() -> Bool:
+        match self.confidence:
+            case Safe: true
+            case Likely: true
+            case _: false
+
+    fn format() -> String:
+        val header = "[{self.id}] {self.description} (confidence: {self.confidence_str()})"
+        var parts = [header]
+        for rep in self.replacements:
+            parts.push("  " + rep.format())
+        parts.join("\n")
+
+    fn confidence_str() -> String:
+        match self.confidence:
+            case Safe: "safe"
+            case Likely: "likely"
+            case Uncertain: "uncertain"
+
+# ============================================================================
+# FixReport: result of applying fixes
+# ============================================================================
+
+class FixReport:
+    applied: Int
+    skipped: Int
+    modified_files: [String]
+    details: [String]
+
+    static fn empty() -> FixReport:
+        FixReport(applied: 0, skipped: 0, modified_files: [], details: [])
+
+    fn format(dry_run: Bool) -> String:
+        val prefix = if dry_run: "Would apply" else: "Applied"
+        var parts = ["{prefix} {self.applied} fix(es):"]
+        for detail in self.details:
+            parts.push("  " + detail)
+        if not self.modified_files.is_empty():
+            val verb = if dry_run: "Would modify" else: "Modified"
+            parts.push("{verb} {self.modified_files.len()} file(s):")
+            for file in self.modified_files:
+                parts.push("  " + file)
+        parts.join("\n")
+
+# ============================================================================
+# FixApplicator: applies fixes to source code (in-memory)
+# ============================================================================
+
+class FixApplicator:
+    static fn apply(fixes: [EasyFix], sources: Dict<String, String>) -> Result<Dict<String, String>, String>:
+        # Group replacements by file
+        var by_file: Dict<String, [Replacement]> = {}
+
+        for fix in fixes:
+            for rep in fix.replacements:
+                if not by_file.contains_key(rep.file):
+                    by_file[rep.file] = []
+                by_file[rep.file].push(rep)
+
+        var results: Dict<String, String> = {}
+
+        for file in by_file.keys():
+            if not sources.contains_key(file):
+                return Err("File not found in sources: {file}")
+
+            val source = sources[file]
+            var replacements = by_file[file]
+
+            # Sort by start position descending (apply from end to avoid offset shifts)
+            # Manual bubble sort since sort_by is not available
+            var i = 0
+            while i < replacements.len():
+                var j = i + 1
+                while j < replacements.len():
+                    if replacements[i].start < replacements[j].start:
+                        val temp = replacements[i]
+                        replacements[i] = replacements[j]
+                        replacements[j] = temp
+                    j = j + 1
+                i = i + 1
+
+            # Check for overlapping spans
+            var i = 0
+            while i < replacements.len() - 1:
+                val curr = replacements[i]
+                val next = replacements[i + 1]
+                # curr.start >= next.start (sorted descending)
+                if next.end > curr.start:
+                    return Err("Conflicting replacements in {file}: spans [{next.start}..{next.end}] and [{curr.start}..{curr.end}] overlap")
+                i = i + 1
+
+            # Apply replacements from end to start
+            var new_source = source
+            for rep in replacements:
+                if rep.start <= new_source.len() and rep.end <= new_source.len():
+                    new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
+
+            results[file] = new_source
+
+        Ok(results)
+
+    static fn filter_by_confidence(fixes: [EasyFix], min_confidence: FixConfidence) -> [EasyFix]:
+        match min_confidence:
+            case Safe:
+                fixes.filter(\f: f.is_safe())
+            case Likely:
+                fixes.filter(\f: f.is_likely())
+            case Uncertain:
+                fixes
+
+    static fn filter_by_id(fixes: [EasyFix], id_prefix: String) -> [EasyFix]:
+        fixes.filter(\f: f.id.starts_with(id_prefix))
+
+# ============================================================================
+# Lint: diagnostic with optional EasyFix
+# ============================================================================
+
+class Lint:
+    code: String
+    level: LintLevel
+    category: LintCategory
+    message: String
+    fix_hint: Option<String>
+    easy_fix: Option<EasyFix>
+
+    fn with_fix(hint: String) -> Lint:
+        Lint(
+            code: self.code,
+            level: self.level,
+            category: self.category,
+            message: self.message,
+            fix_hint: Some(hint),
+            easy_fix: self.easy_fix
+        )
+
+    fn with_easy_fix(fix: EasyFix) -> Lint:
+        Lint(
+            code: self.code,
+            level: self.level,
+            category: self.category,
+            message: self.message,
+            fix_hint: self.fix_hint,
+            easy_fix: Some(fix)
+        )
+
+    fn has_easy_fix() -> Bool:
+        match self.easy_fix:
+            case Some(_): true
+            case nil: false
+
+# ============================================================================
+# LintResult: diagnostic result with location
+# ============================================================================
+
+class LintResult:
+    file_path: String
+    line: Int
+    column: Int
+    lint: Lint
+
+    fn format() -> String:
+        var level_str = "unknown"
+        match self.lint.level:
+            case Allow:
+                level_str = "allow"
+            case Warn:
+                level_str = "warning"
+            case Deny:
+                level_str = "error"
+
+        var output = self.file_path + ":" + self.line.to_string() + ":" + self.column.to_string() + ": " + level_str + "[" + self.lint.code + "]: " + self.lint.message
+
+        match self.lint.fix_hint:
+            case Some(hint):
+                output = output + "\n  hint: " + hint
+            case nil:
+                val _ = 0
+
+        match self.lint.easy_fix:
+            case Some(fix):
+                output = output + "\n  fix: available [{fix.id}] ({fix.confidence_str()})"
+            case nil:
+                val _ = 0
+
+        output
+
+    fn has_easy_fix() -> Bool:
+        self.lint.easy_fix.? == true
+
+# Export all types
+export LintLevel, LintCategory, FixConfidence, Replacement, EasyFix, FixReport, FixApplicator, Lint, LintResult
+
