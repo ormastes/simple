@@ -32,6 +32,11 @@ use compiler.core.tokens.{TOK_SUFFIXED_INT, TOK_SUFFIXED_FLOAT}
 use compiler.core.tokens.{TOK_LABEL, TOK_BACKTICK_IDENT}
 use compiler.core.tokens.{TOK_AMPERSAND, TOK_AMP_COLON}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
+use compiler.core.lexer_types.{Token, Span, lex_span_new, lex_token_new, lex_token_eof}
+
+# Light wrapper struct to satisfy callers expecting a Lexer value.
+struct Lexer:
+    dummy: i64
 
 # ===== Lexer State =====
 
@@ -51,6 +56,30 @@ var lex_cur_text: text = ""
 var lex_cur_line: i64 = 0
 var lex_cur_col: i64 = 0
 var lex_cur_suffix: text = ""
+
+# ===== Public wrapper API =====
+
+fn lexer_new(source: text) -> Lexer:
+    # Initialize global lexer state for the given source and return a thin handle.
+    lex_init(source)
+    Lexer(dummy: 0)
+
+fn token_eof(offset: i64, line: i64) -> Token:
+    # Compatibility shim used by TreeSitter outline parser.
+    lex_token_eof(line)
+
+fn lexer_next_token(self: Lexer) -> Token:
+    # Advance the global lexer and build a Token record.
+    val kind: i64 = lex_next()
+    val text = lex_token_text()
+    val line = lex_token_line()
+    val col = lex_token_col()
+    val span = lex_span_new(0, text.len(), line, col)
+    Token(kind: kind, span: span, text: text)
+
+impl Lexer:
+    static fn new(source: text) -> Lexer:
+        lexer_new(source)
 
 # ===== Lexer Init/State Access =====
 
@@ -849,11 +878,13 @@ fn lex_tokenize_all(source: text) -> i64:
 
     for i in 0..1000000:
         val kind: i64 = lex_next()
-        lex_all_kinds.push(kind)
-        lex_all_texts.push(lex_cur_text)
-        lex_all_lines.push(lex_cur_line)
-        lex_all_cols.push(lex_cur_col)
-        if kind == TOK_EOF:
-            break
+    lex_all_kinds.push(kind)
+    lex_all_texts.push(lex_cur_text)
+    lex_all_lines.push(lex_cur_line)
+    lex_all_cols.push(lex_cur_col)
+    if kind == TOK_EOF:
+        break
 
     lex_all_kinds.len()
+
+export Lexer, lexer_new, lexer_next_token, token_eof

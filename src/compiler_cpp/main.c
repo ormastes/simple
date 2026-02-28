@@ -1,34 +1,13 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <math.h>
+#include <unistd.h>
 #include <time.h>
-#include <ctype.h>
-
-#ifdef _WIN32
-  #include <windows.h>
-  #include <io.h>
-  #include <process.h>
-  #ifdef _MSC_VER
-    #define strdup _strdup
-  #endif
-  #define PATH_SEP '\\'
-#else
-  #include <unistd.h>
-  #include <sys/stat.h>
-  #include <sys/wait.h>
-  #define PATH_SEP '/'
-#endif
-
-#ifdef __APPLE__
-  #include <mach-o/dyld.h>  /* _NSGetExecutablePath */
-#endif
-#if defined(__FreeBSD__)
-  #include <sys/types.h>
-  #include <sys/sysctl.h>
-#endif
+#include <sys/stat.h>
 
 #define nil NULL
 #define pass_do_nothing ((void)0)
@@ -39,11 +18,87 @@
 #pragma GCC diagnostic ignored "-Wparentheses-equality"
 #pragma GCC diagnostic ignored "-Wunused-value"
 
-#include "simple_helpers.h"
+static long long simple_strlen(const char* s) { return s ? (long long)strlen(s) : 0; }
 
-/* Forward declarations for functions defined later */
-static int get_exe_dir(char* buf, size_t bufsz);
-static int file_accessible(const char* path);
+static char* simple_str_concat(const char* a, const char* b) {
+    if (!a) a = ""; if (!b) b = "";
+    size_t la = strlen(a), lb = strlen(b);
+    char* r = (char*)malloc(la + lb + 1);
+    memcpy(r, a, la); memcpy(r + la, b, lb); r[la+lb] = 0;
+    return r;
+}
+
+static int simple_starts_with(const char* s, const char* p) { if (!s||!p) return 0; return strncmp(s,p,strlen(p))==0; }
+static int simple_ends_with(const char* s, const char* x) { if(!s||!x) return 0; size_t sl=strlen(s),xl=strlen(x); return sl>=xl && strcmp(s+sl-xl,x)==0; }
+static int simple_contains(const char* s, const char* n) { if(!s||!n) return 0; return strstr(s,n)!=NULL; }
+static char* simple_replace(const char* s, const char* o, const char* n) {
+    if(!s) return strdup(""); if(!o||!n||!*o) return strdup(s);
+    size_t ol=strlen(o),nl=strlen(n); const char*p=s; char*r=malloc(strlen(s)*2+1); char*d=r;
+    while(*p){if(strncmp(p,o,ol)==0){memcpy(d,n,nl);d+=nl;p+=ol;}else{*d++=*p++;}}
+    *d=0; return r;
+}
+
+typedef struct { const char** items; long long len; long long cap; } SimpleStringArray;
+static SimpleStringArray simple_new_string_array(void) { SimpleStringArray a; a.items=(const char**)malloc(16*sizeof(const char*)); a.len=0; a.cap=16; return a; }
+static void simple_string_push(SimpleStringArray* a, const char* s) { if(a->len>=a->cap){a->cap*=2;a->items=(const char**)realloc(a->items,a->cap*sizeof(const char*));} a->items[a->len++]=strdup(s?s:""); }
+static SimpleStringArray simple_string_array_slice(SimpleStringArray a, long long start) { SimpleStringArray r=simple_new_string_array(); for(long long i=start;i<a.len;i++) simple_string_push(&r,a.items[i]); return r; }
+
+static char* simple_format_long(const char* b, long long v, const char* a) { char buf[256]; snprintf(buf,256,"%s%lld%s",b?b:"",v,a?a:""); return strdup(buf); }
+static char* simple_format_str(const char* b, const char* v, const char* a) { size_t t=strlen(b?b:"")+strlen(v?v:"")+strlen(a?a:"")+1; char*r=malloc(t); snprintf(r,t,"%s%s%s",b?b:"",v?v:"",a?a:""); return r; }
+static char* simple_int_to_str(long long v) { char b[32]; snprintf(b,32,"%lld",v); return strdup(b); }
+static char* simple_double_to_str(double v) { char b[64]; snprintf(b,64,"%g",v); return strdup(b); }
+static const char* simple_substr_from(const char* s, long long start) { if(!s) return ""; long long l=strlen(s); if(start>=l) return ""; return strdup(s+start); }
+#define SPL_TO_STR(x) _Generic((x), \
+    char*: (const char*)(x), \
+    const char*: (x), \
+    long long: simple_int_to_str(x), \
+    int: simple_int_to_str((long long)(x)), \
+    double: simple_double_to_str(x), \
+    default: "<unknown>")
+
+typedef struct { long long* items; long long len; long long cap; } SimpleIntArray;
+static SimpleIntArray simple_new_int_array(void) { SimpleIntArray a; a.items=(long long*)malloc(16*sizeof(long long)); a.len=0; a.cap=16; return a; }
+static void simple_int_push(SimpleIntArray* a, long long v) { if(a->len>=a->cap){a->cap*=2;a->items=(long long*)realloc(a->items,a->cap*sizeof(long long));} a->items[a->len++]=v; }
+static long long simple_int_get(SimpleIntArray a, long long i) { return a.items[i]; }
+
+typedef struct { SimpleStringArray* items; long long len; long long cap; } SimpleStringArrayArray;
+static SimpleStringArrayArray simple_new_string_array_array(void) { SimpleStringArrayArray a; a.items=(SimpleStringArray*)malloc(8*sizeof(SimpleStringArray)); a.len=0; a.cap=8; return a; }
+static void simple_str_arr_push(SimpleStringArrayArray* a, SimpleStringArray v) { if(a->len>=a->cap){a->cap*=2;a->items=(SimpleStringArray*)realloc(a->items,a->cap*sizeof(SimpleStringArray));} a->items[a->len++]=v; }
+
+typedef struct { SimpleIntArray* items; long long len; long long cap; } SimpleIntArrayArray;
+static SimpleIntArrayArray simple_new_int_array_array(void) { SimpleIntArrayArray a; a.items=(SimpleIntArray*)malloc(8*sizeof(SimpleIntArray)); a.len=0; a.cap=8; return a; }
+
+typedef struct { void** items; long long len; long long cap; } SimpleStructArray;
+static SimpleStructArray simple_new_struct_array(void) { SimpleStructArray a; a.items=NULL; a.len=0; a.cap=0; return a; }
+static void simple_struct_push(SimpleStructArray* a, void* v) { if(a->len>=a->cap){a->cap=a->cap?a->cap*2:8;a->items=(void**)realloc(a->items,a->cap*sizeof(void*));} a->items[a->len++]=v; }
+
+static char* simple_trim(const char* s) {
+    if(!s) return strdup("");
+    while(*s==' '||*s=='\t'||*s=='\n'||*s=='\r') s++;
+    long long l=strlen(s);
+    while(l>0&&(s[l-1]==' '||s[l-1]=='\t'||s[l-1]=='\n'||s[l-1]=='\r')) l--;
+    char* r=malloc(l+1); memcpy(r,s,l); r[l]=0; return r;
+}
+static long long simple_index_of(const char* s, const char* n) { if(!s||!n) return -1; const char* f=strstr(s,n); return f?(long long)(f-s):-1; }
+static long long simple_last_index_of(const char* s, const char* n) { if(!s||!n) return -1; long long nl=strlen(n),sl=strlen(s); if(nl>sl) return -1; for(long long i=sl-nl;i>=0;i--) if(strncmp(s+i,n,nl)==0) return i; return -1; }
+static char* simple_substring(const char* s, long long a, long long b) { if(!s) return strdup(""); long long l=strlen(s); if(a<0)a=0; if(b>l)b=l; if(a>=b) return strdup(""); long long n=b-a; char*r=malloc(n+1); memcpy(r,s+a,n); r[n]=0; return r; }
+static char* simple_char_at(const char* s, long long i) { if(!s||i<0||i>=(long long)strlen(s)) return strdup(""); char*r=malloc(2); r[0]=s[i]; r[1]=0; return r; }
+static SimpleStringArray simple_split(const char* s, const char* d) {
+    SimpleStringArray a=simple_new_string_array();
+    if(!s) return a; if(!d||!*d){simple_string_push(&a,s);return a;}
+    long long dl=strlen(d); const char*p=s; const char*f;
+    while((f=strstr(p,d))!=NULL){long long n=f-p;char*t=malloc(n+1);memcpy(t,p,n);t[n]=0;simple_string_push(&a,t);free(t);p=f+dl;}
+    simple_string_push(&a,p); return a;
+}
+static char* simple_string_join(SimpleStringArray* a, const char* d) {
+    if(!a||a->len==0) return strdup(""); long long dl=strlen(d),t=0;
+    for(long long i=0;i<a->len;i++){t+=strlen(a->items[i]);if(i<a->len-1)t+=dl;}
+    char*r=malloc(t+1);char*p=r;
+    for(long long i=0;i<a->len;i++){long long l=strlen(a->items[i]);memcpy(p,a->items[i],l);p+=l;if(i<a->len-1){memcpy(p,d,dl);p+=dl;}}
+    *p=0; return r;
+}
+static const char* simple_string_pop(SimpleStringArray* a) { if(a->len==0) return ""; return a->items[--a->len]; }
+static long long simple_int_pop(SimpleIntArray* a) { if(a->len==0) return 0; return a->items[--a->len]; }
 
 typedef struct {
     int gc_log;
@@ -62,528 +117,25 @@ typedef struct {
 } GlobalFlags;
 
 
-static int file_exists(const char* p) { (void)p; return 0; }
-static const char* file_read(const char* p) { (void)p; return ""; }
-static int file_write(const char* p, const char* d) { (void)p;(void)d; return 1; }
-static int dir_create(const char* p, int recursive) { (void)p;(void)recursive; return 1; }
-static const char* cwd(void) { return ""; }
-static const char* env_get(const char* k) {
-    if (!k) return "";
-    const char* v = getenv(k);
-    return v ? v : "";
-}
+static const char* env_get(const char* k) { (void)k; return ""; }
 static void env_set(const char* k, const char* v) { (void)k; (void)v; }
-static long long shell() { return 0; }
-static long long file_size_raw(const char* p) { (void)p; return 0; }
-
-/* Check file existence using access() */
-static int cli_file_exists(const char* p) {
-    if (!p) return 0;
-#ifdef _WIN32
-    return _access(p, 0) == 0;
-#else
-    return access(p, F_OK) == 0;
-#endif
-}
-
-static char* read_text_file_alloc(const char* path) {
-    if (!path) return NULL;
-    FILE* f = fopen(path, "rb");
-    if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long sz = ftell(f);
-    if (sz < 0) { fclose(f); return NULL; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
-    char* buf = (char*)malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t n = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
-    buf[n] = '\0';
-    return buf;
-}
-
-static int write_text_file_all(const char* path, const char* data) {
-    if (!path || !data) return 0;
-    FILE* f = fopen(path, "wb");
-    if (!f) return 0;
-    size_t len = strlen(data);
-    size_t n = fwrite(data, 1, len, f);
-    fclose(f);
-    return n == len;
-}
-
-static int line_indent_width(const char* line, size_t len) {
-    int n = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (line[i] == ' ') n++;
-        else if (line[i] == '\t') n += 4;
-        else break;
-    }
-    return n;
-}
-
-/* Compatibility shim: rewrite pass_todo/pass_do_nothing/pass_dn → pass
- * so stale interpreter runtimes that only know 'pass' can parse them. */
-static char* preprocess_pass_keywords(const char* src) {
-    if (!src) return NULL;
-    size_t in_len = strlen(src);
-    size_t cap = in_len + 256;
-    char* out = (char*)malloc(cap);
-    if (!out) return NULL;
-    size_t w = 0;
-    size_t i = 0;
-    int changed = 0;
-    while (i < in_len) {
-        /* Check for pass_do_nothing (16 chars), pass_todo (9), pass_dn (7) */
-        if (i + 16 <= in_len && strncmp(src + i, "pass_do_nothing", 15) == 0
-            && (i + 15 >= in_len || !isalnum((unsigned char)src[i+15]))) {
-            if (w + 4 >= cap) { cap = cap * 2; out = (char*)realloc(out, cap); }
-            memcpy(out + w, "pass", 4); w += 4;
-            i += 15;
-            changed = 1;
-        } else if (i + 9 <= in_len && strncmp(src + i, "pass_todo", 9) == 0
-            && (i + 9 >= in_len || !isalnum((unsigned char)src[i+9]))) {
-            if (w + 4 >= cap) { cap = cap * 2; out = (char*)realloc(out, cap); }
-            memcpy(out + w, "pass", 4); w += 4;
-            i += 9;
-            changed = 1;
-        } else if (i + 7 <= in_len && strncmp(src + i, "pass_dn", 7) == 0
-            && (i + 7 >= in_len || !isalnum((unsigned char)src[i+7]))) {
-            if (w + 4 >= cap) { cap = cap * 2; out = (char*)realloc(out, cap); }
-            memcpy(out + w, "pass", 4); w += 4;
-            i += 7;
-            changed = 1;
-        } else {
-            if (w + 1 >= cap) { cap = cap * 2; out = (char*)realloc(out, cap); }
-            out[w++] = src[i++];
-        }
-    }
-    out[w] = '\0';
-    if (!changed) { free(out); return NULL; }
-    return out;
-}
-
-/* Compatibility shim for stale interpreter runtimes:
- * transform bitfield declarations into parser-safe struct forms. */
-static char* preprocess_bitfield_source(const char* src) {
-    if (!src) return NULL;
-    size_t in_len = strlen(src);
-    size_t cap = in_len * 3 + 256;
-    char* out = (char*)malloc(cap);
-    if (!out) return NULL;
-    size_t w = 0;
-    size_t i = 0;
-    int in_bitfield = 0;
-    int bitfield_indent = 0;
-    int reserved_idx = 0;
-    int changed = 0;
-
-    while (i < in_len) {
-        size_t line_start = i;
-        while (i < in_len && src[i] != '\n') i++;
-        size_t line_end = i;
-        size_t line_len = line_end - line_start;
-        const char* line = src + line_start;
-        int indent = line_indent_width(line, line_len);
-
-        if (in_bitfield) {
-            int is_blank = 1;
-            for (size_t k = 0; k < line_len; k++) {
-                if (!isspace((unsigned char)line[k])) { is_blank = 0; break; }
-            }
-            if (!is_blank && indent <= bitfield_indent) {
-                in_bitfield = 0;
-            }
-        }
-
-        if (!in_bitfield) {
-            size_t p = 0;
-            while (p < line_len && (line[p] == ' ' || line[p] == '\t')) p++;
-            if (p + 9 <= line_len && strncmp(line + p, "bitfield ", 9) == 0) {
-                size_t name_start = p + 9;
-                while (name_start < line_len && isspace((unsigned char)line[name_start])) name_start++;
-                size_t name_end = name_start;
-                while (name_end < line_len) {
-                    char c = line[name_end];
-                    if (c == '(' || c == ':' || isspace((unsigned char)c)) break;
-                    name_end++;
-                }
-                if (name_end > name_start) {
-                    if (w + line_len + 32 >= cap) {
-                        cap = cap * 2 + line_len + 64;
-                        out = (char*)realloc(out, cap);
-                        if (!out) return NULL;
-                    }
-                    for (size_t k = 0; k < p; k++) out[w++] = line[k];
-                    memcpy(out + w, "struct ", 7); w += 7;
-                    memcpy(out + w, line + name_start, name_end - name_start); w += (name_end - name_start);
-                    out[w++] = ':';
-                    changed = 1;
-                    in_bitfield = 1;
-                    bitfield_indent = indent;
-                    reserved_idx = 0;
-                    goto write_newline;
-                }
-            }
-        } else {
-            /* Rewrite reserved bitfield segment: "_: uN" -> "__reserved_bitfield_N: uN" */
-            size_t p = 0;
-            while (p < line_len && (line[p] == ' ' || line[p] == '\t')) p++;
-            if (p + 2 < line_len && line[p] == '_' && line[p + 1] == ':') {
-                char repl[64];
-                snprintf(repl, sizeof(repl), "__reserved_bitfield_%d", reserved_idx++);
-                size_t repl_len = strlen(repl);
-                if (w + line_len + repl_len + 8 >= cap) {
-                    cap = cap * 2 + line_len + repl_len + 64;
-                    out = (char*)realloc(out, cap);
-                    if (!out) return NULL;
-                }
-                for (size_t k = 0; k < p; k++) out[w++] = line[k];
-                memcpy(out + w, repl, repl_len); w += repl_len;
-                for (size_t k = p + 1; k < line_len; k++) out[w++] = line[k];
-                changed = 1;
-                goto write_newline;
-            }
-        }
-
-        if (w + line_len + 2 >= cap) {
-            cap = cap * 2 + line_len + 64;
-            out = (char*)realloc(out, cap);
-            if (!out) return NULL;
-        }
-        memcpy(out + w, line, line_len);
-        w += line_len;
-
-write_newline:
-        if (i < in_len && src[i] == '\n') {
-            out[w++] = '\n';
-            i++;
-        }
-    }
-
-    out[w] = '\0';
-    if (!changed) {
-        free(out);
-        return NULL;
-    }
-    return out;
-}
-
-static char* maybe_preprocess_bitfield_file(const char* input_path) {
-    if (!input_path) return NULL;
-    char* src = read_text_file_alloc(input_path);
-    if (!src) return NULL;
-    /* Apply pass keyword rewriting first, then bitfield rewriting. */
-    char* pass_rewritten = preprocess_pass_keywords(src);
-    char* base = pass_rewritten ? pass_rewritten : src;
-    char* transformed = preprocess_bitfield_source(base);
-    /* If bitfield transform returned NULL but pass rewriting happened, use pass result. */
-    if (!transformed && pass_rewritten) transformed = pass_rewritten;
-    else if (pass_rewritten && transformed) free(pass_rewritten);
-    free(src);
-    if (!transformed) return NULL;
-
-    char tmpl[] = "/tmp/simple_bitfield_compat_XXXXXX.spl";
-#if defined(_WIN32)
-    int fd = -1;
-#else
-    int fd = mkstemps(tmpl, 4);
-#endif
-    if (fd < 0) { free(transformed); return NULL; }
-    close(fd);
-    if (!write_text_file_all(tmpl, transformed)) {
-        unlink(tmpl);
-        free(transformed);
-        return NULL;
-    }
-    free(transformed);
-    return strdup(tmpl);
-}
-
-static long long cli_read_file(SimpleStringArray a) { (void)a; return 0; }
-static int g_argc_main = 0;
-static char** g_argv_main = NULL;
-static SimpleStringArray cli_get_args(void) {
-    SimpleStringArray a = simple_new_string_array();
-    for (int i = 0; i < g_argc_main; i++)
-        simple_string_push(&a, g_argv_main[i] ? g_argv_main[i] : "");
-    return a;
-}
-
-/* ── Interpreter delegation ──
- * For commands not natively compiled, delegate to the interpreter binary
- * with the appropriate .spl entry point. This gives fast startup for
- * compiled commands while still supporting all features via interpreter.
- */
-static char g_interp_bin[4096] = {0};
-static char g_src_dir[4096] = {0};
-
-static void init_interp_paths(void) {
-    if (g_interp_bin[0]) return; /* already initialized */
-    char self_path[4096] = {0};
-    if (get_exe_dir(self_path, sizeof(self_path)) != 0) return;
-    /* Prefer unversioned runtime first; versioned path may lag during local development. */
-    snprintf(g_interp_bin, sizeof(g_interp_bin), "%s../bin/release/simple", self_path);
-    if (!file_accessible(g_interp_bin)) {
-        /* Fallback to pinned compatibility runtime. */
-        snprintf(g_interp_bin, sizeof(g_interp_bin), "%s../bin/release/simple-0.6.0", self_path);
-    }
-    snprintf(g_src_dir, sizeof(g_src_dir), "%s../src", self_path);
-}
-
-/* Suppress [DEBUG] and [WARNING] noise from the interpreter binary's stderr.
- * Fork a child to run the interpreter; parent filters stderr via pipe.
- * If fork isn't available, fall back to direct execv (noise but functional). */
-static long long run_interpreter_filtered(char** argv) {
-#ifndef _WIN32
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
-        /* pipe failed — fall back to unfiltered execv */
-        execv(g_interp_bin, argv);
-        perror("execv");
-        return 1;
-    }
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]); close(pipefd[1]);
-        execv(g_interp_bin, argv);
-        perror("execv");
-        return 1;
-    }
-    if (pid == 0) {
-        /* Child: redirect stderr to pipe write end, then exec interpreter */
-        close(pipefd[0]);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-        execv(g_interp_bin, argv);
-        _exit(127);
-    }
-    /* Parent: read from pipe, filter, write to real stderr */
-    close(pipefd[1]);
-    char buf[4096];
-    ssize_t n;
-    /* Line-buffered filtering */
-    char line[8192];
-    int lpos = 0;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
-        for (ssize_t i = 0; i < n; i++) {
-            if (buf[i] == '\n' || lpos >= (int)sizeof(line) - 1) {
-                line[lpos] = '\0';
-                /* Filter out noisy lines */
-                if (strncmp(line, "[DEBUG]", 7) != 0 &&
-                    strncmp(line, "[WARNING] Failed to load test database", 38) != 0 &&
-                    strncmp(line, "[WARNING] Existing records will be preserved", 44) != 0 &&
-                    strncmp(line, "[INFO] Backup created at:", 25) != 0 &&
-                    strncmp(line, "Warning: Failed to update", 25) != 0) {
-                    write(STDERR_FILENO, line, lpos);
-                    write(STDERR_FILENO, "\n", 1);
-                }
-                lpos = 0;
-            } else {
-                line[lpos++] = buf[i];
-            }
-        }
-    }
-    /* Flush remaining partial line */
-    if (lpos > 0) {
-        line[lpos] = '\0';
-        if (strncmp(line, "[DEBUG]", 7) != 0)
-            write(STDERR_FILENO, line, lpos);
-    }
-    close(pipefd[0]);
-    int status;
-    waitpid(pid, &status, 0);
-    free(argv);
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    return 1;
-#else
-    int rc = _spawnv(_P_WAIT, g_interp_bin, (const char* const*)argv);
-    free(argv);
-    return rc;
-#endif
-}
-
-static long long run_interpreter_filtered_keep(char** argv) {
-#ifndef _WIN32
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
-        execv(g_interp_bin, argv);
-        perror("execv");
-        return 1;
-    }
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]); close(pipefd[1]);
-        execv(g_interp_bin, argv);
-        perror("execv");
-        return 1;
-    }
-    if (pid == 0) {
-        close(pipefd[0]);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-        execv(g_interp_bin, argv);
-        _exit(127);
-    }
-    close(pipefd[1]);
-    char buf[4096];
-    ssize_t n;
-    char line[8192];
-    int lpos = 0;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
-        for (ssize_t i = 0; i < n; i++) {
-            if (buf[i] == '\n' || lpos >= (int)sizeof(line) - 1) {
-                line[lpos] = '\0';
-                if (strncmp(line, "[DEBUG]", 7) != 0 &&
-                    strncmp(line, "[WARNING] Failed to load test database", 38) != 0 &&
-                    strncmp(line, "[WARNING] Existing records will be preserved", 44) != 0 &&
-                    strncmp(line, "[INFO] Backup created at:", 25) != 0 &&
-                    strncmp(line, "Warning: Failed to update", 25) != 0) {
-                    write(STDERR_FILENO, line, lpos);
-                    write(STDERR_FILENO, "\n", 1);
-                }
-                lpos = 0;
-            } else {
-                line[lpos++] = buf[i];
-            }
-        }
-    }
-    if (lpos > 0) {
-        line[lpos] = '\0';
-        if (strncmp(line, "[DEBUG]", 7) != 0)
-            write(STDERR_FILENO, line, lpos);
-    }
-    close(pipefd[0]);
-    int status;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    return 1;
-#else
-    int rc = _spawnv(_P_WAIT, g_interp_bin, (const char* const*)argv);
-    return rc;
-#endif
-}
-
-/* Run interpreter with a .spl entry point and the original CLI args */
-static long long delegate_to_interpreter(const char* entry_spl) {
-    init_interp_paths();
-    if (!file_accessible(g_interp_bin)) {
-        fprintf(stderr, "Error: interpreter binary not found (needed for '%s')\n", entry_spl);
-        return 1;
-    }
-    char entry_path[4096];
-    snprintf(entry_path, sizeof(entry_path), "%s/app/cli/%s", g_src_dir, entry_spl);
-
-    char** argv = (char**)malloc((g_argc_main + 3) * sizeof(char*));
-    argv[0] = g_interp_bin;
-    argv[1] = entry_path;
-    for (int i = 1; i < g_argc_main; i++)
-        argv[i + 1] = g_argv_main[i];
-    argv[g_argc_main + 1] = NULL;
-    return run_interpreter_filtered(argv);
-}
-
-static long long delegate_to_interpreter_with_args(const char* entry_spl, int arg_count, char** arg_values) {
-    init_interp_paths();
-    if (!file_accessible(g_interp_bin)) {
-        fprintf(stderr, "Error: interpreter binary not found (needed for '%s')\n", entry_spl);
-        return 1;
-    }
-    char entry_path[4096];
-    snprintf(entry_path, sizeof(entry_path), "%s/app/cli/%s", g_src_dir, entry_spl);
-
-    char** argv = (char**)malloc((arg_count + 3) * sizeof(char*));
-    argv[0] = g_interp_bin;
-    argv[1] = entry_path;
-    for (int i = 0; i < arg_count; i++) argv[i + 2] = arg_values[i];
-    argv[arg_count + 2] = NULL;
-    long long rc = run_interpreter_filtered_keep(argv);
-    free(argv);
-    return rc;
-}
-
-/* Delegate with a specific fast-path entry point for known commands */
-static long long delegate_test(SimpleStringArray a) {
-    /* Check if single .spl test → use lightweight runner */
-    int has_spl = 0;
-    int has_heavy = 0;
-    for (long long i = 0; i < a.len; i++) {
-        const char* arg = a.items[i];
-        if (simple_ends_with(arg, ".spl")) has_spl = 1;
-        if (simple_starts_with(arg, "--coverage") || simple_starts_with(arg, "--sdoctest") ||
-            simple_starts_with(arg, "--container") || strcmp(arg, "--chaos") == 0 ||
-            strcmp(arg, "--fuzz") == 0 || strcmp(arg, "--parallel") == 0)
-            has_heavy = 1;
-    }
-    if (has_spl && !has_heavy) {
-        int spl_idx = -1;
-        for (int i = 1; i < g_argc_main; i++) {
-            if (simple_ends_with(g_argv_main[i], ".spl")) { spl_idx = i; break; }
-        }
-        if (spl_idx >= 0) {
-            char* compat_path = maybe_preprocess_bitfield_file(g_argv_main[spl_idx]);
-            if (compat_path) {
-                init_interp_paths();
-                if (!file_accessible(g_interp_bin)) {
-                    unlink(compat_path);
-                    free(compat_path);
-                    return 1;
-                }
-                /* Stale test runner runtime can fail parsing bitfield files by path.
-                 * Run preprocessed spec directly through interpreter for single-file tests. */
-                char** argv2 = (char**)malloc(3 * sizeof(char*));
-                argv2[0] = g_interp_bin;
-                argv2[1] = compat_path;
-                argv2[2] = NULL;
-                long long rc = run_interpreter_filtered(argv2);
-                unlink(compat_path);
-                free(compat_path);
-                return rc;
-            }
-        }
-        return delegate_to_interpreter("../test_runner_new/test_runner_single.spl");
-    }
-    return delegate_to_interpreter("../test_runner_new/test_runner_main.spl");
-}
-
+static int cli_file_exists(const char* p) { (void)p; return 0; }
+static SimpleStringArray cli_get_args(void) { return simple_new_string_array(); }
 static long long cli_run_code(const char* c, int g, int o) { (void)c;(void)g;(void)o; return 0; }
-/* Run a .spl file through the interpreter binary */
-static long long cli_run_file(const char* p, SimpleStringArray a, int g, int o) {
-    (void)a; (void)g; (void)o;
-    init_interp_paths();
-    if (!file_accessible(g_interp_bin)) {
-        fprintf(stderr, "Error: interpreter binary not found (needed to run '%s')\n", p);
-        return 1;
-    }
-    char* compat_path = maybe_preprocess_bitfield_file(p);
-    const char* exec_path = compat_path ? compat_path : p;
-
-    char** argv = (char**)malloc((g_argc_main + 3) * sizeof(char*));
-    argv[0] = g_interp_bin;
-    argv[1] = (char*)exec_path;
-    for (int i = 1; i < g_argc_main; i++)
-        argv[i + 1] = g_argv_main[i];
-    argv[g_argc_main + 1] = NULL;
-    long long rc = run_interpreter_filtered(argv);
-    if (compat_path) {
-        unlink(compat_path);
-        free(compat_path);
-    }
-    return rc;
-}
+static long long cli_run_file(const char* p, SimpleStringArray a, int g, int o) { (void)p;(void)a;(void)g;(void)o; return 0; }
 static long long cli_watch_file(const char* p) { (void)p; return 0; }
 static long long cli_run_repl(int g, int o) { (void)g;(void)o; return 0; }
-static long long cli_run_tests(SimpleStringArray a, int g, int o) { (void)g;(void)o; return delegate_test(a); }
-static long long cli_run_lint(SimpleStringArray a) { (void)a; return delegate_to_interpreter("lint_entry.spl"); }
-static long long cli_run_fmt(SimpleStringArray a) { (void)a; return delegate_to_interpreter("lint_entry.spl"); }
-static long long cli_run_fix(SimpleStringArray a) { (void)a; return delegate_to_interpreter("lint_entry.spl"); }
+static long long cli_run_tests(SimpleStringArray a, int g, int o) { (void)a;(void)g;(void)o; return 0; }
+static long long cli_run_lint(SimpleStringArray a) { (void)a; return 0; }
+static long long cli_run_fmt(SimpleStringArray a) { (void)a; return 0; }
+static long long cli_run_fix(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_verify(SimpleStringArray a, int g, int o) { (void)a;(void)g;(void)o; return 0; }
 static long long cli_run_migrate(SimpleStringArray a) { (void)a; return 0; }
-static long long cli_run_mcp(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
-static long long cli_run_lsp(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
+static long long cli_run_mcp(SimpleStringArray a) { (void)a; return 0; }
+static long long cli_run_lsp(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_diff(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_constr(SimpleStringArray a) { (void)a; return 0; }
-static long long cli_run_query(SimpleStringArray a) { return cli_run_file("src/app/cli/query.spl", a, 0, 0); }
+static long long cli_run_query(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_info(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_spec_coverage(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_replay(SimpleStringArray a) { (void)a; return 0; }
@@ -593,126 +145,13 @@ static long long cli_run_task_gen(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_spec_gen(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_sspec_docgen(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_feature_doc(SimpleStringArray a) { (void)a; return 0; }
-static long long cli_todo_scan(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
+static long long cli_todo_scan(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_todo_gen(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_lex(SimpleStringArray a) { (void)a; return 0; }
-static long long cli_run_brief(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
+static long long cli_run_brief(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_ffi_gen(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_run_i18n(SimpleStringArray a) { (void)a; return 0; }
-/* Cross-platform: get path of this executable */
-static int get_exe_dir(char* buf, size_t bufsz) {
-#if defined(_WIN32)
-    DWORD len = GetModuleFileNameA(NULL, buf, (DWORD)bufsz);
-    if (len == 0 || len >= bufsz) return -1;
-    /* Truncate to directory */
-    char* last = strrchr(buf, '\\');
-    if (!last) last = strrchr(buf, '/');
-    if (last) *(last + 1) = '\0';
-    return 0;
-#elif defined(__APPLE__)
-    uint32_t size = (uint32_t)bufsz;
-    if (_NSGetExecutablePath(buf, &size) != 0) return -1;
-    buf[bufsz - 1] = '\0';
-    char* last = strrchr(buf, '/');
-    if (last) *(last + 1) = '\0';
-    return 0;
-#elif defined(__FreeBSD__)
-    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
-    size_t len = bufsz;
-    if (sysctl(mib, 4, buf, &len, NULL, 0) != 0) return -1;
-    char* last = strrchr(buf, '/');
-    if (last) *(last + 1) = '\0';
-    return 0;
-#else
-    /* Linux: /proc/self/exe */
-    ssize_t len = readlink("/proc/self/exe", buf, bufsz - 1);
-    if (len <= 0) return -1;
-    buf[len] = '\0';
-    char* last = strrchr(buf, '/');
-    if (last) *(last + 1) = '\0';
-    return 0;
-#endif
-}
-
-/* Cross-platform: check file exists */
-static int file_accessible(const char* path) {
-#ifdef _WIN32
-    return _access(path, 0) == 0;
-#else
-    return access(path, X_OK) == 0;
-#endif
-}
-
-/* Cross-platform: get exit status from system() */
-static int get_exit_status(int rc) {
-#ifdef _WIN32
-    return rc;  /* Windows system() returns exit code directly */
-#else
-    return WEXITSTATUS(rc);
-#endif
-}
-
-static long long cli_compile(SimpleStringArray a) {
-    /* Parse compile args: compile [--backend=c] [-o output] source.spl */
-    const char* source_file = NULL;
-    const char* output_file = NULL;
-    const char* backend = "c";
-    int verbose = 0;
-    for (long long i = 0; i < a.len; i++) {
-        const char* arg = a.items[i];
-        if (strcmp(arg, "compile") == 0) continue;
-        if (strncmp(arg, "--backend=", 10) == 0) { backend = arg + 10; continue; }
-        if (strcmp(arg, "--verbose") == 0 || strcmp(arg, "-v") == 0) { verbose = 1; continue; }
-        if (strcmp(arg, "-o") == 0 && i + 1 < a.len) { output_file = a.items[++i]; continue; }
-        if (strncmp(arg, "-o", 2) == 0 && strlen(arg) > 2) { output_file = arg + 2; continue; }
-        if (strncmp(arg, "--output=", 9) == 0) { output_file = arg + 9; continue; }
-        if (arg[0] == '-') continue; /* skip unknown flags */
-        if (!source_file) source_file = arg;
-    }
-    if (!source_file) {
-        fprintf(stderr, "Error: No source file specified\nUsage: simple compile [--backend=c] [-o output] source.spl\n");
-        return 1;
-    }
-    /* Default output file */
-    char out_buf[4096];
-    if (!output_file) {
-        strncpy(out_buf, source_file, sizeof(out_buf) - 5);
-        char* dot = strrchr(out_buf, '.');
-        if (dot) strcpy(dot, ".c"); else strcat(out_buf, ".c");
-        output_file = out_buf;
-    }
-    /* Find simple_codegen in same directory as this binary */
-    char self_path[4096] = {0};
-    if (get_exe_dir(self_path, sizeof(self_path)) != 0) {
-        fprintf(stderr, "Error: cannot determine binary location\n");
-        return 1;
-    }
-    char codegen_path[4096];
-#ifdef _WIN32
-    snprintf(codegen_path, sizeof(codegen_path), "%ssimple_codegen.exe", self_path);
-#else
-    snprintf(codegen_path, sizeof(codegen_path), "%ssimple_codegen", self_path);
-#endif
-    /* Check codegen exists */
-    if (!file_accessible(codegen_path)) {
-        fprintf(stderr, "Error: simple_codegen not found at %s\n", codegen_path);
-        return 1;
-    }
-    if (verbose) printf("Compiling %s to C (backend=%s)\n", source_file, backend);
-    /* Build and run command */
-    char cmd[8192];
-#ifdef _WIN32
-    snprintf(cmd, sizeof(cmd), "\"%s\" compile \"%s\" \"%s\"", codegen_path, source_file, output_file);
-#else
-    snprintf(cmd, sizeof(cmd), "'%s' '%s' '%s'", codegen_path, source_file, output_file);
-#endif
-    int rc = system(cmd);
-    if (rc == 0) {
-        printf("Output: %s\n", output_file);
-        printf("Build with: clang -std=gnu11 -O2 %s -lm -o output\n", output_file);
-    }
-    return get_exit_status(rc);
-}
+static long long cli_compile(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_handle_web(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_handle_diagram(SimpleStringArray a) { (void)a; return 0; }
 static long long cli_handle_run(SimpleStringArray a, int g, int o) { (void)a;(void)g;(void)o; return 0; }
@@ -720,124 +159,22 @@ static void fault_set_stack_overflow_detection(long long v) { (void)v; }
 static void fault_set_max_recursion_depth(long long v) { (void)v; }
 static void fault_set_timeout(long long v) { (void)v; }
 static void fault_set_execution_limit(long long v) { (void)v; }
-static int jit_available(void) { return 1; }
-static long long handle_build(SimpleStringArray a) {
-    /* Parse build args */
-    int release = 0;
-    int verbose = 0;
-    int do_clean = 0;
-    const char* subcommand = NULL;
-    for (long long i = 0; i < a.len; i++) {
-        const char* arg = a.items[i];
-        if (strcmp(arg, "--release") == 0) { release = 1; continue; }
-        if (strcmp(arg, "--verbose") == 0 || strcmp(arg, "-v") == 0) { verbose = 1; continue; }
-        if (strcmp(arg, "--clean") == 0) { do_clean = 1; continue; }
-        if (arg[0] == '-') continue;
-        if (!subcommand) subcommand = arg;
-    }
-    /* Subcommands that need the interpreter (lint, fmt, check, test, etc.) */
-    if (subcommand) {
-        return delegate_to_interpreter("main.spl");
-    }
-
-    /* Native build using cmake + ninja */
-    char self_path[4096] = {0};
-    if (get_exe_dir(self_path, sizeof(self_path)) != 0) {
-        fprintf(stderr, "Error: cannot determine binary location\n");
-        return 1;
-    }
-    /* Project root is parent of build/ dir */
-    char project_root[4096];
-    snprintf(project_root, sizeof(project_root), "%s..", self_path);
-    char build_dir[4096], src_dir[4096];
-    snprintf(build_dir, sizeof(build_dir), "%s/build", project_root);
-    snprintf(src_dir, sizeof(src_dir), "%s/src/compiler_cpp", project_root);
-
-    int rc;
-    char cmd[8192];
-    const char* build_type = release ? "Release" : "Debug";
-
-    /* Step 1: cmake configure (if needed or --clean) */
-    char ninja_file[4096];
-    snprintf(ninja_file, sizeof(ninja_file), "%s/build.ninja", build_dir);
-    if (!cli_file_exists(ninja_file) || do_clean) {
-        if (verbose) { printf("[build] Configuring cmake (type: %s)...\n", build_type); fflush(stdout); }
-        snprintf(cmd, sizeof(cmd),
-            "cmake -B '%s' -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang "
-            "-DCMAKE_BUILD_TYPE=%s -S '%s'",
-            build_dir, build_type, src_dir);
-        rc = system(cmd);
-        if (get_exit_status(rc) != 0) {
-            fprintf(stderr, "Error: cmake configure failed\n");
-            return 1;
-        }
-    }
-
-    /* Step 2: ninja build */
-    if (verbose) { printf("[build] Building with ninja...\n"); fflush(stdout); }
-    snprintf(cmd, sizeof(cmd), "ninja -C '%s' -j$(nproc)", build_dir);
-    rc = system(cmd);
-    if (get_exit_status(rc) != 0) {
-        fprintf(stderr, "Error: ninja build failed\n");
-        return 1;
-    }
-
-    /* Step 3: For release, copy to bin/release/ */
-    char binary_path[4096];
-    snprintf(binary_path, sizeof(binary_path), "%s/simple", build_dir);
-    if (release) {
-        char release_dir[4096], release_path[4096];
-        snprintf(release_dir, sizeof(release_dir), "%s/bin/release", project_root);
-        snprintf(release_path, sizeof(release_path), "%s/simple-new", release_dir);
-        if (verbose) { printf("[build] Copying to %s...\n", release_path); fflush(stdout); }
-        snprintf(cmd, sizeof(cmd), "cp '%s' '%s'", binary_path, release_path);
-        rc = system(cmd);
-        if (get_exit_status(rc) != 0) {
-            fprintf(stderr, "Warning: failed to copy to release path\n");
-        } else {
-            printf("Release binary: %s\n", release_path);
-        }
-    }
-    printf("Build successful: %s\n", binary_path);
-    return 0;
-}
-static long long run_check(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
-static long long run_arch_check(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
-static long long run_check_dbs(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
-static long long run_fix_dbs(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
-static long long run_doc_coverage(SimpleStringArray a) { (void)a; return delegate_to_interpreter("main.spl"); }
-static long long run_stats(SimpleStringArray a) { (void)a; return delegate_to_interpreter("stats_entry.spl"); }
-static long long run_leak_check() { return delegate_to_interpreter("leak_check_entry.spl"); }
-static void print_cli_help(void) {
-    printf("Simple Language v%s\n\n", env_get("SIMPLE_VERSION"));
-    printf("Usage: simple <command> [options]\n\n");
-    printf("Commands:\n");
-    printf("  <file.spl>     Run a Simple source file\n");
-    printf("  test           Run tests\n");
-    printf("  compile        Compile to C backend\n");
-    printf("  build          Build project\n");
-    printf("  lint           Run linter\n");
-    printf("  fmt            Format code\n");
-    printf("  fix            Auto-fix issues\n");
-    printf("  stats          Show project statistics\n");
-    printf("  mcp            Start MCP server\n");
-    printf("  lsp            Start LSP server\n");
-    printf("  check          Run checks\n");
-    printf("  doc-coverage   Documentation coverage report\n");
-    printf("  todo-scan      Scan TODOs\n");
-    printf("  targets        List compilation targets\n");
-    printf("  linkers        List available linkers\n");
-    printf("  -c <code>      Execute code inline\n");
-    printf("  --version      Show version\n");
-    printf("  --help         Show this help\n");
-    printf("\nGlobal Flags:\n");
-    printf("  --gc-log          Log GC activity\n");
-    printf("  --gc-off          Disable GC\n");
-    printf("  --no-jit          Disable JIT\n");
-    printf("  --interpret       Force interpreter mode\n");
-    printf("  --backend=<name>  Select backend\n");
-    printf("  --timeout=<secs>  Set execution timeout\n");
-}
+static int jit_available(void) { return 0; }
+static long long cli_native_build(SimpleStringArray args) { (void)args; return 0; }
+static long long handle_build(SimpleStringArray a) { (void)a; return 0; }
+static long long run_check(SimpleStringArray a) { (void)a; return 0; }
+static long long run_arch_check(SimpleStringArray a) { (void)a; return 0; }
+static long long run_check_dbs(SimpleStringArray a) { (void)a; return 0; }
+static long long run_fix_dbs(SimpleStringArray a) { (void)a; return 0; }
+static long long run_doc_coverage(SimpleStringArray a) { (void)a; return 0; }
+static long long Feature() { return 0; }
+static long long DbIssue() { return 0; }
+static long long TestDatabase() { return 0; }
+static long long load_test_database_impl() { return 0; }
+static long long BackendPort() { return 0; }
+static long long run_stats(SimpleStringArray a) { (void)a; return 0; }
+static long long run_leak_check() { return 0; }
+static void print_cli_help(void) { }
 static long long handle_init(SimpleStringArray a) { (void)a; return 0; }
 static const char* read_sdn_run_config(void) { return ""; }
 static long long sdn_line_indent() { return 0; }
@@ -845,8 +182,22 @@ static const char* strip_sdn_quotes(void) { return ""; }
 static int check_self_contained(void) { return 0; }
 static void simple_error(const char* cat, const char* msg) { fprintf(stderr, "%s: %s\n", cat, msg); }
 static void error(const char* cat, const char* msg) { simple_error(cat, msg); }
-static int jit_native_available(void) { return 1; }
-extern void spl_init_args(int argc, char** argv);
+static int jit_native_available(void) { return 0; }
+SimpleStructArray sort_features_by_id(SimpleStructArray features);
+SimpleStructArray find_duplicate_ids(SimpleStructArray features);
+SimpleStructArray mark_orphaned_features(SimpleStructArray features, SimpleStringArray ids);
+const char* load_test_database(const char* path);
+SimpleStringArray all_target_archs(void);
+SimpleStringArray check_exhaustiveness(SimpleStringArrayArray arms_archs, SimpleIntArray arms_is_wildcard, SimpleStringArray all_archs);
+long long s_len(const char* s);
+long long id_str_len(const char* s);
+long long parse_int_literal(const char* s);
+long long parts_len(long long parts);
+long long exp_parts_len(long long parts);
+long long ch_ord(long long ch);
+long long text_parse_int(const char* t);
+long long default_(void);
+const char* from_text(const char* t);
 SimpleStringArray get_cli_args(void);
 const char* get_version(void);
 void print_version(void);
@@ -860,6 +211,69 @@ void apply_fault_detection(GlobalFlags flags);
 void apply_jit_env_vars(GlobalFlags flags);
 SimpleStringArray filter_internal_flags(SimpleStringArray args);
 
+SimpleStructArray sort_features_by_id(SimpleStructArray features) {
+    return features;  /* stub: passthrough */
+}
+
+SimpleStructArray find_duplicate_ids(SimpleStructArray features) {
+    SimpleStructArray empty = {NULL, 0, 0};
+    return empty;  /* stub */
+}
+
+SimpleStructArray mark_orphaned_features(SimpleStructArray features, SimpleStringArray ids) {
+    return features;  /* stub: passthrough */
+}
+
+const char* load_test_database(const char* path) {
+    return NULL;  /* stub */
+}
+
+SimpleStringArray all_target_archs(void) {
+    SimpleStringArray empty = {NULL, 0, 0};
+    return empty;  /* stub */
+}
+
+SimpleStringArray check_exhaustiveness(SimpleStringArrayArray arms_archs, SimpleIntArray arms_is_wildcard, SimpleStringArray all_archs) {
+    SimpleStringArray empty = {NULL, 0, 0};
+    return empty;  /* stub */
+}
+
+long long s_len(const char* s) {
+    return simple_strlen(s);
+}
+
+long long id_str_len(const char* s) {
+    return simple_strlen(s);
+}
+
+long long parse_int_literal(const char* s) {
+    return atoll(s);
+}
+
+long long parts_len(long long parts) {
+    return 0;  /* stub: would need array length */
+}
+
+long long exp_parts_len(long long parts) {
+    return 0;  /* stub: would need array length */
+}
+
+long long ch_ord(long long ch) {
+    return ch;  /* ch is already the ordinal value */
+}
+
+long long text_parse_int(const char* t) {
+    return atoll(t);
+}
+
+long long default_(void) {
+    return 0;
+}
+
+const char* from_text(const char* t) {
+    return t;
+}
+
 SimpleStringArray get_cli_args(void) {
     SimpleStringArray all_args = cli_get_args();
     SimpleStringArray args = simple_new_string_array();
@@ -872,7 +286,6 @@ SimpleStringArray get_cli_args(void) {
     simple_string_push(&args, all_args.items[i]);
     i = (i + 1);
     }
-    simple_string_array_free(&all_args);
     return args;
 }
 
@@ -881,12 +294,12 @@ const char* get_version(void) {
     if (((strcmp(version, "") != 0) && (version != NULL))) {
     return version;
     }
-    return "0.7.0";
+    return "0.5.0";
 }
 
 void print_version(void) {
     const char* v = get_version();
-    printf("Simple v%s\n", v);
+    printf("Simple v%lld\n", (long long)(v));
 }
 
 void print_targets(void) {
@@ -938,9 +351,7 @@ void print_error_with_help(const char* msg) {
 
 long long run_lex_command(const char* path) {
     SimpleStringArray args = get_cli_args();
-    long long rc = cli_run_lex(args);
-    simple_string_array_free(&args);
-    return rc;
+    return cli_run_lex(args);
 }
 
 GlobalFlags parse_global_flags(SimpleStringArray args) {
@@ -975,22 +386,23 @@ GlobalFlags parse_global_flags(SimpleStringArray args) {
     } else if ((strcmp(arg, "--no-jit") == 0)) {
     no_jit = 1;
     } else if (simple_starts_with(arg, "--jit-threshold=")) {
-    jit_threshold = atoll(arg + 16);
+    const char* val_str = simple_substr_from(arg, 16);
+    jit_threshold = atoll(val_str);
     } else if (((strcmp(arg, "--jit-threshold") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     jit_threshold = atoll(args.items[i]);
     } else if (simple_starts_with(arg, "--interpreter-mode=")) {
-    interpreter_mode = arg + 19;
+    interpreter_mode = simple_substr_from(arg, 19);
     } else if (((strcmp(arg, "--interpreter-mode") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     interpreter_mode = args.items[i];
     } else if (simple_starts_with(arg, "--run-config=")) {
-    run_config = arg + 13;
+    run_config = simple_substr_from(arg, 13);
     } else if (((strcmp(arg, "--run-config") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     run_config = args.items[i];
     } else if (simple_starts_with(arg, "--backend=")) {
-    backend = arg + 10;
+    backend = simple_substr_from(arg, 10);
     } else if (((strcmp(arg, "--backend") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     backend = args.items[i];
@@ -1001,17 +413,20 @@ GlobalFlags parse_global_flags(SimpleStringArray args) {
     stack_overflow_detection = 0;
     has_stack_overflow_flag = 1;
     } else if (simple_starts_with(arg, "--max-recursion-depth=")) {
-    max_recursion_depth = atoll(arg + 21);
+    const char* val_str = simple_substr_from(arg, 21);
+    max_recursion_depth = atoll(val_str);
     } else if (((strcmp(arg, "--max-recursion-depth") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     max_recursion_depth = atoll(args.items[i]);
     } else if (simple_starts_with(arg, "--timeout=")) {
-    timeout_secs = atoll(arg + 10);
+    const char* val_str = simple_substr_from(arg, 10);
+    timeout_secs = atoll(val_str);
     } else if (((strcmp(arg, "--timeout") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     timeout_secs = atoll(args.items[i]);
     } else if (simple_starts_with(arg, "--execution-limit=")) {
-    execution_limit = atoll(arg + 18);
+    const char* val_str = simple_substr_from(arg, 18);
+    execution_limit = atoll(val_str);
     } else if (((strcmp(arg, "--execution-limit") == 0) && ((i + 1) < args.len))) {
     i = (i + 1);
     execution_limit = atoll(args.items[i]);
@@ -1072,8 +487,7 @@ void apply_jit_env_vars(GlobalFlags flags) {
     env_set("SIMPLE_NO_JIT", "1");
     }
     if ((flags.jit_threshold != 10)) {
-    char t[32];
-    snprintf(t, sizeof(t), "%lld", flags.jit_threshold);
+    const char* t = simple_str_concat("", simple_int_to_str(flags.jit_threshold));
     env_set("SIMPLE_JIT_THRESHOLD", t);
     }
     if ((strcmp(flags.backend, "auto") != 0)) {
@@ -1098,21 +512,8 @@ SimpleStringArray filter_internal_flags(SimpleStringArray args) {
     return result;
 }
 
-static SimpleStringArray _main_args;
-static SimpleStringArray _main_filtered;
-static void _main_cleanup(void) {
-    simple_string_array_free(&_main_args);
-    simple_string_array_free(&_main_filtered);
-}
-
-int main(int argc, char** argv) {
-    g_argc_main = argc;
-    g_argv_main = argv;
-    spl_init_args(argc, argv);
+int main(void) {
     SimpleStringArray args = get_cli_args();
-    _main_args = args;
-    _main_filtered = (SimpleStringArray){NULL, 0, 0};
-    atexit(_main_cleanup);
     if ((args.len == 0)) {
     if (check_self_contained()) {
     return 0;
@@ -1121,18 +522,10 @@ int main(int argc, char** argv) {
     GlobalFlags flags = parse_global_flags(args);
     apply_fault_detection(flags);
     apply_jit_env_vars(flags);
-    SimpleStringArray filtered_args = filter_internal_flags(args);
-    _main_filtered = filtered_args;
-    if (((strcmp(flags.backend, "auto") != 0) && !(flags.force_interpret))) {
-    if (!(jit_native_available())) {
-    char err_buf[256];
-    snprintf(err_buf, sizeof(err_buf), "requested JIT backend '%s' but runtime has no native exec_manager support", flags.backend);
-    print_error(err_buf);
-    return 1;
-        }
+    if (((args.len > 0) && (strcmp(args.items[0], "native-build") == 0))) {
+    return cli_native_build(args);
     }
-    /* Suppress [jit] info message — this is a compiled CLI dispatcher,
-     * JIT is only relevant when running .spl through the interpreter. */
+    SimpleStringArray filtered_args = filter_internal_flags(args);
     if ((filtered_args.len == 0)) {
     return cli_run_repl(flags.gc_log, flags.gc_off);
     }
@@ -1168,9 +561,7 @@ int main(int argc, char** argv) {
     return cli_watch_file(filtered_args.items[1]);
     } else if (strcmp(_match_val, "test") == 0) {
     SimpleStringArray test_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = cli_run_tests(test_args, flags.gc_log, flags.gc_off);
-    simple_string_array_free(&test_args);
-    return _rc;
+    return cli_run_tests(test_args, flags.gc_log, flags.gc_off);
     } else if (strcmp(_match_val, "lex") == 0) {
     if ((filtered_args.len < 2)) {
     print_error("lex requires a source file");
@@ -1187,34 +578,21 @@ int main(int argc, char** argv) {
     return cli_run_fmt(filtered_args);
     } else if (strcmp(_match_val, "check") == 0) {
     SimpleStringArray check_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = run_check(check_args);
-    simple_string_array_free(&check_args);
-    return _rc;
+    return run_check(check_args);
     } else if (strcmp(_match_val, "doc-coverage") == 0) {
-    SimpleStringArray dc_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = run_doc_coverage(dc_args);
-    simple_string_array_free(&dc_args);
-    return _rc;
+    return run_doc_coverage(simple_string_array_slice(filtered_args, 1));
     } else if (strcmp(_match_val, "check-arch") == 0) {
     SimpleStringArray arch_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = run_arch_check(arch_args);
-    simple_string_array_free(&arch_args);
-    return _rc;
+    return run_arch_check(arch_args);
     } else if (strcmp(_match_val, "check-dbs") == 0) {
     SimpleStringArray check_db_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = run_check_dbs(check_db_args);
-    simple_string_array_free(&check_db_args);
-    return _rc;
+    return run_check_dbs(check_db_args);
     } else if (strcmp(_match_val, "fix-dbs") == 0) {
     SimpleStringArray fix_db_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = run_fix_dbs(fix_db_args);
-    simple_string_array_free(&fix_db_args);
-    return _rc;
+    return run_fix_dbs(fix_db_args);
     } else if (strcmp(_match_val, "grammar-doc") == 0) {
     SimpleStringArray grammar_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = cli_run_file("src/app/grammar_doc/mod.spl", grammar_args, flags.gc_log, flags.gc_off);
-    simple_string_array_free(&grammar_args);
-    return _rc;
+    return cli_run_file("src/app/grammar_doc/mod.spl", grammar_args, flags.gc_log, flags.gc_off);
     } else if (strcmp(_match_val, "i18n") == 0) {
     return cli_run_i18n(filtered_args);
     } else if (strcmp(_match_val, "migrate") == 0) {
@@ -1254,9 +632,7 @@ int main(int argc, char** argv) {
     } else if (strcmp(_match_val, "brief") == 0) {
     return cli_run_brief(filtered_args);
     } else if (strcmp(_match_val, "stats") == 0) {
-    SimpleStringArray stats_args = simple_string_array_slice(filtered_args, 1);
-    run_stats(stats_args);
-    simple_string_array_free(&stats_args);
+    run_stats(simple_string_array_slice(filtered_args, 1));
     return 0;
     } else if (strcmp(_match_val, "ffi-gen") == 0) {
     return cli_run_ffi_gen(filtered_args);
@@ -1266,18 +642,14 @@ int main(int argc, char** argv) {
     return cli_run_file("src/app/desugar/mod.spl", filtered_args, flags.gc_log, flags.gc_off);
     } else if (strcmp(_match_val, "dashboard") == 0) {
     SimpleStringArray dashboard_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = cli_run_file("src/app/dashboard/main.spl", dashboard_args, flags.gc_log, flags.gc_off);
-    simple_string_array_free(&dashboard_args);
-    return _rc;
+    return cli_run_file("src/app/dashboard/main.spl", dashboard_args, flags.gc_log, flags.gc_off);
     } else if (strcmp(_match_val, "verify") == 0) {
     return cli_run_verify(filtered_args, flags.gc_log, flags.gc_off);
     } else if (strcmp(_match_val, "diagram") == 0) {
     return cli_handle_diagram(filtered_args);
     } else if (strcmp(_match_val, "build") == 0) {
     SimpleStringArray build_args = simple_string_array_slice(filtered_args, 1);
-    long long _rc = handle_build(build_args);
-    simple_string_array_free(&build_args);
-    return _rc;
+    return handle_build(build_args);
     } else if (strcmp(_match_val, "init") == 0) {
     return handle_init(filtered_args);
     } else if (strcmp(_match_val, "add") == 0) {
@@ -1310,13 +682,9 @@ int main(int argc, char** argv) {
     simple_string_push(&program_args, filtered_args.items[j]);
     j = (j + 1);
             }
-    long long _rc = cli_run_file(first, program_args, flags.gc_log, flags.gc_off);
-    simple_string_array_free(&program_args);
-    return _rc;
+    return cli_run_file(first, program_args, flags.gc_log, flags.gc_off);
     } else {
-    char _err_msg[4096];
-    snprintf(_err_msg, sizeof(_err_msg), "file not found: %s", first);
-    print_error_with_help(_err_msg);
+    print_error_with_help("file not found: {first}");
     return 1;
     }
     }

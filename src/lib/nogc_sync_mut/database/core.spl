@@ -20,7 +20,9 @@
 #   file_write("doc/bug/bug_db.sdn", content)  // ❌ Race condition!
 
 use std.database.atomic (atomic_write, atomic_read)
-use types.{StringId}
+# Minimal StringId definition (avoids external dependency during bootstrap)
+struct StringId:
+    value: i32
 
 # Direct extern declarations for bootstrap runtime compatibility
 # (use app.io.{...} import doesn't resolve reliably in bootstrap interpreter)
@@ -176,7 +178,7 @@ class SdnTable:
     # Parse from SDN format
     static fn parse(content: text) -> SdnTable?:
         val lines = content.split("\n")
-        if not lines.?:
+        if lines.len() == 0:
             return nil
 
         # Find table header line (format: "table_name |col1, col2, col3|")
@@ -205,7 +207,7 @@ class SdnTable:
         val table = SdnTable(name: table_name, columns: columns, rows: [], index: {})
         for i in (header_idx + 1)..lines.len():
             val line = lines[i].trim()
-            if not line.? or line.starts_with("#"):
+            if line == "" or line.starts_with("#"):
                 continue
 
             # Parse row with quote-aware CSV splitting
@@ -292,8 +294,8 @@ class SdnTable:
     fn valid_rows() -> [SdnRow]:
         self.rows.filter(\r:
             val valid_opt = r.get("valid")
-            if valid_opt.?:
-                valid_opt.unwrap() != "false"
+            if val Some(valid_str) = valid_opt:
+                valid_str != "false"
             else:
                 true
         )
@@ -308,9 +310,8 @@ class SdnTable:
         self.index.clear()
         for (i, row) in self.rows.enumerate():
             if row.has("id"):
-                val id_opt = row.get("id")
-                if id_opt.?:
-                    self.index[id_opt.unwrap()] = i
+                if val Some(id_value) = row.get("id"):
+                    self.index[id_value] = i
 
 # ============================================================================
 # SdnDatabase - Base class for all databases
@@ -452,8 +453,7 @@ class SdnDatabase:
         for (name, table) in self.tables:
             for row in table.rows:
                 val valid_opt = row.get("valid")
-                if valid_opt.?:
-                    val valid_str = valid_opt.unwrap()
+                if val Some(valid_str) = valid_opt:
                     if valid_str != "true" and valid_str != "false":
                         val id = row.get("id") ?? "unknown"
                         errors.push("Table '{name}' row '{id}': invalid valid value '{valid_str}'")
@@ -485,7 +485,7 @@ fn split_sdn_row(line: text) -> [text]:
         i = i + 1
 
     # Add last field
-    if current.? or parts.len() > 0:
+    if current != "" or parts.len() > 0:
         parts = parts + [current]
 
     parts
