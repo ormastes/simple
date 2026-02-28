@@ -6,7 +6,8 @@
 use app.io.cli_ops.{rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl}
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
-use compiler.driver.driver.{CompilerDriver, CompilerDriver__create, CompilerDriver__run_compile, aot_file, aot_c_file, compile_to_smf}
+use compiler.driver.driver.{CompilerDriver, CompilerDriver__create, CompilerDriver__run_compile, aot_file, aot_c_file, aot_vhdl_file, compile_to_smf}
+use app.compile.native.{compile_native}
 use compiler.driver.driver_types.{CompileOptions, CompileOptions__default, CompileMode, CompileResult, OutputFormat}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
@@ -188,20 +189,10 @@ fn cli_compile(args: [str]) -> i64:
         return compile_c_backend(source_file, output_file, verbose)
 
     if emit == "native":
-        # Use the pure-Simple native compile pipeline via standalone script
         var out = output_file
         if out == "":
             out = source_file.replace(".spl", "")
-        val simple_bin = _find_simple_binary()
-        var run_args: [text] = ["src/app/compile/native.spl", source_file, out]
-        if verbose:
-            run_args.push("--verbose")
-        val (stdout, stderr, exit_code) = _cli_process_run(simple_bin, run_args)
-        if stdout != "":
-            print stdout
-        if stderr != "":
-            _cli_eprint(stderr)
-        return exit_code
+        return compile_native(source_file, out, verbose, "", false)
 
     if target.starts_with("baremetal-"):
         return compile_baremetal(source_file, target, emit, output_file, verbose)
@@ -354,12 +345,6 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
 # ============================================================================
 
 fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64:
-    """Compile a Simple source file to C++20 output using the MIR C backend.
-
-    Path 1: Pure Simple MIR C backend via compile_c_entry.spl (interpreter mode).
-    Path 2: Pure Simple compiler driver with C backend (aot_c_file).
-    Path 3: Bootstrap generator fallback (legacy gen-c).
-    """
     var out = output_file
     if out == "":
         out = source_file.replace(".spl", ".cpp")
@@ -368,72 +353,20 @@ fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64
         print "Compiling {source_file} to C++20 (MIR C backend)"
         print "  Output: {out}"
 
-    # Path 1: Use the Pure Simple MIR C backend via interpreter.
-    # This loads the compiler driver in interpreter mode and runs the full pipeline.
-    val simple_bin = _find_simple_binary()
-    val compile_c_script = "src/app/cli/compile_c_entry.spl"
-    if _cli_file_exists_impl(compile_c_script):
-        if verbose:
-            print "Using MIR C backend pipeline (interpreter mode)"
-        var c_cmd = "timeout 600s {simple_bin} {compile_c_script} '{source_file}' '{out}'"
-        val result = _cli_shell(c_cmd)
-        if result.stdout != "":
-            print result.stdout
-        if result.stderr != "":
-            _cli_eprint(result.stderr)
-        if result.exit_code == 124:
-            _cli_eprint("Error: C backend compilation timed out after 600s")
-            return 124
-        if result.exit_code == 0:
-            print "Output: {out}"
-            print "Build with: clang++ -std=c++20 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
-            return 0
-        if verbose:
-            _cli_eprint("MIR C backend failed with exit code {result.exit_code}; trying fallbacks")
-
-    # Path 2: Use Pure Simple compiler driver with C backend.
     val aot_result = aot_c_file(source_file, out)
     match aot_result:
         case CompileResult.Success(_):
             print "Output: {out}"
-            print "Build with: clang++ -std=c++20 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
+            print "Build with: clang -std=gnu11 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
             return 0
         case _:
-            if verbose:
-                _cli_eprint("Pure Simple C backend failed; trying legacy fallback")
-
-    # Path 3: Legacy bootstrap C generator (simple_codegen).
-    val codegen_bin = "bin/bootstrap/cpp/simple_codegen"
-    if _cli_file_exists_impl(codegen_bin):
-        if verbose:
-            print "Using legacy simple_codegen (text-based C codegen)"
-        var c_cmd = "timeout 120s {codegen_bin} '{source_file}' '{out}'"
-        val result = _cli_shell(c_cmd)
-        if result.stdout != "":
-            print result.stdout
-        if result.stderr != "":
-            _cli_eprint(result.stderr)
-        if result.exit_code == 0:
-            print "Output: {out}"
-            print "Build with: clang -std=gnu11 -O2 {out} -lm -o output"
-            return 0
-
-    _cli_eprint("Error: C backend generation failed")
-    _cli_eprint("hint: Ensure bin/bootstrap/cpp/simple_codegen exists (build with: cmake -B build -G Ninja -S src/compiler_cpp && ninja -C build)")
-    1
-
-fn _find_simple_binary() -> text:
-    """Find the Simple interpreter binary."""
-    if _cli_file_exists_impl("bin/release/linux-x86_64/simple"):
-        return "bin/release/linux-x86_64/simple"
-    if _cli_file_exists_impl("bin/release/simple"):
-        return "bin/release/simple"
-    if _cli_file_exists_impl("bin/simple"):
-        return "bin/simple"
-    "simple"
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: C backend generation failed")
+            return 1
 
 fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
-    """Compile a Simple source file to VHDL output."""
     var out = output_file
     if out == "":
         out = source_file.replace(".spl", ".vhd")
@@ -442,26 +375,20 @@ fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
         print "Compiling {source_file} to VHDL"
         print "  Output: {out}"
 
-    # The VHDL backend produces .vhd text files from MIR.
-    # Full pipeline: source -> parse -> HIR -> MIR -> VhdlConstraintChecker -> VhdlBackend -> .vhd
-    # Currently delegates to the Simple runtime for compilation.
-    var vhdl_cmd = "bin/release/simple src/app/compile/native.spl '{source_file}' '{out}' --backend=vhdl"
-    if verbose:
-        vhdl_cmd = vhdl_cmd + " --verbose"
-    val result = _cli_shell(vhdl_cmd)
-    if result.stdout != "":
-        print result.stdout
-    if result.stderr != "" and result.exit_code != 0:
-        _cli_eprint(result.stderr)
-        return result.exit_code
-
-    if result.exit_code == 0:
-        print "Output: {out}"
-    return result.exit_code
+    val aot_result = aot_vhdl_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            return 0
+        case _:
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: VHDL compilation failed")
+            return 1
 
 # Native build: compile entire project to native binary via Pure Simple pipeline
 fn cli_native_build(args: [text]) -> i64:
-    # Parse args and delegate to native.spl standalone script
     var source = ""
     var output = ""
     var verbose = false
@@ -471,7 +398,6 @@ fn cli_native_build(args: [text]) -> i64:
         val arg = args[i]
         if arg == "native-build":
             i = i + 1
-            # skip command name
         elif arg == "-o":
             i = i + 1
             if i < args.len():
@@ -490,15 +416,6 @@ fn cli_native_build(args: [text]) -> i64:
     if output == "":
         output = source.replace(".spl", "")
 
-    val simple_bin = _find_simple_binary()
-    var run_args: [text] = ["src/app/compile/native.spl", source, output]
-    if verbose:
-        run_args.push("--verbose")
-    val (stdout, stderr, exit_code) = _cli_process_run(simple_bin, run_args)
-    if stdout != "":
-        print stdout
-    if stderr != "":
-        _cli_eprint(stderr)
-    return exit_code
+    return compile_native(source, output, verbose, "", false)
 
 export cli_compile, compile_baremetal, compile_vhdl, cli_native_build

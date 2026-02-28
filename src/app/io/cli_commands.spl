@@ -2,6 +2,9 @@
 # Extracted from cli_ops.spl for modularity
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
 
+use compiler.driver.driver.{interpret_file}
+use compiler.driver.driver_types.{CompileResult}
+
 # ============================================================================
 # CLI Command Handlers
 # ============================================================================
@@ -13,15 +16,12 @@ fn cli_run_code(code: str, gc_log: bool, gc_off: bool) -> i64:
     1
 
 fn cli_run_file(path: str, args: [str], gc_log: bool, gc_off: bool) -> i64:
-    var run_args: [text] = [path]
-    for arg in args:
-        run_args.push(arg)
-    val result = _cli_process_run("bin/release/simple", run_args)
-    val stdout = result[0]
-    val exit_code = result[2]
-    if stdout.len() > 0:
-        print stdout
-    exit_code
+    val result = interpret_file(path)
+    match result:
+        case CompileResult.Success(_): 0
+        case _:
+            _cli_eprint("Error running {path}")
+            1
 
 fn cli_watch_file(path: str) -> i64:
     print "Watch mode not yet implemented in pure Simple"
@@ -31,7 +31,7 @@ fn cli_run_repl(gc_log: bool, gc_off: bool) -> i64:
     print "=== Simple REPL ==="
     print "REPL not yet implemented in pure Simple"
     print ""
-    print "For now, use: ./bin/release/simple yourfile.spl"
+    print "For now, use: bin/simple yourfile.spl"
     1
 
 fn cli_not_implemented(tool_name: text) -> i64:
@@ -45,34 +45,12 @@ fn _cli_strip_command(args: [str], cmd: text) -> [str]:
         args
 
 fn cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64:
-    # Use the new Simple test runner instead of Rust FFI
-    # This enables resource monitoring, process cleanup, and container support
-    var run_args: [text] = ["src/app/test_runner_new/main.spl"]
-
-    # Pass through all test arguments
-    for arg in args:
-        run_args.push(arg)
-
-    # Add GC flags if needed (test runner supports these)
-    if gc_log:
-        run_args.push("--gc-log")
-    if gc_off:
-        run_args.push("--gc=off")
-
-    # Execute test runner with NO timeout - module loading takes ~35s with 24+ imports
-    # Standard process_run has no timeout and relies on system defaults
-    # This allows the test runner to complete even with slow module loading
-    val result = _cli_process_run("bin/release/simple", run_args)
-    val stdout = result[0]
-    val stderr = result[1]
-    val exit_code = result[2]
-
-    if stdout.len() > 0:
-        print stdout
-    if stderr.len() > 0:
-        _cli_eprint(stderr)
-
-    exit_code
+    val result = interpret_file("src/app/test_runner_new/main.spl")
+    match result:
+        case CompileResult.Success(_): 0
+        case _:
+            _cli_eprint("Error running test runner")
+            1
 
 fn cli_run_lint(args: [str]) -> i64:
     cli_not_implemented("Linter")

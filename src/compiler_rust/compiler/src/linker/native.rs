@@ -18,6 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use simple_common::target::{LinkerFlavor, Target, TargetOS};
+
 use super::error::{LinkerError, LinkerResult};
 
 /// Native linker variant.
@@ -30,6 +32,8 @@ pub enum NativeLinker {
     Lld,
     /// GNU ld: Traditional linker (fallback)
     Ld,
+    /// MSVC link.exe: Microsoft Visual C++ linker (Windows)
+    Msvc,
 }
 
 impl NativeLinker {
@@ -64,7 +68,7 @@ impl NativeLinker {
             return Some(Self::Ld);
         }
 
-        // On Windows, check for lld-link (MSVC-compatible LLD variant)
+        // On Windows, check for lld-link (MSVC-compatible LLD variant), then MSVC link.exe
         #[cfg(target_os = "windows")]
         {
             if Command::new("lld-link")
@@ -75,17 +79,73 @@ impl NativeLinker {
             {
                 return Some(Self::Lld);
             }
+            if Self::is_available(Self::Msvc) {
+                return Some(Self::Msvc);
+            }
         }
 
         None
+    }
+
+    /// Detect the best linker for a specific target.
+    ///
+    /// Uses the target's linker flavor to choose the appropriate linker:
+    /// - GNU targets: mold > lld > ld
+    /// - MSVC targets: lld-link > link.exe
+    /// - WASM targets: wasm-ld
+    pub fn detect_for_target(target: &Target) -> Option<Self> {
+        // Check environment variable first
+        if let Ok(linker) = std::env::var("SIMPLE_LINKER") {
+            return Self::from_name(&linker);
+        }
+
+        match target.linker_flavor() {
+            LinkerFlavor::Msvc => {
+                // Prefer lld-link over link.exe
+                if Command::new("lld-link")
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+                {
+                    return Some(Self::Lld);
+                }
+                if Self::is_available(Self::Msvc) {
+                    return Some(Self::Msvc);
+                }
+                None
+            }
+            LinkerFlavor::Gnu => {
+                // Standard detection order: mold > lld > ld
+                if matches!(target.os, TargetOS::Linux | TargetOS::FreeBSD) && Self::is_available(Self::Mold) {
+                    return Some(Self::Mold);
+                }
+                if Self::is_available(Self::Lld) {
+                    return Some(Self::Lld);
+                }
+                if Self::is_available(Self::Ld) {
+                    return Some(Self::Ld);
+                }
+                None
+            }
+            LinkerFlavor::WasmLd => {
+                // WASM targets use lld's wasm-ld
+                if Self::is_available(Self::Lld) {
+                    Some(Self::Lld)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// Parse linker name from string.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "mold" => Some(Self::Mold),
-            "lld" | "ld.lld" => Some(Self::Lld),
+            "lld" | "ld.lld" | "lld-link" => Some(Self::Lld),
             "ld" | "gnu" | "bfd" => Some(Self::Ld),
+            "msvc" | "link" | "link.exe" => Some(Self::Msvc),
             _ => None,
         }
     }
@@ -94,8 +154,31 @@ impl NativeLinker {
     pub fn command(&self) -> &'static str {
         match self {
             Self::Mold => "mold",
-            Self::Lld => "ld.lld",
+            Self::Lld => {
+                // On Windows targets, LLD uses the lld-link frontend
+                #[cfg(target_os = "windows")]
+                {
+                    "lld-link"
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    "ld.lld"
+                }
+            }
             Self::Ld => "ld",
+            Self::Msvc => "link.exe",
+        }
+    }
+
+    /// Get the linker command name for a specific target.
+    pub fn command_for_target(&self, target: &Target) -> &'static str {
+        match self {
+            Self::Lld => match target.linker_flavor() {
+                LinkerFlavor::Msvc => "lld-link",
+                LinkerFlavor::WasmLd => "wasm-ld",
+                LinkerFlavor::Gnu => "ld.lld",
+            },
+            _ => self.command(),
         }
     }
 
@@ -105,22 +188,35 @@ impl NativeLinker {
             Self::Mold => "mold",
             Self::Lld => "lld",
             Self::Ld => "GNU ld",
+            Self::Msvc => "MSVC link.exe",
         }
     }
 
     /// Check if this linker is available on the system.
     pub fn is_available(linker: Self) -> bool {
-        Command::new(linker.command())
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        match linker {
+            // MSVC link.exe uses /NOLOGO, not --version
+            Self::Msvc => Command::new(linker.command())
+                .arg("/NOLOGO")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false),
+            _ => Command::new(linker.command())
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false),
+        }
     }
 
     /// Get the version of this linker, if available.
     pub fn version(&self) -> Option<String> {
-        Command::new(self.command())
-            .arg("--version")
+        let (cmd, arg) = match self {
+            Self::Msvc => (self.command(), "/NOLOGO"),
+            _ => (self.command(), "--version"),
+        };
+        Command::new(cmd)
+            .arg(arg)
             .output()
             .ok()
             .and_then(|o| {
@@ -161,6 +257,10 @@ impl NativeLinker {
             }
         }
 
+        if matches!(self, Self::Msvc) {
+            return self.link_msvc(objects, output, options);
+        }
+
         let mut cmd = Command::new(self.command());
 
         // Add output file
@@ -184,9 +284,7 @@ impl NativeLinker {
             cmd.arg("-L").arg(path);
         }
 
-        // Add rpath for runtime library loading
-        // This ensures the binary can find shared libraries like libsimple_compiler.so
-        // Use linker-native syntax (--rpath) not gcc syntax (-Wl,-rpath)
+        // Add rpath for runtime library loading (not on macOS — use @rpath via install_name_tool)
         for path in &options.library_paths {
             cmd.arg(format!("--rpath={}", path.display()));
         }
@@ -214,27 +312,90 @@ impl NativeLinker {
         } else {
             let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
             let exit_code = output_result.status.code().unwrap_or(-1);
-
-            // Parse stderr for specific error types
-            if stderr.contains("undefined reference") || stderr.contains("undefined symbol") {
-                // Extract symbol name if possible
-                if let Some(sym) = Self::extract_undefined_symbol(&stderr) {
-                    return Err(LinkerError::UndefinedSymbol(sym));
-                }
-            }
-
-            if stderr.contains("multiple definition") {
-                if let Some(sym) = Self::extract_multiple_definition(&stderr) {
-                    return Err(LinkerError::MultipleDefinition(sym));
-                }
-            }
-
-            Err(LinkerError::LinkerFailed {
-                exit_code,
-                message: format!("{} failed", self.name()),
-                stderr,
-            })
+            self.classify_link_error(exit_code, &stderr)
         }
+    }
+
+    /// MSVC-specific link invocation using /OUT:, /LIBPATH:, etc.
+    fn link_msvc(&self, objects: &[PathBuf], output: &Path, options: &LinkOptions) -> LinkerResult<()> {
+        let mut cmd = Command::new(self.command());
+
+        // MSVC uses /OUT: for output
+        cmd.arg(format!("/OUT:{}", output.display()));
+
+        // Add MSVC-specific flags
+        self.add_common_flags(&mut cmd, options);
+
+        // Add object files
+        for obj in objects {
+            cmd.arg(obj);
+        }
+
+        // Add libraries (MSVC uses name.lib, no -l prefix)
+        for lib in &options.libraries {
+            cmd.arg(format!("{}.lib", lib));
+        }
+
+        // Add library search paths (MSVC uses /LIBPATH:)
+        for path in &options.library_paths {
+            cmd.arg(format!("/LIBPATH:{}", path.display()));
+        }
+
+        // No rpath on Windows (PE uses PATH for DLL resolution)
+
+        // Add extra flags
+        for flag in &options.extra_flags {
+            cmd.arg(flag);
+        }
+
+        // Entry point (MSVC uses /ENTRY:)
+        if let Some(entry) = &options.entry_point {
+            cmd.arg(format!("/ENTRY:{}", entry));
+        }
+
+        // Debug: emit full command when SIMPLE_LINKER_DEBUG is set
+        if std::env::var("SIMPLE_LINKER_DEBUG").is_ok() || options.verbose {
+            eprintln!("Link command: {:?}", cmd);
+        }
+
+        // Execute linker
+        let output_result = cmd.output()?;
+
+        if output_result.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output_result.stderr).to_string();
+            let exit_code = output_result.status.code().unwrap_or(-1);
+            self.classify_link_error(exit_code, &stderr)
+        }
+    }
+
+    /// Classify linker error output into specific error variants.
+    fn classify_link_error(&self, exit_code: i32, stderr: &str) -> LinkerResult<()> {
+        // Check for undefined symbol patterns (GNU/LLD and MSVC)
+        if stderr.contains("undefined reference")
+            || stderr.contains("undefined symbol")
+            || stderr.contains("unresolved external symbol")
+        {
+            if let Some(sym) = Self::extract_undefined_symbol(stderr) {
+                return Err(LinkerError::UndefinedSymbol(sym));
+            }
+        }
+
+        // Check for multiple definition patterns (GNU/LLD and MSVC)
+        if stderr.contains("multiple definition")
+            || stderr.contains("already defined in")
+        {
+            if let Some(sym) = Self::extract_multiple_definition(stderr) {
+                return Err(LinkerError::MultipleDefinition(sym));
+            }
+        }
+
+        Err(LinkerError::LinkerFailed {
+            exit_code,
+            message: format!("{} failed", self.name()),
+            stderr: stderr.to_string(),
+        })
     }
 
     /// Add common flags based on linker type and options.
@@ -299,19 +460,42 @@ impl NativeLinker {
                     cmd.arg("-pie");
                 }
             }
+            Self::Msvc => {
+                if options.generate_map {
+                    if let Some(ref path) = options.map_file {
+                        cmd.arg(format!("/MAP:{}", path.display()));
+                    }
+                }
+                if options.strip {
+                    cmd.arg("/DEBUG:NONE");
+                }
+                if options.shared {
+                    cmd.arg("/DLL");
+                }
+                // MSVC doesn't have a PIE flag (ASLR is enabled by default)
+            }
+            _ => {}
         }
 
         // Debug output
         if std::env::var("SIMPLE_LINKER_DEBUG").is_ok() || options.verbose {
-            cmd.arg("-v");
+            match self {
+                Self::Msvc => {
+                    cmd.arg("/VERBOSE");
+                }
+                _ => {
+                    cmd.arg("-v");
+                }
+            }
         }
     }
 
     /// Extract undefined symbol name from linker error message.
     fn extract_undefined_symbol(stderr: &str) -> Option<String> {
         // Common patterns:
-        // - "undefined reference to `symbol'"
-        // - "undefined symbol: symbol"
+        // GNU:  "undefined reference to `symbol'"
+        // LLD:  "undefined symbol: symbol"
+        // MSVC: "unresolved external symbol _symbol referenced in function _main"
         for line in stderr.lines() {
             if let Some(start) = line.find("undefined reference to `") {
                 let rest = &line[start + 24..];
@@ -324,6 +508,14 @@ impl NativeLinker {
                 let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
                 return Some(rest[..end].to_string());
             }
+            if let Some(start) = line.find("unresolved external symbol ") {
+                let rest = &line[start + 27..];
+                let end = rest
+                    .find(" referenced in")
+                    .or_else(|| rest.find(|c: char| c.is_whitespace()))
+                    .unwrap_or(rest.len());
+                return Some(rest[..end].to_string());
+            }
         }
         None
     }
@@ -331,8 +523,9 @@ impl NativeLinker {
     /// Extract multiply-defined symbol name from linker error message.
     fn extract_multiple_definition(stderr: &str) -> Option<String> {
         // Common patterns:
-        // - "multiple definition of `symbol'"
-        // - "duplicate symbol: symbol"
+        // GNU:  "multiple definition of `symbol'"
+        // LLD:  "duplicate symbol: symbol"
+        // MSVC: "symbol already defined in file.obj"
         for line in stderr.lines() {
             if let Some(start) = line.find("multiple definition of `") {
                 let rest = &line[start + 24..];
@@ -344,6 +537,17 @@ impl NativeLinker {
                 let rest = &line[start + 18..];
                 let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
                 return Some(rest[..end].to_string());
+            }
+            // MSVC: "foo.obj : error LNK2005: _symbol already defined in bar.obj"
+            if let Some(start) = line.find("already defined in") {
+                // Symbol is before "already defined in", after the last space before it
+                let prefix = &line[..start].trim_end();
+                if let Some(sym_start) = prefix.rfind(' ') {
+                    let sym = &prefix[sym_start + 1..];
+                    if !sym.is_empty() {
+                        return Some(sym.to_string());
+                    }
+                }
             }
         }
         None
@@ -461,16 +665,35 @@ mod tests {
         assert_eq!(NativeLinker::from_name("MOLD"), Some(NativeLinker::Mold));
         assert_eq!(NativeLinker::from_name("lld"), Some(NativeLinker::Lld));
         assert_eq!(NativeLinker::from_name("ld.lld"), Some(NativeLinker::Lld));
+        assert_eq!(NativeLinker::from_name("lld-link"), Some(NativeLinker::Lld));
         assert_eq!(NativeLinker::from_name("ld"), Some(NativeLinker::Ld));
         assert_eq!(NativeLinker::from_name("gnu"), Some(NativeLinker::Ld));
+        assert_eq!(NativeLinker::from_name("msvc"), Some(NativeLinker::Msvc));
+        assert_eq!(NativeLinker::from_name("link"), Some(NativeLinker::Msvc));
+        assert_eq!(NativeLinker::from_name("link.exe"), Some(NativeLinker::Msvc));
         assert_eq!(NativeLinker::from_name("unknown"), None);
     }
 
     #[test]
     fn test_linker_command() {
         assert_eq!(NativeLinker::Mold.command(), "mold");
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(NativeLinker::Lld.command(), "ld.lld");
+        #[cfg(target_os = "windows")]
+        assert_eq!(NativeLinker::Lld.command(), "lld-link");
         assert_eq!(NativeLinker::Ld.command(), "ld");
+        assert_eq!(NativeLinker::Msvc.command(), "link.exe");
+    }
+
+    #[test]
+    fn test_linker_command_for_target() {
+        use simple_common::target::{TargetArch, TargetOS};
+
+        let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
+
+        assert_eq!(NativeLinker::Lld.command_for_target(&linux), "ld.lld");
+        assert_eq!(NativeLinker::Lld.command_for_target(&windows), "lld-link");
     }
 
     #[test]
@@ -478,6 +701,7 @@ mod tests {
         assert_eq!(NativeLinker::Mold.name(), "mold");
         assert_eq!(NativeLinker::Lld.name(), "lld");
         assert_eq!(NativeLinker::Ld.name(), "GNU ld");
+        assert_eq!(NativeLinker::Msvc.name(), "MSVC link.exe");
     }
 
     #[test]
@@ -512,32 +736,65 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_for_target() {
+        use simple_common::target::{TargetArch, TargetOS};
+
+        // Should not panic regardless of available linkers
+        let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let _linker = NativeLinker::detect_for_target(&linux);
+
+        let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        let _linker = NativeLinker::detect_for_target(&windows);
+
+        let macos = Target::new(TargetArch::Aarch64, TargetOS::MacOS);
+        let _linker = NativeLinker::detect_for_target(&macos);
+    }
+
+    #[test]
     fn test_extract_undefined_symbol() {
+        // GNU ld pattern
         let stderr = "ld: error: undefined reference to `missing_func'\n";
         assert_eq!(
             NativeLinker::extract_undefined_symbol(stderr),
             Some("missing_func".to_string())
         );
 
+        // LLD pattern
         let stderr2 = "error: undefined symbol: other_func\n";
         assert_eq!(
             NativeLinker::extract_undefined_symbol(stderr2),
             Some("other_func".to_string())
         );
+
+        // MSVC pattern
+        let stderr3 = "main.obj : error LNK2019: unresolved external symbol _foo referenced in function _main\n";
+        assert_eq!(
+            NativeLinker::extract_undefined_symbol(stderr3),
+            Some("_foo".to_string())
+        );
     }
 
     #[test]
     fn test_extract_multiple_definition() {
+        // GNU ld pattern
         let stderr = "ld: error: multiple definition of `duplicate_sym'\n";
         assert_eq!(
             NativeLinker::extract_multiple_definition(stderr),
             Some("duplicate_sym".to_string())
         );
 
+        // LLD pattern
         let stderr2 = "error: duplicate symbol: other_sym\n";
         assert_eq!(
             NativeLinker::extract_multiple_definition(stderr2),
             Some("other_sym".to_string())
+        );
+
+        // MSVC pattern
+        let stderr3 = "foo.obj : error LNK2005: _bar already defined in baz.obj\n";
+        assert_eq!(
+            NativeLinker::extract_multiple_definition(stderr3),
+            Some("_bar".to_string())
         );
     }
 }

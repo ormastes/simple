@@ -21,16 +21,19 @@
 #
 # Usage: simple compile --native -o hello hello.spl
 #
-# Can be run as standalone: bin/release/simple src/app/compile/native.spl <source> <output> [--verbose]
+# Can be run as standalone script, or imported and called directly via compile_native()
 
 # Direct extern declarations to avoid module closure limitations
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_cli_get_args() -> [str]
+extern fn rt_getpid() -> i64
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use std.log.{error, warn, info, debug}
+use compiler.driver.driver.{aot_c_file}
+use compiler.driver.driver_types.{CompileResult}
 
 # ============================================================================
 # Platform Detection
@@ -235,22 +238,19 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
     if verbose:
         info("compile", "Compiling {source_file} to native binary...")
 
-    # Step 1: Generate C++ via MIR C backend (single-file mode)
-    val temp_cpp = shell_output("mktemp /tmp/simple_native_XXXXXX.cpp")
-    if temp_cpp == "":
-        error("compile", "Failed to create temp file")
-        return 1
-
-    val gen_cmd = "bin/simple compile --backend=c -o '{temp_cpp}' '{source_file}' 2>&1"
-    if verbose:
-        debug("compile", "Generating C++: bin/simple compile --backend=c ...")
-    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
-    if gen_exit != 0:
-        error("compile", "C++ generation failed")
-        if gen_out != "":
-            error("compile", gen_out)
-        file_delete(temp_cpp)
-        return 1
+    # Step 1: Generate C via MIR C backend (in-process)
+    val pid = rt_getpid()
+    val temp_cpp = "/tmp/simple_native_{pid}.c"
+    val aot_result = aot_c_file(source_file, temp_cpp)
+    match aot_result:
+        case CompileResult.Success(_):
+            pass
+        case _:
+            error("compile", "C generation failed")
+            val errors = aot_result.get_errors()
+            for err in errors:
+                error("compile", err)
+            return 1
 
     if verbose:
         val cpp_size = file_size(temp_cpp)
@@ -388,15 +388,18 @@ fn compile_gen_c_only(source_file: text, output_file: text, verbose: bool) -> i6
             error("compile", "Failed to create temp file")
             return 1
 
-    val gen_cmd = "bin/simple compile --backend=c -o '{actual_output}' '{source_file}' 2>&1"
-    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
-    if gen_exit != 0:
-        error("compile", "C++ generation failed")
-        if gen_out != "":
-            error("compile", gen_out)
-        if use_stdout:
-            file_delete(actual_output)
-        return 1
+    val aot_result = aot_c_file(source_file, actual_output)
+    match aot_result:
+        case CompileResult.Success(_):
+            pass
+        case _:
+            error("compile", "C generation failed")
+            val errors = aot_result.get_errors()
+            for err in errors:
+                error("compile", err)
+            if use_stdout:
+                file_delete(actual_output)
+            return 1
 
     if use_stdout:
         val content_raw = rt_file_read_text(actual_output)
@@ -452,5 +455,5 @@ fn main() -> i64:
         return compile_native_linked(source_file, output_file, verbose, compiler_override, sanitize)
     compile_native(source_file, output_file, verbose, compiler_override, sanitize)
 
-# export compile_native, compile_native_linked, compile_gen_c_only
-# export find_c_compiler, find_cpp_compiler, detect_platform
+export compile_native, compile_native_linked, compile_gen_c_only
+export find_c_compiler, find_cpp_compiler, detect_platform

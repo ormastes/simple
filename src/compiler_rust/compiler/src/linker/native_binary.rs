@@ -30,12 +30,85 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use simple_common::target::Target;
+use simple_common::target::{LinkerFlavor, Target, TargetArch, TargetOS};
 
 use super::builder::LinkerBuilder;
 use super::error::{LinkerError, LinkerResult};
 use super::layout::{LayoutOptimizer, LayoutSegment};
 use super::native::NativeLinker;
+
+/// Get the architecture-appropriate `ret` instruction for inline asm stubs.
+fn asm_ret_instruction(target: &Target) -> &'static str {
+    match target.arch {
+        TargetArch::X86_64 | TargetArch::X86 => "ret",
+        TargetArch::Aarch64 => "ret", // uses x30 (link register)
+        TargetArch::Arm => "bx lr",
+        TargetArch::Riscv64 | TargetArch::Riscv32 => "ret", // pseudo for jalr x0, ra, 0
+        _ => "ret", // fallback
+    }
+}
+
+/// Detect the C compiler for the target platform.
+///
+/// On Windows, defaults to `cl.exe`. Respects the `CC` environment variable.
+fn detect_c_compiler(target: &Target) -> String {
+    if let Ok(cc) = std::env::var("CC") {
+        return cc;
+    }
+    match target.os {
+        TargetOS::Windows => "cl.exe".to_string(),
+        _ => "cc".to_string(),
+    }
+}
+
+/// Build arguments for compiling a C file to an object file.
+///
+/// Returns (args_before_output, output_flag, args_after_output) based on compiler type.
+/// MSVC uses `/c /Fo<out>`, GNU uses `-c -o <out>`.
+fn compile_c_args(cc: &str, output: &Path, input: &Path) -> Vec<String> {
+    if is_msvc_compiler(cc) {
+        vec![
+            "/c".to_string(),
+            format!("/Fo{}", output.display()),
+            input.display().to_string(),
+        ]
+    } else {
+        vec![
+            "-c".to_string(),
+            "-o".to_string(),
+            output.display().to_string(),
+            input.display().to_string(),
+        ]
+    }
+}
+
+/// Check if a compiler name looks like MSVC cl.exe.
+fn is_msvc_compiler(cc: &str) -> bool {
+    let base = std::path::Path::new(cc)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cc);
+    base.eq_ignore_ascii_case("cl") || base.eq_ignore_ascii_case("cl.exe")
+}
+
+/// Detect the symbol listing tool for the target platform.
+///
+/// Returns the command and arguments for listing undefined symbols.
+/// - Unix: `nm -u`
+/// - Windows: tries `dumpbin /SYMBOLS` > `llvm-nm -u` > `nm -u`
+fn detect_nm_command(target: &Target) -> (String, Vec<String>) {
+    if target.os == TargetOS::Windows {
+        // Try dumpbin first (MSVC tool)
+        if Command::new("dumpbin").arg("/?").output().map(|o| o.status.success()).unwrap_or(false) {
+            return ("dumpbin".to_string(), vec!["/SYMBOLS".to_string()]);
+        }
+        // Try llvm-nm
+        if Command::new("llvm-nm").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+            return ("llvm-nm".to_string(), vec!["-u".to_string()]);
+        }
+    }
+    ("nm".to_string(), vec!["-u".to_string()])
+}
 
 /// Options for native binary compilation.
 #[derive(Debug, Clone)]
@@ -91,30 +164,18 @@ impl Default for NativeBinaryOptions {
             }
         }
 
+        let target = Target::host();
+        let libraries = Self::default_libraries_for_target(&target);
+
         Self {
             output: PathBuf::from("a.out"),
-            target: Target::host(),
+            target,
             layout_optimize: false,
             layout_profile: None,
             strip: false,
             pie: true, // Default to PIE for security (codegen generates PIC)
             shared: false,
-            // Link system libraries and Simple runtime
-            // pthread, dl, m, gcc_s are commonly needed by Rust code on Linux
-            // gcc_s provides _Unwind_Resume for exception handling
-            // simple_compiler provides Cranelift FFI and other runtime functions
-            #[cfg(target_os = "linux")]
-            libraries: vec![
-                "c".to_string(),
-                "pthread".to_string(),
-                "dl".to_string(),
-                "m".to_string(),
-                "gcc_s".to_string(),          // Unwinding support
-                "lzma".to_string(),           // Needed by xz2 (dependency chain)
-                "simple_runtime".to_string(), // Runtime FFI functions
-            ],
-            #[cfg(not(target_os = "linux"))]
-            libraries: vec!["c".to_string()],
+            libraries,
             library_paths,
             linker: None,
             generate_map: false,
@@ -129,73 +190,162 @@ impl NativeBinaryOptions {
         Self::detect_library_paths_for_target(&Target::host())
     }
 
+    /// Get default libraries for a specific target OS.
+    pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
+        use simple_common::target::TargetOS;
+        match target.os {
+            TargetOS::Linux => vec![
+                "c".into(),
+                "pthread".into(),
+                "dl".into(),
+                "m".into(),
+                "gcc_s".into(),          // Unwinding support
+                "lzma".into(),           // Needed by xz2 (dependency chain)
+                "simple_runtime".into(), // Runtime FFI functions
+            ],
+            TargetOS::MacOS => vec![
+                "c".into(),
+                "System".into(),         // Provides pthread, dl, m on macOS
+                "simple_runtime".into(),
+            ],
+            TargetOS::Windows => vec![
+                "c".into(),
+                "msvcrt".into(),
+                "kernel32".into(),
+                "ws2_32".into(),
+                "advapi32".into(),
+                "simple_runtime".into(),
+            ],
+            TargetOS::FreeBSD => vec![
+                "c".into(),
+                "pthread".into(),
+                "m".into(),
+                "execinfo".into(),
+                "simple_runtime".into(),
+            ],
+            _ => vec!["c".into()],
+        }
+    }
+
     /// Detect library paths for a specific target.
     pub fn detect_library_paths_for_target(target: &Target) -> Vec<PathBuf> {
-        use simple_common::target::TargetArch;
+        use simple_common::target::{TargetArch, TargetOS};
         let mut paths = Vec::new();
 
-        #[cfg(target_os = "linux")]
-        {
-            // Choose paths based on target architecture
-            let arch_dirs: &[&str] = match target.arch {
-                TargetArch::X86_64 => &[
-                    "/lib/x86_64-linux-gnu",
-                    "/usr/lib/x86_64-linux-gnu",
-                    "/lib64",
-                    "/usr/lib64",
-                    // GCC runtime library paths
-                    "/usr/lib/gcc/x86_64-linux-gnu/13",
-                    "/usr/lib/gcc/x86_64-linux-gnu/12",
-                    "/usr/lib/gcc/x86_64-linux-gnu/11",
-                ],
-                TargetArch::Aarch64 => &[
-                    "/lib/aarch64-linux-gnu",
-                    "/usr/lib/aarch64-linux-gnu",
-                    "/usr/aarch64-linux-gnu/lib",
-                ],
-                TargetArch::Riscv64 => &[
-                    "/lib/riscv64-linux-gnu",
-                    "/usr/lib/riscv64-linux-gnu",
-                    "/usr/riscv64-linux-gnu/lib",
-                ],
-                _ => &[],
-            };
+        match target.os {
+            TargetOS::Linux => {
+                // Choose paths based on target architecture
+                let arch_dirs: &[&str] = match target.arch {
+                    TargetArch::X86_64 => &[
+                        "/lib/x86_64-linux-gnu",
+                        "/usr/lib/x86_64-linux-gnu",
+                        "/lib64",
+                        "/usr/lib64",
+                        // GCC runtime library paths
+                        "/usr/lib/gcc/x86_64-linux-gnu/13",
+                        "/usr/lib/gcc/x86_64-linux-gnu/12",
+                        "/usr/lib/gcc/x86_64-linux-gnu/11",
+                    ],
+                    TargetArch::Aarch64 => &[
+                        "/lib/aarch64-linux-gnu",
+                        "/usr/lib/aarch64-linux-gnu",
+                        "/usr/aarch64-linux-gnu/lib",
+                    ],
+                    TargetArch::Riscv64 => &[
+                        "/lib/riscv64-linux-gnu",
+                        "/usr/lib/riscv64-linux-gnu",
+                        "/usr/riscv64-linux-gnu/lib",
+                    ],
+                    _ => &[],
+                };
 
-            for path in arch_dirs {
-                let p = PathBuf::from(path);
-                if p.exists() {
-                    paths.push(p);
+                for path in arch_dirs {
+                    let p = PathBuf::from(path);
+                    if p.exists() {
+                        paths.push(p);
+                    }
+                }
+
+                // Add generic paths
+                for path in ["/lib", "/usr/lib"] {
+                    let p = PathBuf::from(path);
+                    if p.exists() {
+                        paths.push(p);
+                    }
                 }
             }
-
-            // Add generic paths
-            for path in ["/lib", "/usr/lib"] {
-                let p = PathBuf::from(path);
-                if p.exists() {
-                    paths.push(p);
+            TargetOS::MacOS => {
+                for path in ["/usr/lib", "/usr/local/lib"] {
+                    let p = PathBuf::from(path);
+                    if p.exists() {
+                        paths.push(p);
+                    }
                 }
             }
-        }
-
-        // macOS library paths
-        #[cfg(target_os = "macos")]
-        {
-            let candidates = ["/usr/lib", "/usr/local/lib"];
-
-            for path in candidates {
-                let p = PathBuf::from(path);
-                if p.exists() {
-                    paths.push(p);
+            TargetOS::FreeBSD => {
+                for path in ["/usr/lib", "/usr/local/lib"] {
+                    let p = PathBuf::from(path);
+                    if p.exists() {
+                        paths.push(p);
+                    }
                 }
             }
+            TargetOS::Windows => {
+                // Probe Windows SDK and MSVC lib paths from environment
+                let arch_subdir = match target.arch {
+                    TargetArch::X86_64 => "x64",
+                    TargetArch::Aarch64 => "arm64",
+                    TargetArch::X86 => "x86",
+                    TargetArch::Arm => "arm",
+                    _ => "x64",
+                };
+
+                // Windows SDK (UniversalCRTSdkDir / WindowsSdkDir)
+                for env_var in ["UniversalCRTSdkDir", "WindowsSdkDir"] {
+                    if let Ok(sdk_dir) = std::env::var(env_var) {
+                        // Try versioned paths: Lib/<version>/um/<arch> and Lib/<version>/ucrt/<arch>
+                        if let Ok(version) = std::env::var("WindowsSDKVersion") {
+                            let version = version.trim_end_matches('\\');
+                            for subdir in ["um", "ucrt"] {
+                                let p = PathBuf::from(&sdk_dir).join("Lib").join(version).join(subdir).join(arch_subdir);
+                                if p.exists() {
+                                    paths.push(p);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // MSVC toolset (VCToolsInstallDir or VCINSTALLDIR)
+                for env_var in ["VCToolsInstallDir", "VCINSTALLDIR"] {
+                    if let Ok(vc_dir) = std::env::var(env_var) {
+                        let p = PathBuf::from(&vc_dir).join("lib").join(arch_subdir);
+                        if p.exists() {
+                            paths.push(p);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
 
         paths
     }
 
+    /// Get the platform-appropriate static library filename for a base name.
+    ///
+    /// Returns `lib{base}.a` on Unix (Linux, macOS, FreeBSD) and `{base}.lib` on Windows.
+    pub fn static_lib_name(base: &str, target: &Target) -> String {
+        use simple_common::target::TargetOS;
+        match target.os {
+            TargetOS::Windows => format!("{}.lib", base),
+            _ => format!("lib{}.a", base),
+        }
+    }
+
     /// Find the Simple runtime library path.
     ///
-    /// Looks for libsimple_runtime.a in:
+    /// Looks for libsimple_runtime.a (or simple_runtime.lib on Windows) in:
     /// 1. SIMPLE_RUNTIME_PATH environment variable
     /// 2. Adjacent to the current executable (for installed binaries)
     /// 3. Cargo target directory (for development)
@@ -410,9 +560,10 @@ impl NativeBinaryBuilder {
         let mut bootstrap_stubs: Vec<PathBuf> = Vec::new();
         let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
         let mut require_crypto = false;
+        let ret_insn = asm_ret_instruction(&self.options.target);
 
         if bootstrap_mode {
-            let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+            let cc = detect_c_compiler(&self.options.target);
 
             // 1) main shim
             let stub_c = temp_path.join("_bootstrap_main.c");
@@ -430,9 +581,7 @@ int main(int argc, char** argv) {
             )
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write stub: {}", e)))?;
             let status = std::process::Command::new(&cc)
-                .args(["-c", "-o"])
-                .arg(&stub_o)
-                .arg(&stub_c)
+                .args(compile_c_args(&cc, &stub_o, &stub_c))
                 .status()
                 .map_err(|e| LinkerError::LinkFailed(format!("failed to compile stub: {}", e)))?;
             if status.success() {
@@ -449,28 +598,45 @@ int main(int argc, char** argv) {
             let miss_o = temp_path.join("_bootstrap_missing.o");
             std::fs::write(
                 &miss_c,
-                r#"
+                format!(r#"
 #include <stdint.h>
 #include <stdbool.h>
-__attribute__((weak)) int64_t get_global_GLOBAL_LOG_LEVEL(void) { return 0; }
-__attribute__((weak)) void set_global_GLOBAL_LOG_LEVEL(int64_t v) { (void)v; }
-__attribute__((weak)) bool rt_file_rename(const char* a, const char* b) { (void)a; (void)b; return true; }
-__attribute__((weak)) void rt_fault_set_stack_overflow_detection(int64_t v) { (void)v; }
-__attribute__((weak)) void rt_fault_set_timeout(int64_t v) { (void)v; }
-__attribute__((weak)) void rt_fault_set_execution_limit(int64_t v) { (void)v; }
-__attribute__((weak)) void rt_debug_set_active(int64_t v) { (void)v; }
-__attribute__((weak)) void rt_debug_enable(void) {}
-__attribute__((weak)) void rt_debug_disable(void) {}
-__attribute__((weak, visibility("default"))) void* get_global_SCOPE_LEVELS(void) { return 0; }
-__attribute__((weak, visibility("default"))) int64_t count_by_severity(void) { return 0; }
-__asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
-"#,
+__attribute__((weak)) int64_t get_global_GLOBAL_LOG_LEVEL(void) {{ return 0; }}
+__attribute__((weak)) void set_global_GLOBAL_LOG_LEVEL(int64_t v) {{ (void)v; }}
+__attribute__((weak)) bool rt_file_rename(const char* a, const char* b) {{ (void)a; (void)b; return true; }}
+__attribute__((weak)) void rt_fault_set_stack_overflow_detection(int64_t v) {{ (void)v; }}
+__attribute__((weak)) void rt_fault_set_timeout(int64_t v) {{ (void)v; }}
+__attribute__((weak)) void rt_fault_set_execution_limit(int64_t v) {{ (void)v; }}
+__attribute__((weak)) void rt_debug_set_active(int64_t v) {{ (void)v; }}
+__attribute__((weak)) void rt_debug_enable(void) {{}}
+__attribute__((weak)) void rt_debug_disable(void) {{}}
+// Real time helpers: provide working wall-clock nanos/micros for bootstrap.
+#if defined(_WIN32)
+#include <windows.h>
+static inline int64_t _rt_now_nanos(void) {{
+    LARGE_INTEGER freq, count;
+    if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&count)) return 0;
+    return (int64_t)((double)count.QuadPart / (double)freq.QuadPart * 1000000000.0);
+}}
+#else
+#include <time.h>
+static inline int64_t _rt_now_nanos(void) {{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}}
+#endif
+__attribute__((weak)) int64_t rt_time_now_nanos(void) {{ return _rt_now_nanos(); }}
+__attribute__((weak)) int64_t rt_time_now_micros(void) {{ return _rt_now_nanos() / 1000; }}
+__attribute__((weak)) int64_t rt_time_now_unix_micros(void) {{ return _rt_now_nanos() / 1000; }}
+__attribute__((weak, visibility("default"))) void* get_global_SCOPE_LEVELS(void) {{ return 0; }}
+__attribute__((weak, visibility("default"))) int64_t count_by_severity(void) {{ return 0; }}
+__asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  {ret_insn}\n");
+"#, ret_insn = ret_insn),
             )
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write missing-symbol stub: {}", e)))?;
             let status = std::process::Command::new(&cc)
-                .args(["-c", "-o"])
-                .arg(&miss_o)
-                .arg(&miss_c)
+                .args(compile_c_args(&cc, &miss_o, &miss_c))
                 .status()
                 .map_err(|e| LinkerError::LinkFailed(format!("failed to compile missing-symbol stub: {}", e)))?;
             if status.success() {
@@ -482,27 +648,140 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
                 );
             }
 
-            // 3) auto-generate stubs for undefined rt_* symbols in the object.
-            if let Ok(nm_out) = std::process::Command::new("nm").arg("-u").arg(&obj_path).output() {
+            // 3) auto-generate stubs for a constrained set of undefined symbols.
+            let (nm_cmd, nm_args) = detect_nm_command(&self.options.target);
+            if let Ok(nm_out) = std::process::Command::new(&nm_cmd).args(&nm_args).arg(&obj_path).output() {
                 let mut symbols = std::collections::BTreeSet::new();
+                // Allowlist: core runtime hooks (rt_*), debugger (ds_*), globals, and a
+                // short list of compiler/service symbols that may be pruned in bootstrap.
+                let extra_keep = [
+                    "BackendPort",
+                    "BlockResolver",
+                    "AopWeaver",
+                    "CodegenPipeline",
+                    "CompilerBackendImpl",
+                    "DiContainer",
+                    "compile_module_with_backend",
+                    "Scope",
+                    "ScopeId",
+                    "SymbolTable",
+                    "LogAspect",
+                    "NativeLinkOptions",
+                    "visibilitychecker_new",
+                    "VisibilityWarning.new",
+                    "with_resolved_blocks",
+                    "write_elf_bytes_to_file",
+                    "HirLowering",
+                    "desugar_module",
+                    "optimize_mir_module",
+                    "process_async_mir",
+                    "get_effective_backend_name",
+                    "resolve_methods",
+                    "link_to_native",
+                    "link_llvm_native",
+                    "link_to_smf",
+                    "link_to_self_contained",
+                    "run_monomorphization",
+                    "run_effect_pass",
+                    "run_compile",
+                    "generate_cmake_for_modules",
+                    "SmfHeader.new_v1_1",
+                    "new",
+                    "create",
+                    "preprocess_conditionals",
+                    "load_path",
+                    "join_path",
+                    "is_absolute_path",
+                    "for_arch",
+                    "host",
+                    "parse",
+                    "parse_leak_dump",
+                    "symbols_get",
+                    "size",
+                    "speed",
+                    "RUNTIME_SYMBOL_NAMES.contains",
+                    "checker_check_symbol_access",
+                    "checker_get_warnings",
+                    "checker_record_warning",
+                    "simple_contract_check",
+                    "simple_contract_check_msg",
+                    "doctest_is_dir",
+                    "doctest_is_file",
+                    "doctest_path_contains",
+                    "doctest_path_exists",
+                    "doctest_path_has_extension",
+                    "doctest_read_file",
+                    "doctest_walk_directory",
+                    "ffi_regex_is_match",
+                    "ffi_regex_find",
+                    "ffi_regex_find_all",
+                    "ffi_regex_captures",
+                    "ffi_regex_replace",
+                    "ffi_regex_replace_all",
+                    "ffi_regex_split",
+                    "ffi_regex_split_n",
+                    "native_http_send",
+                    "native_tcp_accept",
+                    "native_tcp_bind",
+                    "native_tcp_close",
+                    "native_tcp_connect",
+                    "native_tcp_connect_timeout",
+                    "native_tcp_flush",
+                    "native_tcp_get_nodelay",
+                    "native_tcp_peek",
+                    "native_tcp_read",
+                    "native_tcp_set_backlog",
+                    "native_tcp_set_keepalive",
+                    "native_tcp_set_nodelay",
+                    "native_tcp_set_read_timeout",
+                    "native_tcp_set_write_timeout",
+                    "native_tcp_shutdown",
+                    "native_tcp_write",
+                    "native_udp_bind",
+                    "native_udp_close",
+                    "native_udp_connect",
+                    "native_udp_get_broadcast",
+                    "native_udp_get_ttl",
+                    "native_udp_join_multicast_v4",
+                    "native_udp_join_multicast_v6",
+                    "native_udp_leave_multicast_v4",
+                    "native_udp_leave_multicast_v6",
+                    "native_udp_peek",
+                    "native_udp_peek_from",
+                    "native_udp_peer_addr",
+                    "native_udp_recv",
+                    "native_udp_recv_from",
+                    "native_udp_send",
+                    "native_udp_send_to",
+                    "native_udp_set_broadcast",
+                    "native_udp_set_multicast_loop",
+                    "native_udp_set_multicast_ttl",
+                    "native_udp_set_read_timeout",
+                    "native_udp_set_ttl",
+                    "native_udp_set_write_timeout",
+                ];
+                let rt_keep = [
+                    "rt_time_now_nanos",
+                    "rt_time_now_micros",
+                    "rt_time_now_unix_micros",
+                    "rt_fault_set_stack_overflow_detection",
+                    "rt_fault_set_timeout",
+                    "rt_fault_set_execution_limit",
+                    "rt_debug_set_active",
+                    "rt_debug_enable",
+                    "rt_debug_disable",
+                    "rt_file_rename",
+                    "rt_path_parent",
+                ];
                 for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
                     if let Some(sym) = line.split_whitespace().last() {
-                        let keep = sym.starts_with("rt_")
-                            || sym.starts_with("ds_")
+                        let keep = sym.starts_with("ds_")
                             || sym.starts_with("get_global_")
                             || sym.starts_with("set_global_")
                             || sym.contains("GLOBAL_LOG_LEVEL")
                             || sym.contains("SCOPE_LEVELS")
-                            || matches!(
-                                sym,
-                                "count_by_severity"
-                                    | "future_alloc_ready"
-                                    | "future_map"
-                                    | "future_then"
-                                    | "fallback"
-                                    | "panic"
-                                    | "int"
-                            );
+                            || extra_keep.contains(&sym)
+                            || rt_keep.contains(&sym);
                         if keep {
                             symbols.insert(sym.to_string());
                         }
@@ -525,15 +804,16 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
                             ));
                         } else {
                             let clean = sym.replace('\"', "");
-                            code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  ret\\n\");\n", clean));
+                            code.push_str(&format!(
+                                "__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n",
+                                clean, ret_insn
+                            ));
                         }
                     }
                     std::fs::write(&auto_c, code)
                         .map_err(|e| LinkerError::LinkFailed(format!("failed to write auto stub: {}", e)))?;
                     let status = std::process::Command::new(&cc)
-                        .args(["-c", "-o"])
-                        .arg(&auto_o)
-                        .arg(&auto_c)
+                        .args(compile_c_args(&cc, &auto_o, &auto_c))
                         .status()
                         .map_err(|e| LinkerError::LinkFailed(format!("failed to compile auto stub: {}", e)))?;
                     if status.success() {
@@ -569,12 +849,14 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
         };
 
         // Helper to build and execute a link with given output/flags
+        let linker_flavor = self.options.target.linker_flavor();
         let mut do_link = |out_path: &Path,
                            allow_unresolved: bool,
                            extra_stubs: &[PathBuf],
                            require_crypto: bool|
          -> LinkerResult<()> {
-            let mut builder = LinkerBuilder::new();
+            let mut builder = LinkerBuilder::new()
+                .target(self.options.target);
 
             if crt_files.len() >= 2 {
                 builder = builder.object(&crt_files[0]);
@@ -582,16 +864,60 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
             }
 
             builder = builder.object(&obj_path);
+
+            // Whole-archive flags differ by linker flavor
             if !extra_stubs.is_empty() {
-                builder = builder.flag("--whole-archive");
-                for stub in extra_stubs {
-                    builder = builder.object(stub);
+                match linker_flavor {
+                    LinkerFlavor::Msvc => {
+                        // MSVC: /WHOLEARCHIVE:file for each stub
+                        for stub in extra_stubs {
+                            builder = builder.flag(format!("/WHOLEARCHIVE:{}", stub.display()));
+                        }
+                    }
+                    LinkerFlavor::Gnu => {
+                        if matches!(self.options.target.os, TargetOS::MacOS) {
+                            // macOS ld64: -force_load per archive
+                            for stub in extra_stubs {
+                                builder = builder.flag("-force_load".to_string());
+                                builder = builder.object(stub);
+                            }
+                        } else {
+                            // GNU ld / LLD: --whole-archive / --no-whole-archive
+                            builder = builder.flag("--whole-archive");
+                            for stub in extra_stubs {
+                                builder = builder.object(stub);
+                            }
+                            builder = builder.flag("--no-whole-archive");
+                        }
+                    }
+                    LinkerFlavor::WasmLd => {
+                        builder = builder.flag("--whole-archive");
+                        for stub in extra_stubs {
+                            builder = builder.object(stub);
+                        }
+                        builder = builder.flag("--no-whole-archive");
+                    }
                 }
-                builder = builder.flag("--no-whole-archive");
             }
 
+            // Allow-unresolved flags differ by linker flavor
             if allow_unresolved {
-                builder = builder.flag("--unresolved-symbols=ignore-all");
+                match linker_flavor {
+                    LinkerFlavor::Msvc => {
+                        builder = builder.flag("/FORCE:UNRESOLVED".to_string());
+                    }
+                    LinkerFlavor::Gnu => {
+                        if matches!(self.options.target.os, TargetOS::MacOS) {
+                            builder = builder.flag("-undefined".to_string());
+                            builder = builder.flag("dynamic_lookup".to_string());
+                        } else {
+                            builder = builder.flag("--unresolved-symbols=ignore-all".to_string());
+                        }
+                    }
+                    LinkerFlavor::WasmLd => {
+                        builder = builder.flag("--allow-undefined".to_string());
+                    }
+                }
             }
 
             let runtime_dir = NativeBinaryOptions::find_runtime_library_path().or_else(|| {
@@ -642,14 +968,19 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
             if self.options.verbose {
                 builder = builder.verbose();
             }
-            if !self.options.shared {
-                if let Some(dynamic_linker) = self.find_dynamic_linker() {
-                    builder = builder.flag(format!("--dynamic-linker={}", dynamic_linker.display()));
-                }
-                if !self.options.pie {
-                    builder = builder.flag("-no-pie".to_string());
+
+            // Dynamic linker and no-PIE flags (GNU/FreeBSD only, not macOS/Windows)
+            if !self.options.shared && matches!(linker_flavor, LinkerFlavor::Gnu) {
+                if !matches!(self.options.target.os, TargetOS::MacOS) {
+                    if let Some(dynamic_linker) = self.find_dynamic_linker() {
+                        builder = builder.flag(format!("--dynamic-linker={}", dynamic_linker.display()));
+                    }
+                    if !self.options.pie {
+                        builder = builder.flag("-no-pie".to_string());
+                    }
                 }
             }
+
             if crt_files.len() >= 3 {
                 builder = builder.object(&crt_files[2]); // crtn.o
             }
@@ -667,41 +998,154 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
         do_link(first_out, bootstrap_mode, &bootstrap_stubs, require_crypto)?;
 
         // If bootstrap, scan undefineds, add auto-stubs (done earlier for main.o), then relink without allow-unresolved.
-        let final_result = if bootstrap_mode {
-            // Regenerate auto-stubs from first-pass binary (captures runtime needs)
-            let nm_out = std::process::Command::new("nm")
-                .arg("-u")
-                .arg(&first_out)
-                .output()
-                .map_err(|e| LinkerError::LinkFailed(format!("failed to run nm on first-pass output: {}", e)))?;
+            let final_result = if bootstrap_mode {
+                // Regenerate auto-stubs from first-pass binary (captures runtime needs)
+                let (nm_cmd2, nm_args2) = detect_nm_command(&self.options.target);
+                let nm_out = std::process::Command::new(&nm_cmd2)
+                    .args(&nm_args2)
+                    .arg(&first_out)
+                    .output()
+                    .map_err(|e| LinkerError::LinkFailed(format!("failed to run {} on first-pass output: {}", nm_cmd2, e)))?;
 
-            let mut symbols = std::collections::BTreeSet::new();
-            for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
-                if let Some(sym) = line.split_whitespace().last() {
-                    let keep = sym.starts_with("rt_")
-                        || sym.starts_with("ds_")
-                        || sym.starts_with("get_global_")
-                        || sym.starts_with("set_global_")
-                        || sym.contains("GLOBAL_LOG_LEVEL")
-                        || sym.contains("SCOPE_LEVELS")
-                        || matches!(
-                            sym,
-                            "count_by_severity"
-                                | "future_alloc_ready"
-                                | "future_map"
-                                | "future_then"
-                                | "fallback"
-                                | "panic"
-                                | "int"
-                        );
-                    if keep {
-                        symbols.insert(sym.to_string());
+                let mut symbols = std::collections::BTreeSet::new();
+                let extra_keep = [
+                    "BackendPort",
+                    "BlockResolver",
+                    "AopWeaver",
+                    "CodegenPipeline",
+                    "CompilerBackendImpl",
+                    "DiContainer",
+                    "compile_module_with_backend",
+                    "Scope",
+                    "ScopeId",
+                    "SymbolTable",
+                    "LogAspect",
+                    "NativeLinkOptions",
+                    "visibilitychecker_new",
+                    "VisibilityWarning.new",
+                    "with_resolved_blocks",
+                    "write_elf_bytes_to_file",
+                    "HirLowering",
+                    "desugar_module",
+                    "optimize_mir_module",
+                    "process_async_mir",
+                    "get_effective_backend_name",
+                    "resolve_methods",
+                    "link_to_native",
+                    "link_llvm_native",
+                    "link_to_smf",
+                    "link_to_self_contained",
+                    "run_monomorphization",
+                    "run_effect_pass",
+                    "run_compile",
+                    "generate_cmake_for_modules",
+                    "SmfHeader.new_v1_1",
+                    "new",
+                    "create",
+                    "preprocess_conditionals",
+                    "load_path",
+                    "join_path",
+                    "is_absolute_path",
+                    "for_arch",
+                    "host",
+                    "parse",
+                    "parse_leak_dump",
+                    "symbols_get",
+                    "size",
+                    "speed",
+                    "RUNTIME_SYMBOL_NAMES.contains",
+                    "checker_check_symbol_access",
+                    "checker_get_warnings",
+                    "checker_record_warning",
+                    "simple_contract_check",
+                    "simple_contract_check_msg",
+                    "doctest_is_dir",
+                    "doctest_is_file",
+                    "doctest_path_contains",
+                    "doctest_path_exists",
+                    "doctest_path_has_extension",
+                    "doctest_read_file",
+                    "doctest_walk_directory",
+                    "ffi_regex_is_match",
+                    "ffi_regex_find",
+                    "ffi_regex_find_all",
+                    "ffi_regex_captures",
+                    "ffi_regex_replace",
+                    "ffi_regex_replace_all",
+                    "ffi_regex_split",
+                    "ffi_regex_split_n",
+                    "native_http_send",
+                    "native_tcp_accept",
+                    "native_tcp_bind",
+                    "native_tcp_close",
+                    "native_tcp_connect",
+                    "native_tcp_connect_timeout",
+                    "native_tcp_flush",
+                    "native_tcp_get_nodelay",
+                    "native_tcp_peek",
+                    "native_tcp_read",
+                    "native_tcp_set_backlog",
+                    "native_tcp_set_keepalive",
+                    "native_tcp_set_nodelay",
+                    "native_tcp_set_read_timeout",
+                    "native_tcp_set_write_timeout",
+                    "native_tcp_shutdown",
+                    "native_tcp_write",
+                    "native_udp_bind",
+                    "native_udp_close",
+                    "native_udp_connect",
+                    "native_udp_get_broadcast",
+                    "native_udp_get_ttl",
+                    "native_udp_join_multicast_v4",
+                    "native_udp_join_multicast_v6",
+                    "native_udp_leave_multicast_v4",
+                    "native_udp_leave_multicast_v6",
+                    "native_udp_peek",
+                    "native_udp_peek_from",
+                    "native_udp_peer_addr",
+                    "native_udp_recv",
+                    "native_udp_recv_from",
+                    "native_udp_send",
+                    "native_udp_send_to",
+                    "native_udp_set_broadcast",
+                    "native_udp_set_multicast_loop",
+                    "native_udp_set_multicast_ttl",
+                    "native_udp_set_read_timeout",
+                    "native_udp_set_ttl",
+                    "native_udp_set_write_timeout",
+                ];
+                let rt_keep = [
+                    "rt_time_now_nanos",
+                    "rt_time_now_micros",
+                    "rt_time_now_unix_micros",
+                    "rt_fault_set_stack_overflow_detection",
+                    "rt_fault_set_timeout",
+                    "rt_fault_set_execution_limit",
+                    "rt_debug_set_active",
+                    "rt_debug_enable",
+                    "rt_debug_disable",
+                    "rt_file_rename",
+                    "rt_path_parent",
+                ];
+                for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
+                    if let Some(sym) = line.split_whitespace().last() {
+                        let keep = sym.starts_with("ds_")
+                            || sym.starts_with("get_global_")
+                            || sym.starts_with("set_global_")
+                            || sym.contains("GLOBAL_LOG_LEVEL")
+                            || sym.contains("SCOPE_LEVELS")
+                            || extra_keep.contains(&sym)
+                            || rt_keep.contains(&sym);
+                        if keep {
+                            symbols.insert(sym.to_string());
+                        }
                     }
                 }
-            }
             if !symbols.is_empty() {
-                let auto_c = temp_path.join("_bootstrap_auto.c");
-                let auto_o = temp_path.join("_bootstrap_auto.o");
+                // Use a different filename from the first-pass auto-stub so we don't
+                // clobber the broad stub set generated from main.o.
+                let auto_c = temp_path.join("_bootstrap_auto2.c");
+                let auto_o = temp_path.join("_bootstrap_auto2.o");
                 let mut code = String::from("#include <stdint.h>\n#include <stdbool.h>\n");
                 for sym in &symbols {
                     let is_data = sym.contains("GLOBAL_") || sym.contains("SCOPE_");
@@ -715,16 +1159,17 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
                         ));
                     } else {
                         let clean = sym.replace('\"', "");
-                        code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  ret\\n\");\n", clean));
+                        code.push_str(&format!(
+                            "__asm__(\".weak {0}\\n{0}:\\n  {1}\\n\");\n",
+                            clean, ret_insn
+                        ));
                     }
                 }
                 std::fs::write(&auto_c, code)
                     .map_err(|e| LinkerError::LinkFailed(format!("failed to write auto stub: {}", e)))?;
-                let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-                let status = std::process::Command::new(&cc)
-                    .args(["-c", "-o"])
-                    .arg(&auto_o)
-                    .arg(&auto_c)
+                let cc2 = detect_c_compiler(&self.options.target);
+                let status = std::process::Command::new(&cc2)
+                    .args(compile_c_args(&cc2, &auto_o, &auto_c))
                     .status()
                     .map_err(|e| LinkerError::LinkFailed(format!("failed to compile auto stub: {}", e)))?;
                 if status.success() {
@@ -732,7 +1177,7 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
                 } else {
                     eprintln!(
                         "warning: failed to build auto stub (second pass) with {} (status {})",
-                        cc, status
+                        cc2, status
                     );
                 }
             }
@@ -767,59 +1212,84 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
     }
 
     /// Find C runtime startup files on the system.
+    ///
+    /// On Linux/FreeBSD: looks for crt1.o/Scrt1.o, crti.o, crtn.o
+    /// On macOS/Windows: returns empty (CRT handled automatically by the toolchain)
     fn find_crt_files(&self) -> LinkerResult<Vec<PathBuf>> {
-        use simple_common::target::TargetArch;
+        use simple_common::target::{TargetArch, TargetOS};
         let mut crt_files = Vec::new();
 
-        // Common locations for CRT files on Linux
-        #[cfg(target_os = "linux")]
-        {
-            // Choose paths based on target architecture
-            let candidates: Vec<&str> = match self.options.target.arch {
-                TargetArch::X86_64 => vec![
-                    "/usr/lib/x86_64-linux-gnu",
-                    "/usr/lib64",
-                    "/lib/x86_64-linux-gnu",
-                    "/lib64",
-                ],
-                TargetArch::Aarch64 => vec![
-                    "/usr/lib/aarch64-linux-gnu",
-                    "/usr/aarch64-linux-gnu/lib",
-                    "/lib/aarch64-linux-gnu",
-                ],
-                TargetArch::Riscv64 => vec![
-                    "/usr/lib/riscv64-linux-gnu",
-                    "/usr/riscv64-linux-gnu/lib",
-                    "/lib/riscv64-linux-gnu",
-                ],
-                _ => vec!["/usr/lib"],
-            };
+        match self.options.target.os {
+            TargetOS::Linux => {
+                let candidates: Vec<&str> = match self.options.target.arch {
+                    TargetArch::X86_64 => vec![
+                        "/usr/lib/x86_64-linux-gnu",
+                        "/usr/lib64",
+                        "/lib/x86_64-linux-gnu",
+                        "/lib64",
+                    ],
+                    TargetArch::Aarch64 => vec![
+                        "/usr/lib/aarch64-linux-gnu",
+                        "/usr/aarch64-linux-gnu/lib",
+                        "/lib/aarch64-linux-gnu",
+                    ],
+                    TargetArch::Riscv64 => vec![
+                        "/usr/lib/riscv64-linux-gnu",
+                        "/usr/riscv64-linux-gnu/lib",
+                        "/lib/riscv64-linux-gnu",
+                    ],
+                    _ => vec!["/usr/lib"],
+                };
 
-            for dir in candidates {
-                let dir_path = PathBuf::from(dir);
+                for dir in candidates {
+                    let dir_path = PathBuf::from(dir);
+                    let crt1 = if self.options.pie && !self.options.shared {
+                        dir_path.join("Scrt1.o")
+                    } else {
+                        dir_path.join("crt1.o")
+                    };
+                    let crti = dir_path.join("crti.o");
+                    let crtn = dir_path.join("crtn.o");
 
-                // Check for Scrt1.o (for PIE) or crt1.o (for non-PIE)
+                    if crt1.exists() && crti.exists() && crtn.exists() {
+                        crt_files.push(crti);
+                        crt_files.push(crt1);
+                        crt_files.push(crtn);
+                        break;
+                    }
+                }
+            }
+            TargetOS::FreeBSD => {
+                // FreeBSD uses the same crt scheme, in /usr/lib
+                let dir_path = PathBuf::from("/usr/lib");
                 let crt1 = if self.options.pie && !self.options.shared {
                     dir_path.join("Scrt1.o")
                 } else {
                     dir_path.join("crt1.o")
                 };
-
                 let crti = dir_path.join("crti.o");
                 let crtn = dir_path.join("crtn.o");
 
                 if crt1.exists() && crti.exists() && crtn.exists() {
                     crt_files.push(crti);
                     crt_files.push(crt1);
-                    // crtn goes at the end, we'll add it later
                     crt_files.push(crtn);
-                    break;
                 }
+            }
+            TargetOS::MacOS => {
+                // macOS uses -lSystem; no CRT object files needed
+                return Ok(crt_files);
+            }
+            TargetOS::Windows => {
+                // MSVC handles CRT automatically; no manual CRT objects needed
+                return Ok(crt_files);
+            }
+            _ => {
+                return Ok(crt_files);
             }
         }
 
-        if crt_files.is_empty() {
-            // Provide a more helpful error message for cross-compilation
+        if crt_files.is_empty() && matches!(self.options.target.os, TargetOS::Linux | TargetOS::FreeBSD) {
             let arch_name = format!("{:?}", self.options.target.arch).to_lowercase();
             return Err(LinkerError::LinkFailed(format!(
                 "could not find C runtime startup files for {} (crt1.o, crti.o, crtn.o). \
@@ -832,48 +1302,63 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
     }
 
     /// Find the dynamic linker path for the target system.
+    ///
+    /// On Linux: architecture-specific ld-linux paths
+    /// On FreeBSD: /libexec/ld-elf.so.1
+    /// On macOS/Windows: None (handled automatically by the toolchain)
     fn find_dynamic_linker(&self) -> Option<PathBuf> {
-        use simple_common::target::TargetArch;
+        use simple_common::target::{TargetArch, TargetOS};
 
-        #[cfg(target_os = "linux")]
-        {
-            let candidates: Vec<&str> = match self.options.target.arch {
-                TargetArch::X86_64 => vec![
-                    "/lib64/ld-linux-x86-64.so.2",
-                    "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-                    "/lib/ld-linux-x86-64.so.2",
-                ],
-                TargetArch::Aarch64 => vec![
-                    "/lib/ld-linux-aarch64.so.1",
-                    "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
-                ],
-                TargetArch::Riscv64 => vec![
-                    "/lib/ld-linux-riscv64-lp64d.so.1",
-                    "/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1",
-                ],
-                _ => vec![],
-            };
+        match self.options.target.os {
+            TargetOS::Linux => {
+                let candidates: Vec<&str> = match self.options.target.arch {
+                    TargetArch::X86_64 => vec![
+                        "/lib64/ld-linux-x86-64.so.2",
+                        "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+                        "/lib/ld-linux-x86-64.so.2",
+                    ],
+                    TargetArch::Aarch64 => vec![
+                        "/lib/ld-linux-aarch64.so.1",
+                        "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+                    ],
+                    TargetArch::Riscv64 => vec![
+                        "/lib/ld-linux-riscv64-lp64d.so.1",
+                        "/lib/riscv64-linux-gnu/ld-linux-riscv64-lp64d.so.1",
+                    ],
+                    _ => vec![],
+                };
 
-            for path in candidates {
-                let p = PathBuf::from(path);
-                if p.exists() {
-                    return Some(p);
+                for path in candidates {
+                    let p = PathBuf::from(path);
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+
+                // For cross-compilation, return the expected path even if it doesn't exist locally
+                if self.options.target.arch != TargetArch::host() {
+                    return match self.options.target.arch {
+                        TargetArch::X86_64 => Some(PathBuf::from("/lib64/ld-linux-x86-64.so.2")),
+                        TargetArch::Aarch64 => Some(PathBuf::from("/lib/ld-linux-aarch64.so.1")),
+                        TargetArch::Riscv64 => Some(PathBuf::from("/lib/ld-linux-riscv64-lp64d.so.1")),
+                        _ => None,
+                    };
+                }
+
+                None
+            }
+            TargetOS::FreeBSD => {
+                let p = PathBuf::from("/libexec/ld-elf.so.1");
+                if p.exists() || self.options.target.arch != TargetArch::host() {
+                    Some(p)
+                } else {
+                    None
                 }
             }
-
-            // For cross-compilation, return the expected path even if it doesn't exist locally
-            // (it will exist on the target system)
-            if self.options.target.arch != TargetArch::host() {
-                return match self.options.target.arch {
-                    TargetArch::X86_64 => Some(PathBuf::from("/lib64/ld-linux-x86-64.so.2")),
-                    TargetArch::Aarch64 => Some(PathBuf::from("/lib/ld-linux-aarch64.so.1")),
-                    TargetArch::Riscv64 => Some(PathBuf::from("/lib/ld-linux-riscv64-lp64d.so.1")),
-                    _ => None,
-                };
-            }
+            // macOS: ld64 handles dynamic linking automatically
+            // Windows: PE import tables, no Unix-style dynamic linker
+            _ => None,
         }
-
-        None
     }
 
     /// Generate symbol ordering file for layout optimization.
@@ -1173,5 +1658,181 @@ mod tests {
         let options = NativeBinaryOptions::new().output("/usr/local/bin/myapp");
 
         assert_eq!(options.output, PathBuf::from("/usr/local/bin/myapp"));
+    }
+
+    // ============================================================================
+    // Multiplatform & Multi-CPU Tests
+    // ============================================================================
+
+    #[test]
+    fn test_default_libraries_linux() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let libs = NativeBinaryOptions::default_libraries_for_target(&target);
+        assert!(libs.contains(&"c".to_string()));
+        assert!(libs.contains(&"pthread".to_string()));
+        assert!(libs.contains(&"dl".to_string()));
+        assert!(libs.contains(&"m".to_string()));
+        assert!(libs.contains(&"gcc_s".to_string()));
+        assert!(libs.contains(&"simple_runtime".to_string()));
+    }
+
+    #[test]
+    fn test_default_libraries_macos() {
+        let target = Target::new(TargetArch::Aarch64, TargetOS::MacOS);
+        let libs = NativeBinaryOptions::default_libraries_for_target(&target);
+        assert!(libs.contains(&"c".to_string()));
+        assert!(libs.contains(&"System".to_string()));
+        assert!(libs.contains(&"simple_runtime".to_string()));
+        // macOS should NOT have pthread/dl/m (provided by -lSystem)
+        assert!(!libs.contains(&"pthread".to_string()));
+        assert!(!libs.contains(&"dl".to_string()));
+    }
+
+    #[test]
+    fn test_default_libraries_windows() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        let libs = NativeBinaryOptions::default_libraries_for_target(&target);
+        assert!(libs.contains(&"c".to_string()));
+        assert!(libs.contains(&"msvcrt".to_string()));
+        assert!(libs.contains(&"kernel32".to_string()));
+        assert!(libs.contains(&"ws2_32".to_string()));
+        assert!(libs.contains(&"advapi32".to_string()));
+        assert!(libs.contains(&"simple_runtime".to_string()));
+    }
+
+    #[test]
+    fn test_default_libraries_freebsd() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::FreeBSD);
+        let libs = NativeBinaryOptions::default_libraries_for_target(&target);
+        assert!(libs.contains(&"c".to_string()));
+        assert!(libs.contains(&"pthread".to_string()));
+        assert!(libs.contains(&"m".to_string()));
+        assert!(libs.contains(&"execinfo".to_string()));
+        assert!(libs.contains(&"simple_runtime".to_string()));
+    }
+
+    #[test]
+    fn test_static_lib_name_unix() {
+        let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        assert_eq!(NativeBinaryOptions::static_lib_name("simple_runtime", &linux), "libsimple_runtime.a");
+
+        let macos = Target::new(TargetArch::Aarch64, TargetOS::MacOS);
+        assert_eq!(NativeBinaryOptions::static_lib_name("simple_runtime", &macos), "libsimple_runtime.a");
+
+        let freebsd = Target::new(TargetArch::X86_64, TargetOS::FreeBSD);
+        assert_eq!(NativeBinaryOptions::static_lib_name("simple_compiler", &freebsd), "libsimple_compiler.a");
+    }
+
+    #[test]
+    fn test_static_lib_name_windows() {
+        let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        assert_eq!(NativeBinaryOptions::static_lib_name("simple_runtime", &windows), "simple_runtime.lib");
+        assert_eq!(NativeBinaryOptions::static_lib_name("simple_compiler", &windows), "simple_compiler.lib");
+    }
+
+    #[test]
+    fn test_asm_ret_instruction_x86_64() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        assert_eq!(asm_ret_instruction(&target), "ret");
+    }
+
+    #[test]
+    fn test_asm_ret_instruction_aarch64() {
+        let target = Target::new(TargetArch::Aarch64, TargetOS::Linux);
+        assert_eq!(asm_ret_instruction(&target), "ret");
+    }
+
+    #[test]
+    fn test_asm_ret_instruction_arm32() {
+        let target = Target::new(TargetArch::Arm, TargetOS::Linux);
+        assert_eq!(asm_ret_instruction(&target), "bx lr");
+    }
+
+    #[test]
+    fn test_asm_ret_instruction_riscv() {
+        let target = Target::new(TargetArch::Riscv64, TargetOS::Linux);
+        assert_eq!(asm_ret_instruction(&target), "ret");
+    }
+
+    #[test]
+    fn test_detect_c_compiler_default() {
+        // Without CC env var set, should return platform-appropriate default
+        let saved = std::env::var("CC").ok();
+        std::env::remove_var("CC");
+
+        let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        assert_eq!(detect_c_compiler(&linux), "cc");
+
+        let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        assert_eq!(detect_c_compiler(&windows), "cl.exe");
+
+        // Restore CC if it was set
+        if let Some(cc) = saved {
+            std::env::set_var("CC", cc);
+        }
+    }
+
+    #[test]
+    fn test_is_msvc_compiler() {
+        assert!(is_msvc_compiler("cl"));
+        assert!(is_msvc_compiler("cl.exe"));
+        assert!(is_msvc_compiler("CL.EXE"));
+        assert!(!is_msvc_compiler("gcc"));
+        assert!(!is_msvc_compiler("cc"));
+        assert!(!is_msvc_compiler("clang"));
+    }
+
+    #[test]
+    fn test_compile_c_args_gnu() {
+        let args = compile_c_args("cc", Path::new("out.o"), Path::new("in.c"));
+        assert_eq!(args, vec!["-c", "-o", "out.o", "in.c"]);
+    }
+
+    #[test]
+    fn test_compile_c_args_msvc() {
+        let args = compile_c_args("cl.exe", Path::new("out.obj"), Path::new("in.c"));
+        assert_eq!(args, vec!["/c", "/Foout.obj", "in.c"]);
+    }
+
+    #[test]
+    fn test_detect_nm_command_unix() {
+        let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let (cmd, args) = detect_nm_command(&linux);
+        assert_eq!(cmd, "nm");
+        assert_eq!(args, vec!["-u"]);
+    }
+
+    #[test]
+    fn test_library_paths_for_linux_x86_64() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let paths = NativeBinaryOptions::detect_library_paths_for_target(&target);
+        // On a Linux x86_64 system, should find some paths
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert!(!paths.is_empty());
+        // On other systems, just ensure it doesn't panic
+        let _ = paths;
+    }
+
+    #[test]
+    fn test_library_paths_for_windows() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        // Should not panic even without Windows SDK installed
+        let paths = NativeBinaryOptions::detect_library_paths_for_target(&target);
+        let _ = paths;
+    }
+
+    #[test]
+    fn test_library_paths_for_freebsd() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::FreeBSD);
+        let paths = NativeBinaryOptions::detect_library_paths_for_target(&target);
+        // On FreeBSD, should find /usr/lib; on other systems just don't panic
+        let _ = paths;
+    }
+
+    #[test]
+    fn test_library_paths_for_macos() {
+        let target = Target::new(TargetArch::Aarch64, TargetOS::MacOS);
+        let paths = NativeBinaryOptions::detect_library_paths_for_target(&target);
+        let _ = paths;
     }
 }
