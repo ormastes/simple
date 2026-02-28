@@ -8,13 +8,11 @@ use std::time::Instant;
 
 use simple_compiler::{init_coverage, is_coverage_enabled};
 
-use crate::runner::Runner;
 use super::test_discovery::{discover_tests_with_skip, is_skip_test_file, matches_tag};
 use super::types::{
     TestFileResult, TestExecutionMode, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log,
 };
 use super::build_cache::BuildCache;
-use super::execution::run_test_file;
 use super::doctest::{run_doctests, run_md_doctests};
 use super::parallel::run_tests_parallel;
 use super::diagrams::generate_test_diagrams;
@@ -170,12 +168,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     initialize_profiling(&options, quiet);
     initialize_coverage(quiet);
 
-    // Skip runner creation in safe mode (each subprocess creates its own)
-    let runner = if !options.safe_mode {
-        Some(create_runner(&options))
-    } else {
-        None
-    };
+    // Runner is now created fresh per test in run_test_file() to prevent memory leaks.
+    // No shared runner needed.
 
     // Print discovery summary
     print_discovery_summary(&test_files, &options, quiet);
@@ -218,7 +212,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
             run_tests_parallel(&test_files, &options, quiet)
         } else {
             // Sequential execution (default - single-threaded)
-            execute_test_files(runner.as_ref(), &test_files, &options, build_cache.as_ref(), quiet)
+            execute_test_files(&test_files, &options, build_cache.as_ref(), quiet)
         };
 
     // Determine if all tests were run (no filters applied)
@@ -412,17 +406,6 @@ fn initialize_coverage(quiet: bool) {
     }
 }
 
-/// Create test runner with appropriate GC settings
-fn create_runner(options: &TestOptions) -> Runner {
-    if options.gc_off {
-        Runner::new_no_gc()
-    } else if options.gc_log {
-        Runner::new_with_gc_logging()
-    } else {
-        Runner::new()
-    }
-}
-
 /// Prompt the user to qualify any unqualified ignored tests from this run.
 /// Disabled by setting SIMPLE_QUALIFY_INTERACTIVE=0.
 fn prompt_for_ignored_qualifications() {
@@ -600,7 +583,6 @@ fn shuffle_tests(test_files: &mut Vec<PathBuf>, seed: u64) {
 
 /// Execute test files and collect results
 fn execute_test_files(
-    runner: Option<&Runner>,
     test_files: &[PathBuf],
     options: &TestOptions,
     build_cache: Option<&BuildCache>,
@@ -673,24 +655,9 @@ fn execute_test_files(
                 }
             }
             TestExecutionMode::Interpreter => {
-                if options.safe_mode {
-                    // Safe mode - run in separate process
-                    super::execution::run_test_file_safe_mode(path, options)
-                } else if let Some(runner) = runner {
-                    // Normal mode - run in same process
-                    super::execution::run_test_file(runner, path)
-                } else {
-                    TestFileResult {
-                        path: path.to_path_buf(),
-                        passed: 0,
-                        failed: 1,
-                        skipped: 0,
-                        ignored: 0,
-                        duration_ms: 0,
-                        error: Some("No runner available (internal error)".to_string()),
-                        individual_results: vec![],
-                    }
-                }
+                // run_test_file_with_options handles both safe and normal mode.
+                // In normal mode, a fresh Runner is created per test to prevent memory leaks.
+                super::execution::run_test_file_with_options(path, options)
             }
         };
         total_passed += result.passed;

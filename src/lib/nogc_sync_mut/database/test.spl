@@ -105,6 +105,12 @@ fn create_test_database(path: text) -> TestDatabase:
 # TestDatabase
 # ============================================================================
 
+fn unwrap_text(opt: text?, default: text) -> text:
+    if opt != nil: opt else: default
+
+fn unwrap_i64(opt: i64?, default: i64) -> i64:
+    if opt != nil: opt else: default
+
 class TestDatabase:
     db: SdnDatabase
 
@@ -114,7 +120,7 @@ class TestDatabase:
         val now = timestamp_to_iso(rt_timestamp_now())
 
         var runs_table_opt = self.db.get_table_mut("test_runs")
-        if not runs_table_opt.?:
+        if runs_table_opt == nil:
             return ""
 
         var runs_table = runs_table_opt.unwrap()
@@ -141,12 +147,12 @@ class TestDatabase:
     # End test run
     me end_run(run_id: text, status: RunStatus) -> bool:
         var runs_table_opt = self.db.get_table_mut("test_runs")
-        if not runs_table_opt.?:
+        if runs_table_opt == nil:
             return false
 
         var runs_table = runs_table_opt.unwrap()
         val row_opt = runs_table.get_row(run_id)
-        if not row_opt.?:
+        if row_opt == nil:
             return false
 
         var row = row_opt.unwrap()
@@ -165,7 +171,8 @@ class TestDatabase:
         row.set("run_id", run_id)
         row.set("status", test_status_to_string(result.status))
         row.set("duration_ms", "{result.duration_ms}")
-        row.set("error_message", result.error_message ?? "")
+        val err_msg = unwrap_text(result.error_message, "")
+        row.set("error_message", err_msg)
         row.set("timestamp", result.timestamp)
         row.set("valid", "true")
 
@@ -239,7 +246,7 @@ class TestDatabase:
 
         # Validate test_runs table
         val runs_table_opt = self.db.get_table("test_runs")
-        if not runs_table_opt.?:
+        if runs_table_opt == nil:
             issues.push(DbIssue(
                 db_name: db_name,
                 severity: "error",
@@ -269,7 +276,7 @@ class TestDatabase:
             # Stale running runs
             var stale_count = 0
             for row in runs_table.valid_rows():
-                val status = row.get("status") ?? ""
+                val status = unwrap_text(row.get("status"), "")
                 if status == "running":
                     stale_count = stale_count + 1
             if stale_count > 0:
@@ -283,12 +290,12 @@ class TestDatabase:
 
             # Count consistency check: passed + failed <= test_count
             for row in runs_table.valid_rows():
-                val run_id = row.get("run_id") ?? "unknown"
-                val test_count = row.get_i64("test_count") ?? 0
-                val passed = row.get_i64("passed") ?? 0
-                val failed = row.get_i64("failed") ?? 0
-                val crashed = row.get_i64("crashed") ?? 0
-                val timed_out = row.get_i64("timed_out") ?? 0
+                val run_id = unwrap_text(row.get("run_id"), "unknown")
+                val test_count = unwrap_i64(row.get_i64("test_count"), 0)
+                val passed = unwrap_i64(row.get_i64("passed"), 0)
+                val failed = unwrap_i64(row.get_i64("failed"), 0)
+                val crashed = unwrap_i64(row.get_i64("crashed"), 0)
+                val timed_out = unwrap_i64(row.get_i64("timed_out"), 0)
                 val total_results = passed + failed + crashed + timed_out
                 if total_results > test_count and test_count > 0:
                     issues.push(DbIssue(
@@ -301,7 +308,7 @@ class TestDatabase:
 
         # Validate test_results table
         val results_table_opt = self.db.get_table("test_results")
-        if not results_table_opt.?:
+        if results_table_opt == nil:
             issues.push(DbIssue(
                 db_name: db_name,
                 severity: "error",

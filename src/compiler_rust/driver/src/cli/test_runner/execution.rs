@@ -10,6 +10,13 @@ use crate::runner::Runner;
 use super::types::{IndividualTestResult, TestFileResult, TestExecutionMode};
 use super::build_cache::BuildCache;
 
+use simple_compiler::i18n::clear_registry as clear_i18n_state;
+use simple_compiler::interpreter::{
+    clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state,
+    clear_io_state, clear_macro_state, clear_module_cache, clear_net_state,
+};
+use simple_runtime::value::clear_all_runtime_registries;
+
 /// Parse test output to extract pass/fail counts
 pub fn parse_test_output(output: &str) -> (usize, usize) {
     // Look for patterns like "N examples, M failures"
@@ -119,21 +126,37 @@ fn strip_ansi_codes(s: &str) -> String {
 }
 
 /// Run a single test file with options (wrapper for compatibility)
-pub fn run_test_file_with_options(runner: &Runner, path: &Path, options: &super::types::TestOptions) -> TestFileResult {
+pub fn run_test_file_with_options(path: &Path, options: &super::types::TestOptions) -> TestFileResult {
     if options.safe_mode {
         run_test_file_safe_mode(path, options)
     } else {
-        run_test_file(runner, path)
+        run_test_file(path, options)
     }
 }
 
-/// Run a single test file
-pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
+/// Run a single test file with a fresh Runner to prevent memory leaks.
+///
+/// Creates a new Runner per test so that the GC allocator, SmfLoader, and all
+/// internal compiler state are dropped after each test. Combined with explicit
+/// cleanup of thread-local registries, this prevents both inter-test accumulation
+/// and intra-test leaks from persisting across test files.
+pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFileResult {
     let start = Instant::now();
 
-    // Clear BDD state before each file to prevent test result accumulation
-    // across files (imported specs would otherwise duplicate into this file's results)
-    simple_compiler::interpreter::clear_bdd_state();
+    // Clear all thread-local interpreter state to prevent leaks between tests.
+    clear_interpreter_state();
+    clear_bdd_state();
+    clear_module_cache();
+    clear_class_instantiation_state();
+    clear_macro_state();
+    clear_effects_state();
+    clear_io_state();
+    clear_net_state();
+    clear_i18n_state();
+    clear_all_runtime_registries();
+
+    // Create a fresh Runner per test so ExecCore/GcAllocator/SmfLoader don't accumulate.
+    let runner = create_test_runner(options);
 
     match runner.run_file(path) {
         Ok(exit_code) => {
@@ -306,15 +329,25 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
     }
 }
 
-/// Find the simple binary path
+/// Find the simple binary path.
+///
+/// Prefers the current executable so child subprocesses use the same binary
+/// as the parent (ensuring consistent behavior and fixes).
 fn find_simple_binary() -> PathBuf {
-    // Try to find the binary in common locations
+    // Prefer the current executable — ensures child uses the same binary as parent
+    if let Ok(exe) = std::env::current_exe() {
+        if exe.exists() {
+            return exe;
+        }
+    }
+
+    // Fallback: try common locations
     let candidates = vec![
-        PathBuf::from("./bin/wrappers/simple"),              // Wrapper script (preferred)
-        PathBuf::from("./rust/target/debug/simple_runtime"), // Direct runtime (debug)
-        PathBuf::from("./rust/target/release/simple_runtime"), // Direct runtime (release)
-        PathBuf::from("./target/debug/simple"),              // Current binary (debug)
-        PathBuf::from("./target/release/simple"),            // Current binary (release)
+        PathBuf::from("./bin/release/simple"),               // Release binary
+        PathBuf::from("./bin/wrappers/simple"),              // Wrapper script
+        PathBuf::from("./target/bootstrap/simple"),          // Bootstrap build
+        PathBuf::from("./target/release/simple"),            // Cargo release
+        PathBuf::from("./target/debug/simple"),              // Cargo debug
         PathBuf::from("simple"),                             // In PATH
     ];
 
@@ -324,15 +357,6 @@ fn find_simple_binary() -> PathBuf {
         }
     }
 
-    // If we're running as the simple binary, use the current executable
-    if let Ok(exe) = std::env::current_exe() {
-        let filename = exe.file_name().and_then(|n| n.to_str());
-        if filename == Some("simple") || filename == Some("simple_runtime") {
-            return exe;
-        }
-    }
-
-    // Default to looking in target/debug
     PathBuf::from("./target/debug/simple")
 }
 
@@ -432,6 +456,17 @@ pub fn run_test_file_native_mode(
 ) -> TestFileResult {
     eprintln!("[INFO] Native mode for tests not supported, using safe mode");
     run_test_file_safe_mode(path, options)
+}
+
+/// Create a Runner for test execution with appropriate GC settings.
+fn create_test_runner(options: &super::types::TestOptions) -> Runner {
+    if options.gc_off {
+        Runner::new_no_gc()
+    } else if options.gc_log {
+        Runner::new_with_gc_logging()
+    } else {
+        Runner::new()
+    }
 }
 
 #[cfg(test)]
