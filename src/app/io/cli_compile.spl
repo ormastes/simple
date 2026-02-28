@@ -5,10 +5,9 @@
 # Helpers from cli_ops.spl
 use app.io.cli_ops.{rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl}
 
-# Pure Simple compiler driver
-use compiler.driver.driver.{CompilerDriver, aot_file, aot_c_file, compile_to_smf}
-use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult, OutputFormat}
-use compiler.backend.build_native.{BuildConfig, BuildResult, build_native, build_native_llvm}
+# Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
+use compiler.driver.driver.{CompilerDriver, CompilerDriver__create, CompilerDriver__run_compile, aot_file, aot_c_file, compile_to_smf}
+use compiler.driver.driver_types.{CompileOptions, CompileOptions__default, CompileMode, CompileResult, OutputFormat}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
@@ -26,10 +25,10 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
         _cli_eprint("[Pure Simple Compiler] Compiling {source_file} -> {out}")
 
     # Use the Pure Simple compiler driver directly
-    val options = CompileOptions.default()
+    # (use desugared __default/__create for interpreter compatibility)
+    var options = CompileOptions__default()
     options.input_files = [source_file]
     options.output_file = out
-    options.mode = CompileMode.Aot
     options.verbose = verbose
     if release:
         options.release = true
@@ -37,14 +36,8 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     if backend != "" and backend != "auto":
         options.backend = backend
 
-    # Set output format
-    if output_format == "smf":
-        options.output_format = OutputFormat.Smf
-    elif output_format == "self-contained" or output_format == "sc":
-        options.output_format = OutputFormat.SelfContained
-
-    val driver = CompilerDriver.create(options)
-    val result = driver.compile()
+    val driver = CompilerDriver__create(options)
+    val result = CompilerDriver__run_compile(driver)
 
     match result:
         case CompileResult.Success(_):
@@ -195,44 +188,20 @@ fn cli_compile(args: [str]) -> i64:
         return compile_c_backend(source_file, output_file, verbose)
 
     if emit == "native":
-        # Use the pure-Simple native build pipeline
+        # Use the pure-Simple native compile pipeline via standalone script
         var out = output_file
         if out == "":
             out = source_file.replace(".spl", "")
-        var config = BuildConfig.default(source_file, out)
-        config.verbose = verbose
-        if release:
-            config.optimization = 2
-        if march_target != "":
-            config.target_cpu = march_target
-        if use_lto:
-            config.linker_flags = config.linker_flags + ["--lto"]
-
-        # Use LLVM backend if requested
-        val build_result = if backend == "llvm":
-            config.backend = "llvm"
-            build_native_llvm(config)
-        else:
-            build_native(config)
-
-        match build_result:
-            case BuildResult.Success(output_path, stats):
-                if verbose:
-                    print "Native build successful: {output_path}"
-                    print "  Size: {stats.output_size} bytes"
-                    print "  Source files: {stats.source_files}"
-                    print "  Compile time: {stats.compile_time_ms}ms"
-                    print "  Link time: {stats.link_time_ms}ms"
-                return 0
-            case BuildResult.CompileError(file, msg):
-                _cli_eprint("Compile error in {file}: {msg}")
-                return 1
-            case BuildResult.LinkError(msg):
-                _cli_eprint("Link error: {msg}")
-                return 1
-            case BuildResult.Error(msg):
-                _cli_eprint("Build error: {msg}")
-                return 1
+        val simple_bin = _find_simple_binary()
+        var run_args: [text] = ["src/app/compile/native.spl", source_file, out]
+        if verbose:
+            run_args.push("--verbose")
+        val (stdout, stderr, exit_code) = _cli_process_run(simple_bin, run_args)
+        if stdout != "":
+            print stdout
+        if stderr != "":
+            _cli_eprint(stderr)
+        return exit_code
 
     if target.starts_with("baremetal-"):
         return compile_baremetal(source_file, target, emit, output_file, verbose)
@@ -492,25 +461,23 @@ fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
 
 # Native build: compile entire project to native binary via Pure Simple pipeline
 fn cli_native_build(args: [text]) -> i64:
-    # Parse args into BuildConfig
+    # Parse args and delegate to native.spl standalone script
     var source = ""
     var output = ""
     var verbose = false
-    var backend_name = ""
 
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "-o":
+        if arg == "native-build":
+            i = i + 1
+            # skip command name
+        elif arg == "-o":
             i = i + 1
             if i < args.len():
                 output = args[i]
         elif arg == "--verbose" or arg == "-v":
             verbose = true
-        elif arg == "--backend=llvm":
-            backend_name = "llvm"
-        elif arg.starts_with("--backend="):
-            backend_name = arg.substring(10)
         elif not arg.starts_with("-"):
             if source == "":
                 source = arg
@@ -523,32 +490,15 @@ fn cli_native_build(args: [text]) -> i64:
     if output == "":
         output = source.replace(".spl", "")
 
-    var config = BuildConfig.default(source, output)
-    config.verbose = verbose
-    if backend_name == "llvm":
-        config.backend = "llvm"
-
-    val result = if backend_name == "llvm":
-        build_native_llvm(config)
-    else:
-        build_native(config)
-
-    match result:
-        case BuildResult.Success(out, stats):
-            print "Build successful: {out}"
-            if verbose:
-                print "  Size: {stats.output_size} bytes"
-                print "  Compile time: {stats.compile_time_ms}ms"
-                print "  Link time: {stats.link_time_ms}ms"
-            return 0
-        case BuildResult.CompileError(file, msg):
-            _cli_eprint("Compile error in {file}: {msg}")
-            return 1
-        case BuildResult.LinkError(msg):
-            _cli_eprint("Link error: {msg}")
-            return 1
-        case BuildResult.Error(msg):
-            _cli_eprint("Build error: {msg}")
-            return 1
+    val simple_bin = _find_simple_binary()
+    var run_args: [text] = ["src/app/compile/native.spl", source, output]
+    if verbose:
+        run_args.push("--verbose")
+    val (stdout, stderr, exit_code) = _cli_process_run(simple_bin, run_args)
+    if stdout != "":
+        print stdout
+    if stderr != "":
+        _cli_eprint(stderr)
+    return exit_code
 
 export cli_compile, compile_baremetal, compile_vhdl, cli_native_build
