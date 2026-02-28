@@ -4,46 +4,46 @@
 # memory and file-backed mappings for the loader. Keeps a thin Simple layer for
 # basic helpers and statistics.
 
-use app.io.mod (file_size_for_mmap)
+extern fn rt_file_size(path: text) -> i64
 
-# Low-level syscall FFI (generated in app/ffi_gen/specs/mmap_syscalls.spl)
-extern fn rt_mmap(addr: i64, length: i64, prot: i32, flags: i32, fd: i32, offset: i64) -> i64
-extern fn rt_munmap(addr: i64, length: i64) -> i32
-extern fn rt_mprotect(addr: i64, length: i64, prot: i32) -> i32
-extern fn rt_madvise(addr: i64, length: i64, advice: i32) -> i32
-extern fn rt_msync(addr: i64, length: i64, flags: i32) -> i32
-extern fn rt_mlock(addr: i64, length: i64) -> i32
-extern fn rt_munlock(addr: i64, length: i64) -> i32
-extern fn rt_open_fd(path: text, flags: i32, mode: i32) -> i32
-extern fn rt_close_fd(fd: i32) -> i32
+# Low-level syscall FFI (raw address-based wrappers in C runtime)
+extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
+extern fn rt_munmap_raw(addr: i64, length: i64) -> i64
+extern fn rt_mprotect(addr: i64, length: i64, prot: i64) -> i64
+extern fn rt_madvise_raw(addr: i64, length: i64, advice: i64) -> i64
+extern fn rt_msync_flags(addr: i64, length: i64, flags: i64) -> i64
+extern fn rt_mlock(addr: i64, length: i64) -> i64
+extern fn rt_munlock(addr: i64, length: i64) -> i64
+extern fn rt_open_fd(path: text, flags: i64, mode: i64) -> i64
+extern fn rt_close_fd(fd: i64) -> i64
 extern fn rt_page_size() -> i64
 
 # ============================================================================
 # Constants (libc values)
 # ============================================================================
 
-val PROT_NONE: i32 = 0x0
-val PROT_READ: i32 = 0x1
-val PROT_WRITE: i32 = 0x2
-val PROT_EXEC: i32 = 0x4
+val PROT_NONE: i64 = 0x0
+val PROT_READ: i64 = 0x1
+val PROT_WRITE: i64 = 0x2
+val PROT_EXEC: i64 = 0x4
 
-val MAP_SHARED: i32 = 0x1
-val MAP_PRIVATE: i32 = 0x2
-val MAP_ANONYMOUS: i32 = 0x20
+val MAP_SHARED: i64 = 0x1
+val MAP_PRIVATE: i64 = 0x2
+val MAP_ANONYMOUS: i64 = 0x20
 val MAP_FAILED: i64 = -1
-val O_RDONLY: i32 = 0x0
+val O_RDONLY: i64 = 0x0
 
-val MADV_NORMAL: i32 = 0
-val MADV_RANDOM: i32 = 1
-val MADV_SEQUENTIAL: i32 = 2
-val MADV_WILLNEED: i32 = 3
-val MADV_DONTNEED: i32 = 4
+val MADV_NORMAL: i64 = 0
+val MADV_RANDOM: i64 = 1
+val MADV_SEQUENTIAL: i64 = 2
+val MADV_WILLNEED: i64 = 3
+val MADV_DONTNEED: i64 = 4
 
 # ============================================================================
 # Native mmap Implementation (Simple + unsafe)
 # ============================================================================
 
-fn native_mmap_file(path: text, prot: i32, flags: i32, offset: i64, length: i64) -> (i64, i64):
+fn native_mmap_file(path: text, prot: i64, flags: i64, offset: i64, length: i64) -> (i64, i64):
     """Map file using native Simple unsafe operations.
 
     val _tv_0 = [address, size]
@@ -55,17 +55,16 @@ fn native_mmap_file(path: text, prot: i32, flags: i32, offset: i64, length: i64)
         return [0, 0]
 
     # Get file size if length == 0
-    val actual_size = if length == 0:
-        val size = file_size_for_mmap(path)
+    var actual_size = length
+    if length == 0:
+        val size = rt_file_size(path)
         if size < 0:
-            unsafe_close(fd)
+            _ = rt_close_fd(fd)
             return [0, 0]
-        size
-    else:
-        length
+        actual_size = size
 
     # Call mmap syscall
-    val addr = rt_mmap(0, actual_size, prot, flags, fd, offset)
+    val addr = rt_mmap_raw(0, actual_size, prot, flags, fd, offset)
 
     # Close file descriptor (mmap keeps reference)
     _ = rt_close_fd(fd)
@@ -78,7 +77,7 @@ fn native_mmap_file(path: text, prot: i32, flags: i32, offset: i64, length: i64)
 
 fn native_munmap(address: i64, size: i64) -> bool:
     """Unmap memory region."""
-    rt_munmap(address, size) == 0
+    rt_munmap_raw(address, size) == 0
 
 fn native_mmap_read_bytes(address: i64, offset: i64, length: i64) -> [u8]:
     """Read bytes from mapped memory using unsafe pointer operations."""
@@ -118,14 +117,14 @@ fn native_mmap_read_string(address: i64, offset: i64, max_length: i64) -> text:
         val slice = slice_from_raw_parts(ptr, len)
         str_from_utf8_lossy(slice)
 
-fn native_madvise(address: i64, size: i64, advice: i32) -> bool:
+fn native_madvise(address: i64, size: i64, advice: i64) -> bool:
     """Give kernel memory advice."""
-    rt_madvise(address, size, advice) == 0
+    rt_madvise_raw(address, size, advice) == 0
 
 fn native_msync(address: i64, size: i64, is_async: bool) -> bool:
     """Sync memory to disk."""
     val flags = if is_async: 1 else: 2  # MS_ASYNC=1, MS_SYNC=2
-    rt_msync(address, size, flags) == 0
+    rt_msync_flags(address, size, flags) == 0
 
 fn native_mlock(address: i64, size: i64) -> bool:
     """Lock memory in RAM."""
@@ -147,7 +146,7 @@ fn native_alloc_exec_memory(size: i64) -> i64:
     val prot = PROT_READ | PROT_WRITE | PROT_EXEC
     val flags = MAP_PRIVATE | MAP_ANONYMOUS
 
-    val addr = rt_mmap(0, size, prot, flags, -1, 0)
+    val addr = rt_mmap_raw(0, size, prot, flags, -1, 0)
 
     if addr == MAP_FAILED:
         return 0
@@ -162,7 +161,7 @@ fn native_alloc_rw_memory(size: i64) -> i64:
     val prot = PROT_READ | PROT_WRITE
     val flags = MAP_PRIVATE | MAP_ANONYMOUS
 
-    val addr = rt_mmap(0, size, prot, flags, -1, 0)
+    val addr = rt_mmap_raw(0, size, prot, flags, -1, 0)
 
     if addr == MAP_FAILED:
         return 0
@@ -171,7 +170,7 @@ fn native_alloc_rw_memory(size: i64) -> i64:
 
 fn native_free_exec_memory(address: i64, size: i64) -> bool:
     """Free executable memory."""
-    val result = rt_munmap(address, size)
+    val result = rt_munmap_raw(address, size)
 
     if result == 0:
         # Remove from tracking

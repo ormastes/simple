@@ -16,30 +16,36 @@
 # the stored program with a one-off wrapper call. Good enough for demos/tests.
 
 use std.log.{debug}
-use std.nogc_sync_mut.io.process_ops.{shell}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.path as path
 
-fn _write_file(path: text, content: text) -> bool:
-    val cmd = "cat > '{path}' <<'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF"
-    val res = shell(cmd)
-    res.exit_code == 0
+# Pure Simple compiler driver for in-process interpretation
+use compiler.driver.driver.{interpret_file, CompilerDriver}
+use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult}
+
+# File I/O via runtime FFI (no shell dependency)
+extern fn rt_file_write(path: text, content: text) -> i64
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+fn _write_file(fpath: text, content: text) -> bool:
+    rt_file_write(fpath, content) == 0
 
 fn _ensure_jit_dir():
-    shell("mkdir -p tmp/jit >/dev/null 2>&1")
+    rt_dir_create("tmp/jit", true)
 
 fn _cleanup_old_jit_files():
-    shell("find tmp/jit -type f -mtime +1 -delete >/dev/null 2>&1")
+    # No-op: rely on cleanup at session end instead of shelling out
+    pass
 
-fn _read_file(path: text) -> text:
-    val res = shell("cat '{path}'")
-    if res.exit_code == 0:
-        res.stdout
-    else:
-        ""
+fn _read_file(fpath: text) -> text:
+    val result = rt_file_read_text(fpath)
+    result ?? ""
 
-fn _delete_file(path: text):
-    shell("rm -f '{path}'")
+fn _delete_file(fpath: text):
+    rt_file_delete(fpath)
 
 fn rt_set_jit_backend(backend: text) -> bool:
     true  # accepted; actual backend is interpreted
@@ -113,10 +119,23 @@ fn _build_code(source: text, name: text, args: [i64]) -> text:
     "{source}\nprint {name}({arg_str})"
 
 fn _run_code(code: text) -> (text, i64):
-    # Use the installed simple binary to interpret the snippet
-    val cmd = "bin/simple -c \"{code.replace(\"\\\"\", \"\\\\\\\"\")}\""
-    val res = shell(cmd)
-    (res.stdout.trim(), res.exit_code)
+    # Write code to a temp file and interpret in-process via CompilerDriver
+    val tmp_path = "tmp/jit/_jit_run_{current_time_ms()}.spl"
+    if not _write_file(tmp_path, code):
+        return ("", 1)
+
+    val result = interpret_file(tmp_path)
+    _delete_file(tmp_path)
+
+    match result:
+        case CompileResult.Success(output):
+            val out_text = if output.?:
+                "{output}"
+            else:
+                ""
+            return (out_text, 0)
+        case _:
+            return ("", 1)
 
 fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64:
     val stored = _read_file(_handle_path(handle))
@@ -248,11 +267,11 @@ fn jit_get_backend() -> JitBackend:
 # --- Capability detection ---
 
 fn jit_available() -> bool:
-    debug("jit", "jit_available() -> true (soft exec_manager always available)")
-    true  # soft exec_manager is always available in-process
+    debug("jit", "jit_available() -> true (in-process interpreter)")
+    true  # In-process interpreter always available
 
 fn jit_native_available() -> bool:
-    debug("jit", "Native JIT available: true (standalone native build)")
+    debug("jit", "Native JIT available: true (in-process CompilerDriver)")
     true
 
 # --- Execution Manager Creation ---
