@@ -1,8 +1,13 @@
 # Duplication Check - Build System Integration
 #
-# Runs code duplication detection as part of quality phase
+# Runs code duplication detection as part of quality phase.
+# Calls the duplicate_check library API directly (in-process).
 
-use app.io.{shell, file_exists, file_read}
+use app.io.{file_exists, file_read}
+use app.duplicate_check.config.{default_config, DuplicationConfig}
+use app.duplicate_check.detector.{find_duplicates, collect_files}
+use app.duplicate_check.formatter.{write_sdn_database, print_text_report}
+use app.duplicate_check.cache.{new_token_cache_manager}
 
 struct DuplicationCheckConfig:
     enabled: bool
@@ -52,34 +57,27 @@ fn run_duplication_check(config: DuplicationCheckConfig) -> DuplicationCheckResu
 
     print "Running duplication check..."
 
-    # Build command with options
-    var cmd = "bin/simple duplicate-check src/"
-    cmd = cmd + " --min-tokens={config.min_tokens}"
-    cmd = cmd + " --min-lines={config.min_lines}"
-    cmd = cmd + " --min-impact={config.min_impact}"
-    cmd = cmd + " --format=sdn"
+    # Call duplicate_check library API directly (in-process, no subprocess)
+    var det_config = default_config()
+    det_config.min_tokens = config.min_tokens
+    det_config.min_lines = config.min_lines
+    det_config.min_impact = config.min_impact
+    det_config.output_format = "sdn"
+    det_config.report_path = config.report_path
 
-    # Run duplicate-check command
-    val result = shell(cmd)
+    val files = collect_files("src/", det_config)
+    val cache_manager = new_token_cache_manager()
+    val groups = find_duplicates(files, det_config, cache_manager)
 
-    # Parse results from SDN database
-    var duplicate_groups = 0
+    # Write SDN report
+    write_sdn_database(groups, config.report_path)
+
+    val duplicate_groups = groups.len()
+
+    # Count total duplicated lines
     var total_lines = 0
-
-    if file_exists(config.report_path):
-        val content = file_read(config.report_path)
-        val lines = content.split("\n")
-
-        for line in lines:
-            val trimmed = line.trim()
-            if trimmed.starts_with("total_groups:"):
-                val parts = trimmed.split(":")
-                if parts.len() >= 2:
-                    duplicate_groups = int(parts[1].trim())
-            elif trimmed.starts_with("total_lines:"):
-                val parts = trimmed.split(":")
-                if parts.len() >= 2:
-                    total_lines = int(parts[1].trim())
+    for group in groups:
+        total_lines = total_lines + group.total_lines
 
     # Determine success based on configuration
     var success = true
