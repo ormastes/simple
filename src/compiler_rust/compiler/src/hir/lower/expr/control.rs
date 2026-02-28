@@ -478,9 +478,7 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            Pattern::MutIdentifier(_)
-            | Pattern::MoveIdentifier(_)
-            | Pattern::Rest => Ok(HirExpr {
+            Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_) | Pattern::Rest => Ok(HirExpr {
                 kind: HirExprKind::Bool(true),
                 ty: TypeId::BOOL,
             }),

@@ -513,10 +513,7 @@ impl Lowerer {
             // Static method reference — produce Global("ClassName.method")
             {
                 let qualified = format!("{}.{}", class_name, method_name);
-                let ty = self.method_return_types
-                    .get(&qualified)
-                    .copied()
-                    .unwrap_or(TypeId::ANY);
+                let ty = self.method_return_types.get(&qualified).copied().unwrap_or(TypeId::ANY);
                 return Ok(HirExpr {
                     kind: HirExprKind::Global(qualified),
                     ty,

@@ -17,8 +17,8 @@ pub use actor::{ActorHandle, ActorSpawner, Message, ThreadSpawner};
 
 pub mod runtime_symbols;
 pub use runtime_symbols::{
-    AbiVersion, RuntimeSymbolProvider, RuntimeSymbolTier, RUNTIME_SYMBOL_NAMES,
-    symbol_tier_of, runtime_symbols_for_baremetal,
+    AbiVersion, RuntimeSymbolProvider, RuntimeSymbolTier, RUNTIME_SYMBOL_NAMES, symbol_tier_of,
+    runtime_symbols_for_baremetal,
 };
 
 /// Common interface for dynamically loaded modules.
@@ -189,9 +189,7 @@ pub mod fault_detection;
 pub mod gc;
 
 pub mod target;
-pub use target::{
-    LinkerFlavor, PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError,
-};
+pub use target::{LinkerFlavor, PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError};
 
 pub mod diagnostic;
 pub use diagnostic::{Diagnostic, EasyFix, FixConfidence, Label, Replacement, Severity, Span};

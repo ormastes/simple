@@ -925,15 +925,11 @@ impl Lowerer {
                     ty: TypeId::BOOL,
                 })
             }
-            Pattern::MutIdentifier(_)
-            | Pattern::MoveIdentifier(_)
-            | Pattern::Rest => Ok(HirExpr {
+            Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_) | Pattern::Rest => Ok(HirExpr {
                 kind: HirExprKind::Bool(true),
                 ty: TypeId::BOOL,
             }),
-            Pattern::Typed { pattern, .. } => {
-                self.lower_pattern_condition_stmt(subject_idx, subject_ty, pattern, ctx)
-            }
+            Pattern::Typed { pattern, .. } => self.lower_pattern_condition_stmt(subject_idx, subject_ty, pattern, ctx),
             Pattern::Tuple(_elements) => Ok(HirExpr {
                 kind: HirExprKind::Bool(true),
                 ty: TypeId::BOOL,

@@ -64,7 +64,11 @@ pub fn compile_condition_probe<M: Module>(
     let condition_id_val = builder.ins().iconst(types::I32, condition_id as i64);
     let probe_func_id = ctx.runtime_funcs["rt_condition_probe"];
     let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-    adapted_call(builder, probe_func_ref, &[decision_id_val, condition_id_val, result_val]);
+    adapted_call(
+        builder,
+        probe_func_ref,
+        &[decision_id_val, condition_id_val, result_val],
+    );
 
     Ok(())
 }

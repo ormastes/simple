@@ -307,7 +307,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_ends_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_eq", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_len", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]),   // RuntimeValue string -> raw ptr
+    RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]), // RuntimeValue string -> raw ptr
     RuntimeFuncSpec::new("rt_string_char_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_split", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_replace", &[I64, I64, I64], &[I64]),
@@ -1189,16 +1189,26 @@ mod tests {
             *counts.entry(tier_of(spec.name)).or_insert(0usize) += 1;
         }
         // Each tier should have at least a few functions
-        assert!(*counts.get(&RuntimeFuncTier::Core).unwrap_or(&0) >= 5,
-            "Core tier should have at least 5 functions");
-        assert!(*counts.get(&RuntimeFuncTier::Alloc).unwrap_or(&0) >= 20,
-            "Alloc tier should have at least 20 functions");
-        assert!(*counts.get(&RuntimeFuncTier::Sys).unwrap_or(&0) >= 30,
-            "Sys tier should have at least 30 functions");
-        assert!(*counts.get(&RuntimeFuncTier::Async).unwrap_or(&0) >= 10,
-            "Async tier should have at least 10 functions");
-        assert!(*counts.get(&RuntimeFuncTier::Ext).unwrap_or(&0) >= 20,
-            "Ext tier should have at least 20 functions");
+        assert!(
+            *counts.get(&RuntimeFuncTier::Core).unwrap_or(&0) >= 5,
+            "Core tier should have at least 5 functions"
+        );
+        assert!(
+            *counts.get(&RuntimeFuncTier::Alloc).unwrap_or(&0) >= 20,
+            "Alloc tier should have at least 20 functions"
+        );
+        assert!(
+            *counts.get(&RuntimeFuncTier::Sys).unwrap_or(&0) >= 30,
+            "Sys tier should have at least 30 functions"
+        );
+        assert!(
+            *counts.get(&RuntimeFuncTier::Async).unwrap_or(&0) >= 10,
+            "Async tier should have at least 10 functions"
+        );
+        assert!(
+            *counts.get(&RuntimeFuncTier::Ext).unwrap_or(&0) >= 20,
+            "Ext tier should have at least 20 functions"
+        );
     }
 
     #[test]
@@ -1211,10 +1221,13 @@ mod tests {
         };
         let funcs = runtime_funcs_for_target(&baremetal);
         // Baremetal should NOT include sys/async tier functions
-        assert!(funcs.iter().all(|f| {
-            let t = tier_of(f.name);
-            t != RuntimeFuncTier::Sys && t != RuntimeFuncTier::Async
-        }), "Baremetal target should not include Sys or Async tier functions");
+        assert!(
+            funcs.iter().all(|f| {
+                let t = tier_of(f.name);
+                t != RuntimeFuncTier::Sys && t != RuntimeFuncTier::Async
+            }),
+            "Baremetal target should not include Sys or Async tier functions"
+        );
         // But should include Core and Alloc
         assert!(funcs.iter().any(|f| tier_of(f.name) == RuntimeFuncTier::Core));
         assert!(funcs.iter().any(|f| tier_of(f.name) == RuntimeFuncTier::Alloc));

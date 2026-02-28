@@ -219,10 +219,19 @@ impl<'a> Parser<'a> {
         // because dict literals have the form `{ key: value, ... }`.
         let is_block = if matches!(
             self.current.kind,
-            TokenKind::Var | TokenKind::Val | TokenKind::For | TokenKind::While
-            | TokenKind::If | TokenKind::Loop | TokenKind::Return | TokenKind::Break
-            | TokenKind::Continue | TokenKind::Match | TokenKind::Fn | TokenKind::Let
-            | TokenKind::Mut
+            TokenKind::Var
+                | TokenKind::Val
+                | TokenKind::For
+                | TokenKind::While
+                | TokenKind::If
+                | TokenKind::Loop
+                | TokenKind::Return
+                | TokenKind::Break
+                | TokenKind::Continue
+                | TokenKind::Match
+                | TokenKind::Fn
+                | TokenKind::Let
+                | TokenKind::Mut
         ) {
             true
         } else if matches!(self.current.kind, TokenKind::Identifier { .. }) {
@@ -280,10 +289,7 @@ impl<'a> Parser<'a> {
                         // Found matching ')'. Check what follows.
                         self.advance();
                         consumed.push(self.current.clone());
-                        let is_lambda = matches!(
-                            self.current.kind,
-                            TokenKind::Colon | TokenKind::Arrow
-                        );
+                        let is_lambda = matches!(self.current.kind, TokenKind::Colon | TokenKind::Arrow);
 
                         // Restore state
                         for token in consumed.into_iter().rev() {

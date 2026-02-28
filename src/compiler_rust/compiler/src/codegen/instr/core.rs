@@ -1,6 +1,9 @@
 // Core instruction compilation helpers: binary operations, builtin I/O, and interpreter calls.
 
-use cranelift_codegen::ir::{condcodes::{FloatCC, IntCC}, types, InstBuilder};
+use cranelift_codegen::ir::{
+    condcodes::{FloatCC, IntCC},
+    types, InstBuilder,
+};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -17,10 +20,14 @@ fn ensure_i64(builder: &mut FunctionBuilder, val: cranelift_codegen::ir::Value) 
     let val_type = builder.func.dfg.value_type(val);
     match val_type {
         types::I8 | types::I16 | types::I32 => builder.ins().sextend(types::I64, val),
-        types::F64 => builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val),
+        types::F64 => builder
+            .ins()
+            .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val),
         types::F32 => {
             let promoted = builder.ins().fpromote(types::F64, val);
-            builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted)
+            builder
+                .ins()
+                .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted)
         }
         _ => val,
     }
@@ -80,20 +87,32 @@ pub(crate) fn compile_binop<M: Module>(
 
     let val = match op {
         BinOp::Add => {
-            if is_float { builder.ins().fadd(lhs, rhs) }
-            else { builder.ins().iadd(lhs, rhs) }
+            if is_float {
+                builder.ins().fadd(lhs, rhs)
+            } else {
+                builder.ins().iadd(lhs, rhs)
+            }
         }
         BinOp::Sub => {
-            if is_float { builder.ins().fsub(lhs, rhs) }
-            else { builder.ins().isub(lhs, rhs) }
+            if is_float {
+                builder.ins().fsub(lhs, rhs)
+            } else {
+                builder.ins().isub(lhs, rhs)
+            }
         }
         BinOp::Mul => {
-            if is_float { builder.ins().fmul(lhs, rhs) }
-            else { builder.ins().imul(lhs, rhs) }
+            if is_float {
+                builder.ins().fmul(lhs, rhs)
+            } else {
+                builder.ins().imul(lhs, rhs)
+            }
         }
         BinOp::Div => {
-            if is_float { builder.ins().fdiv(lhs, rhs) }
-            else { builder.ins().sdiv(lhs, rhs) }
+            if is_float {
+                builder.ins().fdiv(lhs, rhs)
+            } else {
+                builder.ins().sdiv(lhs, rhs)
+            }
         }
         BinOp::Mod => {
             if is_float {
@@ -213,7 +232,11 @@ pub(crate) fn compile_binop<M: Module>(
         }
         BinOp::And | BinOp::AndSuspend => {
             let lhs_bool = if is_float {
-                let zero_f = if lhs_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                let zero_f = if lhs_type == types::F32 {
+                    builder.ins().f32const(0.0)
+                } else {
+                    builder.ins().f64const(0.0)
+                };
                 builder.ins().fcmp(FloatCC::NotEqual, lhs, zero_f)
             } else {
                 builder.ins().icmp_imm(IntCC::NotEqual, lhs, 0)
@@ -221,7 +244,11 @@ pub(crate) fn compile_binop<M: Module>(
             let rhs_type = builder.func.dfg.value_type(rhs);
             let rhs_is_float = rhs_type == types::F32 || rhs_type == types::F64;
             let rhs_bool = if rhs_is_float {
-                let zero_f = if rhs_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                let zero_f = if rhs_type == types::F32 {
+                    builder.ins().f32const(0.0)
+                } else {
+                    builder.ins().f64const(0.0)
+                };
                 builder.ins().fcmp(FloatCC::NotEqual, rhs, zero_f)
             } else {
                 builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0)
@@ -231,7 +258,11 @@ pub(crate) fn compile_binop<M: Module>(
         }
         BinOp::Or | BinOp::OrSuspend => {
             let lhs_bool = if is_float {
-                let zero_f = if lhs_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                let zero_f = if lhs_type == types::F32 {
+                    builder.ins().f32const(0.0)
+                } else {
+                    builder.ins().f64const(0.0)
+                };
                 builder.ins().fcmp(FloatCC::NotEqual, lhs, zero_f)
             } else {
                 builder.ins().icmp_imm(IntCC::NotEqual, lhs, 0)
@@ -239,7 +270,11 @@ pub(crate) fn compile_binop<M: Module>(
             let rhs_type = builder.func.dfg.value_type(rhs);
             let rhs_is_float = rhs_type == types::F32 || rhs_type == types::F64;
             let rhs_bool = if rhs_is_float {
-                let zero_f = if rhs_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
+                let zero_f = if rhs_type == types::F32 {
+                    builder.ins().f32const(0.0)
+                } else {
+                    builder.ins().f64const(0.0)
+                };
                 builder.ins().fcmp(FloatCC::NotEqual, rhs, zero_f)
             } else {
                 builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0)
@@ -264,7 +299,11 @@ pub(crate) fn compile_binop<M: Module>(
                 builder.append_block_param(loop_header, types::I64); // exponent (int)
                 builder.append_block_param(loop_exit, lhs_type); // final result (float)
 
-                let one_f = if lhs_type == types::F32 { builder.ins().f32const(1.0) } else { builder.ins().f64const(1.0) };
+                let one_f = if lhs_type == types::F32 {
+                    builder.ins().f32const(1.0)
+                } else {
+                    builder.ins().f64const(1.0)
+                };
                 builder.ins().jump(loop_header, &[one_f, rhs_i64]);
 
                 builder.switch_to_block(loop_header);

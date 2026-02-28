@@ -309,7 +309,8 @@ impl Parser<'_> {
             // When val/var/let is followed by `:` or `)`, it's used as a variable name,
             // not a let-binding keyword. E.g., in `case Bool(val): if val: "1" else: "0"`
             if (self.check(&TokenKind::Val) || self.check(&TokenKind::Var))
-                && (self.peek_is(&TokenKind::Colon) || self.peek_is(&TokenKind::RParen)
+                && (self.peek_is(&TokenKind::Colon)
+                    || self.peek_is(&TokenKind::RParen)
                     || self.peek_is(&TokenKind::Then)
                     || self.peek_is(&TokenKind::Dot)
                     || self.peek_is(&TokenKind::Newline)
@@ -1090,7 +1091,12 @@ impl Parser<'_> {
         let inner_type = self.parse_type()?;
 
         Ok(Node::Newtype(NewtypeDef {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             name,
             inner_type,
             visibility: Visibility::Private,
@@ -1204,14 +1210,14 @@ impl Parser<'_> {
 
             // Check for field declarations (extern struct): `name: Type`
             // Fields are identifiers followed by `:` and a type name
-            let is_field = matches!(&self.current.kind, TokenKind::Identifier { .. })
-                && self.peek_is(&TokenKind::Colon);
+            let is_field =
+                matches!(&self.current.kind, TokenKind::Identifier { .. }) && self.peek_is(&TokenKind::Colon);
             if is_field {
                 // Skip field declaration: consume identifier, colon, and type
                 self.advance(); // consume field name
                 self.advance(); // consume colon
                 let _ty = self.parse_type()?; // consume type
-                // Skip newline after field
+                                              // Skip newline after field
                 if self.check(&TokenKind::Newline) {
                     self.advance();
                 }

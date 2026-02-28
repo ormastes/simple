@@ -86,7 +86,11 @@ pub(crate) fn compile_par_reduce<M: Module>(
         .ok_or_else(|| "rt_par_reduce not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
-    let call = adapted_call(builder, func_ref, &[input_val, input_len, initial_val, closure_val, backend_val]);
+    let call = adapted_call(
+        builder,
+        func_ref,
+        &[input_val, input_len, initial_val, closure_val, backend_val],
+    );
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())

@@ -300,11 +300,11 @@ pub enum TokenKind {
     AndThen,  // and_then step_pattern: (chained assertion)
 
     // Low-level keywords
-    Asm,        // asm (inline assembly block)
-    Bitfield,   // bitfield (bitfield definition)
-    Newtype,    // newtype (newtype wrapper)
-    Extend,     // extend (extension methods on existing types)
-    Comptime,   // comptime (compile-time evaluation)
+    Asm,      // asm (inline assembly block)
+    Bitfield, // bitfield (bitfield definition)
+    Newtype,  // newtype (newtype wrapper)
+    Extend,   // extend (extension methods on existing types)
+    Comptime, // comptime (compile-time evaluation)
 
     // Backtick atom literal
     Atom(String), // `symbol` - atom literal with identity comparison

@@ -358,8 +358,7 @@ impl<'a> Parser<'a> {
         // Similarly, `gen` and `kernel` start function declarations but can also be variable names.
         // Disambiguate by checking what follows: dot/assign/lparen means expression, identifier means decl.
         // Check before the match to avoid borrow checker issues with match guards.
-        let is_me_method_decl = matches!(&self.current.kind, TokenKind::Me)
-            && !self.peek_is(&TokenKind::Dot);
+        let is_me_method_decl = matches!(&self.current.kind, TokenKind::Me) && !self.peek_is(&TokenKind::Dot);
         let is_gen_or_kernel_decl = matches!(&self.current.kind, TokenKind::Gen | TokenKind::Kernel)
             && !self.peek_is(&TokenKind::Dot)
             && !self.peek_is(&TokenKind::Assign)
@@ -389,8 +388,7 @@ impl<'a> Parser<'a> {
             && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
         // `common` keyword: only treat as `common use` when followed by `use`.
         // Otherwise it's used as a variable name (e.g., `common.push(x)`).
-        let is_common_use = matches!(&self.current.kind, TokenKind::Common)
-            && self.peek_is(&TokenKind::Use);
+        let is_common_use = matches!(&self.current.kind, TokenKind::Common) && self.peek_is(&TokenKind::Use);
         // `mock` keyword: only treat as mock declaration when followed by identifier
         // (mock Name implements Trait:). Otherwise treat as expression (mock.field, etc.)
         let is_mock_decl = matches!(&self.current.kind, TokenKind::Mock)
@@ -415,12 +413,8 @@ impl<'a> Parser<'a> {
                     self.parse_function_with_doc(doc_comment)
                 }
             }
-            TokenKind::Kernel | TokenKind::Gen if is_gen_or_kernel_decl => {
-                self.parse_function_with_doc(doc_comment)
-            }
-            TokenKind::Me if is_me_method_decl => {
-                self.parse_function_with_doc(doc_comment)
-            }
+            TokenKind::Kernel | TokenKind::Gen if is_gen_or_kernel_decl => self.parse_function_with_doc(doc_comment),
+            TokenKind::Me if is_me_method_decl => self.parse_function_with_doc(doc_comment),
             TokenKind::Async => self.parse_async_function_with_doc(doc_comment),
             TokenKind::Sync => self.parse_sync_function_with_doc(doc_comment),
             TokenKind::Struct => self.parse_struct_with_doc(doc_comment),
@@ -500,7 +494,8 @@ impl<'a> Parser<'a> {
                 // bitfield Name...: -> bitfield definition
                 // bitfield as identifier (import path, variable) -> expression
                 let next = self.peek_next();
-                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase())) {
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase()))
+                {
                     self.parse_bitfield()
                 } else {
                     self.parse_expression_or_assignment()
@@ -510,7 +505,8 @@ impl<'a> Parser<'a> {
                 // newtype Name = ... -> newtype definition
                 // newtype as identifier -> expression
                 let next = self.peek_next();
-                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase())) {
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase()))
+                {
                     self.parse_newtype()
                 } else {
                     self.parse_expression_or_assignment()
@@ -520,7 +516,8 @@ impl<'a> Parser<'a> {
                 // extend TypeName: -> extension block
                 // extend as identifier (method call, import, etc.) -> expression
                 let next = self.peek_next();
-                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase())) {
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name.chars().next().map_or(false, |c| c.is_uppercase()))
+                {
                     self.parse_extend()
                 } else {
                     self.parse_expression_or_assignment()
@@ -550,11 +547,12 @@ impl<'a> Parser<'a> {
                 // NOTE: Do NOT include String/FString here — that would catch
                 // `import X from "path"` where `from` appears after the import target.
                 let next = self.peek_next();
-                if matches!(next.kind,
+                if matches!(
+                    next.kind,
                     TokenKind::Identifier { .. }
                     | TokenKind::Match  // used as module name in lz77/match.spl
                     | TokenKind::Mod    // used as module name in failsafe/__init__.spl
-                    | TokenKind::Dot    // from .module import (relative import)
+                    | TokenKind::Dot // from .module import (relative import)
                 ) {
                     self.parse_from_import() // Python-style: from module import {...}
                 } else {
@@ -702,7 +700,7 @@ impl<'a> Parser<'a> {
                 if matches!(next.kind, TokenKind::Identifier { .. }) {
                     // Replace 'module' identifier with Mod keyword behavior
                     self.advance(); // consume 'module' identifier
-                    // Now parse the rest like `mod name: ...` but without expecting 'mod' keyword
+                                    // Now parse the rest like `mod name: ...` but without expecting 'mod' keyword
                     let start_span = self.previous.span;
                     let mod_name = self.expect_identifier()?;
                     let body = if self.check(&TokenKind::Colon) {
@@ -711,18 +709,27 @@ impl<'a> Parser<'a> {
                         self.expect(&TokenKind::Indent)?;
                         let mut items = Vec::new();
                         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-                            while self.check(&TokenKind::Newline) { self.advance(); }
-                            if self.check(&TokenKind::Dedent) { break; }
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+                            if self.check(&TokenKind::Dedent) {
+                                break;
+                            }
                             items.push(self.parse_item()?);
                         }
-                        if self.check(&TokenKind::Dedent) { self.advance(); }
+                        if self.check(&TokenKind::Dedent) {
+                            self.advance();
+                        }
                         Some(items)
                     } else {
                         None
                     };
                     Ok(Node::ModDecl(crate::ast::ModDecl {
                         span: crate::token::Span::new(
-                            start_span.start, self.previous.span.end, start_span.line, start_span.column,
+                            start_span.start,
+                            self.previous.span.end,
+                            start_span.line,
+                            start_span.column,
                         ),
                         name: mod_name,
                         visibility: crate::ast::Visibility::Private,

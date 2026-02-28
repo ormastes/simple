@@ -63,9 +63,7 @@ fn compile_file_to_object(
     let prefix = module_prefix_from_path(file_path, source_root);
     codegen.set_module_prefix(prefix);
     codegen.set_entry_module(is_entry);
-    let obj = codegen
-        .compile_module(&mir)
-        .map_err(|e| format!("codegen: {e}"))?;
+    let obj = codegen.compile_module(&mir).map_err(|e| format!("codegen: {e}"))?;
 
     Ok(obj)
 }
@@ -143,8 +141,8 @@ fn collect_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn compile_and_link_native() {
     let root = project_root();
-    let compiler_dir = std::env::var("SRC_COMPILER_DIR")
-        .unwrap_or_else(|_| root.join("src/compiler").to_string_lossy().into_owned());
+    let compiler_dir =
+        std::env::var("SRC_COMPILER_DIR").unwrap_or_else(|_| root.join("src/compiler").to_string_lossy().into_owned());
     let limit: usize = std::env::var("NATIVE_LINK_LIMIT")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -170,11 +168,7 @@ fn compile_and_link_native() {
     }
 
     let files: Vec<_> = all_files.iter().take(limit).collect();
-    eprintln!(
-        "\n=== Native Link Test: {} files (limit {}) ===",
-        files.len(),
-        limit
-    );
+    eprintln!("\n=== Native Link Test: {} files (limit {}) ===", files.len(), limit);
 
     // Phase 1: Compile each file to object code
     let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -213,17 +207,8 @@ fn compile_and_link_native() {
         }
     }
 
-    eprintln!(
-        "\nCompiled: {}/{} ({} failed)",
-        compile_ok,
-        files.len(),
-        compile_fail
-    );
-    eprintln!(
-        "Object files: {} in {}",
-        object_paths.len(),
-        temp_dir.path().display()
-    );
+    eprintln!("\nCompiled: {}/{} ({} failed)", compile_ok, files.len(), compile_fail);
+    eprintln!("Object files: {} in {}", object_paths.len(), temp_dir.path().display());
 
     if object_paths.is_empty() {
         eprintln!("No object files to link, skipping link phase");
@@ -240,11 +225,7 @@ fn compile_and_link_native() {
 
     // Phase 2: Link object files together
     let output_path = temp_dir.path().join("simple_native");
-    eprintln!(
-        "\nLinking {} objects -> {}",
-        object_paths.len(),
-        output_path.display()
-    );
+    eprintln!("\nLinking {} objects -> {}", object_paths.len(), output_path.display());
 
     // Find the Simple runtime library
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -259,10 +240,7 @@ fn compile_and_link_native() {
             workspace_root.join("target/release/deps/libsimple_runtime.a"),
         ];
         let fallback = candidates[0].clone();
-        candidates
-            .into_iter()
-            .find(|p| p.exists())
-            .unwrap_or(fallback)
+        candidates.into_iter().find(|p| p.exists()).unwrap_or(fallback)
     };
     if runtime_a.exists() {
         eprintln!("Using runtime: {}", runtime_a.display());
@@ -296,11 +274,7 @@ int main(int argc, char** argv) {
     // Compile main stub
     let main_o = temp_dir.path().join("main_stub.o");
     let cc = std::env::var("CC").unwrap_or_else(|_| {
-        if std::process::Command::new("clang")
-            .arg("--version")
-            .output()
-            .is_ok()
-        {
+        if std::process::Command::new("clang").arg("--version").output().is_ok() {
             "clang".to_string()
         } else {
             "gcc".to_string()
@@ -344,24 +318,15 @@ int main(int argc, char** argv) {
     match cmd.output() {
         Ok(output) => {
             if output.status.success() {
-                let size = std::fs::metadata(&output_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                eprintln!(
-                    "Link SUCCESS: {} ({} KB)",
-                    output_path.display(),
-                    size / 1024
-                );
+                let size = std::fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                eprintln!("Link SUCCESS: {} ({} KB)", output_path.display(), size / 1024);
 
                 // Verify the binary was actually produced
                 assert!(output_path.exists(), "Binary should exist after successful link");
                 assert!(size > 0, "Binary should not be empty");
 
                 // Try to run the binary
-                match std::process::Command::new(&output_path)
-                    .arg("--version")
-                    .output()
-                {
+                match std::process::Command::new(&output_path).arg("--version").output() {
                     Ok(run) => {
                         eprintln!("Run exit code: {}", run.status);
                         if !run.stdout.is_empty() {
@@ -374,11 +339,7 @@ int main(int argc, char** argv) {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 eprintln!("Link FAILED (exit {}): {}", output.status, stderr);
                 // Show first few undefined symbols if any
-                let undef_lines: Vec<&str> = stderr
-                    .lines()
-                    .filter(|l| l.contains("undefined"))
-                    .take(10)
-                    .collect();
+                let undef_lines: Vec<&str> = stderr.lines().filter(|l| l.contains("undefined")).take(10).collect();
                 if !undef_lines.is_empty() {
                     eprintln!("\nUndefined symbols ({}):", undef_lines.len());
                     for line in &undef_lines {

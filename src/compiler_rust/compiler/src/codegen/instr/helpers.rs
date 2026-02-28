@@ -27,13 +27,11 @@ pub(crate) fn get_vreg_or_default<M: Module>(
         // Emit immediate context to stderr so bootstrap logs show the offending site
         eprintln!(
             "[strict-vreg] missing value for {:?} in function {}",
-            vreg,
-            ctx.func.name
+            vreg, ctx.func.name
         );
         panic!(
             "codegen: missing VReg value for {:?} in function {}",
-            vreg,
-            ctx.func.name
+            vreg, ctx.func.name
         );
     }
 
@@ -75,10 +73,14 @@ pub(crate) fn safe_extend_to_i64(
     } else if ty.is_int() && ty.bits() < 64 {
         builder.ins().uextend(types::I64, val)
     } else if ty == types::F64 {
-        builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val)
+        builder
+            .ins()
+            .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val)
     } else if ty == types::F32 {
         let promoted = builder.ins().fpromote(types::F64, val);
-        builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted)
+        builder
+            .ins()
+            .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted)
     } else {
         val
     }
@@ -96,10 +98,14 @@ pub(crate) fn ensure_i64_for_call(
     } else if ty.is_int() && ty.bits() < 64 {
         builder.ins().sextend(types::I64, val)
     } else if ty == types::F64 {
-        builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val)
+        builder
+            .ins()
+            .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), val)
     } else if ty == types::F32 {
         let promoted = builder.ins().fpromote(types::F64, val);
-        builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted)
+        builder
+            .ins()
+            .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted)
     } else {
         val
     }
@@ -189,10 +195,7 @@ fn adapt_value_to_type(
 }
 
 /// Create a default zero value for a given Cranelift type.
-fn default_for_type(
-    builder: &mut FunctionBuilder,
-    ty: cranelift_codegen::ir::Type,
-) -> cranelift_codegen::ir::Value {
+fn default_for_type(builder: &mut FunctionBuilder, ty: cranelift_codegen::ir::Type) -> cranelift_codegen::ir::Value {
     if ty.is_int() {
         builder.ins().iconst(ty, 0)
     } else if ty == types::F32 {
@@ -217,8 +220,7 @@ pub(crate) fn indirect_call_with_result<M: Module>(
     // Adapt args to match the indirect call signature
     let sig = &builder.func.dfg.signatures[sig_ref];
     let expected_count = sig.params.len();
-    let expected_types: Vec<cranelift_codegen::ir::Type> =
-        sig.params.iter().map(|p| p.value_type).collect();
+    let expected_types: Vec<cranelift_codegen::ir::Type> = sig.params.iter().map(|p| p.value_type).collect();
 
     let mut adapted = Vec::with_capacity(expected_count);
     for (i, &expected_ty) in expected_types.iter().enumerate() {

@@ -104,6 +104,65 @@ typedef struct {
 } SplEnum;
 
 /* ================================================================
+ * Debug service state (bootstrap shim)
+ * ================================================================ */
+
+/* The Simple sources define ds_set_active() and other debug-service helpers
+ * in lib.nogc_sync_mut.io.debug_state. The bootstrap runtime does not pull
+ * that module in, so we provide a minimal C implementation to satisfy
+ * references during Stage2 linking. The compiler only checks for existence;
+ * a tiny bool flag is enough for now. */
+
+static int64_t g_ds_is_active = 0;
+
+int64_t ds_set_active(int64_t active) {
+    g_ds_is_active = active ? 1 : 0;
+    return 0;  /* Simple void returns are encoded as int64_t 0 */
+}
+
+/* Fault/limit controls (bootstrap shim)
+ * The Simple sources declare these as externs; provide harmless defaults so
+ * the native bootstrap links without relying on platform-specific watchdogs.
+ * Marked weak so they can be overridden by a real runtime if present.
+ */
+/* Expose fault controls with C names that match extern declarations.  We
+ * provide both `int64_t`-returning versions (used by Simple) and `void`
+ * aliases (in case headers declared them differently). Weak linkage lets a
+ * real runtime override these if linked later. */
+
+__attribute__((weak)) int64_t rt_fault_set_stack_overflow_detection(int64_t enabled) {
+    (void)enabled;
+    return 1;
+}
+__attribute__((weak)) void rt_fault_set_stack_overflow_detection_void(int64_t enabled) {
+    (void)enabled;
+}
+
+__attribute__((weak)) int64_t rt_fault_set_max_recursion_depth(int64_t depth) {
+    (void)depth;
+    return 1;
+}
+__attribute__((weak)) void rt_fault_set_max_recursion_depth_void(int64_t depth) {
+    (void)depth;
+}
+
+__attribute__((weak)) int64_t rt_fault_set_timeout(int64_t timeout_ms) {
+    (void)timeout_ms;
+    return 1;
+}
+__attribute__((weak)) void rt_fault_set_timeout_void(int64_t timeout_ms) {
+    (void)timeout_ms;
+}
+
+__attribute__((weak)) int64_t rt_fault_set_execution_limit(int64_t limit) {
+    (void)limit;
+    return 1;
+}
+__attribute__((weak)) void rt_fault_set_execution_limit_void(int64_t limit) {
+    (void)limit;
+}
+
+/* ================================================================
  * Type checking helpers
  * ================================================================ */
 

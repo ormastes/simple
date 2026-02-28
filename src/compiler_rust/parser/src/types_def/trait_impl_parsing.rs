@@ -221,7 +221,8 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 continue;
             }
-            if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo") {
+            if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo")
+            {
                 self.advance();
                 self.skip_newlines();
                 continue;
@@ -377,7 +378,8 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 continue;
             }
-            if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo") {
+            if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo")
+            {
                 self.advance();
                 self.skip_newlines();
                 continue;

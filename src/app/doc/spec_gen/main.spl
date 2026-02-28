@@ -10,11 +10,11 @@
 # Migrated from scripts/build/spec_gen.py
 
 use app.io
-use app.utils.colors (success, error, warning, info)
-use app.doc.spec_gen.types (SpecFile, categorize_spec)
-use app.doc.spec_gen.parser (parse_spec_file)
-use app.doc.spec_gen.symbols (extract_symbols_hybrid)
-use app.doc.spec_gen.markdown (generate_markdown)
+use app.utils.colors.{success, error, warning, info}
+use app.doc.spec_gen.types.{SpecFile, categorize_spec}
+use app.doc.spec_gen.parser.{parse_spec_file}
+use app.doc.spec_gen.symbols.{extract_symbols_hybrid}
+use app.doc.spec_gen.markdown.{generate_markdown}
 
 export main, spec_gen
 
@@ -119,17 +119,7 @@ fn process_single_spec(config: Config):
     print "Processing: {config.input_file}"
 
     # Parse spec file
-    var spec = parse_spec_file(config.input_file)
-
-    # Extract symbols for each test case
-    var updated_cases = []
-    for tc in spec.test_cases:
-        val symbols = extract_symbols_hybrid(tc)
-        val updated_tc = tc
-        updated_tc.symbols = symbols
-        updated_cases = updated_cases + [updated_tc]
-
-    spec.test_cases = updated_cases
+    val spec = parse_spec_file(config.input_file)
 
     # Generate output path
     val output_path = generate_output_path(config.input_file, config.output_dir)
@@ -162,17 +152,7 @@ fn process_all_specs(config: Config):
     for spec_file in spec_files:
         print "Processing: {spec_file}"
 
-        var spec = parse_spec_file(spec_file)
-
-        # Extract symbols
-        var updated_cases = []
-        for tc in spec.test_cases:
-            val symbols = extract_symbols_hybrid(tc)
-            val updated_tc = tc
-            updated_tc.symbols = symbols
-            updated_cases = updated_cases + [updated_tc]
-
-        spec.test_cases = updated_cases
+        val spec = parse_spec_file(spec_file)
 
         # Generate output
         val output_path = generate_output_path(spec_file, config.output_dir)
@@ -198,8 +178,9 @@ fn generate_index(output_dir: text):
         print warning("No spec files found")
         return
 
-    # Group by category
-    var categories = []
+    # Group by category - use parallel arrays
+    var cat_names = []
+    var cat_specs = []
 
     for spec_file in spec_files:
         val category = categorize_spec(spec_file)
@@ -207,23 +188,30 @@ fn generate_index(output_dir: text):
 
         # Add to category
         var found = false
-        for i in 0..categories.len():
-            if categories[i].0 == category:
-                categories[i].1 = categories[i].1 + [spec]
+        var found_idx = 0
+        var i = 0
+        while i < cat_names.len():
+            if cat_names[i] == category:
                 found = true
-                break
+                found_idx = i
+                i = cat_names.len()
+            i = i + 1
 
-        if not found:
-            categories = categories + [(category, [spec])]
+        if found:
+            cat_specs[found_idx] = cat_specs[found_idx] + [spec]
+        else:
+            cat_names = cat_names + [category]
+            cat_specs = cat_specs + [[spec]]
 
     # Generate TOC markdown
     var toc = "# Specification Index\n\n"
     toc = toc + "**Generated:** {current_timestamp()}\n\n"
     toc = toc + "## Categories\n\n"
 
-    for category_entry in categories:
-        val category = category_entry.0
-        val specs = category_entry.1
+    var ci = 0
+    while ci < cat_names.len():
+        val category = cat_names[ci]
+        val specs = cat_specs[ci]
 
         toc = toc + "### {category}\n\n"
 
@@ -233,6 +221,7 @@ fn generate_index(output_dir: text):
             toc = toc + "- [{title}]({rel_path}) ({spec.test_cases.len()} tests)\n"
 
         toc = toc + "\n"
+        ci = ci + 1
 
     # Write index
     val index_path = "{output_dir}/INDEX.md"
@@ -293,4 +282,4 @@ fn current_timestamp() -> text:
     val hour = timestamp_hour()
     val minute = timestamp_minute()
 
-    "{year}-{month:02}-{day:02} {hour:02}:{minute:02}"
+    "{year}-{month}-{day} {hour}:{minute}"

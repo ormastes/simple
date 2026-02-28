@@ -190,8 +190,7 @@ impl NativeProjectBuilder {
 
         let use_incremental = self.config.incremental && !self.config.clean;
         if use_incremental {
-            std::fs::create_dir_all(&objects_dir)
-                .map_err(|e| format!("create cache dir: {e}"))?;
+            std::fs::create_dir_all(&objects_dir).map_err(|e| format!("create cache dir: {e}"))?;
         }
 
         // 3. Create temp directory for .o files
@@ -234,17 +233,11 @@ impl NativeProjectBuilder {
 
         let cached_count = cached_objects.len();
         if self.config.verbose && use_incremental {
-            eprintln!(
-                "Incremental: {} cached, {} to compile",
-                cached_count,
-                to_compile.len()
-            );
+            eprintln!("Incremental: {} cached, {} to compile", cached_count, to_compile.len());
         }
 
         // Canonicalize the entry file path for comparison during compilation
-        let canonical_entry: Option<PathBuf> = self.entry_file.as_ref().and_then(|p| {
-            std::fs::canonicalize(p).ok()
-        });
+        let canonical_entry: Option<PathBuf> = self.entry_file.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
         if self.config.verbose {
             match &canonical_entry {
                 Some(p) => eprintln!("Canonical entry: {}", p.display()),
@@ -259,31 +252,54 @@ impl NativeProjectBuilder {
         let (import_map, ambiguous_names, all_mangled, re_exports) = if !self.config.no_mangle {
             let result = build_import_map(&file_sources, &self.source_root);
             if self.config.verbose {
-                eprintln!("Import map: {} unique, {} ambiguous function entries, {} modules with re-exports",
-                    result.map.len(), result.ambiguous.len(), result.re_exports.len());
+                eprintln!(
+                    "Import map: {} unique, {} ambiguous function entries, {} modules with re-exports",
+                    result.map.len(),
+                    result.ambiguous.len(),
+                    result.re_exports.len()
+                );
             }
-            (std::sync::Arc::new(result.map), std::sync::Arc::new(result.ambiguous),
-             std::sync::Arc::new(result.all_mangled), std::sync::Arc::new(result.re_exports))
+            (
+                std::sync::Arc::new(result.map),
+                std::sync::Arc::new(result.ambiguous),
+                std::sync::Arc::new(result.all_mangled),
+                std::sync::Arc::new(result.re_exports),
+            )
         } else {
-            (std::sync::Arc::new(std::collections::HashMap::new()),
-             std::sync::Arc::new(std::collections::HashSet::new()),
-             std::sync::Arc::new(std::collections::HashMap::new()),
-             std::sync::Arc::new(std::collections::HashMap::new()))
+            (
+                std::sync::Arc::new(std::collections::HashMap::new()),
+                std::sync::Arc::new(std::collections::HashSet::new()),
+                std::sync::Arc::new(std::collections::HashMap::new()),
+                std::sync::Arc::new(std::collections::HashMap::new()),
+            )
         };
 
         // 5. Compile dirty files
         let results = if self.config.parallel {
-            self.compile_entries_parallel(&to_compile, &temp_dir_path, &canonical_entry, &import_map, &ambiguous_names, &all_mangled, &re_exports)
+            self.compile_entries_parallel(
+                &to_compile,
+                &temp_dir_path,
+                &canonical_entry,
+                &import_map,
+                &ambiguous_names,
+                &all_mangled,
+                &re_exports,
+            )
         } else {
-            self.compile_entries_sequential(&to_compile, &temp_dir_path, &canonical_entry, &import_map, &ambiguous_names, &all_mangled, &re_exports)
+            self.compile_entries_sequential(
+                &to_compile,
+                &temp_dir_path,
+                &canonical_entry,
+                &import_map,
+                &ambiguous_names,
+                &all_mangled,
+                &re_exports,
+            )
         };
         let compile_time = compile_start.elapsed();
 
         // Collect results
-        let mut object_paths: Vec<PathBuf> = cached_objects
-            .into_iter()
-            .map(|(_, p)| p)
-            .collect();
+        let mut object_paths: Vec<PathBuf> = cached_objects.into_iter().map(|(_, p)| p).collect();
         let mut failures = Vec::new();
         let mut freshly_compiled: Vec<(usize, PathBuf)> = Vec::new();
 
@@ -306,7 +322,7 @@ impl NativeProjectBuilder {
             for (path, msg) in &failures {
                 eprintln!("  - {} => {}", path.display(), msg);
             }
-            eprintln!("");  // spacer
+            eprintln!(""); // spacer
         }
 
         if self.config.verbose {
@@ -322,10 +338,7 @@ impl NativeProjectBuilder {
         }
 
         if object_paths.is_empty() {
-            return Err(format!(
-                "All {} files failed to compile",
-                files.len()
-            ));
+            return Err(format!("All {} files failed to compile", files.len()));
         }
 
         // 6. Cache freshly compiled objects
@@ -352,9 +365,7 @@ impl NativeProjectBuilder {
             }
         }
 
-        let binary_size = std::fs::metadata(&self.output)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let binary_size = std::fs::metadata(&self.output).map(|m| m.len()).unwrap_or(0);
 
         if self.config.verbose {
             eprintln!(
@@ -402,9 +413,7 @@ impl NativeProjectBuilder {
     ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         // Configure rayon thread pool if needed
         if let Some(n) = self.config.num_threads {
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(n)
-                .build_global();
+            let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
         }
 
         let project_root = self.project_root.clone();
@@ -445,8 +454,7 @@ impl NativeProjectBuilder {
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
-                        std::fs::write(&obj_path, &obj_code)
-                            .map_err(|e| (path.clone(), format!("write .o: {e}")))?;
+                        std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
                         if verbose && (progress_i + 1) % 50 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }
@@ -497,8 +505,7 @@ impl NativeProjectBuilder {
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
-                        std::fs::write(&obj_path, &obj_code)
-                            .map_err(|e| (path.clone(), format!("write .o: {e}")))?;
+                        std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
                         if self.config.verbose && (progress_i + 1) % 10 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
                         }
@@ -559,9 +566,7 @@ int main(int argc, char** argv) {
 
     /// Link object files into a native binary using LinkerBuilder.
     fn link_objects(&self, object_paths: &[PathBuf]) -> Result<(), String> {
-        let temp_dir = object_paths[0]
-            .parent()
-            .ok_or("no parent for object path")?;
+        let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
         // Compile the C main stub (defines main() which calls spl_main())
         let main_o = self.compile_main_stub(temp_dir)?;
@@ -569,10 +574,7 @@ int main(int argc, char** argv) {
         // Use clang as the linker driver — it handles CRT files (crt1.o, crti.o, crtn.o),
         // libc initialization, and library paths automatically.
         let mut cmd = std::process::Command::new("clang");
-        cmd.arg("-fPIC")
-            .arg("-no-pie")
-            .arg("-o").arg(&self.output)
-            .arg(&main_o);
+        cmd.arg("-fPIC").arg("-no-pie").arg("-o").arg(&self.output).arg(&main_o);
 
         // Add all SPL object files
         for obj in object_paths {
@@ -601,14 +603,12 @@ int main(int argc, char** argv) {
             eprintln!("Link command: {:?}", cmd);
         }
 
-        let output_result = cmd.output()
-            .map_err(|e| format!("link (clang): {e}"))?;
+        let output_result = cmd.output().map_err(|e| format!("link (clang): {e}"))?;
 
         if output_result.status.success() {
             // Report binary size
             if let Ok(meta) = std::fs::metadata(&self.output) {
-                eprintln!("Linked: {} ({} KB) in clang",
-                    self.output.display(), meta.len() / 1024);
+                eprintln!("Linked: {} ({} KB) in clang", self.output.display(), meta.len() / 1024);
             }
             Ok(())
         } else {
@@ -638,18 +638,7 @@ fn compile_file_to_object(
         source = source.replace(".?\n", " != nil\n");
         source = source.replace(".?\r\n", " != nil\r\n");
         for pat in [
-            "? ",
-            "?\n",
-            "?\r\n",
-            "?\t",
-            "?,",
-            "?)",
-            "?]",
-            "?>",
-            "?:",
-            "?=",
-            "?;",
-            "?>",
+            "? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;", "?>",
         ] {
             while source.contains(pat) {
                 source = source.replace(pat, &pat[1..]);
@@ -662,7 +651,9 @@ fn compile_file_to_object(
 
     // Parse
     let mut parser = simple_parser::Parser::new(&source);
-    let ast = parser.parse().map_err(|e| format!("{}: parse: {e}", file_path.display()))?;
+    let ast = parser
+        .parse()
+        .map_err(|e| format!("{}: parse: {e}", file_path.display()))?;
 
     // Build per-module use_map from AST `use` statements.
     // Maps local imported name → mangled symbol name.
@@ -782,26 +773,24 @@ fn compile_file_safe(
 /// Check if a file path matches the canonical entry file path.
 fn is_entry_file(file_path: &Path, canonical_entry: &Option<PathBuf>) -> bool {
     match canonical_entry {
-        Some(entry) => {
-            match std::fs::canonicalize(file_path) {
-                Ok(p) => {
-                    let is_entry = p == *entry;
-                    if is_entry {
-                        return true;
-                    }
-                    if std::env::var("SIMPLE_DEBUG_ENTRY").is_ok() {
-                        eprintln!("[entry-debug] no match: {} vs {}", p.display(), entry.display());
-                    }
-                    false
+        Some(entry) => match std::fs::canonicalize(file_path) {
+            Ok(p) => {
+                let is_entry = p == *entry;
+                if is_entry {
+                    return true;
                 }
-                Err(e) => {
-                    if std::env::var("SIMPLE_DEBUG_ENTRY").is_ok() {
-                        eprintln!("[entry-debug] canonicalize failed for {}: {}", file_path.display(), e);
-                    }
-                    false
+                if std::env::var("SIMPLE_DEBUG_ENTRY").is_ok() {
+                    eprintln!("[entry-debug] no match: {} vs {}", p.display(), entry.display());
                 }
+                false
             }
-        }
+            Err(e) => {
+                if std::env::var("SIMPLE_DEBUG_ENTRY").is_ok() {
+                    eprintln!("[entry-debug] canonicalize failed for {}: {}", file_path.display(), e);
+                }
+                false
+            }
+        },
         None => false,
     }
 }
@@ -832,10 +821,7 @@ struct ImportMapResult {
 /// Parses each source file to discover top-level function definitions,
 /// computes their mangled names, and returns a map from raw name to mangled name
 /// for functions that have exactly one definition across all modules.
-fn build_import_map(
-    file_sources: &[(PathBuf, String)],
-    source_root: &Path,
-) -> ImportMapResult {
+fn build_import_map(file_sources: &[(PathBuf, String)], source_root: &Path) -> ImportMapResult {
     use std::collections::{HashMap, HashSet};
 
     // raw_name → list of mangled names (one per defining module)
@@ -855,10 +841,7 @@ fn build_import_map(
                         // Only include functions with bodies (not extern declarations)
                         if !f.body.statements.is_empty() {
                             let mangled = format!("{}__{}", prefix, f.name);
-                            raw_to_mangled
-                                .entry(f.name.clone())
-                                .or_default()
-                                .push(mangled);
+                            raw_to_mangled.entry(f.name.clone()).or_default().push(mangled);
                         }
                     }
                     simple_parser::ast::Node::Class(c) => {
@@ -872,10 +855,7 @@ fn build_import_map(
                                     .or_default()
                                     .push(format!("{}__{}.{}", prefix, c.name, m.name));
                                 let mangled = format!("{}__{}.{}", prefix, c.name, m.name);
-                                raw_to_mangled
-                                    .entry(raw)
-                                    .or_default()
-                                    .push(mangled);
+                                raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
                         }
                     }
@@ -888,10 +868,7 @@ fn build_import_map(
                         } else {
                             format!("{}__{}", prefix, e.name)
                         };
-                        raw_to_mangled
-                            .entry(e.name.clone())
-                            .or_default()
-                            .push(mangled);
+                        raw_to_mangled.entry(e.name.clone()).or_default().push(mangled);
                     }
                     simple_parser::ast::Node::ExternClass(ec) => {
                         for m in &ec.methods {
@@ -952,9 +929,10 @@ fn build_import_map(
                 }
             }
             for (segments, target) in use_items {
-                let norm_segments: Vec<&str> = segments.iter().map(|s| {
-                    if s == "std" { "lib" } else { s.as_str() }
-                }).collect();
+                let norm_segments: Vec<&str> = segments
+                    .iter()
+                    .map(|s| if s == "std" { "lib" } else { s.as_str() })
+                    .collect();
                 let names = collect_imported_names_flat(target);
                 for name in names {
                     if let Some(candidates) = raw_to_mangled.get(&name) {
@@ -962,14 +940,13 @@ fn build_import_map(
                         let resolved = if candidates.len() == 1 {
                             candidates[0].clone()
                         } else {
-                            candidates.iter()
+                            candidates
+                                .iter()
                                 .find(|c| mangled_matches_use_path(c, &norm_segments))
                                 .cloned()
                                 .unwrap_or_else(|| candidates[0].clone())
                         };
-                        re_exports.entry(prefix.clone())
-                            .or_default()
-                            .insert(name, resolved);
+                        re_exports.entry(prefix.clone()).or_default().insert(name, resolved);
                     }
                 }
             }
@@ -978,21 +955,30 @@ fn build_import_map(
 
     // Hardcode critical logging symbols to avoid bootstrap misses
     let logger_debug = "compiler__common__config__Logger.debug".to_string();
-    map.entry("Logger.debug".to_string()).or_insert_with(|| logger_debug.clone());
+    map.entry("Logger.debug".to_string())
+        .or_insert_with(|| logger_debug.clone());
     map.entry("debug".to_string()).or_insert_with(|| logger_debug.clone());
 
     let logger_trace = "compiler__common__config__Logger.trace".to_string();
-    map.entry("Logger.trace".to_string()).or_insert_with(|| logger_trace.clone());
+    map.entry("Logger.trace".to_string())
+        .or_insert_with(|| logger_trace.clone());
     map.entry("trace".to_string()).or_insert_with(|| logger_trace.clone());
 
     // Bootstrap logger (defined in driver_types) to keep logging non-fatal
     let boot_debug = "compiler__driver__driver_types__BootLogger.debug".to_string();
-    map.entry("BootLogger.debug".to_string()).or_insert_with(|| boot_debug.clone());
+    map.entry("BootLogger.debug".to_string())
+        .or_insert_with(|| boot_debug.clone());
 
     let boot_trace = "compiler__driver__driver_types__BootLogger.trace".to_string();
-    map.entry("BootLogger.trace".to_string()).or_insert_with(|| boot_trace.clone());
+    map.entry("BootLogger.trace".to_string())
+        .or_insert_with(|| boot_trace.clone());
 
-    ImportMapResult { map, ambiguous, all_mangled: raw_to_mangled, re_exports }
+    ImportMapResult {
+        map,
+        ambiguous,
+        all_mangled: raw_to_mangled,
+        re_exports,
+    }
 }
 
 /// Build a per-module use map from AST `use` statements.
@@ -1010,7 +996,13 @@ fn build_use_map_from_ast(
     for item in &ast.items {
         match item {
             simple_parser::ast::Node::UseStmt(use_stmt) => {
-                collect_use_imports(&use_stmt.path.segments, &use_stmt.target, all_mangled, re_exports, &mut use_map);
+                collect_use_imports(
+                    &use_stmt.path.segments,
+                    &use_stmt.target,
+                    all_mangled,
+                    re_exports,
+                    &mut use_map,
+                );
             }
             simple_parser::ast::Node::MultiUse(multi_use) => {
                 for (path, target) in &multi_use.imports {
@@ -1033,9 +1025,10 @@ fn collect_use_imports(
     use_map: &mut std::collections::HashMap<String, String>,
 ) {
     // Normalize path: std → lib
-    let segments: Vec<&str> = path_segments.iter().map(|s| {
-        if s == "std" { "lib" } else { s.as_str() }
-    }).collect();
+    let segments: Vec<&str> = path_segments
+        .iter()
+        .map(|s| if s == "std" { "lib" } else { s.as_str() })
+        .collect();
 
     match target {
         simple_parser::ast::ImportTarget::Single(name) => {
@@ -1197,11 +1190,7 @@ fn find_c_compiler() -> String {
     if let Ok(cc) = std::env::var("CC") {
         return cc;
     }
-    if std::process::Command::new("clang")
-        .arg("--version")
-        .output()
-        .is_ok()
-    {
+    if std::process::Command::new("clang").arg("--version").output().is_ok() {
         return "clang".to_string();
     }
     "gcc".to_string()
@@ -1224,18 +1213,12 @@ mod tests {
         );
 
         assert_eq!(
-            module_prefix_from_path(
-                &PathBuf::from("/project/src/app/cli/main.spl"),
-                &source_root
-            ),
+            module_prefix_from_path(&PathBuf::from("/project/src/app/cli/main.spl"), &source_root),
             "app__cli__main"
         );
 
         assert_eq!(
-            module_prefix_from_path(
-                &PathBuf::from("/project/src/lib/common/text.spl"),
-                &source_root
-            ),
+            module_prefix_from_path(&PathBuf::from("/project/src/lib/common/text.spl"), &source_root),
             "lib__common__text"
         );
     }
@@ -1278,14 +1261,8 @@ mod tests {
 
     #[test]
     fn test_incremental_cache_dir_default() {
-        let builder = NativeProjectBuilder::new(
-            PathBuf::from("/project"),
-            PathBuf::from("/project/bin/simple"),
-        );
-        assert_eq!(
-            builder.cache_dir(),
-            PathBuf::from("/project/.simple/native_cache")
-        );
+        let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"));
+        assert_eq!(builder.cache_dir(), PathBuf::from("/project/.simple/native_cache"));
     }
 
     #[test]
@@ -1293,11 +1270,8 @@ mod tests {
         let mut config = NativeBuildConfig::default();
         config.cache_dir = Some(PathBuf::from("/tmp/my_cache"));
 
-        let builder = NativeProjectBuilder::new(
-            PathBuf::from("/project"),
-            PathBuf::from("/project/bin/simple"),
-        )
-        .config(config);
+        let builder =
+            NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
         assert_eq!(builder.cache_dir(), PathBuf::from("/tmp/my_cache"));
     }
@@ -1305,7 +1279,10 @@ mod tests {
     #[test]
     fn test_default_config_mangle() {
         let config = NativeBuildConfig::default();
-        assert!(!config.no_mangle, "no_mangle should default to false (mangling enabled)");
+        assert!(
+            !config.no_mangle,
+            "no_mangle should default to false (mangling enabled)"
+        );
         assert!(config.incremental, "incremental should default to true");
         assert!(!config.clean, "clean should default to false");
     }

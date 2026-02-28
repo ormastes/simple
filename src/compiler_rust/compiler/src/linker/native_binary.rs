@@ -109,9 +109,9 @@ impl Default for NativeBinaryOptions {
                 "pthread".to_string(),
                 "dl".to_string(),
                 "m".to_string(),
-                "gcc_s".to_string(),           // Unwinding support
-                "lzma".to_string(),            // Needed by xz2 (dependency chain)
-                "simple_runtime".to_string(),  // Runtime FFI functions
+                "gcc_s".to_string(),          // Unwinding support
+                "lzma".to_string(),           // Needed by xz2 (dependency chain)
+                "simple_runtime".to_string(), // Runtime FFI functions
             ],
             #[cfg(not(target_os = "linux"))]
             libraries: vec!["c".to_string()],
@@ -391,8 +391,8 @@ impl NativeBinaryBuilder {
     /// Build the native binary.
     pub fn build(self) -> LinkerResult<NativeBinaryResult> {
         // Create temporary directory for intermediate files
-        let temp_dir = tempfile::tempdir()
-            .map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
+        let temp_dir =
+            tempfile::tempdir().map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
         let (temp_path, _temp_guard) = if std::env::var("SIMPLE_KEEP_TEMP").is_ok() {
             let path = temp_dir.into_path();
             eprintln!("SIMPLE_KEEP_TEMP=1: keeping temp objects in {}", path.display());
@@ -409,6 +409,7 @@ impl NativeBinaryBuilder {
         // Bootstrap helpers: stubs for entry + missing runtime symbols.
         let mut bootstrap_stubs: Vec<PathBuf> = Vec::new();
         let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
+        let mut require_crypto = false;
 
         if bootstrap_mode {
             let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
@@ -437,7 +438,10 @@ int main(int argc, char** argv) {
             if status.success() {
                 bootstrap_stubs.push(stub_o);
             } else {
-                eprintln!("warning: failed to build bootstrap main stub with {} (status {})", cc, status);
+                eprintln!(
+                    "warning: failed to build bootstrap main stub with {} (status {})",
+                    cc, status
+                );
             }
 
             // 2) common missing-symbol stub
@@ -472,7 +476,10 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
             if status.success() {
                 bootstrap_stubs.push(miss_o);
             } else {
-                eprintln!("warning: failed to build bootstrap missing-symbol stub with {} (status {})", cc, status);
+                eprintln!(
+                    "warning: failed to build bootstrap missing-symbol stub with {} (status {})",
+                    cc, status
+                );
             }
 
             // 3) auto-generate stubs for undefined rt_* symbols in the object.
@@ -481,11 +488,21 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
                 for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
                     if let Some(sym) = line.split_whitespace().last() {
                         let keep = sym.starts_with("rt_")
+                            || sym.starts_with("ds_")
                             || sym.starts_with("get_global_")
                             || sym.starts_with("set_global_")
                             || sym.contains("GLOBAL_LOG_LEVEL")
                             || sym.contains("SCOPE_LEVELS")
-                            || matches!(sym, "count_by_severity" | "future_alloc_ready" | "future_map" | "fallback" | "panic" | "int");
+                            || matches!(
+                                sym,
+                                "count_by_severity"
+                                    | "future_alloc_ready"
+                                    | "future_map"
+                                    | "future_then"
+                                    | "fallback"
+                                    | "panic"
+                                    | "int"
+                            );
                         if keep {
                             symbols.insert(sym.to_string());
                         }
@@ -502,7 +519,10 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
                         if is_data && valid_ident {
                             code.push_str(&format!("__attribute__((weak, used)) int64_t {0} = 0;\n", sym));
                         } else if valid_ident {
-                            code.push_str(&format!("__attribute__((weak, used)) int64_t {0}(void) {{ return 0; }}\n", sym));
+                            code.push_str(&format!(
+                                "__attribute__((weak, used)) int64_t {0}(void) {{ return 0; }}\n",
+                                sym
+                            ));
                         } else {
                             let clean = sym.replace('\"', "");
                             code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  ret\\n\");\n", clean));
@@ -549,7 +569,11 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
         };
 
         // Helper to build and execute a link with given output/flags
-        let mut do_link = |out_path: &Path, allow_unresolved: bool, extra_stubs: &[PathBuf]| -> LinkerResult<()> {
+        let mut do_link = |out_path: &Path,
+                           allow_unresolved: bool,
+                           extra_stubs: &[PathBuf],
+                           require_crypto: bool|
+         -> LinkerResult<()> {
             let mut builder = LinkerBuilder::new();
 
             if crt_files.len() >= 2 {
@@ -598,6 +622,9 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
             for path in &self.options.library_paths {
                 builder = builder.library_path(path);
             }
+            if require_crypto {
+                builder = builder.library("crypto");
+            }
             if self.options.strip {
                 builder = builder.strip();
             }
@@ -629,8 +656,12 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
 
         // First pass: allow unresolved during bootstrap so we can see missing symbols.
         let temp_out = temp_path.join("_bootstrap_pass1");
-        let first_out = if bootstrap_mode { &temp_out } else { Path::new(&self.options.output) };
-        do_link(first_out, bootstrap_mode, &bootstrap_stubs)?;
+        let first_out = if bootstrap_mode {
+            &temp_out
+        } else {
+            Path::new(&self.options.output)
+        };
+        do_link(first_out, bootstrap_mode, &bootstrap_stubs, require_crypto)?;
 
         // If bootstrap, scan undefineds, add auto-stubs (done earlier for main.o), then relink without allow-unresolved.
         let final_result = if bootstrap_mode {
@@ -645,11 +676,21 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
             for line in String::from_utf8_lossy(&nm_out.stdout).lines() {
                 if let Some(sym) = line.split_whitespace().last() {
                     let keep = sym.starts_with("rt_")
+                        || sym.starts_with("ds_")
                         || sym.starts_with("get_global_")
                         || sym.starts_with("set_global_")
                         || sym.contains("GLOBAL_LOG_LEVEL")
                         || sym.contains("SCOPE_LEVELS")
-                        || matches!(sym, "count_by_severity" | "future_alloc_ready" | "future_map" | "fallback" | "panic" | "int");
+                        || matches!(
+                            sym,
+                            "count_by_severity"
+                                | "future_alloc_ready"
+                                | "future_map"
+                                | "future_then"
+                                | "fallback"
+                                | "panic"
+                                | "int"
+                        );
                     if keep {
                         symbols.insert(sym.to_string());
                     }
@@ -665,7 +706,10 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
                     if is_data && valid_ident {
                         code.push_str(&format!("__attribute__((weak, used)) int64_t {0} = 0;\n", sym));
                     } else if valid_ident {
-                        code.push_str(&format!("__attribute__((weak, used)) int64_t {0}(void) {{ return 0; }}\n", sym));
+                        code.push_str(&format!(
+                            "__attribute__((weak, used)) int64_t {0}(void) {{ return 0; }}\n",
+                            sym
+                        ));
                     } else {
                         let clean = sym.replace('\"', "");
                         code.push_str(&format!("__asm__(\".weak {0}\\n{0}:\\n  ret\\n\");\n", clean));
@@ -683,10 +727,13 @@ __asm__(".weak SCOPE_LEVELS.contains_key\nSCOPE_LEVELS.contains_key:\n  ret\n");
                 if status.success() {
                     bootstrap_stubs.push(auto_o);
                 } else {
-                    eprintln!("warning: failed to build auto stub (second pass) with {} (status {})", cc, status);
+                    eprintln!(
+                        "warning: failed to build auto stub (second pass) with {} (status {})",
+                        cc, status
+                    );
                 }
             }
-            do_link(Path::new(&self.options.output), false, &bootstrap_stubs)
+            do_link(Path::new(&self.options.output), false, &bootstrap_stubs, require_crypto)
         } else {
             Ok(())
         };

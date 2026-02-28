@@ -108,7 +108,11 @@ fn test_lambda_brace_block_simple() {
     if let Err(ref e) = result {
         eprintln!("Simple brace block parse error: {}", e);
     }
-    assert!(result.is_ok(), "Simple lambda brace block should parse: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Simple lambda brace block should parse: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -119,7 +123,11 @@ fn test_lambda_brace_block_with_var() {
     if let Err(ref e) = result {
         eprintln!("Var brace block parse error: {}", e);
     }
-    assert!(result.is_ok(), "Lambda brace block with var should parse: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Lambda brace block with var should parse: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -129,7 +137,11 @@ fn test_lambda_brace_block_with_for() {
     if let Err(ref e) = result {
         eprintln!("For brace block parse error: {}", e);
     }
-    assert!(result.is_ok(), "Lambda brace block with for should parse: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Lambda brace block with for should parse: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -140,5 +152,9 @@ fn test_lambda_brace_block_comment_then_expr() {
     if let Err(ref e) = result {
         eprintln!("Comment+expr brace block parse error: {}", e);
     }
-    assert!(result.is_ok(), "Lambda brace block with function call should parse: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Lambda brace block with function call should parse: {:?}",
+        result.err()
+    );
 }
