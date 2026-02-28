@@ -20,6 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
+use simple_common::target::Target;
+
 use super::error::{LinkerError, LinkerResult};
 use super::native::{LinkOptions, NativeLinker};
 
@@ -28,6 +30,8 @@ use super::native::{LinkOptions, NativeLinker};
 pub struct LinkerBuilder {
     /// Selected linker (auto-detected if None).
     linker: Option<NativeLinker>,
+    /// Target for linker flavor auto-detection.
+    target: Option<Target>,
     /// Object files to link.
     objects: Vec<PathBuf>,
     /// Output file path.
@@ -43,6 +47,7 @@ impl LinkerBuilder {
     pub fn new() -> Self {
         Self {
             linker: None,
+            target: None,
             objects: Vec::new(),
             output: None,
             options: LinkOptions::new(),
@@ -55,6 +60,16 @@ impl LinkerBuilder {
     /// If not set, the best available linker will be auto-detected.
     pub fn linker(mut self, linker: NativeLinker) -> Self {
         self.linker = Some(linker);
+        self
+    }
+
+    /// Set the target for linker flavor auto-detection.
+    ///
+    /// When set, `detect_for_target()` is used instead of `detect()` when
+    /// auto-detecting the linker, ensuring the correct linker flavor
+    /// (GNU vs MSVC vs WASM) is chosen for the target.
+    pub fn target(mut self, target: Target) -> Self {
+        self.target = Some(target);
         self
     }
 
@@ -207,10 +222,16 @@ impl LinkerBuilder {
             return Err(LinkerError::InvalidConfig("no object files specified".to_string()));
         }
 
-        // Detect linker if not specified
+        // Detect linker if not specified — use target-aware detection when target is set
         let linker = match self.linker {
             Some(l) => l,
-            None => NativeLinker::detect().ok_or(LinkerError::NoLinkerFound)?,
+            None => {
+                if let Some(ref target) = self.target {
+                    NativeLinker::detect_for_target(target).ok_or(LinkerError::NoLinkerFound)?
+                } else {
+                    NativeLinker::detect().ok_or(LinkerError::NoLinkerFound)?
+                }
+            }
         };
 
         // Set up auto-map if needed
@@ -230,8 +251,15 @@ impl LinkerBuilder {
     /// Get the linker that would be used.
     ///
     /// Returns the explicitly set linker, or auto-detects one.
+    /// Uses target-aware detection when a target is set.
     pub fn get_linker(&self) -> Option<NativeLinker> {
-        self.linker.or_else(NativeLinker::detect)
+        self.linker.or_else(|| {
+            if let Some(ref target) = self.target {
+                NativeLinker::detect_for_target(target)
+            } else {
+                NativeLinker::detect()
+            }
+        })
     }
 
     /// Check if the builder is ready to link.
@@ -343,6 +371,33 @@ mod tests {
 
         assert!(builder.options.generate_map);
         assert!(builder.options.map_file.is_none()); // Set during link()
+    }
+
+    #[test]
+    fn test_builder_with_target() {
+        use simple_common::target::{TargetArch, TargetOS};
+
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let builder = LinkerBuilder::new()
+            .target(target)
+            .object("a.o")
+            .output("program");
+
+        assert_eq!(builder.target, Some(target));
+    }
+
+    #[test]
+    fn test_builder_target_affects_detection() {
+        use simple_common::target::{TargetArch, TargetOS};
+
+        // Setting a target should not panic during get_linker()
+        let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let builder = LinkerBuilder::new().target(linux);
+        let _ = builder.get_linker(); // may be None on some systems
+
+        let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        let builder = LinkerBuilder::new().target(windows);
+        let _ = builder.get_linker();
     }
 
     #[test]

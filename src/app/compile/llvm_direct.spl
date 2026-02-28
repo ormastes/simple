@@ -17,7 +17,7 @@
 #   --release-optimized  Convenience: -O2 -march=x86-64-v3 -flto=thin
 #
 # Usage:
-#   bin/release/simple src/app/compile/llvm_direct.spl <source.spl> <output> [options]
+#   Can be run as standalone script, or imported and called directly
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -27,6 +27,8 @@ extern fn rt_getpid() -> i64
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use app.compile.native.{find_cpp_compiler}
 use std.log.{error, info, debug}
+use compiler.driver.driver.{aot_c_file}
+use compiler.driver.driver_types.{CompileResult}
 
 # ============================================================================
 # LLVM Compilation Pipeline
@@ -125,13 +127,16 @@ fn compile_llvm_direct_opts(source_file: text, output_file: text, opts: CompileO
     # Step 1: Generate C++ via MIR C backend (single-file mode)
     val pid = rt_getpid()
     val temp_cpp = "/tmp/simple_llvm_" + str(pid) + ".cpp"
-    val gen_cmd = "bin/simple compile --backend=c -o '" + temp_cpp + "' '" + source_file + "' 2>&1"
-    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
-    if gen_exit != 0:
-        error("compile", "C++ generation failed")
-        if gen_out != "":
-            error("compile", gen_out)
-        return 1
+    val aot_result = aot_c_file(source_file, temp_cpp)
+    match aot_result:
+        case CompileResult.Success(_):
+            pass
+        case _:
+            error("compile", "C generation failed")
+            val errors = aot_result.get_errors()
+            for err in errors:
+                error("compile", err)
+            return 1
 
     if opts.verbose:
         val cpp_size = file_size(temp_cpp)
