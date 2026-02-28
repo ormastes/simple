@@ -446,6 +446,75 @@ bool rt_msync(void* addr, int64_t size) {
 }
 
 /* ----------------------------------------------------------------
+ * Raw mmap/mprotect Syscall Wrappers (stubs — Windows uses VirtualAlloc)
+ * ---------------------------------------------------------------- */
+
+int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, int64_t fd, int64_t offset) {
+    (void)addr; (void)prot; (void)flags; (void)fd; (void)offset;
+    /* Windows doesn't have mmap — use VirtualAlloc for anonymous mappings */
+    if (fd == -1) {
+        DWORD alloc_type = MEM_COMMIT | MEM_RESERVE;
+        DWORD protect = PAGE_READWRITE;
+        if (prot & 0x4) protect = PAGE_EXECUTE_READWRITE;  /* PROT_EXEC */
+        void* result = VirtualAlloc((void*)(uintptr_t)addr, (SIZE_T)length, alloc_type, protect);
+        if (!result) return -1;
+        return (int64_t)(uintptr_t)result;
+    }
+    return -1;  /* File-backed mmap not supported via raw API on Windows */
+}
+
+int64_t rt_munmap_raw(int64_t addr, int64_t length) {
+    (void)length;
+    if (!addr) return -1;
+    return VirtualFree((void*)(uintptr_t)addr, 0, MEM_RELEASE) ? 0 : -1;
+}
+
+int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
+    DWORD protect = PAGE_READWRITE;
+    if (prot == 0x1) protect = PAGE_READONLY;           /* PROT_READ */
+    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;  /* PROT_READ|PROT_EXEC */
+    else if (prot == 0x7) protect = PAGE_EXECUTE_READWRITE;
+    DWORD old_protect;
+    if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
+    return 0;
+}
+
+int64_t rt_madvise_raw(int64_t addr, int64_t length, int64_t advice) {
+    (void)addr; (void)length; (void)advice;
+    return 0;  /* No equivalent on Windows — silently succeed */
+}
+
+int64_t rt_msync_flags(int64_t addr, int64_t length, int64_t flags) {
+    (void)flags;
+    if (!addr || length <= 0) return -1;
+    return FlushViewOfFile((void*)(uintptr_t)addr, (SIZE_T)length) ? 0 : -1;
+}
+
+int64_t rt_mlock(int64_t addr, int64_t length) {
+    return VirtualLock((void*)(uintptr_t)addr, (SIZE_T)length) ? 0 : -1;
+}
+
+int64_t rt_munlock(int64_t addr, int64_t length) {
+    return VirtualUnlock((void*)(uintptr_t)addr, (SIZE_T)length) ? 0 : -1;
+}
+
+int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    (void)mode;
+    int fd = _open(path, (int)flags);
+    return (int64_t)fd;
+}
+
+int64_t rt_close_fd(int64_t fd) {
+    return (int64_t)_close((int)fd);
+}
+
+int64_t rt_page_size(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int64_t)si.dwPageSize;
+}
+
+/* ----------------------------------------------------------------
  * High-Resolution Time
  * ---------------------------------------------------------------- */
 

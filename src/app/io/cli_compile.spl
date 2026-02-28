@@ -5,23 +5,14 @@
 # Helpers from cli_ops.spl
 use app.io.cli_ops.{rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl}
 
+# Pure Simple compiler driver
+use compiler.driver.driver.{CompilerDriver, aot_file, aot_c_file, compile_to_smf}
+use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult, OutputFormat}
+use compiler.backend.build_native.{BuildConfig, BuildResult, build_native, build_native_llvm}
+
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
-# Check if native compiler FFI is available
-fn has_native_compiler_ffi() -> bool:
-    # Default to native compiler FFI in compiled CLI.
-    # Allow explicit override via SIMPLE_COMPILE_RUST:
-    #   1 => force native FFI path
-    #   0 => force pure-simple fallback path
-    val compile_rust = rt_env_get("SIMPLE_COMPILE_RUST")
-    if compile_rust == "0":
-        return false
-    if compile_rust == "1":
-        return true
-
-    true
-
-# Pure Simple compiler implementation (no FFI dependency)
+# Pure Simple compiler implementation (no Rust FFI dependency)
 fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool) -> i64:
     var out = output_file
     if out == "":
@@ -34,24 +25,40 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     if verbose:
         _cli_eprint("[Pure Simple Compiler] Compiling {source_file} -> {out}")
 
-    # Use the compile_to_smf function from compiler.driver
-    # Note: This requires the compiler module to be available
-    # For bootstrap, we shell out to avoid circular dependencies
-    var use_direct = rt_env_get("SIMPLE_DIRECT_COMPILE") == "1"
+    # Use the Pure Simple compiler driver directly
+    val options = CompileOptions.default()
+    options.input_files = [source_file]
+    options.output_file = out
+    options.mode = CompileMode.Aot
+    options.verbose = verbose
+    if release:
+        options.release = true
+        options.optimize = true
+    if backend != "" and backend != "auto":
+        options.backend = backend
 
-    if use_direct:
-        # TODO: Direct import of compiler.driver.compile_to_smf
-        # This will work once we have proper module loading in place
-        _cli_eprint("[Pure Simple Compiler] Direct compilation not yet available")
-        _cli_eprint("[Pure Simple Compiler] Set SIMPLE_COMPILE_RUST=1 to use native compiler")
-        return 1
-    else:
-        # For now, report that we're in interpreter mode and can't compile
-        # The bootstrap will need to use SIMPLE_COMPILE_RUST=1
-        _cli_eprint("error: rt_cli_handle_compile is not supported in interpreter mode")
-        _cli_eprint("hint: Build and run the compiled CLI for full functionality")
-        _cli_eprint("hint: Or set SIMPLE_COMPILE_RUST=1 to use native compiler backend")
-        return 1
+    # Set output format
+    if output_format == "smf":
+        options.output_format = OutputFormat.Smf
+    elif output_format == "self-contained" or output_format == "sc":
+        options.output_format = OutputFormat.SelfContained
+
+    val driver = CompilerDriver.create(options)
+    val result = driver.compile()
+
+    match result:
+        case CompileResult.Success(_):
+            if verbose:
+                _cli_eprint("[Pure Simple Compiler] Compilation successful: {out}")
+            return 0
+        case _:
+            val errors = result.get_errors()
+            if errors.len() > 0:
+                for err in errors:
+                    _cli_eprint("error: {err}")
+            else:
+                _cli_eprint("error: Compilation failed")
+            return 1
 
 fn cli_compile(args: [str]) -> i64:
     _cli_eprint("[cli_compile] args = {args}")
@@ -188,58 +195,56 @@ fn cli_compile(args: [str]) -> i64:
         return compile_c_backend(source_file, output_file, verbose)
 
     if emit == "native":
-        # Use the in-tree Rust compiler directly to avoid the legacy two-argument
-        # helper that rejects multiple sources. This keeps bootstrap paths aligned
-        # with Stage1/Stage2 locations.
+        # Use the pure-Simple native build pipeline
         var out = output_file
         if out == "":
             out = source_file.replace(".spl", "")
-        var cmd = "./src/compiler_rust/target/release/simple compile '{source_file}' --native -o '{out}'"
-        if verbose:
-            cmd = cmd + " --verbose"
-        if use_lto:
-            cmd = cmd + " --lto"
+        var config = BuildConfig.default(source_file, out)
+        config.verbose = verbose
+        if release:
+            config.optimization = 2
         if march_target != "":
-            cmd = cmd + " --march=" + march_target
-        if pgo_generate:
-            cmd = cmd + " --pgo-generate"
-        if pgo_use_path != "":
-            cmd = cmd + " --pgo-use=" + pgo_use_path
-        if release_optimized:
-            cmd = cmd + " --release-optimized"
-        val result = _cli_shell(cmd)
-        if result.stdout != "":
-            print result.stdout
-        if result.stderr != "" and result.exit_code != 0:
-            _cli_eprint(result.stderr)
-        return result.exit_code
+            config.target_cpu = march_target
+        if use_lto:
+            config.linker_flags = config.linker_flags + ["--lto"]
+
+        # Use LLVM backend if requested
+        val build_result = if backend == "llvm":
+            config.backend = "llvm"
+            build_native_llvm(config)
+        else:
+            build_native(config)
+
+        match build_result:
+            case BuildResult.Success(output_path, stats):
+                if verbose:
+                    print "Native build successful: {output_path}"
+                    print "  Size: {stats.output_size} bytes"
+                    print "  Source files: {stats.source_files}"
+                    print "  Compile time: {stats.compile_time_ms}ms"
+                    print "  Link time: {stats.link_time_ms}ms"
+                return 0
+            case BuildResult.CompileError(file, msg):
+                _cli_eprint("Compile error in {file}: {msg}")
+                return 1
+            case BuildResult.LinkError(msg):
+                _cli_eprint("Link error: {msg}")
+                return 1
+            case BuildResult.Error(msg):
+                _cli_eprint("Build error: {msg}")
+                return 1
 
     if target.starts_with("baremetal-"):
         return compile_baremetal(source_file, target, emit, output_file, verbose)
 
-    var compile_args = args
     if output_format != "":
         if output_format != "native" and output_format != "smf" and output_format != "self-contained" and output_format != "sc" and output_format != "both":
             _cli_eprint("Error: Unknown format: {output_format}")
             _cli_eprint("Valid formats: native, smf, self-contained (sc), both")
             return 1
 
-    # Check if we should use Pure Simple compiler (interpreter mode, no FFI)
-    val use_pure_simple = rt_env_get("SIMPLE_USE_PURE_COMPILER") == "1"
-
-    if use_pure_simple or not has_native_compiler_ffi():
-        # Use Pure Simple compiler implementation (works in interpreter/SMF mode)
-        return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release)
-
-    _cli_eprint("[NOTE] Using bootstrap Cranelift path; pure-Simple LLVM path not yet available in interpreter mode")
-
-    if backend == "llvm":
-        val llc_check = _cli_shell("command -v llc >/dev/null 2>&1")
-        if llc_check.exit_code != 0:
-            _cli_eprint("Error: llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)")
-            return 1
-
-    rt_cli_handle_compile(compile_args)
+    # Use Pure Simple compiler driver for all compilation
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:
@@ -383,7 +388,7 @@ fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64
     """Compile a Simple source file to C++20 output using the MIR C backend.
 
     Path 1: Pure Simple MIR C backend via compile_c_entry.spl (interpreter mode).
-    Path 2: Native compile handler (when SIMPLE_COMPILE_RUST=1).
+    Path 2: Pure Simple compiler driver with C backend (aot_c_file).
     Path 3: Bootstrap generator fallback (legacy gen-c).
     """
     var out = output_file
@@ -417,20 +422,16 @@ fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64
         if verbose:
             _cli_eprint("MIR C backend failed with exit code {result.exit_code}; trying fallbacks")
 
-    # Path 2: Native runtime compile handler (requires SIMPLE_COMPILE_RUST=1).
-    val force_native_c = rt_env_get("SIMPLE_COMPILE_RUST") == "1"
-    if force_native_c and has_native_compiler_ffi():
-        var compile_args: [str] = ["compile", source_file, "--backend=c", "-o", out]
-        if verbose:
-            compile_args.push("--verbose")
-
-        val exit_code = rt_cli_handle_compile(compile_args)
-        if exit_code == 0:
+    # Path 2: Use Pure Simple compiler driver with C backend.
+    val aot_result = aot_c_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
             print "Output: {out}"
             print "Build with: clang++ -std=c++20 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
             return 0
-        if verbose:
-            _cli_eprint("Native compile handler failed with exit code {exit_code}")
+        case _:
+            if verbose:
+                _cli_eprint("Pure Simple C backend failed; trying legacy fallback")
 
     # Path 3: Legacy bootstrap C generator (simple_codegen).
     val codegen_bin = "bin/bootstrap/cpp/simple_codegen"
@@ -489,10 +490,65 @@ fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
         print "Output: {out}"
     return result.exit_code
 
-# Native build: compile entire project to native binary via Cranelift
-extern fn rt_native_build(args: [text]) -> i64
-
+# Native build: compile entire project to native binary via Pure Simple pipeline
 fn cli_native_build(args: [text]) -> i64:
-    rt_native_build(args)
+    # Parse args into BuildConfig
+    var source = ""
+    var output = ""
+    var verbose = false
+    var backend_name = ""
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-o":
+            i = i + 1
+            if i < args.len():
+                output = args[i]
+        elif arg == "--verbose" or arg == "-v":
+            verbose = true
+        elif arg == "--backend=llvm":
+            backend_name = "llvm"
+        elif arg.starts_with("--backend="):
+            backend_name = arg.substring(10)
+        elif not arg.starts_with("-"):
+            if source == "":
+                source = arg
+        i = i + 1
+
+    if source == "":
+        _cli_eprint("Error: No source file specified for native build")
+        return 1
+
+    if output == "":
+        output = source.replace(".spl", "")
+
+    var config = BuildConfig.default(source, output)
+    config.verbose = verbose
+    if backend_name == "llvm":
+        config.backend = "llvm"
+
+    val result = if backend_name == "llvm":
+        build_native_llvm(config)
+    else:
+        build_native(config)
+
+    match result:
+        case BuildResult.Success(out, stats):
+            print "Build successful: {out}"
+            if verbose:
+                print "  Size: {stats.output_size} bytes"
+                print "  Compile time: {stats.compile_time_ms}ms"
+                print "  Link time: {stats.link_time_ms}ms"
+            return 0
+        case BuildResult.CompileError(file, msg):
+            _cli_eprint("Compile error in {file}: {msg}")
+            return 1
+        case BuildResult.LinkError(msg):
+            _cli_eprint("Link error: {msg}")
+            return 1
+        case BuildResult.Error(msg):
+            _cli_eprint("Build error: {msg}")
+            return 1
 
 export cli_compile, compile_baremetal, compile_vhdl, cli_native_build

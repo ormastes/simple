@@ -201,6 +201,19 @@ bool     rt_munmap(void* addr, int64_t size);
 bool     rt_madvise(void* addr, int64_t size, int64_t advice);
 bool     rt_msync(void* addr, int64_t size);
 
+/* ===== Raw mmap/mprotect Syscall Wrappers (address-based, for SMF loader) ===== */
+
+int64_t  rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags, int64_t fd, int64_t offset);
+int64_t  rt_munmap_raw(int64_t addr, int64_t length);
+int64_t  rt_mprotect(int64_t addr, int64_t length, int64_t prot);
+int64_t  rt_madvise_raw(int64_t addr, int64_t length, int64_t advice);
+int64_t  rt_msync_flags(int64_t addr, int64_t length, int64_t flags);
+int64_t  rt_mlock(int64_t addr, int64_t length);
+int64_t  rt_munlock(int64_t addr, int64_t length);
+int64_t  rt_open_fd(const char* path, int64_t flags, int64_t mode);
+int64_t  rt_close_fd(int64_t fd);
+int64_t  rt_page_size(void);
+
 /* ===== High-Resolution Time ===== */
 
 int64_t  rt_time_now_nanos(void);   /* Nanosecond precision monotonic time */
