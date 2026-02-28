@@ -480,8 +480,24 @@ impl Target {
     }
 
     /// Get the triple string for Cranelift.
+    ///
+    /// Returns an OS-aware target triple (e.g., `x86_64-apple-darwin` on macOS).
+    /// Falls back to `TargetArch::triple_str()` for unrecognized combinations.
     pub const fn triple_str(&self) -> &'static str {
-        self.arch.triple_str()
+        match (&self.arch, &self.os) {
+            (TargetArch::X86_64, TargetOS::Linux) => "x86_64-unknown-linux-gnu",
+            (TargetArch::X86_64, TargetOS::Windows) => "x86_64-pc-windows-msvc",
+            (TargetArch::X86_64, TargetOS::MacOS) => "x86_64-apple-darwin",
+            (TargetArch::X86_64, TargetOS::FreeBSD) => "x86_64-unknown-freebsd",
+            (TargetArch::Aarch64, TargetOS::Linux) => "aarch64-unknown-linux-gnu",
+            (TargetArch::Aarch64, TargetOS::Windows) => "aarch64-pc-windows-msvc",
+            (TargetArch::Aarch64, TargetOS::MacOS) => "aarch64-apple-darwin",
+            (TargetArch::Aarch64, TargetOS::FreeBSD) => "aarch64-unknown-freebsd",
+            (TargetArch::Riscv64, TargetOS::Linux) => "riscv64gc-unknown-linux-gnu",
+            (TargetArch::Wasm32, _) => "wasm32-unknown-unknown",
+            (TargetArch::Wasm64, _) => "wasm64-unknown-unknown",
+            _ => self.arch.triple_str(),
+        }
     }
 
     /// Check if this is a baremetal target (no OS).
@@ -630,5 +646,58 @@ mod tests {
     fn test_target_display() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         assert_eq!(format!("{}", target), "x86_64-linux");
+    }
+
+    #[test]
+    fn test_target_triple_str_os_aware() {
+        // Linux triples
+        assert_eq!(
+            Target::new(TargetArch::X86_64, TargetOS::Linux).triple_str(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Aarch64, TargetOS::Linux).triple_str(),
+            "aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Riscv64, TargetOS::Linux).triple_str(),
+            "riscv64gc-unknown-linux-gnu"
+        );
+
+        // macOS triples
+        assert_eq!(
+            Target::new(TargetArch::X86_64, TargetOS::MacOS).triple_str(),
+            "x86_64-apple-darwin"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Aarch64, TargetOS::MacOS).triple_str(),
+            "aarch64-apple-darwin"
+        );
+
+        // Windows triples
+        assert_eq!(
+            Target::new(TargetArch::X86_64, TargetOS::Windows).triple_str(),
+            "x86_64-pc-windows-msvc"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Aarch64, TargetOS::Windows).triple_str(),
+            "aarch64-pc-windows-msvc"
+        );
+
+        // FreeBSD triples
+        assert_eq!(
+            Target::new(TargetArch::X86_64, TargetOS::FreeBSD).triple_str(),
+            "x86_64-unknown-freebsd"
+        );
+        assert_eq!(
+            Target::new(TargetArch::Aarch64, TargetOS::FreeBSD).triple_str(),
+            "aarch64-unknown-freebsd"
+        );
+
+        // WASM triples (OS-independent)
+        assert_eq!(
+            Target::new(TargetArch::Wasm32, TargetOS::None).triple_str(),
+            "wasm32-unknown-unknown"
+        );
     }
 }

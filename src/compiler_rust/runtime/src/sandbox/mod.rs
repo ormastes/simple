@@ -27,6 +27,9 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(target_os = "freebsd")]
+pub mod freebsd;
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -236,6 +239,9 @@ pub use macos::apply_sandbox;
 #[cfg(target_os = "windows")]
 pub use windows::apply_sandbox;
 
+#[cfg(target_os = "freebsd")]
+pub use freebsd::apply_sandbox;
+
 // Cleanup function for non-Linux platforms (no-op)
 #[cfg(not(target_os = "linux"))]
 pub fn cleanup_network_rules() {
@@ -243,9 +249,9 @@ pub fn cleanup_network_rules() {
 }
 
 // Fallback for unsupported platforms
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd")))]
 pub fn apply_sandbox(_config: &SandboxConfig) -> SandboxResult<()> {
     Err(SandboxError::UnsupportedPlatform(
-        "Sandboxing is only supported on Linux, macOS, and Windows".to_string(),
+        "Sandboxing is only supported on Linux, macOS, Windows, and FreeBSD".to_string(),
     ))
 }

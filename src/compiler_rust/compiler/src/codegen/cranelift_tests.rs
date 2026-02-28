@@ -42,16 +42,17 @@ fn test_compile_if_else() {
 }
 
 /// Test which architectures Cranelift actually supports.
-/// This documents the current state of cross-compilation support.
+/// With x86, arm64, riscv64 features enabled, all 64-bit targets compile from any host.
+/// 32-bit targets remain unsupported (require LLVM backend).
 #[test]
 fn test_cranelift_target_support() {
     let targets = [
-        ("x86_64", TargetArch::X86_64, cfg!(target_arch = "x86_64")), // Only on x86_64 host
-        ("aarch64", TargetArch::Aarch64, cfg!(target_arch = "aarch64")), // Only on aarch64 host
-        ("riscv64", TargetArch::Riscv64, cfg!(target_arch = "riscv64")), // Only on riscv64 host
-        ("i686", TargetArch::X86, false),                             // Expected: NOT supported
-        ("armv7", TargetArch::Arm, false),                            // Expected: NOT supported
-        ("riscv32", TargetArch::Riscv32, false),                      // Expected: NOT supported
+        ("x86_64", TargetArch::X86_64, true),   // Cross-arch enabled
+        ("aarch64", TargetArch::Aarch64, true),  // Cross-arch enabled
+        ("riscv64", TargetArch::Riscv64, true),  // Cross-arch enabled
+        ("i686", TargetArch::X86, false),        // Expected: NOT supported
+        ("armv7", TargetArch::Arm, false),       // Expected: NOT supported
+        ("riscv32", TargetArch::Riscv32, false), // Expected: NOT supported
     ];
 
     for (name, arch, expected_support) in targets {
@@ -65,11 +66,11 @@ fn test_cranelift_target_support() {
                 name,
                 result.err()
             );
-            println!("{}: ✅ Supported", name);
+            println!("{}: Supported", name);
         } else {
             // 32-bit targets are not supported by Cranelift
             assert!(result.is_err(), "{} should NOT be supported", name);
-            println!("{}: ❌ Not supported (expected)", name);
+            println!("{}: Not supported (expected)", name);
         }
     }
 }

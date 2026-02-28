@@ -48,7 +48,16 @@ fn get_bundled_mold_path() -> Option<PathBuf> {
         "mold"
     };
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "freebsd")]
+    let mold_name = if cfg!(target_arch = "x86_64") {
+        "mold-freebsd-x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "mold-freebsd-aarch64"
+    } else {
+        "mold"
+    };
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
     let mold_name = "mold";
 
     // Check locations in order
@@ -160,6 +169,14 @@ pub extern "C" fn mold_ffi_find_lld() -> *const c_char {
 
     // Try lld (sometimes installed as just 'lld')
     if let Some(path) = find_in_path("lld") {
+        if let Some(c_str) = path_to_c_string(path) {
+            return c_str.into_raw();
+        }
+    }
+
+    // On Windows, try lld-link (MSVC-compatible LLD variant)
+    #[cfg(target_os = "windows")]
+    if let Some(path) = find_in_path("lld-link") {
         if let Some(c_str) = path_to_c_string(path) {
             return c_str.into_raw();
         }

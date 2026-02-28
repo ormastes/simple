@@ -27,9 +27,9 @@ pub fn find_sysroot(target: &Target) -> Option<PathBuf> {
         return Some(system_path);
     }
 
-    // 3. User-local installation
-    if let Ok(home) = std::env::var("HOME") {
-        let user_path = PathBuf::from(format!("{home}/.simple/sysroot/{triple}"));
+    // 3. User-local installation (uses USERPROFILE fallback on Windows)
+    if let Some(home) = super::env::home() {
+        let user_path = home.join(".simple").join("sysroot").join(triple);
         if user_path.exists() {
             return Some(user_path);
         }

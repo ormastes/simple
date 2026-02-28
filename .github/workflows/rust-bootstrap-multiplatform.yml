@@ -1,0 +1,124 @@
+name: Rust Bootstrap Multiplatform
+
+on:
+  push:
+    paths: ['src/compiler_rust/**']
+  pull_request:
+    paths: ['src/compiler_rust/**']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Native builds — compile and test on each platform
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+          - os: macos-latest
+            name: macOS aarch64
+          - os: macos-13
+            name: macOS x86_64
+          - os: windows-latest
+            name: Windows x86_64
+    runs-on: ${{ matrix.os }}
+    name: Native — ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: ${{ runner.os }}-${{ runner.arch }}-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-bootstrap-
+
+      - name: Build
+        working-directory: src/compiler_rust
+        run: cargo build --profile bootstrap -p simple-driver
+
+      - name: Test
+        working-directory: src/compiler_rust
+        run: cargo test --workspace --lib
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          name: bootstrap-${{ matrix.name }}-${{ github.sha }}
+          path: |
+            src/compiler_rust/target/bootstrap/simple*
+          retention-days: 7
+
+  # Cross-compilation builds from Linux x86_64
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            name: Linux aarch64
+            pkg: gcc-aarch64-linux-gnu
+          - target: riscv64gc-unknown-linux-gnu
+            name: Linux riscv64
+            pkg: gcc-riscv64-linux-gnu
+          - target: x86_64-pc-windows-gnu
+            name: Windows x86_64 (MinGW)
+            pkg: gcc-mingw-w64-x86-64
+    name: Cross — ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation toolchain
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.pkg }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/compiler_rust/target
+          key: cross-${{ matrix.target }}-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            cross-${{ matrix.target }}-
+
+      - name: Build
+        working-directory: src/compiler_rust
+        run: cargo build --profile bootstrap -p simple-driver --target ${{ matrix.target }}
+
+  # FreeBSD build (VM-based)
+  freebsd:
+    runs-on: ubuntu-latest
+    name: Native — FreeBSD x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y curl bash
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
+          run: |
+            . "$HOME/.cargo/env"
+            cd src/compiler_rust
+            cargo build --profile bootstrap -p simple-driver
+            cargo test --workspace --lib
