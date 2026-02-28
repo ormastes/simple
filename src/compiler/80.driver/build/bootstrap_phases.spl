@@ -8,6 +8,8 @@
 # - run_interpreter_fallback: Interpreter verification fallback
 
 use app.io.mod (file_exists, file_size_raw, file_hash_sha256, shell)
+use compiler.driver.driver.{interpret_file}
+use compiler.driver.driver_types.{CompileResult}
 use app.build.bootstrap_multiphase.{
     MultiphaseConfig, PhaseResult, BootstrapPhase, CompilationBackend,
     build_ordered_file_list, fail_phase, backend_to_string, current_time_ms
@@ -105,6 +107,7 @@ fn run_phase1_seed(config: MultiphaseConfig) -> PhaseResult:
     )
 
 # Phase 2: Core1 recompiles compiler (reproducibility)
+# MUST use subprocess: runs the Core1 binary (output of Phase 1) as a separate process.
 fn run_phase2_core(config: MultiphaseConfig, phase1: PhaseResult) -> PhaseResult:
     val start_time = current_time_ms()
     val core2_bin = "{config.output_dir}/core2"
@@ -151,6 +154,7 @@ fn run_phase2_core(config: MultiphaseConfig, phase1: PhaseResult) -> PhaseResult
     )
 
 # Phase 3: Core2 compiles the full compiler
+# MUST use subprocess: runs the Core2 binary (output of Phase 2) as a separate process.
 fn run_phase3_full(config: MultiphaseConfig, phase2: PhaseResult) -> PhaseResult:
     val start_time = current_time_ms()
     val full1_bin = "{config.output_dir}/full1"
@@ -196,6 +200,7 @@ fn run_phase3_full(config: MultiphaseConfig, phase2: PhaseResult) -> PhaseResult
     )
 
 # Phase 4: Full1 recompiles itself (reproducibility)
+# MUST use subprocess: runs the Full1 binary (output of Phase 3) as a separate process.
 fn run_phase4_full(config: MultiphaseConfig, phase3: PhaseResult) -> PhaseResult:
     val start_time = current_time_ms()
     val full2_bin = "{config.output_dir}/full2"
@@ -244,13 +249,13 @@ fn run_interpreter_fallback(config: MultiphaseConfig) -> PhaseResult:
     val start_time = current_time_ms()
     print "  Running interpreter verification..."
 
-    # Run a small subset of tests to verify the interpreter works
-    val test_result = shell("bin/release/simple test --only-fast 2>&1 | tail -5")
-    if test_result.exit_code == 0:
-        print "  OK Interpreter tests passed"
-        print "  {test_result.stdout.trim()}"
-    else:
-        print "  WARN Some interpreter tests may have failed"
+    # Run the test runner in-process to verify the interpreter works
+    val test_result = interpret_file("src/app/test_runner_new/main.spl")
+    match test_result:
+        case CompileResult.Success(_):
+            print "  OK Interpreter tests passed"
+        case _:
+            print "  WARN Some interpreter tests may have failed"
 
     # Hash source files for integrity
     val source_hash = shell("find src/compiler/ -name '*.spl' -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1")
