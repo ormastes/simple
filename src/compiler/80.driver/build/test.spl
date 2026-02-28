@@ -13,6 +13,8 @@ use app.build.cargo (Cargo, print_test_result)
 use app.build.baremetal (BaremetalConfig, QemuRunner)
 
 use app.io.{cli_run_tests, file_exists, current_time_ms, file_read, process_run}
+use compiler.driver.driver.{interpret_file}
+use compiler.driver.driver_types.{CompileResult}
 
 # Test orchestrator class
 class TestOrchestrator:
@@ -200,42 +202,20 @@ fn run_rust_tests(config: TestConfig) -> TestResult:
 fn run_doc_tests(config: TestConfig) -> TestResult:
     empty_test_result()
 
-# Run Simple/SSpec tests via test runner
-# NOTE: Uses subprocess (process_run) instead of FFI re-entry (cli_run_tests)
-# to avoid stack overflow when running 345+ test files inside build context.
+# Run Simple/SSpec tests via test runner (in-process)
+# The test runner reads sys_get_args() for CLI args (filter, level, tag, etc.)
+# which are passed through from the original `bin/simple test ...` invocation.
 fn run_simple_tests(config: TestConfig) -> TestResult:
-    # Build args for Simple test runner
-    var args = ["test"]
+    # Run the test runner in-process via interpret_file
+    val result = interpret_file("src/app/test_runner_new/main.spl")
 
-    # Add filter if specified
-    if config.filter.?:
-        args = args.merge([config.filter])
-
-    # Add level filter
-    if config.level.? and config.level != "all":
-        args = args.merge(["--level", config.level])
-
-    # Add tag filter
-    if config.tag.?:
-        args = args.merge(["--tag", config.tag])
-
-    # Add fail-fast
-    if config.fail_fast:
-        args = args.merge(["--fail-fast"])
-
-    # Add timeout
-    if config.timeout > 0:
-        args = args.merge(["--timeout", config.timeout.to_string()])
-
-    # Run as subprocess to avoid stack overflow from FFI re-entry
-    val (stdout, stderr, exit_code) = process_run("bin/simple", args)
-    print stdout
-    if stderr.?:
-        print stderr
+    val success = match result:
+        case CompileResult.Success(_): true
+        case _: false
 
     # Parse detailed results from test_db.sdn
     val parsed = parse_test_db_results()
-    if exit_code == 0:
+    if success:
         TestResult(
             success: true,
             exit_code: 0,
@@ -248,7 +228,7 @@ fn run_simple_tests(config: TestConfig) -> TestResult:
     else:
         TestResult(
             success: false,
-            exit_code: exit_code,
+            exit_code: 1,
             stdout: "",
             stderr: "",
             tests_run: parsed.tests_run,

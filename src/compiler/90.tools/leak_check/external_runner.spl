@@ -9,6 +9,8 @@ extern fn rt_file_exists(path: text) -> bool
 
 use app.io.file_shell.{shell, shell_output, file_write, file_delete}
 use app.compile.native.{find_cpp_compiler}
+use compiler.driver.driver.{aot_c_file}
+use compiler.driver.driver_types.{CompileResult}
 use types
 use parser
 
@@ -45,20 +47,21 @@ fn run_external_check(cfg: LeakCheckConfig) -> LeakCheckResult:
         return result
 
     val temp_cpp = temp_dir + "/leak_check.cpp"
-    val gen_cmd = "bin/simple compile --backend=c -o '{temp_cpp}' '{cfg.source_file}' 2>&1"
     if cfg.verbose:
-        print "Generating C++: bin/simple compile --backend=c ..."
-    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
-    if gen_exit != 0:
-        print "Error: C++ generation failed"
-        if gen_out != "":
-            print gen_out
-        shell("rm -rf '{temp_dir}'")
-        result.exit_code = 1
-        return result
-
-    if cfg.verbose:
-        print "Generated C++ code"
+        print "Generating C++ via in-process aot_c_file..."
+    val aot_result = aot_c_file(cfg.source_file, temp_cpp)
+    match aot_result:
+        case CompileResult.Success(_):
+            if cfg.verbose:
+                print "Generated C++ code"
+        case _:
+            print "Error: C++ generation failed"
+            val errors = aot_result.get_errors()
+            for err in errors:
+                print err
+            shell("rm -rf '{temp_dir}'")
+            result.exit_code = 1
+            return result
 
     val temp_bin = temp_dir + "/leak_check_bin"
 
