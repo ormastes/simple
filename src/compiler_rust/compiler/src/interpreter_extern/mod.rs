@@ -810,6 +810,7 @@ pub(crate) fn call_extern_function(
         "rt_settlement_main" => cli::rt_settlement_main(&evaluated),
 
         // Compilation
+        "rt_native_build" => cli::rt_native_build(&evaluated),
         "rt_cli_handle_compile" => cli::rt_cli_handle_compile(&evaluated),
         "rt_cli_handle_targets" => cli::rt_cli_handle_targets(&evaluated),
         "rt_cli_handle_linkers" => cli::rt_cli_handle_linkers(&evaluated),

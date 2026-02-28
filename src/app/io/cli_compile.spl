@@ -188,42 +188,31 @@ fn cli_compile(args: [str]) -> i64:
         return compile_c_backend(source_file, output_file, verbose)
 
     if emit == "native":
+        # Use the in-tree Rust compiler directly to avoid the legacy two-argument
+        # helper that rejects multiple sources. This keeps bootstrap paths aligned
+        # with Stage1/Stage2 locations.
         var out = output_file
         if out == "":
             out = source_file.replace(".spl", "")
-        # Build optimization flags for llvm_direct pipeline
-        var opt_flags = ""
-        if use_lto:
-            opt_flags = opt_flags + " --lto"
-        if march_target != "":
-            opt_flags = opt_flags + " --march=" + march_target
-        if pgo_generate:
-            opt_flags = opt_flags + " --pgo-generate"
-        if pgo_use_path != "":
-            opt_flags = opt_flags + " --pgo-use=" + pgo_use_path
-        if release_optimized:
-            opt_flags = opt_flags + " --release-optimized"
-        # Use llvm_direct if optimization flags are set, otherwise native
-        var has_opt_flags = use_lto or march_target != "" or pgo_generate or pgo_use_path != "" or release_optimized
-        if has_opt_flags:
-            var llvm_cmd = "bin/release/simple src/app/compile/llvm_direct.spl '{source_file}' '{out}'" + opt_flags
-            if verbose:
-                llvm_cmd = llvm_cmd + " --verbose"
-            val llvm_result = _cli_shell(llvm_cmd)
-            if llvm_result.stdout != "":
-                print llvm_result.stdout
-            if llvm_result.stderr != "" and llvm_result.exit_code != 0:
-                _cli_eprint(llvm_result.stderr)
-            return llvm_result.exit_code
-        var native_cmd = "bin/release/simple src/app/compile/native.spl '{source_file}' '{out}'"
+        var cmd = "./src/compiler_rust/target/release/simple compile '{source_file}' --native -o '{out}'"
         if verbose:
-            native_cmd = "bin/release/simple src/app/compile/native.spl '{source_file}' '{out}' --verbose"
-        val native_result = _cli_shell(native_cmd)
-        if native_result.stdout != "":
-            print native_result.stdout
-        if native_result.stderr != "" and native_result.exit_code != 0:
-            _cli_eprint(native_result.stderr)
-        return native_result.exit_code
+            cmd = cmd + " --verbose"
+        if use_lto:
+            cmd = cmd + " --lto"
+        if march_target != "":
+            cmd = cmd + " --march=" + march_target
+        if pgo_generate:
+            cmd = cmd + " --pgo-generate"
+        if pgo_use_path != "":
+            cmd = cmd + " --pgo-use=" + pgo_use_path
+        if release_optimized:
+            cmd = cmd + " --release-optimized"
+        val result = _cli_shell(cmd)
+        if result.stdout != "":
+            print result.stdout
+        if result.stderr != "" and result.exit_code != 0:
+            _cli_eprint(result.stderr)
+        return result.exit_code
 
     if target.starts_with("baremetal-"):
         return compile_baremetal(source_file, target, emit, output_file, verbose)
@@ -500,4 +489,10 @@ fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
         print "Output: {out}"
     return result.exit_code
 
-export cli_compile, compile_baremetal, compile_vhdl
+# Native build: compile entire project to native binary via Cranelift
+extern fn rt_native_build(args: [text]) -> i64
+
+fn cli_native_build(args: [text]) -> i64:
+    rt_native_build(args)
+
+export cli_compile, compile_baremetal, compile_vhdl, cli_native_build
