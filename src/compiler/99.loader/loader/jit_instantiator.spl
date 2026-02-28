@@ -12,105 +12,22 @@ use compiler.loader.object_mapper.{
     JitMapperConfig
 }
 
-# NOTE: compiler_ffi functions are registered as FFI in Rust runtime - no import needed
-# use compiler.loader.compiler_ffi.*
+# Import compiler_ffi for type inference and template instantiation
+use compiler.loader.compiler_ffi.{
+    compiler_create_context,
+    compiler_destroy_context,
+    compiler_infer_types,
+    compiler_instantiate_template,
+    compiler_get_stats,
+    serialize_types_json,
+    parse_types_json
+}
+
 # mmap functions not yet available in app.io.mod; SmfCache/MappedSmf stubbed locally
 # use compiler.loader.smf_cache (SmfCache, MappedSmf)
 # Executable memory mapping is handled via compiler_shared.loader.object_mapper
 
-# ============================================================================
-# Compiler Context FFI
-# ============================================================================
-
-# These functions bridge to the compiler runtime for type inference and
-# template instantiation. They are called during JIT compilation to
-# produce specialized code from generic templates.
-#
-# FFI Protocol:
-# - Context handles are i64 opaque references
-# - Data is exchanged as SDN-encoded text (not JSON)
-# - Results include a "status" field: "success" or "error"
-# - On error, a "message" field describes the failure
-
-fn compiler_create_context() -> i64:
-    """Create a new compiler context for JIT compilation.
-
-    Returns an opaque handle to a compiler context that maintains
-    type inference state and template caches across instantiations.
-    Returns 0 on failure.
-    """
-    # When the compiler FFI is registered in the runtime, this will
-    # call: extern fn rt_compiler_create_context() -> i64
-    # For now, return a valid dummy handle
-    1
-
-fn compiler_destroy_context(handle: i64) -> bool:
-    """Destroy a compiler context and free associated resources.
-
-    Must be called when the JIT instantiator is done to prevent leaks.
-    """
-    if handle == 0:
-        return false
-    # When FFI is available: extern fn rt_compiler_destroy_context(handle: i64) -> bool
-    true
-
-fn compiler_infer_types(handle: i64, template_sdn: text, hints_sdn: text) -> text:
-    """Infer concrete types for a generic template.
-
-    Uses call-site type hints (argument types, return type context) to
-    determine the concrete type arguments for instantiation.
-
-    Args:
-        handle: Compiler context handle
-        template_sdn: SDN-encoded template definition
-        hints_sdn: SDN-encoded type hints from call site
-
-    Returns: SDN-encoded array of inferred type strings, or error.
-    """
-    if handle == 0:
-        return "status: error\nmessage: invalid context handle"
-    # When FFI is available: extern fn rt_compiler_infer_types(...)
-    "status: success\ntypes: []"
-
-fn compiler_check_types(handle: i64, types_sdn: text, constraints_sdn: text) -> bool:
-    """Check inferred types against template constraints.
-
-    Validates that the concrete types satisfy all trait bounds,
-    where clauses, and other constraints on the generic parameters.
-    """
-    if handle == 0:
-        return false
-    # When FFI is available: extern fn rt_compiler_check_types(...)
-    true
-
-fn compiler_instantiate_template(handle: i64, template_sdn: text, types_sdn: text) -> text:
-    """Instantiate a template with concrete types, producing machine code.
-
-    This is the core JIT compilation step. Takes a serialized template
-    and concrete type arguments, runs monomorphization and code generation,
-    and returns the compiled machine code bytes.
-
-    Returns SDN with:
-        status: "success" or "error"
-        bytecode: base64-encoded machine code (on success)
-        size: code size in bytes (on success)
-        message: error description (on error)
-    """
-    if handle == 0:
-        return "status: error\nmessage: invalid context handle"
-    # When FFI is available: extern fn rt_compiler_instantiate_template(...)
-    "status: success\nbytecode: \nsize: 0"
-
-fn compiler_get_stats(handle: i64) -> text:
-    """Get compiler statistics for diagnostics.
-
-    Returns SDN-encoded stats including type inference count,
-    template instantiation count, cache hit rate, and memory usage.
-    """
-    if handle == 0:
-        return "type_inferences: 0\ntemplate_instantiations: 0"
-    # When FFI is available: extern fn rt_compiler_get_stats(...)
-    "type_inferences: 0\ntemplate_instantiations: 0"
+extern fn json_parse(input: text) -> Result<JsonValue, SimpleError>
 
 # ============================================================================
 # Result Types
@@ -464,22 +381,54 @@ impl JitInstantiator:
         result
 
     me do_jit_compile(entry: PossibleInstantiation, smf_path: text) -> JitInstantiationResult:
-        """Perform JIT compilation via FFI."""
-        # Loading actual template bytes from SMF TemplateCode section not yet implemented
-        eprint("Warning: loading template bytes from SMF not yet implemented; using empty bytes for {entry.template_name}")
-        val tmpl_bytes = TemplateBytes(
-            bytes: [],
-            name: entry.template_name,
-            param_count: entry.type_args.split(",").len() as i32
-        )
+        """Perform JIT compilation via compiler FFI."""
+        # Parse type args from comma-separated string
+        val type_arg_strs = entry.type_args.split(",")
+        var type_params_json: [text] = []
+        var types_json_parts: [text] = []
+        for s in type_arg_strs:
+            val trimmed = s.trim()
+            val normalized = type_from_string(trimmed)
+            type_params_json.push('"{normalized}"')
+            types_json_parts.push('{"kind": "named", "name": "{normalized}"}')
 
-        # Parse type args from string to TypeInfo
-        val type_args = entry.type_args.split(",")
-            .map(\s: type_from_string(s.trim()))
+        # Build template and types JSON for compiler FFI
+        val template_json = '{"name": "{entry.template_name}", "type_params": [' + type_params_json.join(",") + ']}'
+        val types_json = '[' + types_json_parts.join(",") + ']'
 
-        # Compile via FFI not yet implemented (needs JSON serialization infrastructure)
-        eprint("Warning: JIT compilation via FFI not yet implemented for {entry.mangled_name}")
-        val code_result: Result<[u8], text> = Err("JIT compilation not yet implemented")
+        # Call compiler FFI to instantiate template
+        val result_text = compiler_instantiate_template(self.compiler_ctx_handle, template_json, types_json)
+
+        # Parse the JSON result to extract code bytes
+        val parsed = json_parse(result_text)
+        var code_result: Result<[u8], text> = Err("Failed to parse compilation result")
+
+        if parsed.is_ok():
+            val root = parsed.unwrap()
+            val success_val = root.get("success")
+            val is_success = if success_val.?:
+                success_val.unwrap().as_bool() ?? false
+            else:
+                false
+
+            if is_success:
+                var code_bytes: [u8] = []
+                val code_val = root.get("code")
+                if code_val.?:
+                    val code_arr = code_val.unwrap().as_array()
+                    if code_arr.?:
+                        for elem in code_arr.unwrap():
+                            val n = elem.as_number()
+                            if n.?:
+                                code_bytes.push(n.unwrap() as u8)
+                code_result = Ok(code_bytes)
+            else:
+                val error_val = root.get("error")
+                val error_msg = if error_val.?:
+                    error_val.unwrap().as_string() ?? "Unknown compilation error"
+                else:
+                    "Unknown compilation error"
+                code_result = Err(error_msg)
 
         match code_result:
             case Ok(compiled_code):
