@@ -19,6 +19,8 @@ jobs:
   bootstrap-linux-full2:
     name: Linux bootstrap full2
     runs-on: ubuntu-latest
+    outputs:
+      bootstrap-method: ${{ steps.result.outputs.method }}
 
     steps:
       - name: Checkout code
@@ -29,14 +31,68 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang
 
-      - name: Run bootstrap-from-scratch.sh
+      - name: Try downloading latest release binary
+        id: download-release
+        continue-on-error: true
         run: |
+          echo "--- Attempting release binary download ---"
+          chmod +x scripts/bootstrap/download-release.sh
+
+          if scripts/bootstrap/download-release.sh --output=build/release-simple --quiet; then
+            if build/release-simple --version; then
+              echo "release_available=true" >> $GITHUB_OUTPUT
+              echo "Release binary downloaded and verified"
+            else
+              echo "release_available=false" >> $GITHUB_OUTPUT
+              echo "Downloaded binary failed verification"
+              rm -f build/release-simple
+            fi
+          else
+            echo "release_available=false" >> $GITHUB_OUTPUT
+            echo "Release download failed or unavailable"
+          fi
+
+      - name: Build from release binary
+        id: build-from-release
+        if: steps.download-release.outputs.release_available == 'true'
+        continue-on-error: true
+        run: |
+          echo "--- Building new binary using release binary ---"
+          mkdir -p bin/release
+          cp build/release-simple bin/release/simple
+          chmod +x bin/release/simple
+
+          if bin/release/simple build --release; then
+            echo "build_success=true" >> $GITHUB_OUTPUT
+            echo "New binary built from release binary"
+          else
+            echo "build_success=false" >> $GITHUB_OUTPUT
+            echo "Build from release binary failed"
+          fi
+
+      - name: Fallback to C bootstrap
+        id: c-bootstrap
+        if: steps.download-release.outputs.release_available != 'true' || steps.build-from-release.outputs.build_success != 'true'
+        run: |
+          echo "--- Falling back to C bootstrap build ---"
           chmod +x scripts/bootstrap/bootstrap-from-scratch.sh
           scripts/bootstrap/bootstrap-from-scratch.sh \
+            --skip-download \
             --step=full2 \
             --deploy \
             --keep-artifacts \
             --jobs=2
+
+      - name: Record bootstrap method
+        id: result
+        run: |
+          if [[ "${{ steps.build-from-release.outputs.build_success }}" == "true" ]]; then
+            echo "method=release" >> $GITHUB_OUTPUT
+            echo "Bootstrap method: release binary"
+          else
+            echo "method=c-bootstrap" >> $GITHUB_OUTPUT
+            echo "Bootstrap method: C bootstrap"
+          fi
 
       - name: Verify deployed runtime
         run: |

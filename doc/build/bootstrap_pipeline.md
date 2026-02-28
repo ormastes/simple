@@ -1,5 +1,29 @@
 # Bootstrap Pipeline — Rust Seed / Seed / Core / Full
 
+## Fastest Path (Release Download)
+
+If a pre-built release binary exists on GitHub, skip the entire build:
+
+```bash
+# Automatic fallback chain (release → C bootstrap)
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+
+# Direct download only
+scripts/bootstrap/download-release.sh --output=bin/release/simple
+```
+
+**Fallback chain:**
+```
+Phase 0: Download release binary from GitHub releases
+    ├── Success → use downloaded binary, skip Phases 1–3
+    └── Fail → fall back to Phase 1 (C bootstrap)
+Phase 1: CMake configure (C source in src/compiler_cpp/)
+Phase 2: Build with Ninja/Make
+Phase 3: Verify (simple --version)
+Phase 4: Self-host verify (optional, --step=full2)
+Phase 5: Deploy to bin/release/ (optional, --deploy)
+```
+
 ## Fast Path (Rust Seed → Pure Simple)
 
 This is the quickest way to re-bootstrap on a fresh checkout using the Rust seed compiler that lives in `src/compiler_rust/`.
