@@ -6,6 +6,15 @@
 - Cross to FreeBSD ELF using downloaded sysroot and LLVM/LLD.
 - macOS builds must run on a macOS runner (Mach-O requires Apple SDK/linker).
 
+## Rust bootstrap linker pipeline
+The Rust bootstrap compiler (`src/compiler_rust/compiler/src/linker/`) has full
+multiplatform support in the native linker pipeline:
+- **Linker flavors:** GNU (Linux/FreeBSD), MSVC (Windows), ld64 (macOS), wasm-ld (WASM)
+- **Target-aware detection:** `NativeLinker::detect_for_target()` picks the right linker
+- **Per-OS defaults:** libraries, CRT files, dynamic linker, library paths
+- **Architecture-aware stubs:** bootstrap asm uses correct `ret` for x86/ARM/RISC-V
+- **MSVC support:** `/OUT:`, `/LIBPATH:`, `name.lib` syntax, `cl.exe` C compiler detection
+
 ## Dependencies
 - `llvm`, `lld`, `clang`
 - Windows: `mingw-w64` (provides headers/libs and gcc driver to call ld.lld)
