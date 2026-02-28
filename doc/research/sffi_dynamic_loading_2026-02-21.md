@@ -26,13 +26,13 @@ error: semantic: unknown extern function: rt_torch_available
 
 ```
 bin/simple <file.spl>
-    └─ bin/release/simple (Rust binary, 33 MB)
-           ├─ Interpreter mode (default)
+    └─ bin/release/simple (self-hosted binary, 33 MB, fully self-sufficient)
+           ├─ Interpreter mode (default, in-process via interpret_file())
            │    └─ match extern_name in whitelist of 129 names
            │         _ => error("unknown extern function: {name}")
-           ├─ "soft exec_manager" (no native JIT)
-           │    └─ Writes source to tmp file, shells out: bin/simple -c "{code}"
-           │         (slow, same interpreter whitelist applies)
+           ├─ Compilation mode (in-process, no subprocess delegation)
+           │    └─ aot_c_file(), compile_native(), aot_vhdl_file()
+           │         (all compilation happens in-process)
            └─ Cranelift JIT (native, not present in current build)
                 └─ rt_exec_manager_create("cranelift") → not working
 
@@ -41,16 +41,11 @@ bin/simple compile --backend=c && cmake && ninja
            └─ Calls spl_dlopen / spl_wffi_call_i64 from runtime.c (WORKS)
 ```
 
-### 2.2 JIT Mode ("soft exec_manager fallback")
+**Note (2026-02-28):** The "soft exec_manager" subprocess pattern has been eliminated. The self-hosted binary no longer shells out to `bin/simple` or `bin/release/simple` for any compilation, interpretation, or test running. All operations are in-process.
 
-Message: `[jit] Using soft exec_manager fallback (interpreted); native JIT not present`
+### 2.2 JIT Mode
 
-**What it is** (`src/app/io/jit_ffi.spl`):
-1. `exec_manager_compile_source(h, src)` → writes source to `tmp/jit/simple_soft_jit_<h>.spl`
-2. `exec_manager_execute(h, fn_name, args)` → shells out `bin/simple -c "{src}; print fn_name(args)"`
-3. Parses stdout, returns as i64
-
-**Key limitation:** Each execute spawns a new interpreter process. Still hits the same 129-function whitelist. No GPU calls possible.
+**Note (2026-02-28):** The "soft exec_manager" subprocess fallback has been eliminated. The self-hosted binary now handles all file execution in-process via `interpret_file()`. The old pattern of shelling out to `bin/simple -c "{code}"` is no longer used.
 
 **Real Cranelift JIT** (`src/compiler/95.interp/execution/mod.spl`):
 - `rt_exec_manager_create("cranelift")` — not implemented in current binary build
@@ -348,7 +343,7 @@ LD_LIBRARY_PATH=build ./build/torch_cmake/simple
 | WFFI (`spl_dlopen`) in interpreter | ❌ Not in whitelist | Same as above |
 | `rt_torch_*` in C-compiled binary | ✅ Works via runtime.h | Use WFFI + `build/libspl_torch.so` |
 | GPU activity proven | ✅ Via direct C++ test | `build/libspl_torch.so` already built |
-| Soft JIT exec_manager | ✅ Works (slow) | Not useful for FFI dispatch |
+| Subprocess delegation | ✅ Eliminated (2026-02-28) | All compilation/interpretation now in-process |
 | Native Cranelift JIT | ❌ Not in binary build | Would require feature-enabled rebuild |
 
 **Recommended next step:** Implement `src/lib/ffi/dynamic.spl` and update `torch/ffi.spl` to use WFFI calls, enabling torch FFI in C-compiled mode. For interpreter support, add `spl_dlopen`/`spl_dlsym`/`spl_wffi_call_i64` to `src/compiler/95.interp/` so they're available in the next bootstrap cycle.

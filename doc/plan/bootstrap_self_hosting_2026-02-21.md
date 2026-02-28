@@ -24,17 +24,18 @@ Self-hosting is verified when `bin2 ≡ bin3` (same output for same input).
 
 ---
 
-## Current State
+## Current State (Updated 2026-02-28)
 
 | Artifact | Path | Size | How Built |
 |----------|------|------|-----------|
-| Full interpreter | `bin/simple` | 33MB | Rust runtime |
+| Full interpreter | `bin/simple` | 33MB | Self-hosted (Simple compiles itself) |
 | Seed compiler (hand-written) | `bin/bootstrap/cpp/simple` | 26KB | `src/compiler_cpp/real_compiler.c` via clang |
 | Native bootstrap | `bin/bootstrap/native/simple` | 164KB | unknown |
 
+**Self-sufficiency note (2026-02-28):** The self-hosted binary is now **fully self-sufficient**. All compilation (`aot_c_file()`, `compile_native()`, `aot_vhdl_file()`), interpretation (`interpret_file()`), and test running happen **in-process** — no subprocess calls to `bin/simple` or `bin/release/simple`. Only external system tools are called: `clang`/`clang++`, `gcc`, `mold`/`lld`/`ld`, `llc`.
+
 Key directories:
-- **C backend (app layer)**: `src/app/compile/` — mini C codegen, all fixed to `r"" + variable`
-- **C backend (compiler layer)**: `src/compiler/70.backend/backend/c_backend.spl` — full IR → C
+- **C backend (compiler layer)**: `src/compiler/70.backend/backend/c_backend.spl` — full IR → C (legacy mini C codegen in `src/app/compile/` has been deleted)
 - **C output directory**: `src/compiler_cpp/` — contains `real_compiler.c` (seed, hand-written)
 - **Runtime**: `src/runtime/runtime.c` + `runtime.h`
 - **CMakeLists**: `src/compiler_cpp/CMakeLists.txt` — picks up all `.c`/`.cpp` files via glob
@@ -226,18 +227,7 @@ grep -n "backend.*c\|c.*backend\|backend_c" \
 
 ### 2. String Interpolation (Fixed)
 
-All C codegen files have been converted from `"{variable}"` to
-`r"" + variable` to prevent Simple's interpolation engine from corrupting
-generated C source. Files fixed:
-
-- ✅ `src/app/compile/c_helpers.spl`
-- ✅ `src/app/compile/c_codegen_defs.spl`
-- ✅ `src/app/compile/c_runtime.spl`
-- ✅ `src/app/compile/c_translate_decl.spl`
-- ✅ `src/app/compile/c_translate_expr.spl`
-- ✅ `src/app/compile/c_translate_stmt.spl`
-- ✅ `src/compiler/70.backend/backend/c_backend.spl`
-- ✅ `src/compiler/70.backend/backend/c_ir_builder.spl`
+The legacy C codegen files (`src/app/compile/c_helpers.spl`, `c_codegen_defs.spl`, `c_runtime.spl`, `c_translate_*.spl`) have been **deleted** (2026-02-22). The MIR C backend at `src/compiler/70.backend/backend/c_backend.spl` + `c_ir_builder.spl` is now the sole C generation path, used in-process via `aot_c_file()`.
 
 ### 3. Runtime Completeness
 

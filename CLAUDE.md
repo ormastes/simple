@@ -10,15 +10,15 @@ Impl in simple unless it has big performance differences.
 
 | Binary | Path | Role | Source |
 |--------|------|------|--------|
-| **Real binary** | `bin/release/simple` | Full interpreter/compiler (production) | Compiled from Simple source by Simple compiler |
-| **C bootstrap** (temporal) | `build/simple` | Fast CLI dispatcher (~3ms startup), delegates to real binary | Generated C from Simple source (`src/compiler_cpp/`) via CMake+Ninja |
+| **Real binary** | `bin/release/simple` | Full interpreter/compiler (production) — **fully self-sufficient** | Compiled from Simple source by Simple compiler |
+| **C bootstrap** (temporal) | `build/simple` | Fast CLI dispatcher (~3ms startup) | Generated C from Simple source (`src/compiler_cpp/`) via CMake+Ninja |
 | **C bootstrap copy** | `build/bootstrap/c_simple/simple` | Same as `build/simple`, canonical bootstrap location | Same generated C source |
 | **Codegen tool** | `build/simple_codegen` | Compiles single `.spl` → `.c` | From `src/compiler_cpp/real_compiler.c` |
 
 - **Rust seed (dev bootstrap)** — build with `cargo build --profile bootstrap -p simple-driver` in `src/compiler_rust`; output at `src/compiler_rust/target/bootstrap/simple`. Use it to (a) compile the pure Simple compiler + essential libs, then (b) recompile with the freshly built Simple binary to get the final self-hosted `bin/simple`.
 
-- **C bootstrap is temporal** — it provides fast CLI dispatch but delegates all real work (test running, .spl interpretation, compilation) to `bin/release/simple`
-- **`bin/release/simple` is the real binary** — the self-hosted Simple compiler/interpreter
+- **`bin/release/simple` is fully self-sufficient** — all compilation, interpretation, file execution, and test running happens **in-process** via direct function calls (`aot_c_file()`, `compile_native()`, `interpret_file()`, `aot_vhdl_file()`). No subprocess calls to `bin/simple` or `bin/release/simple`.
+- The only external tool calls are system tools: `clang`/`clang++`, `gcc`, `mold`/`lld`/`ld`, `llc`, `uname`, `which`
 - The C bootstrap preprocesses newer syntax (bitfield, pass_do_nothing, pass_dn) for compatibility with older interpreter versions
 
 ---

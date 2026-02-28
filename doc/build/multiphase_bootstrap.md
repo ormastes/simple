@@ -78,7 +78,7 @@ Phase 4: LLVM Optimized (production binary)
 
 **Purpose:** Build a minimal compiler quickly to enable self-hosting
 
-**Method:** `native.spl` (C codegen → GCC)
+**Method:** `native.spl` (C codegen → GCC/Clang) — uses in-process `aot_c_file()` + `compile_native()`, no subprocess delegation
 
 **Command:**
 ```bash
@@ -238,10 +238,12 @@ build/bootstrap/
 After successful bootstrap:
 - **Location:** `bin/simple`
 - **Source:** `build/bootstrap/simple_phase4` (or `simple_phase3` if LLVM unavailable)
+- **Self-sufficient:** All compilation, interpretation, and test running happens in-process via direct function calls (`aot_c_file()`, `compile_native()`, `interpret_file()`, `aot_vhdl_file()`). No subprocess calls to `bin/simple` or `bin/release/simple`.
 - **Features:**
-  - ✓ Interpreter (always available)
-  - ✓ C codegen → GCC (`native.spl`)
-  - ✓ C codegen → LLVM (`llvm_direct.spl`)
+  - ✓ Interpreter (always available, in-process via `interpret_file()`)
+  - ✓ C codegen → GCC/Clang (`native.spl`, in-process via `aot_c_file()` + `compile_native()`)
+  - ✓ C codegen → LLVM (`llvm_direct.spl`, in-process via `aot_c_file()`)
+  - ✓ VHDL backend (in-process via `aot_vhdl_file()`)
   - ✓ Cranelift JIT (available but not used during bootstrap)
 
 ## Performance Metrics

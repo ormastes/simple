@@ -264,7 +264,10 @@ bin/simple compile --backend=llvm --release program.spl
 
 The driver's `aot_compile()` method checks the backend name before format dispatch:
 - If backend is `"c"`, `"cpp"`, or `"ccodegen"` → routes to `compile_to_c()` (writes C++ source)
+- If backend is `"vhdl"` → routes to VHDL generation via `aot_vhdl_file()`
 - Otherwise → routes to `compile_to_native()` (links object files to executable)
+
+**Note (2026-02-28):** All compilation backends are invoked **in-process** via direct function calls (`aot_c_file()`, `compile_native()`, `aot_vhdl_file()`). The binary never spawns subprocess calls to `bin/simple` for compilation.
 
 ```simple
 # In CompilerDriver.aot_compile():
