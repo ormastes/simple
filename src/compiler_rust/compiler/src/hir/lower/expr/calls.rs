@@ -156,16 +156,15 @@ impl Lowerer {
     ) -> LowerResult<Option<HirExpr>> {
         match name {
             "generator" => {
-                if args.len() != 1 {
-                    return Err(LowerError::Unsupported(
-                        "generator expects exactly one argument (a lambda)".to_string(),
-                    ));
+                if args.len() == 1 {
+                    let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                    return Ok(Some(HirExpr {
+                        kind: HirExprKind::GeneratorCreate { body: body_hir },
+                        ty: TypeId::I64,
+                    }));
                 }
-                let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
-                Ok(Some(HirExpr {
-                    kind: HirExprKind::GeneratorCreate { body: body_hir },
-                    ty: TypeId::I64,
-                }))
+                // 2+ args → not a builtin, fall through to regular call
+                return Ok(None);
             }
             "future" => {
                 if args.len() != 1 {

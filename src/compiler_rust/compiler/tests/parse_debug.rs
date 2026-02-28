@@ -2,7 +2,13 @@
 fn test_as_cast_in_func_args() {
     // Test parsing the actual failing files with minimal reproduction
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let test_files = [
         "src/compiler/35.semantics/semantics/cast_rules.spl",
         "src/compiler/99.loader/loader/compiler_ffi.spl",
@@ -21,7 +27,10 @@ fn test_as_cast_in_func_args() {
         let path = base.join(f);
         let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,
-            Err(e) => { eprintln!("  {f}: READ ERROR: {e}"); continue; }
+            Err(e) => {
+                eprintln!("  {f}: READ ERROR: {e}");
+                continue;
+            }
         };
         let mut parser = simple_parser::Parser::new(&src);
         match parser.parse() {
@@ -161,17 +170,24 @@ fn debug_timeout_files() {
     use simple_compiler::monomorphize::monomorphize_module;
 
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
 
-    let files = [
-        "src/compiler/30.types/const_keys.spl",
-    ];
+    let files = ["src/compiler/30.types/const_keys.spl"];
 
     for f in &files {
         let path = base.join(f);
         let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,
-            Err(e) => { eprintln!("  {f}: READ ERROR: {e}"); continue; }
+            Err(e) => {
+                eprintln!("  {f}: READ ERROR: {e}");
+                continue;
+            }
         };
 
         eprintln!("  {f}: starting parse...");
@@ -179,7 +195,10 @@ fn debug_timeout_files() {
         let mut parser = simple_parser::Parser::new(&src);
         let ast = match parser.parse() {
             Ok(a) => a,
-            Err(e) => { eprintln!("  {f}: PARSE ERROR: {e}"); continue; }
+            Err(e) => {
+                eprintln!("  {f}: PARSE ERROR: {e}");
+                continue;
+            }
         };
         let parse_ms = t0.elapsed().as_millis();
 
@@ -197,7 +216,10 @@ fn debug_timeout_files() {
         lowerer.set_lenient_types(true);
         let hir = match lowerer.lower_module(&ast) {
             Ok(h) => h,
-            Err(e) => { eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms HIR ERROR: {e}"); continue; }
+            Err(e) => {
+                eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms HIR ERROR: {e}");
+                continue;
+            }
         };
         let hir_ms = t2.elapsed().as_millis();
 
@@ -205,7 +227,10 @@ fn debug_timeout_files() {
         let t3 = Instant::now();
         let mir = match simple_compiler::mir::lower_to_mir(&hir) {
             Ok(m) => m,
-            Err(e) => { eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms hir={hir_ms}ms MIR ERROR: {e}"); continue; }
+            Err(e) => {
+                eprintln!("  {f}: parse={parse_ms}ms mono={mono_ms}ms hir={hir_ms}ms MIR ERROR: {e}");
+                continue;
+            }
         };
         let mir_ms = t3.elapsed().as_millis();
 
@@ -213,11 +238,12 @@ fn debug_timeout_files() {
         let t4 = Instant::now();
         let codegen = match Codegen::new() {
             Ok(c) => c,
-            Err(e) => { eprintln!("  {f}: codegen init error: {e}"); continue; }
+            Err(e) => {
+                eprintln!("  {f}: codegen init error: {e}");
+                continue;
+            }
         };
-        let obj = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            codegen.compile_module(&mir)
-        }));
+        let obj = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codegen.compile_module(&mir)));
         let codegen_ms = t4.elapsed().as_millis();
 
         match obj {

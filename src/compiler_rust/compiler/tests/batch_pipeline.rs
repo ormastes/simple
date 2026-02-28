@@ -70,7 +70,9 @@ fn run_pipeline(source: &str, file_path: &std::path::Path) -> (Stage, Option<Str
                 simple_parser::ParseError::SyntaxError { line, column, .. } => format!(" [L{}:{}]", line, column),
                 simple_parser::ParseError::MissingToken { span, .. } => format!(" [L{}:{}]", span.line, span.column),
                 simple_parser::ParseError::InvalidPattern { span, .. } => format!(" [L{}:{}]", span.line, span.column),
-                simple_parser::ParseError::ContextualSyntaxError { span, .. } => format!(" [L{}:{}]", span.line, span.column),
+                simple_parser::ParseError::ContextualSyntaxError { span, .. } => {
+                    format!(" [L{}:{}]", span.line, span.column)
+                }
                 _ => String::new(),
             };
             return (Stage::Parse, Some(format!("{e}{span_info}")));
@@ -221,18 +223,11 @@ fn print_summary(label: &str, results: &[FileResult]) {
     let failures: Vec<&FileResult> = results.iter().filter(|r| r.error.is_some()).collect();
     if !failures.is_empty() {
         for stage in &[Stage::Parse, Stage::Hir, Stage::Mir, Stage::Codegen] {
-            let stage_failures: Vec<&&FileResult> = failures
-                .iter()
-                .filter(|r| r.reached == *stage)
-                .collect();
+            let stage_failures: Vec<&&FileResult> = failures.iter().filter(|r| r.reached == *stage).collect();
             if stage_failures.is_empty() {
                 continue;
             }
-            eprintln!(
-                "\n--- {} failures ({}) ---",
-                stage.label(),
-                stage_failures.len()
-            );
+            eprintln!("\n--- {} failures ({}) ---", stage.label(), stage_failures.len());
             for f in stage_failures.iter().take(200) {
                 let rel = f.path.strip_prefix(project_root()).unwrap_or(&f.path);
                 let err = f.error.as_deref().unwrap_or("?");
@@ -253,12 +248,8 @@ fn print_summary(label: &str, results: &[FileResult]) {
 
 #[test]
 fn batch_pipeline_all() {
-    let compiler_dir = std::env::var("SRC_COMPILER_DIR").unwrap_or_else(|_| {
-        project_root()
-            .join("src/compiler")
-            .to_string_lossy()
-            .into_owned()
-    });
+    let compiler_dir = std::env::var("SRC_COMPILER_DIR")
+        .unwrap_or_else(|_| project_root().join("src/compiler").to_string_lossy().into_owned());
 
     let dir = PathBuf::from(&compiler_dir);
     assert!(dir.is_dir(), "directory not found: {}", dir.display());
@@ -266,15 +257,14 @@ fn batch_pipeline_all() {
     let files = collect_spl_files(&dir);
     assert!(!files.is_empty(), "No .spl files found in {}", dir.display());
 
-    eprintln!(
-        "\n=== Batch Pipeline: {} files from {} ===",
-        files.len(),
-        dir.display()
-    );
+    eprintln!("\n=== Batch Pipeline: {} files from {} ===", files.len(), dir.display());
 
     let results = run_batch(&files);
     print_summary("", &results);
 
     let parse_pass = results.iter().filter(|r| r.passed(Stage::Parse)).count();
-    eprintln!("Parse pass rate: {:.1}%", 100.0 * parse_pass as f64 / files.len() as f64);
+    eprintln!(
+        "Parse pass rate: {:.1}%",
+        100.0 * parse_pass as f64 / files.len() as f64
+    );
 }

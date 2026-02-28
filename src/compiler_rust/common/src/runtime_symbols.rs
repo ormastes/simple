@@ -223,12 +223,10 @@ pub fn runtime_symbols_for_baremetal(is_baremetal: bool) -> Vec<&'static str> {
     RUNTIME_SYMBOL_NAMES
         .iter()
         .copied()
-        .filter(|name| {
-            match symbol_tier_of(name) {
-                RuntimeSymbolTier::Core | RuntimeSymbolTier::Alloc => true,
-                RuntimeSymbolTier::Sys | RuntimeSymbolTier::Async => !is_baremetal,
-                RuntimeSymbolTier::Ext => true,
-            }
+        .filter(|name| match symbol_tier_of(name) {
+            RuntimeSymbolTier::Core | RuntimeSymbolTier::Alloc => true,
+            RuntimeSymbolTier::Sys | RuntimeSymbolTier::Async => !is_baremetal,
+            RuntimeSymbolTier::Ext => true,
         })
         .collect()
 }

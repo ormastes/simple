@@ -369,7 +369,7 @@ impl ConcurrencyMode {
     /// Check if mut T is allowed in this mode
     pub fn allows_mut(&self) -> bool {
         match self {
-            ConcurrencyMode::Actor => false,
+            ConcurrencyMode::Actor => true, // allow mut in actor mode until actor system is implemented
             ConcurrencyMode::LockBase => true,
             ConcurrencyMode::Unsafe => true,
         }

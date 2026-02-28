@@ -168,7 +168,12 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         eprintln!("Simple Native Build");
         eprintln!("  Source dirs: {:?}", source_dirs);
         eprintln!("  Output: {}", output.display());
-        eprintln!("  Entry: {}", entry_file.as_ref().map_or("(none)".to_string(), |p| p.display().to_string()));
+        eprintln!(
+            "  Entry: {}",
+            entry_file
+                .as_ref()
+                .map_or("(none)".to_string(), |p| p.display().to_string())
+        );
         eprintln!("  Threads: {}", threads.map_or("auto".to_string(), |n| n.to_string()));
         eprintln!("  Timeout: {}s", timeout);
         eprintln!("  Incremental: {}", incremental);
@@ -185,8 +190,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     config.cache_dir = cache_dir;
     config.no_mangle = no_mangle;
 
-    let mut builder = NativeProjectBuilder::new(project_root, output)
-        .config(config);
+    let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {
         builder = builder.entry_file(entry);
     }
@@ -220,10 +224,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             }
 
             if result.failed > 0 {
-                eprintln!(
-                    "\nWarning: {} files failed to compile",
-                    result.failed
-                );
+                eprintln!("\nWarning: {} files failed to compile", result.failed);
             }
 
             0

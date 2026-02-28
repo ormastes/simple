@@ -46,7 +46,11 @@ pub(crate) fn compile_unit_bound_check<M: Module>(
                 // Convert bool to i64 for the call
                 let in_range_i64 = super::helpers::safe_extend_to_i64(builder, in_range);
 
-                adapted_call(builder, func_ref, &[in_range_i64, val, min_val, max_val, name_ptr, name_len]);
+                adapted_call(
+                    builder,
+                    func_ref,
+                    &[in_range_i64, val, min_val, max_val, name_ptr, name_len],
+                );
             } else {
                 // Fallback: generate inline check with trap on failure
                 let trap_block = builder.create_block();
@@ -109,7 +113,9 @@ pub(crate) fn compile_unit_widen<M: Module>(
     } else {
         // Zero-extend for unsigned types
         match (from_bits, to_bits) {
-            (8, 16) | (8, 32) | (8, 64) | (16, 32) | (16, 64) | (32, 64) => super::helpers::safe_extend_to_i64(builder, val),
+            (8, 16) | (8, 32) | (8, 64) | (16, 32) | (16, 64) | (32, 64) => {
+                super::helpers::safe_extend_to_i64(builder, val)
+            }
             _ => val, // Same size, just copy
         }
     };

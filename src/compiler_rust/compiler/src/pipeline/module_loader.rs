@@ -161,18 +161,7 @@ fn strip_optionals(mut s: String) -> String {
 
     // Patterns where `?` commonly appears.
     for pat in [
-        "? ",
-        "?\n",
-        "?\r\n",
-        "?\t",
-        "?,",
-        "?)",
-        "?]",
-        "?>",
-        "?:",
-        "?=",
-        "?;",
-        "?>",
+        "? ", "?\n", "?\r\n", "?\t", "?,", "?)", "?]", "?>", "?:", "?=", "?;", "?>",
     ] {
         while s.contains(pat) {
             s = s.replace(pat, &pat[1..]); // drop leading '?'

@@ -1,263 +1,73 @@
-"""GPU Module - GPU operations for graphics and compute workloads
-
-@tag:stdlib
-@tag:api
-@tag:gpu
-
-This module provides GPU device management, context creation, and memory
-operations for both graphics and compute workloads. It supports multiple
-backends including CUDA, Vulkan, and Metal.
-
-Core Features
--------------
-
-- **Device enumeration**: Discover and select GPU devices
-- **Context management**: Create and manage GPU contexts
-- **Memory operations**: Allocate and transfer GPU memory
-- **Backend integration**: CUDA, Vulkan, Metal, OpenCL
-- **Cross-platform**: Works on Linux, Windows, macOS
-
-Public API
-----------
-
-Device management:
-```simple
-use std.gpu.device.{GpuDevice, list_gpus, get_default_gpu}
-```
-
-Context creation:
-```simple
-use std.gpu.context.{GpuContext, create_context}
-```
-
-Memory operations:
-```simple
-use std.gpu.memory.{GpuMemory, allocate_gpu, copy_to_gpu, copy_from_gpu}
-```
-
-Examples
---------
-
-Enumerate GPU devices:
-```simple
-use std.gpu.device.{list_gpus}
-
-val gpus = list_gpus()
-print "Found {gpus.len()} GPU(s)"
-
-for gpu in gpus:
-    print "GPU: {gpu.name()}"
-    print "  Memory: {gpu.total_memory()} bytes"
-    print "  Compute capability: {gpu.compute_capability()}"
-    print "  Backend: {gpu.backend()}"
-```
-
-Select and initialize GPU:
-```simple
-use std.gpu.device.{get_default_gpu}
-use std.gpu.context.{create_context}
-
-# Get default GPU
-val gpu = get_default_gpu()
-print "Using GPU: {gpu.name()}"
-
-# Create context
-val context = create_context(gpu)
-print "Context created"
-```
-
-Allocate and transfer memory:
-```simple
-use std.gpu.memory.{allocate_gpu, copy_to_gpu, copy_from_gpu}
-use std.gpu.context.{create_context}
-use std.gpu.device.{get_default_gpu}
-
-# Setup
-val gpu = get_default_gpu()
-val context = create_context(gpu)
-
-# Create host data
-val host_data = [1.0, 2.0, 3.0, 4.0, 5.0]
-
-# Allocate GPU memory
-val gpu_memory = allocate_gpu(context, host_data.len() * 8)  # 8 bytes per f64
-
-# Copy to GPU
-copy_to_gpu(gpu_memory, host_data)
-
-# ... GPU computation ...
-
-# Copy back to host
-val result = copy_from_gpu(gpu_memory)
-print "Result: {result}"
-
-# Free GPU memory
-gpu_memory.free()
-```
-
-Matrix multiplication on GPU:
-```simple
-use std.gpu.device.{get_default_gpu}
-use std.gpu.context.{create_context}
-use std.gpu.kernel.{compile_kernel, launch_kernel}
-
-# Initialize GPU
-val gpu = get_default_gpu()
-val ctx = create_context(gpu)
-
-# Matrices (flattened)
-val A = [1.0, 2.0, 3.0, 4.0]  # 2x2
-val B = [5.0, 6.0, 7.0, 8.0]  # 2x2
-
-# Allocate GPU memory
-val gpu_A = allocate_gpu(ctx, 4 * 8)
-val gpu_B = allocate_gpu(ctx, 4 * 8)
-val gpu_C = allocate_gpu(ctx, 4 * 8)
-
-# Copy input matrices
-copy_to_gpu(gpu_A, A)
-copy_to_gpu(gpu_B, B)
-
-# Compile kernel (CUDA or Vulkan SPIR-V)
-val kernel = compile_kernel(ctx, """
-    __global__ void matmul(float* A, float* B, float* C, int N) {
-        int i = blockIdx.x * blockDim.x + threadIdx.x;
-        if (i < N*N) {
-            int row = i / N;
-            int col = i % N;
-            float sum = 0.0f;
-            for (int k = 0; k < N; k++) {
-                sum += A[row*N + k] * B[k*N + col];
-            }
-            C[i] = sum;
-        }
-    }
-""")
-
-# Launch kernel (grid, block, args)
-launch_kernel(kernel, grid: (1, 1, 1), block: (4, 1, 1),
-              args: [gpu_A, gpu_B, gpu_C, 2])
-
-# Copy result back
-val C = copy_from_gpu(gpu_C)
-print "Result matrix: {C}"
-
-# Cleanup
-gpu_A.free()
-gpu_B.free()
-gpu_C.free()
-```
-
-Backend Selection
------------------
-
-Select GPU backend explicitly:
-
-```simple
-use std.gpu.device.{list_gpus_by_backend, GpuBackend}
-
-# Get CUDA GPUs only
-val cuda_gpus = list_gpus_by_backend(GpuBackend.CUDA)
-
-# Get Vulkan GPUs
-val vulkan_gpus = list_gpus_by_backend(GpuBackend.Vulkan)
-
-# Get Metal GPUs (macOS)
-val metal_gpus = list_gpus_by_backend(GpuBackend.Metal)
-```
-
-Supported Backends
-------------------
-
-| Backend | Platform | Use Case |
-|---------|----------|----------|
-| CUDA | NVIDIA GPUs | Compute, ML |
-| Vulkan | Cross-platform | Graphics, compute |
-| Metal | macOS/iOS | Graphics, compute |
-| OpenCL | Cross-platform | General compute |
-
-Memory Management
------------------
-
-GPU memory is managed explicitly:
-
-```simple
-# Allocate
-val gpu_mem = allocate_gpu(context, size_bytes)
-
-# Use memory
-copy_to_gpu(gpu_mem, host_data)
-# ... compute ...
-val result = copy_from_gpu(gpu_mem)
-
-# Free (important!)
-gpu_mem.free()
-```
-
-Or use RAII pattern:
-```simple
-fn with_gpu_memory(context: GpuContext, size: i64, f: fn(GpuMemory)):
-    val mem = allocate_gpu(context, size)
-    f(mem)
-    mem.free()  # Automatic cleanup
-```
-
-Error Handling
---------------
-
-All GPU operations return Result types:
-
-```simple
-match create_context(gpu):
-    case Ok(ctx):
-        # Use context
-        print "Context created"
-    case Err(error):
-        print "Failed to create context: {error.message}"
-```
-
-GPU compute errors:
-```simple
-val result = launch_kernel(kernel, grid, block, args)
-match result:
-    case Ok(()):
-        print "Kernel launched successfully"
-    case Err(error):
-        print "Kernel launch failed: {error.message}"
-        print "  Code: {error.code}"
-```
-
-Performance Tips
-----------------
-
-1. **Minimize transfers**: GPU ↔ Host transfers are slow
-2. **Batch operations**: Launch many ops before sync
-3. **Use async transfers**: Overlap compute and transfer
-4. **Pin host memory**: For faster transfers
-5. **Reuse allocations**: Allocate once, reuse many times
-
-Submodules
-----------
-
-- **device**: GPU device enumeration and selection
-- **context**: GPU context creation and management
-- **memory**: GPU memory allocation and transfer
-- **kernel**: Kernel compilation and execution
-- **stream**: Async operation streams
-
-Related Modules
----------------
-
-- **std.compute**: High-level compute operations
-- **std.gpu_runtime**: GPU runtime integration with PyTorch
-- **std.dl**: Deep learning utilities
-
-See Also
---------
-
-- **doc/guide/gpu_programming.md**: GPU programming guide
-- **doc/design/gpu_backends.md**: Backend architecture
-- **test/unit/std/gpu/**: GPU test examples
-"""
+# GPU Module - GPU operations for graphics and compute workloads
+#
+# @tag:stdlib
+# @tag:api
+# @tag:gpu
+#
+# This module provides GPU device management, context creation, and memory
+# operations for both graphics and compute workloads. It supports multiple
+# backends including CUDA, Vulkan, and Metal.
+#
+# Core Features
+# -------------
+#
+# - Device enumeration: Discover and select GPU devices
+# - Context management: Create and manage GPU contexts
+# - Memory operations: Allocate and transfer GPU memory
+# - Backend integration: CUDA, Vulkan, Metal, OpenCL
+# - Cross-platform: Works on Linux, Windows, macOS
+#
+# Public API
+# ----------
+#
+# Device management:
+#   use std.gpu.device.{GpuDevice, list_gpus, get_default_gpu}
+#
+# Context creation:
+#   use std.gpu.context.{GpuContext, create_context}
+#
+# Memory operations:
+#   use std.gpu.memory.{GpuMemory, allocate_gpu, copy_to_gpu, copy_from_gpu}
+#
+# Examples
+# --------
+#
+# Enumerate GPU devices:
+#   val gpus = list_gpus()
+#   print "Found {gpus.len()} GPU(s)"
+#
+# Select and initialize GPU:
+#   val gpu = get_default_gpu()
+#   val context = create_context(gpu)
+#
+# Allocate and transfer memory:
+#   val gpu_memory = allocate_gpu(context, host_data.len() * 8)
+#   copy_to_gpu(gpu_memory, host_data)
+#   val result = copy_from_gpu(gpu_memory)
+#   gpu_memory.free()
+#
+# Supported Backends
+# ------------------
+#
+# CUDA    - NVIDIA GPUs     - Compute, ML
+# Vulkan  - Cross-platform  - Graphics, compute
+# Metal   - macOS/iOS       - Graphics, compute
+# OpenCL  - Cross-platform  - General compute
+#
+# Submodules
+# ----------
+#
+# - device: GPU device enumeration and selection
+# - context: GPU context creation and management
+# - memory: GPU memory allocation and transfer
+# - kernel: Kernel compilation and execution
+# - stream: Async operation streams
+#
+# Related Modules
+# ---------------
+#
+# - std.compute: High-level compute operations
+# - std.gpu_runtime: GPU runtime integration with PyTorch
+# - std.dl: Deep learning utilities
 
 # All submodules are automatically available.

@@ -145,21 +145,27 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_env_set" | "rt_set_env" => Some(&[0, 1]),
 
         // File I/O (single path)
-        "rt_file_exists" | "rt_file_canonicalize" | "rt_file_read_text"
-        | "rt_file_remove" | "rt_file_read_lines" | "rt_file_read_bytes" => Some(&[0]),
+        "rt_file_exists"
+        | "rt_file_canonicalize"
+        | "rt_file_read_text"
+        | "rt_file_remove"
+        | "rt_file_read_lines"
+        | "rt_file_read_bytes" => Some(&[0]),
         // File I/O (two text params: path + content, or src + dest)
-        "rt_file_write_text" | "rt_file_copy" | "rt_file_rename"
-        | "rt_file_append_text" | "rt_file_write_bytes" | "rt_file_move" => Some(&[0, 1]),
+        "rt_file_write_text"
+        | "rt_file_copy"
+        | "rt_file_rename"
+        | "rt_file_append_text"
+        | "rt_file_write_bytes"
+        | "rt_file_move" => Some(&[0, 1]),
 
         // Directory operations
-        "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list"
-        | "rt_dir_remove" | "rt_dir_remove_all" | "rt_dir_glob"
-        | "rt_dir_walk" | "rt_set_current_dir" => Some(&[0]),
+        "rt_dir_create" | "rt_dir_create_all" | "rt_dir_list" | "rt_dir_remove" | "rt_dir_remove_all"
+        | "rt_dir_glob" | "rt_dir_walk" | "rt_set_current_dir" => Some(&[0]),
         "rt_file_find" => Some(&[0, 1]),
 
         // Path operations (single path)
-        "rt_path_basename" | "rt_path_dirname" | "rt_path_ext"
-        | "rt_path_absolute" | "rt_path_stem" => Some(&[0]),
+        "rt_path_basename" | "rt_path_dirname" | "rt_path_ext" | "rt_path_absolute" | "rt_path_stem" => Some(&[0]),
         // Path operations (two paths)
         "rt_path_relative" | "rt_path_join" => Some(&[0, 1]),
 
@@ -176,8 +182,9 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_interp_call" => Some(&[0]),
 
         // FFI object system (method name at index 1)
-        "rt_ffi_call_method" | "rt_ffi_has_method"
-        | "rt_ffi_object_call_method" | "rt_ffi_object_has_method" => Some(&[1]),
+        "rt_ffi_call_method" | "rt_ffi_has_method" | "rt_ffi_object_call_method" | "rt_ffi_object_has_method" => {
+            Some(&[1])
+        }
         "rt_ffi_type_register" => Some(&[0]),
 
         // BDD test framework
@@ -186,15 +193,21 @@ fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // Networking (address is text)
         "native_tcp_bind" | "native_tcp_connect" | "native_udp_bind" => Some(&[0]),
         "native_tcp_connect_timeout" => Some(&[0]),
-        "native_tcp_read" | "native_tcp_write" | "native_tcp_peek"
-        | "native_udp_recv_from" | "native_udp_recv" | "native_udp_send"
-        | "native_udp_peek_from" | "native_udp_peek" => Some(&[1]),
+        "native_tcp_read"
+        | "native_tcp_write"
+        | "native_tcp_peek"
+        | "native_udp_recv_from"
+        | "native_udp_recv"
+        | "native_udp_send"
+        | "native_udp_peek_from"
+        | "native_udp_peek" => Some(&[1]),
         "native_udp_connect" => Some(&[1]),
         "native_udp_send_to" => Some(&[1, 2]),
 
         // Regex (pattern and text)
-        "ffi_regex_is_match" | "ffi_regex_find" | "ffi_regex_find_all"
-        | "ffi_regex_captures" | "ffi_regex_split" => Some(&[0, 1]),
+        "ffi_regex_is_match" | "ffi_regex_find" | "ffi_regex_find_all" | "ffi_regex_captures" | "ffi_regex_split" => {
+            Some(&[0, 1])
+        }
         "ffi_regex_replace" | "ffi_regex_replace_all" => Some(&[0, 1, 2]),
         "ffi_regex_split_n" => Some(&[0, 1]),
 
@@ -474,7 +487,8 @@ pub fn compile_call<M: Module>(
         // Cross-module function: declare as import, resolve at link time.
         // Resolution order: 1) per-module use_map (from `use` statements),
         // 2) global import_map (unique names), 3) raw name fallback.
-        let resolved_name = ctx.use_map
+        let resolved_name = ctx
+            .use_map
             .get(func_name)
             .or_else(|| ctx.import_map.get(func_name))
             .map(|s| s.as_str())
@@ -483,16 +497,11 @@ pub fn compile_call<M: Module>(
         // All Simple values are i64-tagged, so use a uniform i64 signature.
         let call_conv = cranelift_codegen::isa::CallConv::SystemV;
         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-        let arg_vals: Vec<_> = args
-            .iter()
-            .map(|a| get_vreg_or_default(ctx, builder, a))
-            .collect();
+        let arg_vals: Vec<_> = args.iter().map(|a| get_vreg_or_default(ctx, builder, a)).collect();
         for _ in 0..arg_vals.len() {
-            sig.params
-                .push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
         }
-        sig.returns
-            .push(cranelift_codegen::ir::AbiParam::new(types::I64));
+        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
 
         match ctx
             .module

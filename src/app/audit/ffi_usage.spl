@@ -5,15 +5,15 @@
 
 use app.io
 use app.io.file_discovery.{find_spl_files}
-use app.utils.colors (success, error, warning, info)
-use app.utils.markdown (MarkdownBuilder)
+use app.utils.colors.{success, error, warning, info}
+use app.utils.markdown.{MarkdownBuilder}
 
 export main, audit_ffi_usage
 
 struct AuditResults:
-    extern_fns: [(text, i64, text)]      # (file, line, name)
-    wrappers: [(text, text, text)]       # (file, wrapper_name, rt_name)
-    direct_calls: [(text, i64, text)]    # (file, line, content)
+    extern_fns: [list]
+    wrappers: [list]
+    direct_calls: [list]
 
 fn main():
     val result = audit_ffi_usage()
@@ -72,7 +72,7 @@ fn audit_ffi_usage() -> bool:
 
     true
 
-fn find_extern_declarations() -> [(text, i64, text)]:
+fn find_extern_declarations() -> [list]:
     """Find all extern fn rt_* declarations"""
     var declarations = []
 
@@ -94,11 +94,11 @@ fn find_extern_declarations() -> [(text, i64, text)]:
                 if line.starts_with("extern fn rt_"):
                     val func_name = extract_function_name_from_extern(line)
                     if func_name.len() > 0:
-                        declarations = declarations + [(file, i + 1, func_name)]
+                        declarations = declarations + [[file, i + 1, func_name]]
 
     declarations
 
-fn find_wrapper_functions() -> [(text, text, text)]:
+fn find_wrapper_functions() -> [list]:
     """Find wrapper functions that call rt_* functions"""
     var wrappers = []
 
@@ -126,12 +126,12 @@ fn find_wrapper_functions() -> [(text, text, text)]:
                 elif current_fn.len() > 0 and trimmed.contains("rt_"):
                     val rt_name = extract_rt_call(trimmed)
                     if rt_name.len() > 0:
-                        wrappers = wrappers + [(file, current_fn, rt_name)]
+                        wrappers = wrappers + [[file, current_fn, rt_name]]
                         current_fn = ""  # Reset after finding call
 
     wrappers
 
-fn find_direct_ffi_calls() -> [(text, i64, text)]:
+fn find_direct_ffi_calls() -> [list]:
     """Find direct FFI calls (not in extern declarations, not in wrappers)"""
     var direct_calls = []
 
@@ -162,7 +162,7 @@ fn find_direct_ffi_calls() -> [(text, i64, text)]:
 
                 # Check for rt_* calls
                 if trimmed.contains("rt_") and trimmed.contains("("):
-                    direct_calls = direct_calls + [(file, i + 1, trimmed)]
+                    direct_calls = direct_calls + [[file, i + 1, trimmed]]
 
     direct_calls
 
@@ -206,13 +206,13 @@ fn extract_rt_call(line: text) -> text:
 
     while i < line.len():
         val ch = line[i]
-        if (ch >= 'a' and ch <= 'z') or ch == '_':
+        if (ch >= "a" and ch <= "z") or ch == "_":
             func_name = func_name + "{ch}"
             i = i + 1
         else:
             break
 
-    if i < line.len() and line[i] == '(':
+    if i < line.len() and line[i] == "(":
         return func_name
 
     ""
@@ -232,9 +232,9 @@ fn generate_report(results: AuditResults) -> text:
     # Group by file
     var current_file = ""
     for call in results.direct_calls:
-        val file = call.0
-        val line_num = call.1
-        val content = call.2
+        val file = call[0]
+        val line_num = call[1]
+        val content = call[2]
 
         if file != current_file:
             md.h4("`{file}`")
@@ -248,26 +248,27 @@ fn generate_report(results: AuditResults) -> text:
     md.paragraph("The following wrapper functions were detected:")
 
     for wrapper in results.wrappers:
-        val wrapper_name = wrapper.1
-        val rt_name = wrapper.2
+        val wrapper_name = wrapper[1]
+        val rt_name = wrapper[2]
         md.append("- `{wrapper_name}()` → wraps `{rt_name}()`\n")
 
     # Add recommendations
     md.h2("Recommendations")
     md.h3("Pattern 1: Use Existing Wrapper")
     md.paragraph("If a wrapper exists, import and use it:")
-    md.code_block("# ❌ Before (direct FFI call)
+    val example1 = """# Before (direct FFI call)
 extern fn rt_file_exists(path: text) -> bool
 val exists = rt_file_exists(path)
 
-# ✅ After (use wrapper)
+# After (use wrapper)
 use app.io.{file_exists}
-val exists = file_exists(path)", "simple")
+val exists = file_exists(path)"""
+    md.code_block(example1, "simple")
 
     md.h3("Pattern 2: Create Missing Wrapper")
     md.paragraph("If no wrapper exists, add it to the appropriate FFI module:")
     md.paragraph("**In `src/lib/ffi/` or `src/compiler/ffi.spl`:**")
-    md.code_block("# Tier 1: Extern declaration
+    val example2 = """# Tier 1: Extern declaration
 extern fn rt_new_function(arg: text) -> i64
 
 # Tier 2: Wrapper function
@@ -275,6 +276,7 @@ fn new_function(arg: text) -> i64:
     rt_new_function(arg)
 
 # Export
-export new_function", "simple")
+export new_function"""
+    md.code_block(example2, "simple")
 
     md.to_string()

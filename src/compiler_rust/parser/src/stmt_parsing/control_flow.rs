@@ -29,28 +29,28 @@ impl<'a> Parser<'a> {
         let is_ident_like = matches!(
             self.current.kind,
             TokenKind::Identifier { .. }
-            | TokenKind::Result
-            | TokenKind::Type
-            | TokenKind::Default
-            | TokenKind::Val
-            | TokenKind::Var
-            | TokenKind::New
-            | TokenKind::Old
-            | TokenKind::From
-            | TokenKind::To
-            | TokenKind::In
-            | TokenKind::Is
-            | TokenKind::As
-            | TokenKind::Match
-            | TokenKind::Use
-            | TokenKind::Out
-            | TokenKind::OutErr
-            | TokenKind::Gen
-            | TokenKind::Impl
-            | TokenKind::Exists
-            | TokenKind::Context
-            | TokenKind::Alias
-            | TokenKind::Bounds
+                | TokenKind::Result
+                | TokenKind::Type
+                | TokenKind::Default
+                | TokenKind::Val
+                | TokenKind::Var
+                | TokenKind::New
+                | TokenKind::Old
+                | TokenKind::From
+                | TokenKind::To
+                | TokenKind::In
+                | TokenKind::Is
+                | TokenKind::As
+                | TokenKind::Match
+                | TokenKind::Use
+                | TokenKind::Out
+                | TokenKind::OutErr
+                | TokenKind::Gen
+                | TokenKind::Impl
+                | TokenKind::Exists
+                | TokenKind::Context
+                | TokenKind::Alias
+                | TokenKind::Bounds
         );
         if is_ident_like {
             // Peek ahead to see if next token is = or compound assignment
@@ -943,15 +943,23 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Indent)?;
         let mut then_body = Vec::new();
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) { self.advance(); }
-            if self.check(&TokenKind::Dedent) { break; }
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
             then_body.push(self.parse_item()?);
         }
-        if self.check(&TokenKind::Dedent) { self.advance(); }
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
 
         // Check for else branch
         // Skip newlines between dedent and else
-        while self.check(&TokenKind::Newline) { self.advance(); }
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
         let else_body = if self.check(&TokenKind::Else) {
             self.advance(); // consume 'else'
             self.expect(&TokenKind::Colon)?;
@@ -959,11 +967,17 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::Indent)?;
             let mut else_items = Vec::new();
             while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-                while self.check(&TokenKind::Newline) { self.advance(); }
-                if self.check(&TokenKind::Dedent) { break; }
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) {
+                    break;
+                }
                 else_items.push(self.parse_item()?);
             }
-            if self.check(&TokenKind::Dedent) { self.advance(); }
+            if self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
             Some(else_items)
         } else {
             None

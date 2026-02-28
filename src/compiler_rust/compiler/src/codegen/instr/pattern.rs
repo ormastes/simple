@@ -67,11 +67,9 @@ pub(crate) fn compile_pattern_test<M: Module>(
                 // Compare floats via bitcast to i64
                 let lit_bits = f.to_bits() as i64;
                 let lit_val = builder.ins().iconst(types::I64, lit_bits);
-                builder.ins().icmp(
-                    cranelift_codegen::ir::condcodes::IntCC::Equal,
-                    subject_val,
-                    lit_val,
-                )
+                builder
+                    .ins()
+                    .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, subject_val, lit_val)
             }
         },
         MirPattern::Binding(_) => builder.ins().iconst(types::I8, 1),

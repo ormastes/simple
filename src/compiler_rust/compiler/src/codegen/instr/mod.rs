@@ -115,7 +115,10 @@ pub struct InstrContext<'a, M: Module> {
 impl<'a, M: Module> InstrContext<'a, M> {
     /// Get a vreg value, returning an error instead of panicking if not found
     pub fn get_vreg(&self, vreg: &VReg) -> InstrResult<cranelift_codegen::ir::Value> {
-        self.vreg_values.get(vreg).copied().ok_or_else(|| format!("vreg {:?} not found in vreg_values", vreg))
+        self.vreg_values
+            .get(vreg)
+            .copied()
+            .ok_or_else(|| format!("vreg {:?} not found in vreg_values", vreg))
     }
 }
 

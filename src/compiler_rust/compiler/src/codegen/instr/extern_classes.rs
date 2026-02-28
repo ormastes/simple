@@ -98,14 +98,17 @@ fn compile_ffi_static_call<M: Module>(
 
     // Create method name string constant in data section (survives into binary)
     let method_name_ptr = {
-        let data_id = ctx.module.declare_anonymous_data(true, false)
+        let data_id = ctx
+            .module
+            .declare_anonymous_data(true, false)
             .map_err(|e| format!("declare string data: {e}"))?;
         let mut desc = cranelift_module::DataDescription::new();
         let mut bytes = full_method_name.as_bytes().to_vec();
         bytes.push(0); // null terminate
         let name_len = bytes.len() - 1; // exclude null terminator
         desc.define(bytes.into_boxed_slice());
-        ctx.module.define_data(data_id, &desc)
+        ctx.module
+            .define_data(data_id, &desc)
             .map_err(|e| format!("define string data: {e}"))?;
         let gv = ctx.module.declare_data_in_func(data_id, builder.func);
         builder.ins().global_value(types::I64, gv)
@@ -196,13 +199,16 @@ fn compile_ffi_instance_call<M: Module>(
 
     // Create method name string constant in data section (survives into binary)
     let method_name_ptr = {
-        let data_id = ctx.module.declare_anonymous_data(true, false)
+        let data_id = ctx
+            .module
+            .declare_anonymous_data(true, false)
             .map_err(|e| format!("declare string data: {e}"))?;
         let mut desc = cranelift_module::DataDescription::new();
         let mut bytes = method_name.as_bytes().to_vec();
         bytes.push(0); // null terminate
         desc.define(bytes.into_boxed_slice());
-        ctx.module.define_data(data_id, &desc)
+        ctx.module
+            .define_data(data_id, &desc)
             .map_err(|e| format!("define string data: {e}"))?;
         let gv = ctx.module.declare_data_in_func(data_id, builder.func);
         builder.ins().global_value(types::I64, gv)

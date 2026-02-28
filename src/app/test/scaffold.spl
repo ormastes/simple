@@ -4,11 +4,22 @@
 # Migrated from scripts/build/scaffold_feature_test.py
 
 use app.io
-use app.utils.colors (success, error, warning, info)
-use app.utils.parsing (extract_section, parse_key_value, parse_table, split_lines)
-use app.utils.markdown (MarkdownBuilder)
+use app.utils.colors.{success, error, warning, info}
+use app.utils.parsing.{extract_section, parse_key_value, parse_table, split_lines}
+use app.utils.markdown.{MarkdownBuilder}
 
 export main, scaffold_feature_test, parse_feature_markdown
+
+fn map_get(metadata: list, key: text, default_val: text) -> text:
+    """Lookup key in parallel-array map [keys, values]"""
+    val keys = metadata[0]
+    val values = metadata[1]
+    var i = 0
+    while i < keys.len():
+        if keys[i] == key:
+            return values[i]
+        i = i + 1
+    default_val
 
 struct FeatureMetadata:
     feature_id: text
@@ -23,7 +34,7 @@ struct FeatureMetadata:
     notes: text
     depends_on: [i64]
     required_by: [i64]
-    examples: [text]
+    code_examples: [text]
 
 fn main():
     val args = get_args()
@@ -49,17 +60,17 @@ fn parse_feature_markdown(md_path: text) -> FeatureMetadata:
     """Parse feature markdown and extract metadata"""
     val content = file_read(md_path)
 
-    # Parse overview table
+    # Parse overview table (returns [keys, values])
     val metadata_map = parse_overview_table(content)
 
     # Extract basic fields
-    val feature_id = metadata_map.get("Feature ID", "").replace("#", "")
-    val feature_name = metadata_map.get("Feature Name", "")
-    val category = metadata_map.get("Category", "")
-    val difficulty_str = metadata_map.get("Difficulty", "3")
+    val feature_id = map_get(metadata_map, "Feature ID", "").replace("#", "")
+    val feature_name = map_get(metadata_map, "Feature Name", "")
+    val category = map_get(metadata_map, "Category", "")
+    val difficulty_str = map_get(metadata_map, "Difficulty", "3")
     val difficulty = parse_difficulty(difficulty_str)
-    val status = metadata_map.get("Status", "✅ Complete")
-    val impl_type = metadata_map.get("Implementation", "R")
+    val status = map_get(metadata_map, "Status", "Complete")
+    val impl_type = map_get(metadata_map, "Implementation", "R")
 
     # Extract sections
     val description = extract_section(content, "Description")
@@ -77,11 +88,13 @@ fn parse_feature_markdown(md_path: text) -> FeatureMetadata:
     # Parse test files
     val rust_tests = parse_test_table(testing_section, "Rust Tests")
 
-    # Parse dependencies
-    val (depends_on, required_by) = parse_dependencies(content)
+    # Parse dependencies (returns [depends_on, required_by])
+    val deps_result = parse_dependencies(content)
+    val depends_on = deps_result[0]
+    val required_by = deps_result[1]
 
-    # Extract code examples
-    val examples = extract_code_examples(content)
+    # Extract code code_examples
+    val code_examples = extract_code_code_examples(content)
 
     FeatureMetadata(
         feature_id: feature_id,
@@ -96,25 +109,26 @@ fn parse_feature_markdown(md_path: text) -> FeatureMetadata:
         notes: notes_section,
         depends_on: depends_on,
         required_by: required_by,
-        examples: examples
+        code_examples: code_examples
     )
 
-fn parse_overview_table(content: text) -> Dict<text, text>:
+fn parse_overview_table(content: text) -> list:
     """Extract metadata from the Overview table"""
-    var metadata = {}
+    # Parallel arrays: keys and values
+    var meta_keys = []
+    var meta_values = []
 
     # Find overview section
     val overview_start = content.find("## Overview")
     if overview_start < 0:
-        return metadata
+        return [meta_keys, meta_values]
 
     # Extract table content between ## Overview and next ##
     val section_content = content.substring(overview_start, content.len())
     val next_section = section_content.find("## ", 12)  # Skip the "## Overview" itself
-    val table_content = if next_section > 0:
-        section_content.substring(0, next_section)
-    else:
-        section_content
+    var table_content = section_content
+    if next_section > 0:
+        table_content = section_content.substring(0, next_section)
 
     # Parse table rows
     val lines = split_lines(table_content)
@@ -125,9 +139,10 @@ fn parse_overview_table(content: text) -> Dict<text, text>:
                 val key = parts[1].trim().replace("**", "")
                 val value = parts[2].trim()
                 if key.len() > 0 and value.len() > 0:
-                    metadata[key] = value
+                    meta_keys.push(key)
+                    meta_values.push(value)
 
-    metadata
+    [meta_keys, meta_values]
 
 fn parse_difficulty(difficulty_str: text) -> i64:
     """Parse difficulty string like '3 (Medium)' to integer"""
@@ -196,14 +211,14 @@ fn parse_test_table(testing_section: text, section_name: text) -> [text]:
 
     tests
 
-fn parse_dependencies(content: text) -> ([i64], [i64]):
+fn parse_dependencies(content: text) -> list:
     """Extract depends_on and required_by feature IDs"""
     var depends_on = []
     var required_by = []
 
     val deps_section = extract_section(content, "Dependencies")
     if deps_section.len() == 0:
-        return (depends_on, required_by)
+        return [depends_on, required_by]
 
     # Parse "Depends on: #1, #2, #3" format
     val depends_start = deps_section.find("Depends on:")
@@ -219,15 +234,15 @@ fn parse_dependencies(content: text) -> ([i64], [i64]):
         if required_line.len() > 0 and not required_line.contains("none"):
             required_by = extract_feature_ids(required_line)
 
-    (depends_on, required_by)
+    [depends_on, required_by]
 
-fn extract_line_after(text: text, start_pos: i64) -> text:
+fn extract_line_after(input: text, start_pos: i64) -> text:
     """Extract rest of line after position"""
-    val newline_pos = text.find("\n", start_pos)
+    val newline_pos = input.find("\n", start_pos)
     if newline_pos > start_pos:
-        text.substring(start_pos, newline_pos)
+        input.substring(start_pos, newline_pos)
     else:
-        text.substring(start_pos, text.len())
+        input.substring(start_pos, input.len())
 
 fn extract_feature_ids(line: text) -> [i64]:
     """Extract #123 style feature IDs from line"""
@@ -235,13 +250,13 @@ fn extract_feature_ids(line: text) -> [i64]:
     var i = 0
 
     while i < line.len():
-        if line[i] == '#':
+        if line[i] == "#":
             # Extract number after #
             var num_str = ""
             var j = i + 1
             while j < line.len():
                 val ch = line[j]
-                if ch >= '0' and ch <= '9':
+                if ch >= "0" and ch <= "9":
                     num_str = num_str + "{ch}"
                     j = j + 1
                 else:
@@ -257,31 +272,31 @@ fn extract_feature_ids(line: text) -> [i64]:
 
     ids
 
-fn extract_code_examples(content: text) -> [text]:
-    """Extract code examples from Examples section"""
-    var examples = []
+fn extract_code_code_examples(content: text) -> [text]:
+    """Extract code code_examples from Examples section"""
+    var code_examples = []
 
-    val examples_section = extract_section(content, "Examples")
-    if examples_section.len() == 0:
-        return examples
+    val code_examples_section = extract_section(content, "Examples")
+    if code_examples_section.len() == 0:
+        return code_examples
 
     # Find code blocks (```simple ... ```)
     var i = 0
-    while i < examples_section.len():
-        val block_start = examples_section.find("```simple", i)
+    while i < code_examples_section.len():
+        val block_start = code_examples_section.find("```simple", i)
         if block_start < 0:
             break
 
         val code_start = block_start + 9  # Length of "```simple"
-        val block_end = examples_section.find("```", code_start)
+        val block_end = code_examples_section.find("```", code_start)
         if block_end < 0:
             break
 
-        val code = examples_section.substring(code_start, block_end).trim()
-        examples = examples + [code]
+        val code = code_examples_section.substring(code_start, block_end).trim()
+        code_examples = code_examples + [code]
         i = block_end + 3
 
-    examples
+    code_examples
 
 fn generate_test_scaffold(metadata: FeatureMetadata, md_path: text) -> text:
     """Generate BDD test scaffold from metadata"""
@@ -308,9 +323,9 @@ fn generate_test_scaffold(metadata: FeatureMetadata, md_path: text) -> text:
     output = output + ["    )"]
     output = output + [""]
 
-    # Generate test stubs from examples
-    if metadata.examples.len() > 0:
-        output = output + ["    it \"parses and executes examples\":"]
+    # Generate test stubs from code_examples
+    if metadata.code_examples.len() > 0:
+        output = output + ["    it \"parses and executes code_examples\":"]
         output = output + ["        # TODO: Add test assertions"]
         output = output + ["        assert true"]
         output = output + [""]

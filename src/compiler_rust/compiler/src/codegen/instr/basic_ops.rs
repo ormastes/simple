@@ -86,15 +86,26 @@ pub fn compile_unary_op<M: Module>(
     let val_is_float = val_type == types::F32 || val_type == types::F64;
     let result = match op {
         UnaryOp::Neg => {
-            if val_is_float { builder.ins().fneg(val) }
-            else { builder.ins().ineg(val) }
+            if val_is_float {
+                builder.ins().fneg(val)
+            } else {
+                builder.ins().ineg(val)
+            }
         }
         UnaryOp::Not => {
             if val_is_float {
-                let zero_f = if val_type == types::F32 { builder.ins().f32const(0.0) } else { builder.ins().f64const(0.0) };
-                builder.ins().fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, val, zero_f)
+                let zero_f = if val_type == types::F32 {
+                    builder.ins().f32const(0.0)
+                } else {
+                    builder.ins().f64const(0.0)
+                };
+                builder
+                    .ins()
+                    .fcmp(cranelift_codegen::ir::condcodes::FloatCC::Equal, val, zero_f)
             } else {
-                builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0)
+                builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0)
             }
         }
         UnaryOp::BitNot => builder.ins().bnot(val),

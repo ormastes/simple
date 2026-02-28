@@ -178,36 +178,33 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Else) || self.check(&TokenKind::Elif) {
                 Expr::Tuple(vec![]) // unit value
             } else {
-            self.expect(&TokenKind::Indent)?;
+                self.expect(&TokenKind::Indent)?;
 
-            let mut statements = Vec::new();
-            while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-                // Skip empty lines
-                while self.check(&TokenKind::Newline) {
+                let mut statements = Vec::new();
+                while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                    // Skip empty lines
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                    if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                        break;
+                    }
+
+                    statements.push(self.parse_item()?);
+
+                    // Consume newline after statement if present
+                    if self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                }
+
+                if self.check(&TokenKind::Dedent) {
                     self.advance();
                 }
-                if self.check(&TokenKind::Dedent) || self.is_at_end() {
-                    break;
-                }
 
-                statements.push(self.parse_item()?);
-
-                // Consume newline after statement if present
-                if self.check(&TokenKind::Newline) {
-                    self.advance();
-                }
-            }
-
-            if self.check(&TokenKind::Dedent) {
-                self.advance();
-            }
-
-            Expr::DoBlock(statements)
+                Expr::DoBlock(statements)
             } // close else for empty-then-branch check
-        } else if self.check(&TokenKind::Return)
-            || self.check(&TokenKind::Break)
-            || self.check(&TokenKind::Continue)
-        {
+        } else if self.check(&TokenKind::Return) || self.check(&TokenKind::Break) || self.check(&TokenKind::Continue) {
             // Diverging statement in then branch: `if cond: return val`
             let stmt = self.parse_item()?;
             Expr::DoBlock(vec![stmt])
@@ -680,7 +677,10 @@ impl<'a> Parser<'a> {
                     // Stop at closing brackets when the lambda body is inside a function call.
                     // Example: items.filter(\d:\n    not done.contains(d)).len()
                     // The `)` that closes .filter(...) terminates the lambda body.
-                    if matches!(self.current.kind, TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) {
+                    if matches!(
+                        self.current.kind,
+                        TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                    ) {
                         break;
                     }
 
@@ -698,7 +698,10 @@ impl<'a> Parser<'a> {
                 // later as the bracket closes. Pop the lexer's indent stack to stay in sync.
                 if self.check(&TokenKind::Dedent) {
                     self.advance();
-                } else if matches!(self.current.kind, TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) {
+                } else if matches!(
+                    self.current.kind,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                ) {
                     // Lambda body ended at a closing bracket without a Dedent.
                     // Pop the indent stack to keep it in sync.
                     self.lexer.pop_indent();
@@ -722,13 +725,19 @@ impl<'a> Parser<'a> {
             // bracket_depth is already at inside-brace level (lexer incremented when scanning {).
             self.lexer.enable_forced_indentation();
             self.advance(); // consume { — next token from lexer has proper indentation
-            // Skip newlines/indents inside brace block
-            while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                            // Skip newlines/indents inside brace block
+            while matches!(
+                self.current.kind,
+                TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+            ) {
                 self.advance();
             }
             let mut statements = Vec::new();
             while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
-                while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                while matches!(
+                    self.current.kind,
+                    TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+                ) {
                     self.advance();
                 }
                 if self.check(&TokenKind::RBrace) || self.check(&TokenKind::Eof) {
@@ -736,7 +745,10 @@ impl<'a> Parser<'a> {
                 }
                 let stmt = self.parse_item()?;
                 statements.push(stmt);
-                while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                while matches!(
+                    self.current.kind,
+                    TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+                ) {
                     self.advance();
                 }
             }

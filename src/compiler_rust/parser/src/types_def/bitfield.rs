@@ -72,7 +72,12 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::Assign)?;
                 let const_value = self.parse_expression()?;
                 constants.push(BitfieldConstant {
-                    span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
                     name: const_name,
                     value: const_value,
                 });
@@ -133,7 +138,12 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Node::Bitfield(BitfieldDef {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             name,
             base_type,
             fields,

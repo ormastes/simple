@@ -641,7 +641,9 @@ impl<'a> Parser<'a> {
         // Handle decorator followed by empty block (e.g., @decorator \n Dedent)
         // This can happen in stub files or conditional compilation
         if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
-            return Ok(Node::Pass(crate::ast::PassStmt { span: self.current.span }));
+            return Ok(Node::Pass(crate::ast::PassStmt {
+                span: self.current.span,
+            }));
         }
 
         // Now parse the function with the collected decorators and effects

@@ -375,17 +375,25 @@ impl<'a> Parser<'a> {
             TokenKind::Extern => self.parse_extern_with_attrs(attributes),
             // Handle attributes before use/export/var/val/trait/mixin/from
             // Attributes like #[cfg(...)] before non-declaration items — skip attrs and parse item
-            TokenKind::Use | TokenKind::Export | TokenKind::Var | TokenKind::Val
-            | TokenKind::Trait | TokenKind::Mixin | TokenKind::From | TokenKind::Import
-            | TokenKind::Const | TokenKind::Static | TokenKind::Type | TokenKind::Newtype
-            | TokenKind::Extend | TokenKind::Bitfield => {
-                self.parse_item()
-            }
+            TokenKind::Use
+            | TokenKind::Export
+            | TokenKind::Var
+            | TokenKind::Val
+            | TokenKind::Trait
+            | TokenKind::Mixin
+            | TokenKind::From
+            | TokenKind::Import
+            | TokenKind::Const
+            | TokenKind::Static
+            | TokenKind::Type
+            | TokenKind::Newtype
+            | TokenKind::Extend
+            | TokenKind::Bitfield => self.parse_item(),
             // Handle attributes followed by empty block (Dedent/Eof)
             // This happens in conditional compilation or stub files
-            TokenKind::Dedent | TokenKind::Eof => {
-                Ok(Node::Pass(PassStmt { span: self.current.span }))
-            }
+            TokenKind::Dedent | TokenKind::Eof => Ok(Node::Pass(PassStmt {
+                span: self.current.span,
+            })),
             _ => {
                 // For identifiers (like describe, it, etc.), parse as expression/statement
                 if matches!(&self.current.kind, TokenKind::Identifier { .. }) {

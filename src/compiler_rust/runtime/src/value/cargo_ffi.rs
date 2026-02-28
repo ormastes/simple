@@ -198,10 +198,7 @@ pub extern "C" fn rt_cargo_test(package: *const c_char, filter: *const c_char) -
 /// Clean cargo build artifacts
 #[no_mangle]
 pub extern "C" fn rt_cargo_clean() -> i64 {
-    let output = Command::new("cargo")
-        .arg("clean")
-        .current_dir(workspace_dir())
-        .output();
+    let output = Command::new("cargo").arg("clean").current_dir(workspace_dir()).output();
 
     match output {
         Ok(output) => {

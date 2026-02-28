@@ -25,9 +25,7 @@ pub struct Timer {
 
 impl Timer {
     pub fn start() -> Self {
-        Self {
-            start: Instant::now(),
-        }
+        Self { start: Instant::now() }
     }
 
     pub fn elapsed_millis(&self) -> u64 {

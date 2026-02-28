@@ -47,7 +47,12 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Node::InlineAsm(InlineAsmStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             volatile: is_volatile,
             instructions,
             target_match: vec![],
@@ -64,7 +69,9 @@ impl<'a> Parser<'a> {
 
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
             self.skip_asm_ws();
-            if self.check(&TokenKind::RParen) { break; }
+            if self.check(&TokenKind::RParen) {
+                break;
+            }
 
             if let Some(c) = self.try_parse_asm_constraint()? {
                 constraints.push(c);
@@ -77,13 +84,20 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.skip_asm_ws();
-            if self.check(&TokenKind::Comma) { self.advance(); }
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            }
             self.skip_asm_ws();
         }
 
         self.expect(&TokenKind::RParen)?;
         Ok(Node::InlineAsm(InlineAsmStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             volatile: is_volatile,
             instructions,
             target_match: vec![],
@@ -127,7 +141,12 @@ impl<'a> Parser<'a> {
         Ok(None)
     }
 
-    fn parse_asm_kw_constraint(&mut self, kw: &str, bname: Option<String>, cs: Span) -> Result<AsmConstraint, ParseError> {
+    fn parse_asm_kw_constraint(
+        &mut self,
+        kw: &str,
+        bname: Option<String>,
+        cs: Span,
+    ) -> Result<AsmConstraint, ParseError> {
         self.advance();
         match kw {
             "inout" => {
@@ -135,44 +154,83 @@ impl<'a> Parser<'a> {
                 let rc = self.expect_identifier()?;
                 self.expect(&TokenKind::RParen)?;
                 let op = self.parse_expression()?;
-                Ok(AsmConstraint { span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column), name: bname, kind: AsmConstraintKind::InOut, reg_class: Some(rc), operand: Some(op) })
+                Ok(AsmConstraint {
+                    span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
+                    name: bname,
+                    kind: AsmConstraintKind::InOut,
+                    reg_class: Some(rc),
+                    operand: Some(op),
+                })
             }
             "lateout" => {
                 self.expect(&TokenKind::LParen)?;
                 let rc = self.expect_identifier()?;
                 self.expect(&TokenKind::RParen)?;
                 let op = self.parse_expression()?;
-                Ok(AsmConstraint { span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column), name: bname, kind: AsmConstraintKind::LateOut, reg_class: Some(rc), operand: Some(op) })
+                Ok(AsmConstraint {
+                    span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
+                    name: bname,
+                    kind: AsmConstraintKind::LateOut,
+                    reg_class: Some(rc),
+                    operand: Some(op),
+                })
             }
             "clobber" => {
                 self.expect(&TokenKind::LParen)?;
                 let rc = self.expect_identifier()?;
                 self.expect(&TokenKind::RParen)?;
-                Ok(AsmConstraint { span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column), name: bname, kind: AsmConstraintKind::Clobber, reg_class: Some(rc), operand: None })
+                Ok(AsmConstraint {
+                    span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
+                    name: bname,
+                    kind: AsmConstraintKind::Clobber,
+                    reg_class: Some(rc),
+                    operand: None,
+                })
             }
             "clobber_abi" => {
                 self.expect(&TokenKind::LParen)?;
                 let abi = self.expect_string_value()?;
                 self.expect(&TokenKind::RParen)?;
-                Ok(AsmConstraint { span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column), name: None, kind: AsmConstraintKind::ClobberAbi(abi), reg_class: None, operand: None })
+                Ok(AsmConstraint {
+                    span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
+                    name: None,
+                    kind: AsmConstraintKind::ClobberAbi(abi),
+                    reg_class: None,
+                    operand: None,
+                })
             }
             "options" => {
                 self.expect(&TokenKind::LParen)?;
                 let mut opts = Vec::new();
                 while !self.check(&TokenKind::RParen) {
                     opts.push(self.expect_identifier()?);
-                    if !self.check(&TokenKind::RParen) { self.expect(&TokenKind::Comma)?; }
+                    if !self.check(&TokenKind::RParen) {
+                        self.expect(&TokenKind::Comma)?;
+                    }
                 }
                 self.expect(&TokenKind::RParen)?;
-                Ok(AsmConstraint { span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column), name: None, kind: AsmConstraintKind::Options(opts), reg_class: None, operand: None })
+                Ok(AsmConstraint {
+                    span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
+                    name: None,
+                    kind: AsmConstraintKind::Options(opts),
+                    reg_class: None,
+                    operand: None,
+                })
             }
-            _ => Err(ParseError::syntax_error_with_span(format!("unexpected asm keyword: {}", kw), self.current.span))
+            _ => Err(ParseError::syntax_error_with_span(
+                format!("unexpected asm keyword: {}", kw),
+                self.current.span,
+            )),
         }
     }
 
     fn parse_asm_dir(&mut self, bname: Option<String>, cs: Span) -> Result<AsmConstraint, ParseError> {
-        if self.check(&TokenKind::In) { return self.parse_asm_in_constraint(bname, cs); }
-        if self.check(&TokenKind::Out) { return self.parse_asm_out_constraint(bname, cs); }
+        if self.check(&TokenKind::In) {
+            return self.parse_asm_in_constraint(bname, cs);
+        }
+        if self.check(&TokenKind::Out) {
+            return self.parse_asm_out_constraint(bname, cs);
+        }
         if let TokenKind::Identifier { name, .. } = &self.current.kind {
             let kw = name.clone();
             match kw.as_str() {
@@ -182,7 +240,10 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        Err(ParseError::syntax_error_with_span("expected asm constraint direction".to_string(), self.current.span))
+        Err(ParseError::syntax_error_with_span(
+            "expected asm constraint direction".to_string(),
+            self.current.span,
+        ))
     }
 
     fn parse_asm_in_constraint(&mut self, bname: Option<String>, cs: Span) -> Result<AsmConstraint, ParseError> {
@@ -191,7 +252,13 @@ impl<'a> Parser<'a> {
         let rc = self.expect_identifier()?;
         self.expect(&TokenKind::RParen)?;
         let op = self.parse_expression()?;
-        Ok(AsmConstraint { span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column), name: bname, kind: AsmConstraintKind::In, reg_class: Some(rc), operand: Some(op) })
+        Ok(AsmConstraint {
+            span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
+            name: bname,
+            kind: AsmConstraintKind::In,
+            reg_class: Some(rc),
+            operand: Some(op),
+        })
     }
 
     fn parse_asm_out_constraint(&mut self, bname: Option<String>, cs: Span) -> Result<AsmConstraint, ParseError> {
@@ -200,7 +267,13 @@ impl<'a> Parser<'a> {
         let rc = self.expect_identifier()?;
         self.expect(&TokenKind::RParen)?;
         let op = self.parse_expression()?;
-        Ok(AsmConstraint { span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column), name: bname, kind: AsmConstraintKind::Out, reg_class: Some(rc), operand: Some(op) })
+        Ok(AsmConstraint {
+            span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
+            name: bname,
+            kind: AsmConstraintKind::Out,
+            reg_class: Some(rc),
+            operand: Some(op),
+        })
     }
 
     fn extract_asm_block_strings(block: &Block, instructions: &mut Vec<String>) {
@@ -232,7 +305,11 @@ impl<'a> Parser<'a> {
                 for arm in &match_stmt.arms {
                     let target = match &arm.pattern {
                         Pattern::Literal(expr) => {
-                            if let Expr::String(s) = expr.as_ref() { s.clone() } else { "_".to_string() }
+                            if let Expr::String(s) = expr.as_ref() {
+                                s.clone()
+                            } else {
+                                "_".to_string()
+                            }
                         }
                         Pattern::Wildcard => "_".to_string(),
                         Pattern::Identifier(name) => name.clone(),
@@ -240,15 +317,30 @@ impl<'a> Parser<'a> {
                     };
                     let mut instrs = Vec::new();
                     for body_stmt in &arm.body.statements {
-                        if let Node::Expression(Expr::String(s)) = body_stmt { instrs.push(s.clone()); }
+                        if let Node::Expression(Expr::String(s)) = body_stmt {
+                            instrs.push(s.clone());
+                        }
                     }
-                    arms.push(AsmTargetArm { span: arm.span, target, instructions: instrs });
+                    arms.push(AsmTargetArm {
+                        span: arm.span,
+                        target,
+                        instructions: instrs,
+                    });
                 }
             }
         }
         Ok(Node::InlineAsm(InlineAsmStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
-            volatile: false, instructions: vec![], target_match: arms, clobbers: vec![], constraints: vec![],
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            volatile: false,
+            instructions: vec![],
+            target_match: arms,
+            clobbers: vec![],
+            constraints: vec![],
         }))
     }
 
@@ -257,7 +349,9 @@ impl<'a> Parser<'a> {
         let mut clobbers = Vec::new();
         while !self.check(&TokenKind::RBracket) {
             clobbers.push(self.expect_identifier()?);
-            if !self.check(&TokenKind::RBracket) { self.expect(&TokenKind::Comma)?; }
+            if !self.check(&TokenKind::RBracket) {
+                self.expect(&TokenKind::Comma)?;
+            }
         }
         self.expect(&TokenKind::RBracket)?;
         Ok(clobbers)
@@ -265,8 +359,16 @@ impl<'a> Parser<'a> {
 
     fn expect_string_value(&mut self) -> Result<String, ParseError> {
         match &self.current.kind {
-            TokenKind::String(s) => { let s = s.clone(); self.advance(); Ok(s) }
-            TokenKind::RawString(s) => { let s = s.clone(); self.advance(); Ok(s) }
+            TokenKind::String(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            TokenKind::RawString(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
             TokenKind::FString(parts) => {
                 let mut text = String::new();
                 for part in parts {
@@ -275,9 +377,14 @@ impl<'a> Parser<'a> {
                         crate::token::FStringToken::Expr(e) => text.push_str(e),
                     }
                 }
-                self.advance(); Ok(text)
+                self.advance();
+                Ok(text)
             }
-            _ => Err(ParseError::unexpected_token("string literal", format!("{:?}", self.current.kind), self.current.span))
+            _ => Err(ParseError::unexpected_token(
+                "string literal",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            )),
         }
     }
 
@@ -286,11 +393,17 @@ impl<'a> Parser<'a> {
     }
 
     fn is_asm_string_token(&self) -> bool {
-        matches!(self.current.kind, TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_))
+        matches!(
+            self.current.kind,
+            TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_)
+        )
     }
 
     fn skip_asm_ws(&mut self) {
-        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+        while matches!(
+            self.current.kind,
+            TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+        ) {
             self.advance();
         }
     }
@@ -329,7 +442,9 @@ mod tests {
 
     #[test]
     fn test_asm_volatile_paren_options() {
-        parse_succeeds("fn test():\n    asm volatile(\n        \"csrsi mstatus, 0x8\",\n        options(nostack)\n    )\n");
+        parse_succeeds(
+            "fn test():\n    asm volatile(\n        \"csrsi mstatus, 0x8\",\n        options(nostack)\n    )\n",
+        );
     }
 
     #[test]
@@ -344,7 +459,9 @@ mod tests {
 
     #[test]
     fn test_asm_volatile_unnamed_in() {
-        parse_succeeds("fn test(x: u64):\n    asm volatile(\n        \"csrc mip, {msie}\",\n        in(reg) x\n    )\n");
+        parse_succeeds(
+            "fn test(x: u64):\n    asm volatile(\n        \"csrc mip, {msie}\",\n        in(reg) x\n    )\n",
+        );
     }
 
     #[test]

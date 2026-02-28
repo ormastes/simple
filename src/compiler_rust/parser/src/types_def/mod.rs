@@ -519,11 +519,8 @@ impl<'a> Parser<'a> {
                 // Handle static var/val as field declarations in struct body
                 if is_static && (self.check(&TokenKind::Var) || self.check(&TokenKind::Val)) {
                     self.advance(); // consume var/val
-                    // Skip the entire static field declaration until newline
-                    while !self.check(&TokenKind::Newline)
-                        && !self.check(&TokenKind::Dedent)
-                        && !self.is_at_end()
-                    {
+                                    // Skip the entire static field declaration until newline
+                    while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                         self.advance();
                     }
                     self.skip_newlines();
@@ -569,18 +566,16 @@ impl<'a> Parser<'a> {
                 // These are desugared type variables: `val _tv_0 = [[text], [text]]`
                 // They define local type aliases used by subsequent fields.
                 self.advance(); // consume val/var
-                // Skip everything until the next newline (consume the whole binding)
-                while !self.check(&TokenKind::Newline)
-                    && !self.check(&TokenKind::Dedent)
-                    && !self.is_at_end()
-                {
+                                // Skip everything until the next newline (consume the whole binding)
+                while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                     self.advance();
                 }
             } else if self.check(&TokenKind::Pass) {
                 // pass/pass_dn/pass_do_nothing in struct body: skip as no-op
                 self.advance();
                 self.skip_newlines();
-            } else if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo") {
+            } else if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo")
+            {
                 // pass_dn / pass_do_nothing / pass_todo as identifiers in struct body: skip
                 self.advance();
                 self.skip_newlines();
@@ -734,11 +729,8 @@ impl<'a> Parser<'a> {
                 // Handle static var/val as field declarations in class body
                 if is_static && (self.check(&TokenKind::Var) || self.check(&TokenKind::Val)) {
                     self.advance(); // consume var/val
-                    // Skip the entire static field declaration until newline
-                    while !self.check(&TokenKind::Newline)
-                        && !self.check(&TokenKind::Dedent)
-                        && !self.is_at_end()
-                    {
+                                    // Skip the entire static field declaration until newline
+                    while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                         self.advance();
                     }
                     self.skip_newlines();
@@ -841,7 +833,8 @@ impl<'a> Parser<'a> {
                 // pass/pass_dn/pass_do_nothing in class body: skip as no-op
                 self.advance();
                 self.skip_newlines();
-            } else if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo") {
+            } else if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "pass_dn" || name == "pass_do_nothing" || name == "pass_todo")
+            {
                 // pass_dn / pass_do_nothing / pass_todo as identifiers in class body: skip
                 self.advance();
                 self.skip_newlines();
@@ -940,7 +933,12 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Node::Extend(ExtendBlock {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             target_type,
             generic_params,
             methods,

@@ -428,6 +428,12 @@ impl<M: Module> CodegenBackend<M> {
             .get(&func.name)
             .ok_or_else(|| BackendError::UnknownFunction(func.name.clone()))?;
 
+        // Skip extern/imported functions (no body expected; provided by runtime/FFI).
+        let decl = self.module.declarations().get_function_decl(func_id);
+        if decl.linkage == cranelift_module::Linkage::Import {
+            return Ok(());
+        }
+
         let sig = build_mir_signature(func);
         self.ctx.func.signature = sig;
         self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
@@ -501,7 +507,17 @@ impl<M: Module> CodegenBackend<M> {
 
         // Create stubs for failed functions
         for func in failed_functions {
+            // In bootstrap mode we let unresolved symbols be handled by C shims/auto-stubs.
+            if std::env::var("SIMPLE_BOOTSTRAP").is_ok() {
+                continue;
+            }
             if let Some(&func_id) = self.func_ids.get(&func.name) {
+                // If this function is declared as an import (extern), skip stub creation;
+                // the symbol is expected to be provided by the runtime/FFI.
+                let decl = self.module.declarations().get_function_decl(func_id);
+                if decl.linkage == cranelift_module::Linkage::Import {
+                    continue;
+                }
                 // Create a stub with the correct signature
                 let sig = build_mir_signature(func);
                 self.ctx.func.signature = sig.clone();
@@ -560,9 +576,7 @@ impl<M: Module> CodegenBackend<M> {
 ///
 /// The numbered layer prefixes (e.g., `10.`, `70.`) are stripped.
 pub fn module_prefix_from_path(file_path: &std::path::Path, source_root: &std::path::Path) -> String {
-    let relative = file_path
-        .strip_prefix(source_root)
-        .unwrap_or(file_path);
+    let relative = file_path.strip_prefix(source_root).unwrap_or(file_path);
 
     let mut parts = Vec::new();
     for component in relative.components() {

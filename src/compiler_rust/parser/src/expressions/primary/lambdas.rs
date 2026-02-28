@@ -49,7 +49,10 @@ impl<'a> Parser<'a> {
                             }
 
                             // Stop at closing brackets when the lambda body is inside a function call.
-                            if matches!(self.current.kind, TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) {
+                            if matches!(
+                                self.current.kind,
+                                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                            ) {
                                 break;
                             }
 
@@ -102,13 +105,19 @@ impl<'a> Parser<'a> {
                 // Check for brace-delimited block body: |x| { ... }
                 let body = if self.check(&TokenKind::LBrace) && self.peek_brace_is_lambda_block() {
                     self.advance(); // consume {
-                    // Skip newlines/indents inside brace block
-                    while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                                    // Skip newlines/indents inside brace block
+                    while matches!(
+                        self.current.kind,
+                        TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+                    ) {
                         self.advance();
                     }
                     let mut statements = Vec::new();
                     while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
-                        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                        while matches!(
+                            self.current.kind,
+                            TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+                        ) {
                             self.advance();
                         }
                         if self.check(&TokenKind::RBrace) || self.check(&TokenKind::Eof) {
@@ -116,7 +125,10 @@ impl<'a> Parser<'a> {
                         }
                         let stmt = self.parse_item()?;
                         statements.push(stmt);
-                        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                        while matches!(
+                            self.current.kind,
+                            TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+                        ) {
                             self.advance();
                         }
                     }

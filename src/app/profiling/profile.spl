@@ -15,7 +15,7 @@
 #   - flamegraph.svg - interactive flamegraph visualization
 
 use app.io
-use app.utils.colors (success, error, warning, info)
+use app.utils.colors.{success, error, warning, info}
 
 export main, profile_interpreter
 
@@ -118,8 +118,9 @@ fn profile_interpreter(config: ProfileConfig) -> bool:
 
     # Build optimized runtime
     print success("Building optimized runtime...")
-    val (_, stderr, code) = process_run("cargo",
-        ["build", "--release", "--quiet", "--manifest-path", "rust/Cargo.toml"])
+    val build_result = process_run("cargo", ["build", "--release", "--quiet", "--manifest-path", "rust/Cargo.toml"])
+    val stderr = build_result[1]
+    val code = build_result[2]
 
     if code != 0:
         print error("Build failed: {stderr}")
@@ -139,36 +140,45 @@ fn profile_interpreter(config: ProfileConfig) -> bool:
 
     # Check if perf needs sudo
     val needs_sudo = check_perf_needs_sudo(config.freq)
-    val sudo = if needs_sudo:
+    var sudo = ""
+    if needs_sudo:
         print warning("Note: perf requires elevated privileges")
-        "sudo "
-    else:
-        ""
+        sudo = "sudo "
 
     # Record with perf
-    val perf_cmd = "{sudo}perf record -F {config.freq} -g --call-graph dwarf -o perf.data -- {runtime} {script_file}"
-    val result = shell(perf_cmd)
+    var perf_args = ["record", "-F", "{config.freq}", "-g", "--call-graph", "dwarf", "-o", "perf.data", "--", runtime, script_file]
+    var perf_prog = "perf"
+    if sudo.len() > 0:
+        perf_prog = "sudo"
+        perf_args = ["perf"] + perf_args
+    val perf_run_result = process_run(perf_prog, perf_args)
+    val perf_code = perf_run_result[2]
 
-    if result.exit_code != 0:
+    if perf_code != 0:
         print error("Profiling failed")
         return false
 
     # Generate flamegraph
     print success("Generating flamegraph: {config.output_file}")
-    val flamegraph_cmd = "{sudo}perf script | flamegraph > {config.output_file}"
-    val fg_result = shell(flamegraph_cmd)
+    var fg_args = ["perf", "script"]
+    var fg_prog = "perf"
+    if sudo.len() > 0:
+        fg_prog = "sudo"
+        fg_args = ["perf", "script"]
+    val fg_run_result = process_run(fg_prog, fg_args)
+    val fg_code = fg_run_result[2]
 
-    if fg_result.exit_code != 0:
+    if fg_code != 0:
         print error("Flamegraph generation failed")
         return false
 
     # Cleanup
     if not config.keep_perf_data:
-        shell("{sudo}rm -f perf.data perf.data.old")
+        val rm_result = process_run("rm", ["-f", "perf.data", "perf.data.old"])
         print warning("Cleaned up perf.data")
 
     if config.mode == "benchmark":
-        file_delete(script_file)
+        val del_result = process_run("rm", ["-f", script_file])
 
     # Show results
     print ""
@@ -182,7 +192,8 @@ fn profile_interpreter(config: ProfileConfig) -> bool:
 
 fn check_command(command: text, install_cmd: text) -> bool:
     """Check if a command is available"""
-    val (_, _, code) = process_run("command", ["-v", command])
+    val cmd_result = process_run("command", ["-v", command])
+    val code = cmd_result[2]
     if code != 0:
         print error("{command} is not installed")
         print "Install with: {install_cmd}"
@@ -191,41 +202,42 @@ fn check_command(command: text, install_cmd: text) -> bool:
 
 fn check_perf_needs_sudo(freq: i64) -> bool:
     """Check if perf requires sudo by attempting a test run"""
-    val (_, _, code) = process_run("perf",
-        ["record", "-o", "/dev/null", "-F", "{freq}", "--", "sleep", "0.1"])
+    val perf_result = process_run("perf", ["record", "-o", "/dev/null", "-F", "{freq}", "--", "sleep", "0.1"])
+    val code = perf_result[2]
     code != 0
 
 fn create_benchmark_script() -> text:
     """Create a benchmark workload script"""
     val script_path = "/tmp/bench_profile.spl"
-    val benchmark_code = "fn fibonacci(n):
-    if n <= 1:
-        n
-    else:
-        fibonacci(n - 1) + fibonacci(n - 2)
-
-fn factorial(n):
-    if n <= 1:
-        1
-    else:
-        n * factorial(n - 1)
-
-fn sum_array(arr):
-    var sum = 0
-    for x in arr:
-        sum = sum + x
-    sum
-
-fn main():
-    # Compute intensive workload
-    for i in 0..100:
-        val fib_result = fibonacci(15)
-        val fact_result = factorial(10)
-        val arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        val sum = sum_array(arr)
-    0
-
-main()"
+    var benchmark_lines = []
+    benchmark_lines.push("fn fibonacci(n):")
+    benchmark_lines.push("    if n <= 1:")
+    benchmark_lines.push("        n")
+    benchmark_lines.push("    else:")
+    benchmark_lines.push("        fibonacci(n - 1) + fibonacci(n - 2)")
+    benchmark_lines.push("")
+    benchmark_lines.push("fn factorial(n):")
+    benchmark_lines.push("    if n <= 1:")
+    benchmark_lines.push("        1")
+    benchmark_lines.push("    else:")
+    benchmark_lines.push("        n * factorial(n - 1)")
+    benchmark_lines.push("")
+    benchmark_lines.push("fn sum_array(arr):")
+    benchmark_lines.push("    var sum = 0")
+    benchmark_lines.push("    for x in arr:")
+    benchmark_lines.push("        sum = sum + x")
+    benchmark_lines.push("    sum")
+    benchmark_lines.push("")
+    benchmark_lines.push("fn main():")
+    benchmark_lines.push("    for i in 0..100:")
+    benchmark_lines.push("        val fib_result = fibonacci(15)")
+    benchmark_lines.push("        val fact_result = factorial(10)")
+    benchmark_lines.push("        val arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]")
+    benchmark_lines.push("        val sum = sum_array(arr)")
+    benchmark_lines.push("    0")
+    benchmark_lines.push("")
+    benchmark_lines.push("main()")
+    val benchmark_code = benchmark_lines.join("\n")
 
     file_write(script_path, benchmark_code)
     script_path

@@ -342,10 +342,15 @@ impl<'a> Parser<'a> {
                 while self.check(&TokenKind::Comma) {
                     self.advance();
                     // Skip whitespace
-                    while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+                    while matches!(
+                        self.current.kind,
+                        TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent
+                    ) {
                         self.advance();
                     }
-                    if self.is_at_end() { break; }
+                    if self.is_at_end() {
+                        break;
+                    }
                     let item_name = self.expect_path_segment()?;
                     if self.check(&TokenKind::As) {
                         self.advance();
@@ -495,10 +500,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Export)?;
 
         // Handle bare `export` (no arguments) - used in conditional compilation blocks
-        if self.check(&TokenKind::Newline)
-            || self.check(&TokenKind::Dedent)
-            || self.is_at_end()
-        {
+        if self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) || self.is_at_end() {
             return Ok(Node::ExportUseStmt(ExportUseStmt {
                 span: Span::new(
                     start_span.start,
@@ -804,9 +806,9 @@ impl<'a> Parser<'a> {
             let mut export_indent_depth = 0;
             while self.check(&TokenKind::Comma) {
                 self.advance(); // consume ','
-                // Skip newlines and indents after comma to support multi-line export lists:
-                // export A, B,
-                //        C, D
+                                // Skip newlines and indents after comma to support multi-line export lists:
+                                // export A, B,
+                                //        C, D
                 while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
                     if self.check(&TokenKind::Indent) {
                         export_indent_depth += 1;
@@ -821,8 +823,12 @@ impl<'a> Parser<'a> {
             }
             // Consume matching dedents
             for _ in 0..export_indent_depth {
-                if self.check(&TokenKind::Newline) { self.advance(); }
-                if self.check(&TokenKind::Dedent) { self.advance(); }
+                if self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) {
+                    self.advance();
+                }
             }
 
             // Check if 'from' keyword is present

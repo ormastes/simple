@@ -131,10 +131,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 return Ok(Type::Generic {
                     name: "Dict".to_string(),
-                    args: vec![
-                        Type::Simple("Any".to_string()),
-                        Type::Simple("Any".to_string()),
-                    ],
+                    args: vec![Type::Simple("Any".to_string()), Type::Simple("Any".to_string())],
                 });
             }
             let key_type = self.parse_type()?;

@@ -483,7 +483,10 @@ impl<'a> Parser<'a> {
                             self.pending_tokens.push_front(self.current.clone());
                             let volatile_tok = self.previous.clone();
                             self.pending_tokens.push_front(crate::token::Token {
-                                kind: TokenKind::Identifier { name: "volatile".to_string(), pattern: crate::token::NamePattern::Immutable },
+                                kind: TokenKind::Identifier {
+                                    name: "volatile".to_string(),
+                                    pattern: crate::token::NamePattern::Immutable,
+                                },
                                 lexeme: "volatile".to_string(),
                                 span: volatile_tok.span,
                             });
