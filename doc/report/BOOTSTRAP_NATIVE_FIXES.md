@@ -35,9 +35,12 @@ Added three test jobs to verify bootstrap binaries can build native hello world:
 
 ### 2. Native Compilation Cross-Platform Support
 
-The existing code in `src/app/compile/native.spl` already handles macOS correctly:
+The code in `src/app/compile/native.spl` handles macOS correctly and is now **fully self-sufficient** (2026-02-28). C code generation uses in-process `aot_c_file()` instead of spawning a `bin/simple compile --backend=c` subprocess:
 
 ```simple
+# In-process C generation (no subprocess)
+val aot_result = aot_c_file(source_file, temp_cpp)
+
 # Finds mold if available
 val mold_path = find_mold_for_native()
 
@@ -50,6 +53,7 @@ else:
 ```
 
 **Key Points:**
+- ✅ In-process C code generation via `aot_c_file()` (no subprocess)
 - ✅ Graceful mold detection and fallback
 - ✅ Works on Linux (with/without mold)
 - ✅ Works on macOS (clang/system linker)
@@ -57,20 +61,19 @@ else:
 
 ### 3. LLVM Direct Compilation
 
-The `src/app/compile/llvm_direct.spl` module also handles cross-platform:
+The `src/app/compile/llvm_direct.spl` module handles cross-platform and now uses in-process `aot_c_file()` for C code generation (2026-02-28):
 
 ```simple
-# Try clang first
-val clang_cmd = "clang -S -emit-llvm -o {temp_ll} {temp_c} 2>&1"
+# In-process C generation (no subprocess)
+val aot_result = aot_c_file(source_file, temp_cpp)
 
-if clang_exit != 0:
-    # Fallback to gcc if clang unavailable
-    return compile_gcc_fallback(c_code, output_file, verbose)
+# Then compile with clang++
+val clang_cmd = "clang++ -std=c++20 {opt_level} ... -o {output_file}"
 ```
 
 **Compilation Paths:**
-1. **LLVM path:** Simple → C → clang → LLVM IR → opt → llc → native
-2. **GCC fallback:** Simple → C → gcc → native
+1. **LLVM path:** Simple → C++20 (in-process via `aot_c_file()`) → clang++ → native
+2. **GCC fallback:** Simple → C++20 (in-process) → g++ → native
 
 ## Test Hello World
 

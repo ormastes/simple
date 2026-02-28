@@ -50,8 +50,7 @@ seed (C++)  -->  core (Simple)  -->  full (Simple)
 
 ### C Backend Bootstrap (Temporal)
 
-The C backend generates C from Simple source. This produces a **temporal** (bootstrap) binary
-that provides fast CLI dispatch but delegates real work to the **real** binary (`bin/release/simple`).
+The C backend generates C from Simple source. This produces a **temporal** (bootstrap) binary.
 
 ```bash
 # Regenerate C from Simple source:
@@ -67,7 +66,7 @@ Output: `build/bootstrap/c_simple/simple` — temporal bootstrap binary.
 
 **Key distinction:**
 - `build/simple` / `build/bootstrap/c_simple/simple` = **temporal** (C bootstrap, fast CLI dispatcher)
-- `bin/release/simple` = **real** (self-hosted Simple compiler/interpreter, production binary)
+- `bin/release/simple` = **real** (self-hosted Simple compiler/interpreter, **fully self-sufficient** — all compilation, interpretation, and test running happens in-process via direct function calls)
 
 ### Bootstrap Chain (Seed/Core/Full)
 

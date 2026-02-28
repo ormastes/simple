@@ -51,9 +51,13 @@ scripts/bootstrap/bootstrap-c.sh --verify
 
 ## Expected Output
 
-- Final binary: `bin/release/simple`
+- Final binary: `bin/release/simple` — **fully self-sufficient** (all compilation, interpretation, and test running happens in-process via direct function calls like `aot_c_file()`, `compile_native()`, `interpret_file()`)
 - C backend bootstrap binary: `bin/bootstrap/cpp/simple`
 - Intermediate artifacts: `build/bootstrap/`
+
+## Architecture Note (2026-02-28)
+
+The self-hosted binary (`bin/release/simple`) no longer delegates any work to subprocess calls. All compilation backends (C, VHDL, native), file execution, and test running use in-process function calls. The only external tool calls are system compilers/linkers: `clang`/`clang++`, `gcc`, `mold`/`lld`/`ld`, `llc`, `uname`, `which`.
 
 ## Related Docs
 
