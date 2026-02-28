@@ -12,6 +12,10 @@
 # 5. If compilation not available, report error with helpful message
 
 use app.io.{file_exists, shell, cwd}
+use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object, SmfReader}
+use compiler.backend.linker.smf_reader.{SmfReaderImpl}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 
 # ============================================================================
 # Object File Resolution
@@ -92,6 +96,7 @@ fn default_object_search_paths() -> [text]:
     [
         "build/obj",           # Standard build output
         "build/artifacts/cache/obj",    # Build system cache
+        "build/smf",           # Watcher-generated SMF cache
         "obj",                 # Local objects
         ".",                   # Current directory
         "build/lib/obj"        # Library object cache
@@ -121,23 +126,61 @@ fn generate_object_candidates(module_name: text) -> [text]:
 
 """Check if we can compile SMF to object."""
 fn can_compile_smf_to_object() -> bool:
-    # Check if smf-to-object tool is available
-    # For now, return false (not yet implemented)
-    false
+    # ObjTaker can extract code from SMF files and produce object bytes
+    true
 
-"""Attempt to compile SMF module to object file (future)."""
+"""Attempt to compile SMF module to object file via ObjTaker.
+
+Uses ObjTaker to open the SMF, extract code for all exported symbols,
+and write as an ELF .o file.
+"""
 fn compile_smf_to_object(
     smf_data: [u8],
     output_path: text
 ) -> Result<(), text>:
-    # SMF to object compilation not yet implemented
-    # This would:
-    # 1. Parse SMF
-    # 2. Extract or reconstruct MIR
-    # 3. Run codegen pipeline
-    # 4. Emit object file
-    eprint("Warning: SMF to object compilation not yet implemented; cannot compile to {output_path}")
-    Err("SMF to object compilation not yet implemented")
+    # Write SMF data to a temp file so SmfReaderImpl can open it
+    val tmp_smf_path = "{output_path}.tmp.smf"
+    if not rt_file_write_bytes(tmp_smf_path, smf_data):
+        return Err("Failed to write temporary SMF file")
+
+    # Open SMF reader
+    val reader_result = SmfReaderImpl.open(tmp_smf_path)
+    if reader_result.is_err():
+        return Err("Failed to open SMF: {reader_result.unwrap_err()}")
+
+    var reader = reader_result.unwrap()
+
+    # Create ObjTaker and extract all exported symbols
+    var obj_taker = objtaker_with_defaults()
+    var all_code: [u8] = []
+
+    val symbols = reader.exported_symbols()
+    for symbol in symbols:
+        val take_result = objtaker_take_object(obj_taker, reader, symbol.name)
+        match take_result:
+            case Code(bytes, _, _):
+                all_code = all_code + bytes
+            case Template(_, _):
+                # Template without type args - skip (needs instantiation hints)
+                pass_dn
+            case Deferred(_, _):
+                # Deferred - skip (needs link-time resolution)
+                pass_dn
+            case NotFound(_):
+                pass_dn
+            case Error(msg):
+                eprint("Warning: failed to extract {symbol.name}: {msg}")
+
+    reader.close()
+
+    # Write extracted code as object file
+    if all_code.len() == 0:
+        return Err("No code extracted from SMF")
+
+    if not rt_file_write_bytes(output_path, all_code):
+        return Err("Failed to write object file: {output_path}")
+
+    Ok(())
 
 # ============================================================================
 # Integration with Linker Wrapper

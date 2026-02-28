@@ -24,6 +24,7 @@ use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
 use compiler.backend.linker.object_emitter.{assemble_code_units}
 use compiler.backend.linker.smf_getter.{SmfGetter}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
 
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
@@ -253,61 +254,79 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 
 # Build self-contained binary when given SMF inputs
 fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -> Result:
-    # Currently support single SMF; libraries handled separately via lsm.
     if smf_inputs.len() == 0:
         return Err("No SMF inputs")
-    if smf_inputs.len() > 1:
-        return Err("Multiple SMF inputs not yet supported")
 
-    val path = smf_inputs[0]
     val verbose = config.verbose
     val provider = create_default_provider(verbose)
 
-    # .lsm library: extract objects and link
-    if path.ends_with(".lsm"):
-        val add_res = provider.add_library(path)
-        if add_res.is_err():
-            return Err(add_res.unwrap_err())
+    # Create shared ObjTaker for extraction/instantiation across all inputs
+    var obj_taker = objtaker_with_defaults()
 
-        val modules = provider.list_modules()
-        if modules.len() == 0:
-            return Err("No modules found in {path}")
-
+    # Support multiple SMF inputs
+    if smf_inputs.len() > 1 or smf_inputs[0].ends_with(".lsm"):
+        # Multi-SMF or .lsm library mode
         val tmp_dir = create_temp_dir()
         if tmp_dir == "":
-            return Err("Failed to create temp dir for library objects")
+            return Err("Failed to create temp dir for SMF objects")
 
         var objs: [text] = []
-        for m in modules:
-            # Prefer embedded object from archive
-            val obj_res = provider.get_object(m)
-            if obj_res.is_ok():
-                val obj_bytes = obj_res.unwrap()
-                val safe = m.replace("/", "_")
-                val obj_path = "{tmp_dir}/{safe}.o"
-                if write_bytes_to_file(obj_path, obj_bytes):
-                    objs.push(obj_path)
-                continue
 
-            # Fallback to exported code
-            val code_res = provider.get_exported_code(m)
-            if code_res.is_err():
-                if verbose:
-                    print "[linker-wrapper] missing object for {m}: {code_res.unwrap_err()}"
-                continue
-            val obj_paths = materialize_code_units(code_res.unwrap(), tmp_dir, verbose)
-            for p in obj_paths:
-                objs.push(p)
+        for path in smf_inputs:
+            if path.ends_with(".lsm"):
+                # .lsm library: extract objects and link
+                val add_res = provider.add_library(path)
+                if add_res.is_err():
+                    cleanup_temp_dir(tmp_dir)
+                    return Err(add_res.unwrap_err())
+
+                val modules = provider.list_modules()
+                for m in modules:
+                    val obj_res = provider.get_object(m)
+                    if obj_res.is_ok():
+                        val obj_bytes = obj_res.unwrap()
+                        val safe = m.replace("/", "_")
+                        val obj_path = "{tmp_dir}/{safe}.o"
+                        if write_bytes_to_file(obj_path, obj_bytes):
+                            objs.push(obj_path)
+                        continue
+
+                    val code_res = provider.get_exported_code(m)
+                    if code_res.is_err():
+                        if verbose:
+                            print "[linker-wrapper] missing object for {m}: {code_res.unwrap_err()}"
+                        continue
+                    val obj_paths = materialize_code_units(code_res.unwrap(), tmp_dir, verbose)
+                    for p in obj_paths:
+                        objs.push(p)
+            else:
+                # Single SMF file: try ObjectProvider extraction
+                val obj_res = provider.get_object(path)
+                if obj_res.is_ok():
+                    val safe = path.replace("/", "_").replace(".smf", "")
+                    val obj_path = "{tmp_dir}/{safe}.o"
+                    if write_bytes_to_file(obj_path, obj_res.unwrap()):
+                        objs.push(obj_path)
+                    continue
+
+                val code_res = provider.get_exported_code(path)
+                if code_res.is_ok():
+                    val code_objs = materialize_code_units(code_res.unwrap(), tmp_dir, verbose)
+                    for p in code_objs:
+                        objs.push(p)
 
         if objs.len() == 0:
             cleanup_temp_dir(tmp_dir)
-            return Err("No object data available in {path}")
+            return Err("No object data available in SMF inputs")
 
         val link_res = link_native_unix(objs, output, config)
         cleanup_temp_dir(tmp_dir)
         return link_res
 
-    # Try to convert single SMF to object via ObjectProvider when possible
+    # Single SMF file path
+    val path = smf_inputs[0]
+
+    # Try to convert single SMF to object via ObjectProvider
     val obj_result = provider.get_object(path)
     if obj_result.is_ok():
         val tmp_dir = create_temp_dir()

@@ -2,12 +2,16 @@
 #
 # Watches for file changes and automatically rebuilds
 
-export WatchConfig, WatchResult, FileChangeEvent, default_watch_config
+export WatchConfig, WatchResult, FileChangeEvent, default_watch_config, compile_changed_to_smf
 
 use app.build.types (BuildConfig, BuildResult, BuildProfile, profile_to_string)
 use app.build.orchestrator (orchestrate_build)
 use app.build.metrics (MetricsTracker, print_metrics)
-use app.io.{current_time_ms, thread_sleep_ms, dir_list}
+use app.io.{current_time_ms, thread_sleep_ms, dir_list, file_exists}
+use driver (compile_to_smf)
+
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_mkdir_p(path: text) -> bool
 
 # Watch configuration
 struct WatchConfig:
@@ -18,6 +22,8 @@ struct WatchConfig:
     clear_console: bool
     run_tests: bool
     notify: bool
+    smf_mode: bool        # When true, compile changed files to SMF cache
+    smf_cache_dir: text   # Directory for SMF cache files (default "build/smf")
 
 # Watch result
 struct WatchResult:
@@ -87,18 +93,33 @@ class WatchOrchestrator:
                 for change in changes:
                     print "  {change.event_type}: {change.path}"
 
-                # Rebuild
+                # Rebuild or compile to SMF
                 print ""
-                print "[{format_time_ms(current_time_ms())}] Rebuilding..."
-                val rebuild_result = orchestrate_build(build_config)
                 total_rebuilds = total_rebuilds + 1
 
-                if rebuild_result.success:
-                    successful_rebuilds = successful_rebuilds + 1
-                    print_success_message(rebuild_result)
+                if config.smf_mode:
+                    print "[{format_time_ms(current_time_ms())}] Compiling changed files to SMF..."
+                    val smf_ok = compile_changed_to_smf(changes, config)
+                    if smf_ok:
+                        successful_rebuilds = successful_rebuilds + 1
+                        print ""
+                        print "SMF compilation succeeded"
+                        print ""
+                    else:
+                        failed_rebuilds = failed_rebuilds + 1
+                        print ""
+                        print "SMF compilation failed"
+                        print ""
                 else:
-                    failed_rebuilds = failed_rebuilds + 1
-                    print_error_message(rebuild_result)
+                    print "[{format_time_ms(current_time_ms())}] Rebuilding..."
+                    val rebuild_result = orchestrate_build(build_config)
+
+                    if rebuild_result.success:
+                        successful_rebuilds = successful_rebuilds + 1
+                        print_success_message(rebuild_result)
+                    else:
+                        failed_rebuilds = failed_rebuilds + 1
+                        print_error_message(rebuild_result)
 
                 # Update snapshot after rebuild
                 last_snapshot = current_snapshot
@@ -163,8 +184,8 @@ fn build_file_snapshot(watch_paths: [text], ignore_patterns: [text]) -> FileSnap
                     should_skip = true
                     break
             if not should_skip:
-                # Use string length as a quick change indicator
-                files[entry] = entry.len()
+                # Use actual file size for change detection
+                files[entry] = rt_file_size(entry)
     FileSnapshot(files: files)
 
 # Detect changes between two snapshots
@@ -226,13 +247,78 @@ fn current_time_str() -> text:
 fn default_watch_config() -> WatchConfig:
     WatchConfig(
         profile: BuildProfile.Debug,
-        watch_paths: ["src/", "build/rust/"],
+        watch_paths: ["src/"],
         ignore_patterns: ["target/", ".git/", "*.swp", "*.tmp"],
         debounce_ms: 500,
         clear_console: true,
         run_tests: false,
-        notify: true
+        notify: true,
+        smf_mode: false,
+        smf_cache_dir: "build/smf"
     )
+
+# SMF watch configuration (for SMF cache mode)
+fn smf_watch_config() -> WatchConfig:
+    WatchConfig(
+        profile: BuildProfile.Debug,
+        watch_paths: ["src/"],
+        ignore_patterns: ["target/", ".git/", "*.swp", "*.tmp"],
+        debounce_ms: 500,
+        clear_console: true,
+        run_tests: false,
+        notify: true,
+        smf_mode: true,
+        smf_cache_dir: "build/smf"
+    )
+
+# ============================================================================
+# SMF Compilation
+# ============================================================================
+
+fn compile_changed_to_smf(changes: [FileChangeEvent], config: WatchConfig) -> bool:
+    """Compile changed .spl files to SMF cache.
+
+    For each changed source file, compiles it to an SMF file in the
+    cache directory (build/smf/ by default).
+    """
+    # Ensure cache directory exists
+    rt_mkdir_p(config.smf_cache_dir)
+
+    var all_ok = true
+    var compiled_count = 0
+
+    for change in changes:
+        # Only compile .spl files that were modified or created
+        if not change.path.ends_with(".spl"):
+            continue
+        if change.event_type == "deleted":
+            continue
+
+        # Convert source path to SMF cache path
+        val smf_path = source_to_smf_cache_path(change.path, config.smf_cache_dir)
+
+        print "  Compiling: {change.path} -> {smf_path}"
+
+        val result = compile_to_smf(change.path, smf_path)
+        if result.is_err():
+            print "  Error: {result.unwrap_err()}"
+            all_ok = false
+        else:
+            compiled_count = compiled_count + 1
+
+    if compiled_count > 0:
+        print "  Compiled {compiled_count} file(s) to SMF cache"
+
+    all_ok
+
+fn source_to_smf_cache_path(source: text, cache_dir: text) -> text:
+    """Convert source path to SMF cache path.
+
+    Example: src/app/cli/main.spl -> build/smf/src_app_cli_main.smf
+    """
+    val base_no_ext = source.replace(".spl", "")
+    val base = base_no_ext.replace("/", "_")
+    "{cache_dir}/{base}.smf"
 
 # Print watch result
 fn print_watch_result(result: WatchResult):
