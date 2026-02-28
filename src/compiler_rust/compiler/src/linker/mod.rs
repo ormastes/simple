@@ -2,16 +2,22 @@
 //!
 //! This module provides:
 //! - **SMF Writer**: Creates Simple Module Format binaries
-//! - **Native Linker**: High-performance native linking with mold/lld/ld support
+//! - **Native Linker**: High-performance native linking with mold/lld/ld/MSVC support
 //! - **Parallel Linker**: Parallel SMF linking using rayon
 //! - **Layout Optimizer**: 4KB page locality optimization (#2030-#2039)
 //!
 //! # Native Linker Selection
 //!
-//! The native linker is auto-detected in order of preference:
-//! 1. **Mold** (Linux only): Fastest linker, ~4x faster than lld
+//! The native linker is auto-detected based on target platform:
+//!
+//! **GNU targets (Linux, FreeBSD):**
+//! 1. **Mold**: Fastest linker, ~4x faster than lld
 //! 2. **LLD**: LLVM's linker, cross-platform, fast
 //! 3. **GNU ld**: Traditional fallback
+//!
+//! **macOS:** LLD or system ld64
+//!
+//! **Windows (MSVC):** lld-link > link.exe
 //!
 //! Override with `SIMPLE_LINKER` environment variable or `--linker` CLI flag.
 

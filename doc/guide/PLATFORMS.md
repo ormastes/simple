@@ -137,6 +137,22 @@ cargo install cross --git https://github.com/cross-rs/cross
 scripts/build-bootstrap-multi-platform.sh
 ```
 
+### FreeBSD
+
+| Architecture | Status | Binary Location | Size |
+|--------------|--------|-----------------|------|
+| x86_64 | 🔄 Experimental | `bin/release/freebsd-x86_64/simple` | 32 MB |
+
+**Requirements:**
+- FreeBSD 13+
+- 64-bit kernel and userspace
+
+**Linker support:** The Rust bootstrap compiler's native linker pipeline supports FreeBSD with:
+- Automatic CRT file detection (`/usr/lib`)
+- Dynamic linker detection (`/libexec/ld-elf.so.1`)
+- Default libraries: c, pthread, m, execinfo, simple_runtime
+- mold/lld/ld linker selection
+
 ## Unsupported Platforms
 
 ### 32-bit Systems
@@ -146,7 +162,6 @@ Simple Language requires 64-bit systems. 32-bit platforms (i686, armv7) are not 
 ### Other Platforms
 
 We welcome contributions to add support for:
-- FreeBSD (x86_64, ARM64)
 - OpenBSD (x86_64)
 - NetBSD (x86_64)
 - Solaris/Illumos (x86_64)
@@ -270,5 +285,18 @@ See LICENSE file for details.
 
 ---
 
-**Last Updated:** 2026-02-06
+## Native Linker Support
+
+The Rust bootstrap compiler supports automatic linker detection per platform:
+
+| Platform | Linker Priority | Default Libraries |
+|----------|----------------|-------------------|
+| Linux | mold > lld > ld | c, pthread, dl, m, gcc_s, lzma |
+| macOS | lld > ld64 | c, System |
+| Windows | lld-link > link.exe (MSVC) | c, msvcrt, kernel32, ws2_32, advapi32 |
+| FreeBSD | mold > lld > ld | c, pthread, m, execinfo |
+
+Override with `SIMPLE_LINKER=<name>` environment variable.
+
+**Last Updated:** 2026-02-28
 **Version:** 0.4.0-pure-simple
