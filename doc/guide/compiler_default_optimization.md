@@ -402,6 +402,31 @@ Registered in pipeline: `src/compiler/60.mir_opt/mir_opt/mod.spl`
 
 ---
 
+## Pass Dispatcher Registry
+
+All MIR optimization passes are wired into the `run_named_pass` dispatcher in `src/compiler/60.mir_opt/mir_opt/mod.spl`. Each pass name used in the pipeline configuration maps to a factory + free-function wrapper:
+
+| Pass Name | Pipeline Level | File | Dispatch Function |
+|-----------|---------------|------|-------------------|
+| `dead_code_elimination` | All (Size, Speed, Aggressive) | `dce.spl` | `dce_run_on_function` |
+| `constant_folding` | All (Size, Speed, Aggressive) | `const_fold.spl` | `cf_run_on_function` |
+| `copy_propagation` | Speed, Aggressive | `copy_prop.spl` | `copypropagation_run_on_function` |
+| `common_subexpr_elim` | Speed, Aggressive | `cse.spl` | `cse_run_on_function` |
+| `inline_small_functions` | Size | `inline.spl` | `inline_run_on_function` |
+| `inline_functions` | Speed | `inline.spl` | `inline_run_on_function` |
+| `inline_aggressive` | Aggressive | `inline.spl` | `inline_run_on_function` |
+| `loop_invariant_motion` | Speed, Aggressive | `loop_opt.spl` | `loop_opt_run_on_function` |
+| `loop_unroll` | Aggressive | `loop_opt.spl` | `loop_opt_run_on_function` |
+| `strength_reduction` | Aggressive | `loop_strength.spl` | `strength_reduction_run_on_function` |
+| `collection_opt` | Speed, Aggressive | `collection_opt.spl` | `collection_opt_run_on_function` |
+| `vectorization` | Aggressive | `auto_vectorize.spl` | Module-level (no-op in per-fn dispatcher) |
+
+Each wrapper follows the pattern: `fn wrapper_name(pass: PassType, func: MirFunction) -> MirFunction` delegating to `pass.run_on_function(func)` or `pass.optimize_function(func)`.
+
+The `pipeline_optimize(pipeline, module)` function iterates all functions in a module and runs every pass in the pipeline's pass list via `run_named_pass`.
+
+---
+
 ## Recommendations
 
 ### For compiler contributors
@@ -416,6 +441,6 @@ Registered in pipeline: `src/compiler/60.mir_opt/mir_opt/mod.spl`
 
 ### For the compiler itself
 
-The compiler already handles patterns 1 and 4 automatically in the MIR optimization pipeline. Patterns 2, 3, 5, 6, 7, and 8 require fundamentally different data structures or algorithm changes that cannot be inferred — these must be fixed in source code.
+All 12 pipeline-configured MIR optimization passes are now wired into the `run_named_pass` dispatcher. The compiler handles collection patterns 1 and 4 automatically via the `collection_opt` pass, while the full pipeline (DCE, constant folding, copy propagation, CSE, inlining, loop optimizations, strength reduction) runs during AOT compilation at Speed and Aggressive optimization levels. Patterns 2, 3, 5, 6, 7, and 8 require fundamentally different data structures or algorithm changes that cannot be inferred — these must be fixed in source code.
 
 The lint pass warns about all 8 patterns at compile time, giving developers the opportunity to fix them before they become performance problems.
