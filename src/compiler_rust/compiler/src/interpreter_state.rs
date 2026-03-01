@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc, Arc, Mutex};
 
 use simple_common::actor::{Message, ThreadSpawner};
-use simple_parser::ast::{Block, EnumDef, MacroDef, Type, UseStmt};
+use simple_parser::ast::{Block, EnumDef, MacroDef, Type};
 
 use crate::aop_config::AopConfig;
 use crate::concurrent_providers::registry::ConcurrentProviderRegistry;
@@ -39,13 +39,6 @@ pub struct LiteralFunctionInfo {
     pub param_name: String,
     /// The function body
     pub body: Block,
-}
-
-/// A module import deferred for lazy loading.
-#[derive(Debug, Clone)]
-pub struct DeferredModule {
-    pub use_stmt: UseStmt,
-    pub module_path: Option<PathBuf>,
 }
 
 //==============================================================================
@@ -118,8 +111,6 @@ thread_local! {
     /// These cannot be reassigned but support functional update with ->
     pub(crate) static IMMUTABLE_VARS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     pub(crate) static EXTERN_FUNCTIONS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
-    /// Deferred (lazy) module imports — module path, source file, import names
-    pub(crate) static DEFERRED_MODULES: RefCell<Vec<DeferredModule>> = RefCell::new(Vec::new());
     /// Current context object for context blocks (DSL support)
     pub(crate) static CONTEXT_OBJECT: RefCell<Option<Value>> = RefCell::new(None);
     /// Name of the variable holding the context object (for mutation persistence)
@@ -549,7 +540,6 @@ pub fn clear_interpreter_state() {
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
     IMMUTABLE_VARS.with(|cell| cell.borrow_mut().clear());
     EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().clear());
-    DEFERRED_MODULES.with(|cell| cell.borrow_mut().clear());
 
     // Clear user macros
     USER_MACROS.with(|cell| cell.borrow_mut().clear());
