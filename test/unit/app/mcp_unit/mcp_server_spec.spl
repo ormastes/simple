@@ -1,0 +1,201 @@
+# MCP Server Protocol Tests
+# Feature: MCP JSON-RPC Server
+# Category: MCP, Protocol
+# Status: In Progress
+#
+# Tests for the MCP server's JSON helpers, tool dispatch, and response formatting.
+
+use std.spec
+use std.nogc_async_mut.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, extract_nested_string, escape_json, make_result_response, make_error_response, make_tool_result, make_notification, make_notification_no_params, log_level_to_int, min_int}
+
+# ----------- Tests -----------
+
+describe "extract_json_string":
+    it "extracts simple string value":
+        val json = jo2(jp("method", js("initialize")), jp("id", "1"))
+        expect(extract_json_string(json, "method")).to_equal("initialize")
+
+    it "extracts from nested JSON":
+        val inner = jo1(jp("name", js("read_code")))
+        val json = jo2(jp("method", js("tools/call")), jp("params", inner))
+        expect(extract_json_string(json, "method")).to_equal("tools/call")
+
+    it "returns empty for missing key":
+        val json = jo1(jp("method", js("test")))
+        expect(extract_json_string(json, "id")).to_equal("")
+
+    it "returns empty for empty string":
+        expect(extract_json_string("", "key")).to_equal("")
+
+    it "handles path with slashes":
+        val json = jo1(jp("path", js("/home/user/test.spl")))
+        expect(extract_json_string(json, "path")).to_equal("/home/user/test.spl")
+
+    it "handles empty string value":
+        val json = jo1(jp("name", js("")))
+        expect(extract_json_string(json, "name")).to_equal("")
+
+describe "extract_json_value":
+    it "extracts numeric value":
+        val json = jo2(jp("id", "42"), jp("method", js("test")))
+        expect(extract_json_value(json, "id")).to_equal("42")
+
+    it "extracts null value":
+        val json = jo1(jp("result", "null"))
+        expect(extract_json_value(json, "result")).to_equal("null")
+
+    it "returns null for missing key":
+        val json = jo1(jp("a", "1"))
+        expect(extract_json_value(json, "b")).to_equal("null")
+
+    it "handles boolean true":
+        val json = jo2(jp("flag", "true"), jp("other", "1"))
+        expect(extract_json_value(json, "flag")).to_equal("true")
+
+    it "handles boolean false":
+        val json = jo1(jp("flag", "false"))
+        expect(extract_json_value(json, "flag")).to_equal("false")
+
+describe "extract_nested_string":
+    it "extracts nested string from params":
+        val params = jo1(jp("name", js("read_code")))
+        val json = jo2(jp("method", js("tools/call")), jp("params", params))
+        expect(extract_nested_string(json, "params", "name")).to_equal("read_code")
+
+    it "returns empty for missing outer key":
+        val json = jo1(jp("method", js("test")))
+        expect(extract_nested_string(json, "params", "name")).to_equal("")
+
+    it "returns empty for missing inner key":
+        val params = jo1(jp("other", js("value")))
+        val json = jo1(jp("params", params))
+        expect(extract_nested_string(json, "params", "name")).to_equal("")
+
+describe "escape_json":
+    it "escapes double quotes":
+        val result = escape_json("say \"hello\"")
+        expect(result.contains("hello")).to_equal(true)
+
+    it "handles empty string":
+        expect(escape_json("")).to_equal("")
+
+    it "handles string with no special chars":
+        expect(escape_json("hello world")).to_equal("hello world")
+
+describe "make_result_response":
+    it "includes jsonrpc version":
+        val response = make_result_response("1", LB() + RB())
+        expect(response.contains("jsonrpc")).to_equal(true)
+        expect(response.contains("2.0")).to_equal(true)
+
+    it "includes id":
+        val response = make_result_response("42", LB() + RB())
+        expect(response.contains("42")).to_equal(true)
+
+    it "includes result":
+        val response = make_result_response("1", js("ok"))
+        expect(response.contains("result")).to_equal(true)
+
+describe "make_error_response":
+    it "includes error code":
+        val response = make_error_response("1", -32600, "Invalid request")
+        expect(response.contains("-32600")).to_equal(true)
+
+    it "includes error message":
+        val response = make_error_response("1", -32600, "Invalid request")
+        expect(response.contains("Invalid request")).to_equal(true)
+
+    it "includes jsonrpc version":
+        val response = make_error_response("1", -32600, "Invalid request")
+        expect(response.contains("2.0")).to_equal(true)
+
+describe "make_tool_result":
+    it "includes jsonrpc version":
+        val response = make_tool_result("1", "Hello world")
+        expect(response.contains("jsonrpc")).to_equal(true)
+
+    it "includes content array":
+        val response = make_tool_result("1", "Hello world")
+        expect(response.contains("content")).to_equal(true)
+
+    it "includes text type":
+        val response = make_tool_result("1", "Hello world")
+        expect(response.contains("text")).to_equal(true)
+
+describe "make_notification":
+    it "includes method":
+        val notif = make_notification("notifications/message", jo1(jp("level", js("info"))))
+        expect(notif.contains("notifications/message")).to_equal(true)
+
+    it "includes params":
+        val notif = make_notification("notifications/message", jo1(jp("level", js("info"))))
+        expect(notif.contains("params")).to_equal(true)
+
+    it "includes jsonrpc version":
+        val notif = make_notification("test/method", LB() + RB())
+        expect(notif.contains("2.0")).to_equal(true)
+
+describe "make_notification_no_params":
+    it "includes method":
+        val notif = make_notification_no_params("notifications/initialized")
+        expect(notif.contains("notifications/initialized")).to_equal(true)
+
+    it "has no params field":
+        val notif = make_notification_no_params("test/method")
+        expect(notif.contains("params")).to_equal(false)
+
+describe "log_level_to_int":
+    it "returns correct value for debug":
+        expect(log_level_to_int("debug")).to_equal(0)
+
+    it "returns correct value for info":
+        expect(log_level_to_int("info")).to_equal(1)
+
+    it "returns correct value for notice":
+        expect(log_level_to_int("notice")).to_equal(2)
+
+    it "returns correct value for warning":
+        expect(log_level_to_int("warning")).to_equal(3)
+
+    it "returns correct value for error":
+        expect(log_level_to_int("error")).to_equal(4)
+
+    it "returns correct value for critical":
+        expect(log_level_to_int("critical")).to_equal(5)
+
+    it "returns correct value for alert":
+        expect(log_level_to_int("alert")).to_equal(6)
+
+    it "returns correct value for emergency":
+        expect(log_level_to_int("emergency")).to_equal(7)
+
+    it "returns -1 for unknown level":
+        expect(log_level_to_int("unknown")).to_equal(-1)
+
+describe "min_int helper":
+    it "returns smaller of two values":
+        expect(min_int(3, 5)).to_equal(3)
+        expect(min_int(10, 2)).to_equal(2)
+
+    it "returns value when equal":
+        expect(min_int(7, 7)).to_equal(7)
+
+describe "jo1 helper":
+    it "creates single pair object":
+        val obj = jo1(jp("key", js("value")))
+        expect(obj.starts_with(LB())).to_equal(true)
+        expect(obj.ends_with(RB())).to_equal(true)
+        expect(obj.contains("key")).to_equal(true)
+
+describe "jo2 helper":
+    it "creates two pair object":
+        val obj = jo2(jp("a", "1"), jp("b", "2"))
+        expect(obj.contains("a")).to_equal(true)
+        expect(obj.contains("b")).to_equal(true)
+
+describe "jo3 helper":
+    it "creates three pair object":
+        val obj = jo3(jp("a", "1"), jp("b", "2"), jp("c", "3"))
+        expect(obj.contains("a")).to_equal(true)
+        expect(obj.contains("b")).to_equal(true)
+        expect(obj.contains("c")).to_equal(true)

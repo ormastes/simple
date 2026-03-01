@@ -4,7 +4,7 @@
 //!   simple native-build [options]
 //!
 //! Options:
-//!   --source <dir>      Source directory (can be repeated; default: src/compiler)
+//!   --source <dir>      Source directory (can be repeated; default: src/compiler, src/app, src/lib)
 //!   -o <path>           Output binary path (default: bin/release/simple_native)
 //!   --entry <file>      Entry file whose main() becomes the program entry point
 //!                        (default: src/app/cli/main.spl if it exists)
@@ -141,6 +141,8 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if source_dirs.is_empty() {
         source_dirs.push(project_root.join("src/compiler"));
+        source_dirs.push(project_root.join("src/app"));
+        source_dirs.push(project_root.join("src/lib"));
     }
     let output = output.unwrap_or_else(|| project_root.join("bin/release/simple_native"));
 

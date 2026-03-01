@@ -1,0 +1,151 @@
+# MCP Symbol Table and Cross-Reference Tests
+# Feature: MCP JSON Helpers for Symbol Operations
+# Category: MCP, Symbol Analysis
+# Status: Complete
+#
+# Tests for MCP helper functions used in symbol table operations,
+# including JSON extraction, response building, and content type detection.
+
+use std.spec
+use std.nogc_async_mut.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, extract_nested_string, escape_json, make_result_response, make_error_response, make_tool_result, detect_mime_type, detect_file_content_type, log_level_to_int, min_int}
+
+describe "extract_json_string for symbol data":
+    it "extracts symbol name from JSON":
+        val json = jo2(jp("name", js("MyClass")), jp("kind", js("class")))
+        expect(extract_json_string(json, "name")).to_equal("MyClass")
+
+    it "extracts symbol kind":
+        val json = jo2(jp("name", js("helper")), jp("kind", js("function")))
+        expect(extract_json_string(json, "kind")).to_equal("function")
+
+    it "extracts module path":
+        val json = jo1(jp("module", js("mcp.simple_lang")))
+        expect(extract_json_string(json, "module")).to_equal("mcp.simple_lang")
+
+    it "returns empty for missing symbol":
+        val json = jo1(jp("name", js("test")))
+        expect(extract_json_string(json, "kind")).to_equal("")
+
+describe "extract_json_value for symbol references":
+    it "extracts reference count":
+        val json = jo2(jp("ref_count", "5"), jp("name", js("target")))
+        expect(extract_json_value(json, "ref_count")).to_equal("5")
+
+    it "extracts line number":
+        val json = jo2(jp("line", "42"), jp("file", js("test.spl")))
+        expect(extract_json_value(json, "line")).to_equal("42")
+
+    it "returns null for missing reference":
+        val json = jo1(jp("name", js("sym")))
+        expect(extract_json_value(json, "ref_count")).to_equal("null")
+
+describe "extract_nested_string for qualified symbols":
+    it "extracts nested symbol name":
+        val symbol = jo1(jp("name", js("parse")))
+        val json = jo1(jp("symbol", symbol))
+        expect(extract_nested_string(json, "symbol", "name")).to_equal("parse")
+
+    it "extracts nested module path":
+        val location = jo1(jp("file", js("src/parser.spl")))
+        val json = jo1(jp("location", location))
+        expect(extract_nested_string(json, "location", "file")).to_equal("src/parser.spl")
+
+    it "returns empty for missing nested key":
+        val inner = jo1(jp("other", js("value")))
+        val json = jo1(jp("data", inner))
+        expect(extract_nested_string(json, "data", "name")).to_equal("")
+
+describe "make_result_response for symbol queries":
+    it "creates response with symbol list":
+        val symbols = "[" + jo1(jp("name", js("MyClass"))) + "]"
+        val response = make_result_response("1", jo1(jp("symbols", symbols)))
+        expect(response.contains("jsonrpc")).to_equal(true)
+        expect(response.contains("result")).to_equal(true)
+
+    it "creates response with empty result":
+        val response = make_result_response("1", jo1(jp("symbols", "[]")))
+        expect(response.contains("2.0")).to_equal(true)
+
+describe "make_error_response for symbol errors":
+    it "creates method not found error":
+        val response = make_error_response("1", -32601, "Symbol not found")
+        expect(response.contains("-32601")).to_equal(true)
+        expect(response.contains("Symbol not found")).to_equal(true)
+
+    it "creates invalid params error":
+        val response = make_error_response("1", -32602, "Invalid symbol query")
+        expect(response.contains("-32602")).to_equal(true)
+
+describe "make_tool_result for symbol info":
+    it "creates tool result with symbol description":
+        val result = make_tool_result("1", "class MyClass in mcp.simple_lang")
+        expect(result.contains("content")).to_equal(true)
+        expect(result.contains("MyClass")).to_equal(true)
+
+describe "detect_mime_type for symbol files":
+    it "detects Simple source files":
+        expect(detect_mime_type("parser.spl")).to_equal("text/x-simple")
+
+    it "detects JSON symbol tables":
+        expect(detect_mime_type("symbols.json")).to_equal("application/json")
+
+    it "defaults to text/plain for unknown":
+        expect(detect_mime_type("symbols.dat")).to_equal("text/plain")
+
+describe "detect_file_content_type for analysis":
+    it "detects text content":
+        expect(detect_file_content_type("module.spl")).to_equal("text")
+
+    it "detects image content":
+        expect(detect_file_content_type("diagram.png")).to_equal("image")
+
+describe "log_level_to_int for symbol analysis logging":
+    it "debug level for verbose symbol tracing":
+        expect(log_level_to_int("debug")).to_equal(0)
+
+    it "info level for symbol discovery":
+        expect(log_level_to_int("info")).to_equal(1)
+
+    it "warning level for missing references":
+        expect(log_level_to_int("warning")).to_equal(3)
+
+    it "error level for broken references":
+        expect(log_level_to_int("error")).to_equal(4)
+
+describe "min_int for symbol table operations":
+    it "limits page size":
+        expect(min_int(100, 50)).to_equal(50)
+
+    it "handles equal values":
+        expect(min_int(25, 25)).to_equal(25)
+
+describe "escape_json for symbol names":
+    it "escapes symbol names with special chars":
+        val escaped = escape_json("operator\"plus\"")
+        expect(escaped.contains("operator")).to_equal(true)
+
+    it "handles normal symbol names":
+        expect(escape_json("my_function")).to_equal("my_function")
+
+    it "handles empty name":
+        expect(escape_json("")).to_equal("")
+
+describe "JSON builders for symbol tables":
+    it "builds symbol entry":
+        val entry = jo3(jp("name", js("parse")), jp("kind", js("function")), jp("visibility", js("public")))
+        expect(entry.contains("parse")).to_equal(true)
+        expect(entry.contains("function")).to_equal(true)
+        expect(entry.contains("public")).to_equal(true)
+
+    it "builds reference entry":
+        val ref_entry = jo3(jp("from", js("main")), jp("to", js("helper")), jp("kind", js("call")))
+        expect(ref_entry.contains("main")).to_equal(true)
+        expect(ref_entry.contains("helper")).to_equal(true)
+        expect(ref_entry.contains("call")).to_equal(true)
+
+    it "builds qualified name":
+        val qname = jo2(jp("module", js("mcp.lang")), jp("name", js("Parser")))
+        val module = extract_json_string(qname, "module")
+        val name = extract_json_string(qname, "name")
+        expect(module).to_equal("mcp.lang")
+        expect(name).to_equal("Parser")

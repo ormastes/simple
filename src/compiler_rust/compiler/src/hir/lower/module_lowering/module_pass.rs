@@ -123,6 +123,8 @@ impl Lowerer {
                 // Register extern function in globals so it can be called
                 let ret_ty = self.resolve_type_opt(&e.return_type)?;
                 self.globals.insert(e.name.clone(), ret_ty);
+                // Track as extern function for codegen (BSS slot initialization)
+                self.extern_fn_names.insert(e.name.clone());
             }
             Node::ExternClass(ec) => {
                 // Register extern class type
@@ -493,6 +495,9 @@ impl Lowerer {
             self.module.globals.push((name.clone(), *ty));
         }
 
+        // Copy extern function names to HirModule for codegen
+        self.module.extern_fn_names = self.extern_fn_names.clone();
+
         // Third pass: lower AOP constructs (#1000-1050)
         self.lower_aop_constructs(ast_module)?;
 
@@ -659,6 +664,9 @@ impl Lowerer {
                 return Err(LowerError::LifetimeViolations(lifetime_violations));
             }
         }
+
+        // Copy extern function names to HirModule for codegen
+        self.module.extern_fn_names = self.extern_fn_names.clone();
 
         // Take warnings before consuming self
         let warnings = std::mem::take(&mut self.memory_warnings);

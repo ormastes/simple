@@ -1,0 +1,104 @@
+# MCP Structured Output Specification
+# Feature: MCP Structured JSON Output
+# Category: MCP, Protocol
+# Status: Complete
+
+use std.spec
+use std.common.text.{NL}
+use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, make_tool_result, make_result_response, make_error_response, escape_json}
+
+describe "MCP File Info Structured Output":
+    context "when getting file info":
+        it "returns JSON object with path":
+            val file_info = jo3(jp("path", js("src/file.spl")), jp("lines", "120"), jp("functions", "5"))
+            expect(file_info.contains("path")).to_equal(true)
+            expect(file_info.contains("src/file.spl")).to_equal(true)
+
+        it "includes lines count":
+            val file_info = jo3(jp("path", js("src/file.spl")), jp("lines", "120"), jp("functions", "5"))
+            expect(file_info.contains("\"lines\":120")).to_equal(true)
+
+        it "includes functions count":
+            val file_info = jo3(jp("path", js("src/file.spl")), jp("lines", "120"), jp("functions", "5"))
+            expect(file_info.contains("\"functions\":5")).to_equal(true)
+
+        it "wraps in tool result":
+            val file_info = jo1(jp("path", js("test.spl")))
+            val tool_result = make_tool_result("1", file_info, false)
+            expect(tool_result.contains("result")).to_equal(true)
+
+    context "when file not found":
+        it "returns error object":
+            val error_json = jo2(jp("error", js("File not found")), jp("path", js("nonexistent.spl")))
+            val tool_result = make_tool_result("1", error_json, true)
+            expect(tool_result.contains("isError")).to_equal(true)
+
+describe "MCP List Files Structured Output":
+    context "when listing files":
+        it "returns JSON array":
+            val files = "[" + jo1(jp("path", js("a.spl"))) + "," + jo1(jp("path", js("b.spl"))) + "]"
+            expect(files.starts_with("[")).to_equal(true)
+            expect(files.ends_with("]")).to_equal(true)
+
+        it "includes file paths":
+            val files = "[" + jo1(jp("path", js("src/main.spl"))) + "]"
+            expect(files.contains("src/main.spl")).to_equal(true)
+
+        it "handles empty directory":
+            val files = "[]"
+            expect(files).to_equal("[]")
+
+describe "MCP Search Code Structured Output":
+    context "when search finds matches":
+        it "returns array of match objects":
+            val match1 = jo3(jp("file", js("src/file.spl")), jp("line", "42"), jp("content", js("matching code")))
+            val matches = "[" + match1 + "]"
+            expect(matches.starts_with("[")).to_equal(true)
+            expect(matches.contains("file")).to_equal(true)
+            expect(matches.contains("42")).to_equal(true)
+            expect(matches.contains("matching code")).to_equal(true)
+
+    context "when search finds nothing":
+        it "returns empty array":
+            val matches = "[]"
+            expect(matches).to_equal("[]")
+
+describe "MCP Bug Database Structured Output":
+    context "when getting bug by ID":
+        it "returns bug JSON object":
+            val bug = jo3(jp("id", js("BUG-001")), jp("severity", js("P1")), jp("status", js("Open")))
+            expect(bug.contains("BUG-001")).to_equal(true)
+            expect(bug.contains("P1")).to_equal(true)
+
+        it "includes title and description":
+            val bug = jo2(jp("title", js("Null ref error")), jp("description", js("Crash on startup")))
+            val title = extract_json_string(bug, "title")
+            expect(title).to_equal("Null ref error")
+
+describe "MCP Error Format Consistency":
+    context "when tools encounter errors":
+        it "returns JSON-RPC error format":
+            val response = make_error_response("1", -32603, "Internal error")
+            expect(response.contains("error")).to_equal(true)
+            expect(response.contains("-32603")).to_equal(true)
+
+        it "errors include message field":
+            val response = make_error_response("1", -32600, "Bad request")
+            expect(response.contains("Bad request")).to_equal(true)
+
+        it "tool result marks errors with isError":
+            val error_content = jo1(jp("error", js("File not found")))
+            val tool_result = make_tool_result("1", error_content, true)
+            expect(tool_result.contains("isError")).to_equal(true)
+
+describe "MCP JSON Parsing Validation":
+    context "when validating output format":
+        it "tool result produces valid JSON-RPC":
+            val content = jo1(jp("data", js("hello")))
+            val result = make_tool_result("42", content, false)
+            expect(result.contains("\"jsonrpc\":\"2.0\"")).to_equal(true)
+            expect(result.contains("\"id\":\"42\"")).to_equal(true)
+
+        it "escapes special characters in output":
+            val escaped = escape_json("line1{NL}line2")
+            expect(escaped.contains(NL)).to_equal(false)

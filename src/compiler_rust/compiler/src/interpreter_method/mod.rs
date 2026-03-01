@@ -11,8 +11,23 @@ use super::{
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+// Thread-local storage for pinned strings used by the "ptr" method on strings.
+// Strings are kept alive here so that raw pointers returned to FFI/codegen remain valid.
+// Call `clear_pinned_strings()` between test runs or when the interpreter resets to reclaim memory.
+thread_local! {
+    static PINNED_STRINGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
+
+/// Clear the thread-local pinned-string cache to free memory.
+pub fn clear_pinned_strings() {
+    PINNED_STRINGS.with(|cell| {
+        cell.borrow_mut().clear();
+    });
+}
 
 // Re-export the with-self-update functions
 pub use special::{exec_function_with_self_return, find_and_exec_method_with_self};

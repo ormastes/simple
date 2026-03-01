@@ -181,6 +181,14 @@ pub fn clear_interpreter_state() {
     INTERP_ENV.with(|e| e.borrow_mut().clear());
 }
 
+/// Clear the global compiled functions registry.
+///
+/// This removes all entries from the `COMPILED_FUNCTIONS` map, allowing
+/// memory to be reclaimed between test runs or interpreter resets.
+pub fn clear_compiled_functions() {
+    COMPILED_FUNCTIONS.write().unwrap().clear();
+}
+
 // ============================================================================
 // Helper to access all thread-local state
 // ============================================================================

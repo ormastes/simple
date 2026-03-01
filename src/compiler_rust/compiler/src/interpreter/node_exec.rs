@@ -18,6 +18,15 @@ use super::coverage_helpers::{record_node_coverage, extract_node_location};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
 use simple_runtime::debug;
 
+/// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
+macro_rules! check_timeout {
+    () => {
+        if crate::interpreter::is_timeout_exceeded() {
+            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+        }
+    };
+}
+
 pub(crate) fn exec_node(
     node: &Node,
     env: &mut Env,
@@ -26,6 +35,9 @@ pub(crate) fn exec_node(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    // Catch statement-level hangs (module init, deep call chains).
+    check_timeout!();
+
     // COVERAGE: Record line execution for this statement
     record_node_coverage(node);
 

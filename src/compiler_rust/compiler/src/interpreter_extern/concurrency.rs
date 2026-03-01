@@ -34,6 +34,16 @@ lazy_static::lazy_static! {
     static ref NEXT_CHANNEL_ID: Arc<Mutex<i64>> = Arc::new(Mutex::new(1));
 }
 
+/// Clear all concurrency registries and reset ID counters.
+/// Called between test runs to prevent OOM from accumulated state.
+pub fn clear_concurrency_registries() {
+    THREAD_HANDLES.lock().unwrap().clear();
+    THREAD_RESULTS.lock().unwrap().clear();
+    CHANNELS.lock().unwrap().clear();
+    *NEXT_HANDLE_ID.lock().unwrap() = 1;
+    *NEXT_CHANNEL_ID.lock().unwrap() = 1;
+}
+
 // ============================================================================
 // Thread Operations
 // ============================================================================

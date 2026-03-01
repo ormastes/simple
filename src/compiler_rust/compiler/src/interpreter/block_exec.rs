@@ -4,6 +4,15 @@ use std::collections::HashMap;
 use simple_parser::ast::{Block, ClassDef, FunctionDef};
 use crate::error::CompileError;
 use crate::value::{Env, Value};
+
+/// Check if the watchdog timeout has been exceeded (single atomic load, negligible overhead).
+macro_rules! check_timeout {
+    () => {
+        if crate::interpreter::is_timeout_exceeded() {
+            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+        }
+    };
+}
 use super::core_types::{Control, Enums, ImplMethods};
 use super::node_exec::exec_node;
 use super::expr::evaluate_expr;
@@ -19,6 +28,9 @@ pub(crate) fn exec_block(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    // Catch module-init hangs and deep call chains that bypass loop-level checks.
+    check_timeout!();
+
     // Enter block scope for tail injection tracking
     let _scope_depth = enter_block_scope();
 

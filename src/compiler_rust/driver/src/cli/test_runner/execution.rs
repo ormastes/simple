@@ -20,6 +20,49 @@ use simple_compiler::interpreter::{
 use simple_compiler::runtime_profile::profiler::clear_global_profiler;
 use simple_compiler::layout_recorder::clear_recording;
 use simple_runtime::value::clear_all_runtime_registries;
+use simple_compiler::interpreter_ffi::clear_interpreter_state as clear_interp_ffi_state;
+use simple_compiler::interpreter_ffi::clear_expr_registry;
+use simple_compiler::hir::clear_hir_thread_arena;
+use simple_compiler::mir::clear_mir_thread_arena;
+use simple_compiler::codegen::clear_thread_buffer_pool;
+use simple_compiler::interpreter::clear_pinned_strings;
+use simple_compiler::interpreter::clear_concurrency_registries;
+use simple_compiler::codegen::clear_cranelift_registries;
+use simple_compiler::interpreter_ffi::clear_compiled_functions;
+use simple_compiler::{start_watchdog, stop_watchdog};
+use simple_common::fault_detection::{reset_timeout, set_stack_overflow_detection_enabled, reset_recursion_depth};
+
+/// Default per-test timeout in seconds (overridable via SIMPLE_TEST_TIMEOUT env var).
+fn per_test_timeout_secs() -> u64 {
+    std::env::var("SIMPLE_TEST_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60)
+}
+
+/// Get current process RSS in bytes. Returns 0 on failure.
+fn get_rss_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(contents) = std::fs::read_to_string("/proc/self/statm") {
+            // statm fields: size resident shared text lib data dt (in pages)
+            if let Some(resident_pages) = contents.split_whitespace().nth(1) {
+                if let Ok(pages) = resident_pages.parse::<u64>() {
+                    return pages * 4096; // page size
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Memory threshold in bytes above which we abort the test run (default: 4 GB).
+fn memory_limit_bytes() -> u64 {
+    std::env::var("SIMPLE_TEST_MEMORY_LIMIT_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(4096) * 1024 * 1024
+}
 
 /// Parse test output to extract pass/fail counts
 pub fn parse_test_output(output: &str) -> (usize, usize) {
@@ -147,6 +190,11 @@ pub fn run_test_file_with_options(path: &Path, options: &super::types::TestOptio
 pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFileResult {
     let start = Instant::now();
 
+    // Enable stack overflow detection for tests even in release builds.
+    // This catches infinite recursion before it overflows the OS stack.
+    set_stack_overflow_detection_enabled(true);
+    reset_recursion_depth();
+
     // Clear all thread-local interpreter state to prevent leaks between tests.
     clear_interpreter_state();
     clear_bdd_state();
@@ -165,11 +213,81 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     clear_span_ffi_registry();
     clear_global_profiler();
     clear_recording();
+    clear_interp_ffi_state();
+    clear_expr_registry();
+    clear_hir_thread_arena();
+    clear_mir_thread_arena();
+    clear_thread_buffer_pool();
+    clear_pinned_strings();
+    clear_concurrency_registries();
+    clear_cranelift_registries();
+    clear_compiled_functions();
+
+    // Force the system allocator to return freed memory to the OS.
+    // Without this, glibc's ptmalloc2 holds onto freed pages, causing
+    // RSS to grow monotonically even though allocations are freed.
+    #[cfg(target_os = "linux")]
+    unsafe { libc::malloc_trim(0); }
 
     // Create a fresh Runner per test so ExecCore/GcAllocator/SmfLoader don't accumulate.
     let runner = create_test_runner(options);
 
-    match runner.run_file(path) {
+    // Start per-test watchdog timer so infinite loops trigger TimeoutExceeded.
+    let timeout_secs = per_test_timeout_secs();
+    start_watchdog(timeout_secs);
+
+    // catch_unwind catches panics (including stack overflows on some platforms)
+    // so that a single crashing test doesn't abort the whole test suite.
+    let run_result: Result<i32, String> = match std::panic::catch_unwind(
+        std::panic::AssertUnwindSafe(|| runner.run_file(path))
+    ) {
+        Ok(inner) => inner,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "test panicked (possible stack overflow)".to_string()
+            };
+            Err(msg)
+        }
+    };
+
+    // Stop watchdog and reset the timeout flag for the next test.
+    stop_watchdog();
+    reset_timeout();
+
+    // Check RSS after the test. If memory grew beyond the limit, report the
+    // test as an OOM failure. This prevents a single leaky test from bringing
+    // down the whole test run.
+    let rss_after = get_rss_bytes();
+    let mem_limit = memory_limit_bytes();
+    if rss_after > mem_limit {
+        let duration_ms = start.elapsed().as_millis() as u64;
+        eprintln!(
+            "[WARN] RSS after test {} is {}MB (limit {}MB) — aborting test run",
+            path.display(),
+            rss_after / (1024 * 1024),
+            mem_limit / (1024 * 1024),
+        );
+        return TestFileResult {
+            path: path.to_path_buf(),
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            ignored: 0,
+            duration_ms,
+            error: Some(format!(
+                "MEMORY LIMIT: RSS {}MB exceeds {}MB limit",
+                rss_after / (1024 * 1024),
+                mem_limit / (1024 * 1024),
+            )),
+            individual_results: vec![],
+        };
+    }
+
+    match run_result {
         Ok(exit_code) => {
             let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -210,7 +328,16 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
         }
         Err(e) => {
             let duration_ms = start.elapsed().as_millis() as u64;
-            let error_msg: String = e.to_string();
+            let error_msg = e.to_string();
+
+            // Detect timeout errors and provide a clear message.
+            let is_timeout = error_msg.contains("timeout") || error_msg.contains("Timeout");
+            let error_display = if is_timeout {
+                format!("TIMEOUT after {}s: {}", timeout_secs, error_msg)
+            } else {
+                error_msg
+            };
+
             TestFileResult {
                 path: path.to_path_buf(),
                 passed: 0,
@@ -218,7 +345,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
                 skipped: 0,
                 ignored: 0,
                 duration_ms,
-                error: Some(error_msg),
+                error: Some(error_display),
                 individual_results: vec![],
             }
         }

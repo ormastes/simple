@@ -19,8 +19,38 @@ struct WatchdogHandle {
 
 static WATCHDOG: Mutex<Option<WatchdogHandle>> = Mutex::new(None);
 
+/// Memory limit in bytes for the watchdog to monitor.
+/// Defaults to 4 GB. Overridable via `SIMPLE_TEST_MEMORY_LIMIT_MB`.
+fn memory_limit_bytes() -> u64 {
+    std::env::var("SIMPLE_TEST_MEMORY_LIMIT_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(4096)
+        * 1024
+        * 1024
+}
+
+/// Read current RSS from /proc/self/statm (Linux only). Returns 0 on failure.
+#[cfg(target_os = "linux")]
+fn read_rss_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|pages| pages * 4096)
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_rss_bytes() -> u64 {
+    0
+}
+
 /// Start the watchdog thread with the given timeout in seconds.
 /// If a watchdog is already running, it is stopped first.
+///
+/// The watchdog monitors both wall-clock time AND resident memory.
+/// If either limit is exceeded, it sets `TIMEOUT_EXCEEDED` so that
+/// `check_timeout!()` in the interpreter will bail out.
 pub fn start_watchdog(timeout_secs: u64) {
     stop_watchdog();
 
@@ -29,12 +59,25 @@ pub fn start_watchdog(timeout_secs: u64) {
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop_flag);
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mem_limit = memory_limit_bytes();
 
     let handle = thread::Builder::new()
         .name("simple-watchdog".to_string())
         .spawn(move || {
             while !stop_clone.load(Ordering::Relaxed) {
                 if Instant::now() >= deadline {
+                    eprintln!("[watchdog] wall-clock timeout ({timeout_secs}s) exceeded");
+                    TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
+                    return;
+                }
+                // Check memory every 500ms (every 5th iteration).
+                let rss = read_rss_bytes();
+                if mem_limit > 0 && rss > mem_limit {
+                    eprintln!(
+                        "[watchdog] RSS {}MB exceeds limit {}MB — triggering timeout",
+                        rss / (1024 * 1024),
+                        mem_limit / (1024 * 1024),
+                    );
                     TIMEOUT_EXCEEDED.store(true, Ordering::SeqCst);
                     return;
                 }

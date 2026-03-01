@@ -335,24 +335,24 @@ pub fn compile_call<M: Module>(
     args: &[VReg],
 ) -> InstrResult<()> {
     let func_name_raw = target.name();
-    // Strip any module/class prefix that may have been baked into the MIR name
-    // (e.g., "compiler__driver__driver_types__rt_file_read_text") so runtime
-    // FFI resolution still recognizes built‑in rt_* symbols.
-    let func_name_unprefixed = func_name_raw
+    // For runtime FFI matching only, strip module prefix to find the base function name.
+    // e.g., "compiler__driver__driver_types__rt_file_read_text" → "rt_file_read_text"
+    let func_name_for_ffi = func_name_raw
         .rsplit_once("__")
         .map(|(_, tail)| tail)
         .unwrap_or(func_name_raw);
-    // Map Simple builtin names to runtime FFI function names
-    let func_name: &str = match func_name_unprefixed {
+    // Map Simple builtin names to runtime FFI function names (for FFI lookup only)
+    let ffi_name: &str = match func_name_for_ffi {
         "sys_get_args" => "rt_get_args",
         "sys_exit" => "rt_exit",
-        // Map text-argument file FFI to RuntimeValue wrappers
         "rt_file_read_text" => "rt_file_read_text_rv",
-        // Map user-facing rt_print/println to RuntimeValue-based implementations
         "rt_println" => "rt_println_value",
         "rt_print" => "rt_print_value",
         other => other,
     };
+    // Use raw name for user-function lookups (func_ids, use_map, import_map)
+    // but mapped FFI name for runtime_funcs and builtin I/O checks
+    let func_name: &str = func_name_raw;
 
     // Handle Result/Option constructor builtins (Ok, Err, Some, None)
     // Also handle qualified names like "MyResult::Ok", "Option::None", etc.
@@ -388,24 +388,25 @@ pub fn compile_call<M: Module>(
     }
 
     // Check if this is a built-in I/O function (print, println, etc.)
-    if let Some(result) = compile_builtin_io_call(ctx, builder, func_name, args, dest)? {
+    // Use ffi_name for builtin/runtime checks since these match on short names
+    if let Some(result) = compile_builtin_io_call(ctx, builder, ffi_name, args, dest)? {
         if let Some(d) = dest {
             ctx.vreg_values.insert(*d, result);
         }
-    } else if let Some(&runtime_id) = ctx.runtime_funcs.get(func_name) {
+    } else if let Some(&runtime_id) = ctx.runtime_funcs.get(ffi_name) {
         // Runtime FFI function — checked BEFORE func_ids because runtime functions
         // are also registered in func_ids for name resolution. Checking here first
         // ensures text expansion and FFI-specific handling (tagging, return type
         // extension) is always applied for known runtime functions.
-        if !is_profiler_function(func_name) {
-            emit_profiler_call(ctx, builder, func_name)?;
+        if !is_profiler_function(ffi_name) {
+            emit_profiler_call(ctx, builder, ffi_name)?;
         }
         let runtime_ref = ctx.module.declare_func_in_func(runtime_id, builder.func);
 
         // Check if this function needs RuntimeValue tagging for certain arguments
-        let tagging_indices = needs_runtime_value_tagging(func_name);
+        let tagging_indices = needs_runtime_value_tagging(ffi_name);
         // Check if this function returns RuntimeValue that needs untagging
-        let needs_untagging = needs_runtime_value_untagging(func_name);
+        let needs_untagging = needs_runtime_value_untagging(ffi_name);
 
         // First collect VReg values with defaults
         let mut arg_vals = Vec::with_capacity(args.len());
@@ -427,7 +428,7 @@ pub fn compile_call<M: Module>(
         // Expand text RuntimeValue arguments to (ptr, len) pairs for C-ABI FFI calls.
         // This handles the ABI mismatch between Simple (everything is RuntimeValue i64)
         // and Rust FFI (text is decomposed into *const u8 + usize).
-        let arg_vals = if let Some(text_indices) = text_arg_indices(func_name) {
+        let arg_vals = if let Some(text_indices) = text_arg_indices(ffi_name) {
             expand_text_args(ctx, builder, &arg_vals, text_indices)
         } else {
             arg_vals
@@ -443,7 +444,7 @@ pub fn compile_call<M: Module>(
                 // Extend smaller return types to i64 (the standard vreg type)
                 // This is needed because some FFI functions return i32 (e.g., rt_exec)
                 // but all vregs are expected to be i64
-                if let Some(ret_type) = get_runtime_return_type(func_name) {
+                if let Some(ret_type) = get_runtime_return_type(ffi_name) {
                     if ret_type == types::I32 {
                         // Sign-extend i32 to i64 (for exit codes and status values)
                         result = builder.ins().sextend(types::I64, result);
@@ -462,7 +463,7 @@ pub fn compile_call<M: Module>(
                 ctx.vreg_values.insert(*d, final_result);
             }
         }
-        if !is_profiler_function(func_name) {
+        if !is_profiler_function(ffi_name) {
             emit_profiler_return(ctx, builder)?;
         }
     } else if let Some(&callee_id) = ctx.func_ids.get(func_name) {
