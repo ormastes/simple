@@ -56,12 +56,12 @@ fn get_rss_bytes() -> u64 {
     0
 }
 
-/// Memory threshold in bytes above which we abort the test run (default: 4 GB).
+/// Memory threshold in bytes above which we abort the test run (default: 2 GB).
 fn memory_limit_bytes() -> u64 {
     std::env::var("SIMPLE_TEST_MEMORY_LIMIT_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(4096) * 1024 * 1024
+        .unwrap_or(2048) * 1024 * 1024
 }
 
 /// Parse test output to extract pass/fail counts

@@ -9,6 +9,7 @@ use app.build.orchestrator (orchestrate_build)
 use app.build.metrics (MetricsTracker, print_metrics)
 use app.io.{current_time_ms, thread_sleep_ms, dir_list, file_exists}
 use driver (compile_to_smf)
+use compiler.shb.shb_cache.{ShbCacheManager, ShbCacheConfig, ShbChangeEvent, compile_changed_to_shb, shb_batch_summary, shb_batch_has_interface_changes}
 
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_mkdir_p(path: text) -> bool
@@ -24,6 +25,8 @@ struct WatchConfig:
     notify: bool
     smf_mode: bool        # When true, compile changed files to SMF cache
     smf_cache_dir: text   # Directory for SMF cache files (default "build/smf")
+    shb_mode: bool        # When true, generate .shb header files on change
+    shb_cache_dir: text   # Directory for SHB cache files (default ".build/headers")
 
 # Watch result
 struct WatchResult:
@@ -97,7 +100,20 @@ class WatchOrchestrator:
                 print ""
                 total_rebuilds = total_rebuilds + 1
 
-                if config.smf_mode:
+                if config.shb_mode:
+                    print "[{format_time_ms(current_time_ms())}] Generating SHB headers..."
+                    val shb_changes = changes_to_shb_events(changes)
+                    val shb_config = ShbCacheConfig(cache_dir: config.shb_cache_dir, enabled: true)
+                    val shb_cache = ShbCacheManager.create(shb_config)
+                    val shb_result = compile_changed_to_shb(shb_changes, shb_cache)
+                    print "  SHB: {shb_batch_summary(shb_result)}"
+                    if shb_batch_has_interface_changes(shb_result):
+                        print "  Interface changes detected — dependents need recompilation"
+                    if shb_result.error_count == 0:
+                        successful_rebuilds = successful_rebuilds + 1
+                    else:
+                        failed_rebuilds = failed_rebuilds + 1
+                else if config.smf_mode:
                     print "[{format_time_ms(current_time_ms())}] Compiling changed files to SMF..."
                     val smf_ok = compile_changed_to_smf(changes, config)
                     if smf_ok:
@@ -254,7 +270,9 @@ fn default_watch_config() -> WatchConfig:
         run_tests: false,
         notify: true,
         smf_mode: false,
-        smf_cache_dir: "build/smf"
+        smf_cache_dir: "build/smf",
+        shb_mode: false,
+        shb_cache_dir: ".build/headers"
     )
 
 # SMF watch configuration (for SMF cache mode)
@@ -268,7 +286,24 @@ fn smf_watch_config() -> WatchConfig:
         run_tests: false,
         notify: true,
         smf_mode: true,
-        smf_cache_dir: "build/smf"
+        smf_cache_dir: "build/smf",
+        shb_mode: false,
+        shb_cache_dir: ".build/headers"
+    )
+
+fn shb_watch_config() -> WatchConfig:
+    WatchConfig(
+        profile: BuildProfile.Debug,
+        watch_paths: ["src/"],
+        ignore_patterns: ["target/", ".git/", "*.swp", "*.tmp"],
+        debounce_ms: 500,
+        clear_console: true,
+        run_tests: false,
+        notify: true,
+        smf_mode: false,
+        smf_cache_dir: "build/smf",
+        shb_mode: true,
+        shb_cache_dir: ".build/headers"
     )
 
 # ============================================================================
@@ -334,3 +369,10 @@ fn print_watch_result(result: WatchResult):
     print "  Successful:          {result.successful_rebuilds}"
     print "  Failed:              {result.failed_rebuilds}"
     print "  Total duration:      {result.total_duration_ms}ms"
+
+# Convert FileChangeEvents to ShbChangeEvents
+fn changes_to_shb_events(changes: [FileChangeEvent]) -> [ShbChangeEvent]:
+    var events: [ShbChangeEvent] = []
+    for change in changes:
+        events.push(ShbChangeEvent(path: change.path, event_type: change.event_type))
+    events

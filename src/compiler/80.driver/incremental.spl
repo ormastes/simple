@@ -40,11 +40,13 @@ class IncrementalState:
     dependencies: {text: [text]}    # file -> files it depends on
     dependents: {text: [text]}      # file -> files that depend on it
     dirty_files: [text]
+    interface_hashes: {text: i64}   # file -> SHB interface hash (for two-level invalidation)
 
 impl IncrementalState:
     static fn create() -> IncrementalState:
         IncrementalState(file_hashes: {}, dependencies: {},
-                         dependents: {}, dirty_files: [])
+                         dependents: {}, dirty_files: [],
+                         interface_hashes: {})
 
     me register_file(path: text, content: text):
         extern fn rt_hash_text(t: text) -> i64
@@ -99,8 +101,30 @@ impl IncrementalState:
             return true
         self.dirty_files.contains(path)
 
+    # Update the interface hash for a file.
+    # Returns true if the hash changed (meaning dependents need recompilation).
+    me update_interface_hash(path: text, hash: i64) -> bool:
+        if self.interface_hashes.contains_key(path):
+            val old_hash = self.interface_hashes[path]
+            self.interface_hashes[path] = hash
+            if old_hash != hash:
+                # Interface changed — cascade dirty to dependents
+                if self.dependents.contains_key(path):
+                    for dep in self.dependents[path]:
+                        self.mark_dirty(dep)
+                return true
+            return false
+        self.interface_hashes[path] = hash
+        true
+
+    fn get_interface_hash(path: text) -> i64:
+        if self.interface_hashes.contains_key(path):
+            return self.interface_hashes[path]
+        0
+
     me reset():
         self.file_hashes = {}
         self.dependencies = {}
         self.dependents = {}
         self.dirty_files = []
+        self.interface_hashes = {}

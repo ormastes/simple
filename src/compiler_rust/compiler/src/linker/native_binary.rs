@@ -380,6 +380,9 @@ impl NativeBinaryOptions {
             // Standard cargo target directory
             "target/release",
             "target/debug",
+            // Rust compiler subdirectory (Simple project layout)
+            "src/compiler_rust/target/release",
+            "src/compiler_rust/target/debug",
             // Workspace root (when running from subdirectory)
             "../target/release",
             "../target/debug",
