@@ -54,21 +54,19 @@ struct ImplInfo:
 
 class CoherenceChecker:
     """Checks trait implementation coherence rules."""
-    local_traits: [text]
-    local_types: [text]
+    local_traits: {text: bool}
+    local_types: {text: bool}
     impls: {text: [ImplInfo]}       # trait_name -> list of impls
 
 impl CoherenceChecker:
     static fn create() -> CoherenceChecker:
-        CoherenceChecker(local_traits: [], local_types: [], impls: {})
+        CoherenceChecker(local_traits: {}, local_types: {}, impls: {})
 
     me register_trait(name: text):
-        if not self.local_traits.contains(name):
-            self.local_traits = self.local_traits.push(name)
+        self.local_traits[name] = true
 
     me register_type(name: text):
-        if not self.local_types.contains(name):
-            self.local_types = self.local_types.push(name)
+        self.local_types[name] = true
 
     me register_impl(info: ImplInfo):
         val key = info.trait_name ?? "_no_trait_"
@@ -91,10 +89,10 @@ impl CoherenceChecker:
             if trait_name == "_no_trait_":
                 continue
             for info in impl_list:
-                val trait_local = self.local_traits.contains(trait_name)
-                val type_local = self.local_types.contains(info.target_type)
+                val trait_local = self.local_traits.contains_key(trait_name)
+                val type_local = self.local_types.contains_key(info.target_type)
                 if not trait_local and not type_local:
-                    val suggestion = if self.local_types.?:
+                    val suggestion = if self.local_types.len() > 0:
                         Some("Create a newtype wrapper in your module")
                     else:
                         nil
@@ -109,30 +107,39 @@ impl CoherenceChecker:
         for (trait_name, impl_list) in self.impls:
             if trait_name == "_no_trait_":
                 continue
-            for i in 0..impl_list.len():
-                for j in (i + 1)..impl_list.len():
-                    val a = impl_list[i]
-                    val b = impl_list[j]
-                    if (not a.is_blanket and not b.is_blanket and
-                       a.target_type == b.target_type):
-                        errors = errors.push(CoherenceError.OverlappingImpl(
-                            trait_name: trait_name,
-                            type1: a.target_type, type2: b.target_type))
+            # Partition non-blanket impls by target_type for O(n) overlap detection
+            var by_type: {text: bool} = {}
+            for info in impl_list:
+                if info.is_blanket:
+                    continue
+                val ty = info.target_type
+                if by_type.contains_key(ty):
+                    # Second non-blanket impl for same target_type = overlap
+                    errors = errors.push(CoherenceError.OverlappingImpl(
+                        trait_name: trait_name,
+                        type1: ty, type2: ty))
+                else:
+                    by_type[ty] = true
         errors
 
     fn check_blanket_conflicts() -> [CoherenceError]:
         """Check blanket impls don't conflict with specific ones."""
         var errors: [CoherenceError] = []
         for (trait_name, impl_list) in self.impls:
-            val blankets = impl_list.filter(\i: i.is_blanket and not i.is_default)
-            val specifics = impl_list.filter(\i: not i.is_blanket)
+            # Collect blankets and specifics in a single pass
+            var blankets: [ImplInfo] = []
+            var specifics: [ImplInfo] = []
+            for info in impl_list:
+                if info.is_blanket and not info.is_default:
+                    blankets = blankets.push(info)
+                else if not info.is_blanket and not info.is_default:
+                    specifics = specifics.push(info)
             for blanket in blankets:
                 for specific in specifics:
-                    if not specific.is_default:
-                        errors = errors.push(CoherenceError.BlanketImplConflict(
-                            trait_name: trait_name,
-                            general: blanket.target_type,
-                            specific: specific.target_type))
+                    errors = errors.push(CoherenceError.BlanketImplConflict(
+                        trait_name: trait_name,
+                        general: blanket.target_type,
+                        specific: specific.target_type))
         errors
 
 # ============================================================================

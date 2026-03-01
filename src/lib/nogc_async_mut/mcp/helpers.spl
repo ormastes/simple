@@ -10,7 +10,15 @@ export extract_json_string_v2, extract_json_string, extract_json_value
 export extract_nested_string, extract_arguments_dict, extract_arg
 export make_result_response, make_error_response, make_tool_result
 export make_notification, make_notification_no_params
-export log_level_to_int, make_tool_schema_multi
+export make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed
+export log_level_to_int, make_log_notification, make_tool_schema_multi
+export make_progress_notification, make_tool_schema_with_output, make_image_content
+export make_audio_content, make_resource_link_content, make_resource_link_content_full
+export make_embedded_resource_content, make_content_annotations
+export make_tool_result_with_structured, register_tool
+export detect_file_content_type, detect_mime_type
+export make_resource_updated_notification, make_sampling_request, make_elicitation_request, make_server_request
+export escape_json
 
 use std.common.text.{NL, escape_json, parse_i64}
 
@@ -235,14 +243,137 @@ fn make_notification(method: text, params: text) -> text:
 fn make_notification_no_params(method: text) -> text:
     jo2(jp("jsonrpc", js("2.0")), jp("method", js(method)))
 
-# --- Log level conversion ---
+# --- List changed notifications ---
+fn make_tools_list_changed() -> text:
+    make_notification_no_params("notifications/tools/list_changed")
+
+fn make_resources_list_changed() -> text:
+    make_notification_no_params("notifications/resources/list_changed")
+
+fn make_prompts_list_changed() -> text:
+    make_notification_no_params("notifications/prompts/list_changed")
+
+# --- Log level conversion (syslog-style, MCP protocol) ---
 fn log_level_to_int(level: text) -> i64:
     if level == "debug": 0
     elif level == "info": 1
-    elif level == "warning": 2
-    elif level == "error": 3
-    elif level == "critical": 4
-    else: 1
+    elif level == "notice": 2
+    elif level == "warning": 3
+    elif level == "error": 4
+    elif level == "critical": 5
+    elif level == "alert": 6
+    elif level == "emergency": 7
+    else: -1
+
+# --- Log notification builder ---
+fn make_log_notification(level: text, message: text, logger: text) -> text:
+    var params = jo2(jp("level", js(level)), jp("data", jo1(jp("message", js(message)))))
+    if logger != "":
+        params = jo3(jp("level", js(level)), jp("logger", js(logger)), jp("data", jo1(jp("message", js(message)))))
+    make_notification("notifications/message", params)
+
+# --- Progress notification builder ---
+fn make_progress_notification(progress_token: text, progress: i64, total: i64, message: text) -> text:
+    var params = jo3(
+        jp("progressToken", js(progress_token)),
+        jp("progress", progress.to_string()),
+        jp("total", total.to_string())
+    )
+    if message != "":
+        params = jo4(
+            jp("progressToken", js(progress_token)),
+            jp("progress", progress.to_string()),
+            jp("total", total.to_string()),
+            jp("message", js(message))
+        )
+    make_notification("notifications/progress", params)
+
+# --- Image content builder ---
+fn make_image_content(base64_data: text, mime_type: text) -> text:
+    jo3(jp("type", js("image")), jp("data", js(base64_data)), jp("mimeType", js(mime_type)))
+
+# --- Audio content builder ---
+fn make_audio_content(base64_data: text, mime_type: text) -> text:
+    jo3(jp("type", js("audio")), jp("data", js(base64_data)), jp("mimeType", js(mime_type)))
+
+# --- Resource link content builders ---
+fn make_resource_link_content(uri: text, name: text) -> text:
+    jo3(jp("type", js("resource_link")), jp("uri", js(uri)), jp("name", js(name)))
+
+fn make_resource_link_content_full(uri: text, name: text, title: text, description: text, mime_type: text, size: i64) -> text:
+    val parts = jp("type", js("resource_link")) + "," + jp("uri", js(uri)) + "," + jp("name", js(name)) + "," + jp("title", js(title)) + "," + jp("description", js(description)) + "," + jp("mimeType", js(mime_type))
+    LB() + parts + RB()
+
+# --- Embedded resource content builder ---
+fn make_embedded_resource_content(uri: text, content: text, mime_type: text) -> text:
+    val resource = jo3(jp("uri", js(uri)), jp("text", js(content)), jp("mimeType", js(mime_type)))
+    jo2(jp("type", js("resource")), jp("resource", resource))
+
+# --- Content annotations builder ---
+fn make_content_annotations(audience: [text], priority: text, last_modified: text) -> text:
+    var parts = ""
+    var count = 0
+    if audience.len() > 0:
+        var arr = "["
+        var i = 0
+        while i < audience.len():
+            if i > 0:
+                arr = arr + ","
+            arr = arr + js(audience[i])
+            i = i + 1
+        arr = arr + "]"
+        parts = jp("audience", arr)
+        count = count + 1
+    if priority != "":
+        if count > 0:
+            parts = parts + ","
+        parts = parts + jp("priority", priority)
+        count = count + 1
+    if last_modified != "":
+        if count > 0:
+            parts = parts + ","
+        parts = parts + jp("lastModified", js(last_modified))
+        count = count + 1
+    LB() + parts + RB()
+
+# --- Tool result with structured content ---
+fn make_tool_result_with_structured(id: text, content: text, structured_content: text) -> text:
+    val result = jo3(jp("content", content), jp("structuredContent", structured_content), jp("isError", "false"))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# --- Register tool (schema without outputSchema) ---
+fn register_tool(name: text, description: text, param_names: [text], param_descs: [text], required: [text], has_input: bool, has_streaming: bool, has_other: bool) -> text:
+    var props = ""
+    var i = 0
+    while i < param_names.len():
+        if i > 0:
+            props = props + ","
+        props = props + jp(param_names[i], jo2(jp("type", js("string")), jp("description", js(param_descs[i]))))
+        i = i + 1
+    var req_array = "["
+    i = 0
+    while i < required.len():
+        if i > 0:
+            req_array = req_array + ","
+        req_array = req_array + js(required[i])
+        i = i + 1
+    req_array = req_array + "]"
+    val input_schema = jo3(jp("type", js("object")), jp("properties", LB() + props + RB()), jp("required", req_array))
+    jo3(jp("name", js(name)), jp("description", js(description)), jp("inputSchema", input_schema))
+
+# --- Tool schema with output schema ---
+fn make_tool_schema_with_output(name: text, description: text, properties: text, required: text, output_schema: text, has_input_schema: bool, has_streaming: bool, has_other: bool) -> text:
+    val input_schema = jo3(
+        jp("type", js("object")),
+        jp("properties", properties),
+        jp("required", required)
+    )
+    jo4(
+        jp("name", js(name)),
+        jp("description", js(description)),
+        jp("inputSchema", input_schema),
+        jp("outputSchema", output_schema)
+    )
 
 # --- Tool schema builders ---
 fn make_tool_schema_multi(
@@ -285,3 +416,83 @@ fn make_tool_schema_multi(
         jp("description", js(description)),
         jp("inputSchema", input_schema)
     )
+
+# --- File content type detection ---
+fn detect_file_content_type(path: text) -> text:
+    val ext = _get_extension(path)
+    if ext == "png" or ext == "jpg" or ext == "jpeg" or ext == "gif" or ext == "webp" or ext == "svg" or ext == "bmp" or ext == "ico":
+        "image"
+    elif ext == "wav" or ext == "mp3" or ext == "ogg" or ext == "flac" or ext == "aac":
+        "audio"
+    elif ext == "mp4" or ext == "webm" or ext == "avi" or ext == "mkv":
+        "video"
+    elif ext == "pdf" or ext == "zip" or ext == "tar" or ext == "gz" or ext == "wasm":
+        "application"
+    else:
+        "text"
+
+fn detect_mime_type(path: text) -> text:
+    val ext = _get_extension(path)
+    if ext == "html" or ext == "htm": "text/html"
+    elif ext == "css": "text/css"
+    elif ext == "js": "text/javascript"
+    elif ext == "json": "application/json"
+    elif ext == "xml": "text/xml"
+    elif ext == "csv": "text/csv"
+    elif ext == "md": "text/markdown"
+    elif ext == "txt": "text/plain"
+    elif ext == "spl": "text/x-simple"
+    elif ext == "py": "text/x-python"
+    elif ext == "rs": "text/x-rust"
+    elif ext == "c" or ext == "h": "text/x-c"
+    elif ext == "cpp" or ext == "hpp": "text/x-c++"
+    elif ext == "java": "text/x-java"
+    elif ext == "go": "text/x-go"
+    elif ext == "rb": "text/x-ruby"
+    elif ext == "sh": "text/x-shellscript"
+    elif ext == "png": "image/png"
+    elif ext == "jpg" or ext == "jpeg": "image/jpeg"
+    elif ext == "gif": "image/gif"
+    elif ext == "svg": "image/svg+xml"
+    elif ext == "webp": "image/webp"
+    elif ext == "bmp": "image/bmp"
+    elif ext == "ico": "image/x-icon"
+    elif ext == "wav": "audio/wav"
+    elif ext == "mp3": "audio/mpeg"
+    elif ext == "ogg": "audio/ogg"
+    elif ext == "pdf": "application/pdf"
+    elif ext == "zip": "application/zip"
+    elif ext == "wasm": "application/wasm"
+    elif ext == "yaml" or ext == "yml": "text/yaml"
+    elif ext == "toml": "text/toml"
+    elif ext == "sdn": "text/x-sdn"
+    else: "text/plain"
+
+fn _get_extension(path: text) -> text:
+    val dot_idx = path.last_index_of(".") ?? -1
+    if dot_idx == -1:
+        return ""
+    path.substring(dot_idx + 1)
+
+# --- Resource updated notification ---
+fn make_resource_updated_notification(uri: text) -> text:
+    val params = jo1(jp("uri", js(uri)))
+    make_notification("notifications/resources/updated", params)
+
+# --- Sampling request builder ---
+fn make_sampling_request(id: text, messages: text, model_preferences: text, max_tokens: i64) -> text:
+    val params = jo3(
+        jp("messages", messages),
+        jp("modelPreferences", model_preferences),
+        jp("maxTokens", max_tokens.to_string())
+    )
+    jo4(jp("jsonrpc", js("2.0")), jp("id", id), jp("method", js("sampling/createMessage")), jp("params", params))
+
+# --- Elicitation request builder ---
+fn make_elicitation_request(id: text, message: text, requested_schema: text) -> text:
+    val params = jo2(jp("message", js(message)), jp("requestedSchema", requested_schema))
+    jo4(jp("jsonrpc", js("2.0")), jp("id", id), jp("method", js("elicitation/create")), jp("params", params))
+
+# --- Server request builder ---
+fn make_server_request(id: text, method: text, params: text) -> text:
+    jo4(jp("jsonrpc", js("2.0")), jp("id", id), jp("method", js(method)), jp("params", params))

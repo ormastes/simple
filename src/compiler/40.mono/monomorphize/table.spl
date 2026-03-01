@@ -31,6 +31,11 @@ struct MonomorphizationTable:
     pending_structs: [(SpecializationKey, StructDef)]
     pending_classes: [(SpecializationKey, ClassDef)]
 
+    # Cursors for O(1) pop from work queues (avoids O(n) remove(0))
+    pending_fn_cursor: i64
+    pending_struct_cursor: i64
+    pending_class_cursor: i64
+
     # Completed specializations (for lookup)
     specialized_functions: {SpecializationKey: FunctionDef}
     specialized_structs: {SpecializationKey: StructDef}
@@ -46,6 +51,9 @@ impl MonomorphizationTable:
             pending_functions: [],
             pending_structs: [],
             pending_classes: [],
+            pending_fn_cursor: 0,
+            pending_struct_cursor: 0,
+            pending_class_cursor: 0,
             specialized_functions: {},
             specialized_structs: {},
             specialized_classes: {},
@@ -111,9 +119,9 @@ impl MonomorphizationTable:
 
         Returns true if any work remains in the queues.
         """
-        (not self.pending_functions.is_empty() or
-        not self.pending_structs.is_empty() or
-        not self.pending_classes.is_empty())
+        (self.pending_fn_cursor < self.pending_functions.len() or
+        self.pending_struct_cursor < self.pending_structs.len() or
+        self.pending_class_cursor < self.pending_classes.len())
 
     me pop_pending_function() -> (SpecializationKey, FunctionDef)?:
         """Get the next pending function to specialize.
@@ -122,29 +130,51 @@ impl MonomorphizationTable:
             Some((key, def)) if work available
             nil if queue empty
 
-        PERFORMANCE: FIFO order (breadth-first) helps with cache locality.
+        PERFORMANCE: O(1) cursor advance instead of O(n) remove(0).
+        FIFO order (breadth-first) helps with cache locality.
         """
-        if self.pending_functions.is_empty():
+        if self.pending_fn_cursor >= self.pending_functions.len():
             return nil
 
-        # Pop from front (FIFO)
-        val item = self.pending_functions.remove(0)
+        # Advance cursor (FIFO)
+        val item = self.pending_functions[self.pending_fn_cursor]
+        self.pending_fn_cursor = self.pending_fn_cursor + 1
+
+        # Reset when all consumed to free memory
+        if self.pending_fn_cursor >= self.pending_functions.len():
+            self.pending_functions = []
+            self.pending_fn_cursor = 0
+
         Some(item)
 
     me pop_pending_struct() -> (SpecializationKey, StructDef)?:
         """Get the next pending struct to specialize."""
-        if self.pending_structs.is_empty():
+        if self.pending_struct_cursor >= self.pending_structs.len():
             return nil
 
-        val item = self.pending_structs.remove(0)
+        val item = self.pending_structs[self.pending_struct_cursor]
+        self.pending_struct_cursor = self.pending_struct_cursor + 1
+
+        # Reset when all consumed to free memory
+        if self.pending_struct_cursor >= self.pending_structs.len():
+            self.pending_structs = []
+            self.pending_struct_cursor = 0
+
         Some(item)
 
     me pop_pending_class() -> (SpecializationKey, ClassDef)?:
         """Get the next pending class to specialize."""
-        if self.pending_classes.is_empty():
+        if self.pending_class_cursor >= self.pending_classes.len():
             return nil
 
-        val item = self.pending_classes.remove(0)
+        val item = self.pending_classes[self.pending_class_cursor]
+        self.pending_class_cursor = self.pending_class_cursor + 1
+
+        # Reset when all consumed to free memory
+        if self.pending_class_cursor >= self.pending_classes.len():
+            self.pending_classes = []
+            self.pending_class_cursor = 0
+
         Some(item)
 
     # ========================================================================
@@ -251,16 +281,15 @@ impl MonomorphizationTable:
 #
 # - request_*: O(1) hash lookup + O(1) append
 # - has_pending: O(1) length check
-# - pop_pending_*: O(n) remove(0) - could optimize with queue
+# - pop_pending_*: O(1) cursor advance (was O(n) remove(0))
 # - mark_processed: O(1) hash insert
 # - add_specialized_*: O(1) hash insert
 # - get_specialized_*: O(1) hash lookup
 #
-# OPTIMIZATION: Replace List with proper queue (VecDeque equivalent)
-# for O(1) pop_front instead of O(n) remove(0)
+# OPTIMIZATION: Cursor-based queue avoids O(n) remove(0).
+# Arrays reset when fully consumed to free memory.
 #
-# Expected performance: ~5% slower than Rust (remove(0) overhead)
-# Acceptable for Phase 3 migration
+# Expected performance: comparable to Rust (O(1) amortized pop)
 #
 # ============================================================================
 # Robustness Checklist
