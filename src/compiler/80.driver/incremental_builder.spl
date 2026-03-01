@@ -134,15 +134,22 @@ class IncrementalState:
     sources: {text: SourceInfo}
     statuses: {text: CompilationStatus}
     artifacts: {text: CachedArtifact}
+    dependents: {text: [text]}
     stats: IncrementalStats
 
 impl IncrementalState:
     static fn create() -> IncrementalState:
         IncrementalState(sources: {}, statuses: {},
-                         artifacts: {}, stats: IncrementalStats.empty())
+                         artifacts: {}, dependents: {},
+                         stats: IncrementalStats.empty())
 
     me register_source(info: SourceInfo):
         self.sources[info.path] = info
+        # Build reverse dependency map
+        for dep in info.dependencies:
+            if not self.dependents.contains_key(dep):
+                self.dependents[dep] = []
+            self.dependents[dep] = self.dependents[dep].push(info.path)
 
     fn get_status(path: text) -> CompilationStatus:
         if self.statuses.contains_key(path):
@@ -160,10 +167,10 @@ impl IncrementalState:
         """Mark a file and its direct dependents as dirty."""
         self.statuses[path] = CompilationStatus.Dirty
 
-        # Cascade to dependents
-        for (src_path, info) in self.sources:
-            if info.dependencies.contains(path):
-                self.statuses[src_path] = CompilationStatus.Dirty
+        # Use reverse dependency map for O(1) lookup
+        if self.dependents.contains_key(path):
+            for dependent in self.dependents[path]:
+                self.statuses[dependent] = CompilationStatus.Dirty
 
     me mark_complete(path: text, artifact: CachedArtifact):
         self.statuses[path] = CompilationStatus.Complete
@@ -209,6 +216,7 @@ impl IncrementalState:
     me clear():
         self.statuses = {}
         self.artifacts = {}
+        self.dependents = {}
 
     fn get_stats() -> IncrementalStats:
         self.stats
