@@ -71,8 +71,7 @@
 ### Step 3: Commit Changes
 
 ```bash
-git add -A
-git commit -m "chore: Prepare release v0.5.0-rc.1"
+jj commit -m "chore: Prepare release v0.5.0-rc.1"
 ```
 
 ### Step 4: Create Tag
@@ -84,7 +83,8 @@ git tag -a v0.5.0-rc.1 -m "Release v0.5.0-rc.1"
 ### Step 5: Push to GitHub
 
 ```bash
-git push origin main
+jj bookmark set main -r @-
+jj git push --bookmark main
 git push origin v0.5.0-rc.1
 ```
 
@@ -156,7 +156,7 @@ If release has critical issues:
 # Delete release
 gh release delete v0.5.0-rc.1 --yes
 
-# Delete tag locally and remotely
+# Delete tag (jj doesn't manage tags, use git)
 git tag -d v0.5.0-rc.1
 git push origin :refs/tags/v0.5.0-rc.1
 ```
@@ -218,9 +218,9 @@ Copy this for each release:
 - [ ] Local build verified
 
 ### Release
-- [ ] Committed: `git commit -m "chore: Release v0.5.0-rc.1"`
+- [ ] Committed: `jj commit -m "chore: Release v0.5.0-rc.1"`
 - [ ] Tagged: `git tag -a v0.5.0-rc.1 -m "Release v0.5.0-rc.1"`
-- [ ] Pushed: `git push origin main && git push origin v0.5.0-rc.1`
+- [ ] Pushed: `jj bookmark set main -r @- && jj git push --bookmark main && git push origin v0.5.0-rc.1`
 - [ ] GitHub Actions completed
 - [ ] Release created on GitHub
 
@@ -261,14 +261,14 @@ grep "version:" simple.sdn
 
 # Update version (edit file)
 # Then commit
-git add -A
-git commit -m "chore: Release vX.Y.Z-rc.N"
+jj commit -m "chore: Release vX.Y.Z-rc.N"
 
-# Create tag
+# Create tag (use git for tags)
 git tag -a vX.Y.Z-rc.N -m "Release vX.Y.Z-rc.N"
 
 # Push
-git push origin main
+jj bookmark set main -r @-
+jj git push --bookmark main
 git push origin vX.Y.Z-rc.N
 
 # Check release status
@@ -324,14 +324,14 @@ Based on current changes (binary structure, script migration):
 # 2. Update CHANGELOG.md
 
 # 3. Commit
-git add -A
-git commit -m "chore: Release v0.5.0-rc.1"
+jj commit -m "chore: Release v0.5.0-rc.1"
 
-# 4. Tag
+# 4. Tag (use git for tags)
 git tag -a v0.5.0-rc.1 -m "Release v0.5.0-rc.1"
 
 # 5. Push
-git push origin main
+jj bookmark set main -r @-
+jj git push --bookmark main
 git push origin v0.5.0-rc.1
 
 # 6. Monitor GitHub Actions

@@ -1,141 +1,137 @@
-describe "Mcp Jj Commit":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+# # MCP jj_commit Shell Quoting Bug
+#
+# **Bug:** mcp_jj_commit_001
+# **File:** src/app/mcp_jj/tools_jj_changes.spl:68
+# **Status:** Open
+#
+# ## Problem
+#
+# `handle_jj_commit()` wraps the commit message in raw single quotes:
+# ```simple
+# cmd = cmd + " -m " + "'" + message + "'"
+# ```
+#
+# This breaks when the message contains:
+# - Single quotes (e.g., "don't")
+# - Literal newlines from JSON `\n` (multi-line messages)
+# - Backslashes or other shell metacharacters
+#
+# The `shell_quote()` function from `jj_runner.spl` is imported but NOT used
+# for -m arguments. Same bug exists in handle_jj_describe, handle_jj_new,
+# and handle_jj_squash.
+#
+# ## Impact
+#
+# jj_commit silently fails: the shell command has broken quoting, jj exits
+# with error, but the MCP response shows "(no output)" instead of the commit
+# confirmation. The working copy remains uncommitted.
+#
+# ## Fix
+#
+# Replace raw quote wrapping with `shell_quote(message)`:
+# ```simple
+# cmd = cmd + " -m " + shell_quote(message)
+# ```
 
-# # # MCP jj_commit Shell Quoting Bug
-# #
-# # **Bug:** mcp_jj_commit_001
-# # **File:** src/app/mcp_jj/tools_jj_changes.spl:68
-# # **Status:** Open
-# #
-# # ## Problem
-# #
-# # `handle_jj_commit()` wraps the commit message in raw single quotes:
-# # ```simple
-# # cmd = cmd + " -m " + "'" + message + "'"
-# # ```
-# #
-# # This breaks when the message contains:
-# # - Single quotes (e.g., "don't")
-# # - Literal newlines from JSON `\n` (multi-line messages)
-# # - Backslashes or other shell metacharacters
-# #
-# # The `shell_quote()` function from `jj_runner.spl` is imported but NOT used
-# # for -m arguments. Same bug exists in handle_jj_describe, handle_jj_new,
-# # and handle_jj_squash.
-# #
-# # ## Impact
-# #
-# # jj_commit silently fails: the shell command has broken quoting, jj exits
-# # with error, but the MCP response shows "(no output)" instead of the commit
-# # confirmation. The working copy remains uncommitted.
-# #
-# # ## Fix
-# #
-# # Replace raw quote wrapping with `shell_quote(message)`:
-# # ```simple
-# # cmd = cmd + " -m " + shell_quote(message)
-# # ```
-# 
-# use std.nogc_sync_mut.mcp.jj.jj_runner.{shell_quote}
-# 
-# describe "mcp_jj_commit_001: shell quoting bug in jj_commit message":
-# 
-#     describe "shell_quote correctly handles special characters":
-#         it "wraps simple text without changes":
-#             val result = shell_quote("hello")
-#             expect(result).to_equal("hello")
-# 
-#         it "wraps text with spaces in single quotes":
-#             val result = shell_quote("hello world")
-#             expect(result).to_equal("'hello world'")
-# 
-#         it "escapes single quotes within text":
-#             val result = shell_quote("don't stop")
-#             expect(result).to_equal("'don'\\''t stop'")
-# 
-#         it "handles empty string":
-#             val result = shell_quote("")
-#             expect(result).to_equal("''")
-# 
-#         it "wraps text with parentheses":
-#             val result = shell_quote("fn(x)")
-#             expect(result).to_equal("'fn(x)'")
-# 
-#         it "wraps text with dollar signs":
-#             val result = shell_quote("$HOME/path")
-#             expect(result).to_equal("'$HOME/path'")
-# 
-#         it "wraps text with backslashes":
-#             val result = shell_quote("path\\to\\file")
-#             expect(result).to_equal("'path\\to\\file'")
-# 
-#     describe "raw quoting (current buggy behavior) vs shell_quote":
-#         it "raw quoting breaks on single quotes in message":
-#             # This is what the bug does:
-#             val message = "don't break"
-#             val buggy_cmd = "commit -m " + "'" + message + "'"
-#             # Produces: commit -m 'don't break'
-#             # Shell sees: commit -m 'don' (then t break' is unparsed)
-#             expect(buggy_cmd).to_equal("commit -m 'don't break'")
-# 
-#             # This is the correct fix:
-#             val fixed_cmd = "commit -m " + shell_quote(message)
-#             # Produces: commit -m 'don'\''t break'
-#             expect(fixed_cmd).to_equal("commit -m 'don'\\''t break'")
-# 
-#         it "raw quoting breaks on backticks in message":
-#             val message = "fix `bug` in parser"
-#             val buggy_cmd = "commit -m " + "'" + message + "'"
-#             # Shell would try to execute `bug` as a command substitution
-#             expect(buggy_cmd.contains("`bug`")).to_equal(true)
-# 
-#             val fixed_cmd = "commit -m " + shell_quote(message)
-#             # shell_quote wraps in single quotes, backticks are safe inside
-#             expect(fixed_cmd.contains("'fix `bug` in parser'")).to_equal(true)
-# 
-#     describe "multi-line messages (the actual failure case)":
-#         it "raw quoting produces broken shell command for multi-line":
-#             val message = "feat: add feature\n\nDetails here"
-#             val buggy_cmd = "commit -m " + "'" + message + "'"
-#             # The \n becomes a literal newline inside the string, breaking
-#             # the single-quoted shell argument across lines
-#             expect(buggy_cmd.contains("\n")).to_equal(true)
-# 
-#         it "shell_quote handles multi-line messages":
-#             val message = "feat: add feature\n\nDetails here"
-#             val fixed_cmd = "commit -m " + shell_quote(message)
-#             # shell_quote wraps the whole thing in single quotes
-#             # newlines inside single quotes are valid in shell
-#             expect(fixed_cmd.starts_with("commit -m '")).to_equal(true)
-# 
-#     describe "affected functions (all 4 share the same bug pattern)":
-#         # These document all locations with the raw quoting bug.
-#         # Pattern: cmd = cmd + " -m " + "'" + message + "'"
-#         # Fix:     cmd = cmd + " -m " + shell_quote(message)
-# 
-#         it "handle_jj_commit line 68 uses raw quotes":
-#             # src/app/mcp_jj/tools_jj_changes.spl:68
-#             # cmd = cmd + " -m " + "'" + message + "'"
-#             val buggy_pattern = "'" + "test_msg" + "'"
-#             expect(buggy_pattern).to_equal("'test_msg'")
-#             # Fix: shell_quote("test_msg") -> "test_msg" (no special chars)
-#             expect(shell_quote("test_msg")).to_equal("test_msg")
-# 
-#         it "handle_jj_describe line 54 uses raw quotes":
-#             # src/app/mcp_jj/tools_jj_changes.spl:54
-#             val msg = "update: it's working"
-#             val fixed = shell_quote(msg)
-#             expect(fixed.contains("'\\''")).to_equal(true)
-# 
-#         it "handle_jj_new line 31 uses raw quotes":
-#             # src/app/mcp_jj/tools_jj_changes.spl:31
-#             val msg = "new change (wip)"
-#             val fixed = shell_quote(msg)
-#             expect(fixed).to_equal("'new change (wip)'")
-# 
-#         it "handle_jj_squash line 91 uses raw quotes":
-#             # src/app/mcp_jj/tools_jj_changes.spl:91
-#             val msg = "squash: merge $FEATURE into main"
-#             val fixed = shell_quote(msg)
-#             expect(fixed).to_equal("'squash: merge $FEATURE into main'")
+use std.nogc_sync_mut.mcp.jj.jj_runner.{shell_quote}
+
+describe "mcp_jj_commit_001: shell quoting bug in jj_commit message":
+
+    describe "shell_quote correctly handles special characters":
+        it "wraps simple text without changes":
+            val result = shell_quote("hello")
+            expect(result).to_equal("hello")
+
+        it "wraps text with spaces in single quotes":
+            val result = shell_quote("hello world")
+            expect(result).to_equal("'hello world'")
+
+        it "escapes single quotes within text":
+            val result = shell_quote("don't stop")
+            expect(result).to_equal("'don'\\''t stop'")
+
+        it "handles empty string":
+            val result = shell_quote("")
+            expect(result).to_equal("''")
+
+        it "wraps text with parentheses":
+            val result = shell_quote("fn(x)")
+            expect(result).to_equal("'fn(x)'")
+
+        it "wraps text with dollar signs":
+            val result = shell_quote("$HOME/path")
+            expect(result).to_equal("'$HOME/path'")
+
+        it "wraps text with backslashes":
+            val result = shell_quote("path\\to\\file")
+            expect(result).to_equal("'path\\to\\file'")
+
+    describe "raw quoting (current buggy behavior) vs shell_quote":
+        it "raw quoting breaks on single quotes in message":
+            # This is what the bug does:
+            val message = "don't break"
+            val buggy_cmd = "commit -m " + "'" + message + "'"
+            # Produces: commit -m 'don't break'
+            # Shell sees: commit -m 'don' (then t break' is unparsed)
+            expect(buggy_cmd).to_equal("commit -m 'don't break'")
+
+            # This is the correct fix:
+            val fixed_cmd = "commit -m " + shell_quote(message)
+            # Produces: commit -m 'don'\''t break'
+            expect(fixed_cmd).to_equal("commit -m 'don'\\''t break'")
+
+        it "raw quoting breaks on backticks in message":
+            val message = "fix `bug` in parser"
+            val buggy_cmd = "commit -m " + "'" + message + "'"
+            # Shell would try to execute `bug` as a command substitution
+            expect(buggy_cmd.contains("`bug`")).to_equal(true)
+
+            val fixed_cmd = "commit -m " + shell_quote(message)
+            # shell_quote wraps in single quotes, backticks are safe inside
+            expect(fixed_cmd.contains("'fix `bug` in parser'")).to_equal(true)
+
+    describe "multi-line messages (the actual failure case)":
+        it "raw quoting produces broken shell command for multi-line":
+            val message = "feat: add feature\n\nDetails here"
+            val buggy_cmd = "commit -m " + "'" + message + "'"
+            # The \n becomes a literal newline inside the string, breaking
+            # the single-quoted shell argument across lines
+            expect(buggy_cmd.contains("\n")).to_equal(true)
+
+        it "shell_quote handles multi-line messages":
+            val message = "feat: add feature\n\nDetails here"
+            val fixed_cmd = "commit -m " + shell_quote(message)
+            # shell_quote wraps the whole thing in single quotes
+            # newlines inside single quotes are valid in shell
+            expect(fixed_cmd.starts_with("commit -m '")).to_equal(true)
+
+    describe "affected functions (all 4 share the same bug pattern)":
+        # These document all locations with the raw quoting bug.
+        # Pattern: cmd = cmd + " -m " + "'" + message + "'"
+        # Fix:     cmd = cmd + " -m " + shell_quote(message)
+
+        it "handle_jj_commit line 68 uses raw quotes":
+            # src/app/mcp_jj/tools_jj_changes.spl:68
+            # cmd = cmd + " -m " + "'" + message + "'"
+            val buggy_pattern = "'" + "test_msg" + "'"
+            expect(buggy_pattern).to_equal("'test_msg'")
+            # Fix: shell_quote("test_msg") -> "test_msg" (no special chars)
+            expect(shell_quote("test_msg")).to_equal("test_msg")
+
+        it "handle_jj_describe line 54 uses raw quotes":
+            # src/app/mcp_jj/tools_jj_changes.spl:54
+            val msg = "update: it's working"
+            val fixed = shell_quote(msg)
+            expect(fixed.contains("'\\''")).to_equal(true)
+
+        it "handle_jj_new line 31 uses raw quotes":
+            # src/app/mcp_jj/tools_jj_changes.spl:31
+            val msg = "new change (wip)"
+            val fixed = shell_quote(msg)
+            expect(fixed).to_equal("'new change (wip)'")
+
+        it "handle_jj_squash line 91 uses raw quotes":
+            # src/app/mcp_jj/tools_jj_changes.spl:91
+            val msg = "squash: merge $FEATURE into main"
+            val fixed = shell_quote(msg)
+            expect(fixed).to_equal("'squash: merge $FEATURE into main'")

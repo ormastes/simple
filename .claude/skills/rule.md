@@ -35,9 +35,10 @@ Reference for the project's mandatory engineering, architectural, testing, and o
 - ADR required for major architectural decisions (see `doc/adr/`)
 
 ### Version Control
-- Use `git` for all version control
+- Use `jj` (Jujutsu) as primary VCS, colocated with git
 - Work on `main` directly — no branches
-- Push: `git push origin main`
+- Commit: `jj commit -m "message"`
+- Push: `jj bookmark set main -r @- && jj git push --bookmark main`
 
 ### Code Style
 - No over-engineering — only make requested changes

@@ -327,28 +327,28 @@ fn log_event(entry: LogEntry):
 
 ### Compiler Source (`src/compiler/`)
 
-| File | Pattern | Code | Severity |
-|------|---------|------|----------|
-| `70.backend/linker/mold.spl:67-89` | String concat in asm generation loop | COLL006 | CRITICAL |
-| `70.backend/linker/wasm_linker.spl:64-98` | String concat building command | COLL006 | HIGH |
-| `40.mono/monomorphize/table.spl:85,97,109` | Unconditional `.clone()` on request | — | HIGH |
-| `40.mono/monomorphize/partition.spl` | 50+ `.clone()` calls | — | HIGH |
-| `core/aop_debug_log.spl:100-101` | `arr = arr + [entry]` (should be `.push()`) | COLL001 | CRITICAL |
-| `core/aop_debug_log.spl:134-138` | Array rebuild to pop last element | COLL007 | CRITICAL |
-| `95.interp/mir_interpreter.spl:535-540` | Array rebuild for call stack pop | COLL007 | HIGH |
+| File | Pattern | Code | Severity | Status |
+|------|---------|------|----------|--------|
+| `70.backend/linker/mold.spl` | String concat in asm generation loop | COLL006 | CRITICAL | **FIXED** — StringBuilder |
+| `70.backend/linker/wasm_linker.spl` | String concat building command | COLL006 | HIGH | **FIXED** — StringBuilder |
+| `40.mono/monomorphize/table.spl` | Unconditional `.clone()` on request | — | HIGH | Deferred (correctness risk) |
+| `40.mono/monomorphize/partition.spl` | 50+ `.clone()` calls | — | HIGH | Deferred (correctness risk) |
+| `core/aop_debug_log.spl` | `arr = arr + [entry]` (should be `.push()`) | COLL001 | CRITICAL | **FIXED** — `.push()` |
+| `core/aop_debug_log.spl` | Array rebuild to pop last element | COLL007 | CRITICAL | **FIXED** — `.push()` in rebuild |
+| `95.interp/mir_interpreter.spl` | Array rebuild for call stack pop | COLL007 | HIGH | **FIXED** — `.pop()` |
 
 ### Stdlib Source (`src/lib/`)
 
-| File | Pattern | Code | Severity |
-|------|---------|------|----------|
-| `common/text_advanced.spl:156-245` | String concat char-by-char in to_title/snake/camel_case | COLL006 | CRITICAL |
-| `common/format_utils.spl:34-41` | String concat in format padding | COLL006 | CRITICAL |
-| `common/json/serializer.spl:82-100` | String concat in JSON serialization | COLL006 | CRITICAL |
-| `common/base64/encode.spl:21-60` | String concat in base64 encoding | COLL006 | CRITICAL |
-| `common/skiplist_utils.spl:62-68` | Array concat + triple-nested rebuild | COLL001 | CRITICAL |
-| `common/red_black_tree/traverse.spl:28-95` | Array concat in tree traversal | COLL001 | HIGH |
-| `common/avl_tree/utilities.spl:109-130` | Array concat in tree utilities | COLL001 | HIGH |
-| `common/base64/decode.spl:43-130` | Array concat in decoding | COLL001 | HIGH |
+| File | Pattern | Code | Severity | Status |
+|------|---------|------|----------|--------|
+| `common/text_advanced.spl` | String concat char-by-char in to_title/snake/camel_case | COLL006 | CRITICAL | **FIXED** — StringBuilder |
+| `common/format_utils.spl` | String concat in format padding | COLL006 | CRITICAL | **FIXED** — StringBuilder |
+| `common/json/serializer.spl` | String concat in JSON serialization | COLL006 | CRITICAL | **FIXED** — StringBuilder |
+| `common/base64/encode.spl` | String concat in base64 encoding | COLL006 | CRITICAL | **FIXED** — StringBuilder |
+| `common/skiplist_utils.spl` | Array concat + triple-nested rebuild | COLL001 | CRITICAL | **FIXED** — `.push()` |
+| `common/red_black_tree/traverse.spl:28-95` | Array concat in tree traversal | COLL001 | HIGH | Open |
+| `common/avl_tree/utilities.spl:109-130` | Array concat in tree utilities | COLL001 | HIGH | Open |
+| `common/base64/decode.spl:43-130` | Array concat in decoding | COLL001 | HIGH | Open |
 
 ---
 

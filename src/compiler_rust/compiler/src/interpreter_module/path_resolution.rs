@@ -348,6 +348,30 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                         return Ok(stdlib_init_path);
                     }
 
+                    // Search lib subdirectories (mirrors module_loader.spl strategy)
+                    // For `use std.format.{...}`, the file might be at lib/common/format.spl
+                    // Search order: nogc_async_mut > nogc_sync_mut > common > gc_async_mut > nogc_async_mut_noalloc
+                    for subdir in &["nogc_async_mut", "nogc_sync_mut", "common", "gc_async_mut", "nogc_async_mut_noalloc"] {
+                        let mut sub_path = stdlib_candidate.join(subdir);
+                        for part in &stdlib_parts {
+                            sub_path = sub_path.join(part);
+                        }
+                        sub_path.set_extension("spl");
+                        if sub_path.exists() && sub_path.is_file() {
+                            return Ok(sub_path);
+                        }
+                        // Also try __init__.spl in subdirectory
+                        let mut sub_init = stdlib_candidate.join(subdir);
+                        for part in &stdlib_parts {
+                            sub_init = sub_init.join(part);
+                        }
+                        sub_init = sub_init.join("__init__");
+                        sub_init.set_extension("spl");
+                        if sub_init.exists() && sub_init.is_file() {
+                            return Ok(sub_init);
+                        }
+                    }
+
                     // Try with numbered directory support in stdlib
                     if let Some(found) = resolve_with_numbered_dirs(&stdlib_candidate, &stdlib_parts) {
                         return Ok(found);

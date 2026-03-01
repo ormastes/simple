@@ -8,6 +8,7 @@
 #   val result = link_wasm(["file.o"], config)
 
 use std.io_runtime.{shell, file_exists, file_delete}
+use std.string_builder.{StringBuilder}
 use compiler.interp.interpreter.llvm.tools.{find_wasm_ld, find_wasm_opt, find_wasi_sysroot}
 
 # ============================================================================
@@ -60,20 +61,20 @@ fn link_wasm(objects: [text], config: WasmLinkConfig) -> Result<text, text>:
     if wasm_ld == "":
         return Err("wasm-ld not found. Install lld: apt install lld (Ubuntu) or brew install llvm (macOS)")
 
-    # TODO: use array of parts + join instead of string concat (COLL006)
     # Build command
-    var cmd = wasm_ld
+    val sb = StringBuilder(parts: [])
+    sb.push(wasm_ld)
 
     # Stack-first layout (stack before data, prevents stack overflow into data)
-    cmd = cmd + " --stack-first"
+    sb.push(" --stack-first")
 
     # Stack size
-    cmd = cmd + " -z stack-size={config.stack_size}"
+    sb.push(" -z stack-size={config.stack_size}")
 
     # Memory configuration
-    cmd = cmd + " --initial-memory={config.initial_memory}"
+    sb.push(" --initial-memory={config.initial_memory}")
     if config.max_memory > 0:
-        cmd = cmd + " --max-memory={config.max_memory}"
+        sb.push(" --max-memory={config.max_memory}")
 
     # Determine WASI sysroot
     var sysroot = config.sysroot
@@ -82,21 +83,22 @@ fn link_wasm(objects: [text], config: WasmLinkConfig) -> Result<text, text>:
 
     if config.standalone or sysroot == "":
         # Standalone mode: no WASI, export everything
-        cmd = cmd + " --no-entry --export-all"
+        sb.push(" --no-entry --export-all")
     else:
         # WASI mode: link with libc, use _start entry
-        cmd = cmd + " --export=_start"
-        cmd = cmd + " -L{sysroot}/lib/wasm32-wasi -lc"
-        cmd = cmd + " {sysroot}/lib/wasm32-wasi/crt1.o"
+        sb.push(" --export=_start")
+        sb.push(" -L{sysroot}/lib/wasm32-wasi -lc")
+        sb.push(" {sysroot}/lib/wasm32-wasi/crt1.o")
 
     # Output path
-    cmd = cmd + " -o {config.output_path}"
+    sb.push(" -o {config.output_path}")
 
     # Input object files
     for obj in objects:
-        cmd = cmd + " {obj}"
+        sb.push(" {obj}")
 
-    cmd = cmd + " 2>&1"
+    sb.push(" 2>&1")
+    val cmd = sb.to_text()
 
     if config.verbose:
         print "[wasm-linker] {cmd}"

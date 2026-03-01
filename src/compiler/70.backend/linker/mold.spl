@@ -12,6 +12,7 @@
 # Uses bin/mold/mold (locally bundled) or system linkers.
 
 use std.io_runtime.{ShellResult, shell, shell_output, shell_bool, process_run, file_exists, file_write, file_delete, file_size_raw, cwd, host_os, host_arch}
+use std.string_builder.{StringBuilder}
 
 use .obj_taker (SymbolType)
 
@@ -63,12 +64,17 @@ fn write_elf_object(code: [i64], name: text, output_path: text) -> Result<(), te
     Generates a .s assembly file with .byte directives for the code bytes,
     then assembles it with `as --64 -o output.o input.s`.
     """
-    # TODO: use StringBuilder instead of string concat in loop (COLL006 - O(n^2))
     # Generate assembly source with .byte directives
-    var asm_lines = ".section .text" + "\n"
-    asm_lines = asm_lines + ".globl " + name + "\n"
-    asm_lines = asm_lines + ".type " + name + ", @function" + "\n"
-    asm_lines = asm_lines + name + ":" + "\n"
+    val sb = StringBuilder(parts: [])
+    sb.push(".section .text\n")
+    sb.push(".globl ")
+    sb.push(name)
+    sb.push("\n")
+    sb.push(".type ")
+    sb.push(name)
+    sb.push(", @function\n")
+    sb.push(name)
+    sb.push(":\n")
 
     # Emit .byte directives (one per line for clarity, batched for efficiency)
     var i = 0
@@ -77,17 +83,22 @@ fn write_elf_object(code: [i64], name: text, output_path: text) -> Result<(), te
     for idx in range(0, code_len):
         if i % batch_size == 0:
             if i > 0:
-                asm_lines = asm_lines + "\n"
-            asm_lines = asm_lines + "    .byte "
+                sb.push("\n")
+            sb.push("    .byte ")
         else:
-            asm_lines = asm_lines + ", "
+            sb.push(", ")
         # Mask to 0-255 range (code values are i64 representing bytes)
         val byte_val = code[idx] % 256
-        asm_lines = asm_lines + "{byte_val}"
+        sb.push("{byte_val}")
         i = i + 1
 
-    asm_lines = asm_lines + "\n"
-    asm_lines = asm_lines + ".size " + name + ", .-" + name + "\n"
+    sb.push("\n")
+    sb.push(".size ")
+    sb.push(name)
+    sb.push(", .-")
+    sb.push(name)
+    sb.push("\n")
+    val asm_lines = sb.to_text()
 
     # Write assembly to temp file
     val asm_path = output_path + ".s"
