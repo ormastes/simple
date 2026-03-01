@@ -190,6 +190,33 @@ pub fn run_test_file_with_options(path: &Path, options: &super::types::TestOptio
 pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFileResult {
     let start = Instant::now();
 
+    // Check RSS BEFORE starting the test. If memory is already above limit,
+    // refuse to start another test to prevent OOM.
+    let rss_before = get_rss_bytes();
+    let mem_limit = memory_limit_bytes();
+    if mem_limit > 0 && rss_before > mem_limit {
+        eprintln!(
+            "[ABORT] RSS {}MB already exceeds limit {}MB before starting {} — stopping test run",
+            rss_before / (1024 * 1024),
+            mem_limit / (1024 * 1024),
+            path.display(),
+        );
+        return TestFileResult {
+            path: path.to_path_buf(),
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            ignored: 0,
+            duration_ms: 0,
+            error: Some(format!(
+                "MEMORY LIMIT ABORT: RSS {}MB exceeds {}MB limit before test start",
+                rss_before / (1024 * 1024),
+                mem_limit / (1024 * 1024),
+            )),
+            individual_results: vec![],
+        };
+    }
+
     // Enable stack overflow detection for tests even in release builds.
     // This catches infinite recursion before it overflows the OS stack.
     set_stack_overflow_detection_enabled(true);

@@ -74,6 +74,9 @@ pub struct UseStmt {
     /// Type-only imports are excluded from circular dependency detection.
     /// Syntax: `use type module.Type`
     pub is_type_only: bool,
+    /// If true, this import is deferred until first symbol access.
+    /// Syntax: `use lazy module.path`
+    pub is_lazy: bool,
 }
 
 /// Common use statement: common use module.path.*

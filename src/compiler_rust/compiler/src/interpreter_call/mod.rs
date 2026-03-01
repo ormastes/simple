@@ -181,6 +181,22 @@ pub(crate) fn evaluate_call(
             return dispatch_context_method(&ctx, name, args, env, functions, classes, enums, impl_methods);
         }
 
+        // Try loading deferred (lazy) modules before giving up
+        let mut enums_clone = enums.clone();
+        if let Ok(loaded) = crate::interpreter::interpreter_module::try_force_deferred_for(
+            name, env, functions, classes, &mut enums_clone,
+        ) {
+            if loaded {
+                // Retry: check functions after lazy load
+                if let Some(func) = functions.get(name).cloned() {
+                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                }
+                if classes.contains_key(name) {
+                    return core::instantiate_class(name, args, env, functions, classes, enums, impl_methods);
+                }
+            }
+        }
+
         // If we reach here with an identifier name, the function is not found
         // E1002 - Undefined Function
         let known_names: Vec<&str> = functions.keys().map(|s| s.as_str()).collect();

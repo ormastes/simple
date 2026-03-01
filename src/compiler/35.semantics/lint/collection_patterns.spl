@@ -1,19 +1,22 @@
 # Collection Efficiency Lint
 #
-# Detects 5 common O(n^2) performance anti-patterns in collection usage:
+# Detects 8 common O(n^2) performance anti-patterns in collection usage:
 #
 # COLL001: Array concat in loop        arr = arr + [x]          CRITICAL
 # COLL002: .contains() on array in loop                         HIGH
 # COLL003: .remove(0) queue drain in loop                       HIGH
 # COLL004: Loop-invariant method call                           MEDIUM
 # COLL005: Chained .filter().filter()                           MEDIUM
+# COLL006: String concat in loop       str = str + x            CRITICAL
+# COLL007: Array rebuild to pop last   arr = arr[0..len-1]      HIGH
+# COLL008: Unbounded global .push()    module var with no reset MEDIUM
 #
 # Works with the arena-based core AST (integer-tagged nodes).
 
 use compiler.core.ast_expr.{
     EXPR_WHILE, EXPR_FOR, EXPR_ASSIGN, EXPR_BINARY,
     EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_INT_LIT, EXPR_IDENT,
-    EXPR_COMPOUND_ASSIGN,
+    EXPR_COMPOUND_ASSIGN, EXPR_SLICE, EXPR_STRING_LIT,
     expr_tag, expr_i_val, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
 }
 use compiler.core.ast_stmt.{
@@ -22,7 +25,7 @@ use compiler.core.ast_stmt.{
     stmt_tag, stmt_expr, stmt_name, stmt_body
 }
 use compiler.core.ast.{
-    DECL_FN, decl_tag, decl_name, decl_body_stmts
+    DECL_FN, DECL_VAR, decl_tag, decl_name, decl_body_stmts
 }
 use compiler.core.tokens.{TOK_PLUS}
 
@@ -58,6 +61,11 @@ fn check_collection_patterns(decl_indices: [i64]) -> [CollectionLintWarning]:
     # COLL005 is expression-level (not loop-dependent), scan all exprs
     val coll005 = check_chained_filter_all(decl_indices)
     for w in coll005:
+        warnings.push(w)
+
+    # COLL008: unbounded global arrays with .push() but no reset
+    val coll008 = check_unbounded_globals(decl_indices)
+    for w in coll008:
         warnings.push(w)
 
     warnings
@@ -166,6 +174,24 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text) -> [CollectionLi
                         hint: "use .push() instead of arr = arr + [x]",
                         item_name: fn_name
                     ))
+                # COLL006: str = str + x in loop (non-array RHS)
+                if is_string_concat_assign_expr(e):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL006",
+                        severity: "CRITICAL",
+                        message: "string concat in loop (O(n^2))",
+                        hint: "use StringBuilder instead of str = str + x",
+                        item_name: fn_name
+                    ))
+                # COLL007: arr = arr[0..arr.len()-1] (array rebuild to pop)
+                if is_array_rebuild_pop(e):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL007",
+                        severity: "HIGH",
+                        message: "array rebuild to remove last element (O(n))",
+                        hint: "use .pop() instead of rebuilding array",
+                        item_name: fn_name
+                    ))
 
         # Check expression statements
         if tag == STMT_EXPR:
@@ -178,6 +204,24 @@ fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text) -> [CollectionLi
                         severity: "CRITICAL",
                         message: "array concat in loop (O(n^2))",
                         hint: "use .push() instead of arr = arr + [x]",
+                        item_name: fn_name
+                    ))
+                # COLL006 via expression-level assign
+                if is_string_concat_assign_expr(e):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL006",
+                        severity: "CRITICAL",
+                        message: "string concat in loop (O(n^2))",
+                        hint: "use StringBuilder instead of str = str + x",
+                        item_name: fn_name
+                    ))
+                # COLL007 via expression-level assign
+                if is_array_rebuild_pop(e):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL007",
+                        severity: "HIGH",
+                        message: "array rebuild to remove last element (O(n))",
+                        hint: "use .pop() instead of rebuilding array",
                         item_name: fn_name
                     ))
 
@@ -319,6 +363,158 @@ fn is_loop_invariant_call(e: i64, iter_var: text) -> bool:
                     return true
     false
 
+# COLL006: Detect str = str + x in loop (string concat, NOT array concat)
+# Same shape as COLL001 but RHS right operand is NOT EXPR_ARRAY_LIT
+fn is_string_concat_assign_expr(e: i64) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_tag[e]
+
+    if tag == EXPR_ASSIGN:
+        val target = expr_left[e]
+        val value = expr_right[e]
+        if target >= 0 and value >= 0:
+            if expr_tag[value] == EXPR_BINARY and expr_i_val[value] == TOK_PLUS:
+                val rhs_right = expr_right[value]
+                val rhs_left = expr_left[value]
+                # Exclude array concat (COLL001 handles that)
+                if rhs_right >= 0 and expr_tag[rhs_right] != EXPR_ARRAY_LIT:
+                    if rhs_left >= 0 and expr_tag[rhs_left] == EXPR_IDENT:
+                        if target >= 0 and expr_tag[target] == EXPR_IDENT:
+                            if expr_s_val[rhs_left] == expr_s_val[target]:
+                                return true
+
+    # Compound assign: str += x (non-array)
+    if tag == EXPR_COMPOUND_ASSIGN:
+        val value = expr_right[e]
+        if value >= 0 and expr_tag[value] != EXPR_ARRAY_LIT:
+            return true
+
+    false
+
+# COLL007: Detect arr = arr[0..arr.len()-1] (array rebuild to remove last)
+# Matches EXPR_ASSIGN where RHS is EXPR_SLICE of the same variable
+fn is_array_rebuild_pop(e: i64) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_tag[e]
+
+    if tag == EXPR_ASSIGN:
+        val target = expr_left[e]
+        val value = expr_right[e]
+        if target >= 0 and value >= 0:
+            if expr_tag[target] == EXPR_IDENT and expr_tag[value] == EXPR_SLICE:
+                # Check that the slice receiver matches the assign target
+                val slice_receiver = expr_left[value]
+                if slice_receiver >= 0 and expr_tag[slice_receiver] == EXPR_IDENT:
+                    if expr_s_val[slice_receiver] == expr_s_val[target]:
+                        return true
+    false
+
+# COLL008: Detect unbounded global array with .push() but no reset
+# Scans module-level var declarations + function bodies for .push() on those vars
+fn check_unbounded_globals(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+
+    # Collect module-level var names that are arrays (initialized with [])
+    var global_arrays: [text] = []
+    for idx in decl_indices:
+        if decl_tag[idx] == DECL_VAR:
+            val init = decl_body_stmts[idx]
+            # A module-level var with array init will have stmts list
+            # Track all module-level vars as potential arrays
+            global_arrays.push(decl_name[idx])
+
+    if global_arrays.len() == 0:
+        return warnings
+
+    # For each function, check if it pushes to a global array
+    # without any corresponding reset/clear/trim
+    for idx in decl_indices:
+        if decl_tag[idx] == DECL_FN:
+            val fn_name = decl_name[idx]
+            val body = decl_body_stmts[idx]
+            val pushed_vars = find_pushed_globals(body, global_arrays)
+            val reset_vars = find_reset_globals(body, global_arrays)
+            for pv in pushed_vars:
+                var has_reset = false
+                for rv in reset_vars:
+                    if rv == pv:
+                        has_reset = true
+                if not has_reset:
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL008",
+                        severity: "MEDIUM",
+                        message: "unbounded global array '{pv}' grows via .push() without reset",
+                        hint: "add capacity check, ring buffer, or periodic reset/clear",
+                        item_name: fn_name
+                    ))
+    warnings
+
+fn find_pushed_globals(stmts: [i64], globals: [text]) -> [text]:
+    var pushed: [text] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+        if tag == STMT_EXPR:
+            val e = stmt_expr[s]
+            if e >= 0 and expr_tag[e] == EXPR_METHOD_CALL:
+                if expr_s_val[e] == "push":
+                    val receiver = expr_left[e]
+                    if receiver >= 0 and expr_tag[receiver] == EXPR_IDENT:
+                        val recv_name = expr_s_val[receiver]
+                        for g in globals:
+                            if g == recv_name:
+                                var already = false
+                                for p in pushed:
+                                    if p == recv_name:
+                                        already = true
+                                if not already:
+                                    pushed.push(recv_name)
+        # Recurse into nested blocks
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
+            val nested = find_pushed_globals(stmt_body[s], globals)
+            for n in nested:
+                var already = false
+                for p in pushed:
+                    if p == n:
+                        already = true
+                if not already:
+                    pushed.push(n)
+    pushed
+
+fn find_reset_globals(stmts: [i64], globals: [text]) -> [text]:
+    var reset: [text] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+        # Check for assignment: global = [] (reset to empty)
+        if tag == STMT_ASSIGN:
+            val name = stmt_name[s]
+            for g in globals:
+                if g == name:
+                    reset.push(name)
+        # Check for .clear() method call
+        if tag == STMT_EXPR:
+            val e = stmt_expr[s]
+            if e >= 0 and expr_tag[e] == EXPR_METHOD_CALL:
+                val method = expr_s_val[e]
+                if method == "clear" or method == "reset" or method == "trim":
+                    val receiver = expr_left[e]
+                    if receiver >= 0 and expr_tag[receiver] == EXPR_IDENT:
+                        val recv_name = expr_s_val[receiver]
+                        for g in globals:
+                            if g == recv_name:
+                                reset.push(recv_name)
+        # Recurse
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
+            val nested = find_reset_globals(stmt_body[s], globals)
+            for n in nested:
+                reset.push(n)
+    reset
+
 # COLL005: Detect chained .filter().filter()
 fn is_chained_filter(e: i64) -> bool:
     if e < 0:
@@ -386,3 +582,5 @@ export CollectionLintWarning
 export check_collection_patterns
 export is_concat_assign_expr, is_contains_call, is_remove_zero_call
 export is_loop_invariant_call, is_chained_filter
+export is_string_concat_assign_expr, is_array_rebuild_pop
+export check_unbounded_globals

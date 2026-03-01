@@ -507,7 +507,7 @@ impl Lowerer {
         // Fourth pass: lower import statements for dependency tracking AND load types
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
-                let import = self.lower_import(&use_stmt.path, &use_stmt.target, use_stmt.is_type_only);
+                let import = self.lower_import(&use_stmt.path, &use_stmt.target, use_stmt.is_type_only, use_stmt.is_lazy);
                 self.module.imports.push(import);
 
                 // NEW: Load types from imported module into globals symbol table
@@ -636,7 +636,7 @@ impl Lowerer {
         // Fourth pass: lower imports
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
-                let import = self.lower_import(&use_stmt.path, &use_stmt.target, use_stmt.is_type_only);
+                let import = self.lower_import(&use_stmt.path, &use_stmt.target, use_stmt.is_type_only, use_stmt.is_lazy);
                 self.module.imports.push(import);
                 let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
             }

@@ -201,6 +201,7 @@ impl<'a> super::Lexer<'a> {
                     TokenKind::Static // Keyword for static declarations
                 }
             }
+            "lazy" => TokenKind::Lazy,
             "type" => TokenKind::Type,
             "unit" => TokenKind::Unit,
             "extern" => TokenKind::Extern,

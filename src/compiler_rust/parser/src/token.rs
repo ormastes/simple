@@ -215,6 +215,7 @@ pub enum TokenKind {
     Move,
     Const,
     Static,
+    Lazy, // lazy (deferred module loading: use lazy)
     Type,
     Unit, // unit (for unit type definitions)
     Extern,
@@ -465,6 +466,7 @@ impl TokenKind {
             TokenKind::Repr => Some("repr"),
             TokenKind::Extern => Some("extern"),
             TokenKind::Static => Some("static"),
+            TokenKind::Lazy => Some("lazy"),
             TokenKind::Const => Some("const"),
             TokenKind::Shared => Some("shared"),
             TokenKind::Dyn => Some("dyn"),

@@ -267,6 +267,18 @@ fn process_use_stmt(
         return Ok(());
     }
 
+    // Defer lazy imports — register for on-demand loading
+    if use_stmt.is_lazy {
+        trace!("Deferring lazy import: {:?}", use_stmt.path);
+        crate::interpreter::DEFERRED_MODULES.with(|cell| {
+            cell.borrow_mut().push(crate::interpreter::DeferredModule {
+                use_stmt: use_stmt.clone(),
+                module_path: module_path.map(|p| p.to_path_buf()),
+            });
+        });
+        return Ok(());
+    }
+
     // Recursively load imported modules
     let binding_name = match &use_stmt.target {
         ImportTarget::Single(name) => name.clone(),
