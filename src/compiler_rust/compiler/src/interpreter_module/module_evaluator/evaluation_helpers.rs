@@ -267,16 +267,11 @@ fn process_use_stmt(
         return Ok(());
     }
 
-    // Defer lazy imports — register for on-demand loading
+    // Note: `use lazy` is parsed but loaded eagerly in the Rust bootstrap interpreter.
+    // Actual lazy/deferred loading is implemented in the Simple interpreter
+    // (src/compiler/10.frontend/core/interpreter/eval_stmts.spl).
     if use_stmt.is_lazy {
-        trace!("Deferring lazy import: {:?}", use_stmt.path);
-        crate::interpreter::DEFERRED_MODULES.with(|cell| {
-            cell.borrow_mut().push(crate::interpreter::DeferredModule {
-                use_stmt: use_stmt.clone(),
-                module_path: module_path.map(|p| p.to_path_buf()),
-            });
-        });
-        return Ok(());
+        trace!("Loading lazy import eagerly (Rust bootstrap): {:?}", use_stmt.path);
     }
 
     // Recursively load imported modules
