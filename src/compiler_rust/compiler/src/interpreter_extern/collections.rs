@@ -1790,3 +1790,19 @@ pub fn __rt_btreeset_is_superset(args: &[Value]) -> Result<Value, CompileError> 
 
     Ok(Value::Bool(set1.is_superset(set2)))
 }
+
+/// Clear all compiler-side collection registries between test runs.
+pub fn clear_collection_registries() {
+    if let Some(reg) = HASHMAP_REGISTRY.get() {
+        reg.lock().unwrap().clear();
+    }
+    if let Some(reg) = HASHSET_REGISTRY.get() {
+        reg.lock().unwrap().clear();
+    }
+    if let Some(reg) = BTREEMAP_REGISTRY.get() {
+        reg.lock().unwrap().clear();
+    }
+    if let Some(reg) = BTREESET_REGISTRY.get() {
+        reg.lock().unwrap().clear();
+    }
+}

@@ -313,6 +313,11 @@ pub fn rt_env_var_count(args: &[Value]) -> Result<Value, CompileError> {
     })
 }
 
+/// Clear the env FFI registry between test runs.
+pub fn clear_env_ffi_registry() {
+    ENV_REGISTRY.with(|r| r.borrow_mut().clear());
+}
+
 /// List all variable names: (env_handle) -> Array<String>
 pub fn rt_env_var_names(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_env_var_names")?;

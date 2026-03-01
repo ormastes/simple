@@ -95,6 +95,11 @@ pub fn rt_span_column(args: &[Value]) -> Result<Value, CompileError> {
     })
 }
 
+/// Clear the span FFI registry between test runs.
+pub fn clear_span_ffi_registry() {
+    SPAN_REGISTRY.with(|r| r.borrow_mut().clear());
+}
+
 /// rt_span_free(handle)
 pub fn rt_span_free(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_i64(args, 0, "rt_span_free")?;

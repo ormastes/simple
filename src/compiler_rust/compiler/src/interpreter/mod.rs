@@ -194,3 +194,8 @@ use interpreter_context::dispatch_context_method;
 #[path = "../interpreter_extern/mod.rs"]
 pub(crate) mod interpreter_extern;
 pub(crate) use interpreter_extern::call_extern_function;
+pub use interpreter_extern::collections::clear_collection_registries;
+pub use interpreter_extern::ast_ffi::clear_ast_ffi_registries;
+pub use interpreter_extern::env_ffi::clear_env_ffi_registry;
+pub use interpreter_extern::error_ffi::clear_error_ffi_registry;
+pub use interpreter_extern::span_ffi::clear_span_ffi_registry;
