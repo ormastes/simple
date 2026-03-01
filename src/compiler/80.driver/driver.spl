@@ -7,6 +7,7 @@
 #
 # Type definitions are in driver_types.spl
 # AOT output methods are in driver_aot_output.spl
+# Convenience API functions are in driver_api.spl
 
 use compiler.hir.hir.*
 use compiler.mir.mir.*
@@ -666,205 +667,15 @@ class CompilerDriver:
         else:
             OptimizationConfig__debug()
 
-# ------------------------------------------------------------------------------
-# Runtime Library Discovery
-# ------------------------------------------------------------------------------
-
-fn find_runtime_lib_dir() -> text:
-    # Check env var first
-    val env_path = rt_env_get("SIMPLE_RUNTIME_PATH")
-    if env_path != nil and env_path != "":
-        return env_path
-    # Default to rust/target/debug
-    if rt_file_exists("rust/target/debug/libsimple_compiler.so"):
-        return "rust/target/debug"
-    if rt_file_exists("rust/target/release/libsimple_compiler.so"):
-        return "rust/target/release"
-    "rust/target/debug"
-
-# ------------------------------------------------------------------------------
-# Convenience Functions
-# ------------------------------------------------------------------------------
-
-fn compile_file(path: text) -> CompileResult:
-    val options = CompileOptions__default()
-    options.input_files = [path]
-    val driver = CompilerDriver__create(options)
-    driver.compile()
-
-fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
-    val options = CompileOptions__default()
-    options.input_files = paths
-    options.mode = mode
-    val driver = CompilerDriver__create(options)
-    driver.compile()
-
-fn interpret_file(path: text) -> CompileResult:
-    compile_files([path], CompileMode.Interpret)
-
-fn jit_file(path: text) -> CompileResult:
-    compile_files([path], CompileMode.Jit)
-
-fn aot_file(path: text, output: text) -> CompileResult:
-    val options = CompileOptions__default()
-    options.input_files = [path]
-    options.mode = CompileMode.Aot
-    options.output_file = Some(output)
-    val driver = CompilerDriver__create(options)
-    driver.compile()
-
-fn aot_c_file(path: text, output: text) -> CompileResult:
-    """Compile a source file to C++20 output using the MIR C backend."""
-    val options = CompileOptions__default()
-    options.input_files = [path]
-    options.mode = CompileMode.Aot
-    options.output_file = Some(output)
-    options.backend = "c"
-    val driver = CompilerDriver__create(options)
-    driver.compile()
-
-fn aot_vhdl_file(path: text, output: text) -> CompileResult:
-    val options = CompileOptions__default()
-    options.input_files = [path]
-    options.mode = CompileMode.Aot
-    options.output_file = Some(output)
-    options.backend = "vhdl"
-    val driver = CompilerDriver__create(options)
-    driver.compile()
-
-fn check_file(path: text) -> CompileResult:
-    compile_files([path], CompileMode.Check)
-
-fn parse_sdn_file(path: text) -> CompileResult:
-    compile_files([path], CompileMode.Sdn)
-
-extern fn rt_process_run(cmd: text, args: [text]) -> text
-
-fn compile_to_smf(path: text, output: text) -> Result<text, text>:
-    """Compile a source file to SMF format using Pure Simple compiler.
-
-    Uses the Pure Simple compiler implementation directly, which works
-    in interpreter mode without requiring Rust FFI.
-    Returns Ok(output_path) on success or Err(message) on failure.
-    """
-    val options = CompileOptions__default()
-    options.input_files = [path]
-    options.output_file = output
-    options.mode = CompileMode.Aot
-    options.output_format = OutputFormat.Smf
-
-    val driver = CompilerDriver__create(options)
-    val result = CompilerDriver__run_compile(driver)
-
-    match result:
-        case CompileResult.Success(_):
-            Ok(output)
-        case _:
-            val errors = result.get_errors()
-            val error_msg = if errors.len() > 0:
-                errors.join("\n")
-            else:
-                "Compilation failed"
-            Err(error_msg)
-
-# Manual ctor wrappers for bootstrap symbol availability
-fn CompileContext__create(options: CompileOptions) -> CompileContext:
-    # Manual inline construction to avoid missing import table entries for static ctors
-    val backend = match options.mode:
-        case CompileMode.Interpret:
-            val interp_impl = InterpreterBackendImpl.new()
-            BackendPort(
-                name: "interpreter",
-                run_fn: fn(m): interp_impl.process_module(m),
-                supports_jit_fn: fn(): false,
-                target_triple_fn: fn(): "interpreter"
-            )
-        case CompileMode.Jit:
-            val jit_impl = CompilerBackendImpl__jit()
-            BackendPort(
-                name: "jit",
-                run_fn: fn(m): jit_impl.process_module(m),
-                supports_jit_fn: fn(): true,
-                target_triple_fn: fn(): "native-jit"
-            )
-        case CompileMode.Aot:
-            val output = options.output_file ?? "a.out"
-            val aot_impl = CompilerBackendImpl__aot(output)
-            BackendPort(
-                name: "aot",
-                run_fn: fn(m): aot_impl.process_module(m),
-                supports_jit_fn: fn(): false,
-                target_triple_fn: fn(): "native-aot"
-            )
-        case CompileMode.Sdn:
-            val sdn_impl = SdnBackendImpl()
-            BackendPort(
-                name: "sdn",
-                run_fn: fn(m): sdn_impl.process_module(m),
-                supports_jit_fn: fn(): false,
-                target_triple_fn: fn(): "sdn"
-            )
-        case CompileMode.Check:
-            BackendPort(
-                name: "check",
-                run_fn: fn(m): Ok(BackendResult.Unit),
-                supports_jit_fn: fn(): false,
-                target_triple_fn: fn(): "check"
-            )
-
-    val config = {}
-    val extensions = nil  # minimize bootstrap dependencies
-    val logger = if options.verbose:
-        Logger(level: 10)
-    else:
-        Logger(level: 0)  # avoid env lookup during bootstrap
-    val aop = nil
-
-    CompileContext(
-        options: options,
-        config: config,
-        backend: backend,
-        extensions: extensions,
-        aop: aop,
-        logger: logger,
-        sources: [],
-        modules: {},
-        hir_modules: {},
-        mir_modules: {},
-        errors: [],
-        warnings: [],
-        visibility_warnings: []
-    )
-
-fn CompilerDriver__create(options: CompileOptions) -> CompilerDriver:
-    val ctx = CompileContext__create(options)
-    CompilerDriver(ctx: ctx)
-
-# Simple top-level wrapper to invoke the instance compile method without cross-module method resolution
-fn CompilerDriver__run_compile(driver: CompilerDriver) -> CompileResult:
-    driver.compile()
-
-# ------------------------------------------------------------------------------
-# FFI Declarations (driver-specific only)
-# ------------------------------------------------------------------------------
-
-extern fn sys_get_args() -> [text]
-extern fn rt_env_get(name: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_dir_create(path: text, recursive: bool) -> bool
-extern fn rt_path_join(a: text, b: text) -> text
-extern fn rt_path_parent(path: text) -> text
-
 # ============================================================================
 # Exports
 # ============================================================================
 
 export CheckBackendImpl, CompilerDriver
-export find_runtime_lib_dir
-export compile_file, compile_files, interpret_file, jit_file, aot_file, aot_c_file, aot_vhdl_file, check_file, parse_sdn_file, compile_to_smf
-export CompileContext__create, CompilerDriver__create
-export CompilerDriver__run_compile
+
+# Re-export API functions for backward compatibility
+# (other files import interpret_file, compile_to_smf etc. from compiler.driver.driver)
+export use compiler.driver.driver_api.*
 
 # Re-export types from driver_types for convenience
 export use driver_types.{CompileMode, CompileMode__from_text, CompileOptions, CompileOptions__default, CompileResult, SourceFile, CompileContext, OutputFormat, OutputFormat__from_text}

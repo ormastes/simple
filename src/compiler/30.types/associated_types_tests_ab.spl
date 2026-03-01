@@ -1,0 +1,356 @@
+"""
+Associated Types - Test Helpers + Phase 4A + 4B Tests
+
+Test setup helpers and test functions for:
+- Phase 4A: AssocTypeDef, TraitDefEx, TraitRegistryEx
+- Phase 4B: AssocTypeImpl, ImplBlockEx, ImplValidator
+"""
+
+use compiler.types.associated_types_defs.{HirType, TraitRef, Symbol}
+use compiler.types.associated_types_defs.{AssocTypeDef, TraitDefEx, TraitRegistryEx}
+use compiler.types.associated_types_defs.{AssocTypeImpl, Obligation, ImplBlockEx}
+use compiler.types.associated_types_defs.{ImplRegistryEx, ImplValidator}
+use compiler.types.associated_types_defs.{AssocTypeProjection, AssocTypeResolver}
+use compiler.types.associated_types_defs.{TraitSolverEx}
+
+# ============================================================================
+# Test Setup Helpers
+# ============================================================================
+
+fn setup_test_registry() -> ImplRegistryEx:
+    """Setup registry with test impls (from Phase 4C)"""
+    val registry = ImplRegistryEx.new()
+
+    # impl Iterator for Range with Item = i64
+    val range_iter = ImplBlockEx.new(
+        TraitRef.new("Iterator"),
+        HirType.Named(name: "Range")
+    )
+    range_iter.add_assoc_type_impl("Item", HirType.Int)
+    registry.register_impl(range_iter)
+
+    # impl Iterator for Vec<T> with Item = T
+    val vec_t = HirType.Generic(name: "Vec", args: [HirType.Named(name: "T")])
+    val vec_iter = ImplBlockEx.new(
+        TraitRef.new("Iterator"),
+        vec_t
+    )
+    vec_iter.add_assoc_type_impl("Item", HirType.Named(name: "T"))
+    registry.register_impl(vec_iter)
+
+    # impl Collection for Vec<T> with Item = T, Index = i64
+    val vec_coll = ImplBlockEx.new(
+        TraitRef.new("Collection"),
+        vec_t
+    )
+    vec_coll.add_assoc_type_impl("Item", HirType.Named(name: "T"))
+    vec_coll.add_assoc_type_impl("Index", HirType.Int)
+    registry.register_impl(vec_coll)
+
+    registry
+
+fn setup_registry() -> ImplRegistryEx:
+    """Setup registry with test impls including String iterator (from Phase 4D)"""
+    val registry = ImplRegistryEx.new()
+
+    # impl Iterator for Range with Item = i64
+    val range_iter = ImplBlockEx.new(
+        TraitRef.new("Iterator"),
+        HirType.Named(name: "Range")
+    )
+    range_iter.add_assoc_type_impl("Item", HirType.Int)
+    registry.register_impl(range_iter)
+
+    # impl Iterator for Vec<T> with Item = T
+    val vec_t = HirType.Generic(name: "Vec", args: [HirType.Named(name: "T")])
+    val vec_iter = ImplBlockEx.new(
+        TraitRef.new("Iterator"),
+        vec_t
+    )
+    vec_iter.add_assoc_type_impl("Item", HirType.Named(name: "T"))
+    registry.register_impl(vec_iter)
+
+    # impl Iterator for String with Item = String (different from T)
+    val string_iter = ImplBlockEx.new(
+        TraitRef.new("Iterator"),
+        HirType.Str
+    )
+    string_iter.add_assoc_type_impl("Item", HirType.Str)
+    registry.register_impl(string_iter)
+
+    registry
+
+# ============================================================================
+# Phase 4A Tests (8 tests)
+# ============================================================================
+
+fn test_assoc_type_basic():
+    """Test basic associated type definition"""
+    val item_type = AssocTypeDef.new("Item")
+
+    assert item_type.name == "Item", "Name is Item"
+    assert not item_type.has_bounds(), "No bounds"
+    assert not item_type.has_default(), "No default"
+    assert item_type.to_string() == "type Item", "String representation"
+
+    print "  pass: Basic associated type"
+
+fn test_multiple_assoc_types():
+    """Test trait with multiple associated types"""
+    val trait_def = TraitDefEx.new("Collection")
+
+    val item_type = AssocTypeDef.new("Item")
+    val index_type = AssocTypeDef.new("Index")
+
+    trait_def.add_assoc_type(item_type)
+    trait_def.add_assoc_type(index_type)
+
+    assert trait_def.assoc_type_count() == 2, "Two associated types"
+    assert trait_def.has_assoc_type("Item"), "Has Item"
+    assert trait_def.has_assoc_type("Index"), "Has Index"
+    assert not trait_def.has_assoc_type("Unknown"), "No Unknown"
+
+    print "  pass: Multiple associated types"
+
+fn test_assoc_type_with_bounds():
+    """Test associated type with trait bounds"""
+    val display_ref = TraitRef.new("Display")
+    val node_type = AssocTypeDef.with_bounds("Node", [display_ref])
+
+    assert node_type.name == "Node", "Name is Node"
+    assert node_type.has_bounds(), "Has bounds"
+    assert not node_type.has_default(), "No default"
+
+    print "  pass: Associated type with bounds"
+
+fn test_default_assoc_type():
+    """Test associated type with default"""
+    val index_type = AssocTypeDef.with_default("Index", HirType.Int)
+
+    assert index_type.name == "Index", "Name is Index"
+    assert not index_type.has_bounds(), "No bounds"
+    assert index_type.has_default(), "Has default"
+
+    print "  pass: Default associated type"
+
+fn test_builtin_iterator_trait():
+    """Test built-in Iterator trait"""
+    val registry = TraitRegistryEx.new()
+    registry.define_builtin_traits()
+
+    assert registry.has_trait("Iterator"), "Has Iterator trait"
+
+    val iterator = registry.get_trait("Iterator")
+    assert iterator.assoc_type_count() == 1, "Iterator has 1 assoc type"
+    assert iterator.has_assoc_type("Item"), "Iterator has Item"
+
+    val item = iterator.get_assoc_type("Item")
+    assert item.name == "Item", "Item assoc type"
+
+    print "  pass: Built-in Iterator trait"
+
+fn test_trait_registry_ex():
+    """Test extended trait registry"""
+    val registry = TraitRegistryEx.new()
+
+    assert registry.count_traits() == 0, "Empty initially"
+
+    # Register Iterator trait
+    val iterator = TraitDefEx.new("Iterator")
+    val item = AssocTypeDef.new("Item")
+    iterator.add_assoc_type(item)
+
+    val registered = registry.register_trait(iterator)
+    assert registered, "Registered"
+    assert registry.count_traits() == 1, "One trait"
+
+    # Lookup
+    val found = registry.get_trait("Iterator")
+    assert found.name == "Iterator", "Found Iterator"
+    assert found.has_assoc_type("Item"), "Has Item"
+
+    print "  pass: Extended trait registry"
+
+fn test_projection_type():
+    """Test projection type representation"""
+    val base = HirType.Named(name: "T")
+    val projection = HirType.Projection(base: base, assoc_name: "Item")
+
+    assert projection.to_string() == "T.Item", "Projection string"
+    assert projection.type_name() == "T", "Base type name"
+
+    print "  pass: Projection type"
+
+fn test_builtin_collection():
+    """Test Collection trait with default Index"""
+    val registry = TraitRegistryEx.new()
+    registry.define_builtin_traits()
+
+    val collection = registry.get_trait("Collection")
+    assert collection.assoc_type_count() == 2, "Two assoc types"
+    assert collection.has_assoc_type("Item"), "Has Item"
+    assert collection.has_assoc_type("Index"), "Has Index"
+
+    val index = collection.get_assoc_type("Index")
+    assert index.has_default(), "Index has default"
+
+    print "  pass: Collection with default Index"
+
+# ============================================================================
+# Phase 4B Tests (8 tests)
+# ============================================================================
+
+fn test_assoc_type_impl_basic():
+    """Test basic associated type implementation"""
+    val item_impl = AssocTypeImpl.new("Item", HirType.Int)
+
+    assert item_impl.name == "Item", "Name is Item"
+    assert item_impl.to_string() == "type Item = i32", "String representation"
+
+    val concrete = item_impl.get_type()
+    assert concrete.type_name() == "i32", "Concrete type is i32"
+
+    print "  pass: Basic associated type impl"
+
+fn test_multiple_assoc_type_impls():
+    """Test impl block with multiple associated types"""
+    val impl_block = ImplBlockEx.new(
+        TraitRef.new("Collection"),
+        HirType.Named(name: "Vec")
+    )
+
+    impl_block.add_assoc_type_impl("Item", HirType.Int)
+    impl_block.add_assoc_type_impl("Index", HirType.Int)
+
+    assert impl_block.assoc_type_impl_count() == 2, "Two assoc type impls"
+    assert impl_block.has_assoc_type_impl("Item"), "Has Item"
+    assert impl_block.has_assoc_type_impl("Index"), "Has Index"
+
+    val item_type = impl_block.get_assoc_type_impl("Item")
+    assert item_type.type_name() == "i32", "Item is i32"
+
+    print "  pass: Multiple associated type impls"
+
+fn test_missing_assoc_type():
+    """Test validation catches missing associated type"""
+    val trait_def = TraitDefEx.new("Iterator")
+    val item_assoc = AssocTypeDef.new("Item")
+    trait_def.add_assoc_type(item_assoc)
+
+    val impl_block = ImplBlockEx.new(
+        TraitRef.new("Iterator"),
+        HirType.Named(name: "Range")
+    )
+    # Not adding Item implementation
+
+    val validator = ImplValidator.new(trait_def)
+    val is_complete = validator.validate_completeness(impl_block)
+
+    assert not is_complete, "Incomplete - missing Item"
+
+    val missing = validator.find_missing_assoc_types(impl_block)
+    assert missing.len() == 1, "One missing type"
+
+    print "  pass: Missing associated type detected"
+
+fn test_assoc_type_bound_satisfied():
+    """Test associated type bound satisfaction (placeholder)"""
+    val trait_def = TraitDefEx.new("Graph")
+    val node_assoc = AssocTypeDef.new("Node")
+    trait_def.add_assoc_type(node_assoc)
+
+    val impl_block = ImplBlockEx.new(
+        TraitRef.new("Graph"),
+        HirType.Named(name: "SimpleGraph")
+    )
+    impl_block.add_assoc_type_impl("Node", HirType.Int)
+
+    val validator = ImplValidator.new(trait_def)
+    val bounds_ok = validator.validate_bounds(impl_block)
+
+    assert bounds_ok, "Bounds satisfied (placeholder)"
+
+    print "  pass: Associated type bound satisfaction"
+
+fn test_default_assoc_type_usage():
+    """Test using default associated type"""
+    val trait_def = TraitDefEx.new("Collection")
+    val item_assoc = AssocTypeDef.new("Item")
+    val index_assoc = AssocTypeDef.new("Index")
+    # Mark index as having default
+    val index_with_default = AssocTypeDef(
+        name: "Index",
+        bounds: "[]",
+        default_type: HirType.Int
+    )
+
+    trait_def.add_assoc_type(item_assoc)
+    trait_def.add_assoc_type(index_with_default)
+
+    val impl_block = ImplBlockEx.new(
+        TraitRef.new("Collection"),
+        HirType.Named(name: "Vec")
+    )
+    impl_block.add_assoc_type_impl("Item", HirType.Int)
+    # Not specifying Index - should use default
+
+    val validator = ImplValidator.new(trait_def)
+    val is_complete = validator.validate_completeness(impl_block)
+
+    assert is_complete, "Complete - Index has default"
+
+    print "  pass: Default associated type usage"
+
+fn test_builtin_range_iterator():
+    """Test built-in Range iterator impl"""
+    val registry = ImplRegistryEx.new()
+    registry.define_builtin_impls()
+
+    assert registry.has_impl("Iterator", "Range"), "Has Iterator for Range"
+
+    val range_iter = registry.find_impl("Iterator", "Range")
+    assert range_iter.has_assoc_type_impl("Item"), "Range has Item"
+
+    val item_type = range_iter.get_assoc_type_impl("Item")
+    assert item_type.type_name() == "i32", "Item is i32"
+
+    print "  pass: Built-in Range iterator"
+
+fn test_impl_registry_ex():
+    """Test extended impl registry"""
+    val registry = ImplRegistryEx.new()
+
+    # Register Iterator for Range
+    val impl_block = ImplBlockEx.new(
+        TraitRef.new("Iterator"),
+        HirType.Named(name: "Range")
+    )
+    impl_block.add_assoc_type_impl("Item", HirType.Int)
+
+    val registered = registry.register_impl(impl_block)
+    assert registered, "Registered"
+
+    # Lookup
+    val found = registry.find_impl("Iterator", "Range")
+    assert found.trait_ref.name == "Iterator", "Found Iterator"
+    assert found.has_assoc_type_impl("Item"), "Has Item"
+
+    print "  pass: Extended impl registry"
+
+fn test_generic_impl():
+    """Test impl for generic type"""
+    val vec_t = HirType.Generic(name: "Vec", args: [HirType.Named(name: "T")])
+
+    val impl_block = ImplBlockEx.new(
+        TraitRef.new("Iterator"),
+        vec_t
+    )
+    impl_block.add_assoc_type_impl("Item", HirType.Named(name: "T"))
+
+    assert impl_block.to_string() == "impl Iterator for Vec (1 assoc types)", "String rep"
+    assert impl_block.has_assoc_type_impl("Item"), "Has Item"
+
+    val item = impl_block.get_assoc_type_impl("Item")
+    assert item.type_name() == "T", "Item is T"
+
+    print "  pass: Generic impl"

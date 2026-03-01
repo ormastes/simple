@@ -1,0 +1,850 @@
+"""
+Associated Types - Type Definitions, Registries, and Solvers
+
+Phase 4A: AssocTypeDef, TraitDefEx, TraitRegistryEx
+Phase 4B: AssocTypeImpl, ImplBlockEx, ImplRegistryEx, ImplValidator
+Phase 4C: AssocTypeProjection, AssocTypeResolver
+Phase 4D: Obligation, TraitSolverEx
+"""
+
+type Symbol = text
+
+# ============================================================================
+# Type System (Phase 4D version - most complete, includes TypeVar)
+# ============================================================================
+
+enum HirType:
+    Int
+    Str
+    Bool
+    Named(name: Symbol)
+    Generic(name: Symbol, args: [HirType])
+    Projection(base: HirType, assoc_name: Symbol)
+    TypeVar(id: i64)  # For generics
+    Error
+
+impl HirType:
+    fn to_string() -> text:
+        match self:
+            case Int: "i32"
+            case Str: "String"
+            case Bool: "bool"
+            case Named(name): name
+            case Generic(name, args):
+                val args_str = if args.len() > 0: "<...>" else: ""
+                "{name}{args_str}"
+            case Projection(base, assoc_name):
+                "{base.to_string()}.{assoc_name}"
+            case TypeVar(id): "T{id}"
+            case Error: "<error>"
+
+    fn type_name() -> Symbol:
+        match self:
+            case Int: "i32"
+            case Str: "String"
+            case Bool: "bool"
+            case Named(name): name
+            case Generic(name, _): name
+            case Projection(base, _): base.type_name()
+            case TypeVar(id): "T{id}"
+            case Error: "<error>"
+
+    fn matches(other: HirType) -> bool:
+        """Simplified type matching"""
+        match (self, other):
+            case (Int, Int): true
+            case (Str, Str): true
+            case (Bool, Bool): true
+            case (Named(n1), Named(n2)): n1 == n2
+            case (TypeVar(_), _): true
+            case (_, TypeVar(_)): true
+            case (Error, _): true
+            case (_, Error): true
+            case _: false
+
+# ============================================================================
+# Trait Reference (Phase 4D version - includes to_string)
+# ============================================================================
+
+class TraitRef:
+    name: text
+
+impl TraitRef:
+    static fn new(name: Symbol) -> TraitRef:
+        TraitRef(name: name)
+
+    fn to_string() -> text:
+        self.name
+
+# ============================================================================
+# Associated Type Definition (Phase 4A)
+# ============================================================================
+
+class AssocTypeDef:
+    """
+    Associated type definition in a trait
+
+    Example:
+        trait Iterator:
+            type Item           # No bounds, no default
+            type Error: Display # With bound
+            type Index = i64    # With default
+    """
+    name: text
+    bounds: text       # Placeholder for [TraitRef]
+    default_type: text # Placeholder for Option<HirType>
+
+impl AssocTypeDef:
+    static fn new(name: Symbol) -> AssocTypeDef:
+        AssocTypeDef(
+            name: name,
+            bounds: "[]",
+            default_type: "None"
+        )
+
+    static fn with_bounds(name: Symbol, bounds: [TraitRef]) -> AssocTypeDef:
+        val assoc_type = AssocTypeDef.new(name)
+        val bounds_dict = {}
+        for bound in bounds:
+            bounds_dict[bound.name] = bound
+        val new_assoc = AssocTypeDef(
+            name: name,
+            bounds: bounds_dict,
+            default_type: "None"
+        )
+        new_assoc
+
+    static fn with_default(name: Symbol, default_type: HirType) -> AssocTypeDef:
+        val assoc_type = AssocTypeDef.new(name)
+        val new_assoc = AssocTypeDef(
+            name: name,
+            bounds: "[]",
+            default_type: default_type
+        )
+        new_assoc
+
+    fn has_bounds() -> bool:
+        self.bounds != "[]"
+
+    fn has_default() -> bool:
+        self.default_type != "None"
+
+    fn to_string() -> text:
+        var result = "type {self.name}"
+
+        if self.has_bounds():
+            result = "{result}: <bounds>"
+
+        if self.has_default():
+            result = "{result} = <default>"
+
+        result
+
+# ============================================================================
+# Extended Trait Definition (Phase 4A)
+# ============================================================================
+
+class TraitDefEx:
+    """
+    Extended trait definition with associated types
+
+    Example:
+        trait Iterator:
+            type Item           # Associated type
+            fn next() -> Item?  # Method using associated type
+    """
+    name: text
+    methods: text      # Placeholder for [MethodSig]
+    supertraits: text  # Placeholder for [Symbol]
+    assoc_types: text  # Dict<Symbol, AssocTypeDef>
+
+impl TraitDefEx:
+    static fn new(name: Symbol) -> TraitDefEx:
+        TraitDefEx(
+            name: name,
+            methods: "[]",
+            supertraits: "[]",
+            assoc_types: {}
+        )
+
+    me add_assoc_type(assoc_type: AssocTypeDef):
+        """Add an associated type to this trait"""
+        self.assoc_types[assoc_type.name] = assoc_type
+
+    fn has_assoc_type(name: Symbol) -> bool:
+        """Check if trait has this associated type"""
+        name in self.assoc_types
+
+    fn get_assoc_type(name: Symbol) -> AssocTypeDef:
+        """Get associated type by name (returns dummy if not found)"""
+        if name in self.assoc_types:
+            return self.assoc_types[name]
+
+        # Return dummy
+        AssocTypeDef.new("NotFound")
+
+    fn assoc_type_count() -> i64:
+        """Count associated types"""
+        self.assoc_types.len()
+
+    fn to_string() -> text:
+        var result = "trait {self.name}"
+
+        if self.assoc_type_count() > 0:
+            result = "{result} (with {self.assoc_type_count()} assoc types)"
+
+        result
+
+# ============================================================================
+# Extended Trait Registry (Phase 4A)
+# ============================================================================
+
+class TraitRegistryEx:
+    """
+    Extended trait registry supporting associated types
+    """
+    traits: text  # Dict<Symbol, TraitDefEx>
+
+impl TraitRegistryEx:
+    static fn new() -> TraitRegistryEx:
+        val registry_data = {
+            "traits": {}
+        }
+        TraitRegistryEx(traits: registry_data)
+
+    me register_trait(trait_def: TraitDefEx) -> bool:
+        """Register a trait definition"""
+        val traits = self.traits["traits"]
+
+        if trait_def.name in traits:
+            return false  # Already registered
+
+        traits[trait_def.name] = trait_def
+        true
+
+    fn get_trait(name: Symbol) -> TraitDefEx:
+        """Get trait by name"""
+        val traits = self.traits["traits"]
+
+        if name in traits:
+            return traits[name]
+
+        # Return dummy
+        TraitDefEx.new("NotFound")
+
+    fn has_trait(name: Symbol) -> bool:
+        """Check if trait exists"""
+        val traits = self.traits["traits"]
+        name in traits
+
+    fn count_traits() -> i64:
+        """Count registered traits"""
+        val traits = self.traits["traits"]
+        traits.len()
+
+    me define_builtin_traits():
+        """Define standard library traits with associated types"""
+
+        # Iterator trait (with Item associated type)
+        val iterator = TraitDefEx.new("Iterator")
+        val item_type = AssocTypeDef.new("Item")
+        iterator.add_assoc_type(item_type)
+        self.register_trait(iterator)
+
+        # Collection trait (with Item and Index)
+        val collection = TraitDefEx.new("Collection")
+        val coll_item = AssocTypeDef.new("Item")
+        val index_type = AssocTypeDef.with_default("Index", HirType.Int)
+        collection.add_assoc_type(coll_item)
+        collection.add_assoc_type(index_type)
+        self.register_trait(collection)
+
+        # Result trait (with Ok and Err types)
+        val result_trait = TraitDefEx.new("Result")
+        val ok_type = AssocTypeDef.new("Ok")
+        val err_type = AssocTypeDef.new("Err")
+        result_trait.add_assoc_type(ok_type)
+        result_trait.add_assoc_type(err_type)
+        self.register_trait(result_trait)
+
+        # Display trait (no associated types - for comparison)
+        val display = TraitDefEx.new("Display")
+        self.register_trait(display)
+
+# ============================================================================
+# Associated Type Implementation (Phase 4B)
+# ============================================================================
+
+class AssocTypeImpl:
+    """
+    Concrete implementation of an associated type
+
+    Example:
+        impl Iterator for Range:
+            type Item = i64  # AssocTypeImpl
+    """
+    name: text
+    concrete_type: text  # HirType
+
+impl AssocTypeImpl:
+    static fn new(name: Symbol, concrete_type: HirType) -> AssocTypeImpl:
+        AssocTypeImpl(
+            name: name,
+            concrete_type: concrete_type
+        )
+
+    fn to_string() -> text:
+        val type_str = self.concrete_type.to_string()
+        "type {self.name} = {type_str}"
+
+    fn get_type() -> HirType:
+        self.concrete_type
+
+# ============================================================================
+# Extended Obligation (Phase 4D)
+# ============================================================================
+
+class Obligation:
+    """
+    Extended obligation with associated type constraints
+
+    Examples:
+        T: Iterator                    # Basic bound
+        T: Iterator<Item=i64>          # With assoc type constraint
+        I: Iterator, I.Item: Display   # Multiple constraints
+    """
+    ty: text                    # HirType
+    trait_ref: text             # TraitRef
+    span: text                  # Span (for errors)
+    assoc_type_constraints: text  # Dict<Symbol, HirType>
+
+impl Obligation:
+    static fn new(ty: HirType, trait_ref: TraitRef) -> Obligation:
+        Obligation(
+            ty: ty,
+            trait_ref: trait_ref,
+            span: "unknown",
+            assoc_type_constraints: {}
+        )
+
+    static fn with_assoc_constraint(
+        ty: HirType,
+        trait_ref: TraitRef,
+        assoc_name: Symbol,
+        assoc_type: HirType
+    ) -> Obligation:
+        """Create obligation with associated type constraint"""
+        val obligation = Obligation.new(ty, trait_ref)
+        val new_obligation = Obligation(
+            ty: ty,
+            trait_ref: trait_ref,
+            span: "unknown",
+            assoc_type_constraints: {assoc_name: assoc_type}
+        )
+        new_obligation
+
+    me add_assoc_constraint(assoc_name: Symbol, assoc_type: HirType):
+        """Add an associated type constraint"""
+        self.assoc_type_constraints[assoc_name] = assoc_type
+
+    fn has_assoc_constraints() -> bool:
+        """Check if obligation has associated type constraints"""
+        self.assoc_type_constraints.len() > 0
+
+    fn to_string() -> text:
+        val type_str = self.ty.to_string()
+        val trait_str = self.trait_ref.name
+        var result = "{type_str}: {trait_str}"
+
+        if self.has_assoc_constraints():
+            val constraints = self.assoc_type_constraints
+            var constraint_strs = []
+
+            for assoc_name in constraints:
+                val assoc_type = constraints[assoc_name]
+                val constraint_str = "{assoc_name}={assoc_type.to_string()}"
+                constraint_strs.push(constraint_str)
+
+            if constraint_strs.len() > 0:
+                val joined = constraint_strs[0]
+                result = "{result}<{joined}>"
+
+        result
+
+# ============================================================================
+# Extended Impl Block (Phase 4D version - includes matches_obligation)
+# ============================================================================
+
+class ImplBlockEx:
+    """
+    Extended impl block with associated type implementations
+
+    Example:
+        impl Iterator for Range:
+            type Item = i64           # Associated type impl
+            fn next() -> i64?: ...    # Method impl
+    """
+    trait_ref: text      # TraitRef
+    for_type: text       # HirType
+    methods: text        # Dict<Symbol, MethodImpl>
+    assoc_type_impls: text  # Dict<Symbol, AssocTypeImpl>
+
+impl ImplBlockEx:
+    static fn new(trait_ref: TraitRef, for_type: HirType) -> ImplBlockEx:
+        ImplBlockEx(
+            trait_ref: trait_ref,
+            for_type: for_type,
+            methods: {},
+            assoc_type_impls: {}
+        )
+
+    me add_assoc_type_impl(name: Symbol, concrete_type: HirType):
+        """Add an associated type implementation"""
+        val assoc_impl = {
+            "name": name,
+            "type": concrete_type
+        }
+        self.assoc_type_impls[name] = assoc_impl
+
+    fn get_assoc_type_impl(name: Symbol) -> HirType:
+        """Get concrete type for associated type"""
+        if name in self.assoc_type_impls:
+            val assoc_impl = self.assoc_type_impls[name]
+            return assoc_impl["type"]
+
+        # Return error type if not found
+        HirType.Error
+
+    fn has_assoc_type_impl(name: Symbol) -> bool:
+        """Check if associated type is implemented"""
+        name in self.assoc_type_impls
+
+    fn assoc_type_impl_count() -> i64:
+        """Count associated type implementations"""
+        self.assoc_type_impls.len()
+
+    fn matches_type(ty: HirType) -> bool:
+        """Check if this impl is for the given type"""
+        self.for_type.matches(ty)
+
+    fn matches_obligation(obligation: Obligation) -> bool:
+        """Check if this impl satisfies obligation (including assoc type constraints)"""
+        # Check trait matches
+        if self.trait_ref.name != obligation.trait_ref.name:
+            return false
+
+        # Check type matches
+        if not self.for_type.matches(obligation.ty):
+            return false
+
+        # Check associated type constraints
+        val constraints = obligation.assoc_type_constraints
+        for assoc_name in constraints:
+            val expected_type = constraints[assoc_name]
+
+            # Check if this impl has the associated type
+            if not self.has_assoc_type_impl(assoc_name):
+                return false
+
+            # Check if types match
+            val actual_type = self.get_assoc_type_impl(assoc_name)
+            if not actual_type.matches(expected_type):
+                return false
+
+        true
+
+    fn to_string() -> text:
+        val trait_name = self.trait_ref.name
+        val type_name = self.for_type.type_name()
+        var result = "impl {trait_name} for {type_name}"
+
+        if self.assoc_type_impl_count() > 0:
+            result = "{result} ({self.assoc_type_impl_count()} assoc types)"
+
+        result
+
+# ============================================================================
+# Extended Impl Registry (Combined lookup methods from 4B/4C/4D)
+# ============================================================================
+
+class ImplRegistryEx:
+    """
+    Extended impl registry supporting associated types
+    """
+    impls: text      # [ImplBlockEx]
+    index: text      # Dict<"trait::type", ImplBlockEx>
+
+impl ImplRegistryEx:
+    static fn new() -> ImplRegistryEx:
+        ImplRegistryEx(
+            impls: [],
+            index: {}
+        )
+
+    me register_impl(impl_block: ImplBlockEx) -> bool:
+        """Register an impl block"""
+        val trait_name = impl_block.trait_ref.name
+        val type_name = impl_block.for_type.type_name()
+        val key = "{trait_name}::{type_name}"
+
+        # Check for duplicate
+        if key in self.index:
+            return false  # Conflict
+
+        # Register
+        self.impls.push(impl_block)
+        self.index[key] = impl_block
+        true
+
+    # From Phase 4B: lookup by trait name + type name strings
+    fn find_impl(trait_name: Symbol, type_name: Symbol) -> ImplBlockEx:
+        """Find impl block for (trait, type) pair by name"""
+        val key = "{trait_name}::{type_name}"
+
+        if key in self.index:
+            return self.index[key]
+
+        # Return dummy impl
+        val dummy_trait = TraitRef.new("NotFound")
+        val dummy_type = HirType.Named(name: "NotFound")
+        ImplBlockEx.new(dummy_trait, dummy_type)
+
+    fn has_impl(trait_name: Symbol, type_name: Symbol) -> bool:
+        """Check if impl exists by name"""
+        val key = "{trait_name}::{type_name}"
+        key in self.index
+
+    # From Phase 4C: lookup by trait name + HirType
+    fn find_impl_for_type(trait_name: Symbol, ty: HirType) -> ImplBlockEx:
+        """Find impl block for (trait, type) pair"""
+        val type_name = ty.type_name()
+        val key = "{trait_name}::{type_name}"
+
+        if key in self.index:
+            return self.index[key]
+
+        # Return dummy
+        val dummy_trait = TraitRef.new("NotFound")
+        val dummy_type = HirType.Named(name: "NotFound")
+        ImplBlockEx.new(dummy_trait, dummy_type)
+
+    # From Phase 4C: find all impls matching a type
+    fn find_impls_for_type(ty: HirType) -> [ImplBlockEx]:
+        """Find all impls for a given type"""
+        var result = []
+
+        for impl_block in self.impls:
+            if impl_block.matches_type(ty):
+                result.push(impl_block)
+
+        result
+
+    # From Phase 4D: find impls matching an obligation (with assoc type constraints)
+    fn find_matching_impls(obligation: Obligation) -> [ImplBlockEx]:
+        """Find all impls that could satisfy obligation (with assoc type constraints)"""
+        var matches = []
+
+        for impl_block in self.impls:
+            if impl_block.matches_obligation(obligation):
+                matches.push(impl_block)
+
+        matches
+
+    me define_builtin_impls():
+        """Define standard library impls with associated types"""
+
+        # impl Iterator for Range
+        val range_iter = ImplBlockEx.new(
+            TraitRef.new("Iterator"),
+            HirType.Named(name: "Range")
+        )
+        range_iter.add_assoc_type_impl("Item", HirType.Int)
+        self.register_impl(range_iter)
+
+        # impl Iterator for Vec<T> (generic)
+        val vec_t = HirType.Generic(name: "Vec", args: [HirType.Named(name: "T")])
+        val vec_iter = ImplBlockEx.new(
+            TraitRef.new("Iterator"),
+            vec_t
+        )
+        vec_iter.add_assoc_type_impl("Item", HirType.Named(name: "T"))
+        self.register_impl(vec_iter)
+
+        # impl Collection for Vec<T>
+        val vec_collection = ImplBlockEx.new(
+            TraitRef.new("Collection"),
+            vec_t
+        )
+        vec_collection.add_assoc_type_impl("Item", HirType.Named(name: "T"))
+        vec_collection.add_assoc_type_impl("Index", HirType.Int)  # Uses default
+        self.register_impl(vec_collection)
+
+# ============================================================================
+# Impl Validator (Phase 4B)
+# ============================================================================
+
+class ImplValidator:
+    """
+    Validates impl blocks with associated types
+    """
+    trait_def: text  # TraitDefEx
+
+impl ImplValidator:
+    static fn new(trait_def: TraitDefEx) -> ImplValidator:
+        ImplValidator(trait_def: trait_def)
+
+    fn validate_completeness(impl_block: ImplBlockEx) -> bool:
+        """
+        Check all required associated types are implemented
+
+        Returns: true if complete, false if missing required types
+        """
+        val assoc_types = self.trait_def.assoc_types
+
+        for assoc_name in assoc_types:
+            val assoc_def = self.trait_def.get_assoc_type(assoc_name)
+
+            # Skip if has default
+            if assoc_def.has_default():
+                pass
+
+            # Check if implemented
+            if not impl_block.has_assoc_type_impl(assoc_name):
+                return false  # Missing required associated type
+
+        true
+
+    fn validate_bounds(impl_block: ImplBlockEx) -> bool:
+        """
+        Check associated type impls satisfy trait bounds
+
+        Placeholder - always returns true for now
+        """
+        true
+
+    fn find_missing_assoc_types(impl_block: ImplBlockEx) -> [Symbol]:
+        """Find all missing required associated types"""
+        var missing = []
+        val assoc_types = self.trait_def.assoc_types
+
+        for assoc_name in assoc_types:
+            val assoc_def = self.trait_def.get_assoc_type(assoc_name)
+
+            # Skip defaults
+            if assoc_def.has_default():
+                pass
+
+            # Check if implemented
+            if not impl_block.has_assoc_type_impl(assoc_name):
+                missing.push(assoc_name)
+
+        missing
+
+# ============================================================================
+# Type Projection (Phase 4C)
+# ============================================================================
+
+class AssocTypeProjection:
+    """
+    Represents an associated type projection: T.Item
+
+    Example: In fn sum<I: Iterator>(iter: I) -> I.Item
+             I.Item is an AssocTypeProjection
+    """
+    base_type: text     # HirType - the type being projected (I)
+    assoc_name: text    # Symbol - the associated type name (Item)
+    resolved: text      # Option<HirType> - cached resolution
+
+impl AssocTypeProjection:
+    static fn new(base_type: HirType, assoc_name: Symbol) -> AssocTypeProjection:
+        AssocTypeProjection(
+            base_type: base_type,
+            assoc_name: assoc_name,
+            resolved: "None"
+        )
+
+    fn to_string() -> text:
+        "{self.base_type.to_string()}.{self.assoc_name}"
+
+    fn is_resolved() -> bool:
+        self.resolved != "None"
+
+    fn get_resolved() -> HirType:
+        if self.is_resolved():
+            return self.resolved
+        HirType.Error
+
+    me set_resolved(ty: HirType):
+        self.resolved = ty
+
+# ============================================================================
+# Associated Type Resolver (Phase 4C)
+# ============================================================================
+
+class AssocTypeResolver:
+    """
+    Core resolver for associated type projections
+
+    Algorithm:
+    1. For projection T.Item:
+       - Find impl blocks for type T
+       - Look up Item in each impl
+       - Return concrete type
+
+    2. Normalization:
+       - Recursively reduce projections to concrete types
+       - Handle nested projections (T.Assoc1.Assoc2)
+    """
+    impl_registry: text  # ImplRegistryEx
+    cache: text          # Dict<projection_str, HirType>
+
+impl AssocTypeResolver:
+    static fn new(impl_registry: ImplRegistryEx) -> AssocTypeResolver:
+        AssocTypeResolver(
+            impl_registry: impl_registry,
+            cache: {}
+        )
+
+    me resolve_projection(projection: AssocTypeProjection) -> HirType:
+        """
+        Resolve a projection to a concrete type
+
+        Example:
+            Given: Range.Item where impl Iterator for Range with Item = i64
+            Returns: i64
+        """
+        # Check cache first
+        val cache_key = projection.to_string()
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        # 1. Get base type
+        val base_type = projection.base_type
+
+        # 2. Normalize base type first (in case it's also a projection)
+        val normalized_base = self.normalize(base_type)
+
+        # 3. Find impl blocks for normalized base type
+        val impls = self.impl_registry.find_impls_for_type(normalized_base)
+
+        # 4. Look up associated type in each impl
+        for impl_block in impls:
+            if impl_block.has_assoc_type_impl(projection.assoc_name):
+                val concrete_type = impl_block.get_assoc_type_impl(projection.assoc_name)
+
+                # Cache result
+                self.cache[cache_key] = concrete_type
+
+                # Set resolved on projection
+                projection.set_resolved(concrete_type)
+
+                return concrete_type
+
+        # 5. Not found - return error
+        HirType.Error
+
+    me normalize(ty: HirType) -> HirType:
+        """
+        Normalize a type by reducing projections to concrete types
+
+        Examples:
+            Range.Item -> i64 (if impl Iterator for Range with Item = i64)
+            Vec<Range.Item> -> Vec<i64>
+        """
+        match ty:
+            case Projection(base, assoc_name):
+                # Create projection object
+                val projection = AssocTypeProjection.new(base, assoc_name)
+                # Resolve it
+                self.resolve_projection(projection)
+
+            case Generic(name, args):
+                # Normalize each type argument
+                var normalized_args = []
+                for arg in args:
+                    val normalized_arg = self.normalize(arg)
+                    normalized_args.push(normalized_arg)
+
+                HirType.Generic(name: name, args: normalized_args)
+
+            case _:
+                # Already normalized
+                ty
+
+    fn find_impl_for_projection(projection: AssocTypeProjection) -> ImplBlockEx:
+        """
+        Find impl block that provides this projection
+
+        Returns: impl block or dummy if not found
+        """
+        val base_type = projection.base_type
+        val impls = self.impl_registry.find_impls_for_type(base_type)
+
+        for impl_block in impls:
+            if impl_block.has_assoc_type_impl(projection.assoc_name):
+                return impl_block
+
+        # Return dummy
+        val dummy_trait = TraitRef.new("NotFound")
+        val dummy_type = HirType.Named(name: "NotFound")
+        ImplBlockEx.new(dummy_trait, dummy_type)
+
+# ============================================================================
+# Extended Trait Solver (Phase 4D)
+# ============================================================================
+
+class TraitSolverEx:
+    """
+    Extended trait solver handling associated type constraints
+    """
+    impl_registry: text  # ImplRegistryEx
+    max_depth: i64
+
+impl TraitSolverEx:
+    static fn new(impl_registry: ImplRegistryEx) -> TraitSolverEx:
+        TraitSolverEx(
+            impl_registry: impl_registry,
+            max_depth: 10
+        )
+
+    fn solve(obligation: Obligation) -> bool:
+        """
+        Solve obligation with associated type constraints
+
+        Algorithm:
+        1. Find matching impls for (trait, type)
+        2. Check associated type constraints match
+        3. Return true if satisfied
+        """
+        val matches = self.impl_registry.find_matching_impls(obligation)
+        matches.len() > 0
+
+    fn solve_all(obligations: [Obligation]) -> [Obligation]:
+        """Solve multiple obligations"""
+        var unsatisfied = []
+
+        for obligation in obligations:
+            if not self.solve(obligation):
+                unsatisfied.push(obligation)
+
+        unsatisfied
+
+    fn can_satisfy(ty: HirType, trait_name: Symbol) -> bool:
+        """Check if type can satisfy trait (without assoc constraints)"""
+        val obligation = Obligation.new(ty, TraitRef.new(trait_name))
+        self.solve(obligation)
+
+    fn can_satisfy_with_assoc(
+        ty: HirType,
+        trait_name: Symbol,
+        assoc_name: Symbol,
+        assoc_type: HirType
+    ) -> bool:
+        """Check if type satisfies trait with associated type constraint"""
+        val obligation = Obligation.with_assoc_constraint(
+            ty,
+            TraitRef.new(trait_name),
+            assoc_name,
+            assoc_type
+        )
+        self.solve(obligation)

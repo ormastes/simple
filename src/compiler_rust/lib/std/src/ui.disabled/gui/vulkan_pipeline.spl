@@ -1,762 +1,515 @@
-# Vulkan Graphics Pipeline - Phase 1 Implementation
+# Vulkan Renderer - Device, Swapchain, RenderPass, and LayoutEngine
 #
-# Graphics pipeline configuration with smart defaults.
-# Follows builder pattern for zero-config initialization.
-#
-# Implementation Status: Phase 1 - Task 5
-# - Pipeline creation with smart defaults
-# - Vertex input state from reflection
-# - Rasterization state with sensible defaults
-# - Dynamic viewport/scissor
+# VulkanDevice initialization, Swapchain management, RenderPass configuration,
+# and LayoutEngine for element tree layout computation.
+# Part of the Vulkan renderer - see vulkan.spl for VulkanRenderer and
+# RenderBackend, and vulkan_commands.spl for ElementProcessor and resource management.
 
 use core.*
+use concurrency.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+use ui.renderer.*
 use ui.gui.vulkan_types.*
-use ui.gui.vulkan_shaders.*
+use ui.gui.vulkan_buffers.*
+use ui.gui.vulkan_ffi.*
 
 # =============================================================================
-# Graphics Pipeline - Complete Pipeline with Smart Defaults
+# Vulkan Device Management
 # =============================================================================
 
-pub struct GraphicsPipeline:
-    # Core handles
-    device: VkDevice
-    pipeline: VkPipeline
-    pipeline_layout: VkPipelineLayout
+struct VulkanDevice:
+    handle: u64            # rt_vk device handle
+    window_handle: u64     # rt_vk window handle
 
-impl GraphicsPipeline:
-    # Create pipeline with smart defaults
-    pub fn new(
-        device: &VulkanDevice,
-        render_pass: &RenderPass,
-        shaders: &ShaderStages,
-    ) -> Result<GraphicsPipeline, text>:
-        # Create pipeline layout (no descriptors for now)
-        val pipeline_layout = vulkan_create_pipeline_layout(device.device)?
+impl VulkanDevice:
+    fn new(window_handle: u64) -> Result<VulkanDevice, text>:
+        # Create Vulkan device using FFI
+        val device_handle = rt_vk_device_create()
+        if device_handle == 0:
+            return Err("Failed to create Vulkan device")
 
-        # Build pipeline with smart defaults
-        val pipeline_info = PipelineBuilder.new()
-            .shaders(shaders)
-            .vertex_input_auto()  # Auto-detect from #[vertex] macro
-            .input_assembly_triangles()
-            .rasterization_default()
-            .viewport_dynamic()
-            .multisample_none()
-            .color_blend_none()
-            .render_pass(render_pass)
-            .layout(pipeline_layout)
-            .build()
+        return Ok(VulkanDevice {
+            handle: device_handle,
+            window_handle: window_handle
+        })
 
-        # Create pipeline via FFI
-        val pipeline = vulkan_create_graphics_pipeline(device.device, &pipeline_info)?
+    fn free(self) -> Result<(), text>:
+        val result = rt_vk_device_free(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to free Vulkan device: error {result}")
+        return Ok(())
 
-        Ok(GraphicsPipeline {device: device.device, pipeline: pipeline, pipeline_layout: pipeline_layout,})
+    fn sync(self) -> Result<(), text>:
+        val result = rt_vk_device_sync(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to sync device: error {result}")
+        return Ok(())
 
-    # Cleanup
-    pub async fn destroy(&self):
-        await vulkan_destroy_pipeline_async(self.device, self.pipeline)
-        await vulkan_destroy_pipeline_layout_async(self.device, self.pipeline_layout)
+    fn get_handle(self) -> u64:
+        self.handle
 
-    pub fn get_pipeline(self) -> VkPipeline:
-        """Get Vulkan pipeline handle.
+    fn is_valid(self) -> bool:
+        self.handle != 0
 
-        Returns:
-            Pipeline handle
-
-        Example:
-            val pipeline = GraphicsPipeline.new(&device, &rp, &shaders)?
-            val handle = pipeline.get_pipeline()
-        """
-        self.pipeline
-
-    pub fn get_layout(self) -> VkPipelineLayout:
-        """Get pipeline layout handle.
-
-        Returns:
-            Layout handle
-
-        Example:
-            val pipeline = GraphicsPipeline.new(&device, &rp, &shaders)?
-            val layout = pipeline.get_layout()
-        """
-        self.pipeline_layout
-
-    pub fn is_valid(self) -> bool:
-        """Check if pipeline is valid.
-
-        Returns:
-            True if both handles are non-zero
-
-        Example:
-            val pipeline = GraphicsPipeline.new(&device, &rp, &shaders)?
-            assert(pipeline.is_valid())
-        """
-        self.pipeline != 0 and self.pipeline_layout != 0
-
-    pub fn summary(self) -> text:
-        """Get graphics pipeline summary.
-
-        Returns:
-            Human-readable summary
-
-        Example:
-            val pipeline = GraphicsPipeline.new(&device, &rp, &shaders)?
-            print(pipeline.summary())
-        """
-        return "GraphicsPipeline: pipeline={self.pipeline}, layout={self.pipeline_layout}"
-
-# =============================================================================
-# Pipeline Builder - Fluent API for Pipeline Configuration
-# =============================================================================
-
-pub struct PipelineBuilder:
-    # Shader stages
-    shader_stages: Option<ShaderStages>
-
-    # Vertex input
-    vertex_bindings: Array<VkVertexInputBindingDescription>
-    vertex_attributes: Array<VkVertexInputAttributeDescription>
-
-    # Input assembly
-    topology: VkPrimitiveTopology
-    primitive_restart: bool
-
-    # Rasterization
-    polygon_mode: VkPolygonMode
-    cull_mode: VkCullModeFlags
-    front_face: VkFrontFace
-    line_width: f32
-
-    # Viewport (dynamic by default)
-    dynamic_viewport: bool
-
-    # Multisample
-    sample_count: VkSampleCountFlagBits
-    sample_shading: bool
-
-    # Color blend
-    blend_enable: bool
-
-    # Render pass
-    render_pass: Option<VkRenderPass>
-    subpass: u32
-
-    # Layout
-    pipeline_layout: Option<VkPipelineLayout>
-
-impl PipelineBuilder:
-    pub fn new() -> PipelineBuilder:
-        PipelineBuilder {
-            shader_stages: None,
-            vertex_bindings: [],
-            vertex_attributes: [],
-            topology: VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-            primitive_restart: false,
-            polygon_mode: VK_POLYGON_MODE_FILL,
-            cull_mode: VK_CULL_MODE_BACK_BIT,
-            front_face: VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            line_width: 1.0,
-            dynamic_viewport: true,
-            sample_count: VK_SAMPLE_COUNT_1_BIT,
-            sample_shading: false,
-            blend_enable: false,
-            render_pass: None,
-            subpass: 0,
-            pipeline_layout: None,
+    fn create_buffer(size: u64, usage: u32, memory_usage: u32) -> Result<Buffer, text>:
+        # Create buffer using VMA (Vulkan Memory Allocator)
+        val buffer_info = VkBufferCreateInfo {
+            size: size,
+            usage: usage,
+            sharing_mode: VK_SHARING_MODE_EXCLUSIVE
         }
 
-    # Set shader stages
-    pub fn shaders(mut self, shaders: &ShaderStages) -> PipelineBuilder:
-        self.shader_stages = Some(shaders.clone())
-        self
+        val alloc_info = VmaAllocationCreateInfo {
+            usage: memory_usage,
+            flags: 0
+        }
 
-    # Auto-detect vertex input from #[vertex] macro reflection
-    # Uses default position (vec3) + color (vec4) layout as fallback
-    # Future: integrate with SPIR-V reflection to auto-detect vertex attributes
-    pub fn vertex_input_auto(mut self) -> PipelineBuilder:
-        # Default vertex layout: position (vec3) + color (vec4) = 28 bytes
-        self.vertex_bindings = [
-            VkVertexInputBindingDescription {
-                binding: 0,
-                stride: 28,  # 3 floats (position) + 4 floats (color) = 7 * 4 bytes
-                input_rate: VK_VERTEX_INPUT_RATE_VERTEX,
+        val (buffer_handle, allocation_handle) = vma_create_buffer(
+            self.allocator,
+            &buffer_info,
+            &alloc_info
+        )?
+
+        return Ok(Buffer {
+            handle: buffer_handle,
+            allocation: allocation_handle,
+            size: size
+        })
+
+    fn create_image(width: u32, height: u32, format: u32, usage: u32) -> Result<Image, text>:
+        # Create image using VMA (Vulkan Memory Allocator)
+        val image_info = VkImageCreateInfo {
+            image_type: VK_IMAGE_TYPE_2D,
+            format: format,
+            extent: VkExtent3D { width: width, height: height, depth: 1 },
+            mip_levels: 1,
+            array_layers: 1,
+            samples: VK_SAMPLE_COUNT_1_BIT,
+            tiling: VK_IMAGE_TILING_OPTIMAL,
+            usage: usage,
+            sharing_mode: VK_SHARING_MODE_EXCLUSIVE,
+            initial_layout: VK_IMAGE_LAYOUT_UNDEFINED
+        }
+
+        val alloc_info = VmaAllocationCreateInfo {
+            usage: VMA_MEMORY_USAGE_GPU_ONLY,
+            flags: 0
+        }
+
+        val (image_handle, allocation_handle) = vma_create_image(
+            self.allocator,
+            &image_info,
+            &alloc_info
+        )?
+
+        # Create image view for accessing the image in shaders
+        val view_info = VkImageViewCreateInfo {
+            image: image_handle,
+            view_type: VK_IMAGE_VIEW_TYPE_2D,
+            format: format,
+            components: VkComponentMapping.identity(),
+            subresource_range: VkImageSubresourceRange {
+                aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1
             }
-        ]
-
-        self.vertex_attributes = [
-            # Position (location = 0)
-            VkVertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: VK_FORMAT_R32G32B32_SFLOAT,
-                offset: 0,
-            },
-            # Color (location = 1)
-            VkVertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: VK_FORMAT_R32G32B32A32_SFLOAT,
-                offset: 12,
-            },
-        ]
-
-        self
-
-    # Set custom vertex input
-    pub fn vertex_input(
-        mut self,
-        bindings: Array<VkVertexInputBindingDescription>,
-        attributes: Array<VkVertexInputAttributeDescription>
-    ) -> PipelineBuilder:
-        self.vertex_bindings = bindings
-        self.vertex_attributes = attributes
-        self
-
-    # Input assembly - triangle list (default)
-    pub fn input_assembly_triangles(mut self) -> PipelineBuilder:
-        self.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
-        self.primitive_restart = false
-        self
-
-    # Input assembly - triangle strip
-    pub fn input_assembly_triangle_strip(mut self) -> PipelineBuilder:
-        self.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
-        self.primitive_restart = true
-        self
-
-    # Input assembly - line list
-    pub fn input_assembly_lines(mut self) -> PipelineBuilder:
-        self.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST
-        self.primitive_restart = false
-        self
-
-    # Rasterization - default settings
-    pub fn rasterization_default(mut self) -> PipelineBuilder:
-        self.polygon_mode = VK_POLYGON_MODE_FILL
-        self.cull_mode = VK_CULL_MODE_BACK_BIT
-        self.front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE
-        self.line_width = 1.0
-        self
-
-    # Rasterization - wireframe
-    pub fn rasterization_wireframe(mut self) -> PipelineBuilder:
-        self.polygon_mode = VK_POLYGON_MODE_LINE
-        self.cull_mode = VK_CULL_MODE_NONE
-        self.line_width = 1.0
-        self
-
-    # Viewport - dynamic (recommended)
-    pub fn viewport_dynamic(mut self) -> PipelineBuilder:
-        self.dynamic_viewport = true
-        self
-
-    # Multisample - none (default)
-    pub fn multisample_none(mut self) -> PipelineBuilder:
-        self.sample_count = VK_SAMPLE_COUNT_1_BIT
-        self.sample_shading = false
-        self
-
-    # Multisample - MSAA 4x
-    pub fn multisample_4x(mut self) -> PipelineBuilder:
-        self.sample_count = VK_SAMPLE_COUNT_4_BIT
-        self.sample_shading = true
-        self
-
-    # Color blend - none (default)
-    pub fn color_blend_none(mut self) -> PipelineBuilder:
-        self.blend_enable = false
-        self
-
-    # Color blend - alpha blending
-    pub fn color_blend_alpha(mut self) -> PipelineBuilder:
-        self.blend_enable = true
-        self
-
-    # Set render pass
-    pub fn render_pass(mut self, render_pass: &RenderPass) -> PipelineBuilder:
-        self.render_pass = Some(render_pass.render_pass)
-        self
-
-    # Set pipeline layout
-    pub fn layout(mut self, layout: VkPipelineLayout) -> PipelineBuilder:
-        self.pipeline_layout = Some(layout)
-        self
-
-    # Build pipeline info
-    pub fn build(self) -> VkGraphicsPipelineCreateInfo:
-        # Validate required fields
-        if self.shader_stages.is_none():
-            panic("Shader stages not set")
-        if self.render_pass.is_none():
-            panic("Render pass not set")
-        if self.pipeline_layout.is_none():
-            panic("Pipeline layout not set")
-
-        VkGraphicsPipelineCreateInfo {
-            # Shader stages
-            shader_stages: self.shader_stages.unwrap().get_stage_infos(),
-
-            # Vertex input
-            vertex_bindings: self.vertex_bindings,
-            vertex_attributes: self.vertex_attributes,
-
-            # Input assembly
-            topology: self.topology,
-            primitive_restart: self.primitive_restart,
-
-            # Rasterization
-            polygon_mode: self.polygon_mode,
-            cull_mode: self.cull_mode,
-            front_face: self.front_face,
-            line_width: self.line_width,
-
-            # Viewport
-            dynamic_viewport: self.dynamic_viewport,
-
-            # Multisample
-            sample_count: self.sample_count,
-            sample_shading: self.sample_shading,
-
-            # Color blend
-            blend_enable: self.blend_enable,
-
-            # Render pass
-            render_pass: self.render_pass.unwrap(),
-            subpass: self.subpass,
-
-            # Layout
-            pipeline_layout: self.pipeline_layout.unwrap(),
         }
 
-# =============================================================================
-# FFI Declarations
-# =============================================================================
+        val image_view = vk_create_image_view(self.device, &view_info)?
 
-# Pipeline creation/destruction
-extern fn vulkan_create_pipeline_layout(device: VkDevice) -> Result<VkPipelineLayout, text>
-extern fn vulkan_create_graphics_pipeline(device: VkDevice, info: &VkGraphicsPipelineCreateInfo) -> Result<VkPipeline, text>
-extern fn vulkan_destroy_pipeline_async(device: VkDevice, pipeline: VkPipeline) -> Future<Result<(), text>>
-extern fn vulkan_destroy_pipeline_layout_async(device: VkDevice, layout: VkPipelineLayout) -> Future<Result<(), text>>
-
-# =============================================================================
-# Vulkan Constants - Topology
-# =============================================================================
-
-pub const VK_PRIMITIVE_TOPOLOGY_POINT_LIST: u32 = 0
-pub const VK_PRIMITIVE_TOPOLOGY_LINE_LIST: u32 = 1
-pub const VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: u32 = 2
-pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: u32 = 3
-pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: u32 = 4
-pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: u32 = 5
-
-# Polygon mode
-pub const VK_POLYGON_MODE_FILL: u32 = 0
-pub const VK_POLYGON_MODE_LINE: u32 = 1
-pub const VK_POLYGON_MODE_POINT: u32 = 2
-
-# Cull mode
-pub const VK_CULL_MODE_NONE: u32 = 0
-pub const VK_CULL_MODE_FRONT_BIT: u32 = 0x00000001
-pub const VK_CULL_MODE_BACK_BIT: u32 = 0x00000002
-pub const VK_CULL_MODE_FRONT_AND_BACK: u32 = 0x00000003
-
-# Front face
-pub const VK_FRONT_FACE_COUNTER_CLOCKWISE: u32 = 0
-pub const VK_FRONT_FACE_CLOCKWISE: u32 = 1
-
-# Sample count
-pub const VK_SAMPLE_COUNT_1_BIT: u32 = 0x00000001
-pub const VK_SAMPLE_COUNT_2_BIT: u32 = 0x00000002
-pub const VK_SAMPLE_COUNT_4_BIT: u32 = 0x00000004
-pub const VK_SAMPLE_COUNT_8_BIT: u32 = 0x00000008
-pub const VK_SAMPLE_COUNT_16_BIT: u32 = 0x00000010
-
-# Vertex input rate
-pub const VK_VERTEX_INPUT_RATE_VERTEX: u32 = 0
-pub const VK_VERTEX_INPUT_RATE_INSTANCE: u32 = 1
-
-# Formats
-pub const VK_FORMAT_R32G32B32_SFLOAT: u32 = 106
-pub const VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109
+        return Ok(Image {
+            handle: image_handle,
+            view: image_view,
+            allocation: allocation_handle,
+            width: width,
+            height: height,
+            format: format
+        })
 
 # =============================================================================
-# Supporting Types
+# Swapchain Management
 # =============================================================================
 
-# Opaque FFI types
-pub type VkPipeline = i64
-pub type VkPipelineLayout = i64
-pub type VkPrimitiveTopology = u32
-pub type VkPolygonMode = u32
-pub type VkCullModeFlags = u32
-pub type VkFrontFace = u32
-pub type VkSampleCountFlagBits = u32
+struct Swapchain:
+    handle: u64                # rt_vk swapchain handle
+    device_handle: u64         # Parent device handle
+    width: u32
+    height: u32
+    image_count: u32
 
-pub struct VkVertexInputBindingDescription:
-    binding: u32
-    stride: u32
-    input_rate: u32
+impl Swapchain:
+    fn new(device: &VulkanDevice, window_handle: u64, width: u32, height: u32) -> Result<Swapchain, text>:
+        # Create swapchain using FFI
+        val swapchain_handle = rt_vk_swapchain_create(device.handle, window_handle, width, height)
+        if swapchain_handle == 0:
+            return Err("Failed to create swapchain")
 
-impl VkVertexInputBindingDescription:
-    pub fn get_binding(self) -> u32:
-        """Get binding index.
+        val image_count = rt_vk_swapchain_get_image_count(swapchain_handle)
 
-        Returns:
-            Binding index
+        return Ok(Swapchain {
+            handle: swapchain_handle,
+            device_handle: device.handle,
+            width: width,
+            height: height,
+            image_count: image_count
+        })
 
-        Example:
-            val desc = VkVertexInputBindingDescription { binding: 0, stride: 28, input_rate: VK_VERTEX_INPUT_RATE_VERTEX }
-            assert(desc.get_binding() == 0)
-        """
-        self.binding
+    fn recreate(self, width: u32, height: u32) -> Result<(), text>:
+        val result = rt_vk_swapchain_recreate(self.handle, width, height)
+        if result != VK_SUCCESS:
+            return Err("Failed to recreate swapchain: error {result}")
+        self.width = width
+        self.height = height
+        return Ok(())
 
-    pub fn get_stride(self) -> u32:
-        """Get vertex stride in bytes.
+    fn acquire_next_image(self, timeout_ns: u64) -> Result<u32, text>:
+        var image_index: u32 = 0
+        val result = rt_vk_swapchain_acquire_next_image(self.handle, timeout_ns, &mut image_index)
+        if result == VK_ERROR_SWAPCHAIN_OUT_OF_DATE:
+            return Err("Swapchain out of date")
+        if result != VK_SUCCESS:
+            return Err("Failed to acquire image: error {result}")
+        return Ok(image_index)
 
-        Returns:
-            Stride in bytes
+    fn present(self, image_index: u32) -> Result<(), text>:
+        val result = rt_vk_swapchain_present(self.handle, image_index)
+        if result == VK_ERROR_SWAPCHAIN_OUT_OF_DATE:
+            return Err("Swapchain out of date")
+        if result != VK_SUCCESS:
+            return Err("Failed to present: error {result}")
+        return Ok(())
 
-        Example:
-            val desc = VkVertexInputBindingDescription { binding: 0, stride: 28, input_rate: VK_VERTEX_INPUT_RATE_VERTEX }
-            assert(desc.get_stride() == 28)
-        """
-        self.stride
+    fn free(self) -> Result<(), text>:
+        val result = rt_vk_swapchain_destroy(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to destroy swapchain: error {result}")
+        return Ok(())
 
-    pub fn is_per_vertex(self) -> bool:
-        """Check if input rate is per-vertex.
+    fn get_handle(self) -> u64:
+        self.handle
 
-        Returns:
-            True if per-vertex input
+    fn get_extent(self) -> (u32, u32):
+        (self.width, self.height)
 
-        Example:
-            val desc = VkVertexInputBindingDescription { binding: 0, stride: 28, input_rate: VK_VERTEX_INPUT_RATE_VERTEX }
-            assert(desc.is_per_vertex())
-        """
-        self.input_rate == VK_VERTEX_INPUT_RATE_VERTEX
+    fn is_valid(self) -> bool:
+        self.handle != 0
 
-    pub fn is_per_instance(self) -> bool:
-        """Check if input rate is per-instance.
+# =============================================================================
+# Render Pass
+# =============================================================================
 
-        Returns:
-            True if per-instance input
+# Standard BGRA8 SRGB format constant (VK_FORMAT_B8G8R8A8_SRGB = 50)
+val VK_FORMAT_B8G8R8A8_SRGB: u32 = 50
 
-        Example:
-            val desc = VkVertexInputBindingDescription { binding: 1, stride: 64, input_rate: VK_VERTEX_INPUT_RATE_INSTANCE }
-            assert(desc.is_per_instance())
-        """
-        self.input_rate == VK_VERTEX_INPUT_RATE_INSTANCE
+struct RenderPass:
+    handle: u64                    # rt_vk render pass handle
+    framebuffer_handles: Array<u64>  # Framebuffer handles for each swapchain image
+    device_handle: u64
 
-    pub fn is_large_stride(self) -> bool:
-        """Check if stride is large (>128 bytes).
+impl RenderPass:
+    fn new(device: &VulkanDevice, swapchain: &Swapchain) -> Result<RenderPass, text>:
+        # Create simple render pass with standard color format
+        val render_pass_handle = rt_vk_render_pass_create_simple(device.handle, VK_FORMAT_B8G8R8A8_SRGB)
+        if render_pass_handle == 0:
+            return Err("Failed to create render pass")
 
-        Returns:
-            True if stride exceeds 128 bytes
+        # Create framebuffers for each swapchain image
+        var framebuffer_handles: Array<u64> = []
+        var temp_handles: Array<u64> = Array.with_capacity(swapchain.image_count as usize)
+        temp_handles.resize(swapchain.image_count as usize, 0)
 
-        Example:
-            val desc = VkVertexInputBindingDescription { binding: 0, stride: 256, input_rate: VK_VERTEX_INPUT_RATE_VERTEX }
-            assert(desc.is_large_stride())
-        """
-        self.stride > 128
+        val fb_count = rt_vk_framebuffer_create_for_swapchain(
+            device.handle,
+            render_pass_handle,
+            swapchain.handle,
+            temp_handles.as_mut_ptr(),
+            swapchain.image_count
+        )
+
+        if fb_count < 0:
+            rt_vk_render_pass_free(render_pass_handle)
+            return Err("Failed to create framebuffers: error {fb_count}")
+
+        # Copy valid handles
+        for i in 0..(fb_count as usize):
+            framebuffer_handles.push(temp_handles[i])
+
+        return Ok(RenderPass {
+            handle: render_pass_handle,
+            framebuffer_handles: framebuffer_handles,
+            device_handle: device.handle
+        })
+
+    fn free(self) -> Result<(), text>:
+        # Free all framebuffers
+        for fb_handle in self.framebuffer_handles:
+            rt_vk_framebuffer_free(fb_handle)
+
+        # Free render pass
+        val result = rt_vk_render_pass_free(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to free render pass: error {result}")
+        return Ok(())
+
+    fn get_handle(self) -> u64:
+        self.handle
+
+    fn get_framebuffer(self, index: usize) -> u64:
+        if index < self.framebuffer_handles.len():
+            return self.framebuffer_handles[index]
+        return 0
+
+    fn is_valid(self) -> bool:
+        self.handle != 0
+
+# =============================================================================
+# Layout Engine (CPU)
+# =============================================================================
+
+struct LayoutEngine:
+    cache: LayoutCache
+
+impl LayoutEngine:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_cache(self) -> bool:
+        """Check if layout cache exists."""
+        # Assuming LayoutCache has a method to check if it's non-empty
+        true  # Cache always exists as it's a value type
 
     pub fn summary(self) -> text:
-        """Get vertex binding summary.
-
-        Returns:
-            Human-readable summary
-
-        Example:
-            val desc = VkVertexInputBindingDescription { binding: 0, stride: 28, input_rate: VK_VERTEX_INPUT_RATE_VERTEX }
-            print(desc.summary())
-        """
-        val rate = if self.is_per_vertex(): "per-vertex" else: "per-instance"
-        return "VertexBinding: binding={self.binding}, stride={self.stride}, {rate}"
-
-pub struct VkVertexInputAttributeDescription:
-    location: u32
-    binding: u32
-    format: u32
-    offset: u32
-
-impl VkVertexInputAttributeDescription:
-    pub fn get_location(self) -> u32:
-        """Get shader location index.
-
-        Returns:
-            Location index
-
-        Example:
-            val attr = VkVertexInputAttributeDescription { location: 0, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 0 }
-            assert(attr.get_location() == 0)
-        """
-        self.location
-
-    pub fn get_binding(self) -> u32:
-        """Get vertex binding index.
-
-        Returns:
-            Binding index
-
-        Example:
-            val attr = VkVertexInputAttributeDescription { location: 0, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 0 }
-            assert(attr.get_binding() == 0)
-        """
-        self.binding
-
-    pub fn get_format(self) -> u32:
-        """Get attribute format.
-
-        Returns:
-            Vulkan format constant
-
-        Example:
-            val attr = VkVertexInputAttributeDescription { location: 0, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 0 }
-            assert(attr.get_format() == VK_FORMAT_R32G32B32_SFLOAT)
-        """
-        self.format
-
-    pub fn get_offset(self) -> u32:
-        """Get byte offset in vertex.
-
-        Returns:
-            Offset in bytes
-
-        Example:
-            val attr = VkVertexInputAttributeDescription { location: 1, binding: 0, format: VK_FORMAT_R32G32B32A32_SFLOAT, offset: 12 }
-            assert(attr.get_offset() == 12)
-        """
-        self.offset
-
-    pub fn is_float_format(self) -> bool:
-        """Check if format is floating point.
-
-        Returns:
-            True if format is f32
-
-        Example:
-            val attr = VkVertexInputAttributeDescription { location: 0, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 0 }
-            assert(attr.is_float_format())
-        """
-        self.format == VK_FORMAT_R32G32B32_SFLOAT or self.format == VK_FORMAT_R32G32B32A32_SFLOAT
-
-    pub fn is_position_format(self) -> bool:
-        """Check if this is likely a position attribute (vec3 f32).
-
-        Returns:
-            True if 3-component f32 at location 0
-
-        Example:
-            val attr = VkVertexInputAttributeDescription { location: 0, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 0 }
-            assert(attr.is_position_format())
-        """
-        self.location == 0 and self.format == VK_FORMAT_R32G32B32_SFLOAT
-
-    pub fn is_color_format(self) -> bool:
-        """Check if this is likely a color attribute (vec4 f32).
-
-        Returns:
-            True if 4-component f32
-
-        Example:
-            val attr = VkVertexInputAttributeDescription { location: 1, binding: 0, format: VK_FORMAT_R32G32B32A32_SFLOAT, offset: 12 }
-            assert(attr.is_color_format())
-        """
-        self.format == VK_FORMAT_R32G32B32A32_SFLOAT
-
-    pub fn summary(self) -> text:
-        """Get vertex attribute summary.
-
-        Returns:
-            Human-readable summary
+        """Get summary of layout engine state."""
+        return "LayoutEngine: cache active"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    static fn new() -> LayoutEngine:
+        return LayoutEngine {
+            cache: LayoutCache.new()
+        }
+
+    fn compute_layout(elem: &Element, constraints: BoxConstraints) -> LayoutResult:
+        # Check cache first
+        if val Some(cached) = self.cache.get(elem.id):
+            if cached.constraints == constraints:
+                return cached.result
+
+        # Compute layout based on element type
+        val result = match elem.kind:
+            case ElementKind.Row | ElementKind.Column:
+                self.layout_flexbox(elem, constraints)
+            case ElementKind.Grid:
+                self.layout_grid(elem, constraints)
+            case _:
+                self.layout_block(elem, constraints)
+
+        # Cache result
+        self.cache.set(elem.id, constraints, result)
+
+        return result
+
+    fn layout_flexbox(elem: &Element, constraints: BoxConstraints) -> LayoutResult:
+        # Flexbox layout algorithm implementation
+        val is_row = elem.kind == ElementKind.Row
+        val main_axis = if is_row: Axis.Horizontal else: Axis.Vertical
+        val cross_axis = if is_row: Axis.Vertical else: Axis.Horizontal
+
+        val children = elem.children
+        val child_count = children.len()
+        if child_count == 0:
+            return LayoutResult {
+                size: Size { width: 0.0, height: 0.0 },
+                children: []
+            }
+
+        # Phase 1: Calculate base sizes and flex factors
+        var total_flex: f32 = 0.0
+        var total_fixed_size: f32 = 0.0
+        var child_infos: Array<FlexChildInfo> = []
+
+        for child in children:
+            val flex = child.style.flex_grow.unwrap_or(0.0)
+            val base_size = self.measure_child_base_size(child, constraints, main_axis)
+            total_flex += flex
+            if flex == 0.0:
+                total_fixed_size += base_size
+            child_infos.push(FlexChildInfo { flex: flex, base_size: base_size })
+
+        # Phase 2: Distribute remaining space
+        val available_main = if is_row: constraints.max_width else: constraints.max_height
+        val remaining_space = (available_main - total_fixed_size).max(0.0)
+        val space_per_flex = if total_flex > 0.0: remaining_space / total_flex else: 0.0
+
+        # Phase 3: Calculate final child sizes and positions
+        var child_layouts: Array<ChildLayout> = []
+        var main_offset: f32 = 0.0
+
+        for (i, child) in children.iter().enumerate():
+            val info = child_infos[i]
+            val main_size = if info.flex > 0.0:
+                info.base_size + (space_per_flex * info.flex)
+            else:
+                info.base_size
+
+            val child_constraints = if is_row:
+                BoxConstraints { min_width: main_size, max_width: main_size,
+                                 min_height: 0.0, max_height: constraints.max_height }
+            else:
+                BoxConstraints { min_width: 0.0, max_width: constraints.max_width,
+                                 min_height: main_size, max_height: main_size }
+
+            val child_result = self.compute_layout(child, child_constraints)
+
+            val position = if is_row:
+                Point { x: main_offset, y: 0.0 }
+            else:
+                Point { x: 0.0, y: main_offset }
+
+            child_layouts.push(ChildLayout {
+                id: child.id,
+                position: position,
+                size: child_result.size
+            })
+
+            main_offset += main_size
+
+        val final_size = if is_row:
+            Size { width: main_offset, height: constraints.max_height }
+        else:
+            Size { width: constraints.max_width, height: main_offset }
+
+        return LayoutResult { size: final_size, children: child_layouts }
+
+    fn layout_grid(elem: &Element, constraints: BoxConstraints) -> LayoutResult:
+        # CSS Grid layout algorithm implementation
+        val style = elem.style
+        val columns = style.grid_template_columns.unwrap_or([TrackSize.Fr(1.0)])
+        val rows = style.grid_template_rows.unwrap_or([TrackSize.Auto])
+        val gap = style.gap.unwrap_or(0.0)
+
+        val col_count = columns.len()
+        val row_count = rows.len().max((elem.children.len() + col_count - 1) / col_count)
+
+        # Calculate column widths
+        val available_width = constraints.max_width - (gap * (col_count - 1) as f32)
+        var total_fr: f32 = 0.0
+        var fixed_width: f32 = 0.0
+        for col in columns:
+            match col:
+                case TrackSize.Fr(fr): total_fr += fr
+                case TrackSize.Px(px): fixed_width += px
+                case TrackSize.Auto: pass  # Will be calculated later
+
+        val fr_unit = if total_fr > 0.0: (available_width - fixed_width) / total_fr else: 0.0
+        var col_widths: Array<f32> = []
+        for col in columns:
+            match col:
+                case TrackSize.Fr(fr): col_widths.push(fr * fr_unit)
+                case TrackSize.Px(px): col_widths.push(px)
+                case TrackSize.Auto: col_widths.push(available_width / col_count as f32)
+
+        # Calculate row heights (simplified: equal distribution)
+        val available_height = constraints.max_height - (gap * (row_count - 1) as f32)
+        val row_height = available_height / row_count as f32
+
+        # Place children in grid cells
+        var child_layouts: Array<ChildLayout> = []
+        for (i, child) in elem.children.iter().enumerate():
+            val col = i % col_count
+            val row = i / col_count
+
+            var x: f32 = 0.0
+            for c in 0..col:
+                x += col_widths[c] + gap
+
+            val y = row as f32 * (row_height + gap)
+
+            val child_constraints = BoxConstraints {
+                min_width: col_widths[col], max_width: col_widths[col],
+                min_height: row_height, max_height: row_height
+            }
+            val child_result = self.compute_layout(child, child_constraints)
+
+            child_layouts.push(ChildLayout {
+                id: child.id,
+                position: Point { x: x, y: y },
+                size: child_result.size
+            })
+
+        return LayoutResult {
+            size: Size { width: constraints.max_width, height: row_count as f32 * (row_height + gap) - gap },
+            children: child_layouts
+        }
+
+    fn layout_block(elem: &Element, constraints: BoxConstraints) -> LayoutResult:
+        # Block layout: stack children vertically with full width
+        var child_layouts: Array<ChildLayout> = []
+        var y_offset: f32 = 0.0
+
+        for child in elem.children:
+            val child_constraints = BoxConstraints {
+                min_width: constraints.min_width,
+                max_width: constraints.max_width,
+                min_height: 0.0,
+                max_height: constraints.max_height - y_offset
+            }
+
+            val child_result = self.compute_layout(child, child_constraints)
+
+            child_layouts.push(ChildLayout {
+                id: child.id,
+                position: Point { x: 0.0, y: y_offset },
+                size: child_result.size
+            })
+
+            y_offset += child_result.size.height
+
+        # Handle text elements specially
+        if elem.kind == ElementKind.Text:
+            val text_size = self.measure_text(elem, constraints)
+            return LayoutResult {
+                size: text_size,
+                children: []
+            }
+
+        return LayoutResult {
+            size: Size { width: constraints.max_width, height: y_offset },
+            children: child_layouts
+        }
+
+    fn measure_child_base_size(child: &Element, constraints: BoxConstraints, axis: Axis) -> f32:
+        # Measure the intrinsic size of a child along the given axis
+        match axis:
+            case Axis.Horizontal:
+                return child.style.width.unwrap_or(constraints.max_width / 4.0)
+            case Axis.Vertical:
+                return child.style.height.unwrap_or(constraints.max_height / 4.0)
+
+    fn measure_text(elem: &Element, constraints: BoxConstraints) -> Size:
+        # Measure text dimensions using the text renderer
+        if val Some(text) = elem.text:
+            return self.text_renderer.measure(text, elem.style.font_size.unwrap_or(16.0), constraints.max_width)
+        return Size { width: 0.0, height: 0.0 }
+
+# Helper structs for layout
+struct FlexChildInfo:
+    flex: f32
+    base_size: f32
+
+enum Axis:
+    Horizontal
+    Vertical
+
+enum TrackSize:
+    Fr(f32)
+    Px(f32)
+    Auto
 
-        Example:
-            val attr = VkVertexInputAttributeDescription { location: 0, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 0 }
-            print(attr.summary())
-        """
-        return "VertexAttribute: location={self.location}, binding={self.binding}, offset={self.offset}"
-
-pub struct VkGraphicsPipelineCreateInfo:
-    # Shader stages
-    shader_stages: Array<VkPipelineShaderStageCreateInfo>
-
-    # Vertex input
-    vertex_bindings: Array<VkVertexInputBindingDescription>
-    vertex_attributes: Array<VkVertexInputAttributeDescription>
-
-    # Input assembly
-    topology: VkPrimitiveTopology
-    primitive_restart: bool
-
-    # Rasterization
-    polygon_mode: VkPolygonMode
-    cull_mode: VkCullModeFlags
-    front_face: VkFrontFace
-    line_width: f32
-
-    # Viewport
-    dynamic_viewport: bool
-
-    # Multisample
-    sample_count: VkSampleCountFlagBits
-    sample_shading: bool
-
-    # Color blend
-    blend_enable: bool
-
-    # Render pass
-    render_pass: VkRenderPass
-    subpass: u32
-
-    # Layout
-    pipeline_layout: VkPipelineLayout
-
-impl VkGraphicsPipelineCreateInfo:
-    pub fn shader_stage_count(self) -> usize:
-        """Get number of shader stages.
-
-        Returns:
-            Number of shader stages (usually 2: vertex + fragment)
-
-        Example:
-            val info = builder.build()
-            assert(info.shader_stage_count() == 2)
-        """
-        self.shader_stages.len()
-
-    pub fn vertex_binding_count(self) -> usize:
-        """Get number of vertex bindings.
-
-        Returns:
-            Number of vertex bindings
-
-        Example:
-            val info = builder.build()
-            val count = info.vertex_binding_count()
-        """
-        self.vertex_bindings.len()
-
-    pub fn vertex_attribute_count(self) -> usize:
-        """Get number of vertex attributes.
-
-        Returns:
-            Number of vertex attributes
-
-        Example:
-            val info = builder.build()
-            val count = info.vertex_attribute_count()
-        """
-        self.vertex_attributes.len()
-
-    pub fn is_triangle_topology(self) -> bool:
-        """Check if topology is triangle-based.
-
-        Returns:
-            True if triangle list, strip, or fan
-
-        Example:
-            val info = builder.build()
-            if info.is_triangle_topology():
-                print("Triangle rendering")
-        """
-        self.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST or
-        self.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP or
-        self.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN
-
-    pub fn is_line_topology(self) -> bool:
-        """Check if topology is line-based.
-
-        Returns:
-            True if line list or strip
-
-        Example:
-            val info = builder.build()
-            if info.is_line_topology():
-                print("Line rendering")
-        """
-        self.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST or
-        self.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
-
-    pub fn is_wireframe(self) -> bool:
-        """Check if polygon mode is wireframe.
-
-        Returns:
-            True if line mode
-
-        Example:
-            val info = builder.rasterization_wireframe().build()
-            assert(info.is_wireframe())
-        """
-        self.polygon_mode == VK_POLYGON_MODE_LINE
-
-    pub fn is_filled(self) -> bool:
-        """Check if polygon mode is filled.
-
-        Returns:
-            True if fill mode
-
-        Example:
-            val info = builder.build()
-            assert(info.is_filled())
-        """
-        self.polygon_mode == VK_POLYGON_MODE_FILL
-
-    pub fn has_backface_culling(self) -> bool:
-        """Check if backface culling is enabled.
-
-        Returns:
-            True if back faces are culled
-
-        Example:
-            val info = builder.build()
-            assert(info.has_backface_culling())
-        """
-        self.cull_mode == VK_CULL_MODE_BACK_BIT or self.cull_mode == VK_CULL_MODE_FRONT_AND_BACK
-
-    pub fn has_multisampling(self) -> bool:
-        """Check if multisampling is enabled.
-
-        Returns:
-            True if sample count > 1
-
-        Example:
-            val info = builder.multisample_4x().build()
-            assert(info.has_multisampling())
-        """
-        self.sample_count > VK_SAMPLE_COUNT_1_BIT
-
-    pub fn has_blending(self) -> bool:
-        """Check if color blending is enabled.
-
-        Returns:
-            True if blending enabled
-
-        Example:
-            val info = builder.color_blend_alpha().build()
-            assert(info.has_blending())
-        """
-        self.blend_enable
-
-    pub fn has_dynamic_viewport(self) -> bool:
-        """Check if viewport is dynamic.
-
-        Returns:
-            True if viewport set dynamically
-
-        Example:
-            val info = builder.build()
-            assert(info.has_dynamic_viewport())
-        """
-        self.dynamic_viewport
-
-    pub fn summary(self) -> text:
-        """Get pipeline create info summary.
-
-        Returns:
-            Human-readable summary
-
-        Example:
-            val info = builder.build()
-            print(info.summary())
-        """
-        val topo = if self.is_triangle_topology(): "triangles" else if self.is_line_topology(): "lines" else: "points"
-        val mode = if self.is_wireframe(): "wireframe" else: "filled"
-        val msaa = if self.has_multisampling(): "MSAA" else: "no-MSAA"
-        return "PipelineCreateInfo: {topo}, {mode}, {msaa}, {self.shader_stage_count()} stages, {self.vertex_attribute_count()} attributes"

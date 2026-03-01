@@ -1,0 +1,243 @@
+# PyTorch Data Transforms - Mixup and Cutmix Augmentation
+#
+# Advanced data augmentation techniques that mix multiple samples:
+# - `Mixup`: Mix two samples by weighted average
+# - `Cutmix`: Replace region with patch from another sample
+# - `CutmixMixup`: Combined Cutmix and Mixup augmentation
+
+export Mixup, Cutmix, CutmixMixup
+
+use ml.torch.tensor_class.{Tensor}
+
+
+# ============================================================================
+# Mixup and Cutmix Data Augmentation
+# ============================================================================
+
+class Mixup:
+    """Mixup data augmentation.
+
+    Mixes two samples by weighted average:
+        x' = λ * x1 + (1 - λ) * x2
+        y' = λ * y1 + (1 - λ) * y2
+
+    λ is sampled from Beta(alpha, alpha).
+
+    From paper "mixup: Beyond Empirical Risk Minimization".
+
+    Example:
+        ```simple
+        val mixup = Mixup(alpha=0.2)
+        val (mixed_x, mixed_y) = mixup.mix(batch_x, batch_y)
+        ```
+    """
+    alpha: f64
+
+    fn __init__(alpha: f64 = 0.2):
+        """Initialize mixup.
+
+        Args:
+            alpha: Beta distribution parameter (higher = more mixing)
+        """
+        self.alpha = alpha
+
+    fn mix(x1: Tensor, y1: any, x2: Tensor, y2: any) -> (Tensor, any):
+        """Mix two samples.
+
+        Args:
+            x1: First input tensor
+            y1: First label
+            x2: Second input tensor
+            y2: Second label
+
+        Returns:
+            Tuple of (mixed_x, mixed_y)
+        """
+        val lam = _sample_beta(self.alpha, self.alpha)
+
+        # Mix inputs: x' = λ * x1 + (1 - λ) * x2
+        val mixed_x = x1.mul_scalar(lam).add(x2.mul_scalar(1.0 - lam))
+
+        # Mix labels (soft labels)
+        val mixed_y = {"y1": y1, "y2": y2, "lam": lam}
+
+        return (mixed_x, mixed_y)
+
+    fn mix_batch(x: Tensor, y: any) -> (Tensor, any):
+        """Mix batch with shuffled version of itself.
+
+        Args:
+            x: Batch input tensor [N, C, H, W]
+            y: Batch labels
+
+        Returns:
+            Tuple of (mixed_x, mixed_y)
+        """
+        val lam = _sample_beta(self.alpha, self.alpha)
+
+        # Shuffle indices (simplified - would shuffle along batch dim)
+        # mixed_x = λ * x + (1 - λ) * x[shuffled]
+        val mixed_x = x  # Placeholder
+
+        val mixed_y = {"y": y, "lam": lam}
+
+        return (mixed_x, mixed_y)
+
+
+class Cutmix:
+    """Cutmix data augmentation.
+
+    Replaces rectangular region of one image with patch from another.
+
+    From paper "CutMix: Regularization Strategy to Train Strong Classifiers".
+
+    Example:
+        ```simple
+        val cutmix = Cutmix(alpha=1.0)
+        val (mixed_x, mixed_y) = cutmix.mix(batch_x, batch_y)
+        ```
+    """
+    alpha: f64
+
+    fn __init__(alpha: f64 = 1.0):
+        """Initialize cutmix.
+
+        Args:
+            alpha: Beta distribution parameter
+        """
+        self.alpha = alpha
+
+    fn mix(x1: Tensor, y1: any, x2: Tensor, y2: any) -> (Tensor, any):
+        """Mix two samples using cutmix.
+
+        Args:
+            x1: First input tensor [C, H, W]
+            y1: First label
+            x2: Second input tensor [C, H, W]
+            y2: Second label
+
+        Returns:
+            Tuple of (mixed_x, mixed_y)
+        """
+        val lam = _sample_beta(self.alpha, self.alpha)
+
+        # Get bounding box for cut
+        val shape = x1.shape()
+        val h = shape[1]
+        val w = shape[2]
+
+        val cut_h = (h.to_float() * (1.0 - lam).sqrt()) as i64
+        val cut_w = (w.to_float() * (1.0 - lam).sqrt()) as i64
+
+        val cx = (rand() * w.to_float()) as i64
+        val cy = (rand() * h.to_float()) as i64
+
+        val x1_clip = max(cx - cut_w / 2, 0)
+        val y1_clip = max(cy - cut_h / 2, 0)
+        val x2_clip = min(cx + cut_w / 2, w)
+        val y2_clip = min(cy + cut_h / 2, h)
+
+        # Replace region (placeholder - would copy from x2 to x1)
+        val mixed_x = x1
+
+        # Compute actual lambda based on area
+        val box_area = (x2_clip - x1_clip) * (y2_clip - y1_clip)
+        val actual_lam = 1.0 - box_area.to_float() / (h * w).to_float()
+
+        val mixed_y = {"y1": y1, "y2": y2, "lam": actual_lam}
+
+        return (mixed_x, mixed_y)
+
+
+class CutmixMixup:
+    """Combined Cutmix and Mixup augmentation.
+
+    Randomly applies either Cutmix or Mixup to each batch.
+
+    Example:
+        ```simple
+        val aug = CutmixMixup(mixup_alpha=0.8, cutmix_alpha=1.0, prob=0.5)
+        val (mixed_x, mixed_y) = aug.mix(batch_x, batch_y)
+        ```
+    """
+    mixup: Mixup
+    cutmix: Cutmix
+    mixup_prob: f64
+    cutmix_prob: f64
+
+    fn __init__(mixup_alpha: f64 = 0.8, cutmix_alpha: f64 = 1.0,
+                mixup_prob: f64 = 0.5, cutmix_prob: f64 = 0.5):
+        """Initialize combined augmentation.
+
+        Args:
+            mixup_alpha: Beta parameter for mixup
+            cutmix_alpha: Beta parameter for cutmix
+            mixup_prob: Probability of applying mixup
+            cutmix_prob: Probability of applying cutmix
+        """
+        self.mixup = Mixup(mixup_alpha)
+        self.cutmix = Cutmix(cutmix_alpha)
+        self.mixup_prob = mixup_prob
+        self.cutmix_prob = cutmix_prob
+
+    fn mix(x1: Tensor, y1: any, x2: Tensor, y2: any) -> (Tensor, any):
+        """Apply random augmentation.
+
+        Args:
+            x1: First input tensor
+            y1: First label
+            x2: Second input tensor
+            y2: Second label
+
+        Returns:
+            Tuple of (mixed_x, mixed_y)
+        """
+        val r = rand()
+
+        if r < self.mixup_prob:
+            return self.mixup.mix(x1, y1, x2, y2)
+        elif r < self.mixup_prob + self.cutmix_prob:
+            return self.cutmix.mix(x1, y1, x2, y2)
+        else:
+            # No augmentation
+            return (x1, y1)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn _sample_beta(alpha: f64, beta: f64) -> f64:
+    """Sample from Beta distribution using gamma samples.
+
+    Uses the fact that Beta(α, β) = X / (X + Y) where
+    X ~ Gamma(α) and Y ~ Gamma(β).
+    """
+    # Simplified approximation using uniform samples
+    # For proper implementation, would use gamma distribution
+    if alpha <= 0.0:
+        return 0.5
+
+    # Use inverse CDF approximation for Beta when α = β
+    val u = rand()
+    if alpha >= 1.0:
+        # For α >= 1, Beta is roughly uniform-ish
+        return u
+    else:
+        # For α < 1, Beta has U-shape, use power transform
+        val p = 0.5  # Bias toward 0.5
+        return p + (u - 0.5) * alpha
+
+
+fn max(a: i64, b: i64) -> i64:
+    """Maximum of two integers."""
+    if a > b:
+        return a
+    return b
+
+
+fn min(a: i64, b: i64) -> i64:
+    """Minimum of two integers."""
+    if a < b:
+        return a
+    return b

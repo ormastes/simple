@@ -1,0 +1,668 @@
+# Simple Language - Query CLI Rich Subcommands
+#
+# Complex/rich query command implementations.
+# Handles rename, code-actions, workspace-symbols, call-hierarchy,
+# type-hierarchy, semantic-tokens, inlay-hints, selection-range,
+# document-formatting, ast-query, sem-query, query-schema.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+use app.cli.query_sanitize.{sanitize_path, sanitize_symbol, safe_grep, safe_grep_file, safe_process}
+use app.cli.query_engine.{engine_signature_help}
+use app.cli.query_ast_query.{engine_ast_query}
+use app.cli.query_sem_query.{engine_sem_query}
+use app.cli.query_schema.{engine_query_schema}
+use app.cli.query_helpers.{_has_flag, _replace_word, _collect_symbol_sets, _classify_token, _collect_fn_return_types, _infer_type_from_rhs, _count_indent, _extract_flag, _extract_call_name}
+
+fn query_file_read_rich(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn query_signature_help(symbol: text, file: text, line_num: i64, col: i64) -> i64:
+    val clean_sym = sanitize_symbol(symbol)
+    if clean_sym == "":
+        print "Error: invalid symbol name"
+        return 1
+    engine_signature_help(file, line_num, col, clean_sym)
+
+fn query_rename(symbol: text, file: text, line_num: i64, cmd_args: [text]) -> i64:
+    val new_name = _extract_flag(cmd_args, "--new-name", "")
+    if new_name == "":
+        print "Error: --new-name <name> is required for rename"
+        return 1
+
+    val clean_sym = sanitize_symbol(symbol)
+    val clean_new = sanitize_symbol(new_name)
+    if clean_sym == "" or clean_new == "":
+        print "Error: invalid symbol names"
+        return 1
+
+    val apply = _has_flag(cmd_args, "--apply")
+
+    # Find all occurrences with safe_grep
+    val (out, _) = safe_grep("\\b" + clean_sym + "\\b", "src/", "*.spl")
+    if out.trim() == "":
+        print "No occurrences found for: {clean_sym}"
+        return 1
+
+    val result_lines = out.split("\n")
+    var count = 0
+    var edits: [text] = []
+    for line in result_lines:
+        val trimmed = line.trim()
+        if trimmed != "":
+            # Parse file:line:content
+            var colon1 = -1
+            var colon2 = -1
+            var ci = 0
+            while ci < trimmed.len():
+                if trimmed.substring(ci, ci + 1) == ":":
+                    if colon1 == -1:
+                        colon1 = ci
+                    elif colon2 == -1:
+                        colon2 = ci
+                        break
+                ci = ci + 1
+            if colon1 > 0 and colon2 > colon1:
+                val edit_file = trimmed.substring(0, colon1)
+                val edit_line = trimmed.substring(colon1 + 1, colon2)
+                val edit_content = trimmed.substring(colon2 + 1)
+                print "{edit_file}:{edit_line}: {clean_sym} -> {clean_new}"
+                edits.push(edit_file)
+            else:
+                print trimmed
+            count = count + 1
+
+    print ""
+    print "Total occurrences: {count}"
+
+    if apply:
+        # Apply edits using safe sed-like replacement via rt_process_run
+        var edited_files: [text] = []
+        for edit_file in edits:
+            var already_done = false
+            for done in edited_files:
+                if done == edit_file:
+                    already_done = true
+                    break
+            if not already_done:
+                val content = rt_file_read_text(edit_file) ?? ""
+                if content != "":
+                    val updated = _replace_word(content, clean_sym, clean_new)
+                    rt_file_write_text(edit_file, updated)
+                    edited_files.push(edit_file)
+                    print "Applied: {edit_file}"
+        print ""
+        print "Rename applied to {edited_files.len()} files"
+    else:
+        print "Rename: {clean_sym} -> {clean_new} (dry-run, use --apply to write)"
+    0
+
+fn query_code_actions(file: text, line_num: i64) -> i64:
+    # TODO: check/fix commands are stubs (cli_check, cli_run_fix return "not implemented").
+    # When they are implemented, call them in-process instead of via subprocess.
+    val check_out = ""
+    val fix_out = ""
+
+    val line_str = "{line_num}"
+
+    var has_diagnostics = false
+    if check_out.trim() != "":
+        val check_lines = check_out.split("\n")
+        print "--- Diagnostics ---"
+        for cline in check_lines:
+            val ct = cline.trim()
+            if (ct != "" and ct.contains(":" + line_str + ":")):
+                print ct
+                has_diagnostics = true
+            elif (ct != "" and ct.contains(":" + line_str + " ")):
+                print ct
+                has_diagnostics = true
+
+    var has_fixes = false
+    if fix_out.trim() != "":
+        val fix_lines = fix_out.split("\n")
+        print ""
+        print "--- Suggested Fixes ---"
+        for fline in fix_lines:
+            val ft = fline.trim()
+            if ft != "" and ft.contains(":" + line_str):
+                print ft
+                has_fixes = true
+
+    if not has_diagnostics and not has_fixes:
+        print "No code actions available at {file}:{line_num}"
+    0
+
+fn query_workspace_symbols(cmd_args: [text]) -> i64:
+    val query = _extract_flag(cmd_args, "--query", "")
+    val kind = _extract_flag(cmd_args, "--kind", "")
+
+    if query == "" and kind == "":
+        print "Error: --query <pattern> or --kind <kind> required"
+        print "Kinds: fn, class, struct, enum, trait"
+        return 1
+
+    val clean_query = sanitize_symbol(query)
+
+    var grep_pattern = ""
+    if kind != "":
+        val clean_kind = sanitize_symbol(kind)
+        if clean_kind == "":
+            print "Error: invalid kind"
+            return 1
+        if clean_query != "":
+            grep_pattern = "^" + clean_kind + " " + clean_query
+        else:
+            grep_pattern = "^" + clean_kind + " "
+    else:
+        grep_pattern = "^fn " + clean_query + "\\|^class " + clean_query + "\\|^struct " + clean_query + "\\|^enum " + clean_query + "\\|^trait " + clean_query
+
+    val (out, _) = safe_grep(grep_pattern, "src/", "*.spl")
+    if out.trim() == "":
+        print "No workspace symbols found"
+        return 0
+
+    # Limit output to 50 lines
+    val result_lines = out.split("\n")
+    var count = 0
+    for rline in result_lines:
+        if rline.trim() != "" and count < 50:
+            print rline
+            count = count + 1
+    0
+
+fn query_call_hierarchy(symbol: text, file: text, cmd_args: [text]) -> i64:
+    val direction = _extract_flag(cmd_args, "--direction", "incoming")
+    val clean_sym = sanitize_symbol(symbol)
+    if clean_sym == "":
+        print "Error: invalid symbol name"
+        return 1
+
+    if direction == "incoming":
+        val (out, _) = safe_grep("\\b" + clean_sym + "(", "src/", "*.spl")
+        if out.trim() == "":
+            print "No incoming calls found for: {clean_sym}"
+            return 0
+        print "--- Incoming calls to {clean_sym} ---"
+        val result_lines = out.split("\n")
+        var count = 0
+        for rline in result_lines:
+            if rline.trim() != "" and count < 50:
+                print rline
+                count = count + 1
+    elif direction == "outgoing":
+        val content = query_file_read_rich(file)
+        if content == "":
+            print "Could not read file: {file}"
+            return 1
+
+        val lines = content.split("\n")
+        var fn_start = -1
+        var li = 0
+        while li < lines.len():
+            val line = lines[li]
+            val tl = line.trim()
+            if (tl.starts_with("fn " + clean_sym + "(") or
+                tl.starts_with("fn " + clean_sym + " (")):
+                fn_start = li
+                break
+            li = li + 1
+
+        if fn_start == -1:
+            print "Could not find function body for: {clean_sym}"
+            return 1
+
+        # Extract function calls from body lines
+        var seen_calls: [text] = []
+        var bi = fn_start + 1
+        while bi < lines.len():
+            val bline = lines[bi]
+            if bline.len() == 0:
+                bi = bi + 1
+                continue
+            val first_ch = bline.substring(0, 1)
+            if first_ch != " " and first_ch != "\t":
+                break
+            # Scan for identifier( patterns
+            var ci = 0
+            while ci < bline.len():
+                val ch = bline.substring(ci, ci + 1)
+                val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+                if is_alpha:
+                    var end_ci = ci + 1
+                    while end_ci < bline.len():
+                        val wc = bline.substring(end_ci, end_ci + 1)
+                        val ww = (wc >= "a" and wc <= "z") or (wc >= "A" and wc <= "Z") or (wc >= "0" and wc <= "9") or wc == "_"
+                        if not ww:
+                            break
+                        end_ci = end_ci + 1
+                    if end_ci < bline.len() and bline.substring(end_ci, end_ci + 1) == "(":
+                        val call_name = bline.substring(ci, end_ci)
+                        var already = false
+                        for s in seen_calls:
+                            if s == call_name:
+                                already = true
+                                break
+                        if not already:
+                            seen_calls.push(call_name)
+                    ci = end_ci
+                else:
+                    ci = ci + 1
+            bi = bi + 1
+
+        if seen_calls.len() == 0:
+            print "No outgoing calls found from: {clean_sym}"
+            return 0
+        print "--- Outgoing calls from {clean_sym} ---"
+        for call_name in seen_calls:
+            print call_name
+    else:
+        print "Error: --direction must be 'incoming' or 'outgoing'"
+        return 1
+    0
+
+fn query_type_hierarchy(symbol: text, file: text, cmd_args: [text]) -> i64:
+    val direction = _extract_flag(cmd_args, "--direction", "supertypes")
+    val clean_sym = sanitize_symbol(symbol)
+    if clean_sym == "":
+        print "Error: invalid symbol name"
+        return 1
+
+    if direction == "supertypes":
+        val (out, _) = safe_grep("impl.*" + clean_sym, "src/", "*.spl")
+        if out.trim() == "":
+            print "No supertypes found for: {clean_sym}"
+            return 0
+        print "--- Supertypes (trait impls) for {clean_sym} ---"
+        val result_lines = out.split("\n")
+        var count = 0
+        for rline in result_lines:
+            if rline.trim() != "" and count < 30:
+                print rline
+                count = count + 1
+    elif direction == "subtypes":
+        val (trait_out, _) = safe_grep("^trait " + clean_sym, "src/", "*.spl")
+        if trait_out.trim() == "":
+            print "No trait definition found for: {clean_sym}"
+            return 0
+        val (impls_out, _2) = safe_grep("impl " + clean_sym + " ", "src/", "*.spl")
+        if impls_out.trim() == "":
+            print "No subtypes (implementors) found for trait: {clean_sym}"
+            return 0
+        print "--- Subtypes (implementors) of trait {clean_sym} ---"
+        val impl_lines = impls_out.split("\n")
+        var count = 0
+        for rline in impl_lines:
+            if rline.trim() != "" and count < 30:
+                print rline
+                count = count + 1
+    else:
+        print "Error: --direction must be 'supertypes' or 'subtypes'"
+        return 1
+    0
+
+fn query_semantic_tokens(file: text, cmd_args: [text]) -> i64:
+    val clean_file = sanitize_path(file)
+    if clean_file == "":
+        print "Error: invalid file path"
+        return 1
+    val start_line_str = _extract_flag(cmd_args, "--start-line", "1")
+    val end_line_str = _extract_flag(cmd_args, "--end-line", "0")
+    val start_line = start_line_str.to_int()
+    var end_line = end_line_str.to_int()
+
+    val content = query_file_read_rich(clean_file)
+    if content == "":
+        print "Could not read file: {clean_file}"
+        return 1
+
+    val lines = content.split("\n")
+    if end_line <= 0 or end_line > lines.len():
+        end_line = lines.len()
+
+    # Build symbol sets from outline for classification
+    var fn_names: [text] = []
+    var type_names: [text] = []
+    var param_names: [text] = []
+    _collect_symbol_sets(content, fn_names, type_names, param_names)
+
+    val keywords = "fn,class,struct,enum,trait,if,elif,else,for,while,match,case,return,val,var,use,import,export,extern,static,me,break,continue,in,not,and,or,true,false,nil,self,impl,type,alias"
+    val kw_list = keywords.split(",")
+
+    val operators = "->,:=,==,!=,>=,<=,|>,>>,~>,**,+=,-=,*=,/=,%=,??,?.,.?"
+    val op_list = operators.split(",")
+
+    var token_count = 0
+    var li = start_line
+    while li <= end_line and li <= lines.len():
+        val line = lines[li - 1]
+        var ci = 0
+        while ci < line.len() and token_count < 500:
+            val ch = line.substring(ci, ci + 1)
+
+            if ch == " " or ch == "\t":
+                ci = ci + 1
+                continue
+
+            # Comment
+            if ch == "#":
+                val comment_len = line.len() - ci
+                print "{li}:{ci}:{comment_len}:comment"
+                token_count = token_count + 1
+                break
+
+            # String literal
+            if ch == "\"":
+                var si = ci + 1
+                while si < line.len():
+                    val sc = line.substring(si, si + 1)
+                    if sc == "\\":
+                        si = si + 2
+                        continue
+                    if sc == "\"":
+                        si = si + 1
+                        break
+                    si = si + 1
+                val str_len = si - ci
+                print "{li}:{ci}:{str_len}:string"
+                token_count = token_count + 1
+                ci = si
+                continue
+
+            # Number
+            val is_digit = ch >= "0" and ch <= "9"
+            if is_digit:
+                var ni = ci + 1
+                while ni < line.len():
+                    val nc = line.substring(ni, ni + 1)
+                    val nd = nc >= "0" and nc <= "9"
+                    if (not nd and nc != "." and nc != "_" and
+                        nc != "x" and nc != "b" and nc != "o" and
+                        nc != "a" and nc != "c" and nc != "d" and
+                        nc != "e" and nc != "f" and nc != "A" and
+                        nc != "B" and nc != "C" and nc != "D" and
+                        nc != "E" and nc != "F"):
+                        break
+                    ni = ni + 1
+                val num_len = ni - ci
+                print "{li}:{ci}:{num_len}:number"
+                token_count = token_count + 1
+                ci = ni
+                continue
+
+            # Identifier or keyword
+            val is_alpha = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+            if is_alpha:
+                var wi = ci + 1
+                while wi < line.len():
+                    val wc = line.substring(wi, wi + 1)
+                    val ww = (wc >= "a" and wc <= "z") or (wc >= "A" and wc <= "Z") or (wc >= "0" and wc <= "9") or wc == "_"
+                    if not ww:
+                        break
+                    wi = wi + 1
+                val word = line.substring(ci, wi)
+                val word_len = wi - ci
+
+                val token_type = _classify_token(word, ci, line, kw_list, fn_names, type_names, param_names)
+                print "{li}:{ci}:{word_len}:{token_type}"
+                token_count = token_count + 1
+                ci = wi
+                continue
+
+            # Operator (multi-char)
+            if ci + 1 < line.len():
+                val two = line.substring(ci, ci + 2)
+                var is_op = false
+                for op in op_list:
+                    if two == op:
+                        is_op = true
+                        break
+                if is_op:
+                    print "{li}:{ci}:2:operator"
+                    token_count = token_count + 1
+                    ci = ci + 2
+                    continue
+
+            ci = ci + 1
+
+        li = li + 1
+
+    if token_count >= 500:
+        print "# (truncated at 500 tokens)"
+    0
+
+fn query_inlay_hints(file: text, cmd_args: [text]) -> i64:
+    val clean_file = sanitize_path(file)
+    if clean_file == "":
+        print "Error: invalid file path"
+        return 1
+    val start_line_str = _extract_flag(cmd_args, "--start-line", "1")
+    val end_line_str = _extract_flag(cmd_args, "--end-line", "0")
+    val start_line = start_line_str.to_int()
+    var end_line = end_line_str.to_int()
+
+    val content = query_file_read_rich(clean_file)
+    if content == "":
+        print "Could not read file: {clean_file}"
+        return 1
+
+    val lines = content.split("\n")
+    if end_line <= 0 or end_line > lines.len():
+        end_line = lines.len()
+
+    # Build function return type map from outline for better inference
+    var fn_names: [text] = []
+    var fn_returns: [text] = []
+    _collect_fn_return_types(content, fn_names, fn_returns)
+
+    var hint_count = 0
+    var li = start_line
+    while li <= end_line and li <= lines.len():
+        val line = lines[li - 1]
+        val trimmed = line.trim()
+
+        var binding_prefix = ""
+        var name_start = 0
+        if trimmed.starts_with("val "):
+            binding_prefix = "val"
+            name_start = 4
+        elif trimmed.starts_with("var "):
+            binding_prefix = "var"
+            name_start = 4
+
+        if binding_prefix != "":
+            val after_kw = trimmed.substring(name_start)
+            var name_chars: [text] = []
+            var ni = 0
+            for nc in after_kw:
+                val nw = (nc >= "a" and nc <= "z") or (nc >= "A" and nc <= "Z") or (nc >= "0" and nc <= "9") or nc == "_"
+                if not nw:
+                    break
+                name_chars.push(nc)
+                ni = ni + 1
+            val var_name = name_chars.join("")
+
+            if var_name != "":
+                val after_name = after_kw.substring(ni).trim()
+                var has_annotation = false
+                if after_name.starts_with(":"):
+                    if after_name.len() > 1:
+                        val next = after_name.substring(1, 2)
+                        if next != "=":
+                            has_annotation = true
+
+                if not has_annotation and after_name.contains("="):
+                    var eq_pos = 0
+                    var found_eq = false
+                    var eqi = 0
+                    for ec in after_name:
+                        if ec == "=" and not found_eq:
+                            eq_pos = eqi
+                            found_eq = true
+                            break
+                        eqi = eqi + 1
+                    if found_eq:
+                        val rhs = after_name.substring(eq_pos + 1).trim()
+                        val inferred = _infer_type_from_rhs(rhs, fn_names, fn_returns)
+                        if inferred != "":
+                            val indent_len = line.len() - trimmed.len()
+                            val col_pos = indent_len + name_start + var_name.len()
+                            print "{li}:{col_pos}: {var_name}: {inferred}"
+                            hint_count = hint_count + 1
+
+        li = li + 1
+
+    if hint_count == 0:
+        print "No inlay hints in range"
+    0
+
+fn query_selection_range(file: text, line_num: i64, col: i64) -> i64:
+    val content = query_file_read_rich(file)
+    if content == "":
+        print "Could not read file: {file}"
+        return 1
+
+    val lines = content.split("\n")
+    if line_num < 1 or line_num > lines.len():
+        print "Line {line_num} out of range (file has {lines.len()} lines)"
+        return 1
+
+    val target_line = lines[line_num - 1]
+    val target_indent = _count_indent(target_line)
+
+    # 1. Word at cursor
+    var word_start = col - 1
+    var word_end = col - 1
+    if col > 0 and col <= target_line.len():
+        for _i in range(0, col):
+            if word_start <= 0:
+                break
+            val ch = target_line.substring(word_start - 1, word_start)
+            val iw = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not iw:
+                break
+            word_start = word_start - 1
+        for _i in range(0, 200):
+            if word_end >= target_line.len():
+                break
+            val ch = target_line.substring(word_end, word_end + 1)
+            val iw = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+            if not iw:
+                break
+            word_end = word_end + 1
+    print "Range: {line_num}:{word_start} - {line_num}:{word_end} (word)"
+
+    # 2. Full line (trimmed content)
+    val trim_start = target_indent
+    val trim_end = target_line.len()
+    print "Range: {line_num}:{trim_start} - {line_num}:{trim_end} (expression)"
+
+    # 3. Full line including indent
+    print "Range: {line_num}:0 - {line_num}:{target_line.len()} (line)"
+
+    # 4. Block at same or deeper indent level
+    var block_start = line_num
+    var bi = line_num - 2
+    while bi >= 0:
+        val bl = lines[bi]
+        if bl.trim() == "":
+            bi = bi - 1
+            continue
+        val bi_indent = _count_indent(bl)
+        if bi_indent < target_indent:
+            break
+        block_start = bi + 1
+        bi = bi - 1
+    var block_end = line_num
+    var bj = line_num
+    while bj < lines.len():
+        val bl = lines[bj]
+        if bl.trim() == "":
+            bj = bj + 1
+            continue
+        val bj_indent = _count_indent(bl)
+        if bj_indent < target_indent:
+            break
+        block_end = bj + 1
+        bj = bj + 1
+    print "Range: {block_start}:0 - {block_end}:{lines[block_end - 1].len()} (block)"
+
+    # 5. Enclosing function or class
+    var enclosing_start = -1
+    var ei = line_num - 2
+    while ei >= 0:
+        val el = lines[ei]
+        val et = el.trim()
+        val starts_fn = et.starts_with("fn ")
+        val starts_class = et.starts_with("class ")
+        val starts_struct = et.starts_with("struct ")
+        if starts_fn or starts_class or starts_struct:
+            enclosing_start = ei + 1
+            break
+        ei = ei - 1
+    if enclosing_start > 0:
+        # Find end of enclosing block
+        var enc_end = enclosing_start
+        var ej = enclosing_start
+        while ej < lines.len():
+            val el = lines[ej]
+            if el.trim() == "":
+                ej = ej + 1
+                continue
+            val ej_indent = _count_indent(el)
+            if ej > enclosing_start and ej_indent == 0:
+                break
+            enc_end = ej + 1
+            ej = ej + 1
+        print "Range: {enclosing_start}:0 - {enc_end}:{lines[enc_end - 1].len()} (function)"
+
+    # 6. Entire file
+    print "Range: 1:0 - {lines.len()}:{lines[lines.len() - 1].len()} (file)"
+    0
+
+fn query_document_formatting(file: text) -> i64:
+    val clean_file = sanitize_path(file)
+    if clean_file == "":
+        print "Error: invalid file path"
+        return 1
+    # TODO: fmt command is a stub (cli_run_fmt returns "not implemented").
+    # When it is implemented, call it in-process instead of via subprocess.
+    val out = ""
+    val code = 0
+    if out.trim() != "":
+        print out
+    else:
+        if code == 0:
+            print "File is already formatted: {clean_file}"
+        else:
+            print "Formatting failed for: {clean_file}"
+    code
+
+fn query_ast_query(cmd_args: [text]) -> i64:
+    if cmd_args.len() < 2:
+        print "Error: ast-query requires a pattern argument"
+        print "Usage: simple query ast-query '(node_kind pred: \"value\")' [--files path] [--format text|json|compact]"
+        return 1
+    val query_str = cmd_args[1]
+    val files_arg = _extract_flag(cmd_args, "--files", "src/")
+    val format_str = _extract_flag(cmd_args, "--format", "text")
+    var files: [text] = [files_arg]
+    engine_ast_query(query_str, files, format_str)
+
+fn query_sem_query(cmd_args: [text]) -> i64:
+    if cmd_args.len() < 2:
+        print "Error: sem-query requires a query argument"
+        print "Usage: simple query sem-query 'FIND <target> WHERE <pred>' [--files path] [--format text|json|compact]"
+        return 1
+    val query_str = cmd_args[1]
+    val files_arg = _extract_flag(cmd_args, "--files", "src/")
+    val format_str = _extract_flag(cmd_args, "--format", "text")
+    var files: [text] = [files_arg]
+    engine_sem_query(query_str, files, format_str)
+
+fn query_query_schema(cmd_args: [text]) -> i64:
+    var kind = ""
+    if cmd_args.len() >= 2:
+        kind = cmd_args[1]
+    engine_query_schema(kind)

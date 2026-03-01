@@ -1,0 +1,291 @@
+# Simple Language - Query CLI Helpers
+#
+# Shared helper/utility functions used by query command implementations.
+# Includes flag extraction, word replacement, symbol set collection,
+# token classification, type inference, and AST/text utilities.
+
+fn _has_flag(cmd_args: [text], flag_name: text) -> bool:
+    for arg in cmd_args:
+        if arg == flag_name:
+            return true
+    false
+
+fn _extract_flag(cmd_args: [text], flag_name: text, default_val: text) -> text:
+    # Extract a --flag value from cmd_args list
+    var i = 0
+    while i < cmd_args.len():
+        if cmd_args[i] == flag_name and i + 1 < cmd_args.len():
+            return cmd_args[i + 1]
+        i = i + 1
+    default_val
+
+fn _replace_word(content: text, old_word: text, new_word: text) -> text:
+    # Replace all whole-word occurrences of old_word with new_word
+    var result: [text] = []
+    var pos = 0
+    while pos <= content.len() - old_word.len():
+        val candidate = content.substring(pos, pos + old_word.len())
+        if candidate == old_word:
+            var left_ok = true
+            var right_ok = true
+            if pos > 0:
+                val lch = content.substring(pos - 1, pos)
+                val lw = (lch >= "a" and lch <= "z") or (lch >= "A" and lch <= "Z") or (lch >= "0" and lch <= "9") or lch == "_"
+                if lw:
+                    left_ok = false
+            if pos + old_word.len() < content.len():
+                val rch = content.substring(pos + old_word.len(), pos + old_word.len() + 1)
+                val rw = (rch >= "a" and rch <= "z") or (rch >= "A" and rch <= "Z") or (rch >= "0" and rch <= "9") or rch == "_"
+                if rw:
+                    right_ok = false
+            if left_ok and right_ok:
+                result.push(new_word)
+                pos = pos + old_word.len()
+                continue
+        result.push(content.substring(pos, pos + 1))
+        pos = pos + 1
+    # Remaining chars
+    if pos < content.len():
+        result.push(content.substring(pos))
+    result.join("")
+
+fn _collect_symbol_sets(content: text, fn_names: [text], type_names: [text], param_names: [text]):
+    # Scan content for function names, type names, param names
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+            var rest = trimmed
+            if rest.starts_with("fn "):
+                rest = rest.substring(3)
+            elif rest.starts_with("me "):
+                rest = rest.substring(3)
+            val name = _extract_ident_from(rest)
+            if name != "":
+                fn_names.push(name)
+            # Extract param names
+            val params = _extract_params_from(rest)
+            val param_list = params.split(",")
+            for param in param_list:
+                val pt = param.trim()
+                val pname = _extract_ident_from(pt)
+                if pname != "":
+                    param_names.push(pname)
+        elif trimmed.starts_with("static fn "):
+            val name = _extract_ident_from(trimmed.substring(10))
+            if name != "":
+                fn_names.push(name)
+        elif trimmed.starts_with("class "):
+            val name = _extract_ident_from(trimmed.substring(6))
+            if name != "":
+                type_names.push(name)
+        elif trimmed.starts_with("struct "):
+            val name = _extract_ident_from(trimmed.substring(7))
+            if name != "":
+                type_names.push(name)
+        elif trimmed.starts_with("enum "):
+            val name = _extract_ident_from(trimmed.substring(5))
+            if name != "":
+                type_names.push(name)
+        elif trimmed.starts_with("trait "):
+            val name = _extract_ident_from(trimmed.substring(6))
+            if name != "":
+                type_names.push(name)
+
+fn _classify_token(word: text, col: i64, line: text, kw_list: [text], fn_names: [text], type_names: [text], param_names: [text]) -> text:
+    # Check keyword first
+    for kw in kw_list:
+        if word == kw:
+            return "keyword"
+
+    # Check if it's a type name (starts with uppercase)
+    val first = word.substring(0, 1)
+    val is_upper = first >= "A" and first <= "Z"
+    if is_upper:
+        for tn in type_names:
+            if word == tn:
+                return "type"
+        return "type"
+
+    # Check if it's a function name
+    for fn_name in fn_names:
+        if word == fn_name:
+            # Check if followed by ( on this line
+            val after_pos = col + word.len()
+            if after_pos < line.len():
+                val next_ch = line.substring(after_pos, after_pos + 1)
+                if next_ch == "(":
+                    return "function"
+            return "function"
+
+    # Check if it's a parameter
+    for pn in param_names:
+        if word == pn:
+            return "parameter"
+
+    # Check if preceded by . (property access)
+    if col > 0:
+        val prev = line.substring(col - 1, col)
+        if prev == ".":
+            return "property"
+
+    # Check if self
+    if word == "self":
+        return "keyword"
+
+    "variable"
+
+fn _collect_fn_return_types(content: text, fn_names: [text], fn_returns: [text]):
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        var rest = ""
+        if trimmed.starts_with("fn "):
+            rest = trimmed.substring(3)
+        elif trimmed.starts_with("static fn "):
+            rest = trimmed.substring(10)
+        elif trimmed.starts_with("me "):
+            rest = trimmed.substring(3)
+        elif trimmed.starts_with("extern fn "):
+            rest = trimmed.substring(10)
+        if rest != "":
+            val name = _extract_ident_from(rest)
+            val ret = _extract_return_from(rest)
+            fn_names.push(name)
+            fn_returns.push(ret)
+
+fn _infer_type_from_rhs(rhs: text, fn_names: [text], fn_returns: [text]) -> text:
+    if rhs == "":
+        return ""
+
+    val first = rhs.substring(0, 1)
+
+    if first == "\"":
+        return "text"
+    if rhs == "true" or rhs == "false":
+        return "bool"
+    if rhs == "nil":
+        return "nil"
+    if first == "[":
+        return "array"
+    if first == "(" and rhs.contains(","):
+        return "tuple"
+
+    # Negative number
+    if first == "-" and rhs.len() > 1:
+        val second = rhs.substring(1, 2)
+        val is_d = second >= "0" and second <= "9"
+        if is_d:
+            if rhs.contains("."):
+                return "f64"
+            return "i64"
+
+    val is_digit = first >= "0" and first <= "9"
+    if is_digit:
+        if rhs.starts_with("0x") or rhs.starts_with("0b") or rhs.starts_with("0o"):
+            return "i64"
+        if rhs.contains("."):
+            return "f64"
+        return "i64"
+
+    # Function call — look up return type from outline
+    if rhs.contains("("):
+        val call_name = _extract_call_name(rhs)
+        if call_name != "":
+            var fi = 0
+            while fi < fn_names.len():
+                if fn_names[fi] == call_name:
+                    if fi < fn_returns.len() and fn_returns[fi] != "":
+                        return fn_returns[fi]
+                fi = fi + 1
+        return "inferred"
+
+    ""
+
+fn _count_indent(line: text) -> i64:
+    var count = 0
+    for ch in line:
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn _extract_ident_from(s: text) -> text:
+    var end_pos = 0
+    while end_pos < s.len():
+        val ch = s.substring(end_pos, end_pos + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return ""
+    s.substring(0, end_pos)
+
+fn _extract_params_from(s: text) -> text:
+    var paren_start = -1
+    var pi = 0
+    while pi < s.len():
+        if s.substring(pi, pi + 1) == "(":
+            paren_start = pi
+            break
+        pi = pi + 1
+    if paren_start < 0:
+        return ""
+    var depth = 0
+    var paren_end = -1
+    var qi = paren_start
+    while qi < s.len():
+        val ch = s.substring(qi, qi + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                paren_end = qi
+                break
+        qi = qi + 1
+    if paren_end < 0:
+        return ""
+    s.substring(paren_start + 1, paren_end)
+
+fn _extract_return_from(s: text) -> text:
+    var ai = 0
+    while ai < s.len() - 1:
+        val two = s.substring(ai, ai + 2)
+        if two == "->":
+            val after = s.substring(ai + 2).trim()
+            var end_pos = 0
+            while end_pos < after.len():
+                val ch = after.substring(end_pos, end_pos + 1)
+                if ch == ":":
+                    break
+                end_pos = end_pos + 1
+            return after.substring(0, end_pos).trim()
+        ai = ai + 1
+    ""
+
+fn _extract_call_name(rhs: text) -> text:
+    # Extract function name from a call expression like "foo(x, y)"
+    var end_pos = 0
+    while end_pos < rhs.len():
+        val ch = rhs.substring(end_pos, end_pos + 1)
+        if ch == "(":
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return ""
+    # Handle method calls: obj.method( -> take "method"
+    var name_part = rhs.substring(0, end_pos)
+    var dot_pos = -1
+    var di = 0
+    while di < name_part.len():
+        if name_part.substring(di, di + 1) == ".":
+            dot_pos = di
+        di = di + 1
+    if dot_pos >= 0:
+        name_part = name_part.substring(dot_pos + 1)
+    name_part.trim()

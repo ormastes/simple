@@ -1,0 +1,427 @@
+# Bundling Operations
+# Bundler class for creating and managing deployment bundles
+
+use core.result.{Result, Ok, Err}
+use shell.{shell, file, dir, path, env}
+use tooling.deployment.bundling.{BundleEntry, EntryType, Bundle, BundleType, CompressionLevel}
+
+# Bundler
+pub class Bundler:
+    pub verbose: bool
+    pub entries: List<BundleEntry>
+
+    pub fn new() -> Bundler:
+        """Create bundler.
+
+        Returns:
+            Bundler instance
+
+        Example:
+            val bundler = Bundler.new()
+
+            bundler.add_binary("target/release/app")
+            bundler.add_library("target/release/libapp.so")
+            bundler.add_scripts("scripts/start.sh")
+            bundler.add_config("config/production.toml")
+
+            val bundle = bundler.create_bundle("app-bundle.tar.gz")
+            print("Bundle contains {bundle.file_count()} files")
+        """
+        Bundler {
+            verbose: false,
+            entries: []
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
+
+    pub fn is_verbose(self) -> bool:
+        """Check if verbose logging is enabled.
+
+        Returns:
+            True if verbose mode is on
+        """
+        self.verbose
+
+    pub fn with_verbose(self, enabled: bool) -> Bundler:
+        """Set verbose logging (fluent API).
+
+        Args:
+            enabled: Verbose flag
+
+        Returns:
+            Self for chaining
+
+        Example:
+            val bundler = Bundler.new().with_verbose(true)
+        """
+        self.verbose = enabled
+        self
+
+    pub fn has_entries(self) -> bool:
+        """Check if bundler has entries.
+
+        Returns:
+            True if entries exist
+        """
+        self.entries.len() > 0
+
+    pub fn summary(self) -> text:
+        """Get bundler summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            bundler.summary()
+            # → "Bundler: 10 entries (verbose: true)"
+        """
+        val verbose_str = if self.verbose: "true" else: "false"
+        "Bundler: {self.get_entry_count()} entries (verbose: {verbose_str})"
+
+    pub fn add_binary(self, binary_path: text):
+        """Add binary to bundle.
+
+        Args:
+            binary_path: Path to binary
+        """
+        if self.verbose:
+            print("Adding binary: {binary_path}")
+
+        val entry = BundleEntry.new(binary_path, EntryType.Binary)
+        self.entries.append(entry)
+
+    pub fn add_library(self, lib_path: text):
+        """Add library to bundle.
+
+        Args:
+            lib_path: Path to library
+        """
+        if self.verbose:
+            print("Adding library: {lib_path}")
+
+        val entry = BundleEntry.new(lib_path, EntryType.Library)
+        self.entries.append(entry)
+
+    pub fn add_scripts(self, script_path: text):
+        """Add scripts to bundle.
+
+        Args:
+            script_path: Path to script or script directory
+        """
+        if self.verbose:
+            print("Adding scripts: {script_path}")
+
+        val entry = BundleEntry.new(script_path, EntryType.Script)
+        self.entries.append(entry)
+
+    pub fn add_config(self, config_path: text):
+        """Add configuration to bundle.
+
+        Args:
+            config_path: Path to config file
+        """
+        if self.verbose:
+            print("Adding config: {config_path}")
+
+        val entry = BundleEntry.new(config_path, EntryType.Config)
+        self.entries.append(entry)
+
+    pub fn add_resources(self, resource_path: text):
+        """Add resource files to bundle.
+
+        Args:
+            resource_path: Path to resource directory
+        """
+        if self.verbose:
+            print("Adding resources: {resource_path}")
+
+        val entry = BundleEntry.new(resource_path, EntryType.Resource)
+        self.entries.append(entry)
+
+    pub fn create_bundle(self, output_path: text) -> Bundle:
+        """Create bundle from added entries.
+
+        Args:
+            output_path: Output bundle path
+
+        Returns:
+            Created bundle
+
+        Example:
+            val bundle = bundler.create_bundle("app-bundle.tar.gz")
+            bundle.write(output_path)
+        """
+        val bundle = Bundle.new("bundle", BundleType.Application)
+
+        if self.verbose:
+            print("Creating bundle: {output_path}")
+            print("  Including {self.entries.len()} entries")
+
+        # Add all collected entries
+        for entry in self.entries:
+            bundle.add_entry(entry)
+
+        # Create archive based on output file extension
+        if output_path.ends_with(".tar.gz") or output_path.ends_with(".tgz"):
+            self.create_tar_gz(output_path)
+        elif output_path.ends_with(".tar"):
+            self.create_tar(output_path)
+        elif output_path.ends_with(".zip"):
+            self.create_zip(output_path)
+        else:
+            # Default to tar.gz
+            self.create_tar_gz(output_path + ".tar.gz")
+
+        bundle
+
+    fn create_tar_gz(output_path: text):
+        """Create tar.gz archive.
+
+        Args:
+            output_path: Output archive path
+        """
+        var args = ["-czf", output_path]
+        for entry in self.entries:
+            args.append(entry.path)
+
+        val result = shell.run("tar", args)
+        if result.exit_code != 0 and self.verbose:
+            print("Warning: tar failed: {result.stderr}")
+
+    fn create_tar(output_path: text):
+        """Create tar archive.
+
+        Args:
+            output_path: Output archive path
+        """
+        var args = ["-cf", output_path]
+        for entry in self.entries:
+            args.append(entry.path)
+
+        val result = shell.run("tar", args)
+        if result.exit_code != 0 and self.verbose:
+            print("Warning: tar failed: {result.stderr}")
+
+    fn create_zip(output_path: text):
+        """Create zip archive.
+
+        Args:
+            output_path: Output archive path
+        """
+        var args = ["-r", output_path]
+        for entry in self.entries:
+            args.append(entry.path)
+
+        val result = shell.run("zip", args)
+        if result.exit_code != 0 and self.verbose:
+            print("Warning: zip failed: {result.stderr}")
+
+    pub fn get_entry_count(self) -> i32:
+        """Get count of entries to be bundled.
+
+        Returns:
+            Number of entries
+        """
+        self.entries.len()
+
+    pub fn list_entries(self) -> List<text>:
+        """List all entry paths.
+
+        Returns:
+            List of entry paths
+        """
+        val paths: List<text> = []
+        for entry in self.entries:
+            paths.append(entry.path)
+        paths
+
+    pub fn get_entries_by_type(self, entry_type: EntryType) -> List<BundleEntry>:
+        """Get entries of specific type.
+
+        Args:
+            entry_type: Entry type to filter by
+
+        Returns:
+            Filtered entries
+
+        Example:
+            val binaries = bundler.get_entries_by_type(EntryType.Binary)
+            for binary in binaries:
+                print("Binary: {binary.path}")
+        """
+        val filtered: List<BundleEntry> = []
+        for entry in self.entries:
+            if entry.entry_type == entry_type:
+                filtered.append(entry)
+        filtered
+
+    pub fn bundle_dependencies(self, binary_path: text) -> List<text>:
+        """Find and bundle shared library dependencies.
+
+        Args:
+            binary_path: Path to binary
+
+        Returns:
+            List of dependency paths
+
+        Uses ldd/otool to find dependencies.
+
+        Example:
+            val deps = bundler.bundle_dependencies("app")
+            # → ["/usr/lib/libc.so.6", "/lib/libm.so.6", ...]
+        """
+        var deps: List<text> = []
+
+        # Detect platform and use appropriate tool
+        val uname_result = shell.run("uname", ["-s"])
+        val platform = uname_result.stdout.trim()
+
+        if platform == "Darwin":
+            # macOS: use otool -L
+            val result = shell.run("otool", ["-L", binary_path])
+            if result.exit_code == 0:
+                for line in result.stdout.lines():
+                    val trimmed = line.trim()
+                    # Skip header line and extract library path
+                    if trimmed.contains("/") and not trimmed.starts_with(binary_path):
+                        val lib_path = self.extract_otool_path(trimmed)
+                        if not lib_path.is_empty() and not lib_path.starts_with("/System") and not lib_path.starts_with("/usr/lib"):
+                            deps.append(lib_path)
+        else:
+            # Linux: use ldd
+            val result = shell.run("ldd", [binary_path])
+            if result.exit_code == 0:
+                for line in result.stdout.lines():
+                    val trimmed = line.trim()
+                    # Parse ldd output: libname.so => /path/to/lib.so (address)
+                    if trimmed.contains("=>"):
+                        val lib_path = self.extract_ldd_path(trimmed)
+                        if not lib_path.is_empty() and not lib_path.starts_with("/lib") and not lib_path.starts_with("/usr/lib"):
+                            deps.append(lib_path)
+
+        if self.verbose:
+            print("Found {deps.len()} dependencies for {binary_path}")
+
+        deps
+
+    fn extract_otool_path(line: text) -> text:
+        """Extract library path from otool output.
+
+        Args:
+            line: otool output line
+
+        Returns:
+            Library path
+        """
+        # Format: /path/to/lib.dylib (compatibility version...)
+        val paren_idx = line.find(" (")
+        if paren_idx > 0:
+            return line[0:paren_idx].trim()
+        line.trim()
+
+    fn extract_ldd_path(line: text) -> text:
+        """Extract library path from ldd output.
+
+        Args:
+            line: ldd output line
+
+        Returns:
+            Library path
+        """
+        # Format: libname.so => /path/to/lib.so (0x...)
+        val arrow_idx = line.find("=>")
+        if arrow_idx < 0:
+            return ""
+
+        val after_arrow = line[arrow_idx + 2:].trim()
+        val paren_idx = after_arrow.find(" (")
+        if paren_idx > 0:
+            return after_arrow[0:paren_idx].trim()
+        after_arrow
+
+    pub fn create_self_contained_bundle(
+        self,
+        binary_path: text,
+        output_dir: text
+    ) -> Result<(), text>:
+        """Create self-contained bundle with all dependencies.
+
+        Args:
+            binary_path: Path to binary
+            output_dir: Output directory
+
+        Returns:
+            Ok if successful
+
+        Creates directory structure:
+        output_dir/
+        ├── bin/app
+        ├── lib/
+        │   ├── libdep1.so
+        │   └── libdep2.so
+        └── run.sh  # Wrapper script that sets LD_LIBRARY_PATH
+        """
+        if self.verbose:
+            print("Creating self-contained bundle in {output_dir}")
+
+        # Create directory structure
+        val bin_dir = "{output_dir}/bin"
+        val lib_dir = "{output_dir}/lib"
+
+        dir.create(output_dir, true)
+        dir.create(bin_dir, true)
+        dir.create(lib_dir, true)
+
+        # Copy binary to bin/
+        val binary_name = path.basename(binary_path)
+        val target_binary = "{bin_dir}/{binary_name}"
+        file.copy(binary_path, target_binary)
+
+        # Make binary executable
+        shell.run("chmod", ["+x", target_binary])
+
+        if self.verbose:
+            print("  ✓ Copied binary to {target_binary}")
+
+        # Find and copy dependencies to lib/
+        val deps = self.bundle_dependencies(binary_path)
+        for dep in deps:
+            val dep_name = path.basename(dep)
+            val target_dep = "{lib_dir}/{dep_name}"
+            file.copy(dep, target_dep)
+
+            if self.verbose:
+                print("  ✓ Copied dependency {dep_name}")
+
+        # Generate wrapper script
+        val wrapper_path = "{output_dir}/run.sh"
+        val wrapper_content = self.generate_wrapper_script(binary_name)
+        file.write_text(wrapper_path, wrapper_content)
+
+        # Make wrapper executable
+        shell.run("chmod", ["+x", wrapper_path])
+
+        if self.verbose:
+            print("  ✓ Generated wrapper script {wrapper_path}")
+
+        Ok(())
+
+    fn generate_wrapper_script(binary_name: text) -> text:
+        """Generate wrapper script for self-contained bundle.
+
+        Args:
+            binary_name: Name of the binary
+
+        Returns:
+            Wrapper script content
+        """
+        var script = "#!/bin/bash\n"
+        script += "# Auto-generated wrapper script\n\n"
+        script += "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        script += "export LD_LIBRARY_PATH=\"$SCRIPT_DIR/lib:$LD_LIBRARY_PATH\"\n"
+        script += "export DYLD_LIBRARY_PATH=\"$SCRIPT_DIR/lib:$DYLD_LIBRARY_PATH\"\n"
+        script += "\n"
+        script += "exec \"$SCRIPT_DIR/bin/{binary_name}\" \"$@\"\n"
+        script

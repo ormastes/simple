@@ -1,0 +1,599 @@
+# Vulkan FFI - High-Level Wrapper Types
+#
+# High-level wrapper types for Vulkan resources.
+# Builds on the raw extern fn bindings in vulkan_ffi.spl.
+#
+# Provides: VkDevice, VkBuffer, VkWindow, VkSwapchain, WindowEvent
+
+use core.*
+use ui.gui.vulkan_ffi.*
+
+pub struct VkDevice:
+    handle: u64
+
+impl VkDevice:
+    pub fn new() -> Result<VkDevice, text>:
+        val handle = rt_vk_device_create()
+        if handle == 0:
+            return Err("Failed to create Vulkan device")
+        return Ok(VkDevice { handle: handle })
+
+    pub fn wait_idle(self) -> Result<(), text>:
+        val result = rt_vk_device_sync(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to sync device: error {result}")
+        return Ok(())
+
+    pub fn free(self) -> Result<(), text>:
+        val result = rt_vk_device_free(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to free device: error {result}")
+        return Ok(())
+
+    pub fn get_handle(self) -> u64:
+        """Get raw device handle.
+
+        Returns:
+            Device handle
+
+        Example:
+            val device = VkDevice.new()?
+            val handle = device.get_handle()
+        """
+        self.handle
+
+    pub fn is_valid(self) -> bool:
+        """Check if device handle is valid.
+
+        Returns:
+            True if handle is non-zero
+
+        Example:
+            val device = VkDevice.new()?
+            assert(device.is_valid())
+        """
+        self.handle != 0
+
+    pub fn summary(self) -> text:
+        """Get device summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val device = VkDevice.new()?
+            print(device.summary())
+        """
+        return "VkDevice: handle={self.handle}"
+
+pub struct VkBuffer:
+    handle: u64
+    size: u64
+
+impl VkBuffer:
+    pub fn new(device: &VkDevice, size: u64) -> Result<VkBuffer, text>:
+        val handle = rt_vk_buffer_alloc(device.handle, size)
+        if handle == 0:
+            return Err("Failed to allocate buffer")
+        return Ok(VkBuffer { handle: handle, size: size })
+
+    pub fn upload(self, data: &Array<u8>) -> Result<(), text>:
+        val result = rt_vk_buffer_upload(self.handle, data.as_ptr(), data.len() as u64)
+        if result != VK_SUCCESS:
+            return Err("Failed to upload to buffer: error {result}")
+        return Ok(())
+
+    pub fn download(self, size: u64) -> Result<Array<u8>, text>:
+        var data = Array.with_capacity(size as usize)
+        data.resize(size as usize, 0)
+        val result = rt_vk_buffer_download(self.handle, data.as_mut_ptr(), size)
+        if result != VK_SUCCESS:
+            return Err("Failed to download from buffer: error {result}")
+        return Ok(data)
+
+    pub fn free(self) -> Result<(), text>:
+        val result = rt_vk_buffer_free(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to free buffer: error {result}")
+        return Ok(())
+
+    pub fn get_handle(self) -> u64:
+        """Get raw buffer handle.
+
+        Returns:
+            Buffer handle
+
+        Example:
+            val buffer = VkBuffer.new(&device, 1024)?
+            val handle = buffer.get_handle()
+        """
+        self.handle
+
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            val buffer = VkBuffer.new(&device, 1024)?
+            assert(buffer.get_size() == 1024)
+        """
+        self.size
+
+    pub fn is_valid(self) -> bool:
+        """Check if buffer handle is valid.
+
+        Returns:
+            True if handle is non-zero
+
+        Example:
+            val buffer = VkBuffer.new(&device, 1024)?
+            assert(buffer.is_valid())
+        """
+        self.handle != 0
+
+    pub fn is_empty(self) -> bool:
+        """Check if buffer has zero size.
+
+        Returns:
+            True if size is zero
+
+        Example:
+            val buffer = VkBuffer.new(&device, 0)?
+            assert(buffer.is_empty())
+        """
+        self.size == 0
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large buffer (>1MB).
+
+        Returns:
+            True if buffer exceeds 1MB
+
+        Example:
+            val buffer = VkBuffer.new(&device, 2 * 1024 * 1024)?
+            assert(buffer.is_large())
+        """
+        self.size > 1024 * 1024
+
+    pub fn summary(self) -> text:
+        """Get buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val buffer = VkBuffer.new(&device, 1024)?
+            print(buffer.summary())
+        """
+        val kb = self.size / 1024
+        return "VkBuffer: handle={self.handle}, size={kb} KB"
+
+pub struct VkWindow:
+    handle: u64
+    width: u32
+    height: u32
+
+impl VkWindow:
+    pub fn new(title: &str, width: u32, height: u32) -> Result<VkWindow, text>:
+        val handle = rt_vk_window_create(
+            title.as_ptr(),
+            title.len() as u64,
+            width,
+            height
+        )
+        if handle == 0:
+            return Err("Failed to create window")
+        return Ok(VkWindow { handle: handle, width: width, height: height })
+
+    pub fn get_size(self) -> (u32, u32):
+        var w: u32 = 0
+        var h: u32 = 0
+        rt_vk_window_get_size(self.handle, &mut w, &mut h)
+        return (w, h)
+
+    pub fn poll_event(self) -> Option<WindowEvent>:
+        var event_type: i32 = 0
+        var event_data: Array<u8> = Array.with_capacity(64)
+        event_data.resize(64, 0)
+
+        val result = rt_vk_window_poll_event(
+            self.handle,
+            &mut event_type,
+            event_data.as_mut_ptr(),
+            64
+        )
+
+        if result != VK_SUCCESS or event_type == 0:
+            return None
+
+        return Some(WindowEvent.from_raw(event_type, &event_data))
+
+    pub fn free(self) -> Result<(), text>:
+        val result = rt_vk_window_destroy(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to destroy window: error {result}")
+        return Ok(())
+
+    pub fn get_handle(self) -> u64:
+        """Get raw window handle.
+
+        Returns:
+            Window handle
+
+        Example:
+            val window = VkWindow.new("Test", 800, 600)?
+            val handle = window.get_handle()
+        """
+        self.handle
+
+    pub fn get_width(self) -> u32:
+        """Get window width.
+
+        Returns:
+            Width in pixels
+
+        Example:
+            val window = VkWindow.new("Test", 800, 600)?
+            assert(window.get_width() == 800)
+        """
+        self.width
+
+    pub fn get_height(self) -> u32:
+        """Get window height.
+
+        Returns:
+            Height in pixels
+
+        Example:
+            val window = VkWindow.new("Test", 800, 600)?
+            assert(window.get_height() == 600)
+        """
+        self.height
+
+    pub fn is_valid(self) -> bool:
+        """Check if window handle is valid.
+
+        Returns:
+            True if handle is non-zero
+
+        Example:
+            val window = VkWindow.new("Test", 800, 600)?
+            assert(window.is_valid())
+        """
+        self.handle != 0
+
+    pub fn aspect_ratio(self) -> f64:
+        """Calculate window aspect ratio.
+
+        Returns:
+            Width / height ratio
+
+        Example:
+            val window = VkWindow.new("Test", 1920, 1080)?
+            assert(window.aspect_ratio() > 1.7)
+        """
+        (self.width as f64) / (self.height as f64)
+
+    pub fn is_landscape(self) -> bool:
+        """Check if window is landscape orientation.
+
+        Returns:
+            True if width > height
+
+        Example:
+            val window = VkWindow.new("Test", 1920, 1080)?
+            assert(window.is_landscape())
+        """
+        self.width > self.height
+
+    pub fn is_portrait(self) -> bool:
+        """Check if window is portrait orientation.
+
+        Returns:
+            True if height > width
+
+        Example:
+            val window = VkWindow.new("Test", 600, 800)?
+            assert(window.is_portrait())
+        """
+        self.height > self.width
+
+    pub fn is_square(self) -> bool:
+        """Check if window is square.
+
+        Returns:
+            True if width == height
+
+        Example:
+            val window = VkWindow.new("Test", 800, 800)?
+            assert(window.is_square())
+        """
+        self.width == self.height
+
+    pub fn area(self) -> u64:
+        """Get window area in pixels.
+
+        Returns:
+            Total pixel area
+
+        Example:
+            val window = VkWindow.new("Test", 800, 600)?
+            assert(window.area() == 480000)
+        """
+        (self.width as u64) * (self.height as u64)
+
+    pub fn summary(self) -> text:
+        """Get window summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val window = VkWindow.new("Test", 800, 600)?
+            print(window.summary())
+        """
+        val orientation = if self.is_landscape(): "landscape" else if self.is_portrait(): "portrait" else: "square"
+        return "VkWindow: {self.width}x{self.height} ({orientation})"
+
+pub struct VkSwapchain:
+    handle: u64
+
+impl VkSwapchain:
+    pub fn new(device: &VkDevice, window: &VkWindow) -> Result<VkSwapchain, text>:
+        val handle = rt_vk_swapchain_create(
+            device.handle,
+            window.handle,
+            window.width,
+            window.height
+        )
+        if handle == 0:
+            return Err("Failed to create swapchain")
+        return Ok(VkSwapchain { handle: handle })
+
+    pub fn acquire_next_image(self, timeout_ns: u64) -> Result<u32, text>:
+        var image_index: u32 = 0
+        val result = rt_vk_swapchain_acquire_next_image(self.handle, timeout_ns, &mut image_index)
+        if result == VK_ERROR_SWAPCHAIN_OUT_OF_DATE:
+            return Err("Swapchain out of date")
+        if result != VK_SUCCESS:
+            return Err("Failed to acquire image: error {result}")
+        return Ok(image_index)
+
+    pub fn present(self, image_index: u32) -> Result<(), text>:
+        val result = rt_vk_swapchain_present(self.handle, image_index)
+        if result == VK_ERROR_SWAPCHAIN_OUT_OF_DATE:
+            return Err("Swapchain out of date")
+        if result != VK_SUCCESS:
+            return Err("Failed to present: error {result}")
+        return Ok(())
+
+    pub fn recreate(self, width: u32, height: u32) -> Result<(), text>:
+        val result = rt_vk_swapchain_recreate(self.handle, width, height)
+        if result != VK_SUCCESS:
+            return Err("Failed to recreate swapchain: error {result}")
+        return Ok(())
+
+    pub fn free(self) -> Result<(), text>:
+        val result = rt_vk_swapchain_destroy(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to destroy swapchain: error {result}")
+        return Ok(())
+
+    pub fn get_handle(self) -> u64:
+        """Get raw swapchain handle.
+
+        Returns:
+            Swapchain handle
+
+        Example:
+            val swapchain = VkSwapchain.new(&device, &window)?
+            val handle = swapchain.get_handle()
+        """
+        self.handle
+
+    pub fn is_valid(self) -> bool:
+        """Check if swapchain handle is valid.
+
+        Returns:
+            True if handle is non-zero
+
+        Example:
+            val swapchain = VkSwapchain.new(&device, &window)?
+            assert(swapchain.is_valid())
+        """
+        self.handle != 0
+
+    pub fn summary(self) -> text:
+        """Get swapchain summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val swapchain = VkSwapchain.new(&device, &window)?
+            print(swapchain.summary())
+        """
+        return "VkSwapchain: handle={self.handle}"
+
+pub enum WindowEvent:
+    None
+    Resize(u32, u32)          # (width, height)
+    Close
+    KeyPress(u32, u32)        # (key, modifiers)
+    KeyRelease(u32, u32)      # (key, modifiers)
+    MouseMove(i32, i32)       # (x, y)
+    MouseButton(u32, bool, i32, i32)  # (button, pressed, x, y)
+
+impl WindowEvent:
+    pub fn from_raw(event_type: i32, data: &Array<u8>) -> WindowEvent:
+        match event_type:
+            case 0: return WindowEvent.None
+            case 1:
+                # Resize event: data[0..4] = width, data[4..8] = height
+                val width = read_u32_le(data, 0)
+                val height = read_u32_le(data, 4)
+                return WindowEvent.Resize(width, height)
+            case 2:
+                return WindowEvent.Close
+            case 3:
+                val key = read_u32_le(data, 0)
+                val mods = read_u32_le(data, 4)
+                return WindowEvent.KeyPress(key, mods)
+            case 4:
+                val key = read_u32_le(data, 0)
+                val mods = read_u32_le(data, 4)
+                return WindowEvent.KeyRelease(key, mods)
+            case 5:
+                val x = read_i32_le(data, 0)
+                val y = read_i32_le(data, 4)
+                return WindowEvent.MouseMove(x, y)
+            case 6:
+                val button = read_u32_le(data, 0)
+                val pressed = data[4] != 0
+                val x = read_i32_le(data, 8)
+                val y = read_i32_le(data, 12)
+                return WindowEvent.MouseButton(button, pressed, x, y)
+            case _:
+                return WindowEvent.None
+
+    pub fn to_string(self) -> text:
+        """Convert event to string.
+
+        Returns:
+            text representation
+
+        Example:
+            val event = WindowEvent.Close
+            assert(event.to_string() == "close")
+        """
+        match self:
+            case None: return "none"
+            case Resize(_, _): return "resize"
+            case Close: return "close"
+            case KeyPress(_, _): return "key_press"
+            case KeyRelease(_, _): return "key_release"
+            case MouseMove(_, _): return "mouse_move"
+            case MouseButton(_, _, _, _): return "mouse_button"
+
+    pub fn description(self) -> text:
+        """Get detailed description of event.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            val event = WindowEvent.Resize(800, 600)
+            assert(event.description().contains("800x600"))
+        """
+        match self:
+            case None: return "No event"
+            case Resize(w, h): return "Window resized to {w}x{h}"
+            case Close: return "Window close requested"
+            case KeyPress(key, mods): return "Key pressed: key={key}, mods={mods}"
+            case KeyRelease(key, mods): return "Key released: key={key}, mods={mods}"
+            case MouseMove(x, y): return "Mouse moved to ({x}, {y})"
+            case MouseButton(btn, pressed, x, y):
+                val action = if pressed: "pressed" else: "released"
+                return "Mouse button {btn} {action} at ({x}, {y})"
+
+    pub fn is_window_event(self) -> bool:
+        """Check if this is a window state event.
+
+        Returns:
+            True if resize or close event
+
+        Example:
+            assert(WindowEvent.Resize(800, 600).is_window_event())
+            assert(not WindowEvent.MouseMove(100, 100).is_window_event())
+        """
+        match self:
+            case Resize(_, _): return true
+            case Close: return true
+            case _: return false
+
+    pub fn is_input_event(self) -> bool:
+        """Check if this is an input event.
+
+        Returns:
+            True if keyboard or mouse event
+
+        Example:
+            assert(WindowEvent.KeyPress(65, 0).is_input_event())
+            assert(not WindowEvent.Close.is_input_event())
+        """
+        match self:
+            case KeyPress(_, _): return true
+            case KeyRelease(_, _): return true
+            case MouseMove(_, _): return true
+            case MouseButton(_, _, _, _): return true
+            case _: return false
+
+    pub fn is_keyboard_event(self) -> bool:
+        """Check if this is a keyboard event.
+
+        Returns:
+            True if key press or release
+
+        Example:
+            assert(WindowEvent.KeyPress(65, 0).is_keyboard_event())
+            assert(not WindowEvent.MouseMove(100, 100).is_keyboard_event())
+        """
+        match self:
+            case KeyPress(_, _): return true
+            case KeyRelease(_, _): return true
+            case _: return false
+
+    pub fn is_mouse_event(self) -> bool:
+        """Check if this is a mouse event.
+
+        Returns:
+            True if mouse move or button
+
+        Example:
+            assert(WindowEvent.MouseMove(100, 100).is_mouse_event())
+            assert(not WindowEvent.KeyPress(65, 0).is_mouse_event())
+        """
+        match self:
+            case MouseMove(_, _): return true
+            case MouseButton(_, _, _, _): return true
+            case _: return false
+
+    pub fn is_close_request(self) -> bool:
+        """Check if this is a close request.
+
+        Returns:
+            True if close event
+
+        Example:
+            assert(WindowEvent.Close.is_close_request())
+            assert(not WindowEvent.Resize(800, 600).is_close_request())
+        """
+        match self:
+            case Close: return true
+            case _: return false
+
+    pub fn is_none(self) -> bool:
+        """Check if this is no event.
+
+        Returns:
+            True if None variant
+
+        Example:
+            assert(WindowEvent.None.is_none())
+            assert(not WindowEvent.Close.is_none())
+        """
+        match self:
+            case None: return true
+            case _: return false
+
+# Helper functions for reading little-endian values
+fn read_u32_le(data: &Array<u8>, offset: usize) -> u32:
+    return (data[offset] as u32)
+         | ((data[offset + 1] as u32) << 8)
+         | ((data[offset + 2] as u32) << 16)
+         | ((data[offset + 3] as u32) << 24)
+
+fn read_i32_le(data: &Array<u8>, offset: usize) -> i32:
+    return read_u32_le(data, offset) as i32

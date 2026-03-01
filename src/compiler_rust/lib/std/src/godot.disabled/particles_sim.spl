@@ -1,0 +1,421 @@
+# Godot Particle Simulation and Effects
+#
+# Particle builder, emission shapes, particle types, and preset effects
+#
+# Features:
+# - EmissionShape (point, sphere, box, custom point cloud)
+# - ParticleBuilder (fluent API for configuring particle systems)
+# - ParticleType (GPU vs CPU selector)
+# - Preset effects (explosion, fire, smoke, rain, snow)
+
+use godot.ffi
+use godot.variant
+use godot.node2d
+use godot.resource
+
+mod particles
+
+
+# Emission Shape
+pub enum EmissionShape:
+    Point = 0       # Single point
+    Sphere = 1      # Sphere/circle
+    Box = 2         # Rectangle/box
+    Points = 3      # Custom point cloud
+    DirectedPoints = 4  # Points with direction
+
+impl EmissionShape:
+    pub fn to_string(self) -> text:
+        """Convert emission shape to string."""
+        match self:
+            case Point: "point"
+            case Sphere: "sphere"
+            case Box: "box"
+            case Points: "points"
+            case DirectedPoints: "directed-points"
+
+    pub fn description(self) -> text:
+        """Get emission shape description."""
+        match self:
+            case Point: "Emit from single point"
+            case Sphere: "Emit from sphere/circle surface"
+            case Box: "Emit from box/rectangle volume"
+            case Points: "Emit from custom point cloud"
+            case DirectedPoints: "Emit from points with directional vectors"
+
+    pub fn is_point(self) -> bool:
+        """Check if emission shape is Point."""
+        match self:
+            case Point: true
+            case _: false
+
+    pub fn is_sphere(self) -> bool:
+        """Check if emission shape is Sphere."""
+        match self:
+            case Sphere: true
+            case _: false
+
+    pub fn is_box(self) -> bool:
+        """Check if emission shape is Box."""
+        match self:
+            case Box: true
+            case _: false
+
+    pub fn is_points(self) -> bool:
+        """Check if emission shape is Points."""
+        match self:
+            case Points: true
+            case _: false
+
+    pub fn is_directed_points(self) -> bool:
+        """Check if emission shape is DirectedPoints."""
+        match self:
+            case DirectedPoints: true
+            case _: false
+
+    pub fn uses_custom_points(self) -> bool:
+        """Check if shape uses custom point cloud."""
+        match self:
+            case Points: true
+            case DirectedPoints: true
+            case _: false
+
+    pub fn is_volumetric(self) -> bool:
+        """Check if shape emits from volume."""
+        match self:
+            case Sphere: true
+            case Box: true
+            case _: false
+
+    pub fn summary(self) -> text:
+        """Get emission shape summary."""
+        val name = self.to_string()
+        val desc = self.description()
+        var props = []
+        if self.uses_custom_points():
+            props.push("custom points")
+        if self.is_volumetric():
+            props.push("volumetric")
+        if props.len() > 0:
+            val props_str = ", ".join(props)
+            return "EmissionShape: {name} ({desc}, {props_str})"
+        else:
+            return "EmissionShape: {name} ({desc})"
+
+
+# Particle Builder Helper
+# Fluent API for creating particle systems
+pub struct ParticleBuilder:
+    particle_type: ParticleType
+    amount: i32
+    lifetime: f64
+    one_shot: bool
+    emission_shape: EmissionShape
+    velocity_min: f32
+    velocity_max: f32
+    scale_min: f32
+    scale_max: f32
+
+impl ParticleBuilder:
+    # Create new builder
+    pub fn new(particle_type: ParticleType) -> ParticleBuilder:
+        return ParticleBuilder(
+            particle_type: particle_type,
+            amount: 100,
+            lifetime: 1.0,
+            one_shot: false,
+            emission_shape: EmissionShape.Point,
+            velocity_min: 50.0,
+            velocity_max: 100.0,
+            scale_min: 1.0,
+            scale_max: 1.0
+        )
+
+    # Set particle count
+    pub fn with_amount(mut self, amount: i32) -> ParticleBuilder:
+        self.amount = amount
+        return self
+
+    # Set lifetime
+    pub fn with_lifetime(mut self, seconds: f64) -> ParticleBuilder:
+        self.lifetime = seconds
+        return self
+
+    # Set one-shot mode
+    pub fn one_shot(mut self) -> ParticleBuilder:
+        self.one_shot = true
+        return self
+
+    # Set emission shape
+    pub fn with_shape(mut self, shape: EmissionShape) -> ParticleBuilder:
+        self.emission_shape = shape
+        return self
+
+    # Set velocity range
+    pub fn with_velocity(mut self, min: f32, max: f32) -> ParticleBuilder:
+        self.velocity_min = min
+        self.velocity_max = max
+        return self
+
+    # Set scale range
+    pub fn with_scale(mut self, min: f32, max: f32) -> ParticleBuilder:
+        self.scale_min = min
+        self.scale_max = max
+        return self
+
+    # Build and configure particle system
+    pub fn apply_to_gpu(self, mut particles: GPUParticles2D):
+        particles.set_amount(self.amount)
+        particles.set_lifetime(self.lifetime)
+        particles.set_one_shot(self.one_shot)
+        particles.set_emitting(true)
+
+    pub fn apply_to_cpu(self, mut particles: CPUParticles2D):
+        particles.set_amount(self.amount)
+        particles.set_lifetime(self.lifetime)
+        particles.set_one_shot(self.one_shot)
+        particles.set_emission_shape(self.emission_shape)
+        particles.set_initial_velocity_min(self.velocity_min)
+        particles.set_initial_velocity_max(self.velocity_max)
+        particles.set_scale_amount_min(self.scale_min)
+        particles.set_scale_amount_max(self.scale_max)
+        particles.set_emitting(true)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_amount(self) -> i32:
+        """Get particle count.
+
+        Returns:
+            Particle count
+
+        Example:
+            builder.get_amount()  # → 100
+        """
+        return self.amount
+
+    pub fn get_lifetime(self) -> f64:
+        """Get particle lifetime in seconds.
+
+        Returns:
+            Lifetime in seconds
+
+        Example:
+            builder.get_lifetime()  # → 1.0
+        """
+        return self.lifetime
+
+    pub fn get_emission_shape(self) -> EmissionShape:
+        """Get emission shape.
+
+        Returns:
+            Emission shape
+
+        Example:
+            builder.get_emission_shape()  # → EmissionShape.Point
+        """
+        return self.emission_shape
+
+    pub fn get_velocity_range(self) -> (f32, f32):
+        """Get velocity range (min, max).
+
+        Returns:
+            Tuple of (min, max) velocity
+
+        Example:
+            builder.get_velocity_range()  # → (50.0, 100.0)
+        """
+        return (self.velocity_min, self.velocity_max)
+
+    pub fn get_scale_range(self) -> (f32, f32):
+        """Get scale range (min, max).
+
+        Returns:
+            Tuple of (min, max) scale
+
+        Example:
+            builder.get_scale_range()  # → (1.0, 1.0)
+        """
+        return (self.scale_min, self.scale_max)
+
+    pub fn is_one_shot(self) -> bool:
+        """Check if one-shot mode is enabled.
+
+        Returns:
+            true if one-shot mode
+
+        Example:
+            builder.is_one_shot()  # → false
+        """
+        return self.one_shot
+
+    pub fn is_continuous(self) -> bool:
+        """Check if continuous emission mode.
+
+        Returns:
+            true if not one-shot
+
+        Example:
+            builder.is_continuous()  # → true
+        """
+        return not self.one_shot
+
+    pub fn is_gpu(self) -> bool:
+        """Check if GPU particle type.
+
+        Returns:
+            true if GPU type
+
+        Example:
+            builder.is_gpu()  # → true
+        """
+        return self.particle_type.is_gpu()
+
+    pub fn is_cpu(self) -> bool:
+        """Check if CPU particle type.
+
+        Returns:
+            true if CPU type
+
+        Example:
+            builder.is_cpu()  # → false
+        """
+        return self.particle_type.is_cpu()
+
+    pub fn has_velocity_variation(self) -> bool:
+        """Check if velocity has variation (min != max).
+
+        Returns:
+            true if velocity varies
+
+        Example:
+            builder.has_velocity_variation()  # → true
+        """
+        return self.velocity_min != self.velocity_max
+
+    pub fn has_scale_variation(self) -> bool:
+        """Check if scale has variation (min != max).
+
+        Returns:
+            true if scale varies
+
+        Example:
+            builder.has_scale_variation()  # → false
+        """
+        return self.scale_min != self.scale_max
+
+    pub fn summary(self) -> text:
+        """Get particle builder summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            builder.summary()
+            # → "ParticleBuilder: GPU, 100 particles, 1.0s lifetime, continuous, point emission"
+        """
+        val ptype = self.particle_type.to_string()
+        val mode = if self.one_shot { "one-shot" } else { "continuous" }
+        val shape = self.emission_shape.to_string()
+        return "ParticleBuilder: {ptype}, {self.amount} particles, {self.lifetime}s lifetime, {mode}, {shape} emission"
+
+
+# Particle type selector
+pub enum ParticleType:
+    GPU
+    CPU
+
+impl ParticleType:
+    pub fn to_string(self) -> text:
+        """Convert particle type to string."""
+        match self:
+            case GPU: "GPU"
+            case CPU: "CPU"
+
+    pub fn description(self) -> text:
+        """Get particle type description."""
+        match self:
+            case GPU: "GPU-accelerated particles (fast, many particles)"
+            case CPU: "CPU-simulated particles (flexible, fewer particles)"
+
+    pub fn is_gpu(self) -> bool:
+        """Check if particle type is GPU."""
+        match self:
+            case GPU: true
+            case _: false
+
+    pub fn is_cpu(self) -> bool:
+        """Check if particle type is CPU."""
+        match self:
+            case CPU: true
+            case _: false
+
+    pub fn is_hardware_accelerated(self) -> bool:
+        """Check if type uses hardware acceleration."""
+        match self:
+            case GPU: true
+            case _: false
+
+    pub fn summary(self) -> text:
+        """Get particle type summary."""
+        val name = self.to_string()
+        val desc = self.description()
+        var props = []
+        if self.is_hardware_accelerated():
+            props.push("hardware accelerated")
+        if props.len() > 0:
+            val props_str = ", ".join(props)
+            return "ParticleType: {name} ({desc}, {props_str})"
+        else:
+            return "ParticleType: {name} ({desc})"
+
+
+# Preset particle effects
+
+# Explosion effect
+pub fn create_explosion() -> ParticleBuilder:
+    return ParticleBuilder.new(ParticleType.GPU)
+        .with_amount(200)
+        .with_lifetime(0.8)
+        .one_shot()
+        .with_shape(EmissionShape.Sphere)
+        .with_velocity(150.0, 300.0)
+        .with_scale(0.5, 1.5)
+
+# Fire effect
+pub fn create_fire() -> ParticleBuilder:
+    return ParticleBuilder.new(ParticleType.GPU)
+        .with_amount(50)
+        .with_lifetime(1.2)
+        .with_shape(EmissionShape.Point)
+        .with_velocity(20.0, 50.0)
+        .with_scale(0.8, 1.2)
+
+# Smoke effect
+pub fn create_smoke() -> ParticleBuilder:
+    return ParticleBuilder.new(ParticleType.CPU)
+        .with_amount(30)
+        .with_lifetime(2.0)
+        .with_shape(EmissionShape.Sphere)
+        .with_velocity(10.0, 30.0)
+        .with_scale(1.0, 2.0)
+
+# Rain effect
+pub fn create_rain() -> ParticleBuilder:
+    return ParticleBuilder.new(ParticleType.GPU)
+        .with_amount(500)
+        .with_lifetime(3.0)
+        .with_shape(EmissionShape.Box)
+        .with_velocity(200.0, 250.0)
+        .with_scale(0.1, 0.3)
+
+# Snow effect
+pub fn create_snow() -> ParticleBuilder:
+    return ParticleBuilder.new(ParticleType.CPU)
+        .with_amount(300)
+        .with_lifetime(5.0)
+        .with_shape(EmissionShape.Box)
+        .with_velocity(20.0, 40.0)
+        .with_scale(0.3, 0.7)

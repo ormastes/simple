@@ -1,2 +1,104 @@
-# MCP Lazy Debug-Log Tools Compatibility Shim
-use std.nogc_async_mut.mcp.main_lazy_debug_log_tools.*
+# MCP Lazy Server - Debug log tool handlers
+# Extracted from main_lazy.spl
+# Handles: debug_log_enable, debug_log_disable, debug_log_clear,
+#          debug_log_query, debug_log_tree, debug_log_status
+
+fn handle_debug_log_enable(id: text, body: text) -> text:
+    var pattern = extract_field(body, "pattern")
+    if pattern == "":
+        pattern = "*"
+    DEBUG_LOG_ENABLED = true
+    DEBUG_LOG_PATTERN = pattern
+    debug_log_add("enter", "debug_log_enable", pattern)
+    var r = LB()
+    r = r + jp("status", js("enabled"))
+    r = r + "," + jp("filter_pattern", js(pattern))
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_log_disable(id: text) -> text:
+    DEBUG_LOG_ENABLED = false
+    make_tool_result(id, jo1(jp("status", js("disabled"))))
+
+fn handle_debug_log_clear(id: text) -> text:
+    DEBUG_LOG_ENTRIES = []
+    DEBUG_LOG_NEXT_ID = 1
+    make_tool_result(id, jo2(jp("status", js("cleared")), jp("entry_count", "0")))
+
+fn handle_debug_log_query(id: text, body: text) -> text:
+    val since_str = extract_field(body, "since_id")
+    val entry_type_filter = extract_field(body, "entry_type")
+    var since_id = int(since_str)
+    if since_id < 0:
+        since_id = 0
+    var arr = SB_L()
+    var first = true
+    var count = 0
+    for e in DEBUG_LOG_ENTRIES:
+        var keep = true
+        if since_id > 0:
+            val eid = int(extract_field(e, "id"))
+            if eid <= since_id:
+                keep = false
+        if keep and entry_type_filter != "":
+            val t = extract_field(e, "entry_type")
+            if t != entry_type_filter:
+                keep = false
+        if keep:
+            if not first:
+                arr = arr + ","
+            first = false
+            arr = arr + e
+            count = count + 1
+    arr = arr + SB_R()
+    var r = LB()
+    r = r + jp("count", str(count))
+    r = r + "," + jp("entries", arr)
+    r = r + RB()
+    make_tool_result(id, r)
+
+fn handle_debug_log_tree(id: text, body: text) -> text:
+    val format = extract_field(body, "format")
+    var as_json = false
+    if format == "json":
+        as_json = true
+    if as_json:
+        var tree_json = SB_L()
+        var has_entries = false
+        for _e in DEBUG_LOG_ENTRIES:
+            has_entries = true
+            break
+        if has_entries:
+            tree_json = tree_json + DEBUG_LOG_ENTRIES.join(",")
+        tree_json = tree_json + SB_R()
+        var rj = LB()
+        rj = rj + jp("format", js("json"))
+        rj = rj + "," + jp("tree", tree_json)
+        rj = rj + RB()
+        return make_tool_result(id, rj)
+    var lines: [text] = []
+    for e in DEBUG_LOG_ENTRIES:
+        val fname = extract_field(e, "function_name")
+        val msg = extract_field(e, "message")
+        lines.push(">> " + fname + " - " + msg)
+    var rt = LB()
+    rt = rt + jp("format", js("text"))
+    rt = rt + "," + jp("tree", js(lines.join(NL)))
+    rt = rt + RB()
+    make_tool_result(id, rt)
+
+fn handle_debug_log_status(id: text) -> text:
+    val r = debug_log_status_json()
+    make_tool_result(id, r)
+
+fn debug_log_status_json() -> text:
+    var entry_count = 0
+    for _e in DEBUG_LOG_ENTRIES:
+        entry_count = entry_count + 1
+    var r = LB()
+    r = r + jp("enabled", bool_text(DEBUG_LOG_ENABLED))
+    r = r + "," + jp("filter_pattern", js(DEBUG_LOG_PATTERN))
+    r = r + "," + jp("entry_count", str(entry_count))
+    r = r + "," + jp("stack_depth", "0")
+    r = r + RB()
+    r

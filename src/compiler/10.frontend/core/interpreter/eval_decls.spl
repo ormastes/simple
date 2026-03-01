@@ -1,0 +1,325 @@
+# Core Interpreter — Declaration/Module/Async Evaluation
+#
+# Split from eval_stmts.spl. Contains:
+# - eval_decl: Declaration evaluation (fn, struct, val, var, enum, use, export, ce)
+# - eval_module: Module evaluation (phase 1-5: register, eval, @init, main, @teardown)
+# - eval_init: Full initialization
+# - Async/await stubs, labeled loops, do blocks, atom expressions
+#
+# All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
+
+# ===== Declaration Evaluation =====
+
+fn eval_decl(did: i64) -> i64:
+    if did < 0: return val_make_nil()
+    if eval_had_error: return -1
+
+    val d_node = decl_get(did)
+    val tag = d_node.tag
+
+    # Check @when conditional compilation: skip disabled decls
+    val decl_name = d_node.name
+    for disabled_name in when_disabled_decls:
+        if disabled_name == decl_name:
+            return val_make_nil()
+
+    if tag == DECL_FN:
+        val name = d_node.name
+        val ret_type = d_node.ret_type
+        func_table_register(name, did)
+        func_register_return_type(name, ret_type)
+        return val_make_nil()
+
+    if tag == DECL_STRUCT:
+        val name = d_node.name
+        struct_table_register(name, did)
+        return val_make_nil()
+
+    if tag == DECL_VAL:
+        val name = d_node.name
+        val body = d_node.body_stmts
+        var init_val = val_make_nil()
+        if body.len() > 0:
+            init_val = eval_expr(body[0])
+            if eval_had_error: return -1
+        env_define_global(name, init_val)
+        return init_val
+
+    if tag == EVAL_DECL_LAZY_VAL:
+        val lv_name = d_node.name
+        val lv_body = d_node.body_stmts
+        var thunk_val = val_make_nil()
+        if lv_body.len() > 0:
+            thunk_val = val_make_thunk(lv_body[0])
+        env_define_global(lv_name, thunk_val)
+        return thunk_val
+
+    if tag == DECL_VAR:
+        val name = d_node.name
+        val body = d_node.body_stmts
+        var init_val = val_make_nil()
+        if body.len() > 0:
+            init_val = eval_expr(body[0])
+            if eval_had_error: return -1
+        env_define_global(name, init_val)
+        return init_val
+
+    if tag == DECL_ENUM:
+        # Register enum variants as constants
+        val name = d_node.name
+        val variants = d_node.field_names
+        var vi: i64 = 0
+        for variant_name in variants:
+            env_define_global(variant_name, val_make_int(vi))
+            vi = vi + 1
+        # Register enum in registry for exhaustiveness checking
+        enum_table_register(name, variants)
+        return val_make_nil()
+
+    if tag == DECL_USE:
+        # Load module and register its exports
+        val module_path = d_node.name
+        val imported_names = d_node.imports
+        val current_file = module_get_path()
+
+        # Check if this is a lazy import — defer loading
+        val is_lazy = decl_get_is_lazy(did)
+        if is_lazy == 1:
+            register_deferred_module(module_path, current_file, imported_names)
+            return val_make_nil()
+
+        # If imports list is empty, load full module
+        # Otherwise, load selective imports
+        var load_result: i64 = 0
+        if imported_names.len() == 0:
+            load_result = load_module(module_path, current_file)
+        else:
+            load_result = load_module_selective(module_path, imported_names, current_file)
+
+        if load_result == 0:
+            eval_set_error("failed to load module: " + module_path)
+            return -1
+
+        return val_make_nil()
+
+    if tag == DECL_EXPORT:
+        # Export declarations - handled during module loading
+        # No runtime action needed
+        return val_make_nil()
+
+    if tag == DECL_CE:
+        # ce NAME: block — evaluate with appropriate CE semantics.
+        # For seq/seq_ce builders: collect yield values into array.
+        # For other builders: monadic bind with nil short-circuit.
+        val ce_builder = d_node.name
+        val ce_body = d_node.body_stmts
+        env_push_scope()
+        var ce_last: i64 = val_make_nil()
+        var ce_short_circuit: bool = false
+        val ce_is_seq = (ce_builder == "seq" or ce_builder == "seq_ce")
+        if ce_is_seq:
+            val new_acc: [i64] = []
+            eval_yield_stack.push(new_acc)
+        for ce_sid in ce_body:
+            if eval_had_error: break
+            if eval_returning: break
+            if ce_short_circuit: break
+            val ce_stmt_tag = stmt_get(ce_sid).tag
+            if ce_stmt_tag == EVAL_STMT_BIND and not ce_is_seq:
+                # Monadic bind: eval rhs, short-circuit on nil
+                val ce_bind_node = stmt_get(ce_sid)
+                val ce_bind_name = ce_bind_node.name
+                val ce_bind_rhs = eval_expr(ce_bind_node.expr_idx)
+                if eval_had_error:
+                    ce_last = -1
+                else:
+                    val ce_bind_is_nil = val_kind(ce_bind_rhs) == 0
+                    if ce_bind_is_nil:
+                        ce_last = ce_bind_rhs
+                        ce_short_circuit = true
+                    else:
+                        env_define(ce_bind_name, ce_bind_rhs)
+                        ce_last = ce_bind_rhs
+            else:
+                ce_last = eval_stmt(ce_sid)
+        if ce_is_seq:
+            val ys_len = eval_yield_stack.len()
+            if ys_len > 0:
+                val collected = eval_yield_stack[ys_len - 1]
+                eval_yield_stack = eval_yield_stack[0:ys_len - 1]
+                env_pop_scope()
+                return val_make_array(collected)
+        env_pop_scope()
+        return ce_last
+
+    # DECL_EXTERN_FN, DECL_IMPL, DECL_CLASS — skip for now
+    val_make_nil()
+
+# ===== Module Evaluation =====
+
+fn eval_module() -> i64:
+    val decls = module_get_decls()
+
+    # Phase 1: Register all functions and structs
+    for did in decls:
+        val d_node = decl_get(did)
+        val tag = d_node.tag
+        if tag == DECL_FN:
+            func_table_register(d_node.name, did)
+            func_register_return_type(d_node.name, d_node.ret_type)
+        if tag == DECL_EXTERN_FN:
+            func_register_return_type(d_node.name, d_node.ret_type)
+        if tag == DECL_STRUCT:
+            struct_table_register(d_node.name, did)
+
+    # Phase 1.5: Process use/import declarations (load dependent modules)
+    for did in decls:
+        if eval_had_error: break
+        val utag = decl_get(did).tag
+        if utag == DECL_USE:
+            eval_decl(did)
+
+    # Phase 2: Evaluate declarations (val/var bindings, enums)
+    var last_val = val_make_nil()
+    for did in decls:
+        if eval_had_error: break
+        val tag = decl_get(did).tag
+        if tag == DECL_VAL:
+            eval_decl(did)
+        if tag == EVAL_DECL_LAZY_VAL:
+            eval_decl(did)
+        if tag == DECL_VAR:
+            eval_decl(did)
+        if tag == DECL_ENUM:
+            eval_decl(did)
+
+    # Phase 3: Call @init functions in order (before main)
+    for init_fn_name in init_functions:
+        if eval_had_error: break
+        val init_decl = func_table_lookup(init_fn_name)
+        if init_decl >= 0:
+            var init_args: [i64] = []
+            eval_function_call(init_decl, init_args)
+
+    # Phase 4: Call main() if it exists
+    val main_decl = func_table_lookup("main")
+    if main_decl >= 0:
+        var empty_args: [i64] = []
+        last_val = eval_function_call(main_decl, empty_args)
+
+    # Phase 5: Call @teardown functions in reverse order (after main)
+    val teardown_len = teardown_functions.len()
+    var tdi: i64 = teardown_len - 1
+    while tdi >= 0:
+        val td_fn_name = teardown_functions[tdi]
+        val td_decl = func_table_lookup(td_fn_name)
+        if td_decl >= 0:
+            var td_args: [i64] = []
+            eval_function_call(td_decl, td_args)
+        tdi = tdi - 1
+
+    last_val
+
+# ===== Full Initialization =====
+
+fn eval_init():
+    val_reset()
+    env_init()
+    func_table_reset()
+    struct_table_reset()
+    mono_cache_init()
+    eval_reset()
+    module_loader_init()
+
+# ===== Async/Await Expressions (Basic Stubs) =====
+# TODO: Full state machine support requires desugaring to state machines
+# For now, these are minimal implementations to avoid crashes
+
+fn eval_await_expr(eid: i64) -> i64:
+    """Evaluate an await expression: await future_expr
+
+    Basic stub: evaluates the future expression and returns it immediately.
+    Full async support requires state machine transformation.
+    """
+    val e_node = expr_get(eid)
+    val future_eid = e_node.left
+    # For now, just evaluate the future synchronously
+    val result = eval_expr(future_eid)
+    if eval_had_error: return -1
+    result
+
+fn eval_yield_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val value_eid = e_node.left
+    val result = eval_expr(value_eid)
+    if eval_had_error: return -1
+    if eval_yield_stack.len() > 0:
+        val top_idx = eval_yield_stack.len() - 1
+        eval_yield_stack[top_idx].push(result)
+    result
+
+fn eval_spawn_expr(eid: i64) -> i64:
+    """Evaluate a spawn expression: spawn fn_call
+
+    Basic stub: evaluates the call synchronously.
+    Full actor support requires async runtime integration.
+    """
+    val e_node = expr_get(eid)
+    val call_eid = e_node.left
+    # For now, just evaluate the call synchronously
+    val result = eval_expr(call_eid)
+    if eval_had_error: return -1
+    result
+
+fn eval_labeled_loop(sid: i64) -> i64:
+    # Evaluate a labeled loop: push label, run inner loop, pop label
+    # If break/continue targets this label, consume the break state
+    val s_node = stmt_get(sid)
+    val my_label = s_node.name
+    val body_stmts = s_node.body
+    eval_label_stack.push(my_label)
+    # Execute the inner loop stmt
+    var result = val_make_nil()
+    if body_stmts.len() > 0:
+        val inner_sid = body_stmts[0]
+        result = eval_stmt(inner_sid)
+    # Pop label
+    val stack_len = eval_label_stack.len()
+    if stack_len > 0:
+        val new_stack: [text] = eval_label_stack[0:stack_len - 1]
+        eval_label_stack = new_stack
+    # If break targeted this label, consume it
+    if eval_breaking:
+        if eval_break_label == my_label:
+            eval_breaking = false
+            eval_break_label = ""
+    # If continue targeted this label, consume it (already consumed by loop)
+    if eval_continuing:
+        if eval_continue_label == my_label:
+            eval_continuing = false
+            eval_continue_label = ""
+    result
+
+fn eval_do_block(eid: i64) -> i64:
+    # Evaluates a do: block expression, returning the value of the last statement
+    val e_node = expr_get(eid)
+    val body_stmts = e_node.stmts
+    env_push_scope()
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+    env_pop_scope()
+    last_val
+
+fn eval_atom_expr(eid: i64) -> i64:
+    # Evaluates an atom literal `symbol — stored as an interned text value
+    val e_node = expr_get(eid)
+    val atom_name = e_node.s_val
+    # Atoms are represented as text with a special prefix for identity comparison
+    val_make_text("`" + atom_name)
+
+export eval_decl, eval_module, eval_init
+export eval_await_expr, eval_yield_expr, eval_spawn_expr
+export eval_labeled_loop, eval_do_block, eval_atom_expr

@@ -168,6 +168,14 @@ fn handle_run_wrapper(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
 // ---------------------------------------------------------------------------
 
 const COMMAND_TABLE: &[CommandEntry] = &[
+    // Build system (bootstrap, lint, fmt, check, etc.)
+    CommandEntry {
+        name: "build",
+        app_path: "src/compiler/80.driver/build/cli_entry.spl",
+        rust_handler: Handler::ArgsGc(handle_build),
+        env_override: "",
+        needs_rust_flags: &[],
+    },
     // Compilation commands
     CommandEntry {
         name: "compile",

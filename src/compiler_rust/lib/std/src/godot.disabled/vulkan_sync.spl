@@ -1,0 +1,430 @@
+# Godot Vulkan Font and Image Rendering
+#
+# Extended overlay elements for text and image rendering
+#
+# Features:
+# - FontAtlas (GPU font atlas with glyph lookup)
+# - TextElement (text overlay with font rendering)
+# - ImageElement (texture overlay with UV rect support)
+# - UVRect (texture coordinate helpers)
+# - Shader SPIR-V data for overlay rendering
+
+use godot.ffi
+use godot.variant
+use godot.node
+use gpu.vulkan  # Simple's Vulkan backend
+
+mod vulkan
+
+
+# =============================================================================
+# Font Atlas for Text Rendering
+# =============================================================================
+
+# Glyph information for a single character
+pub struct GlyphInfo:
+    codepoint: u32      # Unicode codepoint
+    x: u32              # X position in atlas
+    y: u32              # Y position in atlas
+    width: u32          # Glyph width in pixels
+    height: u32         # Glyph height in pixels
+    bearing_x: i32      # X offset from cursor
+    bearing_y: i32      # Y offset from cursor (baseline)
+    advance: u32        # Horizontal advance to next glyph
+
+# Font atlas for GPU text rendering
+pub struct FontAtlas:
+    texture: Option<TextureRID>
+    sampler: Option<SamplerRID>
+    uniform_set: Option<UniformSetRID>
+    atlas_width: u32
+    atlas_height: u32
+    glyphs: Array<GlyphInfo>
+    line_height: u32
+    ascender: i32
+    descender: i32
+
+impl FontAtlas:
+    # Create a new empty font atlas
+    pub fn new() -> FontAtlas:
+        return FontAtlas {
+            texture: None,
+            sampler: None,
+            uniform_set: None,
+            atlas_width: 0,
+            atlas_height: 0,
+            glyphs: [],
+            line_height: 0,
+            ascender: 0,
+            descender: 0
+        }
+
+    # Initialize font atlas with a pre-rendered bitmap
+    pub fn from_bitmap(
+        rendering_device: &mut RenderingDevice,
+        width: u32,
+        height: u32,
+        bitmap_data: &Array<u8>,
+        glyphs: Array<GlyphInfo>,
+        line_height: u32
+    ) -> Result<FontAtlas, text>:
+        # Create texture for font atlas (R8 format for grayscale)
+        val texture = match rendering_device.create_texture(
+            width,
+            height,
+            TextureFormat.R8,
+            TextureUsage.Sampling,
+            Some(bitmap_data)
+        ):
+            case Ok(t): t
+            case Err(e): return Err("Failed to create font texture: {e}")
+
+        # Create sampler with linear filtering for smooth text
+        val sampler = match rendering_device.create_sampler(
+            SamplerFilter.Linear,
+            AddressMode.ClampToEdge
+        ):
+            case Ok(s): s
+            case Err(e):
+                rendering_device.free_texture(texture)
+                return Err("Failed to create sampler: {e}")
+
+        return Ok(FontAtlas {
+            texture: Some(texture),
+            sampler: Some(sampler),
+            uniform_set: None,
+            atlas_width: width,
+            atlas_height: height,
+            glyphs: glyphs,
+            line_height: line_height,
+            ascender: 0,
+            descender: 0
+        })
+
+    # Look up glyph info for a codepoint
+    pub fn get_glyph(self, codepoint: u32) -> Option<&GlyphInfo>:
+        for glyph in &self.glyphs:
+            if glyph.codepoint == codepoint:
+                return Some(glyph)
+        return None
+
+    # Calculate text width in pixels
+    pub fn measure_text(self, text: &str) -> u32:
+        var width: u32 = 0
+        for ch in text.chars():
+            val codepoint = ch as u32
+            match self.get_glyph(codepoint):
+                case Some(glyph): width += glyph.advance
+                case None: width += self.line_height / 2  # Fallback for missing glyphs
+        return width
+
+    # Create a simple built-in monospace font atlas (ASCII only)
+    pub fn create_builtin_monospace(
+        rendering_device: &mut RenderingDevice
+    ) -> Result<FontAtlas, text>:
+        # Built-in 8x16 monospace font for ASCII characters 32-126
+        # This creates a simple font atlas for basic text rendering
+        val glyph_width: u32 = 8
+        val glyph_height: u32 = 16
+        val chars_per_row: u32 = 16
+        val num_chars: u32 = 95  # ASCII 32-126
+        val rows: u32 = (num_chars + chars_per_row - 1) / chars_per_row
+
+        val atlas_width: u32 = chars_per_row * glyph_width  # 128 pixels
+        val atlas_height: u32 = rows * glyph_height          # 96 pixels
+
+        # Create bitmap data (placeholder - would be filled with actual font data)
+        var bitmap_data: Array<u8> = Array.with_capacity((atlas_width * atlas_height) as usize)
+        for i in 0..(atlas_width * atlas_height):
+            bitmap_data.push(0)
+
+        # Create glyph info for each ASCII character
+        var glyphs: Array<GlyphInfo> = []
+        for i in 0..num_chars:
+            val codepoint = 32 + i
+            val row = i / chars_per_row
+            val col = i % chars_per_row
+            glyphs.push(GlyphInfo {
+                codepoint: codepoint,
+                x: col * glyph_width,
+                y: row * glyph_height,
+                width: glyph_width,
+                height: glyph_height,
+                bearing_x: 0,
+                bearing_y: glyph_height as i32,
+                advance: glyph_width
+            })
+
+        return FontAtlas.from_bitmap(
+            rendering_device,
+            atlas_width,
+            atlas_height,
+            &bitmap_data,
+            glyphs,
+            glyph_height
+        )
+
+    # Free all GPU resources
+    pub fn destroy(mut self, rendering_device: &mut RenderingDevice):
+        if val Some(us) = self.uniform_set:
+            rendering_device.free_uniform_set(us)
+        if val Some(s) = self.sampler:
+            rendering_device.free_sampler(s)
+        if val Some(t) = self.texture:
+            rendering_device.free_texture(t)
+
+
+# =============================================================================
+# Extended Overlay Elements for Text and Images
+# =============================================================================
+
+# Text overlay element with font rendering
+pub struct TextElement:
+    x: f32
+    y: f32
+    text: text
+    color: Color
+    font_atlas: Option<FontAtlas>
+    scale: f32
+
+impl TextElement:
+    pub fn new(x: f32, y: f32, content: text, color: Color) -> TextElement:
+        return TextElement {
+            x: x,
+            y: y,
+            text: content,
+            color: color,
+            font_atlas: None,
+            scale: 1.0
+        }
+
+    pub fn with_scale(mut self, scale: f32) -> TextElement:
+        self.scale = scale
+        return self
+
+    pub fn set_font_atlas(mut self, atlas: FontAtlas):
+        self.font_atlas = Some(atlas)
+
+    # Build vertices for text rendering (textured quads)
+    pub fn build_vertices(self) -> Array<u8>:
+        var data: Array<u8> = []
+
+        match &self.font_atlas:
+            case Some(atlas):
+                var cursor_x = self.x
+                val cursor_y = self.y
+
+                for ch in self.text.chars():
+                    val codepoint = ch as u32
+                    match atlas.get_glyph(codepoint):
+                        case Some(glyph):
+                            # Calculate quad positions
+                            val x0 = cursor_x + (glyph.bearing_x as f32) * self.scale
+                            val y0 = cursor_y - (glyph.bearing_y as f32) * self.scale
+                            val x1 = x0 + (glyph.width as f32) * self.scale
+                            val y1 = y0 + (glyph.height as f32) * self.scale
+
+                            # Calculate UV coordinates
+                            val u0 = (glyph.x as f32) / (atlas.atlas_width as f32)
+                            val v0 = (glyph.y as f32) / (atlas.atlas_height as f32)
+                            val u1 = ((glyph.x + glyph.width) as f32) / (atlas.atlas_width as f32)
+                            val v1 = ((glyph.y + glyph.height) as f32) / (atlas.atlas_height as f32)
+
+                            # Triangle 1: top-left, top-right, bottom-left
+                            data.extend(&vertex_uv_to_bytes(x0, y0, u0, v0, &self.color))
+                            data.extend(&vertex_uv_to_bytes(x1, y0, u1, v0, &self.color))
+                            data.extend(&vertex_uv_to_bytes(x0, y1, u0, v1, &self.color))
+
+                            # Triangle 2: bottom-left, top-right, bottom-right
+                            data.extend(&vertex_uv_to_bytes(x0, y1, u0, v1, &self.color))
+                            data.extend(&vertex_uv_to_bytes(x1, y0, u1, v0, &self.color))
+                            data.extend(&vertex_uv_to_bytes(x1, y1, u1, v1, &self.color))
+
+                            cursor_x += (glyph.advance as f32) * self.scale
+
+                        case None:
+                            # Skip unknown characters
+                            cursor_x += (atlas.line_height as f32) * self.scale / 2.0
+            case None:
+                # No font atlas, can't render text
+                pass
+
+        return data
+
+    # Get vertex count (6 vertices per character for 2 triangles)
+    pub fn vertex_count(self) -> u32:
+        return (self.text.len() * 6) as u32
+
+
+# Image overlay element with texture
+pub struct ImageElement:
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+    texture: Option<TextureRID>
+    sampler: Option<SamplerRID>
+    tint: Color
+    uv_rect: UVRect  # UV coordinates for texture atlas support
+
+impl ImageElement:
+    pub fn new(x: f32, y: f32, width: f32, height: f32) -> ImageElement:
+        return ImageElement {
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            texture: None,
+            sampler: None,
+            tint: Color.white(),
+            uv_rect: UVRect.full()
+        }
+
+    pub fn with_texture(mut self, texture: TextureRID, sampler: SamplerRID) -> ImageElement:
+        self.texture = Some(texture)
+        self.sampler = Some(sampler)
+        return self
+
+    pub fn with_tint(mut self, tint: Color) -> ImageElement:
+        self.tint = tint
+        return self
+
+    pub fn with_uv_rect(mut self, uv_rect: UVRect) -> ImageElement:
+        self.uv_rect = uv_rect
+        return self
+
+    # Build vertices for image rendering (textured quad)
+    pub fn build_vertices(self) -> Array<u8>:
+        var data: Array<u8> = []
+
+        val x0 = self.x
+        val y0 = self.y
+        val x1 = self.x + self.width
+        val y1 = self.y + self.height
+
+        val u0 = self.uv_rect.u0
+        val v0 = self.uv_rect.v0
+        val u1 = self.uv_rect.u1
+        val v1 = self.uv_rect.v1
+
+        # Triangle 1: top-left, top-right, bottom-left
+        data.extend(&vertex_uv_to_bytes(x0, y0, u0, v0, &self.tint))
+        data.extend(&vertex_uv_to_bytes(x1, y0, u1, v0, &self.tint))
+        data.extend(&vertex_uv_to_bytes(x0, y1, u0, v1, &self.tint))
+
+        # Triangle 2: bottom-left, top-right, bottom-right
+        data.extend(&vertex_uv_to_bytes(x0, y1, u0, v1, &self.tint))
+        data.extend(&vertex_uv_to_bytes(x1, y0, u1, v0, &self.tint))
+        data.extend(&vertex_uv_to_bytes(x1, y1, u1, v1, &self.tint))
+
+        return data
+
+    # Get vertex count (6 vertices for 2 triangles)
+    pub fn vertex_count(self) -> u32:
+        return 6
+
+
+# UV rectangle for texture coordinates
+pub struct UVRect:
+    u0: f32
+    v0: f32
+    u1: f32
+    v1: f32
+
+impl UVRect:
+    # Full texture (0,0 to 1,1)
+    pub fn full() -> UVRect:
+        return UVRect { u0: 0.0, v0: 0.0, u1: 1.0, v1: 1.0 }
+
+    # Create UV rect from pixel coordinates
+    pub fn from_pixels(x: u32, y: u32, w: u32, h: u32, tex_w: u32, tex_h: u32) -> UVRect:
+        return UVRect {
+            u0: (x as f32) / (tex_w as f32),
+            v0: (y as f32) / (tex_h as f32),
+            u1: ((x + w) as f32) / (tex_w as f32),
+            v1: ((y + h) as f32) / (tex_h as f32)
+        }
+
+
+# Helper: Convert vertex position + UV + color to bytes (32 bytes per vertex)
+fn vertex_uv_to_bytes(x: f32, y: f32, u: f32, v: f32, color: &Color) -> Array<u8>:
+    var data: Array<u8> = []
+    # Position (2 floats = 8 bytes)
+    data.extend(&f32_to_le_bytes(x))
+    data.extend(&f32_to_le_bytes(y))
+    # UV (2 floats = 8 bytes)
+    data.extend(&f32_to_le_bytes(u))
+    data.extend(&f32_to_le_bytes(v))
+    # Color (4 floats = 16 bytes)
+    data.extend(&f32_to_le_bytes(color.r))
+    data.extend(&f32_to_le_bytes(color.g))
+    data.extend(&f32_to_le_bytes(color.b))
+    data.extend(&f32_to_le_bytes(color.a))
+    return data
+
+fn f32_to_le_bytes(value: f32) -> Array<u8>:
+    val bits = value.to_bits()
+    var bytes: Array<u8> = []
+    bytes.push((bits & 0xFF) as u8)
+    bytes.push(((bits >> 8) & 0xFF) as u8)
+    bytes.push(((bits >> 16) & 0xFF) as u8)
+    bytes.push(((bits >> 24) & 0xFF) as u8)
+    return bytes
+
+
+# Array placeholder
+pub struct Array<T>:
+    items: Vec<T>
+
+impl<T> Array<T>:
+    pub fn push(mut self, item: T):
+        pass
+
+    pub fn clear(mut self):
+        pass
+
+
+# =============================================================================
+# Shader SPIR-V Data
+# =============================================================================
+
+# Get pre-compiled SPIR-V bytecode for simple 2D overlay shader
+# This is a minimal vertex+fragment shader for colored primitives
+# Vertex shader: transforms position, passes color
+# Fragment shader: outputs interpolated color
+fn get_overlay_shader_spirv() -> Array<u8>:
+    # In a real implementation, this would either:
+    # 1. Load from a .spv file embedded in the binary
+    # 2. Load from a resource file
+    # 3. Compile from GLSL at runtime using shaderc
+    #
+    # For now, return empty array - the overlay will use Godot's
+    # built-in CanvasItem shader fallback if available
+    #
+    # To enable custom overlay rendering, provide SPIR-V bytecode
+    # compiled from the following GLSL:
+    #
+    # Vertex shader:
+    # #version 450
+    # layout(location = 0) in vec2 position;
+    # layout(location = 1) in vec4 color;
+    # layout(location = 0) out vec4 fragColor;
+    # void main() {
+    #     gl_Position = vec4(position, 0.0, 1.0);
+    #     fragColor = color;
+    # }
+    #
+    # Fragment shader:
+    # #version 450
+    # layout(location = 0) in vec4 fragColor;
+    # layout(location = 0) out vec4 outColor;
+    # void main() {
+    #     outColor = fragColor;
+    # }
+
+    return []
+
+# Load overlay shader from file
+pub fn load_overlay_shader_from_file(path: &str) -> Result<Array<u8>, text>:
+    # Would use fs.read_bytes in actual implementation
+    return Err("File loading not implemented")

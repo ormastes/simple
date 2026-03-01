@@ -10,6 +10,9 @@
 # - Binary/unary operator inference
 #
 # Part of the type_infer/inference split. See inference.spl for module overview.
+#
+# Split into modules:
+#   inference_expr_ops.spl — infer_binary_op, infer_unary_op, narrowing helpers
 
 use compiler.hir.hir.*
 use compiler.core.lexer.*
@@ -17,6 +20,9 @@ use compiler.types.dim_constraints.*
 use compiler.traits.traits.*
 use type_infer_types.*
 use compiler.semantics.narrowing.*
+
+# Import from split operators module
+use compiler.types.type_infer.inference_expr_ops.*
 
 impl HmInferContext:
     # =========================================================================
@@ -678,130 +684,3 @@ impl HmInferContext:
 
             case _:
                 Err(TypeInferError(message: "unsupported expression kind: {expr.kind}", span: span))
-
-    me infer_binary_op(op: HirBinOp, left: HirType, right: HirType, span: Span) -> Result<HirType, TypeInferError>:
-        """Infer type of binary operation."""
-        match op:
-            # Arithmetic: operands same type, return same type
-            case Add | Sub | Mul | Div | Mod | Pow:
-                match self.unify(left, right):
-                    case Err(e): Err(e)
-                    case _: Ok(self.resolve(left))
-
-            # Comparison: operands same type, return bool
-            case Eq | NotEq | Lt | LtEq | Gt | GtEq:
-                match self.unify(left, right):
-                    case Err(e): Err(e)
-                    case _: Ok(HirType(kind: HirTypeKind.Bool, span: span))
-
-            # Logical: operands bool, return bool
-            case And | Or:
-                val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
-                match self.unify(left, bool_ty):
-                    case Err(e): return Err(e)
-                    case _: pass
-                match self.unify(right, bool_ty):
-                    case Err(e): Err(e)
-                    case _: Ok(bool_ty)
-
-            # Bitwise: operands int, return int
-            case BitAnd | BitOr | BitXor | Shl | Shr:
-                val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: span)
-                match self.unify(left, int_ty):
-                    case Err(e): return Err(e)
-                    case _: pass
-                match self.unify(right, int_ty):
-                    case Err(e): Err(e)
-                    case _: Ok(int_ty)
-
-            # Pipeline: x |> f becomes f(x)
-            # Left operand is value, right operand is function
-            case PipeForward:
-                self.infer_pipe_forward(left, right, span)
-
-            # Composition: f >> g means \x -> g(f(x))
-            # Both operands are functions
-            case Compose:
-                self.infer_compose(left, right, span)
-
-            # Backward composition: f << g means \x -> f(g(x))
-            case ComposeBack:
-                self.infer_compose(right, left, span)
-
-            # Parallel: a // b runs both and combines results
-            case Parallel:
-                self.infer_parallel(left, right, span)
-
-            # Layer connection: l1 ~> l2 composes layers with dimension checking
-            case LayerConnect:
-                self.infer_layer_connect(left, right, span)
-
-            # Matrix multiplication
-            case MatMul:
-                self.infer_matmul(left, right, span)
-
-            # Broadcast operations
-            case BroadcastAdd | BroadcastSub | BroadcastMul | BroadcastDiv | BroadcastPow:
-                self.infer_broadcast_op(left, right, span)
-
-            case _:
-                Err(TypeInferError(message: "unsupported binary operator: {op}", span: span))
-
-    me infer_unary_op(op: HirUnaryOp, operand: HirType, span: Span) -> Result<HirType, TypeInferError>:
-        """Infer type of unary operation."""
-        match op:
-            case Neg:
-                Ok(operand)
-            case Not:
-                Ok(HirType(kind: HirTypeKind.Bool, span: span))
-            case BitNot:
-                Ok(operand)
-            case Ref:
-                Ok(HirType(kind: HirTypeKind.Ref(operand, false), span: span))
-            case RefMut:
-                Ok(HirType(kind: HirTypeKind.Ref(operand, true), span: span))
-            case Deref:
-                val resolved = self.resolve(operand)
-                match resolved.kind:
-                    case Ref(inner, _) | Ptr(inner, _):
-                        Ok(inner)
-                    case _:
-                        Ok(self.fresh_var(span))
-            case _:
-                Ok(operand)
-
-    # =========================================================================
-    # Flow-Sensitive Narrowing Helpers
-    # =========================================================================
-
-    fn _lookup_symbol_type(sym_id: i64) -> HirType?:
-        """Look up the current type of a symbol by ID for narrowing analysis.
-
-        Used as the type_lookup callback for analyze_condition.
-        Checks the type environment using the symbol ID as text key.
-        """
-        val name = sym_id.to_text()
-        if self.env[name].?:
-            val scheme = self.env[name]
-            Some(scheme.ty)
-        else:
-            nil
-
-    me _add_immutable_facts(facts: [NarrowingFact]):
-        """Add narrowing facts to the current scope, filtering out mutable symbols.
-
-        Only facts for immutable (val) bindings are added, since mutable (var)
-        bindings could be reassigned between the check and use, invalidating
-        the narrowing.
-        """
-        var i = 0
-        while i < facts.len():
-            val fact = facts[i]
-            val is_mutable = self.mutable_symbols[fact.symbol_id]
-            if is_mutable.? and is_mutable.unwrap():
-                # Skip mutable symbols -- narrowing is unsound for var bindings
-                pass
-            else:
-                # Immutable or unknown (default to allowing narrowing)
-                self.narrowing.add_fact(fact)
-            i = i + 1

@@ -1,0 +1,521 @@
+# Vulkan Types - Extended Types, FFI, and Constants
+#
+# RenderPass, FrameData, GpuSubmitResult, SwapchainError, VK struct types,
+# Vulkan constants, FFI declarations, and utility functions.
+# Part of the types module - see vulkan_types.spl for VulkanDevice and Swapchain.
+
+use core.*
+use concurrency.*
+use ui.gui.vulkan_types.*
+
+# =============================================================================
+# Render Pass - Render Pass Configuration
+# =============================================================================
+
+pub struct RenderPass:
+    render_pass: VkRenderPass
+    device: VulkanDevice
+
+impl RenderPass:
+    # Create render pass from swapchain (infer configuration)
+    # - Color attachment (swapchain format)
+    # - Load op: Clear, Store op: Store
+    # - Initial layout: Undefined, Final layout: PresentSrc
+    pub fn new(device: &VulkanDevice, swapchain: &Swapchain) -> Result<RenderPass, text>:
+        val render_pass = vulkan_create_render_pass(
+            device.device,
+            swapchain.format.format
+        )?
+
+        return Ok(RenderPass {
+            render_pass: render_pass,
+            device: device.clone()
+        })
+
+    pub fn get_render_pass(self) -> VkRenderPass:
+        """Get Vulkan render pass handle.
+
+        Returns:
+            Render pass handle
+
+        Example:
+            val rp = RenderPass.new(&device, &swapchain)?
+            val handle = rp.get_render_pass()
+        """
+        self.render_pass
+
+    pub fn is_valid(self) -> bool:
+        """Check if render pass is valid.
+
+        Returns:
+            True if handle is non-zero
+
+        Example:
+            val rp = RenderPass.new(&device, &swapchain)?
+            assert(rp.is_valid())
+        """
+        self.render_pass != 0
+
+    pub fn summary(self) -> text:
+        """Get render pass summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val rp = RenderPass.new(&device, &swapchain)?
+            print(rp.summary())
+        """
+        return "RenderPass: handle={self.render_pass}"
+
+# =============================================================================
+# Frame Data - Per-Frame Resources (Triple Buffering)
+# =============================================================================
+
+pub struct FrameData:
+    command_buffer: i64
+    fence: i64
+    image_available: i64
+    render_finished: i64
+
+impl FrameData:
+    # Create per-frame resources for triple buffering
+    pub fn new(device: &VulkanDevice) -> FrameData:
+        # Allocate command buffer from device command pool
+        val command_buffer = vulkan_allocate_command_buffer(device.device, device.command_pool)
+
+        # Create fence (signaled initially for first frame)
+        val fence = vulkan_create_fence(device.device, true)
+
+        # Create semaphores for synchronization
+        val image_available = vulkan_create_semaphore(device.device)
+        val render_finished = vulkan_create_semaphore(device.device)
+
+        return FrameData {
+            command_buffer: command_buffer,
+            fence: fence,
+            image_available: image_available,
+            render_finished: render_finished
+        }
+
+# =============================================================================
+# Supporting Structures
+# =============================================================================
+
+pub struct GpuSubmitResult:
+    success: bool
+
+impl GpuSubmitResult:
+    pub fn is_success(self) -> bool:
+        """Check if GPU submit succeeded.
+
+        Returns:
+            True if successful
+
+        Example:
+            val result = GpuSubmitResult { success: true }
+            assert(result.is_success())
+        """
+        self.success
+
+    pub fn is_failure(self) -> bool:
+        """Check if GPU submit failed.
+
+        Returns:
+            True if failed
+
+        Example:
+            val result = GpuSubmitResult { success: false }
+            assert(result.is_failure())
+        """
+        not self.success
+
+    pub fn summary(self) -> text:
+        """Get submit result summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val result = GpuSubmitResult { success: true }
+            print(result.summary())
+        """
+        val status = if self.success: "success" else: "failure"
+        return "GpuSubmitResult: {status}"
+
+pub enum SwapchainError:
+    OutOfDate
+    DeviceLost
+
+impl SwapchainError:
+    pub fn to_string(self) -> text:
+        """Convert error to string.
+
+        Returns:
+            text representation
+
+        Example:
+            val err = SwapchainError.OutOfDate
+            assert(err.to_string() == "out_of_date")
+        """
+        match self:
+            case OutOfDate: return "out_of_date"
+            case DeviceLost: return "device_lost"
+
+    pub fn description(self) -> text:
+        """Get detailed error description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            val err = SwapchainError.OutOfDate
+            print(err.description())
+        """
+        match self:
+            case OutOfDate: return "Swapchain is out of date (window resized or other change)"
+            case DeviceLost: return "Vulkan device lost (GPU reset or driver issue)"
+
+    pub fn is_out_of_date(self) -> bool:
+        """Check if error is out of date.
+
+        Returns:
+            True if out of date
+
+        Example:
+            val err = SwapchainError.OutOfDate
+            assert(err.is_out_of_date())
+        """
+        match self:
+            case OutOfDate: return true
+            case _: return false
+
+    pub fn is_device_lost(self) -> bool:
+        """Check if error is device lost.
+
+        Returns:
+            True if device lost
+
+        Example:
+            val err = SwapchainError.DeviceLost
+            assert(err.is_device_lost())
+        """
+        match self:
+            case DeviceLost: return true
+            case _: return false
+
+    pub fn is_recoverable(self) -> bool:
+        """Check if error is recoverable.
+
+        Returns:
+            True if can recreate swapchain
+
+        Example:
+            val err = SwapchainError.OutOfDate
+            assert(err.is_recoverable())
+        """
+        match self:
+            case OutOfDate: return true
+            case DeviceLost: return false
+
+    pub fn summary(self) -> text:
+        """Get swapchain error summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val err = SwapchainError.OutOfDate
+            print(err.summary())
+            # → "SwapchainError: out_of_date (Swapchain is out of date (window resized or other change), recoverable)"
+        """
+        val name = self.to_string()
+        val desc = self.description()
+        val status = if self.is_recoverable(): "recoverable" else: "fatal"
+        return "SwapchainError: {name} ({desc}, {status})"
+
+pub struct VkSubmitInfo:
+    wait_semaphores: Array<i64>
+    wait_stages: Array<u32>
+    command_buffers: Array<i64>
+    signal_semaphores: Array<i64>
+    fence: i64
+
+pub struct VkPresentInfo:
+    wait_semaphores: Array<i64>
+    swapchains: Array<i64>
+    image_indices: Array<u32>
+
+pub struct VkExtent2D:
+    width: u32
+    height: u32
+
+impl VkExtent2D:
+    pub fn get_width(self) -> u32:
+        """Get extent width.
+
+        Returns:
+            Width in pixels
+
+        Example:
+            val extent = VkExtent2D { width: 800, height: 600 }
+            assert(extent.get_width() == 800)
+        """
+        self.width
+
+    pub fn get_height(self) -> u32:
+        """Get extent height.
+
+        Returns:
+            Height in pixels
+
+        Example:
+            val extent = VkExtent2D { width: 800, height: 600 }
+            assert(extent.get_height() == 600)
+        """
+        self.height
+
+    pub fn area(self) -> u64:
+        """Calculate total area.
+
+        Returns:
+            Area in pixels
+
+        Example:
+            val extent = VkExtent2D { width: 800, height: 600 }
+            assert(extent.area() == 480000)
+        """
+        (self.width as u64) * (self.height as u64)
+
+    pub fn aspect_ratio(self) -> f64:
+        """Calculate aspect ratio.
+
+        Returns:
+            Width / height ratio
+
+        Example:
+            val extent = VkExtent2D { width: 1920, height: 1080 }
+            assert(extent.aspect_ratio() > 1.7)
+        """
+        (self.width as f64) / (self.height as f64)
+
+    pub fn is_landscape(self) -> bool:
+        """Check if landscape orientation.
+
+        Returns:
+            True if width > height
+
+        Example:
+            val extent = VkExtent2D { width: 1920, height: 1080 }
+            assert(extent.is_landscape())
+        """
+        self.width > self.height
+
+    pub fn is_portrait(self) -> bool:
+        """Check if portrait orientation.
+
+        Returns:
+            True if height > width
+
+        Example:
+            val extent = VkExtent2D { width: 600, height: 800 }
+            assert(extent.is_portrait())
+        """
+        self.height > self.width
+
+    pub fn is_square(self) -> bool:
+        """Check if square.
+
+        Returns:
+            True if width == height
+
+        Example:
+            val extent = VkExtent2D { width: 800, height: 800 }
+            assert(extent.is_square())
+        """
+        self.width == self.height
+
+    pub fn summary(self) -> text:
+        """Get extent summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            val extent = VkExtent2D { width: 800, height: 600 }
+            print(extent.summary())
+        """
+        val orientation = if self.is_landscape(): "landscape" else if self.is_portrait(): "portrait" else: "square"
+        return "VkExtent2D: {self.width}x{self.height} ({orientation})"
+
+pub struct VkSurfaceFormatKHR:
+    format: u32
+    color_space: u32
+
+pub struct VkSurfaceCapabilitiesKHR:
+    min_image_count: u32
+    max_image_count: u32
+    current_extent: VkExtent2D
+    min_image_extent: VkExtent2D
+    max_image_extent: VkExtent2D
+    current_transform: u32
+
+pub struct VkQueueFamilyProperties:
+    queue_flags: u32
+    queue_count: u32
+
+pub struct VkPhysicalDeviceProperties:
+    device_name: text
+    device_type: u32
+    limits: VkPhysicalDeviceLimits
+
+pub struct VkPhysicalDeviceLimits:
+    max_image_dimension_2d: u32
+
+pub struct VkPhysicalDeviceFeatures:
+    geometry_shader: bool
+    tessellation_shader: bool
+
+pub struct VkPhysicalDeviceMemoryProperties:
+    memory_type_count: u32
+
+pub struct QueueFamilyFlags:
+    value: u32
+
+impl QueueFamilyFlags:
+    const Graphics: u32 = 0x01
+    const Compute: u32 = 0x02
+    const Transfer: u32 = 0x04
+    const SparseBinding: u32 = 0x08
+    const Protected: u32 = 0x10
+
+    fn bits(self) -> u32:
+        # Return the raw bit flags for this QueueFamilyFlags instance
+        # This allows combining flags: Graphics | Compute = 0x03
+        return self.value
+
+    fn contains(self, flag: u32) -> bool:
+        return (self.bits() & flag) == flag
+
+    fn is_graphics(self) -> bool:
+        return self.contains(Self.Graphics)
+
+    fn is_compute(self) -> bool:
+        return self.contains(Self.Compute)
+
+    fn is_transfer(self) -> bool:
+        return self.contains(Self.Transfer)
+
+# Vulkan constants
+const VK_SUCCESS: i32 = 0
+const VK_ERROR_OUT_OF_DATE_KHR: i32 = -1000001004
+const VK_SUBOPTIMAL_KHR: i32 = 1000001003
+const VK_NULL_HANDLE: i64 = 0
+
+const VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: u32 = 1
+const VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: u32 = 2
+
+const VK_FORMAT_B8G8R8A8_SRGB: u32 = 50
+const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: u32 = 0
+
+const VK_PRESENT_MODE_IMMEDIATE_KHR: u32 = 0
+const VK_PRESENT_MODE_MAILBOX_KHR: u32 = 1
+const VK_PRESENT_MODE_FIFO_KHR: u32 = 2
+
+# =============================================================================
+# FFI Declarations (To Be Implemented in Rust)
+# =============================================================================
+
+# Instance and device creation
+extern fn vulkan_create_instance(app_name: &str, version: u32) -> Result<VkInstance, text>
+extern fn vulkan_enumerate_physical_devices(instance: VkInstance) -> Result<Array<VkPhysicalDevice>, text>
+extern fn vulkan_create_device(physical_device: VkPhysicalDevice, graphics_family: u32,
+                                present_family: u32) -> Result<VkDevice, text>
+extern fn vulkan_get_device_queue(device: VkDevice, family: u32, index: u32) -> VkQueue
+
+# Device queries
+extern fn vulkan_get_physical_device_properties(device: VkPhysicalDevice) -> VkPhysicalDeviceProperties
+extern fn vulkan_get_physical_device_features(device: VkPhysicalDevice) -> VkPhysicalDeviceFeatures
+extern fn vulkan_get_physical_device_memory_properties(device: VkPhysicalDevice) -> VkPhysicalDeviceMemoryProperties
+extern fn vulkan_get_physical_device_queue_families(device: VkPhysicalDevice) -> Array<VkQueueFamilyProperties>
+extern fn vulkan_queue_family_supports_present(device: VkPhysicalDevice, family: u32, window: i64) -> bool
+
+# Surface operations
+extern fn vulkan_get_surface_capabilities(device: VkPhysicalDevice, surface: i64)
+    -> Result<VkSurfaceCapabilitiesKHR, text>
+extern fn vulkan_get_surface_formats(device: VkPhysicalDevice, surface: i64)
+    -> Result<Array<VkSurfaceFormatKHR>, text>
+extern fn vulkan_get_surface_present_modes(device: VkPhysicalDevice, surface: i64)
+    -> Result<Array<u32>, text>
+
+# Swapchain operations
+extern fn vulkan_create_swapchain(device: VkDevice, surface: i64, format: &VkSurfaceFormatKHR,
+                                   extent: &VkExtent2D, image_count: u32, present_mode: u32,
+                                   graphics_family: u32, present_family: u32)
+    -> Result<VkSwapchainKHR, text>
+extern fn vulkan_get_swapchain_images(device: VkDevice, swapchain: VkSwapchainKHR)
+    -> Result<Array<VkImage>, text>
+extern fn vulkan_create_image_view(device: VkDevice, image: VkImage, format: u32) -> VkImageView
+extern fn vulkan_acquire_next_image(device: VkDevice, swapchain: VkSwapchainKHR, timeout: u64,
+                                     semaphore: i64, fence: i64) -> Result<u32, i32>
+
+# Render pass operations
+extern fn vulkan_create_render_pass(device: VkDevice, format: u32) -> Result<VkRenderPass, text>
+
+# Synchronization
+extern fn vulkan_device_wait_idle(device: VkDevice)
+extern fn vulkan_wait_for_fence(device: VkDevice, fence: i64, timeout: u64)
+extern fn vulkan_reset_fence(device: VkDevice, fence: i64)
+extern fn vulkan_create_fence(device: VkDevice, signaled: bool) -> i64
+extern fn vulkan_create_semaphore(device: VkDevice) -> i64
+
+# Command buffer operations
+extern fn vulkan_allocate_command_buffer(device: VkDevice, pool: i64) -> i64
+extern fn vulkan_reset_command_buffer(cmd_buf: i64)
+
+# Queue operations
+extern fn vulkan_queue_present(queue: VkQueue, present_info: &VkPresentInfo) -> i32
+
+# Type aliases for Vulkan handles
+type VkInstance = i64
+type VkPhysicalDevice = i64
+type VkDevice = i64
+type VkQueue = i64
+type VkSwapchainKHR = i64
+type VkImage = i64
+type VkImageView = i64
+type VkRenderPass = i64
+
+# Utility functions
+fn clamp(value: u32, min: u32, max: u32) -> u32:
+    if value < min:
+        return min
+    if value > max:
+        return max
+    return value
+
+fn spawn_blocking<T>(f: fn() -> T) -> Future<T>:
+    # Spawn a blocking task on a thread pool to avoid blocking the async runtime
+    # This is crucial for CPU-intensive work like layout computation
+    val (sender, receiver) = channel.oneshot<T>()
+
+    # Submit to thread pool
+    thread_pool_submit(|| {
+        val result = f()
+        sender.send(result)
+    })
+
+    # Return a future that completes when the blocking task finishes
+    return receiver.into_future()
+
+# Thread pool for blocking tasks
+static mut THREAD_POOL: Option<ThreadPool> = None
+
+fn thread_pool_submit(task: fn() -> ()):
+    unsafe:
+        if THREAD_POOL.is_none():
+            THREAD_POOL = Some(ThreadPool.new(num_cpus()))
+        if val Some(pool) = THREAD_POOL.as_mut():
+            pool.submit(task)
+
+extern fn num_cpus() -> usize

@@ -1,0 +1,432 @@
+# Container Building
+# ContainerBuilder and ContainerImage classes
+
+use tooling.core.project.Language
+use tooling.deployment.containers.{BaseImage, Platform, DockerfileBuilder}
+use core.result.{Result, Ok, Err}
+
+# FFI for process execution and file operations
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
+@extern("runtime", "rt_file_write_text")
+fn _rt_file_write_text(path_ptr: &u8, path_len: u64, content_ptr: &u8, content_len: u64) -> bool
+
+# Container builder
+pub class ContainerBuilder:
+    pub dockerfile_builder: DockerfileBuilder
+    pub base_image: BaseImage
+    pub platforms: List<Platform>
+    pub tags: List<text>
+    pub verbose: bool
+
+    pub fn new() -> ContainerBuilder:
+        """Create container builder.
+
+        Returns:
+            Container builder
+
+        Example:
+            val container = ContainerBuilder.new()
+
+            # Auto-generate Dockerfile
+            container.detect_runtime()  # → :simple_native, :rust, :python
+            container.set_base_image(BaseImage.Alpine("3.18"))
+            container.add_artifacts("target/release/app")
+            container.set_entrypoint("/app/app")
+
+            # Build image
+            val image = container.build(
+                tag: "my-app:1.0.0",
+                platform: [Platform.LinuxAmd64, Platform.LinuxArm64]
+            )
+
+            # Push to registry
+            image.push("docker.io/user/my-app:1.0.0")
+        """
+        ContainerBuilder {
+            dockerfile_builder: DockerfileBuilder.new(),
+            base_image: BaseImage.Alpine("3.18"),
+            platforms: [Platform.LinuxAmd64],
+            tags: [],
+            verbose: false
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
+
+    pub fn is_verbose(self) -> bool:
+        """Check if verbose mode is on."""
+        self.verbose
+
+    pub fn with_verbose(self, enabled: bool) -> ContainerBuilder:
+        """Set verbose (fluent API)."""
+        self.verbose = enabled
+        self
+
+    pub fn has_platforms(self) -> bool:
+        """Check if platforms configured."""
+        self.platforms.len() > 0
+
+    pub fn get_platform_count(self) -> i32:
+        """Get platform count."""
+        self.platforms.len()
+
+    pub fn summary(self) -> text:
+        """Get builder summary."""
+        val verbose_str = if self.verbose: "true" else: "false"
+        "ContainerBuilder: {self.base_image.to_string()} ({self.get_platform_count()} platforms, verbose: {verbose_str})"
+
+    pub fn set_base_image(self, base: BaseImage):
+        """Set base image.
+
+        Args:
+            base: Base image
+        """
+        self.base_image = base
+
+    pub fn add_platform(self, platform: Platform):
+        """Add target platform.
+
+        Args:
+            platform: Platform target
+        """
+        self.platforms.append(platform)
+
+    pub fn get_platform_string(self) -> text:
+        """Get comma-separated platform list for Docker.
+
+        Returns:
+            Platform string for Docker buildx
+
+        Example:
+            # With platforms: [LinuxAmd64, LinuxArm64]
+            builder.get_platform_string()
+            # → "linux/amd64,linux/arm64"
+        """
+        val platform_strs: List<text> = []
+        for platform in self.platforms:
+            platform_strs.append(platform.to_string())
+        platform_strs.join(",")
+
+    pub fn is_multi_platform(self) -> bool:
+        """Check if building for multiple platforms.
+
+        Returns:
+            True if more than one platform
+        """
+        self.platforms.len() > 1
+
+    pub fn detect_runtime(self) -> List<Language>:
+        """Detect runtime languages.
+
+        Returns:
+            Detected languages
+
+        Auto-detects:
+        - Simple native binaries
+        - Rust binaries
+        - Python applications
+        - Node.js applications
+        """
+        @extern("runtime", "rt_file_exists")
+        fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
+        var languages: List<Language> = []
+
+        # Check for Cargo.toml (Rust)
+        val rust_marker = "Cargo.toml"
+        if _rt_file_exists(rust_marker.ptr(), rust_marker.len()):
+            languages.append(Language.Rust)
+
+        # Check for package.json (Node.js/JavaScript)
+        val node_marker = "package.json"
+        if _rt_file_exists(node_marker.ptr(), node_marker.len()):
+            languages.append(Language.JavaScript)
+
+        # Check for requirements.txt or pyproject.toml (Python)
+        val py_marker1 = "requirements.txt"
+        val py_marker2 = "pyproject.toml"
+        if _rt_file_exists(py_marker1.ptr(), py_marker1.len()) or _rt_file_exists(py_marker2.ptr(), py_marker2.len()):
+            languages.append(Language.Python)
+
+        # Check for go.mod (Go)
+        val go_marker = "go.mod"
+        if _rt_file_exists(go_marker.ptr(), go_marker.len()):
+            languages.append(Language.Go)
+
+        # Check for simple.toml (Simple)
+        val simple_marker = "simple.toml"
+        if _rt_file_exists(simple_marker.ptr(), simple_marker.len()):
+            languages.append(Language.Simple)
+
+        languages
+
+    pub fn add_artifacts(self, artifact_path: text):
+        """Add artifacts to image.
+
+        Args:
+            artifact_path: Path to artifacts
+        """
+        self.dockerfile_builder.copy(artifact_path, "/app/")
+
+    pub fn set_entrypoint(self, entrypoint: text):
+        """Set container entrypoint.
+
+        Args:
+            entrypoint: Entrypoint command
+        """
+        self.dockerfile_builder.entrypoint([entrypoint])
+
+    pub fn generate_dockerfile(self) -> text:
+        """Generate Dockerfile.
+
+        Returns:
+            Dockerfile content
+
+        Example:
+            val dockerfile = container.generate_dockerfile()
+            # Writes multi-stage Dockerfile
+        """
+        # Start from base
+        self.dockerfile_builder.from_base(self.base_image)
+
+        # Add runtime-specific instructions based on detected languages
+        val languages = self.detect_runtime()
+        for lang in languages:
+            match lang:
+                Language.Python:
+                    self.dockerfile_builder.run("pip install --no-cache-dir -r requirements.txt")
+                Language.JavaScript:
+                    self.dockerfile_builder.run("npm ci --only=production")
+                Language.Go:
+                    self.dockerfile_builder.run("go build -o /app/main .")
+                Language.Rust:
+                    self.dockerfile_builder.run("cargo build --release")
+                _:
+                    pass
+
+        self.dockerfile_builder.generate()
+
+    pub fn build(
+        self,
+        tag: text,
+        platforms: List<Platform>
+    ) -> ContainerImage:
+        """Build container image.
+
+        Args:
+            tag: Image tag
+            platforms: Target platforms
+
+        Returns:
+            Built image
+
+        Example:
+            val image = container.build(
+                tag: "my-app:1.0.0",
+                platforms: [Platform.LinuxAmd64, Platform.LinuxArm64]
+            )
+        """
+        if self.verbose:
+            print("Building container image: {tag}")
+
+        # Generate Dockerfile
+        val dockerfile = self.generate_dockerfile()
+
+        # Write Dockerfile to temp file
+        val dockerfile_path = ".dockerfile.tmp"
+        _rt_file_write_text(dockerfile_path.ptr(), dockerfile_path.len(), dockerfile.ptr(), dockerfile.len())
+
+        # Execute docker build
+        val cmd = "docker"
+        val platform_str = self.get_platform_string()
+        var args = if self.is_multi_platform():
+            "buildx build --platform {platform_str} -t {tag} -f {dockerfile_path} ."
+        else:
+            "build -t {tag} -f {dockerfile_path} ."
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        if self.verbose and exit_code != 0:
+            print("Docker build failed: {stderr}")
+
+        ContainerImage.new(tag, platforms)
+
+# Container image
+pub class ContainerImage:
+    pub tag: text
+    pub platforms: List<Platform>
+    pub size_mb: f64
+
+    pub fn new(tag: text, platforms: List<Platform>) -> ContainerImage:
+        """Create container image.
+
+        Args:
+            tag: Image tag
+            platforms: Platforms
+
+        Returns:
+            Container image
+        """
+        # Get image size using docker inspect
+        val cmd = "docker"
+        val args = "image inspect {tag} --format='{{.Size}}'"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        var size: f64 = 0.0
+        if exit_code == 0 and not stdout.trim().is_empty():
+            # Parse size from stdout (bytes) and convert to MB
+            var bytes: i64 = 0
+            for ch in stdout.trim().chars():
+                if ch >= '0' and ch <= '9':
+                    bytes = bytes * 10 + ((ch as i64) - ('0' as i64))
+            size = (bytes as f64) / (1024.0 * 1024.0)
+
+        ContainerImage {
+            tag: tag,
+            platforms: platforms,
+            size_mb: size
+        }
+
+    pub fn push(self, registry: text) -> Result<(), text>:
+        """Push image to registry.
+
+        Args:
+            registry: Registry URL
+
+        Returns:
+            Ok if successful
+
+        Example:
+            image.push("docker.io/user/my-app:1.0.0")
+            # or
+            image.push("ghcr.io/org/my-app:1.0.0")
+        """
+        # Tag image for registry if different
+        val full_tag = if registry != self.tag:
+            val cmd = "docker"
+            val args = "tag {self.tag} {registry}"
+            val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+            if exit_code != 0:
+                return Err("Failed to tag image: {stderr}")
+            registry
+        else:
+            self.tag
+
+        # Execute docker push
+        val cmd = "docker"
+        val args = "push {full_tag}"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        if exit_code == 0:
+            Ok(())
+        else:
+            Err("Failed to push image: {stderr}")
+
+    pub fn save(self, output_path: text) -> Result<(), text>:
+        """Save image to tarball.
+
+        Args:
+            output_path: Output tar file
+
+        Returns:
+            Ok if successful
+
+        Example:
+            image.save("my-app-1.0.0-image.tar")
+        """
+        # Execute docker save
+        val cmd = "docker"
+        val args = "save -o {output_path} {self.tag}"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        if exit_code == 0:
+            Ok(())
+        else:
+            Err("Failed to save image: {stderr}")
+
+    pub fn get_registry(self) -> text:
+        """Extract registry from tag.
+
+        Returns:
+            Registry URL or empty string
+
+        Example:
+            # tag = "docker.io/user/app:1.0"
+            image.get_registry()  # → "docker.io"
+
+            # tag = "app:1.0"
+            image.get_registry()  # → ""
+        """
+        if self.tag.contains("/"):
+            val parts = self.tag.split("/")
+            if parts.len() >= 2 and parts[0].contains("."):
+                return parts[0]
+        ""
+
+    pub fn get_image_name(self) -> text:
+        """Extract image name from tag.
+
+        Returns:
+            Image name without registry and version
+
+        Example:
+            # tag = "docker.io/user/app:1.0"
+            image.get_image_name()  # → "user/app"
+
+            # tag = "app:1.0"
+            image.get_image_name()  # → "app"
+        """
+        val without_version = if self.tag.contains(":"):
+            val parts = self.tag.split(":")
+            parts[0]
+        else:
+            self.tag
+
+        # Remove registry if present
+        if without_version.contains("/"):
+            val parts = without_version.split("/")
+            if parts.len() >= 2 and parts[0].contains("."):
+                # Has registry, remove it
+                val remaining = parts[1:]
+                remaining.join("/")
+            else:
+                without_version
+        else:
+            without_version
+
+    pub fn get_version(self) -> text:
+        """Extract version from tag.
+
+        Returns:
+            Version or "latest"
+
+        Example:
+            # tag = "app:1.0.0"
+            image.get_version()  # → "1.0.0"
+
+            # tag = "app"
+            image.get_version()  # → "latest"
+        """
+        if self.tag.contains(":"):
+            val parts = self.tag.split(":")
+            parts[parts.len() - 1]
+        else:
+            "latest"
+
+    pub fn has_registry(self) -> bool:
+        """Check if tag has registry."""
+        not self.get_registry().is_empty()
+
+    pub fn has_version(self) -> bool:
+        """Check if tag has version."""
+        self.tag.contains(":")
+
+    pub fn is_latest(self) -> bool:
+        """Check if latest version."""
+        self.get_version() == "latest"
+
+    pub fn summary(self) -> text:
+        """Get image summary."""
+        "{self.tag} ({self.platforms.len()} platforms, {self.size_mb:.1f} MB)"

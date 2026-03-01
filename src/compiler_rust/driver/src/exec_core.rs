@@ -72,7 +72,7 @@ impl ExecCore {
         // Check SIMPLE_EXECUTION_MODE env var for default mode
         let mode = std::env::var("SIMPLE_EXECUTION_MODE")
             .map(|s| ExecutionMode::from_str(&s))
-            .unwrap_or(ExecutionMode::Interpret); // Stage 1: interpreter default
+            .unwrap_or(ExecutionMode::Jit); // JIT default (Stage 2+)
         Self {
             loader: SmfLoader::new(),
             gc_alloc: gc.clone(),
@@ -99,7 +99,7 @@ impl ExecCore {
             gc_alloc: Arc::new(NoGcAllocator::new()),
             gc_runtime: None,
             symbol_provider: default_runtime_provider(),
-            execution_mode: ExecutionMode::Interpret,
+            execution_mode: ExecutionMode::Jit,
         }
     }
 
@@ -149,7 +149,7 @@ impl ExecCore {
             gc_alloc: Arc::new(NoGcAllocator::with_memory_limit(limit_bytes)),
             gc_runtime: None,
             symbol_provider: default_runtime_provider(),
-            execution_mode: ExecutionMode::Interpret,
+            execution_mode: ExecutionMode::Jit,
         }
     }
 
@@ -160,7 +160,7 @@ impl ExecCore {
             gc_alloc: Arc::new(NoGcAllocator::with_memory_config(config)),
             gc_runtime: None,
             symbol_provider: default_runtime_provider(),
-            execution_mode: ExecutionMode::Interpret,
+            execution_mode: ExecutionMode::Jit,
         }
     }
 

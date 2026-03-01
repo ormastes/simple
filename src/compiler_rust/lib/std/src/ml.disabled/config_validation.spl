@@ -1,0 +1,389 @@
+# Configuration Validation and Resolver System
+#
+# Provides:
+# - ConfResolver: Custom resolver registry for ${resolver:args} interpolation
+# - ConfError: Validation error type
+# - ConfSchema: Schema-based validation and defaults
+#
+# Built-in resolvers:
+# - ${env:VAR_NAME} - Environment variable lookup
+# - ${path.join:a,b,c} - Path joining
+# - ${time.now:%format} - Current timestamp
+# - ${sys.cpu_count} - CPU count
+# - ${math.floor:3.7} - Floor function
+# - ${math.ceil:3.2} - Ceiling function
+
+export ConfResolver, ConfError, ConfSchema
+
+use config.{Conf, _parse_float, _set_nested}
+
+
+# ============================================================================
+# Resolver System
+# ============================================================================
+
+# Global resolver registry
+var _resolvers: any = {}
+
+class ConfResolver:
+    """Custom resolver for configuration interpolation.
+
+    Resolvers handle ${resolver_name:args} patterns in config values.
+
+    Example:
+        ConfResolver.register("double", |args| -> any:
+            val num = _parse_int(args)
+            return num * 2
+        )
+        # In config: ${double:21} -> 42
+    """
+
+    static me register(name: str, handler: fn(str) -> any):
+        """Register a custom resolver.
+
+        Args:
+            name: Resolver name (used as ${name:args})
+            handler: Function that takes args string and returns resolved value
+
+        Example:
+            ConfResolver.register("upper", |s| s.upper())
+        """
+        _resolvers[name] = handler
+
+    static fn resolve(name: str, args: str) -> any:
+        """Resolve a value using a registered resolver.
+
+        Args:
+            name: Resolver name
+            args: Arguments to pass to resolver
+
+        Returns:
+            Resolved value, or original string if resolver not found
+        """
+        if name in _resolvers:
+            val handler = _resolvers[name]
+            return handler(args)
+        return "${" + name + ":" + args + "}"
+
+    static fn has(name: str) -> bool:
+        """Check if a resolver is registered."""
+        return name in _resolvers
+
+
+# ============================================================================
+# Built-in Resolvers
+# ============================================================================
+
+fn _init_builtin_resolvers():
+    """Initialize built-in resolvers."""
+
+    # Environment variable resolver: ${env:VAR_NAME}
+    ConfResolver.register("env", |name| -> any:
+        # Placeholder - would use sys.get_env(name) when available
+        return ""
+    )
+
+    # Path join resolver: ${path.join:a,b,c}
+    ConfResolver.register("path.join", |args| -> any:
+        val parts = args.split(",")
+        var result = ""
+        for i in 0..parts.len():
+            if i > 0:
+                result = result + "/"
+            result = result + parts[i].trim()
+        return result
+    )
+
+    # Current time resolver: ${time.now:%Y%m%d}
+    ConfResolver.register("time.now", |format| -> any:
+        # Placeholder - would use datetime formatting when available
+        return "20260118"
+    )
+
+    # CPU count resolver: ${sys.cpu_count}
+    ConfResolver.register("sys.cpu_count", |_| -> any:
+        # Placeholder - would use sys.cpu_count() when available
+        return 8
+    )
+
+    # Math floor resolver: ${math.floor:3.7}
+    ConfResolver.register("math.floor", |args| -> any:
+        val num = _parse_float(args)
+        return num as i64
+    )
+
+    # Math ceil resolver: ${math.ceil:3.2}
+    ConfResolver.register("math.ceil", |args| -> any:
+        val num = _parse_float(args)
+        val floor_val = num as i64
+        if num > floor_val as f64:
+            return floor_val + 1
+        return floor_val
+    )
+
+# Initialize built-in resolvers on module load
+_init_builtin_resolvers()
+
+
+# ============================================================================
+# Interpolation
+# ============================================================================
+
+fn _interpolate_value(value: any, config: any) -> any:
+    """Interpolate ${...} references in a value.
+
+    Supports:
+    - ${path.to.var} - Reference another config value
+    - ${resolver:args} - Call a registered resolver
+
+    Args:
+        value: Value to interpolate
+        config: Full config dict for variable references
+
+    Returns:
+        Interpolated value
+    """
+    if not (value is str):
+        return value
+
+    var result = value
+    var pos = 0
+
+    while pos < result.len():
+        # Find ${
+        val start = _find_substr(result, "${", pos)
+        if start < 0:
+            break
+
+        # Find matching }
+        val end = _find_char(result, "}", start + 2)
+        if end < 0:
+            break
+
+        # Extract expression
+        val expr = result.substr(start + 2, end)
+
+        # Resolve the expression
+        val resolved = _resolve_expr(expr, config)
+
+        # Replace in result
+        val before = result.substr(0, start)
+        val after = result.substr(end + 1, result.len())
+        result = before + _to_string(resolved) + after
+
+        pos = start + _to_string(resolved).len()
+
+    return result
+
+fn _resolve_expr(expr: str, config: any) -> any:
+    """Resolve a single interpolation expression.
+
+    Args:
+        expr: Expression like "path.to.var" or "resolver:args"
+        config: Full config dict
+
+    Returns:
+        Resolved value
+    """
+    # Check for resolver syntax: name:args
+    val colon_pos = _find_char(expr, ":", 0)
+    if colon_pos > 0:
+        val resolver_name = expr.substr(0, colon_pos)
+        val args = expr.substr(colon_pos + 1, expr.len())
+
+        # First interpolate args (for nested references)
+        val interp_args = _interpolate_value(args, config)
+
+        if ConfResolver.has(resolver_name):
+            return ConfResolver.resolve(resolver_name, _to_string(interp_args))
+
+    # Otherwise, treat as config path reference
+    return _get_nested(config, expr)
+
+fn _get_nested(data: any, key: str) -> any:
+    """Get a nested value from a dictionary."""
+    val parts = key.split(".")
+    var current = data
+
+    for part in parts:
+        if current is dict:
+            if part in current:
+                current = current[part]
+            else:
+                return ""
+        else:
+            return ""
+
+    return current
+
+fn _find_substr(s: str, needle: str, start: i64) -> i64:
+    """Find substring position, returns -1 if not found."""
+    for i in start..(s.len() - needle.len() + 1):
+        var found = true
+        for j in 0..needle.len():
+            if s.char_at(i + j) != needle.char_at(j):
+                found = false
+                break
+        if found:
+            return i
+    return -1
+
+fn _find_char(s: str, ch: str, start: i64) -> i64:
+    """Find character position, returns -1 if not found."""
+    for i in start..s.len():
+        if s.char_at(i) == ch:
+            return i
+    return -1
+
+fn _to_string(value: any) -> str:
+    """Convert any value to string."""
+    if value is str:
+        return value
+    if value is i64:
+        return "{value}"
+    if value is f64:
+        return "{value}"
+    if value is bool:
+        if value:
+            return "true"
+        return "false"
+    return ""
+
+
+# ============================================================================
+# Schema Validation
+# ============================================================================
+
+class ConfError:
+    """Configuration validation error."""
+    path: str
+    message: str
+
+    fn __init__(path: str, message: str):
+        self.path = path
+        self.message = message
+
+    fn to_string() -> str:
+        """Format error message."""
+        return "error at {self.path}: {self.message}"
+
+
+class ConfSchema:
+    """Schema definition for configuration validation.
+
+    Defines expected structure, types, and constraints.
+
+    Example:
+        val schema = ConfSchema.new()
+            .field("model.hidden_size", "int", required=true)
+            .field("training.lr", "float", required=true)
+            .field("training.epochs", "int", default_val=10)
+    """
+    _fields: any  # Dict of field definitions
+
+    fn __init__():
+        self._fields = {}
+
+    static fn new() -> ConfSchema:
+        """Create a new schema."""
+        return ConfSchema()
+
+    me field(path: str, type_name: str, required: bool = false, default_val: any = nil) -> ConfSchema:
+        """Define a field in the schema.
+
+        Args:
+            path: Dot-notation path to field
+            type_name: Expected type ("int", "float", "str", "bool", "list", "dict")
+            required: Whether field is required
+            default_val: Default value if not provided
+
+        Returns:
+            Self for chaining
+        """
+        self._fields[path] = {
+            "type": type_name,
+            "required": required,
+            "default": default_val
+        }
+        return self
+
+    fn validate(config: Conf) -> any:
+        """Validate a configuration against this schema.
+
+        Args:
+            config: Configuration to validate
+
+        Returns:
+            List of ConfError, empty if valid
+        """
+        var errors = []
+
+        for path in self._fields.keys():
+            val field_def = self._fields[path]
+            val value = config.get(path)
+
+            if value.is_empty():
+                if field_def["required"]:
+                    errors = errors.push(ConfError(path, "required field missing"))
+            else:
+                val type_name = field_def["type"]
+                val raw = value.raw()
+
+                if not _check_type(raw, type_name):
+                    errors = errors.push(ConfError(path,
+                        "expected {type_name}, got " + _type_of(raw)))
+
+        return errors
+
+    fn apply_defaults(config: Conf) -> Conf:
+        """Apply default values to missing fields.
+
+        Args:
+            config: Configuration to apply defaults to
+
+        Returns:
+            New configuration with defaults applied
+        """
+        var data = config.to_dict()
+
+        for path in self._fields.keys():
+            val field_def = self._fields[path]
+            val current = config.get(path)
+
+            if current.is_empty() and field_def["default"] != nil:
+                _set_nested(data, path, field_def["default"])
+
+        return Conf.from_dict(data)
+
+
+fn _check_type(value: any, type_name: str) -> bool:
+    """Check if value matches expected type."""
+    if type_name == "int":
+        return value is i64 or value is i32
+    if type_name == "float":
+        return value is f64 or value is f32 or value is i64 or value is i32
+    if type_name == "str":
+        return value is str
+    if type_name == "bool":
+        return value is bool
+    if type_name == "list":
+        return value is list
+    if type_name == "dict":
+        return value is dict
+    return true
+
+fn _type_of(value: any) -> str:
+    """Get type name of value."""
+    if value is i64 or value is i32:
+        return "int"
+    if value is f64 or value is f32:
+        return "float"
+    if value is str:
+        return "str"
+    if value is bool:
+        return "bool"
+    if value is list:
+        return "list"
+    if value is dict:
+        return "dict"
+    return "unknown"

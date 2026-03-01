@@ -1,0 +1,512 @@
+# Hot Reload - Implementation and Helpers
+#
+# HotReload implementation, file system monitoring, dev server communication,
+# file system helpers, error types, and FFI declarations.
+# Part of the hot reload module - see hot_reload.spl for type definitions.
+
+use core.*
+use concurrency.*
+use host.async_nogc_mut.io.fs.*
+use host.async_nogc_mut.net.tcp.*
+use ui.gui.hot_reload.*
+
+# =============================================================================
+# Hot Reload Implementation
+# =============================================================================
+
+impl HotReload:
+    # Create new hot reload manager
+    pub fn new(watch_path: &str) -> HotReload:
+        return HotReload {
+            watch_paths: [watch_path.to_string()],
+            ignore_patterns: [
+                "target/".to_string(),
+                "build/".to_string(),
+                ".git/".to_string(),
+                "node_modules/".to_string()
+            ],
+            file_watcher: FileWatcher.new(),
+            last_modified: Dict.new(),
+            pending_updates: [],
+            state_snapshot: None,
+            preserve_state: true,
+            dev_server: None,
+            server_addr: "127.0.0.1:3030".to_string(),
+            watching: false,
+            last_error: None
+        }
+
+    # Add watch path
+    pub fn add_watch_path(self, path: &str):
+        self.watch_paths.push(path.to_string())
+
+    # Add ignore pattern
+    pub fn ignore(self, pattern: &str):
+        self.ignore_patterns.push(pattern.to_string())
+
+    # Start watching files
+    pub fn watch(self) -> Result<(), HotReloadError>:
+        if self.watching:
+            return Err(HotReloadError.AlreadyWatching)
+
+        # Scan initial files
+        self.scan_files()?
+
+        # Connect to dev server (optional)
+        self.connect_dev_server().ok()  # Ignore connection errors
+
+        self.watching = true
+        return Ok(())
+
+    # Stop watching
+    pub fn stop(self):
+        self.watching = false
+        if val Some(server) = &mut self.dev_server:
+            server.disconnect()
+
+    # Poll for updates
+    pub fn poll_update(self) -> Option<HotUpdate>:
+        if not self.watching:
+            return None
+
+        # Check file system changes
+        self.check_file_changes()
+
+        # Check dev server messages
+        self.check_server_messages()
+
+        # Return next pending update
+        if not self.pending_updates.is_empty():
+            return Some(self.pending_updates.remove(0))
+
+        return None
+
+    # Preserve current application state
+    pub fn preserve_state(self, snapshot: StateSnapshot):
+        self.state_snapshot = Some(snapshot)
+
+    # Restore preserved state
+    pub fn restore_state(self) -> Option<StateSnapshot>:
+        return self.state_snapshot.take()
+
+    # Enable/disable state preservation
+    pub fn set_preserve_state(self, enabled: bool):
+        self.preserve_state = enabled
+
+# =============================================================================
+# File System Monitoring
+# =============================================================================
+
+impl HotReload:
+    # Scan all watched files
+    fn scan_files() -> Result<(), HotReloadError>:
+        for watch_path in &self.watch_paths:
+            self.scan_directory(watch_path)?
+
+        return Ok(())
+
+    # Recursively scan directory
+    fn scan_directory(path: &str) -> Result<(), HotReloadError>:
+        val entries = list_directory(path)?
+
+        for entry in entries:
+            # Skip ignored patterns
+            if self.should_ignore(&entry.path):
+                continue
+
+            if entry.is_dir:
+                self.scan_directory(&entry.path)?
+            else:
+                self.add_file(&entry.path, entry.modified)
+
+        return Ok(())
+
+    # Add file to watch list
+    fn add_file(path: &str, modified: u64):
+        if self.should_watch(path):
+            self.last_modified.insert(path.to_string(), modified)
+
+    # Check if file should be ignored
+    fn should_ignore(path: &str) -> bool:
+        for pattern in &self.ignore_patterns:
+            if path.contains(pattern):
+                return true
+        return false
+
+    # Check if file should be watched
+    fn should_watch(path: &str) -> bool:
+        return path.ends_with(".spl")
+            or path.ends_with(".sui")
+            or path.ends_with(".css")
+
+    # Check for file changes
+    fn check_file_changes():
+        var changed_files: Array<text> = []
+
+        for (path, last_mod) in &self.last_modified:
+            if val Ok(metadata) = get_file_metadata(path):
+                if metadata.modified > *last_mod:
+                    changed_files.push(path.clone())
+                    self.last_modified.insert(path.clone(), metadata.modified)
+
+        # Generate updates for changed files
+        for path in changed_files:
+            if val Some(update) = self.create_update(&path):
+                self.pending_updates.push(update)
+
+    # Create update from file path
+    fn create_update(path: &str) -> Option<HotUpdate>:
+        val kind = if path.ends_with(".sui"):
+            UpdateKind.ComponentReload
+        else if path.ends_with(".spl"):
+            UpdateKind.ModuleReload
+        else if path.ends_with(".css"):
+            UpdateKind.StyleUpdate
+        else:
+            UpdateKind.AssetUpdate
+
+        # Read file content
+        val content = read_file_to_string(path).ok()
+
+        return Some(HotUpdate {
+            kind: kind,
+            file_path: path.to_string(),
+            content: content,
+            timestamp: get_current_timestamp()
+        })
+
+# =============================================================================
+# Dev Server Communication
+# =============================================================================
+
+impl HotReload:
+    # Connect to development server
+    fn connect_dev_server() -> Result<(), HotReloadError>:
+        val socket = TcpStream.connect(&self.server_addr)?
+        self.dev_server = Some(TcpClient {
+            socket: socket,
+            connected: true
+        })
+        return Ok(())
+
+    # Check for messages from dev server
+    fn check_server_messages():
+        if val Some(server) = &mut self.dev_server:
+            if val Some(message) = server.poll_message():
+                self.handle_server_message(message)
+
+    # Handle message from dev server
+    fn handle_server_message(message: text):
+        # Parse message and create update
+        # Format: "UPDATE <kind> <path>"
+        val parts: Array<&str> = message.split(' ').collect()
+        if parts.len() >= 3 and parts[0] == "UPDATE":
+            val kind = match parts[1]:
+                case "component": UpdateKind.ComponentReload
+                case "module": UpdateKind.ModuleReload
+                case "style": UpdateKind.StyleUpdate
+                case "asset": UpdateKind.AssetUpdate
+                case _: return
+
+            val path = parts[2].to_string()
+            if val Some(update) = self.create_update(&path):
+                self.pending_updates.push(update)
+
+# =============================================================================
+# TCP Client Implementation
+# =============================================================================
+
+impl TcpClient:
+    fn poll_message() -> Option<text>:
+        if not self.connected:
+            return None
+
+        # Non-blocking read
+        var buffer = [0u8; 4096]
+        match self.socket.read_timeout(&mut buffer, 0):
+            case Ok(n):
+                if n > 0:
+                    return Some(text.from_utf8_lossy(&buffer[0..n]).to_string())
+            case Err(_):
+                pass
+
+        return None
+
+    fn disconnect():
+        self.socket.shutdown()
+        self.connected = false
+
+# =============================================================================
+# File System Helpers
+# =============================================================================
+
+# Directory entry
+struct DirEntry:
+    path: text
+    is_dir: bool
+    modified: u64
+
+impl DirEntry:
+    pub fn is_directory(self) -> bool:
+        """Check if this is a directory."""
+        self.is_dir
+
+    pub fn is_file(self) -> bool:
+        """Check if this is a file."""
+        not self.is_dir
+
+    pub fn summary(self) -> text:
+        """Get summary of directory entry."""
+        val kind = if self.is_dir: "directory" else: "file"
+        return "DirEntry: '{self.path}' ({kind})"
+
+# List directory contents
+fn list_directory(path: &str) -> Result<Array<DirEntry>, HotReloadError>:
+    # Use FFI to read directory entries
+    match ffi_readdir(path):
+        case Ok(raw_entries):
+            var entries: Array<DirEntry> = []
+            for raw in raw_entries:
+                entries.push(DirEntry {
+                    path: raw.path,
+                    is_dir: raw.is_dir
+                })
+            return Ok(entries)
+        case Err(e):
+            return Err(HotReloadError.IoError(e))
+
+# Get file metadata
+struct FileMetadataInfo:
+    modified: u64
+    size: u64
+
+impl FileMetadataInfo:
+    pub fn is_empty(self) -> bool:
+        """Check if file is empty."""
+        self.size == 0
+
+    pub fn has_size(self) -> bool:
+        """Check if file has non-zero size."""
+        self.size > 0
+
+    pub fn summary(self) -> text:
+        """Get summary of file metadata."""
+        return "FileMetadataInfo: size={self.size}, modified={self.modified}"
+
+fn get_file_metadata(path: &str) -> Result<FileMetadataInfo, HotReloadError>:
+    # Use FFI to stat the file
+    match ffi_stat(path):
+        case Ok(stat_info):
+            return Ok(FileMetadataInfo {
+                modified: stat_info.mtime_ms,
+                size: stat_info.size
+            })
+        case Err(e):
+            return Err(HotReloadError.IoError(e))
+
+# Read file to string
+fn read_file_to_string(path: &str) -> Result<text, HotReloadError>:
+    # Use FFI to read file contents
+    match ffi_read_file(path):
+        case Ok(contents):
+            return Ok(contents)
+        case Err(e):
+            return Err(HotReloadError.IoError(e))
+
+# Get current timestamp (milliseconds since epoch)
+fn get_current_timestamp() -> u64:
+    # Use FFI to get system time
+    return ffi_system_time_ms()
+
+# =============================================================================
+# Error Types
+# =============================================================================
+
+pub enum HotReloadError:
+    AlreadyWatching
+    NotWatching
+    IoError(text)
+    ParseError(text)
+    ConnectionError(text)
+
+impl HotReloadError:
+    pub fn is_already_watching(self) -> bool:
+        """Check if error is already watching."""
+        match self:
+            case AlreadyWatching: true
+            case _: false
+
+    pub fn is_not_watching(self) -> bool:
+        """Check if error is not watching."""
+        match self:
+            case NotWatching: true
+            case _: false
+
+    pub fn is_io_error(self) -> bool:
+        """Check if error is an IO error."""
+        match self:
+            case IoError(_): true
+            case _: false
+
+    pub fn is_parse_error(self) -> bool:
+        """Check if error is a parse error."""
+        match self:
+            case ParseError(_): true
+            case _: false
+
+    pub fn is_connection_error(self) -> bool:
+        """Check if error is a connection error."""
+        match self:
+            case ConnectionError(_): true
+            case _: false
+
+    pub fn description(self) -> text:
+        """Get description of error."""
+        match self:
+            case AlreadyWatching: return "File watcher is already active"
+            case NotWatching: return "File watcher is not active"
+            case IoError(_): return "IO operation failed"
+            case ParseError(_): return "Failed to parse file"
+            case ConnectionError(_): return "Dev server connection failed"
+
+    pub fn summary(self) -> text:
+        """Get comprehensive error summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            HotReloadError.IoError("disk full").summary()
+            # → "HotReloadError: io-error (IO operation failed): IO error: disk full"
+        """
+        val name = match self:
+            case AlreadyWatching: "already-watching"
+            case NotWatching: "not-watching"
+            case IoError(_): "io-error"
+            case ParseError(_): "parse-error"
+            case ConnectionError(_): "connection-error"
+
+        val desc = self.description()
+        val msg = self.to_string()
+        return "HotReloadError: {name} ({desc}): {msg}"
+
+    pub fn to_string(self) -> text:
+        match self:
+            case HotReloadError.AlreadyWatching:
+                return "Already watching files".to_string()
+            case HotReloadError.NotWatching:
+                return "Not currently watching".to_string()
+            case HotReloadError.IoError(msg):
+                return format("IO error: {}", msg)
+            case HotReloadError.ParseError(msg):
+                return format("Parse error: {}", msg)
+            case HotReloadError.ConnectionError(msg):
+                return format("Connection error: {}", msg)
+
+# =============================================================================
+# File Watcher Implementation
+# =============================================================================
+
+impl FileWatcher:
+    static fn new() -> FileWatcher:
+        return FileWatcher {
+            watched_files: Dict.new(),
+            poll_interval_ms: 200  # Poll every 200ms
+        }
+
+# =============================================================================
+# Placeholder Any Type
+# =============================================================================
+
+enum Any:
+    text(text)
+    i32(i64)
+    f32(f64)
+    bool(bool)
+    Array(Array<Any>)
+    Dict(Dict<text, Any>)
+
+impl Any:
+    pub fn is_string(self) -> bool:
+        """Check if this is a string value."""
+        match self:
+            case text(_): true
+            case _: false
+
+    pub fn is_int(self) -> bool:
+        """Check if this is an integer value."""
+        match self:
+            case i32(_): true
+            case _: false
+
+    pub fn is_float(self) -> bool:
+        """Check if this is a f32 value."""
+        match self:
+            case f32(_): true
+            case _: false
+
+    pub fn is_bool(self) -> bool:
+        """Check if this is a boolean value."""
+        match self:
+            case bool(_): true
+            case _: false
+
+    pub fn is_array(self) -> bool:
+        """Check if this is an array value."""
+        match self:
+            case Array(_): true
+            case _: false
+
+    pub fn is_dict(self) -> bool:
+        """Check if this is a dict value."""
+        match self:
+            case Dict(_): true
+            case _: false
+
+    pub fn is_numeric(self) -> bool:
+        """Check if this is a numeric value (i32 or f32)."""
+        self.is_int() or self.is_float()
+
+    pub fn is_container(self) -> bool:
+        """Check if this is a container (array or dict)."""
+        self.is_array() or self.is_dict()
+
+    pub fn to_string(self) -> text:
+        """Convert to string representation."""
+        match self:
+            case text(s): return s
+            case i32(i): return i.to_string()
+            case f32(f): return f.to_string()
+            case bool(b): return if b: "true" else: "false"
+            case Array(_): return "[Array]"
+            case Dict(_): return "{Dict}"
+
+    pub fn description(self) -> text:
+        """Get description of value type."""
+        match self:
+            case text(_): return "text value"
+            case i32(_): return "Integer value"
+            case f32(_): return "f32 value"
+            case bool(_): return "Boolean value"
+            case Array(_): return "Array value"
+            case Dict(_): return "Dictionary value"
+
+# =============================================================================
+# FFI Declarations
+# =============================================================================
+
+# Raw directory entry from FFI
+struct RawDirEntry:
+    path: text
+    is_dir: bool
+
+# Raw stat info from FFI
+struct StatInfo:
+    mtime_ms: u64
+    size: u64
+
+# File system operations
+extern fn ffi_readdir(path: &str) -> Result<Array<RawDirEntry>, text>
+extern fn ffi_stat(path: &str) -> Result<StatInfo, text>
+extern fn ffi_read_file(path: &str) -> Result<text, text>
+extern fn ffi_system_time_ms() -> u64
