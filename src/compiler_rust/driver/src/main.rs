@@ -555,6 +555,30 @@ const COMMAND_TABLE: &[CommandEntry] = &[
 // ---------------------------------------------------------------------------
 
 fn main() {
+    // Ensure generous stack size for deep recursive module loading chains.
+    // Default is 8 MB which can overflow with deeply nested imports.
+    // Spawn the real main on a 32 MB stack thread if RUST_MIN_STACK is not already set.
+    const DESIRED_STACK: usize = 64 * 1024 * 1024; // 64 MB
+    if std::env::var("_SIMPLE_STACK_SET").is_err() {
+        std::env::set_var("_SIMPLE_STACK_SET", "1");
+        let builder = std::thread::Builder::new()
+            .name("simple-main".to_string())
+            .stack_size(DESIRED_STACK);
+        let handler = builder.spawn(|| {
+            // Re-enter main with the large stack.
+            real_main();
+        }).expect("failed to spawn main thread with larger stack");
+        let result = handler.join();
+        match result {
+            Ok(()) => {}
+            Err(_) => std::process::exit(1),
+        }
+        return;
+    }
+    real_main();
+}
+
+fn real_main() {
     // Initialize metrics and startup tracking
     let (metrics_enabled, mut metrics) = init_metrics();
 

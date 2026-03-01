@@ -171,6 +171,7 @@ mod interpreter_eval;
 mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
 pub use interpreter_method::find_and_exec_method_with_self;
+pub use interpreter_method::clear_pinned_strings;
 mod macros;
 pub use macros::{clear_macro_state, set_macro_trace};
 pub(crate) use macros::{
@@ -199,3 +200,4 @@ pub use interpreter_extern::ast_ffi::clear_ast_ffi_registries;
 pub use interpreter_extern::env_ffi::clear_env_ffi_registry;
 pub use interpreter_extern::error_ffi::clear_error_ffi_registry;
 pub use interpreter_extern::span_ffi::clear_span_ffi_registry;
+pub use interpreter_extern::concurrency::clear_concurrency_registries;

@@ -378,19 +378,80 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
 
-        self.func_ids = func_ids;
+        // Merge into existing func_ids rather than replacing.
+        // declare_globals may have already registered extern function imports
+        // which must be preserved for compile_call to find them.
+        for (name, id) in func_ids {
+            self.func_ids.entry(name).or_insert(id);
+        }
         Ok(())
     }
 
     /// Declare all global variables from a MIR module.
     ///
     /// When `module_prefix` is set, globals are mangled to prevent collisions.
-    pub fn declare_globals(&mut self, globals: &[(String, TypeId, bool)]) -> BackendResult<()> {
+    ///
+    /// Globals that correspond to extern function declarations (e.g. `rt_getpid`)
+    /// are initialized with the function's import address so that `GlobalLoad`
+    /// followed by `IndirectCall` resolves correctly at link time.
+    pub fn declare_globals(
+        &mut self,
+        globals: &[(String, TypeId, bool)],
+        extern_fn_names: &std::collections::HashSet<String>,
+    ) -> BackendResult<()> {
         use super::types_util::type_to_cranelift;
 
         for (name, ty, is_mutable) in globals {
             // Skip globals that are actually runtime functions (extern functions)
             if self.runtime_funcs.contains_key(name.as_str()) {
+                continue;
+            }
+
+            // If this global is an extern function declaration, create a data slot
+            // initialized with the function's import address. This ensures that
+            // GlobalLoad + IndirectCall patterns resolve correctly at link time.
+            if extern_fn_names.contains(name) {
+                // Use the RAW (unmangled) name for the function import so the linker
+                // can resolve it against runtime symbols or weak C stubs.
+                let sig = {
+                    let call_conv = CallConv::SystemV;
+                    let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+                    // Extern functions use a generic i64 signature (tagged values)
+                    sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    sig
+                };
+                // Declare the function import under the raw name
+                let func_id = self
+                    .module
+                    .declare_function(name, cranelift_module::Linkage::Import, &sig)
+                    .map_err(|e| BackendError::ModuleError(format!("extern fn '{}': {}", name, e)))?;
+
+                // Also register in func_ids so compile_call can find it
+                self.func_ids.entry(name.clone()).or_insert(func_id);
+
+                // Create a data slot (using the mangled name for collision avoidance)
+                // and initialize it with the function's address via a relocation.
+                let symbol_name = self.mangle_name(name);
+                let data_id = self
+                    .module
+                    .declare_data(&symbol_name, cranelift_module::Linkage::Preemptible, true, false)
+                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+
+                let mut data_desc = cranelift_module::DataDescription::new();
+                // 8 bytes for a function pointer on 64-bit
+                data_desc.define_zeroinit(8);
+                let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);
+                data_desc.write_function_addr(0, func_ref);
+
+                self.module
+                    .define_data(data_id, &data_desc)
+                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+
+                self.global_ids.insert(name.clone(), data_id);
+                if symbol_name != *name {
+                    self.global_ids.insert(symbol_name, data_id);
+                }
                 continue;
             }
 
@@ -488,7 +549,7 @@ impl<M: Module> CodegenBackend<M> {
         let functions = unique_functions;
 
         // First pass: declare globals and functions
-        self.declare_globals(&mir.globals)?;
+        self.declare_globals(&mir.globals, &mir.extern_fn_names)?;
         self.declare_functions(&functions)?;
 
         // Second pass: compile function bodies

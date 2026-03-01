@@ -126,6 +126,11 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     for _ in 0..10 {
         // Try various stdlib locations
         for stdlib_subpath in &[
+            // Preferred: repo layout uses src/std/* (symlink to src/lib)
+            "src/std",
+            // Also try src/lib directly
+            "src/lib",
+            // Legacy layouts kept for compatibility
             "src/std/src",
             "src/lib/std/src",
             "lib/std/src",
@@ -135,10 +140,13 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         ] {
             let stdlib_candidate = current.join(stdlib_subpath);
             if stdlib_candidate.exists() {
-                // When importing from stdlib, "std" represents the stdlib root itself, not a subdirectory.
-                // So "import std.spec" should resolve to "lib/std/src/spec/__init__.spl", not "lib/std/src/std/spec/__init__.spl".
-                // Strip the "std" prefix if present.
-                let stdlib_parts: Vec<String> = if parts.len() > 0 && parts[0] == "std" {
+                // When importing from stdlib, "std" / "lib" / "std_lib" represent the stdlib root itself,
+                // not a subdirectory. Strip the prefix if present.
+                let stdlib_parts: Vec<String> = if !parts.is_empty() && parts[0] == "std" {
+                    parts[1..].to_vec()
+                } else if !parts.is_empty() && parts[0] == "lib" {
+                    parts[1..].to_vec()
+                } else if !parts.is_empty() && parts[0] == "std_lib" {
                     parts[1..].to_vec()
                 } else {
                     parts.to_vec()

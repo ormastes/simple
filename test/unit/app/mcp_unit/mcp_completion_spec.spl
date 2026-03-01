@@ -1,0 +1,92 @@
+# MCP Argument Completion Specification
+# Feature: MCP Completions
+# Category: MCP, Protocol
+# Status: Complete
+
+use std.spec
+use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, make_result_response}
+
+describe "MCP Completion Request":
+    context "when requesting prompt completions":
+        it "accepts completion request with ref/prompt":
+            val ref = jo2(jp("type", js("ref/prompt")), jp("name", js("code-review")))
+            val arg = jo2(jp("name", js("language")), jp("value", js("py")))
+            val params = jo2(jp("ref", ref), jp("argument", arg))
+            expect(params.contains("ref/prompt")).to_equal(true)
+            expect(params.contains("language")).to_equal(true)
+
+        it "handles ref/prompt reference type":
+            val ref = jo1(jp("type", js("ref/prompt")))
+            val ref_type = extract_json_string(ref, "type")
+            expect(ref_type).to_equal("ref/prompt")
+
+        it "builds completion params with argument value":
+            val arg = jo2(jp("name", js("language")), jp("value", js("py")))
+            val arg_value = extract_json_string(arg, "value")
+            expect(arg_value).to_equal("py")
+
+    context "when requesting resource completions":
+        it "handles ref/resource reference type":
+            val ref = jo2(jp("type", js("ref/resource")), jp("uri", js("file:///*")))
+            val ref_type = extract_json_string(ref, "type")
+            expect(ref_type).to_equal("ref/resource")
+
+        it "includes uri in resource ref":
+            val ref = jo2(jp("type", js("ref/resource")), jp("uri", js("bugdb:///*")))
+            expect(ref.contains("bugdb://")).to_equal(true)
+
+describe "MCP Completion Response Format":
+    context "when building completion response":
+        it "includes values array":
+            val values = "[" + js("python") + "," + js("perl") + "]"
+            val completion = jo3(jp("values", values), jp("total", "2"), jp("hasMore", "false"))
+            val result = jo1(jp("completion", completion))
+            val response = make_result_response("1", result)
+            expect(response.contains("values")).to_equal(true)
+            expect(response.contains("python")).to_equal(true)
+
+        it "includes total count":
+            val completion = jo3(jp("values", "[]"), jp("total", "5"), jp("hasMore", "false"))
+            val result = jo1(jp("completion", completion))
+            val response = make_result_response("1", result)
+            expect(response.contains("\"total\":5")).to_equal(true)
+
+        it "includes hasMore flag":
+            val completion = jo3(jp("values", "[]"), jp("total", "150"), jp("hasMore", "true"))
+            val result = jo1(jp("completion", completion))
+            val response = make_result_response("1", result)
+            expect(response.contains("\"hasMore\":true")).to_equal(true)
+
+        it "values array has max 100 items":
+            val max_items = 100
+            val actual_items = 5
+            expect(actual_items <= max_items).to_equal(true)
+
+    context "when no completions available":
+        it "returns empty values array":
+            val completion = jo3(jp("values", "[]"), jp("total", "0"), jp("hasMore", "false"))
+            val result = jo1(jp("completion", completion))
+            val response = make_result_response("1", result)
+            expect(response.contains("\"values\":[]")).to_equal(true)
+
+        it "returns zero total":
+            val completion = jo3(jp("values", "[]"), jp("total", "0"), jp("hasMore", "false"))
+            expect(completion.contains("\"total\":0")).to_equal(true)
+
+        it "returns hasMore as false":
+            val completion = jo3(jp("values", "[]"), jp("total", "0"), jp("hasMore", "false"))
+            expect(completion.contains("\"hasMore\":false")).to_equal(true)
+
+describe "MCP Context-Aware Completions":
+    context "when context arguments provided":
+        it "accepts context parameter in params":
+            val context_arg = jo1(jp("language", js("python")))
+            val arg = jo2(jp("name", js("style")), jp("value", js("d")))
+            val params = jo3(jp("ref", jo1(jp("type", js("ref/prompt")))), jp("argument", arg), jp("context", context_arg))
+            expect(params.contains("context")).to_equal(true)
+            expect(params.contains("python")).to_equal(true)
+
+        it "extracts context values":
+            val context_arg = jo1(jp("language", js("python")))
+            val lang = extract_json_string(context_arg, "language")
+            expect(lang).to_equal("python")

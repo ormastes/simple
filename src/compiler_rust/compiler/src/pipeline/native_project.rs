@@ -1007,6 +1007,16 @@ fn build_use_map_from_ast(
                     &mut use_map,
                 );
             }
+            simple_parser::ast::Node::ExportUseStmt(export_use) => {
+                // export use also imports names into the current module's scope
+                collect_use_imports(
+                    &export_use.path.segments,
+                    &export_use.target,
+                    all_mangled,
+                    re_exports,
+                    &mut use_map,
+                );
+            }
             simple_parser::ast::Node::MultiUse(multi_use) => {
                 for (path, target) in &multi_use.imports {
                     collect_use_imports(&path.segments, target, all_mangled, re_exports, &mut use_map);

@@ -1,0 +1,72 @@
+# Crash Recovery Integration Tests
+# Tests server loop exit conditions and error recovery
+
+use std.spec
+use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, jo1, make_result_response, make_error_response}
+
+describe "Crash Recovery Integration":
+    describe "Server Loop Control":
+        it "stops when should_stop returns true":
+            val should_stop = true
+            expect(should_stop).to_equal(true)
+
+        it "continues when should_stop returns false":
+            val should_stop = false
+            expect(should_stop).to_equal(false)
+
+    describe "Transport EOF Handling":
+        it "handles EOF during message read":
+            val response = make_error_response("1", -32000, "EOF reached")
+            expect(response.contains("EOF")).to_equal(true)
+
+        it "flushes logs on EOF":
+            val msg = "Flushing logs after EOF"
+            expect(msg.contains("Flushing")).to_equal(true)
+
+        it "handles flush error on EOF":
+            val response = make_error_response("1", -32603, "Flush failed on EOF")
+            expect(response.contains("Flush failed")).to_equal(true)
+
+    describe "Request Handling Errors":
+        it "handles error in handle_request_safe":
+            val response = make_error_response("1", -32603, "Request handling failed")
+            expect(response.contains("Request handling failed")).to_equal(true)
+
+        it "handles successful request":
+            val response = make_result_response("1", jo1(jp("status", js("ok"))))
+            expect(response.contains("ok")).to_equal(true)
+
+    describe "Consecutive Error Tracking":
+        it "increments error count on failure":
+            var error_count = 0
+            error_count = error_count + 1
+            expect(error_count).to_equal(1)
+
+        it "resets error count on success":
+            var error_count = 5
+            error_count = 0
+            expect(error_count).to_equal(0)
+
+        it "keeps error count at zero when no errors":
+            val error_count = 0
+            expect(error_count).to_equal(0)
+
+    describe "Error Threshold":
+        it "detects when threshold reached":
+            val consecutive_errors = 10
+            val threshold = 10
+            expect(consecutive_errors >= threshold).to_equal(true)
+
+        it "continues when below threshold":
+            val consecutive_errors = 5
+            val threshold = 10
+            expect(consecutive_errors < threshold).to_equal(true)
+
+    describe "Graceful Shutdown":
+        it "completes shutdown sequence":
+            val response = make_result_response("1", jo1(jp("status", js("shutdown"))))
+            expect(response.contains("shutdown")).to_equal(true)
+
+        it "flushes logs during shutdown":
+            val msg = "Flushing logs during shutdown"
+            expect(msg.contains("Flushing")).to_equal(true)

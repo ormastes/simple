@@ -509,6 +509,9 @@ impl<'a> MirLowerer<'a> {
         let mut module = MirModule::new();
         module.name = hir.name.clone();
 
+        // Copy extern function names from HIR to MIR
+        module.extern_fn_names = hir.extern_fn_names.clone();
+
         // Copy global variables from HIR to MIR
         // IMPORTANT: HIR globals HashMap is used for name resolution and contains:
         // 1. Actual global variables (let/var at module scope)

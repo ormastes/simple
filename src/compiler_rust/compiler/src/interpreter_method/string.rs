@@ -491,11 +491,7 @@ if let Value::Str(ref s) = recv_val {
         "ptr" => {
             // Return raw pointer to string's bytes as i64 (for FFI/codegen)
             // We must pin the string so the pointer remains valid after this Value is dropped.
-            // Use a thread-local cache to keep strings alive.
-            use std::cell::RefCell;
-            thread_local! {
-                static PINNED_STRINGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
-            }
+            // PINNED_STRINGS is defined at module level in mod.rs so it can be cleared externally.
             let cloned = s.to_string();
             let ptr = PINNED_STRINGS.with(|cell| {
                 let mut cache = cell.borrow_mut();

@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 //==============================================================================
 // Trait Metadata for Static Polymorphism
@@ -129,6 +129,10 @@ pub struct HirModule {
     pub lean_blocks: Vec<HirLeanBlock>,
     /// Impl blocks
     pub impls: Vec<HirImpl>,
+    /// Names of extern function declarations (e.g., `rt_getpid`, `aot_c_file`).
+    /// These are globals that hold function pointers and need special handling
+    /// in the codegen to initialize with the function's import address.
+    pub extern_fn_names: HashSet<String>,
 }
 
 impl HirModule {
@@ -148,6 +152,7 @@ impl HirModule {
             trait_infos: HashMap::new(),
             lean_blocks: Vec::new(),
             impls: Vec::new(),
+            extern_fn_names: HashSet::new(),
         }
     }
 

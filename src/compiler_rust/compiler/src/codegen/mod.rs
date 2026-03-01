@@ -50,6 +50,7 @@ pub use buffer_pool::{
     PooledBuffer,
 };
 pub use common_backend::{BackendError, BackendResult, BackendSettings, CodegenBackend};
+pub use cranelift_ffi::clear_cranelift_registries;
 pub use cranelift::*;
 pub use execution_manager::{CodeInfo, ExecutionManager, ExecutionResult};
 #[cfg(not(doctest))]

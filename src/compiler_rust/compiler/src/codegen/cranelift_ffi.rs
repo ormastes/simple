@@ -64,6 +64,15 @@ lazy_static! {
     static ref SIGNATURES: Mutex<HashMap<i64, Signature>> = Mutex::new(HashMap::new());
 }
 
+/// Clear all Cranelift FFI global registries.
+/// Called between test runs to prevent OOM from accumulated state.
+pub fn clear_cranelift_registries() {
+    JIT_MODULES.lock().unwrap().clear();
+    AOT_MODULES.lock().unwrap().clear();
+    FUNC_CONTEXTS.lock().unwrap().clear();
+    SIGNATURES.lock().unwrap().clear();
+}
+
 // ============================================================================
 // Module Context Types
 // ============================================================================

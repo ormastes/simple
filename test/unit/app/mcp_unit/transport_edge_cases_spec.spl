@@ -1,0 +1,191 @@
+# MCP Transport Edge Cases Tests
+# Feature: MCP Transport Error Handling
+# Category: MCP, Transport, Error Handling
+# Status: Complete
+#
+# Tests for edge cases, error conditions, and crash prevention in the transport
+# layer using MCP helpers and the validation system.
+
+use std.spec
+use std.common.text.{NL}
+use std.nogc_async_mut.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, escape_json, make_result_response, make_error_response, make_notification, log_level_to_int, min_int}
+use std.nogc_async_mut.mcp.error_handler.{ErrorCategory, McpError, ValidationLimits, InputValidator}
+use std.nogc_async_mut.mcp.error_handler.{mcp_error, default_validation_limits, strict_validation_limits, input_validator}
+
+describe "Transport edge case - negative content length":
+    it "rejects negative content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(-100)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("negative")).to_equal(true)
+
+    it "rejects -1":
+        val validator = input_validator()
+        val result = validator.validate_content_length(-1)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.category).to_equal(ErrorCategory.Validation)
+
+describe "Transport edge case - excessive content length":
+    it "rejects content length exceeding limit":
+        val validator = input_validator()
+        val result = validator.validate_content_length(2000000)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+    it "accepts content length at limit":
+        val validator = input_validator()
+        val limits = default_validation_limits()
+        val result = validator.validate_content_length(limits.max_content_length)
+        expect(result).to_be_nil()
+
+    it "accepts small content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(100)
+        expect(result).to_be_nil()
+
+describe "Transport edge case - malformed JSON responses":
+    it "parse error for invalid JSON":
+        val response = make_error_response("null", -32700, "Parse error")
+        expect(response.contains("-32700")).to_equal(true)
+        expect(response.contains("Parse error")).to_equal(true)
+
+    it "missing method error":
+        val response = make_error_response("1", -32600, "Missing method field")
+        expect(response.contains("-32600")).to_equal(true)
+
+    it "invalid method type error":
+        val response = make_error_response("1", -32600, "Method must be a string")
+        expect(response.contains("Method must be a string")).to_equal(true)
+
+    it "non-object JSON error":
+        val response = make_error_response("1", -32600, "Expected JSON object")
+        expect(response.contains("Expected JSON object")).to_equal(true)
+
+describe "Transport edge case - ID handling":
+    it "handles integer ID":
+        val json = jo2(jp("id", "42"), jp("method", js("test")))
+        expect(extract_json_value(json, "id")).to_equal("42")
+
+    it "handles missing ID (notification)":
+        val json = jo1(jp("method", js("notifications/initialized")))
+        val id = extract_json_value(json, "id")
+        expect(id).to_equal("null")
+
+    it "handles zero ID":
+        val json = jo2(jp("id", "0"), jp("method", js("test")))
+        expect(extract_json_value(json, "id")).to_equal("0")
+
+describe "Transport edge case - params handling":
+    it "handles missing params":
+        val json = jo2(jp("id", "1"), jp("method", js("test")))
+        val params = extract_json_value(json, "params")
+        expect(params).to_equal("null")
+
+    it "handles empty params object":
+        val json = jo3(jp("id", "1"), jp("method", js("test")), jp("params", LB() + RB()))
+        expect(json.contains("params")).to_equal(true)
+
+describe "Transport edge case - zero length content":
+    it "accepts zero content length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(0)
+        expect(result).to_be_nil()
+
+describe "Transport edge case - response serialization":
+    it "serializes result response correctly":
+        val response = make_result_response("1", jo1(jp("status", js("ok"))))
+        expect(response.contains("jsonrpc")).to_equal(true)
+        expect(response.contains("2.0")).to_equal(true)
+        expect(response.contains("result")).to_equal(true)
+
+    it "serializes error response correctly":
+        val response = make_error_response("1", -32600, "Invalid request")
+        expect(response.contains("jsonrpc")).to_equal(true)
+        expect(response.contains("error")).to_equal(true)
+        expect(response.contains("-32600")).to_equal(true)
+
+describe "Transport edge case - string validation":
+    it "accepts valid strings":
+        val validator = input_validator()
+        val result = validator.validate_string("normal content")
+        expect(result).to_be_nil()
+
+    it "accepts empty strings":
+        val validator = input_validator()
+        val result = validator.validate_string("")
+        expect(result).to_be_nil()
+
+    it "rejects excessively long strings":
+        val validator = input_validator()
+        var long_str = ""
+        var i = 0
+        while i < 70000:
+            long_str = long_str + "x"
+            i = i + 1
+        val result = validator.validate_string(long_str)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
+
+describe "Transport edge case - validation limits":
+    it "default limits are reasonable":
+        val limits = default_validation_limits()
+        expect(limits.max_content_length).to_equal(1048576)
+        expect(limits.max_string_length).to_equal(65536)
+
+    it "strict limits are more restrictive":
+        val default_limits = default_validation_limits()
+        val strict_limits = strict_validation_limits()
+        expect(strict_limits.max_content_length < default_limits.max_content_length).to_equal(true)
+
+describe "Transport edge case - error category mapping":
+    it "parse error maps to -32700":
+        val err = mcp_error(ErrorCategory.ParseError, "Bad JSON")
+        val json = err.to_json_rpc()
+        expect(json.contains("-32700")).to_equal(true)
+
+    it "invalid request maps to -32600":
+        val err = mcp_error(ErrorCategory.InvalidRequest, "Bad request")
+        val json = err.to_json_rpc()
+        expect(json.contains("-32600")).to_equal(true)
+
+    it "method not found maps to -32601":
+        val err = mcp_error(ErrorCategory.MethodNotFound, "Unknown method")
+        val json = err.to_json_rpc()
+        expect(json.contains("-32601")).to_equal(true)
+
+    it "validation maps to -32002":
+        val err = mcp_error(ErrorCategory.Validation, "Validation failed")
+        val json = err.to_json_rpc()
+        expect(json.contains("-32002")).to_equal(true)
+
+describe "Transport edge case - escape handling":
+    it "escapes newlines":
+        val escaped = escape_json("line1{NL}line2")
+        expect(escaped.contains(NL)).to_equal(false)
+
+    it "preserves normal content":
+        expect(escape_json("hello world")).to_equal("hello world")
+
+    it "handles empty content":
+        expect(escape_json("")).to_equal("")
+
+describe "Transport edge case - logging":
+    it "debug for trace messages":
+        expect(log_level_to_int("debug")).to_equal(0)
+
+    it "warning for edge case handling":
+        expect(log_level_to_int("warning")).to_equal(3)
+
+    it "error for transport failures":
+        expect(log_level_to_int("error")).to_equal(4)
+
+describe "Transport edge case - min_int for size limits":
+    it "clamps to smaller value":
+        expect(min_int(100, 50)).to_equal(50)
+
+    it "returns value when equal":
+        expect(min_int(10, 10)).to_equal(10)

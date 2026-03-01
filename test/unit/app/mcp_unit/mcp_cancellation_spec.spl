@@ -1,0 +1,51 @@
+# MCP Cancellation Support Specification
+# Feature: MCP Request Cancellation
+# Category: MCP, Protocol
+# Status: Complete
+
+use std.spec
+use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, jo2, make_notification}
+
+# Inline McpState for cancellation testing (avoids core.* dependency)
+class TestCancelState:
+    cancelled: Dict<String, String>
+    in_flight: Dict<String, String>
+
+    static fn create() -> TestCancelState:
+        TestCancelState(cancelled: {}, in_flight: {})
+
+impl TestCancelState:
+    me cancel_request(id: String, reason: String):
+        self.cancelled[id] = reason
+
+    fn is_cancelled(id: String) -> Bool:
+        self.cancelled.get(id).?
+
+    me register_request(id: String, method: String):
+        self.in_flight[id] = method
+
+    me complete_request(id: String):
+        self.in_flight.remove(id)
+
+    fn is_in_flight(id: String) -> Bool:
+        self.in_flight.get(id).?
+
+describe "MCP Request Cancellation":
+    it "tracks cancelled requests":
+        var state = TestCancelState.create()
+        state.cancel_request("req-1", "User cancelled")
+        expect(state.is_cancelled("req-1")).to_equal(true)
+        expect(state.is_cancelled("req-2")).to_equal(false)
+
+    it "tracks in-flight requests":
+        var state = TestCancelState.create()
+        state.register_request("req-1", "tools/call")
+        expect(state.is_in_flight("req-1")).to_equal(true)
+        state.complete_request("req-1")
+        expect(state.is_in_flight("req-1")).to_equal(false)
+
+    it "builds cancellation notification":
+        val params = jo2(jp("requestId", js("req-1")), jp("reason", js("Timeout")))
+        val notif = make_notification("notifications/cancelled", params)
+        expect(notif.contains("notifications/cancelled")).to_equal(true)
+        expect(notif.contains("req-1")).to_equal(true)

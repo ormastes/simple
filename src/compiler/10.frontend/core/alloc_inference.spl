@@ -1,0 +1,292 @@
+# Core Simple — Allocation Inference
+#
+# Determines which functions allocate memory based on their bodies.
+# Detects direct allocation patterns (new, array literals, dict literals,
+# interpolated strings) and propagates allocating status transitively
+# through the call graph using fixpoint iteration.
+#
+# Direct allocation examples:
+#   fn make_list(): [1, 2, 3]           # array literal = allocates
+#   fn greet(n: text): "hi {n}"         # interpolated string = allocates
+#   fn create(): new Foo()              # new keyword = allocates
+#
+# Transitive propagation:
+#   fn wrapper(): make_list()           # calls allocating fn = allocates
+#   fn pure(x: i64): x + 1             # no alloc path = non-allocating
+
+use compiler.core.ast.{DECL_FN, EXPR_CALL, EXPR_IDENT, EXPR_LAMBDA}
+use compiler.core.ast.{EXPR_NEW, EXPR_ARRAY_LIT, EXPR_DICT_LIT, EXPR_INTERPOLATED_STRING}
+use compiler.core.ast.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN}
+use compiler.core.ast.{STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK, STMT_COMPOUND_ASSIGN}
+use compiler.core.ast.{decl_count, decl_get_tag, decl_get_name, decl_get_body}
+use compiler.core.ast.{stmt_get_tag, stmt_get_expr, stmt_get_body, stmt_get_type}
+use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra}
+use compiler.core.ast.{expr_get_args, expr_get_stmts}
+use compiler.core.ast.{elif_get_cond, elif_get_body, elif_get_else}
+use compiler.core.ast.{arm_get_body}
+
+# ===== Module State =====
+
+var ai_fn_names: [text] = []        # function name by index
+var ai_fn_count: i64 = 0            # total registered functions
+var ai_fn_index = {}                # Dict: name -> index (O(1) lookup)
+var ai_direct_alloc: [i64] = []     # 1 if body has EXPR_NEW/ARRAY_LIT/etc, else 0
+var ai_callees: [[text]] = []       # call edges per function
+var ai_alloc_result: [i64] = []     # final result: 1 if allocates, else 0
+
+# ===== Public API =====
+
+fn alloc_inference_analyze():
+    # Reset state
+    ai_fn_names = []
+    ai_fn_count = 0
+    ai_fn_index = {}
+    ai_direct_alloc = []
+    ai_callees = []
+    ai_alloc_result = []
+
+    # Phase 1: Register all functions
+    register_functions()
+
+    # Phase 2: Scan for direct allocations
+    scan_direct_allocations()
+
+    # Phase 3: Extract call edges
+    extract_call_edges()
+
+    # Phase 4: Fixpoint propagation
+    propagate_alloc()
+
+fn alloc_inference_is_alloc(name: text) -> bool:
+    if ai_fn_index.contains_key(name):
+        val idx = ai_fn_index[name]
+        return ai_alloc_result[idx] == 1
+    return false
+
+fn alloc_inference_get_alloc_fns() -> [text]:
+    var result: [text] = []
+    for i in range(0, ai_fn_count):
+        if ai_alloc_result[i] == 1:
+            result.push(ai_fn_names[i])
+    result
+
+fn alloc_inference_get_non_alloc_fns() -> [text]:
+    var result: [text] = []
+    for i in range(0, ai_fn_count):
+        if ai_alloc_result[i] == 0:
+            result.push(ai_fn_names[i])
+    result
+
+fn alloc_inference_reset():
+    ai_fn_names = []
+    ai_fn_count = 0
+    ai_fn_index = {}
+    ai_direct_alloc = []
+    ai_callees = []
+    ai_alloc_result = []
+
+# ===== Phase 1: Register Functions =====
+
+fn register_functions():
+    val total = decl_count()
+    for i in range(0, total):
+        val tag = decl_get_tag(i)
+        if tag == DECL_FN:
+            val name = decl_get_name(i)
+            ai_fn_index[name] = ai_fn_count
+            ai_fn_names.push(name)
+            ai_direct_alloc.push(0)
+            ai_callees.push([])
+            ai_alloc_result.push(0)
+            ai_fn_count = ai_fn_count + 1
+
+# ===== Phase 2: Scan Direct Allocations =====
+
+fn scan_direct_allocations():
+    var fn_idx = 0
+    val total = decl_count()
+    for i in range(0, total):
+        val tag = decl_get_tag(i)
+        if tag == DECL_FN:
+            val body = decl_get_body(i)
+            for stmt_idx in body:
+                scan_stmt_for_alloc(stmt_idx, fn_idx)
+            fn_idx = fn_idx + 1
+
+fn scan_stmt_for_alloc(stmt_idx: i64, fn_idx: i64):
+    val tag = stmt_get_tag(stmt_idx)
+    val expr_idx = stmt_get_expr(stmt_idx)
+    val body = stmt_get_body(stmt_idx)
+
+    if expr_idx >= 0:
+        scan_expr_for_alloc(expr_idx, fn_idx)
+
+    for nested in body:
+        scan_stmt_for_alloc(nested, fn_idx)
+
+    # Handle if-stmt elif chain
+    if tag == STMT_IF:
+        val elif_idx = stmt_get_type(stmt_idx)
+        if elif_idx >= 0:
+            scan_elif_for_alloc(elif_idx, fn_idx)
+
+fn scan_elif_for_alloc(elif_idx: i64, fn_idx: i64):
+    if elif_idx < 0:
+        return
+    val cond = elif_get_cond(elif_idx)
+    if cond >= 0:
+        scan_expr_for_alloc(cond, fn_idx)
+    val body = elif_get_body(elif_idx)
+    for stmt_idx in body:
+        scan_stmt_for_alloc(stmt_idx, fn_idx)
+    val else_body = elif_get_else(elif_idx)
+    for stmt_idx in else_body:
+        scan_stmt_for_alloc(stmt_idx, fn_idx)
+
+fn scan_expr_for_alloc(expr_idx: i64, fn_idx: i64):
+    if expr_idx < 0:
+        return
+    val tag = expr_get_tag(expr_idx)
+
+    # Check for direct allocation patterns
+    if tag == EXPR_NEW:
+        ai_direct_alloc[fn_idx] = 1
+    if tag == EXPR_ARRAY_LIT:
+        ai_direct_alloc[fn_idx] = 1
+    if tag == EXPR_DICT_LIT:
+        ai_direct_alloc[fn_idx] = 1
+    if tag == EXPR_INTERPOLATED_STRING:
+        ai_direct_alloc[fn_idx] = 1
+
+    # Recurse into child expressions
+    val left = expr_get_left(expr_idx)
+    val right = expr_get_right(expr_idx)
+    val extra = expr_get_extra(expr_idx)
+    val args = expr_get_args(expr_idx)
+    val stmts = expr_get_stmts(expr_idx)
+
+    if left >= 0:
+        scan_expr_for_alloc(left, fn_idx)
+    if right >= 0:
+        scan_expr_for_alloc(right, fn_idx)
+    if extra >= 0:
+        scan_expr_for_alloc(extra, fn_idx)
+    for arg_idx in args:
+        scan_expr_for_alloc(arg_idx, fn_idx)
+    for stmt_idx in stmts:
+        scan_stmt_for_alloc(stmt_idx, fn_idx)
+
+# ===== Phase 3: Extract Call Edges =====
+
+fn extract_call_edges():
+    var fn_idx = 0
+    val total = decl_count()
+    for i in range(0, total):
+        val tag = decl_get_tag(i)
+        if tag == DECL_FN:
+            val body = decl_get_body(i)
+            for stmt_idx in body:
+                collect_calls_from_stmt(stmt_idx, fn_idx)
+            fn_idx = fn_idx + 1
+
+fn add_callee(fn_idx: i64, callee_name: text):
+    # Deduplicate edges
+    val existing = ai_callees[fn_idx]
+    for name in existing:
+        if name == callee_name:
+            return
+    var updated = ai_callees[fn_idx]
+    updated.push(callee_name)
+    ai_callees[fn_idx] = updated
+
+fn collect_calls_from_stmt(stmt_idx: i64, fn_idx: i64):
+    val tag = stmt_get_tag(stmt_idx)
+    val expr_idx = stmt_get_expr(stmt_idx)
+    val body = stmt_get_body(stmt_idx)
+
+    if expr_idx >= 0:
+        collect_calls_from_expr(expr_idx, fn_idx)
+
+    for nested in body:
+        collect_calls_from_stmt(nested, fn_idx)
+
+    # Handle if-stmt elif chain
+    if tag == STMT_IF:
+        val elif_idx = stmt_get_type(stmt_idx)
+        if elif_idx >= 0:
+            collect_calls_from_elif(elif_idx, fn_idx)
+
+fn collect_calls_from_elif(elif_idx: i64, fn_idx: i64):
+    if elif_idx < 0:
+        return
+    val cond = elif_get_cond(elif_idx)
+    if cond >= 0:
+        collect_calls_from_expr(cond, fn_idx)
+    val body = elif_get_body(elif_idx)
+    for stmt_idx in body:
+        collect_calls_from_stmt(stmt_idx, fn_idx)
+    val else_body = elif_get_else(elif_idx)
+    for stmt_idx in else_body:
+        collect_calls_from_stmt(stmt_idx, fn_idx)
+
+fn collect_calls_from_expr(expr_idx: i64, fn_idx: i64):
+    if expr_idx < 0:
+        return
+    val tag = expr_get_tag(expr_idx)
+
+    # Direct function call: callee(args...)
+    if tag == EXPR_CALL:
+        val callee = expr_get_left(expr_idx)
+        if callee >= 0:
+            val callee_tag = expr_get_tag(callee)
+            if callee_tag == EXPR_IDENT:
+                val callee_name = expr_get_str(callee)
+                add_callee(fn_idx, callee_name)
+
+    # Recurse into child expressions
+    val left = expr_get_left(expr_idx)
+    val right = expr_get_right(expr_idx)
+    val extra = expr_get_extra(expr_idx)
+    val args = expr_get_args(expr_idx)
+    val stmts = expr_get_stmts(expr_idx)
+
+    if left >= 0:
+        collect_calls_from_expr(left, fn_idx)
+    if right >= 0:
+        collect_calls_from_expr(right, fn_idx)
+    if extra >= 0:
+        collect_calls_from_expr(extra, fn_idx)
+    for arg_idx in args:
+        collect_calls_from_expr(arg_idx, fn_idx)
+    for stmt_idx in stmts:
+        collect_calls_from_stmt(stmt_idx, fn_idx)
+
+# ===== Phase 4: Fixpoint Propagation =====
+
+fn propagate_alloc():
+    # Seed from direct allocations
+    for i in range(0, ai_fn_count):
+        ai_alloc_result[i] = ai_direct_alloc[i]
+
+    # Fixpoint iteration
+    var changed = true
+    for _iter in range(0, 10000):
+        if not changed:
+            break
+        changed = false
+        for i in range(0, ai_fn_count):
+            if ai_alloc_result[i] == 1:
+                continue
+            val callees = ai_callees[i]
+            for callee_name in callees:
+                if ai_fn_index.contains_key(callee_name):
+                    val callee_idx = ai_fn_index[callee_name]
+                    if ai_alloc_result[callee_idx] == 1:
+                        ai_alloc_result[i] = 1
+                        changed = true
+
+# ===== Exports =====
+
+export alloc_inference_analyze
+export alloc_inference_is_alloc, alloc_inference_get_alloc_fns
+export alloc_inference_get_non_alloc_fns, alloc_inference_reset

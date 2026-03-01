@@ -50,6 +50,8 @@ pub struct Lowerer {
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
+    /// Names of extern function declarations for codegen
+    pub(super) extern_fn_names: HashSet<String>,
 }
 
 impl Lowerer {
@@ -77,6 +79,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             lenient_types: false,
+            extern_fn_names: HashSet::new(),
         }
     }
 
@@ -103,6 +106,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             lenient_types: false,
+            extern_fn_names: HashSet::new(),
         }
     }
 
@@ -152,6 +156,7 @@ impl Lowerer {
             type_inference_config: TypeInferenceConfig::default(),
             method_return_types: HashMap::new(),
             lenient_types: false,
+            extern_fn_names: HashSet::new(),
         }
     }
 

@@ -1,0 +1,123 @@
+# MCP JSON Parser Specification
+# Feature: MCP JSON Parsing
+# Category: MCP, Protocol
+# Status: Complete
+
+use std.spec
+use std.common.text.{NL}
+use std.nogc_async_mut.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, extract_nested_string, escape_json}
+
+describe "JSON String Extraction":
+    context "when extracting simple string values":
+        it "extracts method from JSON-RPC request":
+            val json = jo3(jp("jsonrpc", js("2.0")), jp("id", js("1")), jp("method", js("initialize")))
+            val method = extract_json_string(json, "method")
+            expect(method).to_equal("initialize")
+
+        it "extracts jsonrpc version":
+            val json = jo2(jp("jsonrpc", js("2.0")), jp("id", js("1")))
+            val version = extract_json_string(json, "jsonrpc")
+            expect(version).to_equal("2.0")
+
+        it "returns empty string for missing key":
+            val json = jo1(jp("jsonrpc", js("2.0")))
+            val missing = extract_json_string(json, "nonexistent")
+            expect(missing).to_equal("")
+
+    context "when handling special characters":
+        it "handles strings with slashes":
+            val json = jo1(jp("path", js("src/app/mcp/main.spl")))
+            val path = extract_json_string(json, "path")
+            expect(path).to_contain("/")
+            expect(path).to_equal("src/app/mcp/main.spl")
+
+        it "handles empty string values":
+            val json = jo1(jp("empty", js("")))
+            val empty = extract_json_string(json, "empty")
+            expect(empty).to_equal("")
+
+describe "JSON Value Extraction":
+    context "when extracting numeric values":
+        it "extracts numeric ID":
+            val json = jo2(jp("jsonrpc", js("2.0")), jp("id", "42"))
+            val id = extract_json_value(json, "id")
+            expect(id).to_equal("42")
+
+        it "extracts boolean-like values":
+            val json = jo1(jp("isError", "true"))
+            val value = extract_json_value(json, "isError")
+            expect(value).to_equal("true")
+
+    context "when extracting object values":
+        it "stops at comma delimiter":
+            val json = jo2(jp("id", "1"), jp("method", js("test")))
+            val id = extract_json_value(json, "id")
+            expect(id).to_equal("1")
+
+        it "returns null for missing key":
+            val json = jo1(jp("method", js("test")))
+            val missing = extract_json_value(json, "nonexistent")
+            expect(missing).to_equal("null")
+
+describe "Nested JSON Extraction":
+    context "when accessing nested objects":
+        it "extracts nested string value":
+            val inner = jo1(jp("name", js("read_code")))
+            val json = jo1(jp("params", inner))
+            val name = extract_nested_string(json, "params", "name")
+            expect(name).to_equal("read_code")
+
+        it "extracts nested path":
+            val inner = jo1(jp("uri", js("file:///path/to/file.spl")))
+            val json = jo1(jp("params", inner))
+            val uri = extract_nested_string(json, "params", "uri")
+            expect(uri).to_contain("file://")
+
+        it "returns empty for missing nested key":
+            val json = jo1(jp("params", LB() + RB()))
+            val missing = extract_nested_string(json, "params", "nonexistent")
+            expect(missing).to_equal("")
+
+describe "JSON Parser Edge Cases":
+    context "when handling escape characters":
+        it "escapes newlines":
+            val escaped = escape_json("line1{NL}line2")
+            expect(escaped.contains(NL)).to_equal(false)
+
+        it "escapes tabs":
+            val escaped = escape_json("col1\tcol2")
+            expect(escaped.contains("\t")).to_equal(false)
+
+        it "preserves normal strings":
+            val escaped = escape_json("hello world")
+            expect(escaped).to_equal("hello world")
+
+        it "handles empty string":
+            val escaped = escape_json("")
+            expect(escaped).to_equal("")
+
+    context "when building search patterns":
+        it "builds quoted key pattern":
+            val key = "method"
+            val pattern = Q() + key + Q() + ":"
+            expect(pattern.contains("method")).to_equal(true)
+            expect(pattern.contains(":")).to_equal(true)
+
+describe "JSON Builder Round-Trip":
+    context "when building and extracting":
+        it "round-trips string values":
+            val json = jo1(jp("name", js("Alice")))
+            val extracted = extract_json_string(json, "name")
+            expect(extracted).to_equal("Alice")
+
+        it "round-trips nested values":
+            val inner = jo2(jp("file", js("test.spl")), jp("line", "42"))
+            val json = jo1(jp("params", inner))
+            val file = extract_nested_string(json, "params", "file")
+            expect(file).to_equal("test.spl")
+
+        it "round-trips multiple fields":
+            val json = jo3(jp("a", js("1")), jp("b", js("2")), jp("c", js("3")))
+            expect(extract_json_string(json, "a")).to_equal("1")
+            expect(extract_json_string(json, "b")).to_equal("2")
+            expect(extract_json_string(json, "c")).to_equal("3")
