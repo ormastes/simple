@@ -36,6 +36,7 @@ KEEP_ARTIFACTS=false
 JOBS=7
 SKIP_DOWNLOAD=false
 DOWNLOAD_VERSION=""
+BACKEND="auto"
 
 for arg in "$@"; do
     case "$arg" in
@@ -45,13 +46,16 @@ for arg in "$@"; do
         --jobs=*) JOBS="${arg#--jobs=}" ;;
         --skip-download) SKIP_DOWNLOAD=true ;;
         --download-version=*) DOWNLOAD_VERSION="${arg#--download-version=}" ;;
+        --backend=*) BACKEND="${arg#--backend=}" ;;
         --help|-h)
             echo "Usage: $0 [--step=seed|core1|core2|full1|full2] [--deploy] [--update-release]"
             echo "         [--keep-artifacts] [--jobs=N] [--skip-download] [--download-version=X.Y.Z]"
+            echo "         [--backend=auto|c|llvm|cranelift]"
             echo ""
             echo "Options:"
             echo "  --skip-download          Skip release binary download, force C bootstrap build"
             echo "  --download-version=X.Y.Z Pin release download to a specific version"
+            echo "  --backend=BACKEND        Backend for self-host compilation (default: auto)"
             echo "  --deploy, --update-release  Copy result to bin/release/simple"
             exit 0
             ;;
@@ -64,6 +68,7 @@ echo "Project:    ${PROJECT_DIR}"
 echo "Source:     ${SRC_DIR}"
 echo "Build:      ${BUILD_DIR}"
 echo "Step:       ${STEP}"
+echo "Backend:    ${BACKEND}"
 echo "Jobs:       ${JOBS}"
 echo ""
 
@@ -191,9 +196,11 @@ fi  # end of C bootstrap build (USED_RELEASE_BINARY else branch)
 # Step 4: Self-host verify (full2)
 if [[ "${STEP}" == "full2" ]]; then
     echo "--- Phase 4: Self-host verification ---"
-    echo "Note: full2 self-host rebuild is not yet implemented for the C bootstrap."
-    echo "The bootstrap CLI (build/simple) is a lightweight wrapper;"
-    echo "full self-hosting requires the complete compiler binary (bin/release/simple)."
+    if [[ "${BACKEND}" != "auto" ]]; then
+        "${BUILD_DIR}/simple" build bootstrap --backend=${BACKEND}
+    else
+        "${BUILD_DIR}/simple" build bootstrap
+    fi
     echo ""
 fi
 
