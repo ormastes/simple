@@ -6,6 +6,7 @@
 //! - Project-root-relative imports
 //! - Standard library imports
 //! - __init__.spl directory modules
+//! - Numbered directory matching (e.g., 10.frontend → "frontend")
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,6 +15,162 @@ use std::path::{Path, PathBuf};
 use tracing::trace;
 
 use crate::error::CompileError;
+
+/// Find a numbered directory matching the pattern `NN.name` or `NNN.name`.
+///
+/// The Simple compiler organizes source into numbered layers like:
+///   src/compiler/00.common/
+///   src/compiler/10.frontend/
+///   src/compiler/70.backend/
+///
+/// When resolving `compiler.frontend`, this function finds `10.frontend` for segment `frontend`.
+fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Match pattern: 1-3 digits, dot, then the segment name
+        if let Some(after_dot) = name_str.find('.') {
+            let prefix = &name_str[..after_dot];
+            let suffix = &name_str[after_dot + 1..];
+            if suffix == segment
+                && prefix.len() <= 3
+                && prefix.chars().all(|c| c.is_ascii_digit())
+            {
+                let path = parent.join(&*name_str);
+                if path.is_dir() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find a segment as a subdirectory inside any numbered directory.
+///
+/// For `compiler.core.parser`, when "core" is not found as `NN.core`,
+/// this searches inside each numbered dir (like `10.frontend/`) for
+/// a subdirectory named "core". Returns all matches sorted by numbered prefix.
+fn find_segment_in_numbered_dirs(parent: &Path, segment: &str) -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            // Check if this is a numbered directory (NN.name pattern)
+            if let Some(after_dot) = name_str.find('.') {
+                let prefix = &name_str[..after_dot];
+                if prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
+                    let numbered_path = parent.join(&*name_str);
+                    if numbered_path.is_dir() {
+                        let sub = numbered_path.join(segment);
+                        if sub.is_dir() {
+                            results.push(sub);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results.sort();
+    results
+}
+
+/// Try to resolve the last segment from a given directory.
+/// Checks .spl file, .ssh file, __init__.spl, and numbered directory variants.
+fn try_resolve_last_segment(current: &Path, last: &str) -> Option<PathBuf> {
+    // Try .spl file
+    let file_path = current.join(format!("{}.spl", last));
+    if file_path.exists() && file_path.is_file() {
+        return Some(file_path);
+    }
+
+    // Try .ssh file
+    let ssh_path = current.join(format!("{}.ssh", last));
+    if ssh_path.exists() && ssh_path.is_file() {
+        return Some(ssh_path);
+    }
+
+    // Try directory with __init__.spl
+    let dir_path = current.join(last);
+    let init_path = dir_path.join("__init__.spl");
+    if init_path.exists() && init_path.is_file() {
+        return Some(init_path);
+    }
+
+    // Try numbered directory for the last segment
+    if let Some(numbered_dir) = find_numbered_dir(current, last) {
+        let numbered_init = numbered_dir.join("__init__.spl");
+        if numbered_init.exists() && numbered_init.is_file() {
+            return Some(numbered_init);
+        }
+        let numbered_file = numbered_dir.join(format!("{}.spl", last));
+        if numbered_file.exists() && numbered_file.is_file() {
+            return Some(numbered_file);
+        }
+    }
+
+    None
+}
+
+/// Resolve a path through segments, supporting numbered directories at each level.
+///
+/// For each intermediate segment, tries direct match first, then numbered directory fallback.
+/// When a direct match exists but doesn't lead to a final resolution, backtracks and tries
+/// the numbered directory alternative. This handles cases like `compiler.core.X` where
+/// `src/compiler/core/` exists but doesn't contain X, while `src/compiler/10.frontend/core/`
+/// does contain X.
+fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> {
+    if parts.is_empty() {
+        return None;
+    }
+
+    resolve_with_numbered_dirs_recursive(base, parts, 0)
+}
+
+fn resolve_with_numbered_dirs_recursive(
+    current: &Path,
+    parts: &[String],
+    depth: usize,
+) -> Option<PathBuf> {
+    if depth >= parts.len() {
+        return None;
+    }
+
+    let segment = &parts[depth];
+
+    // Base case: last segment
+    if depth == parts.len() - 1 {
+        return try_resolve_last_segment(current, segment);
+    }
+
+    // Recursive case: intermediate segment
+    // Strategy 1: Try direct path first
+    let direct = current.join(segment);
+    if direct.exists() && direct.is_dir() {
+        if let Some(found) = resolve_with_numbered_dirs_recursive(&direct, parts, depth + 1) {
+            return Some(found);
+        }
+    }
+
+    // Strategy 2: Try numbered directory matching segment (e.g., 10.frontend for "frontend")
+    if let Some(numbered) = find_numbered_dir(current, segment) {
+        if let Some(found) = resolve_with_numbered_dirs_recursive(&numbered, parts, depth + 1) {
+            return Some(found);
+        }
+    }
+
+    // Strategy 3: Try segment as subdirectory inside numbered directories.
+    // For `compiler.core.parser`, "core" is inside `10.frontend/core/`, not `NN.core/`.
+    for sub_dir in find_segment_in_numbered_dirs(current, segment) {
+        if let Some(found) = resolve_with_numbered_dirs_recursive(&sub_dir, parts, depth + 1) {
+            return Some(found);
+        }
+    }
+
+    None
+}
 
 // Thread-local cache for resolved module paths to avoid repeated filesystem probing
 thread_local! {
@@ -86,6 +243,11 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
         return Ok(init_resolved);
     }
 
+    // Try with numbered directory support from base directory
+    if let Some(found) = resolve_with_numbered_dirs(base_dir, parts) {
+        return Ok(found);
+    }
+
     // Try resolving from parent directories (for project-root-relative imports)
     // This handles cases like importing "verification.lean.codegen" from within
     // "verification/regenerate/" - we need to go up to find the "verification/" root
@@ -115,6 +277,12 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             if parent_init_resolved.exists() && parent_init_resolved.is_file() {
                 trace!(path = ?parent_init_resolved, "Found module __init__.spl in parent directory");
                 return Ok(parent_init_resolved);
+            }
+
+            // Try with numbered directory support from parent
+            if let Some(found) = resolve_with_numbered_dirs(&parent_dir, parts) {
+                trace!(path = ?found, "Found module via numbered directory in parent");
+                return Ok(found);
             }
         } else {
             break;
@@ -173,6 +341,11 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     if stdlib_init_path.exists() && stdlib_init_path.is_file() {
                         return Ok(stdlib_init_path);
                     }
+
+                    // Try with numbered directory support in stdlib
+                    if let Some(found) = resolve_with_numbered_dirs(&stdlib_candidate, &stdlib_parts) {
+                        return Ok(found);
+                    }
                 }
             } // End of if stdlib_candidate.exists()
         } // End of for stdlib_subpath
@@ -199,6 +372,22 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             src_init_path.set_extension("spl");
             if src_init_path.exists() && src_init_path.is_file() {
                 return Ok(src_init_path);
+            }
+
+            // Try with numbered directory support in src/
+            if let Some(found) = resolve_with_numbered_dirs(&src_candidate, parts) {
+                return Ok(found);
+            }
+
+            // Strategy: "compiler.*" → src/compiler/ with numbered prefix support
+            // This mirrors the compiler's Strategy 2 for resolving compiler internal modules
+            if parts.len() > 1 && parts[0] == "compiler" {
+                let compiler_dir = src_candidate.join("compiler");
+                if compiler_dir.is_dir() {
+                    if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, &parts[1..]) {
+                        return Ok(found);
+                    }
+                }
             }
         }
 
