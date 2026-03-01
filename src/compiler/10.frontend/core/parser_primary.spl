@@ -13,6 +13,7 @@ use compiler.core.tokens.{TOK_KW_NOT}
 use compiler.core.tokens.{TOK_KW_PASS, TOK_KW_PASS_TODO, TOK_KW_PASS_DO_NOTHING, TOK_KW_PASS_DN}
 use compiler.core.tokens.{TOK_KW_SELF}
 use compiler.core.tokens.{TOK_KW_ASYNC, TOK_KW_AWAIT, TOK_KW_YIELD, TOK_KW_SPAWN}
+use compiler.core.tokens.{TOK_KW_NEW}
 use compiler.core.tokens.{TOK_KW_ASM}
 use compiler.core.tokens.{TOK_MINUS, TOK_NOT}
 use compiler.core.tokens.{TOK_EQ, TOK_LT, TOK_GEQ}
@@ -33,7 +34,7 @@ use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_dict_lit}
 use compiler.core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
-use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom}
+use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_new_alloc}
 use compiler.core.ast.{expr_asm, expr_asm_match, expr_asm_assert}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.core.lexer.{lex_cur_suffix}
@@ -292,6 +293,27 @@ fn parse_primary() -> i64:
         parser_advance()
         val value_expr = parse_expr()
         return expr_yield(value_expr, 0)
+
+    # new expr | new() expr | new(alloc) expr — explicit allocation
+    if par_kind == TOK_KW_NEW:
+        parser_advance()
+        # alloc_kind: 0 = default, 1 = pool, 2 = explicit allocator
+        var alloc_kind = 0
+        var alloc_expr_id = -1
+        # Check for allocator spec: new() or new(allocator)
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_RPAREN:
+                # new() — type pool
+                parser_advance()
+                alloc_kind = 1
+            else:
+                # new(allocator_expr) — explicit allocator
+                alloc_expr_id = parse_expr()
+                parser_expect(TOK_RPAREN)
+                alloc_kind = 2
+        val inner = parse_expr()
+        return expr_new_alloc(alloc_kind, alloc_expr_id, inner, 0)
 
     if par_kind == TOK_KW_SPAWN:
         parser_advance()

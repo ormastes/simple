@@ -160,14 +160,16 @@ impl<'a> Parser<'a> {
                 // Peek at next token
                 let next = self.peek_next();
 
-                // Check if next token indicates allocation context: new Type, new &Type, new *Type
+                // Check if next token indicates allocation context:
+                //   new expr, new() expr, new(alloc) expr
                 match next.kind {
                     TokenKind::Identifier { .. }
                     | TokenKind::Ampersand
                     | TokenKind::Star
                     | TokenKind::Plus
-                    | TokenKind::Minus => {
-                        // Allocation: new Type(...) or new &Type(...)
+                    | TokenKind::Minus
+                    | TokenKind::LParen => {
+                        // Allocation: new Type(...), new() Type(...), new(alloc) Type(...)
                         self.parse_primary_control()
                     }
                     _ => {

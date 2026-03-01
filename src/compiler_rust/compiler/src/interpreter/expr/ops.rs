@@ -86,32 +86,11 @@ pub(super) fn eval_op_expr(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match expr {
-        Expr::New { kind, expr } => {
+        Expr::New { kind: _, expr } => {
+            // Phase 1 stub: evaluate inner expression, ignore allocator spec
+            // Future phases will use the pointer kind for actual allocation
             let inner = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
-            let result = match kind {
-                PointerKind::Unique => Ok(Value::Unique(ManualUniqueValue::new(inner))),
-                PointerKind::Shared => Ok(Value::Shared(ManualSharedValue::new(inner))),
-                PointerKind::Weak => {
-                    if let Value::Shared(shared) = inner {
-                        Ok(Value::Weak(ManualWeakValue::new_from_shared(&shared)))
-                    } else {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INVALID_OPERATION)
-                            .with_help("weak references can only be created from shared pointers");
-                        Err(CompileError::semantic_with_context(
-                            "invalid operation: cannot create weak reference from non-shared pointer",
-                            ctx,
-                        ))
-                    }
-                }
-                PointerKind::Handle => Ok(Value::Handle(ManualHandleValue::new(inner))),
-                PointerKind::Borrow => Ok(Value::Borrow(BorrowValue::new(inner))),
-                PointerKind::BorrowMut => Ok(Value::BorrowMut(BorrowMutValue::new(inner))),
-                // Raw pointers for FFI - treat as shared pointers at runtime
-                PointerKind::RawConst => Ok(Value::Shared(ManualSharedValue::new(inner))),
-                PointerKind::RawMut => Ok(Value::Shared(ManualSharedValue::new(inner))),
-            };
-            Ok(Some(result?))
+            Ok(Some(inner))
         }
         Expr::Binary { op, left, right } => {
             // Handle suspension boolean operators specially (lazy evaluation with await)
