@@ -213,8 +213,26 @@ impl<'a> Parser<'a> {
 
     fn parse_new_expr(&mut self) -> Result<Expr, ParseError> {
         self.advance();
-        // new &Type(...) or new *Type(...)
+
+        // Three forms:
+        //   new expr           — default allocator (Shared)
+        //   new() expr         — type pool (Unique)
+        //   new(alloc) expr    — explicit allocator (Handle, alloc expr ignored in Phase 1)
         let kind = match &self.current.kind {
+            TokenKind::LParen => {
+                self.advance();
+                if matches!(self.current.kind, TokenKind::RParen) {
+                    // new() — type pool form
+                    self.advance();
+                    PointerKind::Unique
+                } else {
+                    // new(alloc_expr) — explicit allocator form
+                    // Parse and discard the allocator expression (Phase 1 stub)
+                    let _alloc_expr = self.parse_expression()?;
+                    self.expect(&TokenKind::RParen)?;
+                    PointerKind::Handle
+                }
+            }
             TokenKind::Ampersand => {
                 self.advance();
                 PointerKind::Unique
@@ -231,7 +249,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 PointerKind::Handle
             }
-            _ => PointerKind::Shared, // default
+            _ => PointerKind::Shared, // default: new expr
         };
         let expr = self.parse_postfix()?;
         Ok(Expr::New {
