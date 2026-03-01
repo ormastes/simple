@@ -20,6 +20,7 @@ pub enum BodyKind {
     Actor,
     Generator,
     Future,
+    Lambda,
 }
 
 /// Create a no-op body stub function. Returns the function ID.
@@ -140,6 +141,7 @@ pub fn get_body_kind(inst: &MirInst) -> Option<(crate::mir::BlockId, BodyKind)> 
         MirInst::ActorSpawn { body_block, .. } => Some((*body_block, BodyKind::Actor)),
         MirInst::GeneratorCreate { body_block, .. } => Some((*body_block, BodyKind::Generator)),
         MirInst::FutureCreate { body_block, .. } => Some((*body_block, BodyKind::Future)),
+        MirInst::ClosureCreate { body_block: Some(bb), .. } => Some((*bb, BodyKind::Lambda)),
         _ => None,
     }
 }
@@ -188,7 +190,7 @@ fn create_outlined_function(
     outlined.visibility = Visibility::Private;
     outlined.entry_block = body_block;
     outlined.return_type = match kind {
-        BodyKind::Generator | BodyKind::Future => crate::hir::TypeId::I64,
+        BodyKind::Generator | BodyKind::Future | BodyKind::Lambda => crate::hir::TypeId::I64,
         BodyKind::Actor => crate::hir::TypeId::VOID,
     };
     outlined.outlined_bodies.clear();
