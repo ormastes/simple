@@ -92,7 +92,16 @@ pub fn rt_thread_sleep(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    thread::sleep(Duration::from_millis(millis));
+    // Sleep in short intervals so watchdog timeout can interrupt long sleeps.
+    let mut remaining = millis;
+    while remaining > 0 {
+        if simple_common::fault_detection::is_timeout_exceeded() {
+            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+        }
+        let chunk = remaining.min(100);
+        thread::sleep(Duration::from_millis(chunk));
+        remaining -= chunk;
+    }
     Ok(Value::Nil)
 }
 
@@ -152,9 +161,9 @@ pub fn rt_thread_spawn_isolated_with_context(
         }
     }
 
-    // Evaluate the body expression
+    // Evaluate the body expression — propagate timeout errors instead of swallowing them.
     let body_value =
-        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods).unwrap_or(Value::Nil);
+        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
 
     // If it's a BlockClosure, execute it; otherwise use the value directly
     let result = match &body_value {
@@ -165,8 +174,7 @@ pub fn rt_thread_spawn_isolated_with_context(
             classes,
             enums,
             impl_methods,
-        )
-        .unwrap_or(Value::Nil),
+        )?,
         _ => body_value,
     };
 
@@ -224,9 +232,9 @@ pub fn rt_thread_spawn_isolated2_with_context(
         local_env.insert(params[1].clone(), data2);
     }
 
-    // First evaluate the body expression to get a potentially BlockClosure value
+    // First evaluate the body expression — propagate timeout errors.
     let body_value =
-        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods).unwrap_or(Value::Nil);
+        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
 
     // If it's a BlockClosure, execute it; otherwise use the value directly
     let result = match &body_value {
@@ -237,8 +245,7 @@ pub fn rt_thread_spawn_isolated2_with_context(
             classes,
             enums,
             impl_methods,
-        )
-        .unwrap_or(Value::Nil),
+        )?,
         _ => body_value,
     };
 
@@ -480,9 +487,16 @@ pub fn rt_channel_recv(args: &[Value]) -> Result<Value, CompileError> {
         drop(channels); // Release lock before blocking
 
         let rx = rx_clone.lock().unwrap();
-        match rx.recv() {
-            Ok(value) => Ok(value),
-            Err(_) => Ok(Value::Nil),
+        // Poll with short timeout instead of blocking forever, so watchdog can interrupt.
+        loop {
+            if simple_common::fault_detection::is_timeout_exceeded() {
+                return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            }
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(value) => return Ok(value),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(Value::Nil),
+            }
         }
     } else {
         Err(CompileError::Runtime(format!("Channel {} not found", channel_id)))

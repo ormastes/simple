@@ -391,6 +391,8 @@ pub enum MirInst {
         capture_types: Vec<TypeId>,
         /// Captured variable values
         captures: Vec<VReg>,
+        /// Body block for lambda extraction (used by expand_with_outlined)
+        body_block: Option<super::BlockId>,
     },
 
     /// Indirect call through a closure or function pointer (zero-cost: load + indirect call)

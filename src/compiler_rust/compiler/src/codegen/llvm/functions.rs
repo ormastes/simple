@@ -322,6 +322,7 @@ impl LlvmBackend {
                 capture_offsets,
                 capture_types,
                 captures,
+                body_block: _,
             } => {
                 self.compile_closure_create(
                     *dest,

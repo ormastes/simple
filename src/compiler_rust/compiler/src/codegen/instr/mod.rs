@@ -397,6 +397,7 @@ pub fn compile_instruction<M: Module>(
             capture_offsets,
             capture_types: _,
             captures,
+            body_block: _,
         } => {
             compile_closure_create(
                 ctx,

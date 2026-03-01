@@ -261,10 +261,25 @@ impl<'a> MirLowerer<'a> {
                 body,
                 captures,
             } => {
-                // Lower the lambda body to get the result vreg
+                // Save current block
+                let original_block = self.with_func(|_, current_block| current_block)?;
+
+                // Create body block and switch to it (like generators/futures)
+                let body_block = self.with_func(|func, _| func.new_block())?;
+                self.set_current_block(body_block)?;
+
+                // Lower the lambda body INTO the body block
                 let body_reg = self.lower_expr(body)?;
 
-                // For now, create a simple closure with captures
+                // Add return terminator to body block
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = crate::mir::Terminator::Return(Some(body_reg));
+                })?;
+
+                // Switch back to original block
+                self.set_current_block(original_block)?;
+
                 // Each capture is 8 bytes (pointer-sized)
                 let closure_size = 8 + (captures.len() as u32 * 8);
                 let capture_offsets: Vec<u32> = (0..captures.len()).map(|i| 8 + (i as u32 * 8)).collect();
@@ -291,8 +306,12 @@ impl<'a> MirLowerer<'a> {
                     capture_regs.push(reg);
                 }
 
-                // Generate a unique function name for the lambda body
-                let func_name = format!("__lambda_{}", body_reg.0);
+                // Generate function name matching expand_with_outlined convention
+                let parent_name = self
+                    .try_contract_ctx()
+                    .map(|ctx| ctx.func_name.clone())
+                    .unwrap_or_else(|_| "anonymous".to_string());
+                let func_name = format!("{}_outlined_{}", parent_name, body_block.0);
 
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -304,6 +323,7 @@ impl<'a> MirLowerer<'a> {
                         capture_offsets,
                         capture_types,
                         captures: capture_regs,
+                        body_block: Some(body_block),
                     });
                     dest
                 })
