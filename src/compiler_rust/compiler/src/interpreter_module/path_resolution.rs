@@ -413,6 +413,19 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     }
                 }
             }
+
+            // Strategy: "app.*" → src/compiler/ with numbered prefix support
+            // The self-hosted compiler maps app.build.X to src/app/build/X.smf (compiled),
+            // but the .spl source lives at src/compiler/80.driver/build/X.spl.
+            // This allows the Rust driver to resolve app.* imports to source files.
+            if parts.len() > 1 && parts[0] == "app" {
+                let compiler_dir = src_candidate.join("compiler");
+                if compiler_dir.is_dir() {
+                    if let Some(found) = resolve_with_numbered_dirs(&compiler_dir, &parts[1..]) {
+                        return Ok(found);
+                    }
+                }
+            }
         }
 
         if let Some(parent) = current.parent() {

@@ -1,0 +1,458 @@
+# Godot Vulkan Rendering
+#
+# Vulkan compositor and 2D overlay rendering via Godot's RenderingDevice
+#
+# Features:
+# - VulkanCompositor node for custom rendering injection
+# - Vulkan2DOverlay for 2D UI rendered via Vulkan
+# - Overlay element geometry building
+# - Byte serialization helpers
+
+use godot.ffi
+use godot.variant
+use godot.node
+use gpu.vulkan  # Simple's Vulkan backend
+
+mod vulkan
+
+
+# Vulkan Compositor Hook
+# Allows injecting custom Vulkan rendering into Godot's pipeline
+pub struct VulkanCompositor extends godot.node.Node:
+    rendering_device: RenderingDevice
+
+    # Vulkan handles (from Godot)
+    vk_instance: u64
+    vk_physical_device: u64
+    vk_device: u64
+    vk_queue_family: u32
+
+    # Simple Vulkan backend integration
+    simple_vk_device: Option<gpu.vulkan.Device>
+    overlay_enabled: bool
+
+    pub fn _ready(mut self):
+        println("Vulkan Compositor ready!")
+
+        # Get Godot's rendering device
+        self.rendering_device = RenderingDevice.get_singleton()
+
+        # Get Vulkan handles
+        self.vk_instance = self.rendering_device.get_vulkan_instance()
+        self.vk_physical_device = self.rendering_device.get_vulkan_physical_device()
+        self.vk_device = self.rendering_device.get_vulkan_device()
+        self.vk_queue_family = self.rendering_device.get_queue_family_index()
+
+        # Initialize Simple's Vulkan backend with Godot's device
+        self.initialize_simple_vulkan()
+
+        self.overlay_enabled = true
+
+        println("Vulkan compositor initialized (device: {self.vk_device})")
+
+    # Initialize Simple's Vulkan backend using Godot's device
+    me initialize_simple_vulkan():
+        # Create Simple Vulkan device wrapper using Godot's handles
+        # self.simple_vk_device = Some(gpu.vulkan.Device.from_existing(
+        #     self.vk_instance,
+        #     self.vk_physical_device,
+        #     self.vk_device,
+        #     self.vk_queue_family
+        # ))
+
+        # For now, create a new device (placeholder)
+        # self.simple_vk_device = Some(gpu.vulkan.Device.new())
+
+        println("Simple Vulkan backend initialized")
+
+    # Render custom overlay using Godot's RenderingDevice
+    pub fn render_overlay(mut self, framebuffer: FramebufferRID):
+        if not self.overlay_enabled:
+            return
+
+        # Begin draw list with transparent clear color
+        val draw_list = ffi.godot_rd_draw_list_begin(
+            self.rendering_device.singleton_ptr,
+            framebuffer.id,
+            0.0, 0.0, 0.0, 0.0  # Transparent clear
+        )
+
+        if draw_list == 0:
+            println("Failed to begin draw list")
+            return
+
+        # Subclasses should override render_draw_commands to add their own commands
+        self.render_draw_commands(draw_list)
+
+        # End draw list
+        ffi.godot_rd_draw_list_end(self.rendering_device.singleton_ptr)
+
+    # Override in subclasses to add custom draw commands
+    pub fn render_draw_commands(mut self, draw_list: u64):
+        # Base implementation does nothing
+        pass
+
+    # Enable/disable overlay rendering
+    pub fn set_overlay_enabled(mut self, enabled: bool):
+        self.overlay_enabled = enabled
+
+        if enabled:
+            println("Vulkan overlay enabled")
+        else:
+            println("Vulkan overlay disabled")
+
+
+# 2D Vulkan Overlay
+# Custom 2D UI rendered via Vulkan on top of Godot's scene
+pub struct Vulkan2DOverlay extends VulkanCompositor:
+    # Overlay properties
+    elements: Array<OverlayElement>
+    needs_redraw: bool
+
+    # GPU resources
+    vertex_buffer: Option<BufferRID>
+    shader: Option<ShaderRID>
+    pipeline: Option<u64>
+
+    pub fn _ready(mut self):
+        # Call parent _ready
+        # super._ready()
+
+        self.elements = []
+        self.needs_redraw = true
+        self.vertex_buffer = None
+        self.shader = None
+        self.pipeline = None
+
+        # Create vertex buffer for overlay elements (max 1000 vertices, 24 bytes each)
+        match self.rendering_device.create_buffer(1000 * 24, BufferUsage.Vertex):
+            case Ok(buf): self.vertex_buffer = Some(buf)
+            case Err(e): println("Failed to create vertex buffer: {e}")
+
+        # Load or create a simple 2D color shader
+        self.initialize_shader()
+
+        println("Vulkan 2D Overlay ready!")
+
+    # Initialize shader and pipeline for 2D overlay rendering
+    fn initialize_shader(mut self):
+        # Simple 2D color shader SPIR-V (would need to be loaded from resources)
+        # For now, we try to load a pre-compiled shader
+        val shader_spirv = get_overlay_shader_spirv()
+
+        if shader_spirv.len() > 0:
+            match self.rendering_device.create_shader(&shader_spirv):
+                case Ok(shader):
+                    self.shader = Some(shader)
+
+                    # Get framebuffer format (RGBA8, no depth)
+                    val fb_format = self.rendering_device.get_framebuffer_format(
+                        37,  # VK_FORMAT_R8G8B8A8_UNORM
+                        0    # No depth
+                    )
+
+                    # Create pipeline with position+color vertex format
+                    val vertex_format = VertexFormat.position_color_2d()
+                    match self.rendering_device.create_render_pipeline(shader, fb_format, vertex_format):
+                        case Ok(pipe):
+                            self.pipeline = Some(pipe.id)
+                            println("Overlay pipeline created successfully")
+                        case Err(e):
+                            println("Failed to create pipeline: {e}")
+                case Err(e):
+                    println("Failed to create shader: {e}")
+        else:
+            println("No overlay shader SPIR-V available")
+
+    # Add overlay element
+    pub fn add_element(mut self, element: OverlayElement):
+        self.elements.push(element)
+        self.needs_redraw = true
+
+    # Clear all elements
+    pub fn clear_elements(mut self):
+        self.elements.clear()
+        self.needs_redraw = true
+
+    # Called every frame
+    pub fn _process(mut self, delta: f64, framebuffer: FramebufferRID):
+        if self.needs_redraw and self.overlay_enabled:
+            self.render_overlay(framebuffer)
+            self.needs_redraw = false
+
+    # Override render_draw_commands from VulkanCompositor
+    pub fn render_draw_commands(mut self, draw_list: u64):
+        if self.elements.len() == 0:
+            return
+
+        # Build vertex data for all elements
+        var vertices: Array<u8> = []
+        var vertex_count: u32 = 0
+
+        for element in &self.elements:
+            val element_vertices = self.build_element_vertices(element)
+            vertices.extend(&element_vertices)
+            vertex_count += match element.element_type:
+                case ElementType.Rectangle: 6  # 2 triangles
+                case ElementType.Circle: 36    # 12 triangles approximation
+                case _: 6
+
+        # Upload vertex data to GPU
+        if val Some(vb) = &self.vertex_buffer:
+            match self.rendering_device.update_buffer(*vb, 0, &vertices):
+                case Ok(_): pass
+                case Err(e): println("Failed to update vertex buffer: {e}")
+
+        # Bind pipeline and draw (if we have one)
+        if val Some(pipe) = self.pipeline:
+            ffi.godot_rd_draw_list_bind_render_pipeline(
+                self.rendering_device.singleton_ptr,
+                draw_list,
+                pipe
+            )
+
+            if val Some(vb) = &self.vertex_buffer:
+                # Draw all elements
+                ffi.godot_rd_draw_list_draw(
+                    self.rendering_device.singleton_ptr,
+                    draw_list,
+                    false,  # Not using indices
+                    vertex_count
+                )
+
+    # Build vertex data for a single element
+    fn build_element_vertices(element: &OverlayElement) -> Array<u8>:
+        var data: Array<u8> = []
+
+        match element.element_type:
+            case ElementType.Rectangle:
+                # 2 triangles = 6 vertices
+                # Each vertex: position (2 floats) + color (4 floats) = 24 bytes
+                val x0 = element.x
+                val y0 = element.y
+                val x1 = element.x + element.width
+                val y1 = element.y + element.height
+
+                # Triangle 1: top-left, top-right, bottom-left
+                data.extend(&vertex_to_bytes(x0, y0, &element.color))
+                data.extend(&vertex_to_bytes(x1, y0, &element.color))
+                data.extend(&vertex_to_bytes(x0, y1, &element.color))
+
+                # Triangle 2: bottom-left, top-right, bottom-right
+                data.extend(&vertex_to_bytes(x0, y1, &element.color))
+                data.extend(&vertex_to_bytes(x1, y0, &element.color))
+                data.extend(&vertex_to_bytes(x1, y1, &element.color))
+
+            case ElementType.Circle:
+                # Approximate circle with 12 triangles (fan from center)
+                val cx = element.x + element.width / 2.0
+                val cy = element.y + element.height / 2.0
+                val rx = element.width / 2.0
+                val ry = element.height / 2.0
+                val segments = 12
+
+                for i in 0..segments:
+                    val angle0 = (i as f32) * 2.0 * 3.14159 / (segments as f32)
+                    val angle1 = ((i + 1) as f32) * 2.0 * 3.14159 / (segments as f32)
+
+                    # Center vertex
+                    data.extend(&vertex_to_bytes(cx, cy, &element.color))
+                    # Edge vertex 0
+                    data.extend(&vertex_to_bytes(cx + rx * angle0.cos(), cy + ry * angle0.sin(), &element.color))
+                    # Edge vertex 1
+                    data.extend(&vertex_to_bytes(cx + rx * angle1.cos(), cy + ry * angle1.sin(), &element.color))
+
+            case _:
+                # Default: render as rectangle
+                val x0 = element.x
+                val y0 = element.y
+                val x1 = element.x + element.width
+                val y1 = element.y + element.height
+
+                data.extend(&vertex_to_bytes(x0, y0, &element.color))
+                data.extend(&vertex_to_bytes(x1, y0, &element.color))
+                data.extend(&vertex_to_bytes(x0, y1, &element.color))
+                data.extend(&vertex_to_bytes(x0, y1, &element.color))
+                data.extend(&vertex_to_bytes(x1, y0, &element.color))
+                data.extend(&vertex_to_bytes(x1, y1, &element.color))
+
+        return data
+
+# Helper: Convert vertex position + color to bytes
+fn vertex_to_bytes(x: f32, y: f32, color: &Color) -> Array<u8>:
+    var data: Array<u8> = []
+    # Position (2 floats = 8 bytes)
+    data.extend(&f32_to_le_bytes(x))
+    data.extend(&f32_to_le_bytes(y))
+    # Color (4 floats = 16 bytes)
+    data.extend(&f32_to_le_bytes(color.r))
+    data.extend(&f32_to_le_bytes(color.g))
+    data.extend(&f32_to_le_bytes(color.b))
+    data.extend(&f32_to_le_bytes(color.a))
+    return data
+
+fn f32_to_le_bytes(value: f32) -> Array<u8>:
+    val bits = value.to_bits()
+    var bytes: Array<u8> = []
+    bytes.push((bits & 0xFF) as u8)
+    bytes.push(((bits >> 8) & 0xFF) as u8)
+    bytes.push(((bits >> 16) & 0xFF) as u8)
+    bytes.push(((bits >> 24) & 0xFF) as u8)
+    return bytes
+
+fn u32_to_le_bytes(value: u32) -> Array<u8>:
+    var bytes: Array<u8> = []
+    bytes.push((value & 0xFF) as u8)
+    bytes.push(((value >> 8) & 0xFF) as u8)
+    bytes.push(((value >> 16) & 0xFF) as u8)
+    bytes.push(((value >> 24) & 0xFF) as u8)
+    return bytes
+
+fn u64_to_le_bytes(value: u64) -> Array<u8>:
+    var bytes: Array<u8> = []
+    bytes.push((value & 0xFF) as u8)
+    bytes.push(((value >> 8) & 0xFF) as u8)
+    bytes.push(((value >> 16) & 0xFF) as u8)
+    bytes.push(((value >> 24) & 0xFF) as u8)
+    bytes.push(((value >> 32) & 0xFF) as u8)
+    bytes.push(((value >> 40) & 0xFF) as u8)
+    bytes.push(((value >> 48) & 0xFF) as u8)
+    bytes.push(((value >> 56) & 0xFF) as u8)
+    return bytes
+
+
+# Overlay Element (UI component for Vulkan rendering)
+pub struct OverlayElement:
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+    color: Color
+    element_type: ElementType
+
+pub enum ElementType:
+    Rectangle
+    Circle
+    Text
+    Image
+
+impl ElementType:
+    pub fn to_string(self) -> text:
+        """Convert element type to string."""
+        match self:
+            case Rectangle: "Rectangle"
+            case Circle: "Circle"
+            case Text: "Text"
+            case Image: "Image"
+
+    pub fn description(self) -> text:
+        """Get element type description."""
+        match self:
+            case Rectangle: "Rectangular overlay element"
+            case Circle: "Circular overlay element"
+            case Text: "Text overlay element"
+            case Image: "Image/texture overlay element"
+
+    pub fn is_rectangle(self) -> bool:
+        """Check if element type is Rectangle."""
+        match self:
+            case Rectangle: true
+            case _: false
+
+    pub fn is_circle(self) -> bool:
+        """Check if element type is Circle."""
+        match self:
+            case Circle: true
+            case _: false
+
+    pub fn is_text(self) -> bool:
+        """Check if element type is Text."""
+        match self:
+            case Text: true
+            case _: false
+
+    pub fn is_image(self) -> bool:
+        """Check if element type is Image."""
+        match self:
+            case Image: true
+            case _: false
+
+    pub fn is_shape(self) -> bool:
+        """Check if element type is a geometric shape."""
+        match self:
+            case Rectangle: true
+            case Circle: true
+            case _: false
+
+    pub fn is_textured(self) -> bool:
+        """Check if element type requires texture/image data."""
+        match self:
+            case Text: true
+            case Image: true
+            case _: false
+
+    pub fn is_simple_geometry(self) -> bool:
+        """Check if element type uses simple color-only geometry."""
+        match self:
+            case Rectangle: true
+            case Circle: true
+            case _: false
+
+    pub fn requires_font_atlas(self) -> bool:
+        """Check if element type requires font atlas for rendering."""
+        match self:
+            case Text: true
+            case _: false
+
+    pub fn summary(self) -> text:
+        """Get element type summary."""
+        val name = self.to_string()
+        val desc = self.description()
+        var props = []
+        if self.is_shape():
+            props.push("shape")
+        if self.is_textured():
+            props.push("textured")
+        if self.is_simple_geometry():
+            props.push("simple-geometry")
+        if self.requires_font_atlas():
+            props.push("requires-font-atlas")
+        if props.len() > 0:
+            val props_str = ", ".join(props)
+            return "ElementType: {name} ({desc}, {props_str})"
+        else:
+            return "ElementType: {name} ({desc})"
+
+pub struct Color:
+    r: f32
+    g: f32
+    b: f32
+    a: f32
+
+impl Color:
+    pub fn rgba(r: f32, g: f32, b: f32, a: f32) -> Color:
+        return Color(r: r, g: g, b: b, a: a)
+
+    pub fn rgb(r: f32, g: f32, b: f32) -> Color:
+        return Color.rgba(r, g, b, 1.0)
+
+    pub fn white() -> Color:
+        return Color.rgba(1.0, 1.0, 1.0, 1.0)
+
+    pub fn black() -> Color:
+        return Color.rgba(0.0, 0.0, 0.0, 1.0)
+
+    pub fn transparent() -> Color:
+        return Color.rgba(0.0, 0.0, 0.0, 0.0)
+
+
+# Array placeholder
+pub struct Array<T>:
+    items: Vec<T>
+
+impl<T> Array<T>:
+    pub fn push(mut self, item: T):
+        pass
+
+    pub fn clear(mut self):
+        pass

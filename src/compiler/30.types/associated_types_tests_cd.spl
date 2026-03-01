@@ -1,0 +1,364 @@
+"""
+Associated Types - Phase 4C + 4D Tests + Main
+
+Test functions for:
+- Phase 4C: AssocTypeProjection, AssocTypeResolver
+- Phase 4D: Obligation, TraitSolverEx
+- main() entry point
+"""
+
+use compiler.types.associated_types_defs.{HirType, TraitRef}
+use compiler.types.associated_types_defs.{AssocTypeProjection, AssocTypeResolver}
+use compiler.types.associated_types_defs.{Obligation, TraitSolverEx}
+use compiler.types.associated_types_tests_ab.{setup_test_registry, setup_registry}
+use compiler.types.associated_types_tests_ab.{test_assoc_type_basic, test_multiple_assoc_types}
+use compiler.types.associated_types_tests_ab.{test_assoc_type_with_bounds, test_default_assoc_type}
+use compiler.types.associated_types_tests_ab.{test_builtin_iterator_trait, test_trait_registry_ex}
+use compiler.types.associated_types_tests_ab.{test_projection_type, test_builtin_collection}
+use compiler.types.associated_types_tests_ab.{test_assoc_type_impl_basic, test_multiple_assoc_type_impls}
+use compiler.types.associated_types_tests_ab.{test_missing_assoc_type, test_assoc_type_bound_satisfied}
+use compiler.types.associated_types_tests_ab.{test_default_assoc_type_usage, test_builtin_range_iterator}
+use compiler.types.associated_types_tests_ab.{test_impl_registry_ex, test_generic_impl}
+
+# ============================================================================
+# Phase 4C Tests (7 tests)
+# ============================================================================
+
+fn test_projection_basic():
+    """Test basic projection resolution"""
+    val registry = setup_test_registry()
+    val resolver = AssocTypeResolver.new(registry)
+
+    # Range.Item -> i64
+    val range_type = HirType.Named(name: "Range")
+    val projection = AssocTypeProjection.new(range_type, "Item")
+
+    val resolved = resolver.resolve_projection(projection)
+    assert resolved.type_name() == "i32", "Range.Item resolves to i32"
+    assert projection.is_resolved(), "Projection is marked resolved"
+
+    print "  pass: Basic projection resolution"
+
+fn test_nested_projection():
+    """Test nested projections (T.Assoc1.Assoc2)"""
+    val registry = setup_test_registry()
+    val resolver = AssocTypeResolver.new(registry)
+
+    # First level: Range.Item -> i64
+    val range_item = HirType.Projection(
+        base: HirType.Named(name: "Range"),
+        assoc_name: "Item"
+    )
+
+    val normalized = resolver.normalize(range_item)
+    assert normalized.type_name() == "i32", "Nested projection resolved"
+
+    print "  pass: Nested projection"
+
+fn test_projection_with_generic():
+    """Test projection with generic base type"""
+    val registry = setup_test_registry()
+    val resolver = AssocTypeResolver.new(registry)
+
+    # Vec<T>.Item -> T
+    val vec_t = HirType.Generic(name: "Vec", args: [HirType.Named(name: "T")])
+    val projection = AssocTypeProjection.new(vec_t, "Item")
+
+    val resolved = resolver.resolve_projection(projection)
+    assert resolved.type_name() == "T", "Vec<T>.Item resolves to T"
+
+    print "  pass: Projection with generic base"
+
+fn test_projection_normalization():
+    """Test type normalization with projections"""
+    val registry = setup_test_registry()
+    val resolver = AssocTypeResolver.new(registry)
+
+    # Normalize: Vec<Range.Item> -> Vec<i64>
+    val range_item = HirType.Projection(
+        base: HirType.Named(name: "Range"),
+        assoc_name: "Item"
+    )
+    val vec_of_range_item = HirType.Generic(
+        name: "Vec",
+        args: [range_item]
+    )
+
+    val normalized = resolver.normalize(vec_of_range_item)
+    assert normalized.type_name() == "Vec", "Normalized to Vec"
+
+    print "  pass: Projection normalization"
+
+fn test_projection_default():
+    """Test projection with default type (placeholder)"""
+    val registry = setup_test_registry()
+    val resolver = AssocTypeResolver.new(registry)
+
+    # Vec<T>.Index -> i64 (using default)
+    val vec_t = HirType.Generic(name: "Vec", args: [HirType.Named(name: "T")])
+    val projection = AssocTypeProjection.new(vec_t, "Index")
+
+    val resolved = resolver.resolve_projection(projection)
+    assert resolved.type_name() == "i32", "Vec<T>.Index resolves to i32 (default)"
+
+    print "  pass: Projection with default"
+
+fn test_projection_error():
+    """Test projection resolution error (missing impl)"""
+    val registry = setup_test_registry()
+    val resolver = AssocTypeResolver.new(registry)
+
+    # String.Item -> Error (no impl)
+    val string_type = HirType.Str
+    val projection = AssocTypeProjection.new(string_type, "Item")
+
+    val resolved = resolver.resolve_projection(projection)
+    assert resolved.type_name() == "<error>", "Missing impl returns Error"
+
+    print "  pass: Projection error handling"
+
+fn test_projection_caching():
+    """Test projection resolution caching"""
+    val registry = setup_test_registry()
+    val resolver = AssocTypeResolver.new(registry)
+
+    # Resolve Range.Item twice
+    val range_type = HirType.Named(name: "Range")
+    val projection1 = AssocTypeProjection.new(range_type, "Item")
+    val projection2 = AssocTypeProjection.new(range_type, "Item")
+
+    val resolved1 = resolver.resolve_projection(projection1)
+    val resolved2 = resolver.resolve_projection(projection2)
+
+    assert resolved1.type_name() == "i32", "First resolution"
+    assert resolved2.type_name() == "i32", "Second resolution (from cache)"
+
+    print "  pass: Projection caching"
+
+# ============================================================================
+# Phase 4D Tests (8 tests)
+# ============================================================================
+
+fn test_generic_with_assoc_return():
+    """Test generic function with associated type in return"""
+    val registry = setup_registry()
+    val solver = TraitSolverEx.new(registry)
+
+    # fn first<I: Iterator>(iter: I) -> I.Item
+    # Check: Range: Iterator
+    val range_type = HirType.Named(name: "Range")
+    val can_use = solver.can_satisfy(range_type, "Iterator")
+
+    assert can_use, "Range satisfies Iterator"
+
+    print "  pass: Generic with assoc type return"
+
+fn test_trait_bound_with_assoc_constraint():
+    """Test trait bound with associated type constraint"""
+    val registry = setup_registry()
+    val solver = TraitSolverEx.new(registry)
+
+    # fn process<I: Iterator<Item=i64>>(iter: I)
+    # Check: Range: Iterator<Item=i64>
+    val range_type = HirType.Named(name: "Range")
+    val satisfies = solver.can_satisfy_with_assoc(
+        range_type,
+        "Iterator",
+        "Item",
+        HirType.Int
+    )
+
+    assert satisfies, "Range satisfies Iterator<Item=i64>"
+
+    # Check: String: Iterator<Item=i64> (should fail)
+    val string_type = HirType.Str
+    val string_satisfies = solver.can_satisfy_with_assoc(
+        string_type,
+        "Iterator",
+        "Item",
+        HirType.Int
+    )
+
+    assert not string_satisfies, "String does NOT satisfy Iterator<Item=i64>"
+
+    print "  pass: Trait bound with assoc constraint"
+
+fn test_method_with_assoc_type():
+    """Test method using associated types"""
+    val registry = setup_registry()
+    val solver = TraitSolverEx.new(registry)
+
+    # trait Iterator:
+    #     type Item
+    #     fn next() -> Item?
+    #     fn collect() -> [Item]
+
+    # Check: Range implements Iterator
+    val range_type = HirType.Named(name: "Range")
+    assert solver.can_satisfy(range_type, "Iterator"), "Range: Iterator"
+
+    # The return type would be: Range.Item which resolves to i64
+
+    print "  pass: Method with associated type"
+
+fn test_obligation_with_constraints():
+    """Test obligation creation with constraints"""
+    val ty = HirType.TypeVar(id: 0)
+    val trait_ref = TraitRef.new("Iterator")
+    val obligation = Obligation.with_assoc_constraint(
+        ty,
+        trait_ref,
+        "Item",
+        HirType.Int
+    )
+
+    assert obligation.has_assoc_constraints(), "Has constraints"
+    assert obligation.to_string() == "T0: Iterator<Item=i32>", "String representation"
+
+    print "  pass: Obligation with constraints"
+
+fn test_multiple_constraints():
+    """Test obligation with multiple associated type constraints"""
+    val ty = HirType.TypeVar(id: 0)
+    val trait_ref = TraitRef.new("Collection")
+    val obligation = Obligation.new(ty, trait_ref)
+
+    obligation.add_assoc_constraint("Item", HirType.Int)
+    obligation.add_assoc_constraint("Index", HirType.Int)
+
+    assert obligation.has_assoc_constraints(), "Has constraints"
+
+    print "  pass: Multiple constraints"
+
+fn test_solver_basic():
+    """Test basic solving without constraints"""
+    val registry = setup_registry()
+    val solver = TraitSolverEx.new(registry)
+
+    # Range: Iterator (without Item constraint)
+    val range_type = HirType.Named(name: "Range")
+    val obligation = Obligation.new(range_type, TraitRef.new("Iterator"))
+
+    assert solver.solve(obligation), "Range: Iterator"
+
+    print "  pass: Basic solving"
+
+fn test_solver_with_constraints():
+    """Test solving with associated type constraints"""
+    val registry = setup_registry()
+    val solver = TraitSolverEx.new(registry)
+
+    # Range: Iterator<Item=i64> (should succeed)
+    val range_type = HirType.Named(name: "Range")
+    val obligation1 = Obligation.with_assoc_constraint(
+        range_type,
+        TraitRef.new("Iterator"),
+        "Item",
+        HirType.Int
+    )
+
+    assert solver.solve(obligation1), "Range: Iterator<Item=i64>"
+
+    # Range: Iterator<Item=String> (should fail)
+    val obligation2 = Obligation.with_assoc_constraint(
+        range_type,
+        TraitRef.new("Iterator"),
+        "Item",
+        HirType.Str
+    )
+
+    assert not solver.solve(obligation2), "Range NOT Iterator<Item=String>"
+
+    print "  pass: Solver with constraints"
+
+fn test_solve_multiple():
+    """Test solving multiple obligations"""
+    val registry = setup_registry()
+    val solver = TraitSolverEx.new(registry)
+
+    var obligations = []
+
+    # Range: Iterator<Item=i64> (should pass)
+    val ob1 = Obligation.with_assoc_constraint(
+        HirType.Named(name: "Range"),
+        TraitRef.new("Iterator"),
+        "Item",
+        HirType.Int
+    )
+    obligations.push(ob1)
+
+    # String: Iterator<Item=String> (should pass)
+    val ob2 = Obligation.with_assoc_constraint(
+        HirType.Str,
+        TraitRef.new("Iterator"),
+        "Item",
+        HirType.Str
+    )
+    obligations.push(ob2)
+
+    # Bool: Iterator (should fail - no impl)
+    val ob3 = Obligation.new(HirType.Bool, TraitRef.new("Iterator"))
+    obligations.push(ob3)
+
+    val unsatisfied = solver.solve_all(obligations)
+
+    assert unsatisfied.len() == 1, "One unsatisfied"
+    assert unsatisfied[0].ty.type_name() == "bool", "Bool unsatisfied"
+
+    print "  pass: Solve multiple"
+
+# ============================================================================
+# Main - runs all 31 tests
+# ============================================================================
+
+fn main():
+    print ""
+    print "Associated Types - Consolidated Tests"
+    print "======================================"
+
+    print ""
+    print "Phase 4A: Definitions"
+    test_assoc_type_basic()
+    test_multiple_assoc_types()
+    test_assoc_type_with_bounds()
+    test_default_assoc_type()
+    test_builtin_iterator_trait()
+    test_trait_registry_ex()
+    test_projection_type()
+    test_builtin_collection()
+
+    print ""
+    print "Phase 4B: Implementations"
+    test_assoc_type_impl_basic()
+    test_multiple_assoc_type_impls()
+    test_missing_assoc_type()
+    test_assoc_type_bound_satisfied()
+    test_default_assoc_type_usage()
+    test_builtin_range_iterator()
+    test_impl_registry_ex()
+    test_generic_impl()
+
+    print ""
+    print "Phase 4C: Projection & Resolution"
+    test_projection_basic()
+    test_nested_projection()
+    test_projection_with_generic()
+    test_projection_normalization()
+    test_projection_default()
+    test_projection_error()
+    test_projection_caching()
+
+    print ""
+    print "Phase 4D: Integration & Bounds"
+    test_generic_with_assoc_return()
+    test_trait_bound_with_assoc_constraint()
+    test_method_with_assoc_type()
+    test_obligation_with_constraints()
+    test_multiple_constraints()
+    test_solver_basic()
+    test_solver_with_constraints()
+    test_solve_multiple()
+
+    print ""
+    print "All 31 tests passed."
+    print ""

@@ -1,0 +1,362 @@
+# Linker Wrapper Helpers - Self-Contained Linking + Binary Utilities
+#
+# Contains SMF linking, self-contained binary creation, runtime binary
+# discovery, trailer building, hash functions, and binary/file I/O helpers.
+# Split from linker_wrapper.spl.
+#
+# Interpreter-safe: no generics (<>) used.
+
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
+use std.log.{debug, info}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+# ============================================================================
+# Self-Contained Binary Constants
+# ============================================================================
+
+# Trailer magic bytes: "SMFE" (SMF Executable)
+val SMFE_MAGIC: [u8] = [83, 77, 70, 69]  # S=83, M=77, F=70, E=69
+val SMFE_TRAILER_SIZE: i64 = 32
+val SMFE_VERSION: i64 = 1
+
+# ============================================================================
+# Self-Contained Config
+# ============================================================================
+
+struct SelfContainedConfig:
+    runtime_binary: text     # Path to bootstrap/simple binary (empty = auto-detect)
+    verbose: bool
+    strip: bool              # Strip debug symbols from output
+
+fn SelfContainedConfig__default() -> SelfContainedConfig:
+    SelfContainedConfig(
+        runtime_binary: "",
+        verbose: false,
+        strip: false
+    )
+
+# ============================================================================
+# SMF Linking
+# ============================================================================
+
+fn link_to_smf(smf_bytes: [u8], output: text, verbose: bool) -> Result:
+    # Write SMF bytes directly to file
+    # Use shell to write binary data via base64 encoding
+    if smf_bytes_len(smf_bytes) == 0:
+        return Err("No SMF data to write")
+
+    # Write bytes using file_write_bytes helper
+    val wrote = write_bytes_to_file(output, smf_bytes)
+    if not wrote:
+        return Err("Failed to write SMF file: {output}")
+
+    if verbose:
+        print "[linker-wrapper] SMF module: {output} ({smf_bytes.len()} bytes)"
+
+    Ok(output)
+
+# ============================================================================
+# Self-Contained Linking
+# ============================================================================
+
+fn link_to_self_contained(smf_data: [u8], output: text, config: SelfContainedConfig) -> Result:
+    debug("linker", "link_to_self_contained: output={output}, smf_data_size={smf_data_len(smf_data)}")
+    if smf_data_len(smf_data) == 0:
+        return Err("No SMF data for self-contained binary")
+
+    # Find runtime binary
+    var runtime_path = config.runtime_binary
+    if runtime_path == "":
+        val found = find_runtime_binary()
+        if found_is_err(found):
+            return Err(found_unwrap_err(found))
+        runtime_path = found_value
+    debug("linker", "Runtime binary: {runtime_path}")
+
+    if config.verbose:
+        print "[linker-wrapper] Runtime binary: {runtime_path}"
+
+    # Step 1: Copy runtime binary to output
+    if not file_copy(runtime_path, output):
+        return Err("Failed to copy runtime binary to {output}")
+
+    # Step 2: Get runtime binary size (= offset where SMF data starts)
+    val runtime_size = file_size_raw(output)
+    if runtime_size <= 0:
+        file_delete(output)
+        return Err("Runtime binary is empty or unreadable")
+
+    # Step 3: Append SMF data to output
+    val append_ok = append_bytes_to_file(output, smf_data)
+    if not append_ok:
+        file_delete(output)
+        return Err("Failed to append SMF data to output")
+
+    # Step 4: Build and append trailer (32 bytes)
+    val smf_offset = runtime_size
+    val smf_size = smf_data_len(smf_data)
+    val checksum = fnv1a_hash(smf_data)
+    val trailer = build_trailer(smf_offset, smf_size, checksum)
+
+    val trailer_ok = append_bytes_to_file(output, trailer)
+    if not trailer_ok:
+        file_delete(output)
+        return Err("Failed to append trailer to output")
+
+    # Step 5: Make output executable
+    val os = host_os()
+    if os != "windows":
+        shell("chmod +x '{output}'")
+
+    val total_size = file_size_raw(output)
+    if config.verbose:
+        print "[linker-wrapper] Self-contained binary: {output}"
+        print "[linker-wrapper]   Runtime: {runtime_size} bytes"
+        print "[linker-wrapper]   SMF data: {smf_size} bytes"
+        print "[linker-wrapper]   Trailer: {SMFE_TRAILER_SIZE} bytes"
+        print "[linker-wrapper]   Total: {total_size} bytes"
+
+    Ok(output)
+
+# ============================================================================
+# Self-Contained Detection
+# ============================================================================
+
+fn detect_self_contained(exe_path: text) -> Result:
+    # Read the last 32 bytes of the binary to check for SMFE trailer
+    val total_size = file_size_raw(exe_path)
+    if total_size < SMFE_TRAILER_SIZE:
+        return Err("File too small for self-contained detection")
+
+    # Read trailer using dd (portable across platforms)
+    val trailer_offset = total_size - SMFE_TRAILER_SIZE
+    val hex_result = shell("dd if='{exe_path}' bs=1 skip={trailer_offset} count={SMFE_TRAILER_SIZE} 2>/dev/null | od -A n -t x1 | tr -d ' \\n'")
+    if hex_result.exit_code != 0:
+        return Err("Failed to read trailer bytes")
+
+    val hex = hex_result.stdout
+    if hex_len(hex) < 8:
+        return Err("Trailer too short")
+
+    # Check magic: "SMFE" = 53 4d 46 45
+    val magic_hex = hex[0:8]
+    if magic_hex != "534d4645":
+        return Err("No SMFE magic found")
+
+    # Parse trailer fields from hex
+    val smf_offset = parse_hex_u64(hex, 8)
+    val smf_size = parse_hex_u64(hex, 24)
+
+    Ok("{smf_offset},{smf_size}")
+
+# ============================================================================
+# Runtime Binary Discovery
+# ============================================================================
+
+fn find_runtime_binary() -> Result:
+    # 1. Check SIMPLE_RUNTIME_BINARY env var
+    val env_path = env_get("SIMPLE_RUNTIME_BINARY")
+    if env_path != "":
+        if file_exists(env_path):
+            return Ok(env_path)
+
+    val current_dir = cwd()
+    val os = host_os()
+    val arch = host_arch()
+
+    # 2. Check platform-specific path
+    var platform_name = os + "-" + arch
+    val platform_path = "{current_dir}/bin/release/{platform_name}/simple"
+    if file_exists(platform_path):
+        return Ok(platform_path)
+
+    # 3. Check generic bootstrap path
+    val generic_path = "{current_dir}/bin/release/simple"
+    if file_exists(generic_path):
+        return Ok(generic_path)
+
+    # 4. Check ./bin/release/simple (relative)
+    if file_exists("./bin/release/simple"):
+        return Ok("./bin/release/simple")
+
+    Err("Runtime binary not found. Set SIMPLE_RUNTIME_BINARY or ensure bin/release/simple exists.")
+
+fn find_runtime_lib_dir() -> text:
+    # Check env var first
+    val env_path = env_get("SIMPLE_RUNTIME_PATH")
+    if env_path != "":
+        if file_exists(env_path):
+            return env_path
+
+    # No runtime library found - return empty (native linking may still work without it)
+    ""
+
+# ============================================================================
+# Trailer Building
+# ============================================================================
+
+fn build_trailer(smf_offset: i64, smf_size: i64, checksum: i64) -> [u8]:
+    var buf: [u8] = []
+
+    # Magic: "SMFE" (4 bytes)
+    buf = buf + (SMFE_MAGIC)
+
+    # SMF offset (8 bytes, little-endian)
+    buf = buf + (i64_to_le_bytes(smf_offset))
+
+    # SMF size (8 bytes, little-endian)
+    buf = buf + (i64_to_le_bytes(smf_size))
+
+    # Checksum (8 bytes, little-endian)
+    buf = buf + (i64_to_le_bytes(checksum))
+
+    # Version (4 bytes, little-endian)
+    buf = buf + (i32_to_le_bytes(SMFE_VERSION))
+
+    buf
+
+# ============================================================================
+# Hash Function
+# ============================================================================
+
+fn fnv1a_hash(data: [u8]) -> i64:
+    # FNV-1a 64-bit hash
+    # Offset basis 0xcbf29ce484222325 as signed i64
+    var hash: i64 = -3750763034362895579
+    for byte in data:
+        val b = byte
+        hash = hash xor b
+        hash = hash * 1099511628211
+    hash
+
+# ============================================================================
+# Binary Helpers
+# ============================================================================
+
+fn i64_to_le_bytes(value: i64) -> [u8]:
+    [
+        bitwise_and(value, 0xFF),
+        ((bit_shr(value, 8)) & 0xFF),
+        ((bit_shr(value, 16)) & 0xFF),
+        ((bit_shr(value, 24)) & 0xFF),
+        ((bit_shr(value, 32)) & 0xFF),
+        ((bit_shr(value, 40)) & 0xFF),
+        ((bit_shr(value, 48)) & 0xFF),
+        ((bit_shr(value, 56)) & 0xFF)
+    ]
+
+fn i32_to_le_bytes(value: i64) -> [u8]:
+    [
+        bitwise_and(value, 0xFF),
+        ((bit_shr(value, 8)) & 0xFF),
+        ((bit_shr(value, 16)) & 0xFF),
+        ((bit_shr(value, 24)) & 0xFF)
+    ]
+
+fn parse_hex_u64(hex: text, offset: i64) -> i64:
+    # Parse 16 hex chars (8 bytes) as little-endian u64
+    var result: i64 = 0
+    var i = 0
+    for idx in range(0, 8):
+        val pos = offset + (idx * 2)
+        if pos + 2 <= hex_len(hex):
+            val byte_hex = hex[pos:pos + 2]
+            val byte_val = hex_byte_to_int(byte_hex)
+            result = result | (byte_val << (idx * 8))
+        i = i + 1
+    result
+
+fn hex_byte_to_int(hex: text) -> i64:
+    if hex_len(hex) < 2:
+        return 0
+    val hi = hex_char_to_int(hex[0:1])
+    val lo = hex_char_to_int(hex[1:2])
+    (hi * 16) + lo
+
+fn hex_char_to_int(c: text) -> i64:
+    match c:
+        case "0": 0
+        case "1": 1
+        case "2": 2
+        case "3": 3
+        case "4": 4
+        case "5": 5
+        case "6": 6
+        case "7": 7
+        case "8": 8
+        case "9": 9
+        case "a": 10
+        case "A": 10
+        case "b": 11
+        case "B": 11
+        case "c": 12
+        case "C": 12
+        case "d": 13
+        case "D": 13
+        case "e": 14
+        case "E": 14
+        case "f": 15
+        case "F": 15
+        case _: 0
+
+# ============================================================================
+# File I/O Helpers (using shell for binary data)
+# ============================================================================
+
+fn write_elf_bytes_to_file(path: text, bytes: [i64]) -> Result<(), text>:
+    """Write raw ELF bytes directly to disk."""
+    if path == "":
+        return Err("Output path is empty")
+
+    # Convert i64 list to u8 list (mask to 0xFF)
+    var data: [u8] = []
+    for b in bytes:
+        data.push(bitwise_and(b, 0xFF))
+
+    if not rt_file_write_bytes(path, data):
+        return Err("Failed to write ELF bytes to {path}")
+
+    # Lightweight magic check to catch obvious corruption
+    if bytes.len() >= 4:
+        if bytes[0] != 0x7f or bytes[1] != 0x45 or bytes[2] != 0x4c or bytes[3] != 0x46:
+            return Err("Invalid ELF magic in {path}")
+
+    Ok(())
+
+fn write_bytes_to_file(path: text, data: [u8]) -> bool:
+    if data.len() == 0:
+        return shell("touch '{path}'").exit_code == 0
+
+    var hex_str = ""
+    for byte in data:
+        val b = bitwise_and(byte, 0xFF)
+        val hi = "0123456789abcdef"[(bit_shr(b, 4)):((bit_shr(b, 4)) + 1)]
+        val lo = "0123456789abcdef"[bitwise_and(b, 0xF):(bitwise_and(b, 0xF) + 1)]
+        hex_str = hex_str + hi + lo
+
+    shell("echo '{hex_str}' | xxd -r -p > '{path}'").exit_code == 0
+
+fn append_bytes_to_file(path: text, data: [u8]) -> bool:
+    if data.len() == 0:
+        return true
+
+    var hex_str = ""
+    for byte in data:
+        val b = bitwise_and(byte, 0xFF)
+        val hi = "0123456789abcdef"[(bit_shr(b, 4)):((bit_shr(b, 4)) + 1)]
+        val lo = "0123456789abcdef"[bitwise_and(b, 0xF):(bitwise_and(b, 0xF) + 1)]
+        hex_str = hex_str + hi + lo
+
+    shell("echo '{hex_str}' | xxd -r -p >> '{path}'").exit_code == 0
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SelfContainedConfig, SelfContainedConfig__default
+export SMFE_MAGIC, SMFE_TRAILER_SIZE, SMFE_VERSION
+export link_to_smf, link_to_self_contained
+export detect_self_contained, find_runtime_binary, find_runtime_lib_dir
+export build_trailer, fnv1a_hash
+export write_elf_bytes_to_file

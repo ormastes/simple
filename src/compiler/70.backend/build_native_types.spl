@@ -1,0 +1,194 @@
+# Build Native Types - Type definitions for the native build pipeline.
+#
+# Defines:
+#   - OutputFormat, LinkConfig, LinkStats, LinkResult, LinkError, Linker
+#   - BuildConfig, BuildResult, BuildStats
+#   - link_native helper
+#
+# Split from build_native.spl; imported by build_native_pipeline.spl and build_native.spl.
+
+use compiler.backend.linker.linker_wrapper.{link_to_native as lw_link_to_native, NativeLinkConfig, NativeLinkConfig__default}
+use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakerConfig, ObjTakeResult, objtaker_new, objtaker_with_defaults, objtakerconfig_default, objtaker_take_object}
+
+# ============================================================================
+# Link Pipeline Types (defined locally because linker/link.spl has deps
+# that the bootstrap parser cannot handle)
+# ============================================================================
+
+enum OutputFormat:
+    Smf
+    Native
+
+struct LinkConfig:
+    output_format: OutputFormat
+    output_path: text
+    libraries: [text]
+    library_paths: [text]
+    pie: bool
+    debug: bool
+    verbose: bool
+    allow_deferred: bool
+    optimization_level: i32
+    target_flags: [text]
+    linker_flags: [text]
+
+struct LinkStats:
+    output_size: i64
+    symbol_count: i32
+
+enum LinkResult:
+    Success(output_path: text, stats: LinkStats)
+    Error(message: text, errors: [LinkError])
+
+struct LinkError:
+    message: text
+
+struct Linker:
+    config: LinkConfig
+
+impl Linker:
+    static fn new(config: LinkConfig) -> Linker:
+        Linker(config: config)
+
+    me link(smf_files: [text]) -> LinkResult:
+        """Link SMF files to native binary using linker_wrapper."""
+        if smf_files.is_empty():
+            return LinkResult.Error(
+                message: "No SMF files to link",
+                errors: [LinkError(message: "empty input")]
+            )
+
+        # Use linker_wrapper to create native binary
+        val output = self.config.output_path
+        val verbose = self.config.verbose
+
+        if verbose:
+            print "[linker] Linking {smf_files.len()} files -> {output}"
+
+        # Delegate to linker_wrapper's link_native function
+        val result = link_native(smf_files, output, self.config)
+        match result:
+            case Ok(path):
+                val stats = LinkStats(output_size: 0, symbol_count: 0)
+                LinkResult.Success(output_path: path, stats: stats)
+            case Err(msg):
+                LinkResult.Error(
+                    message: msg,
+                    errors: [LinkError(message: msg)]
+                )
+
+fn link_native(smf_files: [text], output: text, config: LinkConfig) -> Result<text, text>:
+    """Link SMF files to a native binary using linker_wrapper (SMF-aware)."""
+    var native_cfg = NativeLinkConfig(
+        libraries: config.libraries,
+        library_paths: config.library_paths,
+        runtime_path: "",
+        pie: config.pie,
+        debug: config.debug,
+        verbose: config.verbose,
+        extra_flags: config.linker_flags
+    )
+
+    val result = lw_link_to_native(smf_files, output, native_cfg)
+    match result:
+        case Ok(path): Ok(path)
+        case Err(msg): Err(msg)
+
+# ============================================================================
+# Build Configuration
+# ============================================================================
+
+struct BuildConfig:
+    """Configuration for native build."""
+    entry_point: text
+    output: text
+    dependencies: [text]
+    libraries: [text]
+    library_paths: [text]
+    optimization: i32
+    debug: bool
+    verbose: bool
+    pie: bool
+    target_cpu: text?           # Target CPU (e.g., "x86-64-v3", "haswell", "native")
+    target_features: [text]     # Target features (e.g., ["+avx2", "+fma"])
+    linker_flags: [text]        # Extra linker flags
+    backend: text?              # Backend: nil/"smf" = SMF pipeline, "llvm" = LLVM pipeline
+
+impl BuildConfig:
+    static fn default(entry: text, output: text) -> BuildConfig:
+        BuildConfig(
+            entry_point: entry,
+            output: output,
+            dependencies: [],
+            libraries: ["c"],
+            library_paths: [],
+            optimization: 0,
+            debug: false,
+            verbose: false,
+            pie: true,
+            target_cpu: nil,
+            target_features: [],
+            linker_flags: [],
+            backend: nil
+        )
+
+    static fn for_simple_cli() -> BuildConfig:
+        """Configuration for building simple_new native."""
+        BuildConfig(
+            entry_point: "src/app/cli/main.spl",
+            output: "simple_new_native",
+            dependencies: [
+                "src/compiler/mod.spl",
+                "src/lib/src/mod.spl"
+            ],
+            libraries: ["c", "m", "pthread"],
+            library_paths: [],
+            optimization: 2,
+            debug: false,
+            verbose: true,
+            pie: true,
+            target_cpu: Some("x86-64-v3"),      # Default to modern CPUs
+            target_features: [],
+            linker_flags: [],
+            backend: nil
+        )
+
+# ============================================================================
+# Build Result
+# ============================================================================
+
+enum BuildResult:
+    Success(output: text, stats: BuildStats)
+    CompileError(file: text, message: text)
+    LinkError(message: text)
+    Error(message: text)
+
+struct BuildStats:
+    """Statistics from the build."""
+    source_files: i32
+    smf_files: i32
+    total_symbols: i32
+    output_size: i64
+    compile_time_ms: i64
+    link_time_ms: i64
+
+impl BuildResult:
+    fn is_success() -> bool:
+        match self:
+            case Success(_, _): true
+            case _: false
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export OutputFormat
+export LinkConfig
+export LinkStats
+export LinkResult
+export LinkError
+export Linker
+export link_native
+export BuildConfig
+export BuildResult
+export BuildStats

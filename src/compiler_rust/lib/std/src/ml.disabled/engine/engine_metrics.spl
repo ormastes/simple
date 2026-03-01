@@ -1,0 +1,715 @@
+# Engine Metrics
+#
+# Common metrics for training engine evaluation:
+# - Classification: Accuracy, ConfusionMatrix, Precision, Recall, F1Score, Loss
+# - Regression: MSE, MAE, RMSE
+#
+# All metrics implement the Metric base class interface:
+# - reset(): Clear state for new epoch
+# - update(output): Update with batch output
+# - compute(): Return final metric value
+
+export Accuracy, ConfusionMatrix, Precision, Recall, F1Score, Loss
+export MSE, MAE, RMSE
+
+use engine.__init__.{Metric}
+
+
+# ============================================================================
+# Common Metrics
+# ============================================================================
+
+class Accuracy(Metric):
+    """Accuracy metric for classification.
+
+    Expects output to be dict with "pred" and "labels" keys, or tuple (pred, labels).
+    Predictions and labels can be lists/arrays of class indices.
+
+    Example:
+        ```simple
+        val accuracy = Accuracy()
+        trainer.add_metric(accuracy, "acc")
+
+        # Output format options:
+        # 1. Dict: {"pred": [0, 1, 2], "labels": [0, 1, 1]}
+        # 2. Tuple: ([0, 1, 2], [0, 1, 1])
+        ```
+    """
+    correct: i64
+    total: i64
+
+    static fn new():
+        """Initialize accuracy metric."""
+        self.correct = 0
+        self.total = 0
+
+    me reset():
+        """Reset for new epoch."""
+        self.correct = 0
+        self.total = 0
+
+    me update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "labels" keys
+
+        Supported formats:
+            - Dict: {"pred": [0, 1, 2], "labels": [0, 1, 1]}
+            - Dict: {"y_pred": [...], "y_true": [...]}
+        """
+        var pred = []
+        var labels = []
+
+        # Extract predictions and labels from output dict
+        if "pred" in output and "labels" in output:
+            pred = output["pred"]
+            labels = output["labels"]
+        elif "y_pred" in output and "y_true" in output:
+            pred = output["y_pred"]
+            labels = output["y_true"]
+
+        # Compute matches
+        if len(pred) > 0 and len(labels) > 0:
+            val n = min(len(pred), len(labels))
+            for i in range(n):
+                self.total += 1
+                if pred[i] == labels[i]:
+                    self.correct += 1
+
+    fn compute() -> f64:
+        """Compute accuracy.
+
+        Returns:
+            Accuracy value in range [0.0, 1.0]
+        """
+        if self.total == 0:
+            return 0.0
+        return (self.correct.to_float()) / (self.total.to_float())
+
+
+class ConfusionMatrix:
+    """Confusion matrix for binary and multi-class classification.
+
+    Tracks true positives, false positives, true negatives, false negatives
+    for each class.
+
+    Example:
+        ```simple
+        val cm = ConfusionMatrix(num_classes=3)
+        cm.update([0, 1, 2], [0, 1, 1])  # pred, labels
+        print(cm.tp(1))  # True positives for class 1
+        ```
+    """
+    num_classes: i64
+    _matrix: any  # 2D array [actual][predicted]
+
+    fn __init__(num_classes: i64 = 2):
+        """Initialize confusion matrix.
+
+        Args:
+            num_classes: Number of classes (default: 2 for binary)
+        """
+        self.num_classes = num_classes
+        # Initialize NxN matrix with zeros
+        self._matrix = []
+        for i in range(num_classes):
+            var row = []
+            for j in range(num_classes):
+                row = row + [0]
+            self._matrix = self._matrix + [row]
+
+    me reset():
+        """Reset confusion matrix."""
+        for i in range(self.num_classes):
+            for j in range(self.num_classes):
+                self._matrix[i][j] = 0
+
+    me update(pred: any, labels: any):
+        """Update confusion matrix with predictions.
+
+        Args:
+            pred: Predicted class indices
+            labels: True class indices
+        """
+        val n = min(len(pred), len(labels))
+        for i in range(n):
+            val actual = labels[i]
+            val predicted = pred[i]
+            if actual >= 0 and actual < self.num_classes:
+                if predicted >= 0 and predicted < self.num_classes:
+                    self._matrix[actual][predicted] += 1
+
+    fn tp(class_idx: i64) -> i64:
+        """True positives for a class."""
+        return self._matrix[class_idx][class_idx]
+
+    fn fp(class_idx: i64) -> i64:
+        """False positives for a class (predicted as class but was other)."""
+        var total: i64 = 0
+        for i in range(self.num_classes):
+            if i != class_idx:
+                total += self._matrix[i][class_idx]
+        return total
+
+    fn fn_(class_idx: i64) -> i64:
+        """False negatives for a class (was class but predicted as other)."""
+        var total: i64 = 0
+        for j in range(self.num_classes):
+            if j != class_idx:
+                total += self._matrix[class_idx][j]
+        return total
+
+    fn tn(class_idx: i64) -> i64:
+        """True negatives for a class."""
+        var total: i64 = 0
+        for i in range(self.num_classes):
+            for j in range(self.num_classes):
+                if i != class_idx and j != class_idx:
+                    total += self._matrix[i][j]
+        return total
+
+    fn total_samples() -> i64:
+        """Total samples in confusion matrix."""
+        var total: i64 = 0
+        for i in range(self.num_classes):
+            for j in range(self.num_classes):
+                total += self._matrix[i][j]
+        return total
+
+
+class Precision(Metric):
+    """Precision metric for classification.
+
+    Precision = TP / (TP + FP)
+
+    For multi-class, computes macro-averaged precision.
+
+    Example:
+        ```simple
+        val precision = Precision(num_classes=3)
+        trainer.add_metric(precision, "precision")
+        ```
+    """
+    num_classes: i64
+    _cm: ConfusionMatrix
+
+    fn __init__(num_classes: i64 = 2):
+        """Initialize precision metric.
+
+        Args:
+            num_classes: Number of classes
+        """
+        self.num_classes = num_classes
+        self._cm = ConfusionMatrix(num_classes)
+
+    me reset():
+        """Reset for new epoch."""
+        self._cm.reset()
+
+    me update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "labels" keys
+        """
+        var pred = []
+        var labels = []
+
+        if "pred" in output and "labels" in output:
+            pred = output["pred"]
+            labels = output["labels"]
+        elif "y_pred" in output and "y_true" in output:
+            pred = output["y_pred"]
+            labels = output["y_true"]
+
+        if len(pred) > 0:
+            self._cm.update(pred, labels)
+
+    fn compute() -> f64:
+        """Compute macro-averaged precision.
+
+        Returns:
+            Precision value in range [0.0, 1.0]
+        """
+        var total_precision = 0.0
+        var valid_classes = 0
+
+        for c in range(self.num_classes):
+            val tp = self._cm.tp(c)
+            val fp = self._cm.fp(c)
+            val denominator = tp + fp
+            if denominator > 0:
+                total_precision += tp.to_float() / denominator.to_float()
+                valid_classes += 1
+
+        if valid_classes == 0:
+            return 0.0
+        return total_precision / valid_classes.to_float()
+
+    fn compute_per_class(class_idx: i64) -> f64:
+        """Compute precision for a specific class.
+
+        Args:
+            class_idx: Class index
+
+        Returns:
+            Precision for the specified class
+        """
+        val tp = self._cm.tp(class_idx)
+        val fp = self._cm.fp(class_idx)
+        val denominator = tp + fp
+        if denominator == 0:
+            return 0.0
+        return tp.to_float() / denominator.to_float()
+
+
+class Recall(Metric):
+    """Recall metric for classification.
+
+    Recall = TP / (TP + FN)
+
+    For multi-class, computes macro-averaged recall.
+
+    Example:
+        ```simple
+        val recall = Recall(num_classes=3)
+        trainer.add_metric(recall, "recall")
+        ```
+    """
+    num_classes: i64
+    _cm: ConfusionMatrix
+
+    fn __init__(num_classes: i64 = 2):
+        """Initialize recall metric.
+
+        Args:
+            num_classes: Number of classes
+        """
+        self.num_classes = num_classes
+        self._cm = ConfusionMatrix(num_classes)
+
+    me reset():
+        """Reset for new epoch."""
+        self._cm.reset()
+
+    me update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "labels" keys
+        """
+        var pred = []
+        var labels = []
+
+        if "pred" in output and "labels" in output:
+            pred = output["pred"]
+            labels = output["labels"]
+        elif "y_pred" in output and "y_true" in output:
+            pred = output["y_pred"]
+            labels = output["y_true"]
+
+        if len(pred) > 0:
+            self._cm.update(pred, labels)
+
+    fn compute() -> f64:
+        """Compute macro-averaged recall.
+
+        Returns:
+            Recall value in range [0.0, 1.0]
+        """
+        var total_recall = 0.0
+        var valid_classes = 0
+
+        for c in range(self.num_classes):
+            val tp = self._cm.tp(c)
+            val false_neg = self._cm.fn_(c)
+            val denominator = tp + false_neg
+            if denominator > 0:
+                total_recall += tp.to_float() / denominator.to_float()
+                valid_classes += 1
+
+        if valid_classes == 0:
+            return 0.0
+        return total_recall / valid_classes.to_float()
+
+    fn compute_per_class(class_idx: i64) -> f64:
+        """Compute recall for a specific class.
+
+        Args:
+            class_idx: Class index
+
+        Returns:
+            Recall for the specified class
+        """
+        val tp = self._cm.tp(class_idx)
+        val false_neg = self._cm.fn_(class_idx)
+        val denominator = tp + false_neg
+        if denominator == 0:
+            return 0.0
+        return tp.to_float() / denominator.to_float()
+
+
+class F1Score(Metric):
+    """F1 Score metric for classification.
+
+    F1 = 2 * (Precision * Recall) / (Precision + Recall)
+
+    Harmonic mean of precision and recall.
+
+    Example:
+        ```simple
+        val f1 = F1Score(num_classes=3)
+        trainer.add_metric(f1, "f1")
+        ```
+    """
+    num_classes: i64
+    _cm: ConfusionMatrix
+
+    fn __init__(num_classes: i64 = 2):
+        """Initialize F1 metric.
+
+        Args:
+            num_classes: Number of classes
+        """
+        self.num_classes = num_classes
+        self._cm = ConfusionMatrix(num_classes)
+
+    me reset():
+        """Reset for new epoch."""
+        self._cm.reset()
+
+    me update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "labels" keys
+        """
+        var pred = []
+        var labels = []
+
+        if "pred" in output and "labels" in output:
+            pred = output["pred"]
+            labels = output["labels"]
+        elif "y_pred" in output and "y_true" in output:
+            pred = output["y_pred"]
+            labels = output["y_true"]
+
+        if len(pred) > 0:
+            self._cm.update(pred, labels)
+
+    fn compute() -> f64:
+        """Compute macro-averaged F1 score.
+
+        Returns:
+            F1 score in range [0.0, 1.0]
+        """
+        var total_f1 = 0.0
+        var valid_classes = 0
+
+        for c in range(self.num_classes):
+            val tp = self._cm.tp(c)
+            val fp = self._cm.fp(c)
+            val false_neg = self._cm.fn_(c)
+
+            val precision_denom = tp + fp
+            val recall_denom = tp + false_neg
+
+            if precision_denom > 0 and recall_denom > 0:
+                val precision = tp.to_float() / precision_denom.to_float()
+                val recall = tp.to_float() / recall_denom.to_float()
+
+                if precision + recall > 0.0:
+                    val f1 = 2.0 * precision * recall / (precision + recall)
+                    total_f1 += f1
+                    valid_classes += 1
+
+        if valid_classes == 0:
+            return 0.0
+        return total_f1 / valid_classes.to_float()
+
+    fn compute_per_class(class_idx: i64) -> f64:
+        """Compute F1 score for a specific class.
+
+        Args:
+            class_idx: Class index
+
+        Returns:
+            F1 score for the specified class
+        """
+        val tp = self._cm.tp(class_idx)
+        val fp = self._cm.fp(class_idx)
+        val false_neg = self._cm.fn_(class_idx)
+
+        val precision_denom = tp + fp
+        val recall_denom = tp + false_neg
+
+        if precision_denom == 0 or recall_denom == 0:
+            return 0.0
+
+        val precision = tp.to_float() / precision_denom.to_float()
+        val recall = tp.to_float() / recall_denom.to_float()
+
+        if precision + recall == 0.0:
+            return 0.0
+
+        return 2.0 * precision * recall / (precision + recall)
+
+
+class Loss(Metric):
+    """Average loss metric.
+
+    Example:
+        ```simple
+        val loss_metric = Loss()
+        trainer.add_metric(loss_metric, "loss")
+        ```
+    """
+    total_loss: f64
+    count: i64
+
+    static fn new():
+        """Initialize loss metric."""
+        self.total_loss = 0.0
+        self.count = 0
+
+    me reset():
+        """Reset for new epoch."""
+        self.total_loss = 0.0
+        self.count = 0
+
+    me update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "loss" key
+        """
+        # Check for dict with "loss" key
+        if "loss" in output:
+            self.total_loss += output["loss"]
+            self.count += 1
+
+    fn compute() -> f64:
+        """Compute average loss.
+
+        Returns:
+            Average loss
+        """
+        if self.count == 0:
+            return 0.0
+        return self.total_loss / (self.count.to_float())
+
+
+# ============================================================================
+# Regression Metrics
+# ============================================================================
+
+class MSE(Metric):
+    """Mean Squared Error metric for regression.
+
+    Computes: (1/n) * sum((pred - actual)^2)
+
+    Example:
+        ```simple
+        val mse = MSE()
+        trainer.add_metric(mse, "mse")
+
+        # Output format: {"pred": [1.0, 2.0], "actual": [1.1, 2.2]}
+        ```
+    """
+    total_squared_error: f64 = 0.0
+    count: i64 = 0
+
+    me reset():
+        """Reset for new epoch."""
+        self.total_squared_error = 0.0
+        self.count = 0
+
+    me update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "actual" keys
+        """
+        var pred = []
+        var actual = []
+
+        # Extract predictions and actuals from output dict
+        if "pred" in output and "actual" in output:
+            pred = output["pred"]
+            actual = output["actual"]
+        elif "y_pred" in output and "y_true" in output:
+            pred = output["y_pred"]
+            actual = output["y_true"]
+
+        # Compute squared errors
+        if len(pred) > 0 and len(actual) > 0:
+            val n = min(len(pred), len(actual))
+            for i in range(n):
+                val p = pred[i]
+                val a = actual[i]
+                val diff = p - a
+                self.total_squared_error += diff * diff
+                self.count += 1
+
+    fn compute() -> f64:
+        """Compute mean squared error.
+
+        Returns:
+            MSE value
+        """
+        if self.count == 0:
+            return 0.0
+        return self.total_squared_error / (self.count.to_float())
+
+
+class MAE(Metric):
+    """Mean Absolute Error metric for regression.
+
+    Computes: (1/n) * sum(|pred - actual|)
+
+    Example:
+        ```simple
+        val mae = MAE()
+        trainer.add_metric(mae, "mae")
+
+        # Output format: {"pred": [1.0, 2.0], "actual": [1.1, 2.2]}
+        ```
+    """
+    total_absolute_error: f64 = 0.0
+    count: i64 = 0
+
+    me reset():
+        """Reset for new epoch."""
+        self.total_absolute_error = 0.0
+        self.count = 0
+
+    me update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "actual" keys
+        """
+        var pred = []
+        var actual = []
+
+        # Extract predictions and actuals from output dict
+        if "pred" in output and "actual" in output:
+            pred = output["pred"]
+            actual = output["actual"]
+        elif "y_pred" in output and "y_true" in output:
+            pred = output["y_pred"]
+            actual = output["y_true"]
+
+        # Compute absolute errors
+        if len(pred) > 0 and len(actual) > 0:
+            val n = min(len(pred), len(actual))
+            for i in range(n):
+                val p = pred[i]
+                val a = actual[i]
+                val diff = p - a
+                self.total_absolute_error += abs(diff)
+                self.count += 1
+
+    fn compute() -> f64:
+        """Compute mean absolute error.
+
+        Returns:
+            MAE value
+        """
+        if self.count == 0:
+            return 0.0
+        return self.total_absolute_error / (self.count.to_float())
+
+
+class RMSE(Metric):
+    """Root Mean Squared Error metric for regression.
+
+    Computes: sqrt((1/n) * sum((pred - actual)^2))
+
+    Example:
+        ```simple
+        val rmse = RMSE()
+        trainer.add_metric(rmse, "rmse")
+        ```
+    """
+    total_squared_error: f64 = 0.0
+    count: i64 = 0
+
+    me reset():
+        """Reset for new epoch."""
+        self.total_squared_error = 0.0
+        self.count = 0
+
+    me update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "actual" keys
+        """
+        var pred = []
+        var actual = []
+
+        # Extract predictions and actuals from output dict
+        if "pred" in output and "actual" in output:
+            pred = output["pred"]
+            actual = output["actual"]
+        elif "y_pred" in output and "y_true" in output:
+            pred = output["y_pred"]
+            actual = output["y_true"]
+
+        # Compute squared errors
+        if len(pred) > 0 and len(actual) > 0:
+            val n = min(len(pred), len(actual))
+            for i in range(n):
+                val p = pred[i]
+                val a = actual[i]
+                val diff = p - a
+                self.total_squared_error += diff * diff
+                self.count += 1
+
+    fn compute() -> f64:
+        """Compute root mean squared error.
+
+        Returns:
+            RMSE value
+        """
+        if self.count == 0:
+            return 0.0
+        val mse_val = self.total_squared_error / (self.count.to_float())
+        return sqrt(mse_val)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn abs(x: f64) -> f64:
+    """Absolute value."""
+    if x < 0.0:
+        return -x
+    return x
+
+
+fn sqrt(x: f64) -> f64:
+    """Square root using Newton's method."""
+    if x <= 0.0:
+        return 0.0
+    var guess = x / 2.0
+    for _ in range(20):  # Newton iterations
+        guess = (guess + x / guess) / 2.0
+    return guess
+
+
+fn min(a: i64, b: i64) -> i64:
+    """Minimum of two integers."""
+    if a < b:
+        return a
+    return b
+
+
+fn max(a: i64, b: i64) -> i64:
+    """Maximum of two integers."""
+    if a > b:
+        return a
+    return b

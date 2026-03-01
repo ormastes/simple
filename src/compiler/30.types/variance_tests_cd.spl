@@ -1,0 +1,308 @@
+"""
+Variance Checking - Tests Phase 6C + 6D + Main
+
+Test functions for:
+- Phase 6C: Variance Checking
+- Phase 6D: Integration & Advanced Cases
+- main() entry point
+"""
+
+use compiler.types.variance_types.{Variance, HirType, SubtypeEnv, VarianceChecker}
+use compiler.types.variance_types.{TypeCheckerIntegrated, VarianceAnnotation, VarianceError}
+use compiler.types.variance_types.{box_of, cell_of, fn_type}
+use compiler.types.variance_tests_ab.{test_variance_basic, test_variance_flip}
+use compiler.types.variance_tests_ab.{test_variance_compose, test_variance_combine}
+use compiler.types.variance_tests_ab.{test_type_param_def, test_variance_env}
+use compiler.types.variance_tests_ab.{test_variance_env_multiple, test_variance_env_bulk}
+use compiler.types.variance_tests_ab.{test_infer_box, test_infer_cell}
+use compiler.types.variance_tests_ab.{test_infer_function_type, test_infer_nested_variance}
+use compiler.types.variance_tests_ab.{test_infer_multiple_uses, test_infer_generic_composition}
+use compiler.types.variance_tests_ab.{test_infer_bivariant}
+
+# ============================================================================
+# Tests - Phase 6C: Variance Checking
+# ============================================================================
+
+fn test_covariant_subtyping():
+    """Test covariant subtyping (Box<Cat> <: Box<Animal>)"""
+    val subtype_env = SubtypeEnv.empty()
+    subtype_env.add_subtype("Cat", "Animal")
+
+    val checker = VarianceChecker.new_checker(subtype_env)
+    checker.set_variance("Box", [Variance.Covariant])
+
+    # Box<Cat> <: Box<Animal>?
+    val box_cat = box_of("Cat")
+    val box_animal = box_of("Animal")
+
+    assert checker.check_subtype(box_cat, box_animal), "Box<Cat> <: Box<Animal>"
+
+    # Box<Animal> <: Box<Cat>? No.
+    assert not checker.check_subtype(box_animal, box_cat), "Box<Animal> not <: Box<Cat>"
+
+    print "  [pass] Covariant subtyping"
+
+fn test_inv_rejection():
+    """Test invariant rejection (Cell<Cat> not <: Cell<Animal>)"""
+    val subtype_env = SubtypeEnv.empty()
+    subtype_env.add_subtype("Cat", "Animal")
+
+    val checker = VarianceChecker.new_checker(subtype_env)
+    checker.set_variance("Cell", [Variance.Inv])
+
+    # Cell<Cat> <: Cell<Animal>? No.
+    val cell_cat = cell_of("Cat")
+    val cell_animal = cell_of("Animal")
+
+    assert not checker.check_subtype(cell_cat, cell_animal), "Cell<Cat> not <: Cell<Animal>"
+
+    # Cell<Animal> <: Cell<Cat>? No.
+    assert not checker.check_subtype(cell_animal, cell_cat), "Cell<Animal> not <: Cell<Cat>"
+
+    # Cell<Cat> <: Cell<Cat>? Yes (same type)
+    assert checker.check_subtype(cell_cat, cell_cat), "Cell<Cat> <: Cell<Cat>"
+
+    print "  [pass] Invariant rejection"
+
+fn test_contravariant_function():
+    """Test contravariant function parameters"""
+    val subtype_env = SubtypeEnv.empty()
+    subtype_env.add_subtype("Cat", "Animal")
+
+    val checker = VarianceChecker.new_checker(subtype_env)
+
+    # fn(Animal) -> () <: fn(Cat) -> ()?
+    # Check: fn(A) -> B <: fn(C) -> D if C <: A and B <: D
+    # Here: Cat <: Animal (param) and () <: () (return)
+    # Result: Yes
+    val feed_animal = fn_type("Animal", "Unit")
+    val feed_cat = fn_type("Cat", "Unit")
+
+    assert checker.check_subtype(feed_animal, feed_cat), "fn(Animal) <: fn(Cat)"
+
+    # fn(Cat) -> () <: fn(Animal) -> ()? No.
+    assert not checker.check_subtype(feed_cat, feed_animal), "fn(Cat) not <: fn(Animal)"
+
+    print "  [pass] Contravariant function parameters"
+
+fn test_nested_variance():
+    """Test nested variance checking"""
+    val subtype_env = SubtypeEnv.empty()
+    subtype_env.add_subtype("Cat", "Animal")
+
+    val checker = VarianceChecker.new_checker(subtype_env)
+    checker.set_variance("Box", [Variance.Covariant])
+
+    # Box<Box<Cat>> <: Box<Box<Animal>>?
+    # Outer Box is covariant, inner Box is covariant
+    # Result: Yes
+    val box_box_cat = HirType.Generic(
+        name: "Box",
+        args: [box_of("Cat")]
+    )
+    val box_box_animal = HirType.Generic(
+        name: "Box",
+        args: [box_of("Animal")]
+    )
+
+    assert checker.check_subtype(box_box_cat, box_box_animal), "Box<Box<Cat>> <: Box<Box<Animal>>"
+
+    print "  [pass] Nested variance"
+
+fn test_bivariant_always():
+    """Test bivariant (unused parameter)"""
+    val subtype_env = SubtypeEnv.empty()
+    subtype_env.add_subtype("Cat", "Animal")
+
+    val checker = VarianceChecker.new_checker(subtype_env)
+    checker.set_variance("Marker", [Variance.Bivariant])
+
+    # Marker<Cat> <: Marker<Animal>? Yes (bivariant)
+    val marker_cat = HirType.Generic(name: "Marker", args: [HirType.Generic(name: "Cat", args: [])])
+    val marker_animal = HirType.Generic(name: "Marker", args: [HirType.Generic(name: "Animal", args: [])])
+
+    assert checker.check_subtype(marker_cat, marker_animal), "Marker<Cat> <: Marker<Animal>"
+
+    # Marker<Animal> <: Marker<Cat>? Yes (bivariant)
+    assert checker.check_subtype(marker_animal, marker_cat), "Marker<Animal> <: Marker<Cat>"
+
+    print "  [pass] Bivariant always"
+
+fn test_types_equal():
+    """Test type equality"""
+    val subtype_env = SubtypeEnv.empty()
+    val checker = VarianceChecker.new_checker(subtype_env)
+
+    val ty1 = HirType.Int
+    val ty2 = HirType.Int
+    val ty3 = HirType.Str
+
+    assert checker.types_equal(ty1, ty2), "Int = Int"
+    assert not checker.types_equal(ty1, ty3), "Int != Str"
+
+    val box1 = box_of("Cat")
+    val box2 = box_of("Cat")
+    val box3 = box_of("Dog")
+
+    assert checker.types_equal(box1, box2), "Box<Cat> = Box<Cat>"
+    assert not checker.types_equal(box1, box3), "Box<Cat> != Box<Dog>"
+
+    print "  [pass] Type equality"
+
+# ============================================================================
+# Tests - Phase 6D: Integration & Advanced Cases
+# ============================================================================
+
+fn test_assignment_checking():
+    """Test assignment checking integration"""
+    val subtype_env = SubtypeEnv.empty()
+    subtype_env.add_subtype("Cat", "Animal")
+
+    val checker = VarianceChecker.new_checker(subtype_env)
+    checker.set_variance("Box", [Variance.Covariant])
+
+    val type_checker = TypeCheckerIntegrated.new_checker(checker)
+
+    # Valid: val animal_box: Box<Animal> = cat_box
+    val cat_box = HirType.Generic(name: "Box", args: [HirType.Generic(name: "Cat", args: [])])
+    val animal_box = HirType.Generic(name: "Box", args: [HirType.Generic(name: "Animal", args: [])])
+
+    assert type_checker.check_assignment(animal_box, cat_box), "Valid assignment"
+
+    # Invalid: val cat_box: Box<Cat> = animal_box
+    assert not type_checker.check_assignment(cat_box, animal_box), "Invalid assignment"
+
+    print "  [pass] Assignment checking integration"
+
+fn test_method_call_validation():
+    """Test method call receiver validation"""
+    val subtype_env = SubtypeEnv.empty()
+    subtype_env.add_subtype("Cat", "Animal")
+
+    val checker = VarianceChecker.new_checker(subtype_env)
+    checker.set_variance("Box", [Variance.Covariant])
+
+    val type_checker = TypeCheckerIntegrated.new_checker(checker)
+
+    # Method expects Box<Animal>, called with Box<Cat>
+    val cat_box = HirType.Generic(name: "Box", args: [HirType.Generic(name: "Cat", args: [])])
+    val animal_box = HirType.Generic(name: "Box", args: [HirType.Generic(name: "Animal", args: [])])
+
+    assert type_checker.check_method_call(cat_box, animal_box), "Valid method call"
+    assert not type_checker.check_method_call(animal_box, cat_box), "Invalid method call"
+
+    print "  [pass] Method call validation"
+
+fn test_variance_annotation_match():
+    """Test variance annotation validation"""
+    val annotation = VarianceAnnotation(
+        name: "Box",
+        param_name: "T",
+        explicit: Variance.Covariant,
+        inferred: Variance.Covariant
+    )
+
+    assert annotation.matches(), "Annotation matches"
+
+    print "  [pass] Variance annotation match"
+
+fn test_variance_annotation_mismatch():
+    """Test variance annotation mismatch"""
+    val annotation = VarianceAnnotation(
+        name: "Box",
+        param_name: "T",
+        explicit: Variance.Inv,  # User said invariant
+        inferred: Variance.Covariant  # But inference found covariant
+    )
+
+    assert not annotation.matches(), "Annotation doesn't match"
+
+    val warning = annotation.to_warning()
+    assert warning.len() > 0, "Warning generated"
+
+    print "  [pass] Variance annotation mismatch"
+
+fn test_error_messages():
+    """Test variance error messages"""
+    val cat_box = HirType.Generic(name: "Box", args: [HirType.Generic(name: "Cat", args: [])])
+    val dog_box = HirType.Generic(name: "Box", args: [HirType.Generic(name: "Dog", args: [])])
+
+    val error1 = VarianceError.covariant_violation(cat_box, dog_box)
+    assert error1.to_string().len() > 0, "Error message generated"
+
+    val error2 = VarianceError.inv_violation(cat_box, dog_box)
+    assert error2.to_string().len() > 0, "Error message generated"
+
+    print "  [pass] Error messages"
+
+fn test_generic_instantiation():
+    """Test generic instantiation checking"""
+    val subtype_env = SubtypeEnv.empty()
+    val checker = VarianceChecker.new_checker(subtype_env)
+    val type_checker = TypeCheckerIntegrated.new_checker(checker)
+
+    # Check instantiation (placeholder, always returns true)
+    val result = type_checker.check_generic_instantiation(
+        "Box",
+        [HirType.Generic(name: "Cat", args: [])]
+    )
+
+    assert result, "Generic instantiation OK"
+
+    print "  [pass] Generic instantiation"
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main():
+    print ""
+    print "Variance Checking - All Phases (6A-6D)"
+    print "======================================="
+
+    print ""
+    print "Phase 6A: Variance Representation"
+    print "----------------------------------"
+    test_variance_basic()
+    test_variance_flip()
+    test_variance_compose()
+    test_variance_combine()
+    test_type_param_def()
+    test_variance_env()
+    test_variance_env_multiple()
+    test_variance_env_bulk()
+
+    print ""
+    print "Phase 6B: Variance Inference"
+    print "----------------------------"
+    test_infer_box()
+    test_infer_cell()
+    test_infer_function_type()
+    test_infer_nested_variance()
+    test_infer_multiple_uses()
+    test_infer_generic_composition()
+    test_infer_bivariant()
+
+    print ""
+    print "Phase 6C: Variance Checking"
+    print "---------------------------"
+    test_covariant_subtyping()
+    test_inv_rejection()
+    test_contravariant_function()
+    test_nested_variance()
+    test_bivariant_always()
+    test_types_equal()
+
+    print ""
+    print "Phase 6D: Integration & Advanced Cases"
+    print "---------------------------------------"
+    test_assignment_checking()
+    test_method_call_validation()
+    test_variance_annotation_match()
+    test_variance_annotation_mismatch()
+    test_error_messages()
+    test_generic_instantiation()
+
+    print ""
+    print "All 27 tests passed."
+    print ""

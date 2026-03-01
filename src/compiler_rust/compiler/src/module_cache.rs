@@ -20,10 +20,10 @@ thread_local! {
 /// Maximum depth for recursive module loading to prevent infinite loops
 pub const MAX_MODULE_DEPTH: usize = 50;
 
-/// Maximum total unique modules that can be loaded per test file to prevent OOM.
-/// Keep this low because compiler modules are large (~600K lines total).
+/// Maximum total unique modules that can be loaded to prevent OOM.
 /// Most test files import 5-20 modules; compiler-importing tests cascade to 50+.
-pub const MAX_TOTAL_MODULES: usize = 100;
+/// The build system (bootstrap, etc.) requires 200+ modules.
+pub const MAX_TOTAL_MODULES: usize = 500;
 
 // Thread-local cache for module exports to avoid re-parsing modules
 // Key: normalized module path, Value: module exports dict
