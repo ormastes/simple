@@ -33,6 +33,7 @@ pub(crate) fn compile_closure_create<M: Module>(
         let fn_addr = builder.ins().func_addr(types::I64, func_ref);
         builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
     } else {
+        eprintln!("[WARN] ClosureCreate: function '{}' not found in func_ids ({} entries), storing NULL", func_name, ctx.func_ids.len());
         let null = builder.ins().iconst(types::I64, 0);
         builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
     }

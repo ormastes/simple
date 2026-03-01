@@ -193,6 +193,7 @@ pub fn compile_instruction<M: Module>(
                 // Variable not declared as global - likely a local variable from
                 // tuple destructuring, if-else expressions, or pattern matching.
                 // Use zero as default to allow the function to compile.
+                eprintln!("[WARN] GlobalLoad: global '{}' not found in global_ids ({} entries)", global_name, ctx.global_ids.len());
                 let val = builder.ins().iconst(types::I64, 0);
                 ctx.vreg_values.insert(*dest, val);
             }
