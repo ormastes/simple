@@ -762,6 +762,18 @@ pub fn rt_ast_registry_clear(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Clear all AST FFI registries between test runs.
+pub fn clear_ast_ffi_registries() {
+    EXPR_REGISTRY.with(|r| r.borrow_mut().clear());
+    NODE_REGISTRY.with(|r| r.borrow_mut().clear());
+    PATTERN_REGISTRY.with(|r| r.borrow_mut().clear());
+    BLOCK_REGISTRY.with(|r| r.borrow_mut().clear());
+    FUNCDEF_REGISTRY.with(|r| r.borrow_mut().clear());
+    MATCHARM_REGISTRY.with(|r| r.borrow_mut().clear());
+    PARAM_REGISTRY.with(|r| r.borrow_mut().clear());
+    ARG_REGISTRY.with(|r| r.borrow_mut().clear());
+}
+
 /// Get count of live handles (for debugging/diagnostics)
 pub fn rt_ast_registry_count(_args: &[Value]) -> Result<Value, CompileError> {
     let count = EXPR_REGISTRY.with(|r| r.borrow().len())

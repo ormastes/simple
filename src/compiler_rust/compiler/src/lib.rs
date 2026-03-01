@@ -143,6 +143,7 @@ pub use runtime_profile::{
     collect_global_metrics, generate_global_feedback, global_profiler, record_call, start_profiling, stop_profiling,
     FunctionStats, LayoutFeedback, ProfileConfig, RuntimeMetrics, RuntimeProfiler,
 };
+pub use runtime_profile::profiler::clear_global_profiler;
 pub use semantic_diff::{ChangeKind, DiffSummary, ImpactLevel, SemanticChange, SemanticDiff, SemanticDiffer};
 pub use spec_coverage::{find_spec_file, SpecCoverageReport};
 pub use text_diff::{DiffHunk, DiffLine, TextDiff};

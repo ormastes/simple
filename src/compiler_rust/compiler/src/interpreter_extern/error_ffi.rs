@@ -152,6 +152,11 @@ pub fn rt_error_message(args: &[Value]) -> Result<Value, CompileError> {
     })
 }
 
+/// Clear the error FFI registry between test runs.
+pub fn clear_error_ffi_registry() {
+    ERROR_REGISTRY.with(|r| r.borrow_mut().clear());
+}
+
 /// Free an error handle
 pub fn rt_error_free(args: &[Value]) -> Result<Value, CompileError> {
     let handle = get_handle(args, 0, "rt_error_free")?;

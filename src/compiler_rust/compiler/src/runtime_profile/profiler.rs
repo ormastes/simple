@@ -698,6 +698,13 @@ pub fn generate_global_feedback() -> LayoutFeedback {
     global_profiler().generate_layout_feedback()
 }
 
+/// Clear global profiler data between test runs.
+pub fn clear_global_profiler() {
+    if let Some(profiler) = GLOBAL_PROFILER.get() {
+        profiler.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,7 +14,11 @@ use simple_compiler::i18n::clear_registry as clear_i18n_state;
 use simple_compiler::interpreter::{
     clear_bdd_state, clear_class_instantiation_state, clear_effects_state, clear_interpreter_state,
     clear_io_state, clear_macro_state, clear_module_cache, clear_net_state,
+    clear_collection_registries, clear_ast_ffi_registries, clear_env_ffi_registry,
+    clear_error_ffi_registry, clear_span_ffi_registry,
 };
+use simple_compiler::runtime_profile::profiler::clear_global_profiler;
+use simple_compiler::layout_recorder::clear_recording;
 use simple_runtime::value::clear_all_runtime_registries;
 
 /// Parse test output to extract pass/fail counts
@@ -154,6 +158,13 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     clear_net_state();
     clear_i18n_state();
     clear_all_runtime_registries();
+    clear_collection_registries();
+    clear_ast_ffi_registries();
+    clear_env_ffi_registry();
+    clear_error_ffi_registry();
+    clear_span_ffi_registry();
+    clear_global_profiler();
+    clear_recording();
 
     // Create a fresh Runner per test so ExecCore/GcAllocator/SmfLoader don't accumulate.
     let runner = create_test_runner(options);
