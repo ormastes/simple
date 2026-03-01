@@ -1,0 +1,352 @@
+# Collection Optimization
+#
+# Optimizes common collection anti-patterns in MIR:
+#
+# Pattern 1 — Array concat to push (3-instruction sliding window in loops):
+#   Aggregate(tmp, Array(T), [x])   -> (removed)
+#   Call(result, "+", [arr, tmp])    -> Call(_, "push", [arr, x])
+#   Copy(arr, result)               -> (removed)
+#
+# Pattern 4 — Loop-invariant pure method call hoisting:
+#   Hoists calls to known-pure methods (len, is_empty, first, last,
+#   get, contains_key) out of loop bodies when all args are loop-invariant.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector}
+
+# Known pure methods safe to hoist out of loops
+val PURE_METHODS = ["len", "is_empty", "first", "last", "get", "contains_key"]
+
+# ============================================================================
+# Collection Optimization Pass
+# ============================================================================
+
+class CollectionOptimization:
+    detector: LoopDetector
+    concat_replaced: i64
+    calls_hoisted: i64
+
+impl CollectionOptimization:
+    static fn new() -> CollectionOptimization:
+        CollectionOptimization(
+            detector: LoopDetector.new(),
+            concat_replaced: 0,
+            calls_hoisted: 0
+        )
+
+    me optimize_function(func: MirFunction) -> MirFunction:
+        self.detector.detect_loops(func)
+
+        if self.detector.loops.len() == 0:
+            return func
+
+        var optimized_blocks = func.blocks
+
+        for loop in self.detector.loops:
+            optimized_blocks = self.optimize_concat_in_loop(optimized_blocks, loop)
+            optimized_blocks = self.hoist_pure_calls(optimized_blocks, loop)
+
+        copy_mir_function_with_blocks(func, optimized_blocks)
+
+    # ========================================================================
+    # Pattern 1: Array concat -> push
+    # ========================================================================
+
+    me optimize_concat_in_loop(blocks: [MirBlock], loop: LoopInfo) -> [MirBlock]:
+        # Build loop membership set
+        var loop_set = {}
+        loop_set["{loop.header.id}"] = true
+        for bid in loop.body:
+            loop_set["{bid.id}"] = true
+
+        var new_blocks: [MirBlock] = []
+
+        for block in blocks:
+            if loop_set.contains_key("{block.id.id}"):
+                val optimized = self.optimize_concat_block(block)
+                new_blocks.push(optimized)
+            else:
+                new_blocks.push(block)
+
+        new_blocks
+
+    me optimize_concat_block(block: MirBlock) -> MirBlock:
+        val insts = block.instructions
+        val count = insts.len()
+
+        if count < 3:
+            return block
+
+        var new_insts: [MirInst] = []
+        var i = 0
+
+        while i < count:
+            # Try 3-instruction window match
+            if i + 2 < count:
+                val matched = self.match_concat_pattern(insts[i], insts[i + 1], insts[i + 2])
+                if matched.?:
+                    # Replace with single push call
+                    new_insts.push(matched.unwrap())
+                    self.concat_replaced = self.concat_replaced + 1
+                    i = i + 3
+                    continue
+
+            new_insts.push(insts[i])
+            i = i + 1
+
+        MirBlock(
+            id: block.id,
+            label: block.label,
+            instructions: new_insts,
+            terminator: block.terminator
+        )
+
+    fn match_concat_pattern(inst1: MirInst, inst2: MirInst, inst3: MirInst) -> MirInst?:
+        # inst1: Aggregate(tmp, Array(T), [x])
+        val agg = self.match_single_element_aggregate(inst1)
+        if not agg.?:
+            return nil
+        val agg_dest = agg.unwrap()
+
+        # inst2: Call(result, "+", [arr, tmp])
+        val call_info = self.match_add_call(inst2, agg_dest)
+        if not call_info.?:
+            return nil
+
+        # inst3: Copy(arr, result) where arr is the array from the call
+        val copy_info = self.match_copy_back(inst3, inst2)
+        if not copy_info.?:
+            return nil
+
+        # Extract the single element and array operand for push
+        val element = self.get_aggregate_element(inst1)
+        val arr_operand = self.get_call_first_arg(inst2)
+
+        if not element.? or not arr_operand.?:
+            return nil
+
+        # Create push call: Call(_, "push", [arr, element])
+        val push_func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("push"),
+            MirType.unit()
+        ))
+        MirInst(
+            kind: MirInstKind.Call(nil, push_func, [arr_operand.unwrap(), element.unwrap()]),
+            span: inst2.span
+        )
+
+    fn match_single_element_aggregate(inst: MirInst) -> LocalId?:
+        match inst.kind:
+            case Aggregate(dest, kind, operands):
+                match kind:
+                    case Array(_):
+                        if operands.len() == 1:
+                            return dest
+                        nil
+                    case _: nil
+            case _: nil
+
+    fn match_add_call(inst: MirInst, agg_local: LocalId) -> bool?:
+        match inst.kind:
+            case Call(dest, func, args):
+                # Check func is "+"
+                val fname = self.get_func_name(func)
+                if fname == "+":
+                    # Check second arg references agg_local
+                    if args.len() == 2:
+                        val second = args[1]
+                        if self.operand_refs_local(second, agg_local):
+                            return true
+                nil
+            case _: nil
+
+    fn match_copy_back(inst: MirInst, call_inst: MirInst) -> bool?:
+        match inst.kind:
+            case Copy(dest, src):
+                # Check src matches call dest
+                val call_dest = self.get_call_dest(call_inst)
+                if call_dest.?:
+                    if src.id == call_dest.unwrap().id:
+                        return true
+                nil
+            case _: nil
+
+    fn get_aggregate_element(inst: MirInst) -> MirOperand?:
+        match inst.kind:
+            case Aggregate(_, _, operands):
+                if operands.len() == 1:
+                    return operands[0]
+                nil
+            case _: nil
+
+    fn get_call_first_arg(inst: MirInst) -> MirOperand?:
+        match inst.kind:
+            case Call(_, _, args):
+                if args.len() >= 1:
+                    return args[0]
+                nil
+            case _: nil
+
+    fn get_call_dest(inst: MirInst) -> LocalId?:
+        match inst.kind:
+            case Call(dest, _, _): dest
+            case _: nil
+
+    fn get_func_name(op: MirOperand) -> text:
+        match op.kind:
+            case Const(value, _):
+                match value:
+                    case Str(s): s
+                    case _: ""
+            case _: ""
+
+    fn operand_refs_local(op: MirOperand, target: LocalId) -> bool:
+        match op.kind:
+            case Copy(local):
+                local.id == target.id
+            case Move(local):
+                local.id == target.id
+            case _: false
+
+    # ========================================================================
+    # Pattern 4: Loop-invariant pure call hoisting
+    # ========================================================================
+
+    me hoist_pure_calls(blocks: [MirBlock], loop: LoopInfo) -> [MirBlock]:
+        # Build loop membership set
+        var loop_set = {}
+        loop_set["{loop.header.id}"] = true
+        for bid in loop.body:
+            loop_set["{bid.id}"] = true
+
+        # Build set of locals defined inside the loop
+        var loop_defs: Dict<i64, bool> = {}
+        for block in blocks:
+            if loop_set.contains_key("{block.id.id}"):
+                for inst in block.instructions:
+                    val dest = self.inst_dest(inst)
+                    if dest.?:
+                        loop_defs[dest.unwrap().id] = true
+
+        # Find hoistable pure calls
+        var to_hoist: [MirInst] = []
+        var hoisted_ids: Dict<i64, bool> = {}
+
+        for block in blocks:
+            if loop_set.contains_key("{block.id.id}"):
+                for inst in block.instructions:
+                    if self.is_hoistable_pure_call(inst, loop_defs, hoisted_ids):
+                        to_hoist.push(inst)
+                        val dest = self.inst_dest(inst)
+                        if dest.?:
+                            hoisted_ids[dest.unwrap().id] = true
+
+        if to_hoist.len() == 0:
+            return blocks
+
+        self.calls_hoisted = self.calls_hoisted + to_hoist.len()
+
+        # Build new blocks: insert hoisted before header, remove from body
+        var new_blocks: [MirBlock] = []
+        var inserted = false
+
+        for block in blocks:
+            if block.id.id == loop.header.id and not inserted:
+                # Insert hoisted instructions at start of header
+                var new_insts: [MirInst] = []
+                for h in to_hoist:
+                    new_insts.push(h)
+                for inst in block.instructions:
+                    if not self.inst_in_list(inst, to_hoist):
+                        new_insts.push(inst)
+                new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: new_insts, terminator: block.terminator
+                ))
+                inserted = true
+            elif loop_set.contains_key("{block.id.id}"):
+                # Remove hoisted from body blocks
+                var kept: [MirInst] = []
+                for inst in block.instructions:
+                    if not self.inst_in_list(inst, to_hoist):
+                        kept.push(inst)
+                new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: kept, terminator: block.terminator
+                ))
+            else:
+                new_blocks.push(block)
+
+        new_blocks
+
+    fn is_hoistable_pure_call(inst: MirInst, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
+        match inst.kind:
+            case Call(dest, func, args):
+                val fname = self.get_func_name(func)
+                if not self.is_pure_method(fname):
+                    return false
+                # All args must be loop-invariant
+                for arg in args:
+                    if not self.operand_invariant(arg, loop_defs, hoisted):
+                        return false
+                true
+            case _: false
+
+    fn is_pure_method(name: text) -> bool:
+        for m in PURE_METHODS:
+            if m == name:
+                return true
+        false
+
+    fn operand_invariant(op: MirOperand, loop_defs: Dict<i64, bool>, hoisted: Dict<i64, bool>) -> bool:
+        match op.kind:
+            case Copy(local):
+                val in_loop = loop_defs.has(local.id)
+                val was_hoisted = hoisted.has(local.id)
+                (not in_loop) or was_hoisted
+            case Move(local):
+                val in_loop = loop_defs.has(local.id)
+                val was_hoisted = hoisted.has(local.id)
+                (not in_loop) or was_hoisted
+            case Const(_, _): true
+
+    fn inst_dest(inst: MirInst) -> LocalId?:
+        match inst.kind:
+            case Const(dest, _, _): dest
+            case BinOp(dest, _, _, _): dest
+            case UnaryOp(dest, _, _): dest
+            case Copy(dest, _): dest
+            case Call(dest, _, _): dest
+            case Aggregate(dest, _, _): dest
+            case _: nil
+
+    fn inst_in_list(inst: MirInst, list: [MirInst]) -> bool:
+        val d1 = self.inst_dest(inst)
+        if not d1.?:
+            return false
+        val d1_id = d1.unwrap().id
+        for other in list:
+            val d2 = self.inst_dest(other)
+            if d2.? and d2.unwrap().id == d1_id:
+                return true
+        false
+
+    fn stats_summary() -> text:
+        "CollectionOpt: {self.concat_replaced} concat->push, {self.calls_hoisted} calls hoisted"
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn create_collection_opt_pass() -> CollectionOptimization:
+    CollectionOptimization.new()
+
+fn collection_opt_run_on_function(pass: CollectionOptimization, func: MirFunction) -> MirFunction:
+    pass.optimize_function(func)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CollectionOptimization, create_collection_opt_pass, collection_opt_run_on_function

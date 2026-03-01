@@ -1,0 +1,388 @@
+# Collection Efficiency Lint
+#
+# Detects 5 common O(n^2) performance anti-patterns in collection usage:
+#
+# COLL001: Array concat in loop        arr = arr + [x]          CRITICAL
+# COLL002: .contains() on array in loop                         HIGH
+# COLL003: .remove(0) queue drain in loop                       HIGH
+# COLL004: Loop-invariant method call                           MEDIUM
+# COLL005: Chained .filter().filter()                           MEDIUM
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast_expr.{
+    EXPR_WHILE, EXPR_FOR, EXPR_ASSIGN, EXPR_BINARY,
+    EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_INT_LIT, EXPR_IDENT,
+    EXPR_COMPOUND_ASSIGN,
+    expr_tag, expr_i_val, expr_s_val, expr_left, expr_right, expr_args, expr_stmts
+}
+use compiler.core.ast_stmt.{
+    STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
+    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_COMPOUND_ASSIGN,
+    stmt_tag, stmt_expr, stmt_name, stmt_body
+}
+use compiler.core.ast.{
+    DECL_FN, decl_tag, decl_name, decl_body_stmts
+}
+use compiler.core.tokens.{TOK_PLUS}
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct CollectionLintWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    item_name: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} in '{self.item_name}' — {self.hint}"
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_collection_patterns(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+
+    for idx in decl_indices:
+        if decl_tag[idx] == DECL_FN:
+            val fn_name = decl_name[idx]
+            val body = decl_body_stmts[idx]
+            val fn_warnings = check_fn_body(body, fn_name)
+            for w in fn_warnings:
+                warnings.push(w)
+
+    # COLL005 is expression-level (not loop-dependent), scan all exprs
+    val coll005 = check_chained_filter_all(decl_indices)
+    for w in coll005:
+        warnings.push(w)
+
+    warnings
+
+# ============================================================================
+# Function Body Walker
+# ============================================================================
+
+fn check_fn_body(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+
+        # Recurse into nested blocks/if/match
+        if tag == STMT_IF:
+            val nested = check_fn_body(stmt_body[s], fn_name)
+            for w in nested:
+                warnings.push(w)
+        elif tag == STMT_BLOCK:
+            val nested = check_fn_body(stmt_body[s], fn_name)
+            for w in nested:
+                warnings.push(w)
+
+        # Found a loop — check its body for patterns
+        if tag == STMT_FOR:
+            val iter_var = stmt_name[s]
+            val loop_body = stmt_body[s]
+            val loop_warnings = check_loop_body(loop_body, fn_name, iter_var)
+            for w in loop_warnings:
+                warnings.push(w)
+            # Also recurse into loop body for nested loops
+            val nested = check_fn_body(loop_body, fn_name)
+            for w in nested:
+                warnings.push(w)
+
+        elif tag == STMT_WHILE:
+            val loop_body = stmt_body[s]
+            val loop_warnings = check_loop_body(loop_body, fn_name, "")
+            for w in loop_warnings:
+                warnings.push(w)
+            val nested = check_fn_body(loop_body, fn_name)
+            for w in nested:
+                warnings.push(w)
+
+        # Also check expression-level for/while
+        if tag == STMT_EXPR:
+            val e = stmt_expr[s]
+            if e >= 0:
+                val expr_warnings = check_expr_for_loops(e, fn_name)
+                for w in expr_warnings:
+                    warnings.push(w)
+
+    warnings
+
+fn check_expr_for_loops(e: i64, fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    if e < 0:
+        return warnings
+    val tag = expr_tag[e]
+
+    if tag == EXPR_FOR:
+        val iter_var = expr_s_val[e]
+        val loop_stmts = expr_stmts[e]
+        val loop_warnings = check_loop_body(loop_stmts, fn_name, iter_var)
+        for w in loop_warnings:
+            warnings.push(w)
+        val nested = check_fn_body(loop_stmts, fn_name)
+        for w in nested:
+            warnings.push(w)
+
+    elif tag == EXPR_WHILE:
+        val loop_stmts = expr_stmts[e]
+        val loop_warnings = check_loop_body(loop_stmts, fn_name, "")
+        for w in loop_warnings:
+            warnings.push(w)
+        val nested = check_fn_body(loop_stmts, fn_name)
+        for w in nested:
+            warnings.push(w)
+
+    warnings
+
+# ============================================================================
+# Loop Body Pattern Checks
+# ============================================================================
+
+fn check_loop_body(stmts: [i64], fn_name: text, iter_var: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+
+        # COLL001: arr = arr + [x] in loop
+        if tag == STMT_ASSIGN:
+            val e = stmt_expr[s]
+            if e >= 0:
+                if is_concat_assign_expr(e):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL001",
+                        severity: "CRITICAL",
+                        message: "array concat in loop (O(n^2))",
+                        hint: "use .push() instead of arr = arr + [x]",
+                        item_name: fn_name
+                    ))
+
+        # Check expression statements
+        if tag == STMT_EXPR:
+            val e = stmt_expr[s]
+            if e >= 0:
+                # COLL001 via expression-level assign
+                if is_concat_assign_expr(e):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL001",
+                        severity: "CRITICAL",
+                        message: "array concat in loop (O(n^2))",
+                        hint: "use .push() instead of arr = arr + [x]",
+                        item_name: fn_name
+                    ))
+
+                # COLL002: .contains() on array in loop
+                if is_contains_call(e):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL002",
+                        severity: "HIGH",
+                        message: ".contains() on array inside loop (O(n) per iteration)",
+                        hint: "use a Dict/Set for O(1) lookup",
+                        item_name: fn_name
+                    ))
+
+                # COLL003: .remove(0) queue drain
+                if is_remove_zero_call(e):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL003",
+                        severity: "HIGH",
+                        message: ".remove(0) in loop (O(n) shift per iteration)",
+                        hint: "use a deque or reverse + .pop()",
+                        item_name: fn_name
+                    ))
+
+                # COLL004: loop-invariant method call
+                if is_loop_invariant_call(e, iter_var):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL004",
+                        severity: "MEDIUM",
+                        message: "loop-invariant method call",
+                        hint: "hoist call result to variable before loop",
+                        item_name: fn_name
+                    ))
+
+        # COLL002/COLL003 in if-condition context
+        if tag == STMT_IF:
+            val cond = stmt_expr[s]
+            if cond >= 0:
+                if is_contains_call(cond):
+                    warnings.push(CollectionLintWarning(
+                        code: "COLL002",
+                        severity: "HIGH",
+                        message: ".contains() on array inside loop (O(n) per iteration)",
+                        hint: "use a Dict/Set for O(1) lookup",
+                        item_name: fn_name
+                    ))
+
+        # COLL001 via val/var decl with concat
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val init = stmt_expr[s]
+            if init >= 0:
+                val init_tag = expr_tag[init]
+                if init_tag == EXPR_BINARY:
+                    if expr_i_val[init] == TOK_PLUS:
+                        val right = expr_right[init]
+                        if right >= 0 and expr_tag[right] == EXPR_ARRAY_LIT:
+                            val assign_name = stmt_name[s]
+                            val left = expr_left[init]
+                            if left >= 0 and expr_tag[left] == EXPR_IDENT and expr_s_val[left] == assign_name:
+                                warnings.push(CollectionLintWarning(
+                                    code: "COLL001",
+                                    severity: "CRITICAL",
+                                    message: "array concat in loop (O(n^2))",
+                                    hint: "use .push() instead of arr = arr + [x]",
+                                    item_name: fn_name
+                                ))
+
+    warnings
+
+# ============================================================================
+# Pattern Detectors
+# ============================================================================
+
+# COLL001: Detect arr = arr + [x] pattern
+fn is_concat_assign_expr(e: i64) -> bool:
+    if e < 0:
+        return false
+    val tag = expr_tag[e]
+
+    # Expression-level assign: EXPR_ASSIGN where value is BINARY(+) with ARRAY_LIT
+    if tag == EXPR_ASSIGN:
+        val target = expr_left[e]
+        val value = expr_right[e]
+        if target >= 0 and value >= 0:
+            if expr_tag[value] == EXPR_BINARY and expr_i_val[value] == TOK_PLUS:
+                val rhs_right = expr_right[value]
+                if rhs_right >= 0 and expr_tag[rhs_right] == EXPR_ARRAY_LIT:
+                    # Check lhs of + matches assign target
+                    val rhs_left = expr_left[value]
+                    if rhs_left >= 0 and expr_tag[rhs_left] == EXPR_IDENT:
+                        if target >= 0 and expr_tag[target] == EXPR_IDENT:
+                            if expr_s_val[rhs_left] == expr_s_val[target]:
+                                return true
+
+    # Compound assign: arr += [x]
+    if tag == EXPR_COMPOUND_ASSIGN:
+        val value = expr_right[e]
+        if value >= 0 and expr_tag[value] == EXPR_ARRAY_LIT:
+            return true
+
+    false
+
+# COLL002: Detect .contains() call
+fn is_contains_call(e: i64) -> bool:
+    if e < 0:
+        return false
+    if expr_tag[e] == EXPR_METHOD_CALL:
+        if expr_s_val[e] == "contains":
+            return true
+    false
+
+# COLL003: Detect .remove(0) call
+fn is_remove_zero_call(e: i64) -> bool:
+    if e < 0:
+        return false
+    if expr_tag[e] == EXPR_METHOD_CALL:
+        if expr_s_val[e] == "remove":
+            val call_args = expr_args[e]
+            if call_args.len() == 1:
+                val arg = call_args[0]
+                if arg >= 0 and expr_tag[arg] == EXPR_INT_LIT:
+                    if expr_i_val[arg] == 0:
+                        return true
+    false
+
+# COLL004: Detect loop-invariant method call
+# A method call is loop-invariant if its receiver is not the loop variable
+# and the method is a known pure accessor (len, is_empty, first, last)
+fn is_loop_invariant_call(e: i64, iter_var: text) -> bool:
+    if e < 0:
+        return false
+    if expr_tag[e] == EXPR_METHOD_CALL:
+        val method = expr_s_val[e]
+        if method == "len" or method == "is_empty" or method == "first" or method == "last":
+            val receiver = expr_left[e]
+            if receiver >= 0 and expr_tag[receiver] == EXPR_IDENT:
+                val recv_name = expr_s_val[receiver]
+                # Only warn if receiver is NOT the loop variable (it's external)
+                if iter_var != "" and recv_name != iter_var:
+                    return true
+    false
+
+# COLL005: Detect chained .filter().filter()
+fn is_chained_filter(e: i64) -> bool:
+    if e < 0:
+        return false
+    if expr_tag[e] == EXPR_METHOD_CALL:
+        if expr_s_val[e] == "filter":
+            val receiver = expr_left[e]
+            if receiver >= 0 and expr_tag[receiver] == EXPR_METHOD_CALL:
+                if expr_s_val[receiver] == "filter":
+                    return true
+    false
+
+fn check_chained_filter_all(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for idx in decl_indices:
+        if decl_tag[idx] == DECL_FN:
+            val fn_name = decl_name[idx]
+            val body = decl_body_stmts[idx]
+            val ws = check_stmts_for_chained_filter(body, fn_name)
+            for w in ws:
+                warnings.push(w)
+    warnings
+
+fn check_stmts_for_chained_filter(stmts: [i64], fn_name: text) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_tag[s]
+
+        if tag == STMT_EXPR:
+            val e = stmt_expr[s]
+            if e >= 0 and is_chained_filter(e):
+                warnings.push(CollectionLintWarning(
+                    code: "COLL005",
+                    severity: "MEDIUM",
+                    message: "chained .filter().filter() (two passes over data)",
+                    hint: "combine predicates into single .filter()",
+                    item_name: fn_name
+                ))
+
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val e = stmt_expr[s]
+            if e >= 0 and is_chained_filter(e):
+                warnings.push(CollectionLintWarning(
+                    code: "COLL005",
+                    severity: "MEDIUM",
+                    message: "chained .filter().filter() (two passes over data)",
+                    hint: "combine predicates into single .filter()",
+                    item_name: fn_name
+                ))
+
+        # Recurse into blocks, loops, ifs
+        if tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_IF:
+            val nested = check_stmts_for_chained_filter(stmt_body[s], fn_name)
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CollectionLintWarning
+export check_collection_patterns
+export is_concat_assign_expr, is_contains_call, is_remove_zero_call
+export is_loop_invariant_call, is_chained_filter
