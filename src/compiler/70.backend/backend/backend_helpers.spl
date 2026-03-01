@@ -90,17 +90,16 @@ fn select_backend_with_mode(
     if mode == BuildMode.Test:
         return BackendKind.Interpreter
 
-    # 5. Cranelift backend is currently stubbed (adapter returns error).
-    #    Force LLVM for all non-test modes until Cranelift is implemented.
+    # 5-7. Mode-based selection
     match mode:
         case Debug:
-            BackendKind.Llvm
+            BackendKind.Cranelift  # Fast compilation for debug
 
         case Release:
-            BackendKind.Llvm
+            BackendKind.Llvm  # Optimized runtime for release
 
         case Bootstrap:
-            BackendKind.Llvm
+            BackendKind.Cranelift  # Minimal dependencies for bootstrap
 
         case Test:
             BackendKind.Interpreter  # Already handled above
@@ -170,17 +169,18 @@ fn compile_module_with_backend(
     var kind = BackendKind.Llvm
     if backend_name == "llvm":
         kind = BackendKind.Llvm
+    elif backend_name == "cranelift":
+        kind = BackendKind.Cranelift
     elif backend_name == "native":
         kind = BackendKind.Native
     elif backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
         kind = BackendKind.CCodegen
     elif backend_name == "auto":
-        # Prefer LLVM; if llc is unavailable, return a clear error instead of
-        # silently selecting the stubbed Cranelift backend.
-        if not llc_available():
-            return Err(compileerror_backend_error(BackendKind.Llvm,
-                "llc not found. Install LLVM (e.g., apt install llvm, brew install llvm)"))
-        kind = BackendKind.Llvm
+        # Prefer LLVM when available; fall back to Cranelift
+        if llc_available():
+            kind = BackendKind.Llvm
+        else:
+            kind = BackendKind.Cranelift
 
     # Select build mode and optimization
     val mode = if is_release: BuildMode.Release else: BuildMode.Debug

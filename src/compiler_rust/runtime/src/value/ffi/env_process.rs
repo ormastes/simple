@@ -291,6 +291,10 @@ pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: 
         }
     }
 
+    // Close stdin so child never blocks reading the parent's stdin
+    // (critical when parent is an MCP server using stdin for JSON-RPC)
+    command.stdin(std::process::Stdio::null());
+
     // Execute command
     match command.output() {
         Ok(output) => {
@@ -442,6 +446,7 @@ pub unsafe extern "C" fn rt_process_run_timeout(
     }
 
     let mut child = match command
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -628,6 +633,7 @@ pub unsafe extern "C" fn rt_process_run_with_limits(
     }
 
     command
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 

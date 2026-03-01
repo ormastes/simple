@@ -17,6 +17,7 @@
 
 use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
 use std.log.{debug, info}
+use std.string_builder.{StringBuilder}
 
 use compiler.backend.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
 use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
@@ -391,11 +392,13 @@ fn materialize_code_units(units: [ObjectCodeUnit], tmp_dir: text, verbose: bool)
 fn write_bytes_to_file(path: text, data: [u8]) -> bool:
     if data.len() == 0:
         return false
-    var hex = ""
+    val sb = StringBuilder(parts: [])
     for b in data:
         val hi = "0123456789abcdef"[(bit_shr(bitwise_and(b, 0xFF), 4)):(bit_shr(bitwise_and(b, 0xFF), 4) + 1)]
         val lo = "0123456789abcdef"[bitwise_and(b, 0xF):(bitwise_and(b, 0xF) + 1)]
-        hex = hex + hi + lo
+        sb.push(hi)
+        sb.push(lo)
+    val hex = sb.to_text()
     val res = shell("echo '{hex}' | xxd -r -p > '{path}'")
     res.exit_code == 0
 
@@ -409,41 +412,48 @@ fn filter_smf_inputs(files: [text]) -> [text]:
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # Fallback: use cc (gcc/clang) for linking
     debug("linker", "link_native_cc: fallback linking with cc")
-    var cmd = "cc"
+    val sb = StringBuilder(parts: [])
+    sb.push("cc")
     for obj in object_files:
-        cmd = cmd + " " + obj
+        sb.push(" ")
+        sb.push(obj)
 
     # Library paths
     for lp in config.library_paths:
-        cmd = cmd + " -L" + lp
+        sb.push(" -L")
+        sb.push(lp)
 
     # Auto-detect runtime library
     var runtime_dir = config.runtime_path
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir != "":
-        cmd = cmd + " -L{runtime_dir} -lsimple_compiler"
-        cmd = cmd + " -Wl,-rpath,{runtime_dir}"
+        sb.push(" -L{runtime_dir} -lsimple_compiler")
+        sb.push(" -Wl,-rpath,{runtime_dir}")
 
     # Standard libraries (OS-aware; no -lgcc_s — clang provides compiler-rt)
     var os_name = shell("uname -s").stdout
     os_name = os_name_trim(os_name)
     if os_name == "Darwin":
-        cmd = cmd + " -lc -lpthread -lm -lSystem"
+        sb.push(" -lc -lpthread -lm -lSystem")
     elif os_name == "FreeBSD":
-        cmd = cmd + " -lc -lpthread -lm"
+        sb.push(" -lc -lpthread -lm")
     else:
-        cmd = cmd + " -lc -lpthread -ldl -lm"
+        sb.push(" -lc -lpthread -ldl -lm")
 
     # Libraries from config
     for lib in config.libraries:
-        cmd = cmd + " -l" + lib
+        sb.push(" -l")
+        sb.push(lib)
 
     # Extra flags
     for flag in config.extra_flags:
-        cmd = cmd + " " + flag
+        sb.push(" ")
+        sb.push(flag)
 
-    cmd = cmd + " -o " + output
+    sb.push(" -o ")
+    sb.push(output)
+    val cmd = sb.to_text()
 
     if config.verbose:
         print "[linker-wrapper] cc command: {cmd}"
@@ -463,19 +473,24 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
     if lld_check.exit_code == 0:
         linker_cmd = "lld-link"
 
-    var cmd = linker_cmd
+    val sb = StringBuilder(parts: [])
+    sb.push(linker_cmd)
     for obj in object_files:
-        cmd = cmd + " " + obj
+        sb.push(" ")
+        sb.push(obj)
 
-    cmd = cmd + " /OUT:{output}"
+    sb.push(" /OUT:{output}")
 
     # Libraries
     for lib in config.libraries:
-        cmd = cmd + " {lib}.lib"
+        sb.push(" {lib}.lib")
 
     # Extra flags
     for flag in config.extra_flags:
-        cmd = cmd + " " + flag
+        sb.push(" ")
+        sb.push(flag)
+
+    val cmd = sb.to_text()
 
     if config.verbose:
         print "[linker-wrapper] Windows linker: {cmd}"

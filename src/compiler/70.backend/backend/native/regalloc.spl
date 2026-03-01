@@ -179,7 +179,7 @@ fn compute_live_intervals(func: MachFunction) -> [LiveInterval]:
     var result: [LiveInterval] = []
     val keys = intervals_keys(intervals)
     for key in keys:
-        result = result + [intervals[key]]
+        result.push(intervals[key])
     result
 
 # ============================================================================
@@ -222,7 +222,7 @@ fn linear_scan_x86_64(intervals: [LiveInterval], allocatable: [i64]) -> RegAlloc
 
     # Initialize free register pool
     for i in 0..16:
-        free_regs = free_regs + [false]
+        free_regs.push(false)
     for reg in allocatable:
         free_regs[reg] = true
 
@@ -235,7 +235,7 @@ fn linear_scan_x86_64(intervals: [LiveInterval], allocatable: [i64]) -> RegAlloc
                 if act.assigned_reg >= 0:
                     free_regs[act.assigned_reg] = true
             else:
-                new_active = new_active + [act]
+                new_active.push(act)
         active = new_active
 
         # Try to find a free register
@@ -250,7 +250,7 @@ fn linear_scan_x86_64(intervals: [LiveInterval], allocatable: [i64]) -> RegAlloc
             free_regs[found_reg] = false
             val assigned = interval_assign_reg(interval, found_reg)
             assignments[interval.vreg_id] = found_reg
-            active = active + [assigned]
+            active.push(assigned)
 
             # Track callee-saved usage
             var is_callee_saved = false
@@ -263,7 +263,7 @@ fn linear_scan_x86_64(intervals: [LiveInterval], allocatable: [i64]) -> RegAlloc
                     if used == found_reg:
                         already_tracked = true
                 if not already_tracked:
-                    used_callee_saved = used_callee_saved + [found_reg]
+                    used_callee_saved.push(found_reg)
         else:
             # No free register - spill the longest-lived active interval
             var longest_idx = -1
@@ -294,8 +294,8 @@ fn linear_scan_x86_64(intervals: [LiveInterval], allocatable: [i64]) -> RegAlloc
                     var updated_active: [LiveInterval] = []
                     for i in 0..active_len(active):
                         if i != longest_idx:
-                            updated_active = updated_active + [active[i]]
-                    updated_active = updated_active + [assigned]
+                            updated_active.push(active[i])
+                    updated_active.push(assigned)
                     active = updated_active
                 else:
                     # Current interval is longer, spill it
@@ -381,7 +381,7 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
             val rewritten = rewrite_inst(inst, result)
             for ri in rewritten:
                 new_block = mach_block_add_inst(new_block, ri)
-        new_blocks = new_blocks + [new_block]
+        new_blocks.push(new_block)
 
     # Patch prologue: update SUB RSP frame size and save callee-saved registers
     if new_blocks_len(new_blocks) > 0:
@@ -394,14 +394,14 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
                     if get_phys_reg_id(inst.operands[0]) == X86_RSP:
                         handled = true
                         # Patch frame size to include callee save area
-                        patched_insts = patched_insts + [new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(aligned_frame)])]
+                        patched_insts.push(new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(aligned_frame)]))
                         # Save callee-saved registers to stack slots after SUB RSP
                         for i in 0..callee_save_count:
                             val cs_reg = result.used_callee_saved[i]
                             val offset = base_frame + (i + 1) * 8
-                            patched_insts = patched_insts + [new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(physical_reg(X86_RBP), 0 - offset), op_phys(cs_reg)])]
+                            patched_insts.push(new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(physical_reg(X86_RBP), 0 - offset), op_phys(cs_reg)]))
             if not handled:
-                patched_insts = patched_insts + [inst]
+                patched_insts.push(inst)
         var new_prologue = new_mach_block(prologue.label, prologue.block_id)
         for pi in patched_insts:
             new_prologue = mach_block_add_inst(new_prologue, pi)
@@ -422,8 +422,8 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
                     for i in 0..callee_save_count:
                         val cs_reg = result.used_callee_saved[i]
                         val offset = base_frame + (i + 1) * 8
-                        ep_insts = ep_insts + [new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(cs_reg), op_mem(physical_reg(X86_RBP), 0 - offset)])]
-                ep_insts = ep_insts + [inst]
+                        ep_insts.push(new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(cs_reg), op_mem(physical_reg(X86_RBP), 0 - offset)]))
+                ep_insts.push(inst)
             var new_block = new_mach_block(block.label, block.block_id)
             for pi in ep_insts:
                 new_block = mach_block_add_inst(new_block, pi)
@@ -459,7 +459,7 @@ fn rewrite_inst(inst: MachInst, result: RegAllocResult) -> [MachInst]:
                         if result.assignments_contains(assignments, id):
                             val phys = result.assignments[id]
                             if phys >= 0:
-                                new_operands = new_operands + [op_phys(phys)]
+                                new_operands.push(op_phys(phys))
                             else:
                                 # Spilled - load from stack
                                 if result.spills_contains(spills, id):
@@ -469,10 +469,10 @@ fn rewrite_inst(inst: MachInst, result: RegAllocResult) -> [MachInst]:
                                     if scratch_idx > 0:
                                         scratch = X86_R10
                                     scratch_idx = scratch_idx + 1
-                                    spill_loads = spill_loads + [new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(scratch), op_mem(physical_reg(X86_RBP), 0 - offset)])]
-                                    new_operands = new_operands + [op_phys(scratch)]
+                                    spill_loads.push(new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(scratch), op_mem(physical_reg(X86_RBP), 0 - offset)]))
+                                    new_operands.push(op_phys(scratch))
                                 else:
-                                    new_operands = new_operands + [op_phys(X86_RAX)]
+                                    new_operands.push(op_phys(X86_RAX))
                         elif result.spills_contains(spills, id):
                             val slot = result.spills[id]
                             val offset = (slot + 1) * 8
@@ -480,27 +480,27 @@ fn rewrite_inst(inst: MachInst, result: RegAllocResult) -> [MachInst]:
                             if scratch_idx > 0:
                                 scratch = X86_R10
                             scratch_idx = scratch_idx + 1
-                            spill_loads = spill_loads + [new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(scratch), op_mem(physical_reg(X86_RBP), 0 - offset)])]
-                            new_operands = new_operands + [op_phys(scratch)]
+                            spill_loads.push(new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(scratch), op_mem(physical_reg(X86_RBP), 0 - offset)]))
+                            new_operands.push(op_phys(scratch))
                         else:
-                            new_operands = new_operands + [op_phys(X86_RAX)]
+                            new_operands.push(op_phys(X86_RAX))
                     case Physical(_):
-                        new_operands = new_operands + [operand]
+                        new_operands.push(operand)
             case Mem(base, off):
                 match base.kind:
                     case Virtual(id):
                         if result.assignments_contains(assignments, id):
                             val phys = result.assignments[id]
                             if phys >= 0:
-                                new_operands = new_operands + [op_mem(physical_reg(phys), off)]
+                                new_operands.push(op_mem(physical_reg(phys), off))
                             else:
-                                new_operands = new_operands + [op_mem(physical_reg(X86_RAX), off)]
+                                new_operands.push(op_mem(physical_reg(X86_RAX), off))
                         else:
-                            new_operands = new_operands + [op_mem(physical_reg(X86_RAX), off)]
+                            new_operands.push(op_mem(physical_reg(X86_RAX), off))
                     case Physical(_):
-                        new_operands = new_operands + [operand]
+                        new_operands.push(operand)
             case _:
-                new_operands = new_operands + [operand]
+                new_operands.push(operand)
 
     val rewritten = MachInst(opcode: inst.opcode, operands: new_operands, size: inst.size)
 
@@ -513,13 +513,13 @@ fn rewrite_inst(inst: MachInst, result: RegAllocResult) -> [MachInst]:
                         if result.spills_contains(spills, id):
                             val slot = result.spills[id]
                             val offset = (slot + 1) * 8
-                            spill_stores = spill_stores + [new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(physical_reg(X86_RBP), 0 - offset), op_phys(X86_R11)])]
+                            spill_stores.push(new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(physical_reg(X86_RBP), 0 - offset), op_phys(X86_R11)]))
                     case _: ()
             case _: ()
 
     var all_insts: [MachInst] = []
     all_insts = all_insts + spill_loads
-    all_insts = all_insts + [rewritten]
+    all_insts.push(rewritten)
     all_insts = all_insts + spill_stores
     all_insts
 
