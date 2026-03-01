@@ -313,7 +313,7 @@ if let Value::Str(ref s) = recv_val {
                 Err(_) => return Ok(Value::none()),
             }
         }
-        "to_int" => {
+        "to_int" | "to_i64" | "to_i32" | "to_i16" | "to_i8" => {
             match s.trim().parse::<i64>() {
                 Ok(n) => return Ok(Value::Int(n)),
                 Err(_) => return Ok(Value::Int(0)),

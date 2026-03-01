@@ -20,6 +20,11 @@ thread_local! {
 /// Maximum depth for recursive module loading to prevent infinite loops
 pub const MAX_MODULE_DEPTH: usize = 50;
 
+/// Maximum total unique modules that can be loaded per test file to prevent OOM.
+/// Keep this low because compiler modules are large (~600K lines total).
+/// Most test files import 5-20 modules; compiler-importing tests cascade to 50+.
+pub const MAX_TOTAL_MODULES: usize = 100;
+
 // Thread-local cache for module exports to avoid re-parsing modules
 // Key: normalized module path, Value: module exports dict
 thread_local! {
@@ -37,6 +42,8 @@ thread_local! {
     // Cache for partial exports (type definitions only) - used for circular import resolution
     // This contains exports after register_definitions but before process_imports_and_assignments
     pub static PARTIAL_MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
+    // Total modules loaded counter - reset between test files to prevent OOM
+    pub static TOTAL_MODULES_LOADED: RefCell<usize> = RefCell::new(0);
 }
 
 /// Clear the module exports cache (useful between test runs)
@@ -48,9 +55,24 @@ pub fn clear_module_cache() {
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
     MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
+    TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     // Also clear path resolution cache
     super::interpreter_module::clear_path_resolution_cache();
+}
+
+/// Increment total modules loaded counter, return new count
+pub fn increment_total_modules() -> usize {
+    TOTAL_MODULES_LOADED.with(|c| {
+        let mut v = c.borrow_mut();
+        *v += 1;
+        *v
+    })
+}
+
+/// Reset total modules loaded counter
+pub fn reset_total_modules() {
+    TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
 }
 
 /// Normalize a path to a consistent key for caching/tracking.

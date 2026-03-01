@@ -1,543 +1,539 @@
-describe "Layer Checker":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+# NOTE: These tests validate the MDSOC layer enforcement checker.
+# Run with: bin/simple test test/unit/compiler/mdsoc/layer_checker_spec.spl
+#
+# Tests for: src/compiler/mdsoc/layer_checker.spl
+# The layer checker enforces dependency direction constraints between layers,
+# detects cycles, and manages bypass grants.
 
-# # NOTE: These tests validate the MDSOC layer enforcement checker.
-# # Run with: bin/simple test test/unit/compiler/mdsoc/layer_checker_spec.spl
-# #
-# # Tests for: src/compiler/mdsoc/layer_checker.spl
-# # The layer checker enforces dependency direction constraints between layers,
-# # detects cycles, and manages bypass grants.
-# 
-# use compiler.mdsoc.types.*
-# use compiler.mdsoc.layer_checker.*
-# 
-# # ============================================================================
-# # check_layer_dep standalone function
-# # ============================================================================
-# 
-# describe "check_layer_dep":
-#     it "allows upper to depend on lower (UpperToLower)":
-#         val layer = LayerDef.new(
-#             ["api", "app", "domain", "infra"],
-#             LayerDirection.UpperToLower
-#         )
-#         # api (0) -> domain (2): upper depends on lower = allowed
-#         val result = check_layer_dep(layer, "api", "domain")
-#         expect(result).to_equal(true)
-# 
-#     it "denies lower to depend on upper (UpperToLower)":
-#         val layer = LayerDef.new(
-#             ["api", "app", "domain", "infra"],
-#             LayerDirection.UpperToLower
-#         )
-#         # infra (3) -> api (0): lower depends on upper = denied
-#         val result = check_layer_dep(layer, "infra", "api")
-#         expect(result).to_equal(false)
-# 
-#     it "allows same layer dependency by default":
-#         val layer = LayerDef.new(
-#             ["api", "app", "domain"],
-#             LayerDirection.UpperToLower
-#         )
-#         val result = check_layer_dep(layer, "app", "app")
-#         expect(result).to_equal(true)
-# 
-#     it "allows unknown layers through":
-#         val layer = LayerDef.new(
-#             ["api", "app"],
-#             LayerDirection.UpperToLower
-#         )
-#         # unknown layer -> known layer: unrestricted
-#         val result = check_layer_dep(layer, "external", "api")
-#         expect(result).to_equal(true)
-# 
-#     it "both unknown layers allowed":
-#         val layer = LayerDef.new(
-#             ["api", "app"],
-#             LayerDirection.UpperToLower
-#         )
-#         val result = check_layer_dep(layer, "unknown1", "unknown2")
-#         expect(result).to_equal(true)
-# 
-#     it "allows lower to depend on upper (LowerToUpper)":
-#         val layer = LayerDef.new(
-#             ["api", "app", "domain", "infra"],
-#             LayerDirection.LowerToUpper
-#         )
-#         # infra (3) -> api (0): lower depends on upper = allowed
-#         val result = check_layer_dep(layer, "infra", "api")
-#         expect(result).to_equal(true)
-# 
-#     it "denies upper to depend on lower (LowerToUpper)":
-#         val layer = LayerDef.new(
-#             ["api", "app", "domain", "infra"],
-#             LayerDirection.LowerToUpper
-#         )
-#         # api (0) -> infra (3): upper depends on lower = denied
-#         val result = check_layer_dep(layer, "api", "infra")
-#         expect(result).to_equal(false)
-# 
-#     it "empty layer def allows everything":
-#         val layer = LayerDef.empty()
-#         val result = check_layer_dep(layer, "anything", "else")
-#         expect(result).to_equal(true)
-# 
-# # ============================================================================
-# # LayerChecker construction
-# # ============================================================================
-# 
-# describe "LayerChecker construction":
-#     it "creates checker with layer def":
-#         val layer = LayerDef.new(
-#             ["api", "app", "domain", "infra"],
-#             LayerDirection.UpperToLower
-#         )
-#         val checker = LayerChecker.new(layer)
-#         expect(checker.layer_def.order.len()).to_equal(4)
-# 
-#     it "creates checker with empty layers":
-#         val layer = LayerDef.empty()
-#         val checker = LayerChecker.new(layer)
-#         expect(checker.layer_def.order.len()).to_equal(0)
-# 
-# # ============================================================================
-# # assign_module_layer
-# # ============================================================================
-# 
-# describe "LayerChecker assign_module_layer":
-#     it "registers module with a layer":
-#         val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("src/auth/login.spl", "domain")
-#         val assigned = checker.get_module_layer("src/auth/login.spl") ?? ""
-#         expect(assigned).to_equal("domain")
-# 
-#     it "registers multiple modules":
-#         val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("auth/handler.spl", "api")
-#         checker.assign_module_layer("auth/service.spl", "app")
-#         checker.assign_module_layer("auth/repo.spl", "domain")
-#         val l1 = checker.get_module_layer("auth/handler.spl") ?? ""
-#         val l2 = checker.get_module_layer("auth/service.spl") ?? ""
-#         val l3 = checker.get_module_layer("auth/repo.spl") ?? ""
-#         expect(l1).to_equal("api")
-#         expect(l2).to_equal("app")
-#         expect(l3).to_equal("domain")
-# 
-#     it "returns empty string for unregistered module":
-#         val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val assigned = checker.get_module_layer("unknown.spl") ?? ""
-#         expect(assigned).to_equal("")
-# 
-# # ============================================================================
-# # check_dependency
-# # ============================================================================
-# 
-# describe "LayerChecker check_dependency":
-#     it "allows valid upper-to-lower dependency":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("handler.spl", "api")
-#         checker.assign_module_layer("service.spl", "app")
-#         val violation = checker.check_dependency("handler.spl", "service.spl")
-#         expect(violation).to_be_nil()
-# 
-#     it "detects invalid lower-to-upper dependency":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("repo.spl", "infra")
-#         checker.assign_module_layer("handler.spl", "api")
-#         val violation = checker.check_dependency("repo.spl", "handler.spl")
-#         val is_denied = violation.?
-#         expect(is_denied).to_equal(true)
-# 
-#     it "allows dependency between unregistered modules":
-#         val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         # neither module is registered - no restriction
-#         val violation = checker.check_dependency("unknown1.spl", "unknown2.spl")
-#         expect(violation).to_be_nil()
-# 
-#     it "allows dependency when source is unregistered":
-#         val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("app.spl", "app")
-#         # unregistered -> app: no restriction
-#         val violation = checker.check_dependency("unknown.spl", "app.spl")
-#         expect(violation).to_be_nil()
-# 
-#     it "allows same-layer dependency":
-#         val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("service_a.spl", "app")
-#         checker.assign_module_layer("service_b.spl", "app")
-#         val violation = checker.check_dependency("service_a.spl", "service_b.spl")
-#         expect(violation).to_be_nil()
-# 
-#     it "skips layers when allowed":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("handler.spl", "api")
-#         checker.assign_module_layer("repo.spl", "infra")
-#         # api (0) -> infra (3): skip allowed in non-adjacent mode
-#         val violation = checker.check_dependency("handler.spl", "repo.spl")
-#         expect(violation).to_be_nil()
-# 
-# # ============================================================================
-# # detect_layer_cycles
-# # ============================================================================
-# 
-# describe "LayerChecker detect_layer_cycles":
-#     it "no cycles in empty checker":
-#         val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val cycles = checker.detect_layer_cycles()
-#         expect(cycles.len()).to_equal(0)
-# 
-#     it "no cycles in valid dependency chain":
-#         val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("handler.spl", "api")
-#         checker.assign_module_layer("service.spl", "app")
-#         checker.assign_module_layer("repo.spl", "domain")
-#         checker.add_dependency("handler.spl", "service.spl")
-#         checker.add_dependency("service.spl", "repo.spl")
-#         val cycles = checker.detect_layer_cycles()
-#         expect(cycles.len()).to_equal(0)
-# 
-#     it "detects simple two-module cycle":
-#         val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("a.spl", "api")
-#         checker.assign_module_layer("b.spl", "app")
-#         checker.add_dependency("a.spl", "b.spl")
-#         checker.add_dependency("b.spl", "a.spl")
-#         val cycles = checker.detect_layer_cycles()
-#         expect(cycles.len()).to_be_greater_than(0)
-# 
-#     it "detects three-module cycle":
-#         val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("a.spl", "api")
-#         checker.assign_module_layer("b.spl", "app")
-#         checker.assign_module_layer("c.spl", "domain")
-#         checker.add_dependency("a.spl", "b.spl")
-#         checker.add_dependency("b.spl", "c.spl")
-#         checker.add_dependency("c.spl", "a.spl")
-#         val cycles = checker.detect_layer_cycles()
-#         expect(cycles.len()).to_be_greater_than(0)
-# 
-#     it "detects self-cycle":
-#         val layer = LayerDef.new(["api"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("a.spl", "api")
-#         checker.add_dependency("a.spl", "a.spl")
-#         val cycles = checker.detect_layer_cycles()
-#         expect(cycles.len()).to_be_greater_than(0)
-# 
-# # ============================================================================
-# # Bypass grants
-# # ============================================================================
-# 
-# describe "LayerChecker bypass grants":
-#     it "registers a bypass grant":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val grant = BypassGrant.new(
-#             "infra/db",
-#             "raw_query",
-#             "domain->infra",
-#             "performance critical",
-#             "infra/db.spl:10"
-#         )
-#         checker.register_bypass_grant(grant)
-#         val found = checker.has_bypass_grant("infra/db", "raw_query")
-#         expect(found).to_equal(true)
-# 
-#     it "bypass grant not found for wrong symbol":
-#         val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val grant = BypassGrant.new("mod", "sym_a", "e", "r", "l")
-#         checker.register_bypass_grant(grant)
-#         val found = checker.has_bypass_grant("mod", "sym_b")
-#         expect(found).to_equal(false)
-# 
-#     it "bypass grant not found for wrong module":
-#         val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val grant = BypassGrant.new("mod_a", "sym", "e", "r", "l")
-#         checker.register_bypass_grant(grant)
-#         val found = checker.has_bypass_grant("mod_b", "sym")
-#         expect(found).to_equal(false)
-# 
-#     it "validates matching bypass usage":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val grant = BypassGrant.new(
-#             "infra/db",
-#             "raw_query",
-#             "domain->infra",
-#             "perf",
-#             "db.spl:10"
-#         )
-#         checker.register_bypass_grant(grant)
-# 
-#         val usage = BypassUsage.new(
-#             "domain/repo",
-#             "raw_query",
-#             "domain->infra",
-#             "need direct db access",
-#             "repo.spl:20",
-#             "db.spl:10"
-#         )
-#         val valid = checker.validate_bypass_usage(usage)
-#         expect(valid).to_equal(true)
-# 
-#     it "rejects bypass usage without matching grant":
-#         val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         # No grant registered
-#         val usage = BypassUsage.new(
-#             "domain/repo",
-#             "secret_fn",
-#             "domain->infra",
-#             "reason",
-#             "repo.spl:5",
-#             "other.spl:1"
-#         )
-#         val valid = checker.validate_bypass_usage(usage)
-#         expect(valid).to_equal(false)
-# 
-# # ============================================================================
-# # Bypass non-transitive
-# # ============================================================================
-# 
-# describe "LayerChecker bypass non-transitive":
-#     it "bypass cannot be re-exported through chain":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-# 
-#         # Grant from infra to domain
-#         val grant = BypassGrant.new(
-#             "infra/db",
-#             "raw_query",
-#             "domain->infra",
-#             "perf",
-#             "db.spl:10"
-#         )
-#         checker.register_bypass_grant(grant)
-# 
-#         # Usage from domain (valid - direct, edge matches grant)
-#         val direct_usage = BypassUsage.new(
-#             "domain/repo",
-#             "raw_query",
-#             "domain->infra",
-#             "direct use",
-#             "repo.spl:20",
-#             "db.spl:10"
-#         )
-#         expect(checker.validate_bypass_usage(direct_usage)).to_equal(true)
-# 
-#         # Usage from api (invalid - transitive, edge does not match grant)
-#         val transitive_usage = BypassUsage.new(
-#             "api/handler",
-#             "raw_query",
-#             "api->infra",
-#             "transitive attempt",
-#             "handler.spl:5",
-#             "db.spl:10"
-#         )
-#         val transitive_valid = checker.validate_bypass_usage(transitive_usage)
-#         expect(transitive_valid).to_equal(false)
-# 
-#     it "bypass grant only covers its specified edge":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val grant = BypassGrant.new(
-#             "infra/db",
-#             "raw_query",
-#             "domain->infra",
-#             "perf",
-#             "db.spl:10"
-#         )
-#         checker.register_bypass_grant(grant)
-# 
-#         # Matching edge: allowed
-#         val matching = BypassUsage.new("domain/x", "raw_query", "domain->infra", "r", "x.spl:1", "db.spl:10")
-#         expect(checker.validate_bypass_usage(matching)).to_equal(true)
-# 
-#         # Different edge: denied
-#         val mismatch = BypassUsage.new("app/x", "raw_query", "app->infra", "r", "x.spl:1", "db.spl:10")
-#         expect(checker.validate_bypass_usage(mismatch)).to_equal(false)
-# 
-# # ============================================================================
-# # generate_bypass_report
-# # ============================================================================
-# 
-# describe "LayerChecker generate_bypass_report":
-#     it "empty report with no grants":
-#         val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val report = checker.generate_bypass_report()
-#         expect(report.grant_count).to_equal(0)
-#         expect(report.usage_count).to_equal(0)
-# 
-#     it "report counts grants":
-#         val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         checker.register_bypass_grant(BypassGrant.new("m1", "s1", "e1", "r1", "l1"))
-#         checker.register_bypass_grant(BypassGrant.new("m2", "s2", "e2", "r2", "l2"))
-#         val report = checker.generate_bypass_report()
-#         expect(report.grant_count).to_equal(2)
-# 
-#     it "report includes grant details":
-#         val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
-#         var checker = LayerChecker.new(layer)
-#         val grant = BypassGrant.new("infra/db", "raw_query", "domain->infra", "perf", "db.spl:10")
-#         checker.register_bypass_grant(grant)
-#         val report = checker.generate_bypass_report()
-#         val text_report = report.to_text()
-#         expect(text_report).to_contain("raw_query")
-#         expect(text_report).to_contain("infra/db")
-# 
-# # ============================================================================
-# # LayerDirection.LowerToUpper enforcement
-# # ============================================================================
-# 
-# describe "LayerChecker with LowerToUpper direction":
-#     it "allows lower module to depend on upper":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.LowerToUpper)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("infra_mod.spl", "infra")
-#         checker.assign_module_layer("api_mod.spl", "api")
-#         # infra (3) -> api (0): lower depends on upper = allowed
-#         val violation = checker.check_dependency("infra_mod.spl", "api_mod.spl")
-#         expect(violation).to_be_nil()
-# 
-#     it "denies upper module depending on lower":
-#         val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.LowerToUpper)
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("api_mod.spl", "api")
-#         checker.assign_module_layer("infra_mod.spl", "infra")
-#         # api (0) -> infra (3): upper depends on lower = denied
-#         val violation = checker.check_dependency("api_mod.spl", "infra_mod.spl")
-#         val is_denied = violation.?
-#         expect(is_denied).to_equal(true)
-# 
-#     it "Clean Architecture inward dependency allowed":
-#         val layer = LayerDef.new(
-#             ["entities", "use_cases", "adapters", "frameworks"],
-#             LayerDirection.LowerToUpper
-#         )
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("framework.spl", "frameworks")
-#         checker.assign_module_layer("adapter.spl", "adapters")
-#         checker.assign_module_layer("usecase.spl", "use_cases")
-#         checker.assign_module_layer("entity.spl", "entities")
-# 
-#         # frameworks -> adapters (3->2): allowed
-#         val v1 = checker.check_dependency("framework.spl", "adapter.spl")
-#         expect(v1).to_be_nil()
-#         # adapters -> use_cases (2->1): allowed
-#         val v2 = checker.check_dependency("adapter.spl", "usecase.spl")
-#         expect(v2).to_be_nil()
-#         # use_cases -> entities (1->0): allowed
-#         val v3 = checker.check_dependency("usecase.spl", "entity.spl")
-#         expect(v3).to_be_nil()
-# 
-#     it "Clean Architecture outward dependency denied":
-#         val layer = LayerDef.new(
-#             ["entities", "use_cases", "adapters", "frameworks"],
-#             LayerDirection.LowerToUpper
-#         )
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("entity.spl", "entities")
-#         checker.assign_module_layer("framework.spl", "frameworks")
-#         # entities (0) -> frameworks (3): outward = denied
-#         val violation = checker.check_dependency("entity.spl", "framework.spl")
-#         val is_denied = violation.?
-#         expect(is_denied).to_equal(true)
-# 
-# # ============================================================================
-# # Adjacent-only mode
-# # ============================================================================
-# 
-# describe "LayerChecker adjacent_only mode":
-#     it "allows adjacent layer dependency":
-#         var layer = LayerDef(
-#             order: ["api", "app", "domain", "infra"],
-#             direction: LayerDirection.UpperToLower,
-#             allow_same_layer: true,
-#             allow_adjacent_only: true
-#         )
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("handler.spl", "api")
-#         checker.assign_module_layer("service.spl", "app")
-#         # api (0) -> app (1): adjacent = allowed
-#         val violation = checker.check_dependency("handler.spl", "service.spl")
-#         expect(violation).to_be_nil()
-# 
-#     it "denies non-adjacent layer dependency":
-#         var layer = LayerDef(
-#             order: ["api", "app", "domain", "infra"],
-#             direction: LayerDirection.UpperToLower,
-#             allow_same_layer: true,
-#             allow_adjacent_only: true
-#         )
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("handler.spl", "api")
-#         checker.assign_module_layer("repo.spl", "domain")
-#         # api (0) -> domain (2): skip = denied
-#         val violation = checker.check_dependency("handler.spl", "repo.spl")
-#         val is_denied = violation.?
-#         expect(is_denied).to_equal(true)
-# 
-#     it "same layer is still allowed in adjacent mode":
-#         var layer = LayerDef(
-#             order: ["api", "app", "domain"],
-#             direction: LayerDirection.UpperToLower,
-#             allow_same_layer: true,
-#             allow_adjacent_only: true
-#         )
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("svc_a.spl", "app")
-#         checker.assign_module_layer("svc_b.spl", "app")
-#         val violation = checker.check_dependency("svc_a.spl", "svc_b.spl")
-#         expect(violation).to_be_nil()
-# 
-#     it "same layer denied when allow_same_layer is false":
-#         var layer = LayerDef(
-#             order: ["api", "app", "domain"],
-#             direction: LayerDirection.UpperToLower,
-#             allow_same_layer: false,
-#             allow_adjacent_only: true
-#         )
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("svc_a.spl", "app")
-#         checker.assign_module_layer("svc_b.spl", "app")
-#         val violation = checker.check_dependency("svc_a.spl", "svc_b.spl")
-#         val is_denied = violation.?
-#         expect(is_denied).to_equal(true)
-# 
-#     it "adjacent-only with LowerToUpper direction":
-#         var layer = LayerDef(
-#             order: ["entities", "use_cases", "adapters", "frameworks"],
-#             direction: LayerDirection.LowerToUpper,
-#             allow_same_layer: true,
-#             allow_adjacent_only: true
-#         )
-#         var checker = LayerChecker.new(layer)
-#         checker.assign_module_layer("framework.spl", "frameworks")
-#         checker.assign_module_layer("adapter.spl", "adapters")
-#         checker.assign_module_layer("entity.spl", "entities")
-# 
-#         # frameworks (3) -> adapters (2): adjacent inward = allowed
-#         val v1 = checker.check_dependency("framework.spl", "adapter.spl")
-#         expect(v1).to_be_nil()
-#         # frameworks (3) -> entities (0): skip inward = denied
-#         val v2 = checker.check_dependency("framework.spl", "entity.spl")
-#         val is_denied = v2.?
-#         expect(is_denied).to_equal(true)
+use compiler.mdsoc.types.*
+use compiler.mdsoc.layer_checker.*
+
+# ============================================================================
+# check_layer_dep standalone function
+# ============================================================================
+
+describe "check_layer_dep":
+    it "allows upper to depend on lower (UpperToLower)":
+        val layer = LayerDef.new(
+            ["api", "app", "domain", "infra"],
+            LayerDirection.UpperToLower
+        )
+        # api (0) -> domain (2): upper depends on lower = allowed
+        val result = check_layer_dep(layer, "api", "domain")
+        expect(result).to_equal(true)
+
+    it "denies lower to depend on upper (UpperToLower)":
+        val layer = LayerDef.new(
+            ["api", "app", "domain", "infra"],
+            LayerDirection.UpperToLower
+        )
+        # infra (3) -> api (0): lower depends on upper = denied
+        val result = check_layer_dep(layer, "infra", "api")
+        expect(result).to_equal(false)
+
+    it "allows same layer dependency by default":
+        val layer = LayerDef.new(
+            ["api", "app", "domain"],
+            LayerDirection.UpperToLower
+        )
+        val result = check_layer_dep(layer, "app", "app")
+        expect(result).to_equal(true)
+
+    it "allows unknown layers through":
+        val layer = LayerDef.new(
+            ["api", "app"],
+            LayerDirection.UpperToLower
+        )
+        # unknown layer -> known layer: unrestricted
+        val result = check_layer_dep(layer, "external", "api")
+        expect(result).to_equal(true)
+
+    it "both unknown layers allowed":
+        val layer = LayerDef.new(
+            ["api", "app"],
+            LayerDirection.UpperToLower
+        )
+        val result = check_layer_dep(layer, "unknown1", "unknown2")
+        expect(result).to_equal(true)
+
+    it "allows lower to depend on upper (LowerToUpper)":
+        val layer = LayerDef.new(
+            ["api", "app", "domain", "infra"],
+            LayerDirection.LowerToUpper
+        )
+        # infra (3) -> api (0): lower depends on upper = allowed
+        val result = check_layer_dep(layer, "infra", "api")
+        expect(result).to_equal(true)
+
+    it "denies upper to depend on lower (LowerToUpper)":
+        val layer = LayerDef.new(
+            ["api", "app", "domain", "infra"],
+            LayerDirection.LowerToUpper
+        )
+        # api (0) -> infra (3): upper depends on lower = denied
+        val result = check_layer_dep(layer, "api", "infra")
+        expect(result).to_equal(false)
+
+    it "empty layer def allows everything":
+        val layer = LayerDef.empty()
+        val result = check_layer_dep(layer, "anything", "else")
+        expect(result).to_equal(true)
+
+# ============================================================================
+# LayerChecker construction
+# ============================================================================
+
+describe "LayerChecker construction":
+    it "creates checker with layer def":
+        val layer = LayerDef.new(
+            ["api", "app", "domain", "infra"],
+            LayerDirection.UpperToLower
+        )
+        val checker = LayerChecker.new(layer)
+        expect(checker.layer_def.order.len()).to_equal(4)
+
+    it "creates checker with empty layers":
+        val layer = LayerDef.empty()
+        val checker = LayerChecker.new(layer)
+        expect(checker.layer_def.order.len()).to_equal(0)
+
+# ============================================================================
+# assign_module_layer
+# ============================================================================
+
+describe "LayerChecker assign_module_layer":
+    it "registers module with a layer":
+        val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("src/auth/login.spl", "domain")
+        val assigned = checker.get_module_layer("src/auth/login.spl") ?? ""
+        expect(assigned).to_equal("domain")
+
+    it "registers multiple modules":
+        val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("auth/handler.spl", "api")
+        checker.assign_module_layer("auth/service.spl", "app")
+        checker.assign_module_layer("auth/repo.spl", "domain")
+        val l1 = checker.get_module_layer("auth/handler.spl") ?? ""
+        val l2 = checker.get_module_layer("auth/service.spl") ?? ""
+        val l3 = checker.get_module_layer("auth/repo.spl") ?? ""
+        expect(l1).to_equal("api")
+        expect(l2).to_equal("app")
+        expect(l3).to_equal("domain")
+
+    it "returns empty string for unregistered module":
+        val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val assigned = checker.get_module_layer("unknown.spl") ?? ""
+        expect(assigned).to_equal("")
+
+# ============================================================================
+# check_dependency
+# ============================================================================
+
+describe "LayerChecker check_dependency":
+    it "allows valid upper-to-lower dependency":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("handler.spl", "api")
+        checker.assign_module_layer("service.spl", "app")
+        val violation = checker.check_dependency("handler.spl", "service.spl")
+        expect(violation).to_be_nil()
+
+    it "detects invalid lower-to-upper dependency":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("repo.spl", "infra")
+        checker.assign_module_layer("handler.spl", "api")
+        val violation = checker.check_dependency("repo.spl", "handler.spl")
+        val is_denied = violation.?
+        expect(is_denied).to_equal(true)
+
+    it "allows dependency between unregistered modules":
+        val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        # neither module is registered - no restriction
+        val violation = checker.check_dependency("unknown1.spl", "unknown2.spl")
+        expect(violation).to_be_nil()
+
+    it "allows dependency when source is unregistered":
+        val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("app.spl", "app")
+        # unregistered -> app: no restriction
+        val violation = checker.check_dependency("unknown.spl", "app.spl")
+        expect(violation).to_be_nil()
+
+    it "allows same-layer dependency":
+        val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("service_a.spl", "app")
+        checker.assign_module_layer("service_b.spl", "app")
+        val violation = checker.check_dependency("service_a.spl", "service_b.spl")
+        expect(violation).to_be_nil()
+
+    it "skips layers when allowed":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("handler.spl", "api")
+        checker.assign_module_layer("repo.spl", "infra")
+        # api (0) -> infra (3): skip allowed in non-adjacent mode
+        val violation = checker.check_dependency("handler.spl", "repo.spl")
+        expect(violation).to_be_nil()
+
+# ============================================================================
+# detect_layer_cycles
+# ============================================================================
+
+describe "LayerChecker detect_layer_cycles":
+    it "no cycles in empty checker":
+        val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val cycles = checker.detect_layer_cycles()
+        expect(cycles.len()).to_equal(0)
+
+    it "no cycles in valid dependency chain":
+        val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("handler.spl", "api")
+        checker.assign_module_layer("service.spl", "app")
+        checker.assign_module_layer("repo.spl", "domain")
+        checker.add_dependency("handler.spl", "service.spl")
+        checker.add_dependency("service.spl", "repo.spl")
+        val cycles = checker.detect_layer_cycles()
+        expect(cycles.len()).to_equal(0)
+
+    it "detects simple two-module cycle":
+        val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("a.spl", "api")
+        checker.assign_module_layer("b.spl", "app")
+        checker.add_dependency("a.spl", "b.spl")
+        checker.add_dependency("b.spl", "a.spl")
+        val cycles = checker.detect_layer_cycles()
+        expect(cycles.len()).to_be_greater_than(0)
+
+    it "detects three-module cycle":
+        val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("a.spl", "api")
+        checker.assign_module_layer("b.spl", "app")
+        checker.assign_module_layer("c.spl", "domain")
+        checker.add_dependency("a.spl", "b.spl")
+        checker.add_dependency("b.spl", "c.spl")
+        checker.add_dependency("c.spl", "a.spl")
+        val cycles = checker.detect_layer_cycles()
+        expect(cycles.len()).to_be_greater_than(0)
+
+    it "detects self-cycle":
+        val layer = LayerDef.new(["api"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("a.spl", "api")
+        checker.add_dependency("a.spl", "a.spl")
+        val cycles = checker.detect_layer_cycles()
+        expect(cycles.len()).to_be_greater_than(0)
+
+# ============================================================================
+# Bypass grants
+# ============================================================================
+
+describe "LayerChecker bypass grants":
+    it "registers a bypass grant":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val grant = BypassGrant.new(
+            "infra/db",
+            "raw_query",
+            "domain->infra",
+            "performance critical",
+            "infra/db.spl:10"
+        )
+        checker.register_bypass_grant(grant)
+        val found = checker.has_bypass_grant("infra/db", "raw_query")
+        expect(found).to_equal(true)
+
+    it "bypass grant not found for wrong symbol":
+        val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val grant = BypassGrant.new("mod", "sym_a", "e", "r", "l")
+        checker.register_bypass_grant(grant)
+        val found = checker.has_bypass_grant("mod", "sym_b")
+        expect(found).to_equal(false)
+
+    it "bypass grant not found for wrong module":
+        val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val grant = BypassGrant.new("mod_a", "sym", "e", "r", "l")
+        checker.register_bypass_grant(grant)
+        val found = checker.has_bypass_grant("mod_b", "sym")
+        expect(found).to_equal(false)
+
+    it "validates matching bypass usage":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val grant = BypassGrant.new(
+            "infra/db",
+            "raw_query",
+            "domain->infra",
+            "perf",
+            "db.spl:10"
+        )
+        checker.register_bypass_grant(grant)
+
+        val usage = BypassUsage.new(
+            "domain/repo",
+            "raw_query",
+            "domain->infra",
+            "need direct db access",
+            "repo.spl:20",
+            "db.spl:10"
+        )
+        val valid = checker.validate_bypass_usage(usage)
+        expect(valid).to_equal(true)
+
+    it "rejects bypass usage without matching grant":
+        val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        # No grant registered
+        val usage = BypassUsage.new(
+            "domain/repo",
+            "secret_fn",
+            "domain->infra",
+            "reason",
+            "repo.spl:5",
+            "other.spl:1"
+        )
+        val valid = checker.validate_bypass_usage(usage)
+        expect(valid).to_equal(false)
+
+# ============================================================================
+# Bypass non-transitive
+# ============================================================================
+
+describe "LayerChecker bypass non-transitive":
+    it "bypass cannot be re-exported through chain":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+
+        # Grant from infra to domain
+        val grant = BypassGrant.new(
+            "infra/db",
+            "raw_query",
+            "domain->infra",
+            "perf",
+            "db.spl:10"
+        )
+        checker.register_bypass_grant(grant)
+
+        # Usage from domain (valid - direct, edge matches grant)
+        val direct_usage = BypassUsage.new(
+            "domain/repo",
+            "raw_query",
+            "domain->infra",
+            "direct use",
+            "repo.spl:20",
+            "db.spl:10"
+        )
+        expect(checker.validate_bypass_usage(direct_usage)).to_equal(true)
+
+        # Usage from api (invalid - transitive, edge does not match grant)
+        val transitive_usage = BypassUsage.new(
+            "api/handler",
+            "raw_query",
+            "api->infra",
+            "transitive attempt",
+            "handler.spl:5",
+            "db.spl:10"
+        )
+        val transitive_valid = checker.validate_bypass_usage(transitive_usage)
+        expect(transitive_valid).to_equal(false)
+
+    it "bypass grant only covers its specified edge":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val grant = BypassGrant.new(
+            "infra/db",
+            "raw_query",
+            "domain->infra",
+            "perf",
+            "db.spl:10"
+        )
+        checker.register_bypass_grant(grant)
+
+        # Matching edge: allowed
+        val matching = BypassUsage.new("domain/x", "raw_query", "domain->infra", "r", "x.spl:1", "db.spl:10")
+        expect(checker.validate_bypass_usage(matching)).to_equal(true)
+
+        # Different edge: denied
+        val mismatch = BypassUsage.new("app/x", "raw_query", "app->infra", "r", "x.spl:1", "db.spl:10")
+        expect(checker.validate_bypass_usage(mismatch)).to_equal(false)
+
+# ============================================================================
+# generate_bypass_report
+# ============================================================================
+
+describe "LayerChecker generate_bypass_report":
+    it "empty report with no grants":
+        val layer = LayerDef.new(["api", "app"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val report = checker.generate_bypass_report()
+        expect(report.grant_count).to_equal(0)
+        expect(report.usage_count).to_equal(0)
+
+    it "report counts grants":
+        val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        checker.register_bypass_grant(BypassGrant.new("m1", "s1", "e1", "r1", "l1"))
+        checker.register_bypass_grant(BypassGrant.new("m2", "s2", "e2", "r2", "l2"))
+        val report = checker.generate_bypass_report()
+        expect(report.grant_count).to_equal(2)
+
+    it "report includes grant details":
+        val layer = LayerDef.new(["api", "app", "domain"], LayerDirection.UpperToLower)
+        var checker = LayerChecker.new(layer)
+        val grant = BypassGrant.new("infra/db", "raw_query", "domain->infra", "perf", "db.spl:10")
+        checker.register_bypass_grant(grant)
+        val report = checker.generate_bypass_report()
+        val text_report = report.to_text()
+        expect(text_report).to_contain("raw_query")
+        expect(text_report).to_contain("infra/db")
+
+# ============================================================================
+# LayerDirection.LowerToUpper enforcement
+# ============================================================================
+
+describe "LayerChecker with LowerToUpper direction":
+    it "allows lower module to depend on upper":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.LowerToUpper)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("infra_mod.spl", "infra")
+        checker.assign_module_layer("api_mod.spl", "api")
+        # infra (3) -> api (0): lower depends on upper = allowed
+        val violation = checker.check_dependency("infra_mod.spl", "api_mod.spl")
+        expect(violation).to_be_nil()
+
+    it "denies upper module depending on lower":
+        val layer = LayerDef.new(["api", "app", "domain", "infra"], LayerDirection.LowerToUpper)
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("api_mod.spl", "api")
+        checker.assign_module_layer("infra_mod.spl", "infra")
+        # api (0) -> infra (3): upper depends on lower = denied
+        val violation = checker.check_dependency("api_mod.spl", "infra_mod.spl")
+        val is_denied = violation.?
+        expect(is_denied).to_equal(true)
+
+    it "Clean Architecture inward dependency allowed":
+        val layer = LayerDef.new(
+            ["entities", "use_cases", "adapters", "frameworks"],
+            LayerDirection.LowerToUpper
+        )
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("framework.spl", "frameworks")
+        checker.assign_module_layer("adapter.spl", "adapters")
+        checker.assign_module_layer("usecase.spl", "use_cases")
+        checker.assign_module_layer("entity.spl", "entities")
+
+        # frameworks -> adapters (3->2): allowed
+        val v1 = checker.check_dependency("framework.spl", "adapter.spl")
+        expect(v1).to_be_nil()
+        # adapters -> use_cases (2->1): allowed
+        val v2 = checker.check_dependency("adapter.spl", "usecase.spl")
+        expect(v2).to_be_nil()
+        # use_cases -> entities (1->0): allowed
+        val v3 = checker.check_dependency("usecase.spl", "entity.spl")
+        expect(v3).to_be_nil()
+
+    it "Clean Architecture outward dependency denied":
+        val layer = LayerDef.new(
+            ["entities", "use_cases", "adapters", "frameworks"],
+            LayerDirection.LowerToUpper
+        )
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("entity.spl", "entities")
+        checker.assign_module_layer("framework.spl", "frameworks")
+        # entities (0) -> frameworks (3): outward = denied
+        val violation = checker.check_dependency("entity.spl", "framework.spl")
+        val is_denied = violation.?
+        expect(is_denied).to_equal(true)
+
+# ============================================================================
+# Adjacent-only mode
+# ============================================================================
+
+describe "LayerChecker adjacent_only mode":
+    it "allows adjacent layer dependency":
+        var layer = LayerDef(
+            order: ["api", "app", "domain", "infra"],
+            direction: LayerDirection.UpperToLower,
+            allow_same_layer: true,
+            allow_adjacent_only: true
+        )
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("handler.spl", "api")
+        checker.assign_module_layer("service.spl", "app")
+        # api (0) -> app (1): adjacent = allowed
+        val violation = checker.check_dependency("handler.spl", "service.spl")
+        expect(violation).to_be_nil()
+
+    it "denies non-adjacent layer dependency":
+        var layer = LayerDef(
+            order: ["api", "app", "domain", "infra"],
+            direction: LayerDirection.UpperToLower,
+            allow_same_layer: true,
+            allow_adjacent_only: true
+        )
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("handler.spl", "api")
+        checker.assign_module_layer("repo.spl", "domain")
+        # api (0) -> domain (2): skip = denied
+        val violation = checker.check_dependency("handler.spl", "repo.spl")
+        val is_denied = violation.?
+        expect(is_denied).to_equal(true)
+
+    it "same layer is still allowed in adjacent mode":
+        var layer = LayerDef(
+            order: ["api", "app", "domain"],
+            direction: LayerDirection.UpperToLower,
+            allow_same_layer: true,
+            allow_adjacent_only: true
+        )
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("svc_a.spl", "app")
+        checker.assign_module_layer("svc_b.spl", "app")
+        val violation = checker.check_dependency("svc_a.spl", "svc_b.spl")
+        expect(violation).to_be_nil()
+
+    it "same layer denied when allow_same_layer is false":
+        var layer = LayerDef(
+            order: ["api", "app", "domain"],
+            direction: LayerDirection.UpperToLower,
+            allow_same_layer: false,
+            allow_adjacent_only: true
+        )
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("svc_a.spl", "app")
+        checker.assign_module_layer("svc_b.spl", "app")
+        val violation = checker.check_dependency("svc_a.spl", "svc_b.spl")
+        val is_denied = violation.?
+        expect(is_denied).to_equal(true)
+
+    it "adjacent-only with LowerToUpper direction":
+        var layer = LayerDef(
+            order: ["entities", "use_cases", "adapters", "frameworks"],
+            direction: LayerDirection.LowerToUpper,
+            allow_same_layer: true,
+            allow_adjacent_only: true
+        )
+        var checker = LayerChecker.new(layer)
+        checker.assign_module_layer("framework.spl", "frameworks")
+        checker.assign_module_layer("adapter.spl", "adapters")
+        checker.assign_module_layer("entity.spl", "entities")
+
+        # frameworks (3) -> adapters (2): adjacent inward = allowed
+        val v1 = checker.check_dependency("framework.spl", "adapter.spl")
+        expect(v1).to_be_nil()
+        # frameworks (3) -> entities (0): skip inward = denied
+        val v2 = checker.check_dependency("framework.spl", "entity.spl")
+        val is_denied = v2.?
+        expect(is_denied).to_equal(true)

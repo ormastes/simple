@@ -1,6 +1,7 @@
 use simple_parser::ast::Type;
 
 use crate::error::{codes, CompileError, ErrorContext};
+use crate::interpreter::interpreter_state::BLOCK_SCOPED_ENUMS;
 use crate::semantics::{
     bool_cast, cast_bool_to_numeric, cast_float_to_numeric, cast_int_to_numeric, string_cast, CastNumericResult,
     NumericType,
@@ -88,6 +89,22 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
         Value::Str(ref s) if s.chars().count() == 1 => {
             let code_point = s.chars().next().unwrap() as i64;
             match cast_int_to_numeric(code_point, target) {
+                CastNumericResult::Int(v) => Ok(Value::Int(v)),
+                CastNumericResult::Float(v) => Ok(Value::Float(v)),
+            }
+        }
+        // Enum variant to numeric (ordinal position)
+        Value::Enum { ref enum_name, ref variant, .. } => {
+            let ordinal = BLOCK_SCOPED_ENUMS.with(|cell| {
+                if let Some(edef) = cell.borrow().get(enum_name) {
+                    edef.variants.iter().position(|v| v.name == *variant)
+                        .map(|i| i as i64)
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            });
+            match cast_int_to_numeric(ordinal, target) {
                 CastNumericResult::Int(v) => Ok(Value::Int(v)),
                 CastNumericResult::Float(v) => Ok(Value::Float(v)),
             }
