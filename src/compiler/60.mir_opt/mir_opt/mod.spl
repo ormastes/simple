@@ -15,9 +15,14 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir.*
-use compiler.mir_opt.mir_opt.dce (create_dce_pass)
-use compiler.mir_opt.mir_opt.const_fold (create_const_fold_pass)
+use compiler.mir_opt.mir_opt.dce (create_dce_pass, dce_run_on_function)
+use compiler.mir_opt.mir_opt.const_fold (create_const_fold_pass, cf_run_on_function)
 use compiler.mir_opt.mir_opt.collection_opt (create_collection_opt_pass, collection_opt_run_on_function)
+use compiler.mir_opt.mir_opt.copy_prop (create_copy_prop_pass, copypropagation_run_on_function)
+use compiler.mir_opt.mir_opt.cse (create_cse_pass, cse_run_on_function)
+use compiler.mir_opt.mir_opt.inline (create_inline_small_pass, create_inline_pass, create_inline_aggressive_pass, inline_run_on_function)
+use compiler.mir_opt.mir_opt.loop_opt (create_loop_opt_conservative, create_loop_opt_pass, loop_opt_run_on_function)
+use compiler.mir_opt.mir_opt.loop_strength (create_strength_reduction_pass, strength_reduction_run_on_function)
 
 # ============================================================================
 # Optimization Level
@@ -272,12 +277,50 @@ fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
         case "const_fold":
             var cf = create_const_fold_pass()
             cf_run_on_function(cf, func)
+        case "copy_propagation":
+            var cp = create_copy_prop_pass()
+            copypropagation_run_on_function(cp, func)
+        case "common_subexpr_elim":
+            var cse = create_cse_pass()
+            cse_run_on_function(cse, func)
+        case "inline_small_functions":
+            var inl = create_inline_small_pass()
+            inline_run_on_function(inl, func)
+        case "inline_functions":
+            var inl = create_inline_pass()
+            inline_run_on_function(inl, func)
+        case "inline_aggressive":
+            var inl = create_inline_aggressive_pass()
+            inline_run_on_function(inl, func)
+        case "loop_invariant_motion":
+            var lo = create_loop_opt_conservative()
+            loop_opt_run_on_function(lo, func)
+        case "loop_unroll":
+            var lo = create_loop_opt_pass()
+            loop_opt_run_on_function(lo, func)
+        case "strength_reduction":
+            var sr = create_strength_reduction_pass()
+            strength_reduction_run_on_function(sr, func)
         case "collection_opt":
             var co = create_collection_opt_pass()
             collection_opt_run_on_function(co, func)
+        case "vectorization":
+            # Module-level pass, not per-function — no-op here
+            func
         case _:
             # Unknown pass - return function unchanged
             func
+
+fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirModule:
+    """Run pipeline passes on all functions in a module."""
+    var optimized_module = module
+    for func_symbol in module.functions.keys():
+        val func = module.functions[func_symbol]
+        var optimized_func = func
+        for pass_name in pipeline.passes:
+            optimized_func = run_named_pass(pass_name, optimized_func)
+        optimized_module.functions[func_symbol] = optimized_func
+    optimized_module
 
 # ============================================================================
 # Exports
@@ -285,4 +328,4 @@ fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
 
 export OptLevel, OptimizationPipeline
 export MirPass, PassManager, PassStatistics
-export optimize_module, optimize_function, run_named_pass
+export optimize_module, optimize_function, run_named_pass, pipeline_optimize

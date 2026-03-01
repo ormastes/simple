@@ -453,11 +453,10 @@ pub(super) fn export_functions(
         // Always add to env (for internal module use)
         env.insert(name.clone(), func_with_env.clone());
 
-        // Only add to exports if public (or will be added by process_bare_exports if explicitly exported)
-        if f.visibility.is_public() {
-            exports.insert(name.clone(), func_with_env);
-            exported_count += 1;
-        }
+        // Export all top-level functions by default (Simple convention: all functions are public unless private)
+        // This matches the Simple compiler's behavior where functions don't need `pub` keyword
+        exports.insert(name.clone(), func_with_env);
+        exported_count += 1;
     }
     trace!(
         total_functions = local_functions.len(),

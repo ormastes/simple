@@ -34,7 +34,7 @@ Use these agent definitions when spawning Task subagents. Located in `.claude/ag
 | **debug** | Investigating bugs, tracing errors, profiling | `/debug` |
 | **explore** | Finding files, understanding structure, researching | `/research`, `/architecture` |
 | **docs** | Writing research/design/guide docs, reports | `/doc`, `/todo` |
-| **vcs** | Committing, pushing, viewing history (git) | `/versioning` |
+| **vcs** | Committing, pushing, viewing history (jj/git) | `/versioning` |
 | **infra** | MCP servers, database library, stdlib, SFFI | `/mcp`, `/database`, `/stdlib`, `/sffi` |
 | **build** | Building project, creating releases | `/release` |
 | **ml** | Machine learning features, neural networks | `/deeplearning` |
@@ -52,7 +52,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 
 | Skill | Purpose |
 |-------|---------|
-| `versioning` | Git workflow |
+| `versioning` | JJ (Jujutsu) + Git workflow |
 | `test` | Test writing, methodology, and container testing (safe/isolated runs) |
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
 | `coding` | Simple language rules, coding standards |
@@ -79,9 +79,11 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 ## Critical Rules
 
 ### Version Control
-- Use **git** for all version control
+- Use **jj** (Jujutsu) as primary VCS, colocated with git
 - **NEVER create branches** - work directly on `main`
-- Push: `git add -A && git commit -m "message" && git push origin main`
+- Commit: `jj commit -m "message"` (auto-tracks all changes, no staging needed)
+- Push: `jj bookmark set main -r @- && jj git push --bookmark main`
+- Fetch: `jj git fetch && jj rebase -d main@origin`
 
 ### Language
 - **ALL code in `.spl` or `.ssh`** - No Python, no Bash (except 3 bootstrap scripts in `scripts/`)

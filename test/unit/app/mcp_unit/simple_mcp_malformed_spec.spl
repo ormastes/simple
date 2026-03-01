@@ -1,126 +1,122 @@
-describe "Simple Mcp Malformed":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+# # simple-mcp Malformed Input Handling Specification
+#
+# **Bugs:** simple_mcp_null_param_001, simple_mcp_parse_error_001, simple_mcp_no_id_001
+# **File:** src/app/mcp/main_lite.spl
+# **Status:** Fixed
+#
+# ## Bugs Found
+#
+# ### Bug A: JSON null param treated as literal string "null" (simple_mcp_null_param_001)
+# `extract_arg` reads non-quoted JSON values verbatim. `path:null` becomes
+# the string "null", causing a file-open attempt on a file named "null".
+#
+# ### Bug B: Malformed JSON silently dropped (simple_mcp_parse_error_001)
+# `{not:valid:json}` extracts empty method and id. No case handles this,
+# so no response is sent. JSON-RPC 2.0 requires a -32700 Parse error.
+#
+# ### Bug C: Missing id produces invalid JSON output (simple_mcp_no_id_001)
+# `jp("id", "")` emits `"id":` with no value — invalid JSON. JSON-RPC 2.0
+# notifications (no id) must not generate any response.
 
-# # # simple-mcp Malformed Input Handling Specification
-# #
-# # **Bugs:** simple_mcp_null_param_001, simple_mcp_parse_error_001, simple_mcp_no_id_001
-# # **File:** src/app/mcp/main_lite.spl
-# # **Status:** Fixed
-# #
-# # ## Bugs Found
-# #
-# # ### Bug A: JSON null param treated as literal string "null" (simple_mcp_null_param_001)
-# # `extract_arg` reads non-quoted JSON values verbatim. `path:null` becomes
-# # the string "null", causing a file-open attempt on a file named "null".
-# #
-# # ### Bug B: Malformed JSON silently dropped (simple_mcp_parse_error_001)
-# # `{not:valid:json}` extracts empty method and id. No case handles this,
-# # so no response is sent. JSON-RPC 2.0 requires a -32700 Parse error.
-# #
-# # ### Bug C: Missing id produces invalid JSON output (simple_mcp_no_id_001)
-# # `jp("id", "")` emits `"id":` with no value — invalid JSON. JSON-RPC 2.0
-# # notifications (no id) must not generate any response.
-# 
-# use std.spec
-# 
-# extern fn rt_file_write_text(path: text, content: text) -> bool
-# extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-# 
-# val INIT = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}"
-# val SERVER = "bin/simple_mcp_server"
-# 
-# fn run_msg(msg: text) -> text:
-#     val input = INIT + "\n" + msg + "\n"
-#     rt_file_write_text("/tmp/smcp_test_input.txt", input)
-#     val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", "cat /tmp/smcp_test_input.txt | " + SERVER + " 2>/dev/null | tail -1"])
-#     stdout.trim()
-# 
-# fn run_raw(lines: text) -> text:
-#     rt_file_write_text("/tmp/smcp_test_raw.txt", lines + "\n")
-#     val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", "cat /tmp/smcp_test_raw.txt | " + SERVER + " 2>/dev/null"])
-#     stdout.trim()
-# 
-# 
-# describe "simple-mcp Bug A: JSON null param treated as string (simple_mcp_null_param_001)":
-#     # extract_arg() returns "null" for JSON null values.
-#     # Handlers must reject "null" the same as empty string.
-# 
-#     context "simple_read with path:null":
-#         it "returns missing parameter error, not file-not-found for null":
-#             val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_read\",\"arguments\":{\"path\":null}}}")
-#             expect(resp.contains("-32602")).to_equal(true)
-#             expect(resp.contains("Missing required parameter")).to_equal(true)
-# 
-#         it "does not attempt to open a file named null":
-#             val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_read\",\"arguments\":{\"path\":null}}}")
-#             expect(resp.contains("\"null\"")).to_equal(false)
-# 
-#     context "simple_search with pattern:null":
-#         it "returns missing parameter error":
-#             val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"pattern\":null}}}")
-#             expect(resp.contains("-32602")).to_equal(true)
-#             expect(resp.contains("Missing required parameter")).to_equal(true)
-# 
-#         it "does not run a grep for literal null":
-#             val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"pattern\":null}}}")
-#             expect(resp.contains("No matches found")).to_equal(false)
-# 
-# 
-# describe "simple-mcp Bug B: malformed JSON gets parse error (simple_mcp_parse_error_001)":
-#     # When a line cannot be parsed as valid JSON-RPC (no method, no id),
-#     # the server must respond with -32700 Parse error with id:null.
-# 
-#     it "responds with parse error for malformed JSON":
-#         val output = run_raw(INIT + "\n{not:valid:json}")
-#         expect(output.contains("-32700")).to_equal(true)
-# 
-#     it "parse error response has id null":
-#         val output = run_raw(INIT + "\n{not:valid:json}")
-#         expect(output.contains("\"id\":null")).to_equal(true)
-# 
-#     it "parse error response is valid JSON-RPC envelope":
-#         val output = run_raw(INIT + "\n{not:valid:json}")
-#         expect(output.contains("\"jsonrpc\"")).to_equal(true)
-#         expect(output.contains("\"error\"")).to_equal(true)
-# 
-# 
-# describe "simple-mcp Bug C: notifications (no id) get no response (simple_mcp_no_id_001)":
-#     # JSON-RPC 2.0: requests without id are notifications.
-#     # The server MUST NOT send a response. Previously it sent `"id":,`
-#     # which is invalid JSON.
-# 
-#     it "sends no response for a notification (tools/call without id)":
-#         val output = run_raw(INIT + "\n{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_status\",\"arguments\":{}}}")
-#         # Only the init response should be present (1 line)
-#         expect(output.contains("simple-mcp-lite")).to_equal(true)
-#         expect(output.contains("Working Directory")).to_equal(false)
-# 
-#     it "does not produce invalid JSON with empty id field":
-#         val output = run_raw(INIT + "\n{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_status\",\"arguments\":{}}}")
-#         expect(output.contains("\"id\":,")).to_equal(false)
-# 
-# 
-# describe "simple-mcp: valid inputs still work after fixes":
-#     # Regression: ensure normal inputs still produce correct responses.
-# 
-#     it "simple_status works":
-#         val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_status\",\"arguments\":{}}}")
-#         expect(resp.contains("Working Directory")).to_equal(true)
-#         expect(resp.contains("isError")).to_equal(true)
-# 
-#     it "simple_read with missing path still returns error":
-#         val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_read\",\"arguments\":{}}}")
-#         expect(resp.contains("-32602")).to_equal(true)
-# 
-#     it "simple_search with missing pattern still returns error":
-#         val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{}}}")
-#         expect(resp.contains("-32602")).to_equal(true)
-# 
-#     it "unknown tool still returns -32601":
-#         val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bogus_tool\",\"arguments\":{}}}")
-#         expect(resp.contains("-32601")).to_equal(true)
-# 
-#     it "method not found returns -32601":
-#         val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"no_such_method\",\"params\":{}}")
-#         expect(resp.contains("-32601")).to_equal(true)
+use std.spec
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val INIT = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}}}"
+val SERVER = "bin/simple_mcp_server"
+
+fn run_msg(msg: text) -> text:
+    val input = INIT + "\n" + msg + "\n"
+    rt_file_write_text("/tmp/smcp_test_input.txt", input)
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", "cat /tmp/smcp_test_input.txt | " + SERVER + " 2>/dev/null | tail -1"])
+    stdout.trim()
+
+fn run_raw(lines: text) -> text:
+    rt_file_write_text("/tmp/smcp_test_raw.txt", lines + "\n")
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", "cat /tmp/smcp_test_raw.txt | " + SERVER + " 2>/dev/null"])
+    stdout.trim()
+
+
+describe "simple-mcp Bug A: JSON null param treated as string (simple_mcp_null_param_001)":
+    # extract_arg() returns "null" for JSON null values.
+    # Handlers must reject "null" the same as empty string.
+
+    context "simple_read with path:null":
+        it "returns missing parameter error, not file-not-found for null":
+            val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_read\",\"arguments\":{\"path\":null}}}")
+            expect(resp.contains("-32602")).to_equal(true)
+            expect(resp.contains("Missing required parameter")).to_equal(true)
+
+        it "does not attempt to open a file named null":
+            val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_read\",\"arguments\":{\"path\":null}}}")
+            expect(resp.contains("\"null\"")).to_equal(false)
+
+    context "simple_search with pattern:null":
+        it "returns missing parameter error":
+            val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"pattern\":null}}}")
+            expect(resp.contains("-32602")).to_equal(true)
+            expect(resp.contains("Missing required parameter")).to_equal(true)
+
+        it "does not run a grep for literal null":
+            val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{\"pattern\":null}}}")
+            expect(resp.contains("No matches found")).to_equal(false)
+
+
+describe "simple-mcp Bug B: malformed JSON gets parse error (simple_mcp_parse_error_001)":
+    # When a line cannot be parsed as valid JSON-RPC (no method, no id),
+    # the server must respond with -32700 Parse error with id:null.
+
+    it "responds with parse error for malformed JSON":
+        val output = run_raw(INIT + "\n{not:valid:json}")
+        expect(output.contains("-32700")).to_equal(true)
+
+    it "parse error response has id null":
+        val output = run_raw(INIT + "\n{not:valid:json}")
+        expect(output.contains("\"id\":null")).to_equal(true)
+
+    it "parse error response is valid JSON-RPC envelope":
+        val output = run_raw(INIT + "\n{not:valid:json}")
+        expect(output.contains("\"jsonrpc\"")).to_equal(true)
+        expect(output.contains("\"error\"")).to_equal(true)
+
+
+describe "simple-mcp Bug C: notifications (no id) get no response (simple_mcp_no_id_001)":
+    # JSON-RPC 2.0: requests without id are notifications.
+    # The server MUST NOT send a response. Previously it sent `"id":,`
+    # which is invalid JSON.
+
+    it "sends no response for a notification (tools/call without id)":
+        val output = run_raw(INIT + "\n{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_status\",\"arguments\":{}}}")
+        # Only the init response should be present (1 line)
+        expect(output.contains("simple-mcp-lite")).to_equal(true)
+        expect(output.contains("Working Directory")).to_equal(false)
+
+    it "does not produce invalid JSON with empty id field":
+        val output = run_raw(INIT + "\n{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"simple_status\",\"arguments\":{}}}")
+        expect(output.contains("\"id\":,")).to_equal(false)
+
+
+describe "simple-mcp: valid inputs still work after fixes":
+    # Regression: ensure normal inputs still produce correct responses.
+
+    it "simple_status works":
+        val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_status\",\"arguments\":{}}}")
+        expect(resp.contains("Working Directory")).to_equal(true)
+        expect(resp.contains("isError")).to_equal(true)
+
+    it "simple_read with missing path still returns error":
+        val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_read\",\"arguments\":{}}}")
+        expect(resp.contains("-32602")).to_equal(true)
+
+    it "simple_search with missing pattern still returns error":
+        val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"simple_search\",\"arguments\":{}}}")
+        expect(resp.contains("-32602")).to_equal(true)
+
+    it "unknown tool still returns -32601":
+        val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bogus_tool\",\"arguments\":{}}}")
+        expect(resp.contains("-32601")).to_equal(true)
+
+    it "method not found returns -32601":
+        val resp = run_msg("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"no_such_method\",\"params\":{}}")
+        expect(resp.contains("-32601")).to_equal(true)
