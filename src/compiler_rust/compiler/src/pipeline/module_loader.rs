@@ -399,6 +399,7 @@ pub fn load_module_with_imports_validated(
             path: ModulePath::new(vec!["std".to_string(), "shell".to_string()]),
             target: ImportTarget::Glob,
             is_type_only: false,
+            is_lazy: false,
         });
         module.items.insert(0, shell_import);
     }
@@ -448,6 +449,7 @@ pub fn load_module_with_imports_validated(
                 path: export_use.path.clone(),
                 target: export_use.target.clone(),
                 is_type_only: false,
+                is_lazy: false,
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
@@ -478,6 +480,7 @@ pub fn load_module_with_imports_validated(
                 path: common_use.path.clone(),
                 target: common_use.target.clone(),
                 is_type_only: false,
+                is_lazy: false,
             };
             if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                 let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
@@ -510,6 +513,7 @@ pub fn load_module_with_imports_validated(
                     path: module_path.clone(),
                     target: target.clone(),
                     is_type_only: multi_use.is_type_only,
+                    is_lazy: false,
                 };
                 if let Some(resolved) = resolve_use_to_path(&temp_use, path.parent().unwrap_or(Path::new("."))) {
                     let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;

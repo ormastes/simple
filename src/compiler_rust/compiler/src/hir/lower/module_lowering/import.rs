@@ -9,6 +9,7 @@ impl Lowerer {
         path: &ast::ModulePath,
         target: &ast::ImportTarget,
         is_type_only: bool,
+        is_lazy: bool,
     ) -> crate::hir::HirImport {
         let from_path = path.segments.clone();
         let (items, is_glob) = self.flatten_import_target(target);
@@ -18,6 +19,7 @@ impl Lowerer {
             items,
             is_glob,
             is_type_only,
+            is_lazy,
         }
     }
 

@@ -226,11 +226,20 @@ impl<'a> Parser<'a> {
     /// use crate.module.*
     /// use crate.module.Item as Alias
     /// use type crate.module.Item (type-only import)
+    /// use lazy crate.module.Item (deferred loading)
     pub(crate) fn parse_use(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Use)?;
 
-        // Check for 'type' keyword after 'use'
+        // Check for 'lazy' keyword after 'use'
+        let is_lazy = if self.check(&TokenKind::Lazy) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        // Check for 'type' keyword after 'use' (or 'use lazy')
         let is_type_only = if self.check(&TokenKind::Type) {
             self.advance();
             true
@@ -238,7 +247,13 @@ impl<'a> Parser<'a> {
             false
         };
 
-        self.parse_use_or_import_body(start_span, is_type_only)
+        let mut node = self.parse_use_or_import_body(start_span, is_type_only)?;
+        if is_lazy {
+            if let Node::UseStmt(ref mut use_stmt) = node {
+                use_stmt.is_lazy = true;
+            }
+        }
+        Ok(node)
     }
 
     /// Parse import statement (alias for use): import module.Item
@@ -376,6 +391,7 @@ impl<'a> Parser<'a> {
             path,
             target,
             is_type_only: false,
+            is_lazy: false,
         }))
     }
 
@@ -417,6 +433,7 @@ impl<'a> Parser<'a> {
                 path,
                 target,
                 is_type_only,
+                is_lazy: false,
             }))
         }
     }

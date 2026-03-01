@@ -680,7 +680,15 @@ fn execute_test_files(
         }
 
         let failed = result.failed > 0 || result.error.is_some();
+        let memory_abort = result.error.as_ref()
+            .map_or(false, |e| e.contains("MEMORY LIMIT"));
         results.push(result);
+
+        // Always abort on memory limit — continuing would just OOM the system.
+        if memory_abort {
+            eprintln!("[ABORT] Memory limit exceeded — stopping test run to prevent OOM");
+            break;
+        }
 
         // Stop on first failure if fail-fast
         if options.fail_fast && failed {

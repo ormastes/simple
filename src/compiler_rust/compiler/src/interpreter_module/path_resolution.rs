@@ -126,7 +126,13 @@ fn resolve_with_numbered_dirs(base: &Path, parts: &[String]) -> Option<PathBuf> 
         return None;
     }
 
-    resolve_with_numbered_dirs_recursive(base, parts, 0)
+    // Numbered directory resolution is disabled for now.
+    // Loading compiler source via numbered dirs (e.g., 10.frontend → frontend)
+    // causes the interpreter to load the entire compiler tree (~600K lines),
+    // consuming 4+ GB RAM per test and OOMing the test runner.
+    // TODO: Re-enable with a module loading depth/size limit.
+    let _ = base;
+    None
 }
 
 fn resolve_with_numbered_dirs_recursive(

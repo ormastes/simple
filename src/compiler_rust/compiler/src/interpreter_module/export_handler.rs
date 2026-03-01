@@ -41,6 +41,7 @@ pub fn load_export_source(
         path: export_stmt.path.clone(),
         target: ImportTarget::Glob, // Load entire module to get all exports
         is_type_only: false,        // Runtime export loading is never type-only
+        is_lazy: false,
     };
 
     match load_and_merge_module(&use_stmt, current_file, functions, classes, enums) {

@@ -89,6 +89,9 @@ pub struct HirImport {
     /// Type-only imports don't create runtime dependencies and are excluded
     /// from circular dependency detection.
     pub is_type_only: bool,
+    /// Whether this is a lazy import (`use lazy`)
+    /// Lazy imports defer module loading until first symbol access.
+    pub is_lazy: bool,
 }
 
 /// HIR representation of an impl block
