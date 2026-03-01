@@ -1,391 +1,387 @@
-describe "Async Spawn Analysis":
-    it "skipped":
-        skip("pre-existing test failures - functions/imports not available")
+#!/usr/bin/env simple
+# Spawn Boundedness Analysis Tests — Pass B
+#
+# Tests the compile-time spawn boundedness analysis for baremetal async.
+# Covers: utility functions, data structure construction, init phase
+# validation, instance limits, group capacity, combined checks, and formatting.
+#
+# NOTE: Tests operate at the data structure level (not AST walking) since
+# ExprKind enum constructors fail in interpreter mode. AST walking is
+# tested via integration tests.
 
-# #!/usr/bin/env simple
-# # Spawn Boundedness Analysis Tests — Pass B
-# #
-# # Tests the compile-time spawn boundedness analysis for baremetal async.
-# # Covers: utility functions, data structure construction, init phase
-# # validation, instance limits, group capacity, combined checks, and formatting.
-# #
-# # NOTE: Tests operate at the data structure level (not AST walking) since
-# # ExprKind enum constructors fail in interpreter mode. AST walking is
-# # tested via integration tests.
-# 
-# use compiler.desugar.spawn_analysis.{
-#     SpawnSite,
-#     TaskInfo,
-#     TaskGroupInfo,
-#     SpawnAnalysis,
-#     SpawnDiagnostic,
-#     SpawnVerifyResult,
-#     ScanResult,
-#     LEVEL_ERROR,
-#     LEVEL_WARNING,
-#     LEVEL_INFO,
-#     is_in_list,
-#     get_boot_spawn_count,
-#     add_boot_spawn,
-#     add_boot_spawn_counts,
-#     compute_init_reachable,
-#     verify_spawn_bounds,
-#     format_spawn_analysis,
-#     format_spawn_verify_result
-# }
-# use lexer.Span
-# 
-# # ================================================================
-# # Test Helpers
-# # ================================================================
-# 
-# fn dummy_span() -> Span:
-#     Span.new(0, 0, 1, 1)
-# 
-# fn make_spawn_site(task: text, caller: text, after_await: bool) -> SpawnSite:
-#     SpawnSite(
-#         task_name: task,
-#         caller_name: caller,
-#         is_after_await: after_await,
-#         span: dummy_span()
-#     )
-# 
-# fn make_task_info(name: text, instances: i64) -> TaskInfo:
-#     TaskInfo(name: name, instances: instances, group: nil)
-# 
-# fn make_task_info_grouped(name: text, instances: i64, group: text) -> TaskInfo:
-#     TaskInfo(name: name, instances: instances, group: Some(group))
-# 
-# fn make_group(name: text, cap: i64, members: [text]) -> TaskGroupInfo:
-#     TaskGroupInfo(name: name, cap: cap, members: members)
-# 
-# fn make_clean_analysis() -> SpawnAnalysis:
-#     # Create a valid analysis with 2 spawns within limits.
-#     SpawnAnalysis(
-#         init_functions: ["main"],
-#         init_reachable: ["main", "setup"],
-#         spawn_sites: [
-#             make_spawn_site("uart_rx", "main", false),
-#             make_spawn_site("spi_tx", "setup", false)
-#         ],
-#         task_infos: [
-#             make_task_info("uart_rx", 2),
-#             make_task_info("spi_tx", 2)
-#         ],
-#         group_infos: [],
-#         boot_spawn_names: ["uart_rx", "spi_tx"],
-#         boot_spawn_counts: [1, 1]
-#     )
-# 
-# fn make_analysis_with_outside_spawn() -> SpawnAnalysis:
-#     # Create an analysis with a spawn outside init-reachable.
-#     SpawnAnalysis(
-#         init_functions: ["main"],
-#         init_reachable: ["main"],
-#         spawn_sites: [
-#             make_spawn_site("uart_rx", "main", false),
-#             make_spawn_site("spi_tx", "runtime_handler", false)
-#         ],
-#         task_infos: [
-#             make_task_info("uart_rx", 2),
-#             make_task_info("spi_tx", 2)
-#         ],
-#         group_infos: [],
-#         boot_spawn_names: ["uart_rx"],
-#         boot_spawn_counts: [1]
-#     )
-# 
-# fn make_analysis_with_after_await() -> SpawnAnalysis:
-#     # Create an analysis with a spawn after an await.
-#     SpawnAnalysis(
-#         init_functions: ["main"],
-#         init_reachable: ["main"],
-#         spawn_sites: [
-#             make_spawn_site("uart_rx", "main", true)
-#         ],
-#         task_infos: [
-#             make_task_info("uart_rx", 2)
-#         ],
-#         group_infos: [],
-#         boot_spawn_names: ["uart_rx"],
-#         boot_spawn_counts: [1]
-#     )
-# 
-# # ================================================================
-# # Tests: is_in_list utility
-# # ================================================================
-# 
-# describe "is_in_list utility":
-#     it "finds existing name":
-#         expect(is_in_list("main", ["main", "setup", "init"])).to_equal(true)
-# 
-#     it "returns false for missing name":
-#         expect(is_in_list("handler", ["main", "setup"])).to_equal(false)
-# 
-#     it "returns false for empty list":
-#         expect(is_in_list("main", [])).to_equal(false)
-# 
-# # ================================================================
-# # Tests: get_boot_spawn_count
-# # ================================================================
-# 
-# describe "get_boot_spawn_count lookup":
-#     it "returns count for existing task":
-#         val names = ["uart_rx", "spi_tx"]
-#         val counts = [3, 2]
-#         expect(get_boot_spawn_count("uart_rx", names, counts)).to_equal(3)
-#         expect(get_boot_spawn_count("spi_tx", names, counts)).to_equal(2)
-# 
-#     it "returns zero for unknown task":
-#         val names = ["uart_rx"]
-#         val counts = [3]
-#         expect(get_boot_spawn_count("unknown", names, counts)).to_equal(0)
-# 
-#     it "returns zero for empty arrays":
-#         expect(get_boot_spawn_count("any", [], [])).to_equal(0)
-# 
-# # ================================================================
-# # Tests: Init phase validation
-# # ================================================================
-# 
-# describe "Init phase validation":
-#     it "passes when all spawns in init-reachable":
-#         val sa = make_clean_analysis()
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(false)
-#         expect(result.total_spawns).to_equal(2)
-# 
-#     it "errors when spawn outside init-reachable":
-#         val sa = make_analysis_with_outside_spawn()
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(true)
-#         var found_outside = false
-#         for diag in result.diagnostics:
-#             if diag.message.contains("outside init phase"):
-#                 found_outside = true
-#         expect(found_outside).to_equal(true)
-# 
-#     it "errors when spawn after await":
-#         val sa = make_analysis_with_after_await()
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(true)
-#         var found_after = false
-#         for diag in result.diagnostics:
-#             if diag.message.contains("after await"):
-#                 found_after = true
-#         expect(found_after).to_equal(true)
-# 
-# # ================================================================
-# # Tests: Instance limits
-# # ================================================================
-# 
-# describe "Instance limits":
-#     it "passes when spawns within instance count":
-#         val sa = SpawnAnalysis(
-#             init_functions: ["main"],
-#             init_reachable: ["main"],
-#             spawn_sites: [make_spawn_site("uart_rx", "main", false)],
-#             task_infos: [make_task_info("uart_rx", 4)],
-#             group_infos: [],
-#             boot_spawn_names: ["uart_rx"],
-#             boot_spawn_counts: [2]
-#         )
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(false)
-# 
-#     it "passes when spawns equal instance count":
-#         val sa = SpawnAnalysis(
-#             init_functions: ["main"],
-#             init_reachable: ["main"],
-#             spawn_sites: [make_spawn_site("uart_rx", "main", false)],
-#             task_infos: [make_task_info("uart_rx", 3)],
-#             group_infos: [],
-#             boot_spawn_names: ["uart_rx"],
-#             boot_spawn_counts: [3]
-#         )
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(false)
-# 
-#     it "errors when spawns exceed instance count":
-#         val sa = SpawnAnalysis(
-#             init_functions: ["main"],
-#             init_reachable: ["main"],
-#             spawn_sites: [make_spawn_site("uart_rx", "main", false)],
-#             task_infos: [make_task_info("uart_rx", 2)],
-#             group_infos: [],
-#             boot_spawn_names: ["uart_rx"],
-#             boot_spawn_counts: [5]
-#         )
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(true)
-#         var found_instance_error = false
-#         for diag in result.diagnostics:
-#             if diag.message.contains("spawned 5 times") and diag.message.contains("instances=2"):
-#                 found_instance_error = true
-#         expect(found_instance_error).to_equal(true)
-# 
-# # ================================================================
-# # Tests: Group capacity
-# # ================================================================
-# 
-# describe "Group capacity":
-#     it "passes when group total within cap":
-#         val sa = SpawnAnalysis(
-#             init_functions: ["main"],
-#             init_reachable: ["main"],
-#             spawn_sites: [
-#                 make_spawn_site("uart_rx", "main", false),
-#                 make_spawn_site("spi_tx", "main", false)
-#             ],
-#             task_infos: [
-#                 make_task_info_grouped("uart_rx", 4, "io_pool"),
-#                 make_task_info_grouped("spi_tx", 4, "io_pool")
-#             ],
-#             group_infos: [make_group("io_pool", 6, ["uart_rx", "spi_tx"])],
-#             boot_spawn_names: ["uart_rx", "spi_tx"],
-#             boot_spawn_counts: [2, 3]
-#         )
-#         val result = verify_spawn_bounds(sa)
-#         # Grouped tasks skip individual instance check (group != nil)
-#         # Group total 2+3=5 <= 6 cap
-#         expect(result.has_errors).to_equal(false)
-# 
-#     it "errors when group total exceeds cap":
-#         val sa = SpawnAnalysis(
-#             init_functions: ["main"],
-#             init_reachable: ["main"],
-#             spawn_sites: [
-#                 make_spawn_site("uart_rx", "main", false),
-#                 make_spawn_site("spi_tx", "main", false)
-#             ],
-#             task_infos: [
-#                 make_task_info_grouped("uart_rx", 10, "io_pool"),
-#                 make_task_info_grouped("spi_tx", 10, "io_pool")
-#             ],
-#             group_infos: [make_group("io_pool", 4, ["uart_rx", "spi_tx"])],
-#             boot_spawn_names: ["uart_rx", "spi_tx"],
-#             boot_spawn_counts: [3, 3]
-#         )
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(true)
-#         var found_group_error = false
-#         for diag in result.diagnostics:
-#             if diag.message.contains("task group") and diag.message.contains("cap=4"):
-#                 found_group_error = true
-#         expect(found_group_error).to_equal(true)
-# 
-# # ================================================================
-# # Tests: Combined checks
-# # ================================================================
-# 
-# describe "Combined checks":
-#     it "reports multiple errors at once":
-#         val sa = SpawnAnalysis(
-#             init_functions: ["main"],
-#             init_reachable: ["main"],
-#             spawn_sites: [
-#                 make_spawn_site("uart_rx", "main", true),
-#                 make_spawn_site("spi_tx", "handler", false)
-#             ],
-#             task_infos: [
-#                 make_task_info("uart_rx", 1),
-#                 make_task_info("spi_tx", 1)
-#             ],
-#             group_infos: [],
-#             boot_spawn_names: ["uart_rx"],
-#             boot_spawn_counts: [1]
-#         )
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(true)
-#         # Should have at least 2 errors: after-await + outside init
-#         expect(result.diagnostics.len()).to_be_greater_than(1)
-# 
-#     it "passes clean module with no issues":
-#         val sa = make_clean_analysis()
-#         val result = verify_spawn_bounds(sa)
-#         expect(result.has_errors).to_equal(false)
-#         expect(result.diagnostics.len()).to_equal(0)
-#         expect(result.total_spawns).to_equal(2)
-# 
-# # ================================================================
-# # Tests: Data structure construction
-# # ================================================================
-# 
-# describe "Data structure construction":
-#     it "creates SpawnSite correctly":
-#         val site = make_spawn_site("uart_rx", "main", false)
-#         expect(site.task_name).to_equal("uart_rx")
-#         expect(site.caller_name).to_equal("main")
-#         expect(site.is_after_await).to_equal(false)
-# 
-#     it "creates TaskInfo correctly":
-#         val info = make_task_info("uart_rx", 4)
-#         expect(info.name).to_equal("uart_rx")
-#         expect(info.instances).to_equal(4)
-#         expect(info.group).to_be_nil()
-# 
-#     it "creates TaskGroupInfo correctly":
-#         val group = make_group("io_pool", 8, ["uart_rx", "spi_tx"])
-#         expect(group.name).to_equal("io_pool")
-#         expect(group.cap).to_equal(8)
-#         expect(group.members.len()).to_equal(2)
-# 
-#     it "creates SpawnAnalysis correctly":
-#         val sa = make_clean_analysis()
-#         expect(sa.init_functions.len()).to_equal(1)
-#         expect(sa.init_reachable.len()).to_equal(2)
-#         expect(sa.spawn_sites.len()).to_equal(2)
-#         expect(sa.task_infos.len()).to_equal(2)
-#         expect(sa.boot_spawn_names.len()).to_equal(2)
-#         expect(sa.boot_spawn_counts.len()).to_equal(2)
-# 
-# # ================================================================
-# # Tests: compute_init_reachable
-# # ================================================================
-# 
-# describe "compute_init_reachable":
-#     it "includes init functions themselves":
-#         val reachable = compute_init_reachable(["main"], [], [])
-#         expect(is_in_list("main", reachable)).to_equal(true)
-# 
-#     it "follows direct calls":
-#         val callers = ["main", "main"]
-#         val callees = ["setup", "init_hw"]
-#         val reachable = compute_init_reachable(["main"], callers, callees)
-#         expect(is_in_list("main", reachable)).to_equal(true)
-#         expect(is_in_list("setup", reachable)).to_equal(true)
-#         expect(is_in_list("init_hw", reachable)).to_equal(true)
-# 
-#     it "follows transitive calls":
-#         val callers = ["main", "setup"]
-#         val callees = ["setup", "init_hw"]
-#         val reachable = compute_init_reachable(["main"], callers, callees)
-#         expect(is_in_list("init_hw", reachable)).to_equal(true)
-# 
-#     it "excludes unreachable functions":
-#         val callers = ["main", "handler"]
-#         val callees = ["setup", "process"]
-#         val reachable = compute_init_reachable(["main"], callers, callees)
-#         expect(is_in_list("setup", reachable)).to_equal(true)
-#         expect(is_in_list("handler", reachable)).to_equal(false)
-#         expect(is_in_list("process", reachable)).to_equal(false)
-# 
-# # ================================================================
-# # Tests: Formatting
-# # ================================================================
-# 
-# describe "Spawn analysis formatting":
-#     it "produces non-empty report":
-#         val sa = make_clean_analysis()
-#         val report = format_spawn_analysis(sa)
-#         expect(report.len()).to_be_greater_than(0)
-#         expect(report).to_contain("Spawn Analysis:")
-#         expect(report).to_contain("Init functions:")
-#         expect(report).to_contain("Spawn sites:")
-# 
-#     it "formats verification result":
-#         val sa = make_clean_analysis()
-#         val result = verify_spawn_bounds(sa)
-#         val output = format_spawn_verify_result(result)
-#         expect(output).to_contain("Spawn Verification:")
-#         expect(output).to_contain("All spawn checks passed.")
+use compiler.desugar.spawn_analysis.{
+    SpawnSite,
+    TaskInfo,
+    TaskGroupInfo,
+    SpawnAnalysis,
+    SpawnDiagnostic,
+    SpawnVerifyResult,
+    ScanResult,
+    LEVEL_ERROR,
+    LEVEL_WARNING,
+    LEVEL_INFO,
+    is_in_list,
+    get_boot_spawn_count,
+    add_boot_spawn,
+    add_boot_spawn_counts,
+    compute_init_reachable,
+    verify_spawn_bounds,
+    format_spawn_analysis,
+    format_spawn_verify_result
+}
+use lexer.Span
+
+# ================================================================
+# Test Helpers
+# ================================================================
+
+fn dummy_span() -> Span:
+    Span.new(0, 0, 1, 1)
+
+fn make_spawn_site(task: text, caller: text, after_await: bool) -> SpawnSite:
+    SpawnSite(
+        task_name: task,
+        caller_name: caller,
+        is_after_await: after_await,
+        span: dummy_span()
+    )
+
+fn make_task_info(name: text, instances: i64) -> TaskInfo:
+    TaskInfo(name: name, instances: instances, group: nil)
+
+fn make_task_info_grouped(name: text, instances: i64, group: text) -> TaskInfo:
+    TaskInfo(name: name, instances: instances, group: Some(group))
+
+fn make_group(name: text, cap: i64, members: [text]) -> TaskGroupInfo:
+    TaskGroupInfo(name: name, cap: cap, members: members)
+
+fn make_clean_analysis() -> SpawnAnalysis:
+    # Create a valid analysis with 2 spawns within limits.
+    SpawnAnalysis(
+        init_functions: ["main"],
+        init_reachable: ["main", "setup"],
+        spawn_sites: [
+            make_spawn_site("uart_rx", "main", false),
+            make_spawn_site("spi_tx", "setup", false)
+        ],
+        task_infos: [
+            make_task_info("uart_rx", 2),
+            make_task_info("spi_tx", 2)
+        ],
+        group_infos: [],
+        boot_spawn_names: ["uart_rx", "spi_tx"],
+        boot_spawn_counts: [1, 1]
+    )
+
+fn make_analysis_with_outside_spawn() -> SpawnAnalysis:
+    # Create an analysis with a spawn outside init-reachable.
+    SpawnAnalysis(
+        init_functions: ["main"],
+        init_reachable: ["main"],
+        spawn_sites: [
+            make_spawn_site("uart_rx", "main", false),
+            make_spawn_site("spi_tx", "runtime_handler", false)
+        ],
+        task_infos: [
+            make_task_info("uart_rx", 2),
+            make_task_info("spi_tx", 2)
+        ],
+        group_infos: [],
+        boot_spawn_names: ["uart_rx"],
+        boot_spawn_counts: [1]
+    )
+
+fn make_analysis_with_after_await() -> SpawnAnalysis:
+    # Create an analysis with a spawn after an await.
+    SpawnAnalysis(
+        init_functions: ["main"],
+        init_reachable: ["main"],
+        spawn_sites: [
+            make_spawn_site("uart_rx", "main", true)
+        ],
+        task_infos: [
+            make_task_info("uart_rx", 2)
+        ],
+        group_infos: [],
+        boot_spawn_names: ["uart_rx"],
+        boot_spawn_counts: [1]
+    )
+
+# ================================================================
+# Tests: is_in_list utility
+# ================================================================
+
+describe "is_in_list utility":
+    it "finds existing name":
+        expect(is_in_list("main", ["main", "setup", "init"])).to_equal(true)
+
+    it "returns false for missing name":
+        expect(is_in_list("handler", ["main", "setup"])).to_equal(false)
+
+    it "returns false for empty list":
+        expect(is_in_list("main", [])).to_equal(false)
+
+# ================================================================
+# Tests: get_boot_spawn_count
+# ================================================================
+
+describe "get_boot_spawn_count lookup":
+    it "returns count for existing task":
+        val names = ["uart_rx", "spi_tx"]
+        val counts = [3, 2]
+        expect(get_boot_spawn_count("uart_rx", names, counts)).to_equal(3)
+        expect(get_boot_spawn_count("spi_tx", names, counts)).to_equal(2)
+
+    it "returns zero for unknown task":
+        val names = ["uart_rx"]
+        val counts = [3]
+        expect(get_boot_spawn_count("unknown", names, counts)).to_equal(0)
+
+    it "returns zero for empty arrays":
+        expect(get_boot_spawn_count("any", [], [])).to_equal(0)
+
+# ================================================================
+# Tests: Init phase validation
+# ================================================================
+
+describe "Init phase validation":
+    it "passes when all spawns in init-reachable":
+        val sa = make_clean_analysis()
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(false)
+        expect(result.total_spawns).to_equal(2)
+
+    it "errors when spawn outside init-reachable":
+        val sa = make_analysis_with_outside_spawn()
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(true)
+        var found_outside = false
+        for diag in result.diagnostics:
+            if diag.message.contains("outside init phase"):
+                found_outside = true
+        expect(found_outside).to_equal(true)
+
+    it "errors when spawn after await":
+        val sa = make_analysis_with_after_await()
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(true)
+        var found_after = false
+        for diag in result.diagnostics:
+            if diag.message.contains("after await"):
+                found_after = true
+        expect(found_after).to_equal(true)
+
+# ================================================================
+# Tests: Instance limits
+# ================================================================
+
+describe "Instance limits":
+    it "passes when spawns within instance count":
+        val sa = SpawnAnalysis(
+            init_functions: ["main"],
+            init_reachable: ["main"],
+            spawn_sites: [make_spawn_site("uart_rx", "main", false)],
+            task_infos: [make_task_info("uart_rx", 4)],
+            group_infos: [],
+            boot_spawn_names: ["uart_rx"],
+            boot_spawn_counts: [2]
+        )
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(false)
+
+    it "passes when spawns equal instance count":
+        val sa = SpawnAnalysis(
+            init_functions: ["main"],
+            init_reachable: ["main"],
+            spawn_sites: [make_spawn_site("uart_rx", "main", false)],
+            task_infos: [make_task_info("uart_rx", 3)],
+            group_infos: [],
+            boot_spawn_names: ["uart_rx"],
+            boot_spawn_counts: [3]
+        )
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(false)
+
+    it "errors when spawns exceed instance count":
+        val sa = SpawnAnalysis(
+            init_functions: ["main"],
+            init_reachable: ["main"],
+            spawn_sites: [make_spawn_site("uart_rx", "main", false)],
+            task_infos: [make_task_info("uart_rx", 2)],
+            group_infos: [],
+            boot_spawn_names: ["uart_rx"],
+            boot_spawn_counts: [5]
+        )
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(true)
+        var found_instance_error = false
+        for diag in result.diagnostics:
+            if diag.message.contains("spawned 5 times") and diag.message.contains("instances=2"):
+                found_instance_error = true
+        expect(found_instance_error).to_equal(true)
+
+# ================================================================
+# Tests: Group capacity
+# ================================================================
+
+describe "Group capacity":
+    it "passes when group total within cap":
+        val sa = SpawnAnalysis(
+            init_functions: ["main"],
+            init_reachable: ["main"],
+            spawn_sites: [
+                make_spawn_site("uart_rx", "main", false),
+                make_spawn_site("spi_tx", "main", false)
+            ],
+            task_infos: [
+                make_task_info_grouped("uart_rx", 4, "io_pool"),
+                make_task_info_grouped("spi_tx", 4, "io_pool")
+            ],
+            group_infos: [make_group("io_pool", 6, ["uart_rx", "spi_tx"])],
+            boot_spawn_names: ["uart_rx", "spi_tx"],
+            boot_spawn_counts: [2, 3]
+        )
+        val result = verify_spawn_bounds(sa)
+        # Grouped tasks skip individual instance check (group != nil)
+        # Group total 2+3=5 <= 6 cap
+        expect(result.has_errors).to_equal(false)
+
+    it "errors when group total exceeds cap":
+        val sa = SpawnAnalysis(
+            init_functions: ["main"],
+            init_reachable: ["main"],
+            spawn_sites: [
+                make_spawn_site("uart_rx", "main", false),
+                make_spawn_site("spi_tx", "main", false)
+            ],
+            task_infos: [
+                make_task_info_grouped("uart_rx", 10, "io_pool"),
+                make_task_info_grouped("spi_tx", 10, "io_pool")
+            ],
+            group_infos: [make_group("io_pool", 4, ["uart_rx", "spi_tx"])],
+            boot_spawn_names: ["uart_rx", "spi_tx"],
+            boot_spawn_counts: [3, 3]
+        )
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(true)
+        var found_group_error = false
+        for diag in result.diagnostics:
+            if diag.message.contains("task group") and diag.message.contains("cap=4"):
+                found_group_error = true
+        expect(found_group_error).to_equal(true)
+
+# ================================================================
+# Tests: Combined checks
+# ================================================================
+
+describe "Combined checks":
+    it "reports multiple errors at once":
+        val sa = SpawnAnalysis(
+            init_functions: ["main"],
+            init_reachable: ["main"],
+            spawn_sites: [
+                make_spawn_site("uart_rx", "main", true),
+                make_spawn_site("spi_tx", "handler", false)
+            ],
+            task_infos: [
+                make_task_info("uart_rx", 1),
+                make_task_info("spi_tx", 1)
+            ],
+            group_infos: [],
+            boot_spawn_names: ["uart_rx"],
+            boot_spawn_counts: [1]
+        )
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(true)
+        # Should have at least 2 errors: after-await + outside init
+        expect(result.diagnostics.len()).to_be_greater_than(1)
+
+    it "passes clean module with no issues":
+        val sa = make_clean_analysis()
+        val result = verify_spawn_bounds(sa)
+        expect(result.has_errors).to_equal(false)
+        expect(result.diagnostics.len()).to_equal(0)
+        expect(result.total_spawns).to_equal(2)
+
+# ================================================================
+# Tests: Data structure construction
+# ================================================================
+
+describe "Data structure construction":
+    it "creates SpawnSite correctly":
+        val site = make_spawn_site("uart_rx", "main", false)
+        expect(site.task_name).to_equal("uart_rx")
+        expect(site.caller_name).to_equal("main")
+        expect(site.is_after_await).to_equal(false)
+
+    it "creates TaskInfo correctly":
+        val info = make_task_info("uart_rx", 4)
+        expect(info.name).to_equal("uart_rx")
+        expect(info.instances).to_equal(4)
+        expect(info.group).to_be_nil()
+
+    it "creates TaskGroupInfo correctly":
+        val group = make_group("io_pool", 8, ["uart_rx", "spi_tx"])
+        expect(group.name).to_equal("io_pool")
+        expect(group.cap).to_equal(8)
+        expect(group.members.len()).to_equal(2)
+
+    it "creates SpawnAnalysis correctly":
+        val sa = make_clean_analysis()
+        expect(sa.init_functions.len()).to_equal(1)
+        expect(sa.init_reachable.len()).to_equal(2)
+        expect(sa.spawn_sites.len()).to_equal(2)
+        expect(sa.task_infos.len()).to_equal(2)
+        expect(sa.boot_spawn_names.len()).to_equal(2)
+        expect(sa.boot_spawn_counts.len()).to_equal(2)
+
+# ================================================================
+# Tests: compute_init_reachable
+# ================================================================
+
+describe "compute_init_reachable":
+    it "includes init functions themselves":
+        val reachable = compute_init_reachable(["main"], [], [])
+        expect(is_in_list("main", reachable)).to_equal(true)
+
+    it "follows direct calls":
+        val callers = ["main", "main"]
+        val callees = ["setup", "init_hw"]
+        val reachable = compute_init_reachable(["main"], callers, callees)
+        expect(is_in_list("main", reachable)).to_equal(true)
+        expect(is_in_list("setup", reachable)).to_equal(true)
+        expect(is_in_list("init_hw", reachable)).to_equal(true)
+
+    it "follows transitive calls":
+        val callers = ["main", "setup"]
+        val callees = ["setup", "init_hw"]
+        val reachable = compute_init_reachable(["main"], callers, callees)
+        expect(is_in_list("init_hw", reachable)).to_equal(true)
+
+    it "excludes unreachable functions":
+        val callers = ["main", "handler"]
+        val callees = ["setup", "process"]
+        val reachable = compute_init_reachable(["main"], callers, callees)
+        expect(is_in_list("setup", reachable)).to_equal(true)
+        expect(is_in_list("handler", reachable)).to_equal(false)
+        expect(is_in_list("process", reachable)).to_equal(false)
+
+# ================================================================
+# Tests: Formatting
+# ================================================================
+
+describe "Spawn analysis formatting":
+    it "produces non-empty report":
+        val sa = make_clean_analysis()
+        val report = format_spawn_analysis(sa)
+        expect(report.len()).to_be_greater_than(0)
+        expect(report).to_contain("Spawn Analysis:")
+        expect(report).to_contain("Init functions:")
+        expect(report).to_contain("Spawn sites:")
+
+    it "formats verification result":
+        val sa = make_clean_analysis()
+        val result = verify_spawn_bounds(sa)
+        val output = format_spawn_verify_result(result)
+        expect(output).to_contain("Spawn Verification:")
+        expect(output).to_contain("All spawn checks passed.")

@@ -318,6 +318,23 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         type_bindings: std::collections::HashMap::new(),
                     },
                 );
+                // Register static methods as mangled free functions (StructName__method)
+                for method in &s.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", s.name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: Env::new(),
+                            },
+                        );
+                    }
+                }
             }
             Node::Enum(e) => {
                 enums.insert(e.name.clone(), e.clone());
@@ -420,6 +437,23 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         class_name: final_class.name.clone(),
                     },
                 );
+                // Register static methods as mangled free functions (ClassName__method)
+                for method in &final_class.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", final_class.name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: Env::new(),
+                            },
+                        );
+                    }
+                }
             }
             Node::Impl(impl_block) => {
                 // Check if this is a blanket impl: has #[default] attribute AND generic params
@@ -449,6 +483,24 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // Also add impl methods to class/struct definition for Constructor method dispatch
                     if let Some(class_def) = classes.get_mut(&type_name) {
                         class_def.methods.extend(impl_block.methods.clone());
+                    }
+
+                    // Register static methods from impl blocks as mangled free functions
+                    for method in &impl_block.methods {
+                        let is_static = method.is_static
+                            || !method.params.iter().any(|p| p.name == "self");
+                        if is_static {
+                            let mangled = format!("{}__{}", type_name, method.name);
+                            functions.insert(mangled.clone(), method.clone());
+                            env.insert(
+                                mangled.clone(),
+                                Value::Function {
+                                    name: mangled,
+                                    def: Box::new(method.clone()),
+                                    captured_env: Env::new(),
+                                },
+                            );
+                        }
                     }
 
                     // If this is a trait implementation, verify and register it

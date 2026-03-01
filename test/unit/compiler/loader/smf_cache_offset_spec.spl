@@ -1,422 +1,418 @@
-describe "Smf Cache Offset":
-    it "skipped":
-        skip("imports compiler modules - causes OOM via numbered directory resolution")
+# SMF Cache Section Table Offset Caching Specification
+#
+# Tests for the memory efficiency fix in smf_cache.spl:
+# - MappedSmf now stores section_table_offset as a struct field
+# - read_section() uses cached offset instead of re-reading 128-byte trailer
+# - Eliminates redundant mmap_read_bytes + parsing on every read_section() call
+#
+# Since MappedSmf requires actual mmap operations on real SMF files,
+# these tests focus on:
+# 1. MappedSmf struct construction with section_table_offset field
+# 2. SmfCache behavior (create, get, evict, stats)
+# 3. CacheStats tracking
+# 4. The data patterns used in section table parsing
 
-# # SMF Cache Section Table Offset Caching Specification
-# #
-# # Tests for the memory efficiency fix in smf_cache.spl:
-# # - MappedSmf now stores section_table_offset as a struct field
-# # - read_section() uses cached offset instead of re-reading 128-byte trailer
-# # - Eliminates redundant mmap_read_bytes + parsing on every read_section() call
-# #
-# # Since MappedSmf requires actual mmap operations on real SMF files,
-# # these tests focus on:
-# # 1. MappedSmf struct construction with section_table_offset field
-# # 2. SmfCache behavior (create, get, evict, stats)
-# # 3. CacheStats tracking
-# # 4. The data patterns used in section table parsing
-# 
-# use compiler.loader.smf_cache.*
-# 
-# # ============================================================================
-# # Test Group 1: MappedSmf Struct with section_table_offset
-# # ============================================================================
-# 
-# describe "MappedSmf struct with section_table_offset field":
-#     it "section_table_offset field exists and initializes":
-#         # Verify the new field is part of the struct definition
-#         # MappedSmf has: path, address, size, header, note_sdn,
-#         #   template_section_offset, note_sdn_section_offset, section_table_offset
-#         # The field is set during open() and used in read_section()
-#         pass
-# 
-#     it "section_table_offset is cached from open time":
-#         # After MappedSmf.open(), the section_table_offset field
-#         # should be populated from the trailer parse (bytes[16..24])
-#         # read_section() should use self.section_table_offset
-#         # instead of re-reading the trailer
-#         pass
-# 
-# 
-# # ============================================================================
-# # Test Group 2: CacheStats Struct
-# # ============================================================================
-# 
-# describe "CacheStats":
-#     it "creates with zeroed fields":
-#         val stats = CacheStats(
-#             total_files: 0,
-#             total_memory: 0,
-#             cache_hits: 0,
-#             cache_misses: 0
-#         )
-# 
-#         expect(stats.total_files).to_equal(0)
-#         expect(stats.total_memory).to_equal(0)
-#         expect(stats.cache_hits).to_equal(0)
-#         expect(stats.cache_misses).to_equal(0)
-# 
-#     it "stores file count correctly":
-#         val stats = CacheStats(
-#             total_files: 5,
-#             total_memory: 1024000,
-#             cache_hits: 10,
-#             cache_misses: 3
-#         )
-# 
-#         expect(stats.total_files).to_equal(5)
-#         expect(stats.total_memory).to_equal(1024000)
-#         expect(stats.cache_hits).to_equal(10)
-#         expect(stats.cache_misses).to_equal(3)
-# 
-#     it "tracks large memory values":
-#         val stats = CacheStats(
-#             total_files: 100,
-#             total_memory: 1073741824,
-#             cache_hits: 5000,
-#             cache_misses: 200
-#         )
-# 
-#         expect(stats.total_memory).to_equal(1073741824)
-#         expect(stats.cache_hits).to_equal(5000)
-# 
-# 
-# # ============================================================================
-# # Test Group 3: SmfCache Creation
-# # ============================================================================
-# 
-# describe "SmfCache":
-#     it "new() creates empty cache":
-#         val cache = SmfCache.new()
-# 
-#         expect(cache.enabled).to_equal(true)
-#         expect(cache.cached_count()).to_equal(0)
-# 
-#     it "new() initializes stats to zero":
-#         val cache = SmfCache.new()
-#         val stats = cache.get_stats()
-# 
-#         expect(stats.total_files).to_equal(0)
-#         expect(stats.total_memory).to_equal(0)
-#         expect(stats.cache_hits).to_equal(0)
-#         expect(stats.cache_misses).to_equal(0)
-# 
-#     it "is_cached returns false for uncached path":
-#         val cache = SmfCache.new()
-# 
-#         expect(cache.is_cached("/nonexistent.smf")).to_equal(false)
-# 
-#     it "cached_count returns 0 for empty cache":
-#         val cache = SmfCache.new()
-# 
-#         expect(cache.cached_count()).to_equal(0)
-# 
-# 
-# # ============================================================================
-# # Test Group 4: bytes_to_u32 Helper
-# # ============================================================================
-# 
-# describe "bytes_to_u32 helper":
-#     it "converts zero bytes":
-#         val bytes: [u8] = [0, 0, 0, 0]
-#         val result = bytes_to_u32(bytes)
-#         expect(result).to_equal(0)
-# 
-#     it "converts single byte":
-#         val bytes: [u8] = [42, 0, 0, 0]
-#         val result = bytes_to_u32(bytes)
-#         expect(result).to_equal(42)
-# 
-#     it "converts two bytes little-endian":
-#         # 0x0100 = 256 in little-endian is [0, 1, 0, 0]
-#         val bytes: [u8] = [0, 1, 0, 0]
-#         val result = bytes_to_u32(bytes)
-#         expect(result).to_equal(256)
-# 
-#     it "converts full u32 little-endian":
-#         # 0x04030201 in little-endian is [1, 2, 3, 4]
-#         val bytes: [u8] = [1, 2, 3, 4]
-#         val result = bytes_to_u32(bytes)
-#         # 1 + 2*256 + 3*65536 + 4*16777216 = 1 + 512 + 196608 + 67108864 = 67305985
-#         expect(result).to_equal(67305985)
-# 
-#     it "handles 0xFF bytes":
-#         val bytes: [u8] = [0xFF, 0, 0, 0]
-#         val result = bytes_to_u32(bytes)
-#         expect(result).to_equal(255)
-# 
-#     it "returns 0 for short array":
-#         val bytes: [u8] = [1, 2]
-#         val result = bytes_to_u32(bytes)
-#         expect(result).to_equal(0)
-# 
-#     it "returns 0 for empty array":
-#         val bytes: [u8] = []
-#         val result = bytes_to_u32(bytes)
-#         expect(result).to_equal(0)
-# 
-# 
-# # ============================================================================
-# # Test Group 5: Section Table Offset Computation Pattern
-# # ============================================================================
-# 
-# describe "Section table offset computation":
-#     # Tests the pattern used to compute section_table_offset from trailer bytes.
-#     # This is the value now cached in MappedSmf.section_table_offset
-# 
-#     it "computes 32-bit offset from trailer bytes":
-#         # Simulate trailer bytes at offset 16..20 (section table offset low)
-#         val lo_bytes: [u8] = [0x00, 0x10, 0x00, 0x00]  # 0x1000 = 4096
-#         val lo = bytes_to_u32(lo_bytes)
-# 
-#         expect(lo).to_equal(4096)
-# 
-#     it "computes 64-bit offset from low and high words":
-#         # section_table_offset = lo | (hi << 32)
-#         val lo_bytes: [u8] = [0x00, 0x10, 0x00, 0x00]  # 4096
-#         val hi_bytes: [u8] = [0x00, 0x00, 0x00, 0x00]  # 0
-# 
-#         val lo: i64 = bytes_to_u32(lo_bytes)
-#         val hi: i64 = bytes_to_u32(hi_bytes)
-#         val offset = lo | (hi << 32)
-# 
-#         expect(offset).to_equal(4096)
-# 
-#     it "computes large 64-bit offset":
-#         val lo_bytes: [u8] = [0x00, 0x00, 0x00, 0x00]  # 0
-#         val hi_bytes: [u8] = [0x01, 0x00, 0x00, 0x00]  # 1
-# 
-#         val lo: i64 = bytes_to_u32(lo_bytes)
-#         val hi: i64 = bytes_to_u32(hi_bytes)
-#         val offset = lo | (hi << 32)
-# 
-#         # 1 << 32 = 4294967296
-#         expect(offset).to_equal(4294967296)
-# 
-#     it "section entry offset calculation":
-#         # Each section table entry is 64 bytes
-#         # entry_offset = section_table_offset + (section_index * 64)
-#         val section_table_offset: i64 = 4096
-#         val section_index: i64 = 3
-# 
-#         val entry_offset = section_table_offset + (section_index * 64)
-# 
-#         # 4096 + 3*64 = 4096 + 192 = 4288
-#         expect(entry_offset).to_equal(4288)
-# 
-#     it "validates section index bounds":
-#         val section_count = 5
-#         val valid_index = 3
-#         val invalid_index = 5
-# 
-#         expect(valid_index < section_count).to_equal(true)
-#         expect(invalid_index < section_count).to_equal(false)
-# 
-# 
-# # ============================================================================
-# # Test Group 6: Section Data Offset Extraction Pattern
-# # ============================================================================
-# 
-# describe "Section data offset extraction":
-#     # Tests the byte parsing pattern used in read_section()
-# 
-#     it "extracts data offset from entry bytes":
-#         # Section data offset at entry bytes[16..24] (8 bytes, little-endian)
-#         val entry_bytes: [u8] = [
-#             0, 0, 0, 0,  # offset 0-3: name_offset
-#             0, 0, 0, 0,  # offset 4-7: name_len
-#             0, 0, 0, 0,  # offset 8-11: type
-#             0, 0, 0, 0,  # offset 12-15: flags
-#             0x00, 0x20, 0x00, 0x00,  # offset 16-19: data_offset_lo = 0x2000 = 8192
-#             0x00, 0x00, 0x00, 0x00,  # offset 20-23: data_offset_hi = 0
-#             0x00, 0x04, 0x00, 0x00,  # offset 24-27: data_size_lo = 0x400 = 1024
-#             0x00, 0x00, 0x00, 0x00   # offset 28-31: data_size_hi = 0
-#         ]
-# 
-#         val data_offset_lo: i64 = bytes_to_u32([entry_bytes[16], entry_bytes[17], entry_bytes[18], entry_bytes[19]])
-#         val data_offset_hi: i64 = bytes_to_u32([entry_bytes[20], entry_bytes[21], entry_bytes[22], entry_bytes[23]])
-#         val data_offset = data_offset_lo | (data_offset_hi << 32)
-# 
-#         val data_size_lo: i64 = bytes_to_u32([entry_bytes[24], entry_bytes[25], entry_bytes[26], entry_bytes[27]])
-#         val data_size_hi: i64 = bytes_to_u32([entry_bytes[28], entry_bytes[29], entry_bytes[30], entry_bytes[31]])
-#         val data_size = data_size_lo | (data_size_hi << 32)
-# 
-#         expect(data_offset).to_equal(8192)
-#         expect(data_size).to_equal(1024)
-# 
-#     it "validates data does not extend beyond file":
-#         val file_size: i64 = 10000
-#         val data_offset: i64 = 8192
-#         val data_size: i64 = 1024
-# 
-#         # 8192 + 1024 = 9216 < 10000 — valid
-#         expect(data_offset + data_size > file_size).to_equal(false)
-# 
-#     it "detects data extending beyond file":
-#         val file_size: i64 = 10000
-#         val data_offset: i64 = 9500
-#         val data_size: i64 = 1024
-# 
-#         # 9500 + 1024 = 10524 > 10000 — invalid
-#         expect(data_offset + data_size > file_size).to_equal(true)
-# 
-# 
-# # ============================================================================
-# # Test Group 7: SMF Header Magic Validation Pattern
-# # ============================================================================
-# 
-# describe "SMF header magic validation":
-#     it "validates correct SMF magic bytes":
-#         val magic: [u8] = [0x53, 0x4D, 0x46, 0x00]  # "SMF\0"
-# 
-#         val has_magic = (magic[0] == 0x53 and magic[1] == 0x4D and magic[2] == 0x46 and magic[3] == 0x00)
-#         expect(has_magic).to_equal(true)
-# 
-#     it "rejects wrong magic bytes":
-#         val wrong: [u8] = [0x45, 0x4C, 0x46, 0x00]  # "ELF\0"
-# 
-#         val has_magic = (wrong[0] == 0x53 and wrong[1] == 0x4D and wrong[2] == 0x46 and wrong[3] == 0x00)
-#         expect(has_magic).to_equal(false)
-# 
-#     it "validates version bytes":
-#         val version_major: u8 = 1
-#         val version_minor: u8 = 1
-# 
-#         expect(version_major).to_equal(1)
-#         expect(version_minor).to_equal(1)
-# 
-# 
-# # ============================================================================
-# # Test Group 8: SMF Flags Parsing Pattern
-# # ============================================================================
-# 
-# describe "SMF flags bitfield parsing":
-#     it "parses all-zero flags":
-#         val flags_raw: u32 = 0x00
-# 
-#         expect((flags_raw & 0x01) != 0).to_equal(false)  # executable
-#         expect((flags_raw & 0x02) != 0).to_equal(false)  # reloadable
-#         expect((flags_raw & 0x04) != 0).to_equal(false)  # debug_info
-#         expect((flags_raw & 0x08) != 0).to_equal(false)  # pic
-#         expect((flags_raw & 0x10) != 0).to_equal(false)  # has_stub
-# 
-#     it "parses executable flag":
-#         val flags_raw: u32 = 0x01
-# 
-#         expect((flags_raw & 0x01) != 0).to_equal(true)   # executable
-#         expect((flags_raw & 0x02) != 0).to_equal(false)  # reloadable
-# 
-#     it "parses multiple flags":
-#         val flags_raw: u32 = 0x0B  # executable | reloadable | pic
-# 
-#         expect((flags_raw & 0x01) != 0).to_equal(true)   # executable
-#         expect((flags_raw & 0x02) != 0).to_equal(true)   # reloadable
-#         expect((flags_raw & 0x04) != 0).to_equal(false)  # debug_info
-#         expect((flags_raw & 0x08) != 0).to_equal(true)   # pic
-#         expect((flags_raw & 0x10) != 0).to_equal(false)  # has_stub
-# 
-#     it "parses all flags set":
-#         val flags_raw: u32 = 0x1F
-# 
-#         expect((flags_raw & 0x01) != 0).to_equal(true)
-#         expect((flags_raw & 0x02) != 0).to_equal(true)
-#         expect((flags_raw & 0x04) != 0).to_equal(true)
-#         expect((flags_raw & 0x08) != 0).to_equal(true)
-#         expect((flags_raw & 0x10) != 0).to_equal(true)
-# 
-# 
-# # ============================================================================
-# # Test Group 9: Section Type Identification
-# # ============================================================================
-# 
-# describe "Section type identification":
-#     it "identifies TemplateCode section type":
-#         val sec_type: u32 = 12
-#         expect(sec_type == 12).to_equal(true)
-# 
-#     it "identifies TemplateMeta section type":
-#         val sec_type: u32 = 13
-#         expect(sec_type == 13).to_equal(true)
-# 
-#     it "has_templates when section_count > 1":
-#         val section_count = 3
-#         val has_templates = section_count > 1
-#         expect(has_templates).to_equal(true)
-# 
-#     it "has_note_sdn when section_count > 3":
-#         val section_count = 4
-#         val has_note_sdn = section_count > 3
-#         expect(has_note_sdn).to_equal(true)
-# 
-#     it "no note_sdn when section_count <= 3":
-#         val section_count = 3
-#         val has_note_sdn = section_count > 3
-#         expect(has_note_sdn).to_equal(false)
-# 
-# 
-# # ============================================================================
-# # Test Group 10: Cached Offset Eliminates Redundant Reads
-# # ============================================================================
-# 
-# describe "Cached section_table_offset eliminates redundant trailer reads":
-#     # The key optimization: read_section() previously called
-#     # mmap_read_bytes(self.address, self.size - 128, 128) on EVERY call
-#     # to re-read the trailer and recompute section_table_offset.
-#     #
-#     # Now it uses self.section_table_offset directly (set once during open()).
-# 
-#     it "offset can be stored and reused without re-reading":
-#         # Simulate the pattern: compute once, use many times
-#         val trailer_offset_lo: u32 = 4096
-#         val trailer_offset_hi: u32 = 0
-#         val trailer_offset_lo_i64: i64 = trailer_offset_lo
-#         val trailer_offset_hi_i64: i64 = trailer_offset_hi
-#         val cached_offset: i64 = trailer_offset_lo_i64 | (trailer_offset_hi_i64 << 32)
-# 
-#         # Use cached value for multiple section reads
-#         val entry0 = cached_offset + (0 * 64)
-#         val entry1 = cached_offset + (1 * 64)
-#         val entry2 = cached_offset + (2 * 64)
-#         val entry3 = cached_offset + (3 * 64)
-# 
-#         expect(entry0).to_equal(4096)
-#         expect(entry1).to_equal(4160)
-#         expect(entry2).to_equal(4224)
-#         expect(entry3).to_equal(4288)
-# 
-#     it "cached offset of 0 means no section table":
-#         val cached_offset: i64 = 0
-#         expect(cached_offset == 0).to_equal(true)
-# 
-#     it "multiple read_section calls would reuse same cached offset":
-#         fn run_reuse_check() -> bool:
-#             val cached_offset: i64 = 8192
-#             var all_valid = true
-#             var section_idx = 0
-#             while section_idx < 10:
-#                 val section_idx_i64: i64 = section_idx
-#                 val entry_offset = cached_offset + (section_idx_i64 * 64)
-#                 # Verify entry_offset is consistent
-#                 val expected = 8192 + section_idx * 64
-#                 if entry_offset != expected:
-#                     all_valid = false
-#                 section_idx = section_idx + 1
-#             all_valid
-# 
-#         expect(run_reuse_check()).to_equal(true)
-# 
-#     it "avoids 128-byte trailer read per section access":
-#         # Before fix: each read_section call did:
-#         #   val header_bytes = mmap_read_bytes(self.address, self.size - 128, 128)
-#         #   val st_offset_lo = bytes_to_u32(header_bytes[16..20])
-#         #   val st_offset_hi = bytes_to_u32(header_bytes[20..24])
-#         #   val section_table_offset = st_offset_lo | (st_offset_hi << 32)
-#         #
-#         # After fix: uses self.section_table_offset directly
-#         #
-#         # For N section reads, this saves N * (128-byte read + 2 byte conversions + bit ops)
-#         val n_sections = 100
-#         val bytes_saved_per_call = 128
-#         val total_bytes_saved = n_sections * bytes_saved_per_call
-# 
-#         expect(total_bytes_saved).to_equal(12800)
+use compiler.loader.smf_cache.*
+
+# ============================================================================
+# Test Group 1: MappedSmf Struct with section_table_offset
+# ============================================================================
+
+describe "MappedSmf struct with section_table_offset field":
+    it "section_table_offset field exists and initializes":
+        # Verify the new field is part of the struct definition
+        # MappedSmf has: path, address, size, header, note_sdn,
+        #   template_section_offset, note_sdn_section_offset, section_table_offset
+        # The field is set during open() and used in read_section()
+        pass
+
+    it "section_table_offset is cached from open time":
+        # After MappedSmf.open(), the section_table_offset field
+        # should be populated from the trailer parse (bytes[16..24])
+        # read_section() should use self.section_table_offset
+        # instead of re-reading the trailer
+        pass
+
+
+# ============================================================================
+# Test Group 2: CacheStats Struct
+# ============================================================================
+
+describe "CacheStats":
+    it "creates with zeroed fields":
+        val stats = CacheStats(
+            total_files: 0,
+            total_memory: 0,
+            cache_hits: 0,
+            cache_misses: 0
+        )
+
+        expect(stats.total_files).to_equal(0)
+        expect(stats.total_memory).to_equal(0)
+        expect(stats.cache_hits).to_equal(0)
+        expect(stats.cache_misses).to_equal(0)
+
+    it "stores file count correctly":
+        val stats = CacheStats(
+            total_files: 5,
+            total_memory: 1024000,
+            cache_hits: 10,
+            cache_misses: 3
+        )
+
+        expect(stats.total_files).to_equal(5)
+        expect(stats.total_memory).to_equal(1024000)
+        expect(stats.cache_hits).to_equal(10)
+        expect(stats.cache_misses).to_equal(3)
+
+    it "tracks large memory values":
+        val stats = CacheStats(
+            total_files: 100,
+            total_memory: 1073741824,
+            cache_hits: 5000,
+            cache_misses: 200
+        )
+
+        expect(stats.total_memory).to_equal(1073741824)
+        expect(stats.cache_hits).to_equal(5000)
+
+
+# ============================================================================
+# Test Group 3: SmfCache Creation
+# ============================================================================
+
+describe "SmfCache":
+    it "new() creates empty cache":
+        val cache = SmfCache.new()
+
+        expect(cache.enabled).to_equal(true)
+        expect(cache.cached_count()).to_equal(0)
+
+    it "new() initializes stats to zero":
+        val cache = SmfCache.new()
+        val stats = cache.get_stats()
+
+        expect(stats.total_files).to_equal(0)
+        expect(stats.total_memory).to_equal(0)
+        expect(stats.cache_hits).to_equal(0)
+        expect(stats.cache_misses).to_equal(0)
+
+    it "is_cached returns false for uncached path":
+        val cache = SmfCache.new()
+
+        expect(cache.is_cached("/nonexistent.smf")).to_equal(false)
+
+    it "cached_count returns 0 for empty cache":
+        val cache = SmfCache.new()
+
+        expect(cache.cached_count()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 4: bytes_to_u32 Helper
+# ============================================================================
+
+describe "bytes_to_u32 helper":
+    it "converts zero bytes":
+        val bytes: [u8] = [0, 0, 0, 0]
+        val result = bytes_to_u32(bytes)
+        expect(result).to_equal(0)
+
+    it "converts single byte":
+        val bytes: [u8] = [42, 0, 0, 0]
+        val result = bytes_to_u32(bytes)
+        expect(result).to_equal(42)
+
+    it "converts two bytes little-endian":
+        # 0x0100 = 256 in little-endian is [0, 1, 0, 0]
+        val bytes: [u8] = [0, 1, 0, 0]
+        val result = bytes_to_u32(bytes)
+        expect(result).to_equal(256)
+
+    it "converts full u32 little-endian":
+        # 0x04030201 in little-endian is [1, 2, 3, 4]
+        val bytes: [u8] = [1, 2, 3, 4]
+        val result = bytes_to_u32(bytes)
+        # 1 + 2*256 + 3*65536 + 4*16777216 = 1 + 512 + 196608 + 67108864 = 67305985
+        expect(result).to_equal(67305985)
+
+    it "handles 0xFF bytes":
+        val bytes: [u8] = [0xFF, 0, 0, 0]
+        val result = bytes_to_u32(bytes)
+        expect(result).to_equal(255)
+
+    it "returns 0 for short array":
+        val bytes: [u8] = [1, 2]
+        val result = bytes_to_u32(bytes)
+        expect(result).to_equal(0)
+
+    it "returns 0 for empty array":
+        val bytes: [u8] = []
+        val result = bytes_to_u32(bytes)
+        expect(result).to_equal(0)
+
+
+# ============================================================================
+# Test Group 5: Section Table Offset Computation Pattern
+# ============================================================================
+
+describe "Section table offset computation":
+    # Tests the pattern used to compute section_table_offset from trailer bytes.
+    # This is the value now cached in MappedSmf.section_table_offset
+
+    it "computes 32-bit offset from trailer bytes":
+        # Simulate trailer bytes at offset 16..20 (section table offset low)
+        val lo_bytes: [u8] = [0x00, 0x10, 0x00, 0x00]  # 0x1000 = 4096
+        val lo = bytes_to_u32(lo_bytes)
+
+        expect(lo).to_equal(4096)
+
+    it "computes 64-bit offset from low and high words":
+        # section_table_offset = lo | (hi << 32)
+        val lo_bytes: [u8] = [0x00, 0x10, 0x00, 0x00]  # 4096
+        val hi_bytes: [u8] = [0x00, 0x00, 0x00, 0x00]  # 0
+
+        val lo: i64 = bytes_to_u32(lo_bytes)
+        val hi: i64 = bytes_to_u32(hi_bytes)
+        val offset = lo | (hi << 32)
+
+        expect(offset).to_equal(4096)
+
+    it "computes large 64-bit offset":
+        val lo_bytes: [u8] = [0x00, 0x00, 0x00, 0x00]  # 0
+        val hi_bytes: [u8] = [0x01, 0x00, 0x00, 0x00]  # 1
+
+        val lo: i64 = bytes_to_u32(lo_bytes)
+        val hi: i64 = bytes_to_u32(hi_bytes)
+        val offset = lo | (hi << 32)
+
+        # 1 << 32 = 4294967296
+        expect(offset).to_equal(4294967296)
+
+    it "section entry offset calculation":
+        # Each section table entry is 64 bytes
+        # entry_offset = section_table_offset + (section_index * 64)
+        val section_table_offset: i64 = 4096
+        val section_index: i64 = 3
+
+        val entry_offset = section_table_offset + (section_index * 64)
+
+        # 4096 + 3*64 = 4096 + 192 = 4288
+        expect(entry_offset).to_equal(4288)
+
+    it "validates section index bounds":
+        val section_count = 5
+        val valid_index = 3
+        val invalid_index = 5
+
+        expect(valid_index < section_count).to_equal(true)
+        expect(invalid_index < section_count).to_equal(false)
+
+
+# ============================================================================
+# Test Group 6: Section Data Offset Extraction Pattern
+# ============================================================================
+
+describe "Section data offset extraction":
+    # Tests the byte parsing pattern used in read_section()
+
+    it "extracts data offset from entry bytes":
+        # Section data offset at entry bytes[16..24] (8 bytes, little-endian)
+        val entry_bytes: [u8] = [
+            0, 0, 0, 0,  # offset 0-3: name_offset
+            0, 0, 0, 0,  # offset 4-7: name_len
+            0, 0, 0, 0,  # offset 8-11: type
+            0, 0, 0, 0,  # offset 12-15: flags
+            0x00, 0x20, 0x00, 0x00,  # offset 16-19: data_offset_lo = 0x2000 = 8192
+            0x00, 0x00, 0x00, 0x00,  # offset 20-23: data_offset_hi = 0
+            0x00, 0x04, 0x00, 0x00,  # offset 24-27: data_size_lo = 0x400 = 1024
+            0x00, 0x00, 0x00, 0x00   # offset 28-31: data_size_hi = 0
+        ]
+
+        val data_offset_lo: i64 = bytes_to_u32([entry_bytes[16], entry_bytes[17], entry_bytes[18], entry_bytes[19]])
+        val data_offset_hi: i64 = bytes_to_u32([entry_bytes[20], entry_bytes[21], entry_bytes[22], entry_bytes[23]])
+        val data_offset = data_offset_lo | (data_offset_hi << 32)
+
+        val data_size_lo: i64 = bytes_to_u32([entry_bytes[24], entry_bytes[25], entry_bytes[26], entry_bytes[27]])
+        val data_size_hi: i64 = bytes_to_u32([entry_bytes[28], entry_bytes[29], entry_bytes[30], entry_bytes[31]])
+        val data_size = data_size_lo | (data_size_hi << 32)
+
+        expect(data_offset).to_equal(8192)
+        expect(data_size).to_equal(1024)
+
+    it "validates data does not extend beyond file":
+        val file_size: i64 = 10000
+        val data_offset: i64 = 8192
+        val data_size: i64 = 1024
+
+        # 8192 + 1024 = 9216 < 10000 — valid
+        expect(data_offset + data_size > file_size).to_equal(false)
+
+    it "detects data extending beyond file":
+        val file_size: i64 = 10000
+        val data_offset: i64 = 9500
+        val data_size: i64 = 1024
+
+        # 9500 + 1024 = 10524 > 10000 — invalid
+        expect(data_offset + data_size > file_size).to_equal(true)
+
+
+# ============================================================================
+# Test Group 7: SMF Header Magic Validation Pattern
+# ============================================================================
+
+describe "SMF header magic validation":
+    it "validates correct SMF magic bytes":
+        val magic: [u8] = [0x53, 0x4D, 0x46, 0x00]  # "SMF\0"
+
+        val has_magic = (magic[0] == 0x53 and magic[1] == 0x4D and magic[2] == 0x46 and magic[3] == 0x00)
+        expect(has_magic).to_equal(true)
+
+    it "rejects wrong magic bytes":
+        val wrong: [u8] = [0x45, 0x4C, 0x46, 0x00]  # "ELF\0"
+
+        val has_magic = (wrong[0] == 0x53 and wrong[1] == 0x4D and wrong[2] == 0x46 and wrong[3] == 0x00)
+        expect(has_magic).to_equal(false)
+
+    it "validates version bytes":
+        val version_major: u8 = 1
+        val version_minor: u8 = 1
+
+        expect(version_major).to_equal(1)
+        expect(version_minor).to_equal(1)
+
+
+# ============================================================================
+# Test Group 8: SMF Flags Parsing Pattern
+# ============================================================================
+
+describe "SMF flags bitfield parsing":
+    it "parses all-zero flags":
+        val flags_raw: u32 = 0x00
+
+        expect((flags_raw & 0x01) != 0).to_equal(false)  # executable
+        expect((flags_raw & 0x02) != 0).to_equal(false)  # reloadable
+        expect((flags_raw & 0x04) != 0).to_equal(false)  # debug_info
+        expect((flags_raw & 0x08) != 0).to_equal(false)  # pic
+        expect((flags_raw & 0x10) != 0).to_equal(false)  # has_stub
+
+    it "parses executable flag":
+        val flags_raw: u32 = 0x01
+
+        expect((flags_raw & 0x01) != 0).to_equal(true)   # executable
+        expect((flags_raw & 0x02) != 0).to_equal(false)  # reloadable
+
+    it "parses multiple flags":
+        val flags_raw: u32 = 0x0B  # executable | reloadable | pic
+
+        expect((flags_raw & 0x01) != 0).to_equal(true)   # executable
+        expect((flags_raw & 0x02) != 0).to_equal(true)   # reloadable
+        expect((flags_raw & 0x04) != 0).to_equal(false)  # debug_info
+        expect((flags_raw & 0x08) != 0).to_equal(true)   # pic
+        expect((flags_raw & 0x10) != 0).to_equal(false)  # has_stub
+
+    it "parses all flags set":
+        val flags_raw: u32 = 0x1F
+
+        expect((flags_raw & 0x01) != 0).to_equal(true)
+        expect((flags_raw & 0x02) != 0).to_equal(true)
+        expect((flags_raw & 0x04) != 0).to_equal(true)
+        expect((flags_raw & 0x08) != 0).to_equal(true)
+        expect((flags_raw & 0x10) != 0).to_equal(true)
+
+
+# ============================================================================
+# Test Group 9: Section Type Identification
+# ============================================================================
+
+describe "Section type identification":
+    it "identifies TemplateCode section type":
+        val sec_type: u32 = 12
+        expect(sec_type == 12).to_equal(true)
+
+    it "identifies TemplateMeta section type":
+        val sec_type: u32 = 13
+        expect(sec_type == 13).to_equal(true)
+
+    it "has_templates when section_count > 1":
+        val section_count = 3
+        val has_templates = section_count > 1
+        expect(has_templates).to_equal(true)
+
+    it "has_note_sdn when section_count > 3":
+        val section_count = 4
+        val has_note_sdn = section_count > 3
+        expect(has_note_sdn).to_equal(true)
+
+    it "no note_sdn when section_count <= 3":
+        val section_count = 3
+        val has_note_sdn = section_count > 3
+        expect(has_note_sdn).to_equal(false)
+
+
+# ============================================================================
+# Test Group 10: Cached Offset Eliminates Redundant Reads
+# ============================================================================
+
+describe "Cached section_table_offset eliminates redundant trailer reads":
+    # The key optimization: read_section() previously called
+    # mmap_read_bytes(self.address, self.size - 128, 128) on EVERY call
+    # to re-read the trailer and recompute section_table_offset.
+    #
+    # Now it uses self.section_table_offset directly (set once during open()).
+
+    it "offset can be stored and reused without re-reading":
+        # Simulate the pattern: compute once, use many times
+        val trailer_offset_lo: u32 = 4096
+        val trailer_offset_hi: u32 = 0
+        val trailer_offset_lo_i64: i64 = trailer_offset_lo
+        val trailer_offset_hi_i64: i64 = trailer_offset_hi
+        val cached_offset: i64 = trailer_offset_lo_i64 | (trailer_offset_hi_i64 << 32)
+
+        # Use cached value for multiple section reads
+        val entry0 = cached_offset + (0 * 64)
+        val entry1 = cached_offset + (1 * 64)
+        val entry2 = cached_offset + (2 * 64)
+        val entry3 = cached_offset + (3 * 64)
+
+        expect(entry0).to_equal(4096)
+        expect(entry1).to_equal(4160)
+        expect(entry2).to_equal(4224)
+        expect(entry3).to_equal(4288)
+
+    it "cached offset of 0 means no section table":
+        val cached_offset: i64 = 0
+        expect(cached_offset == 0).to_equal(true)
+
+    it "multiple read_section calls would reuse same cached offset":
+        fn run_reuse_check() -> bool:
+            val cached_offset: i64 = 8192
+            var all_valid = true
+            var section_idx = 0
+            while section_idx < 10:
+                val section_idx_i64: i64 = section_idx
+                val entry_offset = cached_offset + (section_idx_i64 * 64)
+                # Verify entry_offset is consistent
+                val expected = 8192 + section_idx * 64
+                if entry_offset != expected:
+                    all_valid = false
+                section_idx = section_idx + 1
+            all_valid
+
+        expect(run_reuse_check()).to_equal(true)
+
+    it "avoids 128-byte trailer read per section access":
+        # Before fix: each read_section call did:
+        #   val header_bytes = mmap_read_bytes(self.address, self.size - 128, 128)
+        #   val st_offset_lo = bytes_to_u32(header_bytes[16..20])
+        #   val st_offset_hi = bytes_to_u32(header_bytes[20..24])
+        #   val section_table_offset = st_offset_lo | (st_offset_hi << 32)
+        #
+        # After fix: uses self.section_table_offset directly
+        #
+        # For N section reads, this saves N * (128-byte read + 2 byte conversions + bit ops)
+        val n_sections = 100
+        val bytes_saved_per_call = 128
+        val total_bytes_saved = n_sections * bytes_saved_per_call
+
+        expect(total_bytes_saved).to_equal(12800)

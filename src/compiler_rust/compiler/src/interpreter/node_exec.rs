@@ -364,6 +364,23 @@ pub(crate) fn exec_node(
                     type_bindings: std::collections::HashMap::new(),
                 },
             );
+            // Register static methods as mangled free functions (StructName__method)
+            for method in &s.methods {
+                let is_static = method.is_static
+                    || !method.params.iter().any(|p| p.name == "self");
+                if is_static {
+                    let mangled = format!("{}__{}", s.name, method.name);
+                    functions.insert(mangled.clone(), method.clone());
+                    env.insert(
+                        mangled.clone(),
+                        Value::Function {
+                            name: mangled,
+                            def: Box::new(method.clone()),
+                            captured_env: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+            }
             Ok(Control::Next)
         }
         Node::Class(c) => {
@@ -375,6 +392,23 @@ pub(crate) fn exec_node(
                     class_name: c.name.clone(),
                 },
             );
+            // Register static methods as mangled free functions (ClassName__method)
+            for method in &c.methods {
+                let is_static = method.is_static
+                    || !method.params.iter().any(|p| p.name == "self");
+                if is_static {
+                    let mangled = format!("{}__{}", c.name, method.name);
+                    functions.insert(mangled.clone(), method.clone());
+                    env.insert(
+                        mangled.clone(),
+                        Value::Function {
+                            name: mangled,
+                            def: Box::new(method.clone()),
+                            captured_env: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+            }
             Ok(Control::Next)
         }
         Node::Enum(e) => {
@@ -386,6 +420,23 @@ pub(crate) fn exec_node(
                     enum_name: e.name.clone(),
                 },
             );
+            // Register enum static methods as mangled free functions
+            for method in &e.methods {
+                let is_static = method.is_static
+                    || !method.params.iter().any(|p| p.name == "self");
+                if is_static {
+                    let mangled = format!("{}__{}", e.name, method.name);
+                    functions.insert(mangled.clone(), method.clone());
+                    env.insert(
+                        mangled.clone(),
+                        Value::Function {
+                            name: mangled,
+                            def: Box::new(method.clone()),
+                            captured_env: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+            }
             Ok(Control::Next)
         }
         _ => Ok(Control::Next),

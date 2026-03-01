@@ -79,6 +79,24 @@ pub(super) fn register_definitions(
                         class_name: c.name.clone(),
                     },
                 );
+                // Register static methods as mangled free functions (ClassName__method)
+                for method in &c.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", c.name, method.name);
+                        local_functions.insert(mangled.clone(), method.clone());
+                        global_functions.insert(mangled.clone(), method.clone());
+                        exports.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: HashMap::new(),
+                            },
+                        );
+                    }
+                }
             }
             Node::Struct(s) => {
                 // Treat structs like classes for export purposes
@@ -110,6 +128,24 @@ pub(super) fn register_definitions(
                         class_name: s.name.clone(),
                     },
                 );
+                // Register static methods as mangled free functions (StructName__method)
+                for method in &s.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", s.name, method.name);
+                        local_functions.insert(mangled.clone(), method.clone());
+                        global_functions.insert(mangled.clone(), method.clone());
+                        exports.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: HashMap::new(),
+                            },
+                        );
+                    }
+                }
             }
             Node::Impl(impl_block) => {
                 // Add impl block methods to the corresponding class/struct/enum
@@ -133,6 +169,24 @@ pub(super) fn register_definitions(
                     if let Some(enum_def) = global_enums.get_mut(&type_name) {
                         enum_def.methods.extend(impl_block.methods.clone());
                     }
+                    // Register static methods from impl blocks as mangled free functions
+                    for method in &impl_block.methods {
+                        let is_static = method.is_static
+                            || !method.params.iter().any(|p| p.name == "self");
+                        if is_static {
+                            let mangled = format!("{}__{}", type_name, method.name);
+                            local_functions.insert(mangled.clone(), method.clone());
+                            global_functions.insert(mangled.clone(), method.clone());
+                            exports.insert(
+                                mangled.clone(),
+                                Value::Function {
+                                    name: mangled,
+                                    def: Box::new(method.clone()),
+                                    captured_env: HashMap::new(),
+                                },
+                            );
+                        }
+                    }
                 }
             }
             Node::Enum(e) => {
@@ -145,6 +199,44 @@ pub(super) fn register_definitions(
                 exports.insert(e.name.clone(), enum_type.clone());
                 // CRITICAL FIX: Also add to env so it's available in closures
                 env.insert(e.name.clone(), enum_type);
+                // Register enum static methods as mangled free functions
+                for method in &e.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", e.name, method.name);
+                        local_functions.insert(mangled.clone(), method.clone());
+                        global_functions.insert(mangled.clone(), method.clone());
+                        exports.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: HashMap::new(),
+                            },
+                        );
+                    }
+                }
+                // Register enum variant constructors as EnumName__VariantName
+                for variant in &e.variants {
+                    let mangled = format!("{}__{}", e.name, variant.name);
+                    // Export variant as an enum value (unit variant) or constructor
+                    let variant_value = if variant.fields.is_none() || variant.fields.as_ref().map_or(true, |f| f.is_empty()) {
+                        // Unit variant - export as enum value
+                        Value::Enum {
+                            enum_name: e.name.clone(),
+                            variant: variant.name.clone(),
+                            payload: None,
+                        }
+                    } else {
+                        // Variant with fields - export as constructor
+                        Value::Constructor {
+                            class_name: mangled.clone(),
+                        }
+                    };
+                    exports.insert(mangled.clone(), variant_value.clone());
+                    env.insert(mangled, variant_value);
+                }
             }
             Node::Macro(m) => {
                 // Register macro in exports with special prefix
@@ -214,7 +306,9 @@ pub(super) fn process_imports_and_assignments(
                     {
                         // Only handle simple identifier patterns for now
                         if let Pattern::Identifier(name) = &stmt.pattern {
-                            env.insert(name.clone(), value);
+                            env.insert(name.clone(), value.clone());
+                            // Export constants so they're visible after import
+                            exports.insert(name.clone(), value);
                         }
                     }
                 }
@@ -230,7 +324,9 @@ pub(super) fn process_imports_and_assignments(
                         local_enums,
                         impl_methods,
                     ) {
-                        env.insert(name.clone(), value);
+                        env.insert(name.clone(), value.clone());
+                        // Export vars so they're visible after import
+                        exports.insert(name.clone(), value);
                     }
                 }
             }
