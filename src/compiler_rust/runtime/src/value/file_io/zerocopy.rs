@@ -5,6 +5,7 @@
 //! - copy_file_range (Linux 4.5+) - In-kernel file copying
 
 use crate::value::RuntimeValue;
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 
 // =============================================================================

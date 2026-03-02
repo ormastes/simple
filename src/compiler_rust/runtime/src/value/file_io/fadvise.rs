@@ -8,6 +8,7 @@
 //! - Evicting unused data (dontneed)
 //! - Optimizing access patterns (sequential/random)
 
+#[cfg(unix)]
 use std::os::unix::io::RawFd;
 
 /// Hint that file will be accessed sequentially

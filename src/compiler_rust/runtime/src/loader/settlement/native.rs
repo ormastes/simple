@@ -131,10 +131,11 @@ impl LoadedNativeLib {
     #[cfg(windows)]
     pub fn load_shared(name: String, path: &Path) -> Result<Self, String> {
         use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
         let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
 
-        let handle = unsafe { winapi::um::libloaderapi::LoadLibraryW(wide_path.as_ptr()) };
+        let handle = unsafe { LoadLibraryW(wide_path.as_ptr()) };
 
         if handle.is_null() {
             return Err(format!("Failed to load {:?}", path));
@@ -183,11 +184,12 @@ impl LoadedNativeLib {
     #[cfg(windows)]
     pub fn load_system(name: String) -> Result<Self, String> {
         use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
 
         let dll_name = format!("{}.dll", name);
         let wide_name: Vec<u16> = std::ffi::OsStr::new(&dll_name).encode_wide().chain(Some(0)).collect();
 
-        let handle = unsafe { winapi::um::libloaderapi::LoadLibraryW(wide_name.as_ptr()) };
+        let handle = unsafe { LoadLibraryW(wide_name.as_ptr()) };
 
         if handle.is_null() {
             return Err(format!("System library '{}' not found", name));
@@ -222,11 +224,12 @@ impl LoadedNativeLib {
     #[cfg(windows)]
     pub fn get_symbol(&mut self, name: &str) -> Option<usize> {
         self.get_symbol_impl(name, |handle, c_name| unsafe {
-            let sym = winapi::um::libloaderapi::GetProcAddress(handle as _, c_name.as_ptr() as _);
-            if sym.is_null() {
-                None
-            } else {
-                Some(sym as usize)
+            use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+            // GetProcAddress takes HMODULE (*mut c_void) and PCSTR
+            let sym = GetProcAddress(handle, c_name.as_ptr() as *const u8);
+            match sym {
+                Some(f) => Some(f as usize),
+                None => None,
             }
         })
     }
@@ -300,7 +303,7 @@ impl Drop for LoadedNativeLib {
             NativeLibHandle::Dynamic(handle) => {
                 if !handle.is_null() {
                     unsafe {
-                        winapi::um::libloaderapi::FreeLibrary(*handle as _);
+                        windows_sys::Win32::Foundation::FreeLibrary(*handle);
                     }
                 }
             }

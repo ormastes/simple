@@ -33,6 +33,7 @@ pub fn apply_resource_limits(limits: &ResourceLimits) -> SandboxResult<()> {
 }
 
 /// Apply CPU time limit using rlimit.
+#[cfg(unix)]
 fn apply_cpu_limit(duration: Duration) -> SandboxResult<()> {
     use rlimit::{setrlimit, Resource};
 
@@ -45,7 +46,14 @@ fn apply_cpu_limit(duration: Duration) -> SandboxResult<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn apply_cpu_limit(duration: Duration) -> SandboxResult<()> {
+    tracing::debug!("CPU time limit ({} seconds) not applied (not supported on this platform via rlimit)", duration.as_secs());
+    Ok(())
+}
+
 /// Apply memory limit using rlimit.
+#[cfg(unix)]
 fn apply_memory_limit(bytes: u64) -> SandboxResult<()> {
     use rlimit::{setrlimit, Resource};
 
@@ -56,7 +64,14 @@ fn apply_memory_limit(bytes: u64) -> SandboxResult<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn apply_memory_limit(bytes: u64) -> SandboxResult<()> {
+    tracing::debug!("Memory limit ({} bytes) not applied (not supported on this platform via rlimit)", bytes);
+    Ok(())
+}
+
 /// Apply file descriptor limit using rlimit.
+#[cfg(unix)]
 fn apply_fd_limit(count: u64) -> SandboxResult<()> {
     use rlimit::{setrlimit, Resource};
 
@@ -64,6 +79,12 @@ fn apply_fd_limit(count: u64) -> SandboxResult<()> {
         .map_err(|e| SandboxError::ResourceLimit(format!("Failed to set FD limit: {}", e)))?;
 
     tracing::debug!("Applied file descriptor limit: {}", count);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn apply_fd_limit(count: u64) -> SandboxResult<()> {
+    tracing::debug!("File descriptor limit ({}) not applied (not supported on this platform via rlimit)", count);
     Ok(())
 }
 

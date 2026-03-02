@@ -64,19 +64,19 @@ pub extern "C" fn sys_mmap(addr: i64, length: u64, prot: i32, flags: i32, fd: i3
 
     #[cfg(target_family = "windows")]
     {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::Storage::FileSystem::{FILE_MAP_COPY, FILE_MAP_READ, FILE_MAP_WRITE};
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::System::Memory::{
-            CreateFileMappingW, MapViewOfFile, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+            CreateFileMappingW, MapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS,
+            FILE_MAP_READ, FILE_MAP_WRITE,
+            PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
         };
 
         unsafe {
             // Convert fd to HANDLE (Windows file descriptor)
-            let file_handle = if fd == -1 {
-                INVALID_HANDLE_VALUE as isize
+            let file_handle: HANDLE = if fd == -1 {
+                INVALID_HANDLE_VALUE
             } else {
-                fd as isize
+                fd as isize as HANDLE
             };
 
             // Convert prot flags to Windows protection
@@ -101,7 +101,7 @@ pub extern "C" fn sys_mmap(addr: i64, length: u64, prot: i32, flags: i32, fd: i3
                 std::ptr::null(),             // No name (anonymous)
             );
 
-            if map_handle == 0 || map_handle == INVALID_HANDLE_VALUE as isize {
+            if map_handle.is_null() || map_handle == INVALID_HANDLE_VALUE {
                 return -1;
             }
 
@@ -114,7 +114,7 @@ pub extern "C" fn sys_mmap(addr: i64, length: u64, prot: i32, flags: i32, fd: i3
                 FILE_MAP_READ // Default to read
             };
 
-            let ptr = MapViewOfFile(
+            let view = MapViewOfFile(
                 map_handle,
                 desired_access,
                 (offset >> 32) as u32,        // High DWORD of offset
@@ -125,10 +125,10 @@ pub extern "C" fn sys_mmap(addr: i64, length: u64, prot: i32, flags: i32, fd: i3
             // Close the mapping handle (view retains reference to file)
             CloseHandle(map_handle);
 
-            if ptr.is_null() {
+            if view.Value.is_null() {
                 -1
             } else {
-                ptr as i64
+                view.Value as i64
             }
         }
     }
@@ -165,11 +165,14 @@ pub extern "C" fn sys_munmap(addr: i64, length: u64) -> i32 {
 
     #[cfg(target_family = "windows")]
     {
-        use windows_sys::Win32::System::Memory::UnmapViewOfFile;
+        use windows_sys::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
 
         unsafe {
             // UnmapViewOfFile unmaps entire view (length parameter ignored)
-            if UnmapViewOfFile(addr as *const std::ffi::c_void) != 0 {
+            let view = MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: addr as *mut std::ffi::c_void,
+            };
+            if UnmapViewOfFile(view) != 0 {
                 0 // Success
             } else {
                 -1 // Failure
@@ -226,6 +229,7 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
 
     #[cfg(target_family = "windows")]
     {
+        use windows_sys::Win32::Foundation::HANDLE;
         use windows_sys::Win32::System::Memory::{DiscardVirtualMemory, PrefetchVirtualMemory, WIN32_MEMORY_RANGE_ENTRY};
 
         unsafe {
@@ -237,8 +241,10 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
                         NumberOfBytes: length as usize,
                     };
 
+                    // GetCurrentProcess() returns a pseudo-handle (-1)
+                    let current_process: HANDLE = -1isize as HANDLE;
                     if PrefetchVirtualMemory(
-                        std::ptr::null_mut(), // Current process
+                        current_process,      // Current process
                         1,                    // One range
                         &mut range as *mut WIN32_MEMORY_RANGE_ENTRY,
                         0, // No flags
@@ -323,10 +329,9 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
     #[cfg(target_family = "windows")]
     {
         use std::ffi::CStr;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileA, CREATE_ALWAYS, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            CreateFileA, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
             OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING,
         };
 
@@ -378,17 +383,17 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
                 _ => (GENERIC_READ, OPEN_EXISTING),
             };
 
-            let handle = CreateFileA(
+            let handle: HANDLE = CreateFileA(
                 path_bytes.as_ptr(),
                 desired_access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 std::ptr::null(),
                 creation_disposition,
                 FILE_ATTRIBUTE_NORMAL,
-                0,
+                std::ptr::null_mut(),
             );
 
-            if handle == INVALID_HANDLE_VALUE as isize {
+            if handle == INVALID_HANDLE_VALUE {
                 -1
             } else {
                 handle as i32
@@ -427,10 +432,11 @@ pub extern "C" fn sys_close(fd: i32) -> i32 {
 
     #[cfg(target_family = "windows")]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 
         unsafe {
-            if CloseHandle(fd as isize) != 0 {
+            let handle: HANDLE = fd as isize as HANDLE;
+            if CloseHandle(handle) != 0 {
                 0 // Success
             } else {
                 -1 // Failure
@@ -484,11 +490,13 @@ pub extern "C" fn sys_file_size(fd: i32) -> i64 {
 
     #[cfg(target_family = "windows")]
     {
+        use windows_sys::Win32::Foundation::HANDLE;
         use windows_sys::Win32::Storage::FileSystem::GetFileSizeEx;
 
         unsafe {
+            let handle: HANDLE = fd as isize as HANDLE;
             let mut file_size: i64 = 0;
-            if GetFileSizeEx(fd as isize, &mut file_size as *mut i64) != 0 {
+            if GetFileSizeEx(handle, &mut file_size as *mut i64) != 0 {
                 file_size
             } else {
                 -1

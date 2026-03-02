@@ -1,6 +1,7 @@
 //! PTY (Pseudo-Terminal) FFI functions for console I/O testing
 
 use crate::value::RuntimeValue;
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 
 #[cfg(unix)]
@@ -132,7 +133,7 @@ pub extern "C" fn native_pty_read(fd: i64, timeout_ms: i64) -> RuntimeValue {
                     // Error or would block
                     #[cfg(target_os = "linux")]
                     let errno = *libc::__errno_location();
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
                     let errno = *libc::__error();
                     if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
                         // No data available, check timeout
