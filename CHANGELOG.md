@@ -2,29 +2,71 @@
 
 All notable changes to Simple Language will be documented in this file.
 
-## [0.7.0] - 2026-02-24
+## [0.8.0] - 2026-03-02
 
 ### Added
+- **Self-hosting Stage 3**: Simple compiles itself — full self-hosted bootstrap achieved
+- **Cranelift backend**: Multi-backend bootstrap support (LLVM + Cranelift)
+- **JIT default**: Changed default execution mode from Interpret to JIT
+- **`new` keyword** for explicit allocation (Phase 1)
+- **`#[alloc]` / `#[no_alloc]`** function attributes (Phase 2)
+- **Alloc inference pass** for automatic allocation tracking (Phase 3)
+- **Collection efficiency lint** + MIR optimizer passes (COLL001–COLL005)
+- **25+ new MCP tools**: CLI, query, analysis, LSP (34 → 66 tools total)
+- **AST pattern matching** + semantic queries (CodeQL-style `sem-query`)
+- **Multiplatform linker abstraction** for Windows, macOS, FreeBSD, multi-arch
+- **Tiered library structure** (alloc, sys, async, ext)
+- **Tiered runtime FFI classification** for target-aware symbol filtering
+- **Native-build command** with name mangling, re-export resolution
+- **SMF relocation metadata** for unified JIT + native loading
+- **Ruby-like lambda features**: placeholder transform (`_ * 2`), `&:method` refs, curry/partial
+- **WFFI dynamic loading** support
+- **LLVM cross workflow** for Linux/Win/FreeBSD/macOS
+- **Baremetal modules** and `rt_compile_to_llvm_ir` via CompilerDriver + MirToLlvm
 - Type system Wave 2: flow narrowing (M2), associated types (M3), effect system (M4)
 - Bitfield feature — hardware register definitions with zero-overhead bit manipulation
-- Pass keyword variants: `pass_do_nothing`, `pass_dn` (intentional no-ops with semantic meaning)
-- Binary architecture documentation (temporal C bootstrap vs real Simple binary)
-- C bootstrap preprocessing for pass keywords and bitfield syntax compatibility
+- Pass keyword variants: `pass_do_nothing`, `pass_dn`
+- Rust parser extensions: asm, bitfield, newtype, extend, comptime, backtick atoms
+- `slow_it` test marker for filtered slow test runs
 
 ### Changed
-- `build/bootstrap/c_simple/` established as canonical bootstrap location
-- `src/compiler_cpp/` documented as temporal bootstrap (generated C from Simple source)
-- Bootstrap pipeline docs updated with temporal vs real binary distinction
+- Default execution mode: Interpret → JIT
+- Migrated business logic from `app/` to `lib/` and `compiler/` (Phases 0–5)
+- Split all 800+ line files into smaller modules
+- Removed ~200 semantically duplicated files across `src/`
+- Renamed 39 adhoc `_ext` test files to descriptive names
+- Normalized `str` → `text` type annotations across codebase
+- Switched primary VCS documentation from git to jj
+- MCP server: lazy imports, proxy removal for faster startup
+- Multiplatform & multi-CPU support for Rust bootstrap compiler
+- Fully self-sufficient binary — eliminated all `bin/simple` subprocess calls
+- Release binary download fallback added to bootstrap and CI
 
 ### Fixed
-- Corrupted pass_variants_spec.spl test file (keywords replaced with `0`)
+- Deterministic Cranelift codegen for reproducible bootstrap
+- MCP server shell tools (interpreter tuple returns)
+- Cross-platform compilation for Windows, FreeBSD, and macOS bootstrap
+- 4 interpreter fixes to unskip 37 test files (+696 tests)
+- Recovered ~77 test files from skip + added specific skip reasons
+- Prevented test suite hangs and OOM with memory abort
+- Added missing timeouts to MCP tool subprocess calls
+- Cleared compiler-side static registries between test runs (OOM fix)
+- Resolved 220+ failing tests across multiple files
+- Database_sync and codegen_parity test failures
+- Cranelift codegen: reuse declared extern funcs, add diagnostics
 - Module loader crash bugs + memory efficiency improvements
 - Heap-allocation leaks in MIR C codegen
-- C backend `simple_int_to_str` type mismatch for string backend field
+- Lint false positives for True/False enum variants
 
 ### Infrastructure
-- Bootstrap binary updated to v0.7.0 with pass keyword and bitfield support
-- `bin/release/simple` updated as current release binary
+- Self-hosted bootstrap: no fallback for JIT, SMF loader, native builder
+- Bootstrap binary updated for self-hosting
+- `build/bootstrap/c_simple/` as canonical bootstrap location
+- Interpreter optimizations for faster test runs
+
+## [0.7.0] - 2026-02-24 (unreleased)
+
+_Merged into 0.8.0 — see above._
 
 ## [0.6.1] - 2026-02-23
 
