@@ -17,7 +17,7 @@
 # Run:
 #   LD_PRELOAD=build/libspl_torch.so bin/simple examples/projects/medgemma_korean/src/train_phase6.spl
 
-use model.{TextModel, compute_mse_loss, check_gpu}
+use model.{TextModel, compute_mse_loss, check_gpu, sgd_update_tensor}
 use shared_logic.{
     TrainConfig, TrainState, EMBEDDING_SEQ_LEN,
     make_randn_batch_on_cuda, compute_ce_loss,
@@ -38,13 +38,12 @@ use embedding_utils.{
 use layer_utils.{
     ExtendedModel,
     extended_lora_forward,
-    extended_sgd_step, extended_zero_grads
+    extended_zero_grads
 }
 use lora_utils.{
     LoRAConfig, LoRAAdapter,
     create_lora_adapter,
-    lora_sgd_step, lora_zero_grads, lora_clip_and_step,
-    merge_lora_into_model
+    merge_lora_weight
 }
 use train_phase0.{run_phase0}
 use train_phase1.{run_phase1}
@@ -60,6 +59,9 @@ use src.torch_dyn.{
     t_free,
     t_mean,
     autograd_backward,
+    autograd_set_requires_grad,
+    autograd_no_grad_begin,
+    autograd_no_grad_end,
     cuda_empty_cache
 }
 
@@ -67,115 +69,7 @@ export run_phase6
 
 
 # ============================================================================
-# Phase 6 Configuration
-# ============================================================================
-
-val SUBPHASE_A_EPOCHS = 2
-val SUBPHASE_B_EPOCHS = 2
-val SUBPHASE_C_EPOCHS = 3
-
-# Reasoning loss weights
-val CE_WEIGHT = 0.6
-val FORMAT_WEIGHT = 0.2
-val CONFIDENCE_WEIGHT = 0.2
-
-
-# ============================================================================
-# Sub-Phase A: Korean Text (reuse from Phase 5 pattern)
-# ============================================================================
-
-fn run_subphase_a(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig):
-    print("")
-    print("  --- Sub-Phase A: Korean Text ---")
-
-    var state = TrainState.create()
-    for epoch in 0..SUBPHASE_A_EPOCHS:
-        state.reset_epoch()
-        print("  Sub-A Epoch {epoch + 1}/{SUBPHASE_A_EPOCHS}")
-
-        for batch_idx in 0..config.num_batches:
-            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
-
-            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext.emb, config.output_dim)
-            val kor_ids = batch[0]
-            val eng_ids = batch[1]
-            val mask = batch[2]
-            val target = batch[3]
-
-            val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask, lora_l1, lora_l2)
-            val loss_h = compute_mse_loss(logits, target)
-            val loss_val = t_mean(loss_h)
-
-            autograd_backward(loss_h)
-            extended_sgd_step(ext, lora_l1, lora_l2, lr)
-            extended_zero_grads(ext, lora_l1, lora_l2)
-
-            t_free(kor_ids)
-            t_free(eng_ids)
-            t_free(mask)
-            t_free(target)
-            t_free(logits)
-            t_free(loss_h)
-
-            state.add_loss(loss_val)
-            report_training_step(state, config)
-
-        state.update_best()
-        report_epoch_end(epoch, SUBPHASE_A_EPOCHS, state)
-        print("")
-
-    print("  Sub-Phase A complete. Best loss: {state.best_loss}")
-
-
-# ============================================================================
-# Sub-Phase B: Korean Translation (reuse pattern)
-# ============================================================================
-
-fn run_subphase_b(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig):
-    print("")
-    print("  --- Sub-Phase B: Korean->English Translation ---")
-
-    var state = TrainState.create()
-    for epoch in 0..SUBPHASE_B_EPOCHS:
-        state.reset_epoch()
-        print("  Sub-B Epoch {epoch + 1}/{SUBPHASE_B_EPOCHS}")
-
-        for batch_idx in 0..config.num_batches:
-            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
-
-            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext.emb, config.output_dim)
-            val kor_ids = batch[0]
-            val eng_ids = batch[1]
-            val mask = batch[2]
-            val target = batch[3]
-
-            val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask, lora_l1, lora_l2)
-            val loss_h = compute_mse_loss(logits, target)
-            val loss_val = t_mean(loss_h)
-
-            autograd_backward(loss_h)
-            extended_sgd_step(ext, lora_l1, lora_l2, lr)
-            extended_zero_grads(ext, lora_l1, lora_l2)
-
-            t_free(kor_ids)
-            t_free(eng_ids)
-            t_free(mask)
-            t_free(target)
-            t_free(logits)
-            t_free(loss_h)
-
-            state.add_loss(loss_val)
-            report_training_step(state, config)
-
-        state.update_best()
-        report_epoch_end(epoch, SUBPHASE_B_EPOCHS, state)
-        print("")
-
-    print("  Sub-Phase B complete. Best loss: {state.best_loss}")
-
-
-# ============================================================================
-# Sub-Phase C: Korean Medical Exam Reasoning
+# Exam Loss (read-only, no copy issues)
 # ============================================================================
 
 # Compute exam reasoning loss:
@@ -191,10 +85,10 @@ fn compute_exam_loss(logits: i64, target: i64) -> i64:
     val confidence_loss = compute_mse_loss(logits, target)
 
     # Weighted sum: CE * 0.6 + format * 0.2 + confidence * 0.2
-    val ce_weighted = t_mul_scalar(ce_loss, CE_WEIGHT)
-    val format_weighted = t_mul_scalar(format_loss, FORMAT_WEIGHT)
+    val ce_weighted = t_mul_scalar(ce_loss, 0.6)
+    val format_weighted = t_mul_scalar(format_loss, 0.2)
     t_free(format_loss)
-    val conf_weighted = t_mul_scalar(confidence_loss, CONFIDENCE_WEIGHT)
+    val conf_weighted = t_mul_scalar(confidence_loss, 0.2)
     t_free(confidence_loss)
 
     val sum1 = t_add(ce_weighted, format_weighted)
@@ -210,59 +104,6 @@ fn compute_exam_loss(logits: i64, target: i64) -> i64:
     total
 
 
-fn run_subphase_c(ext: ExtendedModel, lora_l1: LoRAAdapter, lora_l2: LoRAAdapter, config: TrainConfig):
-    print("")
-    print("  --- Sub-Phase C: Korean Medical Exam Reasoning ---")
-    print("  Loss = CE*{CE_WEIGHT} + format*{FORMAT_WEIGHT} + confidence*{CONFIDENCE_WEIGHT}")
-
-    var state = TrainState.create()
-    for epoch in 0..SUBPHASE_C_EPOCHS:
-        state.reset_epoch()
-        print("  Sub-C Epoch {epoch + 1}/{SUBPHASE_C_EPOCHS}")
-
-        for batch_idx in 0..config.num_batches:
-            val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
-
-            # Exam question + choices -> extended forward -> logits
-            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext.emb, config.output_dim)
-            val kor_ids = batch[0]
-            val eng_ids = batch[1]
-            val mask = batch[2]
-            val target = batch[3]
-
-            val logits = extended_lora_forward(ext, kor_ids, eng_ids, mask, lora_l1, lora_l2)
-
-            # Exam reasoning loss (weighted combination)
-            val loss_h = compute_exam_loss(logits, target)
-            val loss_val = t_mean(loss_h)
-
-            autograd_backward(loss_h)
-            extended_sgd_step(ext, lora_l1, lora_l2, lr)
-            extended_zero_grads(ext, lora_l1, lora_l2)
-
-            t_free(kor_ids)
-            t_free(eng_ids)
-            t_free(mask)
-            t_free(target)
-            t_free(logits)
-            t_free(loss_h)
-
-            state.add_loss(loss_val)
-            report_training_step(state, config)
-
-        state.update_best()
-        report_epoch_end(epoch, SUBPHASE_C_EPOCHS, state)
-
-        # Validate on exam data
-        val exam_acc = validate_exam_accuracy(ext, lora_l1, lora_l2, config)
-        val retained = validate_per_layer_retention(ext, config)
-        if not retained:
-            print("  WARNING: English retention dropping in Sub-C")
-        print("")
-
-    print("  Sub-Phase C complete. Best loss: {state.best_loss}")
-
-
 # ============================================================================
 # Training
 # ============================================================================
@@ -276,6 +117,13 @@ fn run_phase6(ext_model: ExtendedModel) -> ExtendedModel:
 
     check_gpu()
     print("")
+
+    val SUBPHASE_A_EPOCHS = 2
+    val SUBPHASE_B_EPOCHS = 2
+    val SUBPHASE_C_EPOCHS = 3
+    val CE_WEIGHT = 0.6
+    val FORMAT_WEIGHT = 0.2
+    val CONFIDENCE_WEIGHT = 0.2
 
     val config = TrainConfig.phase6()
     config.print_config("Phase 6 - Korean Medical Exam Reasoning")
@@ -294,15 +142,196 @@ fn run_phase6(ext_model: ExtendedModel) -> ExtendedModel:
     var lora_l2 = create_lora_adapter(config.hidden_dim, config.hidden_dim, lora_config)
     print("")
 
-    # Sub-phase A: Korean text
-    run_subphase_a(ext_model, lora_l1, lora_l2, config)
+    # ==================================================================
+    # Sub-Phase A: Korean Text (inlined for correct mutation semantics)
+    # ==================================================================
+    print("")
+    print("  --- Sub-Phase A: Korean Text ---")
 
-    # Sub-phase B: Korean translation
-    run_subphase_b(ext_model, lora_l1, lora_l2, config)
+    var state_a = TrainState.create()
+    for epoch in 0..SUBPHASE_A_EPOCHS:
+        state_a.reset_epoch()
+        print("  Sub-A Epoch {epoch + 1}/{SUBPHASE_A_EPOCHS}")
 
-    # Sub-phase C: Korean medical exam reasoning
-    run_subphase_c(ext_model, lora_l1, lora_l2, config)
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state_a.global_step, config.warmup_steps, config.learning_rate)
 
+            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext_model.emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+
+            val logits = extended_lora_forward(ext_model, kor_ids, eng_ids, mask, lora_l1, lora_l2)
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = t_mean(loss_h)
+
+            autograd_backward(loss_h)
+
+            # Direct me method calls for LoRA
+            lora_l1.sgd_step(lr)
+            lora_l2.sgd_step(lr)
+            # Inline embedding SGD
+            autograd_no_grad_begin()
+            var old_kor = ext_model.emb.kor_weight
+            ext_model.emb.kor_weight = sgd_update_tensor(ext_model.emb.kor_weight, lr)
+            t_free(old_kor)
+            var old_eng = ext_model.emb.eng_weight
+            ext_model.emb.eng_weight = sgd_update_tensor(ext_model.emb.eng_weight, lr)
+            t_free(old_eng)
+            autograd_no_grad_end()
+            autograd_set_requires_grad(ext_model.emb.kor_weight, true)
+            autograd_set_requires_grad(ext_model.emb.eng_weight, true)
+
+            extended_zero_grads(ext_model, lora_l1, lora_l2)
+
+            t_free(kor_ids)
+            t_free(eng_ids)
+            t_free(mask)
+            t_free(target)
+            t_free(logits)
+            t_free(loss_h)
+
+            state_a.add_loss(loss_val)
+            report_training_step(state_a, config)
+
+        state_a.update_best()
+        report_epoch_end(epoch, SUBPHASE_A_EPOCHS, state_a)
+        print("")
+
+    print("  Sub-Phase A complete. Best loss: {state_a.best_loss}")
+
+    # ==================================================================
+    # Sub-Phase B: Korean Translation (inlined for correct mutation semantics)
+    # ==================================================================
+    print("")
+    print("  --- Sub-Phase B: Korean->English Translation ---")
+
+    var state_b = TrainState.create()
+    for epoch in 0..SUBPHASE_B_EPOCHS:
+        state_b.reset_epoch()
+        print("  Sub-B Epoch {epoch + 1}/{SUBPHASE_B_EPOCHS}")
+
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state_b.global_step, config.warmup_steps, config.learning_rate)
+
+            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext_model.emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+
+            val logits = extended_lora_forward(ext_model, kor_ids, eng_ids, mask, lora_l1, lora_l2)
+            val loss_h = compute_mse_loss(logits, target)
+            val loss_val = t_mean(loss_h)
+
+            autograd_backward(loss_h)
+
+            # Direct me method calls for LoRA
+            lora_l1.sgd_step(lr)
+            lora_l2.sgd_step(lr)
+            # Inline embedding SGD
+            autograd_no_grad_begin()
+            var old_kor = ext_model.emb.kor_weight
+            ext_model.emb.kor_weight = sgd_update_tensor(ext_model.emb.kor_weight, lr)
+            t_free(old_kor)
+            var old_eng = ext_model.emb.eng_weight
+            ext_model.emb.eng_weight = sgd_update_tensor(ext_model.emb.eng_weight, lr)
+            t_free(old_eng)
+            autograd_no_grad_end()
+            autograd_set_requires_grad(ext_model.emb.kor_weight, true)
+            autograd_set_requires_grad(ext_model.emb.eng_weight, true)
+
+            extended_zero_grads(ext_model, lora_l1, lora_l2)
+
+            t_free(kor_ids)
+            t_free(eng_ids)
+            t_free(mask)
+            t_free(target)
+            t_free(logits)
+            t_free(loss_h)
+
+            state_b.add_loss(loss_val)
+            report_training_step(state_b, config)
+
+        state_b.update_best()
+        report_epoch_end(epoch, SUBPHASE_B_EPOCHS, state_b)
+        print("")
+
+    print("  Sub-Phase B complete. Best loss: {state_b.best_loss}")
+
+    # ==================================================================
+    # Sub-Phase C: Korean Medical Exam Reasoning (inlined)
+    # ==================================================================
+    print("")
+    print("  --- Sub-Phase C: Korean Medical Exam Reasoning ---")
+    print("  Loss = CE*{CE_WEIGHT} + format*{FORMAT_WEIGHT} + confidence*{CONFIDENCE_WEIGHT}")
+
+    var state_c = TrainState.create()
+    for epoch in 0..SUBPHASE_C_EPOCHS:
+        state_c.reset_epoch()
+        print("  Sub-C Epoch {epoch + 1}/{SUBPHASE_C_EPOCHS}")
+
+        for batch_idx in 0..config.num_batches:
+            val lr = lr_linear_warmup(state_c.global_step, config.warmup_steps, config.learning_rate)
+
+            # Exam question + choices -> extended forward -> logits
+            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext_model.emb, config.output_dim)
+            val kor_ids = batch[0]
+            val eng_ids = batch[1]
+            val mask = batch[2]
+            val target = batch[3]
+
+            val logits = extended_lora_forward(ext_model, kor_ids, eng_ids, mask, lora_l1, lora_l2)
+
+            # Exam reasoning loss (weighted combination)
+            val loss_h = compute_exam_loss(logits, target)
+            val loss_val = t_mean(loss_h)
+
+            autograd_backward(loss_h)
+
+            # Direct me method calls for LoRA
+            lora_l1.sgd_step(lr)
+            lora_l2.sgd_step(lr)
+            # Inline embedding SGD
+            autograd_no_grad_begin()
+            var old_kor = ext_model.emb.kor_weight
+            ext_model.emb.kor_weight = sgd_update_tensor(ext_model.emb.kor_weight, lr)
+            t_free(old_kor)
+            var old_eng = ext_model.emb.eng_weight
+            ext_model.emb.eng_weight = sgd_update_tensor(ext_model.emb.eng_weight, lr)
+            t_free(old_eng)
+            autograd_no_grad_end()
+            autograd_set_requires_grad(ext_model.emb.kor_weight, true)
+            autograd_set_requires_grad(ext_model.emb.eng_weight, true)
+
+            extended_zero_grads(ext_model, lora_l1, lora_l2)
+
+            t_free(kor_ids)
+            t_free(eng_ids)
+            t_free(mask)
+            t_free(target)
+            t_free(logits)
+            t_free(loss_h)
+
+            state_c.add_loss(loss_val)
+            report_training_step(state_c, config)
+
+        state_c.update_best()
+        report_epoch_end(epoch, SUBPHASE_C_EPOCHS, state_c)
+
+        # Validate on exam data (read-only, copies are fine)
+        val exam_acc = validate_exam_accuracy(ext_model, lora_l1, lora_l2, config)
+        val retained = validate_per_layer_retention(ext_model, config)
+        if not retained:
+            print("  WARNING: English retention dropping in Sub-C")
+        print("")
+
+    print("  Sub-Phase C complete. Best loss: {state_c.best_loss}")
+
+    # ==================================================================
+    # Phase 6 complete
+    # ==================================================================
     print("")
     print("=" * 70)
     print("PHASE 6 TRAINING COMPLETE")
@@ -311,8 +340,15 @@ fn run_phase6(ext_model: ExtendedModel) -> ExtendedModel:
     print("  Embeddings: Updated")
     print("=" * 70)
 
-    # Merge LoRA_5 into base weights
-    merge_lora_into_model(ext_model.base, lora_l1, lora_l2)
+    # Merge LoRA_5 into base weights (inline to mutate ext_model directly)
+    print("Merging LoRA into base model weights...")
+    var old_w1 = ext_model.base.w1
+    ext_model.base.w1 = merge_lora_weight(ext_model.base.w1, lora_l1)
+    t_free(old_w1)
+    var old_w2 = ext_model.base.w2
+    ext_model.base.w2 = merge_lora_weight(ext_model.base.w2, lora_l2)
+    t_free(old_w2)
+    print("  LoRA merged into base weights")
 
     # Final comprehensive validation
     print("")
@@ -321,8 +357,8 @@ fn run_phase6(ext_model: ExtendedModel) -> ExtendedModel:
     print("=" * 70)
 
     val final_config = TrainConfig.default_config()
-    val retained = check_english_retention(ext_model.base, final_config)
-    if retained:
+    val retained_final = check_english_retention(ext_model.base, final_config)
+    if retained_final:
         print("FINAL: English knowledge retained (>= 95%)")
     else:
         print("WARNING: English knowledge degraded below 95%!")

@@ -61,7 +61,7 @@ pub struct TypeRegistry {
 impl TypeRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
-            types: HashMap::new(),
+            types: std::collections::BTreeMap::new(),
             allocator: TypeIdAllocator::new(),
             name_to_id: HashMap::new(),
         };

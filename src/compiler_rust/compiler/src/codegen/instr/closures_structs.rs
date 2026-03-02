@@ -166,6 +166,9 @@ pub(crate) fn compile_method_call_static<M: Module>(
             }
         }
     } else {
+        if std::env::var("SIMPLE_DEBUG_DETERMINISM").is_ok() {
+            eprintln!("[DET-METH] not found: '{}' in fn '{}'", func_name, ctx.current_func_name);
+        }
         let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
 
         let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
