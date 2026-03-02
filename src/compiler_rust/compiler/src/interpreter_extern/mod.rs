@@ -355,6 +355,7 @@ pub(crate) fn call_extern_function(
         "panic" => process::panic(&evaluated),
         "rt_process_run" => system::rt_process_run(&evaluated),
         "rt_process_run_timeout" => system::rt_process_run_timeout(&evaluated),
+        "rt_process_execute" => system::rt_process_execute(&evaluated),
 
         // ====================================================================
         // Filesystem Operations (18 fs_* + 6 file_* = 24 functions)

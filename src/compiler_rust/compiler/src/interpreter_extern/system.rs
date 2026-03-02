@@ -9,7 +9,6 @@ use simple_runtime::value::{
     rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists, rt_env_get as ffi_env_get,
     rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
     rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
-    rt_process_run as ffi_process_run, rt_process_run_timeout as ffi_process_run_timeout,
     rt_platform_name as ffi_platform_name,
 };
 use simple_runtime::value::ffi::config::{
@@ -271,14 +270,14 @@ pub fn rt_is_debug_mode_enabled(_args: &[Value]) -> Result<Value, CompileError> 
 ///
 /// Callable from Simple as: `rt_process_run(cmd, args)`
 ///
-/// # Arguments
-/// * `args` - Evaluated arguments [cmd: String, args: List<String>]
+/// Implemented directly in the interpreter (not via FFI) to return proper
+/// Value::Tuple with Value::Str elements. The FFI path via runtime_to_value
+/// converts heap objects (strings, tuples) to opaque Value::Int pointers,
+/// breaking tuple destructuring in interpreted code.
 ///
 /// # Returns
 /// * Tuple of (stdout: String, stderr: String, exit_code: Int)
 pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
-    use simple_runtime::value::{rt_array_new, rt_array_push, rt_string_new};
-
     if args.len() < 2 {
         return Err(CompileError::runtime("rt_process_run requires 2 arguments (cmd, args)"));
     }
@@ -288,18 +287,15 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::runtime("rt_process_run: cmd must be a string")),
     };
 
-    // Convert args list to RuntimeValue array
-    let args_array = match &args[1] {
+    let cmd_args: Vec<String> = match &args[1] {
         Value::Array(arr) => {
-            // Create a new RuntimeValue array
-            let runtime_arr = rt_array_new(arr.len() as u64);
+            let mut v = Vec::new();
             for item in arr.iter() {
                 if let Value::Str(s) = item {
-                    let runtime_str = rt_string_new(s.as_ptr(), s.len() as u64);
-                    rt_array_push(runtime_arr, runtime_str);
+                    v.push(s.clone());
                 }
             }
-            runtime_arr
+            v
         }
         _ => {
             return Err(CompileError::runtime(
@@ -308,9 +304,67 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    unsafe {
-        let result = ffi_process_run(cmd.as_ptr(), cmd.len() as u64, args_array);
-        Ok(runtime_to_value(result))
+    let output = std::process::Command::new(&cmd)
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::null())
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code().unwrap_or(-1) as i64;
+            Ok(Value::Tuple(vec![Value::Str(stdout), Value::Str(stderr), Value::Int(exit_code)]))
+        }
+        Err(_) => {
+            Ok(Value::Tuple(vec![Value::Str(String::new()), Value::Str(String::new()), Value::Int(-1)]))
+        }
+    }
+}
+
+/// Run a command synchronously and return only the exit code.
+///
+/// Callable from Simple as: `rt_process_execute(cmd, args)`
+///
+/// # Returns
+/// * Int - exit code (0 = success, -1 = error)
+pub fn rt_process_execute(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime("rt_process_execute requires 2 arguments (cmd, args)"));
+    }
+
+    let cmd = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_process_execute: cmd must be a string")),
+    };
+
+    let cmd_args: Vec<String> = match &args[1] {
+        Value::Array(arr) => {
+            let mut v = Vec::new();
+            for item in arr.iter() {
+                if let Value::Str(s) = item {
+                    v.push(s.clone());
+                }
+            }
+            v
+        }
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_execute: args must be an array of strings",
+            ))
+        }
+    };
+
+    let status = std::process::Command::new(&cmd)
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) => Ok(Value::Int(s.code().unwrap_or(-1) as i64)),
+        Err(_) => Ok(Value::Int(-1)),
     }
 }
 
@@ -318,14 +372,15 @@ pub fn rt_process_run(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_process_run_timeout(cmd, args, timeout_ms)`
 ///
+/// Implemented directly in the interpreter (not via FFI) to return proper
+/// Value::Tuple with Value::Str elements, avoiding the runtime_to_value bug.
+///
 /// # Arguments
 /// * `args` - Evaluated arguments [cmd: String, args: List<String>, timeout_ms: Int]
 ///
 /// # Returns
 /// * Tuple of (stdout: String, stderr: String, exit_code: Int) where exit_code=-1 on timeout
 pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
-    use simple_runtime::value::{rt_array_new, rt_array_push, rt_string_new};
-
     if args.len() < 3 {
         return Err(CompileError::runtime(
             "rt_process_run_timeout requires 3 arguments (cmd, args, timeout_ms)",
@@ -337,16 +392,15 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::runtime("rt_process_run_timeout: cmd must be a string")),
     };
 
-    let args_array = match &args[1] {
+    let cmd_args: Vec<String> = match &args[1] {
         Value::Array(arr) => {
-            let runtime_arr = rt_array_new(arr.len() as u64);
+            let mut v = Vec::new();
             for item in arr.iter() {
                 if let Value::Str(s) = item {
-                    let runtime_str = rt_string_new(s.as_ptr(), s.len() as u64);
-                    rt_array_push(runtime_arr, runtime_str);
+                    v.push(s.clone());
                 }
             }
-            runtime_arr
+            v
         }
         _ => {
             return Err(CompileError::runtime(
@@ -364,9 +418,66 @@ pub fn rt_process_run_timeout(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    unsafe {
-        let result = ffi_process_run_timeout(cmd.as_ptr(), cmd.len() as u64, args_array, timeout_ms);
-        Ok(runtime_to_value(result))
+    let mut child = match std::process::Command::new(&cmd)
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return Ok(Value::Tuple(vec![
+                Value::Str(String::new()),
+                Value::Str(String::new()),
+                Value::Int(-1),
+            ]));
+        }
+    };
+
+    // Poll-based timeout
+    let timeout = std::time::Duration::from_millis(timeout_ms as u64);
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_millis(10);
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    break None;
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(_) => break None,
+        }
+    };
+
+    match status {
+        Some(exit_status) => {
+            let stdout = child.stdout.take().map(|mut s| {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                buf
+            }).unwrap_or_default();
+            let stderr = child.stderr.take().map(|mut s| {
+                let mut buf = String::new();
+                std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                buf
+            }).unwrap_or_default();
+            let exit_code = exit_status.code().unwrap_or(-1) as i64;
+            Ok(Value::Tuple(vec![Value::Str(stdout), Value::Str(stderr), Value::Int(exit_code)]))
+        }
+        None => {
+            // Timeout - kill the child
+            let _ = child.kill();
+            let _ = child.wait();
+            Ok(Value::Tuple(vec![
+                Value::Str(String::new()),
+                Value::Str("Process timed out".to_string()),
+                Value::Int(-1),
+            ]))
+        }
     }
 }
 
