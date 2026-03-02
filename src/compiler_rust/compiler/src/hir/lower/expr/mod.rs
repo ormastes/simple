@@ -304,11 +304,14 @@ impl Lowerer {
             }
         }
         // Search pre-registered methods for ".method" suffix
+        // Sort matches by name length (shortest = most specific) for deterministic resolution
         let suffix = format!(".{}", method);
-        for (name, &ret_ty) in &self.method_return_types {
-            if name.ends_with(&suffix) {
-                return ret_ty;
-            }
+        if let Some((_, &ret_ty)) = self.method_return_types
+            .iter()
+            .filter(|(name, _)| name.ends_with(&suffix))
+            .min_by_key(|(name, _)| name.len())
+        {
+            return ret_ty;
         }
         TypeId::ANY
     }

@@ -18,7 +18,7 @@
 
 use model.{TextModel, compute_mse_loss, check_gpu}
 use shared_logic.{
-    TrainConfig, TrainState, EMBEDDING_SEQ_LEN,
+    TrainConfig, TrainState,
     make_randn_batch_on_cuda, compute_ce_loss,
     report_gpu_memory, report_training_step, report_epoch_end,
     lr_linear_warmup
@@ -39,12 +39,22 @@ use train_phase2.{run_phase2}
 
 use src.torch_dyn.{
     torch_available,
+    tensor_randn_2d,
+    tensor_arange_int,
+    t_mul_scalar,
+    t_exp,
+    t_sin,
+    t_cos,
+    t_reshape_2d,
+    t_matmul,
+    t_cuda,
     t_free,
     t_mean,
     autograd_backward,
     autograd_set_requires_grad,
     autograd_no_grad_begin,
     autograd_no_grad_end,
+    t_to_float32,
     cuda_empty_cache
 }
 
@@ -82,19 +92,78 @@ fn run_phase3(model: TextModel) -> ExtendedModel:
     print("  Phase 0-2 knowledge preserved in base weights")
     print("")
 
-    # Create Korean/English dual embeddings
-    var emb = create_kor_eng_embedding(KOR_VOCAB, ENG_VOCAB, EMBED_DIM, KOR_START, KOR_END)
+    # Create Korean/English dual embeddings (inlined to avoid transitive constructor issue)
+    print("Creating KorEngEmbedding:")
+    print("  Korean: vocab={KOR_VOCAB}, range=[{KOR_START}, {KOR_END})")
+    print("  English: vocab={ENG_VOCAB}")
+    print("  Embed dim: {EMBED_DIM}")
+    val kor_cpu = tensor_randn_2d(KOR_VOCAB, EMBED_DIM)
+    val kor_scaled = t_mul_scalar(kor_cpu, 0.02)
+    t_free(kor_cpu)
+    val kor_gpu = t_cuda(kor_scaled, 0)
+    t_free(kor_scaled)
+    autograd_set_requires_grad(kor_gpu, true)
+    val eng_cpu = tensor_randn_2d(ENG_VOCAB, EMBED_DIM)
+    val eng_scaled = t_mul_scalar(eng_cpu, 0.02)
+    t_free(eng_cpu)
+    val eng_gpu = t_cuda(eng_scaled, 0)
+    t_free(eng_scaled)
+    autograd_set_requires_grad(eng_gpu, true)
+    val emb_total = (KOR_VOCAB + ENG_VOCAB) * EMBED_DIM
+    print("  Trainable params: {emb_total}")
+    var emb = KorEngEmbedding(
+        kor_weight: kor_gpu,
+        eng_weight: eng_gpu,
+        kor_start: KOR_START,
+        kor_end: KOR_END,
+        kor_vocab: KOR_VOCAB,
+        eng_vocab: ENG_VOCAB,
+        embed_dim: EMBED_DIM
+    )
     emb.print_summary()
     print("")
 
-    # Create RoPE cache
-    val rope = create_rope_cache(MAX_SEQ_LEN, EMBED_DIM)
+    # Create RoPE cache (inlined to avoid transitive constructor issue)
+    print("Creating RoPE cache: seq_len={MAX_SEQ_LEN}, dim={EMBED_DIM}")
+    val half_dim = EMBED_DIM / 2
+    val indices_int = tensor_arange_int(0, half_dim, 1)
+    val indices_cpu = t_to_float32(indices_int)
+    t_free(indices_int)
+    val scale = -2.0 * 9.210340371976184 / EMBED_DIM
+    val log_freqs = t_mul_scalar(indices_cpu, scale)
+    t_free(indices_cpu)
+    val freqs = t_exp(log_freqs)
+    t_free(log_freqs)
+    val positions_int = tensor_arange_int(0, MAX_SEQ_LEN, 1)
+    val positions_cpu = t_to_float32(positions_int)
+    t_free(positions_int)
+    val pos_col = t_reshape_2d(positions_cpu, MAX_SEQ_LEN, 1)
+    t_free(positions_cpu)
+    val freq_row = t_reshape_2d(freqs, 1, half_dim)
+    t_free(freqs)
+    val angles = t_matmul(pos_col, freq_row)
+    t_free(pos_col)
+    t_free(freq_row)
+    val cos_cpu = t_cos(angles)
+    val sin_cpu = t_sin(angles)
+    t_free(angles)
+    val cos_gpu = t_cuda(cos_cpu, 0)
+    t_free(cos_cpu)
+    val sin_gpu = t_cuda(sin_cpu, 0)
+    t_free(sin_cpu)
+    print("  Cache shape: [{MAX_SEQ_LEN}, {half_dim}]")
+    val rope = RoPECache(
+        cos_cache: cos_gpu,
+        sin_cache: sin_gpu,
+        max_seq_len: MAX_SEQ_LEN,
+        embed_dim: EMBED_DIM
+    )
     rope.print_summary()
     print("")
 
     # Training loop — only embedding weights are trainable
     print("Training: ONLY embedding weights (no LoRA)")
-    print("  Seq len: {EMBEDDING_SEQ_LEN}")
+    print("  Seq len: {8}")
     print("")
 
     var state = TrainState.create()
@@ -106,7 +175,7 @@ fn run_phase3(model: TextModel) -> ExtendedModel:
             val lr = lr_linear_warmup(state.global_step, config.warmup_steps, config.learning_rate)
 
             # Create synthetic token batch with routing data
-            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, emb, config.output_dim)
+            val batch = make_embedding_batch(config.batch_size, 8, emb, config.output_dim)
             val kor_ids = batch[0]
             val eng_ids = batch[1]
             val mask = batch[2]
@@ -114,7 +183,7 @@ fn run_phase3(model: TextModel) -> ExtendedModel:
 
             # Forward: embed -> RoPE -> pool -> model
             val embedded = embed_with_routing(emb, kor_ids, eng_ids, mask)
-            val rotated = apply_rope(embedded, rope, EMBEDDING_SEQ_LEN)
+            val rotated = apply_rope(embedded, rope, 8)
             t_free(embedded)
             val pooled = mean_pool_seq(rotated)
             t_free(rotated)
@@ -170,8 +239,19 @@ fn run_phase3(model: TextModel) -> ExtendedModel:
     print("  Best loss: {state.best_loss}")
     print("=" * 70)
 
-    # Create ExtendedModel
-    val ext_model = create_extended_model(model, emb, rope, EMBEDDING_SEQ_LEN)
+    # Create ExtendedModel (inlined to avoid transitive constructor issue)
+    print("Creating ExtendedModel (embedding + RoPE wrapper)")
+    val ext_model = ExtendedModel(
+        base: model,
+        emb: emb,
+        rope: rope,
+        seq_len: 8,
+        w_front: 0,
+        b_front: 0,
+        w_back: 0,
+        b_back: 0,
+        has_front_back: false
+    )
     report_gpu_memory()
     ext_model
 
