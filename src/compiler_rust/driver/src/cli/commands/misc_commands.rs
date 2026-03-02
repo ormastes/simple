@@ -251,12 +251,13 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     let mut cmd = Command::new(compiler);
     if is_rust_driver {
         // Rust driver: use `compile --native` subcommand
+        // Argument order: compile <source> --native -o <output>
         cmd.arg("compile")
-            .arg("--native")
             .arg("src/app/cli/main.spl")
+            .arg("--native")
             .arg("-o")
             .arg(output);
-        println!("  Running: {} compile --native src/app/cli/main.spl -o {}",
+        println!("  Running: {} compile src/app/cli/main.spl --native -o {}",
             compiler, output);
     } else {
         // Self-hosted binary: run native.spl as a file to compile main.spl
