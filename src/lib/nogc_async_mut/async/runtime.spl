@@ -41,6 +41,7 @@ enum TaskState<T>:
 struct Runtime:
     """Async runtime with event loop and task scheduler."""
     ready_queue: [i64]                      # Task IDs ready to poll
+    in_queue: Dict<i64, bool>              # O(1) membership check for ready_queue
     tasks: Dict<i64, TaskContext>           # All tasks
     completed: Dict<i64, TaskResult>        # Completed task results
 
@@ -60,6 +61,7 @@ impl Runtime:
         """Create a new async runtime."""
         Runtime(
             ready_queue: [],
+            in_queue: {},
             tasks: {},
             completed: {}
         )
@@ -76,9 +78,10 @@ impl Runtime:
         """
         val task_id = generate_task_id()
 
-        # Create waker that adds task back to ready queue
+        # Create waker that adds task back to ready queue (O(1) duplicate check)
         val waker = Waker.from_fn(task_id, \id:
-            if not self.ready_queue.contains(id):
+            if not self.in_queue.contains_key(id):
+                self.in_queue.insert(id, true)
                 self.ready_queue.push(id)
         )
 
@@ -89,6 +92,7 @@ impl Runtime:
         )
 
         self.tasks.insert(task_id, context)
+        self.in_queue.insert(task_id, true)
         self.ready_queue.push(task_id)
 
         task_id
@@ -102,11 +106,13 @@ impl Runtime:
             return false
 
         val task_id = self.ready_queue.pop_front() ?? return false
+        self.in_queue.remove(task_id)
         val context = self.tasks.get(task_id) ?? return true
 
-        # Create waker for this poll
+        # Create waker for this poll (O(1) duplicate check via in_queue)
         val waker = Waker.from_fn(task_id, \id:
-            if not self.ready_queue.contains(id):
+            if not self.in_queue.contains_key(id):
+                self.in_queue.insert(id, true)
                 self.ready_queue.push(id)
         )
 

@@ -10,7 +10,7 @@ use crate::codegen::runtime_ffi::RUNTIME_FUNCS;
 use crate::mir::{CallTarget, VReg};
 
 use super::core::compile_builtin_io_call;
-use super::helpers::{adapted_call, get_vreg_or_default};
+use super::helpers::{adapted_call, create_cstring_constant, get_vreg_or_default};
 use super::{InstrContext, InstrResult};
 
 /// Check if a function name is a profiler function (to avoid recursive instrumentation)
@@ -18,26 +18,7 @@ fn is_profiler_function(name: &str) -> bool {
     name.starts_with("rt_profiler_")
 }
 
-/// Create a null-terminated C string constant in module data and return a pointer value.
-fn create_cstring_constant<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    text: &str,
-) -> InstrResult<cranelift_codegen::ir::Value> {
-    let mut bytes = text.as_bytes().to_vec();
-    bytes.push(0); // null terminator
-    let data_id = ctx
-        .module
-        .declare_anonymous_data(true, false)
-        .map_err(|e| e.to_string())?;
-    let mut data_desc = cranelift_module::DataDescription::new();
-    data_desc.define(bytes.into_boxed_slice());
-    ctx.module.define_data(data_id, &data_desc).map_err(|e| e.to_string())?;
-
-    let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
-    let ptr = builder.ins().global_value(types::I64, global_val);
-    Ok(ptr)
-}
+// create_cstring_constant is now imported from helpers
 
 /// Emit profiler call/return instrumentation around a function call.
 /// Only emits if profiling is active at codegen time (zero overhead when off).

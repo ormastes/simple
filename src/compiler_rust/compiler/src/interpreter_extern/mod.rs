@@ -81,6 +81,7 @@ pub mod env_ffi;
 pub mod error_ffi;
 pub mod span_ffi;
 pub mod rc;
+pub mod wffi;
 
 // Import parent interpreter types
 type Enums = HashMap<String, EnumDef>;
@@ -1189,6 +1190,18 @@ pub(crate) fn call_extern_function(
         "rt_span_line" => span_ffi::rt_span_line(&evaluated),
         "rt_span_column" => span_ffi::rt_span_column(&evaluated),
         "rt_span_free" => span_ffi::rt_span_free(&evaluated),
+
+        // ====================================================================
+        // WFFI Dynamic Library Functions (8 functions)
+        // ====================================================================
+        "spl_dlopen" => wffi::spl_dlopen(&evaluated),
+        "spl_dlsym" => wffi::spl_dlsym(&evaluated),
+        "spl_dlclose" => wffi::spl_dlclose(&evaluated),
+        "spl_wffi_call_i64" => wffi::spl_wffi_call_i64(&evaluated),
+        "spl_f64_to_bits" => wffi::spl_f64_to_bits(&evaluated),
+        "spl_bits_to_f64" => wffi::spl_bits_to_f64(&evaluated),
+        "spl_str_ptr" => wffi::spl_str_ptr(&evaluated),
+        "rt_cstring_to_text" => wffi::rt_cstring_to_text(&evaluated),
 
         _ => Err(common::unknown_function(name)),
     }
