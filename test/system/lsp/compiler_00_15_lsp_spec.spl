@@ -1,0 +1,136 @@
+# LSP System Test: compiler 00.common + 10.frontend + 15.blocks
+
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn find_spl_files(dir: text) -> [text]:
+    var result: [text] = []
+    val entries = rt_dir_list(dir) ?? []
+    var i = 0
+    while i < entries.len():
+        val name = entries[i]
+        val full = "{dir}/{name}"
+        if name.ends_with(".spl"):
+            result.push(full)
+        elif not name.starts_with("."):
+            val subs = find_spl_files(full)
+            var j = 0
+            while j < subs.len():
+                result.push(subs[j])
+                j = j + 1
+        i = i + 1
+    result
+
+fn find_first_code_line(file: text) -> i64:
+    val content = rt_file_read_text(file) ?? ""
+    if content == "":
+        return 1
+    val lines = content.split("\n")
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            return i + 1
+        i = i + 1
+    1
+
+fn run_lsp(subcmd: text, file: text, line: i64, col: i64) -> i64:
+    val (stdout, stderr, code) = rt_process_run("bin/release/simple", ["src/app/cli/query.spl", subcmd, file, "{line}", "{col}"])
+    code
+
+fn run_lsp_no_pos(subcmd: text, file: text) -> i64:
+    val (stdout, stderr, code) = rt_process_run("bin/release/simple", ["src/app/cli/query.spl", subcmd, file])
+    code
+
+fn batch_lsp(subcmd: text, files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val line = find_first_code_line(files[i])
+        val code = run_lsp(subcmd, files[i], line, 5)
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+fn batch_lsp_no_pos(subcmd: text, files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val code = run_lsp_no_pos(subcmd, files[i])
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+fn report_crashes(label: text, crashes: [text]) -> i64:
+    if crashes.len() == 0:
+        print "  PASS: {label} — 0 crashes"
+    else:
+        print "  FAIL: {label} — {crashes.len()} crashes:"
+        var k = 0
+        while k < crashes.len():
+            print "    - {crashes[k]}"
+            k = k + 1
+    crashes.len()
+
+var files: [text] = []
+val f1 = find_spl_files("src/compiler/00.common")
+var i = 0
+while i < f1.len():
+    files.push(f1[i])
+    i = i + 1
+val f2 = find_spl_files("src/compiler/10.frontend")
+i = 0
+while i < f2.len():
+    files.push(f2[i])
+    i = i + 1
+val f3 = find_spl_files("src/compiler/15.blocks")
+i = 0
+while i < f3.len():
+    files.push(f3[i])
+    i = i + 1
+print "Discovered {files.len()} files"
+
+describe "LSP System: compiler 00.common + 10.frontend + 15.blocks":
+    it "hover: no crashes":
+        val crashes = batch_lsp("hover", files)
+        report_crashes("hover", crashes)
+        expect(crashes.len()).to_equal(0)
+
+    it "definition: no crashes":
+        val crashes = batch_lsp("definition", files)
+        report_crashes("definition", crashes)
+        expect(crashes.len()).to_equal(0)
+
+    it "references: no crashes":
+        val crashes = batch_lsp("references", files)
+        report_crashes("references", crashes)
+        expect(crashes.len()).to_equal(0)
+
+    it "completions: no crashes":
+        val crashes = batch_lsp("completions", files)
+        report_crashes("completions", crashes)
+        expect(crashes.len()).to_equal(0)
+
+    it "semantic-tokens: no crashes":
+        val crashes = batch_lsp_no_pos("semantic-tokens", files)
+        report_crashes("semantic-tokens", crashes)
+        expect(crashes.len()).to_equal(0)
+
+    it "folding-range: no crashes":
+        val crashes = batch_lsp_no_pos("folding-range", files)
+        report_crashes("folding-range", crashes)
+        expect(crashes.len()).to_equal(0)
+
+    it "document-highlight: no crashes":
+        val crashes = batch_lsp("document-highlight", files)
+        report_crashes("document-highlight", crashes)
+        expect(crashes.len()).to_equal(0)
+
+    it "type-definition: no crashes":
+        val crashes = batch_lsp("type-definition", files)
+        report_crashes("type-definition", crashes)
+        expect(crashes.len()).to_equal(0)

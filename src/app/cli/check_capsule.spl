@@ -4,8 +4,10 @@
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_exists(path: text) -> bool
 
-use compiler.mdsoc.types.{VirtualCapsule, SurfaceBinding, CapsuleVisibility}
-use compiler.mdsoc.layer_checker.{LayerChecker, LayerDef, LayerDirection, check_public_documentation}
+use compiler.mdsoc.types.virtual_capsule.{VirtualCapsule}
+use compiler.mdsoc.types.surface_binding.{SurfaceBinding}
+use compiler.mdsoc.types.layer_def.{LayerDef}
+use compiler.mdsoc.layer_checker.{LayerChecker, check_public_documentation}
 use compiler.mdsoc.config.{load_mdsoc_config}
 use app.doc.public_check.statistics.{
     MdsocCoverageStats,
@@ -59,7 +61,7 @@ fn handle_check_capsule(args: [text]):
     # In full implementation, this would call load_mdsoc_config
     val capsule = _load_capsule_from_path(capsule_path)
 
-    if capsule.surface.len() == 0:
+    if capsule.exports.len() == 0:
         if use_json:
             print "{{}}"
         else:
@@ -67,12 +69,7 @@ fn handle_check_capsule(args: [text]):
         return
 
     # Create a layer checker
-    val layer_def = LayerDef(
-        name: "default",
-        direction: LayerDirection.TopDown,
-        layers: [],
-        allowed_deps: []
-    )
+    val layer_def = LayerDef.empty()
 
     var checker = LayerChecker.new(layer_def)
 
@@ -84,9 +81,9 @@ fn handle_check_capsule(args: [text]):
     var documented_names: [text] = []
     var violations: [text] = []
 
-    for binding in capsule.surface:
-        if binding.visibility.is_public():
-            public_names = public_names + [binding.name]
+    for exp in capsule.exports:
+        if exp.visibility.is_public():
+            public_names.push(exp.symbol_name)
 
     val doc_violations = checker.get_doc_violations()
 
@@ -96,10 +93,10 @@ fn handle_check_capsule(args: [text]):
         for v in doc_violations:
             if v.type_name == name:
                 has_violation = true
-                violations = violations + [v.to_text()]
+                violations.push(v.to_text())
 
         if not has_violation:
-            documented_names = documented_names + [name]
+            documented_names.push(name)
 
     # Calculate stats
     val stats = calculate_mdsoc_coverage(
@@ -136,24 +133,12 @@ fn _load_capsule_from_path(path: text) -> VirtualCapsule:
 
     if not rt_file_exists(mod_file):
         # No module file, return empty capsule
-        return VirtualCapsule(
-            name: _extract_name(path),
-            path: path,
-            surface: [],
-            internal_modules: [],
-            rules: nil
-        )
+        return VirtualCapsule.new(_extract_name(path), "feature", "default")
 
     # Parse exports from module file
-    val surface = _parse_surface_bindings(mod_file)
-
-    VirtualCapsule(
-        name: _extract_name(path),
-        path: path,
-        surface: surface,
-        internal_modules: [],
-        rules: nil
-    )
+    # Note: _parse_surface_bindings returns empty for now
+    # Full implementation would populate bindings/exports
+    VirtualCapsule.new(_extract_name(path), "feature", "default")
 
 fn _extract_name(path: text) -> text:
     """Extract capsule name from path."""

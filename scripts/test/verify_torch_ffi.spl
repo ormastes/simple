@@ -1,0 +1,108 @@
+# Verify PyTorch FFI Integration Status
+# Checks FFI library, runtime, and integration state
+#
+# Usage: bin/simple run scripts/test/verify_torch_ffi.spl
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_exit(code: i32)
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+fn shell_output(command: text) -> text:
+    val (out, _, _) = shell(command)
+    out.trim()
+
+fn shell_ok(command: text) -> bool:
+    val (_, _, code) = shell(command)
+    code == 0
+
+fn main():
+    val project_root = shell_output("pwd")
+
+    print "PyTorch FFI Integration Verification"
+    print "====================================="
+    print ""
+
+    val ffi_lib = "{project_root}/.build/rust/ffi_torch/target/release/libsimple_torch_ffi.so"
+    val runtime = "{project_root}/bin/release/simple"
+
+    # Check 1: FFI library exists
+    if rt_file_exists(ffi_lib):
+        val size = shell_output("ls -lh {ffi_lib} | awk '{{print $5}}'")
+        print "1. FFI library exists: OK ({size})"
+    else:
+        print "1. FFI library exists: FAIL"
+        print "  Not found at: {ffi_lib}"
+        rt_exit(1)
+
+    # Check 2: FFI library exports
+    if shell_ok("nm -D {ffi_lib} 2>/dev/null | grep -q 'T rt_torch_available'"):
+        print "2. FFI library exports rt_torch_available: OK"
+    else:
+        print "2. FFI library exports rt_torch_available: FAIL"
+
+    # Check 3: Symbol count
+    val sym_count = shell_output("nm -D {ffi_lib} 2>/dev/null | grep ' T rt_torch' | wc -l")
+    print "3. FFI library symbol count: {sym_count} functions"
+
+    # Check 4: Runtime binary
+    if rt_file_exists(runtime):
+        val size = shell_output("ls -lh {runtime} | awk '{{print $5}}'")
+        print "4. Runtime binary exists: OK ({size})"
+    else:
+        print "4. Runtime binary exists: FAIL"
+
+    # Check 5: Runtime integration
+    val integrated = shell_ok("nm {runtime} 2>/dev/null | grep -q ' T rt_torch_tensor_zeros'")
+    if integrated:
+        print "5. Runtime has rt_torch_tensor_zeros: INTEGRATED"
+    else:
+        print "5. Runtime has rt_torch_tensor_zeros: NOT INTEGRATED"
+
+    # Check 6: JIT symbols
+    if shell_ok("nm {runtime} 2>/dev/null | grep -q ' T rt_torch_jit_forward'"):
+        print "6. Runtime has rt_torch_jit_forward: OK"
+    else:
+        print "6. Runtime has rt_torch_jit_forward: FAIL"
+
+    # Check 7: API files
+    val has_api = rt_file_exists("{project_root}/src/lib/torch/mod.spl") and rt_file_exists("{project_root}/src/lib/torch/ffi.spl")
+    if has_api:
+        print "7. Simple API files exist: OK"
+    else:
+        print "7. Simple API files exist: FAIL"
+
+    # Check 8: Examples
+    val example_count = shell_output("find {project_root}/examples/torch -name '*.spl' 2>/dev/null | wc -l")
+    print "8. Example files exist: {example_count} total"
+
+    # Check 9: Test suite
+    if rt_file_exists("{project_root}/test/system/dl_examples_system_spec.spl"):
+        print "9. Test suite exists: OK"
+    else:
+        print "9. Test suite exists: FAIL"
+
+    # Check 10: Documentation
+    if rt_file_exists("{project_root}/doc/torch_ffi_integration.md"):
+        print "10. Documentation exists: OK"
+    else:
+        print "10. Documentation exists: FAIL"
+
+    print ""
+    print "====================================="
+    if integrated:
+        print "STATUS: PyTorch FFI is INTEGRATED"
+        print ""
+        print "You can run PyTorch examples:"
+        print "  bin/simple examples/torch/basics/01_tensor_creation.spl"
+    else:
+        print "STATUS: PyTorch FFI is NOT INTEGRATED"
+        print ""
+        print "The FFI library is built but not linked into the runtime."
+        print "See: doc/torch_ffi_integration.md"
+
+    print ""
+    print "Test suite:"
+    print "  bin/simple test test/system/dl_examples_system_spec.spl"

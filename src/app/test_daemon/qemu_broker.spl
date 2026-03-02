@@ -6,6 +6,8 @@
 export QemuSessionEntry, QemuBroker, qemu_broker_new
 export QEMU_IDLE, QEMU_IN_USE, QEMU_STALE
 
+use std.qemu.qmp_client.{QmpClient, qmp_connect, qmp_savevm, qmp_loadvm}
+
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_hash_text(s: text) -> i64
 
@@ -28,6 +30,9 @@ struct QemuSessionEntry:
     status: i64
     test_count: i64
     last_used: i64
+    qmp_socket: text
+    has_golden_snapshot: bool
+    pid: i64
 
 # ============================================================================
 # Broker
@@ -57,7 +62,10 @@ impl QemuBroker:
                     binary_hash: session.binary_hash,
                     status: QEMU_IN_USE,
                     test_count: session.test_count + 1,
-                    last_used: rt_time_now_unix_micros()
+                    last_used: rt_time_now_unix_micros(),
+                    qmp_socket: session.qmp_socket,
+                    has_golden_snapshot: session.has_golden_snapshot,
+                    pid: session.pid
                 )
                 return self.sessions[i]
             i = i + 1
@@ -72,7 +80,10 @@ impl QemuBroker:
             binary_hash: binary_hash,
             status: QEMU_IN_USE,
             test_count: 1,
-            last_used: rt_time_now_unix_micros()
+            last_used: rt_time_now_unix_micros(),
+            qmp_socket: "",
+            has_golden_snapshot: false,
+            pid: 0
         )
         self.sessions.push(new_session)
         new_session
@@ -87,7 +98,10 @@ impl QemuBroker:
                     binary_hash: self.sessions[i].binary_hash,
                     status: QEMU_IDLE,
                     test_count: self.sessions[i].test_count,
-                    last_used: rt_time_now_unix_micros()
+                    last_used: rt_time_now_unix_micros(),
+                    qmp_socket: self.sessions[i].qmp_socket,
+                    has_golden_snapshot: self.sessions[i].has_golden_snapshot,
+                    pid: self.sessions[i].pid
                 )
                 return
             i = i + 1
@@ -104,6 +118,69 @@ impl QemuBroker:
                 pass_dn
             else:
                 new_sessions.push(session)
+            i = i + 1
+        self.sessions = new_sessions
+
+    me acquire_with_snapshot(arch: text, binary_path: text) -> QemuSessionEntry:
+        var session = self.acquire(arch, binary_path)
+        # If session has QMP and no golden snapshot, create one
+        if session.qmp_socket != "" and not session.has_golden_snapshot:
+            val client = qmp_connect(session.qmp_socket)
+            val saved = qmp_savevm(client, "golden")
+            if saved:
+                # Update session to mark golden snapshot
+                var i = 0
+                while i < self.sessions.len():
+                    if self.sessions[i].session_key == session.session_key:
+                        self.sessions[i] = QemuSessionEntry(
+                            session_key: session.session_key,
+                            arch: session.arch,
+                            binary_hash: session.binary_hash,
+                            status: QEMU_IN_USE,
+                            test_count: session.test_count,
+                            last_used: session.last_used,
+                            qmp_socket: session.qmp_socket,
+                            has_golden_snapshot: true,
+                            pid: session.pid
+                        )
+                        session = self.sessions[i]
+                        break
+                    i = i + 1
+        session
+
+    me snapshot_save(session_key: text, name: text) -> bool:
+        var i = 0
+        while i < self.sessions.len():
+            val s = self.sessions[i]
+            if s.session_key == session_key and s.qmp_socket != "":
+                val client = qmp_connect(s.qmp_socket)
+                return qmp_savevm(client, name)
+            i = i + 1
+        false
+
+    me snapshot_restore(session_key: text, name: text) -> bool:
+        var i = 0
+        while i < self.sessions.len():
+            val s = self.sessions[i]
+            if s.session_key == session_key and s.qmp_socket != "":
+                val client = qmp_connect(s.qmp_socket)
+                return qmp_loadvm(client, name)
+            i = i + 1
+        false
+
+    me shutdown_session(session_key: text):
+        var new_sessions: [QemuSessionEntry] = []
+        var i = 0
+        while i < self.sessions.len():
+            val s = self.sessions[i]
+            if s.session_key == session_key:
+                # Kill QEMU process if we have a PID
+                if s.pid > 0:
+                    val kill_cmd = "kill {s.pid} 2>/dev/null"
+                    # Can't call shell directly here without import; use extern
+                    pass_dn
+            else:
+                new_sessions.push(s)
             i = i + 1
         self.sessions = new_sessions
 

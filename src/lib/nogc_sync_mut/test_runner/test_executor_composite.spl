@@ -16,10 +16,12 @@ use app.io.process_ops.{process_run_timeout}
 
 fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) -> TestFileResult:
     """Execute test in composite platform mode."""
-    val start = time_now_unix_micros()
+    val setup_start = time_now_unix_micros()
     val base = extract_base_runtime(spec)
     val platform = extract_platform_layer(spec)
     val arch = extract_arch_from_spec(spec)
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
 
     # Dispatch to platform-specific runner
     if platform == "baremetal":
@@ -27,10 +29,8 @@ fn run_test_file_composite(file_path: text, options: TestOptions, spec: text) ->
     if platform == "remote":
         return run_test_file_remote(file_path, options, base, arch)
 
-    val end = time_now_unix_micros()
-    val duration_ms = (end - start) / 1000
     TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-        duration_ms: duration_ms, error: "Unknown platform: {platform}", timed_out: false)
+        duration_ms: 0, setup_ms: setup_ms, error: "Unknown platform: {platform}", timed_out: false)
 
 fn extract_base_runtime(spec: text) -> text:
     """Extract base runtime from composite spec (e.g. 'interpreter' from 'interpreter(baremetal(riscv32))')."""
@@ -81,14 +81,20 @@ fn run_test_file_baremetal(file_path: text, options: TestOptions, base: text, ar
 
 fn run_test_file_baremetal_via_interpreter(file_path: text, options: TestOptions, arch: text) -> TestFileResult:
     """Run baremetal logic test via host interpreter."""
+    val setup_start = time_now_unix_micros()
     val binary = find_simple_binary()
     val child_args = build_child_args(file_path, options)
     val timeout_ms = options.timeout * 1000
-    val start = time_now_unix_micros()
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+
+    val test_start = time_now_unix_micros()
     val (stdout, stderr, exit_code) = process_run_timeout(binary, child_args, timeout_ms)
-    val end = time_now_unix_micros()
-    val duration_ms = (end - start) / 1000
-    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    val test_end = time_now_unix_micros()
+    val duration_ms = (test_end - test_start) / 1000
+    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    result.setup_ms = setup_ms
+    result
 
 fn find_baremetal_elf(spec_file: text, arch: text) -> text:
     """Find prebuilt ELF for a baremetal spec file."""
@@ -132,15 +138,15 @@ fn qemu_machine_for_arch(arch: text) -> text:
 
 fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: text, elf_path: text) -> TestFileResult:
     """Execute a prebuilt ELF on QEMU with semihosting and parse results."""
-    val start = time_now_unix_micros()
+    val setup_start = time_now_unix_micros()
     val qemu_bin = qemu_binary_for_arch(arch)
     val machine = qemu_machine_for_arch(arch)
 
     if qemu_bin == "":
-        val end = time_now_unix_micros()
-        val duration_ms = (end - start) / 1000
+        val setup_end = time_now_unix_micros()
+        val setup_ms = (setup_end - setup_start) / 1000
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-            duration_ms: duration_ms, error: "No QEMU binary for arch: {arch}", timed_out: false)
+            duration_ms: 0, setup_ms: setup_ms, error: "No QEMU binary for arch: {arch}", timed_out: false)
 
     # Build QEMU command args
     var qemu_args: [text] = [
@@ -151,13 +157,19 @@ fn run_test_file_baremetal_qemu(file_path: text, options: TestOptions, arch: tex
         "-semihosting-config", "enable=on,target=native",
     ]
 
+    val setup_end = time_now_unix_micros()
+    val setup_ms = (setup_end - setup_start) / 1000
+
     val timeout_ms = options.timeout * 1000
+    val test_start = time_now_unix_micros()
     val (stdout, stderr, exit_code) = process_run_timeout(qemu_bin, qemu_args, timeout_ms)
-    val end = time_now_unix_micros()
-    val duration_ms = (end - start) / 1000
+    val test_end = time_now_unix_micros()
+    val duration_ms = (test_end - test_start) / 1000
 
     # Parse SSpec-format output from QEMU semihosting
-    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    var result = make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    result.setup_ms = setup_ms
+    result
 
 fn run_test_file_remote(file_path: text, options: TestOptions, base: text, arch: text) -> TestFileResult:
     """Execute test on remote target via QEMU.

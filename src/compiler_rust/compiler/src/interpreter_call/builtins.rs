@@ -125,9 +125,9 @@ pub(super) fn eval_builtin(
         "freeze" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match val {
-                Value::Array(vec) => {
-                    // Create immutable frozen copy of array
-                    Ok(Some(Value::FrozenArray(std::sync::Arc::new(vec))))
+                Value::Array(arc) => {
+                    // Create immutable frozen copy of array (Arc is shared)
+                    Ok(Some(Value::FrozenArray(arc)))
                 }
                 Value::Dict(map) => {
                     // Create immutable frozen copy of dict
@@ -524,10 +524,10 @@ pub(super) fn eval_builtin(
             })?;
             let val = evaluate_expr(&gen_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Generator(gen) = val {
-                return Ok(Some(Value::Array(gen.collect_remaining())));
+                return Ok(Some(Value::array(gen.collect_remaining())));
             }
             if let Value::Array(arr) = val {
-                return Ok(Some(Value::Array(arr)));
+                return Ok(Some(Value::Array(arr)));  // already Arc-wrapped
             }
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
@@ -631,6 +631,8 @@ pub(super) fn eval_builtin(
             )?;
             Ok(Some(Value::Bool(val.truthy())))
         }
+        // pass_todo, pass_do_nothing, pass_dn: no-op builtins (accept optional message)
+        "pass_todo" | "pass_do_nothing" | "pass_dn" => Ok(Some(Value::Nil)),
         _ => Ok(None),
     }
 }

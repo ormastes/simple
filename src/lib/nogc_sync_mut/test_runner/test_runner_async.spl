@@ -10,6 +10,9 @@ use app.io.time_ops.{time_now_unix_micros}
 use app.test_runner_new.test_runner_types.{TestFileResult, TestOptions}
 use app.test_runner_new.test_runner_execute.{find_simple_binary, build_child_args, make_result_from_output}
 use app.test_runner_new.runner_lifecycle.{spawn_tracked_process, untrack_process}
+use app.test_runner_new.resource_governor.{ResourceGovernor, governor_create, governor_can_spawn, governor_wait_until_ready}
+
+extern fn rt_thread_sleep(millis: i64)
 
 # ============================================================================
 # Async Test Execution State
@@ -183,8 +186,8 @@ fn wait_for_any_process(runs: [AsyncTestRun]) -> i64:
 
             idx = idx + 1
 
-        # Sleep 100ms (would use rt_sleep if available)
-        # For now, busy-wait is acceptable for testing
+        # Sleep 100ms to avoid busy-wait
+        rt_thread_sleep(100)
 
     -1  # Timeout
 
@@ -253,9 +256,10 @@ fn run_tests_parallel_with_monitoring(
     max_workers: i64
 ) -> [TestFileResult]:
     """
-    Run tests in parallel with timeout monitoring.
+    Run tests in parallel with timeout monitoring and resource governor.
 
     Checks each active process for timeout and kills if exceeded.
+    Uses resource governor to avoid exceeding system memory/CPU limits.
 
     Args:
         files: List of test file paths
@@ -268,9 +272,17 @@ fn run_tests_parallel_with_monitoring(
     var active_runs: [AsyncTestRun] = []
     var next_file_idx = 0
 
+    # Create resource governor (default 25%, overridable via options)
+    val gov = governor_create(options.resource_limit_pct)
+    print "  [parallel] Resource governor: max {gov.max_cpu_cores} cores, {gov.max_memory_mb}MB memory ({gov.resource_limit_pct}% limit)"
+
     while next_file_idx < files.len() or active_runs.len() > 0:
-        # Spawn new tests
+        # Spawn new tests (respecting both max_workers and resource governor)
         while active_runs.len() < max_workers and next_file_idx < files.len():
+            # Check resource governor before spawning
+            if not governor_can_spawn(gov, active_runs.len()):
+                governor_wait_until_ready(gov, active_runs.len())
+
             val file_path = files[next_file_idx]
             val run = spawn_async_test(file_path, options)
             active_runs.push(run)
@@ -301,8 +313,8 @@ fn run_tests_parallel_with_monitoring(
 
         active_runs = new_runs
 
-        # Small sleep to avoid busy-wait (would use rt_sleep)
-        # For now, acceptable for testing
+        # Sleep 100ms to avoid busy-wait
+        rt_thread_sleep(100)
 
     results
 

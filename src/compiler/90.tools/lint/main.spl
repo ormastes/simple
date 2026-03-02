@@ -218,44 +218,46 @@ class Linter:
     
     me check_line(path: String, line_num: Int, line: String):
         val trimmed = line.trim()
-        
-        # Check for unused variables (simple heuristic)
-        if trimmed.starts_with("val ") and not trimmed.contains("="):
-            val lint = Lint.new("W001", LintLevel.Warn, LintCategory.Warning,
-                "Variable declared but never assigned")
-                .with_fix("Remove declaration or assign a value")
-            self.results.push(LintResult.new(path, line_num, 0, lint))
-        
-        # Check for unreachable code
-        if trimmed.starts_with("return "):
-            # Next non-empty line after return is potentially unreachable
-            # (This is oversimplified - needs proper control flow analysis)
-            val _ = 0
-        
-        # Check naming conventions (if enabled)
-        if trimmed.starts_with("fn "):
-            val fn_name = self.extract_function_name(trimmed)
-            if not self.is_snake_case(fn_name):
-                val lint = Lint.new("ST001", LintLevel.Allow, LintCategory.Style,
-                    "Function name '{fn_name}' should be snake_case")
-                    .with_fix("Rename to '{self.to_snake_case(fn_name)}'")
-                self.results.push(LintResult.new(path, line_num, 0, lint))
-        
-        if trimmed.starts_with("class "):
-            val class_name = self.extract_class_name(trimmed)
-            if not self.is_pascal_case(class_name):
-                val lint = Lint.new("ST002", LintLevel.Allow, LintCategory.Style,
-                    "Class name '{class_name}' should be PascalCase")
+        if trimmed == "":
+            return
+
+        # First-character dispatch to skip irrelevant branches early.
+        # Most lines start with identifiers/keywords — only a few prefixes matter.
+        val first = trimmed[0]
+
+        if first == "v":
+            # Check for unused variables (simple heuristic)
+            if trimmed.starts_with("val ") and not trimmed.contains("="):
+                val lint = Lint.new("W001", LintLevel.Warn, LintCategory.Warning,
+                    "Variable declared but never assigned")
+                    .with_fix("Remove declaration or assign a value")
                 self.results.push(LintResult.new(path, line_num, 0, lint))
 
-        # Check TODO/FIXME format
+        if first == "f":
+            # Check naming conventions for functions
+            if trimmed.starts_with("fn "):
+                val fn_name = self.extract_function_name(trimmed)
+                if not self.is_snake_case(fn_name):
+                    val lint = Lint.new("ST001", LintLevel.Allow, LintCategory.Style,
+                        "Function name '{fn_name}' should be snake_case")
+                        .with_fix("Rename to '{self.to_snake_case(fn_name)}'")
+                    self.results.push(LintResult.new(path, line_num, 0, lint))
+
+        if first == "c":
+            if trimmed.starts_with("class "):
+                val class_name = self.extract_class_name(trimmed)
+                if not self.is_pascal_case(class_name):
+                    val lint = Lint.new("ST002", LintLevel.Allow, LintCategory.Style,
+                        "Class name '{class_name}' should be PascalCase")
+                    self.results.push(LintResult.new(path, line_num, 0, lint))
+
+        if first == "u":
+            # Check unfold declaration (only in __init__.spl files)
+            if trimmed.starts_with("unfold ") and trimmed.contains("{"):
+                self.check_unfold_declaration(path, line_num, trimmed)
+
+        # These checks examine content (comments, strings) — always run
         self.check_todo_format(path, line_num, trimmed)
-
-        # Check unfold declaration (only in __init__.spl files)
-        if trimmed.starts_with("unfold ") and trimmed.contains("{"):
-            self.check_unfold_declaration(path, line_num, trimmed)
-
-        # Check for direct .sdn file writes
         self.check_sdn_write(path, line_num, trimmed)
     
     fn extract_function_name(line: String) -> String:

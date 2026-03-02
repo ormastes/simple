@@ -97,7 +97,7 @@ pub fn handle_int_methods(
                     results.push(result);
                 }
             }
-            Value::Array(results)
+            Value::array(results)
         }
         "up_to" => {
             // Create range from self to n (exclusive)
@@ -105,7 +105,7 @@ pub fn handle_int_methods(
                 .as_int()
                 .unwrap_or(n);
             let range: Vec<Value> = (n..end).map(Value::Int).collect();
-            Value::Array(range)
+            Value::array(range)
         }
         "down_to" => {
             // Create range from self down to n (exclusive)
@@ -113,7 +113,7 @@ pub fn handle_int_methods(
                 .as_int()
                 .unwrap_or(0);
             let range: Vec<Value> = (end..n).rev().map(Value::Int).collect();
-            Value::Array(range)
+            Value::array(range)
         }
         "gcd" => {
             // Greatest common divisor
@@ -174,7 +174,7 @@ pub fn handle_int_methods(
             }
 
             if n == 0 {
-                Value::Array(vec![Value::Int(0)])
+                Value::array(vec![Value::Int(0)])
             } else {
                 let mut digits = Vec::new();
                 let mut num = n;
@@ -182,7 +182,7 @@ pub fn handle_int_methods(
                     digits.push(Value::Int(num % base));
                     num /= base;
                 }
-                Value::Array(digits)
+                Value::array(digits)
             }
         }
         "bit_length" => {
@@ -413,7 +413,7 @@ pub fn handle_float_methods(
                 den /= g;
             }
 
-            Value::Array(vec![Value::Int(num), Value::Int(den)])
+            Value::array(vec![Value::Int(num), Value::Int(den)])
         }
         "fdiv" => {
             // Floor division for floats - rounds towards negative infinity

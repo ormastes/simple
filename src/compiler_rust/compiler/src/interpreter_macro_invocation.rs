@@ -71,7 +71,7 @@ pub fn eval_builtin_macro(
                 let MacroArg::Expr(e) = arg;
                 items.push(evaluate_expr(e, env, functions, classes, enums, impl_methods)?);
             }
-            Some(Ok(Value::Array(items)))
+            Some(Ok(Value::array(items)))
         }
         "assert" => {
             if let Some(MacroArg::Expr(e)) = macro_args.first() {

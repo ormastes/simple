@@ -69,7 +69,7 @@ fn build_def_use_chains(body_blocks: [MirBlock]) -> [DefUseChain]:
                 if not chains_map.contains_key(local_id):
                     chains_map[local_id] = DefUseChain(local: local, defs: [], uses: [])
                 var chain = chains_map[local_id]
-                chain.defs = chain.defs + [inst_index]
+                chain.defs.push(inst_index)
                 chains_map[local_id] = chain
 
             # Check what this instruction uses
@@ -79,7 +79,7 @@ fn build_def_use_chains(body_blocks: [MirBlock]) -> [DefUseChain]:
                 if not chains_map.contains_key(local_id):
                     chains_map[local_id] = DefUseChain(local: local, defs: [], uses: [])
                 var chain = chains_map[local_id]
-                chain.uses = chain.uses + [inst_index]
+                chain.uses.push(inst_index)
                 chains_map[local_id] = chain
 
             inst_index = inst_index + 1
@@ -87,7 +87,7 @@ fn build_def_use_chains(body_blocks: [MirBlock]) -> [DefUseChain]:
     # Convert map to list
     var chains: [DefUseChain] = []
     for (key, chain) in chains_map.items():
-        chains = chains + [chain]
+        chains.push(chain)
     chains
 
 # ============================================================================
@@ -133,9 +133,9 @@ fn get_inst_uses(inst: MirInst) -> [LocalId]:
 
     match inst.kind:
         case Copy(_, src):
-            uses = uses + [src]
+            uses.push(src)
         case Move(_, src):
-            uses = uses + [src]
+            uses.push(src)
         case BinOp(_, _, left, right):
             uses = uses + (get_operand_locals(left))
             uses = uses + (get_operand_locals(right))
@@ -207,13 +207,13 @@ fn detect_dependencies(body_blocks: [MirBlock], chains: [DefUseChain], induction
                     if use_idx > def_idx:
                         # Use comes after def - potential RAW dependency
                         val is_carried = is_loop_carried_dependency(def_idx, use_idx, body_blocks)
-                        deps = deps + [Dependency(
+                        deps.push(Dependency(
                             from_inst: def_idx,
                             to_inst: use_idx,
                             dep_type: DependencyType.RAW,
                             local: chain.local,
                             is_loop_carried: is_carried
-                        )]
+                        ))
 
             # Check for WAR (Write-After-Read) dependencies
             for use_idx in chain.uses:
@@ -221,13 +221,13 @@ fn detect_dependencies(body_blocks: [MirBlock], chains: [DefUseChain], induction
                     if def_idx > use_idx:
                         # Def comes after use - potential WAR dependency
                         val is_carried = is_loop_carried_dependency(use_idx, def_idx, body_blocks)
-                        deps = deps + [Dependency(
+                        deps.push(Dependency(
                             from_inst: use_idx,
                             to_inst: def_idx,
                             dep_type: DependencyType.WAR,
                             local: chain.local,
                             is_loop_carried: is_carried
-                        )]
+                        ))
 
             # Check for WAW (Write-After-Write) dependencies
             if chain.defs.len() >= 2:
@@ -236,13 +236,13 @@ fn detect_dependencies(body_blocks: [MirBlock], chains: [DefUseChain], induction
                     val def1 = chain.defs[i]
                     val def2 = chain.defs[i + 1]
                     val is_carried = is_loop_carried_dependency(def1, def2, body_blocks)
-                    deps = deps + [Dependency(
+                    deps.push(Dependency(
                         from_inst: def1,
                         to_inst: def2,
                         dep_type: DependencyType.WAW,
                         local: chain.local,
                         is_loop_carried: is_carried
-                    )]
+                    ))
                     i = i + 1
 
     deps
@@ -278,7 +278,7 @@ fn check_array_aliasing(accesses: [ArrayAccess], induction: LocalId) -> bool:
     var writes: [ArrayAccess] = []
     for access in accesses:
         if not access.is_load:
-            writes = writes + [access]
+            writes.push(access)
 
     # Check each write against all other accesses
     for write in writes:
@@ -397,11 +397,11 @@ fn detect_array_accesses(block: MirBlock) -> [ArrayAccess]:
                     val ptr_id = ptr_local.unwrap().id
                     if gep_results.contains_key(ptr_id):
                         val gep_info = gep_results[ptr_id]
-                        accesses = accesses + [ArrayAccess(
+                        accesses.push(ArrayAccess(
                             base_array: gep_info.base,
                             index_expr: gep_info.index,
                             is_load: true
-                        )]
+                        ))
 
             case Store(ptr, value):
                 # Check if ptr is a GEP result
@@ -410,11 +410,11 @@ fn detect_array_accesses(block: MirBlock) -> [ArrayAccess]:
                     val ptr_id = ptr_local.unwrap().id
                     if gep_results.contains_key(ptr_id):
                         val gep_info = gep_results[ptr_id]
-                        accesses = accesses + [ArrayAccess(
+                        accesses.push(ArrayAccess(
                             base_array: gep_info.base,
                             index_expr: gep_info.index,
                             is_load: false
-                        )]
+                        ))
 
             case _:
                 pass_do_nothing

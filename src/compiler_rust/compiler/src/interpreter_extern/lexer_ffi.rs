@@ -183,7 +183,7 @@ pub fn simple_lexer_tokenize(args: &[Value]) -> Result<Value, CompileError> {
         })
         .collect();
 
-    Ok(Value::Array(token_values))
+    Ok(Value::array(token_values))
 }
 
 #[cfg(test)]

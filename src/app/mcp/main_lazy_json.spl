@@ -19,21 +19,13 @@ fn SB_R() -> text:
     "]"
 
 fn escape_json(s: text) -> text:
-    var parts: [text] = []
-    for ch in s:
-        if ch == "\"":
-            parts.push("\\\"")
-        elif ch == "\\":
-            parts.push("\\\\")
-        elif ch == "\n":
-            parts.push("\\n")
-        elif ch == "\r":
-            parts.push("\\r")
-        elif ch == "\t":
-            parts.push("\\t")
-        else:
-            parts.push(ch)
-    parts.join("")
+    var result = s
+    result = result.replace(r"\", r"\\")
+    result = result.replace(Q(), r"\" + Q())
+    result = result.replace("\n", r"\n")
+    result = result.replace("\r", r"\r")
+    result = result.replace("\t", r"\t")
+    result
 
 fn js(s: text) -> text:
     Q() + escape_json(s) + Q()
@@ -283,35 +275,53 @@ fn summarize_json_shape(raw: text, depth: i64) -> text:
     value_type
 
 fn make_tool_result(id: text, output: text) -> text:
-    val content = SB_L() + jo2(jp("type", js("text")), jp("text", js(output))) + SB_R()
+    val escaped = escape_json(output)
+    val quoted = Q() + escaped + Q()
+    val content = SB_L() + jo2(jp("type", js("text")), jp("text", quoted)) + SB_R()
     val inferred = infer_json_value_type(output)
     val shape = summarize_json_shape(output, 2)
-    val structured = jo3(
-        jp("rawText", js(output)),
+    val structured = jo2(
         jp("inferredType", js(inferred)),
         jp("shape", js(shape))
     )
-    var result = jo1(jp("content", content))
-    result = result.substring(0, result.len() - 1) + "," + jp("structuredContent", structured) + RB()
+    val result = jo2(jp("content", content), jp("structuredContent", structured))
     make_json_result(id, result)
 
 fn make_tool_error(id: text, code: i64, msg: text) -> text:
     val content = SB_L() + jo2(jp("type", js("text")), jp("text", js("ERROR " + str(code) + ": " + msg))) + SB_R()
     val structured = jo2(jp("code", str(code)), jp("message", js(msg)))
-    var result = jo1(jp("content", content))
-    result = result.substring(0, result.len() - 1) + "," + jp("isError", "true") + "," + jp("structuredContent", structured) + RB()
-    make_json_result(id, result)
+    var err_result = LB() + jp("content", content) + "," + jp("isError", "true") + "," + jp("structuredContent", structured) + RB()
+    make_json_result(id, err_result)
 
 # --- Shell helper ---
 # Uses rt_process_run (returns tuple). Note: val (a,b) = expr is broken
 # in interpreter, so we use var + assignment destructuring instead.
 
+fn strip_ansi(s: text) -> text:
+    # Get ESC character (0x1b) via printf subprocess since rt_char_from_code
+    # is not available in the runtime binary.
+    var e_out = ""
+    var e_err = ""
+    var e_rc: i64 = 0
+    (e_out, e_err, e_rc) = rt_process_run("/bin/sh", ["-c", r"printf '\033'"])
+    if e_out == "" or not s.contains(e_out):
+        return s
+    # Remove ESC bytes to prevent invalid JSON control characters
+    s.replace(e_out, "")
+
 fn shell_cmd(command: text) -> (text, i64):
     var stdout = ""
     var stderr = ""
     var code: i64 = 0
-    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + command + " < /dev/null"])
+    if stdout != "":
+        stdout = strip_ansi(stdout)
     (stdout, code)
+
+fn text_byte_len(s: text) -> i64:
+    # For ASCII-dominated JSON payloads, codepoint count == byte count.
+    # Avoids 2 subprocess spawns (file_write + wc -c) per MCP response.
+    s.len()
 
 fn file_read(path: text) -> text:
     rt_file_read_text(path) ?? ""

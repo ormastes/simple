@@ -101,7 +101,7 @@ fn dir_walk_recursive(path: text) -> [text]:
     for line in lines:
         val trimmed = line.trim()
         if trimmed.len() > 0:
-            files = files + [trimmed]
+            files.push(trimmed)
     files
 
 fn should_skip_file(filepath: text) -> bool:
@@ -126,20 +126,21 @@ fn find_rt_calls_in_line(line: text) -> [text]:
         if i + 3 < line.len() and
            line[i] == 'r' and line[i+1] == 't' and line[i+2] == '_':
             # Extract function name
-            var name = "rt_"
+            var name_parts: [text] = []
+            name_parts.push("rt_")
             var j = i + 3
 
             while j < line.len():
                 val ch = line[j]
                 if (ch >= 'a' and ch <= 'z') or ch == '_':
-                    name = name + "{ch}"
+                    name_parts.push("{ch}")
                     j = j + 1
                 else:
                     break
 
             # Check if followed by '('
             if j < line.len() and line[j] == '(':
-                calls = calls + [name]
+                calls.push(name_parts.join(""))
                 i = j
             else:
                 i = i + 1
@@ -201,22 +202,23 @@ fn add_todo_comment(filepath: text) -> bool:
                         COMMON_FFI_WRAPPERS[call]
                     else:
                         call.replace("rt_", "")
-                    wrapper_names = wrapper_names + [wrapper]
+                    wrapper_names.push(wrapper)
 
                 # Create TODO comment
-                var spaces = ""
+                var space_parts: [text] = []
                 for j in 0..indent:
-                    spaces = spaces + " "
+                    space_parts.push(" ")
+                val spaces = space_parts.join("")
 
                 val todo_comment = if rt_calls.len() == 1:
                 else:
                     "{spaces}# TODO: Replace direct FFI calls with wrapper functions from app.io or compiler.ffi"
 
-                new_lines = new_lines + [todo_comment]
+                new_lines.push(todo_comment)
                 modified = true
 
-        new_lines = new_lines + [line]
-        prev_lines = prev_lines + [line]
+        new_lines.push(line)
+        prev_lines.push(line)
 
     if modified:
         val new_content = new_lines.join("\n")
@@ -240,7 +242,7 @@ fn find_missing_wrappers() -> [(text, text)]:
         if trimmed.starts_with("extern fn rt_"):
             val func_name = extract_function_name(trimmed)
             if func_name.len() > 0:
-                externs = externs + [func_name]
+                externs.push(func_name)
 
     # Find all wrapper functions (simple heuristic: fn that calls rt_*)
     var wrappers = {}
@@ -263,7 +265,7 @@ fn find_missing_wrappers() -> [(text, text)]:
     for extern in externs:
         if not wrappers.contains(extern):
             val wrapper = extern.replace("rt_", "")
-            missing = missing + [(extern, wrapper)]
+            missing.push((extern, wrapper))
 
     missing
 
@@ -281,13 +283,14 @@ fn create_missing_wrapper_report() -> text:
     md.h2("Wrappers to Add")
     md.paragraph("Add these to `src/app/io/mod.spl`:")
 
-    var code = ""
+    var code_parts: [text] = []
     for pair in missing:
         val rt_name = pair.0
         val wrapper_name = pair.1
-        code = code + "# TODO: Add wrapper for {rt_name}\n"
-        code = code + "fn {wrapper_name}(...) -> ...:\n"
-        code = code + "    {rt_name}(...)\n\n"
+        code_parts.push("# TODO: Add wrapper for {rt_name}\n")
+        code_parts.push("fn {wrapper_name}(...) -> ...:\n")
+        code_parts.push("    {rt_name}(...)\n\n")
+    val code = code_parts.join("")
 
     md.code_block(code, "simple")
 

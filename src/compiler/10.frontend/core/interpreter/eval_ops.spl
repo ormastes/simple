@@ -138,6 +138,28 @@ fn eval_call(eid: i64) -> i64:
         eval_set_error("undefined function: " + name)
         return -1
 
+    # Path call: Type.method(args) or Enum.Variant(args)
+    if callee_tag == EXPR_FIELD_ACCESS:
+        val base_eid = callee_node.left
+        val member_name = callee_node.s_val
+        val base_node = expr_get(base_eid)
+        val base_tag = base_node.tag
+        if base_tag == EXPR_IDENT:
+            val type_name = base_node.s_val
+            # Check enum variant constructor: Enum.Variant(payload)
+            val enum_variants = enum_table_lookup(type_name)
+            if enum_variants != "":
+                return eval_enum_variant_call(type_name, member_name, arg_eids)
+            # Check static method: Type.method() → Type__method in func table
+            val static_fn_name = type_name + "__" + member_name
+            val static_decl = func_table_lookup(static_fn_name)
+            if static_decl >= 0:
+                return eval_function_call(static_decl, arg_eids)
+            # Check struct constructor with module prefix: Module.Struct(args)
+            val struct_decl2 = struct_table_lookup(member_name)
+            if struct_decl2 >= 0:
+                return eval_struct_constructor(member_name, struct_decl2, arg_eids)
+
     # Indirect call (call on expression result)
     val callee_val = eval_expr(callee_eid)
     if eval_had_error: return -1
@@ -345,14 +367,10 @@ fn eval_method_call(eid: i64) -> i64:
         val full_name = type_name + "__" + method_name
         val decl_id = func_table_lookup(full_name)
         if decl_id >= 0:
-            # Prepend receiver as first arg
-            var all_arg_eids: [i64] = []
-            for aeid in arg_eids:
-                all_arg_eids.push(aeid)
             # Evaluate args, then call with receiver prepended
             var arg_values: [i64] = []
             arg_values.push(receiver)
-            for aeid in all_arg_eids:
+            for aeid in arg_eids:
                 val av = eval_expr(aeid)
                 if eval_had_error: return -1
                 arg_values.push(av)
@@ -402,9 +420,7 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
         if arg_eids.len() > 0:
             val new_elem = eval_expr(arg_eids[0])
             if eval_had_error: return -1
-            var new_elems: [i64] = []
-            for e in elements:
-                new_elems.push(e)
+            var new_elems = elements
             new_elems.push(new_elem)
             return val_make_array(new_elems)
         return receiver
@@ -446,6 +462,20 @@ fn eval_field_access(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val base_eid = e_node.left
     val field_name = e_node.s_val
+
+    # Check for enum variant access: EnumType.Variant (no-arg)
+    val base_node2 = expr_get(base_eid)
+    val base_tag = base_node2.tag
+    if base_tag == EXPR_IDENT:
+        val type_name = base_node2.s_val
+        val enum_variants = enum_table_lookup(type_name)
+        if enum_variants != "":
+            return eval_enum_variant_access(type_name, field_name)
+        # Check for static method reference: Type.method
+        val static_fn = type_name + "__" + field_name
+        val static_decl = func_table_lookup(static_fn)
+        if static_decl >= 0:
+            return val_make_function(static_fn, static_decl)
 
     val base_val = eval_expr(base_eid)
     if eval_had_error: return -1
@@ -724,7 +754,7 @@ fn eval_interpolated_string(eid: i64) -> i64:
     for part_eid in parts:
         val part_val = eval_expr(part_eid)
         if eval_had_error: return -1
-        parts_text = parts_text + [val_to_text(part_val)]
+        parts_text.push(val_to_text(part_val))
     val result = parts_text.join("")
     val_make_text(result)
 
@@ -736,3 +766,76 @@ fn eval_null_coalesce(eid: i64) -> i64:
     if eval_had_error: return -1
     if val_is_nil(left) == false: return left
     eval_expr(e_node.right)
+
+# ===== Enum Variant Construction =====
+
+fn eval_enum_variant_call(type_name: text, variant_name: text, arg_eids: [i64]) -> i64:
+    # EnumType.Variant(payload) → struct with __tag and __payload fields
+    val tag_val = val_make_text(variant_name)
+    var payload_val = val_make_nil()
+    if arg_eids.len() == 1:
+        payload_val = eval_expr(arg_eids[0])
+        if eval_had_error: return -1
+    elif arg_eids.len() > 1:
+        # Multiple args → tuple payload
+        var payload_elems: [i64] = []
+        for aeid in arg_eids:
+            val av = eval_expr(aeid)
+            if eval_had_error: return -1
+            payload_elems.push(av)
+        payload_val = val_make_array(payload_elems)
+    val full_name = type_name + "::" + variant_name
+    var field_names: [text] = []
+    field_names.push("__tag")
+    field_names.push("__payload")
+    var field_values: [i64] = []
+    field_values.push(tag_val)
+    field_values.push(payload_val)
+    val_make_struct(full_name, field_names, field_values)
+
+fn eval_enum_variant_access(type_name: text, variant_name: text) -> i64:
+    # EnumType.Variant (no parens) → struct with __tag, no payload
+    val tag_val = val_make_text(variant_name)
+    val full_name = type_name + "::" + variant_name
+    var field_names: [text] = []
+    field_names.push("__tag")
+    field_names.push("__payload")
+    var field_values: [i64] = []
+    field_values.push(tag_val)
+    field_values.push(val_make_nil())
+    val_make_struct(full_name, field_names, field_values)
+
+# ===== Lambda Expression =====
+# EXPR_LAMBDA: args = [EXPR_IDENT params], stmts = [body exprs]
+# Desugared from \x: expr, _ placeholders, _N numbered, &:method
+
+var lambda_counter: i64 = 0
+
+fn eval_lambda(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val param_idents = e_node.args
+    val body_exprs = e_node.stmts
+
+    # Extract param names from EXPR_IDENT nodes
+    var param_names: [text] = []
+    var param_types: [i64] = []
+    for pid in param_idents:
+        param_names.push(expr_get(pid).s_val)
+        param_types.push(0)
+
+    # Wrap body expressions as stmt_expr_stmt nodes
+    var body_stmts: [i64] = []
+    for beid in body_exprs:
+        body_stmts.push(stmt_expr_stmt(beid, 0))
+
+    # Create anonymous function declaration
+    lambda_counter = lambda_counter + 1
+    val fn_name = "__lambda_{lambda_counter}"
+    var type_params: [text] = []
+    val decl_id = decl_fn(fn_name, param_names, param_types, 0, body_stmts, 0, type_params, 0)
+
+    # Register in function table
+    func_table_register(fn_name, decl_id)
+
+    # Return function value
+    val_make_function(fn_name, decl_id)

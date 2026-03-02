@@ -116,7 +116,7 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
                             elements.push(elem_val);
                         }
 
-                        Value::Array(elements)
+                        Value::array(elements)
                     }
                     HeapObjectType::String => {
                         // Decode string

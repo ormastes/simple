@@ -71,7 +71,7 @@ pub(crate) fn bind_args_with_injected(
 
             // Extract values from spread
             let spread_values: Vec<Value> = match spread_val {
-                Value::Array(arr) => arr,
+                Value::Array(arr) => arr.to_vec(),
                 Value::Tuple(tup) => tup,
                 _ => {
                     let ctx = ErrorContext::new()

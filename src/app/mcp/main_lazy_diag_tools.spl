@@ -43,6 +43,7 @@ fn handle_simple_read(id: text, body: text) -> text:
     if check_exit != 0:
         out_parts.push(NL + "-- diagnostics --" + NL)
         out_parts.push(check_out)
+
     make_tool_result(id, out_parts.join(""))
 
 # ============================================================================
@@ -147,16 +148,20 @@ fn handle_simple_status(id: text, body: text) -> text:
     if file_list_str == "":
         return make_tool_result(id, "-- Project Diagnostics --" + NL + "No .spl files found to check.")
 
-    # Check each file
+    # Check each file (cap at 10 to avoid N sequential subprocess calls)
     val files = file_list_str.split(NL)
     var out_parts: [text] = []
     out_parts.push("-- Project Diagnostics --" + NL)
     var total_errors = 0
     var file_count = 0
+    var total_files = 0
 
     for fpath in files:
         val fp = fpath.trim()
         if fp == "" or not fp.ends_with(".spl"):
+            continue
+        total_files = total_files + 1
+        if file_count >= 10:
             continue
         file_count = file_count + 1
         val _bin = _mcp_find_simple_binary()
@@ -172,12 +177,15 @@ fn handle_simple_status(id: text, body: text) -> text:
             var err_count = 0
             for el in err_lines:
                 val et = el.trim()
-                val is_err = et.starts_with("error") or et.starts_with("Error") or et.starts_with("Type error") or et.starts_with("Parse error")
+                val is_err = (et.starts_with("error") or et.starts_with("Error") or et.starts_with("Type error") or et.starts_with("Parse error"))
                 if is_err:
                     err_count = err_count + 1
             out_parts.push("  " + fp + "  " + str(err_count) + " error(s)" + NL)
 
-    out_parts.push("-- " + str(total_errors) + " file(s) with errors out of " + str(file_count) + " checked --")
+    out_parts.push("-- " + str(total_errors) + " file(s) with errors out of " + str(file_count) + " checked")
+    if total_files > 10:
+        out_parts.push(" (capped at 10 of " + str(total_files) + " files)")
+    out_parts.push(" --")
     make_tool_result(id, out_parts.join(""))
 
 fn extract_spl_from_stat(stat_output: text) -> text:

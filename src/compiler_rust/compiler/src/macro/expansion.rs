@@ -97,7 +97,7 @@ fn expand_user_macro_inner(
                     variadic_values.push(val);
                 }
             }
-            local_env.insert(param.name.clone(), Value::Array(variadic_values));
+            local_env.insert(param.name.clone(), Value::array(variadic_values));
         } else if let Some(MacroArg::Expr(e)) = args.get(idx) {
             let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
             local_env.insert(param.name.clone(), val);

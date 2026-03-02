@@ -50,7 +50,7 @@ pub fn rt_cli_print_version(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_cli_get_args(_args: &[Value]) -> Result<Value, CompileError> {
     let args: Vec<String> = std::env::args().collect();
     let arr: Vec<Value> = args.into_iter().map(Value::Str).collect();
-    Ok(Value::Array(arr))
+    Ok(Value::array(arr))
 }
 
 /// Check if file exists
@@ -110,7 +110,7 @@ pub fn rt_cli_run_tests(args: &[Value]) -> Result<Value, CompileError> {
     if !args.is_empty() {
         match &args[0] {
             Value::Array(arr) => {
-                for val in arr {
+                for val in arr.iter() {
                     if let Value::Str(s) = val {
                         cmd_args.push(s.clone());
                     }

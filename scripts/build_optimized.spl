@@ -1,0 +1,93 @@
+# Build script with all startup optimizations: LTO, PGO, strip
+#
+# Usage:
+#   bin/simple run scripts/build_optimized.spl              # LTO + strip (default)
+#   bin/simple run scripts/build_optimized.spl --pgo        # LTO + PGO + strip
+#   bin/simple run scripts/build_optimized.spl --static     # LTO + static + strip
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_exit(code: i32)
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+fn shell_output(command: text) -> text:
+    val (out, _, _) = shell(command)
+    out.trim()
+
+fn main():
+    val args = rt_cli_get_args()
+    var use_pgo = false
+    var use_static = false
+
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--pgo":
+            use_pgo = true
+        if arg == "--static":
+            use_static = true
+        i = i + 1
+
+    val dir = shell_output("pwd")
+    val build_dir = dir + "/build"
+    val src_dir = dir + "/src/compiler_cpp"
+
+    var cmake_opts = "-DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=ON"
+    cmake_opts = cmake_opts + " -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++"
+
+    if use_static:
+        cmake_opts = cmake_opts + " -DENABLE_STATIC=ON"
+
+    val nproc = shell_output("nproc")
+
+    if use_pgo:
+        print "=== PGO Pass 1: Building instrumented binary ==="
+        val pgo_dir = build_dir + "/pgo-profiles"
+        shell("mkdir -p " + pgo_dir)
+
+        val (_, _, c1) = shell("cmake -B {build_dir} -G Ninja {cmake_opts} -DENABLE_PGO_GENERATE=ON -DPGO_PROFILE_DIR={pgo_dir} -S {src_dir}")
+        if c1 != 0:
+            print "CMake configure failed"
+            rt_exit(1)
+
+        val (_, _, c2) = shell("ninja -C {build_dir} -j{nproc}")
+        if c2 != 0:
+            print "Build failed"
+            rt_exit(1)
+
+        print "=== PGO Pass 1: Running representative workloads ==="
+        rt_env_set("SIMPLE_LIB", dir + "/src")
+        val version = (rt_file_read_text(dir + "/VERSION") ?? "unknown").trim()
+        rt_env_set("SIMPLE_VERSION", version)
+
+        shell("{build_dir}/simple --help >/dev/null 2>&1 || true")
+        shell("{build_dir}/simple compile --help >/dev/null 2>&1 || true")
+        shell("{build_dir}/simple --version >/dev/null 2>&1 || true")
+
+        print "=== PGO Pass 2: Rebuilding with profile data ==="
+        shell("llvm-profdata merge -output={pgo_dir}/default.profdata {pgo_dir}/*.profraw 2>/dev/null || true")
+        shell("cmake -B {build_dir} -G Ninja {cmake_opts} -DENABLE_PGO_GENERATE=OFF -DENABLE_PGO_USE=ON -DPGO_PROFILE_DIR={pgo_dir} -S {src_dir}")
+        shell("ninja -C {build_dir} -j{nproc}")
+        shell("rm -rf {pgo_dir}")
+    else:
+        print "=== Building with LTO + strip ==="
+        val (_, _, c1) = shell("cmake -B {build_dir} -G Ninja {cmake_opts} -S {src_dir}")
+        if c1 != 0:
+            print "CMake configure failed"
+            rt_exit(1)
+
+        val (_, _, c2) = shell("ninja -C {build_dir} -j{nproc}")
+        if c2 != 0:
+            print "Build failed"
+            rt_exit(1)
+
+    print ""
+    print "=== Build complete ==="
+    shell("ls -lh {build_dir}/simple {build_dir}/simple_codegen")
+    print ""
+    print "Binary: {build_dir}/simple"
+    shell("file {build_dir}/simple")

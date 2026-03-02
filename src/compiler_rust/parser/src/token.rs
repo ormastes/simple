@@ -349,6 +349,7 @@ pub enum TokenKind {
     TildeSlashAssign, // ~/= (suspension compound divide)
 
     Ampersand,   // &
+    AmpColon,    // &: (method reference prefix)
     Pipe,        // |
     PipeForward, // |>
     DoublePipe,  // ||

@@ -124,7 +124,7 @@ pub(crate) fn evaluate_macro_invocation(
                 let MacroArg::Expr(e) = arg;
                 items.push(evaluate_expr(e, env, functions, classes, enums, impl_methods)?);
             }
-            Ok(Value::Array(items))
+            Ok(Value::array(items))
         }
         "assert" => {
             if let Some(MacroArg::Expr(e)) = macro_args.first() {

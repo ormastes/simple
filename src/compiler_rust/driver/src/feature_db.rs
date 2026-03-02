@@ -425,7 +425,7 @@ impl FeatureDb {
 
 pub fn load_feature_db(path: &Path) -> Result<FeatureDb, String> {
     // Acquire lock before reading
-    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+    let _lock = FileLock::acquire(path, 2).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let doc = parse_document(&content).map_err(|e| e.to_string())?;
@@ -970,7 +970,7 @@ fn slugify(value: &str) -> String {
 pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error> {
     // Acquire lock before writing
     let _lock =
-        FileLock::acquire(path, 10).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        FileLock::acquire(path, 2).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
 
     let mut fields = vec![
         "id".to_string(),

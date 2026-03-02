@@ -69,7 +69,7 @@ fn inject_mixins(class_def: &ClassDef) -> ClassDef {
 
 fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
     match iterable {
-        Value::Array(arr) => Ok(arr.clone()),
+        Value::Array(arr) => Ok(arr.to_vec()),
         Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
         Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(t) => Ok(t.clone()),
@@ -243,7 +243,8 @@ pub(super) fn exec_block_closure(
                     if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
                         if let Some(container) = local_env.get(container_name).cloned() {
                             let new_container = match container {
-                                Value::Array(mut arr) => {
+                                Value::Array(mut arc) => {
+                                    let arr = std::sync::Arc::make_mut(&mut arc);
                                     let idx = index_val.as_int()? as usize;
                                     if idx < arr.len() {
                                         arr[idx] = val;
@@ -253,7 +254,7 @@ pub(super) fn exec_block_closure(
                                         }
                                         arr.push(val);
                                     }
-                                    Value::Array(arr)
+                                    Value::Array(arc)
                                 }
                                 Value::Dict(mut dict) => {
                                     let key = index_val.to_key_string();
@@ -494,6 +495,23 @@ pub(super) fn exec_block_closure(
                         class_name: final_class.name.clone(),
                     },
                 );
+                // Register static methods as mangled free functions (ClassName__method)
+                for method in &final_class.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", final_class.name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        local_env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: std::collections::HashMap::new(),
+                            },
+                        );
+                    }
+                }
                 last_value = Value::Nil;
             }
             Node::Extern(ext) => {
@@ -567,6 +585,23 @@ pub(super) fn exec_block_closure(
                         type_bindings: std::collections::HashMap::new(),
                     },
                 );
+                // Register static methods as mangled free functions (StructName__method)
+                for method in &s.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", s.name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        local_env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: std::collections::HashMap::new(),
+                            },
+                        );
+                    }
+                }
                 last_value = Value::Nil;
             }
             Node::Class(c) => {
@@ -578,6 +613,23 @@ pub(super) fn exec_block_closure(
                         class_name: final_class.name.clone(),
                     },
                 );
+                // Register static methods as mangled free functions (ClassName__method)
+                for method in &final_class.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", final_class.name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        local_env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: std::collections::HashMap::new(),
+                            },
+                        );
+                    }
+                }
                 last_value = Value::Nil;
             }
             Node::Trait(trait_def) => {
@@ -643,6 +695,24 @@ pub(super) fn exec_block_closure(
                     // Non-trait impl block - merge methods into ClassDef
                     if let Some(class_def) = classes.get_mut(&type_name) {
                         class_def.methods.extend(impl_block.methods.clone());
+                    }
+                }
+
+                // Register static methods from impl as mangled free functions (TypeName__method)
+                for method in &impl_block.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", type_name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        local_env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: std::collections::HashMap::new(),
+                            },
+                        );
                     }
                 }
 
@@ -786,7 +856,8 @@ fn exec_block_closure_mut(
                     if let simple_parser::ast::Expr::Identifier(container_name) = receiver.as_ref() {
                         if let Some(container) = local_env.get(container_name).cloned() {
                             let new_container = match container {
-                                Value::Array(mut arr) => {
+                                Value::Array(mut arc) => {
+                                    let arr = std::sync::Arc::make_mut(&mut arc);
                                     let idx = index_val.as_int()? as usize;
                                     if idx < arr.len() {
                                         arr[idx] = val;
@@ -796,7 +867,7 @@ fn exec_block_closure_mut(
                                         }
                                         arr.push(val);
                                     }
-                                    Value::Array(arr)
+                                    Value::Array(arc)
                                 }
                                 Value::Dict(mut dict) => {
                                     let key = index_val.to_key_string();
@@ -950,6 +1021,23 @@ fn exec_block_closure_mut(
                         type_bindings: std::collections::HashMap::new(),
                     },
                 );
+                // Register static methods as mangled free functions (StructName__method)
+                for method in &s.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", s.name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        local_env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: std::collections::HashMap::new(),
+                            },
+                        );
+                    }
+                }
                 last_value = Value::Nil;
             }
             Node::Class(c) => {
@@ -961,6 +1049,23 @@ fn exec_block_closure_mut(
                         class_name: final_class.name.clone(),
                     },
                 );
+                // Register static methods as mangled free functions (ClassName__method)
+                for method in &final_class.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", final_class.name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        local_env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: std::collections::HashMap::new(),
+                            },
+                        );
+                    }
+                }
                 last_value = Value::Nil;
             }
             Node::Trait(trait_def) => {
@@ -1026,6 +1131,24 @@ fn exec_block_closure_mut(
                     // Non-trait impl block - merge methods into ClassDef
                     if let Some(class_def) = classes.get_mut(&type_name) {
                         class_def.methods.extend(impl_block.methods.clone());
+                    }
+                }
+
+                // Register static methods from impl as mangled free functions (TypeName__method)
+                for method in &impl_block.methods {
+                    let is_static = method.is_static
+                        || !method.params.iter().any(|p| p.name == "self");
+                    if is_static {
+                        let mangled = format!("{}__{}", type_name, method.name);
+                        functions.insert(mangled.clone(), method.clone());
+                        local_env.insert(
+                            mangled.clone(),
+                            Value::Function {
+                                name: mangled,
+                                def: Box::new(method.clone()),
+                                captured_env: std::collections::HashMap::new(),
+                            },
+                        );
                     }
                 }
 

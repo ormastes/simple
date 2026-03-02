@@ -11,7 +11,7 @@
 #   V* [H] hint  - virtual hint line
 
 use std.nogc_async_mut.mcp.diag_core.{DiagEntry}
-use std.text.{NL}
+use common.text.{NL}
 
 # ============================================================================
 # Types
@@ -38,7 +38,7 @@ fn render_outline(source: text, entries: [DiagEntry], mode: text) -> text:
     if syms.len() == 0:
         return source
 
-    var output = ""
+    var parts: [text] = []
 
     for sym in syms:
         val marker = sym_marker(sym.kind)
@@ -50,22 +50,20 @@ fn render_outline(source: text, entries: [DiagEntry], mode: text) -> text:
         else:
             sym_text = marker + " " + sym.signature + " { ... }"
 
-        if output != "":
-            output = output + NL
-        output = output + sym_text
+        parts.push(sym_text)
 
         if mode == "outline":
             val diag_text = render_diag_virtual(entries, sym.start_line, sym.end_line)
             if diag_text != "":
-                output = output + NL + diag_text
+                parts.push(diag_text)
 
     if mode == "compact":
         val err_count = count_severity(entries, "error")
         val warn_count = count_severity(entries, "warning")
         if err_count > 0 or warn_count > 0:
-            output = output + NL + "V* [" + err_count.to_string() + "E " + warn_count.to_string() + "W in file]"
+            parts.push("V* [" + err_count.to_string() + "E " + warn_count.to_string() + "W in file]")
 
-    output
+    parts.join(NL)
 
 # ============================================================================
 # Symbol Scanner
@@ -170,19 +168,16 @@ fn compute_end_lines(raw: [OutlineSym], lines: [text]) -> [OutlineSym]:
 # ============================================================================
 
 fn render_diag_virtual(entries: [DiagEntry], start_ln: i64, end_ln: i64) -> text:
-    var out = ""
+    var parts: [text] = []
     for entry in entries:
         val in_range = entry.line_num >= start_ln and entry.line_num <= end_ln
         if not in_range:
             continue
         val sev = diag_severity_tag(entry.severity)
-        var line = "V* [" + sev + "]:" + entry.line_num.to_string() + "  " + entry.message
-        if out != "":
-            out = out + NL
-        out = out + line
+        parts.push("V* [" + sev + "]:" + entry.line_num.to_string() + "  " + entry.message)
         if entry.easyfix != "":
-            out = out + NL + "V* [H]  " + entry.easyfix
-    out
+            parts.push("V* [H]  " + entry.easyfix)
+    parts.join(NL)
 
 fn count_severity(entries: [DiagEntry], sev: text) -> i64:
     var count = 0
@@ -241,13 +236,7 @@ fn expand_at_source(source: text, selector: text, what: text) -> text:
         if li >= sym.start_line and li <= sym.end_line:
             body_lines.push(line)
 
-    var body = ""
-    var first = true
-    for bl in body_lines:
-        if not first:
-            body = body + NL
-        first = false
-        body = body + bl
+    val body = body_lines.join(NL)
 
     if what == "body":
         return body
@@ -289,13 +278,13 @@ fn expanded_sym_marker(kind: text) -> text:
     "?_"
 
 fn extract_sym_name(rest: text) -> text:
-    var name = ""
+    var end_idx = 0
     for ch in rest:
         val is_delim = ch == "(" or ch == ":" or ch == " " or ch == "<"
         if is_delim:
             break
-        name = name + ch
-    name
+        end_idx = end_idx + 1
+    rest[0:end_idx]
 
 fn strip_colon(sig: text) -> text:
     val trimmed = sig.trim()

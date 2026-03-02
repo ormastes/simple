@@ -405,7 +405,20 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let mut patterns = Vec::new();
                 while !self.check(&TokenKind::RParen) {
-                    patterns.push(self.parse_pattern()?);
+                    // Use parse_single_pattern (not parse_pattern) to avoid the
+                    // comma-or-pattern heuristic consuming tuple element separators.
+                    // Inside tuples, commas are structural separators, not or-pattern markers.
+                    let mut pat = self.parse_single_pattern()?;
+                    // Still allow pipe-separated or-patterns inside individual tuple elements
+                    if self.check(&TokenKind::Pipe) {
+                        let mut or_pats = vec![pat];
+                        while self.check(&TokenKind::Pipe) {
+                            self.advance();
+                            or_pats.push(self.parse_single_pattern()?);
+                        }
+                        pat = Pattern::Or(or_pats);
+                    }
+                    patterns.push(pat);
                     if !self.check(&TokenKind::RParen) {
                         self.expect(&TokenKind::Comma)?;
                     }
@@ -421,7 +434,20 @@ impl<'a> Parser<'a> {
                         self.advance();
                         patterns.push(Pattern::Rest);
                     } else {
-                        patterns.push(self.parse_pattern()?);
+                        // Use parse_single_pattern (not parse_pattern) to avoid the
+                        // comma-or-pattern heuristic consuming array element separators.
+                        // Inside arrays, commas are structural separators, not or-pattern markers.
+                        let mut pat = self.parse_single_pattern()?;
+                        // Still allow pipe-separated or-patterns inside individual array elements
+                        if self.check(&TokenKind::Pipe) {
+                            let mut or_pats = vec![pat];
+                            while self.check(&TokenKind::Pipe) {
+                                self.advance();
+                                or_pats.push(self.parse_single_pattern()?);
+                            }
+                            pat = Pattern::Or(or_pats);
+                        }
+                        patterns.push(pat);
                     }
                     if !self.check(&TokenKind::RBracket) {
                         self.expect(&TokenKind::Comma)?;

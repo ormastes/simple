@@ -1,21 +1,62 @@
 //! Placeholder lambda transformation
 //!
-//! Transforms expressions containing `_` placeholder identifiers into lambdas.
+//! Transforms expressions containing `_` or `_N` placeholder identifiers into lambdas.
 //!
 //! Example transformations:
 //! - `_ * 2` -> `\__p0: __p0 * 2`
 //! - `_ + _` -> `\__p0, __p1: __p0 + __p1`
 //! - `_.field` -> `\__p0: __p0.field`
+//! - `_1 * 10` -> `\__p0: __p0 * 10`
+//! - `_2 - _1` -> `\__p0, __p1: __p1 - __p0`
 
 use crate::ast::enums::MoveMode;
 use crate::ast::{Argument, Expr, LambdaParam};
 
-/// Transform placeholder lambda syntax: expressions containing `_` identifiers
+/// Check if an identifier is a numbered placeholder like `_1`, `_2`, etc.
+fn is_numbered_placeholder(name: &str) -> bool {
+    if name.len() < 2 || !name.starts_with('_') {
+        return false;
+    }
+    name[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Parse the number from a numbered placeholder (1-indexed). Returns None if not a numbered placeholder.
+fn numbered_placeholder_index(name: &str) -> Option<usize> {
+    if is_numbered_placeholder(name) {
+        name[1..].parse::<usize>().ok()
+    } else {
+        None
+    }
+}
+
+/// Transform placeholder lambda syntax: expressions containing `_` or `_N` identifiers
 /// become lambdas with generated parameter names.
 ///
-/// If no `_` placeholders are found, returns the expression unchanged.
+/// If no placeholders are found, returns the expression unchanged.
 pub fn transform_placeholder_lambda(expr: Expr) -> Expr {
-    // First, count how many placeholders are in the expression
+    // Check for numbered placeholders first (_1, _2, etc.)
+    let max_numbered = find_max_numbered(&expr);
+
+    if max_numbered > 0 {
+        // Numbered placeholder mode: _1 maps to __p0, _2 maps to __p1, etc.
+        let transformed_body = replace_numbered_placeholders(expr);
+
+        let params: Vec<LambdaParam> = (0..max_numbered)
+            .map(|i| LambdaParam {
+                name: format!("__p{}", i),
+                ty: None,
+            })
+            .collect();
+
+        return Expr::Lambda {
+            params,
+            body: Box::new(transformed_body),
+            move_mode: MoveMode::Copy,
+            capture_all: false,
+        };
+    }
+
+    // Fall back to unnamed placeholder mode (_)
     let placeholder_count = count_placeholders(&expr);
 
     if placeholder_count == 0 {
@@ -39,6 +80,163 @@ pub fn transform_placeholder_lambda(expr: Expr) -> Expr {
         body: Box::new(transformed_body),
         move_mode: MoveMode::Copy,
         capture_all: false,
+    }
+}
+
+/// Find the maximum numbered placeholder index in an expression.
+/// Returns 0 if no numbered placeholders found.
+fn find_max_numbered(expr: &Expr) -> usize {
+    match expr {
+        Expr::Identifier(name) => numbered_placeholder_index(name).unwrap_or(0),
+        Expr::Binary { left, right, .. } => {
+            find_max_numbered(left).max(find_max_numbered(right))
+        }
+        Expr::Unary { operand, .. } => find_max_numbered(operand),
+        Expr::Call { callee, args } => {
+            let c = find_max_numbered(callee);
+            args.iter().fold(c, |acc, a| acc.max(find_max_numbered(&a.value)))
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            let r = find_max_numbered(receiver);
+            args.iter().fold(r, |acc, a| acc.max(find_max_numbered(&a.value)))
+        }
+        Expr::FieldAccess { receiver, .. } => find_max_numbered(receiver),
+        Expr::Index { receiver, index } => {
+            find_max_numbered(receiver).max(find_max_numbered(index))
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let m = find_max_numbered(condition).max(find_max_numbered(then_branch));
+            else_branch.as_ref().map_or(m, |e| m.max(find_max_numbered(e)))
+        }
+        Expr::Tuple(items) | Expr::Array(items) => {
+            items.iter().fold(0, |acc, e| acc.max(find_max_numbered(e)))
+        }
+        Expr::Dict(entries) => entries
+            .iter()
+            .fold(0, |acc, (k, v)| {
+                acc.max(find_max_numbered(k)).max(find_max_numbered(v))
+            }),
+        Expr::OptionalChain { expr, .. } => find_max_numbered(expr),
+        Expr::Coalesce { expr, default } => {
+            find_max_numbered(expr).max(find_max_numbered(default))
+        }
+        Expr::Slice {
+            receiver,
+            start,
+            end,
+            step,
+        } => {
+            let mut m = find_max_numbered(receiver);
+            if let Some(s) = start {
+                m = m.max(find_max_numbered(s));
+            }
+            if let Some(e) = end {
+                m = m.max(find_max_numbered(e));
+            }
+            if let Some(st) = step {
+                m = m.max(find_max_numbered(st));
+            }
+            m
+        }
+        Expr::Cast { expr, .. } => find_max_numbered(expr),
+        Expr::Spread(inner) => find_max_numbered(inner),
+        Expr::Lambda { .. } => 0,
+        _ => 0,
+    }
+}
+
+/// Replace numbered placeholders `_1`, `_2` etc. with `__p0`, `__p1` (1-indexed to 0-indexed)
+fn replace_numbered_placeholders(expr: Expr) -> Expr {
+    match expr {
+        Expr::Identifier(ref name) => {
+            if let Some(n) = numbered_placeholder_index(name) {
+                Expr::Identifier(format!("__p{}", n - 1))
+            } else {
+                expr
+            }
+        }
+        Expr::Binary { op, left, right } => Expr::Binary {
+            op,
+            left: Box::new(replace_numbered_placeholders(*left)),
+            right: Box::new(replace_numbered_placeholders(*right)),
+        },
+        Expr::Unary { op, operand } => Expr::Unary {
+            op,
+            operand: Box::new(replace_numbered_placeholders(*operand)),
+        },
+        Expr::Call { callee, args } => Expr::Call {
+            callee: Box::new(replace_numbered_placeholders(*callee)),
+            args: args
+                .into_iter()
+                .map(|a| Argument::with_span(a.name, replace_numbered_placeholders(a.value), a.span))
+                .collect(),
+        },
+        Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
+            receiver: Box::new(replace_numbered_placeholders(*receiver)),
+            method,
+            args: args
+                .into_iter()
+                .map(|a| Argument::with_span(a.name, replace_numbered_placeholders(a.value), a.span))
+                .collect(),
+        },
+        Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
+            receiver: Box::new(replace_numbered_placeholders(*receiver)),
+            field,
+        },
+        Expr::Index { receiver, index } => Expr::Index {
+            receiver: Box::new(replace_numbered_placeholders(*receiver)),
+            index: Box::new(replace_numbered_placeholders(*index)),
+        },
+        Expr::If {
+            let_pattern,
+            condition,
+            then_branch,
+            else_branch,
+        } => Expr::If {
+            let_pattern,
+            condition: Box::new(replace_numbered_placeholders(*condition)),
+            then_branch: Box::new(replace_numbered_placeholders(*then_branch)),
+            else_branch: else_branch.map(|e| Box::new(replace_numbered_placeholders(*e))),
+        },
+        Expr::Tuple(items) => Expr::Tuple(items.into_iter().map(replace_numbered_placeholders).collect()),
+        Expr::Array(items) => Expr::Array(items.into_iter().map(replace_numbered_placeholders).collect()),
+        Expr::Dict(entries) => Expr::Dict(
+            entries
+                .into_iter()
+                .map(|(k, v)| (replace_numbered_placeholders(k), replace_numbered_placeholders(v)))
+                .collect(),
+        ),
+        Expr::OptionalChain { expr, field } => Expr::OptionalChain {
+            expr: Box::new(replace_numbered_placeholders(*expr)),
+            field,
+        },
+        Expr::Coalesce { expr, default } => Expr::Coalesce {
+            expr: Box::new(replace_numbered_placeholders(*expr)),
+            default: Box::new(replace_numbered_placeholders(*default)),
+        },
+        Expr::Slice {
+            receiver,
+            start,
+            end,
+            step,
+        } => Expr::Slice {
+            receiver: Box::new(replace_numbered_placeholders(*receiver)),
+            start: start.map(|e| Box::new(replace_numbered_placeholders(*e))),
+            end: end.map(|e| Box::new(replace_numbered_placeholders(*e))),
+            step: step.map(|e| Box::new(replace_numbered_placeholders(*e))),
+        },
+        Expr::Cast { expr, target_type } => Expr::Cast {
+            expr: Box::new(replace_numbered_placeholders(*expr)),
+            target_type,
+        },
+        Expr::Spread(inner) => Expr::Spread(Box::new(replace_numbered_placeholders(*inner))),
+        Expr::Lambda { .. } => expr,
+        _ => expr,
     }
 }
 

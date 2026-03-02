@@ -32,6 +32,7 @@ Use these agent definitions when spawning Task subagents. Located in `.claude/ag
 | **code** | Writing/editing Simple code, implementing features | `/coding`, `/design`, `/sffi` |
 | **test** | Writing tests, fixing test failures, analyzing results | `/test`, `/sspec` |
 | **debug** | Investigating bugs, tracing errors, profiling | `/debug` |
+| **debug-analyst** | Interactive debugging with DAP+LSP enrichment | `/debug-lsp`, `/debug` |
 | **explore** | Finding files, understanding structure, researching | `/research`, `/architecture` |
 | **docs** | Writing research/design/guide docs, reports | `/doc`, `/todo` |
 | **vcs** | Committing, pushing, viewing history (jj/git) | `/versioning` |
@@ -60,6 +61,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | `architecture` | Compiler pipeline, module structure |
 | `research` | Codebase exploration techniques |
 | `debug` | Debugging, tracing, fault detection |
+| `debug-lsp` | DAP+LSP tool chaining for debug session analysis |
 | `stdlib` | Stdlib module development |
 | `todo` | TODO/FIXME comment format |
 | `doc` | Documentation writing workflow — all 10 doc types, relationship model |

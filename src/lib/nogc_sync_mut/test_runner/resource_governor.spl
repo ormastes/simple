@@ -1,0 +1,82 @@
+# Resource Governor — Limits parallel test runner to a percentage of system resources
+#
+# Decides whether to spawn more test processes based on system memory and CPU usage.
+# Default: 25% of total system RAM and CPU cores.
+
+use app.test_runner_new.system_monitor.{get_system_resources, get_system_memory_total_mb}
+use std.io.sysinfo_ops.{cpu_count}
+
+extern fn rt_thread_sleep(millis: i64)
+
+# ============================================================================
+# Resource Governor
+# ============================================================================
+
+struct ResourceGovernor:
+    max_memory_mb: i64
+    max_cpu_cores: i64
+    poll_interval_ms: i64
+    resource_limit_pct: i64
+
+# ============================================================================
+# Constructor
+# ============================================================================
+
+fn governor_create(resource_limit_pct: i64) -> ResourceGovernor:
+    val total_mb = get_system_memory_total_mb()
+    val max_memory_mb = total_mb * resource_limit_pct / 100
+    val cores = cpu_count()
+    var max_cores = cores * resource_limit_pct / 100
+    if max_cores < 1:
+        max_cores = 1
+    ResourceGovernor(
+        max_memory_mb: max_memory_mb,
+        max_cpu_cores: max_cores,
+        poll_interval_ms: 200,
+        resource_limit_pct: resource_limit_pct
+    )
+
+# ============================================================================
+# Spawn Decision
+# ============================================================================
+
+fn governor_can_spawn(gov: ResourceGovernor, active_count: i64) -> bool:
+    # Hard limit: don't exceed core count budget
+    if active_count >= gov.max_cpu_cores:
+        return false
+
+    # Soft limit: check current memory usage
+    val res = get_system_resources()
+    val free_pct = 100.0 - res.memory_percent
+    val limit_f = gov.resource_limit_pct * 1.0
+    if free_pct < limit_f:
+        return false
+
+    true
+
+# ============================================================================
+# Blocking Wait
+# ============================================================================
+
+fn governor_wait_until_ready(gov: ResourceGovernor, active_count: i64):
+    var delay_ms = gov.poll_interval_ms
+    var iteration = 0
+    while not governor_can_spawn(gov, active_count):
+        rt_thread_sleep(delay_ms)
+        iteration = iteration + 1
+        # Exponential backoff: 200 -> 500 -> 1000ms cap
+        if delay_ms < 500:
+            delay_ms = 500
+        elif delay_ms < 1000:
+            delay_ms = 1000
+        # Log status every 5th iteration
+        if iteration % 5 == 0:
+            val res = get_system_resources()
+            print "  [governor] waiting for resources (mem: {res.memory_percent}%, active: {active_count}, limit: {gov.resource_limit_pct}%)"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ResourceGovernor
+export governor_create, governor_can_spawn, governor_wait_until_ready

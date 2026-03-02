@@ -13,9 +13,12 @@ use std.daemon_sdk.types.{
 use app.test_daemon.types.{
     TestDaemonConfig, test_daemon_config_default,
     TREQ_RUN_SINGLE, TREQ_RUN_ALL, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
+    TREQ_AGENT_REGISTER, TREQ_AGENT_CLAIM_BATCH,
+    TREQ_AGENT_REPORT_RESULT, TREQ_AGENT_DEREGISTER,
     TRESP_QUEUED, TRESP_RUNNING, TRESP_COMPLETED, TRESP_FAILED,
     TRESP_SKIPPED, TRESP_CACHED, TRESP_ERROR
 }
+use app.test_daemon.agent_pool.{AgentPool, agent_pool_new}
 use app.test_daemon.cache.{TestResultCache, test_result_cache_load}
 use app.test_daemon.deps.{TestDepGraph, test_dep_graph_load}
 use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
@@ -36,6 +39,7 @@ class TestDaemon:
     cache: TestResultCache
     dep_graph: TestDepGraph
     qemu_broker: QemuBroker
+    agent_pool: AgentPool
     active_requests: {text: text}
 
 impl TestDaemon:
@@ -55,6 +59,10 @@ impl TestDaemon:
             val state = self.runner.get_state()
             if state.cycle_count % 50 == 0:
                 self.qemu_broker.cleanup_idle(self.config.qemu_session_timeout_ms)
+
+            # Periodic agent stale cleanup every 30 cycles
+            if state.cycle_count % 30 == 0:
+                self.agent_pool.cleanup_stale_agents(60000)
 
             # Periodic cache save every 20 cycles
             if state.cycle_count % 20 == 0:
@@ -78,6 +86,14 @@ impl TestDaemon:
             return self.handle_status(req)
         else if kind == TREQ_STOP:
             return self.handle_stop(req)
+        else if kind == TREQ_AGENT_REGISTER:
+            return self.handle_agent_register(req)
+        else if kind == TREQ_AGENT_CLAIM_BATCH:
+            return self.handle_agent_claim_batch(req)
+        else if kind == TREQ_AGENT_REPORT_RESULT:
+            return self.handle_agent_report_result(req)
+        else if kind == TREQ_AGENT_DEREGISTER:
+            return self.handle_agent_deregister(req)
         else if kind == -1:
             # Generic stop signal from daemon_sdk
             return self.handle_stop(req)
@@ -201,6 +217,9 @@ impl TestDaemon:
         resp.fields["cache_entries"] = "{self.cache.entries.keys().len()}"
         resp.fields["qemu_active"] = "{self.qemu_broker.active_count()}"
         resp.fields["qemu_idle"] = "{self.qemu_broker.idle_count()}"
+        resp.fields["agents_active"] = "{self.agent_pool.active_agent_count()}"
+        resp.fields["agents_pending"] = "{self.agent_pool.pending_count()}"
+        resp.fields["agents_completed"] = "{self.agent_pool.completed_count()}"
         resp
 
     # --- Stop ---
@@ -212,20 +231,75 @@ impl TestDaemon:
         self.runner.shutdown()
         daemon_response_new(req.id, TRESP_COMPLETED)
 
+    # --- Agent handlers ---
+
+    fn handle_agent_register(req: DaemonRequest) -> DaemonResponse:
+        val agent_id = req.fields["agent_id"] ?? ""
+        val capabilities = req.fields["capabilities"] ?? ""
+        if agent_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing agent_id"
+            return resp
+        self.agent_pool.register_agent(agent_id, capabilities)
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["agent_id"] = agent_id
+        resp
+
+    fn handle_agent_claim_batch(req: DaemonRequest) -> DaemonResponse:
+        val agent_id = req.fields["agent_id"] ?? ""
+        if agent_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing agent_id"
+            return resp
+        val batch = self.agent_pool.claim_batch(agent_id)
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["batch"] = batch.join(",")
+        resp.fields["count"] = "{batch.len()}"
+        resp
+
+    fn handle_agent_report_result(req: DaemonRequest) -> DaemonResponse:
+        val agent_id = req.fields["agent_id"] ?? ""
+        val test_path = req.fields["test_path"] ?? ""
+        val status = (req.fields["status"] ?? "0").to_i64() ?? 0
+        val passed = (req.fields["passed"] ?? "0").to_i64() ?? 0
+        val failed = (req.fields["failed"] ?? "0").to_i64() ?? 0
+        val duration_ms = (req.fields["duration_ms"] ?? "0").to_i64() ?? 0
+        val output = req.fields["output"] ?? ""
+        self.agent_pool.report_result(agent_id, test_path, status, passed, failed, duration_ms, output)
+
+        # Also record in cache
+        self.dep_graph.analyze_test(test_path)
+        val dep_paths = self.dep_graph.get_deps(test_path)
+        self.cache.record_result(test_path, dep_paths, status, passed, failed, 0, duration_ms, output)
+
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["test_path"] = test_path
+        resp
+
+    fn handle_agent_deregister(req: DaemonRequest) -> DaemonResponse:
+        val agent_id = req.fields["agent_id"] ?? ""
+        if agent_id == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing agent_id"
+            return resp
+        self.agent_pool.deregister_agent(agent_id)
+        daemon_response_new(req.id, TRESP_COMPLETED)
+
     # --- Execute a test ---
 
     fn execute_test(test_path: text) -> DaemonResponse:
-        val start_time = rt_time_now_unix_micros()
-
         # Shell out to bin/simple test
         extern fn rt_shell_exec(cmd: text) -> text
         extern fn rt_shell_exit_code() -> i64
 
+        val setup_start = rt_time_now_unix_micros()
         val cmd = "bin/simple test {test_path} 2>&1"
+        val setup_ms = (rt_time_now_unix_micros() - setup_start) / 1000
+
+        val test_start = rt_time_now_unix_micros()
         val output = rt_shell_exec(cmd)
         val exit_code = rt_shell_exit_code()
-
-        val elapsed = (rt_time_now_unix_micros() - start_time) / 1000
+        val duration_ms = (rt_time_now_unix_micros() - test_start) / 1000
 
         val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
         val passed = if exit_code == 0: 1 else: 0
@@ -234,14 +308,15 @@ impl TestDaemon:
         # Record in cache
         self.dep_graph.analyze_test(test_path)
         val dep_paths = self.dep_graph.get_deps(test_path)
-        self.cache.record_result(test_path, dep_paths, status, passed, failed, 0, elapsed, output)
+        self.cache.record_result(test_path, dep_paths, status, passed, failed, 0, duration_ms, output)
 
         var resp = daemon_response_new("", status)
         resp.fields["test_path"] = test_path
         resp.fields["passed"] = "{passed}"
         resp.fields["failed"] = "{failed}"
         resp.fields["skipped"] = "0"
-        resp.fields["duration_ms"] = "{elapsed}"
+        resp.fields["duration_ms"] = "{duration_ms}"
+        resp.fields["setup_ms"] = "{setup_ms}"
         resp.fields["output"] = output
         resp.fields["cached"] = "false"
         resp
@@ -257,6 +332,7 @@ fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
     val cache = test_result_cache_load(config.cache_path)
     val dep_graph = test_dep_graph_load(config.dep_graph_path)
     val qemu_broker = qemu_broker_new(config.max_qemu_sessions)
+    val pool = agent_pool_new(5)
 
     TestDaemon(
         runner: runner,
@@ -264,6 +340,7 @@ fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
         cache: cache,
         dep_graph: dep_graph,
         qemu_broker: qemu_broker,
+        agent_pool: pool,
         active_requests: {}
     )
 

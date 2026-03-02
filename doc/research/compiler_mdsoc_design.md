@@ -5,9 +5,19 @@
 >
 > Extends `mdsoc_design.md` with a concrete compiler-specific dimension mapping.
 
-**Version:** 1.0
-**Date:** 2026-02-17
-**Status:** Design / Implementation Plan
+**Version:** 1.2
+**Date:** 2026-02-17 (Updated 2026-03-02)
+**Status:** Design complete, architecture implemented (288/288 tests passing in `src/compiler/85.mdsoc/`)
+
+**Implementation vs. Design Note (2026-03-02):**
+The actual implementation lives entirely under `src/compiler/85.mdsoc/` (symlink: `src/compiler/mdsoc`), NOT in the originally proposed locations. Specifically:
+- `src/compiler_core/entity/` was **never created** -- IR types remain in numbered layers (10.frontend, 20.hir, 50.mir, etc.)
+- `src/compiler/feature/` is actually `src/compiler/85.mdsoc/feature/`
+- `src/compiler/transform/` is actually `src/compiler/85.mdsoc/transform/`
+- The compiler uses 17 numbered layers: 00.common, 10.frontend, 15.blocks, 20.hir, 25.traits, 30.types, 35.semantics, 40.mono, 50.mir, 55.borrow, 60.mir_opt, 70.backend, 80.driver, 85.mdsoc, 90.tools, 95.interp, 99.loader
+- 8 convenience symlinks exist for frequently-imported layers (common, frontend, mir, backend, driver, mdsoc, interp, loader)
+- Old unnumbered dirs (core/, linker/) deleted; contents migrated to numbered layers
+- See `doc/feature/mdsoc_complete.md` and `doc/report/compiler_mdsoc_migration.md` for current state
 
 ---
 
@@ -1021,16 +1031,18 @@ describe "Full compilation pipeline":
 
 ## 10. Summary
 
-### What Changes
+### What Changes (Design vs. Reality)
 
-| Aspect | Before | After |
-|--------|--------|-------|
-| IR types | Scattered in `src/compiler_core/*.spl` | `src/compiler_core/entity/*/` |
-| Stage logic | Mixed in `src/compiler_core/` and `src/compiler/` | `src/compiler/feature/*/` |
-| Stage boundaries | Implicit (direct imports) | `src/compiler/transform/feature/*/` |
-| Backends | Mixed with driver | `src/compiler/feature/codegen/backends/*/` |
-| Interpreter | Standalone in `src/compiler_core/interpreter/` | Backend adapter |
-| Test isolation | Hard (shared globals) | Easy (mock ports) |
+The table below shows the **design plan**. The "Actual (2026-03-02)" column shows where things actually ended up:
+
+| Aspect | Before | Planned After | Actual (2026-03-02) |
+|--------|--------|-------|---------------------|
+| IR types | Scattered in `src/compiler_core/*.spl` | `src/compiler_core/entity/*/` | **NOT DONE** -- remain in numbered layers (10.frontend, 20.hir, 30.types, 50.mir) |
+| Stage logic | Mixed in `src/compiler_core/` and `src/compiler/` | `src/compiler/feature/*/` | `src/compiler/85.mdsoc/feature/` (12 stages, 46 files) |
+| Stage boundaries | Implicit (direct imports) | `src/compiler/transform/feature/*/` | `src/compiler/85.mdsoc/transform/` (9 boundaries, 21 files) |
+| Backends | Mixed with driver | `src/compiler/feature/codegen/backends/*/` | `src/compiler/85.mdsoc/feature/codegen/backends/` |
+| Interpreter | Standalone in `src/compiler_core/interpreter/` | Backend adapter | Port defined in `85.mdsoc/`, actual interpreter in `95.interp/` |
+| Test isolation | Hard (shared globals) | Easy (mock ports) | Port structs defined but not wired into pipeline |
 
 ### What Stays the Same
 
@@ -1041,15 +1053,15 @@ describe "Full compilation pipeline":
 
 ### Phasing
 
-| Phase | Focus | Risk |
-|-------|-------|------|
-| 1 | Extract IR entity types | Low |
-| 2 | Feature modules per stage | Medium |
-| 3 | Transform stage boundaries | Medium |
-| 4 | Arch enforcement | Low |
-| 5 | Module loader as adapter | Medium |
-| 6 | Interpreter as backend | High |
-| 7 | Event bus (future) | Future |
+| Phase | Focus | Risk | Status (2026-03-02) |
+|-------|-------|------|---------------------|
+| 1 | Extract IR entity types | Low | NOT DONE |
+| 2 | Feature modules per stage | Medium | DONE (under 85.mdsoc/) |
+| 3 | Transform stage boundaries | Medium | DONE (under 85.mdsoc/) |
+| 4 | Arch enforcement | Low | DONE (check-arch command) |
+| 5 | Module loader as adapter | Medium | DONE (ports + adapters) |
+| 6 | Interpreter as backend | High | DONE (BackendPort defined) |
+| 7 | Event bus | Future | DONE (ports + adapters) |
 
 ---
 
@@ -1059,6 +1071,9 @@ describe "Full compilation pipeline":
 - `doc/guide/standard_architecture.md` — Standard Simple architecture
 - `doc/guide/dimension_transform_examples.md` — Transform pattern examples
 - `doc/guide/transform_init_examples.md` — `__init__.spl` configuration examples
-- `src/compiler_core/ast.spl` — Current AST arena (entity source)
-- `src/compiler_core/interpreter/eval.spl` — Current interpreter (future backend adapter)
-- `src/app/desugar/` — Current desugaring pipeline (future feature stage)
+- `doc/feature/mdsoc_complete.md` — Implementation status (288 tests passing)
+- `doc/report/compiler_mdsoc_migration.md` — Migration tracking
+- `doc/report/compiler_mdsoc_impl_plan.md` — Implementation plan with phase status
+- `src/compiler/85.mdsoc/` — Actual implementation (118 files, one-struct-per-file)
+- Symlink: `src/compiler/mdsoc` -> `85.mdsoc` (runtime resolution workaround)
+- Compiler layers: 00.common, 10.frontend, 15.blocks, 20.hir, 25.traits, 30.types, 35.semantics, 40.mono, 50.mir, 55.borrow, 60.mir_opt, 70.backend, 80.driver, 85.mdsoc, 90.tools, 95.interp, 99.loader

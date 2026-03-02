@@ -85,9 +85,9 @@ fn create_example_group(description: String, parent: Option<Value>) -> Value {
             },
         },
     );
-    fields.insert("children".to_string(), Value::Array(Vec::new()));
-    fields.insert("test_examples".to_string(), Value::Array(Vec::new()));
-    fields.insert("hooks".to_string(), Value::Array(Vec::new()));
+    fields.insert("children".to_string(), Value::array(Vec::new()));
+    fields.insert("test_examples".to_string(), Value::array(Vec::new()));
+    fields.insert("hooks".to_string(), Value::array(Vec::new()));
 
     Value::Object {
         class: "ExampleGroup".to_string(),
@@ -101,7 +101,7 @@ fn create_example(description: String, block: Value, resource_limits: Option<Val
     fields.insert("description".to_string(), Value::Str(description));
     fields.insert("block".to_string(), block);
     fields.insert("is_skipped".to_string(), Value::Bool(false));
-    fields.insert("tags".to_string(), Value::Array(Vec::new()));
+    fields.insert("tags".to_string(), Value::array(Vec::new()));
     fields.insert(
         "timeout_seconds".to_string(),
         Value::Enum {
@@ -139,7 +139,7 @@ fn add_example_to_current_group(example: Value) {
         if let Some(group) = stack.last_mut() {
             if let Value::Object { fields, .. } = group {
                 if let Some(Value::Array(examples)) = Arc::make_mut(fields).get_mut("test_examples") {
-                    examples.push(example);
+                    Arc::make_mut(examples).push(example);
                 }
             }
         }
@@ -153,7 +153,7 @@ fn add_child_to_current_group(child: &Value) {
         if let Some(group) = stack.last_mut() {
             if let Value::Object { fields, .. } = group {
                 if let Some(Value::Array(children)) = Arc::make_mut(fields).get_mut("children") {
-                    children.push(child.clone());
+                    Arc::make_mut(children).push(child.clone());
                 }
             }
         }
@@ -167,7 +167,7 @@ fn add_hook_to_current_group(hook: Value) {
         if let Some(group) = stack.last_mut() {
             if let Value::Object { fields, .. } = group {
                 if let Some(Value::Array(hooks)) = Arc::make_mut(fields).get_mut("hooks") {
-                    hooks.push(hook);
+                    Arc::make_mut(hooks).push(hook);
                 }
             }
         }
@@ -181,9 +181,10 @@ fn update_last_child_in_current_group(updated_child: &Value) {
         if let Some(group) = stack.last_mut() {
             if let Value::Object { fields, .. } = group {
                 if let Some(Value::Array(children)) = Arc::make_mut(fields).get_mut("children") {
-                    if !children.is_empty() {
-                        let last_idx = children.len() - 1;
-                        children[last_idx] = updated_child.clone();
+                    let vec = Arc::make_mut(children);
+                    if !vec.is_empty() {
+                        let last_idx = vec.len() - 1;
+                        vec[last_idx] = updated_child.clone();
                     }
                 }
             }
@@ -1228,7 +1229,7 @@ pub(super) fn eval_bdd_builtin(
         }
         "__bdd_get_all_groups" => {
             let groups = BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| cell.borrow().clone());
-            Ok(Some(Value::Array(groups)))
+            Ok(Some(Value::array(groups)))
         }
         "__bdd_clear_groups" => {
             BDD_REGISTRY_GROUPS.with(|cell: &BddGroupsCell| {

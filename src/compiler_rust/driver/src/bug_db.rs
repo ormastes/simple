@@ -169,7 +169,7 @@ pub fn load_bug_db(path: &Path) -> Result<BugDb, String> {
         return Ok(BugDb::new());
     }
 
-    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+    let _lock = FileLock::acquire(path, 2).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
 
     // Try SDN format first, fall back to JSON for backward compatibility
@@ -355,7 +355,7 @@ pub fn save_bug_db(path: &Path, db: &BugDb) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+    let _lock = FileLock::acquire(path, 2).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
     let mut content = String::new();
     content.push_str("bugs |bug_id, title, description, status, priority, severity, reproducible_by, reproduction_steps, timing_impact, build_impact, related_tests, related_bugs, related_features, created, updated, assignee, reporter, tags, resolution, valid|\n");

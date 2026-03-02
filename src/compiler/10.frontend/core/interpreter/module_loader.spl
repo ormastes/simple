@@ -148,38 +148,40 @@ fn module_get_file_path(module_name: text) -> text:
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_dir_exists(path: text) -> i64
 
+# Cache resolved module paths to avoid repeated filesystem probing.
+# Fast cache: module_name → resolved path (for stdlib modules resolved identically regardless of caller)
+# Full cache: "module_name|current_file" → resolved path (for relative imports)
+var _interp_module_fast_cache: {text: text} = {}
+var _interp_module_cache: {text: text} = {}
+
 fn resolve_module_path(module_name: text, current_file: text) -> text:
+    # Fast path: check module-only cache first (no string concat needed)
+    val fast = _interp_module_fast_cache[module_name] ?? ""
+    if fast != "":
+        return fast
+    # Full path: composite key for relative imports
+    val cache_key = module_name + "|" + current_file
+    val cached = _interp_module_cache[cache_key] ?? ""
+    if cached != "":
+        return cached
+    val result = _resolve_module_path_uncached(module_name, current_file)
+    _interp_module_cache[cache_key] = result
+    # Cache in fast path if it's a stdlib/lib import (not relative)
+    if module_name.starts_with("std.") or module_name.starts_with("lib.") or module_name.starts_with("compiler.") or module_name.starts_with("app."):
+        _interp_module_fast_cache[module_name] = result
+    result
+
+fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     # Convert dotted name to file path
     # std.string → std/text.spl
     # app.io.mod → app/io/mod.spl
     # compiler.frontend.X → compiler/10.frontend/X.spl (numbered dir support)
 
-    var path_parts: [text] = []
-    var current = ""
-    var i: i64 = 0
-    for char in module_name:
-        if char == ".":
-            if current != "":
-                path_parts.push(current)
-                current = ""
-        else:
-            current = current + char
-        i = i + 1
+    # Split dotted module name into parts using array+join (avoids O(n²) concat)
+    val path_parts = module_name.split(".")
 
-    # Add final part
-    if current != "":
-        path_parts.push(current)
-
-    # Join parts with /
-    var relative_path = ""
-    var pi: i64 = 0
-    for part in path_parts:
-        if pi > 0:
-            relative_path = relative_path + "/"
-        relative_path = relative_path + part
-        pi = pi + 1
-
-    relative_path = relative_path + ".spl"
+    # Build relative path with / separator
+    val relative_path = path_parts.join("/") + ".spl"
 
     # Rewrite std/ → lib/ (std is a package alias, real code is in lib/)
     if relative_path.starts_with("std/"):

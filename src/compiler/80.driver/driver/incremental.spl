@@ -38,6 +38,15 @@ impl FileFingerprint:
         Some(FileFingerprint(path: path, content_hash: hash,
                              modified_time: mtime, size: size))
 
+    static fn quick_changed(path: text, cached: FileFingerprint) -> bool:
+        """Fast check using size only — avoids read+hash when size unchanged."""
+        extern fn rt_file_exists(path: text) -> bool
+        extern fn rt_file_size(path: text) -> i64
+        if not rt_file_exists(path):
+            return true
+        val current_size = rt_file_size(path)
+        current_size != cached.size
+
     fn matches(other: FileFingerprint) -> bool:
         """Check if two fingerprints match (same content)."""
         self.content_hash == other.content_hash
@@ -63,10 +72,13 @@ impl DependencyEntry:
         # Source file changed
         if self.fingerprint.is_stale(current):
             return true
-        # Any dependency changed
+        # Any dependency changed — quick size check before full hash
         for dep in self.dependencies:
             if dep_cache.contains_key(dep):
                 val cached = dep_cache[dep]
+                if FileFingerprint__quick_changed(dep, cached):
+                    # Size changed — definitely stale, skip expensive hash
+                    return true
                 val fresh = FileFingerprint__from_file(dep)
                 if fresh.? and cached.is_stale(fresh.unwrap()):
                     return true

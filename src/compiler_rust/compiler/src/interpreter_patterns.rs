@@ -30,14 +30,14 @@ pub(super) fn match_sequence_pattern(
     enums: &Enums,
     is_tuple: bool,
 ) -> Result<bool, CompileError> {
-    let values = if is_tuple {
+    let values: &[Value] = if is_tuple {
         if let Value::Tuple(vals) = value {
-            vals
+            vals.as_slice()
         } else {
             return Ok(false);
         }
     } else if let Value::Array(vals) = value {
-        vals
+        vals.as_slice()
     } else {
         return Ok(false);
     };
@@ -89,7 +89,7 @@ pub(super) fn match_sequence_pattern(
 
         // Store rest in a special binding if followed by an identifier
         // This is a simplified approach - full support would need parser changes
-        bindings.insert("__rest__".to_string(), Value::Array(rest_values));
+        bindings.insert("__rest__".to_string(), Value::array(rest_values));
 
         Ok(true)
     } else {

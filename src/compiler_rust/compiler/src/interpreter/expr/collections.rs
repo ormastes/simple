@@ -162,7 +162,7 @@ pub(super) fn eval_collection_expr(
                 if let Expr::Spread(inner) = item {
                     let spread_val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
                     match spread_val {
-                        Value::Array(spread_arr) => arr.extend(spread_arr),
+                        Value::Array(spread_arr) => arr.extend(spread_arr.iter().cloned()),
                         Value::Tuple(tup) => arr.extend(tup),
                         _ => {
                             let ctx = ErrorContext::new()
@@ -181,7 +181,7 @@ pub(super) fn eval_collection_expr(
                     arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
                 }
             }
-            Ok(Some(Value::Array(arr)))
+            Ok(Some(Value::array(arr)))
         }
         // Vec literals are treated as arrays at runtime
         Expr::VecLiteral(items) => {
@@ -189,7 +189,7 @@ pub(super) fn eval_collection_expr(
             for item in items {
                 arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
             }
-            Ok(Some(Value::Array(arr)))
+            Ok(Some(Value::array(arr)))
         }
         Expr::ArrayRepeat { value, count } => {
             // Evaluate the count first
@@ -224,7 +224,7 @@ pub(super) fn eval_collection_expr(
             // Evaluate the value once and clone it
             let val = evaluate_expr(value, env, functions, classes, enums, impl_methods)?;
             let arr: Vec<Value> = std::iter::repeat(val).take(count_int as usize).collect();
-            Ok(Some(Value::Array(arr)))
+            Ok(Some(Value::array(arr)))
         }
         Expr::Tuple(items) => {
             let mut tup = Vec::new();
@@ -256,7 +256,7 @@ pub(super) fn eval_collection_expr(
                                 .get(start_idx..end_idx.min(arr.len()))
                                 .map(|s| s.to_vec())
                                 .unwrap_or_default();
-                            Ok(Value::Array(sliced))
+                            Ok(Value::array(sliced))
                         }
                         Value::Str(s) => {
                             let chars: Vec<char> = s.chars().collect();
@@ -604,7 +604,7 @@ pub(super) fn eval_collection_expr(
                 let val = evaluate_expr(expr, &mut inner_env, functions, classes, enums, impl_methods)?;
                 result.push(val);
             }
-            Ok(Some(Value::Array(result)))
+            Ok(Some(Value::array(result)))
         }
         Expr::DictComprehension {
             key,
@@ -738,7 +738,7 @@ pub(super) fn eval_collection_expr(
             }
 
             let result = match recv_val {
-                Value::Array(arr) => Ok(Value::Array(slice_collection(&arr, start_idx, end_idx, step_val))),
+                Value::Array(arr) => Ok(Value::array(slice_collection(&arr, start_idx, end_idx, step_val))),
                 Value::Str(s) => {
                     let chars: Vec<char> = s.chars().collect();
                     let sliced = slice_collection(&chars, start_idx, end_idx, step_val);

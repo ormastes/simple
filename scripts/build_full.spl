@@ -1,0 +1,92 @@
+# Build full distribution package (source + binary)
+#
+# Usage:
+#   bin/simple run scripts/build_full.spl                 # Source-only package
+#   bin/simple run scripts/build_full.spl --with-binary   # Include binary
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_exit(code: i32)
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+fn shell_output(command: text) -> text:
+    val (out, _, _) = shell(command)
+    out.trim()
+
+fn dir_exists(path: text) -> bool:
+    val (_, _, code) = shell("test -d '{path}'")
+    code == 0
+
+fn main():
+    val args = rt_cli_get_args()
+    var with_binary = false
+
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--with-binary":
+            with_binary = true
+        if arg == "--help" or arg == "-h":
+            print "Usage: bin/simple run scripts/build_full.spl [--with-binary]"
+            rt_exit(0)
+        i = i + 1
+
+    var version = "0.6.1"
+    if rt_file_exists("simple.sdn"):
+        val v = shell_output("grep 'version:' simple.sdn | head -1 | sed 's/.*version: *//'")
+        if v.len() > 0:
+            version = v
+
+    val pkg_name = "simple-full-{version}"
+    val tmp_dir = "/tmp/{pkg_name}"
+    val output = "{pkg_name}.tar.gz"
+
+    print "Building full package: {output}"
+    print "Version: {version}"
+    print ""
+
+    shell("rm -rf {tmp_dir}")
+    shell("mkdir -p {tmp_dir}")
+
+    print "Copying source code..."
+    val dirs = ["src", "test", "doc", "examples", "scripts", ".github"]
+    var d = 0
+    while d < dirs.len():
+        val dirname = dirs[d]
+        if dir_exists(dirname):
+            shell("cp -r {dirname} {tmp_dir}/")
+        d = d + 1
+
+    val root_files = ["README.md", "LICENSE", "CHANGELOG.md", "CLAUDE.md", "simple.sdn", "CMakeLists.txt"]
+    var f = 0
+    while f < root_files.len():
+        val fname = root_files[f]
+        if rt_file_exists(fname):
+            shell("cp {fname} {tmp_dir}/")
+        f = f + 1
+
+    if with_binary:
+        print "Including binary..."
+        shell("mkdir -p {tmp_dir}/bin/release")
+
+        if rt_file_exists("bin/release/simple"):
+            shell("cp bin/release/simple {tmp_dir}/bin/release/")
+            shell("chmod +x {tmp_dir}/bin/release/simple")
+            print "  Included: bin/release/simple"
+
+        if rt_file_exists("bin/release/simple_codegen"):
+            shell("cp bin/release/simple_codegen {tmp_dir}/bin/release/")
+            shell("chmod +x {tmp_dir}/bin/release/simple_codegen")
+            print "  Included: bin/release/simple_codegen"
+
+    print ""
+    print "Creating archive..."
+    shell("tar czf {output} -C /tmp {pkg_name}")
+    shell("rm -rf {tmp_dir}")
+
+    val size = shell_output("ls -lh {output} | awk '{{print $5}}'")
+    print ""
+    print "Package created: {output} ({size})"

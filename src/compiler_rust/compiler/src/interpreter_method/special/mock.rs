@@ -126,8 +126,8 @@ pub fn handle_mock_methods(
         "getCalls" | "get_calls" => {
             let method_str = extract_method_name!(args, 0, "getCalls", env, functions, classes, enums, impl_methods);
             let calls = mock.get_calls(&method_str);
-            let call_arrays: Vec<Value> = calls.into_iter().map(Value::Array).collect();
-            return Ok(Some(Value::Array(call_arrays)));
+            let call_arrays: Vec<Value> = calls.into_iter().map(Value::array).collect();
+            return Ok(Some(Value::array(call_arrays)));
         }
         // Any other method is treated as a mock call
         _ => {

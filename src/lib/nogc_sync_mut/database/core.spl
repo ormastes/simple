@@ -229,22 +229,22 @@ class SdnTable:
 
     # Export to SDN format
     fn to_sdn() -> text:
-        var result = "{self.name} |"
-        result = result + self.columns.join(", ")
-        result = result + "|\n"
+        var parts: [text] = []
+        parts.push("{self.name} |")
+        parts.push(self.columns.join(", "))
+        parts.push("|\n")
 
         for row in self.rows:
-            result = result + "    "
-            var values = []
+            parts.push("    ")
+            var values: [text] = []
             for col in self.columns:
                 val value = row.get(col) ?? ""
-                # Quote values that contain commas to preserve round-trip safety
                 val formatted = quote_if_needed(value)
                 values.push(formatted)
-            result = result + values.join(", ")
-            result = result + "\n"
+            parts.push(values.join(", "))
+            parts.push("\n")
 
-        result
+        parts.join("")
 
     # Add row
     me add_row(row: SdnRow) -> bool:
@@ -364,15 +364,17 @@ class SdnDatabase:
 
     # Save to disk (atomic with file locking)
     me save() -> bool:
-        var content = ""
+        var sections: [text] = []
 
         # Write strings table first
         val strings_table = self.interner.to_sdn()
-        content = content + strings_table.to_sdn() + "\n\n"
+        sections.push(strings_table.to_sdn())
 
         # Write all other tables
         for (name, table) in self.tables:
-            content = content + table.to_sdn() + "\n\n"
+            sections.push(table.to_sdn())
+
+        val content = sections.join("\n\n") + "\n\n"
 
         # Use atomic_write with FileLock to prevent race conditions
         # This acquires lock, writes temp file, renames, then releases lock
@@ -467,8 +469,8 @@ class SdnDatabase:
 # Split an SDN row line respecting quoted strings that may contain commas.
 # For example: '1, "hello, world", true' -> ["1", '"hello, world"', "true"]
 fn split_sdn_row(line: text) -> [text]:
-    var parts = []
-    var current = ""
+    var parts: [text] = []
+    var chars: [text] = []
     var in_quotes = false
     var i = 0
 
@@ -476,17 +478,17 @@ fn split_sdn_row(line: text) -> [text]:
         val ch = line[i]
         if ch == '"':
             in_quotes = not in_quotes
-            current = current + ch
+            chars.push(ch)
         elif ch == ',' and not in_quotes:
-            parts = parts + [current]
-            current = ""
+            parts.push(chars.join(""))
+            chars = []
         else:
-            current = current + ch
+            chars.push(ch)
         i = i + 1
 
     # Add last field
-    if current != "" or parts.len() > 0:
-        parts = parts + [current]
+    if chars.len() > 0 or parts.len() > 0:
+        parts.push(chars.join(""))
 
     parts
 

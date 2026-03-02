@@ -135,7 +135,7 @@ fn command_to_value(cmd: ShellCommand) -> Value {
             fields.insert("command".to_string(), Value::Str(command));
             fields.insert(
                 "args".to_string(),
-                Value::Array(args.into_iter().map(Value::Str).collect()),
+                Value::array(args.into_iter().map(Value::Str).collect()),
             );
             Value::dict(fields)
         }
@@ -144,7 +144,7 @@ fn command_to_value(cmd: ShellCommand) -> Value {
             fields.insert("type".to_string(), Value::Str("pipeline".to_string()));
             fields.insert(
                 "commands".to_string(),
-                Value::Array(cmds.into_iter().map(command_to_value).collect()),
+                Value::array(cmds.into_iter().map(command_to_value).collect()),
             );
             Value::dict(fields)
         }
@@ -160,7 +160,7 @@ fn command_to_value(cmd: ShellCommand) -> Value {
             fields.insert("type".to_string(), Value::Str("sequence".to_string()));
             fields.insert(
                 "commands".to_string(),
-                Value::Array(cmds.into_iter().map(command_to_value).collect()),
+                Value::array(cmds.into_iter().map(command_to_value).collect()),
             );
             Value::dict(fields)
         }

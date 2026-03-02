@@ -134,7 +134,7 @@ pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError
     match args.get(idx) {
         Some(Value::Array(arr)) => {
             let mut bytes = Vec::with_capacity(arr.len());
-            for v in arr {
+            for v in arr.iter() {
                 match v {
                     Value::Int(i) => bytes.push(*i as u8),
                     _ => {

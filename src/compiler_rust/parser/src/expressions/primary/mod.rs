@@ -266,6 +266,27 @@ impl<'a> Parser<'a> {
                     ))
                 }
             }
+            // &:method syntax: desugar to \__p0: __p0.method()
+            TokenKind::AmpColon => {
+                self.advance(); // consume &:
+                let method_name = self.expect_identifier()?;
+                // Desugar: &:method -> \__p0: __p0.method()
+                let param = LambdaParam {
+                    name: "__p0".to_string(),
+                    ty: None,
+                };
+                let body = Expr::MethodCall {
+                    receiver: Box::new(Expr::Identifier("__p0".to_string())),
+                    method: method_name,
+                    args: vec![],
+                };
+                Ok(Expr::Lambda {
+                    params: vec![param],
+                    body: Box::new(body),
+                    move_mode: enums::MoveMode::Copy,
+                    capture_all: false,
+                })
+            }
             _ => Err(ParseError::unexpected_token(
                 "expression",
                 format!("{:?}", self.current.kind),
