@@ -481,62 +481,97 @@ fn struct_table_get_module(name: text) -> text:
         idx = st_nexts[idx]
     ""
 
-# ===== Enum Type Registry =====
+# ===== Enum Type Registry (Hash Map) =====
 # Tracks enum type names and their variants for exhaustiveness checking.
 # Variants stored as comma-separated text to avoid [[text]] arrays.
+# Uses chained hashing for O(1) average lookup (was O(n) linear scan).
 var enum_reg_names: [text] = []
 var enum_reg_variants: [text] = []
+var enum_hm_buckets: [i64] = []
+var enum_hm_nexts: [i64] = []
 
 fn enum_table_reset():
     enum_reg_names = []
     enum_reg_variants = []
+    enum_hm_buckets = hm_make_global_buckets()
+    enum_hm_nexts = []
 
 fn enum_table_register(name: text, variants: [text]):
-    # Check if already registered
-    var i: i64 = 0
-    for existing in enum_reg_names:
-        if existing == name:
+    if enum_hm_buckets.len() == 0:
+        enum_hm_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = enum_hm_buckets[bucket]
+    while idx != -1:
+        if enum_reg_names[idx] == name:
             return
-        i = i + 1
+        idx = enum_hm_nexts[idx]
+    val new_idx = enum_reg_names.len()
     enum_reg_names.push(name)
     enum_reg_variants.push(variants.join(","))
+    enum_hm_nexts.push(enum_hm_buckets[bucket])
+    enum_hm_buckets[bucket] = new_idx
 
 fn enum_table_lookup(name: text) -> text:
-    # Returns comma-separated variants, or "" if not found
-    var i: i64 = 0
-    for ename in enum_reg_names:
-        if ename == name:
-            return enum_reg_variants[i]
-        i = i + 1
+    if enum_hm_buckets.len() == 0: return ""
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = enum_hm_buckets[bucket]
+    while idx != -1:
+        if enum_reg_names[idx] == name:
+            return enum_reg_variants[idx]
+        idx = enum_hm_nexts[idx]
     ""
 
 fn enum_table_remove(name: text) -> bool:
-    var i: i64 = 0
-    for ename in enum_reg_names:
-        if ename == name:
-            enum_reg_names[i] = ""
-            enum_reg_variants[i] = ""
+    if enum_hm_buckets.len() == 0: return false
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var prev: i64 = -1
+    var idx = enum_hm_buckets[bucket]
+    while idx != -1:
+        if enum_reg_names[idx] == name:
+            if prev == -1:
+                enum_hm_buckets[bucket] = enum_hm_nexts[idx]
+            else:
+                enum_hm_nexts[prev] = enum_hm_nexts[idx]
+            enum_reg_names[idx] = ""
+            enum_reg_variants[idx] = ""
             return true
-        i = i + 1
+        prev = idx
+        idx = enum_hm_nexts[idx]
     false
 
-# ===== Phantom Struct Registry =====
+# ===== Phantom Struct Registry (Hash Map) =====
 # Tracks struct names explicitly registered as phantom types.
+# Uses chained hashing for O(1) average lookup (was O(n) linear scan).
 var phantom_reg_names: [text] = []
+var phantom_hm_buckets: [i64] = []
+var phantom_hm_nexts: [i64] = []
 
 fn phantom_struct_register(name: text):
-    # Register a struct name as a phantom type marker
-    for existing in phantom_reg_names:
-        if existing == name: return
+    if phantom_hm_buckets.len() == 0:
+        phantom_hm_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = phantom_hm_buckets[bucket]
+    while idx != -1:
+        if phantom_reg_names[idx] == name: return
+        idx = phantom_hm_nexts[idx]
+    val new_idx = phantom_reg_names.len()
     phantom_reg_names.push(name)
+    phantom_hm_nexts.push(phantom_hm_buckets[bucket])
+    phantom_hm_buckets[bucket] = new_idx
 
 fn phantom_struct_is_registered(name: text) -> bool:
-    for pname in phantom_reg_names:
-        if pname == name: return true
+    if phantom_hm_buckets.len() == 0: return false
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = phantom_hm_buckets[bucket]
+    while idx != -1:
+        if phantom_reg_names[idx] == name: return true
+        idx = phantom_hm_nexts[idx]
     false
 
 fn phantom_reg_reset():
     phantom_reg_names = []
+    phantom_hm_buckets = hm_make_global_buckets()
+    phantom_hm_nexts = []
 
 # ===== Match Exhaustiveness Helpers =====
 

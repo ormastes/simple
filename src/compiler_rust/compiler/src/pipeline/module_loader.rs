@@ -563,19 +563,17 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         .cloned()
         .collect();
 
-    // For symbol-specific imports (Single, Aliased, Group), we want to resolve
-    // to the MODULE file (not to a per-symbol file). The path segments already
-    // contain the module path. Only for Glob do we use the path as-is.
+    // For Single/Aliased imports, the target name may be a module file (not a symbol).
+    // Append it to the path so we try resolving `std.mcp.main_lazy_json` as
+    // `mcp/main_lazy_json.spl` first, matching the interpreter's behavior.
+    // If the file doesn't exist, resolve_use_to_path returns None and the
+    // interpreter handles the UseStmt directly (treating target as a symbol).
     match &use_stmt.target {
-        ImportTarget::Single(_) | ImportTarget::Aliased { .. } | ImportTarget::Group(_) => {
-            // Symbol-specific import: resolve to the module file
-            // e.g., `import test_import_a.{SimpleError}` -> resolve to test_import_a.spl
-            // The parts already contain just the module path (test_import_a)
+        ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => {
+            parts.push(name.clone());
         }
-        ImportTarget::Glob => {
-            // For glob imports like `use ui.element.*`, the path segments
-            // already contain the module path, we just resolve it as-is
-            // (the last segment is the module file)
+        ImportTarget::Group(_) | ImportTarget::Glob => {
+            // For Group/Glob imports, path segments already contain the full module path
         }
     }
 
