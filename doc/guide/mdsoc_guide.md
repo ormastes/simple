@@ -865,15 +865,47 @@ This pattern (implemented in `src/compiler/70.backend/backend_port.spl` and
 
 ---
 
+## Import Patterns (Updated 2026-03-02)
+
+After the one-struct-per-file refactor, prefer individual imports:
+
+```simple
+# Preferred: individual struct imports
+use compiler.mdsoc.types.caret_id.{CaretId}
+use compiler.mdsoc.types.layer_def.{LayerDef}
+use compiler.mdsoc.types.virtual_capsule.{VirtualCapsule}
+use compiler.mdsoc.checker_types.layer_violation.{LayerViolation}
+
+# Also works: hub re-export imports (backward compatible)
+use compiler.mdsoc.types.*
+```
+
+A symlink `src/compiler/mdsoc` -> `85.mdsoc` is required for runtime module resolution.
+All 288 MDSOC tests pass with this setup.
+
+### Compiler Layer Structure
+
+The compiler uses 17 numbered layers. The `NN.name/` prefix is stripped for imports (e.g., `use frontend.parser` not `use 10.frontend.parser`):
+
+```
+00.common, 10.frontend, 15.blocks, 20.hir, 25.traits, 30.types,
+35.semantics, 40.mono, 50.mir, 55.borrow, 60.mir_opt, 70.backend,
+80.driver, 85.mdsoc, 90.tools, 95.interp, 99.loader
+```
+
+Convenience symlinks exist for frequently-imported layers: `common`, `frontend`, `mir`, `backend`, `driver`, `mdsoc`, `interp`, `loader`.
+
+---
+
 ## Next Steps
 
 - **Theory:** Read `doc/research/mdsoc_design.md` for design rationale
-- **Examples:** Explore `test/unit/compiler/mdsoc/` for working examples
-- **API Reference:** See `src/compiler/85.mdsoc/mdsoc/mod.spl` for type definitions
+- **Examples:** Explore `test/unit/compiler/mdsoc/` for working examples (288 passing tests)
+- **API Reference:** See `src/compiler/85.mdsoc/mod.spl` for type definitions
 - **IDE Support:** Install Simple Language extension for capsule navigation
 
 ---
 
-**Document Version:** 1.0
+**Document Version:** 1.2
 **Last Updated:** 2026-03-02
 **Maintainers:** Simple Language Team

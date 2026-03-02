@@ -1,0 +1,102 @@
+# Resource-limited command executor
+# Run any command with memory, CPU, and process limits
+#
+# Usage: bin/simple run scripts/resource/run_limited.spl [options] -- command [args...]
+#
+# Options:
+#   -m, --memory SIZE       Memory limit (default: 32G)
+#   -p, --processes NUM     Max processes (default: 16)
+#   -n, --nice LEVEL        Nice level (default: 0)
+#   -v, --verbose           Show detailed info
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_exit(code: i32)
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+fn shell_ok(command: text) -> bool:
+    val (_, _, code) = shell(command)
+    code == 0
+
+fn main():
+    val args = rt_cli_get_args()
+    var memory = "32G"
+    var processes = "16"
+    var nice_level = "0"
+    var verbose = false
+    var cmd_parts: [text] = []
+
+    var i = 1
+    var found_separator = false
+    while i < args.len():
+        if found_separator:
+            cmd_parts = cmd_parts + [args[i]]
+        else:
+            val arg = args[i]
+            if arg == "--":
+                found_separator = true
+            else:
+                if arg == "-m" or arg == "--memory":
+                    i = i + 1
+                    memory = args[i]
+                else:
+                    if arg == "-p" or arg == "--processes":
+                        i = i + 1
+                        processes = args[i]
+                    else:
+                        if arg == "-n" or arg == "--nice":
+                            i = i + 1
+                            nice_level = args[i]
+                        else:
+                            if arg == "-v" or arg == "--verbose":
+                                verbose = true
+                            else:
+                                if arg == "-h" or arg == "--help":
+                                    print "Usage: bin/simple run scripts/resource/run_limited.spl [options] -- command [args...]"
+                                    print ""
+                                    print "Options:"
+                                    print "  -m, --memory SIZE     Memory limit (default: 32G)"
+                                    print "  -p, --processes NUM   Max processes (default: 16)"
+                                    print "  -n, --nice LEVEL      Nice level (default: 0)"
+                                    print "  -v, --verbose         Show detailed info"
+                                    rt_exit(0)
+                                else:
+                                    print "Error: Unknown option: {arg}"
+                                    rt_exit(1)
+        i = i + 1
+
+    if cmd_parts.len() == 0:
+        print "Error: No command specified. Use -- before the command."
+        rt_exit(1)
+
+    val command = cmd_parts.join(" ")
+
+    if verbose:
+        print "=== Resource Limits ==="
+        print "Memory:    {memory}"
+        print "Processes: {processes}"
+        print "Nice:      {nice_level}"
+        print "Command:   {command}"
+        print ""
+
+    val has_systemd = shell_ok("command -v systemd-run >/dev/null 2>&1")
+    val has_prlimit = shell_ok("command -v prlimit >/dev/null 2>&1")
+
+    if has_systemd:
+        if verbose:
+            print "Using: systemd-run (cgroups v2)"
+        val (_, _, code) = shell("systemd-run --user --scope --quiet -p MemoryMax={memory} -p TasksMax={processes} nice -n {nice_level} {command}")
+        rt_exit(code)
+    else:
+        if has_prlimit:
+            if verbose:
+                print "Using: prlimit"
+            val (_, _, code) = shell("nice -n {nice_level} prlimit --nproc={processes} {command}")
+            rt_exit(code)
+        else:
+            if verbose:
+                print "Using: ulimit (built-in shell limits)"
+            val (_, _, code) = shell("ulimit -u {processes} 2>/dev/null; nice -n {nice_level} {command}")
+            rt_exit(code)

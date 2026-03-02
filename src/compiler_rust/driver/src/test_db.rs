@@ -1212,7 +1212,7 @@ pub fn load_test_db(path: &Path) -> Result<TestDb, String> {
         return Ok(TestDb::new());
     }
 
-    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+    let _lock = FileLock::acquire(path, 2).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
     let file_size = fs::metadata(path)
         .map_err(|e| format!("Failed to stat file: {}", e))?
@@ -1890,7 +1890,7 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
         }
     }
 
-    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+    let _lock = FileLock::acquire(path, 2).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
     // Build V3 content
     let content = build_v3_sdn(db);
@@ -1924,6 +1924,38 @@ pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
     Ok(())
 }
 
+/// Check if an SDN string value needs quoting in table rows.
+///
+/// Values containing SDN-significant characters must be quoted to avoid
+/// confusing the parser.  For example, `14a73b269158` starts with digits
+/// so the lexer splits it into a number + identifier; colons trigger dict
+/// parsing; brackets/parens affect bracket depth tracking.
+fn needs_quoting(value: &str) -> bool {
+    if value.is_empty() {
+        return false; // Empty values are represented by consecutive commas
+    }
+    // Always quote if value contains characters that are significant to the
+    // SDN lexer or parser:
+    value.contains(',')
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains(':')
+        || value.contains('[')
+        || value.contains(']')
+        || value.contains('(')
+        || value.contains(')')
+        || value.contains('{')
+        || value.contains('}')
+        || value.contains('|')
+        || value.contains('=')
+        || value.contains(' ')
+        || value.contains('\t')
+        // Values starting with a digit that also contain letters (hex hashes
+        // like `14a73b269158`) get split by the lexer into number + ident.
+        || (value.starts_with(|c: char| c.is_ascii_digit())
+            && value.contains(|c: char| c.is_alphabetic()))
+}
+
 /// Build V3 SDN content string.
 fn build_v3_sdn(db: &TestDb) -> String {
     let mut out = String::new();
@@ -1932,7 +1964,7 @@ fn build_v3_sdn(db: &TestDb) -> String {
     out.push_str("strings |id, value|\n");
     for (id, value) in db.interner.to_sdn_rows() {
         let value = value;
-        if value.contains(',') || value.contains('"') || value.contains('\n') {
+        if needs_quoting(&value) {
             out.push_str(&format!("    {}, \"{}\"\n", id, value.replace('"', "\\\"")));
         } else {
             out.push_str(&format!("    {}, {}\n", id, value));

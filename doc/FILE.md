@@ -1,8 +1,9 @@
 # doc/ Directory - Documentation Hub
 
-**Purpose:** Comprehensive project documentation (2,000+ files)
+**Purpose:** Comprehensive project documentation (3,462 .md files)
 **Organization:** 36 subdirectories by topic and document type
 **Formats:** Markdown (.md), SDN (.sdn), reports, specifications
+**Last Updated:** 2026-03-02
 
 ---
 
@@ -99,9 +100,11 @@ RULES (doc/rule/) ← enforced via CI + review
 - **Analysis reports:** `*_analysis_*.md` - Code analysis
 
 **Recent highlights:**
+- `mcp_json_fix_2026-03-02.md` - MCP JSON fix
+- `compiler_mdsoc_migration.md` - Compiler MDSOC numbered layer migration
+- `compiler_mdsoc_impl_plan.md` - MDSOC implementation plan
 - `bin_cleanup_complete_2026-02-16.md` - bin/ reorganization
 - `examples_reorganization_complete_2026-02-16.md` - examples/ restructure
-- `test_runner_fixes_2026-02-14.md` - Test runner improvements
 
 **Use case:** Understanding what's been implemented and how
 
@@ -254,10 +257,15 @@ Runtime system:
 ---
 
 ### compiler/ (Compiler Documentation)
-Compiler implementation:
-- Frontend (lexer, parser)
-- Middle-end (HIR, MIR)
-- Backend (code generation)
+Compiler implementation (MDSOC numbered layers 00-99):
+- Frontend (10.frontend: lexer, parser, treesitter)
+- Blocks (15.blocks), HIR (20.hir), Traits (25.traits)
+- Types (30.types), Semantics (35.semantics)
+- Monomorphization (40.mono), MIR (50.mir)
+- Borrow checking (55.borrow), MIR optimization (60.mir_opt)
+- Backend (70.backend: LLVM, C, Cranelift, WASM, Native)
+- Driver (80.driver), MDSOC (85.mdsoc), Tools (90.tools)
+- Interpreter (95.interp), Loader (99.loader)
 
 ---
 
@@ -531,14 +539,29 @@ grep -l "Status.*In Progress" doc/design/*.md
 
 ---
 
-## 📈 Documentation Statistics
+## Documentation Statistics
 
-**Total files:** 2,000+
+**Total doc files:** 3,462 .md
 **Categories:** 36 subdirectories
 **Auto-generated:** 5 files (updated automatically)
 **User guides:** 50+ guides
 **Reports:** 500+ implementation reports
 **Design docs:** 200+ design documents
+
+### Project-Wide Statistics (2026-03-02)
+- **Source files:** 3,708 .spl + 1,801 .rs = 5,509 total
+- **Test files:** 1,772 .spl
+- **Lines of code:** ~780K .spl, ~2.86M .rs
+- **Total tracked files:** ~27,926
+- **Self-hosting:** Stage 3-4 COMPLETE (fixed-point reached 2026-02-28)
+
+### Notable Changes Since 2026-02-16
+- **Compiler MDSOC migration:** `src/compiler/` now uses numbered layers (00.common through 99.loader)
+- **Deleted .disabled libraries:** godot, graphics, ml, ui, units, unreal, web, browser, electron, coverage, doctest, parser, spec/assertions, spec/bdd (cleaned from `src/compiler_rust/lib/std/src/`)
+- **New app:** `src/app/yank/` (yank tool)
+- **MCP handler adapters** relocated: `src/lib/nogc_sync_mut/mcp/handler_adapters/` -> `src/lib/nogc_async_mut/mcp/handler_adapters/` (debug_adapter, debug_log_adapter, diag_adapter)
+- **New compiler module:** `src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl` (string builder optimization pass)
+- **New test daemon:** `src/app/test_daemon/manifest_daemon.spl`
 
 ---
 
@@ -613,7 +636,7 @@ grep -l "Status.*In Progress" doc/design/*.md
 
 ---
 
-**Last Updated:** 2026-02-16
+**Last Updated:** 2026-03-02
 **Maintainer:** Documentation Team
-**Size:** ~50MB (mostly Markdown)
+**Size:** 3,462 .md files
 **Index:** [INDEX.md](INDEX.md) - Complete file listing

@@ -224,6 +224,17 @@ char* spl_str_concat(const char* a, const char* b) {
     return result;
 }
 
+char* spl_str_append(char* dest, const char* suffix) {
+    if (!suffix || !*suffix) return dest ? dest : spl_str_new("");
+    if (!dest) return spl_str_new(suffix);
+    size_t dlen = strlen(dest);
+    size_t slen = strlen(suffix);
+    dest = (char*)SPL_REALLOC(dest, dlen + slen + 1, "str");
+    memcpy(dest + dlen, suffix, slen);
+    dest[dlen + slen] = '\0';
+    return dest;
+}
+
 int64_t spl_str_len(const char* s) {
     return s ? (int64_t)strlen(s) : 0;
 }

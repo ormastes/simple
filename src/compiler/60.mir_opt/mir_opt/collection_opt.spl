@@ -7,6 +7,10 @@
 #   Call(result, "+", [arr, tmp])    -> Call(_, "push", [arr, x])
 #   Copy(arr, result)               -> (removed)
 #
+# Pattern 2 — String concat to append (2-instruction sliding window in loops):
+#   BinOp(tmp, Add, str_var, suffix) -> (removed)  [where str_var is Ptr(I8)]
+#   Copy(str_var, tmp)               -> Call(str_var, "spl_str_append", [str_var, suffix])
+#
 # Pattern 4 — Loop-invariant pure method call hoisting:
 #   Hoists calls to known-pure methods (len, is_empty, first, last,
 #   get, contains_key) out of loop bodies when all args are loop-invariant.
@@ -25,6 +29,7 @@ val PURE_METHODS = ["len", "is_empty", "first", "last", "get", "contains_key"]
 class CollectionOptimization:
     detector: LoopDetector
     concat_replaced: i64
+    str_append_replaced: i64
     calls_hoisted: i64
 
 impl CollectionOptimization:
@@ -32,28 +37,51 @@ impl CollectionOptimization:
         CollectionOptimization(
             detector: LoopDetector.new(),
             concat_replaced: 0,
+            str_append_replaced: 0,
             calls_hoisted: 0
         )
 
     me optimize_function(func: MirFunction) -> MirFunction:
         self.detector.detect_loops(func)
 
-        if self.detector.loops.len() == 0:
-            return func
-
         var optimized_blocks = func.blocks
 
-        for loop in self.detector.loops:
-            optimized_blocks = self.optimize_concat_in_loop(optimized_blocks, loop)
-            optimized_blocks = self.hoist_pure_calls(optimized_blocks, loop)
+        if self.detector.loops.len() > 0:
+            for loop in self.detector.loops:
+                optimized_blocks = self.optimize_concat_in_loop(optimized_blocks, loop, func)
+                optimized_blocks = self.hoist_pure_calls(optimized_blocks, loop)
+
+        # Also sweep non-loop blocks for the same concat patterns
+        optimized_blocks = self.optimize_concat_all_blocks(optimized_blocks, func)
 
         copy_mir_function_with_blocks(func, optimized_blocks)
+
+    # ========================================================================
+    # Non-loop concat sweep (applies same patterns to all blocks)
+    # ========================================================================
+
+    me optimize_concat_all_blocks(blocks: [MirBlock], func: MirFunction) -> [MirBlock]:
+        # Build set of blocks already in loops (skip them)
+        var loop_block_set = {}
+        for loop in self.detector.loops:
+            loop_block_set["{loop.header.id}"] = true
+            for bid in loop.body:
+                loop_block_set["{bid.id}"] = true
+
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            if loop_block_set.contains_key("{block.id.id}"):
+                new_blocks.push(block)
+            else:
+                val optimized = self.optimize_concat_block(block, func)
+                new_blocks.push(optimized)
+        new_blocks
 
     # ========================================================================
     # Pattern 1: Array concat -> push
     # ========================================================================
 
-    me optimize_concat_in_loop(blocks: [MirBlock], loop: LoopInfo) -> [MirBlock]:
+    me optimize_concat_in_loop(blocks: [MirBlock], loop: LoopInfo, func: MirFunction) -> [MirBlock]:
         # Build loop membership set
         var loop_set = {}
         loop_set["{loop.header.id}"] = true
@@ -64,32 +92,40 @@ impl CollectionOptimization:
 
         for block in blocks:
             if loop_set.contains_key("{block.id.id}"):
-                val optimized = self.optimize_concat_block(block)
+                val optimized = self.optimize_concat_block(block, func)
                 new_blocks.push(optimized)
             else:
                 new_blocks.push(block)
 
         new_blocks
 
-    me optimize_concat_block(block: MirBlock) -> MirBlock:
+    me optimize_concat_block(block: MirBlock, func: MirFunction) -> MirBlock:
         val insts = block.instructions
         val count = insts.len()
 
-        if count < 3:
+        if count < 2:
             return block
 
         var new_insts: [MirInst] = []
         var i = 0
 
         while i < count:
-            # Try 3-instruction window match
+            # Try 3-instruction window match (array concat -> push)
             if i + 2 < count:
                 val matched = self.match_concat_pattern(insts[i], insts[i + 1], insts[i + 2])
                 if matched.?:
-                    # Replace with single push call
                     new_insts.push(matched.unwrap())
                     self.concat_replaced = self.concat_replaced + 1
                     i = i + 3
+                    continue
+
+            # Try 2-instruction window match (string concat -> append)
+            if i + 1 < count:
+                val str_matched = self.match_str_concat_pattern(insts[i], insts[i + 1], func)
+                if str_matched.?:
+                    new_insts.push(str_matched.unwrap())
+                    self.str_append_replaced = self.str_append_replaced + 1
+                    i = i + 2
                     continue
 
             new_insts.push(insts[i])
@@ -208,6 +244,58 @@ impl CollectionOptimization:
             case Move(local):
                 local.id == target.id
             case _: false
+
+    # ========================================================================
+    # Pattern 2: String concat -> spl_str_append
+    # ========================================================================
+
+    fn match_str_concat_pattern(inst1: MirInst, inst2: MirInst, func: MirFunction) -> MirInst?:
+        # inst1: BinOp(tmp, Add, Copy(str_var), Copy(suffix))
+        match inst1.kind:
+            case BinOp(tmp_dest, op, left, right):
+                match op:
+                    case Add:
+                        # Check left operand is a local with Ptr(I8) type (text)
+                        val str_local = self.operand_local_id(left)
+                        if not str_local.?:
+                            return nil
+                        if not self.local_is_text(str_local.unwrap(), func):
+                            return nil
+                        # inst2: Copy(str_var, tmp) — same local as left operand
+                        match inst2.kind:
+                            case Copy(copy_dest, copy_src):
+                                if copy_src.id == tmp_dest.id and copy_dest.id == str_local.unwrap().id:
+                                    # Match! Replace with spl_str_append call
+                                    val append_func = MirOperand(kind: MirOperandKind.Const(
+                                        MirConstValue.Str("spl_str_append"),
+                                        MirType.unit()
+                                    ))
+                                    return MirInst(
+                                        kind: MirInstKind.Call(copy_dest, append_func, [left, right]),
+                                        span: inst1.span
+                                    )
+                                nil
+                            case _: nil
+                    case _: nil
+            case _: nil
+
+    fn operand_local_id(op: MirOperand) -> LocalId?:
+        match op.kind:
+            case Copy(local): local
+            case Move(local): local
+            case _: nil
+
+    fn local_is_text(local_id: LocalId, func: MirFunction) -> bool:
+        # Text is represented as Ptr(I8, false) in MIR
+        for loc in func.locals:
+            if loc.id.id == local_id.id:
+                match loc.type_.kind:
+                    case Ptr(pointee, _):
+                        match pointee.kind:
+                            case I8: return true
+                            case _: return false
+                    case _: return false
+        false
 
     # ========================================================================
     # Pattern 4: Loop-invariant pure call hoisting
@@ -333,7 +421,7 @@ impl CollectionOptimization:
         false
 
     fn stats_summary() -> text:
-        "CollectionOpt: {self.concat_replaced} concat->push, {self.calls_hoisted} calls hoisted"
+        "CollectionOpt: {self.concat_replaced} concat->push, {self.str_append_replaced} str->append, {self.calls_hoisted} calls hoisted"
 
 # ============================================================================
 # Factory Functions

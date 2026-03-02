@@ -89,42 +89,42 @@ fn gen_text(rng, min_len: i64, max_len: i64):
     val printable = " !#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_abcdefghijklmnopqrstuvwxyz{|}~"
     val (r2, length) = rng_next_range(rng, min_len, max_len + 1)
     var current_rng = r2
-    var result = ""
+    var chars_parts: [text] = []
     var i = 0
     while i < length:
         val (r3, idx) = rng_next_range(current_rng, 0, printable.len())
         current_rng = r3
-        result = result + printable[idx]
+        chars_parts.push(printable[idx])
         i = i + 1
-    (current_rng, result)
+    (current_rng, chars_parts.join(""))
 
 fn gen_ascii(rng, min_len: i64, max_len: i64):
     """Generate a random ASCII string (letters, digits, common symbols)."""
     val chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-."
     val (r2, length) = rng_next_range(rng, min_len, max_len + 1)
     var current_rng = r2
-    var result = ""
+    var chars_parts: [text] = []
     var i = 0
     while i < length:
         val (r3, idx) = rng_next_range(current_rng, 0, chars.len())
         current_rng = r3
-        result = result + chars[idx]
+        chars_parts.push(chars[idx])
         i = i + 1
-    (current_rng, result)
+    (current_rng, chars_parts.join(""))
 
 fn gen_alpha(rng, min_len: i64, max_len: i64):
     """Generate a random alphabetic string (a-z, A-Z)."""
     val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     val (r2, length) = rng_next_range(rng, min_len, max_len + 1)
     var current_rng = r2
-    var result = ""
+    var chars_parts: [text] = []
     var i = 0
     while i < length:
         val (r3, idx) = rng_next_range(current_rng, 0, chars.len())
         current_rng = r3
-        result = result + chars[idx]
+        chars_parts.push(chars[idx])
         i = i + 1
-    (current_rng, result)
+    (current_rng, chars_parts.join(""))
 
 fn gen_identifier(rng, min_len: i64, max_len: i64):
     """Generate a valid Simple identifier (starts with letter, then alnum/_)."""
@@ -135,15 +135,16 @@ fn gen_identifier(rng, min_len: i64, max_len: i64):
     if actual_len < 1:
         actual_len = 1
     val (r3, fc_idx) = rng_next_range(r2, 0, first_chars.len())
-    var result = first_chars[fc_idx]
+    var id_parts: [text] = []
+    id_parts.push(first_chars[fc_idx])
     var current_rng = r3
     var i = 1
     while i < actual_len:
         val (r4, rc_idx) = rng_next_range(current_rng, 0, rest_chars.len())
         current_rng = r4
-        result = result + rest_chars[rc_idx]
+        id_parts.push(rest_chars[rc_idx])
         i = i + 1
-    (current_rng, result)
+    (current_rng, id_parts.join(""))
 
 fn gen_list_int(rng, min_len: i64, max_len: i64, min_v: i64, max_v: i64):
     """Generate a list of random integers."""
@@ -263,31 +264,27 @@ fn gen_sdn_value(rng, max_depth: i64):
         # SDN object: { key = value, ... }
         val (r3, num_fields) = rng_next_range(r2, 1, 4)
         var current_rng = r3
-        var fields = ""
+        var field_parts: [text] = []
         var fi = 0
         while fi < num_fields:
             val (r4, key) = gen_identifier(current_rng, 2, 6)
             val (r5, sub_val) = gen_sdn_value(r4, max_depth - 1)
             current_rng = r5
-            if fi > 0:
-                fields = fields + ", "
-            fields = fields + key + " = " + sub_val
+            field_parts.push(key + " = " + sub_val)
             fi = fi + 1
-        (current_rng, "{ " + fields + " }")
+        (current_rng, "{ " + field_parts.join(", ") + " }")
     else:
         # SDN array: [val, val, ...]
         val (r3, num_items) = rng_next_range(r2, 0, 4)
         var current_rng = r3
-        var items = ""
+        var item_parts: [text] = []
         var ai = 0
         while ai < num_items:
             val (r4, sub_val) = gen_sdn_value(current_rng, max_depth - 1)
             current_rng = r4
-            if ai > 0:
-                items = items + ", "
-            items = items + sub_val
+            item_parts.push(sub_val)
             ai = ai + 1
-        (current_rng, "[" + items + "]")
+        (current_rng, "[" + item_parts.join(", ") + "]")
 
 fn gen_semver(rng):
     """Generate a random semver string (e.g. '1.2.3')."""
@@ -301,17 +298,15 @@ fn gen_path(rng, max_depth: i64):
     val extensions = [".spl", ".sdn", ".md", ".txt", ""]
     val (r2, depth) = rng_next_range(rng, 1, max_depth + 1)
     var current_rng = r2
-    var segments = ""
+    var seg_parts: [text] = []
     var di = 0
     while di < depth:
         val (r3, seg) = gen_identifier(current_rng, 2, 8)
         current_rng = r3
-        if di > 0:
-            segments = segments + "/"
-        segments = segments + seg
+        seg_parts.push(seg)
         di = di + 1
     val (r4, ext) = random_choice(current_rng, extensions)
-    (r4, segments + ext)
+    (r4, seg_parts.join("/") + ext)
 
 # ============================================================================
 # Shrinking
@@ -560,19 +555,19 @@ fn corpus_load(dir: text) -> [text]:
     if content == "":
         return []
     var entries = []
-    var current = ""
+    var current_chars: [text] = []
     var i = 0
     while i < content.len():
         val ch = content[i]
         if ch == "\n":
-            if current.len() > 0:
-                entries.push(current)
-            current = ""
+            if current_chars.len() > 0:
+                entries.push(current_chars.join(""))
+            current_chars = []
         else:
-            current = current + ch
+            current_chars.push(ch)
         i = i + 1
-    if current.len() > 0:
-        entries.push(current)
+    if current_chars.len() > 0:
+        entries.push(current_chars.join(""))
     entries
 
 fn corpus_save(dir: text, inputs: [text]):
@@ -580,9 +575,10 @@ fn corpus_save(dir: text, inputs: [text]):
 
     One entry per line. Overwrites existing manifest.
     """
-    var content = ""
+    var content_parts: [text] = []
     for input_val in inputs:
-        content = content + input_val + "\n"
+        content_parts.push(input_val)
+    val content = content_parts.join("\n") + "\n"
     val manifest_path = dir + "/corpus.txt"
     rt_file_write(manifest_path, content)
 
@@ -629,10 +625,12 @@ fn fuzz_report_all(results: [FuzzResult]) -> text:
     var header = "Fuzz Results: {passed}/{total} passed"
     if failed > 0:
         header = header + ", {failed} failed"
-    var report = header + "\n"
-    report = report + "=" * 60 + "\n"
+    var report_parts: [text] = []
+    report_parts.push(header)
+    report_parts.push("=" * 60)
     for line in lines:
-        report = report + line + "\n"
+        report_parts.push(line)
+    val report = report_parts.join("\n") + "\n"
     report
 
 # ============================================================================

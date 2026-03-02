@@ -31,6 +31,14 @@ fn debug_log_add(entry_type: text, function_name: text, message: text):
     e = e + RB()
     DEBUG_LOG_ENTRIES = DEBUG_LOG_ENTRIES + [e]
     DEBUG_LOG_NEXT_ID = DEBUG_LOG_NEXT_ID + 1
+    # Cap log entries to prevent unbounded growth in long-running servers
+    # NOTE: Cannot use DEBUG_LOG_ENTRIES.len() — triggers "unsupported path call"
+    # on cross-module vars in interpreter mode. Use iteration count instead.
+    var _log_count: i64 = 0
+    for _le in DEBUG_LOG_ENTRIES:
+        _log_count = _log_count + 1
+    if _log_count > 5000:
+        DEBUG_LOG_ENTRIES = DEBUG_LOG_ENTRIES[2500..]
 
 fn handle_debug_create_session(id: text, body: text) -> text:
     val program = extract_field(body, "program")
@@ -375,7 +383,10 @@ fn handle_debug_set_variable(id: text, body: text) -> text:
     val idx = find_session_index(session_id)
     if idx < 0:
         return make_tool_error(id, -32602, "Session not found: " + session_id)
-    var frame_index = int(extract_field(body, "frame_index"))
+    val frame_index_str = extract_field(body, "frame_index")
+    var frame_index = 0
+    if frame_index_str != "":
+        frame_index = int(frame_index_str)
     if frame_index < 0:
         frame_index = 0
     var s = DEBUG_SESSIONS[idx]

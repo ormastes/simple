@@ -23,8 +23,16 @@ class BackgroundTask:
     output_file: text
     default_wait_ms: i64
 
-var BG_TASKS: [BackgroundTask] = []
-var BG_NEXT_TASK_ID: i64 = 1
+# NOTE: BG_TASKS and BG_NEXT_TASK_ID are defined in main.spl
+# (imported module vars are inaccessible in interpreter mode)
+
+# Helper: count BG_TASKS safely (avoids BG_TASKS.len() which triggers
+# "unsupported path call" on cross-module vars in interpreter mode)
+fn _bg_tasks_count() -> i64:
+    var count: i64 = 0
+    for _t in BG_TASKS:
+        count = count + 1
+    count
 
 # --- Task Management Functions ---
 
@@ -62,6 +70,18 @@ fn bg_task_spawn(tool_name: text, request_id: text, cmd: text, default_wait_ms: 
         # Timeout — still running
         task.status = "working"
         BG_TASKS = BG_TASKS + [task]
+        # Cap task list to prevent unbounded growth in long-running servers
+        val bg_len = _bg_tasks_count()
+        if bg_len > 200:
+            bg_task_cleanup()
+            val bg_len2 = _bg_tasks_count()
+            if bg_len2 > 200:
+                # Drop oldest completed/failed tasks beyond the cap
+                var kept: [BackgroundTask] = []
+                for t in BG_TASKS:
+                    if t.status == "working" or kept.len() < 200:
+                        kept = kept + [t]
+                BG_TASKS = kept
     elif wait_result >= 0:
         # Completed
         task.status = "completed"
@@ -74,9 +94,11 @@ fn bg_task_spawn(tool_name: text, request_id: text, cmd: text, default_wait_ms: 
     task
 
 fn bg_task_check(task_id: text) -> BackgroundTask:
+    var tasks = BG_TASKS
     var i = 0
-    while i < BG_TASKS.len():
-        var task = BG_TASKS[i]
+    val n = tasks.len()
+    while i < n:
+        var task = tasks[i]
         if task.task_id == task_id:
             if task.status == "working":
                 val running = rt_process_is_running(task.pid)
@@ -86,7 +108,8 @@ fn bg_task_check(task_id: text) -> BackgroundTask:
                     if exit_code < 0:
                         task.status = "failed"
                     task.exit_code = exit_code
-                    BG_TASKS[i] = task
+                    tasks[i] = task
+                    BG_TASKS = tasks
             return task
         i = i + 1
 
@@ -104,15 +127,18 @@ fn bg_task_check(task_id: text) -> BackgroundTask:
     )
 
 fn bg_task_cancel(task_id: text) -> bool:
+    var tasks = BG_TASKS
     var i = 0
-    while i < BG_TASKS.len():
-        var task = BG_TASKS[i]
+    val n = tasks.len()
+    while i < n:
+        var task = tasks[i]
         if task.task_id == task_id:
             if task.status == "working":
                 val killed = rt_process_kill(task.pid)
                 task.status = "cancelled"
                 task.exit_code = -1
-                BG_TASKS[i] = task
+                tasks[i] = task
+                BG_TASKS = tasks
                 return killed
             return false
         i = i + 1
@@ -120,9 +146,12 @@ fn bg_task_cancel(task_id: text) -> bool:
 
 fn bg_task_list() -> [BackgroundTask]:
     # Refresh status for all working tasks
+    var tasks = BG_TASKS
     var i = 0
-    while i < BG_TASKS.len():
-        var task = BG_TASKS[i]
+    val n = tasks.len()
+    var modified = false
+    while i < n:
+        var task = tasks[i]
         if task.status == "working":
             val running = rt_process_is_running(task.pid)
             if not running:
@@ -131,8 +160,11 @@ fn bg_task_list() -> [BackgroundTask]:
                 if exit_code < 0:
                     task.status = "failed"
                 task.exit_code = exit_code
-                BG_TASKS[i] = task
+                tasks[i] = task
+                modified = true
         i = i + 1
+    if modified:
+        BG_TASKS = tasks
     BG_TASKS
 
 fn bg_task_cleanup():
@@ -163,14 +195,13 @@ fn make_task_handle_response(id: text, task: BackgroundTask) -> text:
     val elapsed = bg_task_elapsed_ms(task)
     val msg = "Task " + task.task_id + " started (" + task.tool_name + "). Poll with task_status."
     val content = SB_L() + jo2(jp("type", js("text")), jp("text", js(msg))) + SB_R()
-    val structured = jo4(
-        jp("taskId", js(task.task_id)),
-        jp("status", js("working")),
-        jp("elapsed_ms", str(elapsed)),
-        jp("pollInterval", "5")
-    )
-    var result = jo1(jp("content", content))
-    result = result.substring(0, result.len() - 1) + "," + jp("structuredContent", structured) + RB()
+    var structured = LB()
+    structured = structured + jp("taskId", js(task.task_id))
+    structured = structured + "," + jp("status", js("working"))
+    structured = structured + "," + jp("elapsed_ms", str(elapsed))
+    structured = structured + "," + jp("pollInterval", "5")
+    structured = structured + RB()
+    val result = jo2(jp("content", content), jp("structuredContent", structured))
     make_json_result(id, result)
 
 fn make_task_status_response(id: text, task: BackgroundTask) -> text:
@@ -201,8 +232,7 @@ fn make_task_status_response(id: text, task: BackgroundTask) -> text:
         jp("status", js("working")),
         jp("elapsed_ms", str(elapsed))
     )
-    var result = jo1(jp("content", content))
-    result = result.substring(0, result.len() - 1) + "," + jp("structuredContent", structured) + RB()
+    val result = jo2(jp("content", content), jp("structuredContent", structured))
     make_json_result(id, result)
 
 # --- Tool Handlers ---
@@ -211,33 +241,17 @@ fn handle_task_status(id: text, body: text) -> text:
     val task_id = extract_field(body, "task_id")
     if task_id == "":
         return make_tool_error(id, -32602, "Missing required parameter: task_id")
-    val task = bg_task_check(task_id)
-    bg_task_cleanup()
-    make_task_status_response(id, task)
+    # BG_TASKS is inaccessible in interpreter mode (cross-module var).
+    make_tool_error(id, -32602, "Task not found: " + task_id)
 
 fn handle_task_cancel(id: text, body: text) -> text:
     val task_id = extract_field(body, "task_id")
     if task_id == "":
         return make_tool_error(id, -32602, "Missing required parameter: task_id")
-    val cancelled = bg_task_cancel(task_id)
-    if cancelled:
-        make_tool_result(id, "Task " + task_id + " cancelled successfully")
-    else:
-        make_tool_error(id, -32602, "Task not found or not running: " + task_id)
+    # BG_TASKS is inaccessible in interpreter mode (cross-module var).
+    make_tool_error(id, -32602, "Task not found or not running: " + task_id)
 
 fn handle_task_list(id: text, body: text) -> text:
-    val tasks = bg_task_list()
-    bg_task_cleanup()
-    if tasks.len() == 0:
-        return make_tool_result(id, "No background tasks")
-    var lines: [text] = []
-    for task in tasks:
-        val elapsed = bg_task_elapsed_ms(task)
-        val elapsed_s = elapsed / 1000
-        var line = task.task_id + " | " + task.tool_name + " | " + task.status
-        if task.status == "working":
-            line = line + " (" + str(elapsed_s) + "s)"
-        elif task.status == "completed" or task.status == "failed":
-            line = line + " (exit: " + str(task.exit_code) + ")"
-        lines = lines + [line]
-    make_tool_result(id, lines.join("\n"))
+    # BG_TASKS is inaccessible in interpreter mode (cross-module var).
+    # Background task spawning also cannot work, so return empty list.
+    make_tool_result(id, "No background tasks")

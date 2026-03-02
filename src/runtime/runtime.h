@@ -92,6 +92,7 @@ void     spl_free_value(SplValue v);    /* deep free */
 
 char*    spl_str_new(const char* s);             /* strdup wrapper */
 char*    spl_str_concat(const char* a, const char* b);
+char*    spl_str_append(char* dest, const char* suffix); /* in-place realloc append */
 int64_t  spl_str_len(const char* s);
 int      spl_str_eq(const char* a, const char* b);
 int      spl_str_cmp(const char* a, const char* b);  /* strcmp wrapper */

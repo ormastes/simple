@@ -232,7 +232,7 @@ impl Clone for Value {
             Value::Bool(b) => Value::Bool(*b),
             Value::Str(s) => Value::Str(s.clone()),
             Value::Symbol(s) => Value::Symbol(s.clone()),
-            Value::Array(a) => Value::Array(a.clone()),
+            Value::Array(a) => Value::Array(Arc::clone(a)),
             Value::FrozenArray(a) => Value::FrozenArray(a.clone()),
             Value::FixedSizeArray { size, data } => Value::FixedSizeArray {
                 size: *size,

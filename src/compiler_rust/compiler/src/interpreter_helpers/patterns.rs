@@ -351,14 +351,14 @@ pub(crate) fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, en
             // Allow tuple pattern to match both Tuple and Array
             let values: Vec<Value> = match val {
                 Value::Tuple(v) => v,
-                Value::Array(v) => v,
+                Value::Array(v) => (*v).clone(),
                 _ => Vec::new(),
             };
             bind_collection_pattern(patterns, values, is_mutable, env);
         }
         Pattern::Array(patterns) => {
             if let Value::Array(values) = val {
-                bind_collection_pattern(patterns, values, is_mutable, env);
+                bind_collection_pattern(patterns, (*values).clone(), is_mutable, env);
             }
         }
         _ => bind_let_pattern_element(pat, val, is_mutable, env),

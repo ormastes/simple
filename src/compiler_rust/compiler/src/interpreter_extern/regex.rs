@@ -20,13 +20,13 @@ pub fn find(args: &[Value]) -> Result<Value, CompileError> {
     match regex::Regex::new(&pattern) {
         Ok(re) => {
             if let Some(m) = re.find(&text) {
-                Ok(Value::Array(vec![
+                Ok(Value::array(vec![
                     Value::Str(m.as_str().to_string()),
                     Value::Int(m.start() as i64),
                     Value::Int(m.end() as i64),
                 ]))
             } else {
-                Ok(Value::Array(vec![]))
+                Ok(Value::array(vec![]))
             }
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
@@ -42,14 +42,14 @@ pub fn find_all(args: &[Value]) -> Result<Value, CompileError> {
             let results: Vec<Value> = re
                 .find_iter(&text)
                 .map(|m| {
-                    Value::Array(vec![
+                    Value::array(vec![
                         Value::Str(m.as_str().to_string()),
                         Value::Int(m.start() as i64),
                         Value::Int(m.end() as i64),
                     ])
                 })
                 .collect();
-            Ok(Value::Array(results))
+            Ok(Value::array(results))
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
     }
@@ -69,9 +69,9 @@ pub fn captures(args: &[Value]) -> Result<Value, CompileError> {
                         None => Value::Nil,
                     })
                     .collect();
-                Ok(Value::Array(results))
+                Ok(Value::array(results))
             } else {
-                Ok(Value::Array(vec![]))
+                Ok(Value::array(vec![]))
             }
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
@@ -107,7 +107,7 @@ pub fn split(args: &[Value]) -> Result<Value, CompileError> {
     match regex::Regex::new(&pattern) {
         Ok(re) => {
             let parts: Vec<Value> = re.split(&text).map(|s| Value::Str(s.to_string())).collect();
-            Ok(Value::Array(parts))
+            Ok(Value::array(parts))
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
     }
@@ -121,7 +121,7 @@ pub fn split_n(args: &[Value]) -> Result<Value, CompileError> {
     match regex::Regex::new(&pattern) {
         Ok(re) => {
             let parts: Vec<Value> = re.splitn(&text, limit).map(|s| Value::Str(s.to_string())).collect();
-            Ok(Value::Array(parts))
+            Ok(Value::array(parts))
         }
         Err(e) => Err(CompileError::semantic(format!("invalid regex pattern: {}", e))),
     }

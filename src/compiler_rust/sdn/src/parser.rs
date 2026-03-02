@@ -464,7 +464,75 @@ impl<'a> Parser<'a> {
             }
 
             let value = self.parse_value()?;
-            row.push(value);
+
+            // Record position after value parse, so we can detect whitespace
+            // gaps between absorbed tokens.
+            let value_end = if self.pos > 0 && self.pos <= self.tokens.len() {
+                self.tokens[self.pos - 1].span.end
+            } else {
+                0
+            };
+
+            // Check if there are extra tokens before the next delimiter (comma,
+            // newline, dedent, eof).  This handles cases where the lexer splits a
+            // single logical value into multiple tokens, e.g.:
+            //   - `14a73b269158` (hex hash) -> Integer(14) + Identifier("a73b269158")
+            //   - `BUG-RT-001: foo` (unquoted text with colon) -> Ident + Colon + Ident
+            //   - `Dict.get() return type` (unquoted multi-word) -> multiple tokens
+            //
+            // For the last expected column, absorb until end of line.
+            // For non-last columns, absorb until the next comma.
+            let is_last_col = expected_cols > 0 && row.len() + 1 == expected_cols;
+            let has_extra = !self.is_at_end()
+                && !matches!(self.peek_kind(), Some(TokenKind::Newline) | Some(TokenKind::Dedent) | Some(TokenKind::Comma));
+
+            if has_extra {
+                let mut combined = match &value {
+                    SdnValue::String(s) => s.clone(),
+                    SdnValue::Int(n) => n.to_string(),
+                    SdnValue::Float(f) => f.to_string(),
+                    SdnValue::Bool(b) => b.to_string(),
+                    SdnValue::Null => "null".to_string(),
+                    _ => format!("{}", value),
+                };
+                let mut last_end = value_end;
+
+                if is_last_col {
+                    // Last column: absorb everything until end of line
+                    while !self.is_at_end()
+                        && !matches!(self.peek_kind(), Some(TokenKind::Newline) | Some(TokenKind::Dedent))
+                    {
+                        if let Some(token) = self.peek() {
+                            // Insert space if there was whitespace between tokens in source
+                            if token.span.start > last_end {
+                                combined.push(' ');
+                            }
+                        }
+                        if let Some(token) = self.advance() {
+                            last_end = token.span.end;
+                            combined.push_str(&token.lexeme);
+                        }
+                    }
+                } else {
+                    // Non-last column: absorb until comma (the field separator)
+                    while !self.is_at_end()
+                        && !matches!(self.peek_kind(), Some(TokenKind::Newline) | Some(TokenKind::Dedent) | Some(TokenKind::Comma))
+                    {
+                        if let Some(token) = self.peek() {
+                            if token.span.start > last_end {
+                                combined.push(' ');
+                            }
+                        }
+                        if let Some(token) = self.advance() {
+                            last_end = token.span.end;
+                            combined.push_str(&token.lexeme);
+                        }
+                    }
+                }
+                row.push(SdnValue::String(combined));
+            } else {
+                row.push(value);
+            }
 
             if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
                 self.advance();
@@ -1026,5 +1094,133 @@ mod tests {
         } else {
             panic!("Expected table");
         }
+    }
+
+    #[test]
+    fn test_table_multiword_unquoted_last_column() {
+        // Multi-word unquoted values in the last column should be absorbed
+        let src = "strings |id, value|\n    14, works with null coalescing operator\n";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { rows, .. } = result.get("strings").unwrap() {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 2);
+            assert_eq!(rows[0][0].as_i64(), Some(14));
+            assert_eq!(rows[0][1].as_str(), Some("works with null coalescing operator"));
+        } else {
+            panic!("Expected table");
+        }
+
+        // Multi-word with non-keyword identifiers
+        let src2 = "data |id, value|\n    14, hello world\n";
+        let result2 = parse(src2).unwrap();
+        if let SdnValue::Table { rows, .. } = result2.get("data").unwrap() {
+            assert_eq!(rows[0][1].as_str(), Some("hello world"));
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_table_unquoted_colon_in_last_column() {
+        // Simulates what build_v3_sdn produces when a string contains ':'
+        // but no ',' or '"' or '\n' — the serializer writes it unquoted
+        let src = "strings |id, value|\n    1, BUG-RT-001: workaround\n";
+        let result = parse(src);
+        assert!(result.is_ok(), "Unquoted colon in last column should parse: {:?}", result.err());
+        if let Ok(SdnValue::Dict(dict)) = &result {
+            if let Some(SdnValue::Table { rows, .. }) = dict.get("strings") {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].len(), 2);
+                assert_eq!(rows[0][0].as_i64(), Some(1));
+                // The value should contain the full text including the colon
+                let val = rows[0][1].as_str().unwrap();
+                assert!(val.contains("BUG-RT-001"), "Value should contain BUG-RT-001, got: {}", val);
+                assert!(val.contains("workaround"), "Value should contain workaround, got: {}", val);
+            } else {
+                panic!("Expected table");
+            }
+        }
+    }
+
+    #[test]
+    fn test_table_unquoted_brackets_in_last_column() {
+        // Simulates what build_v3_sdn produces when a string contains '[]'
+        let src = "strings |id, value|\n    2, slices string with s[0:end]\n";
+        let result = parse(src);
+        assert!(result.is_ok(), "Unquoted brackets in last column should parse: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_table_unquoted_parens_in_last_column() {
+        // Simulates what build_v3_sdn produces when a string contains '()'
+        let src = "strings |id, value|\n    3, Dict.get() return type\n";
+        let result = parse(src);
+        assert!(result.is_ok(), "Unquoted parens in last column should parse: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_table_unquoted_special_chars_multirow() {
+        // Multiple rows with special characters, simulating a real test_db scenario
+        let src = "strings |id, value|\n    1, BUG-RT-001: Slice syntax [:variable] > workaround: explicit 0 start\n    2, passed\n    3, Dict.get() return type\n";
+        let result = parse(src);
+        assert!(result.is_ok(), "Multi-row table with special chars should parse: {:?}", result.err());
+        if let Ok(SdnValue::Dict(dict)) = &result {
+            if let Some(SdnValue::Table { rows, .. }) = dict.get("strings") {
+                assert_eq!(rows.len(), 3, "Should have 3 rows");
+                // Row 2 should be simple
+                assert_eq!(rows[1][1].as_str(), Some("passed"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_table_hex_like_value() {
+        // Reproduces the test_db_runs.sdn issue:
+        // "14a73b269158" starts with digits, lexer splits into 14 (int) + a73b269158 (ident)
+        let src = "runs |id, hash, status|\n    run1, 14a73b269158, running\n";
+        let result = parse(src);
+        assert!(result.is_ok(), "Hex-like values should parse: {:?}", result.err());
+        if let Ok(SdnValue::Dict(dict)) = &result {
+            if let Some(SdnValue::Table { rows, .. }) = dict.get("runs") {
+                assert_eq!(rows.len(), 1, "Should have 1 row");
+                assert_eq!(rows[0].len(), 3, "Should have 3 columns");
+            }
+        }
+    }
+
+    #[test]
+    fn test_table_empty_middle_field_with_hex() {
+        // The exact pattern from test_db_runs.sdn line 1754
+        let src = r#"test_runs |run_id, start_time, end_time, pid, hostname, status, total, passed, failed, errors, skipped|
+        run_20260222_040405_249, "2026-02-22T04:04:05.249674475+00:00", , 1, 14a73b269158, running, 0, 0, 0, 0, 0
+"#;
+        let result = parse(src);
+        assert!(result.is_ok(), "Real test_db_runs pattern should parse: {:?}", result.err());
+        if let Ok(SdnValue::Dict(dict)) = &result {
+            if let Some(SdnValue::Table { rows, .. }) = dict.get("test_runs") {
+                assert_eq!(rows.len(), 1, "Should have 1 row");
+                assert_eq!(rows[0].len(), 11, "Should have 11 columns, got {}", rows[0].len());
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_test_db_file() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/test/test_db.sdn");
+        if !path.exists() {
+            return;
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        parse(&content).expect("test_db.sdn should parse successfully");
+    }
+
+    #[test]
+    fn test_parse_test_db_runs_file() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/test/test_db_runs.sdn");
+        if !path.exists() {
+            return;
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        parse(&content).expect("test_db_runs.sdn should parse successfully");
     }
 }

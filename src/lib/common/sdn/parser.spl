@@ -290,7 +290,30 @@ impl SdnParser:
                 continue
 
             val value = self.parse_value()?
-            row.push(value)
+
+            # If this is the last expected column, absorb remaining tokens on the
+            # line into the value.  Handles unquoted multi-word strings like
+            # `14, works with null coalescing operator` in 2-column tables.
+            if expected_cols > 0 and row.len() + 1 == expected_cols:
+                var has_extra = false
+                if not self.is_at_end():
+                    if not self.peek_kind_matches_newline():
+                        if not self.peek_kind_matches_dedent():
+                            if not self.peek_kind_matches_comma():
+                                has_extra = true
+                if has_extra:
+                    var combined = value.to_text()
+                    while not self.is_at_end():
+                        if self.peek_kind_matches_newline() or self.peek_kind_matches_dedent() or self.peek_kind_matches_comma():
+                            break
+                        val token = self.advance()
+                        if token.?:
+                            combined = combined + " " + token.unwrap().lexeme
+                    row.push(SdnValue.String(combined))
+                else:
+                    row.push(value)
+            else:
+                row.push(value)
 
             if self.peek_kind_matches_comma():
                 self.advance()

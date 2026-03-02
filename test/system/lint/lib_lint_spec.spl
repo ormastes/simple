@@ -1,0 +1,62 @@
+# Lint System Test: all library modules
+# tag: slow, system
+#
+# Runs bin/release/simple lint on every .spl file under src/lib/
+# Asserts zero crashes (exit code > 1).
+
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn find_spl_files(dir: text) -> [text]:
+    var result: [text] = []
+    val entries = rt_dir_list(dir) ?? []
+    var i = 0
+    while i < entries.len():
+        val name = entries[i]
+        val full = "{dir}/{name}"
+        if name.ends_with(".spl"):
+            result.push(full)
+        elif not name.starts_with("."):
+            val subs = find_spl_files(full)
+            var j = 0
+            while j < subs.len():
+                result.push(subs[j])
+                j = j + 1
+        i = i + 1
+    result
+
+fn run_lint_file(file: text) -> i64:
+    val (stdout, stderr, code) = rt_process_run("bin/release/simple", ["lint", file])
+    code
+
+fn batch_lint(files: [text]) -> [text]:
+    var crashes: [text] = []
+    var i = 0
+    while i < files.len():
+        val code = run_lint_file(files[i])
+        if code > 1:
+            crashes.push(files[i])
+        i = i + 1
+    crashes
+
+fn report_crashes(label: text, crashes: [text]) -> i64:
+    if crashes.len() == 0:
+        print "  PASS: {label} — 0 crashes"
+    else:
+        print "  FAIL: {label} — {crashes.len()} crashes:"
+        var k = 0
+        while k < crashes.len():
+            print "    - {crashes[k]}"
+            k = k + 1
+    crashes.len()
+
+var files = find_spl_files("src/lib")
+print "Lint System: lib — discovered {files.len()} files"
+
+describe "Lint System: lib":
+    it "lint all lib files: no crashes":
+        val crashes = batch_lint(files)
+        report_crashes("lint lib", crashes)
+        expect(crashes.len()).to_equal(0)

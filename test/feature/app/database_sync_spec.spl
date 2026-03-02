@@ -173,6 +173,11 @@ fn load_database_task(path: text) -> Result<DatabaseTask, text>:
         Err(e) : Err(e)
 
 # Save/load functions
+fn escape_quotes(s: text) -> text:
+    if s.contains("\""):
+        return s.replace("\"", "\\\"")
+    s
+
 fn save_todo_db(path: text, db: TodoDb) -> Result<(), text>:
     var lines = []
     lines.push("todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|")
@@ -181,7 +186,7 @@ fn save_todo_db(path: text, db: TodoDb) -> Result<(), text>:
         val record = pair[1]
         val issue_str = ""
         val blocked_str = "[]"
-        val desc_escaped = record.description.replace("\"", "\\\"")
+        val desc_escaped = escape_quotes(record.description)
         val row = "    {record.id}, {record.keyword}, {record.area}, {record.priority}, \"{desc_escaped}\", {record.file}, {record.line}, {issue_str}, {blocked_str}, {record.status}, {record.valid}"
         lines.push(row)
 
@@ -196,14 +201,15 @@ fn load_todo_db(path: text) -> Result<TodoDb, text>:
         return Ok(new_todo_db())
 
     val content = read_file(path)
-    if content.trim() == "":
+    if content == "":
         return Ok(new_todo_db())
 
     var db = new_todo_db()
     var in_table = false
     var line_num = 0
+    val lines = content.split("\n")
 
-    for line in content.split("\n"):
+    for line in lines:
         line_num = line_num + 1
         val trimmed = line.trim()
 
@@ -238,8 +244,8 @@ fn save_feature_db(path: text, db: FeatureDb) -> Result<(), text>:
 
     for pair in db.records:
         val record = pair[1]
-        val name_escaped = record.name.replace("\"", "\\\"")
-        val desc_escaped = record.description.replace("\"", "\\\"")
+        val name_escaped = escape_quotes(record.name)
+        val desc_escaped = escape_quotes(record.description)
         val row = "    {record.id}, {record.category}, \"{name_escaped}\", \"{desc_escaped}\", {record.status}, {record.valid}"
         lines.push(row)
 
@@ -254,14 +260,15 @@ fn load_feature_db(path: text) -> Result<FeatureDb, text>:
         return Ok(new_feature_db())
 
     val content = read_file(path)
-    if content.trim() == "":
+    if content == "":
         return Ok(new_feature_db())
 
     var db = new_feature_db()
     var in_table = false
     var line_num = 0
+    val lines = content.split("\n")
 
-    for line in content.split("\n"):
+    for line in lines:
         line_num = line_num + 1
         val trimmed = line.trim()
 
@@ -289,8 +296,8 @@ fn save_task_db(path: text, db: TaskDb) -> Result<(), text>:
 
     for pair in db.records:
         val record = pair[1]
-        val name_escaped = record.name.replace("\"", "\\\"")
-        val desc_escaped = record.description.replace("\"", "\\\"")
+        val name_escaped = escape_quotes(record.name)
+        val desc_escaped = escape_quotes(record.description)
         val row = "    {record.id}, \"{name_escaped}\", \"{desc_escaped}\", {record.priority}, {record.status}, {record.valid}"
         lines.push(row)
 
@@ -305,14 +312,15 @@ fn load_task_db(path: text) -> Result<TaskDb, text>:
         return Ok(new_task_db())
 
     val content = read_file(path)
-    if content.trim() == "":
+    if content == "":
         return Ok(new_task_db())
 
     var db = new_task_db()
     var in_table = false
     var line_num = 0
+    val lines = content.split("\n")
 
-    for line in content.split("\n"):
+    for line in lines:
         line_num = line_num + 1
         val trimmed = line.trim()
 
@@ -521,11 +529,8 @@ describe "Database Synchronization":
             it "serializes concurrent reads":
                 # Given: Two processes
                 val db_path = "/tmp/test_mutual_read.sdn"
-                save_todo_db(db_path, create_test_db(10))
-
-                # When: Both processes try to read
-                # (Simulated: sequential with lock checks)
-                save_todo_db(db_path, create_test_db(10))
+                val test_db = create_test_db(10)
+                save_todo_db(db_path, test_db)
 
                 val read1_start = current_time_ms()
                 val db1 = load_todo_db(db_path)
@@ -542,10 +547,12 @@ describe "Database Synchronization":
             it "serializes concurrent writes":
                 # Given: Two writers
                 val db_path = "/tmp/test_mutual_write.sdn"
+                val db_small = create_test_db(10)
+                val db_large = create_test_db(20)
 
                 # When: Both try to write
-                val write1 = async_save_todo_db(db_path, create_test_db(10))
-                val write2 = async_save_todo_db(db_path, create_test_db(20))
+                val write1 = async_save_todo_db(db_path, db_small)
+                val write2 = async_save_todo_db(db_path, db_large)
 
                 # Wait for both
                 val result1 = write1.wait()
@@ -560,9 +567,10 @@ describe "Database Synchronization":
                 val db_path = "/tmp/test_no_lost_update.sdn"
                 val original = create_test_db(50)
                 save_todo_db(db_path, original)
+                val updated = create_test_db(100)
 
                 # When: Writer updates while reader loads
-                val write_task = async_save_todo_db(db_path, create_test_db(100))
+                val write_task = async_save_todo_db(db_path, updated)
                 val read_task = async_load_todo_db(db_path)
 
                 val write_result = write_task.wait()
@@ -830,10 +838,11 @@ describe "Database Synchronization":
         it "handles concurrent read/write safely":
             # Given: Multiple concurrent processes
             val db_path = "/tmp/test_integration.sdn"
+            val write_db = create_test_db(100)
 
             # When: Reader and writer operate concurrently
             val read_task = async_read_database(db_path)
-            val write_task = async_write_database(db_path, create_test_db(100))
+            val write_task = async_write_database(db_path, write_db)
 
             val read_result = read_task.wait()
             val write_result = write_task.wait()
@@ -845,11 +854,12 @@ describe "Database Synchronization":
         it "prevents data corruption under stress":
             # Given: 4 concurrent writers
             val db_path = "/tmp/test_stress.sdn"
+            val stress_db = create_test_db(25)
 
             # When: All write simultaneously
             var tasks = []
             for i in 0..4:
-                tasks.push(async_write_database(db_path, create_test_db(25)))
+                tasks.push(async_write_database(db_path, stress_db))
 
             # Wait for all
             for task in tasks:

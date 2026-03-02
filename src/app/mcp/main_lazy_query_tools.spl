@@ -142,33 +142,43 @@ fn handle_simple_dependencies(id: text, body: text) -> text:
 
     var cmd = ""
     if file != "":
-        # Show imports for a specific file
-        cmd = "timeout 10 grep -n '^use \\|^import ' " + file + " 2>/dev/null"
-        var imports_out = ""
-        var _u: i64 = 0
-        (imports_out, _u) = shell_cmd(cmd)
+        # Read file in-process and extract imports (no subprocess needed)
+        val source = file_read(file)
+        var imports_parts: [text] = []
+        if source != "":
+            val source_lines = source.split("\n")
+            var ln = 0
+            for line in source_lines:
+                ln = ln + 1
+                val t = line.trim()
+                if t.starts_with("use ") or t.starts_with("import "):
+                    imports_parts.push(str(ln) + ":" + line)
 
-        # Also find reverse dependencies (who imports this module)
-        val basename = file
-        var module_name = ""
-        # Extract module path from file path (e.g. src/lib/common/text/mod.spl -> std.text)
-        var name_out = ""
-        var _u2: i64 = 0
-        (name_out, _u2) = shell_cmd("echo " + basename + " | sed 's|src/lib/||;s|src/||;s|/|.|g;s|\\.spl$||;s|\\.mod$||'")
-        module_name = name_out.trim()
+        # Extract module name from file path in-process
+        # e.g. src/lib/common/text/mod.spl -> common.text.mod
+        var module_name = file
+        if module_name.starts_with("src/lib/"):
+            module_name = module_name.substring(8)
+        elif module_name.starts_with("src/"):
+            module_name = module_name.substring(4)
+        module_name = module_name.replace("/", ".")
+        if module_name.ends_with(".spl"):
+            module_name = module_name.substring(0, module_name.len() - 4)
+        if module_name.ends_with(".mod"):
+            module_name = module_name.substring(0, module_name.len() - 4)
 
-        var rev_cmd = "timeout 15 grep -rn 'use.*" + module_name + "\\|import.*" + module_name + "' src/ --include='*.spl' 2>/dev/null | head -30"
+        # Single grep for reverse dependencies
         var rev_out = ""
         var _u3: i64 = 0
-        (rev_out, _u3) = shell_cmd(rev_cmd)
+        (rev_out, _u3) = shell_cmd("timeout 15 grep -rn 'use.*" + module_name + "\\|import.*" + module_name + "' src/ --include='*.spl' 2>/dev/null | head -30")
 
         var out_parts: [text] = []
         out_parts.push("-- simple_dependencies file=" + file + " --\n")
         out_parts.push("\n--- Imports ---\n")
-        if imports_out.trim() == "":
+        if imports_parts.len() == 0:
             out_parts.push("(no imports)\n")
         else:
-            out_parts.push(imports_out)
+            out_parts.push(imports_parts.join("\n") + "\n")
         out_parts.push("\n--- Reverse Dependencies ---\n")
         if rev_out.trim() == "":
             out_parts.push("(no reverse dependencies found)\n")
@@ -176,16 +186,17 @@ fn handle_simple_dependencies(id: text, body: text) -> text:
             out_parts.push(rev_out)
         return make_tool_result(id, out_parts.join(""))
     else:
-        # Project-wide dependency summary
-        var summary_cmd = r"timeout 15 grep -rch '^use \|^import ' src/ --include='*.spl' 2>/dev/null | awk '{s+=$1} END {print s}'"
-        var total_out = ""
-        var _u4: i64 = 0
-        (total_out, _u4) = shell_cmd(summary_cmd)
-
-        var top_cmd = r"timeout 15 grep -roh '^use [^ .]*\.[^ .{]*' src/ --include='*.spl' 2>/dev/null | sort | uniq -c | sort -rn | head -20"
+        # Project-wide dependency summary — single grep piped to awk + sort
+        var summary_cmd = r"timeout 15 grep -roh '^use [^ .]*\.[^ .{]*' src/ --include='*.spl' 2>/dev/null | sort | uniq -c | sort -rn | head -20"
         var top_out = ""
         var _u5: i64 = 0
-        (top_out, _u5) = shell_cmd(top_cmd)
+        (top_out, _u5) = shell_cmd(summary_cmd)
+
+        # Count total imports from the same data
+        var count_cmd = r"timeout 15 grep -rch '^use \|^import ' src/ --include='*.spl' 2>/dev/null | awk '{s+=$1} END {print s}'"
+        var total_out = ""
+        var _u4: i64 = 0
+        (total_out, _u4) = shell_cmd(count_cmd)
 
         var out_parts: [text] = []
         out_parts.push("-- simple_dependencies (project summary) --\n")
@@ -270,25 +281,30 @@ fn handle_simple_context(id: text, body: text) -> text:
     out_parts.push("\n--- Source (" + str(line_num) + " lines) ---\n")
     out_parts.push(num_parts.join(""))
 
-    # 2. Imports
-    var imports_out = ""
-    var _u: i64 = 0
-    (imports_out, _u) = shell_cmd("grep -n '^use \\|^import ' " + file + " 2>/dev/null")
-    out_parts.push("\n--- Imports ---\n")
-    if imports_out.trim() == "":
-        out_parts.push("(none)\n")
-    else:
-        out_parts.push(imports_out)
+    # 2. Imports (in-process scan — file already in memory)
+    var import_parts: [text] = []
+    var symbol_parts: [text] = []
+    var scan_ln = 0
+    for line in lines:
+        scan_ln = scan_ln + 1
+        val t = line.trim()
+        if t.starts_with("use ") or t.starts_with("import "):
+            import_parts.push(str(scan_ln) + ":" + line)
+        if (t.starts_with("fn ") or t.starts_with("class ") or t.starts_with("struct ") or t.starts_with("enum ") or t.starts_with("export ") or t.starts_with("val ") or t.starts_with("var ")):
+            symbol_parts.push(str(scan_ln) + ":" + line)
 
-    # 3. Public symbols
-    var symbols_out = ""
-    var _u2: i64 = 0
-    (symbols_out, _u2) = shell_cmd("grep -n '^fn \\|^class \\|^struct \\|^enum \\|^export \\|^val \\|^var ' " + file + " 2>/dev/null")
-    out_parts.push("\n--- Symbols ---\n")
-    if symbols_out.trim() == "":
+    out_parts.push("\n--- Imports ---\n")
+    if import_parts.len() == 0:
         out_parts.push("(none)\n")
     else:
-        out_parts.push(symbols_out)
+        out_parts.push(import_parts.join("\n") + "\n")
+
+    # 3. Public symbols (in-process scan — file already in memory)
+    out_parts.push("\n--- Symbols ---\n")
+    if symbol_parts.len() == 0:
+        out_parts.push("(none)\n")
+    else:
+        out_parts.push(symbol_parts.join("\n") + "\n")
 
     # 4. Diagnostics
     var check_out = ""
@@ -300,16 +316,19 @@ fn handle_simple_context(id: text, body: text) -> text:
     else:
         out_parts.push(check_out)
 
-    # 5. If target specified, grep for it
+    # 5. If target specified, scan in-process (file already in memory)
     if target != "":
-        var target_out = ""
-        var _u3: i64 = 0
-        (target_out, _u3) = shell_cmd("grep -n '" + target + "' " + file + " 2>/dev/null")
+        var target_parts: [text] = []
+        var tgt_ln = 0
+        for line in lines:
+            tgt_ln = tgt_ln + 1
+            if line.contains(target):
+                target_parts.push(str(tgt_ln) + ":" + line)
         out_parts.push("\n--- Target: " + target + " ---\n")
-        if target_out.trim() == "":
+        if target_parts.len() == 0:
             out_parts.push("(not found in file)\n")
         else:
-            out_parts.push(target_out)
+            out_parts.push(target_parts.join("\n") + "\n")
 
     make_tool_result(id, out_parts.join(""))
 

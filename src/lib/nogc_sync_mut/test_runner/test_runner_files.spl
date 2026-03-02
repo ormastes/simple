@@ -6,6 +6,13 @@ use test_runner_types.*
 use app.io.sysinfo_ops.{path_basename}
 use app.io.file_ops.{file_read, file_exists}
 use app.io.dir_ops.{dir_walk}
+use test_manifest.{
+    TestManifest, TestManifestEntry,
+    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh
+}
+use test_manifest_scanner.{manifest_full_scan}
+
+extern fn rt_time_now_unix_micros() -> i64
 
 # =========================================================================
 # ANSI Stripping
@@ -15,7 +22,7 @@ fn strip_ansi(s: text) -> text:
     # Strip ANSI escape sequences by scanning for ESC[ ... m patterns.
     # ESC character is \x1b (27). We detect it by checking for the two-char
     # sequence that starts ANSI codes: ESC followed by '['.
-    var result = ""
+    var parts: [text] = []
     var i = 0
     var in_escape = false
     while i < s.len():
@@ -47,9 +54,9 @@ fn strip_ansi(s: text) -> text:
                 if looks_like_ansi:
                     i = j
                     continue
-        result = result + ch
+        parts.push(ch)
         i = i + 1
-    result
+    parts.join("")
 
 # =========================================================================
 # File Type Checking
@@ -135,10 +142,132 @@ fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
             spec.contains(tag) or tag == "composite"
 
 # =========================================================================
-# Test File Discovery
+# Fast Test File Discovery (manifest-based)
+# =========================================================================
+
+fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bool) -> [text]:
+    # Single file — no manifest needed
+    if base_path.ends_with(".spl"):
+        if file_exists(base_path) and is_test_file(base_path):
+            return [base_path]
+        return []
+
+    if not use_cache:
+        return discover_test_files_slow(base_path, options)
+
+    # Try loading manifest
+    val manifest = manifest_load(MANIFEST_PATH)
+    if not manifest_is_fresh(manifest):
+        # Manifest missing or stale — fall back to full scan, then save
+        val result = discover_test_files_slow(base_path, options)
+        # Build manifest in background for next run
+        save_manifest_from_discovery(base_path)
+        return result
+
+    # Fast path: filter manifest entries in-memory
+    val start = rt_time_now_unix_micros()
+    var test_files: [text] = []
+
+    for entry in manifest.entries:
+        # Path prefix filter
+        if not entry.path.starts_with(base_path):
+            continue
+
+        # Level filter
+        if not manifest_entry_matches_level(entry, options.level):
+            continue
+
+        # Skip @skip/@pending unless --only-skipped
+        if not options.only_skipped:
+            if entry.has_skip or entry.has_pending:
+                continue
+
+        # Advanced directory filters
+        if not options.fuzz_mode and entry.is_fuzz:
+            continue
+        if not options.chaos_mode and entry.is_chaos:
+            continue
+        if not options.deploy_mode and entry.is_deploy:
+            continue
+        if not options.security_mode and entry.is_security:
+            continue
+
+        # Baremetal/remote filtering
+        val explicit_target = base_path.contains("/baremetal") or base_path.contains("/remote")
+        val is_host_mode = not execution_mode_is_composite(options.mode)
+        if is_host_mode and not explicit_target:
+            if entry.is_baremetal or entry.path.contains("/remote/"):
+                continue
+
+        # Platform tag filtering
+        if not explicit_target and entry.platform_tags != "":
+            val ptags = entry.platform_tags.split(",")
+            var tag_matched = false
+            for ptag in ptags:
+                if platform_tag_matches(ptag, options.mode):
+                    tag_matched = true
+            if not tag_matched:
+                continue
+
+        # Content-based filters (from manifest metadata, no file I/O)
+        if options.list_ignored:
+            if not entry.has_slow and not entry.has_skip and not entry.has_pending:
+                continue
+
+        if options.only_slow and not options.run_all:
+            if not entry.has_slow:
+                continue
+
+        if options.only_skipped:
+            if not entry.has_skip:
+                continue
+
+        if options.tag != "":
+            if not entry.tags.contains(options.tag):
+                continue
+
+        # Skip slow tests by default
+        if not options.run_all and not options.only_slow:
+            if entry.has_slow:
+                continue
+
+        test_files.push(entry.path)
+
+    # Apply seed shuffle
+    if options.has_seed:
+        test_files = shuffle_files(test_files, options.seed)
+
+    val elapsed = rt_time_now_unix_micros() - start
+    val elapsed_ms = elapsed / 1000
+    print "  Discovery: {elapsed_ms}ms (from manifest, {manifest.entries.len()} indexed)"
+
+    test_files
+
+fn manifest_entry_matches_level(entry: TestManifestEntry, level: TestLevel) -> bool:
+    match level:
+        case TestLevel.All: true
+        case TestLevel.Unit: entry.test_level == 1
+        case TestLevel.Integration: entry.test_level == 2
+        case TestLevel.System: entry.test_level == 3
+
+fn save_manifest_from_discovery(base_path: text):
+    # Determine scan directories based on base_path
+    var dirs: [text] = []
+    if base_path == "test/" or base_path == "test":
+        dirs = ["test/"]
+    else:
+        dirs = [base_path]
+    val manifest = manifest_full_scan(dirs)
+    manifest_save(manifest, MANIFEST_PATH)
+
+# =========================================================================
+# Test File Discovery (original full-scan path)
 # =========================================================================
 
 fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
+    return discover_test_files_fast(base_path, options, true)
+
+fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
     # If path is a single file, use it directly
     if base_path.ends_with(".spl"):
         if file_exists(base_path) and is_test_file(base_path):
@@ -394,7 +523,8 @@ export is_test_file, matches_level
 export read_file_content
 export file_has_slow_test, file_has_skip_tag, file_has_ignored_test, file_has_tag
 export file_get_platform_tags, platform_tag_matches
-export discover_test_files
+export discover_test_files, discover_test_files_fast, discover_test_files_slow
+export save_manifest_from_discovery
 export simple_hash, shuffle_files
 export extract_skip_feature_info, print_skip_features
 export print_discovery_summary

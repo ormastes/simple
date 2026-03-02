@@ -259,7 +259,7 @@ pub fn __rt_hashmap_keys(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
-        return registry.map.hashmap_keys(handle).map(|v| Value::Array(v));
+        return registry.map.hashmap_keys(handle).map(|v| Value::array(v));
     }
     let handle = match args.get(0) {
         Some(Value::Int(n)) => *n as HashMapHandle,
@@ -274,7 +274,7 @@ pub fn __rt_hashmap_keys(args: &[Value]) -> Result<Value, CompileError> {
         .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
-    Ok(Value::Array(keys))
+    Ok(Value::array(keys))
 }
 
 /// Get all values from the HashMap as an array
@@ -285,7 +285,7 @@ pub fn __rt_hashmap_values(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
-        return registry.map.hashmap_values(handle).map(|v| Value::Array(v));
+        return registry.map.hashmap_values(handle).map(|v| Value::array(v));
     }
     let handle = match args.get(0) {
         Some(Value::Int(n)) => *n as HashMapHandle,
@@ -300,7 +300,7 @@ pub fn __rt_hashmap_values(args: &[Value]) -> Result<Value, CompileError> {
         .ok_or_else(|| CompileError::runtime(format!("Invalid HashMap handle: {}", handle)))?;
 
     let values: Vec<Value> = map.values().cloned().collect();
-    Ok(Value::Array(values))
+    Ok(Value::array(values))
 }
 
 /// Get all entries from the HashMap as an array of [key, value] pairs
@@ -311,7 +311,7 @@ pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashMap handle".to_string())),
         };
-        return registry.map.hashmap_entries(handle).map(|v| Value::Array(v));
+        return registry.map.hashmap_entries(handle).map(|v| Value::array(v));
     }
     let handle = match args.get(0) {
         Some(Value::Int(n)) => *n as HashMapHandle,
@@ -327,10 +327,10 @@ pub fn __rt_hashmap_entries(args: &[Value]) -> Result<Value, CompileError> {
 
     let entries: Vec<Value> = map
         .iter()
-        .map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()]))
+        .map(|(k, v)| Value::array(vec![Value::Str(k.clone()), v.clone()]))
         .collect();
 
-    Ok(Value::Array(entries))
+    Ok(Value::array(entries))
 }
 
 // ============================================================================
@@ -559,7 +559,7 @@ pub fn __rt_hashset_to_array(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid HashSet handle".to_string())),
         };
-        return registry.map.hashset_to_array(handle).map(|v| Value::Array(v));
+        return registry.map.hashset_to_array(handle).map(|v| Value::array(v));
     }
     let handle = match args.get(0) {
         Some(Value::Int(n)) => *n as HashSetHandle,
@@ -574,7 +574,7 @@ pub fn __rt_hashset_to_array(args: &[Value]) -> Result<Value, CompileError> {
         .ok_or_else(|| CompileError::runtime(format!("Invalid HashSet handle: {}", handle)))?;
 
     let array: Vec<Value> = set.iter().map(|s| Value::Str(s.clone())).collect();
-    Ok(Value::Array(array))
+    Ok(Value::array(array))
 }
 
 /// Union of two HashSets (returns new set with all elements from both)
@@ -1097,7 +1097,7 @@ pub fn __rt_btreemap_keys(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
-        return registry.map.btreemap_keys(handle).map(|v| Value::Array(v));
+        return registry.map.btreemap_keys(handle).map(|v| Value::array(v));
     }
     let handle = match args.get(0) {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
@@ -1112,7 +1112,7 @@ pub fn __rt_btreemap_keys(args: &[Value]) -> Result<Value, CompileError> {
         .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
-    Ok(Value::Array(keys))
+    Ok(Value::array(keys))
 }
 
 /// Get all values from the BTreeMap as an array (in key-sorted order)
@@ -1123,7 +1123,7 @@ pub fn __rt_btreemap_values(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
-        return registry.map.btreemap_values(handle).map(|v| Value::Array(v));
+        return registry.map.btreemap_values(handle).map(|v| Value::array(v));
     }
     let handle = match args.get(0) {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
@@ -1138,7 +1138,7 @@ pub fn __rt_btreemap_values(args: &[Value]) -> Result<Value, CompileError> {
         .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
 
     let values: Vec<Value> = map.values().cloned().collect();
-    Ok(Value::Array(values))
+    Ok(Value::array(values))
 }
 
 /// Get all entries from the BTreeMap as an array of [key, value] pairs (sorted order)
@@ -1149,7 +1149,7 @@ pub fn __rt_btreemap_entries(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeMap handle".to_string())),
         };
-        return registry.map.btreemap_entries(handle).map(|v| Value::Array(v));
+        return registry.map.btreemap_entries(handle).map(|v| Value::array(v));
     }
     let handle = match args.get(0) {
         Some(Value::Int(n)) => *n as BTreeMapHandle,
@@ -1165,10 +1165,10 @@ pub fn __rt_btreemap_entries(args: &[Value]) -> Result<Value, CompileError> {
 
     let entries: Vec<Value> = map
         .iter()
-        .map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()]))
+        .map(|(k, v)| Value::array(vec![Value::Str(k.clone()), v.clone()]))
         .collect();
 
-    Ok(Value::Array(entries))
+    Ok(Value::array(entries))
 }
 
 /// Get the first (smallest) key from the BTreeMap
@@ -1455,7 +1455,7 @@ pub fn __rt_btreeset_to_array(args: &[Value]) -> Result<Value, CompileError> {
             Some(Value::Int(n)) => *n,
             _ => return Err(CompileError::runtime("Invalid BTreeSet handle".to_string())),
         };
-        return registry.map.btreeset_to_array(handle).map(|v| Value::Array(v));
+        return registry.map.btreeset_to_array(handle).map(|v| Value::array(v));
     }
     let handle = match args.get(0) {
         Some(Value::Int(n)) => *n as BTreeSetHandle,
@@ -1470,7 +1470,7 @@ pub fn __rt_btreeset_to_array(args: &[Value]) -> Result<Value, CompileError> {
         .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeSet handle: {}", handle)))?;
 
     let array: Vec<Value> = set.iter().map(|s| Value::Str(s.clone())).collect();
-    Ok(Value::Array(array))
+    Ok(Value::array(array))
 }
 
 /// Get the first (smallest) element from the BTreeSet

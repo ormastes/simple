@@ -69,7 +69,7 @@ impl std::fmt::Debug for BridgeValue {
             bridge_tags::BOOL => write!(f, "BridgeValue::Bool({})", self.payload != 0),
             bridge_tags::STRING => write!(f, "BridgeValue::String(...)"),
             bridge_tags::SYMBOL => write!(f, "BridgeValue::Symbol(...)"),
-            bridge_tags::ARRAY => write!(f, "BridgeValue::Array(len={})", self.payload),
+            bridge_tags::ARRAY => write!(f, "BridgeValue::array(len={})", self.payload),
             bridge_tags::TUPLE => write!(f, "BridgeValue::Tuple(len={})", self.payload),
             bridge_tags::DICT => write!(f, "BridgeValue::Dict(len={})", self.payload),
             bridge_tags::OBJECT => write!(f, "BridgeValue::Object(...)"),
@@ -498,7 +498,7 @@ impl BridgeValue {
                     Value::Symbol(cstr.to_string_lossy().into_owned())
                 }
             }
-            bridge_tags::ARRAY => self.to_vec_value(Value::Array),
+            bridge_tags::ARRAY => self.to_vec_value(Value::array),
             bridge_tags::TUPLE => self.to_vec_value(Value::Tuple),
             bridge_tags::DICT => {
                 // Return empty dict for now

@@ -273,9 +273,9 @@ pub(super) fn eval_op_expr(
                     (a, Value::Str(b)) => Ok(Value::Str(format!("{}{}", a.to_display_string(), b))),
                     // Array concatenation: [a, b] + [c, d] => [a, b, c, d]
                     (Value::Array(a), Value::Array(b)) => {
-                        let mut result = a.clone();
-                        result.extend(b.iter().cloned());
-                        Ok(Value::Array(result))
+                        let mut arc = Arc::clone(&a);
+                        Arc::make_mut(&mut arc).extend(b.iter().cloned());
+                        Ok(Value::Array(arc))
                     }
                     _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
                     _ => {
@@ -619,7 +619,7 @@ pub(super) fn eval_op_expr(
                                 results.push(right_result);
                             }
 
-                            Ok(Value::Array(results))
+                            Ok(Value::array(results))
                         }
                         _ => {
                             let ctx = ErrorContext::new()
@@ -981,10 +981,10 @@ fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileE
 
             row.push(sum);
         }
-        result.push(Value::Array(row));
+        result.push(Value::array(row));
     }
 
-    Ok(Value::Array(result))
+    Ok(Value::array(result))
 }
 
 /// Multiply 2D matrix by 1D vector
@@ -1067,7 +1067,7 @@ fn matmul_matrix_vector(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
         result.push(sum);
     }
 
-    Ok(Value::Array(result))
+    Ok(Value::array(result))
 }
 
 /// Multiply 1D vector by 2D matrix
@@ -1151,5 +1151,5 @@ fn matmul_vector_matrix(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
         result.push(sum);
     }
 
-    Ok(Value::Array(result))
+    Ok(Value::array(result))
 }

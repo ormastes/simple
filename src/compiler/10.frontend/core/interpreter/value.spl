@@ -33,6 +33,10 @@ var val_thunk_expr_ids: [i64] = []  # expression id for VAL_THUNK (deferred eval
 # ===== Sentinel =====
 val VAL_NONE: i64 = -1
 
+# ===== Free List for Value Recycling =====
+# When values are no longer needed, their slots can be reused instead of growing the arena.
+var val_free_list: [i64] = []
+
 # ===== Value Cache =====
 # Pre-allocated singletons for frequently created values.
 # Avoids arena allocation for nil, true, false, small ints 0..255, empty text.
@@ -42,6 +46,10 @@ var cache_false: i64 = -1
 var cache_empty_text: i64 = -1
 var cache_ints: [i64] = []
 var cache_initialized: bool = false
+# Interned common text literals
+var cache_text_nil: i64 = -1
+var cache_text_true: i64 = -1
+var cache_text_false: i64 = -1
 
 # ===== Value Arena Management =====
 
@@ -60,6 +68,7 @@ fn val_reset():
     val_func_names = []
     val_func_decls = []
     val_thunk_expr_ids = []
+    val_free_list = []
     cache_initialized = false
     val_init_cache()
 
@@ -75,6 +84,13 @@ fn val_init_cache():
     # Allocate cached empty text
     cache_empty_text = val_alloc(VAL_TEXT)
     val_texts[cache_empty_text] = ""
+    # Allocate cached common text literals
+    cache_text_nil = val_alloc(VAL_TEXT)
+    val_texts[cache_text_nil] = "nil"
+    cache_text_true = val_alloc(VAL_TEXT)
+    val_texts[cache_text_true] = "true"
+    cache_text_false = val_alloc(VAL_TEXT)
+    val_texts[cache_text_false] = "false"
     # Allocate cached small integers 0..255
     cache_ints = []
     var i: i64 = 0
@@ -86,6 +102,22 @@ fn val_init_cache():
     cache_initialized = true
 
 fn val_alloc(kind: i64) -> i64:
+    # Reuse a recycled slot if available — avoids growing all 11 arrays
+    if val_free_list.len() > 0:
+        val idx = val_free_list[val_free_list.len() - 1]
+        val_free_list.pop()
+        val_kinds[idx] = kind
+        val_ints[idx] = 0
+        val_floats[idx] = 0.0
+        val_texts[idx] = ""
+        val_arrays[idx] = []
+        val_struct_names[idx] = ""
+        val_struct_fields[idx] = []
+        val_struct_values[idx] = []
+        val_func_names[idx] = ""
+        val_func_decls[idx] = -1
+        val_thunk_expr_ids[idx] = -1
+        return idx
     val idx = val_kinds.len()
     val_kinds.push(kind)
     val_ints.push(0)
@@ -99,6 +131,22 @@ fn val_alloc(kind: i64) -> i64:
     val_func_decls.push(-1)
     val_thunk_expr_ids.push(-1)
     idx
+
+# ===== Value Recycling =====
+# Release a value slot back to the free list for reuse.
+# Do NOT free cached singletons (nil, true, false, small ints, empty text).
+fn val_free(vid: i64):
+    if vid < 0: return
+    # Don't free cached values (first 259 slots: nil + true + false + empty_text + 256 ints)
+    if cache_initialized and vid < 260: return
+    val_kinds[vid] = VAL_NIL
+    val_texts[vid] = ""
+    val_arrays[vid] = []
+    val_struct_names[vid] = ""
+    val_struct_fields[vid] = []
+    val_struct_values[vid] = []
+    val_func_names[vid] = ""
+    val_free_list.push(vid)
 
 # ===== Value Constructors =====
 
@@ -130,8 +178,11 @@ fn val_make_float(f: f64) -> i64:
     idx
 
 fn val_make_text(s: text) -> i64:
-    if cache_initialized and s == "":
-        return cache_empty_text
+    if cache_initialized:
+        if s == "": return cache_empty_text
+        if s == "nil": return cache_text_nil
+        if s == "true": return cache_text_true
+        if s == "false": return cache_text_false
     val idx = val_alloc(VAL_TEXT)
     val_texts[idx] = s
     idx
@@ -328,15 +379,7 @@ fn val_to_text(vid: i64) -> text:
         var parts: [text] = []
         for eid in elems:
             parts.push(val_to_text(eid))
-        var result = "["
-        var first = true
-        for p in parts:
-            if first:
-                first = false
-            else:
-                result = result + ", "
-            result = result + p
-        return result + "]"
+        return "[" + parts.join(", ") + "]"
     if kind == VAL_STRUCT:
         return val_struct_names[vid] + "(...)"
     if kind == VAL_FUNCTION:
@@ -400,7 +443,7 @@ fn core_val_is_truthy_i(vid: i64) -> i64:
 
 export VAL_NIL, VAL_BOOL, VAL_INT, VAL_FLOAT, VAL_TEXT, VAL_ARRAY, VAL_STRUCT, VAL_FUNCTION, VAL_THUNK
 export VAL_NONE
-export val_count, val_reset, val_alloc, val_init_cache
+export val_count, val_reset, val_alloc, val_free, val_init_cache, val_free_list
 export val_make_nil, val_make_bool, val_make_int, val_make_float, val_make_text
 export val_make_array, val_make_struct, val_make_function
 export val_get_kind, val_get_int, val_get_bool, val_get_float, val_get_text

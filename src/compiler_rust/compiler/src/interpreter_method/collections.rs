@@ -38,18 +38,18 @@ pub fn handle_array_methods(
             let item = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             let mut new_arr = arr.to_vec();
             new_arr.push(item);
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "pop" => {
             let mut new_arr = arr.to_vec();
             new_arr.pop();
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "concat" | "extend" => {
             let other = eval_arg(
                 args,
                 0,
-                Value::Array(vec![]),
+                Value::array(vec![]),
                 env,
                 functions,
                 classes,
@@ -58,8 +58,8 @@ pub fn handle_array_methods(
             )?;
             if let Value::Array(other_arr) = other {
                 let mut new_arr = arr.to_vec();
-                new_arr.extend(other_arr);
-                Value::Array(new_arr)
+                new_arr.extend(other_arr.iter().cloned());
+                Value::array(new_arr)
             } else {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -77,7 +77,7 @@ pub fn handle_array_methods(
             if idx <= new_arr.len() {
                 new_arr.insert(idx, item);
             }
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "remove" => {
             let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
@@ -85,12 +85,12 @@ pub fn handle_array_methods(
             if idx < new_arr.len() {
                 new_arr.remove(idx);
             }
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "rev" | "reverse" => {
             let mut new_arr = arr.to_vec();
             new_arr.reverse();
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "slice" => {
             let start = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
@@ -102,7 +102,7 @@ pub fn handle_array_methods(
                 .unwrap_or(arr.len());
             let end = end.min(arr.len());
             let start = start.min(end);
-            Value::Array(arr[start..end].to_vec())
+            Value::array(arr[start..end].to_vec())
         }
         "map" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -132,7 +132,7 @@ pub fn handle_array_methods(
                 Value::Array(other_arr) => {
                     let mut result = arr.to_vec();
                     result.extend_from_slice(&other_arr);
-                    Value::Array(result)
+                    Value::array(result)
                 }
                 _ => {
                     return Err(CompileError::semantic("merge expects an array argument".to_string()));
@@ -230,7 +230,7 @@ pub fn handle_array_methods(
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
                 _ => std::cmp::Ordering::Equal,
             });
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "sort_desc" => {
             let mut new_arr = arr.to_vec();
@@ -240,7 +240,7 @@ pub fn handle_array_methods(
                 (Value::Str(a), Value::Str(b)) => b.cmp(a),
                 _ => std::cmp::Ordering::Equal,
             });
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "enumerate" => {
             let result: Vec<Value> = arr
@@ -248,13 +248,13 @@ pub fn handle_array_methods(
                 .enumerate()
                 .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v.clone()]))
                 .collect();
-            Value::Array(result)
+            Value::array(result)
         }
         "zip" => {
             let other = eval_arg(
                 args,
                 0,
-                Value::Array(vec![]),
+                Value::array(vec![]),
                 env,
                 functions,
                 classes,
@@ -267,7 +267,7 @@ pub fn handle_array_methods(
                     .zip(other_arr.iter())
                     .map(|(a, b)| Value::Tuple(vec![a.clone(), b.clone()]))
                     .collect();
-                Value::Array(result)
+                Value::array(result)
             } else {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -280,36 +280,36 @@ pub fn handle_array_methods(
             let mapped = eval_array_map(arr, func, functions, classes, enums, impl_methods)?;
             if let Value::Array(mapped_arr) = mapped {
                 let mut result = Vec::new();
-                for item in mapped_arr {
+                for item in mapped_arr.iter() {
                     if let Value::Array(inner) = item {
-                        result.extend(inner);
+                        result.extend(inner.iter().cloned());
                     } else {
-                        result.push(item);
+                        result.push(item.clone());
                     }
                 }
-                Value::Array(result)
+                Value::array(result)
             } else {
-                Value::Array(vec![])
+                Value::array(vec![])
             }
         }
         "flatten" => {
             let mut result = Vec::new();
             for item in arr {
                 if let Value::Array(inner) = item {
-                    result.extend(inner.clone());
+                    result.extend(inner.iter().cloned());
                 } else {
                     result.push(item.clone());
                 }
             }
-            Value::Array(result)
+            Value::array(result)
         }
         "take" => {
             let n = eval_arg_usize(args, 0, arr.len(), env, functions, classes, enums, impl_methods)?;
-            Value::Array(arr.iter().take(n).cloned().collect())
+            Value::array(arr.iter().take(n).cloned().collect())
         }
         "skip" | "drop" => {
             let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Value::Array(arr.iter().skip(n).cloned().collect())
+            Value::array(arr.iter().skip(n).cloned().collect())
         }
         "take_while" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -332,7 +332,7 @@ pub fn handle_array_methods(
                     result.push(item.clone());
                 }
             }
-            Value::Array(result)
+            Value::array(result)
         }
         "skip_while" | "drop_while" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -360,12 +360,12 @@ pub fn handle_array_methods(
                     }
                 }
             }
-            Value::Array(result)
+            Value::array(result)
         }
         "chunk" | "chunks" => {
             let size = eval_arg_usize(args, 0, 1, env, functions, classes, enums, impl_methods)?.max(1);
-            let result: Vec<Value> = arr.chunks(size).map(|chunk| Value::Array(chunk.to_vec())).collect();
-            Value::Array(result)
+            let result: Vec<Value> = arr.chunks(size).map(|chunk| Value::array(chunk.to_vec())).collect();
+            Value::array(result)
         }
         "uniq" | "unique" | "distinct" => {
             let mut seen = Vec::new();
@@ -376,7 +376,7 @@ pub fn handle_array_methods(
                     result.push(item.clone());
                 }
             }
-            Value::Array(result)
+            Value::array(result)
         }
         "min" => {
             let min_val = arr.iter().min_by(|a, b| match (a, b) {
@@ -443,7 +443,7 @@ pub fn handle_array_methods(
                     }
                 }
             }
-            Value::Tuple(vec![Value::Array(pass), Value::Array(fail)])
+            Value::Tuple(vec![Value::array(pass), Value::array(fail)])
         }
         "group_by" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -464,7 +464,7 @@ pub fn handle_array_methods(
                     groups.entry(key_str).or_default().push(item.clone());
                 }
             }
-            let result: HashMap<String, Value> = groups.into_iter().map(|(k, v)| (k, Value::Array(v))).collect();
+            let result: HashMap<String, Value> = groups.into_iter().map(|(k, v)| (k, Value::array(v))).collect();
             Value::Dict(result)
         }
         "compact" => {
@@ -489,12 +489,12 @@ pub fn handle_array_methods(
                     }
                 })
                 .collect();
-            Value::Array(result)
+            Value::array(result)
         }
         "rotate" => {
             // Rotate array elements by n positions (left if positive, right if negative)
             if arr.is_empty() {
-                return Ok(Some(Value::Array(vec![])));
+                return Ok(Some(Value::array(vec![])));
             }
             let n = eval_arg(args, 0, Value::Int(1), env, functions, classes, enums, impl_methods)?
                 .as_int()
@@ -504,7 +504,7 @@ pub fn handle_array_methods(
             let pivot = n as usize;
             let mut result = arr[pivot..].to_vec();
             result.extend_from_slice(&arr[..pivot]);
-            Value::Array(result)
+            Value::array(result)
         }
         "shuffle" => {
             // Randomize array order
@@ -513,7 +513,7 @@ pub fn handle_array_methods(
             let mut result = arr.to_vec();
             let mut rng = thread_rng();
             result.shuffle(&mut rng);
-            Value::Array(result)
+            Value::array(result)
         }
         "sample" => {
             // Return random element(s) from array
@@ -534,7 +534,7 @@ pub fn handle_array_methods(
                 Some(count) if count > 0 => {
                     // Return array of n random elements
                     let sample: Vec<Value> = arr.choose_multiple(&mut rng, count as usize).cloned().collect();
-                    Value::Array(sample)
+                    Value::array(sample)
                 }
                 _ => {
                     // Return single random element
@@ -545,14 +545,14 @@ pub fn handle_array_methods(
         "transpose" => {
             // Transpose 2D array (array of arrays)
             if arr.is_empty() {
-                return Ok(Some(Value::Array(vec![])));
+                return Ok(Some(Value::array(vec![])));
             }
 
             // Check if all elements are arrays
-            let inner_arrays: Vec<&Vec<Value>> = arr
+            let inner_arrays: Vec<&[Value]> = arr
                 .iter()
                 .map(|v| match v {
-                    Value::Array(a) => Some(a),
+                    Value::Array(a) => Some(a.as_slice()),
                     _ => None,
                 })
                 .collect::<Option<Vec<_>>>()
@@ -564,7 +564,7 @@ pub fn handle_array_methods(
                 })?;
 
             if inner_arrays.is_empty() {
-                return Ok(Some(Value::Array(vec![])));
+                return Ok(Some(Value::array(vec![])));
             }
 
             // Find max length
@@ -578,7 +578,7 @@ pub fn handle_array_methods(
                 }
             }
 
-            Value::Array(result.into_iter().map(Value::Array).collect())
+            Value::array(result.into_iter().map(Value::array).collect())
         }
         "fetch" => {
             // Get element at index with default value if out of bounds
@@ -588,7 +588,7 @@ pub fn handle_array_methods(
         }
         "clear" => {
             // Return empty array (functional style - original is not modified)
-            Value::Array(vec![])
+            Value::array(vec![])
         }
         "sorted" => {
             // Alias for sort - returns a new sorted array
@@ -599,17 +599,17 @@ pub fn handle_array_methods(
                 (Value::Str(a), Value::Str(b)) => a.cmp(b),
                 _ => std::cmp::Ordering::Equal,
             });
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "reversed" => {
             // Alias for reverse - returns a new reversed array
             let mut new_arr = arr.to_vec();
             new_arr.reverse();
-            Value::Array(new_arr)
+            Value::array(new_arr)
         }
         "copy" | "clone" => {
             // Return a shallow copy of the array
-            Value::Array(arr.to_vec())
+            Value::array(arr.to_vec())
         }
         "all_truthy" => {
             // Check if all elements are truthy (without a predicate function)
@@ -628,7 +628,7 @@ pub fn handle_array_methods(
         "fill" => {
             // Fill array with a value (returns new array of same length)
             let value = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            Value::Array(vec![value; arr.len()])
+            Value::array(vec![value; arr.len()])
         }
         "ptr" => {
             // Return raw pointer to array's data as i64 (for FFI/codegen)
@@ -660,7 +660,7 @@ pub fn handle_tuple_methods(
         }
         "first" => tup.first().cloned().unwrap_or(Value::Nil),
         "last" => tup.last().cloned().unwrap_or(Value::Nil),
-        "to_array" => Value::Array(tup.to_vec()),
+        "to_array" => Value::array(tup.to_vec()),
         "has" | "contains" => {
             let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Value::Bool(tup.contains(&needle))
@@ -854,11 +854,11 @@ pub fn handle_dict_methods(
         }
         "keys" => {
             let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
-            Value::Array(keys)
+            Value::array(keys)
         }
         "values" => {
             let vals: Vec<Value> = map.values().cloned().collect();
-            Value::Array(vals)
+            Value::array(vals)
         }
         "set" | "insert" => {
             let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
@@ -913,7 +913,7 @@ pub fn handle_dict_methods(
                 .iter()
                 .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
                 .collect();
-            Value::Array(entries)
+            Value::array(entries)
         }
         "map_values" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;

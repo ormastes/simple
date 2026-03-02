@@ -1,102 +1,119 @@
 # Simple Language Compiler - File & Class Structure Analysis
 
-**Date:** 2026-02-16
+**Date:** 2026-03-02
 **Status:** Comprehensive Inventory & Refactoring Guide
-**Scope:** Full codebase (2,649 .spl files, 623,207 lines)
+**Scope:** Full codebase (5,644 .spl files, 1,107,838 lines)
 
 ---
 
 ## Executive Summary
 
-### Codebase Statistics (2026-02-16)
+### Codebase Statistics (2026-03-02)
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| **Total .spl Files** | 2,649 | +71 files since 2026-02-14 |
-| **Total Lines of Code** | 623,207 | Includes all src/ directories |
-| **Core Lines (src/)** | 111,044 | Actual source code |
-| **Test Lines (test/)** | ~512,000+ | 4,067 passing tests |
-| **Directories** | 2,567 | Full project structure |
+| **Total .spl Files** | 5,644 | src/ (3,708) + test/ (1,772) + examples/ (130) + doc/ (34) |
+| **Total .spl Lines** | 1,107,838 | src/ (779,948) + test/ (327,890) |
+| **Core Lines (src/)** | 779,948 | All Simple source code |
+| **Rust Lines** | 482,983 | Rust seed bootstrap compiler |
+| **C Lines** | 28,582 | C bootstrap (16,208) + runtime (12,374) |
+| **Test Lines (test/)** | 327,890 | 1,772 test files |
+| **Directories** | 8,988 | Full project structure |
+| **Documentation** | 3,462 | Markdown files in doc/ |
 
 ### Distribution by Directory
 
-| Directory | Files | Lines | % of Core | Purpose |
-|-----------|-------|-------|-----------|---------|
-| `src/lib/` | 909 | 192,427 | 173.3% | Standard library (utilities, data structures, protocols) |
-| `src/compiler/` | 436 | 140,341 | 126.4% | Full compiler (Full Simple) |
-| `src/app/` | 594 | 129,154 | 116.3% | Applications & tools (CLI, MCP, LSP, test runner) |
-| `src/compiler_core_legacy/` | 441 | 97,057 | 87.4% | Core compiler (Core Simple) |
-| `src/lib/` | 123 | 30,993 | 27.9% | Database, actors, ML, parsers |
-| `src/compiler_core_legacy/` | 42 | 17,871 | 16.1% | Core Simple library (seed-compilable) |
-| `src/baremetal/` | 36 | 4,829 | 4.3% | Bare-metal runtime |
-| `src/remote/` | 15 | 3,964 | 3.6% | Remote execution |
-| `src/lib/ffi/` | 11 | 1,808 | 1.6% | FFI bridge utilities |
-| Other | 42 | 5,564 | 5.0% | Diagnostics, MCP lib, shared, test utils |
+| Directory | Files | Lines | Purpose |
+|-----------|-------|-------|---------|
+| `src/lib/` | 1,546 | 317,086 | Standard library (also symlinked as `src/std/`) |
+| `src/compiler/` | 918 | 207,912 | Self-hosted compiler (17 numbered layers) |
+| `src/compiler_rust/lib/` | 712 | 174,178 | Stdlib copy for Rust bootstrap |
+| `src/app/` | 479 | 75,423 | Applications & tools (CLI, MCP, LSP, test runner) |
+| `src/i18n/` | 29 | 4,801 | Internationalization |
+| `src/compiler_cpp/` | 15 (C) | 16,208 | Generated C bootstrap source |
+| `src/runtime/` | 48 (C) | 12,374 | C runtime (linked by generated C++) |
+| `src/compiler_rust/` | 1,800 (Rust) | 482,983 | Rust seed bootstrap compiler |
 
-**Note:** Percentages exceed 100% because std/ contains extensive utilities that serve the entire codebase.
+**Note:** `src/std/` is a symlink to `src/lib/`. `src/compiler/mdsoc/` is a symlink to `src/compiler/85.mdsoc/`.
 
 ### Key Architectural Highlights
 
-1. **100% Pure Simple** - No Rust/C++ source (except bootstrap seed compiler)
-2. **Self-Hosting** - Compiler written in Simple, compiles itself
-3. **Multi-Backend** - LLVM, Cranelift, Native (x86-64, AArch64, RISC-V), WASM, Interpreter
-4. **Comprehensive Stdlib** - 909 files covering networking, crypto, ML, data structures
-5. **Production Ready** - 4,067/4,067 tests passing (100%)
-6. **Bootstrap Duplication** - ~15,000 lines intentionally duplicated for self-hosting
+1. **100% Pure Simple** - Self-hosted compiler written entirely in Simple
+2. **Self-Hosting** - Stage 3 complete: Simple compiles itself (fixed-point reached)
+3. **Multi-Backend** - LLVM, Cranelift, Native (x86-64, AArch64, RISC-V), WASM, C, Interpreter
+4. **Comprehensive Stdlib** - 1,546 files covering networking, crypto, data structures, MCP, testing
+5. **Numbered Compiler Layers** - 17 layers (00.common through 99.loader) with clear dependencies
+6. **Rust Seed Bootstrap** - Rust compiler bootstraps the pure Simple compiler, then self-hosted
+7. **12 disabled library directories deleted** - browser, coverage, doctest, electron, godot, graphics, ml, parser, ui, units, unreal, web removed from `compiler_rust/lib/std/`
 
 ---
 
 ## 1. Complete Directory Tree
 
-### 1.1 Core Simple Library (`src/compiler_core_legacy/` - 42 files, 17,871 lines)
+### 1.1 Compiler (`src/compiler/` - 918 files, 207,912 lines)
 
-**Purpose:** Seed-compilable core library for bootstrapping. Minimal dependencies, can compile through C seed compiler.
+**Purpose:** Self-hosted compiler written entirely in Simple. Organized into 17 numbered layers with clear dependency ordering. The number prefix (NN.) is stripped for imports.
 
-#### Key Modules
+#### Compiler Layer Architecture
 
-| File | Lines | Purpose | Key Types |
-|------|-------|---------|-----------|
-| `parser.spl` | 2,135 | Core parser (seed-compilable) | `CoreParser` |
-| `interpreter/eval.spl` | 1,797 | Tree-walk interpreter with JIT | `Interpreter` |
-| `ast.spl` | 922 | AST node definitions | `CoreExpr`, `CoreStmt`, `CoreDecl` |
-| `lexer.spl` | 829 | Lexical analysis | - |
-| `mir.spl` | 756 | Mid-level IR | `MirInst`, `MirBlock` |
-| `lexer_struct.spl` | 720 | Lexer state management | `CoreLexer` |
-| `types.spl` | 582 | Type system core | `TypeKind` |
-| `aop.spl` | 541 | Aspect-oriented programming | `Advice`, `AdviceKind` |
-| `type_checker.spl` | 442 | Type checking | `TypeChecker` |
-| `tokens.spl` | 446 | Token definitions | `TokenKind`, `Token` |
-| `type_inference.spl` | 415 | Type inference engine | `InferContext` |
-| `type_erasure.spl` | 302 | Generic type erasure | - |
-| `error.spl` | 178 | Error handling | `CompilerError` |
-| `backend_types.spl` | 156 | Backend type definitions | `BackendKind` |
+| Layer | Files | Lines | Purpose |
+|-------|-------|-------|---------|
+| `00.common/` | 40 | 6,933 | Error types, config, effects, visibility, diagnostics |
+| `10.frontend/` | 90 | 31,245 | Lexer, parser, AST, tree-sitter, desugar |
+| `15.blocks/` | 24 | 4,329 | Block definition system (custom blocks, testing blocks) |
+| `20.hir/` | 17 | 4,965 | HIR types, definitions, lowering, inference |
+| `25.traits/` | 8 | 1,932 | Trait def, impl, solver, coherence, validation |
+| `30.types/` | 53 | 18,901 | Type inference, type system, dimension constraints |
+| `35.semantics/` | 26 | 6,843 | Semantic analysis, lint, narrowing, safety checker |
+| `40.mono/` | 20 | 6,340 | Monomorphization, instantiation |
+| `50.mir/` | 15 | 4,521 | MIR types, data, instructions, lowering |
+| `55.borrow/` | 8 | 2,841 | Borrow checking, GC analysis |
+| `60.mir_opt/` | 21 | 7,208 | MIR optimization passes (vectorize, inline, const-fold, string_builder) |
+| `70.backend/` | 186 | 50,500 | Backends (LLVM, C, Cranelift, WASM, Native), linker, codegen |
+| `80.driver/` | 81 | 17,869 | Driver, pipeline, project, build mode, incremental |
+| `85.mdsoc/` | 118 | 4,655 | MDSOC (virtual capsules, feature, transform, weaving) |
+| `90.tools/` | 169 | 30,068 | API surface, coverage, query, symbol analyzer, AOP, lint |
+| `95.interp/` | 10 | 1,801 | Interpreter, MIR interpreter, execution |
+| `99.loader/` | 20 | 6,405 | Module resolver, loader, JIT instantiator |
+| `test*/` | 10 | 523 | Compiler test fixtures |
+| **Total** | **918** | **207,912** | |
 
-#### Subdirectories
+**Symlink:** `src/compiler/mdsoc/` -> `85.mdsoc/` (convenience alias)
 
-**`interpreter/` (7 files, 3,053 lines) - Core interpreter runtime**
+**Legacy empty dirs:** `backend/`, `common/`, `driver/`, `frontend/`, `interp/`, `linker/`, `loader/`, `mir/` (0 files each, remnants of pre-numbered layout)
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `eval.spl` | 1,797 | Expression/statement evaluation |
-| `env.spl` | 160 | Variable environment |
-| `value.spl` | 316 | Runtime values |
-| `ops.spl` | 236 | Operator implementations |
-| `module_loader.spl` | 278 | Module loading & imports |
-| `jit.spl` | 141 | JIT compilation |
-| `mod.spl` | 125 | Module entry points |
+#### Deleted Files (since 2026-02-16)
+- `00.common/registry/mod.spl` - Registry module removed
+- `core/aop_debug_log.spl` - AOP debug log removed
+- `core/backend_types.spl` - Backend types consolidated
+- `core/interpreter/jit.spl` - JIT moved to numbered layer
+- `core/lexer.spl` - Lexer moved to numbered layer
+- `linker/smf_reader.spl` - SMF reader removed
+- `99.loader/mod.spl` - Loader module entry point removed
 
-**`compiler/` (3 files, 2,463 lines) - Seed compiler support**
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `driver.spl` | 62 | Compiler driver |
-| `test.spl` | 62 | Compiler tests |
+#### New Files (since 2026-02-16)
+- `60.mir_opt/mir_opt/string_builder_opt.spl` - String builder optimization pass
 
 ---
 
-### 1.2 Standard Library (`src/lib/` - 909 files, 192,427 lines)
+### 1.2 Standard Library (`src/lib/` - 1,546 files, 317,086 lines)
 
-**Purpose:** Comprehensive standard library covering all common needs.
+**Purpose:** Comprehensive standard library covering all common needs. Accessible as `use std.X` or `use lib.X` (the module resolver rewrites `std` -> `lib` internally). `src/std/` is a symlink to `src/lib/`.
+
+#### Library Structure
+
+| Directory | Files | Lines | Purpose |
+|-----------|-------|-------|---------|
+| `common/` | 676 | 145,108 | Pure functions, no mutation (text, math, json, crypto, encoding) |
+| `nogc_sync_mut/` | 592 | 124,193 | Sync mutable, no GC (ffi, fs, net, http, database, mcp, spec) |
+| `nogc_async_mut/` | 148 | 29,972 | Async mutable, no GC (actors, async, threads, generators, mcp, llm) |
+| `nogc_async_mut_noalloc/` | 79 | 12,829 | Baremetal, execution, memory, qemu |
+| `gc_async_mut/` | 21 | 4,393 | GC + async (gpu, cuda, torch, pure ML library) |
+| `database/` | 12 | 129 | Database interfaces |
+| `ffi/` | 4 | 12 | FFI bridge utilities |
+| `async/` | 3 | 6 | Async primitives |
+| `sdn/` | 1 | 9 | SDN format |
+| Root files | 10 | ~444 | `__init__.spl`, `text.spl`, `string_core.spl`, etc. |
 
 #### Top 50 Modules by Size
 
@@ -148,253 +165,107 @@
 | **I/O** | ~30 | ~10,000 | File, binary, async I/O, streams |
 | **Concurrency** | ~25 | ~8,000 | Threads, actors, channels, locks |
 
-#### Platform Library (`src/lib/platform/` - 6 files, 414 lines)
-
-**Purpose:** Cross-platform abstraction (endianness, newlines, paths).
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `config.spl` | 127 | Platform config detection |
-| `convert.spl` | 108 | Endian/newline conversion |
-| `wire.spl` | 82 | Wire protocol serialization |
-| `text_io.spl` | 30 | Platform-aware file I/O |
-| `newline.spl` | 39 | Newline translation |
-| `mod.spl` | 28 | Public API |
-
 ---
 
-### 1.3 Applications (`src/app/` - 594 files, 129,154 lines)
+### 1.3 Applications (`src/app/` - 479 files, 75,423 lines)
 
-**Purpose:** CLI tools, build system, MCP servers, language servers, test runners.
+**Purpose:** CLI tools, build system, MCP servers, language servers, test runners. 95 subdirectories.
 
-#### Top 30 Applications
+#### Largest Applications (by file count/lines)
 
-| Application | Files | Lines | Purpose | Key Files |
-|-------------|-------|-------|---------|-----------|
-| `io/` | 40 | 11,190 | I/O subsystem (CLI, JIT, window, audio) | `cli_ops.spl` (664), `jit_ffi.spl` (621) |
-| `ffi_gen/` | 71 | 12,130 | FFI wrapper generator | `main.spl` (1,035), `parser.spl` |
-| `test_runner_new/` | 44 | 10,213 | Test runner & SDoctest | `test_runner_main.spl` (704) |
-| `parser/` | 39 | 9,176 | Parser tools & AST | `ast.spl` (899), `modules.spl` (616) |
-| `mcp/` | 28 | 8,394 | MCP servers (fileio, debug) | `fileio_main.spl` (717), `debug_tools.spl` (675) |
-| `build/` | 28 | 7,231 | Build system & bootstrap | `bootstrap_multiphase.spl` (1,544) |
-| `ffi_gen.specs/` | 41 | 6,608 | FFI generation specs | `cranelift_core.spl` (972) |
-| `mcp_jj/` | 19 | 4,654 | Jujutsu VCS MCP | `tools_jj.spl` (1,127), `tools_git.spl` (911) |
-| `lsp/` | 20 | 4,525 | Language Server Protocol | `server.spl` (649) |
-| `compile/` | 10 | 4,258 | C translation & codegen | `c_translate.spl` (1,896) |
-| `package/` | 26 | 3,615 | Package management | - |
-| `cli/` | 14 | 2,602 | CLI main & commands | `main.spl` (756) |
-| `wrapper_gen/` | 12 | 2,376 | Wrapper code generator | - |
-| `verify/` | 11 | 2,217 | Verification tools | - |
-| `dap/` | 9 | 2,141 | Debug Adapter Protocol | `server.spl` (755) |
-| `dashboard/` | 5 | 1,760 | Interactive dashboard | - |
-| `desugar/` | 6 | 1,454 | Static method desugaring | `static_methods.spl`, `rewriter.spl` |
-| `depgraph/` | 10 | 1,393 | Dependency graph | - |
-| `formatter/` | 1 | 704 | Code formatter | - |
-| `lint/` | 1 | 616 | Linter | - |
+| Application | Files | Lines | Purpose |
+|-------------|-------|-------|---------|
+| `test_runner_new/` | 51 | 12,368 | Test runner & SDoctest |
+| `io/` | 47 | 11,687 | I/O subsystem (CLI, JIT, window, audio) |
+| `cli/` | 32 | 7,795 | CLI main & commands |
+| `debug/` | 21 | 4,735 | Debugging tools |
+| `test/` | 17 | 4,604 | Test extraction & scaffolding |
+| `mcp/` | 11 | 4,045 | MCP servers (lazy CLI, debug, diag, protocol, query, tasks) |
+| `lsp/` | 15 | 3,251 | Language Server Protocol |
+| `dap/` | 13 | 3,188 | Debug Adapter Protocol |
+| `doc/` | 10 | 2,699 | Documentation tools |
+| `lsp.handlers/` | 7 | 2,094 | LSP handler implementations |
+| `stats/` | 12 | 2,000 | Statistics & doc coverage |
+| `test_daemon/` | 10 | 1,778 | Test daemon with caching & change detection |
+| `leak_check/` | 9 | 1,251 | Leak detection tools |
+| `compile/` | 8 | 1,011 | C translation & codegen |
+| `feature_doc/` | 7 | 901 | Feature documentation generator |
 
-#### Key Applications Detail
+#### New Applications (since 2026-02-16)
+- `yank/main.spl` - Package yank/unpublish tool
+- `test_daemon/manifest_daemon.spl` - Manifest-based test daemon
 
-**1. CLI (`cli/main.spl` - 756 lines)**
+#### Key Application Details
+
+**1. CLI (`cli/` - 32 files, 7,795 lines)**
 - Entry point for `bin/simple` binary
 - Command dispatch: build, test, run, compile
-- Functions: `main()`, `parse_args()`, `dispatch_command()`
+- Includes: `arch_check.spl`, `check_capsule.spl`, test commands
 
-**2. Build System (`build/` - 7,231 lines)**
-- Multi-phase bootstrap compilation
-- Native, WASM, bare-metal builds
-- Incremental compilation support
-
-**3. Test Runner (`test_runner_new/` - 10,213 lines)**
+**2. Test Runner (`test_runner_new/` - 51 files, 12,368 lines)**
 - SSpec test execution
-- SDoctest (executable docs) - 36/36 tests passing
+- SDoctest (executable docs)
 - Test report generation
-- Subdirectory: `sdoctest/` (9 files)
 
-**4. MCP Servers**
-- `mcp/fileio_main.spl` (717) - File operations
-- `mcp/debug_tools.spl` (675) - Debugging
-- `mcp_jj/tools_jj.spl` (1,127) - Jujutsu VCS
-- `mcp_jj/tools_git.spl` (911) - Git fallback
+**3. MCP Server (`mcp/` - 11 files, 4,045 lines)**
+- Lazy protocol, CLI tools, debug tools, debug log tools
+- Diagnostic tools, JSON handling, query tools
+- Task management, test daemon tools
 
-**5. FFI Generator (`ffi_gen/` - 12,130 lines)**
-- Two/three-tier FFI wrapper generation
-- Parses .sdn specs, generates .spl wrappers
-- 41 spec files in `ffi_gen.specs/`
+**4. Test Daemon (`test_daemon/` - 10 files, 1,778 lines)**
+- Change detection and caching
+- Dependency tracking
+- QEMU broker, manifest daemon
 
 ---
 
-### 1.4 Full Compiler (`src/compiler/` - 436 files, 140,341 lines)
+### 1.4 Rust Seed Bootstrap (`src/compiler_rust/` - 1,800 .rs files, 482,983 lines)
 
-**Purpose:** Full-featured compiler (Full Simple). Requires desugaring to run on Core Simple.
+**Purpose:** Rust implementation of the Simple compiler used to bootstrap the self-hosted Simple compiler. Contains both Rust source and a copy of the stdlib in `.spl` format.
 
-#### Top 40 Files
+| Component | Files | Lines | Purpose |
+|-----------|-------|-------|---------|
+| `compiler/src/` | 544 .rs | 194,251 | Core compiler (interpreter, values, builtins, macros) |
+| `parser/src/` | 87 .rs | 33,626 | Parser (lexer, AST, patterns) |
+| `lib/std/` | 712 .spl | 174,178 | Stdlib copy for Rust bootstrap |
+| Other .rs | 826 | ~255,106 | Runtime, driver, tests, common utilities |
 
-| File | Lines | Purpose | Key Types |
-|------|-------|---------|-----------|
-| `parser.spl` | 2,453 | Full parser with all features | `Parser` |
-| `treesitter/outline.spl` | 1,799 | Tree-sitter integration | `OutlineNode` |
-| `mir_opt/auto_vectorize.spl` | 1,528 | Auto-vectorization pass | `Vectorizer` |
-| `mir_lowering.spl` | 1,503 | HIR → MIR lowering | - |
-| `type_infer/inference.spl` | 1,437 | Type inference engine | `TypeInferencer` |
-| `monomorphize/deferred.spl` | 1,405 | Deferred monomorphization | `DeferredMonomorphizer` |
-| `lexer.spl` | 1,382 | Full lexer | `Lexer` |
-| `backend/llvm_ir_builder.spl` | 1,123 | LLVM IR generation | `LLVMIRBuilder` |
-| `backend/native/mod.spl` | 1,098 | Native backend entry | - |
-| `mir_data.spl` | 1,080 | MIR data structures | `MirInst`, `MirBlock` |
-| `backend/interpreter.spl` | 1,057 | Interpreter backend | `InterpreterBackend` |
-| `linker/linker_wrapper.spl` | 1,019 | Linker integration | - |
-| `mir_opt/loop_opt.spl` | 957 | Loop optimization | - |
-| `type_system/expr_infer.spl` | 928 | Expression type inference | - |
-| `backend/native/elf_writer.spl` | 921 | ELF file generation | - |
-| `resolve.spl` | 876 | Name resolution | - |
-| `driver.spl` | 856 | Compiler driver | - |
-| `parser_types.spl` | 841 | Parser type definitions | - |
-| `traits.spl` | 816 | Trait system | - |
-| `dim_constraints.spl` | 787 | Dimension checking (ML) | - |
-| `backend/lean_backend.spl` | 782 | Lean proof backend | - |
-| `smf_writer.spl` | 781 | SMF binary format writer | - |
-| `optimization_passes.spl` | 781 | Optimization pipeline | - |
-| `loader/compiler_ffi.spl` | 774 | Compiler FFI interface | - |
-| `build_native.spl` | 765 | Native build orchestration | - |
-| `backend/native/mach_inst.spl` | 753 | Machine instruction repr | - |
+**Deleted `.disabled` directories (12 removed):**
+- `browser.disabled`, `coverage.disabled`, `doctest.disabled`, `electron.disabled`
+- `godot.disabled`, `graphics.disabled`, `ml.disabled`, `parser.disabled`
+- `ui.disabled`, `units.disabled`, `unreal.disabled`, `web.disabled`
 
-#### Major Subsystems
-
-| Subsystem | Files | Lines | Description |
-|-----------|-------|-------|-------------|
-| `backend/` | 84 | ~28,000 | 8 backends (LLVM, Cranelift, Native, Interpreter, Lean, CUDA, Vulkan, WASM) |
-| `backend/native/` | 35 | ~12,000 | Native x86-64, AArch64, RISC-V (32/64) codegen |
-| `mir_opt/` | 18 | ~9,500 | MIR optimization (vectorize, inline, loop, const-fold) |
-| `type_system/` | 22 | ~8,200 | Type checking, inference, effects, traits |
-| `linker/` | 15 | ~6,800 | Linking & symbol resolution |
-| `monomorphize/` | 12 | ~5,500 | Generic monomorphization |
-| `hir_lowering/` | 10 | ~5,200 | HIR lowering passes |
-| `blocks/` | 8 | ~3,600 | Custom block system |
-| `gc_analysis/` | 6 | ~2,800 | Garbage collection analysis |
-
-#### Backend Type Mappers (7 files, 1,974 lines)
-
-| File | Lines | Maps Simple types to |
-|------|-------|----------------------|
-| `backend/llvm_type_mapper.spl` | 304 | LLVM types |
-| `backend/cranelift_type_mapper.spl` | 234 | Cranelift types |
-| `backend/wasm_type_mapper.spl` | 286 | WebAssembly types |
-| `backend/interpreter_type_mapper.spl` | 236 | Interpreter values |
-| `backend/cuda_type_mapper.spl` | 317 | CUDA/PTX types |
-| `backend/vulkan_type_mapper.spl` | 384 | SPIR-V types |
-| `backend/vhdl_type_mapper.spl` | 213 | VHDL hardware types |
-
-**Pattern:** 30-40% structural overlap. Each backend has unique type requirements.
-
-#### Native Backend ISel (4 architectures, 2,480 lines)
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `backend/native/isel_x86_64.spl` | 669 | x86-64 instruction selection |
-| `backend/native/isel_aarch64.spl` | 601 | AArch64 instruction selection |
-| `backend/native/isel_riscv64.spl` | 595 | RISC-V 64-bit isel |
-| `backend/native/isel_riscv32.spl` | 615 | RISC-V 32-bit isel |
-
-**Pattern:** 60-70% structural overlap. Similar MIR → machine instruction logic.
-
-#### Native Backend Encoding (4 files, ~2,200 lines)
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `backend/native/encode_x86_64.spl` | ~600 | x86-64 machine code encoding |
-| `backend/native/encode_aarch64.spl` | ~550 | AArch64 encoding |
-| `backend/native/encode_riscv64.spl` | ~550 | RISC-V 64-bit encoding |
-| `backend/native/encode_riscv32.spl` | ~500 | RISC-V 32-bit encoding |
-
-**Pattern:** 50-60% overlap. Architecture-specific byte encodings.
+No `.disabled` directories remain anywhere in the codebase.
 
 ---
 
-### 1.5 Core Compiler (`src/compiler_core_legacy/` - 441 files, 97,057 lines)
-
-**Purpose:** Core Simple version of compiler (subset). Can run on seed compiler.
-
-**Key Differences from `src/compiler/`:**
-- 69% of lines (97,057 vs 140,341)
-- Simplified features (no higher-kinded types)
-- Fewer optimization passes
-- Can bootstrap from seed compiler
-
-**Intentional Duplication:** ~15,000 lines for bootstrap purposes. Required until Full Simple → Core Simple desugaring is complete.
-
-**Documented in:**
-- `src/compiler/README.md`
-- `src/compiler_core_legacy/README.md`
-- `doc/report/duplication_phase3_summary.md`
-
----
-
-### 1.6 Libraries (`src/lib/` - 123 files, 30,993 lines)
-
-**Purpose:** Core libraries (database, actors, ML, parsers).
-
-#### Top 25 Files
-
-| File | Lines | Purpose | Key Types |
-|------|-------|---------|-----------|
-| `parser/parser.spl` | 1,071 | Parser library | `Parser` |
-| `pure/parser.spl` | 1,056 | Pure functional parser | `PureParser` |
-| `pure/evaluator.spl` | 962 | Pure evaluator | `Evaluator` |
-| `database/test_extended/database.spl` | 900 | Extended DB tests | - |
-| `pure/parser_old.spl` | 858 | Old parser (legacy) | - |
-| `qemu/debug_boot_runner.spl` | 585 | QEMU debugging | `DebugBootRunner` |
-| `database/core.spl` | 510 | BugDB, TestDB, FeatureDB | `BugDB`, `TestDB`, `FeatureDB` |
-| `actor_scheduler.spl` | 458 | Actor runtime scheduler | `ActorScheduler` |
-| `memory/refc_binary.spl` | 453 | Ref-counted binary data | `BinaryRef` |
-| `qemu/mod.spl` | 453 | QEMU integration | - |
-| `collections/lazy_seq.spl` | 434 | Lazy sequences | - |
-| `pure/test/benchmark.spl` | 424 | ML benchmarks | - |
-| `database/test_extended/queries.spl` | 413 | Query builder tests | - |
-| `perf.spl` | 405 | Performance profiling | - |
-| `message_transfer.spl` | 401 | Message passing | - |
-| `pure/autograd.spl` | 389 | Automatic differentiation | `AutogradEngine` |
-| `database/bug.spl` | 383 | Bug tracking | `BugDatabase` |
-| `pure/training.spl` | 382 | ML training loops | `TrainingLoop` |
-| `pure/autograd_global.spl` | 368 | Global autograd state | - |
-| `json/builder.spl` | 354 | JSON builder (fluent API) | `JsonBuilder` |
-
-#### Key Libraries
-
-**1. Database (`database/` - 6 files, 2,479 lines)**
-- `core.spl` (510) - BugDB, TestDB, FeatureDB, QueryBuilder
-- `bug.spl` (383) - Bug tracking
-- Status: 98/115 tests passing (85.2%), production-ready
-
-**2. Actor System (2 files, 565 lines)**
-- `actor_scheduler.spl` (458) - Message-passing concurrency
-- `actor_heap.spl` (107) - Actor heap management
-
-**3. Pure ML (`pure/` - 12 files, ~5,500 lines)**
-- Automatic differentiation
-- Training loops
-- Tensor operations
-- Hybrid CPU/GPU acceleration
-
-**4. Parser Library (3 implementations, ~2,985 lines)**
-- `parser/parser.spl` (1,071) - Imperative parser
-- `pure/parser.spl` (1,056) - Functional parser
-- `pure/parser_old.spl` (858) - Legacy parser
-
----
-
-### 1.7 Other Directories
+### 1.5 Other Source Directories
 
 | Directory | Files | Lines | Purpose |
 |-----------|-------|-------|---------|
-| `baremetal/` | 36 | 4,829 | Bare-metal runtime (no OS) |
-| `remote/` | 15 | 3,964 | Remote execution & RPC |
-| `ffi/` | 11 | 1,808 | FFI bridge utilities |
-| `diagnostics/` | 10 | 1,152 | Diagnostic formatting |
-| `mcp_lib/` | 8 | 796 | MCP protocol library |
-| `shared/` | 5 | 571 | Shared utilities |
-| `diagnostics_minimal/` | 5 | 328 | Minimal diagnostics |
-| `test/` | 4 | 1,728 | Test utilities |
-| `shared/llvm/` | 3 | 369 | LLVM shared code |
+| `src/compiler_cpp/` | 15 (C) | 16,208 | Generated C from Simple source (temporal bootstrap via CMake+Ninja) |
+| `src/runtime/` | 48 (C) | 12,374 | C runtime (runtime.c/runtime.h linked by generated C++) |
+| `src/i18n/` | 29 (.spl) | 4,801 | Internationalization |
+| `src/lib/ffi/` | 4 (.spl) | 12 | FFI bridge utilities |
+
+**Removed directories (no longer exist):**
+- `src/compiler_core_legacy/` - Core compiler merged into `src/compiler/`
+- `src/baremetal/` - Bare-metal runtime merged into library
+- `src/remote/` - Remote execution merged into library
+
+---
+
+### 1.6 Test Suite (`test/` - 1,772 files, 327,890 lines)
+
+| Directory | Files | Purpose |
+|-----------|-------|---------|
+| `test/unit/` | 1,318 | Unit tests |
+| `test/feature/` | 326 | Feature tests |
+| `test/integration/` | 47 | Integration tests |
+| `test/system/` | 10 | System tests (including LLM live tests) |
+| `test/perf/` | 7 | Performance benchmarks |
+| `test/fuzz/` | 3 | Fuzz tests |
+| Other | 61 | Fixtures, examples, manual, deploy, benchmarks |
 
 ---
 
@@ -502,10 +373,8 @@ val json = json_object([
 - `backend/vhdl_type_mapper.spl` (213 lines)
 - `backend/lean_type_mapper.spl` (~150 lines)
 
-**Plus duplicates in `compiler_core_legacy/` (7 files, ~800 lines)**
-
-**Total:** ~2,774 lines (compiler/) + ~800 lines (compiler_core_legacy/) = **~3,574 lines**
-**Estimated structural overlap:** 30-40% (~1,070-1,430 lines)
+**Total:** ~2,774 lines
+**Estimated structural overlap:** 30-40% (~830-1,110 lines)
 
 **Common pattern:**
 ```simple
@@ -528,22 +397,17 @@ fn map_type(ty: TypeKind) -> BackendType:
 
 ---
 
-#### 5. Parser (3 implementations)
+#### 5. Parser (multiple implementations)
 
 **Files involved:**
-- `src/compiler_core_legacy/parser.spl` (2,135 lines) - Seed-compilable
-- `src/lib/parser/parser.spl` (1,071 lines) - Library parser
-- `src/lib/pure/parser.spl` (1,056 lines) - Functional parser
-- `src/lib/pure/parser_old.spl` (858 lines) - Legacy
-
-**Total:** ~5,120 lines
-**Estimated structural overlap:** 40-50% (~2,000-2,500 lines)
+- `src/compiler/10.frontend/core/parser.spl` + `parser_expr.spl` + `parser_primary.spl` - Self-hosted compiler parser
+- `src/compiler_rust/parser/src/` (87 .rs files) - Rust bootstrap parser
+- Various library parsers in `src/lib/`
 
 **Why it exists:**
-- `compiler_core_legacy/parser.spl` - Bootstrap (seed-compilable, minimal deps)
-- `lib/parser/parser.spl` - General-purpose library parser
-- `lib/pure/parser.spl` - Functional parser (combinator-based)
-- `lib/pure/parser_old.spl` - Legacy (should be removed)
+- Self-hosted parser in Simple for the production compiler
+- Rust parser for bootstrapping
+- Library parsers for user-facing parser combinators
 
 **Common patterns:**
 - Token consumption: `expect()`, `consume()`, `peek()`
@@ -551,23 +415,23 @@ fn map_type(ty: TypeKind) -> BackendType:
 - Precedence climbing
 - Error recovery
 
-**Impact:** High (maintenance burden, but required for bootstrap)
+**Impact:** Medium (bootstrap requires dual implementation, but well-separated)
 
 ---
 
 #### 6. Native Backend ISel (4 architectures)
 
 **Files involved:**
-- `compiler/backend/native/isel_x86_64.spl` (669 lines)
-- `compiler/backend/native/isel_aarch64.spl` (601 lines)
-- `compiler/backend/native/isel_riscv64.spl` (595 lines)
-- `compiler/backend/native/isel_riscv32.spl` (615 lines)
+- `compiler/70.backend/backend/native/isel_x86_64.spl` (669 lines)
+- `compiler/70.backend/backend/native/isel_aarch64.spl` (601 lines)
+- `compiler/70.backend/backend/native/isel_riscv64.spl` (595 lines)
+- `compiler/70.backend/backend/native/isel_riscv32.spl` (615 lines)
 
 **Plus encoding files:**
-- `encode_x86_64.spl` (~600 lines)
-- `encode_aarch64.spl` (~550 lines)
-- `encode_riscv64.spl` (~550 lines)
-- `encode_riscv32.spl` (~500 lines)
+- `70.backend/backend/native/encode_x86_64.spl` (~600 lines)
+- `70.backend/backend/native/encode_aarch64.spl` (~550 lines)
+- `70.backend/backend/native/encode_riscv64.spl` (~550 lines)
+- `70.backend/backend/native/encode_riscv32.spl` (~500 lines)
 
 **Total:** 2,480 (isel) + 2,200 (encode) = **4,680 lines**
 **Estimated overlap:** 60-70% (~2,800-3,275 lines)
@@ -628,19 +492,15 @@ fn select_inst(mir: MirInst) -> MachInst:
 
 ### MEDIUM DUPLICATIONS
 
-#### 8. Lexer (3 implementations)
+#### 8. Lexer (2 implementations)
 
 **Files involved:**
-- `src/compiler_core_legacy/lexer.spl` (829 lines) + `lexer_struct.spl` (720 lines) = 1,549 lines
-- `src/compiler/lexer.spl` (1,382 lines)
-- `src/compiler_core_legacy/lexer.spl` (~1,200 lines estimated)
+- `src/compiler/10.frontend/core/lexer.spl` - Self-hosted lexer (Simple)
+- `src/compiler_rust/parser/src/` - Rust bootstrap lexer
 
-**Total:** ~4,131 lines
-**Estimated overlap:** 70-80% (~2,890-3,305 lines)
+**Why it exists:** Bootstrap requires both Simple and Rust implementations
 
-**Why it exists:** Bootstrap duplication (documented, intentional)
-
-**Impact:** Medium (maintenance burden)
+**Impact:** Medium (maintenance burden, but well-separated by language)
 
 ---
 
@@ -739,7 +599,7 @@ fn select_inst(mir: MirInst) -> MachInst:
    - Keep `string_core.spl` for now (internal APIs)
 
 7. **Week 2, Day 4-5:** Verification
-   - Run full test suite (4,067 tests)
+   - Run full test suite (full test suite)
    - Check no regressions
    - Update documentation
 
@@ -1006,33 +866,24 @@ class X86_64ISA:
 
 ### Module Hierarchy
 
-**Current issue:** Flat structure in `src/lib/` (909 files)
-
-**Proposal:** Organize into subdirectories by category
+**Current state:** `src/lib/` is now organized by mutation/GC category:
 
 ```
 src/lib/
-  core/           # String, array, option, result (core data types)
-  collections/    # Advanced data structures (skiplist, graph, tree)
-  algorithms/     # Sorting, searching, graph algorithms
-  io/             # File I/O, binary I/O, streams
-  net/            # HTTP, TCP, UDP, WebSocket
-  crypto/         # Cryptography modules
-  serialization/  # JSON, CBOR, YAML, XML, etc.
-  math/           # Math, linear algebra, stats
-  ml/             # Machine learning (tensors, training)
-  testing/        # Testing utilities
-  concurrent/     # Concurrency primitives
+  common/                  # 676 files - Pure functions, no mutation
+  nogc_sync_mut/           # 592 files - Sync mutable, no GC
+  nogc_async_mut/          # 148 files - Async mutable, no GC
+  gc_async_mut/            #  21 files - GC + async (GPU, ML)
+  nogc_async_mut_noalloc/  #  79 files - Baremetal, no alloc
+  database/                #  12 files - Database interfaces
+  ffi/                     #   4 files - FFI bridge
+  async/                   #   3 files - Async primitives
+  sdn/                     #   1 file  - SDN format
 ```
 
-**Benefits:**
-- Easier navigation
-- Clearer module relationships
-- Reduced name collisions
+**Note:** This category-based organization was adopted since 2026-02-16. Within each category, modules are organized by domain (e.g., `common/json/`, `common/crypto/`, `nogc_sync_mut/mcp/`).
 
-**Risk:** Medium (breaks existing imports)
-
-**Timeline:** 2-3 weeks (gradual migration with forwarding modules)
+**Remaining improvement:** Within `common/` (676 files), some naming inconsistencies persist (`*_utils.spl` overuse).
 
 ---
 
@@ -1141,11 +992,11 @@ src/lib/
 
 #### 1. Lexer/Parser Bootstrap Duplication
 
-**Files:** `compiler_core_legacy/lexer.spl`, `compiler/lexer.spl`, `compiler_core_legacy/lexer.spl`
+**Files:** `compiler/10.frontend/core/lexer.spl` (Simple), `compiler_rust/parser/src/` (Rust)
 
-**Reason:** Required for self-hosting bootstrap
-**Status:** Documented in `src/compiler/README.md`
-**Decision:** Keep as-is until desugaring pipeline is complete
+**Reason:** Required for self-hosting bootstrap (Rust seeds Simple)
+**Status:** Documented, intentional
+**Decision:** Keep as-is (two different languages, necessary for bootstrap)
 
 ---
 
@@ -1192,7 +1043,7 @@ src/lib/
 **Deliverables:**
 - ~2,300 lines removed
 - ~300 files updated
-- Full test suite passing (4,067 tests)
+- Full test suite passing (full test suite)
 
 **Dependencies:** None
 
@@ -1266,7 +1117,7 @@ src/lib/
 **For each phase:**
 
 1. **Regression Testing**
-   - Run full test suite (4,067 tests)
+   - Run full test suite (full test suite)
    - Zero tolerance for failures
    - Run after each batch of changes (not just at end)
 
@@ -1309,42 +1160,35 @@ src/lib/
 
 ## 8. Summary Statistics & Health Metrics
 
-### Codebase Health (2026-02-16)
+### Codebase Health (2026-03-02)
 
 | Metric | Value | Target | Status |
 |--------|-------|--------|--------|
-| **Total Files** | 2,649 | - | - |
-| **Total Lines (src/)** | 111,044 | - | - |
-| **Test Coverage** | 4,067/4,067 (100%) | 100% | ✅ |
-| **Intentional Duplication** | ~15,000 (13.5%) | Documented | ✅ |
-| **Addressable Duplication** | ~14,800 (13.3%) | <10% | ⚠️ |
-| **High-Risk Files** | 8 ISA files | Stable | ⚠️ |
+| **Total .spl Files (src/)** | 3,708 | - | - |
+| **Total .spl Lines (src/)** | 779,948 | - | - |
+| **Rust Lines** | 482,983 | - | Bootstrap seed |
+| **C Lines** | 28,582 | - | Bootstrap + runtime |
+| **Test Files** | 1,772 | - | - |
+| **Test Lines** | 327,890 | - | - |
+| **Compiler Layers** | 17 | - | Numbered 00-99 |
+| **Self-Hosting** | Stage 3 | Complete | Fixed-point reached |
+| **Disabled Lib Dirs Deleted** | 12 | 0 remaining | Cleanup complete |
 
-### Duplication Breakdown
+### Architecture Overview
 
-| Category | Lines | % of Codebase | Status | Priority |
-|----------|-------|---------------|--------|----------|
-| **Bootstrap (compiler_core_legacy/)** | ~15,000 | 13.5% | Documented | N/A |
-| **String/Array utilities** | ~3,000 | 2.7% | Addressable | P1 |
-| **Phase files** | ~8,000 | 7.2% | Addressable | P2 |
-| **Type mappers** | ~3,500 | 3.2% | Backend-specific | P3 |
-| **Parser triplication** | ~5,100 | 4.6% | Bootstrap | N/A |
-| **ISA encoders** | ~4,700 | 4.2% | Cross-platform | P3 |
-| **Other** | ~2,000 | 1.8% | Various | P2 |
-| **Total Duplication** | ~41,300 | 37.2% | - | - |
+| Component | Files | Lines | Language | Role |
+|-----------|-------|-------|----------|------|
+| **Self-hosted compiler** | 918 .spl | 207,912 | Simple | Production compiler |
+| **Standard library** | 1,546 .spl | 317,086 | Simple | `use std.X` imports |
+| **Applications** | 479 .spl | 75,423 | Simple | CLI, MCP, LSP, test runner |
+| **Rust bootstrap** | 1,800 .rs | 482,983 | Rust | Seed compiler for bootstrapping |
+| **Rust stdlib copy** | 712 .spl | 174,178 | Simple | Stdlib for Rust bootstrap |
+| **C bootstrap** | 15 .c | 16,208 | C | Generated C dispatcher |
+| **C runtime** | 48 .c/.h | 12,374 | C | Runtime linked by generated C++ |
+| **i18n** | 29 .spl | 4,801 | Simple | Internationalization |
+| **Tests** | 1,772 .spl | 327,890 | Simple | Unit, integration, system, feature |
 
-**Note:** Total exceeds addressable because bootstrap duplication is intentional.
-
-### Refactoring ROI Analysis
-
-| Phase | Duration | Lines Saved | Files Updated | ROI (lines/day) |
-|-------|----------|-------------|---------------|-----------------|
-| **Phase 1 (Quick Wins)** | 5 weeks | 2,300 | 296 | 92 |
-| **Phase 2 (Medium-term)** | 12 weeks | 9,600 | 1,063 | 160 |
-| **Phase 3 (Long-term)** | 7 months | 3,000 | 24 | 21 |
-| **Total** | 14+ months | 14,900 | 1,383 | 36 |
-
-**Recommendation:** Focus on Phase 1 (highest ROI, lowest risk)
+**Recommendation:** Focus on Phase 1 refactoring (highest ROI, lowest risk)
 
 ---
 
@@ -1352,51 +1196,55 @@ src/lib/
 
 ### Architectural Insights
 
-1. **Bootstrap Complexity is Acceptable**
-   - 3 compiler implementations (core, compiler_core_legacy, compiler)
-   - ~15,000 lines duplicated for self-hosting
-   - Well-documented, intentional
-   - **Recommendation:** Keep until desugaring pipeline complete
+1. **Self-Hosting is Complete**
+   - Stage 3 reached: Simple compiles itself (fixed-point)
+   - `compiler_core_legacy/` has been merged/removed
+   - Rust seed compiler bootstraps the Simple compiler
+   - **Status:** Production-ready self-hosted compiler
 
-2. **Standard Library Needs Organization**
-   - 909 files, 192K lines
-   - Flat structure causes confusion
-   - ~3,000 lines duplicated in string/array utilities
-   - **Recommendation:** Reorganize into subdirectories (Phase 2)
+2. **Numbered Compiler Layers Are Well-Organized**
+   - 17 layers (00-99) with clear dependency ordering
+   - Layer numbers stripped for import paths
+   - Legacy empty dirs remain as remnants but contain no files
+   - **Recommendation:** Clean up empty legacy dirs when convenient
 
-3. **Backend Architecture is Sound**
-   - 8 backends, each with unique requirements
+3. **Standard Library is Comprehensive and Well-Categorized**
+   - 1,546 files, 317K lines organized by mutation/GC category
+   - `common/` (676 files) - Pure functions, largest category
+   - `nogc_sync_mut/` (592 files) - Sync mutable operations
+   - `nogc_async_mut/` (148 files) - Async operations including MCP
+   - **Recommendation:** Continue category-based organization
+
+4. **Backend Architecture is Sound**
+   - Backends in `70.backend/` (186 files, 50K lines)
    - Type mapper duplication is acceptable for now
    - ISA encoder duplication is high-risk to change
    - **Recommendation:** Wait for trait system before abstracting
 
-4. **Testing Infrastructure is Excellent**
-   - 4,067/4,067 tests passing (100%)
-   - SSpec BDD framework mature
-   - SDoctest system working (36/36 tests)
-   - **Recommendation:** Maintain test-first discipline during refactoring
+5. **12 Disabled Library Directories Cleaned Up**
+   - browser, coverage, doctest, electron, godot, graphics, ml, parser, ui, units, unreal, web
+   - All removed from `compiler_rust/lib/std/src/`
+   - No `.disabled` directories remain
 
 ### Strengths
 
-✅ **Well-documented bootstrap duplication**
-✅ **Clear directory structure**
-✅ **100% test coverage**
-✅ **Consistent naming (mostly)**
-✅ **Comprehensive standard library**
-✅ **Self-hosting compiler**
+- Well-organized numbered compiler layers
+- Self-hosting compiler with fixed-point bootstrap
+- Comprehensive standard library (1,546 files)
+- Category-based library organization (common, nogc_sync_mut, etc.)
+- MCP handler adapters properly placed in async layer
+- Clean codebase (no disabled directories remaining)
 
 ### Weaknesses
 
-⚠️ **String/array utilities scattered**
-⚠️ **Phase files clutter compiler/**
-⚠️ **Flat stdlib hierarchy**
-⚠️ **Some inconsistent naming (`*_utils` overuse)**
-⚠️ **Validator pattern not abstracted**
+- String/array utilities scattered across library
+- Some legacy empty directories in compiler/
+- Some inconsistent naming (`*_utils` overuse in common/)
 
 ### Maintenance Burden
 
 **High-Maintenance Areas:**
-1. compiler/ ↔ compiler_core_legacy/ synchronization (~15,000 lines)
+1. Rust bootstrap ↔ Simple compiler synchronization
 2. Phase files (27 files, manual tracking)
 3. Backend type mappers (16 files, backend-specific changes)
 4. ISA encoders (8 files, architecture-specific)
@@ -1428,7 +1276,7 @@ src/lib/
 3. **Week 1-2: String Consolidation**
    - Follow Recommendation 1 action plan
    - Update ~150 import statements
-   - Verify 4,067 tests still pass
+   - Verify full test suite still pass
 
 4. **Week 3: Array Consolidation**
    - Follow Recommendation 2 action plan
@@ -1466,49 +1314,62 @@ src/lib/
 
 ```bash
 # Find all .spl files
-find src/ -name "*.spl"
+find src/ -name "*.spl" -not -path "*/compiler/mdsoc/*" -not -path "src/std/*"
 
 # Count lines by directory
 for dir in src/*/; do
   echo "$(basename "$dir"): $(find "$dir" -name "*.spl" -exec wc -l {} + 2>/dev/null | tail -1)"
 done
 
+# Count compiler layer files
+for dir in src/compiler/[0-9]*/; do
+  count=$(find "$dir" -name "*.spl" | wc -l)
+  echo "$(basename "$dir"): $count files"
+done
+
 # Find duplicate function names across files
 grep -rh "^fn " src/ --include="*.spl" | sort | uniq -c | sort -rn | head -30
 
 # Find all imports of a module
-grep -r "use std.text_utils" src/ test/
+grep -r "use std.text" src/ test/
 
 # Find all type mapper files
-find src/ -name "*_type_mapper.spl"
+find src/compiler/70.backend/ -name "*_type_mapper.spl"
 
 # Count ISA files
-find src/compiler/backend/native -name "isel_*.spl" -o -name "encode_*.spl"
+find src/compiler/70.backend/backend/native -name "isel_*.spl" -o -name "encode_*.spl"
 ```
 
 ### Key Files to Review
 
 **Documentation:**
-- `CLAUDE.md` - Development guide (this document)
-- `src/compiler/README.md` - Compiler bootstrap duplication
-- `src/compiler_core_legacy/README.md` - Core compiler documentation
+- `CLAUDE.md` - Development guide
 - `doc/guide/syntax_quick_reference.md` - Language syntax
 
 **Core Implementation:**
-- `src/compiler_core_legacy/parser.spl` (2,135 lines) - Bootstrap parser
-- `src/lib/spec.spl` (694 lines) - SSpec testing framework
-- `src/app/cli/main.spl` (756 lines) - CLI entry point
-- `src/compiler/driver.spl` (856 lines) - Compiler driver
+- `src/compiler/10.frontend/core/parser.spl` - Self-hosted parser
+- `src/compiler/10.frontend/core/lexer.spl` - Self-hosted lexer
+- `src/compiler/80.driver/` - Compiler driver & pipeline
+- `src/app/cli/` - CLI entry point & commands
+- `src/app/mcp/` - MCP server implementation
+
+**Compiler Layers (key entry points):**
+- `src/compiler/10.frontend/` - Frontend (lexer, parser, AST, tree-sitter)
+- `src/compiler/30.types/` - Type inference & type system
+- `src/compiler/70.backend/` - All backends (LLVM, C, Cranelift, WASM, Native)
+- `src/compiler/85.mdsoc/` - MDSOC capsule system
+- `src/compiler/90.tools/` - Developer tools (lint, AOP, coverage, query)
 
 **Duplication Hotspots:**
-- `src/lib/text.spl`, `src/lib/text_utils.spl` - String processing
-- `src/compiler/backend/*_type_mapper.spl` - Backend type mappers
-- `src/compiler/backend/native/isel_*.spl` - ISA instruction selection
+- `src/lib/common/text.spl`, string utilities - String processing
+- `src/compiler/70.backend/backend/*_type_mapper.spl` - Backend type mappers
+- `src/compiler/70.backend/backend/native/isel_*.spl` - ISA instruction selection
 
 ---
-vscode-remote://tunnel%2Bdl/home/ormastes/dev/pub/simple/dist
-**Document Version:** 2.0
-**Date:** 2026-02-16
-**Author:** Claude Sonnet 4.5 (Explore Agent)
-**Status:** Comprehensive refactoring guide with actionable recommendations
-**Next Review:** After Phase 1 completion (5 weeks)
+
+**Document Version:** 3.0
+**Date:** 2026-03-02
+**Author:** Claude Opus 4.6
+**Status:** Comprehensive inventory updated to reflect numbered compiler layers, deleted legacy dirs, self-hosting completion
+**Previous Version:** 2.0 (2026-02-16, Claude Sonnet 4.5)
+**Next Review:** After Phase 1 completion

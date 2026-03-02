@@ -31,7 +31,7 @@ pub(crate) fn call_method_on_value(
             "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
             "to_string" => return Ok(Value::Str(s.clone())),
-            "chars" => return Ok(Value::Array(s.chars().map(|c| Value::Str(c.to_string())).collect())),
+            "chars" => return Ok(Value::array(s.chars().map(|c| Value::Str(c.to_string())).collect())),
             "trim" | "strip" => return Ok(Value::Str(s.trim().to_string())),
             "to_upper" | "upper" | "uppercase" => return Ok(Value::Str(s.to_uppercase())),
             "to_lower" | "lower" | "lowercase" => return Ok(Value::Str(s.to_lowercase())),
@@ -157,15 +157,15 @@ pub(crate) fn call_method_on_value(
                 return Ok(Value::Str(joined));
             }
             "reverse" | "reversed" => {
-                let mut rev = arr.clone();
+                let mut rev = arr.to_vec();
                 rev.reverse();
-                return Ok(Value::Array(rev));
+                return Ok(Value::array(rev));
             }
             "map" => {
                 if let Some(func_val) = _args.first() {
                     if let Value::Function { def, captured_env, .. } = func_val {
                         let mut result = Vec::new();
-                        for item in arr {
+                        for item in arr.iter() {
                             let mut call_env = captured_env.clone();
                             let val = exec_function_with_values(
                                 def,
@@ -178,16 +178,16 @@ pub(crate) fn call_method_on_value(
                             )?;
                             result.push(val);
                         }
-                        return Ok(Value::Array(result));
+                        return Ok(Value::array(result));
                     }
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.to_vec()));
             }
             "filter" => {
                 if let Some(func_val) = _args.first() {
                     if let Value::Function { def, captured_env, .. } = func_val {
                         let mut result = Vec::new();
-                        for item in arr {
+                        for item in arr.iter() {
                             let mut call_env = captured_env.clone();
                             let val = exec_function_with_values(
                                 def,
@@ -202,16 +202,16 @@ pub(crate) fn call_method_on_value(
                                 result.push(item.clone());
                             }
                         }
-                        return Ok(Value::Array(result));
+                        return Ok(Value::array(result));
                     }
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.to_vec()));
             }
             "flat_map" | "flatmap" => {
                 if let Some(func_val) = _args.first() {
                     if let Value::Function { def, captured_env, .. } = func_val {
                         let mut result = Vec::new();
-                        for item in arr {
+                        for item in arr.iter() {
                             let mut call_env = captured_env.clone();
                             let val = exec_function_with_values(
                                 def,
@@ -223,39 +223,39 @@ pub(crate) fn call_method_on_value(
                                 _impl_methods,
                             )?;
                             if let Value::Array(inner) = val {
-                                result.extend(inner);
+                                result.extend(inner.iter().cloned());
                             } else {
                                 result.push(val);
                             }
                         }
-                        return Ok(Value::Array(result));
+                        return Ok(Value::array(result));
                     }
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.to_vec()));
             }
             "sort" | "sorted" => {
-                let mut sorted = arr.clone();
+                let mut sorted = arr.to_vec();
                 sorted.sort_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
                     (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
-                return Ok(Value::Array(sorted));
+                return Ok(Value::array(sorted));
             }
             "sum" => {
                 let mut total = 0i64;
                 let mut is_float = false;
                 let mut ftotal = 0.0f64;
-                for item in arr {
+                for item in arr.iter() {
                     match item {
                         Value::Int(n) => {
-                            total += n;
+                            total += *n;
                             ftotal += *n as f64;
                         }
                         Value::Float(f) => {
                             is_float = true;
-                            ftotal += f;
+                            ftotal += *f;
                         }
                         _ => {}
                     }
@@ -269,7 +269,7 @@ pub(crate) fn call_method_on_value(
             "any" => {
                 if let Some(func_val) = _args.first() {
                     if let Value::Function { def, captured_env, .. } = func_val {
-                        for item in arr {
+                        for item in arr.iter() {
                             let mut call_env = captured_env.clone();
                             let val = exec_function_with_values(
                                 def,
@@ -292,7 +292,7 @@ pub(crate) fn call_method_on_value(
             "all" => {
                 if let Some(func_val) = _args.first() {
                     if let Value::Function { def, captured_env, .. } = func_val {
-                        for item in arr {
+                        for item in arr.iter() {
                             let mut call_env = captured_env.clone();
                             let val = exec_function_with_values(
                                 def,
@@ -318,7 +318,7 @@ pub(crate) fn call_method_on_value(
                     .enumerate()
                     .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v.clone()]))
                     .collect();
-                return Ok(Value::Array(result));
+                return Ok(Value::array(result));
             }
             "zip" => {
                 if let Some(Value::Array(other)) = _args.first() {
@@ -327,9 +327,9 @@ pub(crate) fn call_method_on_value(
                         .zip(other.iter())
                         .map(|(a, b)| Value::Tuple(vec![a.clone(), b.clone()]))
                         .collect();
-                    return Ok(Value::Array(result));
+                    return Ok(Value::array(result));
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.to_vec()));
             }
             "unwrap_or" => {
                 if let Some(default) = _args.first() {
@@ -337,7 +337,7 @@ pub(crate) fn call_method_on_value(
                         return Ok(default.clone());
                     }
                 }
-                return Ok(Value::Array(arr.clone()));
+                return Ok(Value::array(arr.to_vec()));
             }
             _ => {}
         },

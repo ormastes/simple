@@ -210,10 +210,10 @@ impl WeavingConfig:
         var around: [WeavingRule] = []
         for rule in rules:
             match rule.form:
-                case Before: before = before + [rule]
-                case AfterSuccess: after_success = after_success + [rule]
-                case AfterError: after_error = after_error + [rule]
-                case Around: around = around + [rule]
+                case Before: before.push(rule)
+                case AfterSuccess: after_success.push(rule)
+                case AfterError: after_error.push(rule)
+                case Around: around.push(rule)
         val has_rules = rules.len() > 0
         WeavingConfig(enabled: has_rules, before_advices: before,
                       after_success_advices: after_success,
@@ -222,13 +222,13 @@ impl WeavingConfig:
 fn weavingconfig_all_rules(config: WeavingConfig) -> [WeavingRule]:
     var result: [WeavingRule] = []
     for rule in config.before_advices:
-        result = result + [rule]
+        result.push(rule)
     for rule in config.after_success_advices:
-        result = result + [rule]
+        result.push(rule)
     for rule in config.after_error_advices:
-        result = result + [rule]
+        result.push(rule)
     for rule in config.around_advices:
-        result = result + [rule]
+        result.push(rule)
     result
 
 # ============================================================================
@@ -303,14 +303,14 @@ fn weavingresult_errors(result: WeavingResult) -> [WeavingDiagnostic]:
     var out: [WeavingDiagnostic] = []
     for d in result.diagnostics:
         if d.is_error():
-            out = out + [d]
+            out.push(d)
     out
 
 fn weavingresult_warnings(result: WeavingResult) -> [WeavingDiagnostic]:
     var out: [WeavingDiagnostic] = []
     for d in result.diagnostics:
         if d.is_warning():
-            out = out + [d]
+            out.push(d)
     out
 
 # ============================================================================
@@ -361,11 +361,11 @@ fn sort_matched_by_priority(items: [MatchedAdvice]) -> [MatchedAdvice]:
             elif j_pri == b_pri:
                 if remaining[j].specificity > remaining[best_idx].specificity:
                     best_idx = j
-        sorted = sorted + [remaining[best_idx]]
+        sorted.push(remaining[best_idx])
         var new_remaining: [MatchedAdvice] = []
         for k in range(0, remaining.len()):
             if k != best_idx:
-                new_remaining = new_remaining + [remaining[k]]
+                new_remaining.push(remaining[k])
         remaining = new_remaining
     sorted
 
@@ -387,13 +387,13 @@ fn detect_join_points(config: WeavingConfig, func_name: text, module_path: text,
     var join_points: [JoinPoint] = []
 
     # Function execution join point (at entry)
-    join_points = join_points + [JoinPoint(
+    join_points.push(JoinPoint(
         kind: JoinPointKind.Execution,
         kind_function_name: func_name,
         kind_signature: context.signature,
         kind_location: "",
         kind_error_type: "",
-        block_id: 0, instruction_index: 0, context: context)]
+        block_id: 0, instruction_index: 0, context: context))
 
     # Scan blocks for decision/condition/error join points
     for block in blocks:
@@ -402,28 +402,28 @@ fn detect_join_points(config: WeavingConfig, func_name: text, module_path: text,
             val inst_kind = info.kind_tag
             if inst_kind == "comparison":
                 val loc = "{func_name}:block{block.id}:inst{idx}"
-                join_points = join_points + [JoinPoint(
+                join_points.push(JoinPoint(
                     kind: JoinPointKind.Condition,
                     kind_function_name: "", kind_signature: "",
                     kind_location: loc, kind_error_type: "",
                     block_id: block.id, instruction_index: idx,
-                    context: context)]
+                    context: context))
             elif inst_kind == "branch" or inst_kind == "pattern_test":
                 val loc = "{func_name}:block{block.id}:inst{idx}"
-                join_points = join_points + [JoinPoint(
+                join_points.push(JoinPoint(
                     kind: JoinPointKind.Decision,
                     kind_function_name: "", kind_signature: "",
                     kind_location: loc, kind_error_type: "",
                     block_id: block.id, instruction_index: idx,
-                    context: context)]
+                    context: context))
             elif inst_kind == "error" or inst_kind == "try_unwrap":
                 val loc = "{func_name}:block{block.id}:inst{idx}"
-                join_points = join_points + [JoinPoint(
+                join_points.push(JoinPoint(
                     kind: JoinPointKind.Error,
                     kind_function_name: "", kind_signature: "",
                     kind_location: loc, kind_error_type: "Result",
                     block_id: block.id, instruction_index: idx,
-                    context: context)]
+                    context: context))
 
     join_points
 
@@ -437,10 +437,10 @@ fn match_advice_for_join_point(config: WeavingConfig, join_point: JoinPoint) -> 
     val all_rules = weavingconfig_all_rules(config)
     for rule in all_rules:
         if matches_predicate(rule.predicate_text, join_point.context):
-            matched = matched + [MatchedAdvice(
+            matched.push(MatchedAdvice(
                 advice_function: rule.advice_function,
                 form: rule.form, priority: rule.priority,
-                specificity: predicate_specificity(rule.predicate_text))]
+                specificity: predicate_specificity(rule.predicate_text)))
 
     # Warn about ambiguous ordering
     if matched.len() > 1:
@@ -450,7 +450,7 @@ fn match_advice_for_join_point(config: WeavingConfig, join_point: JoinPoint) -> 
                 if matched[i].priority == matched[i + 1].priority:
                     var diag = WeavingDiagnostic.warning("Ambiguous advice ordering at priority {matched[i].priority}")
                     diag = diag.with_location(join_point.context.function_name)
-                    diagnostics = diagnostics + [diag]
+                    diagnostics.push(diag)
                     found_ambiguous = true
 
     # Sort by priority (higher first), then specificity
@@ -467,7 +467,10 @@ fn weave_function(config: WeavingConfig, func_name: text, module_path: text,
     val join_points = detect_join_points(
         config, func_name, module_path, attributes, effects, blocks)
 
-    var result = WeavingResult.empty()
+    var all_calls: [AdviceCallInfo] = []
+    var all_diags: [WeavingDiagnostic] = []
+    var join_points_woven = 0
+    var advices_inserted = 0
     var used_rules: [text] = []
 
     for jp in join_points:
@@ -475,28 +478,20 @@ fn weave_function(config: WeavingConfig, func_name: text, module_path: text,
         val advices = match_result.matched
         val diags = match_result.diagnostics
 
-        var new_calls = result.advice_calls
         for a in advices:
-            new_calls = new_calls + [AdviceCallInfo(
-                join_point_kind: jp.kind, advice_function: a.advice_function)]
+            all_calls.push(AdviceCallInfo(
+                join_point_kind: jp.kind, advice_function: a.advice_function))
 
-        var new_diags = result.diagnostics
         for d in diags:
-            new_diags = new_diags + [d]
+            all_diags.push(d)
 
-        var woven_inc = 0
         if advices.len() > 0:
-            woven_inc = 1
-
-        result = WeavingResult(
-            join_points_woven: result.join_points_woven + woven_inc,
-            advices_inserted: result.advices_inserted + advices.len(),
-            advice_calls: new_calls,
-            diagnostics: new_diags)
+            join_points_woven = join_points_woven + 1
+        advices_inserted = advices_inserted + advices.len()
 
         for a in advices:
             if not used_rules.contains(a.advice_function):
-                used_rules = used_rules + [a.advice_function]
+                used_rules.push(a.advice_function)
 
     # Warn about unused advice rules
     val all_rules = weavingconfig_all_rules(config)
@@ -505,23 +500,19 @@ fn weave_function(config: WeavingConfig, func_name: text, module_path: text,
             var diag = WeavingDiagnostic.warning("Advice '{rule.advice_function}' was never applied")
             diag = diag.with_predicate(rule.predicate_text)
             diag = diag.with_location(func_name)
-            result = WeavingResult(
-                join_points_woven: result.join_points_woven,
-                advices_inserted: result.advices_inserted,
-                advice_calls: result.advice_calls,
-                diagnostics: result.diagnostics + [diag])
+            all_diags.push(diag)
 
     # Summary diagnostic
-    if result.join_points_woven > 0:
-        var summary = WeavingDiagnostic.info("Woven {result.advices_inserted} advice calls at {result.join_points_woven} join points")
+    if join_points_woven > 0:
+        var summary = WeavingDiagnostic.info("Woven {advices_inserted} advice calls at {join_points_woven} join points")
         summary = summary.with_location(func_name)
-        result = WeavingResult(
-            join_points_woven: result.join_points_woven,
-            advices_inserted: result.advices_inserted,
-            advice_calls: result.advice_calls,
-            diagnostics: result.diagnostics + [summary])
+        all_diags.push(summary)
 
-    result
+    WeavingResult(
+        join_points_woven: join_points_woven,
+        advices_inserted: advices_inserted,
+        advice_calls: all_calls,
+        diagnostics: all_diags)
 
 # ============================================================================
 # Exports

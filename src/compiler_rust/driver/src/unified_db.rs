@@ -277,7 +277,7 @@ impl<T: Record> Database<T> {
         let path = path.as_ref();
 
         // Acquire lock
-        let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+        let _lock = FileLock::acquire(path, 2).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
         // Create database instance
         let mut db = Database::new(path);
@@ -343,7 +343,7 @@ impl<T: Record> Database<T> {
     pub fn save(&self) -> Result<(), io::Error> {
         // Acquire lock
         let _lock =
-            FileLock::acquire(&self.path, 10).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
+            FileLock::acquire(&self.path, 2).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{:?}", e)))?;
 
         // Load existing file to preserve other tables
         let mut existing_dict = indexmap::IndexMap::new();

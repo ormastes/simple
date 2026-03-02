@@ -147,16 +147,17 @@ pub(crate) fn exec_node(
 
                         // Convert Array to FixedSizeArray
                         match value {
-                            Value::Array(data) => {
-                                if data.len() != size {
+                            Value::Array(arc_data) => {
+                                if arc_data.len() != size {
                                     let var_name = get_var_name(&let_stmt.pattern);
                                     return Err(CompileError::semantic(format!(
                                         "Fixed-size array `{}` size mismatch: expected {}, got {}",
                                         var_name,
                                         size,
-                                        data.len()
+                                        arc_data.len()
                                     )));
                                 }
+                                let data = Arc::unwrap_or_clone(arc_data);
                                 Value::FixedSizeArray { size, data }
                             }
                             _ => {
@@ -746,7 +747,8 @@ fn exec_assignment(
 
             if let Some(container) = container {
                 let new_container = match container {
-                    Value::Array(mut arr) => {
+                    Value::Array(mut arc) => {
+                        let arr = Arc::make_mut(&mut arc);
                         let idx = index_val.as_int()? as usize;
                         if idx < arr.len() {
                             arr[idx] = value;
@@ -757,7 +759,7 @@ fn exec_assignment(
                             }
                             arr.push(value);
                         }
-                        Value::Array(arr)
+                        Value::Array(arc)
                     }
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
@@ -831,7 +833,8 @@ fn exec_assignment(
                             let mut fields = fields;
                             if let Some(container) = fields.get(field_name).cloned() {
                                 let new_container = match container {
-                                    Value::Array(mut arr) => {
+                                    Value::Array(mut arc) => {
+                                        let arr = Arc::make_mut(&mut arc);
                                         let idx = index_val.as_int()? as usize;
                                         if idx < arr.len() {
                                             arr[idx] = value;
@@ -841,7 +844,7 @@ fn exec_assignment(
                                             }
                                             arr.push(value);
                                         }
-                                        Value::Array(arr)
+                                        Value::Array(arc)
                                     }
                                     Value::Dict(mut dict) => {
                                         let key = index_val.to_key_string();
@@ -940,7 +943,8 @@ fn exec_assignment(
                                     let inner_class = i_class;
                                     if let Some(container) = inner_fields.get(field_name).cloned() {
                                         let new_container = match container {
-                                            Value::Array(mut arr) => {
+                                            Value::Array(mut arc) => {
+                                                let arr = Arc::make_mut(&mut arc);
                                                 let idx = index_val.as_int()? as usize;
                                                 if idx < arr.len() {
                                                     arr[idx] = value;
@@ -950,7 +954,7 @@ fn exec_assignment(
                                                     }
                                                     arr.push(value);
                                                 }
-                                                Value::Array(arr)
+                                                Value::Array(arc)
                                             }
                                             Value::Dict(mut dict) => {
                                                 let key = index_val.to_key_string();
@@ -1021,7 +1025,7 @@ fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let values: Vec<Value> = match value {
             Value::Tuple(v) => v,
-            Value::Array(v) => v,
+            Value::Array(arc) => Arc::unwrap_or_clone(arc),
             _ => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)

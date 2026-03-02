@@ -63,7 +63,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
                 if file_exists(cleanup_path):
                     file_delete(cleanup_path)
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: dur, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
     else:
         val (out, err, code) = process_run_timeout(binary, child_args, timeout_ms)
         stdout = out
@@ -115,7 +115,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
                 val end2 = time_now_unix_micros()
                 val dur = (end2 - start) / 1000
                 return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                    duration_ms: dur, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+                    duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
         else:
             val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
             stdout = out
@@ -156,7 +156,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
             val end2 = time_now_unix_micros()
             val dur = (end2 - start) / 1000
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: dur, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
     else:
         val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
         stdout = out
@@ -204,9 +204,9 @@ fn preprocess_sspec_file(file_path: text) -> text:
 
     # Split into imports/top-level-defs and body, wrap body in fn main():
     val lines = content.split("\n")
-    var imports = ""
-    var top_level = ""
-    var body = ""
+    var import_parts: [text] = []
+    var top_level_parts: [text] = []
+    var body_parts: [text] = []
     var in_docstring = false
     var in_top_fn = false
     var top_fn_indent = 0
@@ -222,28 +222,28 @@ fn preprocess_sspec_file(file_path: text) -> text:
             if in_docstring:
                 in_docstring = false
                 if in_top_fn:
-                    top_level = top_level + line + "\n"
+                    top_level_parts.push(line)
                 else:
-                    body = body + "    " + line + "\n"
+                    body_parts.push("    " + line)
                 continue
             else:
                 in_docstring = true
                 if in_top_fn:
-                    top_level = top_level + line + "\n"
+                    top_level_parts.push(line)
                 else:
-                    body = body + "    " + line + "\n"
+                    body_parts.push("    " + line)
                 continue
 
         if in_docstring:
             if in_top_fn:
-                top_level = top_level + line + "\n"
+                top_level_parts.push(line)
             else:
-                body = body + "    " + line + "\n"
+                body_parts.push("    " + line)
             continue
 
         # Import/use statements go before fn main()
         if trimmed.starts_with("import ") or trimmed.starts_with("use "):
-            imports = imports + line + "\n"
+            import_parts.push(line)
             continue
 
         # Top-level function definitions (at column 0 only) stay outside main
@@ -253,18 +253,18 @@ fn preprocess_sspec_file(file_path: text) -> text:
                 if trimmed.starts_with("fn ") or trimmed.starts_with("async fn ") or trimmed.starts_with("static fn "):
                     in_top_fn = true
                     top_fn_indent = 0
-                    top_level = top_level + line + "\n"
+                    top_level_parts.push(line)
                     continue
 
         # If we're inside a top-level function definition, keep collecting
         # lines until we see a line at the same or lesser indentation (not blank)
         if in_top_fn:
             if trimmed.len() == 0:
-                top_level = top_level + "\n"
+                top_level_parts.push("")
                 continue
             val current_indent = line.len() - trimmed.len()
             if current_indent > top_fn_indent:
-                top_level = top_level + line + "\n"
+                top_level_parts.push(line)
                 continue
             else:
                 # This line is at same/lesser indent — end of function
@@ -273,11 +273,14 @@ fn preprocess_sspec_file(file_path: text) -> text:
 
         # Everything else goes into fn main() body
         if trimmed.len() > 0:
-            body = body + "    " + line + "\n"
+            body_parts.push("    " + line)
         else:
-            body = body + "\n"
+            body_parts.push("")
 
-    val wrapped = imports + "\n" + top_level + "\nfn main():\n" + body
+    val imports = import_parts.join("\n")
+    val top_level = top_level_parts.join("\n")
+    val body = body_parts.join("\n")
+    val wrapped = imports + "\n\n" + top_level + "\nfn main():\n" + body
     val tmp_path = "/tmp/sspec_wrapped_" + file_path.replace("/", "_")
     file_write(tmp_path, wrapped)
     tmp_path
@@ -315,6 +318,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             skipped: 0,
             pending: 0,
             duration_ms: duration_ms,
+            setup_ms: 0,
             error: error_msg,
             timed_out: false
         )
@@ -347,7 +351,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 if cleanup_path != "" and file_exists(cleanup_path):
                     file_delete(cleanup_path)
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
-                duration_ms: dur, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
+                duration_ms: dur, setup_ms: 0, error: "Memory limit exceeded ({options.max_mem_gb}GB)", timed_out: false)
     else:
         val (out, err, code) = process_run_timeout(binary, run_args, timeout_ms)
         stdout = out
@@ -406,6 +410,7 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
             skipped: 0,
             pending: 0,
             duration_ms: duration_ms,
+            setup_ms: 0,
             error: "Resource limit exceeded: {result.limit_type}",
             timed_out: result.limit_type.contains("timeout")
         )

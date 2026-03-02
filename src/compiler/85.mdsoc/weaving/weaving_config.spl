@@ -1,0 +1,87 @@
+# Weaving configuration struct and factory functions
+
+export WeavingConfig
+export weavingconfig_disabled, weavingconfig_from_aop_config, weavingconfig_from_hir_advices
+
+use compiler.mdsoc.weaving.advice_form.{AdviceForm}
+use compiler.mdsoc.weaving.weaving_rule.{WeavingRule}
+use aop_config (AopConfig)
+use compiler.hir.hir.{HirAopAdvice}
+
+struct WeavingConfig:
+    """Weaving configuration loaded from TOML."""
+    enabled: bool
+    before_advices: [WeavingRule]
+    after_success_advices: [WeavingRule]
+    after_error_advices: [WeavingRule]
+    around_advices: [WeavingRule]
+
+
+# ============================================================================
+# WeavingConfig Methods (was: impl WeavingConfig:)
+# ============================================================================
+
+fn weavingconfig_disabled() -> WeavingConfig:
+        """Create an empty configuration (weaving disabled)."""
+        WeavingConfig(
+            enabled: false,
+            before_advices: [],
+            after_success_advices: [],
+            after_error_advices: [],
+            around_advices: []
+        )
+
+
+fn weavingconfig_from_aop_config(aop_config: AopConfig) -> WeavingConfig:
+        """Load from AOP configuration.
+
+        For now, treat runtime around as compile-time around.
+        In the future, we'll have separate compile-time config.
+        """
+        val around_advices = aop_config.around.map(\rule:
+            WeavingRule(
+                predicate_text: rule.raw_predicate_clone(raw_predicate),
+                advice_function: rule.advice_clone(advice),
+                form: AdviceForm.Around,
+                priority: rule.priority
+            )
+        )
+
+        WeavingConfig(
+            enabled: aop_config.runtime_enabled,
+            before_advices: [],
+            after_success_advices: [],
+            after_error_advices: [],
+            around_advices: around_advices
+        )
+
+
+fn weavingconfig_from_hir_advices(advices: [HirAopAdvice]) -> WeavingConfig:
+        """Load from HIR AOP advices (parsed from Simple source code)."""
+        var before_advices: [WeavingRule] = []
+        var after_success_advices: [WeavingRule] = []
+        var after_error_advices: [WeavingRule] = []
+        var around_advices: [WeavingRule] = []
+
+        for advice in advices:
+            val form = adviceform_from_str(advice.form) ?? AdviceForm.Before
+            val rule = WeavingRule(
+                predicate_text: advice.predicate_text,
+                advice_function: advice.advice_function,
+                form: form,
+                priority: advice.priority
+            )
+
+            match form:
+                case Before: before_advices = before_advices.push(rule)
+                case AfterSuccess: after_success_advices = after_success_advices.push(rule)
+                case AfterError: after_error_advices = after_error_advices.push(rule)
+                case Around: around_advices = around_advices.push(rule)
+
+        WeavingConfig(
+            enabled: not advices.is_empty(),
+            before_advices: before_advices,
+            after_success_advices: after_success_advices,
+            after_error_advices: after_error_advices,
+            around_advices: around_advices
+        )

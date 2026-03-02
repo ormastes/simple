@@ -215,6 +215,10 @@ pub(super) fn eval_literal_expr(
             }
         }
         Expr::Identifier(name) => {
+            // Handle pass_todo, pass_do_nothing, pass_dn as no-op identifiers
+            if name == "pass_todo" || name == "pass_do_nothing" || name == "pass_dn" {
+                return Ok(Some(Value::Nil));
+            }
             // Check for Option::None literal using type-safe variant
             if name == OptionVariant::None.as_str() {
                 return Ok(Some(Value::none()));

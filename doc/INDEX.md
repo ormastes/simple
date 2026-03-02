@@ -1,8 +1,8 @@
 # Simple Language - Documentation Index
 
-**Last Updated:** 2026-02-14
+**Last Updated:** 2026-03-02
 **Version:** 0.5.0
-**Status:** ✅ PRODUCTION READY
+**Status:** Self-hosted (Stage 3-4 fixed-point reached 2026-02-28)
 
 ---
 
@@ -69,7 +69,7 @@
 
 **Architecture & Codebase:**
 - [architecture/overview.md](architecture/overview.md) - High-level architecture
-- [architecture/file_class_structure.md](architecture/file_class_structure.md) - **Comprehensive inventory** (2,649 files, 623K lines, duplication analysis)
+- [architecture/file_class_structure.md](architecture/file_class_structure.md) - **Comprehensive inventory** (~5,500 source files, ~780K .spl lines)
 
 ---
 
@@ -153,23 +153,24 @@
 
 ---
 
-## 📈 Key Metrics
+## Key Metrics
 
-### Test Coverage
-- **Total Tests:** 221
-- **Passing:** ~98% (217+)
-- **Performance:** 5-7ms average
-- **Categories:** 10+ (all 95%+ passing)
+### Codebase (as of 2026-03-02)
+- **Source files:** 3,708 .spl + 1,801 .rs = 5,509 total
+- **Test files:** 1,772 .spl
+- **Doc files:** 3,462 .md
+- **Lines:** ~780K .spl, ~2.86M .rs
+- **Total tracked files:** ~27,926
+
+### Self-Hosting
+- **Stage 3-4 COMPLETE** (fixed-point reached 2026-02-28)
+- Rust bootstrap -> native -> self-hosted -> fixed-point
+- Compiler uses MDSOC numbered layer structure (00-99)
 
 ### Feature Completeness
 - **Working:** 95%+ (170 of 180)
 - **Documented:** 100% (10,000+ lines)
-- **Production Ready:** Yes ✅
-
-### Timeline Accuracy
-- **Original Estimate:** 32 weeks
-- **Actual Need:** 1-2 weeks
-- **Variance:** 90%+ reduction
+- **Production Ready:** Yes
 
 ---
 
@@ -227,7 +228,7 @@ doc/
 │   └── README.md                     ← Template and format
 ├── architecture/                     ← Architecture documentation
 │   ├── overview.md                   ← High-level architecture
-│   └── file_class_structure.md       ← Codebase inventory (2,649 files, 623K lines)
+│   └── file_class_structure.md       ← Codebase inventory (~5,500 source files, ~780K .spl lines)
 ├── adr/                              ← Architecture Decision Records
 │   └── README.md                     ← ADR format and lifecycle
 │
@@ -263,7 +264,20 @@ See [FILE.md](FILE.md) for the complete relationship table and per-folder templa
 
 ---
 
-## 🔄 Update History
+## Update History
+
+### 2026-03-02 - Self-Hosting & MDSOC Update
+- **Self-hosting Stage 3-4 complete:** Fixed-point reached 2026-02-28 (Simple compiles itself to identical output)
+- **Compiler MDSOC migration:** Numbered layer structure (00.common through 99.loader)
+- **Codebase growth:** 5,509 source files, ~27,926 total tracked files
+- **Skipped tests triage:** 198 -> 150 skipped tests (48 removed, 13 un-skipped)
+- **New reports:**
+  - `report/mcp_json_fix_2026-03-02.md` - MCP JSON fix
+  - `report/compiler_mdsoc_migration.md` - Compiler MDSOC migration
+  - `report/compiler_mdsoc_impl_plan.md` - MDSOC implementation plan
+- **Deleted .disabled libraries:** godot, graphics, ml, ui, units, unreal, web, browser, electron, coverage, doctest, parser, spec/assertions, spec/bdd
+- **New app:** `src/app/yank/` - Yank tool
+- **MCP handler adapters** relocated from `nogc_sync_mut` to `nogc_async_mut`
 
 ### 2026-02-14 - MAJOR UPDATE
 - **7-agent comprehensive audit completed**
@@ -380,8 +394,8 @@ See [FILE.md](FILE.md) for the complete relationship table and per-folder templa
 
 ---
 
-**Documentation Status:** ✅ COMPLETE
+**Documentation Status:** COMPLETE
 
-**Last Major Update:** 2026-02-14 (7-agent audit)
+**Last Major Update:** 2026-03-02 (self-hosting + MDSOC update)
 
-**Next Update:** After beta release (estimated 1 week)
+**Previous Major Update:** 2026-02-14 (7-agent audit)

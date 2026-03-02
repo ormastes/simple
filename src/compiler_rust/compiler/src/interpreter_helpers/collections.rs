@@ -18,7 +18,7 @@ pub(crate) fn eval_array_map(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     let results = apply_lambda_to_vec(arr, &func, functions, classes, enums, impl_methods)?;
-    Ok(Value::Array(results))
+    Ok(Value::array(results))
 }
 
 /// Setup environment with single parameter binding for a lambda
@@ -65,7 +65,7 @@ pub(crate) fn eval_array_filter(
                 results.push(item.clone());
             }
         }
-        Ok(Value::Array(results))
+        Ok(Value::array(results))
     })
 }
 
@@ -248,7 +248,7 @@ pub(crate) use interpreter_helpers_option_result::*;
 /// Convert a value to an iterable vector (for comprehensions)
 pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
     match val {
-        Value::Array(arr) => Ok(arr.clone()),
+        Value::Array(arr) => Ok(arr.as_ref().clone()),
         Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
         Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(tup) => Ok(tup.clone()),
@@ -287,7 +287,7 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
 
 /// Helper for binding sequence patterns (Tuple and Array) during comprehensions
 pub(crate) fn bind_sequence_pattern(value: &Value, patterns: &[Pattern], env: &mut Env, allow_tuple: bool) -> bool {
-    let values = match value {
+    let values: &[Value] = match value {
         Value::Tuple(vals) if allow_tuple => vals,
         Value::Array(vals) => vals,
         _ => return false,

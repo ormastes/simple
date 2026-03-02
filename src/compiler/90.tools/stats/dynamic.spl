@@ -67,6 +67,16 @@ fn count_sdoctest_lines_in_spl() -> i64:
     val cmd = "find src -name '*.spl' -not -path '*/release/*' -not -path '*/build/*' | xargs grep -ch '^[[:space:]]*>>>' 2>/dev/null | awk '{{s+=$1}} END{{print s+0}}'"
     run_cmd(cmd).to_int()
 
+# Count Rust source files (excluding target/)
+fn count_rust_files() -> i64:
+    val cmd = "find src/compiler_rust -name '*.rs' -not -path '*/target/*' 2>/dev/null | wc -l"
+    run_cmd(cmd).to_int()
+
+# Count Rust code lines (non-blank, non-comment, excluding target/)
+fn count_rust_code_lines() -> i64:
+    val cmd = "find src/compiler_rust -name '*.rs' -not -path '*/target/*' 2>/dev/null | xargs grep -v -E '^[[:space:]]*(//|$)' 2>/dev/null | wc -l"
+    run_cmd(cmd).to_int()
+
 # Count pattern in file
 fn count_in_file(file: text, pattern: text) -> i64:
     if not file_exists(file):
@@ -231,6 +241,8 @@ fn run_stats(args: [text]):
     var test_sloc = 0
     var md_example_lines = 0
     var spl_sdoctest_lines = 0
+    var rust_files = 0
+    var rust_sloc = 0
     if not is_quick:
         # Per-area SLOC (numbered compiler dirs only — avoids double-counting mirror dirs)
         compiler_sloc = count_code_lines("src/compiler/[0-9]*.*")
@@ -243,13 +255,17 @@ fn run_stats(args: [text]):
         comment_lines = count_comment_lines("src")
         blank_lines   = count_blank_lines("src")
 
+        # Rust bootstrap code (src/compiler_rust/)
+        rust_files = count_rust_files()
+        rust_sloc  = count_rust_code_lines()
+
         # Embedded code in docs and specs
         md_example_lines   = count_md_code_block_lines()
         spl_sdoctest_lines = count_sdoctest_lines_in_spl()
 
     if not is_json:
         if total_lines > 0:
-            val total_all = code_lines + test_sloc + md_example_lines + spl_sdoctest_lines
+            val total_all = code_lines + test_sloc + rust_sloc + md_example_lines + spl_sdoctest_lines
             print "Lines of Code (SLOC = no blanks/comments):"
             print "  compiler:  {compiler_sloc}"
             print "  app:       {app_sloc}"
@@ -258,6 +274,8 @@ fn run_stats(args: [text]):
             print "  src total: {code_lines}  (raw: {total_lines}  comment: {comment_lines}  blank: {blank_lines})"
             print ""
             print "  test:      {test_sloc}"
+            print ""
+            print "  rust (src/compiler_rust):  {rust_sloc}  ({rust_files} files)"
             print ""
             print "  .md embedded (```simple/spl/sdoctest): {md_example_lines}"
             print "  .spl sdoctest (>>> lines):              {spl_sdoctest_lines}"
@@ -450,6 +468,7 @@ fn run_stats(args: [text]):
             total_src, app_files, lib_files, std_files, core_files, compiler_files,
             test_files, total_lines, code_lines, comment_lines, blank_lines,
             compiler_sloc, app_sloc, lib_sloc, test_sloc, md_example_lines, spl_sdoctest_lines,
+            rust_files, rust_sloc,
             test_count, pass_count,
             unit_specs, integration_specs, system_specs,
             sdoctest_code, sdoctest_md,

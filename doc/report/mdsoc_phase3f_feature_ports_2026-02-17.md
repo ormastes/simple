@@ -2,6 +2,7 @@
 
 **Date:** 2026-02-17
 **Status:** Complete
+**Note:** A subsequent one-struct-per-file refactor (2026-03-02) split all `ports.spl` files into individual port struct files. See `doc/report/compiler_mdsoc_migration.md` for details.
 
 ## Summary
 

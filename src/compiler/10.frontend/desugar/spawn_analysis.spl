@@ -174,9 +174,9 @@ fn add_boot_spawn_counts(task_name: text, names: [text], counts: [i64]) -> [i64]
             var new_counts = []
             for j in 0..counts.len():
                 if j == i:
-                    new_counts = new_counts + [counts[j] + 1]
+                    new_counts.push(counts[j] + 1)
                 else:
-                    new_counts = new_counts + [counts[j]]
+                    new_counts.push(counts[j])
             return new_counts
     # New entry
     counts + [1]
@@ -195,7 +195,7 @@ fn find_init_functions(module: Module) -> [text]:
     for func in module.functions:
         val attrs = parse_function_attrs(func.attributes)
         if attrs.is_entry or attrs.is_boot:
-            init_fns = init_fns + [func.name]
+            init_fns.push(func.name)
     init_fns
 
 # ================================================================
@@ -212,7 +212,7 @@ fn build_call_graph_callers(module: Module) -> [text]:
     for func in module.functions:
         val callees = extract_callees_from_block(func.body)
         for callee in callees:
-            callers = callers + [func.name]
+            callers.push(func.name)
     callers
 
 fn build_call_graph_callees(module: Module) -> [text]:
@@ -224,7 +224,7 @@ fn build_call_graph_callees(module: Module) -> [text]:
     for func in module.functions:
         val callees = extract_callees_from_block(func.body)
         for callee in callees:
-            callees_out = callees_out + [callee]
+            callees_out.push(callee)
     callees_out
 
 fn extract_callees_from_block(block: Block) -> [text]:
@@ -232,7 +232,8 @@ fn extract_callees_from_block(block: Block) -> [text]:
     var callees = []
     for stmt in block.stmts:
         val stmt_callees = extract_callees_from_stmt(stmt)
-        callees = callees + stmt_callees
+        for c in stmt_callees:
+            callees.push(c)
     callees
 
 fn extract_callees_from_stmt(stmt: Stmt) -> [text]:
@@ -240,24 +241,33 @@ fn extract_callees_from_stmt(stmt: Stmt) -> [text]:
     var callees = []
     match stmt.kind:
         case StmtKind.Expr(expr):
-            callees = callees + extract_callees_from_expr(expr)
+            for c in extract_callees_from_expr(expr):
+                callees.push(c)
         case StmtKind.Val(_, _, value):
             if value != nil:
-                callees = callees + extract_callees_from_expr(value)
+                for c in extract_callees_from_expr(value):
+                    callees.push(c)
         case StmtKind.Var(_, _, value):
             if value != nil:
-                callees = callees + extract_callees_from_expr(value)
+                for c in extract_callees_from_expr(value):
+                    callees.push(c)
         case StmtKind.Assign(_, _, value):
-            callees = callees + extract_callees_from_expr(value)
+            for c in extract_callees_from_expr(value):
+                callees.push(c)
         case StmtKind.Return(value):
             if value != nil:
-                callees = callees + extract_callees_from_expr(value)
+                for c in extract_callees_from_expr(value):
+                    callees.push(c)
         case StmtKind.While(cond, body):
-            callees = callees + extract_callees_from_expr(cond)
-            callees = callees + extract_callees_from_block(body)
+            for c in extract_callees_from_expr(cond):
+                callees.push(c)
+            for c in extract_callees_from_block(body):
+                callees.push(c)
         case StmtKind.For(_, iter, body):
-            callees = callees + extract_callees_from_expr(iter)
-            callees = callees + extract_callees_from_block(body)
+            for c in extract_callees_from_expr(iter):
+                callees.push(c)
+            for c in extract_callees_from_block(body):
+                callees.push(c)
         case _: ()
     callees
 
@@ -268,23 +278,32 @@ fn extract_callees_from_expr(expr: Expr) -> [text]:
         case ExprKind.Call(func_expr, args):
             match func_expr.kind:
                 case ExprKind.Ident(name):
-                    callees = callees + [name]
+                    callees.push(name)
                 case _: ()
-            callees = callees + extract_callees_from_expr(func_expr)
+            for c in extract_callees_from_expr(func_expr):
+                callees.push(c)
             for arg in args:
-                callees = callees + extract_callees_from_expr(arg.value)
+                for c in extract_callees_from_expr(arg.value):
+                    callees.push(c)
         case ExprKind.Binary(left, _, right):
-            callees = callees + extract_callees_from_expr(left)
-            callees = callees + extract_callees_from_expr(right)
+            for c in extract_callees_from_expr(left):
+                callees.push(c)
+            for c in extract_callees_from_expr(right):
+                callees.push(c)
         case ExprKind.Unary(_, operand):
-            callees = callees + extract_callees_from_expr(operand)
+            for c in extract_callees_from_expr(operand):
+                callees.push(c)
         case ExprKind.If(cond, then_e, else_e):
-            callees = callees + extract_callees_from_expr(cond)
-            callees = callees + extract_callees_from_expr(then_e)
+            for c in extract_callees_from_expr(cond):
+                callees.push(c)
+            for c in extract_callees_from_expr(then_e):
+                callees.push(c)
             if else_e != nil:
-                callees = callees + extract_callees_from_expr(else_e)
+                for c in extract_callees_from_expr(else_e):
+                    callees.push(c)
         case ExprKind.Block(block):
-            callees = callees + extract_callees_from_block(block)
+            for c in extract_callees_from_block(block):
+                callees.push(c)
         case _: ()
     callees
 
@@ -306,7 +325,7 @@ fn compute_init_reachable(
     # Seed with init functions
     for fn_name in init_fns:
         if not is_in_list(fn_name, reachable):
-            reachable = reachable + [fn_name]
+            reachable.push(fn_name)
 
     # BFS: process queue
     var queue_idx = 0
@@ -322,7 +341,7 @@ fn compute_init_reachable(
             if callers[i] == current:
                 val callee = callees[i]
                 if not is_in_list(callee, reachable):
-                    reachable = reachable + [callee]
+                    reachable.push(callee)
 
     reachable
 
@@ -339,7 +358,8 @@ fn find_spawn_sites(module: Module) -> [SpawnSite]:
     var sites = []
     for func in module.functions:
         val result = scan_block_for_spawns(func.body, func.name)
-        sites = sites + result.sites
+        for s in result.sites:
+            sites.push(s)
     sites
 
 fn scan_block_for_spawns(block: Block, caller: text) -> ScanResult:
@@ -349,7 +369,8 @@ fn scan_block_for_spawns(block: Block, caller: text) -> ScanResult:
 
     for stmt in block.stmts:
         val result = scan_stmt_for_spawns(stmt, caller, found_await)
-        sites = sites + result.sites
+        for s in result.sites:
+            sites.push(s)
         if result.found_await:
             found_await = true
 
@@ -363,19 +384,22 @@ fn scan_stmt_for_spawns(stmt: Stmt, caller: text, seen_await: bool) -> ScanResul
     match stmt.kind:
         case StmtKind.Expr(expr):
             val result = scan_expr_for_spawns(expr, caller, found_await)
-            sites = sites + result.sites
+            for s in result.sites:
+                sites.push(s)
             if result.found_await:
                 found_await = true
         case StmtKind.Val(_, _, value):
             if value != nil:
                 val result = scan_expr_for_spawns(value, caller, found_await)
-                sites = sites + result.sites
+                for s in result.sites:
+                    sites.push(s)
                 if result.found_await:
                     found_await = true
         case StmtKind.Var(_, _, value):
             if value != nil:
                 val result = scan_expr_for_spawns(value, caller, found_await)
-                sites = sites + result.sites
+                for s in result.sites:
+                    sites.push(s)
                 if result.found_await:
                     found_await = true
         case _: ()
@@ -409,7 +433,7 @@ fn scan_expr_for_spawns(expr: Expr, caller: text, seen_await: bool) -> ScanResul
                 is_after_await: found_await,
                 span: expr.span
             )
-            sites = sites + [site]
+            sites.push(site)
 
         case ExprKind.Call(func_expr, args):
             # Check for spawn() as a function call
@@ -433,29 +457,33 @@ fn scan_expr_for_spawns(expr: Expr, caller: text, seen_await: bool) -> ScanResul
                             is_after_await: found_await,
                             span: expr.span
                         )
-                        sites = sites + [site]
+                        sites.push(site)
                 case _: ()
 
             # Recurse into call arguments
             for arg in args:
                 val result = scan_expr_for_spawns(arg.value, caller, found_await)
-                sites = sites + result.sites
+                for s in result.sites:
+                    sites.push(s)
                 if result.found_await:
                     found_await = true
 
         case ExprKind.Binary(left, _, right):
             val lr = scan_expr_for_spawns(left, caller, found_await)
-            sites = sites + lr.sites
+            for s in lr.sites:
+                sites.push(s)
             if lr.found_await:
                 found_await = true
             val rr = scan_expr_for_spawns(right, caller, found_await)
-            sites = sites + rr.sites
+            for s in rr.sites:
+                sites.push(s)
             if rr.found_await:
                 found_await = true
 
         case ExprKind.Block(block):
             val br = scan_block_for_spawns(block, caller)
-            sites = sites + br.sites
+            for s in br.sites:
+                sites.push(s)
             if br.found_await:
                 found_await = true
 
@@ -479,7 +507,7 @@ fn collect_task_infos(module: Module) -> [TaskInfo]:
                 instances: ta.instances,
                 group: ta.group
             )
-            infos = infos + [info]
+            infos.push(info)
     infos
 
 # ================================================================
@@ -537,7 +565,7 @@ fn verify_spawn_bounds(analysis: SpawnAnalysis) -> SpawnVerifyResult:
                 message: "spawn of '{site.task_name}' in '{site.caller_name}' is outside init phase — all spawns must be reachable from @entry/@boot",
                 span: Some(site.span)
             )
-            diagnostics = diagnostics + [diag]
+            diagnostics.push(diag)
             has_errors = true
 
     # Check 2: Spawn after await in init function
@@ -549,7 +577,7 @@ fn verify_spawn_bounds(analysis: SpawnAnalysis) -> SpawnVerifyResult:
                 message: "spawn of '{site.task_name}' in '{site.caller_name}' occurs after await — spawns must precede all awaits in init",
                 span: Some(site.span)
             )
-            diagnostics = diagnostics + [diag]
+            diagnostics.push(diag)
             has_errors = true
 
     # Check 3: Instance limits (ungrouped tasks)
@@ -566,7 +594,7 @@ fn verify_spawn_bounds(analysis: SpawnAnalysis) -> SpawnVerifyResult:
                     message: "task '{info.name}' spawned {count} times but @task(instances={info.instances})",
                     span: nil
                 )
-                diagnostics = diagnostics + [diag]
+                diagnostics.push(diag)
                 has_errors = true
 
     # Check 4: Group capacity limits
@@ -585,7 +613,7 @@ fn verify_spawn_bounds(analysis: SpawnAnalysis) -> SpawnVerifyResult:
                 message: "task group '{group.name}' has {group_total} spawns but cap={group.cap}",
                 span: nil
             )
-            diagnostics = diagnostics + [diag]
+            diagnostics.push(diag)
             has_errors = true
 
     SpawnVerifyResult(
@@ -665,29 +693,29 @@ fn analyze_spawns_with_groups(
 fn format_spawn_analysis(sa: SpawnAnalysis) -> text:
     """Format spawn analysis for debugging output."""
     var lines = []
-    lines = lines + ["Spawn Analysis:"]
-    lines = lines + ["  Init functions: {sa.init_functions.len()}"]
+    lines.push("Spawn Analysis:")
+    lines.push("  Init functions: {sa.init_functions.len()}")
     for fn_name in sa.init_functions:
-        lines = lines + ["    {fn_name}"]
-    lines = lines + ["  Init-reachable: {sa.init_reachable.len()}"]
+        lines.push("    {fn_name}")
+    lines.push("  Init-reachable: {sa.init_reachable.len()}")
     for fn_name in sa.init_reachable:
-        lines = lines + ["    {fn_name}"]
-    lines = lines + ["  Spawn sites: {sa.spawn_sites.len()}"]
+        lines.push("    {fn_name}")
+    lines.push("  Spawn sites: {sa.spawn_sites.len()}")
     for site in sa.spawn_sites:
         var after_str = ""
         if site.is_after_await:
             after_str = " (AFTER AWAIT)"
-        lines = lines + ["    spawn {site.task_name} in {site.caller_name}{after_str}"]
-    lines = lines + ["  Task infos: {sa.task_infos.len()}"]
+        lines.push("    spawn {site.task_name} in {site.caller_name}{after_str}")
+    lines.push("  Task infos: {sa.task_infos.len()}")
     for info in sa.task_infos:
         var group_str = ""
         if info.group != nil:
             group_str = " group={info.group ?? \"\"}"
-        lines = lines + ["    {info.name}: instances={info.instances}{group_str}"]
+        lines.push("    {info.name}: instances={info.instances}{group_str}")
     if sa.boot_spawn_names.len() > 0:
-        lines = lines + ["  Boot spawns:"]
+        lines.push("  Boot spawns:")
         for i in 0..sa.boot_spawn_names.len():
-            lines = lines + ["    {sa.boot_spawn_names[i]}: {sa.boot_spawn_counts[i]}"]
+            lines.push("    {sa.boot_spawn_names[i]}: {sa.boot_spawn_counts[i]}")
     lines.join("\n")
 
 fn format_spawn_verify_result(result: SpawnVerifyResult) -> text:
@@ -697,12 +725,12 @@ fn format_spawn_verify_result(result: SpawnVerifyResult) -> text:
     var status_str = status
     if result.has_errors:
         status_str = "FAIL"
-    lines = lines + ["Spawn Verification: {status_str} ({result.total_spawns} spawn sites)"]
+    lines.push("Spawn Verification: {status_str} ({result.total_spawns} spawn sites)")
     if result.diagnostics.len() == 0:
-        lines = lines + ["  All spawn checks passed."]
+        lines.push("  All spawn checks passed.")
         return lines.join("\n")
     for diag in result.diagnostics:
-        lines = lines + ["  [{diag.level}] {diag.message}"]
+        lines.push("  [{diag.level}] {diag.message}")
     lines.join("\n")
 
 # ================================================================

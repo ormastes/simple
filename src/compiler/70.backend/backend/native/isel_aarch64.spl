@@ -91,17 +91,17 @@ fn a64_lower_const_int(ctx: ISelContext, v: i64) -> LoweredOperand:
 
     var insts: [MachInst] = []
     # MOVZ rd, #chunk0
-    insts = insts + [new_mach_inst(A64_OP_MOVZ, [dest, op_imm(chunk0)])]
+    insts.push(new_mach_inst(A64_OP_MOVZ, [dest, op_imm(chunk0)]))
 
     # MOVK rd, #chunk1, LSL #16 (if nonzero)
     if chunk1 != 0:
-        insts = insts + [new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk1), op_imm(16)])]
+        insts.push(new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk1), op_imm(16)]))
 
     if chunk2 != 0:
-        insts = insts + [new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk2), op_imm(32)])]
+        insts.push(new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk2), op_imm(32)]))
 
     if chunk3 != 0:
-        insts = insts + [new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk3), op_imm(48)])]
+        insts.push(new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk3), op_imm(48)]))
 
     LoweredOperand(insts: insts, result: dest, ctx: new_ctx)
 
@@ -255,7 +255,7 @@ fn a64_isel_const(ctx: ISelContext, dest: LocalId, value: MirConstValue, type_: 
     val dest_op = local_vreg_op(dest.id)
     # Move the const result to the destination vreg
     var insts = lowered.insts
-    insts = insts + [new_mach_inst(A64_OP_MOV, [dest_op, lowered.result])]
+    insts.push(new_mach_inst(A64_OP_MOV, [dest_op, lowered.result]))
     ISelInstResult(insts: insts, ctx: lowered.ctx)
 
 fn a64_isel_copy(ctx: ISelContext, dest: LocalId, src: LocalId) -> ISelInstResult:
@@ -272,50 +272,58 @@ fn a64_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperan
     var current_ctx = right_low.ctx
     val dest_op = local_vreg_op(dest.id)
     var insts: [MachInst] = []
-    insts = insts + left_low.insts
-    insts = insts + right_low.insts
+    for ai in left_low.insts:
+        insts.push(ai)
+    for ai in right_low.insts:
+        insts.push(ai)
 
     match op:
         case Add:
-            insts = insts + [new_mach_inst(A64_OP_ADD, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_ADD, [dest_op, left_low.result, right_low.result]))
         case Sub:
-            insts = insts + [new_mach_inst(A64_OP_SUB, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_SUB, [dest_op, left_low.result, right_low.result]))
         case Mul:
-            insts = insts + [new_mach_inst(A64_OP_MUL, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_MUL, [dest_op, left_low.result, right_low.result]))
         case Div:
-            insts = insts + [new_mach_inst(A64_OP_SDIV, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_SDIV, [dest_op, left_low.result, right_low.result]))
         case Rem:
             # AArch64 has no remainder instruction.
             # rem = left - (left / right) * right
             # Use x16 as scratch (IP0, caller-saved)
-            insts = insts + [new_mach_inst(A64_OP_SDIV, [op_phys(AARCH64_X16), left_low.result, right_low.result])]
-            insts = insts + [new_mach_inst(A64_OP_MUL, [op_phys(AARCH64_X16), op_phys(AARCH64_X16), right_low.result])]
-            insts = insts + [new_mach_inst(A64_OP_SUB, [dest_op, left_low.result, op_phys(AARCH64_X16)])]
+            insts.push(new_mach_inst(A64_OP_SDIV, [op_phys(AARCH64_X16), left_low.result, right_low.result]))
+            insts.push(new_mach_inst(A64_OP_MUL, [op_phys(AARCH64_X16), op_phys(AARCH64_X16), right_low.result]))
+            insts.push(new_mach_inst(A64_OP_SUB, [dest_op, left_low.result, op_phys(AARCH64_X16)]))
         case BitAnd:
-            insts = insts + [new_mach_inst(A64_OP_AND, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_AND, [dest_op, left_low.result, right_low.result]))
         case BitOr:
-            insts = insts + [new_mach_inst(A64_OP_ORR, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_ORR, [dest_op, left_low.result, right_low.result]))
         case BitXor:
-            insts = insts + [new_mach_inst(A64_OP_EOR, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_EOR, [dest_op, left_low.result, right_low.result]))
         case Shl:
-            insts = insts + [new_mach_inst(A64_OP_LSL, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_LSL, [dest_op, left_low.result, right_low.result]))
         case Shr:
-            insts = insts + [new_mach_inst(A64_OP_ASR, [dest_op, left_low.result, right_low.result])]
+            insts.push(new_mach_inst(A64_OP_ASR, [dest_op, left_low.result, right_low.result]))
         case Eq:
-            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_EQ)
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_EQ):
+                insts.push(ai)
         case Ne:
-            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_NE)
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_NE):
+                insts.push(ai)
         case Lt:
-            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LT)
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LT):
+                insts.push(ai)
         case Le:
-            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LE)
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LE):
+                insts.push(ai)
         case Gt:
-            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GT)
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GT):
+                insts.push(ai)
         case Ge:
-            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GE)
+            for ai in a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GE):
+                insts.push(ai)
         case _:
             # Unsupported binop - zero result
-            insts = insts + [new_mach_inst(A64_OP_MOVZ, [dest_op, op_imm(0)])]
+            insts.push(new_mach_inst(A64_OP_MOVZ, [dest_op, op_imm(0)]))
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
@@ -323,8 +331,8 @@ fn a64_isel_comparison(dest: Operand, left: Operand, right: Operand, cond: i64) 
     # CMP left, right (alias: SUBS xzr, left, right)
     # CSET dest, <cond>
     var insts: [MachInst] = []
-    insts = insts + [new_mach_inst(A64_OP_CMP, [left, right])]
-    insts = insts + [new_mach_inst(A64_OP_CSET, [dest, op_imm(cond)])]
+    insts.push(new_mach_inst(A64_OP_CMP, [left, right]))
+    insts.push(new_mach_inst(A64_OP_CSET, [dest, op_imm(cond)]))
     insts
 
 # ============================================================================
@@ -339,29 +347,29 @@ fn a64_isel_unaryop(ctx: ISelContext, dest: LocalId, op: MirUnaryOp, operand: Mi
     match op:
         case Neg:
             # NEG rd, rn (alias: SUB rd, xzr, rn)
-            insts = insts + [new_mach_inst(A64_OP_NEG, [dest_op, low.result])]
+            insts.push(new_mach_inst(A64_OP_NEG, [dest_op, low.result]))
         case Not:
             # Logical not: EOR rd, rn, #-1 (all ones)
             val not_low = isel_fresh_dest(low.ctx)
             val ones = not_low.result
-            insts = insts + [new_mach_inst(A64_OP_MOVZ, [ones, op_imm(65535)])]
-            insts = insts + [new_mach_inst(A64_OP_MOVK, [ones, op_imm(65535), op_imm(16)])]
-            insts = insts + [new_mach_inst(A64_OP_MOVK, [ones, op_imm(65535), op_imm(32)])]
-            insts = insts + [new_mach_inst(A64_OP_MOVK, [ones, op_imm(65535), op_imm(48)])]
-            insts = insts + [new_mach_inst(A64_OP_EOR, [dest_op, low.result, ones])]
+            insts.push(new_mach_inst(A64_OP_MOVZ, [ones, op_imm(65535)]))
+            insts.push(new_mach_inst(A64_OP_MOVK, [ones, op_imm(65535), op_imm(16)]))
+            insts.push(new_mach_inst(A64_OP_MOVK, [ones, op_imm(65535), op_imm(32)]))
+            insts.push(new_mach_inst(A64_OP_MOVK, [ones, op_imm(65535), op_imm(48)]))
+            insts.push(new_mach_inst(A64_OP_EOR, [dest_op, low.result, ones]))
             return ISelInstResult(insts: insts, ctx: not_low.ctx)
         case BitNot:
             # Same as logical Not for integers
             val bnot_low = isel_fresh_dest(low.ctx)
             val bnot_ones = bnot_low.result
-            insts = insts + [new_mach_inst(A64_OP_MOVZ, [bnot_ones, op_imm(65535)])]
-            insts = insts + [new_mach_inst(A64_OP_MOVK, [bnot_ones, op_imm(65535), op_imm(16)])]
-            insts = insts + [new_mach_inst(A64_OP_MOVK, [bnot_ones, op_imm(65535), op_imm(32)])]
-            insts = insts + [new_mach_inst(A64_OP_MOVK, [bnot_ones, op_imm(65535), op_imm(48)])]
-            insts = insts + [new_mach_inst(A64_OP_EOR, [dest_op, low.result, bnot_ones])]
+            insts.push(new_mach_inst(A64_OP_MOVZ, [bnot_ones, op_imm(65535)]))
+            insts.push(new_mach_inst(A64_OP_MOVK, [bnot_ones, op_imm(65535), op_imm(16)]))
+            insts.push(new_mach_inst(A64_OP_MOVK, [bnot_ones, op_imm(65535), op_imm(32)]))
+            insts.push(new_mach_inst(A64_OP_MOVK, [bnot_ones, op_imm(65535), op_imm(48)]))
+            insts.push(new_mach_inst(A64_OP_EOR, [dest_op, low.result, bnot_ones]))
             return ISelInstResult(insts: insts, ctx: bnot_low.ctx)
         case _:
-            insts = insts + [new_mach_inst(A64_OP_MOV, [dest_op, low.result])]
+            insts.push(new_mach_inst(A64_OP_MOV, [dest_op, low.result]))
 
     ISelInstResult(insts: insts, ctx: low.ctx)
 
@@ -374,16 +382,17 @@ fn a64_isel_load(ctx: ISelContext, dest: LocalId, ptr: MirOperand) -> ISelInstRe
     val dest_op = local_vreg_op(dest.id)
     var insts = low.insts
     # LDR dest, [base, #0]
-    insts = insts + [new_mach_inst(A64_OP_LDR, [dest_op, op_mem(operand_get_reg(low.result), 0)])]
+    insts.push(new_mach_inst(A64_OP_LDR, [dest_op, op_mem(operand_get_reg(low.result), 0)]))
     ISelInstResult(insts: insts, ctx: low.ctx)
 
 fn a64_isel_store(ctx: ISelContext, ptr: MirOperand, value: MirOperand) -> ISelInstResult:
     val ptr_low = a64_lower_operand(ctx, ptr)
     val val_low = a64_lower_operand(ptr_low.ctx, value)
     var insts = ptr_low.insts
-    insts = insts + val_low.insts
+    for ai in val_low.insts:
+        insts.push(ai)
     # STR value, [base, #0]
-    insts = insts + [new_mach_inst(A64_OP_STR, [val_low.result, op_mem(operand_get_reg(ptr_low.result), 0)])]
+    insts.push(new_mach_inst(A64_OP_STR, [val_low.result, op_mem(operand_get_reg(ptr_low.result), 0)]))
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
 fn a64_isel_get_field(ctx: ISelContext, dest: LocalId, base: MirOperand, field: i64) -> ISelInstResult:
@@ -392,7 +401,7 @@ fn a64_isel_get_field(ctx: ISelContext, dest: LocalId, base: MirOperand, field: 
     val offset = field * 8
     var insts = base_low.insts
     # LDR dest, [base, #offset]
-    insts = insts + [new_mach_inst(A64_OP_LDR, [dest_op, op_mem(operand_get_reg(base_low.result), offset)])]
+    insts.push(new_mach_inst(A64_OP_LDR, [dest_op, op_mem(operand_get_reg(base_low.result), offset)]))
     ISelInstResult(insts: insts, ctx: base_low.ctx)
 
 fn a64_isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirOperand) -> ISelInstResult:
@@ -400,9 +409,10 @@ fn a64_isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: Mir
     val val_low = a64_lower_operand(base_low.ctx, value)
     val offset = field * 8
     var insts = base_low.insts
-    insts = insts + val_low.insts
+    for ai in val_low.insts:
+        insts.push(ai)
     # STR value, [base, #offset]
-    insts = insts + [new_mach_inst(A64_OP_STR, [val_low.result, op_mem(operand_get_reg(base_low.result), offset)])]
+    insts.push(new_mach_inst(A64_OP_STR, [val_low.result, op_mem(operand_get_reg(base_low.result), offset)]))
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
 fn a64_isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult:
@@ -415,9 +425,9 @@ fn a64_isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstRe
     val dest_op = local_vreg_op(dest.id)
     var insts: [MachInst] = []
     # SUB sp, sp, #size
-    insts = insts + [new_mach_inst(A64_OP_SUB_IMM, [op_phys(AARCH64_SP), op_phys(AARCH64_SP), op_imm(alloc_size)])]
+    insts.push(new_mach_inst(A64_OP_SUB_IMM, [op_phys(AARCH64_SP), op_phys(AARCH64_SP), op_imm(alloc_size)]))
     # MOV dest, sp (capture the address)
-    insts = insts + [new_mach_inst(A64_OP_MOV, [dest_op, op_phys(AARCH64_SP)])]
+    insts.push(new_mach_inst(A64_OP_MOV, [dest_op, op_phys(AARCH64_SP)]))
     ISelInstResult(insts: insts, ctx: ctx)
 
 fn a64_isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: MirType) -> ISelInstResult:
@@ -425,7 +435,7 @@ fn a64_isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: M
     val dest_op = local_vreg_op(dest.id)
     var insts = low.insts
     # Simple move - truncation/extension handled by encoder based on type
-    insts = insts + [new_mach_inst(A64_OP_MOV, [dest_op, low.result])]
+    insts.push(new_mach_inst(A64_OP_MOV, [dest_op, low.result]))
     ISelInstResult(insts: insts, ctx: low.ctx)
 
 # ============================================================================
@@ -440,34 +450,35 @@ fn a64_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [Mi
     for i in 0..args_len(args):
         val arg_low = a64_lower_operand(current_ctx, args[i])
         current_ctx = arg_low.ctx
-        insts = insts + arg_low.insts
+        for ai in arg_low.insts:
+            insts.push(ai)
         if i < aarch64_arg_regs_len():
             val arg_reg = AARCH64_ARG_REGS[i]
-            insts = insts + [new_mach_inst(A64_OP_MOV, [op_phys(arg_reg), arg_low.result])]
+            insts.push(new_mach_inst(A64_OP_MOV, [op_phys(arg_reg), arg_low.result]))
         else:
             # Stack argument: STR value, [sp, #offset]
             # AArch64 passes excess args on stack at positive offsets from SP
             val stack_offset = (i - aarch64_arg_regs_len()) * 8
-            insts = insts + [new_mach_inst(A64_OP_STR, [arg_low.result, op_mem(physical_reg(AARCH64_SP), stack_offset)])]
+            insts.push(new_mach_inst(A64_OP_STR, [arg_low.result, op_mem(physical_reg(AARCH64_SP), stack_offset)]))
 
     # Emit call
     match func_op.kind:
         case Const(mirconstvalue_Str(name), _):
             # Direct call to named function: BL symbol
             current_ctx = isel_add_extern(current_ctx, name)
-            insts = insts + [new_mach_inst(A64_OP_BL, [op_sym(name)])]
+            insts.push(new_mach_inst(A64_OP_BL, [op_sym(name)]))
         case Copy(local):
             # Indirect call through register: BLR xN
-            insts = insts + [new_mach_inst(A64_OP_BL, [local_vreg_op(local.id)])]
+            insts.push(new_mach_inst(A64_OP_BL, [local_vreg_op(local.id)]))
         case Move(local):
-            insts = insts + [new_mach_inst(A64_OP_BL, [local_vreg_op(local.id)])]
+            insts.push(new_mach_inst(A64_OP_BL, [local_vreg_op(local.id)]))
         case _:
-            insts = insts + [new_mach_inst(A64_OP_NOP, [])]
+            insts.push(new_mach_inst(A64_OP_NOP, []))
 
     # Move return value from x0
     if has_dest:
         val d = dest_value
-        insts = insts + [new_mach_inst(A64_OP_MOV, [local_vreg_op(d.id), op_phys(AARCH64_X0)])]
+        insts.push(new_mach_inst(A64_OP_MOV, [local_vreg_op(d.id), op_phys(AARCH64_X0)]))
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
@@ -497,25 +508,26 @@ fn a64_isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
     if has_value:
         val v = value_value
         val low = a64_lower_operand(ctx, v)
-        insts = insts + low.insts
+        for ai in low.insts:
+            insts.push(ai)
         # MOV x0, result
-        insts = insts + [new_mach_inst(A64_OP_MOV, [op_phys(AARCH64_X0), low.result])]
+        insts.push(new_mach_inst(A64_OP_MOV, [op_phys(AARCH64_X0), low.result]))
     # Epilogue: restore SP from FP, restore FP and LR, return
     # MOV sp, x29
-    insts = insts + [new_mach_inst(A64_OP_MOV, [op_phys(AARCH64_SP), op_phys(AARCH64_X29)])]
+    insts.push(new_mach_inst(A64_OP_MOV, [op_phys(AARCH64_SP), op_phys(AARCH64_X29)]))
     # LDP x29, x30, [sp], #16
-    insts = insts + [new_mach_inst(A64_OP_LDP, [op_phys(AARCH64_X29), op_phys(AARCH64_X30), op_phys(AARCH64_SP), op_imm(16)])]
+    insts.push(new_mach_inst(A64_OP_LDP, [op_phys(AARCH64_X29), op_phys(AARCH64_X30), op_phys(AARCH64_SP), op_imm(16)]))
     # RET (branches to x30)
-    insts = insts + [new_mach_inst(A64_OP_RET, [])]
+    insts.push(new_mach_inst(A64_OP_RET, []))
     ISelInstResult(insts: insts, ctx: ctx)
 
 fn a64_isel_if(ctx: ISelContext, cond: MirOperand, then_: BlockId, else_: BlockId) -> ISelInstResult:
     val cond_low = a64_lower_operand(ctx, cond)
     var insts = cond_low.insts
     # CBNZ cond, then_label (branch if nonzero = true)
-    insts = insts + [new_mach_inst(A64_OP_CBNZ, [cond_low.result, op_label(then_.id)])]
+    insts.push(new_mach_inst(A64_OP_CBNZ, [cond_low.result, op_label(then_.id)]))
     # B else_label (fallthrough to else)
-    insts = insts + [new_mach_inst(A64_OP_B, [op_label(else_.id)])]
+    insts.push(new_mach_inst(A64_OP_B, [op_label(else_.id)]))
     ISelInstResult(insts: insts, ctx: cond_low.ctx)
 
 fn a64_isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], default_target: BlockId) -> ISelInstResult:
@@ -528,14 +540,14 @@ fn a64_isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], d
         # Load case value into temp vreg
         val case_low = isel_fresh_dest(val_low.ctx)
         val case_op = case_low.result
-        insts = insts + [new_mach_inst(A64_OP_MOVZ, [case_op, op_imm(target.value)])]
+        insts.push(new_mach_inst(A64_OP_MOVZ, [case_op, op_imm(target.value)]))
         # CMP value, case_value
-        insts = insts + [new_mach_inst(A64_OP_CMP, [val_low.result, case_op])]
+        insts.push(new_mach_inst(A64_OP_CMP, [val_low.result, case_op]))
         # BEQ target_label
-        insts = insts + [new_mach_inst(A64_OP_BEQ, [op_label(target.target.id)])]
+        insts.push(new_mach_inst(A64_OP_BEQ, [op_label(target.target.id)]))
 
     # B default_label
-    insts = insts + [new_mach_inst(A64_OP_B, [op_label(default_target.id)])]
+    insts.push(new_mach_inst(A64_OP_B, [op_label(default_target.id)]))
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
 # ============================================================================

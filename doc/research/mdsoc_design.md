@@ -8,10 +8,10 @@
 > - Provide an explicit, auditable bridging mechanism (Transform) for mismatches
 >
 > For the compiler-level MDSOC implementation (virtual capsules, carets, layer enforcement),
-> see `src/compiler/mdsoc/` and `doc/feature/mdsoc_complete.md`.
+> see `src/compiler/85.mdsoc/` (symlink: `src/compiler/mdsoc`) and `doc/feature/mdsoc_complete.md`.
 
-**Status:** Design complete, application-level patterns documented
-**Last Updated:** 2026-02-17
+**Status:** Design complete, implementation complete (288/288 tests passing)
+**Last Updated:** 2026-03-02
 
 ---
 
@@ -635,8 +635,12 @@ VIOLATION: src/feature/Checkout/app/CheckoutUseCase.spl
 - https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html
 
 **Simple implementation:**
-- `src/compiler/mdsoc/` — Compiler-level MDSOC (virtual capsules, carets, layer enforcement)
-- `doc/feature/mdsoc_complete.md` — Implementation status (105+ tests, production-ready)
+- `src/compiler/85.mdsoc/` — Compiler-level MDSOC (virtual capsules, carets, layer enforcement, 118 files)
+- Symlink: `src/compiler/mdsoc` -> `85.mdsoc` (runtime resolution workaround)
+- Compiler uses 17 numbered layers: 00.common, 10.frontend, 15.blocks, 20.hir, 25.traits, 30.types, 35.semantics, 40.mono, 50.mir, 55.borrow, 60.mir_opt, 70.backend, 80.driver, 85.mdsoc, 90.tools, 95.interp, 99.loader
+- 8 convenience symlinks (common, frontend, mir, backend, driver, mdsoc, interp, loader) point to numbered dirs
+- Old unnumbered dirs (core/, linker/) deleted; contents migrated to numbered layers
+- `doc/feature/mdsoc_complete.md` — Implementation status (288 tests passing, one-struct-per-file)
 - `doc/guide/standard_architecture.md` — Application-level architecture guide
 - `doc/guide/dimension_transform_examples.md` — Practical transform examples
 - `doc/guide/transform_init_examples.md` — `__init__.spl` config hierarchy examples

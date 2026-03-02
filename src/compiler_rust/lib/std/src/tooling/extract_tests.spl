@@ -116,8 +116,8 @@ fn extract_code_examples(md_content: text) -> List<CodeExample>:
     var current_section = "General"
     var line_num: u64 = 0
     var in_code_block = false
-    var current_code = ""
-    var current_context = ""
+    var current_code_lines: List<text> = []
+    var context_parts: [text] = []
     var code_start_line: u64 = 0
 
     # Patterns
@@ -135,7 +135,7 @@ fn extract_code_examples(md_content: text) -> List<CodeExample>:
             val section_text = m.matched_text()
             # Remove '## ' prefix
             current_section = section_text.substring(3, section_text.len())
-            current_context = ""
+            context_parts = []
             continue
 
         # Check for code block start
@@ -143,22 +143,22 @@ fn extract_code_examples(md_content: text) -> List<CodeExample>:
             val fence_match = code_fence_pattern.search(line)
             if fence_match != nil:
                 in_code_block = true
-                current_code = ""
+                current_code_lines = []
                 code_start_line = line_num + 1
                 continue
             else:
                 # Accumulate context (non-empty lines that aren't headers or fences)
                 if not line.trim().is_empty() and not line.starts_with("#"):
-                    if not current_context.is_empty():
-                        current_context = current_context + " "
-                    current_context = current_context + line.trim()
+                    context_parts.push(line.trim())
         else:
             # We're in a code block - check for end
             val end_match = code_end_pattern.search(line)
             if end_match != nil:
                 # End of code block - create example
                 in_code_block = false
+                val current_code = current_code_lines.join("\n")
                 if not current_code.trim().is_empty():
+                    val current_context = context_parts.join(" ")
                     val example = CodeExample.new(
                         current_section,
                         current_context,
@@ -166,13 +166,11 @@ fn extract_code_examples(md_content: text) -> List<CodeExample>:
                         code_start_line
                     )
                     examples.append(example)
-                current_code = ""
-                current_context = ""
+                current_code_lines = []
+                context_parts = []
             else:
                 # Accumulate code
-                if not current_code.is_empty():
-                    current_code = current_code + "\n"
-                current_code = current_code + line
+                current_code_lines.push(line)
 
     examples
 
@@ -182,42 +180,42 @@ fn generate_spec_spl(
     metadata: SpecMetadata,
     examples: List<CodeExample>
 ) -> text:
-    var output = ""
+    var parts: [text] = []
 
     # Header with metadata
-    output = output + "\"\"\"\n"
-    output = output + "# {metadata.title} - Test Specification\n\n"
-    output = output + "**Status:** {metadata.status}\n"
+    parts.push("\"\"\"\n")
+    parts.push("# {metadata.title} - Test Specification\n\n")
+    parts.push("**Status:** {metadata.status}\n")
 
     if not metadata.feature_ids.is_empty():
-        output = output + "**Feature IDs:** {metadata.feature_ids}\n"
+        parts.push("**Feature IDs:** {metadata.feature_ids}\n")
 
-    output = output + "**Source:** {source_filename}\n"
-    output = output + "**Type:** Extracted Examples (Category B)\n\n"
+    parts.push("**Source:** {source_filename}\n")
+    parts.push("**Type:** Extracted Examples (Category B)\n\n")
 
-    output = output + "## Overview\n\n"
-    output = output + "This file contains executable test cases extracted from {source_filename}.\n"
-    output = output + "The original specification file remains as architectural reference documentation.\n\n"
+    parts.push("## Overview\n\n")
+    parts.push("This file contains executable test cases extracted from {source_filename}.\n")
+    parts.push("The original specification file remains as architectural reference documentation.\n\n")
 
-    output = output + "**Note:** This is a test extraction file. For complete specification text,\n"
-    output = output + "design rationale, and architecture, see doc/spec/{source_filename}\n\n"
+    parts.push("**Note:** This is a test extraction file. For complete specification text,\n")
+    parts.push("design rationale, and architecture, see doc/spec/{source_filename}\n\n")
 
-    output = output + "## Extracted Test Cases\n\n"
-    output = output + "{examples.len()} test cases extracted covering:\n"
-    output = output + "- Core functionality examples\n"
-    output = output + "- Edge cases and validation\n"
-    output = output + "- Integration patterns\n"
-    output = output + "\"\"\"\n\n"
+    parts.push("## Extracted Test Cases\n\n")
+    parts.push("{examples.len()} test cases extracted covering:\n")
+    parts.push("- Core functionality examples\n")
+    parts.push("- Edge cases and validation\n")
+    parts.push("- Integration patterns\n")
+    parts.push("\"\"\"\n\n")
 
     # Generate test cases
     if examples.is_empty():
         # No examples found
-        output = output + "# No testable code examples found\n\n"
-        output = output + "test \"placeholder\":\n"
-        output = output + "    \"\"\"\n"
-        output = output + "    Placeholder test - add test cases as implementation progresses.\n"
-        output = output + "    \"\"\"\n"
-        output = output + "    assert_compiles()\n"
+        parts.push("# No testable code examples found\n\n")
+        parts.push("test \"placeholder\":\n")
+        parts.push("    \"\"\"\n")
+        parts.push("    Placeholder test - add test cases as implementation progresses.\n")
+        parts.push("    \"\"\"\n")
+        parts.push("    assert_compiles()\n")
     else:
         var i = 0
         while i < examples.len():
@@ -225,7 +223,7 @@ fn generate_spec_spl(
             val test_num = i + 1
 
             # Test marker
-            output = output + "## Test: {example.section} (Line ~{example.line_number})\n\n"
+            parts.push("## Test: {example.section} (Line ~{example.line_number})\n\n")
 
             # Add context if available
             if not example.context.is_empty() and example.context.len() > 20:
@@ -234,27 +232,27 @@ fn generate_spec_spl(
                 else:
                     example.context
 
-                output = output + "\"\"\"\n"
-                output = output + "{context_short}\n"
-                output = output + "\"\"\"\n"
+                parts.push("\"\"\"\n")
+                parts.push("{context_short}\n")
+                parts.push("\"\"\"\n")
 
             # Check if code already has test structure
             if example.code.contains("test ") or example.code.starts_with("fn "):
                 # Already structured, use as-is
-                output = output + "{example.code}\n\n"
+                parts.push("{example.code}\n\n")
             else:
                 # Wrap in test function
                 val test_name = generate_test_name(example.section, test_num)
-                output = output + "test \"{test_name}\":\n"
+                parts.push("test \"{test_name}\":\n")
 
                 # Indent code
                 val indented = indent_code(example.code, 4)
-                output = output + "{indented}\n"
-                output = output + "    assert_compiles()\n\n"
+                parts.push("{indented}\n")
+                parts.push("    assert_compiles()\n\n")
 
             i = i + 1
 
-    output
+    parts.join("")
 
 # Generate test name from section name
 fn generate_test_name(section: text, num: u64) -> text:
@@ -279,7 +277,15 @@ fn generate_test_name(section: text, num: u64) -> text:
 # Indent code by n spaces
 fn indent_code(code: text, spaces: u64) -> text:
     val lines = code.split("\n")
-    var result = ""
+    var parts: [text] = []
+
+    # Build indent string once
+    var indent_parts: [text] = []
+    var j: u64 = 0
+    while j < spaces:
+        indent_parts.push(" ")
+        j = j + 1
+    val indent = indent_parts.join("")
 
     var i = 0
     while i < lines.len():
@@ -287,23 +293,15 @@ fn indent_code(code: text, spaces: u64) -> text:
 
         # Add indentation if line is not empty
         if not line.trim().is_empty():
-            var indent = ""
-            var j: u64 = 0
-            while j < spaces:
-                indent = indent + " "
-                j = j + 1
-            result = result + indent + line
-        else:
-            # Keep empty lines empty
-            result = result + ""
+            parts.push(indent + line)
 
         # Add newline except for last line
         if i < lines.len() - 1:
-            result = result + "\n"
+            parts.push("\n")
 
         i = i + 1
 
-    result
+    parts.join("")
 
 # Extract tests from markdown file to _spec.spl file
 fn extract_tests(

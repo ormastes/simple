@@ -242,7 +242,7 @@ pub fn rt_file_read_lines(args: &[Value]) -> Result<Value, CompileError> {
     match fs::read_to_string(&path) {
         Ok(content) => {
             let lines: Vec<Value> = content.lines().map(|l| Value::Str(l.to_string())).collect();
-            Ok(make_some(Value::Array(lines)))
+            Ok(make_some(Value::array(lines)))
         }
         Err(_) => Ok(make_none()),
     }
@@ -267,7 +267,7 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     match fs::read(&path) {
         Ok(bytes) => {
             let arr: Vec<Value> = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(make_some(Value::Array(arr)))
+            Ok(make_some(Value::array(arr)))
         }
         Err(_) => Ok(make_none()),
     }
@@ -338,7 +338,7 @@ pub fn rt_dir_list(args: &[Value]) -> Result<Value, CompileError> {
                 .filter_map(|e| e.file_name().into_string().ok())
                 .map(Value::Str)
                 .collect();
-            Ok(make_some(Value::Array(names)))
+            Ok(make_some(Value::array(names)))
         }
         Err(_) => Ok(make_none()),
     }
@@ -387,9 +387,9 @@ pub fn rt_file_find(args: &[Value]) -> Result<Value, CompileError> {
                     }
                 })
                 .collect();
-            Ok(Value::Array(matches))
+            Ok(Value::array(matches))
         }
-        Err(_) => Ok(Value::Array(vec![])),
+        Err(_) => Ok(Value::array(vec![])),
     }
 }
 
@@ -425,7 +425,7 @@ pub fn rt_dir_walk(args: &[Value]) -> Result<Value, CompileError> {
 
     let mut results = Vec::new();
     walk_recursive(Path::new(&path), &mut results);
-    Ok(Value::Array(results))
+    Ok(Value::array(results))
 }
 
 /// Get current directory

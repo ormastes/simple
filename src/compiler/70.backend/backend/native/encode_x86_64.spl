@@ -97,10 +97,10 @@ fn i32_byte3(v: i64) -> i64:
 
 fn emit_i32(buf: [i64], value: i64) -> [i64]:
     var result = buf
-    result = result + [i32_byte0(value)]
-    result = result + [i32_byte1(value)]
-    result = result + [i32_byte2(value)]
-    result = result + [i32_byte3(value)]
+    result.push(i32_byte0(value))
+    result.push(i32_byte1(value))
+    result.push(i32_byte2(value))
+    result.push(i32_byte3(value))
     result
 
 fn emit_i64_bytes(buf: [i64], value: i64) -> [i64]:
@@ -168,180 +168,183 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
     var pending = ectx.pending_jumps
 
     if inst.opcode == X86_OP_NOP:
-        code = code + [0x90]
+        code.push(0x90)
 
     elif inst.opcode == X86_OP_INT3:
-        code = code + [0xcc]
+        code.push(0xcc)
 
     elif inst.opcode == X86_OP_RET:
-        code = code + [0xc3]
+        code.push(0xc3)
 
     elif inst.opcode == X86_OP_CQO:
         # REX.W + 99
-        code = code + [0x48, 0x99]
+        code.push(0x48)
+        code.push(0x99)
 
     elif inst.opcode == X86_OP_SYSCALL:
-        code = code + [0x0f, 0x05]
+        code.push(0x0f)
+        code.push(0x05)
 
     elif inst.opcode == X86_OP_MOV_REG_REG:
         val dst = get_phys_reg_id(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(src, dst)]
-        code = code + [0x89]
-        code = code + [modrm_direct(src, dst)]
+        code.push(rex_wrb(src, dst))
+        code.push(0x89)
+        code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_MOV_REG_IMM:
         val dst = get_phys_reg_id(inst.operands[0])
         val imm = get_imm_value(inst.operands[1])
         # REX.W + B8+rd + imm64
-        code = code + [rex_wb(dst)]
-        code = code + [0xb8 + reg_low3(dst)]
+        code.push(rex_wb(dst))
+        code.push(0xb8 + reg_low3(dst))
         code = emit_i64_bytes(code, imm)
 
     elif inst.opcode == X86_OP_MOV_REG_IMM32:
         val dst = get_phys_reg_id(inst.operands[0])
         val imm = get_imm_value(inst.operands[1])
         if dst >= 8:
-            code = code + [0x41]
-        code = code + [0xb8 + reg_low3(dst)]
+            code.push(0x41)
+        code.push(0xb8 + reg_low3(dst))
         code = emit_i32(code, imm)
 
     elif inst.opcode == X86_OP_MOV_REG_MEM:
         val dst = get_phys_reg_id(inst.operands[0])
         val base = get_mem_base_id(inst.operands[1])
         val offset = get_mem_offset(inst.operands[1])
-        code = code + [rex_wrb(dst, base)]
-        code = code + [0x8b]
+        code.push(rex_wrb(dst, base))
+        code.push(0x8b)
         code = encode_mem_operand(code, dst, base, offset)
 
     elif inst.opcode == X86_OP_MOV_MEM_REG:
         val base = get_mem_base_id(inst.operands[0])
         val offset = get_mem_offset(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(src, base)]
-        code = code + [0x89]
+        code.push(rex_wrb(src, base))
+        code.push(0x89)
         code = encode_mem_operand(code, src, base, offset)
 
     elif inst.opcode == X86_OP_ADD:
         val dst = get_phys_reg_id(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(src, dst)]
-        code = code + [0x01]
-        code = code + [modrm_direct(src, dst)]
+        code.push(rex_wrb(src, dst))
+        code.push(0x01)
+        code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_ADD_IMM:
         val dst = get_phys_reg_id(inst.operands[0])
         val imm = get_imm_value(inst.operands[1])
-        code = code + [rex_wb(dst)]
-        code = code + [0x81]
-        code = code + [modrm_direct(0, dst)]
+        code.push(rex_wb(dst))
+        code.push(0x81)
+        code.push(modrm_direct(0, dst))
         code = emit_i32(code, imm)
 
     elif inst.opcode == X86_OP_SUB:
         val dst = get_phys_reg_id(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(src, dst)]
-        code = code + [0x29]
-        code = code + [modrm_direct(src, dst)]
+        code.push(rex_wrb(src, dst))
+        code.push(0x29)
+        code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_SUB_IMM:
         val dst = get_phys_reg_id(inst.operands[0])
         val imm = get_imm_value(inst.operands[1])
         if imm == 0:
             # No-op for sub rsp, 0
-            code = code + [0x90]
+            code.push(0x90)
         else:
-            code = code + [rex_wb(dst)]
-            code = code + [0x81]
-            code = code + [modrm_direct(5, dst)]  # /5 = sub
+            code.push(rex_wb(dst))
+            code.push(0x81)
+            code.push(modrm_direct(5, dst))  # /5 = sub
             code = emit_i32(code, imm)
 
     elif inst.opcode == X86_OP_IMUL:
         val dst = get_phys_reg_id(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(dst, src)]
-        code = code + [0x0f, 0xaf]
-        code = code + [modrm_direct(dst, src)]
+        code.push(rex_wrb(dst, src))
+        code.push(0x0f)
+        code.push(0xaf)
+        code.push(modrm_direct(dst, src))
 
     elif inst.opcode == X86_OP_IDIV:
         val src = get_phys_reg_id(inst.operands[0])
-        code = code + [rex_wb(src)]
-        code = code + [0xf7]
-        code = code + [modrm_direct(7, src)]  # /7 = idiv
+        code.push(rex_wb(src))
+        code.push(0xf7)
+        code.push(modrm_direct(7, src))  # /7 = idiv
 
     elif inst.opcode == X86_OP_AND:
         val dst = get_phys_reg_id(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(src, dst)]
-        code = code + [0x21]
-        code = code + [modrm_direct(src, dst)]
+        code.push(rex_wrb(src, dst))
+        code.push(0x21)
+        code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_OR:
         val dst = get_phys_reg_id(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(src, dst)]
-        code = code + [0x09]
-        code = code + [modrm_direct(src, dst)]
+        code.push(rex_wrb(src, dst))
+        code.push(0x09)
+        code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_XOR:
         val dst = get_phys_reg_id(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(src, dst)]
-        code = code + [0x31]
-        code = code + [modrm_direct(src, dst)]
+        code.push(rex_wrb(src, dst))
+        code.push(0x31)
+        code.push(modrm_direct(src, dst))
 
     elif inst.opcode == X86_OP_SHL:
         val dst = get_phys_reg_id(inst.operands[0])
         # SHL r/m64, cl (D3 /4)
-        code = code + [rex_wb(dst)]
-        code = code + [0xd3]
-        code = code + [modrm_direct(4, dst)]
+        code.push(rex_wb(dst))
+        code.push(0xd3)
+        code.push(modrm_direct(4, dst))
 
     elif inst.opcode == X86_OP_SAR:
         val dst = get_phys_reg_id(inst.operands[0])
-        code = code + [rex_wb(dst)]
-        code = code + [0xd3]
-        code = code + [modrm_direct(7, dst)]
+        code.push(rex_wb(dst))
+        code.push(0xd3)
+        code.push(modrm_direct(7, dst))
 
     elif inst.opcode == X86_OP_SHR:
         val dst = get_phys_reg_id(inst.operands[0])
-        code = code + [rex_wb(dst)]
-        code = code + [0xd3]
-        code = code + [modrm_direct(5, dst)]
+        code.push(rex_wb(dst))
+        code.push(0xd3)
+        code.push(modrm_direct(5, dst))
 
     elif inst.opcode == X86_OP_NEG:
         val dst = get_phys_reg_id(inst.operands[0])
-        code = code + [rex_wb(dst)]
-        code = code + [0xf7]
-        code = code + [modrm_direct(3, dst)]
+        code.push(rex_wb(dst))
+        code.push(0xf7)
+        code.push(modrm_direct(3, dst))
 
     elif inst.opcode == X86_OP_NOT:
         val dst = get_phys_reg_id(inst.operands[0])
-        code = code + [rex_wb(dst)]
-        code = code + [0xf7]
-        code = code + [modrm_direct(2, dst)]
+        code.push(rex_wb(dst))
+        code.push(0xf7)
+        code.push(modrm_direct(2, dst))
 
     elif inst.opcode == X86_OP_CMP:
         val left = get_phys_reg_id(inst.operands[0])
         val right = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(right, left)]
-        code = code + [0x39]
-        code = code + [modrm_direct(right, left)]
+        code.push(rex_wrb(right, left))
+        code.push(0x39)
+        code.push(modrm_direct(right, left))
 
     elif inst.opcode == X86_OP_CMP_IMM:
         val dst = get_phys_reg_id(inst.operands[0])
         val imm = get_imm_value(inst.operands[1])
-        code = code + [rex_wb(dst)]
-        code = code + [0x81]
-        code = code + [modrm_direct(7, dst)]  # /7 = cmp
+        code.push(rex_wb(dst))
+        code.push(0x81)
+        code.push(modrm_direct(7, dst))  # /7 = cmp
         code = emit_i32(code, imm)
 
     elif inst.opcode == X86_OP_TEST:
         val left = get_phys_reg_id(inst.operands[0])
         val right = get_phys_reg_id(inst.operands[1])
-        code = code + [rex_wrb(right, left)]
-        code = code + [0x85]
-        code = code + [modrm_direct(right, left)]
+        code.push(rex_wrb(right, left))
+        code.push(0x85)
+        code.push(modrm_direct(right, left))
 
     elif inst.opcode == X86_OP_SETE:
         val dst = get_phys_reg_id(inst.operands[0])
@@ -387,9 +390,10 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         val dst = get_phys_reg_id(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
         # movzx r64, r8 -> REX.W + 0F B6 /r
-        code = code + [rex_wrb(dst, src)]
-        code = code + [0x0f, 0xb6]
-        code = code + [modrm_direct(dst, src)]
+        code.push(rex_wrb(dst, src))
+        code.push(0x0f)
+        code.push(0xb6)
+        code.push(modrm_direct(dst, src))
 
     elif inst.opcode == X86_OP_LEA:
         val dst = get_phys_reg_id(inst.operands[0])
@@ -397,9 +401,9 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         match inst.operands[1].kind:
             case Sym(name):
                 # LEA with RIP-relative addressing for symbol
-                code = code + [rex_wr(dst)]
-                code = code + [0x8d]
-                code = code + [modrm(0, dst, 5)]  # [rip+disp32]
+                code.push(rex_wr(dst))
+                code.push(0x8d)
+                code.push(modrm(0, dst, 5))  # [rip+disp32]
                 # Record relocation
                 val reloc = EncodedReloc(
                     offset: code_len(code),
@@ -407,96 +411,100 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                     reloc_type: 2,  # R_X86_64_PC32
                     addend: -4
                 )
-                relocs = relocs + [reloc]
+                relocs.push(reloc)
                 code = emit_i32(code, 0)  # Placeholder
             case Mem(base, offset):
                 val base_id = reg_id(base)
-                code = code + [rex_wrb(dst, base_id)]
-                code = code + [0x8d]
+                code.push(rex_wrb(dst, base_id))
+                code.push(0x8d)
                 code = encode_mem_operand(code, dst, base_id, offset)
             case _:
-                code = code + [0x90]  # NOP fallback
+                code.push(0x90)  # NOP fallback
 
     elif inst.opcode == X86_OP_PUSH:
         val src = get_phys_reg_id(inst.operands[0])
         if src >= 8:
-            code = code + [0x41]  # REX.B
-        code = code + [0x50 + reg_low3(src)]
+            code.push(0x41)  # REX.B
+        code.push(0x50 + reg_low3(src))
 
     elif inst.opcode == X86_OP_POP:
         val dst = get_phys_reg_id(inst.operands[0])
         if dst >= 8:
-            code = code + [0x41]  # REX.B
-        code = code + [0x58 + reg_low3(dst)]
+            code.push(0x41)  # REX.B
+        code.push(0x58 + reg_low3(dst))
 
     elif inst.opcode == X86_OP_JMP:
         match inst.operands[0].kind:
             case Label(block_id):
-                code = code + [0xe9]  # JMP rel32
+                code.push(0xe9)  # JMP rel32
                 val jump_offset = code_len(code)
                 code = emit_i32(code, 0)  # Placeholder
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: false)]
+                pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: false))
             case _:
-                code = code + [0x90]
+                code.push(0x90)
 
     elif inst.opcode == X86_OP_JE:
         val block_id = get_label_id(inst.operands[0])
-        code = code + [0x0f, 0x84]  # JE rel32
+        code.push(0x0f)
+        code.push(0x84)  # JE rel32
         val jump_offset = code_len(code)
         code = emit_i32(code, 0)
-        pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true)]
+        pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true))
 
     elif inst.opcode == X86_OP_JNE:
         val block_id = get_label_id(inst.operands[0])
-        code = code + [0x0f, 0x85]  # JNE rel32
+        code.push(0x0f)
+        code.push(0x85)  # JNE rel32
         val jump_offset = code_len(code)
         code = emit_i32(code, 0)
-        pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true)]
+        pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true))
 
     elif inst.opcode == X86_OP_JNZ:
         val block_id = get_label_id(inst.operands[0])
-        code = code + [0x0f, 0x85]  # JNZ = JNE rel32
+        code.push(0x0f)
+        code.push(0x85)  # JNZ = JNE rel32
         val jump_offset = code_len(code)
         code = emit_i32(code, 0)
-        pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true)]
+        pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true))
 
     elif inst.opcode == X86_OP_JZ:
         val block_id = get_label_id(inst.operands[0])
-        code = code + [0x0f, 0x84]  # JZ = JE rel32
+        code.push(0x0f)
+        code.push(0x84)  # JZ = JE rel32
         val jump_offset = code_len(code)
         code = emit_i32(code, 0)
-        pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true)]
+        pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true))
 
     elif inst.opcode == X86_OP_CALL:
         match inst.operands[0].kind:
             case Sym(name):
-                code = code + [0xe8]  # CALL rel32
+                code.push(0xe8)  # CALL rel32
                 val reloc = EncodedReloc(
                     offset: code_len(code),
                     symbol_name: name,
                     reloc_type: 4,  # R_X86_64_PLT32
                     addend: -4
                 )
-                relocs = relocs + [reloc]
+                relocs.push(reloc)
                 code = emit_i32(code, 0)  # Placeholder
             case Label(block_id):
-                code = code + [0xe8]
+                code.push(0xe8)
                 val jump_offset = code_len(code)
                 code = emit_i32(code, 0)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: false)]
+                pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: false))
             case _:
-                code = code + [0x90]
+                code.push(0x90)
 
     elif inst.opcode == X86_OP_CALL_INDIRECT:
         val src = get_phys_reg_id(inst.operands[0])
         # call *reg: FF /2
-        code = code + [rex_wb(src)]
-        code = code + [0xff]
-        code = code + [modrm_direct(2, src)]
+        code.push(rex_wb(src))
+        code.push(0xff)
+        code.push(modrm_direct(2, src))
 
     else:
         # Unknown opcode - emit NOP
-        code = code + [0x90]
+        code.push(0x90)
 
     EncodeContext(code: code, relocations: relocs, block_offsets: ectx.block_offsets, pending_jumps: pending)
 
@@ -511,29 +519,29 @@ fn encode_mem_operand(code: [i64], reg: i64, base: i64, offset: i64) -> [i64]:
     if base_low == 4:
         # RSP/R12 needs SIB byte
         if offset == 0:
-            result = result + [modrm_indirect(reg, base)]
-            result = result + [sib_byte(0, 4, base)]  # SIB: no index, RSP base
+            result.push(modrm_indirect(reg, base))
+            result.push(sib_byte(0, 4, base))  # SIB: no index, RSP base
         elif fits_in_i8(offset):
-            result = result + [modrm_disp8(reg, base)]
-            result = result + [sib_byte(0, 4, base)]
-            result = result + [i32_byte0(offset)]
+            result.push(modrm_disp8(reg, base))
+            result.push(sib_byte(0, 4, base))
+            result.push(i32_byte0(offset))
         else:
-            result = result + [modrm_disp32(reg, base)]
-            result = result + [sib_byte(0, 4, base)]
+            result.push(modrm_disp32(reg, base))
+            result.push(sib_byte(0, 4, base))
             result = emit_i32(result, offset)
     elif base_low == 5:
         if offset == 0:
             # RBP/R13 with disp=0 needs explicit disp8(0)
-            result = result + [modrm_disp8(reg, base)]
-            result = result + [0]
+            result.push(modrm_disp8(reg, base))
+            result.push(0)
     else:
         if offset == 0:
-            result = result + [modrm_indirect(reg, base)]
+            result.push(modrm_indirect(reg, base))
         elif fits_in_i8(offset):
-            result = result + [modrm_disp8(reg, base)]
-            result = result + [i32_byte0(offset)]
+            result.push(modrm_disp8(reg, base))
+            result.push(i32_byte0(offset))
         else:
-            result = result + [modrm_disp32(reg, base)]
+            result.push(modrm_disp32(reg, base))
             result = emit_i32(result, offset)
 
     result
@@ -546,11 +554,12 @@ fn encode_setcc(code: [i64], cc_opcode: i64, dst: i64) -> [i64]:
     var result = code
     # setCC uses 8-bit register, need REX if dst >= 4 (spl, bpl, sil, dil)
     if dst >= 8:
-        result = result + [0x41]  # REX.B
+        result.push(0x41)  # REX.B
     elif dst >= 4:
-        result = result + [0x40]  # REX (for spl etc.)
-    result = result + [0x0f, cc_opcode]
-    result = result + [modrm_direct(0, dst)]
+        result.push(0x40)  # REX (for spl etc.)
+    result.push(0x0f)
+    result.push(cc_opcode)
+    result.push(modrm_direct(0, dst))
     result
 
 # ============================================================================

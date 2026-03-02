@@ -22,16 +22,17 @@ class StrengthReduction:
 
     Example transformations:
     - i * 4 -> i << 2 (multiply by power of 2)
-    - i * c -> i + i + ... (multiply by small constant)
+    - i * 3 -> (i << 1) + i (small constant decomposition)
     - i / 2 -> i >> 1 (divide by power of 2)
 
     Most impactful in loop bodies where operation repeats.
     """
     reduced_count: i64
+    next_local_id: i64
 
 impl StrengthReduction:
     static fn new() -> StrengthReduction:
-        StrengthReduction(reduced_count: 0)
+        StrengthReduction(reduced_count: 0, next_local_id: 900000)
 
     me optimize_function(func: MirFunction) -> MirFunction:
         """Run strength reduction on function."""
@@ -39,7 +40,7 @@ impl StrengthReduction:
 
         for block in func.blocks:
             val optimized = self.reduce_block(block)
-            optimized_blocks = optimized_blocks.push(optimized)
+            optimized_blocks.push(optimized)
 
         copy_mir_function_with_blocks(func, optimized_blocks)
 
@@ -48,8 +49,9 @@ impl StrengthReduction:
         var reduced_instructions: [MirInst] = []
 
         for inst in block.instructions:
-            val reduced = self.try_reduce_instruction(inst)
-            reduced_instructions = reduced_instructions.push(reduced)
+            val expanded = self.try_reduce_instruction(inst)
+            for ei in expanded:
+                reduced_instructions.push(ei)
 
         MirBlock(
             id: block.id,
@@ -58,20 +60,26 @@ impl StrengthReduction:
             terminator: block.terminator
         )
 
-    me try_reduce_instruction(inst: MirInst) -> MirInst:
-        """Try to apply strength reduction to instruction."""
+    me try_reduce_instruction(inst: MirInst) -> [MirInst]:
+        """Try to apply strength reduction to instruction. Returns list (may expand to multiple)."""
         match inst.kind:
             case BinOp(dest, op, left, right):
-                # Try to reduce expensive binary operations
+                # Try single-instruction reduction first
                 val reduced = self.try_reduce_binop(dest, op, left, right, inst.span)
                 if reduced.?:
                     self.reduced_count = self.reduced_count + 1
-                    return reduced.unwrap()
-                inst
+                    return [reduced.unwrap()]
+
+                # Try small-constant multiply decomposition (multi-instruction)
+                val decomposed = self.try_decompose_small_mul(dest, op, left, right, inst.span)
+                if decomposed.len() > 0:
+                    self.reduced_count = self.reduced_count + 1
+                    return decomposed
+
+                [inst]
 
             case _:
-                # No reduction possible
-                inst
+                [inst]
 
     fn try_reduce_binop(
         dest: LocalId,
@@ -190,6 +198,85 @@ impl StrengthReduction:
                 nil
             case _:
                 nil
+
+    me try_decompose_small_mul(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand, span: Span) -> [MirInst]:
+        """
+        Decompose small-constant multiplies into shift+add/sub sequences.
+
+        x * 3  → tmp = x << 1; dest = tmp + x
+        x * 5  → tmp = x << 2; dest = tmp + x
+        x * 7  → tmp = x << 3; dest = tmp - x
+        x * 9  → tmp = x << 3; dest = tmp + x
+        x * 15 → tmp = x << 4; dest = tmp - x
+        """
+        match op:
+            case Mul:
+                pass
+            case _:
+                return []
+
+        # Check right operand for small constant
+        var const_val = self.operand_const_int_value(right)
+        var variable_operand = left
+        if not const_val.?:
+            # Check left operand
+            const_val = self.operand_const_int_value(left)
+            variable_operand = right
+        if not const_val.?:
+            return []
+
+        val c = const_val.unwrap()
+
+        # Map: constant → (shift_amount, add_or_sub)
+        # x * 3  = (x << 1) + x  → shift=1, add
+        # x * 5  = (x << 2) + x  → shift=2, add
+        # x * 7  = (x << 3) - x  → shift=3, sub
+        # x * 9  = (x << 3) + x  → shift=3, add
+        # x * 15 = (x << 4) - x  → shift=4, sub
+        var shift_amount = 0
+        var use_sub = false
+        var matched = false
+
+        if c == 3:
+            shift_amount = 1
+            matched = true
+        elif c == 5:
+            shift_amount = 2
+            matched = true
+        elif c == 7:
+            shift_amount = 3
+            use_sub = true
+            matched = true
+        elif c == 9:
+            shift_amount = 3
+            matched = true
+        elif c == 15:
+            shift_amount = 4
+            use_sub = true
+            matched = true
+
+        if not matched:
+            return []
+
+        # Allocate temp local for the shift result
+        val tmp_id = LocalId(id: self.next_local_id)
+        self.next_local_id = self.next_local_id + 1
+
+        # Instruction 1: tmp = variable_operand << shift_amount
+        val shift_inst = MirInst(
+            kind: MirInstKind.BinOp(tmp_id, MirBinOp.Shl, variable_operand, mir_operand_const_int(shift_amount)),
+            span: span
+        )
+
+        # Instruction 2: dest = tmp +/- variable_operand
+        val tmp_operand = MirOperand(kind: MirOperandKind.Copy(tmp_id))
+        val combine_op = if use_sub: MirBinOp.Sub else: MirBinOp.Add
+        val combine_inst = MirInst(
+            kind: MirInstKind.BinOp(dest, combine_op, tmp_operand, variable_operand),
+            span: span
+        )
+
+        [shift_inst, combine_inst]
 
     fn operand_const_int_value(op: MirOperand) -> i64?:
         """Extract constant integer value from operand."""

@@ -238,8 +238,8 @@ mod tests {
 
     #[test]
     fn test_mode_allows_mut() {
-        // Actor mode allows mut T (temporarily, until actor system is implemented)
-        assert!(ConcurrencyMode::Actor.allows_mut());
+        // Actor mode rejects mut T — use iso T or lock_base instead
+        assert!(!ConcurrencyMode::Actor.allows_mut());
 
         // LockBase mode allows mut T
         assert!(ConcurrencyMode::LockBase.allows_mut());
@@ -258,13 +258,13 @@ mod tests {
 
     #[test]
     fn test_mode_compatibility_actor() {
-        // Actor mode: mut T allowed (temporarily, until actor system is implemented)
+        // Actor mode: mut T (Exclusive) is NOT allowed — use iso T or lock_base
         assert!(CapabilityEnv::check_mode_compatibility(
             ReferenceCapability::Exclusive,
             ConcurrencyMode::Actor,
             "test_fn"
         )
-        .is_ok());
+        .is_err());
 
         // Actor mode: iso T allowed
         assert!(CapabilityEnv::check_mode_compatibility(

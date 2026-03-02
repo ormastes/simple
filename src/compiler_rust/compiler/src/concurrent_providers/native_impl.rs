@@ -131,7 +131,7 @@ impl MapProvider for NativeMapProvider {
         let map = get_map!(self, handle)?;
         Ok(map
             .iter()
-            .map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()]))
+            .map(|(k, v)| Value::array(vec![Value::Str(k.clone()), v.clone()]))
             .collect())
     }
 
@@ -364,7 +364,7 @@ impl MapProvider for NativeMapProvider {
             .ok_or_else(|| CompileError::runtime(format!("Invalid BTreeMap handle: {}", handle)))?;
         Ok(map
             .iter()
-            .map(|(k, v)| Value::Array(vec![Value::Str(k.clone()), v.clone()]))
+            .map(|(k, v)| Value::array(vec![Value::Str(k.clone()), v.clone()]))
             .collect())
     }
 

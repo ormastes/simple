@@ -79,8 +79,19 @@ bin/simple bug-gen
 4. **Fix:** Apply workaround or fix root cause
 5. **Verify:** Run test to confirm fix
 
+## Active Session Debugging (DAP+LSP)
+
+For interactive debugging with breakpoints and LSP-enriched inspection,
+use the `debug-analyst` agent or read the `/debug-lsp` skill.
+
+Quick-start: `debug_create_session` → `debug_set_breakpoint` → `debug_continue` →
+`debug_stack_trace` + `debug_get_variables` → enrich with `simple_hover` / `simple_workspace_symbols`.
+See `/debug-lsp` for full chain patterns.
+
 ## See Also
 
 - `/debug` - Full debugging guide with all techniques
+- `/debug-lsp` - DAP+LSP chaining patterns for active session analysis
 - `/mcp-failure-analysis` - MCP tools for failure analysis
+- Use `debug-analyst` agent for interactive session debugging with LSP enrichment
 - `doc/bug/bug_db.sdn` - Bug tracking database

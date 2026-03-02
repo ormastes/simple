@@ -1,0 +1,106 @@
+# Build bootstrap binaries for all platforms locally
+# This script is for local development/testing
+#
+# Usage: bin/simple run scripts/build/build_bootstrap_multi_platform.spl
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+fn shell_output(command: text) -> text:
+    val (out, _, _) = shell(command)
+    out.trim()
+
+fn shell_ok(command: text) -> bool:
+    val (_, _, code) = shell(command)
+    code == 0
+
+fn main():
+    print "Building multi-platform bootstrap binaries..."
+
+    val os = shell_output("uname -s | tr '[:upper:]' '[:lower:]'")
+    var arch = shell_output("uname -m")
+    if arch == "aarch64" or arch == "arm64":
+        arch = "arm64"
+    val current_platform = "{os}-{arch}"
+    print "Current platform: {current_platform}"
+
+    val has_cross = shell_ok("command -v cross >/dev/null 2>&1")
+    if not has_cross:
+        print "Warning: 'cross' not installed. Cross-compilation will be skipped."
+        print "Install with: cargo install cross --git https://github.com/cross-rs/cross"
+
+    shell("mkdir -p bin/release")
+
+    val platforms = ["linux-x86_64", "linux-arm64", "linux-riscv64", "macos-x86_64", "macos-arm64", "windows-x86_64", "windows-arm64"]
+    val targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+
+    var i = 0
+    while i < platforms.len():
+        val platform = platforms[i]
+        val target = targets[i]
+
+        print ""
+        print "================================================"
+        print "Building: {platform} ({target})"
+        print "================================================"
+
+        val needs_cross = platform != current_platform
+
+        if needs_cross and not has_cross:
+            print "Skipping {platform} (cross-compilation not available)"
+            i = i + 1
+            pass_dn
+
+        shell("rustup target add {target} 2>/dev/null || true")
+
+        if needs_cross:
+            print "Using cross for {platform}..."
+            shell("cross build --release --target {target}")
+        else:
+            print "Native build for {platform}..."
+            shell("cargo build --release --target {target}")
+
+        shell("mkdir -p bin/release/{platform}")
+
+        var ext = ""
+        if platform.starts_with("windows"):
+            ext = ".exe"
+
+        val source_bin = "target/{target}/release/simple{ext}"
+        val dest_bin = "bin/release/{platform}/simple{ext}"
+
+        if rt_file_exists(source_bin):
+            shell("cp {source_bin} {dest_bin}")
+            shell("chmod +x {dest_bin}")
+            val size = shell_output("ls -lh {dest_bin} | awk '{{print $5}}'")
+            print "Built: {dest_bin} ({size})"
+        else:
+            print "Failed: Binary not found at {source_bin}"
+
+        i = i + 1
+
+    print ""
+    print "================================================"
+    print "Build Summary"
+    print "================================================"
+
+    var j = 0
+    while j < platforms.len():
+        val platform = platforms[j]
+        var ext = ""
+        if platform.starts_with("windows"):
+            ext = ".exe"
+        val binary = "bin/release/{platform}/simple{ext}"
+        if rt_file_exists(binary):
+            val size = shell_output("ls -lh {binary} | awk '{{print $5}}'")
+            print "  {platform}: {size}"
+        else:
+            print "  {platform}: not built"
+        j = j + 1
+
+    print ""
+    print "Bootstrap build complete!"
+    print "Binaries located in: bin/release/"

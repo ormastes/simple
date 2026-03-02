@@ -170,6 +170,43 @@ impl SdnDocument {
     }
 }
 
+/// Check if an SDN string value needs quoting when serialized.
+///
+/// Values containing characters that are significant to the SDN lexer or
+/// parser must be quoted to avoid mis-parsing.
+fn sdn_needs_quoting(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    // Characters significant to the SDN lexer/parser
+    if value.contains(|c: char| {
+        c.is_whitespace()
+            || c == ','
+            || c == ':'
+            || c == '"'
+            || c == '['
+            || c == ']'
+            || c == '('
+            || c == ')'
+            || c == '{'
+            || c == '}'
+            || c == '|'
+            || c == '='
+            || c == '>'
+            || c == '<'
+    }) {
+        return true;
+    }
+    // Values starting with a digit that also contain letters get split by
+    // the lexer into a number token + identifier token (e.g., `14a73b269158`
+    // becomes Integer(14) + Identifier("a73b269158")).
+    if value.starts_with(|c: char| c.is_ascii_digit()) && value.contains(|c: char| c.is_alphabetic()) {
+        return true;
+    }
+    // SDN keywords would be parsed as non-String types
+    matches!(value, "null" | "nil" | "true" | "false" | "table")
+}
+
 /// Render SDN value to string with indentation.
 fn render_value(value: &SdnValue, indent: usize) -> String {
     let prefix = "    ".repeat(indent);
@@ -180,7 +217,7 @@ fn render_value(value: &SdnValue, indent: usize) -> String {
         SdnValue::Int(i) => i.to_string(),
         SdnValue::Float(f) => f.to_string(),
         SdnValue::String(s) => {
-            if s.contains(|c: char| c.is_whitespace() || c == ',' || c == ':' || c == '"') {
+            if sdn_needs_quoting(s) {
                 format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
             } else {
                 s.clone()

@@ -161,7 +161,7 @@ pub fn load_todo_db(path: &Path) -> Result<TodoDb, String> {
     eprintln!("DEBUG: load_todo_db called for path: {}", path.display());
 
     // Acquire lock before reading
-    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+    let _lock = FileLock::acquire(path, 2).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
     if !path.exists() {
         eprintln!("DEBUG: Database file does not exist, creating new");
@@ -323,7 +323,7 @@ fn parse_todo_db(doc: &SdnDocument, path: &Path) -> Result<TodoDb, String> {
 pub fn save_todo_db(path: &Path, db: &TodoDb) -> Result<(), std::io::Error> {
     // Acquire lock before writing
     let _lock =
-        FileLock::acquire(path, 10).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+        FileLock::acquire(path, 2).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
 
     let fields = vec![
         "id".to_string(),

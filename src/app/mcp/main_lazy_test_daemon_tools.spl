@@ -4,13 +4,60 @@
 # Uses file-based IPC with the test daemon process via daemon_sdk.
 # Auto-starts daemon on first request.
 
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_mkdir_p(path: text) -> bool
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_hash_text(s: text) -> i64
-extern fn rt_getpid() -> i64
+fn _td_mkdir_p(path: text):
+    var _out = ""
+    var _code: i64 = 0
+    (_out, _code) = shell_cmd("mkdir -p " + path)
+
+fn _td_hash_text(s: text) -> i64:
+    var h: i64 = 5381
+    for ch in s:
+        h = h * 33 + 1
+    if h < 0:
+        h = 0 - h
+    h
+
+fn _td_process_exists(pid: i64) -> bool:
+    var out = ""
+    var code: i64 = 0
+    (out, code) = shell_cmd("kill -0 " + str(pid) + " 2>/dev/null")
+    code == 0
+
+fn _td_sleep_ms(ms: i64):
+    var _out = ""
+    var _code: i64 = 0
+    if ms <= 0:
+        return
+    if ms < 200:
+        (_out, _code) = shell_cmd("sleep 0.1")
+    elif ms < 1000:
+        # Convert ms to fractional seconds: e.g. 500 -> "0.5"
+        val tenths = ms / 100
+        (_out, _code) = shell_cmd("sleep 0." + str(tenths))
+    else:
+        val secs = ms / 1000
+        (_out, _code) = shell_cmd("sleep " + str(secs))
+
+fn _td_file_rename(from_path: text, to_path: text) -> bool:
+    var _out = ""
+    var code: i64 = 0
+    (_out, code) = shell_cmd("mv " + from_path + " " + to_path)
+    code == 0
+
+fn _td_file_delete(path: text) -> bool:
+    var _out = ""
+    var code: i64 = 0
+    (_out, code) = shell_cmd("rm -f " + path)
+    code == 0
+
+fn _td_getpid() -> i64:
+    var out = ""
+    var _code: i64 = 0
+    (out, _code) = shell_cmd("echo $$")
+    val trimmed = out.trim()
+    if trimmed == "":
+        return 0
+    int(trimmed)
 
 # ============================================================================
 # test_daemon_run — Run test with change detection
@@ -100,9 +147,8 @@ fn handle_test_daemon_status(id: text, body: text) -> text:
     val pid_str = lines[0].trim()
 
     # Check if PID is alive
-    extern fn rt_process_exists(pid: i64) -> bool
-    val pid = pid_str.to_i64() ?? 0
-    if pid <= 0 or not rt_process_exists(pid):
+    val pid = int(pid_str)
+    if pid <= 0 or not _td_process_exists(pid):
         return make_tool_result(id, "Test daemon: not running (stale lock, pid: " + pid_str + ")")
 
     # Submit status request
@@ -145,15 +191,14 @@ fn ensure_test_daemon() -> bool:
         if content != "":
             val lines = content.split("\n")
             val pid_str = lines[0].trim()
-            val pid = pid_str.to_i64() ?? 0
+            val pid = int(pid_str)
             if pid > 0:
-                extern fn rt_process_exists(pid: i64) -> bool
-                if rt_process_exists(pid):
+                if _td_process_exists(pid):
                     return true
 
     # Start daemon
-    rt_mkdir_p(".build/test_daemon/requests")
-    rt_mkdir_p(".build/test_daemon/responses")
+    _td_mkdir_p(".build/test_daemon/requests")
+    _td_mkdir_p(".build/test_daemon/responses")
 
     val _bin = _mcp_find_simple_binary()
     val cmd = _bin + " test-daemon start &"
@@ -162,16 +207,15 @@ fn ensure_test_daemon() -> bool:
     (out, exit_code) = shell_cmd(cmd)
 
     # Brief wait for daemon to acquire lock
-    extern fn rt_sleep_ms(ms: i64)
-    rt_sleep_ms(500)
+    _td_sleep_ms(500)
 
     rt_file_exists(lock_path)
 
 fn build_and_submit_test_request(kind: i64, test_path: text, filter: text) -> text:
     val request_dir = ".build/test_daemon/requests"
-    rt_mkdir_p(request_dir)
+    _td_mkdir_p(request_dir)
 
-    val pid = rt_getpid()
+    val pid = _td_getpid()
     val ts = rt_time_now_unix_micros()
     val req_id = "{pid}_{ts}"
 
@@ -183,16 +227,14 @@ fn build_and_submit_test_request(kind: i64, test_path: text, filter: text) -> te
     if filter != "":
         content = content + "field.filter={filter}\n"
 
-    val hash = rt_hash_text(req_id)
+    val hash = _td_hash_text(req_id)
     val req_path = "{request_dir}/{hash}_{req_id}.req"
 
     val tmp_path = "{req_path}.tmp"
     if rt_file_write_text(tmp_path, content):
-        extern fn rt_file_rename(from: text, to: text) -> bool
-        if rt_file_rename(tmp_path, req_path):
+        if _td_file_rename(tmp_path, req_path):
             return req_id
-        extern fn rt_file_delete(path: text) -> bool
-        rt_file_delete(tmp_path)
+        _td_file_delete(tmp_path)
 
     if rt_file_write_text(req_path, content):
         return req_id
@@ -203,14 +245,13 @@ fn poll_test_response(request_id: text, timeout_ms: i64) -> text:
     val resp_path = "{response_dir}/{request_id}.resp"
     val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
 
-    extern fn rt_sleep_ms(ms: i64)
     var attempts = 0
     while rt_time_now_unix_micros() < deadline and attempts < 6000:
         if rt_file_exists(resp_path):
             val content = rt_file_read_text(resp_path) ?? ""
             if content != "":
                 return format_test_response(content)
-        rt_sleep_ms(100)
+        _td_sleep_ms(100)
         attempts = attempts + 1
 
     ""
@@ -222,7 +263,7 @@ fn format_test_response(content: text) -> text:
     var failed = ""
     var skipped = ""
     var duration = ""
-    var output = ""
+    var output_parts: [text] = []
     var cached = ""
 
     val lines = content.split("\n")
@@ -254,36 +295,38 @@ fn format_test_response(content: text) -> text:
         elif line.starts_with("field.duration_ms="):
             duration = line.substring(18)
         elif line.starts_with("field.output="):
-            output = line.substring(13)
+            output_parts.push(line.substring(13))
         elif line.starts_with("field.cached="):
             cached = line.substring(13)
         elif line.starts_with("field.daemon_status="):
             status_str = line.substring(20)
         elif line.starts_with("field.items_processed="):
-            output = output + "items_processed: " + line.substring(22) + "\n"
+            output_parts.push("items_processed: " + line.substring(22) + "\n")
         elif line.starts_with("field.cache_entries="):
-            output = output + "cache_entries: " + line.substring(19) + "\n"
+            output_parts.push("cache_entries: " + line.substring(19) + "\n")
         elif line.starts_with("field.qemu_active="):
-            output = output + "qemu_active: " + line.substring(18) + "\n"
+            output_parts.push("qemu_active: " + line.substring(18) + "\n")
         elif line.starts_with("field.qemu_idle="):
-            output = output + "qemu_idle: " + line.substring(16) + "\n"
+            output_parts.push("qemu_idle: " + line.substring(16) + "\n")
         elif line.starts_with("field.error="):
-            output = "ERROR: " + line.substring(12)
+            output_parts = ["ERROR: " + line.substring(12)]
         i = i + 1
 
-    var result = "Status: " + status_str
+    val output = output_parts.join("")
+    var result_parts: [text] = []
+    result_parts.push("Status: " + status_str)
     if test_path != "":
-        result = result + "\nTest: " + test_path
+        result_parts.push("\nTest: " + test_path)
     if cached == "true":
-        result = result + " (cached)"
+        result_parts.push(" (cached)")
     if passed != "":
-        result = result + "\nPassed: " + passed
+        result_parts.push("\nPassed: " + passed)
     if failed != "":
-        result = result + ", Failed: " + failed
+        result_parts.push(", Failed: " + failed)
     if skipped != "":
-        result = result + ", Skipped: " + skipped
+        result_parts.push(", Skipped: " + skipped)
     if duration != "":
-        result = result + "\nDuration: " + duration + "ms"
+        result_parts.push("\nDuration: " + duration + "ms")
     if output != "":
-        result = result + "\n" + output
-    result
+        result_parts.push("\n" + output)
+    result_parts.join("")

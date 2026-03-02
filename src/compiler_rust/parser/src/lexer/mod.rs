@@ -363,6 +363,9 @@ impl<'a> Lexer<'a> {
                 if self.check('&') {
                     self.advance();
                     TokenKind::DoubleAmp
+                } else if self.check(':') {
+                    self.advance();
+                    TokenKind::AmpColon
                 } else {
                     TokenKind::Ampersand
                 }

@@ -499,7 +499,8 @@ pub enum Value {
     Str(String),
     Symbol(String),
     /// Mutable array (default for array literals)
-    Array(Vec<Value>),
+    /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations)
+    Array(Arc<Vec<Value>>),
     /// Immutable frozen array (created via freeze(), copy-on-freeze semantics)
     FrozenArray(Arc<Vec<Value>>),
     /// Fixed-size array with runtime size checking ([T; N] syntax)
@@ -632,7 +633,7 @@ impl Clone for NativeFunction {
 impl Value {
     /// Create a new mutable array value (default for array literals)
     pub fn array(vec: Vec<Value>) -> Self {
-        Value::Array(vec)
+        Value::Array(Arc::new(vec))
     }
 
     /// Create a new frozen (immutable) array value

@@ -31,6 +31,11 @@ struct LineContext:
     trimmed: text
     indent: i64
 
+# Module-level cache for pre-split lines. Set by check_all_rules() to
+# avoid re-splitting the same source 8+ times.
+var _cached_lines: [text] = []
+var _cached_source = ""
+
 fn for_each_line(source: text, callback: fn(LineContext) -> [EasyFix]) -> [EasyFix]:
     """
     Iterate over source lines and collect fixes from callback.
@@ -38,7 +43,11 @@ fn for_each_line(source: text, callback: fn(LineContext) -> [EasyFix]) -> [EasyF
     Handles the common pattern of splitting source, tracking line numbers/offsets,
     and collecting fixes. Reduces duplication in rule implementations.
     """
-    val lines = source.split("\n")
+    var lines: [text] = []
+    if source == _cached_source and _cached_lines.len() > 0:
+        lines = _cached_lines
+    else:
+        lines = source.split("\n")
     var line_num = 0
     var byte_offset = 0
     var all_fixes: [EasyFix] = []
@@ -57,7 +66,8 @@ fn for_each_line(source: text, callback: fn(LineContext) -> [EasyFix]) -> [EasyF
         )
 
         val line_fixes = callback(context)
-        all_fixes = all_fixes.concat(line_fixes)
+        for fix in line_fixes:
+            all_fixes.push(fix)
 
         byte_offset = byte_offset + line.len() + 1
 
@@ -68,7 +78,11 @@ fn for_each_line(source: text, callback: fn(LineContext) -> [EasyFix]) -> [EasyF
 # ============================================================================
 
 fn byte_offset_of(source: String, target_line: Int, target_col: Int) -> Int:
-    val lines = source.split("\n")
+    var lines: [text] = []
+    if source == _cached_source and _cached_lines.len() > 0:
+        lines = _cached_lines
+    else:
+        lines = source.split("\n")
     var offset = 0
     var line_num = 1
     for line in lines:
@@ -82,7 +96,11 @@ fn line_start_offset(source: String, target_line: Int) -> Int:
     byte_offset_of(source, target_line, 1)
 
 fn line_end_offset(source: String, target_line: Int) -> Int:
-    val lines = source.split("\n")
+    var lines: [text] = []
+    if source == _cached_source and _cached_lines.len() > 0:
+        lines = _cached_lines
+    else:
+        lines = source.split("\n")
     var offset = 0
     var line_num = 1
     for line in lines:
@@ -274,7 +292,11 @@ fn check_sspec_missing_docstrings(source: String, file: String) -> [EasyFix]:
     if not file.ends_with("_spec.spl"):
         return fixes
 
-    val lines = source.split("\n")
+    var lines: [text] = []
+    if source == _cached_source and _cached_lines.len() > 0:
+        lines = _cached_lines
+    else:
+        lines = source.split("\n")
     var line_num = 0
     var byte_offset = 0
 
@@ -396,7 +418,11 @@ fn check_sspec_manual_assertions(source: String, file: String) -> [EasyFix]:
 
 fn check_non_exhaustive_match(source: String, file: String) -> [EasyFix]:
     var fixes: [EasyFix] = []
-    val lines = source.split("\n")
+    var lines: [text] = []
+    if source == _cached_source and _cached_lines.len() > 0:
+        lines = _cached_lines
+    else:
+        lines = source.split("\n")
     var line_num = 0
     var byte_offset = 0
     var in_match = false
@@ -510,7 +536,11 @@ fn levenshtein(a: String, b: String) -> Int:
 
 fn check_typo_suggestion(source: String, file: String, known_names: [String]) -> [EasyFix]:
     var fixes: [EasyFix] = []
-    val lines = source.split("\n")
+    var lines: [text] = []
+    if source == _cached_source and _cached_lines.len() > 0:
+        lines = _cached_lines
+    else:
+        lines = source.split("\n")
     var line_num = 0
     var byte_offset = 0
 
@@ -718,6 +748,10 @@ fn check_deprecated_if_let(source: String, file: String) -> [EasyFix]:
 # ============================================================================
 
 fn check_all_rules(source: String, file: String) -> [EasyFix]:
+    # Split source ONCE and cache for all rule functions to reuse
+    _cached_source = source
+    _cached_lines = source.split("\n")
+
     var all_fixes: [EasyFix] = []
 
     val fixes1 = check_print_in_test_spec(source, file)
@@ -754,6 +788,10 @@ fn check_all_rules(source: String, file: String) -> [EasyFix]:
 
     # Rules 7 (typo) and 9 (type coercion) are no-ops in text-scanning mode.
     # They require compiler integration (Rust side).
+
+    # Clear cache to avoid holding reference to large source string
+    _cached_source = ""
+    _cached_lines = []
 
     all_fixes
 

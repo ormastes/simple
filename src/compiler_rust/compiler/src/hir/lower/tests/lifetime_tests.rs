@@ -506,7 +506,8 @@ fn test_ref_mut_creates_exclusive_capability() {
 fn test_ref_mut():
     var x: i32 = 10
     val ptr = &mut x
-    *ptr
+    val result = *ptr
+    result
 "#;
 
     let result = lower_with_warnings(source);
@@ -520,7 +521,8 @@ fn test_ref_creates_shared_capability() {
 fn test_ref():
     val x: i32 = 10
     val ptr = &x
-    *ptr
+    val result = *ptr
+    result
 "#;
 
     let result = lower_with_warnings(source);
@@ -556,7 +558,9 @@ fn mutable_aliasing():
     var x: i32 = 10
     val r1 = &mut x
     val r2 = &mut x
-    *r1 + *r2
+    val v1 = *r1
+    val v2 = *r2
+    v1 + v2
 "#;
 
     // This should fail due to aliasing violation
@@ -578,7 +582,9 @@ fn shared_aliasing():
     val x: i32 = 10
     val r1 = &x
     val r2 = &x
-    *r1 + *r2
+    val v1 = *r1
+    val v2 = *r2
+    v1 + v2
 "#;
 
     let result = lower_with_warnings(source);
