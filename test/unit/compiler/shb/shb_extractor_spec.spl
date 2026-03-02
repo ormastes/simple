@@ -1,0 +1,149 @@
+# SHB Extractor Test
+#
+# Verifies interface hashing and canonical API string generation.
+
+use compiler.shb.shb_types.{
+    ShbModuleInterface, ShbFnEntry, ShbStructEntry, ShbEnumEntry,
+    ShbParam, ShbFieldEntry,
+    shb_module_interface_new, SHB_FLAG_PUB
+}
+use compiler.shb.shb_hash.{
+    shb_source_hash, shb_interface_hash, shb_canonical_api_string,
+    shb_fn_signature, shb_struct_signature, shb_enum_signature
+}
+
+describe "SHB Extractor":
+    describe "Source Hashing":
+        it "same source gives same hash":
+            val h1 = shb_source_hash("fn foo(): 42")
+            val h2 = shb_source_hash("fn foo(): 42")
+            expect(h1).to_equal(h2)
+
+        it "different source gives different hash":
+            val h1 = shb_source_hash("fn foo(): 42")
+            val h2 = shb_source_hash("fn foo(): 43")
+            expect(h1 != h2).to_equal(true)
+
+    describe "Interface Hashing":
+        it "same public API gives same hash":
+            var iface1 = shb_module_interface_new(1, 0)
+            iface1.functions.push(ShbFnEntry(
+                name: "add", params: [ShbParam(name: "x", type_name: "i64")],
+                return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            var iface2 = shb_module_interface_new(2, 0)
+            iface2.functions.push(ShbFnEntry(
+                name: "add", params: [ShbParam(name: "x", type_name: "i64")],
+                return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            val h1 = shb_interface_hash(iface1)
+            val h2 = shb_interface_hash(iface2)
+            expect(h1).to_equal(h2)
+
+        it "different param types change hash":
+            var iface1 = shb_module_interface_new(1, 0)
+            iface1.functions.push(ShbFnEntry(
+                name: "convert", params: [ShbParam(name: "x", type_name: "i64")],
+                return_type: "text", flags: SHB_FLAG_PUB
+            ))
+            var iface2 = shb_module_interface_new(1, 0)
+            iface2.functions.push(ShbFnEntry(
+                name: "convert", params: [ShbParam(name: "x", type_name: "f64")],
+                return_type: "text", flags: SHB_FLAG_PUB
+            ))
+            val h1 = shb_interface_hash(iface1)
+            val h2 = shb_interface_hash(iface2)
+            expect(h1 != h2).to_equal(true)
+
+        it "adding a function changes hash":
+            var iface1 = shb_module_interface_new(1, 0)
+            iface1.functions.push(ShbFnEntry(
+                name: "foo", params: [], return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            var iface2 = shb_module_interface_new(1, 0)
+            iface2.functions.push(ShbFnEntry(
+                name: "foo", params: [], return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            iface2.functions.push(ShbFnEntry(
+                name: "bar", params: [], return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            val h1 = shb_interface_hash(iface1)
+            val h2 = shb_interface_hash(iface2)
+            expect(h1 != h2).to_equal(true)
+
+    describe "Canonical API String":
+        it "produces deterministic output":
+            var iface = shb_module_interface_new(0, 0)
+            iface.functions.push(ShbFnEntry(
+                name: "beta", params: [], return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            iface.functions.push(ShbFnEntry(
+                name: "alpha", params: [], return_type: "text", flags: SHB_FLAG_PUB
+            ))
+            val api = shb_canonical_api_string(iface)
+            expect(api.contains("fn alpha()")).to_equal(true)
+            expect(api.contains("fn beta()")).to_equal(true)
+
+    describe "Signature Builders":
+        it "formats function signature":
+            val f = ShbFnEntry(
+                name: "add",
+                params: [ShbParam(name: "a", type_name: "i64"), ShbParam(name: "b", type_name: "i64")],
+                return_type: "i64",
+                flags: SHB_FLAG_PUB
+            )
+            val sig = shb_fn_signature(f)
+            expect(sig).to_equal("fn add(a: i64, b: i64) -> i64")
+
+        it "formats struct signature":
+            val s = ShbStructEntry(
+                name: "Point",
+                fields: [
+                    ShbFieldEntry(name: "x", type_name: "f64", flags: 0),
+                    ShbFieldEntry(name: "y", type_name: "f64", flags: 0)
+                ],
+                flags: SHB_FLAG_PUB
+            )
+            val sig = shb_struct_signature(s)
+            expect(sig).to_equal("struct Point(x: f64, y: f64)")
+
+        it "formats enum signature":
+            val e = ShbEnumEntry(
+                name: "Color",
+                variants: ["Red", "Green", "Blue"],
+                flags: SHB_FLAG_PUB
+            )
+            val sig = shb_enum_signature(e)
+            expect(sig).to_equal("enum Color(Red, Green, Blue)")
+
+    describe "Two-Level Hash":
+        it "body change does not alter interface hash":
+            var iface1 = shb_module_interface_new(100, 0)
+            iface1.functions.push(ShbFnEntry(
+                name: "square", params: [ShbParam(name: "x", type_name: "i64")],
+                return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            var iface2 = shb_module_interface_new(200, 0)
+            iface2.functions.push(ShbFnEntry(
+                name: "square", params: [ShbParam(name: "x", type_name: "i64")],
+                return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            val h1 = shb_interface_hash(iface1)
+            val h2 = shb_interface_hash(iface2)
+            expect(h1).to_equal(h2)
+
+        it "signature change alters interface hash":
+            var iface1 = shb_module_interface_new(100, 0)
+            iface1.functions.push(ShbFnEntry(
+                name: "square", params: [ShbParam(name: "x", type_name: "i64")],
+                return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            var iface2 = shb_module_interface_new(100, 0)
+            iface2.functions.push(ShbFnEntry(
+                name: "square",
+                params: [ShbParam(name: "x", type_name: "i64"), ShbParam(name: "y", type_name: "i64")],
+                return_type: "i64", flags: SHB_FLAG_PUB
+            ))
+            val h1 = shb_interface_hash(iface1)
+            val h2 = shb_interface_hash(iface2)
+            expect(h1 != h2).to_equal(true)

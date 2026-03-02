@@ -1,0 +1,402 @@
+# SHB Reader — mmap-backed lazy reader for .shb files
+#
+# Only decodes the 64-byte header + 64-byte section table on open.
+# Section data is decoded on demand (lazy loading).
+
+use std.binary_io.{BinaryReader, ByteOrder}
+
+use compiler.shb.shb_types.{
+    ShbHeader, ShbSectionTable, ShbModuleInterface,
+    ShbFnEntry, ShbStructEntry, ShbClassEntry, ShbEnumEntry,
+    ShbTraitEntry, ShbReexportEntry, ShbTypeLayoutEntry,
+    ShbDependencyEntry, ShbParam, ShbFieldEntry, ShbMethodRef,
+    SHB_HEADER_SIZE, SHB_SECTION_TABLE_SIZE, SHB_SECTION_COUNT,
+    SHB_SECTION_FUNCTIONS, SHB_SECTION_STRUCTS, SHB_SECTION_CLASSES,
+    SHB_SECTION_TYPE_LAYOUTS, SHB_SECTION_ENUMS, SHB_SECTION_TRAITS,
+    SHB_SECTION_REEXPORTS, SHB_SECTION_DEPENDENCIES,
+    SHB_MAGIC_0, SHB_MAGIC_1, SHB_MAGIC_2, SHB_MAGIC_3,
+    shb_header_valid
+}
+use compiler.shb.shb_string_table.{ShbStringReader}
+
+val LE = ByteOrder.LittleEndian
+
+# --- Reader class ---
+
+class ShbReader:
+    data: [u8]
+    header: ShbHeader
+    section_offsets: [i64]
+    strtab: ShbStringReader
+    valid: bool
+
+    # Open a .shb file. Reads only header + section table.
+    static fn open(path: text) -> ShbReader:
+        val bytes = rt_file_read_bytes(path)
+        if bytes == nil:
+            return shb_reader_invalid()
+        ShbReader.from_bytes(bytes)
+
+    # Open from raw bytes (for testing without files)
+    static fn from_bytes(bytes: [u8]) -> ShbReader:
+        if bytes.len() < SHB_HEADER_SIZE + SHB_SECTION_TABLE_SIZE:
+            return shb_reader_invalid()
+
+        var r = BinaryReader.new(bytes)
+
+        # Read header
+        val header = shb_read_header(r)
+        if shb_header_valid(header) == false:
+            return shb_reader_invalid()
+
+        # Read section offset table
+        var offsets: [i64] = []
+        var si = 0
+        while si < SHB_SECTION_COUNT:
+            val off = r.read_i64(LE) ?? 0
+            offsets.push(off)
+            si = si + 1
+
+        # Build string table reader
+        val strtab_off = header.string_table_offset
+        val strtab_size = header.string_table_size
+        var strtab_data: [u8] = []
+        if strtab_off > 0:
+            var bi = 0
+            while bi < strtab_size:
+                val idx = strtab_off + bi
+                if idx < bytes.len():
+                    strtab_data.push(bytes[idx])
+                bi = bi + 1
+
+        val strtab = ShbStringReader.from_bytes(strtab_data, 0)
+
+        ShbReader(
+            data: bytes,
+            header: header,
+            section_offsets: offsets,
+            strtab: strtab,
+            valid: true
+        )
+
+    fn is_valid() -> bool:
+        self.valid
+
+    fn get_header() -> ShbHeader:
+        self.header
+
+    fn source_hash() -> i64:
+        self.header.source_hash
+
+    fn interface_hash() -> i64:
+        self.header.interface_hash
+
+    # --- Lazy section readers ---
+
+    fn read_functions() -> [ShbFnEntry]:
+        if self.valid == false:
+            return []
+        val offset = self.section_offsets[SHB_SECTION_FUNCTIONS]
+        if offset == 0:
+            return []
+        var r = BinaryReader.new(self.data)
+        r.seek(offset)
+        val count = r.read_u32(LE) ?? 0
+        var fns: [ShbFnEntry] = []
+        var i = 0
+        while i < count:
+            val name_off = r.read_u32(LE) ?? 0
+            val param_count = r.read_u16(LE) ?? 0
+            val ret_off = r.read_u32(LE) ?? 0
+            val flags = r.read_u16(LE) ?? 0
+            var params: [ShbParam] = []
+            var pi = 0
+            while pi < param_count:
+                val pn_off = r.read_u32(LE) ?? 0
+                val pt_off = r.read_u32(LE) ?? 0
+                params.push(ShbParam(
+                    name: self.strtab.read_at(pn_off),
+                    type_name: self.strtab.read_at(pt_off)
+                ))
+                pi = pi + 1
+            fns.push(ShbFnEntry(
+                name: self.strtab.read_at(name_off),
+                params: params,
+                return_type: self.strtab.read_at(ret_off),
+                flags: flags
+            ))
+            i = i + 1
+        fns
+
+    fn read_structs() -> [ShbStructEntry]:
+        if self.valid == false:
+            return []
+        val offset = self.section_offsets[SHB_SECTION_STRUCTS]
+        if offset == 0:
+            return []
+        var r = BinaryReader.new(self.data)
+        r.seek(offset)
+        val count = r.read_u32(LE) ?? 0
+        var structs: [ShbStructEntry] = []
+        var i = 0
+        while i < count:
+            val name_off = r.read_u32(LE) ?? 0
+            val field_count = r.read_u16(LE) ?? 0
+            val flags = r.read_u16(LE) ?? 0
+            var fields: [ShbFieldEntry] = []
+            var fi = 0
+            while fi < field_count:
+                val fn_off = r.read_u32(LE) ?? 0
+                val ft_off = r.read_u32(LE) ?? 0
+                val ff = r.read_u32(LE) ?? 0
+                fields.push(ShbFieldEntry(
+                    name: self.strtab.read_at(fn_off),
+                    type_name: self.strtab.read_at(ft_off),
+                    flags: ff
+                ))
+                fi = fi + 1
+            structs.push(ShbStructEntry(
+                name: self.strtab.read_at(name_off),
+                fields: fields,
+                flags: flags
+            ))
+            i = i + 1
+        structs
+
+    fn read_classes() -> [ShbClassEntry]:
+        if self.valid == false:
+            return []
+        val offset = self.section_offsets[SHB_SECTION_CLASSES]
+        if offset == 0:
+            return []
+        var r = BinaryReader.new(self.data)
+        r.seek(offset)
+        val count = r.read_u32(LE) ?? 0
+        var classes: [ShbClassEntry] = []
+        var i = 0
+        while i < count:
+            val name_off = r.read_u32(LE) ?? 0
+            val field_count = r.read_u16(LE) ?? 0
+            val flags = r.read_u16(LE) ?? 0
+            var fields: [ShbFieldEntry] = []
+            var fi = 0
+            while fi < field_count:
+                val fn_off = r.read_u32(LE) ?? 0
+                val ft_off = r.read_u32(LE) ?? 0
+                val ff = r.read_u32(LE) ?? 0
+                fields.push(ShbFieldEntry(
+                    name: self.strtab.read_at(fn_off),
+                    type_name: self.strtab.read_at(ft_off),
+                    flags: ff
+                ))
+                fi = fi + 1
+            val method_count = r.read_u16(LE) ?? 0
+            var methods: [ShbMethodRef] = []
+            var mi = 0
+            while mi < method_count:
+                val mn_off = r.read_u32(LE) ?? 0
+                methods.push(ShbMethodRef(name: self.strtab.read_at(mn_off)))
+                mi = mi + 1
+            classes.push(ShbClassEntry(
+                name: self.strtab.read_at(name_off),
+                fields: fields,
+                methods: methods,
+                flags: flags
+            ))
+            i = i + 1
+        classes
+
+    fn read_enums() -> [ShbEnumEntry]:
+        if self.valid == false:
+            return []
+        val offset = self.section_offsets[SHB_SECTION_ENUMS]
+        if offset == 0:
+            return []
+        var r = BinaryReader.new(self.data)
+        r.seek(offset)
+        val count = r.read_u32(LE) ?? 0
+        var enums: [ShbEnumEntry] = []
+        var i = 0
+        while i < count:
+            val name_off = r.read_u32(LE) ?? 0
+            val variant_count = r.read_u16(LE) ?? 0
+            val flags = r.read_u16(LE) ?? 0
+            var variants: [text] = []
+            var vi = 0
+            while vi < variant_count:
+                val v_off = r.read_u32(LE) ?? 0
+                variants.push(self.strtab.read_at(v_off))
+                vi = vi + 1
+            enums.push(ShbEnumEntry(
+                name: self.strtab.read_at(name_off),
+                variants: variants,
+                flags: flags
+            ))
+            i = i + 1
+        enums
+
+    fn read_traits() -> [ShbTraitEntry]:
+        if self.valid == false:
+            return []
+        val offset = self.section_offsets[SHB_SECTION_TRAITS]
+        if offset == 0:
+            return []
+        var r = BinaryReader.new(self.data)
+        r.seek(offset)
+        val count = r.read_u32(LE) ?? 0
+        var traits: [ShbTraitEntry] = []
+        var i = 0
+        while i < count:
+            val name_off = r.read_u32(LE) ?? 0
+            val method_count = r.read_u16(LE) ?? 0
+            val flags = r.read_u16(LE) ?? 0
+            var methods: [text] = []
+            var mi = 0
+            while mi < method_count:
+                val m_off = r.read_u32(LE) ?? 0
+                methods.push(self.strtab.read_at(m_off))
+                mi = mi + 1
+            traits.push(ShbTraitEntry(
+                name: self.strtab.read_at(name_off),
+                methods: methods,
+                flags: flags
+            ))
+            i = i + 1
+        traits
+
+    fn read_reexports() -> [ShbReexportEntry]:
+        if self.valid == false:
+            return []
+        val offset = self.section_offsets[SHB_SECTION_REEXPORTS]
+        if offset == 0:
+            return []
+        var r = BinaryReader.new(self.data)
+        r.seek(offset)
+        val count = r.read_u32(LE) ?? 0
+        var reexports: [ShbReexportEntry] = []
+        var i = 0
+        while i < count:
+            val sym_off = r.read_u32(LE) ?? 0
+            val mod_off = r.read_u32(LE) ?? 0
+            reexports.push(ShbReexportEntry(
+                symbol_name: self.strtab.read_at(sym_off),
+                source_module: self.strtab.read_at(mod_off)
+            ))
+            i = i + 1
+        reexports
+
+    fn read_type_layouts() -> [ShbTypeLayoutEntry]:
+        if self.valid == false:
+            return []
+        val offset = self.section_offsets[SHB_SECTION_TYPE_LAYOUTS]
+        if offset == 0:
+            return []
+        var r = BinaryReader.new(self.data)
+        r.seek(offset)
+        val count = r.read_u32(LE) ?? 0
+        var layouts: [ShbTypeLayoutEntry] = []
+        var i = 0
+        while i < count:
+            val tn_off = r.read_u32(LE) ?? 0
+            val sz = r.read_u32(LE) ?? 0
+            val al = r.read_u32(LE) ?? 0
+            val fl = r.read_u32(LE) ?? 0
+            layouts.push(ShbTypeLayoutEntry(
+                type_name: self.strtab.read_at(tn_off),
+                size: sz,
+                alignment: al,
+                flags: fl
+            ))
+            i = i + 1
+        layouts
+
+    fn read_dependencies() -> [ShbDependencyEntry]:
+        if self.valid == false:
+            return []
+        val offset = self.section_offsets[SHB_SECTION_DEPENDENCIES]
+        if offset == 0:
+            return []
+        var r = BinaryReader.new(self.data)
+        r.seek(offset)
+        val count = r.read_u32(LE) ?? 0
+        var deps: [ShbDependencyEntry] = []
+        var i = 0
+        while i < count:
+            val mp_off = r.read_u32(LE) ?? 0
+            val ihash = r.read_i64(LE) ?? 0
+            deps.push(ShbDependencyEntry(
+                module_path: self.strtab.read_at(mp_off),
+                interface_hash: ihash
+            ))
+            i = i + 1
+        deps
+
+    # Read all sections into a full ShbModuleInterface
+    fn read_all() -> ShbModuleInterface:
+        ShbModuleInterface(
+            header: self.header,
+            functions: self.read_functions(),
+            structs: self.read_structs(),
+            classes: self.read_classes(),
+            enums: self.read_enums(),
+            traits: self.read_traits(),
+            reexports: self.read_reexports(),
+            type_layouts: self.read_type_layouts(),
+            dependencies: self.read_dependencies()
+        )
+
+# --- Helper: invalid reader ---
+
+fn shb_reader_invalid() -> ShbReader:
+    ShbReader(
+        data: [],
+        header: ShbHeader(
+            magic: [], version_major: 0, version_minor: 0,
+            platform: 0, arch: 0, source_hash: 0, interface_hash: 0,
+            write_timestamp: 0, section_count: 0, string_table_offset: 0,
+            string_table_size: 0, flags: 0, module_name_offset: 0
+        ),
+        section_offsets: [],
+        strtab: ShbStringReader.from_bytes([], 0),
+        valid: false
+    )
+
+# --- Helper: read header from BinaryReader positioned at 0 ---
+
+fn shb_read_header(r: BinaryReader) -> ShbHeader:
+    val m0 = r.read_u8() ?? 0
+    val m1 = r.read_u8() ?? 0
+    val m2 = r.read_u8() ?? 0
+    val m3 = r.read_u8() ?? 0
+    val vmaj = r.read_u8() ?? 0
+    val vmin = r.read_u8() ?? 0
+    val plat = r.read_u8() ?? 0
+    val arch_val = r.read_u8() ?? 0
+    val src_hash = r.read_i64(LE) ?? 0
+    val iface_hash = r.read_i64(LE) ?? 0
+    val ts = r.read_i64(LE) ?? 0
+    val sec_count = r.read_u32(LE) ?? 0
+    val strtab_off = r.read_u32(LE) ?? 0
+    val strtab_sz = r.read_u32(LE) ?? 0
+    val flags = r.read_u32(LE) ?? 0
+    val mod_name_off = r.read_i64(LE) ?? 0
+    val reserved = r.read_i64(LE) ?? 0
+    ShbHeader(
+        magic: [m0, m1, m2, m3],
+        version_major: vmaj,
+        version_minor: vmin,
+        platform: plat,
+        arch: arch_val,
+        source_hash: src_hash,
+        interface_hash: iface_hash,
+        write_timestamp: ts,
+        section_count: sec_count,
+        string_table_offset: strtab_off,
+        string_table_size: strtab_sz,
+        flags: flags,
+        module_name_offset: mod_name_off
+    )
+
+# --- FFI ---
+
+extern fn rt_file_read_bytes(path: text) -> [u8]

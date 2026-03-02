@@ -1,0 +1,78 @@
+# SHB String Table — Deduplicated null-terminated UTF-8 strings
+#
+# Offset 0 is always the empty string (single null byte).
+# Strings are packed contiguously with null terminators.
+# Deduplication via Dict<text, u32> during building.
+
+use std.binary_io.{BinaryWriter, BinaryReader, ByteOrder}
+
+# --- String Table Builder ---
+
+class ShbStringTable:
+    data: [u8]
+    offsets: {text: i64}
+
+    static fn create() -> ShbStringTable:
+        var tbl = ShbStringTable(data: [0], offsets: {})
+        # Offset 0 = empty string (null byte already in data)
+        tbl.offsets[""] = 0
+        tbl
+
+    # Add a string and return its offset. Deduplicates.
+    me add(s: text) -> i64:
+        val existing = self.offsets[s]
+        if existing.?:
+            return existing
+        val offset = self.data.len()
+        # Append UTF-8 bytes + null terminator
+        var i = 0
+        while i < s.len():
+            self.data.push(s.byte_at(i))
+            i = i + 1
+        self.data.push(0)
+        self.offsets[s] = offset
+        offset
+
+    fn size() -> i64:
+        self.data.len()
+
+    fn get_offset(s: text) -> i64:
+        val existing = self.offsets[s]
+        if existing.?:
+            return existing
+        -1
+
+    fn get_data() -> [u8]:
+        self.data
+
+    # Write the string table to a BinaryWriter
+    me write_to(writer: BinaryWriter):
+        writer.write_bytes(self.data)
+
+# --- String Table Reader ---
+# Reads strings from a byte buffer at given offsets.
+
+class ShbStringReader:
+    data: [u8]
+    base_offset: i64
+
+    static fn from_bytes(data: [u8], base_offset: i64) -> ShbStringReader:
+        ShbStringReader(data: data, base_offset: base_offset)
+
+    # Read a null-terminated string at the given string table offset
+    fn read_at(offset: i64) -> text:
+        if offset < 0:
+            return ""
+        if offset >= self.data.len():
+            return ""
+        var result = ""
+        var pos = offset
+        while pos < self.data.len():
+            val b = self.data[pos]
+            if b == 0:
+                return result
+            result = result + chr(b)
+            pos = pos + 1
+        result
+
+extern fn chr(code: u8) -> text

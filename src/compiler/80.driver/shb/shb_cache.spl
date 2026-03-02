@@ -1,0 +1,229 @@
+# SHB Cache Manager — Two-level hash cache + watcher integration
+#
+# Manages .shb header files for incremental compilation.
+# Two-level hash optimization:
+#   Level 1: source_hash — skip if file unchanged
+#   Level 2: interface_hash — recompile only this file if API unchanged,
+#            mark dependents dirty only if API changed
+
+use compiler.shb.shb_types.{ShbModuleInterface, shb_module_interface_new}
+use compiler.shb.shb_writer.{shb_write}
+use compiler.shb.shb_reader.{ShbReader}
+use compiler.shb.shb_hash.{shb_source_hash, shb_interface_hash}
+use compiler.shb.shb_extractor.{shb_extract}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+# --- Cache configuration ---
+
+struct ShbCacheConfig:
+    cache_dir: text
+    enabled: bool
+
+fn shb_cache_config_default() -> ShbCacheConfig:
+    ShbCacheConfig(cache_dir: ".build/headers", enabled: true)
+
+# --- Cache result constants ---
+
+val SHB_CACHE_UNCHANGED: i64 = 0
+val SHB_CACHE_BODY_ONLY: i64 = 1
+val SHB_CACHE_INTERFACE: i64 = 2
+val SHB_CACHE_NEW: i64 = 3
+val SHB_CACHE_ERROR: i64 = -1
+
+struct ShbCacheResult:
+    status: i64
+    interface_hash: i64
+    old_interface_hash: i64
+
+# --- Cache Manager ---
+
+class ShbCacheManager:
+    config: ShbCacheConfig
+    interface_hashes: {text: i64}
+
+    static fn create(config: ShbCacheConfig) -> ShbCacheManager:
+        rt_mkdir_p(config.cache_dir)
+        ShbCacheManager(config: config, interface_hashes: {})
+
+    static fn with_defaults() -> ShbCacheManager:
+        ShbCacheManager.create(shb_cache_config_default())
+
+    # Process a source file: check cache, extract if needed, write .shb
+    me process_file(source_path: text) -> ShbCacheResult:
+        val source = rt_file_read_text(source_path) ?? ""
+        if source == "":
+            return ShbCacheResult(status: SHB_CACHE_ERROR, interface_hash: 0, old_interface_hash: 0)
+
+        val src_hash = rt_hash_text(source)
+        val shb_path = self.source_to_shb_path(source_path)
+
+        # Level 1: Check if source is unchanged
+        if rt_file_exists(shb_path):
+            val reader = ShbReader.open(shb_path)
+            if reader.is_valid():
+                val old_src_hash = reader.source_hash()
+                val old_iface_hash = reader.interface_hash()
+
+                if src_hash == old_src_hash:
+                    self.interface_hashes[source_path] = old_iface_hash
+                    return ShbCacheResult(
+                        status: SHB_CACHE_UNCHANGED,
+                        interface_hash: old_iface_hash,
+                        old_interface_hash: old_iface_hash
+                    )
+
+                # Source changed — extract new interface
+                val iface = shb_extract(source, source_path)
+                val new_iface_hash = iface.header.interface_hash
+
+                # Level 2: Check if interface changed
+                if new_iface_hash == old_iface_hash:
+                    shb_write(iface, shb_path)
+                    self.interface_hashes[source_path] = new_iface_hash
+                    return ShbCacheResult(
+                        status: SHB_CACHE_BODY_ONLY,
+                        interface_hash: new_iface_hash,
+                        old_interface_hash: old_iface_hash
+                    )
+                else:
+                    shb_write(iface, shb_path)
+                    self.interface_hashes[source_path] = new_iface_hash
+                    return ShbCacheResult(
+                        status: SHB_CACHE_INTERFACE,
+                        interface_hash: new_iface_hash,
+                        old_interface_hash: old_iface_hash
+                    )
+
+        # No cached .shb — fresh extraction
+        val iface = shb_extract(source, source_path)
+        shb_write(iface, shb_path)
+        val new_iface_hash = iface.header.interface_hash
+        self.interface_hashes[source_path] = new_iface_hash
+        ShbCacheResult(
+            status: SHB_CACHE_NEW,
+            interface_hash: new_iface_hash,
+            old_interface_hash: 0
+        )
+
+    fn get_interface_hash(source_path: text) -> i64:
+        val h = self.interface_hashes[source_path]
+        if h.?:
+            return h
+        val shb_path = self.source_to_shb_path(source_path)
+        if rt_file_exists(shb_path):
+            val reader = ShbReader.open(shb_path)
+            if reader.is_valid():
+                return reader.interface_hash()
+        0
+
+    fn is_dependency_stale(dep_path: text, expected_hash: i64) -> bool:
+        val actual = self.get_interface_hash(dep_path)
+        if actual == 0:
+            return true
+        actual != expected_hash
+
+    fn validate_dependencies(shb_path: text) -> bool:
+        val reader = ShbReader.open(shb_path)
+        if reader.is_valid() == false:
+            return false
+        val deps = reader.read_dependencies()
+        var i = 0
+        while i < deps.len():
+            val dep = deps[i]
+            if self.is_dependency_stale(dep.module_path, dep.interface_hash):
+                return false
+            i = i + 1
+        true
+
+    fn source_to_shb_path(source_path: text) -> text:
+        val base = source_path.replace("/", "_").replace(".spl", "")
+        "{self.config.cache_dir}/{base}.shb"
+
+# --- Watcher integration ---
+
+fn compile_changed_to_shb(changes: [ShbChangeEvent], cache: ShbCacheManager) -> ShbBatchResult:
+    var results: [ShbCacheResult] = []
+    var unchanged = 0
+    var body_only = 0
+    var iface_changed = 0
+    var new_files = 0
+    var errors = 0
+
+    var i = 0
+    while i < changes.len():
+        val change = changes[i]
+        if change.path.ends_with(".spl") == false:
+            i = i + 1
+            continue
+        if change.event_type == "deleted":
+            i = i + 1
+            continue
+
+        val result = cache.process_file(change.path)
+        results.push(result)
+
+        if result.status == SHB_CACHE_UNCHANGED:
+            unchanged = unchanged + 1
+        else if result.status == SHB_CACHE_BODY_ONLY:
+            body_only = body_only + 1
+        else if result.status == SHB_CACHE_INTERFACE:
+            iface_changed = iface_changed + 1
+        else if result.status == SHB_CACHE_NEW:
+            new_files = new_files + 1
+        else:
+            errors = errors + 1
+
+        i = i + 1
+
+    ShbBatchResult(
+        results: results,
+        unchanged_count: unchanged,
+        body_only_count: body_only,
+        interface_changed_count: iface_changed,
+        new_count: new_files,
+        error_count: errors
+    )
+
+# --- Batch result ---
+
+struct ShbChangeEvent:
+    path: text
+    event_type: text
+
+struct ShbBatchResult:
+    results: [ShbCacheResult]
+    unchanged_count: i64
+    body_only_count: i64
+    interface_changed_count: i64
+    new_count: i64
+    error_count: i64
+
+fn shb_batch_summary(result: ShbBatchResult) -> text:
+    var parts: [text] = []
+    if result.unchanged_count > 0:
+        parts.push("{result.unchanged_count} unchanged")
+    if result.body_only_count > 0:
+        parts.push("{result.body_only_count} body-only")
+    if result.interface_changed_count > 0:
+        parts.push("{result.interface_changed_count} interface changed")
+    if result.new_count > 0:
+        parts.push("{result.new_count} new")
+    if result.error_count > 0:
+        parts.push("{result.error_count} errors")
+    var summary = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            summary = summary + ", "
+        summary = summary + parts[i]
+        i = i + 1
+    summary
+
+fn shb_batch_has_interface_changes(result: ShbBatchResult) -> bool:
+    result.interface_changed_count > 0

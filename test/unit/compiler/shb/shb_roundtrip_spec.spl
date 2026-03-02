@@ -1,0 +1,253 @@
+# SHB Roundtrip Test
+#
+# Verifies that writing an ShbModuleInterface to .shb and reading it back
+# produces identical data.
+
+use compiler.shb.shb_types.{
+    ShbModuleInterface, ShbFnEntry, ShbStructEntry, ShbClassEntry,
+    ShbEnumEntry, ShbTraitEntry, ShbReexportEntry, ShbTypeLayoutEntry,
+    ShbDependencyEntry, ShbParam, ShbFieldEntry, ShbMethodRef,
+    shb_module_interface_new, shb_primitive_layouts,
+    SHB_FLAG_PUB, SHB_FLAG_ASYNC, SHB_MAGIC_0, SHB_MAGIC_1, SHB_MAGIC_2, SHB_MAGIC_3,
+    SHB_VERSION_MAJOR
+}
+use compiler.shb.shb_writer.{shb_write}
+use compiler.shb.shb_reader.{ShbReader}
+use compiler.shb.shb_string_table.{ShbStringTable}
+
+describe "SHB Roundtrip":
+    describe "String Table":
+        it "deduplicates strings":
+            var strtab = ShbStringTable.create()
+            val off1 = strtab.add("hello")
+            val off2 = strtab.add("world")
+            val off3 = strtab.add("hello")
+            expect(off1).to_equal(off3)
+            expect(off1 != off2).to_equal(true)
+
+        it "offset 0 is empty string":
+            var strtab = ShbStringTable.create()
+            val off = strtab.get_offset("")
+            expect(off).to_equal(0)
+
+    describe "Header Validation":
+        it "validates correct magic":
+            var iface = shb_module_interface_new(42, 99)
+            expect(iface.header.magic[0]).to_equal(SHB_MAGIC_0)
+            expect(iface.header.magic[1]).to_equal(SHB_MAGIC_1)
+            expect(iface.header.magic[2]).to_equal(SHB_MAGIC_2)
+            expect(iface.header.magic[3]).to_equal(SHB_MAGIC_3)
+            expect(iface.header.version_major).to_equal(SHB_VERSION_MAJOR)
+
+    describe "Write and Read":
+        it "roundtrips empty module":
+            var iface = shb_module_interface_new(100, 200)
+            val path = "/tmp/test_shb_empty.shb"
+            val ok = shb_write(iface, path)
+            expect(ok).to_equal(true)
+
+            val reader = ShbReader.open(path)
+            expect(reader.is_valid()).to_equal(true)
+            expect(reader.source_hash()).to_equal(100)
+            expect(reader.interface_hash()).to_equal(200)
+            expect(reader.read_functions().len()).to_equal(0)
+            expect(reader.read_structs().len()).to_equal(0)
+
+        it "roundtrips functions":
+            var iface = shb_module_interface_new(10, 20)
+            iface.functions.push(ShbFnEntry(
+                name: "add",
+                params: [
+                    ShbParam(name: "a", type_name: "i64"),
+                    ShbParam(name: "b", type_name: "i64")
+                ],
+                return_type: "i64",
+                flags: SHB_FLAG_PUB
+            ))
+            iface.functions.push(ShbFnEntry(
+                name: "greet",
+                params: [ShbParam(name: "name", type_name: "text")],
+                return_type: "text",
+                flags: SHB_FLAG_PUB | SHB_FLAG_ASYNC
+            ))
+
+            val path = "/tmp/test_shb_fns.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            expect(reader.is_valid()).to_equal(true)
+
+            val fns = reader.read_functions()
+            expect(fns.len()).to_equal(2)
+            expect(fns[0].name).to_equal("add")
+            expect(fns[0].params.len()).to_equal(2)
+            expect(fns[0].params[0].name).to_equal("a")
+            expect(fns[0].params[0].type_name).to_equal("i64")
+            expect(fns[0].return_type).to_equal("i64")
+            expect(fns[1].name).to_equal("greet")
+            expect(fns[1].params[0].type_name).to_equal("text")
+
+        it "roundtrips structs":
+            var iface = shb_module_interface_new(30, 40)
+            iface.structs.push(ShbStructEntry(
+                name: "Point",
+                fields: [
+                    ShbFieldEntry(name: "x", type_name: "f64", flags: SHB_FLAG_PUB),
+                    ShbFieldEntry(name: "y", type_name: "f64", flags: SHB_FLAG_PUB)
+                ],
+                flags: SHB_FLAG_PUB
+            ))
+
+            val path = "/tmp/test_shb_structs.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            val structs = reader.read_structs()
+            expect(structs.len()).to_equal(1)
+            expect(structs[0].name).to_equal("Point")
+            expect(structs[0].fields.len()).to_equal(2)
+            expect(structs[0].fields[0].name).to_equal("x")
+            expect(structs[0].fields[1].type_name).to_equal("f64")
+
+        it "roundtrips classes with methods":
+            var iface = shb_module_interface_new(50, 60)
+            iface.classes.push(ShbClassEntry(
+                name: "Counter",
+                fields: [ShbFieldEntry(name: "count", type_name: "i64", flags: 0)],
+                methods: [ShbMethodRef(name: "increment"), ShbMethodRef(name: "reset")],
+                flags: SHB_FLAG_PUB
+            ))
+
+            val path = "/tmp/test_shb_classes.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            val classes = reader.read_classes()
+            expect(classes.len()).to_equal(1)
+            expect(classes[0].name).to_equal("Counter")
+            expect(classes[0].fields.len()).to_equal(1)
+            expect(classes[0].methods.len()).to_equal(2)
+            expect(classes[0].methods[0].name).to_equal("increment")
+
+        it "roundtrips enums":
+            var iface = shb_module_interface_new(70, 80)
+            iface.enums.push(ShbEnumEntry(
+                name: "Color",
+                variants: ["Red", "Green", "Blue"],
+                flags: SHB_FLAG_PUB
+            ))
+
+            val path = "/tmp/test_shb_enums.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            val enums = reader.read_enums()
+            expect(enums.len()).to_equal(1)
+            expect(enums[0].name).to_equal("Color")
+            expect(enums[0].variants.len()).to_equal(3)
+            expect(enums[0].variants[0]).to_equal("Red")
+            expect(enums[0].variants[2]).to_equal("Blue")
+
+        it "roundtrips traits":
+            var iface = shb_module_interface_new(90, 100)
+            iface.traits.push(ShbTraitEntry(
+                name: "Serializable",
+                methods: ["serialize", "deserialize"],
+                flags: SHB_FLAG_PUB
+            ))
+
+            val path = "/tmp/test_shb_traits.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            val traits = reader.read_traits()
+            expect(traits.len()).to_equal(1)
+            expect(traits[0].name).to_equal("Serializable")
+            expect(traits[0].methods.len()).to_equal(2)
+
+        it "roundtrips reexports":
+            var iface = shb_module_interface_new(110, 120)
+            iface.reexports.push(ShbReexportEntry(
+                symbol_name: "HashMap",
+                source_module: "std.collections"
+            ))
+
+            val path = "/tmp/test_shb_reexports.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            val reexports = reader.read_reexports()
+            expect(reexports.len()).to_equal(1)
+            expect(reexports[0].symbol_name).to_equal("HashMap")
+            expect(reexports[0].source_module).to_equal("std.collections")
+
+        it "roundtrips type layouts":
+            var iface = shb_module_interface_new(130, 140)
+            iface.type_layouts = shb_primitive_layouts()
+
+            val path = "/tmp/test_shb_layouts.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            val layouts = reader.read_type_layouts()
+            expect(layouts.len()).to_equal(14)
+            expect(layouts[0].type_name).to_equal("i8")
+            expect(layouts[0].size).to_equal(1)
+            expect(layouts[0].alignment).to_equal(1)
+
+        it "roundtrips dependencies":
+            var iface = shb_module_interface_new(150, 160)
+            iface.dependencies.push(ShbDependencyEntry(
+                module_path: "std.io",
+                interface_hash: 12345
+            ))
+            iface.dependencies.push(ShbDependencyEntry(
+                module_path: "std.math",
+                interface_hash: 67890
+            ))
+
+            val path = "/tmp/test_shb_deps.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            val deps = reader.read_dependencies()
+            expect(deps.len()).to_equal(2)
+            expect(deps[0].module_path).to_equal("std.io")
+            expect(deps[0].interface_hash).to_equal(12345)
+            expect(deps[1].module_path).to_equal("std.math")
+
+        it "roundtrips full module":
+            var iface = shb_module_interface_new(999, 888)
+            iface.functions.push(ShbFnEntry(
+                name: "process",
+                params: [ShbParam(name: "data", type_name: "[u8]")],
+                return_type: "bool",
+                flags: SHB_FLAG_PUB
+            ))
+            iface.structs.push(ShbStructEntry(
+                name: "Config",
+                fields: [ShbFieldEntry(name: "verbose", type_name: "bool", flags: 0)],
+                flags: SHB_FLAG_PUB
+            ))
+            iface.enums.push(ShbEnumEntry(
+                name: "Status",
+                variants: ["Ok", "Error"],
+                flags: SHB_FLAG_PUB
+            ))
+            iface.type_layouts = shb_primitive_layouts()
+
+            val path = "/tmp/test_shb_full.shb"
+            shb_write(iface, path)
+            val reader = ShbReader.open(path)
+            val read_back = reader.read_all()
+            expect(read_back.functions.len()).to_equal(1)
+            expect(read_back.structs.len()).to_equal(1)
+            expect(read_back.enums.len()).to_equal(1)
+            expect(read_back.type_layouts.len()).to_equal(14)
+            expect(read_back.functions[0].name).to_equal("process")
+
+    describe "Invalid Data":
+        it "rejects too-small buffer":
+            val reader = ShbReader.from_bytes([0, 1, 2])
+            expect(reader.is_valid()).to_equal(false)
+
+        it "rejects wrong magic":
+            var bad_data: [u8] = []
+            var bi = 0
+            while bi < 128:
+                bad_data.push(0)
+                bi = bi + 1
+            val reader = ShbReader.from_bytes(bad_data)
+            expect(reader.is_valid()).to_equal(false)
