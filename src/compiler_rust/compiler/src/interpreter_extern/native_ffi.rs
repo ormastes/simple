@@ -6,8 +6,8 @@ use crate::linker::NativeBinaryOptions;
 use crate::pipeline::CompilerPipeline;
 use crate::value::Value;
 use std::path::Path;
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use std::{env, path::PathBuf};
 
 /// Compile Simple source to LLVM IR for bare-metal targets
@@ -209,10 +209,21 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
         ]));
     }
 
-    // Execute binary with timeout
-    let start = Instant::now();
-    let output = match Command::new(binary_path).args(&cmd_args).output() {
-        Ok(output) => output,
+    // Clamp timeout: treat 0 or negative as immediate timeout
+    let timeout = if timeout_ms > 0 {
+        Duration::from_millis(timeout_ms)
+    } else {
+        Duration::from_millis(1)
+    };
+
+    // Spawn the process (non-blocking) with piped stdout/stderr
+    let mut child = match Command::new(binary_path)
+        .args(&cmd_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
         Err(e) => {
             return Ok(Value::Tuple(vec![
                 Value::Str("".into()),
@@ -222,10 +233,30 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let duration_ms = start.elapsed().as_millis() as i64;
+    // Wait with timeout using a polling loop
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(10);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    // Timeout exceeded — kill the child process
+                    let _ = child.kill();
+                    let _ = child.wait(); // Reap the zombie
+                    break None;
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
 
-    // Check if execution exceeded timeout
-    if duration_ms > timeout_ms as i64 {
+    if status.is_none() {
         return Ok(Value::Tuple(vec![
             Value::Str("".into()),
             Value::Str("Execution timed out".into()),
@@ -233,13 +264,23 @@ pub fn rt_execute_native(args: &[Value]) -> Result<Value, CompileError> {
         ]));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1) as i64;
+    // Read captured output
+    let mut stdout_str = String::new();
+    let mut stderr_str = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        use std::io::Read;
+        let _ = out.read_to_string(&mut stdout_str);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        use std::io::Read;
+        let _ = err.read_to_string(&mut stderr_str);
+    }
+
+    let exit_code = status.unwrap().code().unwrap_or(-1) as i64;
 
     Ok(Value::Tuple(vec![
-        Value::Str(stdout.into()),
-        Value::Str(stderr.into()),
+        Value::Str(stdout_str.into()),
+        Value::Str(stderr_str.into()),
         Value::Int(exit_code),
     ]))
 }

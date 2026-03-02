@@ -53,17 +53,28 @@ fn reset_vars():
     # Reset variable counter for tests.
     next_var_id = 0
 
+# Structs to wrap multi-field enum variants (workaround: enum destructuring
+# binds the entire payload as one value, not individual positional fields)
+struct VarType:
+    id: i64
+    level: i64
+
+struct FnType:
+    param: SimpleType
+    ret_type: SimpleType
+
 # Simple type representation for testing
 enum SimpleType:
-    TyVar(id: i64, level: i64)    # Type variable with level
+    TyVar(VarType)                 # Type variable with level
     TyInt                          # Integer type
     TyBool                         # Boolean type
-    TyStr                          # String type
+    TyString                          # String type
     TyUnit                         # Unit type
-    TyFn(param: SimpleType, ret: SimpleType)  # Function type
+    TyFn(FnType)                   # Function type
 
 fn ty_var(level: i64) -> SimpleType:
-    SimpleType.TyVar(id: fresh_var(), level: level)
+    val id = fresh_var()
+    SimpleType.TyVar(VarType(id: id, level: level))
 
 fn ty_int() -> SimpleType:
     SimpleType.TyInt
@@ -72,25 +83,35 @@ fn ty_bool() -> SimpleType:
     SimpleType.TyBool
 
 fn ty_str() -> SimpleType:
-    SimpleType.TyStr
+    SimpleType.TyString
 
 fn ty_fn(p: SimpleType, r: SimpleType) -> SimpleType:
-    SimpleType.TyFn(param: p, ret: r)
+    SimpleType.TyFn(FnType(param: p, ret_type: r))
 
 fn is_var(t: SimpleType) -> bool:
     match t:
-        case TyVar(_, _): true
+        case TyVar(_): true
         case _: false
 
 fn get_var_id(t: SimpleType) -> i64:
     match t:
-        case TyVar(id, _): id
+        case TyVar(data): data.id
         case _: -1
 
 fn get_var_level(t: SimpleType) -> i64:
     match t:
-        case TyVar(_, level): level
+        case TyVar(data): data.level
         case _: -1
+
+fn get_fn_param(t: SimpleType) -> SimpleType:
+    match t:
+        case TyFn(data): data.param
+        case _: SimpleType.TyUnit
+
+fn get_fn_ret(t: SimpleType) -> SimpleType:
+    match t:
+        case TyFn(data): data.ret_type
+        case _: SimpleType.TyUnit
 
 # ============================================================================
 # Simple Substitution
@@ -115,12 +136,14 @@ fn subst_get(s: SimpleSubst, id: i64) -> SimpleType?:
 
 fn subst_apply(s: SimpleSubst, t: SimpleType) -> SimpleType:
     match t:
-        case TyVar(id, level):
-            match subst_get(s, id):
+        case TyVar(vdata):
+            match subst_get(s, vdata.id):
                 case Some(resolved): subst_apply(s, resolved)
                 case _: t
-        case TyFn(param, ret):
-            ty_fn(subst_apply(s, param), subst_apply(s, ret))
+        case TyFn(fdata):
+            val param_applied = subst_apply(s, fdata.param)
+            val ret_applied = subst_apply(s, fdata.ret_type)
+            ty_fn(param_applied, ret_applied)
         case _: t
 
 # ============================================================================
@@ -134,9 +157,13 @@ enum UnifyResult:
 fn occurs_check(id: i64, t: SimpleType) -> bool:
     # Check if variable id occurs in type t (prevents infinite types).
     match t:
-        case TyVar(other_id, _): id == other_id
-        case TyFn(param, ret): occurs_check(id, param) or occurs_check(id, ret)
+        case TyVar(vdata): id == vdata.id
+        case TyFn(fdata): occurs_check(id, fdata.param) or occurs_check(id, fdata.ret_type)
         case _: false
+
+fn types_equal_prim(a: SimpleType, b: SimpleType) -> bool:
+    # Check if two types are the same primitive type using equality.
+    a == b
 
 fn unify(s: SimpleSubst, t1: SimpleType, t2: SimpleType) -> UnifyResult:
     # Unify two types, extending the substitution.
@@ -144,42 +171,58 @@ fn unify(s: SimpleSubst, t1: SimpleType, t2: SimpleType) -> UnifyResult:
     val ty1 = subst_apply(s, t1)
     val ty2 = subst_apply(s, t2)
 
-    match (ty1, ty2):
-        # Same primitive types
-        case (TyInt, TyInt): UnifyResult.Ok(subst: s)
-        case (TyBool, TyBool): UnifyResult.Ok(subst: s)
-        case (TyStr, TyStr): UnifyResult.Ok(subst: s)
-        case (TyUnit, TyUnit): UnifyResult.Ok(subst: s)
+    # Check same primitive types first (using equality)
+    if types_equal_prim(ty1, ty2):
+        if not is_var(ty1):
+            if not is_fn_type(ty1):
+                return UnifyResult.Ok(subst: s)
 
-        # Type variable unification
-        case (TyVar(id1, _), TyVar(id2, _)):
-            if id1 == id2:
-                UnifyResult.Ok(subst: s)
-            else:
-                UnifyResult.Ok(subst: subst_add(s, id1, ty2))
+    # Type variable cases
+    val ty1_is_var = is_var(ty1)
+    val ty2_is_var = is_var(ty2)
 
-        case (TyVar(id, _), _):
-            if occurs_check(id, ty2):
-                UnifyResult.Err(msg: "occurs check failed")
-            else:
-                UnifyResult.Ok(subst: subst_add(s, id, ty2))
+    if ty1_is_var and ty2_is_var:
+        val id1 = get_var_id(ty1)
+        val id2 = get_var_id(ty2)
+        if id1 == id2:
+            return UnifyResult.Ok(subst: s)
+        else:
+            return UnifyResult.Ok(subst: subst_add(s, id1, ty2))
 
-        case (_, TyVar(id, _)):
-            if occurs_check(id, ty1):
-                UnifyResult.Err(msg: "occurs check failed")
-            else:
-                UnifyResult.Ok(subst: subst_add(s, id, ty1))
+    if ty1_is_var:
+        val id1 = get_var_id(ty1)
+        if occurs_check(id1, ty2):
+            return UnifyResult.Err(msg: "occurs check failed")
+        else:
+            return UnifyResult.Ok(subst: subst_add(s, id1, ty2))
 
-        # Function type unification
-        case (TyFn(p1, r1), TyFn(p2, r2)):
-            match unify(s, p1, p2):
-                case Ok(s1):
-                    unify(s1, r1, r2)
-                case Err(msg):
-                    UnifyResult.Err(msg: msg)
+    if ty2_is_var:
+        val id2 = get_var_id(ty2)
+        if occurs_check(id2, ty1):
+            return UnifyResult.Err(msg: "occurs check failed")
+        else:
+            return UnifyResult.Ok(subst: subst_add(s, id2, ty1))
 
-        case _:
-            UnifyResult.Err(msg: "type mismatch")
+    # Function type unification
+    val ty1_is_fn = is_fn_type(ty1)
+    val ty2_is_fn = is_fn_type(ty2)
+    if ty1_is_fn and ty2_is_fn:
+        val p1 = get_fn_param(ty1)
+        val r1 = get_fn_ret(ty1)
+        val p2 = get_fn_param(ty2)
+        val r2 = get_fn_ret(ty2)
+        match unify(s, p1, p2):
+            case Ok(s1):
+                return unify(s1, r1, r2)
+            case Err(msg):
+                return UnifyResult.Err(msg: msg)
+
+    UnifyResult.Err(msg: "type mismatch")
+
+fn is_fn_type(t: SimpleType) -> bool:
+    match t:
+        case TyFn(_): true
+        case _: false
 
 fn unify_ok(t1: SimpleType, t2: SimpleType) -> bool:
     match unify(empty_subst(), t1, t2):
@@ -198,14 +241,14 @@ fn unify_err(t1: SimpleType, t2: SimpleType) -> bool:
 fn collect_free_vars(t: SimpleType, level: i64) -> [i64]:
     # Collect type variables with level > given level (generalizable).
     match t:
-        case TyVar(id, var_level):
-            if var_level > level:
-                [id]
+        case TyVar(vdata):
+            if vdata.level > level:
+                [vdata.id]
             else:
                 []
-        case TyFn(param, ret):
-            var result = collect_free_vars(param, level)
-            for v in collect_free_vars(ret, level):
+        case TyFn(fdata):
+            var result = collect_free_vars(fdata.param, level)
+            for v in collect_free_vars(fdata.ret_type, level):
                 var found = false
                 for r in result:
                     if r == v:
@@ -252,14 +295,33 @@ describe "HM Type Inference Core":
 
     context "Unification":
         it "unifies same primitive types":
-            check(unify_ok(ty_int(), ty_int()), "int = int")
-            check(unify_ok(ty_bool(), ty_bool()), "bool = bool")
-            check(unify_ok(ty_str(), ty_str()), "str = str")
+            # Direct test with match on result
+            val r_int = unify(empty_subst(), ty_int(), ty_int())
+            match r_int:
+                case Ok(_): pass
+                case Err(_): assert false, "int=int failed"
+            val r_bool = unify(empty_subst(), ty_bool(), ty_bool())
+            match r_bool:
+                case Ok(_): pass
+                case Err(_): assert false, "bool=bool failed"
+            val r_str = unify(empty_subst(), ty_str(), ty_str())
+            match r_str:
+                case Ok(_): pass
+                case Err(_): assert false, "str=str failed"
 
         it "fails to unify different primitive types":
-            check(unify_err(ty_int(), ty_bool()), "int != bool")
-            check(unify_err(ty_str(), ty_int()), "str != int")
-            check(unify_err(ty_bool(), ty_str()), "bool != str")
+            val r1 = unify(empty_subst(), ty_int(), ty_bool())
+            match r1:
+                case Ok(_): assert false, "int != bool should fail"
+                case Err(_): pass
+            val r2 = unify(empty_subst(), ty_str(), ty_int())
+            match r2:
+                case Ok(_): assert false, "str != int should fail"
+                case Err(_): pass
+            val r3 = unify(empty_subst(), ty_bool(), ty_str())
+            match r3:
+                case Ok(_): assert false, "bool != str should fail"
+                case Err(_): pass
 
         it "unifies type variable with concrete type":
             reset_vars()
@@ -302,14 +364,20 @@ describe "HM Type Inference Core":
             val fn_of_v = ty_fn(v, ty_int())  # v -> int
 
             # Try to unify v = v -> int (would create infinite type)
-            check(unify_err(v, fn_of_v), "should fail occurs check")
+            val r = unify(empty_subst(), v, fn_of_v)
+            match r:
+                case Ok(_): assert false, "should fail occurs check"
+                case Err(_): pass
 
         it "unifies function types":
             reset_vars()
             val f1 = ty_fn(ty_int(), ty_bool())
             val f2 = ty_fn(ty_int(), ty_bool())
 
-            check(unify_ok(f1, f2), "same function types should unify")
+            val r = unify(empty_subst(), f1, f2)
+            match r:
+                case Ok(_): pass
+                case Err(_): assert false, "same function types should unify"
 
         it "unifies function types with variables":
             reset_vars()
@@ -375,8 +443,10 @@ describe "HM Type Inference Core":
                 case Ok(s1):
                     val resolved1 = subst_apply(s1, inst1)
                     # inst1 should be int -> int
-                    match resolved1:
-                        case TyFn(TyInt, TyInt): assert true
+                    val p1 = get_fn_param(resolved1)
+                    val r1 = get_fn_ret(resolved1)
+                    match (p1, r1):
+                        case (TyInt, TyInt): assert true
                         case _: assert false, "expected int -> int"
                 case Err(_):
                     check(false, "first use unification failed")
@@ -391,8 +461,10 @@ describe "HM Type Inference Core":
                 case Ok(s2):
                     val resolved2 = subst_apply(s2, inst2)
                     # inst2 should be bool -> bool
-                    match resolved2:
-                        case TyFn(TyBool, TyBool): assert true
+                    val p2 = get_fn_param(resolved2)
+                    val r2 = get_fn_ret(resolved2)
+                    match (p2, r2):
+                        case (TyBool, TyBool): assert true
                         case _: assert false, "expected bool -> bool"
                 case Err(_):
                     check(false, "second use unification failed")
@@ -410,8 +482,8 @@ describe "HM Type Inference Core":
 
             check(is_var(param_ty), "param is variable")
             match fn_ty:
-                case TyFn(p, r):
-                    check(get_var_id(p) == get_var_id(r), "param and return same var")
+                case TyFn(data):
+                    check(get_var_id(data.param) == get_var_id(data.ret_type), "param and return same var")
                 case _:
                     check(false, "expected function type")
 

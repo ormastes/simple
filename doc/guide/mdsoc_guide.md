@@ -112,7 +112,7 @@ Carets define aspect roots with different directory layouts:
 ```sdn
 roots:
   - name: core
-    path: src/compiler_core/       # Business logic
+    path: src/core/       # Business logic
 
   - name: ui
     path: src/ui/         # User interface
@@ -560,7 +560,7 @@ src/
 ```sdn
 roots:
   - name: core
-    path: src/compiler_core/
+    path: src/core/
 
   - name: posix
     path: src/posix/
@@ -592,7 +592,7 @@ dimension:
 ### Surface Composition
 
 ```simple
-# src/compiler_core/platform/filesystem/__init__.spl
+# src/core/platform/filesystem/__init__.spl
 
 use filesystem.interface.{FileSystem}
 
@@ -838,8 +838,8 @@ struct ParserPort:
     parse_fn: fn([text], text) -> [text]
 ```
 
-This pattern (implemented in `src/compiler/backend_port.spl` and
-`src/compiler/compiler_services.spl`) makes all pipeline dependencies visible from one struct.
+This pattern (implemented in `src/compiler/70.backend/backend_port.spl` and
+`src/compiler/00.common/compiler_services.spl`) makes all pipeline dependencies visible from one struct.
 
 ### Benefits over String-Keyed DI
 
@@ -869,11 +869,11 @@ This pattern (implemented in `src/compiler/backend_port.spl` and
 
 - **Theory:** Read `doc/research/mdsoc_design.md` for design rationale
 - **Examples:** Explore `test/unit/compiler/mdsoc/` for working examples
-- **API Reference:** See `src/compiler/mdsoc/mod.spl` for type definitions
+- **API Reference:** See `src/compiler/85.mdsoc/mdsoc/mod.spl` for type definitions
 - **IDE Support:** Install Simple Language extension for capsule navigation
 
 ---
 
 **Document Version:** 1.0
-**Last Updated:** 2026-02-17
+**Last Updated:** 2026-03-02
 **Maintainers:** Simple Language Team

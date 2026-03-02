@@ -1,0 +1,208 @@
+# Cache Validator — Unified validation for SHB and SMF cache artifacts
+#
+# Shared entry point for checking cache freshness. Extracts common
+# validation logic used by ShbCacheManager, IncrementalCompiler,
+# and the watcher service.
+#
+# Validation levels:
+#   1. Source hash — did the source file change?
+#   2. Interface hash — did the public API change? (SHB only)
+#   3. Options hash — did compile options change? (SMF only)
+#   4. Dependencies — did any imported module's interface change?
+
+export validate_source_hash, validate_dependencies, validate_shb, validate_smf
+export check_freshness, source_to_cache_path
+
+use compiler.driver.cache.cache_types.{
+    CacheCheckResult,
+    cache_check_result_fresh, cache_check_result_stale,
+    cache_check_result_missing, cache_check_result_error,
+    CACHE_FRESH, CACHE_BODY_CHANGED, CACHE_STALE, CACHE_MISSING, CACHE_ERROR
+}
+use compiler.driver.cache.compile_options_hash.{
+    CompileOptionsHash,
+    compile_options_hash_validate, compile_options_hash_from_bytes,
+    compile_options_hash_zero, compile_options_hash_is_zero
+}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_hash_text(s: text) -> i64
+
+# ============================================================================
+# Level 1: Source Hash Validation
+# ============================================================================
+
+fn validate_source_hash(source_path: text, cached_hash: i64) -> CacheCheckResult:
+    val source = rt_file_read_text(source_path) ?? ""
+    if source == "":
+        return cache_check_result_error("failed to read source: {source_path}")
+
+    val current_hash = rt_hash_text(source)
+    if current_hash == cached_hash:
+        return cache_check_result_fresh(current_hash)
+
+    cache_check_result_stale(current_hash, cached_hash, "source hash changed")
+
+# ============================================================================
+# Level 4: Dependency Validation
+# ============================================================================
+
+fn validate_dependencies(deps: [CacheDependency], get_interface_hash: fn(text) -> i64) -> CacheCheckResult:
+    var i = 0
+    while i < deps.len():
+        val dep = deps[i]
+        val actual_hash = get_interface_hash(dep.module_path)
+        if actual_hash == 0:
+            return cache_check_result_stale(0, 0, "dependency missing: {dep.module_path}")
+        if actual_hash != dep.expected_hash:
+            return cache_check_result_stale(actual_hash, dep.expected_hash, "dependency interface changed: {dep.module_path}")
+        i = i + 1
+    cache_check_result_fresh(0)
+
+# ============================================================================
+# SHB Validation (Level 1 + Level 2)
+# ============================================================================
+
+fn validate_shb(source_path: text, shb_path: text, get_interface_hash: fn(text) -> i64) -> CacheCheckResult:
+    if not rt_file_exists(shb_path):
+        val source = rt_file_read_text(source_path) ?? ""
+        if source == "":
+            return cache_check_result_error("failed to read source: {source_path}")
+        val src_hash = rt_hash_text(source)
+        return cache_check_result_missing(src_hash)
+
+    # Read SHB and check source hash
+    use compiler.shb.shb_reader.{ShbReader}
+    val reader = ShbReader.open(shb_path)
+    if reader.is_valid() == false:
+        return cache_check_result_error("invalid SHB file: {shb_path}")
+
+    val source = rt_file_read_text(source_path) ?? ""
+    if source == "":
+        return cache_check_result_error("failed to read source: {source_path}")
+
+    val src_hash = rt_hash_text(source)
+    val cached_src_hash = reader.source_hash()
+
+    if src_hash == cached_src_hash:
+        return cache_check_result_fresh(src_hash)
+
+    # Source changed — return STALE (caller decides whether to check interface)
+    cache_check_result_stale(src_hash, cached_src_hash, "source hash changed")
+
+# ============================================================================
+# SMF Validation (Level 1 + Level 3)
+# ============================================================================
+
+fn validate_smf(source_path: text, smf_path: text, options_hash: CompileOptionsHash) -> CacheCheckResult:
+    if not rt_file_exists(smf_path):
+        val source = rt_file_read_text(source_path) ?? ""
+        if source == "":
+            return cache_check_result_error("failed to read source: {source_path}")
+        val src_hash = rt_hash_text(source)
+        return cache_check_result_missing(src_hash)
+
+    # Read SMF header for source_hash and options_hash
+    val header_bytes = read_smf_reserved_bytes(smf_path)
+    if header_bytes.len() == 0:
+        return cache_check_result_error("failed to read SMF header: {smf_path}")
+
+    # Check source hash
+    val smf_source_hash = read_smf_source_hash(smf_path)
+    val source = rt_file_read_text(source_path) ?? ""
+    if source == "":
+        return cache_check_result_error("failed to read source: {source_path}")
+
+    val current_src_hash = rt_hash_text(source)
+    if current_src_hash != smf_source_hash:
+        return cache_check_result_stale(current_src_hash, smf_source_hash, "source hash changed")
+
+    # Check options hash (Level 3)
+    if not compile_options_hash_is_zero(options_hash):
+        val stored_options = compile_options_hash_from_bytes(header_bytes)
+        val options_result = compile_options_hash_validate(stored_options, options_hash)
+        if options_result.status != CACHE_FRESH:
+            return options_result
+
+    cache_check_result_fresh(current_src_hash)
+
+# ============================================================================
+# Combined Freshness Check
+# ============================================================================
+
+fn check_freshness(source_path: text, shb_dir: text, smf_path: text, options_hash: CompileOptionsHash) -> CacheCheckResult:
+    # Check SHB first (faster, header-only)
+    val shb_path = source_to_cache_path(source_path, shb_dir, ".shb")
+
+    val shb_result = validate_shb(source_path, shb_path, fn(p: text) -> i64: 0)
+    if shb_result.status == CACHE_STALE or shb_result.status == CACHE_MISSING:
+        return shb_result
+
+    # If SHB is fresh, also check SMF if path provided
+    if smf_path != "":
+        return validate_smf(source_path, smf_path, options_hash)
+
+    shb_result
+
+# ============================================================================
+# Path Helpers
+# ============================================================================
+
+fn source_to_cache_path(source_path: text, cache_dir: text, extension: text) -> text:
+    val base = source_path.replace("/", "_").replace(".spl", "")
+    "{cache_dir}/{base}{extension}"
+
+# ============================================================================
+# Dependency Type
+# ============================================================================
+
+struct CacheDependency:
+    module_path: text
+    expected_hash: i64
+
+# ============================================================================
+# SMF Header Reading Helpers
+# ============================================================================
+
+fn read_smf_reserved_bytes(smf_path: text) -> [u8]:
+    # Read the reserved[0..16] bytes from SMF header for CompileOptionsHash
+    # SMF v1.1: header is at EOF-128, reserved starts at offset 88 within header
+    extern fn rt_file_size(path: text) -> i64
+    extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
+
+    val file_size = rt_file_size(smf_path)
+    if file_size < 128:
+        return []
+
+    # Header is at EOF-128, reserved field starts at offset 88
+    val header_start = file_size - 128
+    val reserved_offset = header_start + 88
+    rt_file_read_bytes_range(smf_path, reserved_offset, 16)
+
+fn read_smf_source_hash(smf_path: text) -> i64:
+    # Read source_hash from SMF header (at offset 80 within 128-byte header)
+    # Hashing section: module_hash(8 bytes) + source_hash(8 bytes) at header offset 76
+    extern fn rt_file_size(path: text) -> i64
+    extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
+
+    val file_size = rt_file_size(smf_path)
+    if file_size < 128:
+        return 0
+
+    val header_start = file_size - 128
+    # source_hash is at header offset 84 (after module_hash at 76)
+    val source_hash_offset = header_start + 84
+    val bytes = rt_file_read_bytes_range(smf_path, source_hash_offset, 8)
+    if bytes.len() < 8:
+        return 0
+
+    val b0 = bytes[0] as i64
+    val b1 = bytes[1] as i64
+    val b2 = bytes[2] as i64
+    val b3 = bytes[3] as i64
+    val b4 = bytes[4] as i64
+    val b5 = bytes[5] as i64
+    val b6 = bytes[6] as i64
+    val b7 = bytes[7] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)

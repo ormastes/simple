@@ -1,0 +1,293 @@
+# Test Daemon — Core daemon using DaemonRunner for test execution
+#
+# Handles concurrent test requests, caches results for unchanged tests,
+# manages QEMU session sharing, and deduplicates concurrent requests.
+
+export TestDaemon, test_daemon_start
+
+use std.daemon_sdk.daemon.{DaemonRunner, daemon_runner_start}
+use std.daemon_sdk.types.{
+    DaemonConfig, DaemonRequest, DaemonResponse, DaemonState,
+    daemon_response_new
+}
+use app.test_daemon.types.{
+    TestDaemonConfig, test_daemon_config_default,
+    TREQ_RUN_SINGLE, TREQ_RUN_ALL, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP,
+    TRESP_QUEUED, TRESP_RUNNING, TRESP_COMPLETED, TRESP_FAILED,
+    TRESP_SKIPPED, TRESP_CACHED, TRESP_ERROR
+}
+use app.test_daemon.cache.{TestResultCache, test_result_cache_load}
+use app.test_daemon.deps.{TestDepGraph, test_dep_graph_load}
+use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+
+# ============================================================================
+# Test Daemon
+# ============================================================================
+
+class TestDaemon:
+    runner: DaemonRunner
+    config: TestDaemonConfig
+    cache: TestResultCache
+    dep_graph: TestDepGraph
+    qemu_broker: QemuBroker
+    active_requests: {text: text}
+
+impl TestDaemon:
+    fn is_running() -> bool:
+        self.runner.is_running()
+
+    fn get_state() -> DaemonState:
+        self.runner.get_state()
+
+    # --- Main loop ---
+
+    me run():
+        while self.runner.is_running():
+            self.runner.run_poll_cycle(self.handle_request)
+
+            # Periodic QEMU cleanup every 50 cycles
+            val state = self.runner.get_state()
+            if state.cycle_count % 50 == 0:
+                self.qemu_broker.cleanup_idle(self.config.qemu_session_timeout_ms)
+
+            # Periodic cache save every 20 cycles
+            if state.cycle_count % 20 == 0:
+                self.cache.save()
+                self.dep_graph.save()
+
+            extern fn rt_sleep_ms(ms: i64)
+            rt_sleep_ms(self.config.daemon.poll_interval_ms)
+
+    # --- Request handler ---
+
+    fn handle_request(req: DaemonRequest) -> DaemonResponse:
+        val kind = req.kind
+        if kind == TREQ_RUN_SINGLE:
+            return self.handle_run_single(req)
+        else if kind == TREQ_RUN_ALL:
+            return self.handle_run_all(req)
+        else if kind == TREQ_CLEAN_RUN:
+            return self.handle_clean_run(req)
+        else if kind == TREQ_STATUS:
+            return self.handle_status(req)
+        else if kind == TREQ_STOP:
+            return self.handle_stop(req)
+        else if kind == -1:
+            # Generic stop signal from daemon_sdk
+            return self.handle_stop(req)
+
+        var resp = daemon_response_new(req.id, TRESP_ERROR)
+        resp.fields["error"] = "unknown request kind: {kind}"
+        resp
+
+    # --- Run single test ---
+
+    fn handle_run_single(req: DaemonRequest) -> DaemonResponse:
+        val test_path = req.fields["test_path"] ?? ""
+        val clean = req.fields["clean"] ?? ""
+
+        if test_path == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing test_path"
+            return resp
+
+        # Dedup check
+        val dedup_key = rt_hash_text(test_path)
+        val existing = self.active_requests["{dedup_key}"]
+        if existing.? and existing != req.id:
+            var resp = daemon_response_new(req.id, TRESP_QUEUED)
+            resp.fields["redirect"] = existing
+            return resp
+
+        self.active_requests["{dedup_key}"] = req.id
+
+        # Change detection (unless clean run)
+        if clean != "true":
+            self.dep_graph.analyze_test(test_path)
+            val dep_paths = self.dep_graph.get_deps(test_path)
+            val cached = self.cache.check_freshness(test_path, dep_paths)
+            if cached.test_path != "":
+                # Remove from active
+                self.active_requests["{dedup_key}"] = ""
+                var resp = daemon_response_new(req.id, TRESP_CACHED)
+                resp.fields["test_path"] = test_path
+                resp.fields["passed"] = "{cached.result_passed}"
+                resp.fields["failed"] = "{cached.result_failed}"
+                resp.fields["skipped"] = "{cached.result_skipped}"
+                resp.fields["duration_ms"] = "{cached.result_duration_ms}"
+                resp.fields["output"] = cached.result_output
+                resp.fields["cached"] = "true"
+                return resp
+
+        # Execute test
+        val result = self.execute_test(test_path)
+
+        # Remove from active
+        self.active_requests["{dedup_key}"] = ""
+
+        result
+
+    # --- Run all tests ---
+
+    fn handle_run_all(req: DaemonRequest) -> DaemonResponse:
+        val filter = req.fields["filter"] ?? ""
+        val test_files = discover_test_files(filter)
+
+        var total_passed: i64 = 0
+        var total_failed: i64 = 0
+        var total_skipped: i64 = 0
+        var total_cached: i64 = 0
+        val start_time = rt_time_now_unix_micros()
+
+        var i = 0
+        while i < test_files.len():
+            val test_path = test_files[i]
+            self.dep_graph.analyze_test(test_path)
+            val dep_paths = self.dep_graph.get_deps(test_path)
+            val cached = self.cache.check_freshness(test_path, dep_paths)
+
+            if cached.test_path != "":
+                total_passed = total_passed + cached.result_passed
+                total_failed = total_failed + cached.result_failed
+                total_skipped = total_skipped + cached.result_skipped
+                total_cached = total_cached + 1
+            else:
+                self.execute_test(test_path)
+                val dep_paths2 = self.dep_graph.get_deps(test_path)
+                val entry = self.cache.check_freshness(test_path, dep_paths2)
+                if entry.test_path != "":
+                    total_passed = total_passed + entry.result_passed
+                    total_failed = total_failed + entry.result_failed
+                    total_skipped = total_skipped + entry.result_skipped
+            i = i + 1
+
+        val elapsed = (rt_time_now_unix_micros() - start_time) / 1000
+
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["passed"] = "{total_passed}"
+        resp.fields["failed"] = "{total_failed}"
+        resp.fields["skipped"] = "{total_skipped}"
+        resp.fields["cached"] = "{total_cached}"
+        resp.fields["total"] = "{test_files.len()}"
+        resp.fields["duration_ms"] = "{elapsed}"
+        resp
+
+    # --- Clean run (bypass cache) ---
+
+    fn handle_clean_run(req: DaemonRequest) -> DaemonResponse:
+        val test_path = req.fields["test_path"] ?? ""
+        if test_path == "":
+            var resp = daemon_response_new(req.id, TRESP_ERROR)
+            resp.fields["error"] = "missing test_path"
+            return resp
+
+        self.execute_test(test_path)
+
+    # --- Status query ---
+
+    fn handle_status(req: DaemonRequest) -> DaemonResponse:
+        val state = self.runner.get_state()
+        var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["daemon_status"] = state.status_text()
+        resp.fields["items_processed"] = "{state.items_processed}"
+        resp.fields["errors_count"] = "{state.errors_count}"
+        resp.fields["cycle_count"] = "{state.cycle_count}"
+        resp.fields["cache_entries"] = "{self.cache.entries.keys().len()}"
+        resp.fields["qemu_active"] = "{self.qemu_broker.active_count()}"
+        resp.fields["qemu_idle"] = "{self.qemu_broker.idle_count()}"
+        resp
+
+    # --- Stop ---
+
+    fn handle_stop(req: DaemonRequest) -> DaemonResponse:
+        self.cache.save()
+        self.dep_graph.save()
+        self.qemu_broker.shutdown_all()
+        self.runner.shutdown()
+        daemon_response_new(req.id, TRESP_COMPLETED)
+
+    # --- Execute a test ---
+
+    fn execute_test(test_path: text) -> DaemonResponse:
+        val start_time = rt_time_now_unix_micros()
+
+        # Shell out to bin/simple test
+        extern fn rt_shell_exec(cmd: text) -> text
+        extern fn rt_shell_exit_code() -> i64
+
+        val cmd = "bin/simple test {test_path} 2>&1"
+        val output = rt_shell_exec(cmd)
+        val exit_code = rt_shell_exit_code()
+
+        val elapsed = (rt_time_now_unix_micros() - start_time) / 1000
+
+        val status = if exit_code == 0: TRESP_COMPLETED else: TRESP_FAILED
+        val passed = if exit_code == 0: 1 else: 0
+        val failed = if exit_code != 0: 1 else: 0
+
+        # Record in cache
+        self.dep_graph.analyze_test(test_path)
+        val dep_paths = self.dep_graph.get_deps(test_path)
+        self.cache.record_result(test_path, dep_paths, status, passed, failed, 0, elapsed, output)
+
+        var resp = daemon_response_new("", status)
+        resp.fields["test_path"] = test_path
+        resp.fields["passed"] = "{passed}"
+        resp.fields["failed"] = "{failed}"
+        resp.fields["skipped"] = "0"
+        resp.fields["duration_ms"] = "{elapsed}"
+        resp.fields["output"] = output
+        resp.fields["cached"] = "false"
+        resp
+
+# ============================================================================
+# Factory
+# ============================================================================
+
+fn test_daemon_start(config: TestDaemonConfig) -> TestDaemon:
+    rt_mkdir_p(".build/test_daemon")
+
+    val runner = daemon_runner_start(config.daemon)
+    val cache = test_result_cache_load(config.cache_path)
+    val dep_graph = test_dep_graph_load(config.dep_graph_path)
+    val qemu_broker = qemu_broker_new(config.max_qemu_sessions)
+
+    TestDaemon(
+        runner: runner,
+        config: config,
+        cache: cache,
+        dep_graph: dep_graph,
+        qemu_broker: qemu_broker,
+        active_requests: {}
+    )
+
+# ============================================================================
+# Test Discovery
+# ============================================================================
+
+fn discover_test_files(filter: text) -> [text]:
+    var files: [text] = []
+    discover_test_files_in_dir("test/", filter, files)
+    files
+
+fn discover_test_files_in_dir(dir: text, filter: text, files: [text]):
+    if not rt_file_exists(dir):
+        return
+
+    val entries = rt_dir_list(dir)
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry.ends_with("_spec.spl"):
+            if filter == "" or entry.contains(filter):
+                files.push(entry)
+        else if not entry.contains("."):
+            # Likely a directory — recurse
+            discover_test_files_in_dir(entry, filter, files)
+        i = i + 1

@@ -16,6 +16,7 @@ use app.io.{file_read, file_exists, path_join}
 use compiler.backend.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_HEADER_SIZE, fnv1a_hash}
 use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 use compiler.backend.linker.smf_reader.{SmfReaderImpl}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 
 # ============================================================================
 # SMF Source Type
@@ -240,7 +241,18 @@ impl SmfGetter:
                 return reader.get_object(location.module_name)
 
             case SmfSourceType.SingleFile:
-                return Err("Single SMF files do not include object files")
+                # Try reading Code section for ELF magic via SmfReaderMemory
+                val smf_result = self.load_single_file(location)
+                if smf_result.is_err():
+                    return Err(smf_result.unwrap_err())
+                val smf_bytes = smf_result.unwrap()
+                val mem_reader_result = SmfReaderMemory.from_data(smf_bytes)
+                if mem_reader_result.is_err():
+                    return Err("Failed to parse SMF: {mem_reader_result.unwrap_err()}")
+                val mem_reader = mem_reader_result.unwrap()
+                if mem_reader.has_elf_object():
+                    return mem_reader.read_elf_object()
+                return Err("Single SMF file has no ELF object: {location.module_name}")
 
     """Get an SMF reader for a module.
 

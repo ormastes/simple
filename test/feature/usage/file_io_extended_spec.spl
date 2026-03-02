@@ -6,9 +6,207 @@
 #
 # Extended File I/O operations including line-based reading, append operations,
 # binary I/O, file moving, recursive directory operations, and path utilities.
+#
+# Self-contained: all I/O functions defined inline via extern fn declarations.
 
+# ============================================================================
+# Extern Function Declarations (runtime built-ins)
+# ============================================================================
 
-use infra.*
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_move(src: text, dst: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Shell helper — calls rt_process_run and returns exit code, stdout, stderr
+# ============================================================================
+
+fn _shell_code(command: text) -> i64:
+    val result = rt_process_run("/bin/sh", ["-c", command])
+    result.2
+
+fn _shell_out(command: text) -> text:
+    val result = rt_process_run("/bin/sh", ["-c", command])
+    result.0
+
+# ============================================================================
+# Error type
+# ============================================================================
+
+struct IoError:
+    message: text
+
+# ============================================================================
+# File Operations (matching infra.* API)
+# ============================================================================
+
+fn write_file(path: text, content: text):
+    rt_file_write_text(path, content)
+
+fn read_file(path: text) -> Result<text, IoError>:
+    if not rt_file_exists(path):
+        return Err(IoError(message: "File not found: {path}"))
+    val content = rt_file_read_text(path)
+    Ok(content ?? "")
+
+fn file_exist(path: text) -> bool:
+    rt_file_exists(path)
+
+fn remove_file(path: text):
+    rt_file_delete(path)
+
+fn read_lines(path: text) -> Result<[text], IoError>:
+    if not rt_file_exists(path):
+        return Err(IoError(message: "File not found: {path}"))
+    val content = rt_file_read_text(path) ?? ""
+    if content.len() == 0:
+        return Ok([])
+    Ok(content.split("\n"))
+
+fn append_file(path: text, content: text) -> Result<(), IoError>:
+    val escaped = content.replace("'", "'\\''")
+    val code = _shell_code("printf '%s' '{escaped}' >> '{path}' 2>&1")
+    if code == 0:
+        Ok(())
+    else:
+        Err(IoError(message: "Failed to append to {path}"))
+
+fn read_bytes(path: text) -> Result<[i64], IoError>:
+    if not rt_file_exists(path):
+        return Err(IoError(message: "File not found: {path}"))
+    val code = _shell_code("od -An -td1 -v '{path}' 2>&1")
+    if code != 0:
+        return Err(IoError(message: "Failed to read bytes from {path}"))
+    val output = _shell_out("od -An -td1 -v '{path}' 2>&1").trim()
+    if output.len() == 0:
+        return Ok([])
+    var bytes: [i64] = []
+    val parts = output.split(" ")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.len() > 0:
+            val byte_val = int(trimmed)
+            if byte_val < 0:
+                bytes.push(byte_val + 256)
+            else:
+                bytes.push(byte_val)
+    Ok(bytes)
+
+fn write_bytes(path: text, data: [i64]) -> Result<(), IoError>:
+    var octal_str = ""
+    for byte in data:
+        val b = if byte < 0: byte + 256 else: byte
+        val b_mod = b % 256
+        val octal = _to_octal(b_mod)
+        octal_str = octal_str + "\\{octal}"
+    val code = _shell_code("printf '{octal_str}' > '{path}' 2>&1")
+    if code == 0:
+        Ok(())
+    else:
+        Err(IoError(message: "Failed to write bytes to {path}"))
+
+fn _to_octal(n: i64) -> text:
+    var num = n
+    var digits: [i64] = []
+    if num == 0:
+        return "000"
+    while num > 0:
+        digits.push(num % 8)
+        num = num / 8
+    var result = ""
+    var i = digits.len() - 1
+    while i >= 0:
+        result = result + "{digits[i]}"
+        i = i - 1
+    while result.len() < 3:
+        result = "0" + result
+    result
+
+fn move_file(src: text, dest: text) -> Result<(), IoError>:
+    if not rt_file_exists(src):
+        return Err(IoError(message: "Source file not found: {src}"))
+    val code = _shell_code("mv '{src}' '{dest}' 2>&1")
+    if code == 0:
+        Ok(())
+    else:
+        Err(IoError(message: "Failed to move {src} to {dest}"))
+
+fn create_dir_all(path: text) -> Result<(), IoError>:
+    val code = _shell_code("mkdir -p '{path}' 2>&1")
+    if code == 0:
+        Ok(())
+    else:
+        Err(IoError(message: "Failed to create directory {path}"))
+
+fn create_dir(path: text) -> Result<(), IoError>:
+    val code = _shell_code("mkdir '{path}' 2>&1")
+    if code == 0:
+        Ok(())
+    else:
+        Err(IoError(message: "Failed to create directory {path}"))
+
+fn walk_dir(path: text) -> Result<[text], IoError>:
+    val code = _shell_code("find '{path}' 2>&1")
+    if code != 0:
+        return Err(IoError(message: "Failed to walk directory {path}"))
+    val out = _shell_out("find '{path}' 2>&1")
+    val lines = out.split("\n")
+    var entries: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() > 0 and trimmed != path:
+            entries.push(trimmed)
+    Ok(entries)
+
+fn current_dir() -> text:
+    val out = _shell_out("pwd 2>&1")
+    out.trim()
+
+fn remove_dir(path: text) -> Result<(), IoError>:
+    val code = _shell_code("rmdir '{path}' 2>&1")
+    if code == 0:
+        Ok(())
+    else:
+        Err(IoError(message: "Failed to remove directory {path}"))
+
+fn remove_dir_all(path: text) -> Result<(), IoError>:
+    val code = _shell_code("rm -rf '{path}' 2>&1")
+    if code == 0:
+        Ok(())
+    else:
+        Err(IoError(message: "Failed to remove directory {path}"))
+
+fn stem(path: text) -> text:
+    # Use shell to extract filename without extension
+    val base = _shell_out("basename '{path}'").trim()
+    val has_dot = base.contains(".")
+    if has_dot:
+        # Get part before last dot
+        val without_ext = _shell_out("echo '{base}' | rev | cut -d. -f2- | rev").trim()
+        without_ext
+    else:
+        base
+
+fn relative_path(target: text, base: text) -> text:
+    if target == base:
+        return ""
+    if target.starts_with(base):
+        val rel = target[base.len():]
+        if rel.starts_with("/"):
+            rel[1:]
+        else:
+            rel
+    else:
+        target
+
+fn path_join(dir: text, file: text) -> text:
+    if dir.ends_with("/"):
+        dir + file
+    else:
+        dir + "/" + file
 
 # ============================================================================
 # Test Group 1: Line-Based File Reading

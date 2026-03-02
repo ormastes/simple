@@ -15,12 +15,14 @@ fn cache_lru_clear(cache):
     """Clear all entries from LRU cache."""
     cache['keys'] = []
     cache['values'] = []
+    cache['key_index'] = {}
     cache
 
 fn cache_fifo_clear(cache):
     """Clear all entries from FIFO cache."""
     cache['keys'] = []
     cache['values'] = []
+    cache['key_index'] = {}
     cache
 
 fn cache_lfu_clear(cache):
@@ -28,6 +30,7 @@ fn cache_lfu_clear(cache):
     cache['keys'] = []
     cache['values'] = []
     cache['frequencies'] = []
+    cache['key_index'] = {}
     cache
 
 fn cache_ttl_clear(cache):
@@ -35,6 +38,7 @@ fn cache_ttl_clear(cache):
     cache['keys'] = []
     cache['values'] = []
     cache['expiry_times'] = []
+    cache['key_index'] = {}
     cache
 
 fn cache_clear(cache):
@@ -78,6 +82,8 @@ fn cache_ttl_cleanup(cache):
     cache['keys'] = new_keys
     cache['values'] = new_values
     cache['expiry_times'] = new_expiry_times
+    # Rebuild key_index after cleanup
+    _rebuild_key_index(cache)
     cache
 
 # ============================================================================
@@ -120,24 +126,20 @@ fn cache_size(cache) -> i64:
 
 fn cache_lru_contains(cache, key: text) -> bool:
     """Check if key exists in LRU cache."""
-    val keys = cache['keys']
-    _find_key_index(keys, key) >= 0
+    _find_key_index_in(cache, key) >= 0
 
 fn cache_fifo_contains(cache, key: text) -> bool:
     """Check if key exists in FIFO cache."""
-    val keys = cache['keys']
-    _find_key_index(keys, key) >= 0
+    _find_key_index_in(cache, key) >= 0
 
 fn cache_lfu_contains(cache, key: text) -> bool:
     """Check if key exists in LFU cache."""
-    val keys = cache['keys']
-    _find_key_index(keys, key) >= 0
+    _find_key_index_in(cache, key) >= 0
 
 fn cache_ttl_contains(cache, key: text) -> bool:
     """Check if key exists in TTL cache and is not expired."""
-    val keys = cache['keys']
     val expiry_times = cache['expiry_times']
-    val index = _find_key_index(keys, key)
+    val index = _find_key_index_in(cache, key)
 
     if index >= 0:
         val now = _get_timestamp()
@@ -171,18 +173,28 @@ fn memo_clear(memo_cache):
 # Helper Functions
 # ============================================================================
 
-fn _find_key_index(keys, key: text) -> i64:
-    """Find index of key in keys array. Returns -1 if not found."""
-    var i = 0
-    while i < keys.len():
-        if keys[i] == key:
-            return i
-        i = i + 1
+fn _find_key_index_in(cache, key: text) -> i64:
+    """Find index of key using the key_index dict. Returns -1 if not found."""
+    val ki = cache['key_index']
+    if ki.contains_key(key):
+        return ki[key]
     -1
 
+fn _rebuild_key_index(cache):
+    """Rebuild the key_index dict from the keys array."""
+    var ki = {}
+    val keys = cache['keys']
+    var i = 0
+    while i < keys.len():
+        ki[keys[i]] = i
+        i = i + 1
+    cache['key_index'] = ki
+
+extern fn rt_time_now_unix_micros() -> i64
+
 fn _get_timestamp() -> i64:
-    """Get current timestamp (simulated with counter for testing)."""
-    1000000
+    """Get current timestamp in milliseconds."""
+    rt_time_now_unix_micros() / 1000
 
 export cache_lru_clear, cache_fifo_clear, cache_lfu_clear, cache_ttl_clear, cache_clear
 export cache_ttl_cleanup

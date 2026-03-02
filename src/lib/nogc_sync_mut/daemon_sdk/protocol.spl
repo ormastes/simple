@@ -1,0 +1,226 @@
+# Daemon SDK Protocol — File-based IPC for request/response messaging
+#
+# Generic protocol using key=value serialization.
+# Atomic writes via tmp+rename. Requests use .req extension,
+# responses use .resp extension.
+
+export write_daemon_request, read_daemon_requests, clear_processed_requests
+export write_daemon_response, read_daemon_response, clear_old_responses
+export daemon_request_path_for
+
+use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new, daemon_response_new}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+# ============================================================================
+# Write Request
+# ============================================================================
+
+fn write_daemon_request(req: DaemonRequest, request_dir: text) -> text:
+    rt_mkdir_p(request_dir)
+
+    val req_path = daemon_request_path_for(req.id, request_dir)
+
+    var content = "id={req.id}\n"
+    content = content + "kind={req.kind}\n"
+    content = content + "timestamp={req.timestamp}\n"
+
+    # Serialize fields
+    val keys = req.fields.keys()
+    var i = 0
+    while i < keys.len():
+        val key = keys[i]
+        val value = req.fields[key] ?? ""
+        content = content + "field.{key}={value}\n"
+        i = i + 1
+
+    # Atomic write: tmp + rename
+    val tmp_path = "{req_path}.tmp"
+    if rt_file_write_text(tmp_path, content):
+        extern fn rt_file_rename(from: text, to: text) -> bool
+        if rt_file_rename(tmp_path, req_path):
+            return req_path
+        rt_file_delete(tmp_path)
+
+    # Fallback: direct write
+    if rt_file_write_text(req_path, content):
+        return req_path
+    ""
+
+# ============================================================================
+# Read Requests
+# ============================================================================
+
+fn read_daemon_requests(request_dir: text) -> [DaemonRequest]:
+    var requests: [DaemonRequest] = []
+
+    if not rt_file_exists(request_dir):
+        return requests
+
+    val files = rt_dir_list(request_dir)
+    var i = 0
+    while i < files.len():
+        val file_path = files[i]
+        if file_path.ends_with(".req"):
+            val req = parse_request_file(file_path)
+            if req.id != "":
+                requests.push(req)
+        i = i + 1
+
+    requests
+
+fn parse_request_file(path: text) -> DaemonRequest:
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return DaemonRequest(id: "", kind: 0, timestamp: 0, fields: {})
+
+    var id = ""
+    var kind: i64 = 0
+    var timestamp: i64 = 0
+    var fields: {text: text} = {}
+
+    val lines = content.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        if line.starts_with("id="):
+            id = line.substring(3)
+        else if line.starts_with("kind="):
+            kind = line.substring(5).to_i64() ?? 0
+        else if line.starts_with("timestamp="):
+            timestamp = line.substring(10).to_i64() ?? 0
+        else if line.starts_with("field."):
+            val rest = line.substring(6)
+            val eq_pos = rest.index_of("=")
+            if eq_pos > 0:
+                val key = rest.substring(0, eq_pos)
+                val value = rest.substring(eq_pos + 1)
+                fields[key] = value
+        li = li + 1
+
+    DaemonRequest(id: id, kind: kind, timestamp: timestamp, fields: fields)
+
+# ============================================================================
+# Write Response
+# ============================================================================
+
+fn write_daemon_response(resp: DaemonResponse, response_dir: text) -> bool:
+    rt_mkdir_p(response_dir)
+
+    val resp_path = "{response_dir}/{resp.request_id}.resp"
+
+    var content = "request_id={resp.request_id}\n"
+    content = content + "status={resp.status}\n"
+    content = content + "timestamp={resp.timestamp}\n"
+
+    val keys = resp.fields.keys()
+    var i = 0
+    while i < keys.len():
+        val key = keys[i]
+        val value = resp.fields[key] ?? ""
+        content = content + "field.{key}={value}\n"
+        i = i + 1
+
+    # Atomic write
+    val tmp_path = "{resp_path}.tmp"
+    if rt_file_write_text(tmp_path, content):
+        extern fn rt_file_rename(from: text, to: text) -> bool
+        if rt_file_rename(tmp_path, resp_path):
+            return true
+        rt_file_delete(tmp_path)
+
+    rt_file_write_text(resp_path, content)
+
+# ============================================================================
+# Read Response
+# ============================================================================
+
+fn read_daemon_response(request_id: text, response_dir: text) -> DaemonResponse:
+    val resp_path = "{response_dir}/{request_id}.resp"
+    if not rt_file_exists(resp_path):
+        return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
+
+    val content = rt_file_read_text(resp_path) ?? ""
+    if content == "":
+        return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
+
+    var req_id = ""
+    var status: i64 = -1
+    var timestamp: i64 = 0
+    var fields: {text: text} = {}
+
+    val lines = content.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        if line.starts_with("request_id="):
+            req_id = line.substring(11)
+        else if line.starts_with("status="):
+            status = line.substring(7).to_i64() ?? -1
+        else if line.starts_with("timestamp="):
+            timestamp = line.substring(10).to_i64() ?? 0
+        else if line.starts_with("field."):
+            val rest = line.substring(6)
+            val eq_pos = rest.index_of("=")
+            if eq_pos > 0:
+                val key = rest.substring(0, eq_pos)
+                val value = rest.substring(eq_pos + 1)
+                fields[key] = value
+        li = li + 1
+
+    DaemonResponse(request_id: req_id, status: status, timestamp: timestamp, fields: fields)
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+fn clear_processed_requests(request_dir: text, processed_ids: [text]):
+    var i = 0
+    while i < processed_ids.len():
+        val req_path = daemon_request_path_for(processed_ids[i], request_dir)
+        rt_file_delete(req_path)
+        i = i + 1
+
+fn clear_old_responses(response_dir: text, max_age_ms: i64):
+    if not rt_file_exists(response_dir):
+        return
+
+    val now = rt_time_now_unix_micros()
+    val max_age_us = max_age_ms * 1000
+    val files = rt_dir_list(response_dir)
+    var i = 0
+    while i < files.len():
+        val file_path = files[i]
+        if file_path.ends_with(".resp"):
+            val resp = read_daemon_response_timestamp(file_path)
+            if resp > 0 and (now - resp) > max_age_us:
+                rt_file_delete(file_path)
+        i = i + 1
+
+fn read_daemon_response_timestamp(path: text) -> i64:
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return 0
+    val lines = content.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        if line.starts_with("timestamp="):
+            return line.substring(10).to_i64() ?? 0
+        li = li + 1
+    0
+
+# ============================================================================
+# Path Helpers
+# ============================================================================
+
+fn daemon_request_path_for(request_id: text, request_dir: text) -> text:
+    val hash = rt_hash_text(request_id)
+    "{request_dir}/{hash}_{request_id}.req"

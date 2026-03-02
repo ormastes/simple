@@ -1,0 +1,175 @@
+# Watcher Types — Request, config, and state types for watcher service
+#
+# Defines the data structures used by the watcher daemon, client,
+# and protocol for file-based IPC.
+
+export WatcherRequestKind, WatcherRequest, WatcherConfig, WatcherState
+export watcher_config_default, watcher_request_new
+export watcher_config_to_daemon, watcher_request_to_daemon, daemon_request_to_watcher
+
+extern fn rt_time_now_unix_micros() -> i64
+
+use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, daemon_config_new, daemon_request_new}
+
+# ============================================================================
+# Request Types
+# ============================================================================
+
+val WATCHER_REQUEST_SHB: i64 = 0
+val WATCHER_REQUEST_SMF: i64 = 1
+val WATCHER_REQUEST_BOTH: i64 = 2
+
+enum WatcherRequestKind:
+    Shb
+    Smf
+    Both
+
+impl WatcherRequestKind:
+    fn to_i64() -> i64:
+        match self:
+            case WatcherRequestKind.Shb: WATCHER_REQUEST_SHB
+            case WatcherRequestKind.Smf: WATCHER_REQUEST_SMF
+            case WatcherRequestKind.Both: WATCHER_REQUEST_BOTH
+            case _: WATCHER_REQUEST_SHB
+
+    fn to_text() -> text:
+        match self:
+            case WatcherRequestKind.Shb: "shb"
+            case WatcherRequestKind.Smf: "smf"
+            case WatcherRequestKind.Both: "both"
+            case _: "shb"
+
+    static fn from_text(s: text) -> WatcherRequestKind:
+        match s:
+            case "shb": WatcherRequestKind.Shb
+            case "smf": WatcherRequestKind.Smf
+            case "both": WatcherRequestKind.Both
+            case _: WatcherRequestKind.Shb
+
+struct WatcherRequest:
+    source_path: text
+    kind: WatcherRequestKind
+    source_hash: i64
+    options_hash: i64
+    timestamp: i64
+
+fn watcher_request_new(source_path: text, kind: WatcherRequestKind) -> WatcherRequest:
+    WatcherRequest(
+        source_path: source_path,
+        kind: kind,
+        source_hash: 0,
+        options_hash: 0,
+        timestamp: rt_time_now_unix_micros()
+    )
+
+impl WatcherRequest:
+    fn to_text() -> text:
+        "WatcherRequest(path: {self.source_path}, kind: {self.kind.to_text()}, ts: {self.timestamp})"
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct WatcherConfig:
+    poll_interval_ms: i64
+    request_timeout_ms: i64
+    cache_dir: text
+    shb_dir: text
+    smf_dir: text
+    request_dir: text
+    lock_path: text
+    max_concurrent: i64
+
+fn watcher_config_default() -> WatcherConfig:
+    WatcherConfig(
+        poll_interval_ms: 500,
+        request_timeout_ms: 30000,
+        cache_dir: ".build",
+        shb_dir: ".build/headers",
+        smf_dir: "build/smf",
+        request_dir: ".build/watcher/requests",
+        lock_path: ".build/watcher/watcher.lock",
+        max_concurrent: 50
+    )
+
+impl WatcherConfig:
+    fn to_text() -> text:
+        "WatcherConfig(poll: {self.poll_interval_ms}ms, shb: {self.shb_dir}, smf: {self.smf_dir})"
+
+# ============================================================================
+# Watcher State
+# ============================================================================
+
+val WATCHER_STATE_IDLE: i64 = 0
+val WATCHER_STATE_POLLING: i64 = 1
+val WATCHER_STATE_PROCESSING: i64 = 2
+val WATCHER_STATE_SHUTTING_DOWN: i64 = 3
+
+struct WatcherState:
+    status: i64
+    last_poll_time: i64
+    files_processed: i64
+    errors_count: i64
+    cycle_count: i64
+
+fn watcher_state_new() -> WatcherState:
+    WatcherState(
+        status: WATCHER_STATE_IDLE,
+        last_poll_time: 0,
+        files_processed: 0,
+        errors_count: 0,
+        cycle_count: 0
+    )
+
+impl WatcherState:
+    fn is_idle() -> bool:
+        self.status == WATCHER_STATE_IDLE
+
+    fn is_running() -> bool:
+        self.status == WATCHER_STATE_POLLING or self.status == WATCHER_STATE_PROCESSING
+
+    fn status_text() -> text:
+        match self.status:
+            case 0: "idle"
+            case 1: "polling"
+            case 2: "processing"
+            case 3: "shutting_down"
+            case _: "unknown"
+
+# ============================================================================
+# Daemon SDK Conversions
+# ============================================================================
+
+fn watcher_config_to_daemon(wc: WatcherConfig) -> DaemonConfig:
+    var dc = daemon_config_new(wc.lock_path, wc.request_dir, "{wc.cache_dir}/watcher/responses")
+    dc.poll_interval_ms = wc.poll_interval_ms
+    dc.request_timeout_ms = wc.request_timeout_ms
+    dc.max_concurrent = wc.max_concurrent
+    dc
+
+fn watcher_request_to_daemon(wr: WatcherRequest) -> DaemonRequest:
+    var dr = daemon_request_new(wr.kind.to_i64())
+    dr.fields["source_path"] = wr.source_path
+    dr.fields["source_hash"] = "{wr.source_hash}"
+    dr.fields["options_hash"] = "{wr.options_hash}"
+    dr
+
+fn daemon_request_to_watcher(dr: DaemonRequest) -> WatcherRequest:
+    val source_path = dr.fields["source_path"] ?? ""
+    val kind_i = dr.kind
+    var kind = WatcherRequestKind.Shb
+    if kind_i == WATCHER_REQUEST_SMF:
+        kind = WatcherRequestKind.Smf
+    else if kind_i == WATCHER_REQUEST_BOTH:
+        kind = WatcherRequestKind.Both
+
+    val source_hash_str = dr.fields["source_hash"] ?? "0"
+    val options_hash_str = dr.fields["options_hash"] ?? "0"
+
+    WatcherRequest(
+        source_path: source_path,
+        kind: kind,
+        source_hash: source_hash_str.to_i64() ?? 0,
+        options_hash: options_hash_str.to_i64() ?? 0,
+        timestamp: dr.timestamp
+    )

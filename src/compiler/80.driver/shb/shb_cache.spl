@@ -2,15 +2,21 @@
 #
 # Manages .shb header files for incremental compilation.
 # Two-level hash optimization:
-#   Level 1: source_hash — skip if file unchanged
+#   Level 1: source_hash — skip if file unchanged (via shared cache_validator)
 #   Level 2: interface_hash — recompile only this file if API unchanged,
 #            mark dependents dirty only if API changed
+#
+# Delegates Level 1 source hash checks to cache_validator for shared logic.
 
 use compiler.shb.shb_types.{ShbModuleInterface, shb_module_interface_new}
 use compiler.shb.shb_writer.{shb_write}
 use compiler.shb.shb_reader.{ShbReader}
 use compiler.shb.shb_hash.{shb_source_hash, shb_interface_hash}
 use compiler.shb.shb_extractor.{shb_extract}
+use compiler.driver.cache.cache_types.{
+    CacheCheckResult, CACHE_FRESH, CACHE_STALE, CACHE_MISSING, CACHE_ERROR
+}
+use compiler.driver.cache.cache_validator.{validate_source_hash}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -55,6 +61,7 @@ class ShbCacheManager:
         ShbCacheManager.create(shb_cache_config_default())
 
     # Process a source file: check cache, extract if needed, write .shb
+    # Delegates Level 1 source hash check to shared cache_validator.
     me process_file(source_path: text) -> ShbCacheResult:
         val source = rt_file_read_text(source_path) ?? ""
         if source == "":
@@ -63,14 +70,16 @@ class ShbCacheManager:
         val src_hash = rt_hash_text(source)
         val shb_path = self.source_to_shb_path(source_path)
 
-        # Level 1: Check if source is unchanged
+        # Level 1: Check if source is unchanged (shared validation)
         if rt_file_exists(shb_path):
             val reader = ShbReader.open(shb_path)
             if reader.is_valid():
                 val old_src_hash = reader.source_hash()
                 val old_iface_hash = reader.interface_hash()
 
-                if src_hash == old_src_hash:
+                # Use shared validator for source hash check
+                val source_check = validate_source_hash(source_path, old_src_hash)
+                if source_check.status == CACHE_FRESH:
                     self.interface_hashes[source_path] = old_iface_hash
                     return ShbCacheResult(
                         status: SHB_CACHE_UNCHANGED,

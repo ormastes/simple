@@ -1,0 +1,133 @@
+# Cache Types — Shared result and policy types for SHB/SMF cache validation
+#
+# Provides a unified vocabulary for cache freshness checks across:
+# - SHB (interface headers) — source_hash + interface_hash
+# - SMF (compiled modules) — source_hash + options_hash (backend, opt level, etc.)
+# - Watcher service — request/response status
+#
+# Cache status levels:
+#   FRESH (0)        — Up-to-date, use cached artifact
+#   BODY_CHANGED (1) — Source changed but interface same (SHB only)
+#   STALE (2)        — Must rebuild
+#   MISSING (3)      — No artifact exists
+#   ERROR (-1)       — Check failed
+
+export CACHE_FRESH, CACHE_BODY_CHANGED, CACHE_STALE, CACHE_MISSING, CACHE_ERROR
+export CacheCheckResult, CachePolicy
+export cache_check_result_fresh, cache_check_result_stale, cache_check_result_missing, cache_check_result_error
+export cache_policy_default, cache_policy_strict, cache_policy_relaxed
+
+# ============================================================================
+# Cache Status Constants
+# ============================================================================
+
+val CACHE_FRESH: i64 = 0
+val CACHE_BODY_CHANGED: i64 = 1
+val CACHE_STALE: i64 = 2
+val CACHE_MISSING: i64 = 3
+val CACHE_ERROR: i64 = -1
+
+# ============================================================================
+# Cache Check Result
+# ============================================================================
+
+struct CacheCheckResult:
+    status: i64
+    source_hash: i64
+    cached_source_hash: i64
+    detail: text
+
+# Factory helpers (avoid static method issues in bootstrap)
+fn cache_check_result_fresh(source_hash: i64) -> CacheCheckResult:
+    CacheCheckResult(
+        status: CACHE_FRESH,
+        source_hash: source_hash,
+        cached_source_hash: source_hash,
+        detail: "fresh"
+    )
+
+fn cache_check_result_stale(source_hash: i64, cached_hash: i64, reason: text) -> CacheCheckResult:
+    CacheCheckResult(
+        status: CACHE_STALE,
+        source_hash: source_hash,
+        cached_source_hash: cached_hash,
+        detail: reason
+    )
+
+fn cache_check_result_missing(source_hash: i64) -> CacheCheckResult:
+    CacheCheckResult(
+        status: CACHE_MISSING,
+        source_hash: source_hash,
+        cached_source_hash: 0,
+        detail: "no cached artifact"
+    )
+
+fn cache_check_result_error(reason: text) -> CacheCheckResult:
+    CacheCheckResult(
+        status: CACHE_ERROR,
+        source_hash: 0,
+        cached_source_hash: 0,
+        detail: reason
+    )
+
+impl CacheCheckResult:
+    fn is_fresh() -> bool:
+        self.status == CACHE_FRESH
+
+    fn is_stale() -> bool:
+        self.status == CACHE_STALE
+
+    fn is_missing() -> bool:
+        self.status == CACHE_MISSING
+
+    fn is_error() -> bool:
+        self.status == CACHE_ERROR
+
+    fn is_usable() -> bool:
+        self.status == CACHE_FRESH or self.status == CACHE_BODY_CHANGED
+
+    fn status_text() -> text:
+        match self.status:
+            case 0: "fresh"
+            case 1: "body_changed"
+            case 2: "stale"
+            case 3: "missing"
+            case -1: "error"
+            case _: "unknown"
+
+    fn to_text() -> text:
+        "CacheCheckResult(status: {self.status_text()}, detail: {self.detail})"
+
+# ============================================================================
+# Cache Policy
+# ============================================================================
+
+struct CachePolicy:
+    check_source_hash: bool
+    check_interface_hash: bool
+    check_options_hash: bool
+    max_staleness_ms: i64
+
+fn cache_policy_default() -> CachePolicy:
+    CachePolicy(
+        check_source_hash: true,
+        check_interface_hash: true,
+        check_options_hash: true,
+        max_staleness_ms: 0
+    )
+
+fn cache_policy_strict() -> CachePolicy:
+    CachePolicy(
+        check_source_hash: true,
+        check_interface_hash: true,
+        check_options_hash: true,
+        max_staleness_ms: 0
+    )
+
+fn cache_policy_relaxed() -> CachePolicy:
+    CachePolicy(
+        check_source_hash: true,
+        check_interface_hash: false,
+        check_options_hash: false,
+        max_staleness_ms: 30000
+    )

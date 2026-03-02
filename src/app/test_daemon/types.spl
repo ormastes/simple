@@ -1,0 +1,96 @@
+# Test Daemon Types — Request kinds, response statuses, configuration
+#
+# Defines the test-specific protocol layered on top of daemon_sdk.
+
+export TREQ_RUN_SINGLE, TREQ_RUN_ALL, TREQ_CLEAN_RUN, TREQ_STATUS, TREQ_STOP
+export TRESP_QUEUED, TRESP_RUNNING, TRESP_COMPLETED, TRESP_FAILED
+export TRESP_SKIPPED, TRESP_CACHED, TRESP_ERROR
+export TestDaemonConfig, test_daemon_config_default
+export test_request_to_daemon, daemon_response_to_test_result, TestResult
+
+use std.daemon_sdk.types.{DaemonConfig, DaemonRequest, DaemonResponse, daemon_config_new, daemon_request_new}
+
+# ============================================================================
+# Request Kinds
+# ============================================================================
+
+val TREQ_RUN_SINGLE: i64 = 1
+val TREQ_RUN_ALL: i64 = 2
+val TREQ_CLEAN_RUN: i64 = 3
+val TREQ_STATUS: i64 = 4
+val TREQ_STOP: i64 = 5
+
+# ============================================================================
+# Response Statuses
+# ============================================================================
+
+val TRESP_QUEUED: i64 = 0
+val TRESP_RUNNING: i64 = 1
+val TRESP_COMPLETED: i64 = 2
+val TRESP_FAILED: i64 = 3
+val TRESP_SKIPPED: i64 = 4
+val TRESP_ERROR: i64 = 5
+val TRESP_CACHED: i64 = 6
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct TestDaemonConfig:
+    daemon: DaemonConfig
+    cache_path: text
+    dep_graph_path: text
+    qemu_session_timeout_ms: i64
+    max_qemu_sessions: i64
+
+fn test_daemon_config_default() -> TestDaemonConfig:
+    val dc = daemon_config_new(
+        ".build/test_daemon/test_daemon.lock",
+        ".build/test_daemon/requests",
+        ".build/test_daemon/responses"
+    )
+    TestDaemonConfig(
+        daemon: dc,
+        cache_path: ".build/test_daemon/test_cache.sdn",
+        dep_graph_path: ".build/test_daemon/dep_graph.sdn",
+        qemu_session_timeout_ms: 300000,
+        max_qemu_sessions: 4
+    )
+
+# ============================================================================
+# Test Result
+# ============================================================================
+
+struct TestResult:
+    test_path: text
+    status: i64
+    passed: i64
+    failed: i64
+    skipped: i64
+    duration_ms: i64
+    output: text
+    cached: bool
+
+# ============================================================================
+# Conversions
+# ============================================================================
+
+fn test_request_to_daemon(kind: i64, test_path: text, filter: text, clean: bool) -> DaemonRequest:
+    var req = daemon_request_new(kind)
+    req.fields["test_path"] = test_path
+    req.fields["filter"] = filter
+    if clean:
+        req.fields["clean"] = "true"
+    req
+
+fn daemon_response_to_test_result(resp: DaemonResponse) -> TestResult:
+    TestResult(
+        test_path: resp.fields["test_path"] ?? "",
+        status: resp.status,
+        passed: (resp.fields["passed"] ?? "0").to_i64() ?? 0,
+        failed: (resp.fields["failed"] ?? "0").to_i64() ?? 0,
+        skipped: (resp.fields["skipped"] ?? "0").to_i64() ?? 0,
+        duration_ms: (resp.fields["duration_ms"] ?? "0").to_i64() ?? 0,
+        output: resp.fields["output"] ?? "",
+        cached: resp.fields["cached"] ?? "" == "true"
+    )

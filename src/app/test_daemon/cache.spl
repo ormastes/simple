@@ -1,0 +1,243 @@
+# Test Daemon Cache — Change detection and result caching
+#
+# Tracks content hashes of test files and their dependencies.
+# Returns cached results when nothing has changed.
+
+export TestCacheEntry, TestResultCache
+export test_result_cache_new, test_result_cache_load
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_mkdir_p(path: text) -> bool
+
+# ============================================================================
+# Cache Entry
+# ============================================================================
+
+struct TestCacheEntry:
+    test_path: text
+    test_hash: i64
+    dep_hashes: {text: i64}
+    result_status: i64
+    result_passed: i64
+    result_failed: i64
+    result_skipped: i64
+    result_duration_ms: i64
+    result_output: text
+    last_run_timestamp: i64
+
+# ============================================================================
+# Result Cache
+# ============================================================================
+
+class TestResultCache:
+    entries: {text: TestCacheEntry}
+    cache_path: text
+
+fn test_result_cache_new(cache_path: text) -> TestResultCache:
+    TestResultCache(entries: {}, cache_path: cache_path)
+
+impl TestResultCache:
+    # Check if a test's cached result is still fresh
+    fn check_freshness(test_path: text, dep_paths: [text]) -> TestCacheEntry:
+        val entry = self.entries[test_path]
+        if entry.?:
+            val existing = entry
+            # Hash current test file
+            val source = rt_file_read_text(test_path) ?? ""
+            val current_hash = rt_hash_text(source)
+            if current_hash != existing.test_hash:
+                return TestCacheEntry(test_path: "", test_hash: 0, dep_hashes: {}, result_status: -1, result_passed: 0, result_failed: 0, result_skipped: 0, result_duration_ms: 0, result_output: "", last_run_timestamp: 0)
+
+            # Check each dependency hash
+            var i = 0
+            while i < dep_paths.len():
+                val dep_path = dep_paths[i]
+                val dep_source = rt_file_read_text(dep_path) ?? ""
+                val dep_hash = rt_hash_text(dep_source)
+                val cached_hash = existing.dep_hashes[dep_path] ?? 0
+                if dep_hash != cached_hash:
+                    return TestCacheEntry(test_path: "", test_hash: 0, dep_hashes: {}, result_status: -1, result_passed: 0, result_failed: 0, result_skipped: 0, result_duration_ms: 0, result_output: "", last_run_timestamp: 0)
+                i = i + 1
+
+            # All match — return cached entry
+            return existing
+
+        # No cached entry
+        TestCacheEntry(test_path: "", test_hash: 0, dep_hashes: {}, result_status: -1, result_passed: 0, result_failed: 0, result_skipped: 0, result_duration_ms: 0, result_output: "", last_run_timestamp: 0)
+
+    # Record a test result with current hashes
+    me record_result(test_path: text, dep_paths: [text], status: i64, passed: i64, failed: i64, skipped: i64, duration_ms: i64, output: text):
+        val source = rt_file_read_text(test_path) ?? ""
+        val test_hash = rt_hash_text(source)
+
+        var dep_hashes: {text: i64} = {}
+        var i = 0
+        while i < dep_paths.len():
+            val dep_path = dep_paths[i]
+            val dep_source = rt_file_read_text(dep_path) ?? ""
+            dep_hashes[dep_path] = rt_hash_text(dep_source)
+            i = i + 1
+
+        # Truncate output to 10KB
+        var truncated_output = output
+        if output.len() > 10240:
+            truncated_output = output.substring(0, 10240) + "\n... (truncated)"
+
+        val entry = TestCacheEntry(
+            test_path: test_path,
+            test_hash: test_hash,
+            dep_hashes: dep_hashes,
+            result_status: status,
+            result_passed: passed,
+            result_failed: failed,
+            result_skipped: skipped,
+            result_duration_ms: duration_ms,
+            result_output: truncated_output,
+            last_run_timestamp: rt_time_now_unix_micros()
+        )
+        self.entries[test_path] = entry
+
+    me invalidate_all():
+        self.entries = {}
+
+    # Persist cache to SDN-like key=value file
+    me save():
+        val parent = cache_path_parent(self.cache_path)
+        rt_mkdir_p(parent)
+
+        var content = "# Test Result Cache\n"
+        val keys = self.entries.keys()
+        var i = 0
+        while i < keys.len():
+            val key = keys[i]
+            val entry = self.entries[key]
+            content = content + "\n[{key}]\n"
+            content = content + "test_hash={entry.test_hash}\n"
+            content = content + "result_status={entry.result_status}\n"
+            content = content + "result_passed={entry.result_passed}\n"
+            content = content + "result_failed={entry.result_failed}\n"
+            content = content + "result_skipped={entry.result_skipped}\n"
+            content = content + "result_duration_ms={entry.result_duration_ms}\n"
+            content = content + "last_run_timestamp={entry.last_run_timestamp}\n"
+
+            # Serialize dep hashes
+            val dep_keys = entry.dep_hashes.keys()
+            var di = 0
+            while di < dep_keys.len():
+                val dk = dep_keys[di]
+                val dv = entry.dep_hashes[dk] ?? 0
+                content = content + "dep.{dk}={dv}\n"
+                di = di + 1
+            i = i + 1
+
+        rt_file_write_text(self.cache_path, content)
+
+# ============================================================================
+# Load Cache
+# ============================================================================
+
+fn test_result_cache_load(cache_path: text) -> TestResultCache:
+    var cache = test_result_cache_new(cache_path)
+
+    if not rt_file_exists(cache_path):
+        return cache
+
+    val content = rt_file_read_text(cache_path) ?? ""
+    if content == "":
+        return cache
+
+    var current_key = ""
+    var current_test_hash: i64 = 0
+    var current_status: i64 = 0
+    var current_passed: i64 = 0
+    var current_failed: i64 = 0
+    var current_skipped: i64 = 0
+    var current_duration: i64 = 0
+    var current_timestamp: i64 = 0
+    var current_deps: {text: i64} = {}
+
+    val lines = content.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        if line.starts_with("[") and line.ends_with("]"):
+            # Save previous entry if exists
+            if current_key != "":
+                val entry = TestCacheEntry(
+                    test_path: current_key,
+                    test_hash: current_test_hash,
+                    dep_hashes: current_deps,
+                    result_status: current_status,
+                    result_passed: current_passed,
+                    result_failed: current_failed,
+                    result_skipped: current_skipped,
+                    result_duration_ms: current_duration,
+                    result_output: "",
+                    last_run_timestamp: current_timestamp
+                )
+                cache.entries[current_key] = entry
+
+            # Start new entry
+            current_key = line.substring(1, line.len() - 1)
+            current_test_hash = 0
+            current_status = 0
+            current_passed = 0
+            current_failed = 0
+            current_skipped = 0
+            current_duration = 0
+            current_timestamp = 0
+            current_deps = {}
+        else if line.starts_with("test_hash="):
+            current_test_hash = line.substring(10).to_i64() ?? 0
+        else if line.starts_with("result_status="):
+            current_status = line.substring(14).to_i64() ?? 0
+        else if line.starts_with("result_passed="):
+            current_passed = line.substring(14).to_i64() ?? 0
+        else if line.starts_with("result_failed="):
+            current_failed = line.substring(14).to_i64() ?? 0
+        else if line.starts_with("result_skipped="):
+            current_skipped = line.substring(15).to_i64() ?? 0
+        else if line.starts_with("result_duration_ms="):
+            current_duration = line.substring(19).to_i64() ?? 0
+        else if line.starts_with("last_run_timestamp="):
+            current_timestamp = line.substring(19).to_i64() ?? 0
+        else if line.starts_with("dep."):
+            val rest = line.substring(4)
+            val eq_pos = rest.index_of("=")
+            if eq_pos > 0:
+                val dk = rest.substring(0, eq_pos)
+                val dv = rest.substring(eq_pos + 1).to_i64() ?? 0
+                current_deps[dk] = dv
+        li = li + 1
+
+    # Save last entry
+    if current_key != "":
+        val entry = TestCacheEntry(
+            test_path: current_key,
+            test_hash: current_test_hash,
+            dep_hashes: current_deps,
+            result_status: current_status,
+            result_passed: current_passed,
+            result_failed: current_failed,
+            result_skipped: current_skipped,
+            result_duration_ms: current_duration,
+            result_output: "",
+            last_run_timestamp: current_timestamp
+        )
+        cache.entries[current_key] = entry
+
+    cache
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn cache_path_parent(path: text) -> text:
+    val last_slash = path.last_index_of("/")
+    if last_slash < 0:
+        return "."
+    path.substring(0, last_slash)

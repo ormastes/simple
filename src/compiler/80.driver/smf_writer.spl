@@ -776,6 +776,267 @@ fn hash_name(name: text) -> i32:
         hash = hash * 16777619
     hash
 
+# ============================================================================
+# ELF Relocation Extraction
+# ============================================================================
+
+# Relocation entry extracted from ELF .rela.text section
+struct ElfRelocEntry:
+    offset: i64
+    sym_idx: i64
+    reloc_type: i64
+    addend: i64
+
+# Symbol entry extracted from ELF .symtab section
+struct ElfSymEntry:
+    name: text
+    value: i64
+    size: i64
+    info: i64
+    section_idx: i64
+
+"""Extract .rela.text relocations from an ELF object file.
+
+Parses ELF64 section headers to find .rela.text, then reads relocation entries.
+Each ELF rela entry is 24 bytes: offset(8) + info(8) + addend(8).
+"""
+fn extract_elf_relocations(object_code: [u8]) -> [ElfRelocEntry]:
+    if object_code.len() < 64:
+        return []
+    # Verify ELF magic
+    val magic_ok = (object_code[0] == 0x7F and
+        object_code[1] == 0x45 and
+        object_code[2] == 0x4C and
+        object_code[3] == 0x46)
+    if not magic_ok:
+        return []
+    if object_code[4] != 2:
+        return []
+
+    val e_shoff = _read_u64_le(object_code, 40)
+    val e_shentsize = _read_u16_le(object_code, 58)
+    val e_shnum = _read_u16_le(object_code, 60)
+    val e_shstrndx = _read_u16_le(object_code, 62)
+
+    if e_shoff == 0 or e_shnum == 0 or e_shentsize < 64:
+        return []
+
+    # Get section name string table
+    val shstrtab_off = e_shoff + (e_shstrndx * e_shentsize)
+    if shstrtab_off + 64 > object_code.len():
+        return []
+    val strtab_offset = _read_u64_le(object_code, shstrtab_off + 24)
+
+    # Search for .rela.text section (SHT_RELA = 4)
+    var i = 0
+    while i < e_shnum:
+        val sh_off = e_shoff + (i * e_shentsize)
+        if sh_off + 64 > object_code.len():
+            i = i + 1
+            continue
+        val sh_type = _read_u32_le(object_code, sh_off + 4)
+        if sh_type == 4:
+            # Check name is ".rela.text"
+            val sh_name_idx = _read_u32_le(object_code, sh_off)
+            val name_off = strtab_offset + sh_name_idx
+            if name_off + 10 <= object_code.len():
+                # ".rela.text" = 2E 72 65 6C 61 2E 74 65 78 74
+                val is_rela = (object_code[name_off] == 0x2E and
+                    object_code[name_off + 1] == 0x72 and
+                    object_code[name_off + 2] == 0x65 and
+                    object_code[name_off + 3] == 0x6C and
+                    object_code[name_off + 4] == 0x61)
+                if is_rela:
+                    val sec_offset = _read_u64_le(object_code, sh_off + 24)
+                    val sec_size = _read_u64_le(object_code, sh_off + 32)
+                    val entry_size = 24
+                    val count = sec_size / entry_size
+                    var relocs: [ElfRelocEntry] = []
+                    var j = 0
+                    while j < count:
+                        val e_off = sec_offset + j * entry_size
+                        if e_off + entry_size > object_code.len():
+                            j = j + 1
+                            continue
+                        val r_offset = _read_u64_le(object_code, e_off)
+                        val r_info = _read_u64_le(object_code, e_off + 8)
+                        val r_addend = _read_u64_le(object_code, e_off + 16)
+                        val r_sym = (r_info >> 32) & 0xFFFFFFFF
+                        val r_type = r_info & 0xFFFFFFFF
+                        relocs.push(ElfRelocEntry(
+                            offset: r_offset,
+                            sym_idx: r_sym,
+                            reloc_type: r_type,
+                            addend: r_addend
+                        ))
+                        j = j + 1
+                    return relocs
+        i = i + 1
+    []
+
+"""Map ELF x86_64 relocation types to SMF wire values."""
+fn elf_reloc_type_to_smf(elf_type: i64) -> i32:
+    # x86_64 ELF relocation types
+    match elf_type:
+        1: 1     # R_X86_64_64 -> Abs64
+        2: 2     # R_X86_64_PC32 -> Rel32
+        4: 3     # R_X86_64_PLT32 -> PltRel32
+        9: 4     # R_X86_64_GOTPCREL -> GotRel32
+        _: 1     # Default to Abs64
+
+"""Build SMF with embedded Reloc section from an ELF object.
+
+Instead of stripping the ELF to raw .text bytes, this function extracts
+.text code AND .rela.text relocations, producing an SMF file that can be
+relocated at load time by the Simple-side module loader.
+"""
+fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u8]:
+    val code_bytes = extract_code_from_object(object_code)
+    val elf_relocs = extract_elf_relocations(object_code)
+
+    # If no relocations found, fall back to normal SMF generation
+    if elf_relocs.len() == 0:
+        return generate_smf_with_options(object_code, options)
+
+    # Serialize relocations as SMF Reloc section (24 bytes per entry)
+    var reloc_bytes: [u8] = []
+    for reloc in elf_relocs:
+        # offset (u64)
+        reloc_bytes = reloc_bytes + (u64_to_bytes(reloc.offset))
+        # symbol_index (u32)
+        reloc_bytes = reloc_bytes + (u32_to_bytes(reloc.sym_idx as i32))
+        # reloc_type (u8) + pad (3)
+        reloc_bytes.push(elf_reloc_type_to_smf(reloc.reloc_type) as u8)
+        reloc_bytes.push(0)
+        reloc_bytes.push(0)
+        reloc_bytes.push(0)
+        # addend (i64)
+        reloc_bytes = reloc_bytes + (u64_to_bytes(reloc.addend))
+
+    # Build SMF with Code + Reloc sections
+    var buf: [u8] = []
+    val code_offset = 0
+    val reloc_offset = code_bytes.len()
+    val section_table_offset = reloc_offset + reloc_bytes.len()
+
+    var section_count = 2  # Code + Reloc
+    if options.has_any_sections():
+        section_count = section_count + 1
+
+    val section_entry_size = 64
+    val section_table_size = section_count * section_entry_size
+    val symbol_table_offset = section_table_offset + section_table_size
+    val string_table_offset = symbol_table_offset + 72
+    val header_offset = string_table_offset + 5
+
+    # Write code
+    buf = buf + (code_bytes)
+
+    # Write reloc section
+    buf = buf + (reloc_bytes)
+
+    # Write section table - Code section
+    buf = buf + (build_section_entry(
+        section_type: 1,
+        flags: 0x05,
+        offset: code_offset,
+        size: code_bytes.len(),
+        name: "code"
+    ))
+
+    # Write section table - Reloc section (wire type 5)
+    buf = buf + (build_section_entry(
+        section_type: 5,
+        flags: 0x01,
+        offset: reloc_offset,
+        size: reloc_bytes.len(),
+        name: "rela"
+    ))
+
+    # Write symbol table
+    buf = buf + (build_symbol_entry("main", 0, code_bytes.len()))
+
+    # Write string table
+    buf = buf + ("main\0".to_bytes())
+
+    # Write HEADER as trailer
+    val platform = text_to_platform(options.target.os)
+    val arch = text_to_arch(options.target.arch)
+    var header = SmfHeader.new_v1_1(platform, arch)
+    header.set_executable(true)
+    header.section_count = section_count
+    header.section_table_offset = section_table_offset
+    header.symbol_table_offset = symbol_table_offset
+    header.symbol_count = 1
+    header.exported_count = 1
+    header.entry_point = 0
+    header.set_stub_info(0, 0)
+    buf = buf + (header.to_bytes())
+
+    buf
+
+# SMF output mode for the driver
+enum SmfOutputMode:
+    CodeOnly       # Current default: strip ELF to raw .text bytes
+    ElfEmbedded    # Phase 1: store full ELF .o in Code section
+    RelocSections  # Phase 2: Code + Reloc sections
+
+"""Build SMF with the full ELF .o embedded in the Code section.
+
+Unlike the default path (extract_code_from_object strips to raw .text),
+this preserves the complete ELF object including relocations, symbols,
+and section headers. The native linker can extract the ELF .o directly
+from the SMF Code section by checking for ELF magic bytes.
+"""
+fn build_smf_with_elf_embedded(object_code: [u8], target: Target) -> [u8]:
+    # Store the full ELF .o bytes as-is in the Code section
+    # (skip extract_code_from_object which strips to raw .text)
+    var buf: [u8] = []
+    val code_offset = 0
+    val section_table_offset = object_code.len()
+    val section_count = 1
+    val section_entry_size = 64
+    val section_table_size = section_count * section_entry_size
+    val symbol_table_offset = section_table_offset + section_table_size
+    val string_table_offset = symbol_table_offset + 72
+    val header_offset = string_table_offset + 5
+
+    # Write full ELF .o as Code section
+    buf = buf + (object_code)
+
+    # Write section table - Code section (contains full ELF)
+    buf = buf + (build_section_entry(
+        section_type: 1,
+        flags: 0x05,
+        offset: code_offset,
+        size: object_code.len(),
+        name: "code"
+    ))
+
+    # Write symbol table
+    buf = buf + (build_symbol_entry("main", 0, object_code.len()))
+
+    # Write string table
+    buf = buf + ("main\0".to_bytes())
+
+    # Write HEADER as trailer
+    val platform = text_to_platform(target.os)
+    val arch = text_to_arch(target.arch)
+    var header = SmfHeader.new_v1_1(platform, arch)
+    header.set_executable(true)
+    header.section_count = section_count
+    header.section_table_offset = section_table_offset
+    header.symbol_table_offset = symbol_table_offset
+    header.symbol_count = 1
+    header.exported_count = 1
+    header.entry_point = 0
+    header.set_stub_info(0, 0)
+    buf = buf + (header.to_bytes())
+
+    buf
+
 export generate_smf_with_templates, generate_smf_with_all_sections, generate_smf_with_options
-export Target, SmfBuildOptions
-export build_smf_with_code_for_target, extract_code_from_object
+export Target, SmfBuildOptions, SmfOutputMode
+export build_smf_with_code_for_target, extract_code_from_object, build_smf_with_relocations
+export build_smf_with_elf_embedded
+export ElfRelocEntry, ElfSymEntry, extract_elf_relocations, elf_reloc_type_to_smf

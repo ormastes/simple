@@ -1,0 +1,284 @@
+# Test Daemon Cache System Test
+#
+# Tests real file-based change detection and caching.
+# Creates actual test files, hashes them, records results,
+# modifies files, and verifies cache invalidation.
+#
+# **Feature IDs:** #TDMN-SYS-021 to #TDMN-SYS-030
+# **Category:** Infrastructure / System Test
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn simple_hash(s: text) -> i64:
+    val bs = s.bytes()
+    var h: i64 = 5381
+    var i = 0
+    while i < bs.len():
+        h = h * 33 + bs[i]
+        i = i + 1
+    if h < 0:
+        h = 0 - h
+    h
+
+# ============================================================================
+# Module-level state
+# ============================================================================
+
+var cache_dir: text = ""
+var cache_file: text = ""
+var src_dir: text = ""
+
+# In-memory cache simulation with real file hashing
+var cc_paths: [text] = []
+var cc_hashes: [i64] = []
+var cc_statuses: [i64] = []
+var cc_passed: [i64] = []
+var cc_failed: [i64] = []
+
+fn cc_setup():
+    val pid = rt_getpid()
+    val ts = rt_time_now_unix_micros()
+    cache_dir = "/tmp/tdcache_test_{pid}_{ts}"
+    cache_file = "{cache_dir}/test_cache.sdn"
+    src_dir = "{cache_dir}/src"
+    rt_dir_create_all(cache_dir)
+    rt_dir_create_all(src_dir)
+    cc_paths = []
+    cc_hashes = []
+    cc_statuses = []
+    cc_passed = []
+    cc_failed = []
+
+fn cc_cleanup():
+    # Clean up test source files
+    cleanup_cc_dir(src_dir)
+    rt_file_delete(cache_file)
+    rt_file_delete(src_dir)
+    rt_file_delete(cache_dir)
+
+fn cleanup_cc_dir(dir: text):
+    if not rt_file_exists(dir):
+        return
+    # Just delete known files
+    var i = 0
+    while i < cc_paths.len():
+        rt_file_delete(cc_paths[i])
+        i = i + 1
+
+fn cc_find(path: text) -> i64:
+    var i = 0
+    while i < cc_paths.len():
+        if cc_paths[i] == path:
+            return i
+        i = i + 1
+    -1
+
+fn cc_create_source(name: text, content: text) -> text:
+    val path = "{src_dir}/{name}"
+    rt_file_write_text(path, content)
+    path
+
+fn cc_hash_file(path: text) -> i64:
+    val content = rt_file_read_text(path) ?? ""
+    simple_hash(content)
+
+fn cc_record(path: text, status: i64, passed: i64, failed: i64):
+    val hash = cc_hash_file(path)
+    val idx = cc_find(path)
+    if idx >= 0:
+        cc_hashes[idx] = hash
+        cc_statuses[idx] = status
+        cc_passed[idx] = passed
+        cc_failed[idx] = failed
+    else:
+        cc_paths = cc_paths + [path]
+        cc_hashes = cc_hashes + [hash]
+        cc_statuses = cc_statuses + [status]
+        cc_passed = cc_passed + [passed]
+        cc_failed = cc_failed + [failed]
+
+fn cc_check_fresh(path: text) -> bool:
+    val idx = cc_find(path)
+    if idx < 0:
+        return false
+    val current_hash = cc_hash_file(path)
+    cc_hashes[idx] == current_hash
+
+fn cc_invalidate_all():
+    cc_paths = []
+    cc_hashes = []
+    cc_statuses = []
+    cc_passed = []
+    cc_failed = []
+
+fn cc_save():
+    var content = "# Test Cache\n"
+    var i = 0
+    while i < cc_paths.len():
+        content = content + "\n[{cc_paths[i]}]\n"
+        content = content + "hash={cc_hashes[i]}\n"
+        content = content + "status={cc_statuses[i]}\n"
+        content = content + "passed={cc_passed[i]}\n"
+        content = content + "failed={cc_failed[i]}\n"
+        i = i + 1
+    rt_file_write_text(cache_file, content)
+
+# Getters
+fn cc_get_dir() -> text:
+    cache_dir
+fn cc_count() -> i64:
+    cc_paths.len()
+fn cc_get_status(path: text) -> i64:
+    val idx = cc_find(path)
+    if idx >= 0:
+        return cc_statuses[idx]
+    -1
+fn cc_get_passed(path: text) -> i64:
+    val idx = cc_find(path)
+    if idx >= 0:
+        return cc_passed[idx]
+    0
+
+# ============================================================================
+# Helper functions (extracted from it blocks to avoid closure mutation bugs)
+# ============================================================================
+
+fn cc_save_and_read_content() -> text:
+    cc_save()
+    val content = rt_file_read_text(cache_file) ?? ""
+    content
+
+fn cc_cache_file_exists() -> bool:
+    rt_file_exists(cache_file)
+
+fn build_big_content(n: i64) -> text:
+    var big_content = ""
+    var i: i64 = 0
+    while i < n:
+        big_content = big_content + "# Line {i}: Some test content that makes this file large\n"
+        i = i + 1
+    big_content
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "TestDaemon Cache System":
+    describe "real file hashing":
+        it "detects unchanged file as fresh":
+            cc_setup()
+            val path = cc_create_source("unchanged_spec.spl", "# test file\nval x = 42\n")
+            cc_record(path, 2, 5, 0)
+            expect(cc_check_fresh(path)).to_equal(true)
+            cc_cleanup()
+
+        it "detects modified file as stale":
+            cc_setup()
+            val path = cc_create_source("changing_spec.spl", "# version 1\nval x = 1\n")
+            cc_record(path, 2, 5, 0)
+            # Modify the file
+            rt_file_write_text(path, "# version 2\nval x = 2\n")
+            expect(cc_check_fresh(path)).to_equal(false)
+            cc_cleanup()
+
+        it "detects new file as not cached":
+            cc_setup()
+            val path = cc_create_source("new_spec.spl", "# brand new test\n")
+            expect(cc_check_fresh(path)).to_equal(false)
+            cc_cleanup()
+
+    describe "multi-file change detection":
+        it "tracks 5 test files independently":
+            cc_setup()
+            val p1 = cc_create_source("t1_spec.spl", "# test 1\n")
+            val p2 = cc_create_source("t2_spec.spl", "# test 2\n")
+            val p3 = cc_create_source("t3_spec.spl", "# test 3\n")
+            val p4 = cc_create_source("t4_spec.spl", "# test 4\n")
+            val p5 = cc_create_source("t5_spec.spl", "# test 5\n")
+            cc_record(p1, 2, 3, 0)
+            cc_record(p2, 2, 5, 0)
+            cc_record(p3, 2, 2, 0)
+            cc_record(p4, 2, 8, 0)
+            cc_record(p5, 2, 1, 0)
+            expect(cc_count()).to_equal(5)
+            # All fresh initially
+            expect(cc_check_fresh(p1)).to_equal(true)
+            expect(cc_check_fresh(p2)).to_equal(true)
+            expect(cc_check_fresh(p3)).to_equal(true)
+            # Modify only p3
+            rt_file_write_text(p3, "# test 3 modified\n")
+            expect(cc_check_fresh(p1)).to_equal(true)
+            expect(cc_check_fresh(p2)).to_equal(true)
+            expect(cc_check_fresh(p3)).to_equal(false)
+            expect(cc_check_fresh(p4)).to_equal(true)
+            expect(cc_check_fresh(p5)).to_equal(true)
+            cc_cleanup()
+
+        it "re-records after modification":
+            cc_setup()
+            val path = cc_create_source("rerecord_spec.spl", "# v1\n")
+            cc_record(path, 2, 5, 0)
+            expect(cc_check_fresh(path)).to_equal(true)
+            rt_file_write_text(path, "# v2\n")
+            expect(cc_check_fresh(path)).to_equal(false)
+            cc_record(path, 2, 6, 0)
+            expect(cc_check_fresh(path)).to_equal(true)
+            expect(cc_get_passed(path)).to_equal(6)
+            cc_cleanup()
+
+    describe "invalidation":
+        it "invalidates all cached results":
+            cc_setup()
+            val p1 = cc_create_source("inv1_spec.spl", "# test 1\n")
+            val p2 = cc_create_source("inv2_spec.spl", "# test 2\n")
+            cc_record(p1, 2, 5, 0)
+            cc_record(p2, 2, 3, 0)
+            expect(cc_count()).to_equal(2)
+            cc_invalidate_all()
+            expect(cc_count()).to_equal(0)
+            expect(cc_check_fresh(p1)).to_equal(false)
+            cc_cleanup()
+
+    describe "persistence":
+        it "saves cache to file":
+            cc_setup()
+            val path = cc_create_source("persist_spec.spl", "# persistent\n")
+            cc_record(path, 2, 10, 0)
+            val content = cc_save_and_read_content()
+            expect(cc_cache_file_exists()).to_equal(true)
+            expect(content).to_contain("persist_spec.spl")
+            expect(content).to_contain("passed=10")
+            cc_cleanup()
+
+    describe "edge cases":
+        it "handles empty file":
+            cc_setup()
+            val path = cc_create_source("empty_spec.spl", "")
+            cc_record(path, 2, 0, 0)
+            expect(cc_check_fresh(path)).to_equal(true)
+            cc_cleanup()
+
+        it "handles very large content":
+            cc_setup()
+            val big_content = build_big_content(100)
+            val path = cc_create_source("big_spec.spl", big_content)
+            cc_record(path, 2, 50, 0)
+            expect(cc_check_fresh(path)).to_equal(true)
+            # Add one more line
+            val big_content_modified = big_content + "# one more line\n"
+            rt_file_write_text(path, big_content_modified)
+            expect(cc_check_fresh(path)).to_equal(false)
+            cc_cleanup()
+
+        it "handles special characters in file path":
+            cc_setup()
+            val path = cc_create_source("test-with-dashes_and_underscores_spec.spl", "# special\n")
+            cc_record(path, 2, 1, 0)
+            expect(cc_check_fresh(path)).to_equal(true)
+            cc_cleanup()

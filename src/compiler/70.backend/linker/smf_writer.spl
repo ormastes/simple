@@ -69,6 +69,19 @@ impl SectionType:
             case Note: ".note"
             case Debug: ".debug"
 
+    """Map to wire byte value (Rust-runtime compatible)."""
+    fn to_wire_u8() -> u8:
+        match self:
+            case Code: 1
+            case Data: 2
+            case RoData: 3
+            case Bss: 4
+            case RelTab: 5
+            case StrTab: 6
+            case Note: 7
+            case Debug: 8
+            case SymTab: 9
+
 enum SymbolBinding:
     Local
     Global
@@ -85,6 +98,15 @@ enum RelocationType:
     Rel32
     PltRel32
     GotRel32
+
+impl RelocationType:
+    """Map to wire byte value for SMF reloc section."""
+    fn to_wire_u8() -> u8:
+        match self:
+            case Abs64: 1
+            case Rel32: 2
+            case PltRel32: 3
+            case GotRel32: 4
 
 enum SmfWriteError:
     IoError(text)
@@ -206,3 +228,49 @@ impl SmfWriter:
 
         # For now, return placeholder - real impl uses FFI
         Ok([])
+
+    """Serialize relocations to a byte array for the Reloc section.
+
+    Each entry is 24 bytes:
+      offset: u64 (8) | symbol_index: u32 (4) | reloc_type: u8 (1) | pad: 3 | addend: i64 (8)
+    """
+    fn serialize_relocations() -> [u8]:
+        var buf: [u8] = []
+        for reloc in self.relocations:
+            # offset (u64, 8 bytes)
+            buf = buf + (u64_to_bytes_u8(reloc.offset))
+            # symbol_index (u32, 4 bytes)
+            buf = buf + (u32_to_bytes_u8(reloc.symbol_index))
+            # reloc_type (u8, 1 byte)
+            buf.push(reloc.reloc_type.to_wire_u8())
+            # padding (3 bytes)
+            buf.push(0)
+            buf.push(0)
+            buf.push(0)
+            # addend (i64, 8 bytes)
+            buf = buf + (u64_to_bytes_u8(reloc.addend))
+        buf
+
+# ============================================================================
+# Byte serialization helpers (u8 output)
+# ============================================================================
+
+fn u32_to_bytes_u8(value: i64) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 24) & 0xFF) as u8
+    ]
+
+fn u64_to_bytes_u8(value: i64) -> [u8]:
+    [
+        (value & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 24) & 0xFF) as u8,
+        ((value >> 32) & 0xFF) as u8,
+        ((value >> 40) & 0xFF) as u8,
+        ((value >> 48) & 0xFF) as u8,
+        ((value >> 56) & 0xFF) as u8
+    ]

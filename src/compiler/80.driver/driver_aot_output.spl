@@ -11,7 +11,7 @@
 use compiler.backend.backend.{compile_module_with_backend, get_effective_backend_name}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default, write_elf_bytes_to_file}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
-use compiler.driver.smf_writer.{generate_smf_with_templates, Target}
+use compiler.driver.smf_writer.{generate_smf_with_templates, Target, build_smf_with_elf_embedded, build_smf_with_relocations, SmfBuildOptions}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use driver_types.{CompileResult, CompileOptions, OutputFormat}
 use compiler.driver.driver.{CompilerDriver}
@@ -229,7 +229,17 @@ impl CompilerDriver:
 
         # Wrap object code into SMF format
         val target = Target__host()
-        val smf_bytes = generate_smf_with_templates(all_object_bytes, nil, nil, target)
+        val smf_mode = self.ctx.options.smf_output_mode
+        val smf_bytes = if smf_mode == "elf_embedded":
+            # Phase 1: Store full ELF .o in Code section (native linker can read it)
+            build_smf_with_elf_embedded(all_object_bytes, target)
+        elif smf_mode == "reloc_sections":
+            # Phase 2: Extract .text + relocations into separate sections
+            val opts = SmfBuildOptions.create(target)
+            build_smf_with_relocations(all_object_bytes, opts)
+        else:
+            # Default: strip ELF to raw .text bytes
+            generate_smf_with_templates(all_object_bytes, nil, nil, target)
         CompileResult.Success(smf_bytes)
 
     # --------------------------------------------------------------------------

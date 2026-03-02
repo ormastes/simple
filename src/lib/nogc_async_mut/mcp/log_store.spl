@@ -71,52 +71,58 @@ fn log_tree_to_json(entries: [DebugLogEntry]) -> text:
     # Build tree nodes from enter entries, attach exit data
     # Root nodes have parent_group_id == 0
 
-    # First pass: collect enter entries and their exit durations
-    var enter_map_gids: [i64] = []
-    var enter_map_entries: [DebugLogEntry] = []
-    var duration_map_gids: [i64] = []
-    var duration_map_vals: [i64] = []
+    # First pass: collect enter entries, durations, and children-by-parent
+    var enter_by_gid: {i64: DebugLogEntry} = {}
+    var duration_by_gid: {i64: i64} = {}
+    var children_by_parent: {i64: [DebugLogEntry]} = {}
+    var root_entries: [DebugLogEntry] = []
 
     for entry in entries:
         if entry.entry_type == "enter":
-            enter_map_gids.push(entry.group_id)
-            enter_map_entries.push(entry)
+            enter_by_gid[entry.group_id] = entry
+            # Build children-by-parent lookup
+            val pgid = entry.parent_group_id
+            if pgid == 0:
+                root_entries.push(entry)
+            else:
+                if children_by_parent.contains_key(pgid):
+                    var kids = children_by_parent[pgid]
+                    kids.push(entry)
+                    children_by_parent[pgid] = kids
+                else:
+                    children_by_parent[pgid] = [entry]
         elif entry.entry_type == "exit":
-            duration_map_gids.push(entry.group_id)
-            duration_map_vals.push(entry.duration_ms)
+            duration_by_gid[entry.group_id] = entry.duration_ms
 
-    # Build JSON tree recursively via parent_group_id
+    # Build JSON tree recursively via pre-built lookups
     val sb = StringBuilder(parts: [])
     sb.push("[")
     var first_root = true
-    for i in range(0, enter_map_gids.len()):
-        val e = enter_map_entries[i]
-        if e.parent_group_id == 0:
-            if not first_root:
-                sb.push(",")
-            first_root = false
-            _build_tree_node_sb(sb, e, enter_map_gids, enter_map_entries, duration_map_gids, duration_map_vals)
+    for e in root_entries:
+        if not first_root:
+            sb.push(",")
+        first_root = false
+        _build_tree_node_sb(sb, e, children_by_parent, duration_by_gid)
     sb.push("]")
     sb.to_text()
 
-fn _build_tree_node_sb(sb: StringBuilder, entry: DebugLogEntry, all_gids: [i64], all_entries: [DebugLogEntry], dur_gids: [i64], dur_vals: [i64]):
-    # Find duration for this group
+fn _build_tree_node_sb(sb: StringBuilder, entry: DebugLogEntry, children_by_parent: {i64: [DebugLogEntry]}, duration_by_gid: {i64: i64}):
+    # Find duration for this group - O(1) lookup
     var dur = 0
-    for i in range(0, dur_gids.len()):
-        if dur_gids[i] == entry.group_id:
-            dur = dur_vals[i]
+    if duration_by_gid.contains_key(entry.group_id):
+        dur = duration_by_gid[entry.group_id]
 
-    # Find children (entries whose parent_group_id == this group_id)
+    # Find children - O(1) lookup
     val children_sb = StringBuilder(parts: [])
     children_sb.push("[")
     var first_child = true
-    for i in range(0, all_gids.len()):
-        val child = all_entries[i]
-        if child.parent_group_id == entry.group_id:
+    if children_by_parent.contains_key(entry.group_id):
+        val kids = children_by_parent[entry.group_id]
+        for child in kids:
             if not first_child:
                 children_sb.push(",")
             first_child = false
-            _build_tree_node_sb(children_sb, child, all_gids, all_entries, dur_gids, dur_vals)
+            _build_tree_node_sb(children_sb, child, children_by_parent, duration_by_gid)
     children_sb.push("]")
     val children = children_sb.to_text()
 

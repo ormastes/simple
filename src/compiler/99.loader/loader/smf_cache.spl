@@ -539,9 +539,56 @@ fn get_bool_from_value(value: SdnValue) -> Result<bool, text>:
         case _: Err("Expected boolean value")
 
 # ============================================================================
+# Validated SMF Loading
+# ============================================================================
+
+fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool) -> Result<MappedSmf, text>:
+    """Load an SMF file with backend/options validation.
+
+    Checks that the cached SMF was compiled with matching options.
+    On mismatch, prints a WARNING and returns Err so caller can recompile.
+    """
+    use compiler.driver.cache.compile_options_hash.{
+        CompileOptionsHash, compile_options_hash_compute,
+        compile_options_hash_from_bytes, compile_options_hash_validate,
+        compile_options_hash_is_zero
+    }
+    use compiler.driver.cache.cache_types.{CACHE_FRESH}
+
+    # Compute current options hash
+    val current_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off)
+
+    # Open the SMF file
+    val mapped_result = MappedSmf.open(smf_path)
+    if mapped_result.is_err():
+        return mapped_result
+
+    val mapped = mapped_result.unwrap()
+
+    # Read compile options hash from header reserved bytes
+    val reserved_bytes = mapped.header.get_compile_options_bytes()
+    val stored_hash = compile_options_hash_from_bytes(reserved_bytes)
+
+    # Skip validation if SMF has no stored hash (old format)
+    if compile_options_hash_is_zero(stored_hash):
+        return Ok(mapped)
+
+    # Validate options match
+    val validation = compile_options_hash_validate(stored_hash, current_hash)
+    if validation.status != CACHE_FRESH:
+        eprint("WARNING: SMF backend mismatch for {smf_path}: {validation.detail}")
+        eprint("  Stored: backend={stored_hash.backend_kind}, opt={stored_hash.opt_level}")
+        eprint("  Current: backend={current_hash.backend_kind}, opt={current_hash.opt_level}")
+        val _ = mapped.close()
+        return Err("SMF options mismatch: {validation.detail}")
+
+    Ok(mapped)
+
+# ============================================================================
 # Exports
 # ============================================================================
 
 export SmfCache
 export MappedSmf
 export CacheStats
+export validated_smf_load
