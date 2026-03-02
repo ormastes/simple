@@ -1,0 +1,462 @@
+# Vulkan Renderer - Supporting Types and Synchronization
+#
+# Frame, FrameData (command buffer recording/submit/free),
+# ResourceManager, BufferManager (triple-buffered GPU uploads),
+# TextRenderer, Pipeline, and byte-conversion utilities.
+# Part of the Vulkan renderer - see vulkan_commands.spl for ElementProcessor.
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+use ui.renderer.*
+use ui.gui.vulkan_types.*
+use ui.gui.vulkan_buffers.*
+use ui.gui.vulkan_ffi.*
+
+# =============================================================================
+# Supporting Types
+# =============================================================================
+
+struct Frame:
+    image_index: u32           # Swapchain image index
+    buffer_index: usize        # Frame buffer index (0-2)
+    command_buffer: i64        # VkCommandBuffer
+
+impl Frame:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_valid(self) -> bool:
+        """Check if frame has valid command buffer."""
+        self.command_buffer != 0
+
+    pub fn is_first_buffer(self) -> bool:
+        """Check if using first buffer (index 0)."""
+        self.buffer_index == 0
+
+    pub fn is_second_buffer(self) -> bool:
+        """Check if using second buffer (index 1)."""
+        self.buffer_index == 1
+
+    pub fn is_third_buffer(self) -> bool:
+        """Check if using third buffer (index 2)."""
+        self.buffer_index == 2
+
+    pub fn summary(self) -> text:
+        """Get summary of frame state."""
+        return "Frame: image={self.image_index}, buffer={self.buffer_index}"
+
+struct FrameData:
+    command_buffer_handle: u64  # rt_vk command buffer handle
+    device_handle: u64          # Parent device handle
+    is_recording: bool          # Whether command buffer is recording
+
+impl FrameData:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_command_buffer(self) -> bool:
+        """Check if command buffer is allocated."""
+        self.command_buffer_handle != 0
+
+    pub fn is_fully_initialized(self) -> bool:
+        """Check if all resources are initialized."""
+        self.has_command_buffer()
+
+    pub fn summary(self) -> text:
+        """Get summary of frame data state."""
+        val status = if self.is_fully_initialized(): "ready" else: "incomplete"
+        val recording = if self.is_recording: " (recording)" else: ""
+        return "FrameData: {status}{recording}"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    fn new(device: &VulkanDevice) -> FrameData:
+        # Command buffer is allocated on-demand when begin() is called
+        return FrameData {
+            command_buffer_handle: 0,
+            device_handle: device.handle,
+            is_recording: false
+        }
+
+    fn begin(self) -> Result<(), text>:
+        """Begin command buffer recording."""
+        if self.is_recording:
+            return Err("Command buffer already recording")
+
+        val handle = rt_vk_command_buffer_begin(self.device_handle)
+        if handle == 0:
+            return Err("Failed to begin command buffer")
+
+        self.command_buffer_handle = handle
+        self.is_recording = true
+        return Ok(())
+
+    fn end(self) -> Result<(), text>:
+        """End command buffer recording."""
+        if not self.is_recording:
+            return Err("Command buffer not recording")
+
+        val result = rt_vk_command_buffer_end(self.command_buffer_handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to end command buffer: error {result}")
+
+        self.is_recording = false
+        return Ok(())
+
+    fn submit(self) -> Result<(), text>:
+        """Submit command buffer for execution."""
+        if self.is_recording:
+            return Err("Cannot submit while recording")
+
+        val result = rt_vk_command_buffer_submit(self.command_buffer_handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to submit command buffer: error {result}")
+        return Ok(())
+
+    fn free(self) -> Result<(), text>:
+        """Free the command buffer."""
+        if self.command_buffer_handle != 0:
+            val result = rt_vk_command_buffer_free(self.command_buffer_handle)
+            if result != VK_SUCCESS:
+                return Err("Failed to free command buffer: error {result}")
+            self.command_buffer_handle = 0
+        return Ok(())
+
+    fn get_handle(self) -> u64:
+        self.command_buffer_handle
+
+# Types imported from ui.gui.vulkan.types.*
+
+struct ResourceManager:
+    textures: Dict<u64, Image>
+    font_atlas: Option<Image>
+    pipelines: Dict<u64, Pipeline>
+
+impl ResourceManager:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_textures(self) -> bool:
+        """Check if any textures are loaded."""
+        self.textures.len() > 0
+
+    pub fn has_font_atlas(self) -> bool:
+        """Check if font atlas is loaded."""
+        match self.font_atlas:
+            case Some(_): true
+            case None: false
+
+    pub fn has_pipelines(self) -> bool:
+        """Check if any pipelines are created."""
+        self.pipelines.len() > 0
+
+    pub fn texture_count(self) -> usize:
+        """Get number of loaded textures."""
+        self.textures.len()
+
+    pub fn pipeline_count(self) -> usize:
+        """Get number of created pipelines."""
+        self.pipelines.len()
+
+    pub fn is_empty(self) -> bool:
+        """Check if no resources are loaded."""
+        not self.has_textures() and not self.has_pipelines()
+
+    pub fn summary(self) -> text:
+        """Get summary of resource manager state."""
+        val font = if self.has_font_atlas(): "yes" else: "no"
+        return "ResourceManager: {self.texture_count()} textures, {self.pipeline_count()} pipelines, font atlas={font}"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    fn new(device: &VulkanDevice) -> ResourceManager:
+        return ResourceManager {
+            textures: Dict.new(),
+            font_atlas: None,
+            pipelines: Dict.new()
+        }
+
+struct BufferManager:
+    device_handle: u64
+    vertex_buffers: Array<Buffer>
+    index_buffers: Array<Buffer>
+    uniform_buffers: Array<Buffer>
+    # Cached GPU buffer handles for per-frame uploads (triple buffering)
+    gpu_vertex_buffers: Array<u64>
+    gpu_index_buffers: Array<u64>
+    gpu_uniform_buffers: Array<u64>
+
+impl BufferManager:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_vertex_buffers(self) -> bool:
+        """Check if any vertex buffers exist."""
+        self.vertex_buffers.len() > 0
+
+    pub fn has_index_buffers(self) -> bool:
+        """Check if any index buffers exist."""
+        self.index_buffers.len() > 0
+
+    pub fn has_uniform_buffers(self) -> bool:
+        """Check if any uniform buffers exist."""
+        self.uniform_buffers.len() > 0
+
+    pub fn vertex_buffer_count(self) -> usize:
+        """Get number of vertex buffers."""
+        self.vertex_buffers.len()
+
+    pub fn index_buffer_count(self) -> usize:
+        """Get number of index buffers."""
+        self.index_buffers.len()
+
+    pub fn uniform_buffer_count(self) -> usize:
+        """Get number of uniform buffers."""
+        self.uniform_buffers.len()
+
+    pub fn total_buffer_count(self) -> usize:
+        """Get total number of all buffers."""
+        self.vertex_buffer_count() + self.index_buffer_count() + self.uniform_buffer_count()
+
+    pub fn is_empty(self) -> bool:
+        """Check if no buffers exist."""
+        self.total_buffer_count() == 0
+
+    pub fn summary(self) -> text:
+        """Get summary of buffer manager state."""
+        return "BufferManager: {self.vertex_buffer_count()} vertex, {self.index_buffer_count()} index, {self.uniform_buffer_count()} uniform"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    fn new(device: &VulkanDevice) -> BufferManager:
+        # Pre-allocate GPU buffers for triple buffering (3 frames)
+        var gpu_vertex = Array.with_capacity(3)
+        var gpu_index = Array.with_capacity(3)
+        var gpu_uniform = Array.with_capacity(3)
+
+        # Allocate initial buffers for each frame
+        for i in 0..3:
+            # Vertex buffer: 64KB initial size (enough for ~2600 vertices)
+            val vb = rt_vk_buffer_alloc(device.handle, 65536)
+            gpu_vertex.push(vb)
+
+            # Index buffer: 16KB initial size (enough for ~4000 indices)
+            val ib = rt_vk_buffer_alloc(device.handle, 16384)
+            gpu_index.push(ib)
+
+            # Uniform buffer: 256 bytes (4x4 matrix + extras)
+            val ub = rt_vk_buffer_alloc(device.handle, 256)
+            gpu_uniform.push(ub)
+
+        return BufferManager {
+            device_handle: device.handle,
+            vertex_buffers: [],
+            index_buffers: [],
+            uniform_buffers: [],
+            gpu_vertex_buffers: gpu_vertex,
+            gpu_index_buffers: gpu_index,
+            gpu_uniform_buffers: gpu_uniform
+        }
+
+    fn upload_draw_list(draw_list: &DrawList, frame_index: usize):
+        # Ensure frame_index is valid (0-2 for triple buffering)
+        val idx = frame_index % 3
+
+        # Upload vertex data
+        if draw_list.vertices.len() > 0:
+            val vertex_buffer = self.gpu_vertex_buffers[idx]
+            if vertex_buffer != 0:
+                # Convert vertices to raw bytes
+                val vertex_data = self.vertices_to_bytes(&draw_list.vertices)
+                rt_vk_buffer_upload(vertex_buffer, vertex_data.as_ptr(), vertex_data.len() as u64)
+
+        # Upload index data
+        if draw_list.indices.len() > 0:
+            val index_buffer = self.gpu_index_buffers[idx]
+            if index_buffer != 0:
+                # Convert indices to raw bytes (u32 array)
+                val index_data = self.indices_to_bytes(&draw_list.indices)
+                rt_vk_buffer_upload(index_buffer, index_data.as_ptr(), index_data.len() as u64)
+
+        # Upload uniform data (projection matrix)
+        val uniform_buffer = self.gpu_uniform_buffers[idx]
+        if uniform_buffer != 0:
+            # Create orthographic projection matrix
+            # For now, use identity - real implementation would compute based on viewport
+            val uniform_data = self.create_projection_uniform()
+            rt_vk_buffer_upload(uniform_buffer, uniform_data.as_ptr(), uniform_data.len() as u64)
+
+    fn vertices_to_bytes(vertices: &Array<Vertex>) -> Array<u8>:
+        # Vertex layout: position (2 x f32), uv (2 x f32), color (u32)
+        # Total: 20 bytes per vertex
+        val bytes_per_vertex: usize = 20
+        val total_size = vertices.len() * bytes_per_vertex
+        var data = Array.with_capacity(total_size)
+
+        for vertex in vertices:
+            # Position x (f32 - 4 bytes)
+            val px_bytes = f32_to_bytes(vertex.position.0)
+            data.extend(&px_bytes)
+
+            # Position y (f32 - 4 bytes)
+            val py_bytes = f32_to_bytes(vertex.position.1)
+            data.extend(&py_bytes)
+
+            # UV u (f32 - 4 bytes)
+            val u_bytes = f32_to_bytes(vertex.uv.0)
+            data.extend(&u_bytes)
+
+            # UV v (f32 - 4 bytes)
+            val v_bytes = f32_to_bytes(vertex.uv.1)
+            data.extend(&v_bytes)
+
+            # Color (u32 - 4 bytes)
+            val color_bytes = u32_to_bytes(vertex.color)
+            data.extend(&color_bytes)
+
+        return data
+
+    fn indices_to_bytes(indices: &Array<u32>) -> Array<u8>:
+        # Each index is u32 (4 bytes)
+        val total_size = indices.len() * 4
+        var data = Array.with_capacity(total_size)
+
+        for index in indices:
+            val index_bytes = u32_to_bytes(*index)
+            data.extend(&index_bytes)
+
+        return data
+
+    fn create_projection_uniform() -> Array<u8>:
+        # Create identity matrix for now (16 floats = 64 bytes)
+        # In a real implementation, this would be an orthographic projection
+        var data = Array.with_capacity(64)
+
+        # Identity 4x4 matrix in column-major order
+        # [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+        for row in 0..4:
+            for col in 0..4:
+                val value: f32 = if row == col: 1.0 else: 0.0
+                val bytes = f32_to_bytes(value)
+                data.extend(&bytes)
+
+        return data
+
+    fn get_vertex_buffer(frame_index: usize) -> u64:
+        """Get GPU vertex buffer handle for specified frame."""
+        return self.gpu_vertex_buffers[frame_index % 3]
+
+    fn get_index_buffer(frame_index: usize) -> u64:
+        """Get GPU index buffer handle for specified frame."""
+        return self.gpu_index_buffers[frame_index % 3]
+
+    fn get_uniform_buffer(frame_index: usize) -> u64:
+        """Get GPU uniform buffer handle for specified frame."""
+        return self.gpu_uniform_buffers[frame_index % 3]
+
+struct TextRenderer:
+    font_atlas: Option<Image>
+    glyph_cache: Dict<u64, Rect>
+
+impl TextRenderer:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_font_atlas(self) -> bool:
+        """Check if font atlas is loaded."""
+        match self.font_atlas:
+            case Some(_): true
+            case None: false
+
+    pub fn has_glyph_cache(self) -> bool:
+        """Check if any glyphs are cached."""
+        self.glyph_cache.len() > 0
+
+    pub fn glyph_count(self) -> usize:
+        """Get number of cached glyphs."""
+        self.glyph_cache.len()
+
+    pub fn is_ready(self) -> bool:
+        """Check if text renderer is ready (has font atlas)."""
+        self.has_font_atlas()
+
+    pub fn summary(self) -> text:
+        """Get summary of text renderer state."""
+        val atlas = if self.has_font_atlas(): "loaded" else: "none"
+        return "TextRenderer: font atlas={atlas}, {self.glyph_count()} glyphs cached"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    fn new(device: &VulkanDevice) -> TextRenderer:
+        return TextRenderer {
+            font_atlas: None,
+            glyph_cache: Dict.new()
+        }
+
+struct Pipeline:
+    handle: i64                # VkPipeline
+    layout: i64                # VkPipelineLayout
+    type: PipelineType
+
+impl Pipeline:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_valid(self) -> bool:
+        """Check if pipeline has valid handles."""
+        self.handle != 0 and self.layout != 0
+
+    pub fn has_handle(self) -> bool:
+        """Check if pipeline handle exists."""
+        self.handle != 0
+
+    pub fn has_layout(self) -> bool:
+        """Check if pipeline layout exists."""
+        self.layout != 0
+
+    pub fn summary(self) -> text:
+        """Get summary of pipeline state."""
+        val status = if self.is_valid(): "valid" else: "invalid"
+        return "Pipeline: type={self.type}, {status}"
+
+# =============================================================================
+# Byte Conversion Utilities
+# =============================================================================
+
+fn f32_to_bytes(value: f32) -> Array<u8>:
+    """Convert f32 to little-endian bytes."""
+    # Use bit representation of f32
+    val bits = value.to_bits()
+    return u32_to_bytes(bits)
+
+fn u32_to_bytes(value: u32) -> Array<u8>:
+    """Convert u32 to little-endian bytes."""
+    var bytes = Array.with_capacity(4)
+    bytes.push((value & 0xFF) as u8)
+    bytes.push(((value >> 8) & 0xFF) as u8)
+    bytes.push(((value >> 16) & 0xFF) as u8)
+    bytes.push(((value >> 24) & 0xFF) as u8)
+    return bytes
+
+# =============================================================================
+# FFI Notes
+# =============================================================================
+# All Vulkan FFI functions are imported from ui.gui.vulkan_ffi module
+# which provides bindings to the rt_vk_* functions in the runtime.
