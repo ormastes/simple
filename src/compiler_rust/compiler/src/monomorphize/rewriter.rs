@@ -49,8 +49,10 @@ pub fn monomorphize_module(module: &Module) -> Module {
         }
     }
 
-    // Add all specialized functions
-    for (_key, func) in mono.table().specialized_functions() {
+    // Add all specialized functions (sorted by mangled name for deterministic output)
+    let mut specialized: Vec<_> = mono.table().specialized_functions().collect();
+    specialized.sort_by(|(ka, _), (kb, _)| ka.mangled_name().cmp(&kb.mangled_name()));
+    for (_key, func) in specialized {
         new_items.push(Node::Function(func.clone()));
     }
 

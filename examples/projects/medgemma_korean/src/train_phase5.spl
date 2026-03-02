@@ -17,7 +17,7 @@
 
 use model.{TextModel, compute_mse_loss, check_gpu, sgd_update_tensor}
 use shared_logic.{
-    TrainConfig, TrainState, EMBEDDING_SEQ_LEN,
+    TrainConfig, TrainState,
     make_randn_batch_on_cuda, compute_ce_loss,
     report_gpu_memory, report_training_step, report_epoch_end,
     lr_linear_warmup
@@ -49,6 +49,10 @@ use train_phase4.{run_phase4}
 
 use src.torch_dyn.{
     torch_available,
+    tensor_randn_2d,
+    tensor_zeros_1d,
+    t_mul_scalar,
+    t_cuda,
     t_free,
     t_mean,
     t_clone,
@@ -82,22 +86,38 @@ fn run_phase5(ext_model: ExtendedModel) -> ExtendedModel:
     val config = TrainConfig.phase5()
     config.print_config("Phase 5 - Korean Translation")
 
-    # Duplicate front/back layers (inlined to avoid copy-semantics issue)
+    # Duplicate front/back layers (correct shapes: input_dim x input_dim, output_dim x output_dim)
     print("Duplicating front/back layers:")
-    val w_front = t_clone(ext_model.base.w1)
-    autograd_set_requires_grad(w_front, true)
-    val b_front = t_clone(ext_model.base.b1)
-    autograd_set_requires_grad(b_front, true)
-    print("  Front layer: clone of L1 [{ext_model.base.config.hidden_dim}, {ext_model.base.config.input_dim}]")
-    val w_back = t_clone(ext_model.base.w3)
-    autograd_set_requires_grad(w_back, true)
-    val b_back = t_clone(ext_model.base.b3)
-    autograd_set_requires_grad(b_back, true)
-    print("  Back layer: clone of L3 [{ext_model.base.config.output_dim}, {ext_model.base.config.hidden_dim}]")
-    ext_model.w_front = w_front
-    ext_model.b_front = b_front
-    ext_model.w_back = w_back
-    ext_model.b_back = b_back
+    val in_dim = ext_model.base.config.input_dim
+    val out_dim = ext_model.base.config.output_dim
+    # Front: [input_dim, input_dim] -> preserves input shape for L1
+    val w_front_cpu = tensor_randn_2d(in_dim, in_dim)
+    val w_front_scaled = t_mul_scalar(w_front_cpu, 0.02)
+    t_free(w_front_cpu)
+    val w_front_g = t_cuda(w_front_scaled, 0)
+    t_free(w_front_scaled)
+    autograd_set_requires_grad(w_front_g, true)
+    val b_front_cpu = tensor_zeros_1d(in_dim)
+    val b_front_g = t_cuda(b_front_cpu, 0)
+    t_free(b_front_cpu)
+    autograd_set_requires_grad(b_front_g, true)
+    print("  Front layer: [{in_dim}, {in_dim}] (identity-like)")
+    # Back: [output_dim, output_dim] -> preserves output shape from L3
+    val w_back_cpu = tensor_randn_2d(out_dim, out_dim)
+    val w_back_scaled = t_mul_scalar(w_back_cpu, 0.02)
+    t_free(w_back_cpu)
+    val w_back_g = t_cuda(w_back_scaled, 0)
+    t_free(w_back_scaled)
+    autograd_set_requires_grad(w_back_g, true)
+    val b_back_cpu = tensor_zeros_1d(out_dim)
+    val b_back_g = t_cuda(b_back_cpu, 0)
+    t_free(b_back_cpu)
+    autograd_set_requires_grad(b_back_g, true)
+    print("  Back layer: [{out_dim}, {out_dim}] (identity-like)")
+    ext_model.w_front = w_front_g
+    ext_model.b_front = b_front_g
+    ext_model.w_back = w_back_g
+    ext_model.b_back = b_back_g
     ext_model.has_front_back = true
     print("  Front/back layers: ACTIVE")
     print("")
@@ -125,7 +145,7 @@ fn run_phase5(ext_model: ExtendedModel) -> ExtendedModel:
         print("  Sub-A Epoch {epoch + 1}/{SUBPHASE_A_EPOCHS}")
         for batch_idx in 0..config.num_batches:
             val lr = lr_linear_warmup(state_a.global_step, config.warmup_steps, config.learning_rate)
-            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext_model.emb, config.output_dim)
+            val batch = make_embedding_batch(config.batch_size, 8, ext_model.emb, config.output_dim)
             val kor_ids = batch[0]
             val eng_ids = batch[1]
             val mask = batch[2]
@@ -196,7 +216,7 @@ fn run_phase5(ext_model: ExtendedModel) -> ExtendedModel:
         for batch_idx in 0..config.num_batches:
             val lr = lr_linear_warmup(state_b.global_step, config.warmup_steps, config.learning_rate)
             # Korean source tokens
-            val batch = make_embedding_batch(config.batch_size, EMBEDDING_SEQ_LEN, ext_model.emb, config.output_dim)
+            val batch = make_embedding_batch(config.batch_size, 8, ext_model.emb, config.output_dim)
             val kor_ids = batch[0]
             val eng_ids = batch[1]
             val mask = batch[2]

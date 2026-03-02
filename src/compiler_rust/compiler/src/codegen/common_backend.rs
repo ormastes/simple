@@ -584,46 +584,10 @@ impl<M: Module> CodegenBackend<M> {
         // Second pass: compile function bodies
         // Track functions that fail compilation so we can create stubs
         let mut failed_functions: Vec<&MirFunction> = Vec::new();
-        let debug_determinism = std::env::var("SIMPLE_DEBUG_DETERMINISM").is_ok();
-        if debug_determinism {
-            // Per-function hash to identify which functions have non-deterministic MIR
-            for func in &functions {
-                let mut h: u64 = 0xcbf29ce484222325;
-                let bc = func.blocks.len() as u64;
-                h ^= bc;
-                h = h.wrapping_mul(0x100000001b3);
-                for blk in &func.blocks {
-                    let ic = blk.instructions.len() as u64;
-                    h ^= ic;
-                    h = h.wrapping_mul(0x100000001b3);
-                    // Hash instruction debug strings for deeper comparison
-                    for inst in &blk.instructions {
-                        let s = format!("{:?}", inst);
-                        for b in s.as_bytes() {
-                            h ^= *b as u64;
-                            h = h.wrapping_mul(0x100000001b3);
-                        }
-                    }
-                    let t = format!("{:?}", blk.terminator);
-                    for b in t.as_bytes() {
-                        h ^= *b as u64;
-                        h = h.wrapping_mul(0x100000001b3);
-                    }
-                }
-                eprintln!("[DET] fn {} {:016x} blocks={} params={}", func.name, h, func.blocks.len(), func.params.len());
-            }
-        }
         for func in &functions {
             match self.compile_function(func) {
-                Ok(()) => {
-                    if debug_determinism {
-                        eprintln!("[DET] compiled: {}", func.name);
-                    }
-                }
+                Ok(()) => {}
                 Err(_e) => {
-                    if debug_determinism {
-                        eprintln!("[DET] FAILED: {} -- {}", func.name, _e);
-                    }
                     failed_functions.push(func);
                     // IMPORTANT: Clear context to prevent state from leaking to next function
                     self.module.clear_context(&mut self.ctx);
