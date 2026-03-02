@@ -1,0 +1,295 @@
+# SHB Hash — Deterministic interface hashing
+#
+# Produces a stable FNV-1a hash of the canonical public API string.
+# Used for two-level cache invalidation:
+#   source_hash → did the file change at all?
+#   interface_hash → did the PUBLIC interface change?
+
+use compiler.shb.shb_types.{
+    ShbModuleInterface, ShbFnEntry, ShbStructEntry, ShbClassEntry,
+    ShbEnumEntry, ShbTraitEntry, ShbReexportEntry, ShbParam
+}
+
+# --- FNV-1a hash of source text ---
+
+fn shb_source_hash(source: text) -> i64:
+    rt_hash_text(source)
+
+# --- Deterministic interface hash ---
+# Build a canonical string representation of the public API,
+# then hash it. Sorted by name for stability.
+
+fn shb_interface_hash(iface: ShbModuleInterface) -> i64:
+    val canonical = shb_canonical_api_string(iface)
+    rt_hash_text(canonical)
+
+# --- Canonical API string builder ---
+# Produces a deterministic text representation of the public interface.
+# All items sorted alphabetically by name within their category.
+
+fn shb_canonical_api_string(iface: ShbModuleInterface) -> text:
+    var parts: [text] = []
+
+    # Functions (sorted by name)
+    val fn_names = shb_sorted_fn_names(iface.functions)
+    var fi = 0
+    while fi < fn_names.len():
+        val name = fn_names[fi]
+        val f = shb_find_fn(iface.functions, name)
+        if f.?:
+            parts.push(shb_fn_signature(f))
+        fi = fi + 1
+
+    # Structs (sorted by name)
+    val struct_names = shb_sorted_struct_names(iface.structs)
+    var si = 0
+    while si < struct_names.len():
+        val name = struct_names[si]
+        val s = shb_find_struct(iface.structs, name)
+        if s.?:
+            parts.push(shb_struct_signature(s))
+        si = si + 1
+
+    # Classes (sorted by name)
+    val class_names = shb_sorted_class_names(iface.classes)
+    var ci = 0
+    while ci < class_names.len():
+        val name = class_names[ci]
+        val c = shb_find_class(iface.classes, name)
+        if c.?:
+            parts.push(shb_class_signature(c))
+        ci = ci + 1
+
+    # Enums (sorted by name)
+    val enum_names = shb_sorted_enum_names(iface.enums)
+    var ei = 0
+    while ei < enum_names.len():
+        val name = enum_names[ei]
+        val e = shb_find_enum(iface.enums, name)
+        if e.?:
+            parts.push(shb_enum_signature(e))
+        ei = ei + 1
+
+    # Traits (sorted by name)
+    val trait_names = shb_sorted_trait_names(iface.traits)
+    var ti = 0
+    while ti < trait_names.len():
+        val name = trait_names[ti]
+        val t = shb_find_trait(iface.traits, name)
+        if t.?:
+            parts.push(shb_trait_signature(t))
+        ti = ti + 1
+
+    # Reexports (sorted by symbol_name)
+    val reexport_names = shb_sorted_reexport_names(iface.reexports)
+    var ri = 0
+    while ri < reexport_names.len():
+        val name = reexport_names[ri]
+        val re = shb_find_reexport(iface.reexports, name)
+        if re.?:
+            parts.push("reexport " + re.symbol_name + " from " + re.source_module)
+        ri = ri + 1
+
+    shb_join(parts, "\n")
+
+# --- Signature builders ---
+
+fn shb_fn_signature(f: ShbFnEntry) -> text:
+    var sig = "fn " + f.name + "("
+    var pi = 0
+    while pi < f.params.len():
+        if pi > 0:
+            sig = sig + ", "
+        sig = sig + f.params[pi].name + ": " + f.params[pi].type_name
+        pi = pi + 1
+    sig = sig + ")"
+    if f.return_type != "":
+        sig = sig + " -> " + f.return_type
+    sig
+
+fn shb_struct_signature(s: ShbStructEntry) -> text:
+    var sig = "struct " + s.name + "("
+    var fi = 0
+    while fi < s.fields.len():
+        if fi > 0:
+            sig = sig + ", "
+        sig = sig + s.fields[fi].name + ": " + s.fields[fi].type_name
+        fi = fi + 1
+    sig + ")"
+
+fn shb_class_signature(c: ShbClassEntry) -> text:
+    var sig = "class " + c.name + "("
+    var fi = 0
+    while fi < c.fields.len():
+        if fi > 0:
+            sig = sig + ", "
+        sig = sig + c.fields[fi].name + ": " + c.fields[fi].type_name
+        fi = fi + 1
+    sig = sig + ")"
+    if c.methods.len() > 0:
+        sig = sig + " methods["
+        var mi = 0
+        while mi < c.methods.len():
+            if mi > 0:
+                sig = sig + ", "
+            sig = sig + c.methods[mi].name
+            mi = mi + 1
+        sig = sig + "]"
+    sig
+
+fn shb_enum_signature(e: ShbEnumEntry) -> text:
+    var sig = "enum " + e.name + "("
+    var vi = 0
+    while vi < e.variants.len():
+        if vi > 0:
+            sig = sig + ", "
+        sig = sig + e.variants[vi]
+        vi = vi + 1
+    sig + ")"
+
+fn shb_trait_signature(t: ShbTraitEntry) -> text:
+    var sig = "trait " + t.name + "("
+    var mi = 0
+    while mi < t.methods.len():
+        if mi > 0:
+            sig = sig + ", "
+        sig = sig + t.methods[mi]
+        mi = mi + 1
+    sig + ")"
+
+# --- Sorted name extractors ---
+
+fn shb_sorted_fn_names(fns: [ShbFnEntry]) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < fns.len():
+        names.push(fns[i].name)
+        i = i + 1
+    sort_strings(names)
+
+fn shb_sorted_struct_names(structs: [ShbStructEntry]) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < structs.len():
+        names.push(structs[i].name)
+        i = i + 1
+    sort_strings(names)
+
+fn shb_sorted_class_names(classes: [ShbClassEntry]) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < classes.len():
+        names.push(classes[i].name)
+        i = i + 1
+    sort_strings(names)
+
+fn shb_sorted_enum_names(enums: [ShbEnumEntry]) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < enums.len():
+        names.push(enums[i].name)
+        i = i + 1
+    sort_strings(names)
+
+fn shb_sorted_trait_names(traits: [ShbTraitEntry]) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < traits.len():
+        names.push(traits[i].name)
+        i = i + 1
+    sort_strings(names)
+
+fn shb_sorted_reexport_names(reexports: [ShbReexportEntry]) -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < reexports.len():
+        names.push(reexports[i].symbol_name)
+        i = i + 1
+    sort_strings(names)
+
+# --- Lookup helpers ---
+
+fn shb_find_fn(fns: [ShbFnEntry], name: text) -> ShbFnEntry:
+    var i = 0
+    while i < fns.len():
+        if fns[i].name == name:
+            return fns[i]
+        i = i + 1
+    nil
+
+fn shb_find_struct(structs: [ShbStructEntry], name: text) -> ShbStructEntry:
+    var i = 0
+    while i < structs.len():
+        if structs[i].name == name:
+            return structs[i]
+        i = i + 1
+    nil
+
+fn shb_find_class(classes: [ShbClassEntry], name: text) -> ShbClassEntry:
+    var i = 0
+    while i < classes.len():
+        if classes[i].name == name:
+            return classes[i]
+        i = i + 1
+    nil
+
+fn shb_find_enum(enums: [ShbEnumEntry], name: text) -> ShbEnumEntry:
+    var i = 0
+    while i < enums.len():
+        if enums[i].name == name:
+            return enums[i]
+        i = i + 1
+    nil
+
+fn shb_find_trait(traits: [ShbTraitEntry], name: text) -> ShbTraitEntry:
+    var i = 0
+    while i < traits.len():
+        if traits[i].name == name:
+            return traits[i]
+        i = i + 1
+    nil
+
+fn shb_find_reexport(reexports: [ShbReexportEntry], name: text) -> ShbReexportEntry:
+    var i = 0
+    while i < reexports.len():
+        if reexports[i].symbol_name == name:
+            return reexports[i]
+        i = i + 1
+    nil
+
+# --- Utility ---
+
+fn sort_strings(names: [text]) -> [text]:
+    # Simple insertion sort — API surfaces are small
+    var sorted: [text] = []
+    var i = 0
+    while i < names.len():
+        sorted.push(names[i])
+        i = i + 1
+    var outer = 1
+    while outer < sorted.len():
+        val key = sorted[outer]
+        var inner = outer - 1
+        while inner >= 0:
+            if sorted[inner] > key:
+                sorted[inner + 1] = sorted[inner]
+                inner = inner - 1
+            else:
+                inner = -1
+        sorted[inner + 1] = key
+        outer = outer + 1
+    sorted
+
+fn shb_join(parts: [text], sep: text) -> text:
+    var result = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            result = result + sep
+        result = result + parts[i]
+        i = i + 1
+    result
+
+# --- FFI ---
+
+extern fn rt_hash_text(s: text) -> i64
