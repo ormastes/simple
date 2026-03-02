@@ -132,6 +132,7 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
             println!("BOOTSTRAP OPTIONS:");
             println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");
             println!("  --output=<dir>     Output directory (default: bootstrap)");
+            println!("  --seed=<path>      Seed compiler binary (default: bin/release/simple)");
             0
         }
         _ => {
@@ -157,16 +158,34 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
 /// Stage 3: Compile compiler with Stage 2 output, verify Stage 2 == Stage 3
 fn handle_bootstrap(args: &[&str]) -> i32 {
     use std::process::Command;
-    use std::time::Instant;
+
+    // Check for help
+    if args.iter().any(|a| *a == "-h" || *a == "--help") {
+        println!("3-stage self-compilation bootstrap pipeline");
+        println!();
+        println!("USAGE: simple build bootstrap [options]");
+        println!();
+        println!("OPTIONS:");
+        println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");
+        println!("  --output=<dir>     Output directory (default: bootstrap)");
+        println!("  --seed=<path>      Seed compiler binary (default: bin/release/simple)");
+        println!();
+        println!("The seed compiler must be a self-hosted Simple binary capable of");
+        println!("running src/app/compile/native.spl to compile the compiler source.");
+        return 0;
+    }
 
     // Parse options
     let mut backend = "auto".to_string();
     let mut output_dir = "bootstrap".to_string();
+    let mut seed_compiler: Option<String> = None;
     for arg in args {
         if let Some(b) = arg.strip_prefix("--backend=") {
             backend = b.to_string();
         } else if let Some(d) = arg.strip_prefix("--output=") {
             output_dir = d.to_string();
+        } else if let Some(s) = arg.strip_prefix("--seed=") {
+            seed_compiler = Some(s.to_string());
         }
     }
 
@@ -177,13 +196,23 @@ fn handle_bootstrap(args: &[&str]) -> i32 {
     // Ensure output directory exists
     let _ = std::fs::create_dir_all(&output_dir);
 
-    // Find initial compiler
-    let compiler = if PathBuf::from("bin/release/simple").exists() {
+    // Find initial compiler.
+    // Bootstrap requires a self-hosted Simple compiler that can run native.spl.
+    // The Rust driver cannot do this (it uses a Rust-native pipeline).
+    // Look for a working compiler in order of preference:
+    let compiler = if let Some(seed) = seed_compiler {
+        if !PathBuf::from(&seed).exists() {
+            eprintln!("Error: seed compiler not found: {}", seed);
+            return 1;
+        }
+        seed
+    } else if PathBuf::from("bin/release/simple").exists() {
         "bin/release/simple".to_string()
     } else if PathBuf::from("bin/simple").exists() {
         "bin/simple".to_string()
     } else {
         eprintln!("Error: No compiler binary found at bin/release/simple or bin/simple");
+        eprintln!("  Use --seed=<path> to specify a self-hosted compiler binary");
         return 1;
     };
 
@@ -243,43 +272,29 @@ struct StageResult {
 fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
     use std::process::Command;
 
-    // Detect whether this compiler is the Rust driver or a self-hosted Simple binary.
-    // The Rust driver uses `compile --native`, while self-hosted binaries use
-    // `src/app/compile/native.spl` as a file argument.
-    let is_rust_driver = is_rust_driver_binary(compiler);
-
+    // Bootstrap runs each stage as a subprocess:
+    //   compiler src/app/compile/native.spl src/app/cli/main.spl <output> [--backend=X]
     let mut cmd = Command::new(compiler);
-    if is_rust_driver {
-        // Rust driver: use `compile --native` subcommand
-        // Argument order: compile <source> --native -o <output>
-        cmd.arg("compile")
-            .arg("src/app/cli/main.spl")
-            .arg("--native")
-            .arg("-o")
-            .arg(output);
-        println!("  Running: {} compile src/app/cli/main.spl --native -o {}",
-            compiler, output);
-    } else {
-        // Self-hosted binary: run native.spl as a file to compile main.spl
-        cmd.arg("src/app/compile/native.spl")
-            .arg("src/app/cli/main.spl")
-            .arg(output);
-        if backend != "auto" {
-            cmd.arg(format!("--backend={}", backend));
-        }
-        println!("  Running: {} src/app/compile/native.spl src/app/cli/main.spl {} {}",
-            compiler, output,
-            if backend != "auto" { format!("--backend={}", backend) } else { String::new() });
+    cmd.arg("src/app/compile/native.spl")
+        .arg("src/app/cli/main.spl")
+        .arg(output);
+    if backend != "auto" {
+        cmd.arg(format!("--backend={}", backend));
     }
 
-    match cmd.output() {
-        Ok(result) => {
-            if !result.status.success() {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                eprintln!("  Compile failed (exit {:?})", result.status.code());
-                if !stderr.is_empty() {
-                    eprintln!("  stderr: {}", stderr.trim());
-                }
+    println!("  Running: {} src/app/compile/native.spl src/app/cli/main.spl {} {}",
+        compiler, output,
+        if backend != "auto" { format!("--backend={}", backend) } else { String::new() });
+
+    // Use inherited stdio so the user can see progress
+    let status = cmd
+        .stdin(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(exit_status) => {
+            if !exit_status.success() {
+                eprintln!("  Compile failed (exit {:?})", exit_status.code());
                 return StageResult { success: false, size: 0, hash: String::new() };
             }
 
@@ -305,38 +320,6 @@ fn compile_stage(compiler: &str, output: &str, backend: &str) -> StageResult {
             StageResult { success: false, size: 0, hash: String::new() }
         }
     }
-}
-
-/// Check if a compiler binary is the Rust driver (vs a self-hosted Simple binary).
-///
-/// Stage 1 always uses the current binary (Rust driver), so we check if the
-/// compiler path matches the current executable. For Stage 2+, the output
-/// binaries are self-hosted Simple compilers that use the `native.spl` file
-/// execution approach.
-fn is_rust_driver_binary(compiler: &str) -> bool {
-    // The Rust driver is always used as Stage 1 compiler.
-    // Stage 2+ compilers are in the bootstrap output directory.
-    let compiler_path = PathBuf::from(compiler);
-
-    // If the compiler is in the bootstrap directory, it's a self-hosted binary
-    if compiler.contains("/simple_stage") || compiler.contains("\\simple_stage") {
-        return false;
-    }
-
-    // If it matches bin/release/simple or bin/simple, it's the Rust driver
-    // (since we're running from the Rust driver)
-    if compiler == "bin/release/simple" || compiler == "bin/simple" {
-        return true;
-    }
-
-    // Check if it's the current executable
-    if let Ok(current) = std::env::current_exe() {
-        if let Ok(comp_canonical) = compiler_path.canonicalize() {
-            return comp_canonical == current;
-        }
-    }
-
-    false
 }
 
 /// Handle 'brief' command - LLM-friendly code overview

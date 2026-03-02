@@ -33,6 +33,16 @@ var val_thunk_expr_ids: [i64] = []  # expression id for VAL_THUNK (deferred eval
 # ===== Sentinel =====
 val VAL_NONE: i64 = -1
 
+# ===== Value Cache =====
+# Pre-allocated singletons for frequently created values.
+# Avoids arena allocation for nil, true, false, small ints 0..255, empty text.
+var cache_nil: i64 = -1
+var cache_true: i64 = -1
+var cache_false: i64 = -1
+var cache_empty_text: i64 = -1
+var cache_ints: [i64] = []
+var cache_initialized: bool = false
+
 # ===== Value Arena Management =====
 
 fn val_count() -> i64:
@@ -50,6 +60,30 @@ fn val_reset():
     val_func_names = []
     val_func_decls = []
     val_thunk_expr_ids = []
+    cache_initialized = false
+    val_init_cache()
+
+fn val_init_cache():
+    if cache_initialized: return
+    # Allocate cached nil
+    cache_nil = val_alloc(VAL_NIL)
+    # Allocate cached booleans
+    cache_true = val_alloc(VAL_BOOL)
+    val_ints[cache_true] = 1
+    cache_false = val_alloc(VAL_BOOL)
+    val_ints[cache_false] = 0
+    # Allocate cached empty text
+    cache_empty_text = val_alloc(VAL_TEXT)
+    val_texts[cache_empty_text] = ""
+    # Allocate cached small integers 0..255
+    cache_ints = []
+    var i: i64 = 0
+    while i < 256:
+        val idx = val_alloc(VAL_INT)
+        val_ints[idx] = i
+        cache_ints.push(idx)
+        i = i + 1
+    cache_initialized = true
 
 fn val_alloc(kind: i64) -> i64:
     val idx = val_kinds.len()
@@ -69,9 +103,13 @@ fn val_alloc(kind: i64) -> i64:
 # ===== Value Constructors =====
 
 fn val_make_nil() -> i64:
+    if cache_initialized: return cache_nil
     val_alloc(VAL_NIL)
 
 fn val_make_bool(b: bool) -> i64:
+    if cache_initialized:
+        if b: return cache_true
+        return cache_false
     val idx = val_alloc(VAL_BOOL)
     if b:
         val_ints[idx] = 1
@@ -80,6 +118,8 @@ fn val_make_bool(b: bool) -> i64:
     idx
 
 fn val_make_int(n: i64) -> i64:
+    if cache_initialized and n >= 0 and n < 256:
+        return cache_ints[n]
     val idx = val_alloc(VAL_INT)
     val_ints[idx] = n
     idx
@@ -90,6 +130,8 @@ fn val_make_float(f: f64) -> i64:
     idx
 
 fn val_make_text(s: text) -> i64:
+    if cache_initialized and s == "":
+        return cache_empty_text
     val idx = val_alloc(VAL_TEXT)
     val_texts[idx] = s
     idx
@@ -358,7 +400,7 @@ fn core_val_is_truthy_i(vid: i64) -> i64:
 
 export VAL_NIL, VAL_BOOL, VAL_INT, VAL_FLOAT, VAL_TEXT, VAL_ARRAY, VAL_STRUCT, VAL_FUNCTION, VAL_THUNK
 export VAL_NONE
-export val_count, val_reset, val_alloc
+export val_count, val_reset, val_alloc, val_init_cache
 export val_make_nil, val_make_bool, val_make_int, val_make_float, val_make_text
 export val_make_array, val_make_struct, val_make_function
 export val_get_kind, val_get_int, val_get_bool, val_get_float, val_get_text
